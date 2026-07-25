@@ -292,6 +292,16 @@ class InstrumentControlGUI:
         """Safety shutdown on window close (user request 2026-07-20: the
         sig gen used to keep DRIVING after the app was closed). Best-effort
         per output -- a dead instrument must never block exit."""
+        # Stop a running SLDEA test FIRST so its worker performs the proper
+        # ramp-to-zero before we cut outputs (audit 2026-07-25: close never
+        # set _sldea_stop, racing the worker's 10 Hz drive).
+        if getattr(self, '_sldea_running', False):
+            self._sldea_stop = True
+            for _ in range(30):                     # up to ~3 s
+                if not self._sldea_running:
+                    break
+                self.root.update()
+                time.sleep(0.1)
         try:
             self.cam_seq_running = False
             self.cam_stop_preview()
@@ -668,6 +678,11 @@ class InstrumentControlGUI:
         """Close + reopen one instrument off the UI thread (issue #40)."""
         if not INSTRUMENTS_SUPPORTED:
             messagebox.showinfo("Linux only", NOT_LINUX_NOTE)
+            return
+        # A LIVE SLDEA run owns the SG: nulling self.sg mid-run used to skip
+        # the safety ramp-down entirely (audit 2026-07-25, critical C1).
+        if key == 'sg' and getattr(self, '_sldea_live_ch', None) is not None:
+            self._sg_live_locked(self._sldea_live_ch)
             return
         old = getattr(self, key)
         setattr(self, key, None)   # nothing may use the handle meanwhile
@@ -2040,7 +2055,8 @@ ANALYSIS:
                 detail = f"Enable CH{ch} output?"
             if not messagebox.askyesno(
                     "Enable output",
-                    detail + "\n\nThis energizes the terminals."):
+                    detail + "\n\nThis energizes the terminals.",
+                    default='no'):
                 return
 
         def done(_result, error):
@@ -2583,13 +2599,18 @@ LOGGING:
         self.root.after(100, self._sldea_animate_cursor)
 
     def _sldea_dry_toggle(self):
+        # The checkbox TEXT must state the current mode, not just tint it:
+        # in LIVE mode it used to still read 'DRY RUN — HV OFF' (audit
+        # 2026-07-25 — color was the only signal).
         if self.sldea_dryrun.get():
-            self.sldea_dry_cb.config(bg='#fff3cd', fg='#8a5a00',
+            self.sldea_dry_cb.config(text="DRY RUN — HV OFF",
+                                     bg='#fff3cd', fg='#8a5a00',
                                      selectcolor='#fff3cd')
             self.sldea_run_btn.config(text="▶ Run (DRY)", bg='#8a5a00',
                                       activebackground='#6d4700')
         else:
-            self.sldea_dry_cb.config(bg='#f8d7da', fg='#a01010',
+            self.sldea_dry_cb.config(text="⚡ LIVE — HV WILL BE DRIVEN",
+                                     bg='#f8d7da', fg='#a01010',
                                      selectcolor='#f8d7da')
             self.sldea_run_btn.config(text="▶ Run — LIVE HV", bg='#c62828',
                                       activebackground='#8e1a1a')
@@ -2616,11 +2637,17 @@ LOGGING:
                     "SLDEA", "Signal generator not connected — it drives the "
                     "Trek. Connect it (Signal Gen tab) or use Dry Run.")
                 return
+            if not self.scope and not messagebox.askyesno(
+                    "No current monitoring",
+                    "No oscilloscope connected — this LIVE run will have NO "
+                    "measured kV/µA columns and NO breakdown watchdog.\n\n"
+                    "Proceed without monitoring?", default='no'):
+                return
             if not messagebox.askyesno(
                     "Energize HV?",
                     f"LIVE run — this drives the Trek up to "
                     f"{max(p.levels):g} kV via SG CH{self.sldea_vars['sgch'].get()}"
-                    f".\n\n{p.summary()}\n\nProceed?"):
+                    f".\n\n{p.summary()}\n\nProceed?", default='no'):
                 return
         sgch = int(self.sldea_vars['sgch'].get())
         vch = int(self.sldea_vars['vch'].get())
@@ -2635,8 +2662,13 @@ LOGGING:
             diam_mm = 16.0
         autoproc = self.sldea_autoproc.get()
         trek_sign = -1.0 if self.sldea_trek_inv.get() else 1.0
-        # Breakdown watchdog (live only)
-        wd_on = self.sldea_wd_on.get() and not dry
+        # Breakdown watchdog (live only). Only claim it is armed when it
+        # actually will be: the worker needs a scope to read the current
+        # (audit 2026-07-25 — the old banner printed either way).
+        wd_on = self.sldea_wd_on.get() and not dry and self.scope is not None
+        if self.sldea_wd_on.get() and not dry and self.scope is None:
+            self._sldea_log("⚠ watchdog requested but NO SCOPE — running "
+                            "without breakdown protection")
         try:
             wd_ua = float(self.sldea_vars['wd_ua'].get())
             wd_s = float(self.sldea_vars['wd_s'].get())
@@ -2660,6 +2692,10 @@ LOGGING:
         self._sldea_stop = False
         self._sldea_bd_tripped = False
         self._sldea_running = True
+        # LIVE interlock: the driven SG channel belongs to the run until it
+        # ends (user decision 2026-07-25: lock the active channel, leave the
+        # other usable, loud note on any attempt).
+        self._sldea_live_ch = sgch if not dry else None
         self.sldea_run_btn.config(state='disabled')
         self.sldea_abort_btn.config(state='normal')
         self._sldea_elapsed = 0.0
@@ -2694,7 +2730,7 @@ LOGGING:
             return messagebox.askyesno(
                 "Camera pre-flight",
                 "No camera frame available — the run would capture no "
-                "images.\n\nContinue anyway?")
+                "images.\n\nContinue anyway?", default='no')
 
         import numpy as np
         from PIL import Image, ImageDraw, ImageTk
@@ -2795,8 +2831,22 @@ LOGGING:
 
     def _sldea_finished(self):
         self._sldea_running = False
+        self._sldea_live_ch = None
         self.sldea_run_btn.config(state='normal')
         self.sldea_abort_btn.config(state='disabled')
+
+    def _sg_live_locked(self, channel=None):
+        """True (+ loud note) when a LIVE SLDEA run owns this SG channel."""
+        ch = getattr(self, '_sldea_live_ch', None)
+        if ch is None or (channel is not None and channel != ch):
+            return False
+        messagebox.showwarning(
+            "Channel in use — LIVE HV run",
+            f"SG CH{ch} is driving the Trek in a LIVE SLDEA run.\n\n"
+            f"Its controls are locked until the run ends (the other channel "
+            f"stays available). Abort the run on the SLDEA tab first if you "
+            f"must take over.")
+        return True
 
     def _sldea_log(self, msg):
         def up():
@@ -2823,6 +2873,11 @@ LOGGING:
         rundir = os.path.join(outdir, runname or p.run_dirname(started))
         framedir = os.path.join(rundir, 'frames')
         fh = None
+        # Capture the SG handle ONCE: a mid-run Reconnect nulls self.sg, and
+        # the finally-block ramp-down must always reach the instrument this
+        # run actually drove (audit 2026-07-25, critical C1/C3 — HV could be
+        # left energized while the UI reported 'complete').
+        sg = self.sg if not dry else None
         try:
             os.makedirs(framedir, exist_ok=True)
             # Write run metadata FIRST -- before any (possibly slow) camera
@@ -2870,6 +2925,7 @@ LOGGING:
             watchdog = (sldea_profile.BreakdownWatchdog(wd_ua, wd_s)
                         if (wd_on and not dry and self.scope) else None)
             last_wd = -1.0
+            wd_bad_since, wd_blind = None, False
             while not self._sldea_stop:
                 el = time.monotonic() - t0
                 self._sldea_elapsed = el          # feeds the preview playhead
@@ -2882,8 +2938,29 @@ LOGGING:
                     try:
                         mi = self.scope.measure('MEAN', ich)
                         ua = measured_ua(mi) if mi is not None else None
-                    except Exception:
+                    except Exception as e:
                         ua = None
+                        if wd_bad_since is None:
+                            self._sldea_log(f"⚠ watchdog scope read failed: "
+                                            f"{e}")
+                    # Monitoring-loss alarm (policy 2026-07-25: warn loudly,
+                    # keep running). Unreadable samples used to disarm the
+                    # watchdog in total silence.
+                    if ua is None:
+                        if wd_bad_since is None:
+                            wd_bad_since = el
+                        elif el - wd_bad_since >= 10.0 and not wd_blind:
+                            wd_blind = True
+                            self._sldea_log(
+                                "⚠⚠ CURRENT MONITORING LOST — scope "
+                                "unreadable for 10 s, breakdown watchdog is "
+                                "BLIND. Run continues; watch the DEA and "
+                                "abort manually if in doubt.")
+                    else:
+                        if wd_blind:
+                            self._sldea_log("watchdog: current monitoring "
+                                            "recovered")
+                        wd_bad_since, wd_blind = None, False
                     if watchdog.update(el, ua):
                         self._sldea_bd_tripped = True
                         self._sldea_log(
@@ -2900,11 +2977,11 @@ LOGGING:
                                       f"(>{wd_ua:g}µA for {wd_s:g}s)")
                         self._sldea_stop = True
                         break
-                if not dry and self.sg:
+                if sg is not None:
                     kv = p.kv_at(el)
                     if last_kv is None or abs(kv - last_kv) > 1e-4:
                         try:
-                            self.sg.set_offset(
+                            sg.set_offset(
                                 sgch, trek_sign * control_v_for_kv(kv))
                         except Exception as e:
                             self._sldea_log(f"SG set_offset error: {e}")
@@ -2940,12 +3017,38 @@ LOGGING:
             self._sldea_log(f"ERROR: {e}")
             self._sldea_set_status("error", fg='red')
         finally:
-            if not dry and self.sg:
-                try:
-                    self.sg.set_offset(sgch, 0.0)
-                    self.sg.set_output(sgch, False)
-                except Exception:
-                    pass
+            # GUARANTEED HV shutdown: always ramp the SG this run drove
+            # (captured handle — survives a mid-run Reconnect), and NEVER
+            # swallow a failure silently: the old bare `except: pass` let a
+            # dead link end a run green while the Trek stayed energized
+            # (audit 2026-07-25, criticals C1-C3).
+            if sg is not None:
+                zeroed = False
+                for target in ([sg, self.sg] if self.sg is not sg
+                               else [sg]):
+                    if target is None or zeroed:
+                        continue
+                    try:
+                        target.set_offset(sgch, 0.0)
+                        target.set_output(sgch, False)
+                        zeroed = True
+                    except Exception as e:
+                        self._sldea_log(f"SG zeroing attempt failed: {e}")
+                if not zeroed:
+                    self._sldea_log(
+                        "⚡⚡ FAILED TO ZERO THE SG OUTPUT — the Trek may "
+                        "still be energized. TURN OFF THE SG/TREK AT THE "
+                        "FRONT PANEL NOW.")
+                    self._sldea_set_status(
+                        "⚡ NOT ZEROED — turn off SG/Trek manually!",
+                        fg='#c62828')
+                    self.root.after(0, lambda: messagebox.showerror(
+                        "HV NOT ZEROED",
+                        "The run ended but the signal generator could not "
+                        "be zeroed (link error).\n\nThe Trek may still be "
+                        "outputting high voltage.\n\n→ Turn the SG output "
+                        "OFF on its front panel (or power it off) NOW, "
+                        "then check the Trek."))
             if fh is not None:
                 try:
                     fh.close()
@@ -3733,6 +3836,10 @@ LOGGING:
         optional main-thread callback fired when this apply finishes (used
         by preset loads to chain CH2 behind CH1 under the shared busy key).
         """
+        if self._sg_live_locked(channel):
+            if _then:
+                _then()          # keep preset chains moving past the lock
+            return
         if not self.sg:
             messagebox.showerror("Error", "Signal generator not connected")
             if _then:
@@ -3824,8 +3931,26 @@ LOGGING:
         if not self.sg:
             messagebox.showerror("Error", "Signal generator not connected")
             return
+        if self._sg_live_locked(channel):
+            return
         widgets = self.sg_channel_widgets[channel]
         new_state = not widgets['output'].get()
+        if new_state:
+            # Turning an output ON can energize the Trek HV amplifier on
+            # this bench (1 V = 1 kV) — the PSU already confirms; the SG
+            # must too (audit 2026-07-25). Enter defaults to No.
+            wave = widgets['waveform'].get() if 'waveform' in widgets else '?'
+            try:
+                off = float(widgets['offset'].get())
+            except (KeyError, TypeError, ValueError):
+                off = None
+            detail = f"Turn CH{channel} output ON? ({wave}" + \
+                (f", offset {off:g} V" if off is not None else "") + ")"
+            if not messagebox.askyesno(
+                    "Enable SG output",
+                    detail + "\n\nIf this channel feeds the Trek, "
+                    "1 V = 1 kV at the DEA.", default='no'):
+                return
 
         def done(_result, error):
             if error:

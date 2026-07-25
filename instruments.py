@@ -104,8 +104,18 @@ class VisaInstrument:
             self.inst.clear()
         except Exception:
             pass
-        self.idn = self.inst.query('*IDN?').strip()
-        self._post_open()
+        # If IDN/post-open fails, CLOSE the session before propagating: a
+        # leaked open claims the USB interface for the process lifetime,
+        # making every reconnect fail until app restart (audit 2026-07-25).
+        try:
+            self.idn = self.inst.query('*IDN?').strip()
+            self._post_open()
+        except Exception:
+            try:
+                self.inst.close()
+            except Exception:
+                pass
+            raise
 
     def _post_open(self):
         """Subclass hook for additional setup after open + IDN."""
@@ -578,6 +588,8 @@ class BK4055B(VisaInstrument):
     _BSWV_NUMERIC = (
         'FRQ', 'PERI', 'AMP', 'AMPVRMS', 'OFST', 'HLEV', 'LLEV',
         'PHSE', 'DUTY', 'SYM', 'RISE', 'FALL', 'DLY', 'WIDTH',
+        'STDEV', 'MEAN',   # NOISE params -- read back as '0.2V'/'0V';
+                           # leaving them raw broke Apply after any sync
     )
 
     @staticmethod
@@ -1263,7 +1275,16 @@ class BK5493C:
             self.inst.read_termination = '\n'
             self.inst.write_termination = '\n'
             self.inst.timeout = 5000
-        self.idn = self.inst.query('*IDN?').strip() if identify else ''
+        try:
+            self.idn = self.inst.query('*IDN?').strip() if identify else ''
+        except Exception:
+            # close on failed identify -- the DMM's socket accepts a single
+            # client, so a leaked session blocks every reconnect
+            try:
+                self.inst.close()
+            except Exception:
+                pass
+            raise
 
     @classmethod
     def function_labels(cls):

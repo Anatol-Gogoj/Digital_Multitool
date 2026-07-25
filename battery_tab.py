@@ -76,7 +76,11 @@ class BatteryPane(ttk.Frame):
                 df = load_and_process(path)
                 self.after(0, lambda: self._on_load_success(df, path, fname))
             except Exception as e:
-                self.after(0, lambda: self._on_load_error(e))
+                # Bind the exception NOW: Python deletes the except-target
+                # name when the block exits, so a bare `lambda: ...(e)`
+                # raised NameError when Tk ran it later and load failures
+                # were never reported (audit 2026-07-25, verified live).
+                self.after(0, lambda err=e: self._on_load_error(err))
 
         threading.Thread(target=_do_load, daemon=True).start()
 

@@ -72,13 +72,19 @@ NUMERIC_COLS = ["current_mA", "voltage_mV", "capacity_mAh",
 
 
 def deps_available():
-    """(ok, reason) -- True when pandas + openpyxl + matplotlib import."""
+    """(ok, reason) -- True when pandas + openpyxl + matplotlib import.
+
+    Catches Exception, not just ImportError: a torn/mixed-version pandas in
+    the shared pylibs cache raises AttributeError during its own import,
+    and that used to escape here and kill the WHOLE app at startup before
+    the window appeared (audit 2026-07-25; webcam.deps_available already
+    does the same deliberately)."""
     try:
         import pandas          # noqa: F401
         import openpyxl        # noqa: F401
         import matplotlib      # noqa: F401
         return True, ""
-    except ImportError as e:
+    except Exception as e:
         return False, str(e)
 
 

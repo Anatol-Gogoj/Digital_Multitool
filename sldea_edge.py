@@ -82,8 +82,13 @@ def save_settings(rundir, settings):
     if EDGE_HDR in text:
         text = text.split(EDGE_HDR, 1)[0].rstrip() + '\n'
     lines = [EDGE_HDR] + [f"{k}: {settings[k]:g}" for k in DEFAULT_SETTINGS]
-    with open(path, 'w') as f:
+    # Atomic (tmp + replace): the in-place truncate used to destroy the
+    # run's only metadata record on a mid-write NAS failure (audit
+    # 2026-07-25).
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
         f.write(text.rstrip() + '\n\n' + '\n'.join(lines) + '\n')
+    os.replace(tmp, path)
     return path
 
 
@@ -429,14 +434,85 @@ def wrinkle_onset(rows, results, settings):
 # scale + write-back
 # ---------------------------------------------------------------------------
 
-def mm_per_px(results, rows, settings):
-    """Scale from the DEA's nominal resting diameter vs the baseline (or
-    first accepted) detection. None when nothing is accepted."""
+def baseline_disc(base_gray, settings):
+    """Trace the RESTING DEA disc on the baseline frame itself (no diff).
+
+    Difference imaging can never calibrate off the baseline (a self-diff
+    yields nothing), so the px→mm scale used to key silently off the first
+    ACTIVATED frame's changed region — wrong whenever that region is not
+    the full disc (audit 2026-07-25). The resting disc reads DARKER than
+    the membrane (bench 2026-07-23: disc ~165, membrane ~197-207), so an
+    inverse-Otsu on the central ROI + the same merged-region contour
+    recovers it. Returns a candidate-like dict (method 'baseline-disc') or
+    None when no plausible disc is found."""
+    import cv2
+    if base_gray is None:
+        return None
+    g = base_gray
+    h0, w0 = g.shape
+    f = 1.0
+    if w0 > DETECT_MAX_W:
+        f = DETECT_MAX_W / float(w0)
+        g = cv2.resize(g, (DETECT_MAX_W, max(1, int(round(h0 * f)))),
+                       interpolation=cv2.INTER_AREA)
+    h, w = g.shape
+    rf = min(1.0, max(0.2, float(settings.get('roi_frac', 0.85))))
+    x0 = int(w * (1 - rf) / 2)
+    y0 = int(h * (1 - rf) / 2)
+    sub = g[y0:h - y0 or None, x0:w - x0 or None].astype(np.uint8)
+    sub = cv2.GaussianBlur(sub, (5, 5), 0)
+    # Neutralize the electrode strips first: their near-saturated pixels
+    # drag Otsu to a strip-vs-everything split instead of disc-vs-membrane.
+    lum = float(settings.get('electrode_lum', 220) or 220)
+    bright = sub >= lum
+    if bright.any() and (~bright).any():
+        sub = sub.copy()
+        sub[bright] = np.uint8(np.median(sub[~bright]))
+    # dark disc on brighter membrane -> inverse threshold
+    _t, mask = cv2.threshold(sub, 0, 255,
+                             cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # sanity: the dark class must be a minority region distinctly darker
+    # than the light class, else there is no disc to find
+    dark = sub[mask > 0]
+    light = sub[mask == 0]
+    if dark.size < 200 or light.size < 200:
+        return None
+    if float(np.median(light)) - float(np.median(dark)) < 8:
+        return None
+    frac = dark.size / float(sub.size)
+    if not 0.005 <= frac <= 0.6:
+        return None
+    c = _region_candidate(mask, 'baseline-disc', offset=(x0, y0))
+    if c is None or c['solidity'] < 0.5:
+        return None
+    if f != 1.0:
+        inv = 1.0 / f
+        c['area_px'] *= inv * inv
+        c['diam_px'] *= inv
+        c['cx'] *= inv
+        c['cy'] *= inv
+        c['contour'] = (np.asarray(c['contour'], float) * inv)
+    c['conf'] = round(min(0.99, 0.5 + 0.5 * c['solidity']), 3)
+    c['wrinkle'] = None
+    c['spread_pct'] = 0.0
+    return c
+
+
+def mm_per_px(results, rows, settings, baseline_ref=None):
+    """Scale from the DEA's nominal resting diameter.
+
+    Preference order (audit 2026-07-25): an accepted result on the row
+    tagged 'baseline' → the `baseline_ref` (a baseline_disc() detection or
+    a manual calibration dict with 'diam_px') → the first accepted result
+    (last resort — its outline is an ACTIVATED region, so the scale may be
+    off; callers should record the source). None when nothing is usable."""
     ref = None
     for i, row in enumerate(rows):
         if results.get(i) and (row.get('tag') == 'baseline'):
             ref = results[i]
             break
+    if ref is None and baseline_ref and baseline_ref.get('diam_px'):
+        ref = baseline_ref
     if ref is None:
         for i in sorted(results):
             if results[i]:
@@ -447,10 +523,31 @@ def mm_per_px(results, rows, settings):
     return float(settings['diam_mm']) / float(ref['diam_px'])
 
 
+def scale_source(results, rows, baseline_ref=None):
+    """Human-readable description of which reference mm_per_px would use."""
+    for i, row in enumerate(rows):
+        if results.get(i) and (row.get('tag') == 'baseline'):
+            return f"baseline row (idx {i})"
+    if baseline_ref and baseline_ref.get('diam_px'):
+        return baseline_ref.get('method', 'baseline-disc') + \
+            f" ({baseline_ref['diam_px']:.0f} px)"
+    for i in sorted(results):
+        if results[i]:
+            return (f"FIRST ACCEPTED frame (idx {i}) — activated region, "
+                    f"scale may be off")
+    return "none"
+
+
 def apply_results(rows, results, scale, flags, annos=None):
     """Fill the active_area_* / wrinkle_idx / notes columns in `rows`
     (in place). `annos` are informational notes (e.g. wrinkle-mode) appended
-    alongside the breakdown flags but never treated as breakdown."""
+    alongside the breakdown flags but never treated as breakdown.
+
+    Reprocess-safe (audit 2026-07-25): rejected rows blank EVERY derived
+    column (a previous pass's mm²/wrinkle used to survive next to the
+    'rejected' note), accepted rows blank mm²/diam when no scale is
+    available (instead of keeping stale ones), and flag/anno notes are not
+    appended twice on repeated saves."""
     annos = annos or {}
     for i, row in enumerate(rows):
         r = results.get(i)
@@ -459,18 +556,24 @@ def apply_results(rows, results, scale, flags, annos=None):
             if scale:
                 row['active_area_mm2'] = f"{r['area_px'] * scale * scale:.3f}"
                 row['active_diam_mm'] = f"{r['diam_px'] * scale:.3f}"
+            else:
+                row['active_area_mm2'] = ''
+                row['active_diam_mm'] = ''
             if r.get('wrinkle') is not None:
                 row['wrinkle_idx'] = f"{float(r['wrinkle']):.2f}"
             note = f"edge:{r['method']} conf {r['conf']:.2f}"
             if r.get('chosen_by'):
                 note += f" ({r['chosen_by']})"
         elif i in results:                 # explicitly reviewed + rejected
-            row['active_area_px'] = ''
+            for col in ('active_area_px', 'active_area_mm2',
+                        'active_diam_mm', 'wrinkle_idx'):
+                if col in row or col == 'active_area_px':
+                    row[col] = ''
             note = 'rejected (no reliable edge)'
         else:
             note = row.get('notes') or ''
         for extra in (flags.get(i), annos.get(i)):
-            if extra:
+            if extra and extra not in note:
                 note = (note + '; ' if note else '') + extra
         row['notes'] = note
     return rows
@@ -509,12 +612,18 @@ def mark_breakdown_files(run, flags):
 
 
 def write_back(rundir, run):
-    """Rewrite data.csv (backup first) with the filled columns."""
+    """Rewrite data.csv (backup first) with the filled columns.
+
+    Atomic: writes data.csv.tmp then os.replace — a NAS hiccup mid-write
+    used to leave a truncated data.csv with the frames already renamed
+    (audit 2026-07-25)."""
     csv_path = os.path.join(rundir, 'data.csv')
     shutil.copy2(csv_path, csv_path + '.bak')
-    with open(csv_path, 'w', newline='') as f:
+    tmp = csv_path + '.tmp'
+    with open(tmp, 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=run['columns'])
         w.writeheader()
         for row in run['rows']:
             w.writerow(row)
+    os.replace(tmp, csv_path)
     return csv_path

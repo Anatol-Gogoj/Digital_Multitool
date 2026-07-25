@@ -104,18 +104,19 @@ def load_panels(run, picks):
 
 def detect_panels(panels, base_gray, settings, rows):
     """Run candidates() for each panel; return (results_by_idx, cands_by_idx,
-    mm_scale). results holds the best candidate (or None) per row index so
-    the shared mm_per_px picks the same reference as the real pipeline."""
+    mm_scale). The scale prefers the non-diff baseline-disc trace, exactly
+    like Edge Review (audit 2026-07-25)."""
     results, cands = {}, {}
     for p in panels:
         cl = se.candidates(base_gray, p['gray'], settings)
         cands[p['idx']] = cl
         results[p['idx']] = cl[0] if cl else None
-    scale = se.mm_per_px(results, rows, settings)
+    ref = se.baseline_disc(base_gray, settings)
+    scale = se.mm_per_px(results, rows, settings, baseline_ref=ref)
     return results, cands, scale
 
 
-def _panel_title(panel, cands, scale):
+def _panel_title(panel, cands, scale, settings=None):
     row = panel['row']
     kv = row.get('nominal_kV') or '?'
     head = f"{panel['label']}  ·  {kv} kV"
@@ -124,13 +125,16 @@ def _panel_title(panel, cands, scale):
     c = cands[0]
     area = c['area_px']
     mm2 = f"{area * scale * scale:.1f} mm²  ·  " if scale else ""
-    rev = "REVIEW" if se.needs_review(cands, {**se.DEFAULT_SETTINGS}) else "ok"
+    # the run's LIVE settings, not defaults — the footer promises this
+    # matches Edge Review exactly (audit 2026-07-25)
+    rev = "REVIEW" if se.needs_review(
+        cands, settings or se.DEFAULT_SETTINGS) else "ok"
     return (head + f"  ·  {c['method']}\n{mm2}{area:.0f} px²  ·  "
             f"fill {c['solidity']:.2f}  ·  wrinkle {c.get('wrinkle', 0):.2f}"
             f"  ·  conf {c['conf']:.2f}  ·  {rev}")
 
 
-def render(ax, panel, cands, scale, fill=True):
+def render(ax, panel, cands, scale, fill=True, settings=None):
     """Draw one panel: the frame + candidate outlines (best thick), optional
     translucent fill of the chosen region, and a stats title. Reuses a
     persistent imshow so live updates only touch the overlays."""
@@ -154,7 +158,7 @@ def render(ax, panel, cands, scale, fill=True):
         ax.plot(xs, ys, color=col, lw=2.0 if k == 0 else 1.0)
         if k == 0 and fill:
             ax.fill(xs, ys, color=col, alpha=0.18)
-    ax.set_title(_panel_title(panel, cands, scale), fontsize=8.5,
+    ax.set_title(_panel_title(panel, cands, scale, settings), fontsize=8.5,
                  loc='left')
 
 
@@ -286,7 +290,8 @@ def main(argv):
         _, cands, scale = detect_panels(panels, base_gray, settings,
                                         run['rows'])
         for ax, p in zip(axs, panels):
-            render(ax, p, cands[p['idx']], scale, fill=fill_var.get())
+            render(ax, p, cands[p['idx']], scale, fill=fill_var.get(),
+                   settings=settings)
         fig.tight_layout()
         canvas.draw_idle()
 

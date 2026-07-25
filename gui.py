@@ -2825,10 +2825,24 @@ LOGGING:
 
     def _sldea_open_tuner(self, rundir):
         """Launch the live parameter tuner (its own process). rundir=None
-        lets the tuner pick the newest run under the output dir."""
+        resolves the newest run under the output dir HERE — passing the
+        parent dir made the tuner exit code 2 invisibly, so the button
+        never worked (audit 2026-07-25)."""
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               'sldea_tuner.py')
-        target = rundir or self.sldea_outdir.get()
+        target = rundir
+        if not target:
+            parent = self.sldea_outdir.get()
+            try:
+                import sldea_tuner as _st
+                target = _st._newest_run(parent)
+            except Exception:
+                target = None
+            if not target:
+                messagebox.showinfo(
+                    "Edge tuner",
+                    f"No finished runs (data.csv) found under\n{parent}")
+                return
         try:
             subprocess.Popen([sys.executable, script, target],
                              start_new_session=True)

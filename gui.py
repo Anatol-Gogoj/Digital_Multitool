@@ -270,7 +270,19 @@ class InstrumentControlGUI:
                              ("webcam", self.create_webcam_tab),
                              ("SLDEA test", self.create_sldea_tab)):
             self._progress(f"Loading {label}...")
-            build()
+            try:
+                build()
+            except Exception as e:
+                # One broken tab (torn pylibs, bad import) must degrade,
+                # not kill the whole app before the window even appears
+                # (audit 2026-07-25 — startup had no guard at all).
+                err = ttk.Frame(self.notebook)
+                self.notebook.add(err, text=f"{label} (unavailable)")
+                tk.Label(err, fg='#a01010', justify='left', wraplength=700,
+                         text=f"This tab failed to load:\n\n{e}\n\n"
+                              f"The rest of the app keeps working. Try "
+                              f"Help → Update Software, or report this."
+                         ).pack(padx=20, pady=20, anchor='w')
         
         # Footer: status bar (left, stretches) + version readout (right)
         footer = tk.Frame(root)

@@ -18,6 +18,12 @@ import os
 # Module-level so tests can point it at a temp dir.
 LOCAL_FALLBACK = os.path.join(os.path.expanduser('~'), '.local', 'share',
                               'scpi_control', 'presets')
+# Second-chance fallback: the root-run desktop installer left
+# ~/.local/share/scpi_control root-owned in one user's home (same failure
+# the camera settings hit, webcam.py 2026-07-24). ~/.cache/scpi_control is
+# created BY the user at every launch, so it is always writable.
+LOCAL_FALLBACK2 = os.path.join(os.path.expanduser('~'), '.cache',
+                               'scpi_control', 'presets')
 
 _note = None          # human-readable description of the last fallback
 
@@ -33,8 +39,9 @@ def clear_note():
     _note = None
 
 
-def local_mirror(path, root=None):
-    """`path` remapped into LOCAL_FALLBACK.
+def local_mirror(path, root=None, base=None):
+    """`path` remapped into the local fallback (`base`, default
+    LOCAL_FALLBACK).
 
     With `root` (the configured presets directory) the layout underneath it
     is preserved, so presets/arb/<name>.csv mirrors to
@@ -48,7 +55,7 @@ def local_mirror(path, root=None):
                 tail = rel
         except ValueError:      # different drives on Windows
             pass
-    return os.path.join(LOCAL_FALLBACK, tail)
+    return os.path.join(base or LOCAL_FALLBACK, tail)
 
 
 def writable_path(path, is_dir=False, root=None):
@@ -69,12 +76,26 @@ def writable_path(path, is_dir=False, root=None):
         os.remove(probe)
         return path
     except OSError as e:
-        alt = local_mirror(path, root)
-        alt_dir = alt if is_dir else os.path.dirname(alt)
-        os.makedirs(alt_dir, exist_ok=True)
-        _note = (f"Shared drive unavailable ({e.strerror or e}) -- saved to "
-                 f"the local copy in {alt_dir}")
-        return alt
+        # Try each local fallback in turn: the primary can itself be
+        # unwritable (root-owned installer artefact — audit 2026-07-25;
+        # the unguarded makedirs here used to escape and kill the save).
+        last = e
+        for base in (LOCAL_FALLBACK, LOCAL_FALLBACK2):
+            alt = local_mirror(path, root, base=base)
+            alt_dir = alt if is_dir else os.path.dirname(alt)
+            try:
+                os.makedirs(alt_dir, exist_ok=True)
+                probe2 = os.path.join(alt_dir, '.scpi-write-probe')
+                with open(probe2, 'w'):
+                    pass
+                os.remove(probe2)
+            except OSError as e2:
+                last = e2
+                continue
+            _note = (f"Shared drive unavailable ({e.strerror or e}) -- "
+                     f"saved to the local copy in {alt_dir}")
+            return alt
+        raise last
 
 
 def readable_path(path, root=None):

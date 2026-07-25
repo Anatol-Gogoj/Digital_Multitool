@@ -46,16 +46,7 @@ mkdir -p "$APP/presets/arb"
 [ -f "$APP/presets/siggen_presets.json" ] || \
   printf '{\n  "version": 1,\n  "presets": {}\n}\n' > "$APP/presets/siggen_presets.json"
 
-echo "2/3  Stamping build hash into version.py"
-HASH="$(git -c safe.directory="$SRC" -C "$SRC" rev-parse --short HEAD 2>/dev/null || true)"
-if [ -n "$HASH" ] && [ -f "$APP/version.py" ]; then
-  sed -i -E "s/^(__version__ = \")([^\"]*)(\")/\1\2+$HASH\3/" "$APP/version.py"
-  echo "     stamped +$HASH"
-else
-  echo "     (no git hash available; footer shows plain version)"
-fi
-
-echo "3/3  Installing Python deps (staged locally, then synced -> $LIBS)"
+echo "2/3  Installing Python deps (staged locally, then synced -> $LIBS)"
 # Stage the whole dependency set on LOCAL disk first, then one rsync to the
 # share. Installing straight into the CIFS pylibs left a long window where a
 # user's launcher could cache-sync a HALF-WRITTEN package (bench 2026-07-23:
@@ -65,5 +56,19 @@ STAGE="$(mktemp -d /tmp/scpi-libs-XXXXXX)"
 "$PIP_PY" -m pip install --quiet --target="$STAGE" -r "$SRC/requirements.txt"
 rsync -a --delete "$STAGE"/ "$LIBS"/
 rm -rf "$STAGE"
+
+echo "3/3  Stamping build hash into version.py (deploy-complete marker)"
+# The stamp goes in LAST: the launcher treats a matching version.py stamp
+# as 'cache current' for the app AND pylibs, so stamping before the pylibs
+# rsync (old order) let a launch during deploy cache torn libs under the
+# new stamp PERMANENTLY (audit 2026-07-25). Stamped last, a mid-deploy
+# launch just double-syncs once -- harmless.
+HASH="$(git -c safe.directory="$SRC" -C "$SRC" rev-parse --short HEAD 2>/dev/null || true)"
+if [ -n "$HASH" ] && [ -f "$APP/version.py" ]; then
+  sed -i -E "s/^(__version__ = \")([^\"]*)(\")/\1\2+$HASH\3/" "$APP/version.py"
+  echo "     stamped +$HASH"
+else
+  echo "     (no git hash available; footer shows plain version)"
+fi
 
 echo "Done. Launch with:  bash $DEST/launch_gui.sh"

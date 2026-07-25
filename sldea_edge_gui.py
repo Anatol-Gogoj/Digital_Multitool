@@ -106,12 +106,19 @@ class EdgeReviewApp:
         self.cand_frame.pack(fill='x')
         self.cand_radios = []
         for k in range(3):
+            row = ttk.Frame(self.cand_frame)
+            row.pack(fill='x')
+            # swatch carries the color; the TEXT stays readable (colored
+            # label text was 1.6:1 and the mapping was color-only — audit
+            # 2026-07-25; letters are also drawn ON the image now)
+            tk.Label(row, width=2, bg=CAND_COLORS[k],
+                     text=CAND_KEYS[k], fg='black').pack(side='left',
+                                                         padx=(0, 4))
             rb = tk.Radiobutton(
-                self.cand_frame, text=f"{CAND_KEYS[k]}: —", anchor='w',
-                variable=self.cand_var, value=k, fg=CAND_COLORS[k],
-                activeforeground=CAND_COLORS[k],
+                row, text="—", anchor='w',
+                variable=self.cand_var, value=k,
                 command=self._choose_current)
-            rb.pack(fill='x')
+            rb.pack(side='left', fill='x', expand=True)
             self.cand_radios.append(rb)
         bt = ttk.Frame(side)
         bt.pack(fill='x', pady=6)
@@ -137,7 +144,11 @@ class EdgeReviewApp:
         for key, fn in (('<Key-1>', lambda e: self._pick_k(0)),
                         ('<Key-2>', lambda e: self._pick_k(1)),
                         ('<Key-3>', lambda e: self._pick_k(2)),
+                        ('<Key-a>', lambda e: self._pick_k(0)),
+                        ('<Key-b>', lambda e: self._pick_k(1)),
+                        ('<Key-c>', lambda e: self._pick_k(2)),
                         ('<Key-r>', lambda e: self._reject()),
+                        ('<Key-R>', lambda e: self._reject()),
                         ('<Return>', lambda e: self._accept_next()),
                         ('<Left>', lambda e: self._step(-1)),
                         ('<Right>', lambda e: self._step(+1))):
@@ -463,6 +474,15 @@ class EdgeReviewApp:
             wdt = 2 if (chosen and c['method'] == chosen['method']) else 1
             if len(pts) > 2:
                 dr.line(pts + [pts[0]], fill=CAND_COLORS[k], width=wdt)
+                # letter tag: candidate↔outline mapping must not rely on
+                # color alone (audit 2026-07-25)
+                tx, ty = max(pts, key=lambda p: p[0])
+                tx = min(tx + 4, img.width - 14)
+                for dx in (-1, 1):
+                    for dy in (-1, 1):
+                        dr.text((tx + dx, ty + dy), CAND_KEYS[k],
+                                fill='black')
+                dr.text((tx, ty), CAND_KEYS[k], fill=CAND_COLORS[k])
         self._photo = ImageTk.PhotoImage(img)
         self.canvas.delete('all')
         self.canvas.config(width=img.width, height=img.height)

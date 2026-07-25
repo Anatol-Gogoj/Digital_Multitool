@@ -156,6 +156,13 @@ class ScrollableTab(ttk.Frame):
                                                anchor='nw')
         self.body.bind('<Configure>', self._on_body_configure)
         self._canvas.bind('<Configure>', self._on_canvas_configure)
+        # keyboard scrolling (audit 2026-07-25: tabs were mouse-wheel only)
+        self._canvas.configure(takefocus=1)
+        for key, n in (('<Up>', -1), ('<Down>', 1),
+                       ('<Prior>', -5), ('<Next>', 5)):
+            self._canvas.bind(key,
+                              lambda e, n=n: self._canvas.yview_scroll(
+                                  n, 'units'))
         # Mouse wheel scrolls whichever tab the pointer is over. bind_all
         # is grabbed on Enter and released on Leave so tabs don't fight.
         self.bind('<Enter>', self._bind_wheel)

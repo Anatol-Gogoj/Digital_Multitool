@@ -169,5 +169,30 @@ def _run():
     print(f"\n{len(fns)} tests passed")
 
 
+def test_fallback_chain_skips_rootowned_primary():
+    # The primary local fallback can itself be unwritable (root-owned
+    # installer artefact, audit 2026-07-25): writable_path must land in the
+    # SECOND fallback instead of raising.
+    import tempfile, shutil, os
+    share = tempfile.mkdtemp(prefix='pp_share_')
+    ro = tempfile.mkdtemp(prefix='pp_ro_')
+    ok2 = tempfile.mkdtemp(prefix='pp_cache_')
+    os.chmod(share, 0o555)                      # share "unreachable"
+    os.chmod(ro, 0o555)                         # root-owned primary
+    p1, p2 = presets_path.LOCAL_FALLBACK, presets_path.LOCAL_FALLBACK2
+    presets_path.LOCAL_FALLBACK = os.path.join(ro, 'presets')
+    presets_path.LOCAL_FALLBACK2 = os.path.join(ok2, 'presets')
+    try:
+        out = presets_path.writable_path(os.path.join(share, 'x.json'))
+        assert out.startswith(presets_path.LOCAL_FALLBACK2), out
+        assert presets_path.fallback_note()
+    finally:
+        presets_path.LOCAL_FALLBACK, presets_path.LOCAL_FALLBACK2 = p1, p2
+        for d in (share, ro):
+            os.chmod(d, 0o755)
+        for d in (share, ro, ok2):
+            shutil.rmtree(d)
+
+
 if __name__ == '__main__':
     _run()

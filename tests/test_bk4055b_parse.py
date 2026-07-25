@@ -245,6 +245,17 @@ def test_sync_parse_and_set():
     assert sg.sent == ['C1:SYNC ON', 'C2:SYNC OFF']
 
 
+def test_noise_stdev_mean_parsed_numeric():
+    # STDEV/MEAN were missing from _BSWV_NUMERIC: a NOISE channel synced
+    # back '0.2V'/'0V' strings into the entries and Apply then died on
+    # float() (audit 2026-07-25).
+    sg = FakeSG(bswv='C1:BSWV WVTP,NOISE,STDEV,0.2V,MEAN,0V')
+    d = sg.get_basic_wave_dict(1)
+    assert d['WVTP'] == 'NOISE'
+    assert d['STDEV'] == 0.2 and isinstance(d['STDEV'], float), d
+    assert d['MEAN'] == 0.0 and isinstance(d['MEAN'], float), d
+
+
 if __name__ == '__main__':
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     for t in tests:

@@ -74,6 +74,9 @@ class EdgeReviewApp:
                    command=self._advanced).pack(side=tk.LEFT)
         ttk.Button(top, text="🎚 Tune…",
                    command=self._open_tuner).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(top, text="📏 Calibrate…",
+                   command=self._calibrate_scale).pack(side=tk.LEFT,
+                                                       padx=(6, 0))
         self.save_btn = ttk.Button(top, text="💾 Save to data.csv…",
                                    command=self.save, state='disabled')
         self.save_btn.pack(side=tk.RIGHT)
@@ -142,11 +145,16 @@ class EdgeReviewApp:
 
     # ---------------- run selection ----------------
     def _list_runs(self, parent):
+        # Any directory holding a data.csv is a run — custom-named runs
+        # (the SLDEA tab allows free names) were invisible before and
+        # auto-open silently fell back to the newest SLDEA_* run instead
+        # (audit 2026-07-25).
         try:
-            names = sorted((n for n in os.listdir(parent)
-                            if n.startswith('SLDEA_') and
-                            os.path.isdir(os.path.join(parent, n))),
-                           reverse=True)
+            names = sorted(
+                (n for n in os.listdir(parent)
+                 if os.path.isdir(os.path.join(parent, n)) and
+                 os.path.exists(os.path.join(parent, n, 'data.csv'))),
+                reverse=True)
         except OSError:
             return []
         out = []
@@ -154,9 +162,10 @@ class EdgeReviewApp:
             done = ''
             try:
                 with open(os.path.join(parent, n, 'data.csv')) as f:
-                    if 'active_area_px' in f.readline() and any(
-                            line.split(',')[10:11] != ['']
-                            and line.split(',')[10].strip()
+                    # length-guarded: a truncated/blank line used to raise
+                    # IndexError and crash the whole listing
+                    if 'active_area_px' in (f.readline() or '') and any(
+                            len(c := line.split(',')) > 10 and c[10].strip()
                             for line in f):
                         done = '  ✓ processed'
             except OSError:
@@ -182,10 +191,19 @@ class EdgeReviewApp:
                     if r.split('  ')[0] == preselect:
                         want = i
                         break
+                else:
+                    # NEVER silently fall back to a different run when an
+                    # explicit target was given (audit 2026-07-25: auto-open
+                    # used to process the newest run instead).
+                    self.status.config(
+                        text=f"target run '{preselect}' not found in "
+                             f"{self.parent} — pick one manually")
+                    return
             self.run_box.current(want)
             self._pick_run()
         else:
-            self.status.config(text=f"no SLDEA_* runs in {self.parent}")
+            self.status.config(text=f"no runs (data.csv dirs) in "
+                                    f"{self.parent}")
 
     def _browse(self):
         d = filedialog.askdirectory(initialdir=self.parent or DEFAULT_PARENT)
@@ -208,6 +226,8 @@ class EdgeReviewApp:
                            if (r.get('frame_file') or '').strip()]
         self.cands_all, self.results, self.flags = {}, {}, {}
         self.auto_idx, self.auto_rej = set(), set()
+        self.base_ref = None
+        self.manual_ref = None
         self.pos = 0
         self.save_btn.config(state='disabled')
         n = len(self.frame_rows)
@@ -253,6 +273,12 @@ class EdgeReviewApp:
                 "busy or dry-run frames were skipped).")
             return
         self.detect_btn.config(state='disabled')
+        # Every Detect pass starts CLEAN: stale results from a previous
+        # pass (old settings, manual picks) used to survive re-detection
+        # and get saved as a silent mix of two passes (audit 2026-07-25).
+        self.cands_all, self.results, self.flags = {}, {}, {}
+        self.auto_idx, self.auto_rej = set(), set()
+        self.base_ref = None
         self._t0 = time.time()
         self._clock_on = True
         self._tick_clock()
@@ -271,13 +297,24 @@ class EdgeReviewApp:
         return None
 
     def _detect_worker(self):
-        base = self._base_gray()
-        for i in self.frame_rows:
-            img = se.load_gray(se.frame_path(self.run, self.run['rows'][i]))
-            cands = [] if img is None else se.candidates(
-                base, img, self.settings)
-            self._detq.put((i, cands))
-        self._detq.put(None)
+        # Per-frame try + sentinel in finally: one bad frame (shape
+        # mismatch, decode error) used to kill the thread silently and
+        # leave 'DETECTING…' stuck forever (audit 2026-07-25).
+        try:
+            base = self._base_gray()
+            self._base_ref_pending = se.baseline_disc(base, self.settings)
+            for i in self.frame_rows:
+                try:
+                    img = se.load_gray(
+                        se.frame_path(self.run, self.run['rows'][i]))
+                    cands = [] if img is None else se.candidates(
+                        base, img, self.settings)
+                except Exception as e:
+                    print(f"detect: frame {i} failed: {e}")
+                    cands = []
+                self._detq.put((i, cands))
+        finally:
+            self._detq.put(None)
 
     def _poll_detect(self):
         done = False
@@ -307,7 +344,10 @@ class EdgeReviewApp:
     def detect_all_sync(self):
         """Synchronous detection (used by --auto tests and headless runs)."""
         self._t0 = self._t0 or time.time()
+        self.cands_all, self.results, self.flags = {}, {}, {}
+        self.auto_idx, self.auto_rej = set(), set()
         base = self._base_gray()
+        self._base_ref_pending = se.baseline_disc(base, self.settings)
         for i in self.frame_rows:
             img = se.load_gray(se.frame_path(self.run, self.run['rows'][i]))
             self.cands_all[i] = [] if img is None else se.candidates(
@@ -316,6 +356,9 @@ class EdgeReviewApp:
 
     def _finish_detect(self):
         self.auto_rej = set()
+        # px→mm reference traced on the BASELINE frame itself (non-diff);
+        # manual calibration (📏) overrides it.
+        self.base_ref = getattr(self, '_base_ref_pending', None)
         for i in self.frame_rows:
             cands = self.cands_all.get(i, [])
             if cands and not se.needs_review(cands, self.settings):
@@ -333,11 +376,13 @@ class EdgeReviewApp:
         self._banner(None)
         q = self._queue_list()
         took = self._fmt_t(time.time() - self._t0) if self._t0 else '?'
+        sc = (f"; scale ref: baseline disc {self.base_ref['diam_px']:.0f} px"
+              if self.base_ref else "; scale ref: NONE — use 📏 Calibrate")
         self.status.config(
             text=f"detected {len(self.frame_rows)} frames in {took}: "
                  f"{len(self.auto_idx)} auto-accepted, "
                  f"{len(self.auto_rej)} no-change/no-edge, "
-                 f"{len(q)} need review")
+                 f"{len(q)} need review{sc}")
         self.pos = self.frame_rows.index(q[0]) if q else 0
         self._show()
 
@@ -515,7 +560,11 @@ class EdgeReviewApp:
                  "and outline overlays are saved beside it.")
         if not messagebox.askyesno("Save results", msg):
             return
-        scale = se.mm_per_px(self.results, self.run['rows'], self.settings)
+        ref = self.manual_ref or self.base_ref
+        scale = se.mm_per_px(self.results, self.run['rows'], self.settings,
+                             baseline_ref=ref)
+        src = se.scale_source(self.results, self.run['rows'],
+                              baseline_ref=ref)
         onset, annos = se.wrinkle_onset(self.run['rows'], self.results,
                                         self.settings)
         if 'wrinkle_idx' not in self.run['columns']:
@@ -525,10 +574,22 @@ class EdgeReviewApp:
                         'wrinkle_idx')
         for row in self.run['rows']:
             row.setdefault('wrinkle_idx', '')
-        se.apply_results(self.run['rows'], self.results, scale, self.flags,
-                         annos)
-        renamed = se.mark_breakdown_files(self.run, self.flags)
-        se.write_back(self.rundir, self.run)
+        # The destructive phase (renames + CSV rewrite) must NEVER fail
+        # silently: an hour of review used to vanish without a dialog on a
+        # NAS hiccup (audit 2026-07-25). write_back is atomic now, and
+        # data.csv.bak always predates the renames.
+        try:
+            se.apply_results(self.run['rows'], self.results, scale,
+                             self.flags, annos)
+            renamed = se.mark_breakdown_files(self.run, self.flags)
+            se.write_back(self.rundir, self.run)
+        except Exception as e:
+            messagebox.showerror(
+                "Save FAILED",
+                f"Writing results failed:\n\n{e}\n\nYour review is still in "
+                f"memory — fix the problem (share up? disk full?) and Save "
+                f"again. A pre-save backup is at data.csv.bak.")
+            return
         self._clock_on = False
         took = self._fmt_t(time.time() - self._t0) if self._t0 else '?'
         self.clock_lbl.config(text=f"done in {took}")
@@ -538,8 +599,8 @@ class EdgeReviewApp:
         except Exception as e:
             self.status.config(text=f"saved CSV; plot/overlays failed: {e}")
             return
-        scale_txt = (f"scale {scale:.5f} mm/px" if scale
-                     else "no mm scale (no baseline accept)")
+        scale_txt = (f"scale {scale:.5f} mm/px [{src}]" if scale
+                     else "no mm scale — use 📏 Calibrate")
         bd_txt = f", {renamed} frame(s) renamed _BREAKDOWN" if renamed else ""
         self.status.config(
             text=f"saved in {took} — data.csv updated ({scale_txt}){bd_txt}")
@@ -598,6 +659,72 @@ class EdgeReviewApp:
             cv2.polylines(img, [np.asarray(r['contour'], np.int32)], True,
                           (80, 200, 0), 2)
             cv2.imwrite(os.path.join(outdir, os.path.basename(path)), img)
+
+    def _calibrate_scale(self):
+        """Manual px→mm calibration: click the two opposite edges of the
+        RESTING disc on the baseline frame; the known nominal diameter
+        (diam_mm) between them sets the scale. Overrides the automatic
+        baseline-disc detection."""
+        if not self.run:
+            messagebox.showinfo("Calibrate", "Pick a run first")
+            return
+        base_row = None
+        for i in self.frame_rows:
+            if self.run['rows'][i].get('tag') == 'baseline':
+                base_row = self.run['rows'][i]
+                break
+        if base_row is None and self.frame_rows:
+            base_row = self.run['rows'][self.frame_rows[0]]
+        path = se.frame_path(self.run, base_row) if base_row else None
+        if not path or not os.path.exists(path):
+            messagebox.showinfo("Calibrate", "No baseline frame on disk.")
+            return
+        from PIL import Image, ImageTk
+        img = Image.open(path).convert('RGB')
+        scale_v = VIEW_W / img.width
+        disp = img.resize((VIEW_W, int(img.height * scale_v)))
+        win = tk.Toplevel(self.root)
+        win.title("Calibrate scale — click the disc's two opposite edges")
+        win.transient(self.root)
+        tk.Label(win, text=f"Click LEFT edge then RIGHT edge of the resting "
+                           f"disc (nominal {self.settings['diam_mm']:g} mm "
+                           f"across). Esc cancels.").pack(pady=(6, 2))
+        cv = tk.Canvas(win, width=disp.width, height=disp.height)
+        cv.pack(padx=8, pady=8)
+        photo = ImageTk.PhotoImage(disp)
+        cv.create_image(0, 0, anchor='nw', image=photo)
+        cv.image = photo
+        pts = []
+
+        def click(ev):
+            pts.append((ev.x, ev.y))
+            cv.create_oval(ev.x - 4, ev.y - 4, ev.x + 4, ev.y + 4,
+                           outline='#00e676', width=2)
+            if len(pts) == 2:
+                cv.create_line(*pts[0], *pts[1], fill='#00e676', width=2)
+                dpx_disp = ((pts[0][0] - pts[1][0]) ** 2 +
+                            (pts[0][1] - pts[1][1]) ** 2) ** 0.5
+                dpx_full = dpx_disp / scale_v
+                if dpx_full < 10:
+                    messagebox.showwarning("Calibrate",
+                                           "Points are too close — retry.")
+                    win.destroy()
+                    return
+                self.manual_ref = {'method': 'manual-calibration',
+                                   'diam_px': dpx_full}
+                self.status.config(
+                    text=f"scale calibrated manually: "
+                         f"{self.settings['diam_mm']:g} mm = "
+                         f"{dpx_full:.0f} px "
+                         f"({self.settings['diam_mm'] / dpx_full:.5f} mm/px)"
+                         f" — used at Save")
+                win.destroy()
+
+        cv.bind('<Button-1>', click)
+        win.bind('<Escape>', lambda e: win.destroy())
+        cv.focus_set()
+        win.grab_set()
+        self.root.wait_window(win)
 
     def _open_tuner(self):
         """Launch the live slider tuner on the current run (own process)."""

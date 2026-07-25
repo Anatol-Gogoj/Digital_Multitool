@@ -163,6 +163,64 @@ def test_norm_bg_neutralizes_global_brightness_drift():
         f"norm_bg failed to isolate the disc: {cands[0]['area_px']:.0f} px"
 
 
+def test_baseline_disc_traces_resting_dea():
+    # Non-diff detector for the px->mm scale (audit 2026-07-25): the
+    # resting disc is DARKER than the membrane; electrode strips cross it.
+    img = np.full((480, 640), 200.0, np.float32)          # membrane
+    yy, xx = np.mgrid[0:480, 0:640]
+    disc = (xx - 320) ** 2 + (yy - 240) ** 2 <= 100 * 100
+    img[disc] = 165.0                                     # resting disc
+    img[:, 312:326] = 250.0                               # electrode strip
+    ref = se.baseline_disc(img, dict(se.DEFAULT_SETTINGS))
+    assert ref is not None, "disc not found on baseline"
+    assert ref['method'] == 'baseline-disc'
+    # the strip splits the dark disc; merged contour must still recover a
+    # diameter near 200 px
+    assert abs(ref['diam_px'] - 200) / 200 < 0.20, ref['diam_px']
+    # flat frame (no disc) must yield None, never a fabrication
+    flat = np.full((480, 640), 200.0, np.float32)
+    assert se.baseline_disc(flat, dict(se.DEFAULT_SETTINGS)) is None
+
+
+def test_mm_per_px_prefers_baseline_ref_over_first_accept():
+    rows = [{'tag': 'baseline'}, {'tag': 'post-ramp'}]
+    results = {1: {'diam_px': 100.0, 'area_px': 1.0}}   # activated frame
+    s = dict(se.DEFAULT_SETTINGS); s['diam_mm'] = 16.0
+    # without a baseline ref: falls back to the activated frame (documented)
+    assert abs(se.mm_per_px(results, rows, s) - 0.16) < 1e-9
+    # with the baseline-disc ref: the ref wins
+    ref = {'method': 'baseline-disc', 'diam_px': 200.0}
+    assert abs(se.mm_per_px(results, rows, s, baseline_ref=ref) - 0.08) < 1e-9
+    assert 'baseline-disc' in se.scale_source(results, rows,
+                                              baseline_ref=ref)
+    assert 'FIRST ACCEPTED' in se.scale_source(results, rows)
+
+
+def test_apply_results_reprocess_blanks_and_dedups():
+    # audit 2026-07-25: rejected rows kept stale mm2/wrinkle; repeated
+    # saves duplicated breakdown notes.
+    rows = [{'tag': 'post-ramp', 'nominal_kV': '5',
+             'active_area_mm2': '12.3', 'active_diam_mm': '4.0',
+             'wrinkle_idx': '1.80', 'notes': ''}]
+    se.apply_results(rows, {0: None}, None, {})          # reviewed+rejected
+    assert rows[0]['active_area_mm2'] == '' and rows[0]['wrinkle_idx'] == ''
+    # accepted with NO scale blanks mm2/diam instead of keeping stale ones
+    rows2 = [{'active_area_mm2': '9.9', 'active_diam_mm': '3.3',
+              'notes': ''}]
+    se.apply_results(rows2, {0: {'area_px': 100.0, 'diam_px': 11.3,
+                                 'conf': 0.9, 'method': 'diff-hi'}},
+                     None, {})
+    assert rows2[0]['active_area_px'] == '100'
+    assert rows2[0]['active_area_mm2'] == ''
+    # flags applied twice -> note appears once
+    rows3 = [{'notes': ''}]
+    res = {0: {'area_px': 1.0, 'diam_px': 1.0, 'conf': 0.5,
+               'method': 'diff-hi'}}
+    se.apply_results(rows3, res, None, {0: 'BREAKDOWN? current spike'})
+    se.apply_results(rows3, res, None, {0: 'BREAKDOWN? current spike'})
+    assert rows3[0]['notes'].count('BREAKDOWN? current spike') == 1
+
+
 def test_weak_fallback_candidate_reaches_review():
     # A change that fails the fill filter must still surface ONE candidate
     # for human review, not silently vanish -- and a fallback must never

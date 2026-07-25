@@ -1350,6 +1350,9 @@ ANALYSIS:
             return
         if self.sweeping:
             return
+        # The 200 ms continuous poller shares the LCR session; running both
+        # interleaved write/read pairs on one wire (audit 2026-07-25).
+        self.lcr_stop_continuous()
         try:
             freqs = self._parse_sweep_axis('freq', 100, 500000, 'Frequency')
             volts = self._parse_sweep_axis('volt', 0.01, 2.0, 'Voltage')
@@ -1380,6 +1383,8 @@ ANALYSIS:
                 return
 
         self.sweeping = True
+        # generation token: Stop→Start used to revive the old sweep worker
+        self._sweep_gen = object()
         self._set_sweep_ui_state(running=True)
         self.sw_progress.configure(maximum=total_samples, value=0)
         self.sw_status.config(text=f"Starting sweep: {len(freqs)} freqs × {len(volts)} V × "
@@ -1395,7 +1400,8 @@ ANALYSIS:
 
         self.sweep_thread = threading.Thread(
             target=self._lcr_sweep_worker,
-            args=(freqs, volts, mode, order, dwell, n_samples, isd, out_path, total_samples),
+            args=(freqs, volts, mode, order, dwell, n_samples, isd, out_path,
+                  total_samples, self._sweep_gen),
             daemon=True,
         )
         self.sweep_thread.start()
@@ -1404,27 +1410,34 @@ ANALYSIS:
     def lcr_stop_sweep(self):
         if self.sweeping:
             self.sweeping = False
+            self._sweep_gen = object()   # retire the worker unconditionally
             self.sw_status.config(text="Stop requested — finishing current sample...",
                                   foreground='orange')
 
-    def _interruptible_sleep(self, seconds, chunk=0.05):
+    def _interruptible_sleep(self, seconds, chunk=0.05, alive=None):
         """Sleep in small chunks so cancellation stays snappy."""
         end = time.monotonic() + seconds
-        while self.sweeping:
+        while (alive() if alive is not None else self.sweeping):
             remaining = end - time.monotonic()
             if remaining <= 0:
                 return
             time.sleep(min(chunk, remaining))
 
     def _lcr_sweep_worker(self, freqs, volts, mode, order, dwell, n_samples, isd,
-                          out_path, total_samples):
+                          out_path, total_samples, tok=None):
         """Background thread: run the sweep, write CSV, push events onto sweep_queue.
 
         Worker NEVER touches Tk directly — all UI changes go through the queue,
         which is drained on the main thread by _drain_sweep_queue. Calling
         root.after() from a worker thread is not safe in tkinter and crashes
         with "main thread is not in main loop".
+
+        `tok` is this run's generation token: Stop→Start within one dwell
+        used to REVIVE the old worker alongside the new one (audit
+        2026-07-25).
         """
+        alive = (lambda: self.sweeping and self._sweep_gen is tok) \
+            if tok is not None else (lambda: self.sweeping)
         sample_count = 0
         try:
             self.lcr.set_mode(mode)
@@ -1441,11 +1454,11 @@ ANALYSIS:
                                  'Sample Index', 'Primary', 'Secondary', 'Status'])
 
                 for outer_val in outer_vals:
-                    if not self.sweeping:
+                    if not alive():
                         break
                     outer_setter(outer_val)
                     for inner_val in inner_vals:
-                        if not self.sweeping:
+                        if not alive():
                             break
                         inner_setter(inner_val)
                         if order == 'Freq outer, V inner':
@@ -1454,12 +1467,12 @@ ANALYSIS:
                             volt_val, freq_val = outer_val, inner_val
 
                         if dwell > 0:
-                            self._interruptible_sleep(dwell)
-                        if not self.sweeping:
+                            self._interruptible_sleep(dwell, alive=alive)
+                        if not alive():
                             break
 
                         for s in range(n_samples):
-                            if not self.sweeping:
+                            if not alive():
                                 break
                             primary, secondary, status = self.lcr.measure()
                             ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
@@ -1469,8 +1482,8 @@ ANALYSIS:
                             sample_count += 1
                             self.sweep_queue.put(('progress', sample_count, total_samples,
                                                   freq_val, volt_val, s + 1, n_samples))
-                            if isd > 0 and s < n_samples - 1 and self.sweeping:
-                                self._interruptible_sleep(isd)
+                            if isd > 0 and s < n_samples - 1 and alive():
+                                self._interruptible_sleep(isd, alive=alive)
         except Exception as e:
             self.sweep_queue.put(('error', str(e), out_path, sample_count))
             return
@@ -4381,23 +4394,43 @@ LOGGING:
                                  f"Cannot create log directory:\n{e}")
             return
 
+        # Everything the worker needs is read HERE on the main thread (the
+        # worker must not touch Tk variables — the documented Tcl-hang
+        # class) and passed as plain values.
+        cfg = {
+            'dir': log_path,
+            'lcr': bool(self.log_lcr.get()),
+            'scope': {ch: bool(self.log_scope_channels[ch].get())
+                      for ch in range(1, 5)},
+            'sg': {ch: bool(self.log_sg_channels[ch].get())
+                   for ch in (1, 2)},
+            'psu': {ch: bool(self.log_psu_channels[ch].get())
+                    for ch in (1, 2)},
+            'dmm': bool(self.log_dmm.get()),
+            'dmm_fn': self._log_dmm_fn,
+        }
         self.recording = True
+        # Per-run generation token (audit 2026-07-25): Stop→Start within one
+        # interval used to REVIVE the old sleeping worker — it kept appending
+        # to the finished run's CSVs and doubled the instrument traffic.
+        self._log_gen = tok = object()
         self.log_start_btn.config(state='disabled')
         self.log_stop_btn.config(state='normal')
 
         # Start logging thread (interval passed in -- already validated)
         self.record_thread = threading.Thread(
-            target=self._logging_worker, args=(interval,), daemon=True)
+            target=self._logging_worker, args=(interval, cfg, tok),
+            daemon=True)
         self.record_thread.start()
 
         self.log_message(f"Logging started ({', '.join(selected)} "
                          f"every {interval:g} s)")
 
-    def _logging_worker(self, interval):
+    def _logging_worker(self, interval, cfg, tok):
         """Run logging_loop and never die silently: a fatal error reports to
         the log widget and resets the Start/Stop buttons (issue #39)."""
         try:
-            self.logging_loop(interval)
+            self.logging_loop(interval, cfg, tok)
         except Exception as e:
             self.log_message(f"Logging stopped by error: {e}")
             self.root.after(0, self._logging_failed)
@@ -4408,6 +4441,7 @@ LOGGING:
     
     def stop_logging(self):
         self.recording = False
+        self._log_gen = object()      # retire the old worker unconditionally
         self.log_start_btn.config(state='normal')
         self.log_stop_btn.config(state='disabled')
         self.log_message("Logging stopped")
@@ -4415,9 +4449,10 @@ LOGGING:
     # consecutive per-source errors before that source is dropped from a run
     _LOG_MAX_FAILS = 5
 
-    def logging_loop(self, interval):
-        """Background logging thread. `interval` (s) is validated by
-        start_logging before this thread launches.
+    def logging_loop(self, interval, cfg, tok):
+        """Background logging thread. `interval` (s) is validated and every
+        Tk value is pre-read into `cfg` by start_logging (no widget access
+        from this thread); `tok` is this run's generation token.
 
         Every source carries a consecutive-failure counter (issue #46):
         after _LOG_MAX_FAILS misses in a row it is dropped from the run
@@ -4426,7 +4461,7 @@ LOGGING:
         """
         import os
 
-        log_path = self.log_dir.get()
+        log_path = cfg['dir']
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         files, writers, fails = {}, {}, {}
 
@@ -4438,29 +4473,29 @@ LOGGING:
             fails[key] = 0
             self.log_message(f"{key} log: {path}")
 
-        if self.log_lcr.get() and self.lcr:
+        if cfg['lcr'] and self.lcr:
             _open('LCR', f"lcr_{stamp}.csv",
                   ['Timestamp', 'Mode', 'Frequency (Hz)', 'Primary',
                    'Secondary', 'Status'])
         for ch in range(1, 5):
-            if self.log_scope_channels[ch].get() and self.scope:
+            if cfg['scope'][ch] and self.scope:
                 _open(f'Scope CH{ch}', f"scope_ch{ch}_{stamp}.csv",
                       ['Timestamp', 'Frequency (Hz)', 'Period (s)',
                        'Mean (V)', 'Pk-Pk (V)', 'RMS (V)', 'Amplitude (V)'])
         # Sig-gen STIMULUS channels (issue #46): what was driving the DUT,
         # in the same run as the measured response. Short queries, USB-safe.
         for ch in (1, 2):
-            if self.log_sg_channels[ch].get() and self.sg:
+            if cfg['sg'][ch] and self.sg:
                 _open(f'SigGen CH{ch}', f"siggen_ch{ch}_{stamp}.csv",
                       ['Timestamp', 'Waveform', 'Frequency (Hz)',
                        'Amplitude (Vpp)', 'Offset (V)', 'Stdev (V)',
                        'Mean (V)', 'Output'])
         # DC supply: applied voltage, measured current, calculated power.
         for ch in (1, 2):
-            if self.log_psu_channels[ch].get() and self.psu:
+            if cfg['psu'][ch] and self.psu:
                 _open(f'DC Supply CH{ch}', f"psu_ch{ch}_{stamp}.csv",
                       ['Timestamp', 'Set V', 'Meas V', 'Meas A', 'Power (W)'])
-        if self.log_dmm.get() and self.dmm:
+        if cfg['dmm'] and self.dmm:
             _open('DMM', f"dmm_{stamp}.csv",
                   ['Timestamp', 'Function', 'Value', 'Unit'])
 
@@ -4489,7 +4524,7 @@ LOGGING:
             writer.writerow([now, config['mode'], config['frequency'],
                              primary, secondary, status])
 
-        while self.recording:
+        while self.recording and self._log_gen is tok:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             _sample('LCR', _lcr_row)
             for ch in range(1, 5):
@@ -4519,7 +4554,7 @@ LOGGING:
                 _sample(f'DC Supply CH{ch}', _psu_row)
 
             def _dmm_row(writer):
-                fn = self._log_dmm_fn
+                fn = cfg['dmm_fn']
                 val = self.dmm.measure(fn)
                 writer.writerow([now, fn, '' if val is None else val,
                                  self.dmm.unit(fn)])
@@ -4528,7 +4563,12 @@ LOGGING:
                 self.log_message("All logging sources failed -- stopping")
                 self.root.after(0, self._logging_failed)
                 break
-            time.sleep(interval)
+            # chunked so Stop retires this thread within ~0.3 s instead of
+            # sleeping through a whole interval (the revival race window)
+            t_end = time.monotonic() + interval
+            while (self.recording and self._log_gen is tok
+                   and time.monotonic() < t_end):
+                time.sleep(min(0.3, max(0.0, t_end - time.monotonic())))
 
         # Close whatever survived to the end of the run
         for f in files.values():
@@ -5449,6 +5489,7 @@ LOGGING:
                 f"{self.cam_prefix_var.get().strip() or 'cap'}_timed_focus.csv")
 
         self.cam_seq_running = True
+        self._cam_seq_gen = object()   # Stop→Start must not revive old worker
         self._cam_active_btn = self.cam_tm_btn
         self._cam_active_idle = "Start timed capture"
         self._cam_active_status = self.cam_tm_status
@@ -5475,6 +5516,8 @@ LOGGING:
                           save_dir, save_prefix, spec):
         """Fire the camera at each delay after a t=0 trigger. No waveform
         math -- the delay list is the phase schedule (Approach A)."""
+        tok = getattr(self, '_cam_seq_gen', None)
+        alive = lambda: self.cam_seq_running and self._cam_seq_gen is tok
         rows = []
         try:
             if trigger_ch is not None:
@@ -5484,9 +5527,9 @@ LOGGING:
                 target = t0 + d
                 # sleep in small slices so Stop stays responsive over a long
                 # run (delays can be many minutes apart)
-                while self.cam_seq_running and time.monotonic() < target:
+                while alive() and time.monotonic() < target:
                     time.sleep(min(0.05, max(0, target - time.monotonic())))
-                if not self.cam_seq_running:
+                if not alive():
                     break
                 frame = webcam.oneshot_rgb(spec)
                 path, score = None, None
@@ -5526,6 +5569,15 @@ LOGGING:
             self.cam_interval_btn.config(text="Start interval")
 
     def _cam_interval_tick(self, period_ms):
+        # Stop when the preview is gone: SLDEA runs / stepped captures stop
+        # the preview behind the user's back, and this tick used to keep
+        # saving the SAME frozen frame with fresh timestamps for the whole
+        # run (audit 2026-07-25).
+        if not self.cam_previewing or self.cam is None:
+            self._cam_stop_interval()
+            self.status_bar.config(
+                text="Interval capture stopped (preview is off)")
+            return
         frame = self.cam_last_frame
         if frame is not None:
             path = self._cam_save_frame(frame)
@@ -5586,6 +5638,7 @@ LOGGING:
                                     f"{self.cam_prefix_var.get().strip() or 'cap'}"
                                     f"_focus.csv")
         self.cam_seq_running = True
+        self._cam_seq_gen = object()   # Stop→Start must not revive old worker
         self._cam_active_btn = self.cam_seq_btn
         self._cam_active_idle = "Run sweep"
         self._cam_active_status = self.cam_seq_status
@@ -5610,17 +5663,19 @@ LOGGING:
     def _cam_seq_worker(self, ch, key, values, dwell, csv_path,
                         save_dir, save_prefix, spec):
         """Background: set the sig-gen param, dwell, capture, optional focus."""
+        tok = getattr(self, '_cam_seq_gen', None)
+        alive = lambda: self.cam_seq_running and self._cam_seq_gen is tok
         rows = []
         try:
             for n, v in enumerate(values):
-                if not self.cam_seq_running:
+                if not alive():
                     break
                 self.sg.set_basic_wave(ch, **{key: float(v)})
                 # dwell in small chunks so Stop stays responsive
                 end = time.monotonic() + dwell
-                while self.cam_seq_running and time.monotonic() < end:
+                while alive() and time.monotonic() < end:
                     time.sleep(min(0.05, max(0, end - time.monotonic())))
-                if not self.cam_seq_running:
+                if not alive():
                     break
                 frame = webcam.oneshot_rgb(spec)
                 path, score = None, None

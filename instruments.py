@@ -37,6 +37,25 @@ _RM = None
 _RM_LOCK = threading.Lock()
 
 
+def _io_lock(obj):
+    """Per-instrument reentrant I/O lock, created lazily.
+
+    SCPI is write-then-read: two threads interleaving on one session cross
+    their replies (audit 2026-07-25 — the GUI runs button ops, the logging
+    thread, the LCR sweep, the SLDEA worker and camera sequences against
+    the same sessions; only the PSU had a lock). Lazy creation keeps
+    test fakes that skip __init__ working. RLock so a compound driver
+    method can hold it across its whole transaction while the primitives
+    it calls re-acquire."""
+    lock = obj.__dict__.get('_io_rlock')
+    if lock is None:
+        with _RM_LOCK:
+            lock = obj.__dict__.get('_io_rlock')
+            if lock is None:
+                lock = obj.__dict__['_io_rlock'] = threading.RLock()
+    return lock
+
+
 def get_resource_manager():
     """Process-wide PyVISA ResourceManager (pyvisa-py backend).
 
@@ -130,13 +149,16 @@ class VisaInstrument:
         return None
 
     def write(self, command):
-        self.inst.write(command)
+        with _io_lock(self):
+            self.inst.write(command)
 
     def read(self):
-        return self.inst.read().strip()
+        with _io_lock(self):
+            return self.inst.read().strip()
 
     def read_raw(self):
-        return self.inst.read_raw()
+        with _io_lock(self):
+            return self.inst.read_raw()
 
     def write_raw(self, data):
         """Write raw bytes verbatim (no termination/encoding munging).
@@ -145,7 +167,8 @@ class VisaInstrument:
         WVDT arbitrary-waveform upload where sample bytes follow the ASCII
         header directly.
         """
-        return self.inst.write_raw(data)
+        with _io_lock(self):
+            return self.inst.write_raw(data)
 
     def write_raw_oneshot(self, data):
         """Write a large binary payload as ONE USBTMC Bulk-OUT message.
@@ -171,7 +194,8 @@ class VisaInstrument:
 
     def ask(self, command):
         """Write a command and return its response (newline-stripped)."""
-        return self.inst.query(command).strip()
+        with _io_lock(self):
+            return self.inst.query(command).strip()
 
     # Alias matching pyvisa convention; both ask() and query() are used here.
     query = ask
@@ -187,19 +211,20 @@ class VisaInstrument:
         query reads its OWN reply. More forceful than inst.clear() (which
         does not reliably flush every meter): reads with a short timeout until
         the buffer is empty. Silent."""
-        old = getattr(self.inst, 'timeout', None)
-        try:
-            self.inst.timeout = 60
-            for _ in range(20):
-                self.inst.read()          # discard a stale reply
-        except Exception:
-            pass                          # timeout -> buffer empty
-        finally:
-            if old is not None:
-                try:
-                    self.inst.timeout = old
-                except Exception:
-                    pass
+        with _io_lock(self):
+            old = getattr(self.inst, 'timeout', None)
+            try:
+                self.inst.timeout = 60
+                for _ in range(20):
+                    self.inst.read()      # discard a stale reply
+            except Exception:
+                pass                      # timeout -> buffer empty
+            finally:
+                if old is not None:
+                    try:
+                        self.inst.timeout = old
+                    except Exception:
+                        pass
 
     def go_local(self):
         """Best-effort return-to-local so the front panel works again after
@@ -301,7 +326,8 @@ class BK894(VisaInstrument):
 
     def measure(self):
         """Return (primary, secondary, status). status 0 = good."""
-        result = self.ask(':FETC?')
+        with _io_lock(self):
+            result = self.ask(':FETC?')
         primary, secondary, status = result.split(',')
         return float(primary), float(secondary), int(status)
 
@@ -468,10 +494,16 @@ class TekMSO24(VisaInstrument):
         self.write('ACQUIRE:STATE STOP')
 
     def measure(self, meas_type, channel):
-        """Automated measurement. Returns float or None for invalid signals."""
-        self.write(f'MEASUREMENT:IMMED:TYPE {meas_type}')
-        self.write(f'MEASUREMENT:IMMED:SOURCE CH{channel}')
-        result = self.ask('MEASUREMENT:IMMED:VALUE?')
+        """Automated measurement. Returns float or None for invalid signals.
+
+        Holds the instrument lock across the whole TYPE/SOURCE/VALUE?
+        triple: it programs GLOBAL state, so an interleaved caller used to
+        read the other thread's channel/type (audit 2026-07-25 — e.g. the
+        SLDEA watchdog reading V_Out as current)."""
+        with _io_lock(self):
+            self.write(f'MEASUREMENT:IMMED:TYPE {meas_type}')
+            self.write(f'MEASUREMENT:IMMED:SOURCE CH{channel}')
+            result = self.ask('MEASUREMENT:IMMED:VALUE?')
         try:
             val = float(result)
             if abs(val) > 1e30:
@@ -486,10 +518,15 @@ class TekMSO24(VisaInstrument):
         # short for callers. (Root cause of the GUI's frequency issue.)
         types = (('freq', 'FREQUENCY'), ('period', 'PERIOD'), ('mean', 'MEAN'),
                  ('pk2pk', 'PK2PK'), ('rms', 'RMS'), ('amplitude', 'AMPLITUDE'))
-        return {key: self.measure(scpi, channel) for key, scpi in types}
+        with _io_lock(self):
+            return {key: self.measure(scpi, channel) for key, scpi in types}
 
     def get_waveform(self, channel):
         """Acquire a channel waveform. Returns {'t', 'v', 'dt', 'npts'}."""
+        with _io_lock(self):
+            return self._get_waveform_locked(channel)
+
+    def _get_waveform_locked(self, channel):
         self.write(f'DATA:SOURCE CH{channel}')
         time.sleep(0.1)
 
@@ -1066,14 +1103,18 @@ class BK9174B:
 
     # --- transport ---------------------------------------------------------
     def write(self, command):
-        self.ser.write((command + self.WRITE_TERM).encode('ascii'))
+        with _io_lock(self):
+            self.ser.write((command + self.WRITE_TERM).encode('ascii'))
 
     def read(self):
-        return self.ser.readline().decode('ascii', errors='replace').strip()
+        with _io_lock(self):
+            return self.ser.readline().decode('ascii', errors='replace').strip()
 
     def query(self, command):
-        self.write(command)
-        return self.read()
+        # one lock across write+read: the reply must be OURS
+        with _io_lock(self):
+            self.write(command)
+            return self.read()
 
     def close(self):
         try:
@@ -1299,7 +1340,8 @@ class BK5493C:
         q = self._QUERY.get(function)
         if q is None:
             raise ValueError(f"unknown DMM function {function!r}")
-        raw = self.inst.query(q).strip()
+        with _io_lock(self):
+            raw = self.inst.query(q).strip()
         try:
             return float(raw)
         except ValueError:

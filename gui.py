@@ -128,6 +128,7 @@ SG_STATE_KEYS = {'freq': 'freq_hz', 'amp': 'amp_vpp', 'offset': 'offset_v',
 # LAN. Flip to False to hide the ARB waveform + Waveform Editor again.
 SG_ARB_ENABLED = True
 
+MUTED = '#555555'   # readable muted text (X11 'gray'=#bebebe is 1.3:1)
 PREVIEW_MAX_HEIGHT = 520   # webcam preview height budget (px)
 
 SG_LOAD_HIGHZ = 'High-Z'   # UI label for the SCPI 'HZ' (high impedance) token
@@ -582,9 +583,15 @@ class InstrumentControlGUI:
         def ok():
             win.destroy()
             action(var.get())
-        ttk.Button(btns, text="OK", command=ok).pack(side=tk.LEFT, padx=4)
+        okb = ttk.Button(btns, text="OK", command=ok)
+        okb.pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Cancel",
                    command=win.destroy).pack(side=tk.LEFT, padx=4)
+        # keyboard path: a Tk grab blocks only the POINTER — without focus
+        # + key bindings a keyboard user was locked out (audit 2026-07-25)
+        okb.focus_set()
+        win.bind('<Return>', lambda e: ok())
+        win.bind('<Escape>', lambda e: win.destroy())
         win.grab_set()
 
     def auto_connect(self):
@@ -1186,7 +1193,7 @@ ANALYSIS:
         ttk.Entry(out, textvariable=self.sw_output).grid(row=0, column=1, sticky='ew', padx=4)
         ttk.Button(out, text="Browse...", command=self._browse_sweep_output).grid(row=0, column=2)
         ttk.Label(out, text="(blank → <log dir>/sweep_<timestamp>.csv)",
-                  foreground='gray').grid(row=1, column=1, sticky='w', padx=4)
+                  foreground=MUTED).grid(row=1, column=1, sticky='w', padx=4)
 
         # Controls + progress
         ctrl = ttk.Frame(sweep_frame)
@@ -1199,7 +1206,7 @@ ANALYSIS:
         self.sw_progress = ttk.Progressbar(ctrl, mode='determinate')
         self.sw_progress.grid(row=0, column=2, sticky='ew')
 
-        self.sw_status = ttk.Label(sweep_frame, text="Idle.", foreground='gray')
+        self.sw_status = ttk.Label(sweep_frame, text="Idle.", foreground=MUTED)
         self.sw_status.grid(row=4, column=0, columnspan=2, sticky='w', pady=(4, 0))
 
         self._update_sweep_mode_state('freq')
@@ -1575,6 +1582,11 @@ ANALYSIS:
         win.title("Update Software")
         win.geometry("720x430")
         win.transient(self.root)
+        # Closing mid-update is allowed: the drain loop below survives the
+        # destroyed widgets and clears _updating at the end. It used to die
+        # on the first TclError and latch _updating forever, silently
+        # killing the menu item for the session (audit 2026-07-25).
+        win.protocol('WM_DELETE_WINDOW', win.destroy)
         txt = scrolledtext.ScrolledText(win, wrap='word', font='TkFixedFont')
         txt.pack(fill='both', expand=True, padx=8, pady=(8, 4))
         txt.configure(state='disabled')
@@ -1615,14 +1627,18 @@ ANALYSIS:
         txt.configure(state='disabled')
 
     def _drain_update_queue(self, q, txt, close_btn, restart_btn):
-        """Main-thread poller: drain update output and update the dialog."""
+        """Main-thread poller: drain update output and update the dialog.
+        Survives the dialog being closed mid-update (widgets gone): keeps
+        consuming the queue and still clears _updating at the end."""
+        alive = bool(txt.winfo_exists())
         final = False
         rc = None
         try:
             while True:
                 kind, payload = q.get_nowait()
                 if kind == 'line':
-                    self._append_update_text(txt, payload)
+                    if alive:
+                        self._append_update_text(txt, payload)
                 elif kind == 'done':
                     rc = payload
                     final = True
@@ -1632,6 +1648,11 @@ ANALYSIS:
             self.root.after(50, self._drain_update_queue, q, txt, close_btn, restart_btn)
             return
         self._updating = False
+        if not alive:
+            self.status_bar.config(
+                text="Update finished in the background"
+                     + (" — restart to apply" if rc == 0 else " (FAILED)"))
+            return
         close_btn.config(state='normal')
         if rc == 0:
             self._append_update_text(
@@ -2397,7 +2418,7 @@ LOGGING:
                                 pady=(6, 0))
 
         prev = ttk.LabelFrame(f, text="Preview — kV vs time  "
-                              "(● baseline  ● post-ramp  ● pre-ramp)", padding=6)
+                              "(dots: gray=baseline  green=post-ramp  red=pre-ramp)", padding=6)
         prev.pack(fill='x', padx=10, pady=8)
         self.sldea_canvas = tk.Canvas(prev, height=210, bg='white',
                                       highlightthickness=0)
@@ -2812,12 +2833,19 @@ LOGGING:
                     self.notebook.select(i)
                     break
 
-        ttk.Button(bf, text="✔ Looks good — start run",
-                   command=go).pack(side=tk.LEFT, padx=6)
+        gob = ttk.Button(bf, text="✔ Looks good — start run", command=go)
+        gob.pack(side=tk.LEFT, padx=6)
         ttk.Button(bf, text="✎ Adjust (open Webcam tab)",
                    command=adjust).pack(side=tk.LEFT, padx=6)
         ttk.Button(bf, text="✖ Cancel",
                    command=win.destroy).pack(side=tk.LEFT, padx=6)
+        # keyboard path + stacking: a Tk grab blocks only the pointer, and a
+        # non-transient dialog could sink behind the main window leaving the
+        # app apparently frozen (audit 2026-07-25)
+        win.transient(self.root)
+        gob.focus_set()
+        win.bind('<Return>', lambda e: go())
+        win.bind('<Escape>', lambda e: win.destroy())
         self.root.wait_window(win)
         return result['go']
 
@@ -3499,7 +3527,7 @@ LOGGING:
                               "it. ARB = custom waveform (design in the "
                               "Waveform Editor, deliver via flash-drive "
                               ".bin).")
-        applied_wave = tk.Label(wrow, text='--', fg='gray', width=14, anchor='w')
+        applied_wave = tk.Label(wrow, text='--', fg=MUTED, width=14, anchor='w')
         applied_wave.pack(side=tk.LEFT, padx=4)
         widgets['waveform'] = waveform
         widgets['applied']['waveform'] = applied_wave
@@ -3541,7 +3569,7 @@ LOGGING:
                 w.insert(0, SG_FIELD_DEFAULTS[key])
                 w.bind('<KeyRelease>', lambda e, c=ch: self._sg_redraw_preview(c))
                 w.pack(side=tk.LEFT, padx=4)
-            applied = tk.Label(row, text='--', fg='gray', width=14, anchor='w')
+            applied = tk.Label(row, text='--', fg=MUTED, width=14, anchor='w')
             applied.pack(side=tk.LEFT, padx=4)
             if key in SG_FIELD_TOOLTIPS:
                 add_tooltip(w, SG_FIELD_TOOLTIPS[key])
@@ -3618,7 +3646,7 @@ LOGGING:
                     "waveform period -- feed it to the scope's Aux In "
                     "for rock-solid triggering on slow arbs.").pack(
             side=tk.LEFT, padx=(12, 0))
-        applied_burst = tk.Label(burst, text='--', fg='gray', anchor='w')
+        applied_burst = tk.Label(burst, text='--', fg=MUTED, anchor='w')
         applied_burst.pack(side=tk.LEFT, padx=8)
         widgets['applied']['burst'] = applied_burst
 
@@ -4700,14 +4728,14 @@ LOGGING:
                     "(where the auto is clamped) and finds an EXPOSURE for a "
                     "mid-grey image — the only genuinely stable combo. Fills "
                     "the fields; then Apply & Lock.").pack(side=tk.LEFT)
-        self.cam_sensor_status = ttk.Label(btns, text="", foreground="gray")
+        self.cam_sensor_status = ttk.Label(btns, text="", foreground=MUTED)
         self.cam_sensor_status.pack(side=tk.LEFT, padx=10)
         self._cam_build_control_rows()
 
         # --- preview image ---
         self.cam_view = tk.Label(tab, bg='black', width=80, height=24,
                                  anchor='center',
-                                 text="(preview off)", fg='gray')
+                                 text="(preview off)", fg=MUTED)
         self.cam_view.pack(fill='both', expand=True, padx=8, pady=4)
 
         # --- output folder ---
@@ -4795,7 +4823,7 @@ LOGGING:
                     "uneven spacing or a handful of specific levels.").grid(
             row=2, column=1, columnspan=5, sticky='w', padx=2, pady=(4, 0))
         ttk.Label(st, text="(overrides start/stop/step)",
-                  foreground='gray').grid(row=2, column=6, columnspan=2,
+                  foreground=MUTED).grid(row=2, column=6, columnspan=2,
                                           sticky='w', pady=(4, 0))
         self.cam_seq_focus = tk.BooleanVar(value=True)
         add_tooltip(ttk.Checkbutton(st, text="log focus CSV",
@@ -4809,7 +4837,7 @@ LOGGING:
                     "For each level: write it to the chosen channel, wait "
                     "the dwell, save a photo (filename carries the level). "
                     "Click again to stop.")
-        self.cam_seq_status = ttk.Label(st, text="", foreground='gray')
+        self.cam_seq_status = ttk.Label(st, text="", foreground=MUTED)
         self.cam_seq_status.grid(row=3, column=0, columnspan=8, sticky='w', pady=(4, 0))
 
         # --- waveform-synced timed capture (Approach A) ---
@@ -4873,13 +4901,13 @@ LOGGING:
                     "Begin: (optionally fire the burst trigger,) then save a "
                     "photo at each delay. Filenames carry the delay, e.g. "
                     "cap_0002_..._300s.png. Click again to stop.")
-        tk.Label(tm, fg='gray', justify=tk.LEFT, wraplength=560,
+        tk.Label(tm, fg=MUTED, justify=tk.LEFT, wraplength=560,
                  text="The ~5 ms exposure is tiny next to a slow waveform, so "
                       "each shot effectively freezes the instant at its "
                       "delay. Alignment is as good as the trigger (a few tens "
                       "of ms) -- fine for multi-second holds.").grid(
             row=3, column=0, columnspan=8, sticky='w', pady=(4, 0))
-        self.cam_tm_status = ttk.Label(tm, text="", foreground='gray')
+        self.cam_tm_status = ttk.Label(tm, text="", foreground=MUTED)
         self.cam_tm_status.grid(row=4, column=0, columnspan=8, sticky='w',
                                 pady=(2, 0))
 
@@ -4990,7 +5018,7 @@ LOGGING:
                 e.insert(0, str(val if val is not None else 0))
                 e.pack(side=tk.LEFT, padx=4)
                 ttk.Label(frame, text=f"({c['min']}–{c['max']})",
-                          foreground='#888').pack(side=tk.LEFT)
+                          foreground=MUTED).pack(side=tk.LEFT)
                 self.camctl_rows[name] = ('int', e)
                 wdg = e
                 # keep the attributes other code reads (SLDEA, auto-expose)
@@ -5009,7 +5037,7 @@ LOGGING:
             webcam.set_locked(saved)
             self.cam_sensor_status.config(
                 text=f"restored + locked {len(saved)} saved controls",
-                foreground='gray')
+                foreground=MUTED)
 
     def _cam_collect_controls(self):
         """Panel -> {name: int}, with the autos forced sane unless the user
@@ -5044,7 +5072,7 @@ LOGGING:
             else:
                 self._set_entry(w, val)
         self.cam_sensor_status.config(text="read from camera",
-                                      foreground='gray')
+                                      foreground=MUTED)
 
     def cam_apply_controls(self):
         """Write EVERY panel value to the camera, lock them for all capture
@@ -5277,7 +5305,7 @@ LOGGING:
                     self.cam_sync_controls()
                     self.cam_sensor_status.config(
                         text=f"exposure {exp} (mean level {mean:.0f})",
-                        foreground='gray')
+                        foreground=MUTED)
             finally:
                 if was_previewing:
                     self.cam_start_preview()

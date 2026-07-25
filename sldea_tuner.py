@@ -37,6 +37,17 @@ SLIDERS = [
     ('electrode_lum', 'Electrode mask (0=off)',    0,   255, 1,    False),
     ('wrinkle_ratio', 'Wrinkle-mode ratio',        1.0, 3.0, 0.05, False),
 ]
+# one-line explanations shown as a hint row under the sliders (audit
+# 2026-07-25: the Edge Review twins have tips; the tuner had none)
+SLIDER_HINTS = {
+    'blur_px': 'noise smoothing before differencing — higher = smoother',
+    'diff_thresh': 'fixed change threshold; 0 lets Otsu pick it per frame',
+    'min_diff': 'below this the frame counts as unchanged vs baseline',
+    'min_solidity': 'outlines emptier than this go to review, never auto',
+    'roi_frac': 'central search window (electrode glare lives at edges)',
+    'electrode_lum': 'baseline pixels this bright are masked (copper)',
+    'wrinkle_ratio': 'texture-vs-baseline index that counts as wrinkled',
+}
 PANEL_COLORS = ['#00e676', '#40c4ff', '#ff9100']   # best, 2nd, 3rd
 
 
@@ -325,6 +336,10 @@ def main(argv):
         sc.grid(row=r, column=1, sticky='ew')
         scales[key] = sc
         vallabels[key] = vlab
+        hint = SLIDER_HINTS.get(key)
+        if hint:
+            ttk.Label(ctl, text=hint, foreground='#555').grid(
+                row=r, column=3, sticky='w', padx=(10, 0))
     ctl.columnconfigure(1, weight=1)
 
     opts = ttk.Frame(root, padding=(8, 0))

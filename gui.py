@@ -2689,6 +2689,8 @@ LOGGING:
                     "measured kV/µA columns and NO breakdown watchdog.\n\n"
                     "Proceed without monitoring?", default='no'):
                 return
+            if self.scope and not self._sldea_check_monitors(p):
+                return
             if not messagebox.askyesno(
                     "Energize HV?",
                     f"LIVE run — this drives the Trek up to "
@@ -2755,6 +2757,66 @@ LOGGING:
                   wd_on, wd_ua, wd_s, trek_sign),
             daemon=True).start()
         self.root.after(100, self._sldea_animate_cursor)   # scroll the playhead
+
+    def _sldea_check_monitors(self, p):
+        """Verify the scope can actually SEE the Trek monitors before a LIVE
+        run; offer to fix the scaling. Returns True to proceed.
+
+        Bench 2026-07-25: CH2 was left at 2.6 mV/div for a 0-10 V monitor
+        and CH3 carried a 10x factor on a plain BNC, so five whole runs
+        logged blank measured_kV and tenfold currents with nothing on
+        screen to hint at it."""
+        vch = int(self.sldea_vars['vch'].get())
+        ich = int(self.sldea_vars['ich'].get())
+        try:
+            wd_ua = float(self.sldea_vars['wd_ua'].get())
+        except (KeyError, ValueError):
+            wd_ua = 100.0
+
+        def _q(ch, cmd):
+            try:
+                return float(self.scope.ask(f'CH{ch}:{cmd}'))
+            except Exception:
+                return None
+
+        v_scale, v_atten = _q(vch, 'SCALE?'), _q(vch, 'PROBEFUNC:EXTATTEN?')
+        i_scale, i_atten = _q(ich, 'SCALE?'), _q(ich, 'PROBEFUNC:EXTATTEN?')
+        probs = sldea_profile.monitor_problems(
+            max(p.levels), v_scale=v_scale, v_atten=v_atten,
+            i_scale=i_scale, i_atten=i_atten, breakdown_ua=wd_ua)
+        if not probs:
+            return True
+        plan = sldea_profile.monitor_fix_plan(max(p.levels), wd_ua)
+        msg = ("The oscilloscope cannot correctly record this run:\n\n• "
+               + "\n\n• ".join(probs)
+               + f"\n\nFix it automatically?\n"
+                 f"  CH{vch} (V_Out) → {plan['v_scale']:g} V/div, 1x\n"
+                 f"  CH{ich} (I_Out) → {plan['i_scale']:g} V/div, 1x\n\n"
+                 f"Yes = fix and continue · No = run anyway · Cancel = stop")
+        ans = messagebox.askyesnocancel("Scope monitor setup", msg,
+                                        default='yes')
+        if ans is None:
+            return False
+        if ans:
+            try:
+                for ch, sc in ((vch, plan['v_scale']), (ich, plan['i_scale'])):
+                    self.scope.write(f'CH{ch}:PROBEFUNC:EXTATTEN '
+                                     f"{plan['atten']:g}")
+                    self.scope.write(f'CH{ch}:SCALE {sc:g}')
+                    self.scope.write(f'CH{ch}:OFFSET 0')
+                    self.scope.write(f"CH{ch}:POSITION {plan['position']:g}")
+                    self.scope.write(f'CH{ch}:COUPLING DC')
+                    self.scope.write(f'SELECT:CH{ch} ON')
+                self._sldea_log(f"scope monitors rescaled: CH{vch} "
+                                f"{plan['v_scale']:g} V/div, CH{ich} "
+                                f"{plan['i_scale']:g} V/div, 1x attenuation")
+            except Exception as e:
+                messagebox.showerror("Scope", f"Could not rescale: {e}")
+                return False
+        else:
+            self._sldea_log("⚠ proceeding with a scope setup that cannot "
+                            "record this run correctly")
+        return True
 
     def _sldea_preflight(self, cam_exp, cam_gain):
         """Modal camera pre-flight: one fresh snapshot with a centering

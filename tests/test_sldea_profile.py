@@ -9,8 +9,36 @@ _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
     _os.path.abspath(__file__))))
 
 from sldea_profile import (SldeaProfile, BreakdownWatchdog, compute_levels,
+                           monitor_problems, monitor_fix_plan,
                            control_v_for_kv, measured_kv, measured_ua,
                            TREK_MAX_KV)
+
+
+def test_monitor_problems_catches_the_2026_07_25_bench_bug():
+    # The exact scope state that silently ruined five runs: CH2 at
+    # 2.6 mV/div for a 0-10 V monitor, CH3 with a 10x factor on a BNC.
+    probs = monitor_problems(10.0, v_scale=0.0026, v_atten=1.0,
+                             i_scale=0.09, i_atten=10.0)
+    joined = ' | '.join(probs)
+    assert len(probs) == 3, probs
+    assert 'V_Out' in joined and 'off-screen' in joined
+    assert '10x probe' in joined                      # attenuation flagged
+    # a correctly set up scope is silent
+    assert monitor_problems(10.0, v_scale=2.0, v_atten=1.0,
+                            i_scale=2.0, i_atten=1.0) == []
+    # unknown values (query failed) are never guessed at
+    assert monitor_problems(10.0) == []
+
+
+def test_monitor_fix_plan_satisfies_its_own_check():
+    for kv in (1.0, 5.5, 10.0):
+        plan = monitor_fix_plan(kv)
+        assert monitor_problems(kv, v_scale=plan['v_scale'],
+                                v_atten=plan['atten'],
+                                i_scale=plan['i_scale'],
+                                i_atten=plan['atten']) == []
+    # and it does not over-range: 1 kV must not pick the 10 V/div step
+    assert monitor_fix_plan(1.0)['v_scale'] < 1.0
 
 
 def test_watchdog_trips_only_after_sustained_current():

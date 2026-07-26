@@ -63,6 +63,67 @@ def fmt_duration(seconds):
     return f"{s // 3600:d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
 
 
+SCOPE_DIVISIONS = 8          # MSO24 vertical divisions
+BNC_ATTEN = 1.0              # bench convention: monitors are direct BNC
+
+
+def suggested_scale(volts_needed, divisions=SCOPE_DIVISIONS):
+    """A sane V/div that puts `volts_needed` on screen with headroom."""
+    from math import ceil
+    if volts_needed <= 0:
+        return 1.0
+    raw = (volts_needed * 1.3) / divisions        # 30% headroom
+    for step in (0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0):
+        if step >= raw:
+            return step
+    return 10.0
+
+
+def monitor_problems(max_kv, v_scale=None, v_atten=None, i_scale=None,
+                     i_atten=None, breakdown_ua=100.0,
+                     divisions=SCOPE_DIVISIONS):
+    """Problems with the scope's Trek-monitor channel setup, as readable
+    strings (empty list = ready to run).
+
+    Bench 2026-07-25: CH2 sat at 2.6 mV/div while V_Out swings 0-10 V, so
+    the MSO24 returned its invalid sentinel for nearly every reading and
+    FIVE runs recorded no usable measured_kV at all; CH3 additionally
+    carried a 10x attenuation factor with a plain BNC cable, inflating
+    every logged current tenfold. Both are invisible from the GUI, so a
+    live run now checks them up front."""
+    out = []
+    v_need = float(max_kv) / VMON_KV_PER_V
+    i_need = max(1.0, 2.0 * float(breakdown_ua) / IMON_UA_PER_V)
+    for label, scale, atten, need in (
+            ('V_Out', v_scale, v_atten, v_need),
+            ('I_Out', i_scale, i_atten, i_need)):
+        if atten is not None and abs(float(atten) - BNC_ATTEN) > 1e-6:
+            out.append(
+                f"{label}: scope thinks a {float(atten):g}x probe is fitted, "
+                f"but the monitors use direct BNC — readings would be "
+                f"{float(atten):g}x off.")
+        if scale is not None:
+            span = float(scale) * divisions
+            if span < need:
+                out.append(
+                    f"{label}: {float(scale):g} V/div shows only ±"
+                    f"{span / 2:.3g} V, but this run needs {need:.3g} V "
+                    f"({'up to %g kV' % max_kv if label == 'V_Out' else 'breakdown headroom'})"
+                    f" — readings will go off-screen and log as blank.")
+    return out
+
+
+def monitor_fix_plan(max_kv, breakdown_ua=100.0, divisions=SCOPE_DIVISIONS):
+    """{'v_scale','i_scale','atten','position'} that would satisfy
+    monitor_problems() for this run."""
+    v_need = float(max_kv) / VMON_KV_PER_V
+    i_need = max(1.0, 2.0 * float(breakdown_ua) / IMON_UA_PER_V)
+    return {'v_scale': suggested_scale(v_need, divisions),
+            'i_scale': suggested_scale(max(i_need, v_need), divisions),
+            'atten': BNC_ATTEN,
+            'position': -3.0}
+
+
 class BreakdownWatchdog:
     """Deliberately SLOW-to-trip breakdown detector for live runs.
 

@@ -5837,6 +5837,39 @@ LOGGING:
 
 
 
+def _startup_failed(exc):
+    """Show a startup crash instead of vanishing.
+
+    The desktop entry runs with Terminal=false and the launchers discard
+    stdout, so a startup exception used to look exactly like 'the splash
+    disappeared and nothing happened' with no way to find out why (bench
+    report 2026-07-25)."""
+    import traceback
+    detail = ''.join(traceback.format_exception(
+        type(exc), exc, exc.__traceback__))
+    print(detail, file=sys.stderr)          # still lands in launch.log
+    try:
+        err = tk.Tk()
+        err.title("SCPI Control failed to start")
+        tk.Label(err, fg='#a01010', justify='left', padx=14, pady=(12, 4),
+                 font=('TkDefaultFont', 11, 'bold'),
+                 text="The app could not start.").pack(anchor='w')
+        tk.Label(err, justify='left', padx=14, wraplength=760,
+                 text=f"{type(exc).__name__}: {exc}\n\nFull details are in "
+                      f"the launch log:\n"
+                      f"{os.path.expanduser('~/.cache/scpi_control/launch.log')}"
+                 ).pack(anchor='w')
+        box = scrolledtext.ScrolledText(err, wrap='word', width=100,
+                                        height=18, font='TkFixedFont')
+        box.pack(fill='both', expand=True, padx=14, pady=10)
+        box.insert('1.0', detail)
+        box.configure(state='disabled')
+        tk.Button(err, text="Close", command=err.destroy).pack(pady=(0, 12))
+        err.mainloop()
+    except Exception:
+        pass                                 # no display: the log is enough
+
+
 if __name__ == "__main__":
     root = tk.Tk()
     # Show a splash immediately: building the tabs takes a couple of seconds
@@ -5846,9 +5879,19 @@ if __name__ == "__main__":
         splash = SplashScreen(root, version_string())
     except tk.TclError:
         splash = None
-    app = InstrumentControlGUI(
-        root, progress=splash.set_status if splash else None)
-    if splash:
-        splash.close()
-    root.deiconify()
+    try:
+        app = InstrumentControlGUI(
+            root, progress=splash.set_status if splash else None)
+        if splash:
+            splash.close()
+        root.deiconify()
+    except BaseException as e:               # includes KeyboardInterrupt
+        try:
+            if splash:
+                splash.close()
+            root.destroy()
+        except Exception:
+            pass
+        _startup_failed(e)
+        sys.exit(1)
     root.mainloop()

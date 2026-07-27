@@ -18,6 +18,8 @@ tab has a Reconnect button):
 A version readout is shown in the footer. Instrument drivers live in
 instruments.py; signal-gen presets in siggen_presets.py.
 """
+import tk_fontfix                      # must precede tkinter:
+tk_fontfix.apply()                     # colour emoji crash Tk
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
 import csv

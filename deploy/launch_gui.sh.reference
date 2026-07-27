@@ -65,4 +65,52 @@ fi
 # cd into the SHARE app dir so gui.py's relative presets/ path resolves to
 # the shared presets folder (presets stay shared between all users).
 cd "$APP"
-exec env PYTHONPATH="$RUN_LIBS${PYTHONPATH:+:$PYTHONPATH}" "$PY" "$RUN_APP/gui.py" "$@"
+
+# --- run WITH a log, and never fail silently ------------------------------
+# The desktop entry is Terminal=false and this script used to exec python
+# with its output going nowhere, so a startup crash looked identical to
+# "the splash vanished and nothing happened" -- unreportable and
+# undiagnosable (bench report 2026-07-25). Keep the previous session's log
+# so a crash survives the user immediately relaunching.
+LOG="$CACHE/launch.log"
+mkdir -p "$CACHE" 2>/dev/null || true
+[ -f "$LOG" ] && mv -f "$LOG" "$LOG.prev" 2>/dev/null || true
+{
+  echo "=== SCPI Control launch $(date -Is) ==="
+  echo "user=$(id -un) host=$(hostname) display=${DISPLAY:-none}${WAYLAND_DISPLAY:+ wayland=$WAYLAND_DISPLAY}"
+  echo "app=$RUN_APP libs=$RUN_LIBS python=$PY"
+  echo "version: $share_stamp"
+  echo
+} >"$LOG" 2>/dev/null || true
+
+set +e
+env PYTHONPATH="$RUN_LIBS${PYTHONPATH:+:$PYTHONPATH}" "$PY" "$RUN_APP/gui.py" "$@" 2>&1 \
+  | tee -a "$LOG"
+rc=${PIPESTATUS[0]}
+set -e
+
+if [ "${rc:-0}" -ne 0 ]; then
+  detail="$(tail -n 20 "$LOG" 2>/dev/null)"
+  msg="SCPI Control exited with code $rc.
+
+Log: $LOG
+
+$detail"
+  # zenity -> notify-send -> a plain Tk window (python3.11+tkinter are
+  # always present here, unlike GTK/zenity on a bare session)
+  zenity --error --width=760 --title "SCPI Control failed to start" \
+         --text "$msg" 2>/dev/null \
+    || notify-send -u critical "SCPI Control failed to start" \
+         "exit $rc -- see $LOG" 2>/dev/null \
+    || SCPI_ERRMSG="$msg" "$PY" -c '
+import os, tkinter as tk
+from tkinter import scrolledtext
+r = tk.Tk(); r.title("SCPI Control failed to start")
+t = scrolledtext.ScrolledText(r, width=100, height=24, font="TkFixedFont")
+t.pack(fill="both", expand=True); t.insert("1.0", os.environ.get("SCPI_ERRMSG", ""))
+t.configure(state="disabled")
+tk.Button(r, text="Close", command=r.destroy).pack(pady=6)
+r.mainloop()' 2>/dev/null \
+    || true
+fi
+exit "${rc:-0}"

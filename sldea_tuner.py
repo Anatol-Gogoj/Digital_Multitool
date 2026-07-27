@@ -23,6 +23,8 @@ import sys
 import numpy as np
 
 import sldea_edge as se
+import tk_fontfix                      # must run before tkinter connects:
+tk_fontfix.apply()                     # colour-emoji glyphs hard-crash Tk
 
 DEFAULT_DIR = os.environ.get(
     'SCPI_SLDEA_DIR', '/mnt/shareDrive/robot_incubator/SLDEA_data')

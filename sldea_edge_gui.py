@@ -22,6 +22,8 @@ import sys
 import threading
 import time
 import queue as _queue
+import tk_fontfix                      # must precede tkinter:
+tk_fontfix.apply()                     # colour emoji crash Tk
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 

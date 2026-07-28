@@ -168,6 +168,12 @@ def norm_bg_scale(base, img, roi_frac):
     return min(1.4, max(0.7, med_b / med_i))
 
 
+def _detector_diff(base, img, settings):
+    """The exact map candidates() thresholds, ROI-cropped and normalized.
+    Via sldea_edge so the two can never drift apart."""
+    return se.prepared_diff(base, img, settings)['sub']
+
+
 def drift(base, img):
     """Phase-correlate baseline->frame. Returns (dx, dy, response, aligned).
 
@@ -360,8 +366,26 @@ def analyze(rundir, max_frames=24):
         nbr = np.abs(np.clip(fr['gray'][ys, xs] * nb, 0, 255) - base[ys, xs])
         cands = se.candidates(base, fr['gray'], settings)
         best = cands[0] if cands else None
+        # A/B the normalization the detector applies: the run's own setting
+        # against the legacy scalar. One command then answers "did the
+        # gain+offset fit actually change what gets detected", instead of
+        # it being an argument about residuals.
+        alt = dict(settings)
+        alt['norm_bg'] = 1 if int(settings.get('norm_bg', 2) or 0) >= 2 else 2
+        alt_cands = se.candidates(base, fr['gray'], alt)
+        alt_best = alt_cands[0] if alt_cands else None
+        # the gate and Otsu describe DETECTOR behaviour, so they are read
+        # off the diff the detector actually thresholds -- normalized --
+        # rather than the raw one
+        norm = _detector_diff(base, fr['gray'], settings)
+        gate_p99 = float(np.percentile(norm, 99))
         per.append({
             'gain': round(a, 3), 'offset': round(b, 2),
+            'alt_norm_bg': alt['norm_bg'],
+            'alt_area_px': round(float(alt_best['area_px']), 0)
+            if alt_best else 0.0,
+            'alt_conf': float(alt_best['conf']) if alt_best else 0.0,
+            'alt_needs_review': bool(se.needs_review(alt_cands, alt)),
             'diff_mean_photofit': round(float(aff.mean()), 2),
             'diff_mean_normbg': round(float(nbr.mean()), 2),
             'sep_photofit': round(separability(aff), 3),
@@ -371,13 +395,11 @@ def analyze(rundir, max_frames=24):
             'pc_response': round(resp, 3),
             'diff_mean': round(float(r_roi.mean()), 2),
             'diff_mean_registered': round(float(g_roi.mean()), 2),
-            'diff_p99': round(float(np.percentile(blurred[ys, xs], 99)), 2),
-            'diff_p99_sigma': round(float(np.percentile(blurred[ys, xs], 99))
-                                    / sigma, 1),
-            'gated': bool(float(np.percentile(blurred[ys, xs], 99))
-                          < float(settings.get('min_diff', 10))),
+            'diff_p99': round(gate_p99, 2),
+            'diff_p99_sigma': round(gate_p99 / sigma, 1),
+            'gated': bool(gate_p99 < float(settings.get('min_diff', 10))),
             'otsu': round(float(cv2.threshold(
-                blurred[ys, xs], 0, 255,
+                norm, 0, 255,
                 cv2.THRESH_BINARY + cv2.THRESH_OTSU)[0]), 1),
             # p90, not median: the active region is a MINORITY of the ROI,
             # so a median reports the untouched surround and reads ~1.0 even
@@ -571,6 +593,25 @@ def verdicts(d):
                     f"{kvs} kV. min_diff is {md:g} gray levels = "
                     f"{md / sigma:.1f} sigma."))
 
+    # A/B: did switching the normalization change what gets DETECTED?
+    alt_mode = per[0].get('alt_norm_bg')
+    if alt_mode is not None:
+        now = int(d['settings'].get('norm_bg', 2) or 0)
+        rev_now = sum(1 for p in per if p['needs_review'])
+        rev_alt = sum(1 for p in per if p['alt_needs_review'])
+        names = {0: 'no normalization', 1: 'the legacy scalar',
+                 2: 'the gain+offset fit'}
+        conf_now = float(np.median([p['conf'] for p in per]))
+        conf_alt = float(np.median([p['alt_conf'] for p in per]))
+        sev = 'OK' if rev_now < rev_alt or conf_now > conf_alt else 'MED'
+        out.append((sev, f'Detector under {names.get(now, now)} vs '
+                    f'{names.get(alt_mode, alt_mode)}',
+                    f"frames needing review {rev_now}/{len(per)} against "
+                    f"{rev_alt}/{len(per)}; median confidence "
+                    f"{conf_now:.2f} against {conf_alt:.2f}. This is the "
+                    f"only comparison that matters -- residuals are the "
+                    f"means, detections are the end."))
+
     kv = np.array([p['kv'] for p in per], float)
     ar = np.array([p['area_px'] for p in per], float)
     ok = ~np.isnan(kv) & (ar > 0)
@@ -661,7 +702,9 @@ def report(d):
     A("             threshold splits it), 1 = two clean ones. Highest wins.")
     A("  tex    wrinkle-energy ratio at the ROI p90 (1.0 = no texture "
       "change)")
-    A("  area   what candidates() detects TODAY with the run's own settings")
+    A("  area   what candidates() detects with the run's own settings;")
+    A("         the A/B verdict above compares that against the other")
+    A("         normalization mode, on the same frames")
     return "\n".join(L)
 
 

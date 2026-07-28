@@ -12,7 +12,10 @@ the pipeline produces -- this is a viewfinder on the real algorithm, not a
 reimplementation.
 
     python sldea_tuner.py [RUNDIR]              # or newest under the default
+    python sldea_tuner.py 1                     # bench shortcut (see
+                                                # sldea_edge.BENCH_RUNS)
     python sldea_tuner.py --selftest OUT.png    # headless render, no window
+    python sldea_tuner.py --resolve PATH        # print the resolved run
 
 Also doubles as the labelling front-end for the ML route: tune until the
 masks are right, then the saved outlines are weak labels to correct/export.
@@ -245,38 +248,29 @@ def _selftest(out_png):
 # GUI
 # ---------------------------------------------------------------------------
 
-def _newest_run(root):
-    """Newest run directory under `root`, or None.
-
-    A run is ANY sub-directory holding a run CSV -- not only SLDEA_*.
-    Edge Review has always accepted custom-named runs; this required the
-    prefix, so bench folders like P3_1_2.5mL_20260728 were invisible to the
-    Tune buttons while being perfectly openable in Edge Review (bench
-    2026-07-28)."""
-    try:
-        subs = [os.path.join(root, n) for n in os.listdir(root)
-                if os.path.isdir(os.path.join(root, n))]
-    except OSError:
-        return None
-    subs = [s for s in subs if se.run_csv(s)]
-    return max(subs, key=os.path.getmtime) if subs else None
-
-
-def resolve_run(path):
-    """The run to work on: `path` itself when it is a run, else the newest
-    run inside it. -> path or None. One resolver for the CLI, the Tune
-    buttons and the Windows launcher, so they cannot disagree."""
-    if not path:
-        return None
-    if se.run_csv(path):
-        return path
-    return _newest_run(path)
+# Run resolution lives in sldea_edge -- the Tk-free module every reader
+# already imports, so the diagnostic gets the same rules without dragging
+# the font workaround in. Kept under the old names: gui.py calls
+# _newest_run, and the Windows launcher calls resolve_run.
+_newest_run = se.newest_run
+resolve_run = se.resolve_run
 
 
 def main(argv):
     args = [a for a in argv if not a.startswith('--')]
     if '--selftest' in argv:
         _selftest(args[0] if args else 'tuner_selftest.png')
+        return 0
+    if '--resolve' in argv:
+        # For the Windows launcher: print the resolved run directory and
+        # exit. A flag rather than `python -c "..."` in the batch file --
+        # cmd mangles a command that starts with a quoted path and carries
+        # further quoted arguments, which silently broke every path
+        # containing a space (bench 2026-07-28).
+        target = resolve_run(args[0] if args else None)
+        if not target:
+            return 2
+        print(target)
         return 0
 
     rundir = resolve_run(args[0]) if args else _newest_run(DEFAULT_DIR)

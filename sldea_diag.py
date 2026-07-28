@@ -7,6 +7,7 @@ decided; this shows you WHY, and whether the detector is even looking at
 the right signal.
 
     python sldea_diag.py RUNDIR [--out DIR] [--max-frames N]
+    python sldea_diag.py 1                      # bench shortcut
     python sldea_diag.py --selftest OUT.png     # synthetic, no run needed
 
 Writes sldea_diag.txt / .json / .png next to the run (or into --out) and
@@ -900,10 +901,12 @@ def main(argv):
     if not args:
         print(__doc__.strip().split('\n\n')[1])
         return 2
-    rundir = args[0]
-    if not se.run_csv(rundir):
+    # same resolver as the tuner: a run directory, a parent full of runs,
+    # or a bench shortcut like `1`
+    rundir = se.resolve_run(args[0])
+    if not rundir:
         print(f"not a run directory (no data.csv, and no renamed "
-              f"data1.csv / data2.csv ...): {rundir}")
+              f"data1.csv / data2.csv ...): {args[0]}")
         return 2
     out = rundir
     if '--out' in argv:

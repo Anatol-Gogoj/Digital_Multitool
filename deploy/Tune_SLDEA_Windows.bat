@@ -158,23 +158,24 @@ if not defined TARGET (
     set "HOW=Drag a run folder onto this launcher, or set the folder that holds the runs once with:  setx SCPI_SLDEA_DIR ""C:\SLDEA""  and open a new window."
     goto :fail
 )
-if not exist "!TARGET!" (
-    set "WHY=The folder !TARGET! does not exist."
-    set "HOW=Copy the run folder to this PC first - tuning writes setup.txt into it, and reading frames over the network is slow - then drag the local copy onto this launcher."
-    goto :fail
-)
 pushd "%APP%"
+REM Resolve through the app itself: it accepts a run folder, a parent full
+REM of runs, or a bench shortcut like 1/2/3. Done with a --resolve flag and
+REM a temp file rather than `python -c "..."` inside a for /f -- cmd strips
+REM the outer quotes of a command that STARTS with a quoted path and also
+REM carries quoted arguments, which silently broke every path containing a
+REM space (bench 2026-07-28). stderr goes to the log, never to nul: that
+REM redirect is what made the failure invisible.
+set "RESOLVED=%TEMP%\sldea_resolved.txt"
+del "%RESOLVED%" >nul 2>&1
+"%VENV%\Scripts\python.exe" "%APP%\sldea_tuner.py" --resolve "!TARGET!" >"%RESOLVED%" 2>>"%LOG%"
 set "RUNDIR="
-REM One resolver for everything: it accepts a run folder OR a parent full of
-REM runs, does not care whether the folder is named SLDEA_*, and accepts a
-REM data.csv renamed to data1.csv / data2.csv (Excel will not open two
-REM workbooks of the same name). Doing this in Python rather than batch is
-REM what keeps the launcher and the app's Tune buttons from disagreeing.
-for /f "usebackq delims=" %%r in (`"%VENV%\Scripts\python.exe" -c "import sys, sldea_tuner as t; print(t.resolve_run(sys.argv[1]) or '')" "!TARGET!" 2^>nul`) do set "RUNDIR=%%r"
+if exist "%RESOLVED%" set /p RUNDIR=<"%RESOLVED%"
+del "%RESOLVED%" >nul 2>&1
 if not defined RUNDIR (
     popd
-    set "WHY=No SLDEA run was found in !TARGET!."
-    set "HOW=A run folder holds a frames folder and data.csv - or data1.csv, data2.csv and so on if you renamed it. If you pointed at the folder that CONTAINS the runs, the newest one inside it is used; check that at least one sub-folder really holds a data CSV."
+    set "WHY=No SLDEA run was found for !TARGET!."
+    set "HOW=A run folder holds a frames folder and data.csv - or data1.csv, data2.csv and so on if you renamed it. You can also pass the folder that CONTAINS the runs (the newest one inside it is used), or a bench shortcut: 1, 2 or 3. If this looks right, the end of %LOG% has the actual error."
     goto :fail
 )
 echo       OK - !RUNDIR!

@@ -11,7 +11,7 @@ REM       _software folder, or against the launcher's local mirror).
 REM    2. Reuse the main launcher's venv when it exists; otherwise build a
 REM       tuner-only one -- numpy + opencv + matplotlib is all this needs.
 REM    3. Resolve the run: the folder dropped on me, else %SCPI_SLDEA_DIR%,
-REM       else ask. A PARENT folder resolves to its newest SLDEA_* run.
+REM       else ask. A PARENT folder resolves to the newest run inside it.
 REM    4. Open the tuner on it -- or, with /diag, run the diagnostic.
 REM
 REM  Save in the tuner writes the tuned values into that run's setup.txt, so
@@ -165,17 +165,16 @@ if not exist "!TARGET!" (
 )
 pushd "%APP%"
 set "RUNDIR="
-if exist "!TARGET!\data.csv" (
-    set "RUNDIR=!TARGET!"
-) else (
-    REM a parent folder: reuse the tuner's own resolver so this launcher and
-    REM the app's Tune buttons always agree on what "newest run" means
-    for /f "usebackq delims=" %%r in (`"%VENV%\Scripts\python.exe" -c "import sys, sldea_tuner as t; print(t._newest_run(sys.argv[1]) or '')" "!TARGET!" 2^>nul`) do set "RUNDIR=%%r"
-)
+REM One resolver for everything: it accepts a run folder OR a parent full of
+REM runs, does not care whether the folder is named SLDEA_*, and accepts a
+REM data.csv renamed to data1.csv / data2.csv (Excel will not open two
+REM workbooks of the same name). Doing this in Python rather than batch is
+REM what keeps the launcher and the app's Tune buttons from disagreeing.
+for /f "usebackq delims=" %%r in (`"%VENV%\Scripts\python.exe" -c "import sys, sldea_tuner as t; print(t.resolve_run(sys.argv[1]) or '')" "!TARGET!" 2^>nul`) do set "RUNDIR=%%r"
 if not defined RUNDIR (
     popd
     set "WHY=No SLDEA run was found in !TARGET!."
-    set "HOW=A run folder holds data.csv and a frames folder. If you pointed at the folder that CONTAINS the runs, note that auto-discovery only sees sub-folders named SLDEA_* that contain a data.csv - otherwise drag the run folder itself onto this launcher."
+    set "HOW=A run folder holds a frames folder and data.csv - or data1.csv, data2.csv and so on if you renamed it. If you pointed at the folder that CONTAINS the runs, the newest one inside it is used; check that at least one sub-folder really holds a data CSV."
     goto :fail
 )
 echo       OK - !RUNDIR!

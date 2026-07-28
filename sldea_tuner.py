@@ -246,14 +246,31 @@ def _selftest(out_png):
 # ---------------------------------------------------------------------------
 
 def _newest_run(root):
+    """Newest run directory under `root`, or None.
+
+    A run is ANY sub-directory holding a run CSV -- not only SLDEA_*.
+    Edge Review has always accepted custom-named runs; this required the
+    prefix, so bench folders like P3_1_2.5mL_20260728 were invisible to the
+    Tune buttons while being perfectly openable in Edge Review (bench
+    2026-07-28)."""
     try:
         subs = [os.path.join(root, n) for n in os.listdir(root)
-                if n.startswith('SLDEA_') and
-                os.path.isdir(os.path.join(root, n))]
+                if os.path.isdir(os.path.join(root, n))]
     except OSError:
         return None
-    subs = [s for s in subs if os.path.exists(os.path.join(s, 'data.csv'))]
+    subs = [s for s in subs if se.run_csv(s)]
     return max(subs, key=os.path.getmtime) if subs else None
+
+
+def resolve_run(path):
+    """The run to work on: `path` itself when it is a run, else the newest
+    run inside it. -> path or None. One resolver for the CLI, the Tune
+    buttons and the Windows launcher, so they cannot disagree."""
+    if not path:
+        return None
+    if se.run_csv(path):
+        return path
+    return _newest_run(path)
 
 
 def main(argv):
@@ -262,9 +279,12 @@ def main(argv):
         _selftest(args[0] if args else 'tuner_selftest.png')
         return 0
 
-    rundir = args[0] if args else _newest_run(DEFAULT_DIR)
-    if not rundir or not os.path.exists(os.path.join(rundir, 'data.csv')):
-        print(f"no run found (looked in {DEFAULT_DIR}); pass a RUNDIR")
+    rundir = resolve_run(args[0]) if args else _newest_run(DEFAULT_DIR)
+    if not rundir:
+        where = args[0] if args else DEFAULT_DIR
+        print(f"no run found (looked in {where}); pass a run directory -- "
+              f"one holding data.csv (or data1.csv, data2.csv ...) and a "
+              f"frames/ folder")
         return 2
 
     import tkinter as tk

@@ -94,11 +94,16 @@ if errorlevel 1 (
     set "HOW=Install a current Python from https://www.python.org/downloads/ - tick 'Add python.exe to PATH' - then run this launcher again."
     goto :fail
 )
-%PY% -c "import tkinter" >nul 2>&1
-if errorlevel 1 (
-    set "WHY=This Python was installed without tkinter, the graphical toolkit the tuner needs."
-    set "HOW=Re-run the Python installer, choose Modify, and enable 'tcl/tk and IDLE'. Then run this launcher again."
-    goto :fail
+REM the diagnostic never opens a window, so do not fail it over tkinter
+set "NEEDMODS=numpy, cv2, matplotlib"
+if not "!MODE!"=="diag" (
+    set "NEEDMODS=numpy, cv2, matplotlib, tkinter"
+    %PY% -c "import tkinter" >nul 2>&1
+    if errorlevel 1 (
+        set "WHY=This Python was installed without tkinter, the graphical toolkit the tuner needs."
+        set "HOW=Re-run the Python installer, choose Modify, and enable 'tcl/tk and IDLE'. Then run this launcher again. To run only the diagnostic, which needs no window, pass /diag."
+        goto :fail
+    )
 )
 echo       OK.
 echo.
@@ -119,12 +124,12 @@ if not exist "%VENV%\Scripts\python.exe" (
 )
 REM self-healing: install only when something is actually missing, so the
 REM normal start stays offline and instant
-"%VENV%\Scripts\python.exe" -c "import numpy, cv2, matplotlib, tkinter" >nul 2>&1
+"%VENV%\Scripts\python.exe" -c "import !NEEDMODS!" >nul 2>&1
 if errorlevel 1 (
     echo       Installing packages - needs internet, please wait...
     "%VENV%\Scripts\python.exe" -m pip install --upgrade pip >>"%LOG%" 2>&1
     "%VENV%\Scripts\python.exe" -m pip install numpy opencv-python-headless matplotlib >>"%LOG%" 2>&1
-    "%VENV%\Scripts\python.exe" -c "import numpy, cv2, matplotlib, tkinter" >nul 2>&1
+    "%VENV%\Scripts\python.exe" -c "import !NEEDMODS!" >nul 2>&1
     if errorlevel 1 (
         set "WHY=The tuner's Python packages could not be installed."
         set "HOW=Usually this means no internet connection. Connect and retry; if it still fails, delete the folder %TUNEVENV% and run this launcher again. The last lines of %LOG% say which package failed."

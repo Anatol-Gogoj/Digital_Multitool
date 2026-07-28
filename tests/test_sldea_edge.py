@@ -462,9 +462,13 @@ def test_bench_shortcuts_resolve_and_stay_inert_elsewhere():
     assert set(se.BENCH_RUNS) == {'1', '2', '3'}
     for key, path in se.BENCH_RUNS.items():
         assert 'P3_' + key in path, (key, path)
-    # inert here: the hardcoded paths do not exist on this machine
-    for key in se.BENCH_RUNS:
-        assert se.resolve_run(key) is None
+    # Holds on both kinds of machine. Where the runs are present -- the
+    # bench PC, or anywhere they have been extracted for analysis -- a
+    # shortcut resolves to its own directory; where they are absent it
+    # resolves to nothing. What it must never do is resolve to some
+    # OTHER run, which is what a bare newest_run() fallback would give.
+    for key, path in se.BENCH_RUNS.items():
+        assert se.resolve_run(key) in (None, path), (key, se.resolve_run(key))
 
     parent = tempfile.mkdtemp(prefix='shortcut_')
     d = os.path.join(parent, 'P3_9')

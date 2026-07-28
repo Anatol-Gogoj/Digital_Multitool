@@ -6,12 +6,15 @@ failure modes is actually present. The tuner shows you what the detector
 decided; this shows you WHY, and whether the detector is even looking at
 the right signal.
 
-    python sldea_diag.py RUNDIR [--out DIR] [--max-frames N]
+    python sldea_diag.py RUNDIR [--out DIR] [--max-frames N] [--no-contact]
     python sldea_diag.py 1                      # bench shortcut
     python sldea_diag.py --selftest OUT.png     # synthetic, no run needed
 
-Writes sldea_diag.txt / .json / .png next to the run (or into --out) and
-prints the report. The JSON is data only -- small enough to send.
+Writes sldea_diag.txt / .json / .png / _contact.png next to the run (or
+into --out) and prints the report. The JSON is data only -- small enough to
+send. The contact sheet draws the detected outline on real frames across
+the ramp: the numbers say whether a threshold CAN separate the active
+area, that says whether the outline landed in the right place.
 
 What it measures, and the failure each one pins down:
 
@@ -916,6 +919,73 @@ def _selftest(out_png):
           f"drift {min(shifts):.1f}-{max(shifts):.1f} px detected)")
 
 
+def contact_sheet(rundir, png, count=8, max_frames=24):
+    """A grid of real frames with the detected outline drawn on each.
+
+    The numbers say whether a threshold CAN separate the active area; this
+    says whether the outline is in the right place. An agent working on
+    this can read the PNG directly, which is the check that no residual
+    substitutes for."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    run = se.load_run(rundir)
+    settings = se.load_settings(rundir)
+    rows = run['rows']
+    base_i = next((i for i, r in enumerate(rows)
+                   if (r.get('tag') or '') == 'baseline'), 0)
+    base = se.load_gray(se.frame_path(run, rows[base_i]) or '')
+    if base is None:
+        raise SystemExit(f"baseline frame not loadable in {rundir}")
+    idx = [i for i, r in enumerate(rows)
+           if i != base_i and (r.get('frame_file') or '').strip()]
+    if not idx:
+        raise SystemExit(f"no frames in {rundir}")
+    if len(idx) > count:                      # even coverage of the ramp
+        idx = sorted({idx[round(j * (len(idx) - 1) / (count - 1.0))]
+                      for j in range(count)})
+
+    cols = min(4, len(idx))
+    rowsn = int(np.ceil(len(idx) / cols))
+    fig, axs = plt.subplots(rowsn, cols,
+                            figsize=(4.2 * cols, 2.9 * rowsn), squeeze=False)
+    for ax in axs.ravel():
+        ax.axis('off')
+    for k, i in enumerate(idx):
+        gray = se.load_gray(se.frame_path(run, rows[i]) or '')
+        ax = axs[k // cols][k % cols]
+        if gray is None or gray.shape != base.shape:
+            continue
+        cands = se.candidates(base, gray, settings)
+        ax.imshow(gray, cmap='gray', vmin=0, vmax=255)
+        ax.axis('off')
+        for j, c in enumerate(cands[:3]):
+            pts = np.asarray(c['contour'], float)
+            if len(pts) < 3:
+                continue
+            xs = np.append(pts[:, 0], pts[0, 0])
+            ys = np.append(pts[:, 1], pts[0, 1])
+            ax.plot(xs, ys, lw=2.0 if j == 0 else 0.9,
+                    color=['#00e676', '#40c4ff', '#ff9100'][j])
+        kv = _fkv(rows[i])
+        best = cands[0] if cands else None
+        head = f"{kv:g} kV" if not np.isnan(kv) else "? kV"
+        if best:
+            rev = 'REVIEW' if se.needs_review(cands, settings) else 'ok'
+            head += (f"  {best['area_px']:.0f} px2  conf "
+                     f"{best['conf']:.2f}  {rev}")
+        else:
+            head += "  no candidates (gated)"
+        ax.set_title(head, fontsize=8, loc='left')
+    fig.suptitle(f"detections -- {os.path.basename(os.path.abspath(rundir))} "
+                 f"(norm_bg={settings.get('norm_bg')})", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(png, dpi=90)
+    plt.close(fig)
+    return png
+
+
 def main(argv):
     args = [a for a in argv if not a.startswith('--')]
     if '--selftest' in argv:
@@ -948,7 +1018,13 @@ def main(argv):
     with open(stem + '.json', 'w') as f:
         json.dump(d, f, indent=1)
     figure(d, stem + '.png', rundir=rundir)
-    print(f"\nwrote {stem}.txt / .json / .png")
+    made = '.txt / .json / .png'
+    if '--no-contact' not in argv:
+        # the outline drawn on the real frame: the check no residual can
+        # stand in for, and readable by an agent working without a bench
+        contact_sheet(rundir, stem + '_contact.png')
+        made += ' / _contact.png'
+    print(f"\nwrote {stem}{made}")
     return 0
 
 

@@ -137,7 +137,7 @@ Sliders cannot fix a run whose signal is not where the detector is looking. Befo
 python sldea_diag.py "C:\SLDEA\SLDEA_20260721_1430"
 ```
 
-or `Tune_SLDEA_Windows.bat /diag`, which uses the same environment. It writes `sldea_diag.txt` / `.json` / `.png` into the run folder, changes nothing, and reports:
+or `deploy\Tune_SLDEA_Windows.bat /diag`, which uses the same environment (from PowerShell, prefix it: `.\deploy\Tune_SLDEA_Windows.bat /diag` — PowerShell will not run a bare script name from the current directory). The diagnostic opens no window, so unlike the tuner it does not need a Python built with tkinter. It writes `sldea_diag.txt` / `.json` / `.png` into the run folder, changes nothing, and reports:
 
 - **drift** — phase correlation baseline→frame, and how much of the difference energy disappears once that shift is undone. `candidates()` normalises brightness but never registers geometry, so rig or camera movement rings every hard edge in the scene and reads as change.
 - **which map separates** — the same ROI scored as a raw difference, a registered difference, and a dense wrinkle map (local Laplacian energy vs the baseline). 0 means one noise population, where no threshold exists that splits active from inactive; 1 means two clean ones. Whichever wins is what the detector *should* be segmenting — the number that matters when the DEA wrinkles without expanding, because difference-imaging then has nothing to find.

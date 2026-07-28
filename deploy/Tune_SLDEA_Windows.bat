@@ -27,6 +27,11 @@ REM  Pass /diag to run the run diagnostic (sldea_diag.py) instead of the
 REM  tuner: it reports, in numbers, WHY a run will not tune -- drift,
 REM  which map actually separates, threshold transfer, the gate. Make a
 REM  shortcut with /diag in the target if you want it one click away.
+REM  %~dp0 FIRST: `shift` below moves %0 as well as the arguments, so after
+REM  parsing, %~dp0 no longer points at this file and every path built from
+REM  it silently misses (bench 2026-07-28: "could not find sldea_tuner.py"
+REM  from inside the checkout that contained it).
+set "HERE=%~dp0"
 set "MODE=tune"
 set "TARGET="
 :parseargs
@@ -60,9 +65,9 @@ REM ---- 1/5 the app -----------------------------------------------------
 echo [1/5] Locating the application...
 set "APP="
 REM a checkout: this file sits in deploy\, the app is its parent
-if exist "%~dp0..\sldea_tuner.py" set "APP=%~dp0.."
+if exist "%HERE%..\sldea_tuner.py" set "APP=%HERE%.."
 REM the share: this file sits in _software\ next to the SCPI_Control folder
-if not defined APP if exist "%~dp0SCPI_Control\sldea_tuner.py" set "APP=%~dp0SCPI_Control"
+if not defined APP if exist "%HERE%SCPI_Control\sldea_tuner.py" set "APP=%HERE%SCPI_Control"
 REM last resort: the local mirror the main launcher keeps up to date
 if not defined APP if exist "%CACHE%\app\sldea_tuner.py" set "APP=%CACHE%\app"
 if not defined APP (

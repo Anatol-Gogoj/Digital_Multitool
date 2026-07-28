@@ -308,12 +308,14 @@ def main(argv):
     ctl.pack(fill='x')
     scales, vallabels = {}, {}
     fill_var = tk.BooleanVar(value=True)
-    norm_var = tk.BooleanVar(value=bool(settings.get('norm_bg', 1)))
+    # the checkbox is on/off; ON means the affine fit (2). A run whose
+    # setup.txt still says 1 keeps the legacy scalar until it is retuned.
+    norm_var = tk.BooleanVar(value=bool(settings.get('norm_bg', 2)))
     job = {'id': None}
 
     def recompute():
         job['id'] = None
-        settings['norm_bg'] = 1 if norm_var.get() else 0
+        settings['norm_bg'] = 2 if norm_var.get() else 0
         _, cands, scale = detect_panels(panels, base_gray, settings,
                                         run['rows'])
         for ax, p in zip(axs, panels):
@@ -360,7 +362,8 @@ def main(argv):
 
     opts = ttk.Frame(root, padding=(8, 0))
     opts.pack(fill='x')
-    ttk.Checkbutton(opts, text="Normalize brightness to baseline (norm_bg)",
+    ttk.Checkbutton(opts, text="Match frame to baseline: gain+offset "
+                    "(norm_bg)",
                     variable=norm_var, command=schedule).pack(side='left')
     ttk.Checkbutton(opts, text="Shade detected region", variable=fill_var,
                     command=schedule).pack(side='left', padx=12)
@@ -377,7 +380,7 @@ def main(argv):
             settings[key] = int(dv) if is_int else dv
             scales[key].set(dv)
             vallabels[key].config(text=(f"{int(dv)}" if is_int else f"{dv:g}"))
-        norm_var.set(bool(se.DEFAULT_SETTINGS.get('norm_bg', 1)))
+        norm_var.set(bool(se.DEFAULT_SETTINGS.get('norm_bg', 2)))
         schedule()
 
     bar = ttk.Frame(root, padding=8)

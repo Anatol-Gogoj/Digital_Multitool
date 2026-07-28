@@ -147,29 +147,9 @@ def texture_map(gray, win=15):
     return cv2.boxFilter(energy, -1, (win, win))
 
 
-def photometric_fit(base, img, roi):
-    """Gain and offset taking the baseline onto the frame: img ~ a*base + b.
-
-    Fitted on MATCHED QUANTILES rather than pixels, so a genuinely changed
-    minority of the frame moves only the extreme quantiles and cannot drag
-    the fit -- the DEA is a small part of the picture and must not define
-    the correction meant to remove everything else.
-
-    Why affine and not the scalar gain candidates() applies: an exposure or
-    gain change moves bright pixels far more than dark ones, so a single
-    ratio estimated on a DARK border band is both badly determined and the
-    wrong model. Under it, the lit dish keeps a large residual while the
-    margin looks fine.
-
-    Caveat worth knowing when reading the gain: saturated highlights bias
-    the slope DOWN, because clipped pixels cannot move. If the electrodes
-    blow out to 255, the fitted gain is a lower bound."""
-    qs = np.linspace(2, 98, 49)
-    xb = np.percentile(base[roi], qs)
-    xi = np.percentile(img[roi], qs)
-    a, b = np.linalg.lstsq(np.vstack([xb, np.ones_like(xb)]).T, xi,
-                           rcond=None)[0]
-    return float(a), float(b)
+# One definition, in the module the detector itself uses -- the diagnostic
+# must measure exactly the correction candidates() applies.
+photometric_fit = se.photometric_fit
 
 
 def norm_bg_scale(base, img, roi_frac):

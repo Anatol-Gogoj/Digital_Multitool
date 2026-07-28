@@ -81,6 +81,13 @@ def test_windows_launcher_contract():
     for script in ('sldea_tuner.py', 'sldea_diag.py'):
         assert script in text, script
         assert _os.path.exists(_os.path.join(repo, script)), script
+    # `shift` moves %0 too, so %~dp0 must be banked BEFORE argument parsing
+    # or the launcher cannot find the app it is sitting next to (bench
+    # 2026-07-28). Batch has no unit tests; this is the guard.
+    first_shift = text.find('\nshift')
+    banked = text.find('set "HERE=%~dp0"')
+    assert 0 <= banked < first_shift, (banked, first_shift)
+    assert '%~dp0' not in text[first_shift:], "%~dp0 used after a shift"
 
 
 def _run():

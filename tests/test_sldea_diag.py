@@ -127,6 +127,78 @@ def test_analyze_reports_the_dominant_failure_of_each_synthetic_run():
     assert any('stable' in h.lower() for h in ok_heads), ok_heads
 
 
+def test_photometric_fit_recovers_gain_and_offset():
+    """Bench runs P3_* 2026-07-28: every frame, including 0.25 kV where
+    nothing has activated, differed from the baseline by 10-17 sigma. A
+    gain+offset model has to be able to take that back out, or the
+    diagnostic cannot tell photometry from the device."""
+    # an intensity RAMP, not _scene(): its rig bars sit at 230 and would
+    # saturate under a 1.22 gain, and clipped highlights bias the slope
+    # down -- the same trap real frames set when electrodes blow out
+    rng = np.random.default_rng(5)
+    base = np.tile(np.linspace(20, 180, 320, dtype=np.float32), (240, 1))
+    base += rng.normal(0, 1.5, base.shape).astype(np.float32)
+    frame = np.clip(base * 1.22 + 4.0, 0, 255).astype(np.float32)
+    roi = sd._roi(base.shape, 0.85)
+    a, b = sd.photometric_fit(base, frame, roi)
+    assert abs(a - 1.22) < 0.05, a
+    assert abs(b - 4.0) < 3.0, b
+    raw = float(np.abs(frame[roi] - base[roi]).mean())
+    corrected = float(np.abs((a * base[roi] + b) - frame[roi]).mean())
+    assert raw > 15, raw
+    assert corrected < 0.15 * raw, (raw, corrected)
+
+
+def test_photometry_verdict_fires_on_an_exposure_mismatch():
+    root = tempfile.mkdtemp(prefix='diag_photo_')
+    d = sd.analyze(sd._synth_run(_os.path.join(root, 'SLDEA_p'), 'expand',
+                                 gain=1.22, offset=4.0))
+    heads = [h for _s, h, _det in sd.verdicts(d)]
+    assert any('photometry' in h.lower() for h in heads), heads
+    for p in d['frames']:
+        assert p['diff_mean_photofit'] < p['diff_mean'], p['kv']
+
+
+def _fake_d(**frame_overrides):
+    """A verdicts() input with everything neutral, for testing one rule."""
+    frame = {'idx': 1, 'kv': 5.0, 'file': 'f.png', 'shift_px': 0.1,
+             'dx': 0.1, 'dy': 0.0, 'pc_response': 0.5, 'diff_mean': 4.0,
+             'diff_mean_registered': 4.0, 'diff_mean_normbg': 4.0,
+             'diff_mean_photofit': 4.0, 'gain': 1.0, 'offset': 0.0,
+             'diff_p99': 8.0, 'diff_p99_sigma': 4.0, 'gated': False,
+             'otsu': 20.0, 'texture_ratio': 1.0, 'sep_intensity': 0.4,
+             'sep_registered': 0.4, 'sep_photofit': 0.4, 'sep_texture': 0.4,
+             'area_px': 1000.0, 'solidity': 0.7, 'conf': 0.8,
+             'needs_review': False}
+    frame.update(frame_overrides)
+    return {'rundir': '/x', 'frames_analyzed': 3, 'baseline_row': 0,
+            'frame_shape': [240, 320], 'sigma': 2.0,
+            'sigma_source': 'test', 'settings': dict(se_defaults()),
+            'sweep_thresholds': [3, 5], 'sweeps': [],
+            'frames': [dict(frame), dict(frame), dict(frame)]}
+
+
+def se_defaults():
+    import sldea_edge as se
+    return se.DEFAULT_SETTINGS
+
+
+def test_a_large_shift_registration_cannot_cash_in_is_not_called_drift():
+    """Bench runs P3_*: phase correlation reported 5-27 px, but undoing it
+    changed the diff energy by ~1% -- the horizontal electrode strips leave
+    translation along their own axis unobservable. Calling that drift would
+    aim the next fix at registration, which the data says will not help."""
+    d = _fake_d(shift_px=14.0, diff_mean=30.0, diff_mean_registered=29.7)
+    verdicts = sd.verdicts(d)
+    heads = [h.lower() for _s, h, _det in verdicts]
+    assert any('not a real translation' in h for h in heads), heads
+    assert not any('drift is polluting' in h for h in heads), heads
+    # and when registration DOES pay off, it is still called drift
+    d2 = _fake_d(shift_px=14.0, diff_mean=30.0, diff_mean_registered=15.0)
+    heads2 = [h.lower() for _s, h, _det in sd.verdicts(d2)]
+    assert any('drift' in h and 'polluting' in h for h in heads2), heads2
+
+
 def test_report_renders_for_every_synthetic_run():
     root = tempfile.mkdtemp(prefix='diag_report_')
     d = sd.analyze(sd._synth_run(_os.path.join(root, 'SLDEA_r'), 'wrinkle'))

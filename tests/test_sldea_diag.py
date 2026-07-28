@@ -159,6 +159,33 @@ def test_photometry_verdict_fires_on_an_exposure_mismatch():
         assert p['diff_mean_photofit'] < p['diff_mean'], p['kv']
 
 
+def test_same_voltage_pairs_expose_an_instrument_floor():
+    """The run carries its own control: two snapshots at one voltage hold
+    the same scene in the same state. If they differ, that is the camera,
+    and it bounds every other number in the report. Modelled here as a
+    per-snapshot gain, the behaviour a camera reopened for every grab
+    would show."""
+    root = tempfile.mkdtemp(prefix='diag_rep_')
+    d = sd.analyze(sd._synth_run(_os.path.join(root, 'SLDEA_j'), 'expand',
+                                 jitter=0.2))
+    rep = d['repeats']
+    assert rep['kind'] == 'same voltage', rep['kind']
+    assert len(rep['pairs']) >= 3, rep['pairs']
+    # a gain+offset fit between the pair members takes the difference back
+    # out: nothing moved, only the exposure did
+    for p in rep['pairs']:
+        assert p['diff_mean_photofit'] < p['diff_mean'], p
+    heads = [h.lower() for _s, h, _det in sd.verdicts(d)]
+    assert any('should be identical' in h for h in heads), heads
+
+
+def test_a_steady_camera_is_not_accused_of_a_floor():
+    root = tempfile.mkdtemp(prefix='diag_steady_')
+    d = sd.analyze(sd._synth_run(_os.path.join(root, 'SLDEA_s'), 'expand'))
+    heads = [h.lower() for _s, h, _det in sd.verdicts(d)]
+    assert not any('should be identical' in h for h in heads), heads
+
+
 def _fake_d(**frame_overrides):
     """A verdicts() input with everything neutral, for testing one rule."""
     frame = {'idx': 1, 'kv': 5.0, 'file': 'f.png', 'shift_px': 0.1,
@@ -174,7 +201,7 @@ def _fake_d(**frame_overrides):
     return {'rundir': '/x', 'frames_analyzed': 3, 'baseline_row': 0,
             'frame_shape': [240, 320], 'sigma': 2.0,
             'sigma_source': 'test', 'settings': dict(se_defaults()),
-            'sweep_thresholds': [3, 5], 'sweeps': [],
+            'sweep_thresholds': [3, 5], 'sweeps': [], 'repeats': {},
             'frames': [dict(frame), dict(frame), dict(frame)]}
 
 

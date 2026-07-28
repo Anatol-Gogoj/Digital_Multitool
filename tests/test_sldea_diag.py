@@ -186,6 +186,34 @@ def test_a_steady_camera_is_not_accused_of_a_floor():
     assert not any('should be identical' in h for h in heads), heads
 
 
+def test_ab_compares_the_two_normalizations_on_the_same_frames():
+    """Residuals are the means; detections are the end. The report has to
+    say whether switching normalization changed what candidates() actually
+    found, on the same frames, in one run."""
+    root = tempfile.mkdtemp(prefix='diag_ab_')
+    d = sd.analyze(sd._synth_run(_os.path.join(root, 'SLDEA_ab'), 'expand',
+                                 gain=0.78, offset=12.0))
+    for p in d['frames']:
+        assert p['alt_norm_bg'] == 1, p       # default is 2, so alt is 1
+        for k in ('alt_area_px', 'alt_conf', 'alt_needs_review'):
+            assert k in p, k
+    heads = [h for _s, h, _det in sd.verdicts(d)]
+    assert any('vs' in h and 'gain+offset' in h for h in heads), heads
+
+
+def test_gate_is_read_off_the_map_the_detector_thresholds():
+    """The gate and Otsu columns describe detector behaviour, so they must
+    come from the normalized map candidates() cuts -- not a raw difference
+    it never sees. Under a photometric mismatch those differ hugely."""
+    base, _img, _d = _scene()
+    frame = np.clip(base * 0.78 + 12.0, 0, 255).astype(np.float32)
+    s = dict(sd.se.DEFAULT_SETTINGS)
+    raw = float(np.percentile(np.abs(frame - base), 99))
+    det = float(np.percentile(sd._detector_diff(base, frame, s), 99))
+    assert raw > 20, raw            # the uncorrected mismatch is large...
+    assert det < 0.5 * raw, (det, raw)   # ...the detector does not see it
+
+
 def _fake_d(**frame_overrides):
     """A verdicts() input with everything neutral, for testing one rule."""
     frame = {'idx': 1, 'kv': 5.0, 'file': 'f.png', 'shift_px': 0.1,

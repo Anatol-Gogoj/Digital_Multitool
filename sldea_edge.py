@@ -333,27 +333,18 @@ def _wrinkle_ratio(base_full, img_full, contour):
     return round(min(e_img / max(e_base, 1e-3), 9.99), 2)
 
 
-def candidates(base_gray, img_gray, settings):
-    """Up to 3 candidate outlines for the active area, best first.
+def prepared_diff(base_gray, img_gray, settings):
+    """The difference map candidates() actually thresholds.
 
-    Difference-imaging only (bench 2026-07-23: the old HoughCircles candidate
-    fabricated a confident circle on EVERY frame -- it teleported around the
-    image with a hard-coded high score -- and the DEA expansion is not
-    necessarily circular anyway, so the circle prior is wrong):
+    -> {sub, x0, y0, f, img_full, base_full}: the ROI-cropped,
+    normalized, electrode-masked, blurred difference at the
+    detector's own scale, plus what is needed to map results back to
+    full resolution.
 
-      |img - baseline| -> blur -> central ROI -> three thresholds
-      (0.6*Otsu / Otsu / 1.5*Otsu, or the fixed diff_thresh) -> morphological
-      open+close -> largest contour each.
-
-    Honest no-change gate: if the ROI diff's 99th percentile is below
-    min_diff, the frame shows no detectable change vs baseline and NO
-    candidates are returned (low-kV frames really look identical -- inventing
-    an outline there was the old failure mode).
-
-    Confidence = 0.4*solidity + 0.3*boundary-contrast + 0.3*cross-method
-    agreement; solidity (not circularity) so slightly oblong expansions score
-    fully. Frames wider than DETECT_MAX_W are detected at reduced scale and
-    every px quantity is rescaled to full resolution.
+    Extracted so the diagnostic can report the no-change gate and the
+    Otsu threshold on the SAME map the detector cuts. Reporting them
+    on a raw difference the detector never sees was misleading once
+    normalization started doing real work (bench 2026-07-28).
     """
     import cv2
     img_full, base_full = img_gray, base_gray   # full-res kept for wrinkle
@@ -422,6 +413,37 @@ def candidates(base_gray, img_gray, settings):
     x0 = int(w * (1 - rf) / 2)
     y0 = int(h * (1 - rf) / 2)
     sub = diff[y0:h - y0 or h, x0:w - x0 or w]
+    return {'sub': sub, 'x0': x0, 'y0': y0, 'f': f,
+            'img_full': img_full, 'base_full': base_full}
+
+
+def candidates(base_gray, img_gray, settings):
+    """Up to 3 candidate outlines for the active area, best first.
+
+    Difference-imaging only (bench 2026-07-23: the old HoughCircles candidate
+    fabricated a confident circle on EVERY frame -- it teleported around the
+    image with a hard-coded high score -- and the DEA expansion is not
+    necessarily circular anyway, so the circle prior is wrong):
+
+      |img - baseline| -> blur -> central ROI -> three thresholds
+      (0.6*Otsu / Otsu / 1.5*Otsu, or the fixed diff_thresh) -> morphological
+      open+close -> largest contour each.
+
+    Honest no-change gate: if the ROI diff's 99th percentile is below
+    min_diff, the frame shows no detectable change vs baseline and NO
+    candidates are returned (low-kV frames really look identical -- inventing
+    an outline there was the old failure mode).
+
+    Confidence = 0.4*solidity + 0.3*boundary-contrast + 0.3*cross-method
+    agreement; solidity (not circularity) so slightly oblong expansions score
+    fully. Frames wider than DETECT_MAX_W are detected at reduced scale and
+    every px quantity is rescaled to full resolution.
+    """
+    import cv2
+    prep = prepared_diff(base_gray, img_gray, settings)
+    sub, x0, y0, f = (prep['sub'], prep['x0'], prep['y0'],
+                      prep['f'])
+    img_full, base_full = prep['img_full'], prep['base_full']
     if float(np.percentile(sub, 99)) < float(settings.get('min_diff', 10)):
         return []                       # no detectable change vs baseline
     otsu_t, _m = cv2.threshold(sub, 0, 255,

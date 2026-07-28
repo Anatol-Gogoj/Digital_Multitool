@@ -12,7 +12,7 @@ REM    2. Reuse the main launcher's venv when it exists; otherwise build a
 REM       tuner-only one -- numpy + opencv + matplotlib is all this needs.
 REM    3. Resolve the run: the folder dropped on me, else %SCPI_SLDEA_DIR%,
 REM       else ask. A PARENT folder resolves to its newest SLDEA_* run.
-REM    4. Open the tuner on it.
+REM    4. Open the tuner on it -- or, with /diag, run the diagnostic.
 REM
 REM  Save in the tuner writes the tuned values into that run's setup.txt, so
 REM  work on a LOCAL copy of the run, not on the share.
@@ -22,6 +22,25 @@ REM  waits, so nothing ever closes silently.
 REM ============================================================================
 setlocal EnableExtensions EnableDelayedExpansion
 title SLDEA edge tuner - launcher
+
+REM  Pass /diag to run the run diagnostic (sldea_diag.py) instead of the
+REM  tuner: it reports, in numbers, WHY a run will not tune -- drift,
+REM  which map actually separates, threshold transfer, the gate. Make a
+REM  shortcut with /diag in the target if you want it one click away.
+set "MODE=tune"
+set "TARGET="
+:parseargs
+if "%~1"=="" goto :parsed
+if /i "%~1"=="/diag" (
+    set "MODE=diag"
+) else if /i "%~1"=="--diag" (
+    set "MODE=diag"
+) else if not defined TARGET (
+    set "TARGET=%~1"
+)
+shift
+goto :parseargs
+:parsed
 
 set "CACHE=%LOCALAPPDATA%\SCPI_Control"
 set "APPVENV=%CACHE%\venv"
@@ -118,8 +137,7 @@ if errorlevel 1 (
 echo.
 
 REM ---- 4/5 the run -----------------------------------------------------
-echo [4/5] Finding the run to tune...
-set "TARGET=%~1"
+echo [4/5] Finding the run to work on...
 if not defined TARGET if defined SCPI_SLDEA_DIR set "TARGET=%SCPI_SLDEA_DIR%"
 if not defined TARGET (
     echo       No folder given and SCPI_SLDEA_DIR is not set - opening a picker.
@@ -154,22 +172,31 @@ echo       OK - !RUNDIR!
 echo.
 
 REM ---- 5/5 launch ------------------------------------------------------
-echo [5/5] Starting the tuner...
-echo.
-echo       Keep this window open while the tuner runs.
-echo       Save writes the tuned values into the run's setup.txt, which
-echo       Edge Review and auto-process then use.
-echo.
-"%VENV%\Scripts\python.exe" "%APP%\sldea_tuner.py" "!RUNDIR!"
+if "!MODE!"=="diag" (
+    echo [5/5] Running the run diagnostic...
+    echo.
+    echo       It writes sldea_diag.txt / .json / .png into the run folder.
+    echo       The .json is data only - small enough to send on.
+    echo.
+    "%VENV%\Scripts\python.exe" "%APP%\sldea_diag.py" "!RUNDIR!"
+) else (
+    echo [5/5] Starting the tuner...
+    echo.
+    echo       Keep this window open while the tuner runs.
+    echo       Save writes the tuned values into the run's setup.txt, which
+    echo       Edge Review and auto-process then use.
+    echo.
+    "%VENV%\Scripts\python.exe" "%APP%\sldea_tuner.py" "!RUNDIR!"
+)
 set "RC=!ERRORLEVEL!"
 popd
 if not "!RC!"=="0" (
-    set "WHY=The tuner stopped with error code !RC!. The lines printed above are the actual error."
+    set "WHY=It stopped with error code !RC!. The lines printed above are the actual error."
     set "HOW=Copy the text above and send it to the maintainer. If it mentions a missing module, delete the folder %TUNEVENV% and run this launcher again to rebuild the environment."
     goto :fail
 )
 echo.
-echo  Tuner closed normally.
+echo  Closed normally.
 timeout /t 3 >nul
 endlocal
 exit /b 0

@@ -393,6 +393,33 @@ def test_write_back_updates_the_file_the_run_was_read_from():
         assert 'edited' in f.read()
 
 
+def test_bench_shortcuts_resolve_and_stay_inert_elsewhere():
+    """`1`, `2`, `3` stand in for the three P3 runs the bench reopens all
+    day. On any machine without those paths the shortcut must resolve to
+    nothing rather than to a wrong directory."""
+    assert set(se.BENCH_RUNS) == {'1', '2', '3'}
+    for key, path in se.BENCH_RUNS.items():
+        assert 'P3_' + key in path, (key, path)
+    # inert here: the hardcoded paths do not exist on this machine
+    for key in se.BENCH_RUNS:
+        assert se.resolve_run(key) is None
+
+    parent = tempfile.mkdtemp(prefix='shortcut_')
+    d = os.path.join(parent, 'P3_9')
+    os.makedirs(os.path.join(d, 'frames'), exist_ok=True)
+    _fake_run(d, [{'step': 0, 'tag': 'baseline', 'nominal_kV': '0'}])
+    saved = dict(se.BENCH_RUNS)
+    try:
+        se.BENCH_RUNS['9'] = d
+        assert se.resolve_run('9') == d
+        assert se.resolve_run(' 9 ') == d          # stray whitespace is fine
+        se.BENCH_RUNS['8'] = os.path.join(parent, 'nope')
+        assert se.resolve_run('8') is None         # points nowhere: not used
+    finally:
+        se.BENCH_RUNS.clear()
+        se.BENCH_RUNS.update(saved)
+
+
 def test_load_run_says_what_is_missing():
     d = tempfile.mkdtemp(prefix='runcsv_none_')
     try:

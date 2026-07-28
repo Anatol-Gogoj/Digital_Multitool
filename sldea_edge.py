@@ -121,6 +121,53 @@ def run_csv(rundir):
     return os.path.join(rundir, names[0])
 
 
+# Bench shortcuts (2026-07-28): the three P3 runs live at a fixed spot and
+# get reopened constantly, so `1`, `2`, `3` stand in for them anywhere a run
+# directory is accepted -- the tuner, the diagnostic and the Windows
+# launcher. Entries whose path does not exist are skipped, so this is inert
+# on the bench PC, on CI and on anyone else's machine.
+_ONEDRIVE = (r'C:\Users\anato\OneDrive - University of Connecticut'
+             r'\Recordings\SLDEA_data')
+BENCH_RUNS = {
+    '1': _ONEDRIVE + r'\P3_1_2.5mL_20260728',
+    '2': _ONEDRIVE + r'\P3_2_2.5mL_20260728',
+    '3': _ONEDRIVE + r'\P3_3_2.5mL_20260728',
+}
+
+
+def newest_run(root):
+    """Newest run directory under `root`, or None.
+
+    A run is ANY sub-directory holding a run CSV -- not only SLDEA_*. Bench
+    folders are named things like P3_1_2.5mL_20260728, and requiring the
+    prefix made them invisible to the Tune buttons while Edge Review opened
+    them happily (bench 2026-07-28)."""
+    try:
+        subs = [os.path.join(root, n) for n in os.listdir(root)
+                if os.path.isdir(os.path.join(root, n))]
+    except OSError:
+        return None
+    subs = [s for s in subs if run_csv(s)]
+    return max(subs, key=os.path.getmtime) if subs else None
+
+
+def resolve_run(path):
+    """The run to work on -> path, or None.
+
+    Accepts a bench shortcut ('1'), a run directory, or a parent full of
+    runs (giving the newest). One resolver for the CLI, the app's Tune
+    buttons and the Windows launcher, so the three cannot disagree about
+    what a given argument means."""
+    if not path:
+        return None
+    shortcut = BENCH_RUNS.get(str(path).strip())
+    if shortcut and run_csv(shortcut):
+        return shortcut
+    if run_csv(path):
+        return path
+    return newest_run(path)
+
+
 def load_run(rundir):
     """-> {'rows': [...], 'columns': [...], 'csv_path', 'frames_dir'}.
     Rows are the data CSV's rows in order (all columns kept as strings)."""

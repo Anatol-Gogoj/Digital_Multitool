@@ -163,6 +163,68 @@ def test_norm_bg_neutralizes_global_brightness_drift():
         f"norm_bg failed to isolate the disc: {cands[0]['area_px']:.0f} px"
 
 
+def test_affine_norm_survives_a_gain_and_offset_baseline_mismatch():
+    """Bench runs P3_* (2026-07-28): every frame sat at gain 0.72-0.82 with
+    a +8..+41 offset against its own baseline, leaving a 26-gray-level
+    pedestal that no threshold could sit above. Two snapshots at one
+    voltage agreed to ~0.5 sigma, so this is the baseline vs the run, not
+    the camera. A scalar ratio cannot express it; gain+offset can."""
+    # A scene with real dynamic range: a gradient plus a bright strip, the
+    # way a lit dish and its electrodes look. A FLAT baseline would leave
+    # the fit no range to work with and is not what any frame looks like.
+    yy, xx = np.mgrid[0:240, 0:240]
+    base = (60.0 + 140.0 * xx / 239.0).astype(np.float32)
+    base[:, 8:20] = 235.0
+    img = base.copy()
+    img[(xx - 120) ** 2 + (yy - 120) ** 2 <= 40 * 40] += 30
+    # the mismatch: the frame is a compressed, lifted version of the scene
+    img = np.clip(img * 0.78 + 12.0, 0, 255)
+
+    s = dict(se.DEFAULT_SETTINGS)
+    assert s['norm_bg'] == 2, "affine normalization must be the default"
+    cands = se.candidates(base, img, s)
+    assert cands, "no candidates under a gain+offset mismatch"
+    true_area = np.pi * 40 * 40
+    err = abs(cands[0]['area_px'] - true_area) / true_area
+    assert err < 0.15, f"affine norm missed the disc: {cands[0]['area_px']:.0f}"
+
+    # and the fit itself recovers the transform it was given
+    roi = (slice(18, 222), slice(18, 222))
+    a, b = se.photometric_fit(base, img, roi)
+    assert abs(a - 0.78) < 0.06, a
+
+    # Compare the corrections where NOTHING changed -- outside the disc,
+    # inside the ROI. There the residual is pure artifact, so a correct
+    # model drives it to zero while a wrong one leaves the pedestal. Over
+    # the whole ROI the disc's real signal floors both and hides the
+    # difference, which is exactly the confusion the bench ran into.
+    still = np.zeros(base.shape, bool)
+    still[roi] = True
+    still[(xx - 120) ** 2 + (yy - 120) ** 2 <= 50 * 50] = False
+    scalar = np.clip(img * (np.median(base) / np.median(img)), 0, 255)
+    raw_resid = float(np.abs(img - base)[still].mean())
+    scalar_resid = float(np.abs(scalar - base)[still].mean())
+    affine_resid = float(np.abs(((img - b) / a) - base)[still].mean())
+    # affine removes ~87% of the artifact here, the scalar ~57%. Neither
+    # reaches zero: adding a region reorders the intensity distribution
+    # rather than only shifting its tail, so quantile matching can close
+    # most of the gap but not all of it.
+    assert affine_resid < 0.25 * raw_resid, (affine_resid, raw_resid)
+    assert affine_resid < 0.5 * scalar_resid, (affine_resid, scalar_resid)
+
+
+def test_legacy_scalar_norm_is_still_reachable():
+    """A run tuned under norm_bg: 1 must reprocess the way it was tuned."""
+    base = _disc_frame(0, level=0, base=120.0)
+    img = np.clip(_disc_frame(40, level=30, base=120.0) * 1.10, 0, 255)
+    s = dict(se.DEFAULT_SETTINGS)
+    s['norm_bg'] = 1
+    cands = se.candidates(base, img, s)
+    assert cands, "legacy scalar path stopped detecting"
+    true_area = np.pi * 40 * 40
+    assert abs(cands[0]['area_px'] - true_area) / true_area < 0.15
+
+
 def test_baseline_disc_traces_resting_dea():
     # Non-diff detector for the px->mm scale (audit 2026-07-25): the
     # resting disc is DARKER than the membrane; electrode strips cross it.

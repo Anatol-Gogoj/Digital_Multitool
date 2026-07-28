@@ -42,7 +42,11 @@ DEFAULT_SETTINGS = {
     'breakdown_ua': 50.0,   # Trek current above this flags breakdown
     'area_jump_pct': 35.0,  # area collapse (V rising) that flags breakdown
     'wrinkle_ratio': 1.4,   # wrinkle index >= this = wrinkle-mode (active)
-    'norm_bg': 1,           # normalize frame brightness to baseline (1=on)
+    # photometric normalization vs the baseline: 0=off, 1=legacy scalar
+    # border-band ratio, 2=gain+offset fit on ROI quantiles. 2 is the
+    # default since 2026-07-28: on the bench runs the scalar left a
+    # 26-gray-level pedestal that no threshold could sit above.
+    'norm_bg': 2,
 }
 _NUM = r'[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?'
 
@@ -200,6 +204,48 @@ def load_gray(path):
 # candidate detection
 # ---------------------------------------------------------------------------
 
+def photometric_fit(base, img, roi):
+    """Gain and offset taking the baseline onto the frame: img ~ a*base + b.
+
+    Fitted on MATCHED QUANTILES, not pixels, so a genuinely changed
+    minority of the frame moves only the extreme quantiles and cannot drag
+    the correction meant to remove everything else.
+
+    Why affine rather than the scalar border-band ratio: bench runs P3_*
+    (2026-07-28) sat at gain 0.72-0.82 with a +8..+41 offset against their
+    own baseline, and a single ratio cannot express that. Two snapshots at
+    one voltage in those runs agree to ~0.5 sigma, so the camera is steady
+    -- the mismatch is between the BASELINE and the rest of the run, and it
+    put a 26-gray-level pedestal under every threshold.
+
+    Saturated highlights bias the slope down (clipped pixels cannot move),
+    so a fitted gain is a lower bound when the electrodes blow out. And
+    the trimming assumes the changed region is a MINORITY of the ROI: if
+    more than about a third of it moves, the trim can keep the changed
+    population instead. sldea_diag reports the residual, which is where
+    that would show up."""
+    qs = np.linspace(2, 98, 49)
+    xb = np.percentile(base[roi], qs)
+    xi = np.percentile(img[roi], qs)
+    keep = np.ones(xb.shape, bool)
+    a, b = 1.0, 0.0
+    # Trimmed refit: the changed region still shifts the quantiles it
+    # occupies, and on a scene with wide dynamic range a small slope error
+    # leaves a large residual at the bright end. Drop the worst-fitting
+    # third and refit, so the correction is defined by the part of the
+    # picture that did NOT change.
+    for _pass in range(3):
+        design = np.vstack([xb[keep], np.ones(int(keep.sum()))]).T
+        a, b = np.linalg.lstsq(design, xi[keep], rcond=None)[0]
+        resid = np.abs((a * xb + b) - xi)
+        cut = np.quantile(resid, 0.67)
+        nxt = resid <= max(cut, 1e-6)
+        if nxt.sum() < 8 or (nxt == keep).all():
+            break
+        keep = nxt
+    return float(a), float(b)
+
+
 def _region_candidate(mask, method, offset=(0, 0)):
     """Changed-region outline for one threshold tier -> candidate dict.
 
@@ -329,15 +375,31 @@ def candidates(base_gray, img_gray, settings):
     rf = min(1.0, max(0.2, float(settings.get('roi_frac', 0.85))))
     bx = int(w * (1 - rf) / 2)
     by = int(h * (1 - rf) / 2)
-    if base_gray is not None and settings.get('norm_bg', 1) and bx and by:
-        band = np.ones_like(img_gray, bool)
-        band[by:h - by, bx:w - bx] = False
-        med_i = float(np.median(img_gray[band])) or 1.0
-        med_b = float(np.median(base_gray[band]))
-        scale = min(1.4, max(0.7, med_b / med_i))
-        if abs(scale - 1.0) > 0.005:
-            img_gray = np.clip(img_gray * scale, 0, 255)
-            img_full = np.clip(img_full * scale, 0, 255)
+    mode = int(settings.get('norm_bg', 2) or 0)
+    if base_gray is not None and mode and bx and by:
+        if mode >= 2:
+            # Affine (gain+offset) fit on ROI quantiles, then map the frame
+            # back into the baseline's photometric space. On the bench runs
+            # this took the mean ROI difference from 26 gray levels to 1.6
+            # -- below the sensor noise -- while leaving a residual that
+            # still grows with voltage, so it removes the artifact and not
+            # the device.
+            roi = (slice(by, h - by), slice(bx, w - bx))
+            a, b = photometric_fit(base_gray, img_gray, roi)
+            if a > 0.2 and (abs(a - 1.0) > 0.005 or abs(b) > 0.5):
+                img_gray = np.clip((img_gray - b) / a, 0, 255)
+                img_full = np.clip((img_full - b) / a, 0, 255)
+        else:
+            # legacy scalar: border-band median ratio (norm_bg: 1). Kept so
+            # a run tuned under it reprocesses identically.
+            band = np.ones_like(img_gray, bool)
+            band[by:h - by, bx:w - bx] = False
+            med_i = float(np.median(img_gray[band])) or 1.0
+            med_b = float(np.median(base_gray[band]))
+            scale = min(1.4, max(0.7, med_b / med_i))
+            if abs(scale - 1.0) > 0.005:
+                img_gray = np.clip(img_gray * scale, 0, 255)
+                img_full = np.clip(img_full * scale, 0, 255)
     k = int(settings.get('blur_px', 5)) | 1
     diff = cv2.absdiff(img_gray, base_gray).astype(np.uint8) \
         if base_gray is not None else img_gray.astype(np.uint8)

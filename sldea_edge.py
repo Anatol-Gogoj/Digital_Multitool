@@ -96,15 +96,44 @@ def save_settings(rundir, settings):
 # run loading
 # ---------------------------------------------------------------------------
 
+_RUN_CSV = re.compile(r'^data(\d*)\.csv$', re.IGNORECASE)
+
+
+def run_csv(rundir):
+    """Path to this run's data CSV, or None when the directory is not a run.
+
+    Canonically data.csv. The bench also keeps renamed copies -- data1.csv,
+    data2.csv -- because Excel refuses to open two workbooks with the same
+    filename, and a renamed run is still a run. Every reader resolves the
+    name through here, so one rename cannot make a folder invisible to the
+    tuner, Edge Review and the diagnostic all at once (bench 2026-07-28).
+
+    An exact data.csv always wins; otherwise the lowest number, so the
+    choice is stable rather than depending on directory order."""
+    try:
+        names = [n for n in os.listdir(rundir) if _RUN_CSV.match(n)]
+    except OSError:
+        return None
+    if not names:
+        return None
+    names.sort(key=lambda n: (n.lower() != 'data.csv',
+                              int(_RUN_CSV.match(n).group(1) or 0), n))
+    return os.path.join(rundir, names[0])
+
+
 def load_run(rundir):
-    """-> {'rows': [dict...], 'columns': [...], 'frames_dir': path}.
-    Rows are data.csv rows in order (all columns kept as strings)."""
-    csv_path = os.path.join(rundir, 'data.csv')
+    """-> {'rows': [...], 'columns': [...], 'csv_path', 'frames_dir'}.
+    Rows are the data CSV's rows in order (all columns kept as strings)."""
+    csv_path = run_csv(rundir)
+    if csv_path is None:
+        raise FileNotFoundError(
+            f"no run CSV in {rundir} (expected data.csv, or data1.csv / "
+            f"data2.csv / ... if the file was renamed)")
     with open(csv_path, newline='') as f:
         reader = csv.DictReader(f)
         rows = list(reader)
         columns = list(reader.fieldnames or [])
-    return {'rows': rows, 'columns': columns,
+    return {'rows': rows, 'columns': columns, 'csv_path': csv_path,
             'frames_dir': os.path.join(rundir, 'frames')}
 
 
@@ -616,8 +645,10 @@ def write_back(rundir, run):
 
     Atomic: writes data.csv.tmp then os.replace — a NAS hiccup mid-write
     used to leave a truncated data.csv with the frames already renamed
-    (audit 2026-07-25)."""
-    csv_path = os.path.join(rundir, 'data.csv')
+    (audit 2026-07-25). Writes back to the file the run was READ from, so
+    a renamed CSV is updated in place rather than sprouting a second one."""
+    csv_path = (run.get('csv_path') or run_csv(rundir)
+                or os.path.join(rundir, 'data.csv'))
     shutil.copy2(csv_path, csv_path + '.bak')
     tmp = csv_path + '.tmp'
     with open(tmp, 'w', newline='') as f:

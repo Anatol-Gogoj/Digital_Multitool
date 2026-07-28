@@ -158,15 +158,17 @@ class EdgeReviewApp:
 
     # ---------------- run selection ----------------
     def _list_runs(self, parent):
-        # Any directory holding a data.csv is a run — custom-named runs
+        # Any directory holding a run CSV is a run — custom-named runs
         # (the SLDEA tab allows free names) were invisible before and
         # auto-open silently fell back to the newest SLDEA_* run instead
-        # (audit 2026-07-25).
+        # (audit 2026-07-25). se.run_csv also accepts a renamed data1.csv /
+        # data2.csv, which the bench uses to open several runs in Excel at
+        # once (2026-07-28).
         try:
             names = sorted(
                 (n for n in os.listdir(parent)
                  if os.path.isdir(os.path.join(parent, n)) and
-                 os.path.exists(os.path.join(parent, n, 'data.csv'))),
+                 se.run_csv(os.path.join(parent, n))),
                 reverse=True)
         except OSError:
             return []
@@ -174,7 +176,7 @@ class EdgeReviewApp:
         for n in names:
             done = ''
             try:
-                with open(os.path.join(parent, n, 'data.csv')) as f:
+                with open(se.run_csv(os.path.join(parent, n))) as f:
                     # length-guarded: a truncated/blank line used to raise
                     # IndexError and crash the whole listing
                     if 'active_area_px' in (f.readline() or '') and any(
@@ -187,9 +189,9 @@ class EdgeReviewApp:
         return out
 
     def _populate_runs(self, path):
-        """Accept a run dir (has data.csv) or a parent full of runs."""
+        """Accept a run dir (holds a run CSV) or a parent full of runs."""
         path = os.path.abspath(path)
-        if os.path.isfile(os.path.join(path, 'data.csv')):
+        if se.run_csv(path):
             self.parent = os.path.dirname(path)
             preselect = os.path.basename(path)
         else:
@@ -215,8 +217,8 @@ class EdgeReviewApp:
             self.run_box.current(want)
             self._pick_run()
         else:
-            self.status.config(text=f"no runs (data.csv dirs) in "
-                                    f"{self.parent}")
+            self.status.config(text=f"no runs (dirs holding a data CSV) "
+                                    f"in {self.parent}")
 
     def _browse(self):
         d = filedialog.askdirectory(initialdir=self.parent or DEFAULT_PARENT)

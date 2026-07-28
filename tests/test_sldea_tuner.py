@@ -65,6 +65,37 @@ def test_choose_indices_empty():
     assert st.choose_indices([]) == []
 
 
+def _run_dir(parent, name, csv_name='data.csv'):
+    import csv
+    d = _os.path.join(parent, name)
+    _os.makedirs(_os.path.join(d, 'frames'), exist_ok=True)
+    with open(_os.path.join(d, csv_name), 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=['step', 'tag', 'nominal_kV',
+                                          'frame_file'])
+        w.writeheader()
+        w.writerow({'step': 0, 'tag': 'baseline', 'nominal_kV': '0',
+                    'frame_file': 'f0.png'})
+    return d
+
+
+def test_run_discovery_takes_custom_names_and_renamed_csvs():
+    """Bench 2026-07-28: runs are named things like P3_1_2.5mL_20260728 and
+    their data.csv gets renamed data1.csv so several open in Excel at once.
+    Edge Review accepted both; the Tune buttons required an SLDEA_ prefix
+    and the exact filename, so they saw no runs at all."""
+    import tempfile
+    parent = tempfile.mkdtemp(prefix='tuner_discovery_')
+    custom = _run_dir(parent, 'P3_1_2.5mL_20260728', csv_name='data1.csv')
+    assert st._newest_run(parent) == custom
+    assert st.resolve_run(custom) == custom      # the run itself
+    assert st.resolve_run(parent) == custom      # a parent full of runs
+    # a directory that is not a run resolves to nothing rather than itself
+    empty = _os.path.join(parent, 'not_a_run')
+    _os.makedirs(empty, exist_ok=True)
+    assert st.resolve_run(empty) is None
+    assert st.resolve_run('') is None
+
+
 def test_windows_launcher_contract():
     """The Windows tuner launcher calls into this module by name. Batch
     files are not importable, so nothing else would notice a rename until a
@@ -74,8 +105,8 @@ def test_windows_launcher_contract():
     text = open(bat, encoding='utf-8', errors='replace').read()
     repo = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
     assert 'sldea_tuner.py' in text
-    assert '_newest_run' in text and callable(st._newest_run)
-    # it resolves a parent folder the same way the app's Tune buttons do
+    assert 'resolve_run' in text and callable(st.resolve_run)
+    # it resolves the run the same way the app's Tune buttons do
     assert 'sldea_tuner as t' in text
     # every script it can launch has to actually be there
     for script in ('sldea_tuner.py', 'sldea_diag.py'):

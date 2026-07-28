@@ -901,8 +901,9 @@ def main(argv):
         print(__doc__.strip().split('\n\n')[1])
         return 2
     rundir = args[0]
-    if not os.path.exists(os.path.join(rundir, 'data.csv')):
-        print(f"not a run directory (no data.csv): {rundir}")
+    if not se.run_csv(rundir):
+        print(f"not a run directory (no data.csv, and no renamed "
+              f"data1.csv / data2.csv ...): {rundir}")
         return 2
     out = rundir
     if '--out' in argv:

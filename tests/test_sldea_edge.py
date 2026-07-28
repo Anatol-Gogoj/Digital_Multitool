@@ -358,6 +358,51 @@ def test_rejected_row_marked():
     assert rows[0]['notes'] == 'rejected (no reliable edge)'
 
 
+def test_run_csv_accepts_a_renamed_data_csv():
+    """Excel will not open two workbooks with the same filename, so the
+    bench renames copies data1.csv, data2.csv... A renamed run is still a
+    run, and must not go invisible to the tuner, Edge Review and the
+    diagnostic at once (bench 2026-07-28)."""
+    d = tempfile.mkdtemp(prefix='runcsv_')
+    assert se.run_csv(d) is None                  # not a run yet
+    _fake_run(d, [{'step': 0, 'tag': 'baseline', 'nominal_kV': '0'}])
+    os.rename(os.path.join(d, 'data.csv'), os.path.join(d, 'data2.csv'))
+    assert os.path.basename(se.run_csv(d)) == 'data2.csv'
+    run = se.load_run(d)
+    assert len(run['rows']) == 1
+    assert run['csv_path'].endswith('data2.csv')
+
+    # an exact data.csv always wins over a numbered copy
+    _fake_run(d, [{'step': 0, 'tag': 'baseline', 'nominal_kV': '0'}])
+    assert os.path.basename(se.run_csv(d)) == 'data.csv'
+
+
+def test_write_back_updates_the_file_the_run_was_read_from():
+    d = tempfile.mkdtemp(prefix='runcsv_wb_')
+    _fake_run(d, [{'step': 0, 'tag': 'baseline', 'nominal_kV': '0',
+                   'frame_file': 'f0.png'}])
+    os.rename(os.path.join(d, 'data.csv'), os.path.join(d, 'data3.csv'))
+    run = se.load_run(d)
+    run['rows'][0]['notes'] = 'edited'
+    path = se.write_back(d, run)
+    assert path.endswith('data3.csv'), path
+    # no stray data.csv conjured beside it, and the backup follows the name
+    assert not os.path.exists(os.path.join(d, 'data.csv'))
+    assert os.path.exists(os.path.join(d, 'data3.csv.bak'))
+    with open(path) as f:
+        assert 'edited' in f.read()
+
+
+def test_load_run_says_what_is_missing():
+    d = tempfile.mkdtemp(prefix='runcsv_none_')
+    try:
+        se.load_run(d)
+    except FileNotFoundError as e:
+        assert 'data1.csv' in str(e), str(e)     # names the rename it accepts
+    else:
+        raise AssertionError("load_run accepted a directory with no CSV")
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     for fn in fns:

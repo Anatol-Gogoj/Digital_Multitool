@@ -129,6 +129,24 @@ Saved settings live in the run's `setup.txt`, so the review pass uses exactly wh
 .venv\Scripts\python sldea_edge_gui.py "C:\SLDEA\SLDEA_20260721_1430" --auto
 ```
 
+### When a run will not tune
+
+Sliders cannot fix a run whose signal is not where the detector is looking. Before spending another session dragging them, measure it:
+
+```
+python sldea_diag.py "C:\SLDEA\SLDEA_20260721_1430"
+```
+
+or `Tune_SLDEA_Windows.bat /diag`, which uses the same environment. It writes `sldea_diag.txt` / `.json` / `.png` into the run folder, changes nothing, and reports:
+
+- **drift** — phase correlation baseline→frame, and how much of the difference energy disappears once that shift is undone. `candidates()` normalises brightness but never registers geometry, so rig or camera movement rings every hard edge in the scene and reads as change.
+- **which map separates** — the same ROI scored as a raw difference, a registered difference, and a dense wrinkle map (local Laplacian energy vs the baseline). 0 means one noise population, where no threshold exists that splits active from inactive; 1 means two clean ones. Whichever wins is what the detector *should* be segmenting — the number that matters when the DEA wrinkles without expanding, because difference-imaging then has nothing to find.
+- **threshold transfer** — the per-frame Otsu value across the run. All three candidate tiers are multiples of it, so when it swings, a setting tuned on one frame is a different cut on the next.
+- **step behaviour** — area swept against threshold, showing where the 21×21 merge close bridges patches and the area jumps.
+- **the gate** — ROI diff p99 against `min_diff` per frame, and every threshold restated in units of the sensor's own σ, since a gray-level constant does not transfer between runs, cameras or exposures.
+
+`python sldea_diag.py --selftest out.png` runs it against synthetic runs — one that expands, one that only wrinkles, one that drifts — without needing any data.
+
 ## Repository layout & tests
 
 - Repo root: the application modules only (`gui.py`, `instruments.py`, the arb/export/format/profile libraries, `version.py`).

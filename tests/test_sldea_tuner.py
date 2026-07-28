@@ -72,10 +72,15 @@ def test_windows_launcher_contract():
     bat = _os.path.join(_os.path.dirname(_os.path.dirname(
         _os.path.abspath(__file__))), 'deploy', 'Tune_SLDEA_Windows.bat')
     text = open(bat, encoding='utf-8', errors='replace').read()
+    repo = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
     assert 'sldea_tuner.py' in text
     assert '_newest_run' in text and callable(st._newest_run)
     # it resolves a parent folder the same way the app's Tune buttons do
     assert 'sldea_tuner as t' in text
+    # every script it can launch has to actually be there
+    for script in ('sldea_tuner.py', 'sldea_diag.py'):
+        assert script in text, script
+        assert _os.path.exists(_os.path.join(repo, script)), script
 
 
 def _run():

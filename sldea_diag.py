@@ -14,11 +14,22 @@ prints the report. The JSON is data only -- small enough to send.
 
 What it measures, and the failure each one pins down:
 
+  PHOTOMETRY the mean ROI difference as it stands, after the scalar
+             norm_bg gain the detector applies, and after a gain+offset
+             fit on matched quantiles. When the last is far below the
+             first, the difference was mostly an exposure mismatch and
+             never measured the device: thresholds then sit on a pedestal
+             many sigma tall, and no setting can work. The lowest-voltage
+             frame is the control -- nothing has activated there, so
+             whatever it differs by is the artifact.
+
   DRIFT      phase correlation baseline->frame, and how much of the diff
              energy disappears once that shift is undone. candidates() has
              photometric normalization but NO geometric registration, so
              drift makes every hard edge in the scene ring in the absdiff
-             -- outlines that hug the rig, "Rorschach" speckle.
+             -- outlines that hug the rig, "Rorschach" speckle. A large
+             shift that registration cannot cash in is reported as what it
+             is: an unconstrained estimate, not drift.
 
   FEATURE    separability (Otsu's between-class variance ratio, rescaled
              so one noise population reads 0) of three maps over the same
@@ -126,6 +137,47 @@ def texture_map(gray, win=15):
     blurred = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), 2.5)
     energy = np.abs(cv2.Laplacian(blurred, cv2.CV_32F, ksize=3))
     return cv2.boxFilter(energy, -1, (win, win))
+
+
+def photometric_fit(base, img, roi):
+    """Gain and offset taking the baseline onto the frame: img ~ a*base + b.
+
+    Fitted on MATCHED QUANTILES rather than pixels, so a genuinely changed
+    minority of the frame moves only the extreme quantiles and cannot drag
+    the fit -- the DEA is a small part of the picture and must not define
+    the correction meant to remove everything else.
+
+    Why affine and not the scalar gain candidates() applies: an exposure or
+    gain change moves bright pixels far more than dark ones, so a single
+    ratio estimated on a DARK border band is both badly determined and the
+    wrong model. Under it, the lit dish keeps a large residual while the
+    margin looks fine.
+
+    Caveat worth knowing when reading the gain: saturated highlights bias
+    the slope DOWN, because clipped pixels cannot move. If the electrodes
+    blow out to 255, the fitted gain is a lower bound."""
+    qs = np.linspace(2, 98, 49)
+    xb = np.percentile(base[roi], qs)
+    xi = np.percentile(img[roi], qs)
+    a, b = np.linalg.lstsq(np.vstack([xb, np.ones_like(xb)]).T, xi,
+                           rcond=None)[0]
+    return float(a), float(b)
+
+
+def norm_bg_scale(base, img, roi_frac):
+    """The scalar gain candidates() actually applies (sldea_edge, norm_bg):
+    border-band median ratio, clamped. Reproduced here so the report can
+    say what the shipping correction leaves behind."""
+    h, w = base.shape
+    rf = min(1.0, max(0.2, float(roi_frac)))
+    by, bx = int(h * (1 - rf) / 2), int(w * (1 - rf) / 2)
+    if not (by and bx):
+        return 1.0
+    band = np.ones(base.shape, bool)
+    band[by:h - by, bx:w - bx] = False
+    med_i = float(np.median(img[band])) or 1.0
+    med_b = float(np.median(base[band]))
+    return min(1.4, max(0.7, med_b / med_i))
 
 
 def drift(base, img):
@@ -248,9 +300,17 @@ def analyze(rundir, max_frames=24):
         blurred = cv2.GaussianBlur(raw.astype(np.uint8), (k, k), 0)
         tex = texture_map(fr['gray']) / np.maximum(tex_base, 1e-3)
         r_roi, g_roi, t_roi = raw[ys, xs], reg[ys, xs], tex[ys, xs]
+        a, b = photometric_fit(base, fr['gray'], (ys, xs))
+        aff = np.abs((a * base[ys, xs] + b) - fr['gray'][ys, xs])
+        nb = norm_bg_scale(base, fr['gray'], roi_frac)
+        nbr = np.abs(np.clip(fr['gray'][ys, xs] * nb, 0, 255) - base[ys, xs])
         cands = se.candidates(base, fr['gray'], settings)
         best = cands[0] if cands else None
         per.append({
+            'gain': round(a, 3), 'offset': round(b, 2),
+            'diff_mean_photofit': round(float(aff.mean()), 2),
+            'diff_mean_normbg': round(float(nbr.mean()), 2),
+            'sep_photofit': round(separability(aff), 3),
             'idx': fr['idx'], 'kv': fr['kv'], 'file': fr['file'],
             'shift_px': round(float(np.hypot(dx, dy)), 2),
             'dx': round(dx, 2), 'dy': round(dy, 2),
@@ -325,17 +385,54 @@ def verdicts(d):
                     f"the baseline, for a global shift to be well "
                     f"determined -- read the drift line below as indicative "
                     f"and trust the registered-vs-raw diff energy instead."))
-    if med_shift >= 1.0 or med_drop >= 0.15:
+    if med_drop >= 0.15:
         out.append(('HIGH', 'Geometric drift is polluting the difference',
                     f"median shift {med_shift:.2f} px (max "
                     f"{max(shifts):.2f}); undoing it removes "
                     f"{100 * med_drop:.0f}% of the mean ROI diff energy. "
                     f"candidates() never registers, so that energy is being "
                     f"thresholded as if it were membrane change."))
+    elif med_shift >= 1.0:
+        # a large shift that registration cannot cash in is not a shift:
+        # an elongated feature (electrode strips) leaves translation along
+        # its own axis unobservable, and phase correlation returns noise
+        # there. Reporting drift here would send the fix in a direction the
+        # data does not support (bench runs P3_*, 2026-07-28).
+        out.append(('MED', 'The measured shift is not a real translation',
+                    f"median shift {med_shift:.2f} px, yet undoing it "
+                    f"changes the diff energy by only "
+                    f"{100 * med_drop:.0f}%. A true shift of that size "
+                    f"would remove far more. Expect an elongated feature "
+                    f"in frame whose long axis is unconstrained; registering"
+                    f" on this estimate would not help."))
     else:
         out.append(('OK', 'Frames are geometrically stable',
                     f"median shift {med_shift:.2f} px, registration would "
                     f"remove only {100 * med_drop:.0f}% of the diff energy."))
+
+    # photometry: is the difference even measuring the device?
+    raw = float(np.median([p['diff_mean'] for p in per]))
+    aff = float(np.median([p['diff_mean_photofit'] for p in per]))
+    nbg = float(np.median([p['diff_mean_normbg'] for p in per]))
+    cold = min(per, key=lambda p: (1e9 if np.isnan(p['kv']) else p['kv']))
+    if raw > 4 * sigma and aff < 0.6 * raw:
+        out.append(('HIGH', 'The difference is dominated by photometry, not '
+                    'by the device',
+                    f"median ROI difference {raw:.1f} gray levels "
+                    f"({raw / sigma:.0f} sigma); a gain+offset fit leaves "
+                    f"{aff:.1f}, while the scalar norm_bg correction the "
+                    f"detector applies leaves {nbg:.1f}. At "
+                    f"{cold['kv']:g} kV, where nothing has activated yet, "
+                    f"the frames already differ by "
+                    f"{cold['diff_mean'] / sigma:.0f} sigma. Every "
+                    f"threshold is being set on that pedestal."))
+    elif raw > 4 * sigma and cold['diff_mean'] > 4 * sigma:
+        out.append(('HIGH', 'Something other than the device is changing',
+                    f"at {cold['kv']:g} kV the ROI already differs by "
+                    f"{cold['diff_mean'] / sigma:.0f} sigma, and a "
+                    f"gain+offset fit does not explain it (leaves "
+                    f"{aff:.1f} of {raw:.1f}). The scene itself is moving "
+                    f"or changing between the baseline and the run."))
 
     si = float(np.median([p['sep_intensity'] for p in per]))
     sr = float(np.median([p['sep_registered'] for p in per]))
@@ -433,26 +530,29 @@ def report(d):
     A("")
     A("PER FRAME")
     A("-" * 74)
-    A(f"{'kV':>6} {'shift':>6} {'pcr':>5} {'diff':>6} {'p99/s':>6} "
-      f"{'otsu':>5} {'sep-I':>6} {'sep-R':>6} {'sep-T':>6} {'tex':>5} "
-      f"{'area':>8} {'rev':>4}")
+    A(f"{'kV':>6} {'shift':>6} {'pcr':>5} {'diff':>6} {'d-nbg':>6} "
+      f"{'d-aff':>6} {'gain':>5} {'otsu':>5} {'sep-I':>6} {'sep-A':>6} "
+      f"{'sep-T':>6} {'tex':>5} {'area':>8} {'rev':>4}")
     for p in d['frames']:
         kv = '?' if np.isnan(p['kv']) else f"{p['kv']:.2f}"
         A(f"{kv:>6} {p['shift_px']:>6.2f} {p['pc_response']:>5.2f} "
-          f"{p['diff_mean']:>6.2f} "
-          f"{p['diff_p99_sigma']:>6.1f} {p['otsu']:>5.0f} "
-          f"{p['sep_intensity']:>6.2f} {p['sep_registered']:>6.2f} "
-          f"{p['sep_texture']:>6.2f} {p['texture_ratio']:>5.2f} "
+          f"{p['diff_mean']:>6.2f} {p['diff_mean_normbg']:>6.2f} "
+          f"{p['diff_mean_photofit']:>6.2f} {p['gain']:>5.2f} "
+          f"{p['otsu']:>5.0f} {p['sep_intensity']:>6.2f} "
+          f"{p['sep_photofit']:>6.2f} {p['sep_texture']:>6.2f} "
+          f"{p['texture_ratio']:>5.2f} "
           f"{p['area_px']:>8.0f} {'yes' if p['needs_review'] else 'no':>4}"
           + ('  GATED' if p['gated'] else ''))
     A("")
     A("  shift  px of rig/camera movement vs the baseline (phase corr.);")
     A("         pcr is that estimate's response -- below ~0.05, distrust it")
-    A("  diff   mean ROI |frame-baseline|;  p99/s  the gate's statistic, "
-      "in sigma")
-    A("  sep-I/R/T  separability of the raw / registered absdiff and the")
-    A("             wrinkle map: 0 = one noise population (no threshold can")
-    A("             split it), 1 = two clean populations. Highest wins.")
+    A("  diff   mean ROI |frame-baseline|; d-nbg after the scalar norm_bg")
+    A("         correction the detector applies; d-aff after a gain+offset")
+    A("         fit. If d-aff is far below diff, the difference was mostly")
+    A("         photometry -- not the device. gain is that fit's slope.")
+    A("  sep-I/A/T  separability of the raw / photometry-corrected absdiff")
+    A("             and the wrinkle map: 0 = one noise population (no")
+    A("             threshold splits it), 1 = two clean ones. Highest wins.")
     A("  tex    wrinkle-energy ratio at the ROI p90 (1.0 = no texture "
       "change)")
     A("  area   what candidates() detects TODAY with the run's own settings")
@@ -492,11 +592,13 @@ def figure(d, png, rundir=None):
         base = se.load_gray(se.frame_path(run, rows[d['baseline_row']]) or '')
         img = se.load_gray(os.path.join(run['frames_dir'], hot['file']))
         if base is not None and img is not None and base.shape == img.shape:
-            _dx, _dy, _r, aligned = drift(base, img)
+            ys, xs = _roi(base.shape, d['settings'].get('roi_frac', 0.85))
+            a, b = photometric_fit(base, img, (ys, xs))
             tex = texture_map(img) / np.maximum(texture_map(base), 1e-3)
             for ax, (m, t) in zip(axs[0], [
                     (cv2.absdiff(img, base), 'raw absdiff'),
-                    (cv2.absdiff(aligned, base), 'registered absdiff'),
+                    (np.abs((a * base + b) - img),
+                     'absdiff after gain+offset fit'),
                     (np.clip(tex, 0, 3), 'wrinkle map (texture ratio)')]):
                 ax.imshow(m, cmap='magma')
                 ax.set_title(f"{t}\n{hot['kv']:g} kV", fontsize=9)
@@ -508,15 +610,26 @@ def figure(d, png, rundir=None):
             ax.axis('off')
 
     ax = axs[1][0]
-    ax.plot(kv, [p['shift_px'] for p in per], 'o-', color='#d81b60')
-    ax.axhline(1.0, ls='--', color='#999', lw=1)
-    ax.set_title('drift vs baseline', fontsize=9)
+    ax.plot(kv, [p['diff_mean'] for p in per], 'o-', label='raw')
+    ax.plot(kv, [p['diff_mean_normbg'] for p in per], 's-', label='norm_bg')
+    ax.plot(kv, [p['diff_mean_photofit'] for p in per], '^-',
+            label='gain+offset')
+    ax.axhline(d['sigma'], ls=':', color='#444', lw=1)
+    ax.annotate('1 sigma', (kv[0], d['sigma']), fontsize=7, va='bottom')
+    ax.set_title('difference energy -- what is left after correction',
+                 fontsize=9)
     ax.set_xlabel('nominal kV')
-    ax.set_ylabel('shift (px)')
+    ax.set_ylabel('mean |diff| (gray levels)')
+    ax.legend(fontsize=7, loc='upper left')
+    tw = ax.twinx()
+    tw.plot(kv, [p['shift_px'] for p in per], color='#bbb', lw=1, zorder=0)
+    tw.set_ylabel('shift (px)', color='#999', fontsize=8)
+    tw.tick_params(axis='y', colors='#999', labelsize=7)
 
     ax = axs[1][1]
     ax.plot(kv, [p['sep_intensity'] for p in per], 'o-', label='absdiff')
     ax.plot(kv, [p['sep_registered'] for p in per], 's-', label='registered')
+    ax.plot(kv, [p['sep_photofit'] for p in per], 'd-', label='gain+offset')
     ax.plot(kv, [p['sep_texture'] for p in per], '^-', label='wrinkle')
     ax.set_title('Otsu separability -- which map can be thresholded',
                  fontsize=9)
@@ -548,7 +661,7 @@ def figure(d, png, rundir=None):
 # selftest: a run that expands, and a run that only wrinkles
 # ---------------------------------------------------------------------------
 
-def _synth_run(dirpath, mode, shift=0.0):
+def _synth_run(dirpath, mode, shift=0.0, gain=1.0, offset=0.0):
     """Synthesise a run. mode 'expand' grows a brighter disc (the case
     difference-imaging was designed for); mode 'wrinkle' keeps the disc the
     same mean brightness and adds ridges instead -- the case the bench
@@ -573,6 +686,8 @@ def _synth_run(dirpath, mode, shift=0.0):
         else:
             img[m] += 34
         img += rng.normal(0, 1.6, img.shape)
+        if kv > 0 and (gain != 1.0 or offset):
+            img = img * gain + offset
         if kv > 0 and shift:
             m2 = np.float32([[1, 0, shift], [0, 1, shift * 0.5]])
             img = cv2.warpAffine(img, m2, (320, 240),

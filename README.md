@@ -99,6 +99,36 @@ Instrument control is **Linux-only** (the pyvisa-py/libusb/udev stack lives on t
 
 Windows lab PCs with the ShareDrive mapped launch via **`_software\Launch_SCPI_Control_Windows.bat`** (double-click; reference copy in `deploy/`). First run needs Python 3.10+ installed and internet — it creates a local venv and installs the requirements (the share's `pylibs` are Linux binaries); later runs sync only when the version stamp changes, exactly like the Linux local-cache launcher.
 
+### SLDEA tuning session on Windows
+
+The edge tuner (`sldea_tuner.py`) is a standalone Tk program rather than a tab, and it touches no instruments — so any Windows PC holding a copy of the run data is a fine place to tune. Double-click **`_software\Tune_SLDEA_Windows.bat`** (reference copy in `deploy/`), or drag a run folder onto it. It reuses the main launcher's venv when one exists, otherwise builds a small one with just `numpy`, `opencv-python-headless` and `matplotlib` — the tuner's only real dependencies.
+
+From a checkout, the same thing by hand:
+
+```
+py -3 -m venv .venv
+.venv\Scripts\pip install numpy opencv-python-headless matplotlib
+.venv\Scripts\python sldea_tuner.py "C:\SLDEA\SLDEA_20260721_1430"
+```
+
+Python must have been installed with the **"tcl/tk and IDLE"** option ticked. Check the whole stack without needing a window first — this renders headless and prints the areas it found:
+
+```
+.venv\Scripts\python sldea_tuner.py --selftest tuner_selftest.png
+```
+
+A run directory is what the SLDEA tab writes: `data.csv` (needs the `frame_file`, `tag` and `nominal_kV` columns) plus `frames\`, and optionally `setup.txt`. Copy the folder to local disk before tuning — **Save writes the tuned values into that run's `setup.txt`**, and every slider drag re-reads the frames, which is slow over SMB.
+
+Pass the run folder explicitly. With no argument the tuner falls back to `%SCPI_SLDEA_DIR%` and then to the Linux share path, which on Windows only prints "no run found" and exits 2. Setting it once — `setx SCPI_SLDEA_DIR "C:\SLDEA"`, new shell required — makes the no-argument form, the SLDEA tab's **🎚 Tune params…** button and Edge Review's **Tune** button all resolve the newest run under it. Autodiscovery only sees folders named `SLDEA_*` that contain a `data.csv`; an explicit run folder can be named anything.
+
+One data trap worth knowing: the first loadable panel is used as the difference baseline, so if the run's baseline frame is missing or unreadable the mid-run frame silently becomes the reference and every outline is wrong. Check that the panel labelled `baseline` really shows the 0 kV image.
+
+Saved settings live in the run's `setup.txt`, so the review pass uses exactly what was tuned:
+
+```
+.venv\Scripts\python sldea_edge_gui.py "C:\SLDEA\SLDEA_20260721_1430" --auto
+```
+
 ## Repository layout & tests
 
 - Repo root: the application modules only (`gui.py`, `instruments.py`, the arb/export/format/profile libraries, `version.py`).

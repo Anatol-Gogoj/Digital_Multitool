@@ -65,6 +65,19 @@ def test_choose_indices_empty():
     assert st.choose_indices([]) == []
 
 
+def test_windows_launcher_contract():
+    """The Windows tuner launcher calls into this module by name. Batch
+    files are not importable, so nothing else would notice a rename until a
+    user double-clicks it on a machine none of us are sitting at."""
+    bat = _os.path.join(_os.path.dirname(_os.path.dirname(
+        _os.path.abspath(__file__))), 'deploy', 'Tune_SLDEA_Windows.bat')
+    text = open(bat, encoding='utf-8', errors='replace').read()
+    assert 'sldea_tuner.py' in text
+    assert '_newest_run' in text and callable(st._newest_run)
+    # it resolves a parent folder the same way the app's Tune buttons do
+    assert 'sldea_tuner as t' in text
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items())
            if k.startswith('test_') and callable(v)]

@@ -14,6 +14,13 @@ prints the report. The JSON is data only -- small enough to send.
 
 What it measures, and the failure each one pins down:
 
+  REPEAT     the run's own control experiment. Two snapshots at the same
+             nominal kV, seconds apart, hold the same scene in the same
+             state -- whatever separates them is the instrument, not the
+             device. If that floor is as large as the difference against
+             the baseline, no threshold anywhere can work, and the fix is
+             at capture time rather than in the detector.
+
   PHOTOMETRY the mean ROI difference as it stands, after the scalar
              norm_bg gain the detector applies, and after a gain+offset
              fit on matched quantiles. When the last is far below the
@@ -253,6 +260,72 @@ def _sweep_area(base, img, settings):
     return out
 
 
+def _seconds_between(row_a, row_b):
+    """Wall-clock gap from the CSV timestamps, or None."""
+    import datetime as _dt
+    try:
+        ta = _dt.datetime.fromisoformat((row_a.get('timestamp') or '').strip())
+        tb = _dt.datetime.fromisoformat((row_b.get('timestamp') or '').strip())
+        return round(abs((tb - ta).total_seconds()), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def repeat_pairs(run, base_shape, roi_frac, limit=40):
+    """Frames that should look ALIKE, and how much they actually differ.
+
+    The run itself carries the control experiment: two snapshots at the
+    same nominal kV, seconds apart, contain the same scene in the same
+    state. Whatever separates them is instrumentation -- exposure, gain,
+    white balance, focus -- and not the device. Compare that floor against
+    how far each frame sits from the baseline and you know immediately
+    whether the baseline difference carries any device signal at all.
+
+    Same-voltage pairs are used when the run has them (the pre-ramp /
+    post-ramp snapshots of one step); otherwise adjacent frames, where the
+    voltage moved by one small step and the device cannot account for much.
+    Streams two frames at a time, so a 1080p run costs no memory."""
+    rows = run['rows']
+    have = [i for i, r in enumerate(rows)
+            if (r.get('frame_file') or '').strip()]
+    same, adjacent = [], []
+    for k in range(1, len(have)):
+        i, j = have[k - 1], have[k]
+        a, b = _fkv(rows[i]), _fkv(rows[j])
+        if not np.isnan(a) and not np.isnan(b) and abs(a - b) < 1e-6:
+            same.append((i, j))
+        else:
+            adjacent.append((i, j))
+    pairs = same or adjacent
+    kind = 'same voltage' if same else 'adjacent step'
+    dropped = max(0, len(pairs) - limit)
+    pairs = pairs[:limit]
+
+    ys, xs = _roi(base_shape, roi_frac)
+    out, prev_idx, prev = [], None, None
+    for i, j in pairs:
+        if prev_idx != i:
+            prev = se.load_gray(se.frame_path(run, rows[i]) or '')
+            prev_idx = i
+        cur = se.load_gray(se.frame_path(run, rows[j]) or '')
+        if prev is None or cur is None or prev.shape != base_shape \
+                or cur.shape != base_shape:
+            continue
+        a, b = photometric_fit(prev, cur, (ys, xs))
+        out.append({
+            'row_a': i, 'row_b': j,
+            'kv_a': _fkv(rows[i]), 'kv_b': _fkv(rows[j]),
+            'seconds': _seconds_between(rows[i], rows[j]),
+            'diff_mean': round(float(np.abs(cur[ys, xs]
+                                            - prev[ys, xs]).mean()), 2),
+            'diff_mean_photofit': round(float(np.abs(
+                (a * prev[ys, xs] + b) - cur[ys, xs]).mean()), 2),
+            'gain': round(a, 3),
+        })
+        prev, prev_idx = cur, j
+    return {'kind': kind, 'dropped': dropped, 'pairs': out}
+
+
 def analyze(rundir, max_frames=24):
     """Every measurement, as plain data (JSON-serializable)."""
     import cv2
@@ -347,7 +420,9 @@ def analyze(rundir, max_frames=24):
                'area': _sweep_area(base, by_idx[p['idx']]['gray'], settings)}
               for p in hot if p['idx'] in by_idx]
 
+    repeats = repeat_pairs(run, base.shape, roi_frac)
     return {'rundir': os.path.abspath(rundir),
+            'repeats': repeats,
             'frames_analyzed': len(per), 'baseline_row': base_i,
             'frame_shape': list(base.shape), 'sigma': round(sigma, 2),
             'sigma_source': sigma_src, 'settings': dict(settings),
@@ -410,11 +485,36 @@ def verdicts(d):
                     f"median shift {med_shift:.2f} px, registration would "
                     f"remove only {100 * med_drop:.0f}% of the diff energy."))
 
+    # the run's own control: frames that should look alike, and do not
+    reps = (d.get('repeats') or {}).get('pairs') or []
+    floor = float(np.median([r['diff_mean'] for r in reps])) if reps else None
+    kind = (d.get('repeats') or {}).get('kind', '')
+    if floor is not None and floor > 4 * sigma:
+        secs = [r['seconds'] for r in reps if r['seconds'] is not None]
+        when = f" {np.median(secs):.0f} s apart" if secs else ""
+        fl_aff = float(np.median([r['diff_mean_photofit'] for r in reps]))
+        out.append(('HIGH', 'Frames that should be identical are not',
+                    f"{len(reps)} pairs at the {kind}{when} differ by "
+                    f"{floor:.1f} gray levels ({floor / sigma:.0f} sigma) -- "
+                    f"a gain+offset fit between the two takes that to "
+                    f"{fl_aff:.1f}. The device cannot have changed between "
+                    f"them, so this is the instrument, and no baseline "
+                    f"difference smaller than it can be trusted."))
+
     # photometry: is the difference even measuring the device?
     raw = float(np.median([p['diff_mean'] for p in per]))
     aff = float(np.median([p['diff_mean_photofit'] for p in per]))
     nbg = float(np.median([p['diff_mean_normbg'] for p in per]))
     cold = min(per, key=lambda p: (1e9 if np.isnan(p['kv']) else p['kv']))
+    if floor is not None and raw > 4 * sigma and floor > 0.7 * raw:
+        out.append(('HIGH', 'The baseline difference carries no more signal '
+                    'than two frames of the same thing',
+                    f"median difference vs the baseline {raw:.1f} gray "
+                    f"levels, against {floor:.1f} between frames that should "
+                    f"be identical. Whatever the ramp does to the picture is "
+                    f"smaller than the noise the camera adds between two "
+                    f"snapshots -- tuning thresholds on this cannot work, "
+                    f"and no amount of it will."))
     if raw > 4 * sigma and aff < 0.6 * raw:
         out.append(('HIGH', 'The difference is dominated by photometry, not '
                     'by the device',
@@ -527,6 +627,31 @@ def report(d):
         A(f"[{sev:4}] {head}")
         for line in _wrap(detail, 66):
             A(f"        {line}")
+    reps = (d.get('repeats') or {}).get('pairs') or []
+    if reps:
+        kind = d['repeats'].get('kind', '')
+        A("")
+        A(f"REPEATABILITY  ({len(reps)} pairs at the {kind} -- the run's "
+          f"own control)")
+        A("-" * 74)
+        fl = float(np.median([r['diff_mean'] for r in reps]))
+        fa = float(np.median([r['diff_mean_photofit'] for r in reps]))
+        secs = [r['seconds'] for r in reps if r['seconds'] is not None]
+        A(f"  median difference between frames that should look alike: "
+          f"{fl:.2f} gray levels ({fl / d['sigma']:.0f} sigma)")
+        A(f"  after a gain+offset fit between the two:                  "
+          f"{fa:.2f}")
+        if secs:
+            A(f"  typical gap between them: {np.median(secs):.1f} s")
+        A(f"  worst pair: {max(r['diff_mean'] for r in reps):.2f}   "
+          f"best pair: {min(r['diff_mean'] for r in reps):.2f}   "
+          f"fitted gain spread: "
+          f"{min(r['gain'] for r in reps):.3f}.."
+          f"{max(r['gain'] for r in reps):.3f}")
+        A("  The device cannot change between these, so this is the floor")
+        A("  under every number below it.")
+        if d['repeats'].get('dropped'):
+            A(f"  ({d['repeats']['dropped']} further pairs not measured)")
     A("")
     A("PER FRAME")
     A("-" * 74)
@@ -616,6 +741,12 @@ def figure(d, png, rundir=None):
             label='gain+offset')
     ax.axhline(d['sigma'], ls=':', color='#444', lw=1)
     ax.annotate('1 sigma', (kv[0], d['sigma']), fontsize=7, va='bottom')
+    reps = (d.get('repeats') or {}).get('pairs') or []
+    if reps:
+        fl = float(np.median([r['diff_mean'] for r in reps]))
+        ax.axhline(fl, ls='--', color='#d81b60', lw=1.2)
+        ax.annotate('identical-frame floor', (kv[0], fl), fontsize=7,
+                    va='bottom', color='#d81b60')
     ax.set_title('difference energy -- what is left after correction',
                  fontsize=9)
     ax.set_xlabel('nominal kV')
@@ -661,7 +792,8 @@ def figure(d, png, rundir=None):
 # selftest: a run that expands, and a run that only wrinkles
 # ---------------------------------------------------------------------------
 
-def _synth_run(dirpath, mode, shift=0.0, gain=1.0, offset=0.0):
+def _synth_run(dirpath, mode, shift=0.0, gain=1.0, offset=0.0,
+               jitter=0.0):
     """Synthesise a run. mode 'expand' grows a brighter disc (the case
     difference-imaging was designed for); mode 'wrinkle' keeps the disc the
     same mean brightness and adds ridges instead -- the case the bench
@@ -695,17 +827,32 @@ def _synth_run(dirpath, mode, shift=0.0, gain=1.0, offset=0.0):
         return np.clip(img, 0, 255).astype(np.uint8)
 
     rows = []
+    step = 0
     for k, kv in enumerate([0.0, 2.0, 4.0, 6.0]):
-        if k == 0:
-            im = make(0, 0.0, False)
-        elif mode == 'expand':
-            im = make(25 + 9 * k, kv, False)
-        else:
-            im = make(60, kv, True)          # same size every step
-        fn = f'SLDEA_s{k:02d}_{kv:05.2f}kV.png'
-        cv2.imwrite(os.path.join(frames, fn), im)
-        rows.append({'step': k, 'tag': 'baseline' if k == 0 else 'post-ramp',
-                     'nominal_kV': kv, 'frame_file': fn})
+        # with jitter, every voltage is snapshotted TWICE (pre-ramp and
+        # post-ramp, as the real tab does) and each snapshot gets its own
+        # gain -- the hypothesis that the camera re-converges its exposure
+        # on every grab, which makes two pictures of one unchanged scene
+        # differ. Those pairs are the run's own control.
+        reps = 2 if (jitter and k) else 1
+        for r in range(reps):
+            if k == 0:
+                im = make(0, 0.0, False)
+            elif mode == 'expand':
+                im = make(25 + 9 * k, kv, False)
+            else:
+                im = make(60, kv, True)      # same size every step
+            if jitter and k:
+                g = 1.0 + float(rng.normal(0, jitter))
+                im = np.clip(im.astype(np.float32) * g, 0,
+                             255).astype(np.uint8)
+            tag = ('baseline' if k == 0 else
+                   ('pre-ramp' if r == 0 else 'post-ramp'))
+            fn = f'SLDEA_s{step:02d}_{kv:05.2f}kV_{tag}.png'
+            cv2.imwrite(os.path.join(frames, fn), im)
+            rows.append({'step': step, 'tag': tag, 'nominal_kV': kv,
+                         'frame_file': fn})
+            step += 1
     with open(os.path.join(dirpath, 'data.csv'), 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()

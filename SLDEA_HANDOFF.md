@@ -214,6 +214,29 @@ and with the ~5 kV event all previous evidence pointed at.
    device is ever built whose leads leave the disc away from the strip
    azimuths, the exclusion needs the lead's own azimuth.
 
+## Decision log (2026-07-28, both sessions)
+
+Every entry is a choice that could have gone another way; the evidence
+column is what settled it. Do not relitigate these without new evidence.
+
+| Decision | Why | Evidence |
+|---|---|---|
+| Active area = full responding disc, leads and passive ring excluded | Lab ruling (Anatol, 2026-07-28) | — |
+| Measure the resting disc by radial rays + robust circle fit, not region-growing | Smooth CNT traces and under-strip shadows bridge the dark class to the strips past ANY mask; region-growing is unfixable here | Overlays: cyan region contour leaks to both strips on all 3 baselines; fit lands 0.4% from by-eye truth |
+| A circle prior is legitimate for `baseline_disc` only | The resting disc is circular by construction; the activated area is not | P3 discs measure axis ratio 0.966–0.999 at rest |
+| Define the foil by texture, not brightness | Median foil pixel (173) is dimmer than paper (176–190); a brightness cut can only catch specular streaks (34–42% coverage) | Foil-fraction of detections fell 83–100% → 0–1% after full-footprint suppression |
+| Thickness gate (30 px inscribed depth) on foil components | A step edge smears into a band exactly one box-window wide; real crinkle is a filled region — without the gate a hard-edged disc's own rim classifies as foil | Synthetic rim false-positive; real strips have ~100 px depth |
+| Fit photometry on paper only (ROI − disc − foil) | A changed region bigger than the trim can absorb drags its own correction | Q1: run 3's gain dip 0.77→0.55 vanished under restriction; run 2's survived (real scene change) |
+| Texture threshold is a ratio vs the frame's own baseline (`wrinkle_ratio`), not a gray-level | Gray-level constants do not transfer: per-frame Otsu swings 0.3–3.2σ across one run | TRANSFER section of the diag; tex channel stable where tiers flip |
+| Texture candidates must be wrinkled THROUGH (band-eroded core) | A step edge draws a high-ratio ring around a smooth interior; a ring thinner than the box window is indistinguishable from that artifact | Synthetic flat-disc ring false-positive at spread 27% |
+| Boundary feature = the INK EDGE on the normalized frame | The change map cannot mark the boundary: a change edge rides out to the passive wrinkle ring (1.6–2× areas); the valley between responses tracks the taut rim, which migrates inward with kV | Radial profiles at 4.25 kV: ring saturates to 1.27 r₀; ink step visibly moved ~80 px and the fit sits on it (`edge_profiles.png`) |
+| The passive membrane ring is excluded like the leads | It responds (hoop-wrinkles) but is not electroded | Lab ruling + the 4.25 kV profile |
+| `spread_pct` on disc-fit = its own 85% CI on area | Cross-tier spread measures threshold sensitivity; a boundary fit's honest dispersion is its edge-point scatter | CI 0.2–0.5% on the bench runs |
+| Corroboration pools split by semantics (tiers / tex / disc-fit) | Mixing full-region and interior-subset areas into one spread sent 24/24 frames to review over a difference of DEFINITION | Review rate 100% → 15–19% with no change to any threshold |
+| Gated frames with a known disc are stated as `resting`, not blanked | "No detectable change + known object" is a measurement (area = resting), not an absence | Low-kV frames auto-accept at conf 0.82–0.91; empty-scene behavior unchanged (no ref → no fabrication) |
+| Pair mismatches and dips are ANNOTATED, never averaged away | A mismatch usually means the detection changed, not the device; a dip usually IS the event | `ramp_consistency`; flags cluster in the 4.6–5.9 kV band |
+| Report text stays ASCII | cp1252 consoles: one `→` crashed the whole diagnostic | UnicodeEncodeError on the analysis PC |
+
 ## Repo state you are inheriting
 
 - All of the above is code + tests on this branch; nothing else changed.

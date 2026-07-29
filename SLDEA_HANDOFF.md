@@ -214,6 +214,48 @@ and with the ~5 kV event all previous evidence pointed at.
    device is ever built whose leads leave the disc away from the strip
    azimuths, the exclusion needs the lead's own azimuth.
 
+## Confidence round 2 (2026-07-29) — pair-confirm, hysteresis, sub-pixel
+
+Three mechanisms, one commit, all three validated on both campaigns:
+
+- **Sub-pixel, contrast-adaptive disc-fit rays**: parabolic refinement
+  on the ink step, and the per-ray step cut derived from the scene's own
+  median ink contrast (`max(3, 0.35·median)`) instead of a fixed 4 —
+  the P3 ink steps 10–25 with a fainter top arc while the 07-23 devices
+  step 40+ and their spurious lead/shadow edges alone reach 6–8. Effect:
+  coverage up (disc-fit now holds through the P3 5.75 kV event frames it
+  used to refuse), residuals down.
+- **Channel hysteresis** (`candidates(..., prev_method=)`): the previous
+  frame's winning channel gets +0.05, tagged `hyst_bonus`, so a
+  challenger must win by a margin, not a coin flip. Threaded through the
+  GUI detect loops, the diagnostic and the contact sheet.
+- **Pair agreement folded into conf** (`reconcile_pairs`, called by the
+  GUI between detection and auto-accept, and by the diagnostic): best
+  candidates of a same-kV pair that agree within a CI-derived tolerance
+  gain +0.05 (`pair_confirmed`); past twice the tolerance both are
+  capped below `accept_conf` (`pair_mismatch_pct`) — a confident tier
+  flip can never auto-accept on both sides of a contradiction.
+- Plus the **containment cap**: a tex-ratio patch sitting inside a valid
+  disc-fit is capped just below it (`capped_by`) — the recorded area is
+  the boundary's, per the active-area ruling; tex still wins outright
+  where the fit refuses.
+
+| run (pre-event where marked) | review | median conf | conf ≥0.85 |
+|------|--------|-------------|-----------|
+| P3_1 | 4/48 (was 8) | 0.97 (was 0.91) | 79% (was 63%) |
+| P3_2 | 8/48 (was 9) | 0.99 (was 0.90) | 83% (was 79%) |
+| P3_3 | 6/48 (was 7) | 0.95 (was 0.87) | 90% (was 54%) |
+| 152205 <5.2 kV | 1/40 (was 6) | 0.93 (was 0.84) | 83% |
+| 155425 <5.2 kV | 2/40 (was 6) | 0.93 (was 0.83) | 78% |
+| 233451 <5.2 kV | 2/32 (was 6) | 0.95 (was 0.87) | 78% |
+
+Contact-sheet check (P3_2): every sampled frame disc-fit or resting,
+boundaries on the visible edge including 5.75 kV (1.33× resting, conf
+0.97, smooth between the 4.5 peak and the 7.25 plateau). The known
+caveat of pair-confirm: correlated errors would be boosted together —
+which is exactly what the human-label calibration (issue #162) exists
+to audit. Do that next, before trusting any bar above 0.85.
+
 ## Generalization check (2026-07-29) — the 2026-07-23 dataset
 
 Ran unmodified on `D:\Downloads\SLDEA_data\SLDEA_20260723_*` — a

@@ -9,7 +9,9 @@ reason turned out to explain most of the earlier statistics.
 Read this file, then `sldea_edge.py` (`candidates`, `prepared_diff`,
 `photometric_fit`, `baseline_disc`, `mm_per_px`) and `sldea_diag.py`.
 
-Branch: `claude/local-tuning-win11-qsqpqo` (PR #156).
+All of this is on `main` as of `331b957` (PR #156, merged 2026-07-28). The
+branch it came from, `claude/local-tuning-win11-qsqpqo`, has been deleted —
+start from `main`.
 
 ## The physical setup
 
@@ -221,12 +223,13 @@ If you extract runs into the working directory, `.gitignore` already
 excludes `P3_*/`, `SLDEA_*/`, `*.zip` and the diagnostic's outputs — but
 that only protects you if nobody uses `git add -f`.
 
-**One uncommitted change:** `tests/test_sldea_edge.py:465`. The test
+**A test that encoded the absence of the data was fixed** (already on
+`main`): `tests/test_sldea_edge.py`. The test
 `test_bench_shortcuts_resolve_and_stay_inert_elsewhere` asserted the bench
 paths do not exist on this machine — true when written, false now that the
-runs are here, so it failed. It now asserts what its docstring promises: a
-shortcut resolves to its own directory or to nothing, never to a different
-run. 25/25 pass. Commit it or fold it into your first commit.
+runs are here, so it failed for the wrong reason. It now asserts what its
+docstring promises: a shortcut resolves to its own directory or to nothing,
+never to a different run. 25/25 pass.
 
 ## How to run the loop
 

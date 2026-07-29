@@ -74,7 +74,9 @@ that floor, so its whole low ramp caps to review. After eyeballing one
 such frame, either raise `audit_nostep_pct` to ~20 for that run
 (Advanced… → save to setup.txt) or accept the review load. Do NOT
 raise the default: P3's floor is 0–2.8% and the default catches real
-onset interpolation there.
+onset interpolation there. (Done since: 155425's setup.txt now carries
+a saved edge-settings section with `audit_nostep_pct: 20`, so the
+diagnostic measures its review load at 21/48, not this table's 33/48.)
 
 ## The #162 manual-trace tool (built this session)
 

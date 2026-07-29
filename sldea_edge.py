@@ -18,6 +18,22 @@ with a confidence score; frames whose best candidate is weak (or whose
 candidates disagree) are queued for the human-in-the-loop pass in the GUI. Breakdown heuristics flag
 suspect steps: a Trek current spike and an area collapse while voltage rises.
 
+Since 2026-07-29 the primary channel is the BOUNDARY TRACKER
+('disc-fit'): the resting disc is measured on the baseline
+(baseline_disc, radial rays + robust circle fit), and each frame's
+active area is the ink edge of that known object, tracked by rays and a
+robust ellipse — the full responding disc, leads and the passive
+wrinkle ring excluded, with a real 85% CI on area from the edge
+scatter. Gated frames with a known disc report 'resting' instead of an
+empty row. Same-kV pair agreement and channel hysteresis are folded
+into confidence (reconcile_pairs / prev_method).
+
+A note on 'conf': it is a review-ordering score — the strength of
+internally consistent evidence — NOT a calibrated probability that the
+boundary is correct. The pair bonus certifies against random error
+only; correlated failure modes agree too. See SLDEA_HANDOFF.md
+("Does higher conf mean more correct edges?") before leaning on it.
+
 Areas are stored in px^2 and converted to mm^2 using the DEA's nominal
 resting diameter (default 16 mm) against the baseline detection.
 

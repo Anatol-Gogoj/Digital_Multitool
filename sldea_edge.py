@@ -1188,12 +1188,19 @@ def candidates(base_gray, img_gray, settings, prev_method=None):
                 c['conf'] = round(min(0.99, c['conf'] + 0.05), 3)
                 break
     # The recorded quantity is the BOUNDARY's area (2026-07-28 ruling), so
-    # a wrinkled-interior patch sitting inside a valid boundary fit is
+    # a changed or wrinkled patch sitting inside a valid boundary fit is
     # supporting evidence, never the better answer: cap it just below the
-    # fit. Where the fit refuses (event frames), tex still wins outright.
+    # fit. Tex-only at first; the diff tiers joined 2026-07-29 (operator
+    # spot-read, 155425 @ 5.25 kV post: diff-hi outlined an interior patch
+    # at half the fit's area and outranked the correct boundary). A diff
+    # region LARGER than the fit is a disagreement, not containment, and
+    # still competes; where the fit refuses (event frames), tex and diff
+    # still win outright.
     if dfit is not None:
         for c in out:
-            if (c['method'] == 'tex-ratio' and c['conf'] >= dfit['conf']
+            if ((c['method'] == 'tex-ratio'
+                 or c['method'].startswith('diff'))
+                    and c['conf'] >= dfit['conf']
                     and np.hypot(c['cx'] - dfit['cx'],
                                  c['cy'] - dfit['cy']) <= 0.5 * dfit['diam_px']
                     and c['area_px'] <= 1.2 * dfit['area_px']):

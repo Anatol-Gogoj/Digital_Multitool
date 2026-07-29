@@ -70,11 +70,26 @@ verdict stands; these caps are per-frame exceptions, not a systematic.
 **The 155425 floor:** that device's resting boundary has a stable
 ~15.5–16% faint-arc sector (constant 24–25 of 155 audited rays on
 every low-kV frame, bias clean there). The 15% default sits just under
-that floor, so its whole low ramp caps to review. After eyeballing one
-such frame, either raise `audit_nostep_pct` to ~20 for that run
-(Advanced… → save to setup.txt) or accept the review load. Do NOT
-raise the default: P3's floor is 0–2.8% and the default catches real
-onset interpolation there.
+that floor, so its whole low ramp capped to review. **Resolved
+2026-07-29** after the operator spot-read (below): `audit_nostep_pct:
+20` is saved in that run's setup.txt — both the `D:\Downloads` and the
+OneDrive copies, a `.bak-20260729-pre-audit-knob` kept beside each —
+so the benign floor no longer floods review while the bias gate keeps
+catching the real 2.25–2.75 kV drift. Do NOT raise the default: P3's
+floor is 0–2.8% and the default catches real onset interpolation
+there.
+
+**Operator spot-read (Anatol, 2026-07-29, 155425 contact sheet):**
+the baseline trace, the resting circles (0.25–2.75 kV) and both
+disc-fit boundaries (3.5 / 4.5 kV) read as good; at 5.25 kV the good
+outline is the RANK-3 disc-fit (160,667 px² = 1.48× resting, conf
+0.70), not the diff-patch winner — a follow-up task was spawned to
+consider extending the containment cap to diff tiers inside a valid
+disc-fit; the 6 kV frame is okay-with-caveats (near breakdown, stays
+in review). One caveat the sheet cannot arbitrate: the 2.25–2.75 kV
+resting circles carry a real −4..−6 px audit bias, which is ~1 px at
+contact-sheet scale — invisible there — so their `audit_bias` caps
+stand even though the circles look clean by eye.
 
 ## The #162 manual-trace tool (built this session)
 

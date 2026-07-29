@@ -431,7 +431,10 @@ def analyze(rundir, max_frames=24):
         norm = _detector_diff(base, fr['gray'], settings)
         gate_p99 = float(np.percentile(norm, 99))
         ff = _foil_fraction(best, foil)
+        aud = se.audit_boundary(se.prepared_diff(base, fr['gray'],
+                                                 settings), best, settings)
         per.append({
+            'audit': aud,
             'gain': round(a, 3), 'offset': round(b, 2),
             'gain_paper': round(ap, 3),
             'foil_frac': None if ff is None else round(ff, 3),
@@ -667,6 +670,25 @@ def verdicts(d):
                         f"figures fall back to the first accepted frame "
                         f"-- an ACTIVATED region. Treat active_area_mm2 "
                         f"as uncalibrated until the baseline is fixed."))
+
+    auds = [p.get('audit') for p in per]
+    auds = [a for a in auds if a and a.get('bias_px') is not None]
+    if auds:
+        bias = float(np.median([a['bias_px'] for a in auds]))
+        p95 = float(np.percentile([abs(a['bias_px']) for a in auds], 95))
+        ns = float(np.median([a['nostep_pct'] for a in auds]))
+        detail = (f"median signed offset fit-vs-step {bias:+.1f} px "
+                  f"(p95 |offset| {p95:.1f}), median no-step arc "
+                  f"{ns:.0f}% over {len(auds)} audited boundaries. ")
+        if abs(bias) <= 2.0 and ns <= 10.0:
+            out.append(('OK', 'Accepted boundaries sit on a real ink step',
+                        detail + "Within the 2 px / 10% trust rule: not "
+                        "noise, and no systematic feature bias."))
+        else:
+            out.append(('HIGH', 'Accepted boundaries fail the self-audit',
+                        detail + "Past the 2 px / 10% rule -- a large "
+                        "no-step arc means circled noise; a clean bias "
+                        "means the wrong feature. Fix before labeling."))
 
     cons = d.get('consistency')
     if cons and cons.get('checked', 0) >= 4:

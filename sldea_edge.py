@@ -1320,6 +1320,87 @@ def reconcile_pairs(rows, cands_by_idx, settings):
     return stats
 
 
+def audit_boundary(prep, cand, settings):
+    """Self-audit of an ACCEPTED boundary: is there really an ink step
+    under it, and is the fit centred on that step?
+
+    Along the candidate's own contour (per-angle radius, so an ellipse
+    is not penalized), each open ray reports the SIGNED offset between
+    the fitted boundary and the measured step position (+ = fit outside
+    the step, full-res px), or 'no step' when nothing under the boundary
+    clears the scene's adaptive cut. 'Circled the noise' reads as a
+    large no-step arc; a systematically wrong feature reads as nonzero
+    bias with small MAD. conf certifies consistency; THIS is the
+    correctness check that costs the operator nothing (2026-07-29).
+    -> {'bias_px', 'mad_px', 'nostep_pct', 'n_rays'} or None."""
+    import cv2
+    if cand is None or cand.get('method') not in ('disc-fit', 'resting'):
+        return None
+    small, base_full = prep['base_small'], prep['base_full']
+    if small is None or base_full is None:
+        return None
+    h, w = small.shape
+    f = w / float(base_full.shape[1])
+    cx, cy = cand['cx'] * f, cand['cy'] * f
+    pts = np.asarray(cand['contour'], np.float64) * f
+    ang = np.arctan2(pts[:, 1] - cy, pts[:, 0] - cx)
+    rad = np.hypot(pts[:, 0] - cx, pts[:, 1] - cy)
+    order = np.argsort(ang)
+    ang, rad = ang[order], rad[order]
+    r0 = float(np.median(rad))
+    if r0 < 8:
+        return None
+    sm = cv2.GaussianBlur(cv2.medianBlur(
+        np.clip(prep['img_small'], 0, 255).astype(np.uint8), 3),
+        (0, 0), 2.0).astype(np.float32)
+    fo = _foil_small(base_full, (w, h))
+    win = max(6.0, 0.3 * r0)
+    nray = 180
+    th = np.linspace(-np.pi, np.pi, nray, endpoint=False)
+    r_th = np.interp(th, ang, rad, period=2 * np.pi)
+    offs, steps, nostep = [], [], 0
+    for k in range(nray):
+        rr = np.arange(max(2.0, r_th[k] - win), r_th[k] + win, 1.0)
+        xs = (cx + rr * np.cos(th[k])).astype(np.float32)[None, :]
+        ys = (cy + rr * np.sin(th[k])).astype(np.float32)[None, :]
+        rej = cv2.remap(fo.astype(np.uint8), xs, ys, cv2.INTER_NEAREST,
+                        borderMode=cv2.BORDER_CONSTANT, borderValue=1)[0]
+        if rej.any():
+            continue
+        prof = cv2.remap(sm, xs, ys, cv2.INTER_LINEAR,
+                         borderMode=cv2.BORDER_REPLICATE)[0]
+        st = np.diff(prof)
+        gi = int(np.argmax(st))
+        ins = prof[max(gi - 16, 0):gi - 3]
+        outs = prof[gi + 4:gi + 17]
+        stepc = (float(np.median(outs)) - float(np.median(ins))
+                 if ins.size >= 3 and outs.size >= 3 else 0.0)
+        s0 = float(st[gi])
+        sm1 = float(st[gi - 1]) if gi > 0 else s0
+        sp1 = float(st[gi + 1]) if gi < len(st) - 1 else s0
+        den = sm1 - 2 * s0 + sp1
+        d = 0.5 * (sm1 - sp1) / den if abs(den) > 1e-9 else 0.0
+        offs.append((r_th[k] - (rr[gi] + 0.5 + min(0.75, max(-0.75, d))))
+                    / f)
+        steps.append(stepc)
+    if len(steps) < 12:
+        return None
+    cut = max(3.0, 0.35 * float(np.median([s for s in steps if s > 2.0]
+                                          or [3.0])))
+    good = [o for o, s in zip(offs, steps) if s >= cut]
+    nostep = sum(1 for s in steps if s < cut)
+    if len(good) < 6:
+        return {'bias_px': None, 'mad_px': None,
+                'nostep_pct': round(100.0 * nostep / len(steps), 1),
+                'n_rays': len(steps)}
+    b = float(np.median(good))
+    return {'bias_px': round(b, 2),
+            'mad_px': round(float(np.median(np.abs(np.asarray(good) - b))),
+                            2),
+            'nostep_pct': round(100.0 * nostep / len(steps), 1),
+            'n_rays': len(steps)}
+
+
 def ramp_consistency(rows, results, settings=None,
                      pair_tol=0.12, dip_slack=0.10):
     """Annotations for the physics a per-frame detector cannot see.

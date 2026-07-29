@@ -762,6 +762,36 @@ def test_reconcile_pairs_boosts_agreement_and_caps_contradiction():
     assert cands[2][0]['pair_mismatch_pct'] == cands[3][0]['pair_mismatch_pct'] == 80.0
 
 
+def test_audit_boundary_measures_bias_and_circled_noise():
+    """The self-audit is the correctness check conf cannot provide: a
+    true boundary audits to ~0 bias; the same boundary shifted +5 px
+    audits to ~+5; a boundary with nothing under it reports a large
+    no-step arc ('circled the noise')."""
+    base, img = _bridged_pair(r_active=112)
+    s = dict(se.DEFAULT_SETTINGS)
+    prep = se.prepared_diff(base, img, s)
+    cands = se.candidates(base, img, s)
+    best = next(c for c in cands if c['method'] == 'disc-fit')
+    a = se.audit_boundary(prep, best, s)
+    assert a and a['bias_px'] is not None
+    assert abs(a['bias_px']) < 2.0, a
+    assert a['nostep_pct'] <= 10.0, a
+    shifted = dict(best)
+    shifted['contour'] = (np.asarray(best['contour'], float)
+                          - [best['cx'], best['cy']]) * (117.0 / 112.0) \
+        + [best['cx'], best['cy']]
+    a2 = se.audit_boundary(prep, shifted, s)
+    assert a2 and a2['bias_px'] is not None
+    assert 3.0 < a2['bias_px'] < 7.0, a2
+    rng = np.random.default_rng(3)
+    flat = np.clip(np.full(base.shape, 190.0, np.float32)
+                   + rng.normal(0, 1.5, base.shape), 0,
+                   255).astype(np.float32)
+    prep3 = se.prepared_diff(base, flat, s)
+    a3 = se.audit_boundary(prep3, best, s)
+    assert a3 and a3['nostep_pct'] > 50.0, a3
+
+
 def test_ramp_consistency_flags_pairs_and_dips():
     rows = [{'nominal_kV': '1'}, {'nominal_kV': '1'},
             {'nominal_kV': '2'}, {'nominal_kV': '2'},

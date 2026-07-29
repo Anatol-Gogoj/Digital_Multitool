@@ -11,7 +11,38 @@ Read this file, then `sldea_edge.py` (`candidates`, `_texture_candidate`,
 `prepared_diff`, `photometric_fit`, `foil_mask`, `baseline_disc`,
 `mm_per_px`) and `sldea_diag.py`.
 
-## START HERE — first task of the next session (decided 2026-07-29)
+## SELF-AUDIT RESULTS (run 2026-07-29, same session) — READ FIRST
+
+`audit_boundary` is implemented, tested (38/16 suites), wired into the
+diagnostic (per-frame `audit` JSON + verdict), and run on all six runs:
+
+| run | median bias (px) | p95 abs | median no-step arc | verdict |
+|-----|-----------------|---------|--------------------|---------|
+| P3_1 | −0.4 | 8.8 | 2.4% | OK |
+| P3_2 | +0.1 | 4.9 | 2.8% | OK |
+| P3_3 | +0.4 | 6.7 | 0.0% | OK |
+| 152205 | −0.3 | 5.6 | **14.2%** | HIGH |
+| 155425 | +0.0 | 4.8 | **15.5%** | HIGH |
+| 233451 | +0.1 | 2.6 | 8.0% | OK |
+
+**Verdict: no systematic feature bias anywhere** (|median| ≤ 0.4 px —
+the halo/wrong-feature fear is ruled out; the fits sit ON the ink
+step). **"Circled the noise" is also ruled out globally** — but near
+wrinkle onset (4.75–5.75 kV) part of the boundary arc has NO measurable
+step under it (worst frames 21–43%): the ink locally washes out and the
+ellipse INTERPOLATES those sectors. The two HIGH runs are short 6 kV
+ramps where onset frames dominate the sample; their low-kV frames audit
+clean.
+
+**Immediate first task for the new session (small, specified):** fold
+the audit into acceptance — compute `nostep_pct` for the winning
+disc-fit inside `candidates()` (or cap in `reconcile_pairs`' caller)
+and cap conf below `accept_conf` when no-step arc > 15%, tagging
+`audit_nostep`. That sends exactly the interpolated-arc onset frames to
+review. THEN the #162 tracer + labels — onset frames are now known to
+be where the labels matter most.
+
+## The original self-audit spec (for reference; now implemented)
 
 **Build the boundary self-audit, run it on all six runs, and report the
 bias numbers — before any labeling happens.** Rationale: conf is

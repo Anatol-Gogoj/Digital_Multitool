@@ -138,16 +138,10 @@ def separability(vals):
     return max(0.0, (eta - ETA_FLOOR) / (1.0 - ETA_FLOOR))
 
 
-def texture_map(gray, win=15):
-    """Local wrinkle energy: mean |Laplacian| of the denoised frame over a
-    window. Same denoise-then-texture recipe as sldea_edge._wrinkle_ratio
-    (raw Laplacian is all sensor grain), but dense -- a per-pixel map that
-    can be SEGMENTED, where the existing one only scores a region the
-    intensity diff already found."""
-    import cv2
-    blurred = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), 2.5)
-    energy = np.abs(cv2.Laplacian(blurred, cv2.CV_32F, ksize=3))
-    return cv2.boxFilter(energy, -1, (win, win))
+# One definition, in the module the detector itself uses -- since
+# 2026-07-28 candidates() SEGMENTS this map (the tex-ratio channel), so
+# the diagnostic must measure exactly the energy the detector cuts.
+texture_map = se.texture_energy
 
 
 # One definition, in the module the detector itself uses -- the diagnostic
@@ -175,6 +169,26 @@ def _detector_diff(base, img, settings):
     """The exact map candidates() thresholds, ROI-cropped and normalized.
     Via sldea_edge so the two can never drift apart."""
     return se.prepared_diff(base, img, settings)['sub']
+
+
+def _foil_fraction(cand, foil):
+    """Fraction of a candidate's filled outline lying on the foil strips.
+
+    THE localization number: statistics on the diff said nothing while
+    83-100% of every detection sat on the electrodes (bench 2026-07-28).
+    None when there is no detection to locate; 0.0 when the scene has no
+    foil."""
+    import cv2
+    if cand is None:
+        return None
+    if foil is None or not foil.any():
+        return 0.0
+    m = np.zeros(foil.shape, np.uint8)
+    cv2.drawContours(m, [np.asarray(cand['contour'], np.int32)], -1, 1, -1)
+    denom = int((m > 0).sum())
+    if not denom:
+        return None
+    return float((foil & (m > 0)).sum()) / denom
 
 
 def drift(base, img):
@@ -354,6 +368,12 @@ def analyze(rundir, max_frames=24):
     sigma = max(sigma, 0.05)
     ys, xs = _roi(base.shape, roi_frac)
     tex_base = texture_map(base)
+    # where the electrodes are, where the resting disc is, and the paper
+    # left between them -- the localization context every per-frame
+    # number below is judged against
+    foil = se.foil_mask(base)
+    disc_ref = se.baseline_disc(base, settings)
+    paper = se._paper_mask(base, base.shape, settings)
     k = int(settings.get('blur_px', 5)) | 1
     per = []
     for fr in frames:
@@ -364,6 +384,7 @@ def analyze(rundir, max_frames=24):
         tex = texture_map(fr['gray']) / np.maximum(tex_base, 1e-3)
         r_roi, g_roi, t_roi = raw[ys, xs], reg[ys, xs], tex[ys, xs]
         a, b = photometric_fit(base, fr['gray'], (ys, xs))
+        ap, _bp = photometric_fit(base, fr['gray'], (ys, xs), mask=paper)
         aff = np.abs((a * base[ys, xs] + b) - fr['gray'][ys, xs])
         nb = norm_bg_scale(base, fr['gray'], roi_frac)
         nbr = np.abs(np.clip(fr['gray'][ys, xs] * nb, 0, 255) - base[ys, xs])
@@ -382,8 +403,12 @@ def analyze(rundir, max_frames=24):
         # rather than the raw one
         norm = _detector_diff(base, fr['gray'], settings)
         gate_p99 = float(np.percentile(norm, 99))
+        ff = _foil_fraction(best, foil)
         per.append({
             'gain': round(a, 3), 'offset': round(b, 2),
+            'gain_paper': round(ap, 3),
+            'foil_frac': None if ff is None else round(ff, 3),
+            'method': best['method'] if best else '',
             'alt_norm_bg': alt['norm_bg'],
             'alt_area_px': round(float(alt_best['area_px']), 0)
             if alt_best else 0.0,
@@ -427,11 +452,19 @@ def analyze(rundir, max_frames=24):
               for p in hot if p['idx'] in by_idx]
 
     repeats = repeat_pairs(run, base.shape, roi_frac)
+    ref_out = None
+    if disc_ref is not None:
+        ref_out = {kk: vv for kk, vv in disc_ref.items() if kk != 'contour'}
+        ref_out['mm_per_px'] = round(float(settings['diam_mm'])
+                                     / float(disc_ref['diam_px']), 5)
     return {'rundir': os.path.abspath(rundir),
             'repeats': repeats,
             'frames_analyzed': len(per), 'baseline_row': base_i,
             'frame_shape': list(base.shape), 'sigma': round(sigma, 2),
             'sigma_source': sigma_src, 'settings': dict(settings),
+            'foil_pct': round(100.0 * float(foil.mean()), 1)
+            if foil is not None else 0.0,
+            'baseline_disc': ref_out,
             'sweep_thresholds': SWEEP_T, 'sweeps': sweeps, 'frames': per}
 
 
@@ -540,6 +573,51 @@ def verdicts(d):
                     f"{aff:.1f} of {raw:.1f}). The scene itself is moving "
                     f"or changing between the baseline and the run."))
 
+    # localization: every statistic above can look fine while the outline
+    # sits on the wrong OBJECT -- which is what the frames exposed on the
+    # P3 runs (83-100% of detected area on the strips, sep 0.000)
+    ffs = [p.get('foil_frac') for p in per]
+    ffs = [v for v in ffs if v is not None]
+    if ffs:
+        med_ff = float(np.median(ffs))
+        n_hi = sum(1 for v in ffs if v > 0.5)
+        if med_ff > 0.5:
+            out.append(('HIGH', 'Detections sit on the electrodes, not the '
+                        'device',
+                        f"median {100 * med_ff:.0f}% of the detected area "
+                        f"lies on the foil strips ({n_hi}/{len(ffs)} frames "
+                        f"mostly foil). Whatever the residuals say, the "
+                        f"detector is outlining the wrong object, and no "
+                        f"threshold tuning fixes that."))
+        elif n_hi:
+            out.append(('MED', 'Some detections sit on the electrodes',
+                        f"{n_hi}/{len(ffs)} detections are mostly foil "
+                        f"(median {100 * med_ff:.0f}%). Check those frames "
+                        f"on the contact sheet."))
+        else:
+            out.append(('OK', 'Detections stay off the electrodes',
+                        f"median {100 * med_ff:.0f}% of detected area on "
+                        f"foil across {len(ffs)} frames with a detection."))
+
+    if 'baseline_disc' in d:
+        ref = d.get('baseline_disc')
+        if ref:
+            out.append(('OK', 'px->mm is anchored on the resting disc',
+                        f"baseline-disc diam {ref['diam_px']:.0f} px "
+                        f"(circ {ref.get('circ', 0):.2f}, fill "
+                        f"{ref.get('solidity', 0):.2f}, arc "
+                        f"{ref.get('arc_cov', 0):.2f}, conf "
+                        f"{ref.get('conf', 0):.2f}) -> "
+                        f"{ref.get('mm_per_px', 0):.5f} mm/px. The blob "
+                        f"trace this replaces read 896-951 px on these "
+                        f"runs -- a 1.5-1.6x diameter error at conf 0.93."))
+        else:
+            out.append(('MED', 'No trustworthy resting-disc trace',
+                        f"baseline_disc refused this baseline, so mm "
+                        f"figures fall back to the first accepted frame "
+                        f"-- an ACTIVATED region. Treat active_area_mm2 "
+                        f"as uncalibrated until the baseline is fixed."))
+
     si = float(np.median([p['sep_intensity'] for p in per]))
     sr = float(np.median([p['sep_registered'] for p in per]))
     st = float(np.median([p['sep_texture'] for p in per]))
@@ -644,7 +722,22 @@ def report(d):
     s = d['settings']
     A(f"run settings    : min_diff {s.get('min_diff')}  "
       f"diff_thresh {s.get('diff_thresh')}  blur_px {s.get('blur_px')}  "
-      f"min_solidity {s.get('min_solidity')}  roi_frac {s.get('roi_frac')}")
+      f"min_solidity {s.get('min_solidity')}  roi_frac {s.get('roi_frac')}  "
+      f"tex_seg {s.get('tex_seg')}")
+    if 'foil_pct' in d:
+        A(f"electrodes      : texture footprint covers {d['foil_pct']:.1f}% "
+          f"of the frame")
+    if 'baseline_disc' in d:
+        ref = d.get('baseline_disc')
+        if ref:
+            A(f"resting disc    : diam {ref['diam_px']:.0f} px  centre "
+              f"({ref['cx']:.0f},{ref['cy']:.0f})  circ "
+              f"{ref.get('circ', 0):.2f}  fill {ref.get('solidity', 0):.2f}"
+              f"  conf {ref.get('conf', 0):.2f}  ->  "
+              f"{ref.get('mm_per_px', 0):.5f} mm/px")
+        else:
+            A("resting disc    : NOT FOUND (baseline_disc refused -- mm "
+              "figures fall back to an activated frame)")
     A("")
     A("VERDICTS")
     A("-" * 74)
@@ -681,17 +774,22 @@ def report(d):
     A("PER FRAME")
     A("-" * 74)
     A(f"{'kV':>6} {'shift':>6} {'pcr':>5} {'diff':>6} {'d-nbg':>6} "
-      f"{'d-aff':>6} {'gain':>5} {'otsu':>5} {'sep-I':>6} {'sep-A':>6} "
-      f"{'sep-T':>6} {'tex':>5} {'area':>8} {'rev':>4}")
+      f"{'d-aff':>6} {'gain':>5} {'g-pap':>6} {'otsu':>5} {'sep-I':>6} "
+      f"{'sep-A':>6} {'sep-T':>6} {'tex':>5} {'foil%':>6} {'area':>8} "
+      f"{'rev':>4}  method")
     for p in d['frames']:
         kv = '?' if np.isnan(p['kv']) else f"{p['kv']:.2f}"
+        ff = ('     -' if p.get('foil_frac') is None
+              else f"{100 * p['foil_frac']:>6.0f}")
         A(f"{kv:>6} {p['shift_px']:>6.2f} {p['pc_response']:>5.2f} "
           f"{p['diff_mean']:>6.2f} {p['diff_mean_normbg']:>6.2f} "
           f"{p['diff_mean_photofit']:>6.2f} {p['gain']:>5.2f} "
+          f"{p.get('gain_paper', float('nan')):>6.2f} "
           f"{p['otsu']:>5.0f} {p['sep_intensity']:>6.2f} "
           f"{p['sep_photofit']:>6.2f} {p['sep_texture']:>6.2f} "
-          f"{p['texture_ratio']:>5.2f} "
+          f"{p['texture_ratio']:>5.2f} {ff} "
           f"{p['area_px']:>8.0f} {'yes' if p['needs_review'] else 'no':>4}"
+          f"  {p.get('method', '')}"
           + ('  GATED' if p['gated'] else ''))
     A("")
     A("  shift  px of rig/camera movement vs the baseline (phase corr.);")
@@ -699,12 +797,17 @@ def report(d):
     A("  diff   mean ROI |frame-baseline|; d-nbg after the scalar norm_bg")
     A("         correction the detector applies; d-aff after a gain+offset")
     A("         fit. If d-aff is far below diff, the difference was mostly")
-    A("         photometry -- not the device. gain is that fit's slope.")
+    A("         photometry -- not the device. gain is that fit's slope;")
+    A("         g-pap is the same fit restricted to the paper background")
+    A("         (what norm_bg 2 actually applies since 2026-07-28).")
     A("  sep-I/A/T  separability of the raw / photometry-corrected absdiff")
     A("             and the wrinkle map: 0 = one noise population (no")
     A("             threshold splits it), 1 = two clean ones. Highest wins.")
     A("  tex    wrinkle-energy ratio at the ROI p90 (1.0 = no texture "
       "change)")
+    A("  foil%  fraction of the detected area lying on the electrode")
+    A("         strips -- the localization number; method is the winning")
+    A("         candidate tier ('tex-ratio' = the texture channel)")
     A("  area   what candidates() detects with the run's own settings;")
     A("         the A/B verdict above compares that against the other")
     A("         normalization mode, on the same frames")
@@ -946,15 +1049,49 @@ def contact_sheet(rundir, png, count=8, max_frames=24):
         idx = sorted({idx[round(j * (len(idx) - 1) / (count - 1.0))]
                       for j in range(count)})
 
-    cols = min(4, len(idx))
-    rowsn = int(np.ceil(len(idx) / cols))
+    panels = 1 + len(idx)                    # baseline panel leads
+    cols = min(4, panels)
+    rowsn = int(np.ceil(panels / cols))
     fig, axs = plt.subplots(rowsn, cols,
                             figsize=(4.2 * cols, 2.9 * rowsn), squeeze=False)
     for ax in axs.ravel():
         ax.axis('off')
+
+    # Panel 0: the baseline with the resting-disc trace and the foil
+    # footprint -- the two anchors (px→mm scale, electrode suppression)
+    # every other panel's detection depends on. Drawing them is the check
+    # that caught the 1.5x scale error no residual could see.
+    import cv2 as _cv2
+    ax0 = axs[0][0]
+    ax0.imshow(base, cmap='gray', vmin=0, vmax=255)
+    ax0.axis('off')
+    foil = se.foil_mask(base)
+    if foil is not None and foil.any():
+        fc, _h = _cv2.findContours(foil.astype(np.uint8),
+                                   _cv2.RETR_EXTERNAL,
+                                   _cv2.CHAIN_APPROX_SIMPLE)
+        for c in fc:
+            pts = c.reshape(-1, 2)
+            ax0.plot(np.append(pts[:, 0], pts[0, 0]),
+                     np.append(pts[:, 1], pts[0, 1]),
+                     lw=0.9, color='#ff9100')
+    ref = se.baseline_disc(base, settings)
+    head0 = "baseline"
+    if ref is not None:
+        pts = np.asarray(ref['contour'], float)
+        ax0.plot(np.append(pts[:, 0], pts[0, 0]),
+                 np.append(pts[:, 1], pts[0, 1]), lw=2.0, color='#00e676')
+        head0 += (f"  disc {ref['diam_px']:.0f} px  circ "
+                  f"{ref.get('circ', 0):.2f}  conf {ref.get('conf', 0):.2f}")
+    else:
+        head0 += "  disc NOT FOUND"
+    if foil is not None:
+        head0 += f"  foil {100 * float(foil.mean()):.0f}%"
+    ax0.set_title(head0, fontsize=8, loc='left')
+
     for k, i in enumerate(idx):
         gray = se.load_gray(se.frame_path(run, rows[i]) or '')
-        ax = axs[k // cols][k % cols]
+        ax = axs[(k + 1) // cols][(k + 1) % cols]
         if gray is None or gray.shape != base.shape:
             continue
         cands = se.candidates(base, gray, settings)
@@ -973,8 +1110,8 @@ def contact_sheet(rundir, png, count=8, max_frames=24):
         head = f"{kv:g} kV" if not np.isnan(kv) else "? kV"
         if best:
             rev = 'REVIEW' if se.needs_review(cands, settings) else 'ok'
-            head += (f"  {best['area_px']:.0f} px2  conf "
-                     f"{best['conf']:.2f}  {rev}")
+            head += (f"  {best['method']}  {best['area_px']:.0f} px2  "
+                     f"conf {best['conf']:.2f}  {rev}")
         else:
             head += "  no candidates (gated)"
         ax.set_title(head, fontsize=8, loc='left')

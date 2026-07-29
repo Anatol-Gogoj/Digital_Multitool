@@ -170,16 +170,42 @@ correctly review/manual-trace territory.
   (resting/disc-fit below 3.75 kV) is unlabeled and the audit says it
   is fine; label a few anyway as controls before trusting the bins.
 
+## Label re-score after the containment fix (same day)
+
+The containment-cap-for-diff-tiers task landed (PR #166, its own
+session) and the 13 stored labels were re-scored against fresh
+detection — no new operator time, exactly the re-calibration path the
+sidecar exists for:
+
+- **The fix's target is fixed**: the 5.25 kV pair now records the
+  disc-fit boundary — IoU vs the operator 0.42/0.43 → **0.82/0.82**.
+  Overall median across the labeled frames 0.47 → 0.57; disc-fit
+  median 0.84 wherever it fits.
+- **The remaining low-IoU mass is entirely the >= 5.5 kV wash-out
+  frames**: no boundary candidate can exist there (the ink is gone),
+  the winner flips between patch tiers at conf 0.94–0.99 with IoU
+  0.46–0.57 — and every one is HELD IN REVIEW by the 16–20%
+  cross-tier spread, so nothing misleading auto-accepts. (−57 µA at
+  6.0 kV: this is breakdown territory; the bright-wrinkle boundary
+  mode is the honest fix if those frames ever matter.)
+- **The queue is now conservative in the opposite direction**: the
+  onset disc-fits (4.0–5.25 kV) score IoU 0.82–0.89 against the human
+  while sitting audit-capped at conf 0.73–0.74 → review. Correct per
+  the audit (part of their arc IS interpolated), but the labels say
+  the interpolation is landing on the right boundary — a
+  method-conditional acceptance decision after the full ~30 labels
+  can recover those without loosening anything else.
+
 ## IMMEDIATE NEXT TASKS (operator time, in order)
 
 1. **Finish the ~30 labels**: P3 onset frames (4.5–5.75 kV), a few
    1.5–3 kV `audit_bias` resting frames (each trace is both the
    corrected measurement and a label), and a handful of clean
    auto-accepted frames as controls — 13/~30 done (155425).
-2. **After the containment-cap task lands**: re-detect, re-score the
-   stored labels against the new winners, re-run
-   `python sldea_trace.py <runs>` — then decide `accept_conf`
-   method-conditionally.
+2. **At ~30 labels**: re-run `python sldea_trace.py <runs>` plus a
+   re-score against current winners, then decide `accept_conf`
+   method-conditionally (including whether audit-capped disc-fits at
+   IoU >= 0.8 may auto-accept).
 3. Spot-read the new review queue on the contact sheets — the capped
    frames are annotated with their tags in Edge Review and the
    diagnostic (`audit_nostep` / `audit_bias` per frame in the JSON,

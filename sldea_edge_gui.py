@@ -15,6 +15,7 @@ overlays for audit.
 
 With --auto (used by the SLDEA tab's "auto process"), detection starts
 immediately on launch. Keyboard: 1/2/3 pick a candidate, R reject,
+T trace the boundary by hand (#162 -- also the labeling instrument),
 Left/Right navigate, Enter accept + next.
 """
 import os
@@ -27,7 +28,10 @@ tk_fontfix.apply()                     # colour emoji crash Tk
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+import numpy as np
+
 import sldea_edge as se
+import sldea_trace as strc
 
 DEFAULT_PARENT = os.environ.get('SCPI_SLDEA_DIR',
                                 '/mnt/shareDrive/robot_incubator/SLDEA_data')
@@ -128,6 +132,8 @@ class EdgeReviewApp:
                    command=self._accept_next).pack(side=tk.LEFT)
         ttk.Button(bt, text="✘ Reject (R)",
                    command=self._reject).pack(side=tk.LEFT, padx=6)
+        ttk.Button(bt, text="✏ Trace (T)",
+                   command=self._trace).pack(side=tk.LEFT)
         nav = ttk.Frame(side)
         nav.pack(fill='x')
         ttk.Button(nav, text="◀ Prev",
@@ -151,6 +157,8 @@ class EdgeReviewApp:
                         ('<Key-c>', lambda e: self._pick_k(2)),
                         ('<Key-r>', lambda e: self._reject()),
                         ('<Key-R>', lambda e: self._reject()),
+                        ('<Key-t>', lambda e: self._trace()),
+                        ('<Key-T>', lambda e: self._trace()),
                         ('<Return>', lambda e: self._accept_next()),
                         ('<Left>', lambda e: self._step(-1)),
                         ('<Right>', lambda e: self._step(+1))):
@@ -537,6 +545,71 @@ class EdgeReviewApp:
         self._recount()
         self._advance()
 
+    # ---------------- manual trace (#162) ----------------
+    def _trace(self):
+        """Trace the boundary by hand: the recovery path when every
+        candidate is rejected, and the labeling instrument for the
+        conf-vs-IoU calibration. Allowed even when a candidate exists --
+        correcting a near-miss is a valuable label, not a rejection."""
+        i = self._current()
+        if self.run is None or i is None:
+            messagebox.showinfo("Trace", "Pick a run first")
+            return
+        path = se.frame_path(self.run, self.run['rows'][i])
+        if not path or not os.path.exists(path):
+            messagebox.showinfo("Trace", "This row has no frame on disk.")
+            return
+        scale = se.mm_per_px(self.results, self.run['rows'], self.settings,
+                             baseline_ref=self.manual_ref or self.base_ref)
+        TraceWindow(self, i, path, mm_per_px=scale)
+
+    def _trace_done(self, i, points, meta):
+        """The closed polygon becomes the frame's accepted result AND a
+        ground-truth label appended to edge_labels.json (atomic; tracing
+        itself never touches data.csv/setup.txt -- the result flows
+        through the normal Save path)."""
+        poly = np.asarray(points, np.float64)
+        area = strc.polygon_area(poly)
+        cx, cy = strc.polygon_centroid(poly)
+        wrinkle = None
+        gray = se.load_gray(se.frame_path(self.run, self.run['rows'][i]))
+        try:
+            base = self._base_gray()
+            if base is not None and gray is not None:
+                wrinkle = se._wrinkle_ratio(base, gray,
+                                            poly.astype(np.int32))
+        except Exception:
+            wrinkle = None
+        res = {'method': 'manual-trace', 'conf': 1.0, 'chosen_by': 'user',
+               'area_px': float(area),
+               'diam_px': strc.equivalent_diam(area),
+               'cx': float(cx), 'cy': float(cy),
+               'contour': poly.astype(np.int32), 'solidity': 1.0,
+               'spread_pct': 0.0, 'ci85_pct': None, 'wrinkle': wrinkle,
+               'n_points': len(poly)}
+        self.results[i] = res
+        self.auto_idx.discard(i)
+        self._recount()
+        # every trace is a label, stored with the machine's best candidate
+        # at trace time so IoU is computable offline (#162)
+        cands = self.cands_all.get(i, [])
+        shape = gray.shape if gray is not None else (0, 0)
+        rec = strc.label_record(i, self.run['rows'][i], poly, shape,
+                                machine=cands[0] if cands else None,
+                                **meta)
+        try:
+            strc.append_label(self.rundir, rec)
+            n = len(strc.load_labels(self.rundir))
+            self.status.config(
+                text=f"manual trace accepted ({area:.0f} px², "
+                     f"{len(poly)} points) — label {n} in "
+                     f"{strc.LABELS_NAME}")
+        except (OSError, ValueError) as e:
+            messagebox.showerror(
+                "Trace label", f"The trace is ACCEPTED for this frame, but "
+                f"appending the label sidecar failed:\n\n{e}")
+        self._show()
+
     def _advance(self):
         """After accept/reject: jump to the next unreviewed frame (first one
         after the current position, wrapping), else just the next frame."""
@@ -800,6 +873,15 @@ class EdgeReviewApp:
                             "frame (ignores electrode glare at the edges)",
                 'accept_conf': "auto-accept at/above this confidence (0–1)",
                 'spread_pct': "candidate area disagreement (%) forcing review",
+                'audit_nostep_pct': "self-audit gate: % of the winning "
+                                    "boundary's arc with no measurable ink "
+                                    "step under it above which the frame is "
+                                    "capped to review; 0 disables",
+                'audit_bias_px': "self-audit gate: median offset (px) "
+                                 "between the fitted boundary and the "
+                                 "measured ink step above which the frame "
+                                 "is capped to review (catches resting "
+                                 "claims gone stale); 0 disables",
                 'breakdown_ua': "flag breakdown above this Trek current (µA)",
                 'area_jump_pct': "flag breakdown on area collapse (%) while "
                                  "voltage rises",
@@ -841,6 +923,341 @@ class EdgeReviewApp:
         ttk.Button(bf, text="Apply", command=apply).pack(side=tk.LEFT, padx=4)
         ttk.Button(bf, text="Apply + Save to setup.txt",
                    command=lambda: apply(True)).pack(side=tk.LEFT, padx=4)
+
+
+class TraceWindow(tk.Toplevel):
+    """Manual boundary tracing (#162): click points that close into the
+    outer edge of the active area. All geometry/undo/coordinate state
+    lives in sldea_trace (headless-tested); this class only translates
+    Tk events into model calls and repaints.
+
+    Interaction: left-click add point (drag an existing point to move
+    it, right-click deletes it), wheel zooms about the cursor, middle-
+    or space-drag pans, F fits, Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) undo/
+    redo, Enter / double-click / clicking the first point closes,
+    Esc cancels. The polygon is stored in FULL-RES image px throughout
+    -- zoom can never desynchronize clicks from image coordinates."""
+
+    CV_W, CV_H = 900, 620
+    GRAB_PX = 8            # view-px radius: press on a point = drag it
+    DEL_PX = 12            # view-px radius for right-click delete
+
+    def __init__(self, app, row_index, img_path, mm_per_px=None):
+        super().__init__(app.root)
+        from PIL import Image
+        self.app = app
+        self.row_index = row_index
+        self.mm_per_px = mm_per_px
+        self.img = Image.open(img_path).convert('RGB')
+        self.gray = se.load_gray(img_path)
+        row = app.run['rows'][row_index]
+        self.title(f"Trace boundary — step {row.get('step')} "
+                   f"[{row.get('tag')}] {row.get('nominal_kV')} kV")
+        self.model = strc.TraceModel()
+        self.vt = strc.ViewTransform()
+        self.vt.fit(self.img.width, self.img.height, self.CV_W, self.CV_H)
+        self._t_open = time.time()
+        self._snap_used = False
+        self._drag_idx = None
+        self._drag_orig = None
+        self._pan_from = None
+        self._space = False
+        self._cursor = None
+        self._photo = None
+
+        bar = ttk.Frame(self, padding=4)
+        bar.pack(fill='x')
+        self.undo_btn = ttk.Button(bar, text="↶ Undo",
+                                   command=self._undo, state='disabled')
+        self.undo_btn.pack(side=tk.LEFT)
+        self.redo_btn = ttk.Button(bar, text="↷ Redo",
+                                   command=self._redo, state='disabled')
+        self.redo_btn.pack(side=tk.LEFT, padx=4)
+        ttk.Button(bar, text="⟲ Restart placements…",
+                   command=self._restart).pack(side=tk.LEFT, padx=(8, 0))
+        self.snap_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="edge snap",
+                        variable=self.snap_var).pack(side=tk.LEFT,
+                                                     padx=(12, 0))
+        self.ov_rest = tk.BooleanVar(value=True)
+        self.ov_cand = tk.BooleanVar(value=False)
+        self.ov_prev = tk.BooleanVar(value=False)
+        for var, txt in ((self.ov_rest, "resting disc"),
+                         (self.ov_cand, "candidates"),
+                         (self.ov_prev, "prev outline")):
+            ttk.Checkbutton(bar, text=txt, variable=var,
+                            command=self._repaint).pack(side=tk.LEFT,
+                                                        padx=(6, 0))
+        ttk.Button(bar, text="✔ Done (Enter)",
+                   command=self._done).pack(side=tk.RIGHT)
+        ttk.Button(bar, text="Cancel (Esc)",
+                   command=self._cancel).pack(side=tk.RIGHT, padx=6)
+        self.zoom_lbl = ttk.Label(bar, text="")
+        self.zoom_lbl.pack(side=tk.RIGHT, padx=8)
+
+        self.cv = tk.Canvas(self, width=self.CV_W, height=self.CV_H,
+                            bg='#111', highlightthickness=0,
+                            cursor='crosshair')
+        self.cv.pack(padx=4, pady=4)
+        self.stat = tk.Label(self, anchor='w', justify='left',
+                             text="click to place points — they close "
+                                  "into the outer edge of the active area")
+        self.stat.pack(fill='x', padx=6, pady=(0, 4))
+
+        self.cv.bind('<Button-1>', self._press)
+        self.cv.bind('<B1-Motion>', self._drag)
+        self.cv.bind('<ButtonRelease-1>', self._release)
+        self.cv.bind('<Button-3>', self._delete_near)
+        self.cv.bind('<Double-Button-1>', lambda e: self._done())
+        self.cv.bind('<Motion>', self._motion)
+        self.cv.bind('<MouseWheel>',
+                     lambda e: self._wheel(e.x, e.y, e.delta / 120.0))
+        self.cv.bind('<Button-4>', lambda e: self._wheel(e.x, e.y, 1))
+        self.cv.bind('<Button-5>', lambda e: self._wheel(e.x, e.y, -1))
+        self.cv.bind('<Button-2>', self._pan_start)
+        self.cv.bind('<B2-Motion>', self._pan_move)
+        self.bind('<Control-z>', lambda e: self._undo())
+        self.bind('<Control-y>', lambda e: self._redo())
+        self.bind('<Control-Z>', lambda e: self._redo())   # Ctrl+Shift+Z
+        self.bind('<Key-f>', lambda e: self._fit())
+        self.bind('<Key-F>', lambda e: self._fit())
+        self.bind('<Return>', lambda e: self._done())
+        self.bind('<Escape>', lambda e: self._cancel())
+        self.bind('<KeyPress-space>', lambda e: self._set_space(True))
+        self.bind('<KeyRelease-space>', lambda e: self._set_space(False))
+        self.protocol('WM_DELETE_WINDOW', self._cancel)
+        self.transient(app.root)
+        self.grab_set()
+        self.cv.focus_set()
+        self._repaint()
+
+    # -- coordinate helpers ---------------------------------------------
+    def _img_xy(self, ev):
+        return self.vt.to_image(ev.x, ev.y)
+
+    def _near_point(self, ev, r_view):
+        ix, iy = self._img_xy(ev)
+        return self.model.nearest(ix, iy, r_view / self.vt.zoom)
+
+    # -- pointer events -------------------------------------------------
+    def _press(self, ev):
+        if self._space:
+            self._pan_start(ev)
+            return
+        idx = self._near_point(ev, self.GRAB_PX)
+        pts = self.model.points
+        if idx == 0 and len(pts) >= 3:
+            self._done()
+            return
+        if idx is not None:
+            self._drag_idx = idx
+            self._drag_orig = pts[idx]
+            return
+        ix, iy = self._img_xy(ev)
+        if self.snap_var.get() and self.gray is not None:
+            ix, iy = strc.edge_snap(self.gray, ix, iy)
+            self._snap_used = True
+        self.model.add(ix, iy)
+        self._vectors()
+
+    def _drag(self, ev):
+        if self._pan_from is not None:
+            self._pan_move(ev)
+            return
+        if self._drag_idx is None:
+            return
+        self.model.points[self._drag_idx] = self._img_xy(ev)
+        self._vectors()
+
+    def _release(self, ev):
+        if self._pan_from is not None:
+            self._pan_from = None
+            return
+        if self._drag_idx is None:
+            return
+        idx, orig = self._drag_idx, self._drag_orig
+        self._drag_idx = self._drag_orig = None
+        ix, iy = self._img_xy(ev)
+        if self.snap_var.get() and self.gray is not None:
+            ix, iy = strc.edge_snap(self.gray, ix, iy)
+            self._snap_used = True
+        # reconcile through the op stack: transient motion above was a
+        # preview; the MOVE is one atomic, undoable op
+        self.model.points[idx] = orig
+        self.model.move(idx, ix, iy)
+        self._vectors()
+
+    def _delete_near(self, ev):
+        idx = self._near_point(ev, self.DEL_PX)
+        if idx is not None:
+            self.model.delete(idx)
+            self._vectors()
+
+    def _motion(self, ev):
+        self._cursor = (ev.x, ev.y)
+        self._vectors()
+
+    # -- view -----------------------------------------------------------
+    def _wheel(self, vx, vy, steps):
+        self.vt.zoom_at(vx, vy, 1.15 ** steps)
+        self._repaint()
+
+    def _pan_start(self, ev):
+        self._pan_from = (ev.x, ev.y)
+
+    def _pan_move(self, ev):
+        if self._pan_from is None:
+            return
+        dx, dy = ev.x - self._pan_from[0], ev.y - self._pan_from[1]
+        self._pan_from = (ev.x, ev.y)
+        self.vt.pan_view(dx, dy)
+        self._repaint()
+
+    def _set_space(self, held):
+        self._space = held
+        if not held:
+            self._pan_from = None
+
+    def _fit(self):
+        self.vt.fit(self.img.width, self.img.height, self.CV_W, self.CV_H)
+        self._repaint()
+
+    # -- history --------------------------------------------------------
+    def _undo(self):
+        if self.model.undo():
+            self._vectors()
+
+    def _redo(self):
+        if self.model.redo():
+            self._vectors()
+
+    def _restart(self):
+        if not self.model.points:
+            return
+        if messagebox.askyesno("Restart placements",
+                               "Remove ALL placed points and start over?\n"
+                               "(This is one undoable step.)",
+                               parent=self):
+            self.model.restart()
+            self._vectors()
+
+    # -- painting -------------------------------------------------------
+    def _repaint(self):
+        """Photo layer: the visible crop of the full-res frame, resized
+        to the viewport (nearest-neighbour when zoomed in, so pixels stay
+        honest). Vector layer painted on top."""
+        from PIL import Image, ImageTk
+        t = self.vt
+        ix0, iy0 = t.to_image(0, 0)
+        ix1, iy1 = t.to_image(self.CV_W, self.CV_H)
+        cx0, cy0 = max(0, int(ix0)), max(0, int(iy0))
+        cx1 = min(self.img.width, int(ix1) + 2)
+        cy1 = min(self.img.height, int(iy1) + 2)
+        self.cv.delete('img')
+        if cx1 > cx0 and cy1 > cy0:
+            crop = self.img.crop((cx0, cy0, cx1, cy1))
+            dw = max(1, int(round((cx1 - cx0) * t.zoom)))
+            dh = max(1, int(round((cy1 - cy0) * t.zoom)))
+            res = Image.NEAREST if t.zoom >= 2.0 else Image.BILINEAR
+            self._photo = ImageTk.PhotoImage(crop.resize((dw, dh), res))
+            vx, vy = t.to_view(cx0, cy0)
+            self.cv.create_image(int(vx), int(vy), anchor='nw',
+                                 image=self._photo, tags='img')
+        self.cv.tag_lower('img')
+        self.zoom_lbl.config(text=f"zoom {100 * t.zoom:.0f}%")
+        self._vectors()
+
+    def _poly_view(self, contour):
+        return [c for x, y in np.asarray(contour, float)
+                for c in self.vt.to_view(x, y)]
+
+    def _vectors(self):
+        self.cv.delete('vec')
+        t = self.vt
+        # context overlays (recorded in the label so calibration knows
+        # what the operator could see)
+        if self.ov_rest.get() and self.app.base_ref is not None \
+                and self.app.base_ref.get('contour') is not None:
+            self.cv.create_polygon(
+                *self._poly_view(self.app.base_ref['contour']),
+                outline='#888888', fill='', dash=(4, 4), tags='vec')
+        if self.ov_cand.get():
+            for k, c in enumerate(self.app.cands_all.get(self.row_index,
+                                                         [])):
+                self.cv.create_polygon(
+                    *self._poly_view(c['contour']),
+                    outline=CAND_COLORS[k], fill='', dash=(2, 4),
+                    tags='vec')
+        if self.ov_prev.get():
+            prev = None
+            for j in self.app.frame_rows:
+                if j >= self.row_index:
+                    break
+                r = self.app.results.get(j)
+                if r:
+                    prev = r
+            if prev is not None:
+                self.cv.create_polygon(
+                    *self._poly_view(prev['contour']),
+                    outline='#b39ddb', fill='', dash=(6, 3), tags='vec')
+        pts = self.model.points
+        vp = [self.vt.to_view(x, y) for x, y in pts]
+        if len(vp) >= 2:
+            for a, b in zip(vp[:-1], vp[1:]):
+                self.cv.create_line(*a, *b, fill='#00e676', width=2,
+                                    tags='vec')
+        if len(vp) >= 3:
+            self.cv.create_line(*vp[-1], *vp[0], fill='#00e676',
+                                dash=(3, 4), tags='vec')
+        if self._cursor and vp and self._drag_idx is None:
+            self.cv.create_line(*vp[-1], *self._cursor, fill='#80cbc4',
+                                dash=(2, 4), tags='vec')
+        for k, (vx, vy) in enumerate(vp):
+            r = 5 if k == 0 else 3
+            self.cv.create_oval(vx - r, vy - r, vx + r, vy + r,
+                                outline='#00e676',
+                                width=2 if k == 0 else 1,
+                                fill='#003322', tags='vec')
+        self.undo_btn.config(
+            state='normal' if self.model.can_undo() else 'disabled')
+        self.redo_btn.config(
+            state='normal' if self.model.can_redo() else 'disabled')
+        area = strc.polygon_area(pts)
+        mm = (f"  =  {area * self.mm_per_px ** 2:.1f} mm²"
+              if self.mm_per_px and area else "")
+        self.stat.config(
+            text=f"{len(pts)} point(s) — area {area:.0f} px²{mm} — "
+                 f"click add · drag move · right-click delete · wheel "
+                 f"zoom · middle/space drag pan · Enter/double-click/"
+                 f"first-point close · F fit · Esc cancel")
+
+    # -- finish ---------------------------------------------------------
+    def _done(self):
+        pts = list(self.model.points)
+        if len(pts) < 3:
+            messagebox.showinfo("Trace", "Place at least 3 points to "
+                                "close the outline.", parent=self)
+            return
+        if strc.self_intersects(pts) and not messagebox.askyesno(
+                "Trace", "The outline crosses itself. Keep it anyway?",
+                parent=self):
+            return
+        meta = {'zoom': self.vt.zoom,
+                'overlays': {'resting': bool(self.ov_rest.get()),
+                             'candidates': bool(self.ov_cand.get()),
+                             'prev': bool(self.ov_prev.get())},
+                'elapsed_s': time.time() - self._t_open,
+                'snapped': self._snap_used}
+        self.grab_release()
+        self.destroy()
+        self.app._trace_done(self.row_index, pts, meta)
+
+    def _cancel(self):
+        if self.model.points and not messagebox.askyesno(
+                "Trace", "Discard the traced points?", parent=self):
+            return
+        self.grab_release()
+        self.destroy()
 
 
 def main():

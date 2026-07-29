@@ -214,6 +214,39 @@ and with the ~5 kV event all previous evidence pointed at.
    device is ever built whose leads leave the disc away from the strip
    azimuths, the exclusion needs the lead's own azimuth.
 
+## Generalization check (2026-07-29) — the 2026-07-23 dataset
+
+Ran unmodified on `D:\Downloads\SLDEA_data\SLDEA_20260723_*` — a
+different campaign entirely: color frames, the full 3D-printed annulus
+in frame, a TEXTURED blue foam background instead of paper, tape strips
+entering vertically (152205/155425) or horizontally (233451), a much
+smaller higher-contrast disc, one run at camera gain 44, and a steady
+camera (fitted gain 1.00 — the P3 photometric pedestal was that
+campaign's artifact, and the fit correctly no-ops here). Zero retuning.
+
+- **Scale**: disc 371/372 px on the two afternoon runs of the same
+  device 32 min apart (0.3% repeatability), 362 px at night; circ 0.98,
+  conf 0.85–0.88 on all three. Verified on the contact-sheet baseline
+  panels.
+- **Detection**: resting auto-accepts the low ramp; disc-fit tracks the
+  expansion (CI 0.5–0.7%) mid-ramp; review 6/40 and 6/32 frames below
+  5.2 kV at median conf 0.83–0.87.
+- **The flags above 5.2 kV are the device, not the detector**: both
+  devices break down — the CSVs record −78 µA at 6.0 kV (152205) and
+  −26 → −123 µA over 5.6–6.4 kV (233451, which stopped at 7.6 of a
+  planned 10 kV). Wrinkle onset ~5.2–5.6 kV is visible in the frames;
+  post-breakdown frames yield small flagged non-disc changes, never a
+  fabricated disc.
+- **Known limits observed** (both fail toward review, not toward wrong
+  numbers): the annulus' print texture partially enters the foil mask
+  (harmless — a static object; costs a few blocked ray azimuths), and
+  under violent bright wrinkling near breakdown the ink edge washes out
+  and disc-fit yields to tex/diff candidates with review. A
+  "bright-wrinkle boundary" mode could extend coverage there if those
+  frames ever matter; they are post-failure frames today.
+- The aborted 2-frame run (233426) and the frameless folder (145259)
+  are handled gracefully (no crash; nothing invented).
+
 ## Decision log (2026-07-28, both sessions)
 
 Every entry is a choice that could have gone another way; the evidence

@@ -129,19 +129,57 @@ pools every `edge_labels.json` it finds and prints the conf-vs-IoU
 table (P(IoU >= 0.8) per conf bin, per-method medians) — the curve
 that decides what `accept_conf` may rise to.
 
+## Calibration round 1 (2026-07-29) — the first 13 labels
+
+The operator traced 13 review-queue frames of 155425 (3.75–6 kV) with
+the new tool. First conf-vs-IoU data, and it answers the "could we be
+more confident that we've circled the noise?" question with numbers:
+
+| conf bin | n | P(IoU>=0.8) | median IoU |
+|----------|---|-------------|------------|
+| 0.50–0.75 | 5 | 0.40 | 0.57 |
+| 0.75–0.95 | 2 | 0.00 | 0.42 |
+| 0.95–1.00 | 6 | 0.00 | 0.46 |
+
+**On this sample conf is ANTI-calibrated, and the reason is method
+semantics, not noise.** Every conf >= 0.95 label is a `diff-hi` winner
+at 5.5–6 kV (pair-confirmed to 0.97–0.99, correlated): it outlines the
+interior wrinkle PATCH, IoU 0.39–0.47 against the operator's boundary.
+The boundary tracker, wherever it can fit at all, agrees with the
+human at IoU 0.82–0.89 (median 0.84 over 4 frames) — including the
+5.25 kV pair where disc-fit fit fine (IoU 0.83) but was outranked by
+two patches and TRUNCATED out of the top-3. Above 5.5 kV the ink
+washes out and the fitter cannot run: no boundary-shaped candidate
+exists there today (the known bright-wrinkle limit); those frames are
+correctly review/manual-trace territory.
+
+**Consequences:**
+- **`accept_conf` stays at 0.75.** The curve is non-monotone because
+  the bar means different things per method (disc-fit 0.74 → IoU
+  0.85–0.89; diff-hi 0.99 → 0.46). Raise it only after the ranking fix
+  below and a re-calibration, method-conditional.
+- A follow-up task is running (separate session, spawned 2026-07-29):
+  extend the containment cap so diff patches inside a valid disc-fit
+  are demoted like tex patches already are. The 5.25 kV pair is its
+  smoking gun.
+- Re-calibration costs no new operator time: the polygons are stored,
+  so after any ranking change, re-run detection on the labeled frames
+  and score the NEW winners against the stored traces offline.
+- Sample bias to keep in mind: all 13 labels are one run's review
+  queue — the hard frames. The clean auto-accepted majority
+  (resting/disc-fit below 3.75 kV) is unlabeled and the audit says it
+  is fine; label a few anyway as controls before trusting the bins.
+
 ## IMMEDIATE NEXT TASKS (operator time, in order)
 
-1. **Label ~30 frames across both campaigns** with the tracer, chosen
-   where the labels matter most: the onset band (4.5–5.75 kV, both
-   campaigns — the interpolated-arc frames now queued for review), a
-   few of the 1.5–3 kV `audit_bias` resting frames (each trace is both
-   the corrected measurement and a label), and a handful of clean
-   mid-ramp disc-fits as controls. Every review-queue frame traced =
-   one measurement fixed + one label earned.
-2. **Run `python sldea_trace.py` over the runs** → the conf-vs-IoU
-   curve → raise `accept_conf` to whatever the curve supports. This
-   also audits the pair-confirm/hysteresis boosts (correlated errors
-   included), which no internal check can.
+1. **Finish the ~30 labels**: P3 onset frames (4.5–5.75 kV), a few
+   1.5–3 kV `audit_bias` resting frames (each trace is both the
+   corrected measurement and a label), and a handful of clean
+   auto-accepted frames as controls — 13/~30 done (155425).
+2. **After the containment-cap task lands**: re-detect, re-score the
+   stored labels against the new winners, re-run
+   `python sldea_trace.py <runs>` — then decide `accept_conf`
+   method-conditionally.
 3. Spot-read the new review queue on the contact sheets — the capped
    frames are annotated with their tags in Edge Review and the
    diagnostic (`audit_nostep` / `audit_bias` per frame in the JSON,
@@ -494,6 +532,15 @@ contradiction found", not "validated correct".
    shows up as no-step arc. Not yet implemented; small.
 3. Operator spot-reads of the contact sheets (minutes per run).
 
+**Status 2026-07-29: all three now exist.** The audit (2) is
+implemented and gates acceptance; the spot-read (3) happened for
+155425; and the first 13 labels (1) are in — see "Calibration round 1"
+above. The question this section asked is answered for the diff-patch
+channel: at conf 0.97–0.99 the machine HAD circled a subset of the
+active area, at IoU 0.39–0.47 against the human boundary. The
+boundary tracker where it runs measures IoU 0.82–0.89. conf remains a
+review-ordering score until the method-conditional re-calibration.
+
 ## Generalization check (2026-07-29) — the 2026-07-23 dataset
 
 Ran unmodified on `D:\Downloads\SLDEA_data\SLDEA_20260723_*` — a
@@ -561,6 +608,7 @@ column is what settled it. Do not relitigate these without new evidence.
 | An audit cap survives pair confirmation | Two frames wrong the same way agree; the audit's per-boundary verdict outranks cross-frame consistency | reconcile_pairs; test_pair_agreement_cannot_lift_an_audit_capped_boundary |
 | Labels are full polygons + the machine's candidate at trace time, in an append-only atomic sidecar | IoU must be computable offline without re-detection; a mid-write failure must never destroy accumulated ground truth | #162 spec; edge_labels.json; corrupt file refuses rather than clobbers |
 | Manual traces flow through the NORMAL accept path (method 'manual-trace', conf 1.0) | One save path, one CSV semantics; tracing is also the recovery path for frames where the detector honestly gives up | apply_results note 'edge:manual-trace conf 1.00 (user)' |
+| accept_conf stays 0.75 until a method-conditional re-calibration after the containment-cap fix | Calibration round 1: conf is anti-calibrated across methods — diff-hi at 0.97–0.99 scores IoU 0.39–0.47 (interior patch, correlated pair boosts), disc-fit at 0.70–0.74 scores 0.82–0.89 | 13 labels, 155425; "Calibration round 1" section |
 
 ## Repo state you are inheriting
 

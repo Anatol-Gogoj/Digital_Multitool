@@ -1,0 +1,474 @@
+#!/usr/bin/env python3
+"""Manual boundary tracing for SLDEA Edge Review -- the model half (#162).
+
+Two jobs in one feature (issue #162, Anatol 2026-07-29):
+
+1. RECOVERY: when every automated candidate is rejected, the operator
+   finishes the measurement by tracing the outer edge of the active area
+   by hand -- post-breakdown and event frames, exactly where the
+   detector honestly gives up.
+2. GROUND TRUTH: every trace is a label. The polygon is stored full-res
+   alongside the machine's best candidate at trace time, so the
+   conf-vs-IoU calibration curve is computable offline later without
+   re-detection. That curve is what can turn conf from a review-ordering
+   score into a bar that MEANS something (SLDEA_HANDOFF.md, Open #1).
+
+No Tk in here: geometry, the undo/redo op stack, view<->image coordinate
+mapping, the edge-snap magnet and the label sidecar are all headless and
+unit-tested (tests/test_sldea_trace.py). sldea_edge_gui.TraceWindow is a
+thin interaction layer over this module.
+
+Labels live in edge_labels.json BESIDE data.csv -- append-only across
+sessions, atomic tmp+replace (same pattern as save_settings). Tracing
+never touches data.csv or setup.txt itself; the traced polygon flows
+through the normal accept -> apply_results -> write_back path instead.
+
+CLI: python sldea_trace.py <run-or-parent> [...] prints the pooled
+conf-vs-IoU calibration summary from every edge_labels.json found.
+"""
+import getpass
+import json
+import os
+import time
+
+import numpy as np
+
+LABELS_NAME = 'edge_labels.json'
+LABELS_VERSION = 1
+
+
+# ---------------------------------------------------------------------------
+# polygon geometry
+# ---------------------------------------------------------------------------
+
+def polygon_area(pts):
+    """Shoelace area (px^2) of a closed polygon given as [(x, y), ...].
+    The closing edge last->first is implied. Absolute value: winding
+    direction is a mouse-path accident, not information."""
+    p = np.asarray(pts, np.float64)
+    if len(p) < 3:
+        return 0.0
+    x, y = p[:, 0], p[:, 1]
+    return float(abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+                 / 2.0)
+
+
+def polygon_centroid(pts):
+    """Area centroid; falls back to the vertex mean for degenerate
+    (collinear / <3 point) input."""
+    p = np.asarray(pts, np.float64)
+    if len(p) < 3:
+        return (float(p[:, 0].mean()), float(p[:, 1].mean())) if len(p) \
+            else (0.0, 0.0)
+    x, y = p[:, 0], p[:, 1]
+    xn, yn = np.roll(x, -1), np.roll(y, -1)
+    cross = x * yn - xn * y
+    a = cross.sum() / 2.0
+    if abs(a) < 1e-9:
+        return float(x.mean()), float(y.mean())
+    cx = float(((x + xn) * cross).sum() / (6.0 * a))
+    cy = float(((y + yn) * cross).sum() / (6.0 * a))
+    return cx, cy
+
+
+def equivalent_diam(area_px):
+    """Diameter of the circle with this area -- what active_diam_mm is
+    derived from for a non-elliptical outline."""
+    return float(2.0 * np.sqrt(max(area_px, 0.0) / np.pi))
+
+
+def _segs_cross(a, b, c, d):
+    """Proper intersection of open segments ab and cd (shared endpoints
+    do not count -- adjacent polygon edges always share one)."""
+    def orient(p, q, r):
+        v = (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+        return 0 if abs(v) < 1e-12 else (1 if v > 0 else -1)
+    o1, o2 = orient(a, b, c), orient(a, b, d)
+    o3, o4 = orient(c, d, a), orient(c, d, b)
+    return o1 != o2 and o3 != o4 and 0 not in (o1, o2, o3, o4)
+
+
+def self_intersects(pts):
+    """True when any two non-adjacent edges of the closed polygon cross.
+    O(n^2) -- hand traces are tens of points, not thousands."""
+    p = [tuple(map(float, q)) for q in pts]
+    n = len(p)
+    if n < 4:
+        return False
+    edges = [(p[i], p[(i + 1) % n]) for i in range(n)]
+    for i in range(n):
+        for j in range(i + 1, n):
+            if j == i or (j + 1) % n == i or (i + 1) % n == j:
+                continue                      # adjacent (or same) edges
+            if _segs_cross(*edges[i], *edges[j]):
+                return True
+    return False
+
+
+def polygon_mask(pts, shape):
+    """Filled uint8 mask (0/1) of the polygon on an (h, w) canvas."""
+    import cv2
+    m = np.zeros(shape[:2], np.uint8)
+    p = np.asarray(pts, np.float64)
+    if len(p) >= 3:
+        cv2.fillPoly(m, [np.round(p).astype(np.int32)], 1)
+    return m
+
+
+def iou(pts_a, pts_b, shape):
+    """Intersection-over-union of two outlines rasterized on `shape`.
+    -> float in [0, 1]; 0.0 when either is degenerate."""
+    a, b = polygon_mask(pts_a, shape), polygon_mask(pts_b, shape)
+    union = int((a | b).sum())
+    if not union:
+        return 0.0
+    return float(int((a & b).sum()) / union)
+
+
+# ---------------------------------------------------------------------------
+# view <-> image coordinate mapping (zoom / pan)
+# ---------------------------------------------------------------------------
+
+class ViewTransform:
+    """Zoom+pan mapping between full-res image px and view (canvas) px.
+
+    view = (image - origin) * zoom. Kept as plain floats so the Tk layer
+    cannot desynchronize click coordinates from image coordinates -- the
+    polygon is ALWAYS stored full-res (#162 acceptance criterion)."""
+
+    def __init__(self, zoom=1.0, ox=0.0, oy=0.0,
+                 min_zoom=0.05, max_zoom=16.0):
+        self.zoom = float(zoom)
+        self.ox, self.oy = float(ox), float(oy)
+        self.min_zoom, self.max_zoom = float(min_zoom), float(max_zoom)
+
+    def to_view(self, ix, iy):
+        return ((ix - self.ox) * self.zoom, (iy - self.oy) * self.zoom)
+
+    def to_image(self, vx, vy):
+        return (vx / self.zoom + self.ox, vy / self.zoom + self.oy)
+
+    def zoom_at(self, vx, vy, factor):
+        """Rescale about the cursor: the image point under (vx, vy)
+        stays under (vx, vy). Factor is clamped to the zoom limits."""
+        ix, iy = self.to_image(vx, vy)
+        z = max(self.min_zoom, min(self.max_zoom, self.zoom * factor))
+        self.zoom = z
+        self.ox = ix - vx / z
+        self.oy = iy - vy / z
+
+    def pan_view(self, dvx, dvy):
+        """Shift by a view-space drag delta (image follows the mouse)."""
+        self.ox -= dvx / self.zoom
+        self.oy -= dvy / self.zoom
+
+    def fit(self, img_w, img_h, view_w, view_h):
+        """Whole image centred in the viewport ('F')."""
+        z = min(view_w / float(img_w), view_h / float(img_h))
+        self.zoom = max(self.min_zoom, min(self.max_zoom, z))
+        self.ox = (img_w - view_w / self.zoom) / 2.0
+        self.oy = (img_h - view_h / self.zoom) / 2.0
+
+
+# ---------------------------------------------------------------------------
+# the undo/redo op stack
+# ---------------------------------------------------------------------------
+
+class TraceModel:
+    """Polygon-in-progress with a single history of atomic ops.
+
+    Ops: add / move / delete / restart. Restart is itself ONE undoable
+    op (#162: the confirm dialog is not the only safety net). Any new op
+    clears the redo stack. Points are full-res image px."""
+
+    def __init__(self):
+        self.points = []
+        self._undo = []
+        self._redo = []
+
+    # -- edits ----------------------------------------------------------
+    def add(self, x, y, index=None):
+        i = len(self.points) if index is None else int(index)
+        self.points.insert(i, (float(x), float(y)))
+        self._push(('add', i, (float(x), float(y))))
+
+    def move(self, index, x, y):
+        old = self.points[index]
+        new = (float(x), float(y))
+        if new == old:
+            return
+        self.points[index] = new
+        self._push(('move', index, old, new))
+
+    def delete(self, index):
+        old = self.points.pop(index)
+        self._push(('delete', index, old))
+
+    def restart(self):
+        if not self.points:
+            return
+        self._push(('restart', list(self.points)))
+        self.points = []
+
+    def nearest(self, x, y, max_dist):
+        """Index of the nearest point within max_dist, else None."""
+        if not self.points:
+            return None
+        p = np.asarray(self.points, np.float64)
+        d = np.hypot(p[:, 0] - x, p[:, 1] - y)
+        i = int(np.argmin(d))
+        return i if d[i] <= max_dist else None
+
+    # -- history --------------------------------------------------------
+    def _push(self, op):
+        self._undo.append(op)
+        self._redo.clear()
+
+    def can_undo(self):
+        return bool(self._undo)
+
+    def can_redo(self):
+        return bool(self._redo)
+
+    def undo(self):
+        if not self._undo:
+            return False
+        op = self._undo.pop()
+        kind = op[0]
+        if kind == 'add':
+            self.points.pop(op[1])
+        elif kind == 'move':
+            self.points[op[1]] = op[2]
+        elif kind == 'delete':
+            self.points.insert(op[1], op[2])
+        elif kind == 'restart':
+            self.points = list(op[1])
+        self._redo.append(op)
+        return True
+
+    def redo(self):
+        if not self._redo:
+            return False
+        op = self._redo.pop()
+        kind = op[0]
+        if kind == 'add':
+            self.points.insert(op[1], op[2])
+        elif kind == 'move':
+            self.points[op[1]] = op[3]
+        elif kind == 'delete':
+            self.points.pop(op[1])
+        elif kind == 'restart':
+            self.points = []
+        self._undo.append(op)
+        return True
+
+
+# ---------------------------------------------------------------------------
+# edge snap (optional magnet, OFF by default)
+# ---------------------------------------------------------------------------
+
+def edge_snap(gray, x, y, radius=5):
+    """Snap (x, y) to the strongest local intensity step within `radius`
+    px -- Sobel magnitude argmax, ties broken toward the click. Returns
+    the input unchanged when the neighborhood is flat (no gradient above
+    noise) or out of frame. Labels made with this ON are tagged
+    'snapped' so calibration can weight them separately (#162)."""
+    import cv2
+    h, w = gray.shape[:2]
+    xi, yi = int(round(x)), int(round(y))
+    if not (0 <= xi < w and 0 <= yi < h):
+        return float(x), float(y)
+    r = int(radius)
+    x0, x1 = max(0, xi - r - 2), min(w, xi + r + 3)
+    y0, y1 = max(0, yi - r - 2), min(h, yi + r + 3)
+    patch = np.asarray(gray[y0:y1, x0:x1], np.float32)
+    gx = cv2.Sobel(patch, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(patch, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.hypot(gx, gy)
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    dist = np.hypot(xx - x, yy - y)
+    mag[dist > r] = -1.0
+    if float(mag.max()) < 8.0:            # flat: nothing worth snapping to
+        return float(x), float(y)
+    # strongest step; among near-equal magnitudes prefer the closest
+    good = mag >= 0.9 * float(mag.max())
+    cand = np.argwhere(good)
+    k = int(np.argmin(dist[good]))
+    py, px = cand[k]
+    return float(xx[py, px]), float(yy[py, px])
+
+
+# ---------------------------------------------------------------------------
+# the label sidecar (edge_labels.json)
+# ---------------------------------------------------------------------------
+
+def machine_summary(cand):
+    """The machine's best candidate at trace time, JSON-clean -- enough
+    to compute IoU offline without re-detection. None-safe."""
+    if not cand:
+        return None
+    out = {'method': cand.get('method'),
+           'conf': float(cand.get('conf', 0.0)),
+           'area_px': float(cand.get('area_px', 0.0))}
+    for k in ('audit_nostep', 'audit_bias'):
+        if cand.get(k) is not None:
+            out[k] = float(cand[k])
+    c = cand.get('contour')
+    if c is not None and len(c):
+        out['contour'] = [[float(x), float(y)] for x, y in np.asarray(c)]
+    return out
+
+
+def label_record(row_index, row, polygon, frame_shape, *, machine=None,
+                 zoom=1.0, overlays=None, elapsed_s=None, snapped=False,
+                 user=None, now=None):
+    """One edge_labels.json entry. `row` is the run CSV row dict; the
+    polygon is full-res [(x, y), ...]. Self-contained for offline IoU:
+    carries the frame shape and the machine candidate it competes with."""
+    poly = [[float(x), float(y)] for x, y in polygon]
+    area = polygon_area(poly)
+    return {
+        'row_index': int(row_index),
+        'frame_file': (row.get('frame_file') or '').strip(),
+        'nominal_kV': (row.get('nominal_kV') or '').strip(),
+        'tag': (row.get('tag') or '').strip(),
+        'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S',
+                                   time.localtime(now)),
+        'user': user or getpass.getuser(),
+        'polygon': poly,
+        'n_points': len(poly),
+        'area_px': round(area, 1),
+        'frame_shape': [int(frame_shape[0]), int(frame_shape[1])],
+        'zoom': round(float(zoom), 3),
+        'overlays': dict(overlays or {}),
+        'elapsed_s': None if elapsed_s is None else round(float(elapsed_s),
+                                                          1),
+        'snapped': bool(snapped),
+        'machine': machine_summary(machine),
+    }
+
+
+def load_labels(rundir, path=None):
+    """-> list of label records (possibly empty). Raises ValueError on a
+    corrupt file rather than silently treating labels as absent -- the
+    GUI must refuse to append to (and later clobber) a file it cannot
+    read."""
+    p = path or os.path.join(rundir, LABELS_NAME)
+    try:
+        with open(p) as f:
+            d = json.load(f)
+    except FileNotFoundError:
+        return []
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{p} is not valid JSON ({e}); fix or move it "
+                         f"before tracing") from e
+    return list(d.get('labels', []))
+
+
+def append_label(rundir, rec, path=None):
+    """Append one record, atomically (tmp + os.replace -- the same
+    pattern as save_settings; a mid-write failure must not destroy the
+    accumulated ground truth). -> the sidecar path."""
+    p = path or os.path.join(rundir, LABELS_NAME)
+    labels = load_labels(rundir, path=p)
+    labels.append(rec)
+    tmp = p + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump({'version': LABELS_VERSION, 'labels': labels}, f,
+                  indent=1)
+    os.replace(tmp, p)
+    return p
+
+
+# ---------------------------------------------------------------------------
+# conf-vs-IoU calibration (consumes the labels once they exist)
+# ---------------------------------------------------------------------------
+
+def label_iou(rec):
+    """IoU between a label's polygon and its stored machine candidate,
+    or None when the machine had no contour to compare."""
+    m = rec.get('machine') or {}
+    if not m.get('contour') or len(rec.get('polygon') or []) < 3:
+        return None
+    shape = tuple(rec.get('frame_shape') or (1080, 1920))
+    return iou(rec['polygon'], m['contour'], shape)
+
+
+def conf_vs_iou(labels):
+    """-> [(conf, iou, method, rec), ...] for every label with a
+    comparable machine candidate."""
+    out = []
+    for rec in labels:
+        v = label_iou(rec)
+        if v is None:
+            continue
+        m = rec['machine']
+        out.append((float(m.get('conf', 0.0)), v,
+                    m.get('method') or '?', rec))
+    return out
+
+
+def calibration_summary(pairs, target_iou=0.8, bins=(0.0, 0.5, 0.75,
+                                                     0.85, 0.95, 1.01)):
+    """ASCII summary of P(IoU >= target | conf bin) -- the curve that
+    decides what accept_conf may rise to (#162 / handoff Open #1).
+    `pairs` is conf_vs_iou() output. Returns a list of lines."""
+    lines = [f"conf-vs-IoU calibration  ({len(pairs)} labeled frames, "
+             f"target IoU >= {target_iou:g})"]
+    if not pairs:
+        lines.append("  no labels with a comparable machine candidate yet"
+                     " -- trace frames in Edge Review first")
+        return lines
+    arr = sorted(pairs, key=lambda t: t[0])
+    lines.append(f"  {'conf bin':>12} {'n':>4} {'P(IoU>=t)':>10} "
+                 f"{'median IoU':>11}")
+    for lo, hi in zip(bins[:-1], bins[1:]):
+        sel = [t for t in arr if lo <= t[0] < hi]
+        if not sel:
+            continue
+        ious = [t[1] for t in sel]
+        p = sum(1 for v in ious if v >= target_iou) / len(ious)
+        lines.append(f"  {f'{lo:.2f}-{min(hi, 1.0):.2f}':>12} "
+                     f"{len(sel):>4} {p:>10.2f} "
+                     f"{float(np.median(ious)):>11.2f}")
+    by_m = {}
+    for conf, v, m, _r in arr:
+        by_m.setdefault(m, []).append(v)
+    for m, vs in sorted(by_m.items()):
+        lines.append(f"  {m:<12} n={len(vs):<3} median IoU "
+                     f"{float(np.median(vs)):.2f}")
+    return lines
+
+
+def _iter_label_files(paths):
+    """Run dirs or parents-of-runs -> (rundir, labels) pairs."""
+    import sldea_edge as se
+    for p in paths:
+        cand = [p] + [os.path.join(p, n) for n in sorted(os.listdir(p))
+                      if os.path.isdir(os.path.join(p, n))] \
+            if os.path.isdir(p) else []
+        for d in cand:
+            if se.run_csv(d) and os.path.exists(
+                    os.path.join(d, LABELS_NAME)):
+                yield d, load_labels(d)
+
+
+def main(argv):
+    if not argv:
+        print(__doc__.strip().split('\n\n')[-1])
+        return 2
+    pairs, n_labels, n_runs = [], 0, 0
+    for rundir, labels in _iter_label_files(argv):
+        n_runs += 1
+        n_labels += len(labels)
+        pairs.extend(conf_vs_iou(labels))
+        print(f"{os.path.basename(rundir)}: {len(labels)} label(s)")
+    print(f"\n{n_labels} labels across {n_runs} run(s)")
+    for line in calibration_summary(pairs):
+        print(line)
+    return 0
+
+
+if __name__ == '__main__':
+    import sys
+    raise SystemExit(main(sys.argv[1:]))

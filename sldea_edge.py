@@ -8,11 +8,14 @@ directory the Digital Multitool's SLDEA tab wrote:
     SLDEA_<ts>/setup.txt + data.csv + frames/SLDEA_sNN_XX.XXkV_tag.png
 
 Approach: difference-imaging against the 0 kV baseline frame at three
-threshold tiers; each tier's outline is the convex hull of the significant
-changed patches (DEA activation reads as patchy wrinkling, and the shape may
-be oblong -- no circle prior). Up to 3 candidates per frame with a confidence
-score; frames whose best candidate is weak (or whose candidates disagree) are
-queued for the human-in-the-loop pass in the GUI. Breakdown heuristics flag
+threshold tiers, plus (2026-07-28) one candidate segmented from the
+texture-ratio map -- the P3 devices activate by wrinkling with almost no
+intensity displacement, and texture is the one channel where the device
+outranks the electrode strips. Each outline is the merged-region contour of
+the significant changed patches (activation reads as patchy wrinkling, and
+the shape may be oblong -- no circle prior). Up to 3 candidates per frame
+with a confidence score; frames whose best candidate is weak (or whose
+candidates disagree) are queued for the human-in-the-loop pass in the GUI. Breakdown heuristics flag
 suspect steps: a Trek current spike and an area collapse while voltage rises.
 
 Areas are stored in px^2 and converted to mm^2 using the DEA's nominal
@@ -42,6 +45,8 @@ DEFAULT_SETTINGS = {
     'breakdown_ua': 50.0,   # Trek current above this flags breakdown
     'area_jump_pct': 35.0,  # area collapse (V rising) that flags breakdown
     'wrinkle_ratio': 1.4,   # wrinkle index >= this = wrinkle-mode (active)
+    'tex_seg': 1,           # also segment the texture-ratio map (0 = the
+                            # intensity diff only, as before 2026-07-28)
     # photometric normalization vs the baseline: 0=off, 1=legacy scalar
     # border-band ratio, 2=gain+offset fit on ROI quantiles. 2 is the
     # default since 2026-07-28: on the bench runs the scalar left a
@@ -129,9 +134,17 @@ def run_csv(rundir):
 # get reopened constantly, so `1`, `2`, `3` stand in for them anywhere a run
 # directory is accepted -- the tuner, the diagnostic and the Windows
 # launcher. Entries whose path does not exist are skipped, so this is inert
-# on the bench PC, on CI and on anyone else's machine.
-_ONEDRIVE = (r'C:\Users\anato\OneDrive - University of Connecticut'
-             r'\Recordings\SLDEA_data')
+# on the bench PC, on CI and on anyone else's machine. The runs are synced
+# to more than one machine under different user profiles, so the first
+# root that exists wins.
+_ONEDRIVE_ROOTS = (
+    r'C:\Users\anato\OneDrive - University of Connecticut'
+    r'\Recordings\SLDEA_data',                       # bench PC
+    r'C:\Users\Anatol Gogoj\OneDrive - University of Connecticut'
+    r'\Recordings\SLDEA_data',                       # analysis PC
+)
+_ONEDRIVE = next((r for r in _ONEDRIVE_ROOTS if os.path.isdir(r)),
+                 _ONEDRIVE_ROOTS[0])
 BENCH_RUNS = {
     '1': _ONEDRIVE + r'\P3_1_2.5mL_20260728',
     '2': _ONEDRIVE + r'\P3_2_2.5mL_20260728',
@@ -201,10 +214,125 @@ def load_gray(path):
 
 
 # ---------------------------------------------------------------------------
+# texture: wrinkle energy and the electrode-strip footprint
+# ---------------------------------------------------------------------------
+
+def texture_energy(gray, win=15):
+    """Dense local wrinkle energy: |Laplacian| of the sigma-2.5 denoised
+    frame, box-averaged over `win` px. Same denoise-then-texture recipe as
+    _wrinkle_ratio (raw Laplacian is all sensor grain; the multi-pixel
+    wrinkle ridges survive the blur) but per-pixel, so the map can be
+    SEGMENTED rather than only score a region something else found."""
+    import cv2
+    blurred = cv2.GaussianBlur(np.asarray(gray, np.float32), (0, 0), 2.5)
+    energy = np.abs(cv2.Laplacian(blurred, cv2.CV_32F, ksize=3))
+    return cv2.boxFilter(energy, -1, (win, win))
+
+
+def _fingerprint(gray):
+    """Cheap content key for the per-baseline caches. id() is unsafe --
+    every load_gray returns a fresh array for the same file."""
+    import hashlib
+    a = np.ascontiguousarray(np.asarray(gray, np.float32)[::16, ::16])
+    return (gray.shape, hashlib.blake2b(a.tobytes(), digest_size=8)
+            .hexdigest())
+
+
+def _memo(cache, key, fn):
+    """4-entry memo: one baseline per run, a couple of runs open at once."""
+    if key in cache:
+        return cache[key]
+    val = fn()
+    if len(cache) >= 4:
+        cache.pop(next(iter(cache)))
+    cache[key] = val
+    return val
+
+
+_TEXE_CACHE = {}
+
+
+def _texture_energy_cached(base_gray):
+    return _memo(_TEXE_CACHE, _fingerprint(base_gray),
+                 lambda: texture_energy(base_gray))
+
+
+# Below this local-|Laplacian| energy nothing counts as foil: on a scene
+# with no textured object at all (flat synthetics, a rig with no strips in
+# frame) the percentile of a near-zero map would select noise as 'foil'.
+FOIL_TEX_FLOOR = 2.0
+
+_FOIL_CACHE = {}
+
+
+def foil_mask(base_gray, pct=92.0):
+    """Full-resolution bool mask of the crinkled electrode strips in the
+    BASELINE, from texture rather than brightness.
+
+    Brightness cannot define the foil: on the P3 baselines the median foil
+    pixel is 173 (p10 144) against paper at 176-190, so the electrode_lum
+    >= 220 cut covers only 34-42% of the strips -- the specular streaks --
+    and leaves the dark creases, exactly the pixels that swing when the
+    foil shifts, exposed to the differencing (bench 2026-07-28). Texture
+    separates cleanly: the crinkled strips are high local-Laplacian energy
+    while both the paper and the resting disc are smooth. Coverage on the
+    three P3 baselines: 12.7-13.3% of the frame, hugging the strips --
+    verified by eye on the overlays, which is the only reason to trust it.
+
+    Kernel sizes are tuned on the 1920x1080 bench frames; pass the
+    FULL-resolution baseline and downscale the mask, not the input."""
+    import cv2
+    if base_gray is None:
+        return None
+
+    def build():
+        tex = texture_energy(base_gray)
+        thr = max(float(np.percentile(tex, pct)), FOIL_TEX_FLOOR)
+        m = (tex >= thr).astype(np.uint8)
+        out = np.zeros(base_gray.shape, bool)
+        if not m.any():
+            return out
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((41, 41), np.uint8))
+        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((15, 15), np.uint8))
+        n, lab, stats, _c = cv2.connectedComponentsWithStats(m)
+        # Thickness gate: crinkled foil is a FILLED region of energy (the
+        # P3 strips run 100+ px of inscribed depth) while a mere step edge
+        # -- a sharp disc rim, a rig line -- is a band no thicker than the
+        # texture window that close-41 fattened. Without this, a
+        # hard-edged disc's own rim classifies as foil and the radial
+        # tracer can never reach it.
+        dist = cv2.distanceTransform((m > 0).astype(np.uint8),
+                                     cv2.DIST_L2, 5)
+        keep = np.zeros_like(m)
+        for i in range(1, n):
+            if (stats[i, cv2.CC_STAT_AREA] >= 0.005 * m.size
+                    and float(dist[lab == i].max()) >= 30.0):
+                keep[lab == i] = 1
+        if keep.any():
+            out = cv2.dilate(keep,
+                             np.ones((15, 15), np.uint8)).astype(bool)
+        return out
+
+    return _memo(_FOIL_CACHE, (_fingerprint(base_gray), pct), build)
+
+
+def _foil_small(base_full, size_wh):
+    """The foil mask at the detector's working size (w, h)."""
+    import cv2
+    fo = foil_mask(base_full)
+    if fo is None or not fo.any():
+        return np.zeros((size_wh[1], size_wh[0]), bool)
+    if fo.shape == (size_wh[1], size_wh[0]):
+        return fo
+    return cv2.resize(fo.astype(np.uint8), size_wh,
+                      interpolation=cv2.INTER_NEAREST).astype(bool)
+
+
+# ---------------------------------------------------------------------------
 # candidate detection
 # ---------------------------------------------------------------------------
 
-def photometric_fit(base, img, roi):
+def photometric_fit(base, img, roi, mask=None):
     """Gain and offset taking the baseline onto the frame: img ~ a*base + b.
 
     Fitted on MATCHED QUANTILES, not pixels, so a genuinely changed
@@ -223,10 +351,23 @@ def photometric_fit(base, img, roi):
     the trimming assumes the changed region is a MINORITY of the ROI: if
     more than about a third of it moves, the trim can keep the changed
     population instead. sldea_diag reports the residual, which is where
-    that would show up."""
+    that would show up.
+
+    `mask` (bool array, same shape as the images): fit only on those
+    pixels -- the paper background. Confirmed on the bench (2026-07-28,
+    Q1): with the device inside its own fit region, run 3's gain dived
+    0.77 -> 0.55 at 5.25 kV and recovered to a flat 0.78..0.85 once the
+    fit was restricted to paper -- a changed region bigger than the trim
+    can absorb is exactly the failure the paragraph above warns about.
+    Falls back to the plain ROI when the mask keeps too few pixels for
+    the quantiles to mean anything."""
     qs = np.linspace(2, 98, 49)
-    xb = np.percentile(base[roi], qs)
-    xi = np.percentile(img[roi], qs)
+    if mask is not None and int(mask.sum()) >= 2000:
+        xb = np.percentile(base[mask], qs)
+        xi = np.percentile(img[mask], qs)
+    else:
+        xb = np.percentile(base[roi], qs)
+        xi = np.percentile(img[roi], qs)
     keep = np.ones(xb.shape, bool)
     a, b = 1.0, 0.0
     # Trimmed refit: the changed region still shifts the quantiles it
@@ -333,6 +474,42 @@ def _wrinkle_ratio(base_full, img_full, contour):
     return round(min(e_img / max(e_base, 1e-3), 9.99), 2)
 
 
+def _paper_mask(base_full, small_shape, settings):
+    """Detector-scale mask of the PAPER background -- the ROI minus the
+    foil strips minus the resting disc -- for the photometric fit under
+    norm_bg 2.
+
+    The fit's trimming assumes the changed region is a minority of its fit
+    region; the disc is not always one, and the foil is the dominant
+    variance either way. Measured on the bench (2026-07-28, Q1): run 3's
+    ~5 kV gain excursion was an artifact of the device sitting inside its
+    own fit region and vanished under this restriction, while run 2's
+    survived it -- two causes the full-ROI fit could not separate.
+
+    None when there is nothing to exclude (no foil, no disc found): the
+    caller then fits on the plain ROI exactly as before, so scenes
+    without strips reprocess identically."""
+    import cv2
+    h, w = small_shape
+    fo = _foil_small(base_full, (w, h))
+    ref = baseline_disc(base_full, settings)
+    if not fo.any() and ref is None:
+        return None
+    rf = min(1.0, max(0.2, float(settings.get('roi_frac', 0.85))))
+    bx = int(w * (1 - rf) / 2)
+    by = int(h * (1 - rf) / 2)
+    mask = np.zeros(small_shape, bool)
+    mask[by:h - by or None, bx:w - bx or None] = True
+    mask &= ~fo
+    if ref is not None:
+        f = w / float(base_full.shape[1])
+        cx, cy = ref['cx'] * f, ref['cy'] * f
+        r = 0.5 * ref['diam_px'] * f * 1.12     # margin for the soft edge
+        yy, xx = np.ogrid[0:h, 0:w]
+        mask &= ((xx - cx) ** 2 + (yy - cy) ** 2) > r * r
+    return mask
+
+
 def prepared_diff(base_gray, img_gray, settings):
     """The difference map candidates() actually thresholds.
 
@@ -374,9 +551,12 @@ def prepared_diff(base_gray, img_gray, settings):
             # this took the mean ROI difference from 26 gray levels to 1.6
             # -- below the sensor noise -- while leaving a residual that
             # still grows with voltage, so it removes the artifact and not
-            # the device.
+            # the device. Fitted on the PAPER background only (ROI minus
+            # disc minus foil) when the scene has those, so the device
+            # cannot drag its own correction (2026-07-28, Q1).
             roi = (slice(by, h - by), slice(bx, w - bx))
-            a, b = photometric_fit(base_gray, img_gray, roi)
+            paper = _paper_mask(base_full, img_gray.shape, settings)
+            a, b = photometric_fit(base_gray, img_gray, roi, mask=paper)
             if a > 0.2 and (abs(a - 1.0) > 0.005 or abs(b) > 0.5):
                 img_gray = np.clip((img_gray - b) / a, 0, 255)
                 img_full = np.clip((img_full - b) / a, 0, 255)
@@ -391,6 +571,7 @@ def prepared_diff(base_gray, img_gray, settings):
             if abs(scale - 1.0) > 0.005:
                 img_gray = np.clip(img_gray * scale, 0, 255)
                 img_full = np.clip(img_full * scale, 0, 255)
+    img_small = img_gray
     k = int(settings.get('blur_px', 5)) | 1
     diff = cv2.absdiff(img_gray, base_gray).astype(np.uint8) \
         if base_gray is not None else img_gray.astype(np.uint8)
@@ -401,10 +582,16 @@ def prepared_diff(base_gray, img_gray, settings):
     # are. (Never mask on the current frame: the wrinkled activated region
     # saturates too, and masking it would erase the very signal we score --
     # bench 2026-07-23, 5.5 kV wrinkle index dropped 1.9 -> 1.2 that way.)
+    # The brightness cut alone covered only 34-42% of the strips -- the
+    # specular streaks -- while the dark creases, the pixels that actually
+    # swing when the foil shifts, stayed in the diff and won 83-100% of
+    # the detected area (bench 2026-07-28). The texture-derived footprint
+    # covers the whole strip; the same knob turns both off.
     lum = float(settings.get('electrode_lum', 0) or 0)
     if lum > 0 and base_gray is not None:
         glint = (base_gray >= lum).astype(np.uint8)
         glint = cv2.dilate(glint, np.ones((7, 7), np.uint8))
+        glint[_foil_small(base_full, (diff.shape[1], diff.shape[0]))] = 1
         diff[glint > 0] = 0
     diff = cv2.GaussianBlur(diff, (k, k), 0)
     # central ROI: the DEA sits mid-frame; electrode glare lives at the edges
@@ -414,7 +601,349 @@ def prepared_diff(base_gray, img_gray, settings):
     y0 = int(h * (1 - rf) / 2)
     sub = diff[y0:h - y0 or h, x0:w - x0 or w]
     return {'sub': sub, 'x0': x0, 'y0': y0, 'f': f,
-            'img_full': img_full, 'base_full': base_full}
+            'img_full': img_full, 'base_full': base_full,
+            'base_small': base_gray, 'img_small': img_small,
+            'diff_small': diff}
+
+
+def _ratio_small(prep, settings):
+    """Texture-ratio map at the detector's scale, foil and glint
+    neutralized. Energies are computed at FULL resolution (the wrinkle
+    ridges do not survive downscale), the ratio is then resized once and
+    shared by the texture candidate and the disc-boundary fit.
+
+    Regularized: on smooth paper both energies are near zero and a bare
+    quotient is noise amplified; +median(base energy) pins the quiet
+    regions to ~1 while a real wrinkle still clears the threshold.
+    Floored at 0.5 -- the energy scale of real sensor grain -- so a
+    noise-free synthetic baseline cannot make faint edge tails read as
+    arbitrarily large ratios."""
+    import cv2
+    base_full, img_full = prep['base_full'], prep['img_full']
+    if base_full is None:
+        return None
+    eb = _texture_energy_cached(base_full)
+    ei = texture_energy(img_full)
+    c0 = max(float(np.median(eb)), 0.5)
+    ratio = (ei + c0) / (eb + c0)
+    small = prep['base_small']
+    h, w = small.shape
+    if ratio.shape != small.shape:
+        ratio = cv2.resize(ratio, (w, h), interpolation=cv2.INTER_AREA)
+    neutral = _foil_small(base_full, (w, h)).copy()
+    lum = float(settings.get('electrode_lum', 0) or 0)
+    if lum > 0:
+        glint = cv2.dilate((small >= lum).astype(np.uint8),
+                           np.ones((7, 7), np.uint8))
+        neutral |= glint > 0
+    ratio[neutral] = 1.0
+    return ratio
+
+
+def _fit_ellipse_robust(pts):
+    """Trimmed ellipse fit -> ((cx, cy), (A, B), phi_deg, keep) or None.
+    Residual is radial about the ellipse centre, so a bulge confined to a
+    few sectors -- an electrode lead lighting up -- is trimmed away
+    instead of dragging the boundary."""
+    import cv2
+    if len(pts) < 20:
+        return None
+    keep = np.ones(len(pts), bool)
+    ell = None
+    for _ in range(3):
+        if keep.sum() < 20:
+            return None
+        ell = cv2.fitEllipse(pts[keep].astype(np.float32))
+        (xc, yc), (A, B), phi = ell
+        a, b = max(A, 1e-3) / 2.0, max(B, 1e-3) / 2.0
+        th = np.arctan2(pts[:, 1] - yc, pts[:, 0] - xc) - np.radians(phi)
+        r_ell = (a * b) / np.sqrt((b * np.cos(th)) ** 2
+                                  + (a * np.sin(th)) ** 2)
+        resid = np.abs(np.hypot(pts[:, 0] - xc, pts[:, 1] - yc) - r_ell)
+        sig = max(float(np.std(resid[keep])), 1.0)
+        nxt = resid <= 2.5 * sig
+        if (nxt == keep).all():
+            break
+        keep = nxt
+    return ell, keep
+
+
+def _disc_fit_candidate(prep, settings, ref):
+    """Boundary of the RESPONDING DISC, tracked from the known resting
+    disc -- the active area as the lab records it (2026-07-28 decision:
+    the full responding disc, wrinkled and non-wrinkled together, leads
+    excluded).
+
+    The blob channels answer 'which changed region is biggest'; this one
+    answers 'where is the edge of the object we know is there'. Rays are
+    cast from the resting-disc centre over a fused change map (sigma-
+    scaled intensity diff OR texture ratio, so displacement and wrinkle
+    both count); each ray takes the OUTERMOST sustained change edge, so
+    interior wrinkle gaps do not matter. Rays through the strips are
+    excluded by azimuth (the electrode leads feed the tape in those same
+    sectors, and the lab says leads are not active area); a lead bulge
+    that survives is trimmed by the robust ellipse fit. Area comes from
+    the FITTED shape, not a pixel blob -- no merge-close area steps.
+
+    spread_pct on this candidate is the fit's own 85% confidence
+    interval on area (percent): the cross-tier area spread it replaces
+    measured threshold sensitivity, and for a boundary fit the honest
+    analogue is the measurement's own dispersion."""
+    import cv2
+    if ref is None:
+        return None
+    small, diff = prep['base_small'], prep['diff_small']
+    base_full = prep['base_full']
+    if small is None or base_full is None:
+        return None
+    h, w = small.shape
+    f = w / float(base_full.shape[1])
+    cx0, cy0 = ref['cx'] * f, ref['cy'] * f
+    r0 = 0.5 * ref['diam_px'] * f
+    if r0 < 12:
+        return None
+    ratio = _ratio_small(prep, settings)
+    fo = _foil_small(base_full, (w, h))
+    paper = _paper_mask(base_full, small.shape, settings)
+    dref = diff[paper] if (paper is not None and paper.any()) else diff
+    med_p = float(np.median(dref))
+    sigma = max(1.4826 * float(np.median(np.abs(dref - med_p))), 0.5)
+    thr = max(1.05, float(settings.get('wrinkle_ratio', 1.4)))
+    # EXCESS change above the paper's own residual: at high kV the
+    # photometric fit leaves a few gray levels across the whole scene
+    # (the residual that grows with voltage), and a map normalized to raw
+    # diff reads the paper itself as ~0.3 'change' -- the edge walk then
+    # rides that plateau out to the vignetting and reports the disc at a
+    # physically impossible 2x area. UNCLIPPED: the valley detector below
+    # needs the dynamic range a saturating map destroys.
+    dn = np.maximum((diff.astype(np.float32) - med_p) / (4.0 * sigma),
+                    0.0)
+    tn = np.maximum((ratio - 1.0) / (thr - 1.0), 0.0) \
+        if ratio is not None else np.zeros_like(dn)
+    change_raw = np.maximum(dn, tn)
+    change = np.minimum(change_raw, 1.0)
+
+    rs = np.arange(max(4.0, 0.45 * r0), 1.8 * r0, 1.0)
+    nray = 360
+    th = np.linspace(0, 2 * np.pi, nray, endpoint=False)
+    xs = (cx0 + np.outer(np.cos(th), rs)).astype(np.float32)
+    ys = (cy0 + np.outer(np.sin(th), rs)).astype(np.float32)
+    prof = cv2.remap(change_raw, xs, ys, cv2.INTER_LINEAR,
+                     borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    fop = cv2.remap(fo.astype(np.uint8), xs, ys, cv2.INTER_NEAREST,
+                    borderMode=cv2.BORDER_CONSTANT, borderValue=1)
+    # strips (and the leads that feed them) block whole SECTORS, +-10 deg
+    blocked = fop.any(axis=1)
+    bi = np.where(blocked)[0]
+    for k in bi:
+        blocked[max(0, k - 10):k + 11] = True
+        if k < 10:
+            blocked[nray + k - 10:] = True
+        if k > nray - 11:
+            blocked[:k + 11 - nray] = True
+    # is the disc responding at all? judged inside 0.85 r0
+    yy, xx = np.ogrid[0:h, 0:w]
+    inner = ((xx - cx0) ** 2 + (yy - cy0) ** 2 <= (0.85 * r0) ** 2) & ~fo
+    if int(inner.sum()) < 100:
+        return None
+    # p75, not median: a partially responding disc (wrinkle patches over
+    # part of the interior) still counts as responding
+    i_lvl = float(np.percentile(change[inner], 75))
+    if i_lvl < 0.2:
+        return None                     # no response above the noise scale
+    level = max(0.45 * i_lvl, 0.10)
+    sm_prof = cv2.blur(prof, (1, 7))
+    # The boundary feature is the INK EDGE of the electrode itself, on
+    # the photometrically NORMALIZED current frame -- the same dark->
+    # light step baseline_disc measures at 0 kV, tracked as it moves.
+    # The change map cannot mark the boundary: the passive membrane ring
+    # outside the electrode hoop-wrinkles as the disc expands (real
+    # response, but not active area -- same ruling as the leads), and
+    # the taut rim of the active disc barely changes, so change-based
+    # edges land either on the ring's outer edge (1.6x area) or on the
+    # rim's inner side (shrinking with kV). The ink moves with the
+    # membrane and stays darker than everything around it; the change
+    # map's job here is only to say the disc is RESPONDING at all.
+    sm_img = cv2.GaussianBlur(cv2.medianBlur(
+        np.clip(prep['img_small'], 0, 255).astype(np.uint8), 3),
+        (0, 0), 2.0).astype(np.float32)
+    iprof = cv2.remap(sm_img, xs, ys, cv2.INTER_LINEAR,
+                      borderMode=cv2.BORDER_REPLICATE)
+    istep = np.diff(iprof, axis=1)
+    nr = len(rs)
+    in_lo = int(np.searchsorted(rs, 0.55 * r0))
+    in_hi = int(np.searchsorted(rs, 0.80 * r0))
+    w_lo = int(np.searchsorted(rs, 0.80 * r0))
+    w_hi = min(int(np.searchsorted(rs, 1.38 * r0)), nr - 6)
+    if in_hi <= in_lo or w_hi <= w_lo + 4:
+        return None
+    pts = []
+    steps = []
+    for k in range(nray):
+        if blocked[k]:
+            continue
+        if float(np.median(sm_prof[k, in_lo:in_hi])) < level:
+            continue                    # this sector is not responding
+        gi = w_lo + int(np.argmax(istep[k, w_lo:w_hi]))
+        ins = iprof[k, max(gi - 20, 0):gi - 4]
+        outs = iprof[k, gi + 5:gi + 21]
+        if ins.size < 4 or outs.size < 4:
+            continue
+        stepc = float(np.median(outs)) - float(np.median(ins))
+        if stepc < 4.0:
+            continue                    # no sustained dark->light edge
+        redge = rs[gi] + 0.5
+        pts.append((cx0 + redge * np.cos(th[k]),
+                    cy0 + redge * np.sin(th[k])))
+        steps.append(stepc)
+    pts = np.asarray(pts, np.float64)
+    open_sectors = int((~blocked).sum())
+    if len(pts) < 40 or open_sectors < 90:
+        return None
+    fit = _fit_ellipse_robust(pts)
+    if fit is None:
+        return None
+    (exc, eyc), (A, B), phi = fit[0]
+    keep = fit[1]
+    pin = pts[keep]
+    a, b = A / 2.0, B / 2.0
+    r_eq = float(np.sqrt(a * b))
+    # gates: the responding disc is the resting disc, slightly deformed.
+    # The observed full-ramp expansion is ~1.25x AREA (1.12x radius); a
+    # fit claiming more than 1.3x radius is tracking something else --
+    # the halo, the vignetting, the annulus -- not the device.
+    if not 0.9 <= r_eq / r0 <= 1.3:
+        return None
+    if np.hypot(exc - cx0, eyc - cy0) > 0.15 * r0:
+        return None
+    circ = min(a, b) / max(max(a, b), 1e-6)
+    if circ < 0.55:
+        return None
+    thp = np.arctan2(pin[:, 1] - eyc, pin[:, 0] - exc) - np.radians(phi)
+    r_ell = (a * b) / np.sqrt((b * np.cos(thp)) ** 2
+                              + (a * np.sin(thp)) ** 2)
+    resid = np.abs(np.hypot(pin[:, 0] - exc, pin[:, 1] - eyc) - r_ell)
+    med_res = float(np.median(resid))
+    if med_res > 0.06 * r_eq:
+        return None
+    cov = len(pin) / float(open_sectors)
+    # 85% CI on area from the edge scatter: dA = perimeter * dr, and the
+    # mean-radius error is sigma_r / sqrt(n)
+    se_r = 1.4826 * med_res / np.sqrt(max(len(pin), 1))
+    ci85 = 100.0 * 1.44 * 2.0 * se_r / r_eq
+    # boundary strength: the ink edge's own sustained dark->light step
+    # (10-25 gray levels on the P3 devices), on the kept rays
+    steps = np.asarray(steps, np.float64)
+    contrast = max(0.0, min(1.0, float(np.median(steps[keep])) / 12.0))
+    ring_in = ((xx - exc) ** 2 + (yy - eyc) ** 2 <= (0.92 * r_eq) ** 2) \
+        & ~fo
+    fill = float((change[ring_in] >= level).mean()) if ring_in.any() else 0.0
+    conf = min(0.99, 0.40 * min(1.0, cov / 0.75) + 0.30 * contrast
+               + 0.30 * (1.0 - min(1.0, med_res / (0.06 * r_eq))))
+    th2 = np.linspace(0, 2 * np.pi, 72, endpoint=False)
+    ex = exc + a * np.cos(th2) * np.cos(np.radians(phi)) \
+        - b * np.sin(th2) * np.sin(np.radians(phi))
+    ey = eyc + a * np.cos(th2) * np.sin(np.radians(phi)) \
+        + b * np.sin(th2) * np.cos(np.radians(phi))
+    return {'method': 'disc-fit', 'area_px': float(np.pi * a * b),
+            'diam_px': float(2 * r_eq), 'cx': float(exc), 'cy': float(eyc),
+            'circ': round(float(circ), 3), 'solidity': round(fill, 3),
+            'contour': np.stack([ex, ey], axis=1),
+            'contrast': round(contrast, 3), 'conf_own': round(conf, 3),
+            'ci85_pct': round(float(ci85), 2), 'n_edge': int(len(pin)),
+            'arc_cov': round(cov, 2)}
+
+
+def _resting_candidate(prep, settings, ref):
+    """The no-change frame, stated instead of blanked: with the resting
+    disc known and the frame showing no detectable change against the
+    baseline, the honest measurement is 'the active area equals the
+    resting area' -- not an empty row. Confidence grows with the margin
+    below the gate (a frame at half the gate is more certainly unchanged
+    than one brushing it). Low-kV frames then auto-accept with a real
+    area instead of queueing for review over nothing."""
+    if ref is None:
+        return None
+    p99 = float(np.percentile(prep['sub'], 99))
+    md = float(settings.get('min_diff', 10)) or 1.0
+    margin = max(0.0, min(1.0, 1.0 - p99 / md))
+    c = dict(ref)
+    c['method'] = 'resting'
+    c['conf_own'] = round(min(0.95, 0.70 + 0.25 * margin), 3)
+    c['ci85_pct'] = 0.0
+    c['contrast'] = 0.0        # its contour is FULL-res already: keep it
+    c['fullres'] = True        # out of the det-scale contrast/rescale paths
+    c['wrinkle'] = None
+    return c
+
+
+def _texture_candidate(prep, settings):
+    """Candidate from the TEXTURE-RATIO map: local wrinkle energy of the
+    frame over the baseline's, foil and glint neutralized, thresholded at
+    `wrinkle_ratio`.
+
+    The lab defines the wrinkled region AS the active area, and texture is
+    the one channel where the device outranks the electrodes instead of
+    losing to them by an order of magnitude: on the P3 baselines the disc
+    sits 10-25 gray levels from the paper while the strips span 120-255,
+    but the wrinkled disc is the only thing whose LOCAL energy rises
+    against its own baseline (bench 2026-07-28). The threshold is a
+    physical ratio against the frame's own baseline, not a gray-level
+    constant, so it transfers across runs, cameras and exposures where an
+    Otsu-derived cut does not (the per-frame Otsu swings ~2x over one
+    ramp).
+
+    Energies are computed at FULL resolution -- the wrinkle ridges are
+    multi-pixel there and downscaling would average them into the grain --
+    then the ratio is segmented at the detector's scale with its own
+    morphology."""
+    import cv2
+    base_full = prep['base_full']
+    ratio = _ratio_small(prep, settings)
+    if ratio is None:
+        return None
+    small = prep['base_small']
+    h, w = small.shape
+    x0, y0 = prep['x0'], prep['y0']
+    rsub = ratio[y0:h - y0 or h, x0:w - x0 or w]
+    thr = max(1.05, float(settings.get('wrinkle_ratio', 1.4)))
+    m = rsub >= thr
+    # a global texture change (focus loss, gross motion) is not an
+    # activation, and segmenting it would outline the whole ROI
+    if not m.any() or float(m.mean()) > 0.5:
+        return None
+    c = _region_candidate(m.astype(np.uint8), 'tex-ratio', offset=(x0, y0))
+    if c is None:
+        return None
+    mm = np.zeros_like(m, np.uint8)
+    cv2.drawContours(mm, [np.asarray(c['contour'] - np.array([x0, y0]),
+                                     np.int32)], -1, 255, -1)
+    if not (mm > 0).any():
+        return None
+    # A region is an activation only if it is wrinkled THROUGH. A step
+    # edge (a rim, a rig line, anything that moved or brightened) draws a
+    # high-ratio band exactly one box-window-plus-blur wide around a
+    # smooth interior. Erode the region by that band width: a hollow ring
+    # then reads its own quiet hole -- or vanishes -- while genuine
+    # wrinkling keeps a textured core. An annular activation thinner than
+    # the band is below this map's resolution and is refused as
+    # indistinguishable from the artifact.
+    sc = w / float(base_full.shape[1])
+    e = max(5, int(round(27.0 * sc)))
+    core = cv2.erode(mm, cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                                   (2 * e + 1, 2 * e + 1)))
+    if not (core > 0).any():
+        return None
+    if float(np.median(rsub[core > 0])) < 1.0 + 0.5 * (thr - 1.0):
+        return None
+    # boundary contrast on ITS OWN map (the diff map may be silent on a
+    # pure wrinkle, which is the case this channel exists for)
+    ring = cv2.dilate(mm, np.ones((15, 15), np.uint8)) & ~mm
+    inside = float(rsub[mm > 0].mean())
+    outside = float(rsub[ring > 0].mean()) if (ring > 0).any() else 1.0
+    c['contrast'] = max(0.0, min(1.0, (inside - outside)
+                                 / max(thr - 1.0, 0.1)))
+    return c
 
 
 def candidates(base_gray, img_gray, settings):
@@ -429,55 +958,107 @@ def candidates(base_gray, img_gray, settings):
       (0.6*Otsu / Otsu / 1.5*Otsu, or the fixed diff_thresh) -> morphological
       open+close -> largest contour each.
 
-    Honest no-change gate: if the ROI diff's 99th percentile is below
-    min_diff, the frame shows no detectable change vs baseline and NO
-    candidates are returned (low-kV frames really look identical -- inventing
-    an outline there was the old failure mode).
+    Plus, since 2026-07-28, one candidate from the texture-ratio map
+    (`tex_seg`, method 'tex-ratio'): the P3 runs activate by WRINKLING
+    with almost no intensity displacement, so the intensity diff has
+    nothing separable to find (sep 0.000 on all 72 frames) while the
+    wrinkle energy does. It competes on confidence like any other tier.
 
-    Confidence = 0.4*solidity + 0.3*boundary-contrast + 0.3*cross-method
-    agreement; solidity (not circularity) so slightly oblong expansions score
-    fully. Frames wider than DETECT_MAX_W are detected at reduced scale and
-    every px quantity is rescaled to full resolution.
+    And, when the resting disc is known (baseline_disc), the boundary
+    tracker (method 'disc-fit'): rays from the resting centre over a
+    fused diff/texture change map, robust ellipse fit, leads and strips
+    excluded -- the active area as the lab defines it, the full
+    responding disc. Its spread_pct is its own 85% CI on area. On a
+    gated frame with a known disc, a 'resting' candidate states that the
+    area equals the resting area instead of leaving an empty row.
+
+    Honest no-change gate: if the ROI diff's 99th percentile is below
+    min_diff, the intensity tiers return nothing (low-kV frames really
+    look identical -- inventing an outline there was the old failure
+    mode). The texture and boundary channels are consulted either way: a
+    fine wrinkle can be invisible to the downscaled diff yet real, and
+    dropping it with the gate would re-create the old blindness in the
+    one case those channels exist for.
+
+    Confidence = 0.3*solidity + 0.3*boundary-contrast + 0.2*cross-method
+    agreement + 0.2*wrinkle bonus; solidity (not circularity) so slightly
+    oblong expansions score fully. Frames wider than DETECT_MAX_W are
+    detected at reduced scale and every px quantity is rescaled to full
+    resolution.
     """
     import cv2
     prep = prepared_diff(base_gray, img_gray, settings)
     sub, x0, y0, f = (prep['sub'], prep['x0'], prep['y0'],
                       prep['f'])
     img_full, base_full = prep['img_full'], prep['base_full']
-    if float(np.percentile(sub, 99)) < float(settings.get('min_diff', 10)):
-        return []                       # no detectable change vs baseline
-    otsu_t, _m = cv2.threshold(sub, 0, 255,
-                               cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    fixed = float(settings.get('diff_thresh') or 0)
-    threshes = ([('diff-fixed', fixed)] if fixed else []) + \
-        [('diff-lo', max(3.0, 0.6 * otsu_t)),
-         ('diff-otsu', max(3.0, otsu_t)),
-         ('diff-hi', max(4.0, 1.5 * otsu_t))]
+    ref = baseline_disc(base_gray, settings) if base_gray is not None \
+        else None
+    min_sol = float(settings.get('min_solidity', 0))
+    gated = (float(np.percentile(sub, 99))
+             < float(settings.get('min_diff', 10)))
     out = []
     weak = []
-    for method, t in threshes[:3]:
-        _t, m = cv2.threshold(sub, t, 255, cv2.THRESH_BINARY)
-        c = _region_candidate(m, method, offset=(x0, y0))
-        if c is None:
-            continue
-        if c['solidity'] >= float(settings.get('min_solidity', 0)):
-            out.append(c)
+    if not gated:
+        otsu_t, _m = cv2.threshold(sub, 0, 255,
+                                   cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        fixed = float(settings.get('diff_thresh') or 0)
+        threshes = ([('diff-fixed', fixed)] if fixed else []) + \
+            [('diff-lo', max(3.0, 0.6 * otsu_t)),
+             ('diff-otsu', max(3.0, otsu_t)),
+             ('diff-hi', max(4.0, 1.5 * otsu_t))]
+        for method, t in threshes[:3]:
+            _t, m = cv2.threshold(sub, t, 255, cv2.THRESH_BINARY)
+            c = _region_candidate(m, method, offset=(x0, y0))
+            if c is None:
+                continue
+            if c['solidity'] >= min_sol:
+                out.append(c)
+            else:
+                weak.append(c)
+    tc = None
+    if int(settings.get('tex_seg', 1) or 0):
+        tc = _texture_candidate(prep, settings)
+        if tc is not None:
+            if tc['solidity'] >= min_sol:
+                out.append(tc)
+            else:
+                weak.append(tc)
+    # a gated frame with no texture response has nothing for a boundary
+    # fit to track -- that is the resting case, not a detection
+    dfc = _disc_fit_candidate(prep, settings, ref) \
+        if (not gated or tc is not None) else None
+    if dfc is not None:
+        if dfc['solidity'] >= min_sol:
+            out.append(dfc)
         else:
-            weak.append(c)
+            weak.append(dfc)
+    if gated and not out and not weak:
+        # no change, and the resting disc is known: state the resting
+        # area instead of an empty row (see _resting_candidate)
+        rc = _resting_candidate(prep, settings, ref)
+        if rc is not None:
+            out.append(rc)
     if not out and weak:
-        # Nothing passed the fill filter, but SOMETHING changed (the frame
-        # already passed the no-change gate) -- keep the best weak candidate
-        # so the human gets to judge it instead of a silent auto-reject
-        # (user 2026-07-23: subtle changes are visible by eye). Tagged so it
-        # can never auto-accept.
+        # Nothing passed the fill filter, but SOMETHING changed (diff gate
+        # passed, or the texture map lit up) -- keep the best weak
+        # candidate so the human gets to judge it instead of a silent
+        # auto-reject (user 2026-07-23: subtle changes are visible by
+        # eye). Tagged so it can never auto-accept.
         best_weak = max(weak, key=lambda c: c['solidity'])
         best_weak['fallback'] = True
         out = [best_weak]
     if not out:
         return []
-    # boundary contrast (downscaled): diff level inside vs just outside
+    # boundary contrast (downscaled): diff level inside vs just outside.
+    # The tex-ratio candidate arrives with contrast measured on its own
+    # map -- the diff can be silent on a pure wrinkle, and scoring it
+    # there would punish exactly the case the channel exists for.
     ker = np.ones((15, 15), np.uint8)
     for c in out:
+        if 'contrast' in c:
+            c.pop('mask_local', None)
+            c.pop('_thresh', None)
+            continue
         m = np.zeros_like(sub)
         cv2.drawContours(m, [np.asarray(c['contour'] -
                                         np.array([x0, y0]), np.int32)],
@@ -491,6 +1072,8 @@ def candidates(base_gray, img_gray, settings):
     if f != 1.0:                    # rescale every px quantity to full-res
         inv = 1.0 / f
         for c in out:
+            if c.pop('fullres', False):
+                continue            # resting: born in full-res coordinates
             c['area_px'] *= inv * inv
             c['diam_px'] *= inv
             c['cx'] *= inv
@@ -499,16 +1082,48 @@ def candidates(base_gray, img_gray, settings):
     # wrinkle index at full resolution (contours are full-res now)
     for c in out:
         c['wrinkle'] = _wrinkle_ratio(base_full, img_full, c['contour'])
-    areas = np.array([c['area_px'] for c in out], float)
-    spread = float(areas.std() / areas.mean()) if len(out) > 1 else 0.0
+    # Corroboration by SEMANTICS (2026-07-28): the diff tiers all measure
+    # the full changed region, so their mutual spread measures threshold
+    # sensitivity, as always. The tex candidate outlines the wrinkled
+    # INTERIOR -- a subset by definition, so its area belongs in no
+    # spread; its corroboration is sitting inside the boundary fit. The
+    # disc-fit reports its own fit CI as spread_pct (an area measurement's
+    # honest dispersion), lightly modulated by whether the tiers land
+    # near its boundary. Mixing all areas into one spread made every
+    # channel accuse every other of disagreement over a difference of
+    # DEFINITION, and 24/24 frames went to review on it.
+    tiers = [c for c in out if c['method'].startswith('diff')]
+    dfit = next((c for c in out if c['method'] == 'disc-fit'), None)
+    areas = np.array([c['area_px'] for c in tiers], float)
+    spread = float(areas.std() / areas.mean()) if len(tiers) > 1 else 0.0
     agreement = max(0.0, 1.0 - spread)
     for c in out:
-        # wrinkle bonus: the lab defines the wrinkled region AS the active
-        # area, so a candidate whose interior is wrinkle-textured outranks a
-        # bigger smooth one.
+        m = c['method']
+        if m == 'disc-fit':
+            agree_fit = 1.0
+            if len(areas):
+                agree_fit = max(0.0, 1.0 - min(1.0, abs(
+                    float(np.median(areas)) - c['area_px'])
+                    / max(c['area_px'], 1.0)))
+            c['conf'] = round(min(0.99, c.pop('conf_own')
+                                  * (0.85 + 0.15 * agree_fit)), 3)
+            c['spread_pct'] = c['ci85_pct']
+            continue
+        if m == 'resting':
+            c['conf'] = c.pop('conf_own')
+            c['spread_pct'] = 0.0
+            continue
+        # wrinkle bonus: a candidate whose interior is wrinkle-textured
+        # outranks a bigger smooth one (the wrinkled region is active).
         wbonus = max(0.0, min(1.0, (c['wrinkle'] - 1.0) / 1.5))
+        agr = agreement
+        if m == 'tex-ratio' and dfit is not None:
+            inside = (np.hypot(c['cx'] - dfit['cx'], c['cy'] - dfit['cy'])
+                      <= 0.5 * dfit['diam_px'])
+            agr = (1.0 if inside
+                   and c['area_px'] <= 1.2 * dfit['area_px'] else 0.3)
         c['conf'] = round(0.3 * c['solidity'] + 0.3 * c['contrast']
-                          + 0.2 * agreement + 0.2 * wbonus, 3)
+                          + 0.2 * agr + 0.2 * wbonus, 3)
         c['spread_pct'] = round(100 * spread, 1)
     out.sort(key=lambda c: c['conf'], reverse=True)
     return out[:3]
@@ -590,25 +1205,141 @@ def wrinkle_onset(rows, results, settings):
     return onset, annos
 
 
+def ramp_consistency(rows, results, settings=None,
+                     pair_tol=0.12, dip_slack=0.10):
+    """Annotations for the physics a per-frame detector cannot see.
+    -> {row_index: note}
+
+    Two invariants the rig guarantees: the two snapshots of one step
+    (pre-ramp / post-ramp) photograph the same state, so their areas must
+    agree; and the area cannot shrink while the voltage rises, short of
+    breakdown. Violations are ANNOTATED for review, never averaged away:
+    a pair mismatch usually means the two frames' detections picked
+    different objects or tiers, and a dip usually IS the interesting
+    event (pull-in, breakdown) or a detection failure -- both are for a
+    human. `results` maps row index -> accepted candidate dict (the same
+    shape apply_results takes)."""
+    def _area(i):
+        r = results.get(i)
+        try:
+            a = float(r.get('area_px')) if r else None
+        except (TypeError, ValueError):
+            return None
+        return a if a and a > 0 else None
+
+    def _kv(row):
+        try:
+            return float(row.get('nominal_kV') or '')
+        except (TypeError, ValueError):
+            return None
+
+    annos = {}
+    by_step = {}
+    for i, row in enumerate(rows):
+        kv = _kv(row)
+        if kv is not None and _area(i) is not None:
+            by_step.setdefault(kv, []).append(i)
+    for kv, idxs in sorted(by_step.items()):
+        if len(idxs) < 2:
+            continue
+        vals = [_area(i) for i in idxs]
+        lo, hi = min(vals), max(vals)
+        mid = (hi + lo) / 2.0
+        if mid > 0 and (hi - lo) / mid > pair_tol:
+            for i in idxs:
+                annos[i] = (f"pair mismatch "
+                            f"{100 * (hi - lo) / mid:.0f}% at {kv:g} kV")
+    prev_a = prev_kv = None
+    for i, row in enumerate(rows):
+        kv, a = _kv(row), _area(i)
+        if kv is None or a is None:
+            continue
+        if (prev_a and prev_kv is not None and kv >= prev_kv
+                and a < prev_a * (1.0 - dip_slack)):
+            annos.setdefault(i, f"area dip {100 * (1 - a / prev_a):.0f}% "
+                                f"vs previous step")
+        prev_a, prev_kv = a, kv
+    return annos
+
+
 # ---------------------------------------------------------------------------
 # scale + write-back
 # ---------------------------------------------------------------------------
+
+def _fit_circle(pts):
+    """Trimmed Kasa circle fit -> (cx, cy, r, keep_mask). Refits after
+    dropping >2.5-sigma residuals so a few edge points on the wrong
+    feature (a shadow, the annulus) cannot steer the circle."""
+    keep = np.ones(len(pts), bool)
+    ux = uy = r = 0.0
+    for _ in range(4):
+        x, y = pts[keep, 0], pts[keep, 1]
+        design = np.column_stack([x, y, np.ones(x.size)])
+        rhs = x * x + y * y
+        sol, *_ = np.linalg.lstsq(design, rhs, rcond=None)
+        ux, uy = sol[0] / 2.0, sol[1] / 2.0
+        r = float(np.sqrt(max(sol[2] + ux * ux + uy * uy, 1e-9)))
+        resid = np.abs(np.hypot(pts[:, 0] - ux, pts[:, 1] - uy) - r)
+        sig = max(float(np.std(resid[keep])), 1.0)
+        nxt = resid <= 2.5 * sig
+        if (nxt == keep).all() or nxt.sum() < 24:
+            break
+        keep = nxt
+    return float(ux), float(uy), r, keep
+
+
+_DISC_CACHE = {}
+
 
 def baseline_disc(base_gray, settings):
     """Trace the RESTING DEA disc on the baseline frame itself (no diff).
 
     Difference imaging can never calibrate off the baseline (a self-diff
-    yields nothing), so the px→mm scale used to key silently off the first
-    ACTIVATED frame's changed region — wrong whenever that region is not
-    the full disc (audit 2026-07-25). The resting disc reads DARKER than
-    the membrane (bench 2026-07-23: disc ~165, membrane ~197-207), so an
-    inverse-Otsu on the central ROI + the same merged-region contour
-    recovers it. Returns a candidate-like dict (method 'baseline-disc') or
-    None when no plausible disc is found."""
+    yields nothing), so the px→mm scale keys off this. The resting disc
+    reads DARKER than its surround (P3 baselines: disc 162-167, paper
+    176-190), and this is the one detection where a circle prior is
+    legitimate: the resting active area is circular by construction,
+    which is exactly what the nominal-diameter scale assumes.
+
+    Region-growing cannot do this job. On all three P3 baselines the dark
+    class is bridged to both electrode strips by smooth CNT traces and
+    under-strip shadows that neither the brightness cut nor the texture
+    footprint covers, and the 21x21 merge close then returned one blob
+    spanning 85% of the frame width with circ 0.32 -- at conf 0.93 --
+    and mm_per_px silently inherited a 1.5-1.6x diameter error, putting
+    every recorded active_area_mm2 off by 2.3-2.7x (bench 2026-07-28).
+
+    So: seed on the biggest central dark region, cast radial rays, take
+    the strongest dark->light step on each ray whose edge neighborhood is
+    clear of foil and glint (rays measuring through the strips are
+    excluded, not repaired), and fit a circle robustly to the edge points
+    -- twice, because an off-centre seed truncates the far side. Refuses (None) unless the accepted edge
+    covers >= ~120 degrees of arc, the fit residual stays under 6% of the
+    radius, the circle is actually filled with the dark class, and the
+    diameter is a plausible fraction of the ROI; conf is built from those
+    same three quantities, so a shape that barely passes cannot read as
+    certainty. Verified against the by-eye measurement on the three P3
+    baselines (579/578/586 px): agreement within ~1%.
+
+    Returns a candidate-like dict (method 'baseline-disc') or None."""
+    key = (_fingerprint(base_gray) if base_gray is not None else None,
+           float(settings.get('roi_frac', 0.85)),
+           float(settings.get('electrode_lum', 220) or 220))
+    if key in _DISC_CACHE:
+        hit = _DISC_CACHE[key]
+        return dict(hit) if hit is not None else None
+    ref = _baseline_disc_uncached(base_gray, settings)
+    if len(_DISC_CACHE) >= 4:
+        _DISC_CACHE.pop(next(iter(_DISC_CACHE)))
+    _DISC_CACHE[key] = ref
+    return dict(ref) if ref is not None else None
+
+
+def _baseline_disc_uncached(base_gray, settings):
     import cv2
     if base_gray is None:
         return None
-    g = base_gray
+    g = np.asarray(base_gray, np.float32)
     h0, w0 = g.shape
     f = 1.0
     if w0 > DETECT_MAX_W:
@@ -619,43 +1350,131 @@ def baseline_disc(base_gray, settings):
     rf = min(1.0, max(0.2, float(settings.get('roi_frac', 0.85))))
     x0 = int(w * (1 - rf) / 2)
     y0 = int(h * (1 - rf) / 2)
-    sub = g[y0:h - y0 or None, x0:w - x0 or None].astype(np.uint8)
-    sub = cv2.GaussianBlur(sub, (5, 5), 0)
-    # Neutralize the electrode strips first: their near-saturated pixels
-    # drag Otsu to a strip-vs-everything split instead of disc-vs-membrane.
+    sub = g[y0:h - y0 or None, x0:w - x0 or None]
+    hs, ws = sub.shape
+    if min(hs, ws) < 48:
+        return None
+    # denoise at this scale (the by-eye measurement used median 9 +
+    # sigma 6 at full resolution; a third of that at a third the size)
+    sm = cv2.GaussianBlur(cv2.medianBlur(sub.astype(np.uint8), 3),
+                          (0, 0), 2.0).astype(np.float32)
     lum = float(settings.get('electrode_lum', 220) or 220)
-    bright = sub >= lum
-    if bright.any() and (~bright).any():
-        sub = sub.copy()
-        sub[bright] = np.uint8(np.median(sub[~bright]))
-    # dark disc on brighter membrane -> inverse threshold
-    _t, mask = cv2.threshold(sub, 0, 255,
-                             cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    # sanity: the dark class must be a minority region distinctly darker
-    # than the light class, else there is no disc to find
-    dark = sub[mask > 0]
-    light = sub[mask == 0]
-    if dark.size < 200 or light.size < 200:
+    reject = _foil_small(base_gray, (w, h))[y0:h - y0 or None,
+                                            x0:w - x0 or None].copy()
+    reject |= sm >= lum
+    free = ~reject
+    if int(free.sum()) < 400:
         return None
-    if float(np.median(light)) - float(np.median(dark)) < 8:
+    paper = float(np.median(sm[free]))
+    # seed: biggest, most central dark region (disc sits 10-25 gray
+    # levels below the paper; 5 keeps a faint top edge in the class)
+    dark = ((sm < paper - 5) & free).astype(np.uint8)
+    dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    n, lab, stats, cent = cv2.connectedComponentsWithStats(dark)
+    seed, score = None, 0.0
+    for i in range(1, n):
+        a = float(stats[i, cv2.CC_STAT_AREA])
+        if a < 0.002 * sub.size:
+            continue
+        cx, cy = cent[i]
+        d2 = ((cx - ws / 2) / ws) ** 2 + ((cy - hs / 2) / hs) ** 2
+        s = a * max(0.05, 1.0 - 4.0 * d2)
+        if s > score:
+            seed, score = (float(cx), float(cy)), s
+    if seed is None:
         return None
-    frac = dark.size / float(sub.size)
-    if not 0.005 <= frac <= 0.6:
+
+    r_hi = 0.55 * min(hs, ws)
+    rs = np.arange(6.0, r_hi, 1.0)
+    nray = 360
+
+    def cast(cx0, cy0):
+        """Edge points: per ray, the strongest dark->light step whose
+        EDGE NEIGHBORHOOD is clear of foil and glint. Contamination is
+        judged around the step, not along the whole path: an electrode
+        crossing the disc interior occludes the middle of many rays whose
+        edge measurement is perfectly clean, and origin-to-edge rejection
+        would throw all of them away."""
+        th = np.linspace(0, 2 * np.pi, nray, endpoint=False)
+        xs = (cx0 + np.outer(np.cos(th), rs)).astype(np.float32)
+        ys = (cy0 + np.outer(np.sin(th), rs)).astype(np.float32)
+        prof = cv2.remap(sm, xs, ys, cv2.INTER_LINEAR,
+                         borderMode=cv2.BORDER_REPLICATE)
+        rej = cv2.remap(reject.astype(np.uint8), xs, ys, cv2.INTER_NEAREST,
+                        borderMode=cv2.BORDER_CONSTANT, borderValue=1)
+        rejcum = np.cumsum(rej > 0, axis=1)
+        step = np.diff(prof, axis=1)
+        pts = []
+        nr = len(rs)
+        for k in range(nray):
+            gi = int(np.argmax(step[k]))
+            if gi < 8 or gi > nr - 9:
+                continue
+            if (rejcum[k, min(gi + 10, nr - 1)]
+                    - rejcum[k, max(gi - 15, 0)]) > 0:
+                continue
+            ins = prof[k, max(gi - 20, 0):gi - 4]
+            outs = prof[k, gi + 5:gi + 21]
+            if ins.size < 4 or outs.size < 4:
+                continue
+            if float(np.median(outs)) - float(np.median(ins)) < 4.0:
+                continue
+            redge = rs[gi] + 0.5
+            pts.append((cx0 + redge * np.cos(th[k]),
+                        cy0 + redge * np.sin(th[k])))
+        return np.asarray(pts, np.float64)
+
+    pts = cast(*seed)
+    if len(pts) < 40:
         return None
-    c = _region_candidate(mask, 'baseline-disc', offset=(x0, y0))
-    if c is None or c['solidity'] < 0.5:
+    cx1, cy1, _r1, _k1 = _fit_circle(pts)
+    if not (0 <= cx1 <= ws and 0 <= cy1 <= hs):
         return None
-    if f != 1.0:
-        inv = 1.0 / f
-        c['area_px'] *= inv * inv
-        c['diam_px'] *= inv
-        c['cx'] *= inv
-        c['cy'] *= inv
-        c['contour'] = (np.asarray(c['contour'], float) * inv)
-    c['conf'] = round(min(0.99, 0.5 + 0.5 * c['solidity']), 3)
-    c['wrinkle'] = None
-    c['spread_pct'] = 0.0
-    return c
+    pts = cast(cx1, cy1)                # re-cast from the fitted centre
+    if len(pts) < 40:
+        return None
+    cx, cy, r, keep = _fit_circle(pts)
+    pin = pts[keep]
+    if len(pin) < 40 or not (0 <= cx <= ws and 0 <= cy <= hs):
+        return None
+    resid = float(np.median(np.abs(
+        np.hypot(pin[:, 0] - cx, pin[:, 1] - cy) - r)))
+    ang = np.degrees(np.arctan2(pin[:, 1] - cy, pin[:, 0] - cx)) % 360.0
+    cov = len(np.unique((ang // 10).astype(int))) / 36.0
+    yy, xx = np.ogrid[0:hs, 0:ws]
+    inside = ((xx - cx) ** 2 + (yy - cy) ** 2 <= (0.9 * r) ** 2) & free
+    if int(inside.sum()) < 200:
+        return None
+    fill = float(((sm < paper - 4) & inside).sum()) / float(inside.sum())
+    dmin = float(min(hs, ws))
+    if (cov < 0.34 or resid > 0.06 * r or fill < 0.55
+            or not 0.06 * dmin <= 2 * r <= 0.85 * dmin):
+        return None
+    try:
+        ell = cv2.fitEllipse(pin.astype(np.float32))
+        circ = round(min(ell[1]) / max(max(ell[1]), 1e-6), 3)
+    except cv2.error:
+        circ = 0.0
+    # The one gate the old code lacked: a resting disc is ROUND. The blob
+    # it used to return read circ 0.32; a shadow rectangle's trimmed fit
+    # still only reaches ~0.7. The P3 discs measure 0.966-0.999.
+    if circ < 0.85:
+        return None
+    conf = min(0.99, 0.4 * fill + 0.35 * cov
+               + 0.25 * (1.0 - min(1.0, resid / (0.06 * r))))
+    inv = 1.0 / f
+    ccx = (cx + x0) * inv
+    ccy = (cy + y0) * inv
+    rr = r * inv
+    th2 = np.linspace(0, 2 * np.pi, 90, endpoint=False)
+    contour = np.stack([ccx + rr * np.cos(th2),
+                        ccy + rr * np.sin(th2)], axis=1)
+    return {'method': 'baseline-disc', 'area_px': float(np.pi * rr * rr),
+            'diam_px': float(2 * rr), 'cx': ccx, 'cy': ccy,
+            'circ': circ, 'solidity': round(fill, 3), 'contour': contour,
+            'conf': round(conf, 3), 'wrinkle': None, 'spread_pct': 0.0,
+            'arc_cov': round(cov, 2), 'fit_resid_px': round(resid * inv, 1),
+            'n_edge': int(len(pin)), 'paper_lum': round(paper, 1)}
 
 
 def mm_per_px(results, rows, settings, baseline_ref=None):

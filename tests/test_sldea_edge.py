@@ -738,6 +738,52 @@ def test_hysteresis_bonus_favors_the_incumbent_channel():
     assert [c['conf'] for c in ghost] == [c['conf'] for c in plain]
 
 
+def test_contained_diff_patch_cannot_outrank_the_boundary_fit():
+    """Operator spot-read (155425 @ 5.25 kV post, 2026-07-29): the diff
+    tiers outlined a strong interior patch at half the fit's area and
+    outranked the correct disc-fit boundary. Per the active-area ruling
+    the recorded area is the BOUNDARY's, so a diff patch contained in a
+    valid fit is supporting evidence, never the better answer -- the
+    same containment cap the tex channel already gets. The failure
+    shape: the disc expands with a faint (but trackable) ink edge while
+    the diff is dominated by a compact dark patch at its centre."""
+    rng = np.random.default_rng(7)
+    base = _bridged_scene(with_disc=True, seed=7)
+    h, w = base.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    img = np.full((h, w), 190.0, np.float32)
+    r_act = 112
+    img[(xx - 480) ** 2 + (yy - 270) ** 2 <= r_act * r_act] = 183.0
+    img[(xx - 480) ** 2 + (yy - 270) ** 2 <= 55 * 55] = 140.0
+    img[230:310, 0:330] = base[230:310, 0:330]
+    img[230:310, 630:960] = base[230:310, 630:960]
+    img[262:278, 330:392] = 174.0
+    img[262:278, 568:630] = 174.0
+    img[310:352, 270:345] = 165.0
+    img[310:352, 615:690] = 165.0
+    img += rng.normal(0, 1.5, img.shape).astype(np.float32)
+    img = np.clip(img, 0, 255).astype(np.float32)
+    s = dict(se.DEFAULT_SETTINGS)
+    cands = se.candidates(base, img, s)
+    best = cands[0]
+    assert best['method'] == 'disc-fit', [c['method'] for c in cands]
+    exp = np.pi * r_act * r_act
+    assert abs(best['area_px'] - exp) / exp < 0.08, best['area_px']
+    # the patch tier is still offered (rank kept), but tagged and capped
+    # just below the fit -- the tag certifies it OUTRANKED the fit before
+    # the cap, exactly the 5.25 kV shape
+    patch = [c for c in cands if c['method'].startswith('diff')
+             and c['area_px'] <= 0.5 * best['area_px']]
+    assert patch, [(c['method'], c['area_px']) for c in cands]
+    for c in patch:
+        assert c.get('capped_by') == 'disc-fit', c
+        assert c['conf'] == round(best['conf'] - 0.01, 3), c
+    # and the incumbent's +0.05 cannot ride a contained patch back over
+    # the boundary: hysteresis applies before the cap
+    held = se.candidates(base, img, s, prev_method=patch[0]['method'])
+    assert held[0]['method'] == 'disc-fit', [c['method'] for c in held]
+
+
 def test_reconcile_pairs_boosts_agreement_and_caps_contradiction():
     rows = [{'nominal_kV': '1'}, {'nominal_kV': '1'},
             {'nominal_kV': '2'}, {'nominal_kV': '2'}]

@@ -99,6 +99,58 @@ Instrument control is **Linux-only** (the pyvisa-py/libusb/udev stack lives on t
 
 Windows lab PCs with the ShareDrive mapped launch via **`_software\Launch_SCPI_Control_Windows.bat`** (double-click; reference copy in `deploy/`). First run needs Python 3.10+ installed and internet — it creates a local venv and installs the requirements (the share's `pylibs` are Linux binaries); later runs sync only when the version stamp changes, exactly like the Linux local-cache launcher.
 
+### SLDEA tuning session on Windows
+
+The edge tuner (`sldea_tuner.py`) is a standalone Tk program rather than a tab, and it touches no instruments — so any Windows PC holding a copy of the run data is a fine place to tune. Double-click **`_software\Tune_SLDEA_Windows.bat`** (reference copy in `deploy/`), or drag a run folder onto it. It reuses the main launcher's venv when one exists, otherwise builds a small one with just `numpy`, `opencv-python-headless` and `matplotlib` — the tuner's only real dependencies.
+
+From a checkout, the same thing by hand:
+
+```
+py -3 -m venv .venv
+.venv\Scripts\pip install numpy opencv-python-headless matplotlib
+.venv\Scripts\python sldea_tuner.py "C:\SLDEA\SLDEA_20260721_1430"
+```
+
+Python must have been installed with the **"tcl/tk and IDLE"** option ticked. Check the whole stack without needing a window first — this renders headless and prints the areas it found:
+
+```
+.venv\Scripts\python sldea_tuner.py --selftest tuner_selftest.png
+```
+
+A run directory is what the SLDEA tab writes: `data.csv` (needs the `frame_file`, `tag` and `nominal_kV` columns) plus `frames\`, and optionally `setup.txt`. The CSV may also be named `data1.csv`, `data2.csv` and so on — Excel refuses to open two workbooks with the same filename, so renaming copies is normal, and every reader here accepts it (an exact `data.csv` wins if both are present). Copy the folder to local disk before tuning — **Save writes the tuned values into that run's `setup.txt`**, and every slider drag re-reads the frames, which is slow over SMB.
+
+The three bench runs under `Recordings\SLDEA_data` are hardcoded as shortcuts `1`, `2` and `3` (`sldea_edge.BENCH_RUNS`) — `sldea_diag.py 1`, `sldea_tuner.py 2`, or `.\deploy\Tune_SLDEA_Windows.bat /diag 3` — so the long OneDrive path never has to be typed. Entries whose path does not exist are ignored, so the shortcuts are inert on any other machine.
+
+Pass the run folder explicitly. With no argument the tuner falls back to `%SCPI_SLDEA_DIR%` and then to the Linux share path, which on Windows only prints "no run found" and exits 2. Setting it once — `setx SCPI_SLDEA_DIR "C:\SLDEA"`, new shell required — makes the no-argument form, the SLDEA tab's **🎚 Tune params…** button and Edge Review's **Tune** button all resolve the newest run under it. Autodiscovery treats any sub-folder holding a run CSV as a run, whatever it is called — bench names like `P3_1_2.5mL_20260728` included.
+
+One data trap worth knowing: the first loadable panel is used as the difference baseline, so if the run's baseline frame is missing or unreadable the mid-run frame silently becomes the reference and every outline is wrong. Check that the panel labelled `baseline` really shows the 0 kV image.
+
+Saved settings live in the run's `setup.txt`, so the review pass uses exactly what was tuned:
+
+```
+.venv\Scripts\python sldea_edge_gui.py "C:\SLDEA\SLDEA_20260721_1430" --auto
+```
+
+### When a run will not tune
+
+Sliders cannot fix a run whose signal is not where the detector is looking. Before spending another session dragging them, measure it:
+
+```
+python sldea_diag.py "C:\SLDEA\SLDEA_20260721_1430"
+```
+
+or `deploy\Tune_SLDEA_Windows.bat /diag`, which uses the same environment (from PowerShell, prefix it: `.\deploy\Tune_SLDEA_Windows.bat /diag` — PowerShell will not run a bare script name from the current directory). The diagnostic opens no window, so unlike the tuner it does not need a Python built with tkinter. It writes `sldea_diag.txt` / `.json` / `.png` into the run folder, changes nothing, and reports:
+
+- **repeatability** — the run's own control experiment, needing no new data: two snapshots at the same nominal kV, seconds apart, hold the same scene in the same state, so whatever separates them is the instrument rather than the device. When that floor is as large as the difference against the baseline, no threshold anywhere can work and the fix belongs at capture time.
+- **photometry** — the mean ROI difference as it stands, after the scalar `norm_bg` gain the detector applies, and after a gain+offset fit on matched quantiles. When the last is far below the first, the difference was mostly an exposure mismatch and never measured the device — every threshold is then set on a pedestal many σ tall. The lowest-voltage frame is the control: nothing has activated there, so whatever it differs by is the artifact.
+- **drift** — phase correlation baseline→frame, and how much of the difference energy disappears once that shift is undone. `candidates()` normalises brightness but never registers geometry, so rig or camera movement rings every hard edge in the scene and reads as change. A large shift that registration cannot cash in is reported as what it is — an unconstrained estimate, not drift.
+- **which map separates** — the same ROI scored as a raw difference, a registered difference, and a dense wrinkle map (local Laplacian energy vs the baseline). 0 means one noise population, where no threshold exists that splits active from inactive; 1 means two clean ones. Whichever wins is what the detector *should* be segmenting — the number that matters when the DEA wrinkles without expanding, because difference-imaging then has nothing to find.
+- **threshold transfer** — the per-frame Otsu value across the run. All three candidate tiers are multiples of it, so when it swings, a setting tuned on one frame is a different cut on the next.
+- **step behaviour** — area swept against threshold, showing where the 21×21 merge close bridges patches and the area jumps.
+- **the gate** — ROI diff p99 against `min_diff` per frame, and every threshold restated in units of the sensor's own σ, since a gray-level constant does not transfer between runs, cameras or exposures.
+
+`python sldea_diag.py --selftest out.png` runs it against synthetic runs — one that expands, one that only wrinkles, one that drifts — without needing any data.
+
 ## Repository layout & tests
 
 - Repo root: the application modules only (`gui.py`, `instruments.py`, the arb/export/format/profile libraries, `version.py`).

@@ -12,7 +12,10 @@ the pipeline produces -- this is a viewfinder on the real algorithm, not a
 reimplementation.
 
     python sldea_tuner.py [RUNDIR]              # or newest under the default
+    python sldea_tuner.py 1                     # bench shortcut (see
+                                                # sldea_edge.BENCH_RUNS)
     python sldea_tuner.py --selftest OUT.png    # headless render, no window
+    python sldea_tuner.py --resolve PATH        # print the resolved run
 
 Also doubles as the labelling front-end for the ML route: tune until the
 masks are right, then the saved outlines are weak labels to correct/export.
@@ -245,15 +248,12 @@ def _selftest(out_png):
 # GUI
 # ---------------------------------------------------------------------------
 
-def _newest_run(root):
-    try:
-        subs = [os.path.join(root, n) for n in os.listdir(root)
-                if n.startswith('SLDEA_') and
-                os.path.isdir(os.path.join(root, n))]
-    except OSError:
-        return None
-    subs = [s for s in subs if os.path.exists(os.path.join(s, 'data.csv'))]
-    return max(subs, key=os.path.getmtime) if subs else None
+# Run resolution lives in sldea_edge -- the Tk-free module every reader
+# already imports, so the diagnostic gets the same rules without dragging
+# the font workaround in. Kept under the old names: gui.py calls
+# _newest_run, and the Windows launcher calls resolve_run.
+_newest_run = se.newest_run
+resolve_run = se.resolve_run
 
 
 def main(argv):
@@ -261,10 +261,24 @@ def main(argv):
     if '--selftest' in argv:
         _selftest(args[0] if args else 'tuner_selftest.png')
         return 0
+    if '--resolve' in argv:
+        # For the Windows launcher: print the resolved run directory and
+        # exit. A flag rather than `python -c "..."` in the batch file --
+        # cmd mangles a command that starts with a quoted path and carries
+        # further quoted arguments, which silently broke every path
+        # containing a space (bench 2026-07-28).
+        target = resolve_run(args[0] if args else None)
+        if not target:
+            return 2
+        print(target)
+        return 0
 
-    rundir = args[0] if args else _newest_run(DEFAULT_DIR)
-    if not rundir or not os.path.exists(os.path.join(rundir, 'data.csv')):
-        print(f"no run found (looked in {DEFAULT_DIR}); pass a RUNDIR")
+    rundir = resolve_run(args[0]) if args else _newest_run(DEFAULT_DIR)
+    if not rundir:
+        where = args[0] if args else DEFAULT_DIR
+        print(f"no run found (looked in {where}); pass a run directory -- "
+              f"one holding data.csv (or data1.csv, data2.csv ...) and a "
+              f"frames/ folder")
         return 2
 
     import tkinter as tk
@@ -294,12 +308,14 @@ def main(argv):
     ctl.pack(fill='x')
     scales, vallabels = {}, {}
     fill_var = tk.BooleanVar(value=True)
-    norm_var = tk.BooleanVar(value=bool(settings.get('norm_bg', 1)))
+    # the checkbox is on/off; ON means the affine fit (2). A run whose
+    # setup.txt still says 1 keeps the legacy scalar until it is retuned.
+    norm_var = tk.BooleanVar(value=bool(settings.get('norm_bg', 2)))
     job = {'id': None}
 
     def recompute():
         job['id'] = None
-        settings['norm_bg'] = 1 if norm_var.get() else 0
+        settings['norm_bg'] = 2 if norm_var.get() else 0
         _, cands, scale = detect_panels(panels, base_gray, settings,
                                         run['rows'])
         for ax, p in zip(axs, panels):
@@ -346,7 +362,8 @@ def main(argv):
 
     opts = ttk.Frame(root, padding=(8, 0))
     opts.pack(fill='x')
-    ttk.Checkbutton(opts, text="Normalize brightness to baseline (norm_bg)",
+    ttk.Checkbutton(opts, text="Match frame to baseline: gain+offset "
+                    "(norm_bg)",
                     variable=norm_var, command=schedule).pack(side='left')
     ttk.Checkbutton(opts, text="Shade detected region", variable=fill_var,
                     command=schedule).pack(side='left', padx=12)
@@ -363,7 +380,7 @@ def main(argv):
             settings[key] = int(dv) if is_int else dv
             scales[key].set(dv)
             vallabels[key].config(text=(f"{int(dv)}" if is_int else f"{dv:g}"))
-        norm_var.set(bool(se.DEFAULT_SETTINGS.get('norm_bg', 1)))
+        norm_var.set(bool(se.DEFAULT_SETTINGS.get('norm_bg', 2)))
         schedule()
 
     bar = ttk.Frame(root, padding=8)

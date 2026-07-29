@@ -11,6 +11,44 @@ Read this file, then `sldea_edge.py` (`candidates`, `_texture_candidate`,
 `prepared_diff`, `photometric_fit`, `foil_mask`, `baseline_disc`,
 `mm_per_px`) and `sldea_diag.py`.
 
+## START HERE — first task of the next session (decided 2026-07-29)
+
+**Build the boundary self-audit, run it on all six runs, and report the
+bias numbers — before any labeling happens.** Rationale: conf is
+currently a consistency score (see "Does higher conf mean more correct
+edges?" below); the audit is the only correctness check that costs the
+operator nothing, and if it finds a systematic bias, that gets fixed
+BEFORE operator labeling time (#162) is spent measuring a known flaw.
+
+Spec, agreed with Anatol:
+
+- New function in `sldea_edge` (so the GUI/tuner can reuse it), e.g.
+  `audit_boundary(prep, cand, settings)`; reported by `sldea_diag`.
+- For every frame whose best candidate is `disc-fit` or `resting`:
+  along the FITTED boundary, per kept ray, locate the local ink step's
+  half-height position and report the SIGNED offset to the fitted
+  radius (+ = fit outside the step), plus the fraction of boundary arc
+  with NO measurable step beneath it (step below the scene's adaptive
+  cut within a ±window).
+- Per frame: median signed offset (px, full-res), MAD, no-step arc %.
+  Per run: median bias, p95 |offset|, median no-step arc — new report
+  section + JSON block + two per-frame columns.
+- Decision rule: |median bias| <= 2 px AND no-step arc <= 10% on all
+  six runs -> detections trustworthy at the current bar; proceed to
+  #162 labeling. Anything worse -> investigate the feature bias first
+  (prime suspects: halo interference, asymmetric-soft-edge smoothing
+  shift; see the rejected-designs history in the decision log).
+- Tests: a synthetic with a known boundary audits to ~0 bias; a
+  candidate deliberately shifted +5 px audits to ~+5; the ring-artifact
+  scene audits to a large no-step arc.
+- "Circled the noise" maps exactly to: large no-step arc. Systematic
+  wrong-feature maps to: nonzero bias with small MAD. Say which, with
+  numbers, in the handoff when done.
+
+Then, second: the #162 manual-trace tool + ~30 operator labels across
+both campaigns -> the conf-vs-IoU calibration curve -> raise
+`accept_conf` to whatever the curve supports. In that order.
+
 Start from `main`. The work described here was developed on
 `claude/automated-tuning-tasks-3f935d`.
 
@@ -189,12 +227,14 @@ and with the ~5 kV event all previous evidence pointed at.
 
 ## Open — in rough priority order
 
-1. **Calibrate conf against human labels.** Median conf is at 0.87–0.91
-   but only 54–79% of frames clear 0.85. ~30 accepted/adjusted frames in
-   Edge Review across the three runs would let the conf weights be fit
-   so conf ≈ P(IoU with the human ≥ 0.8) — after which raising
-   `accept_conf` to 0.85 (or wherever the bar moves) is a measured
-   decision, not a guess. This is the next session's main lever.
+0. **The boundary self-audit — see START HERE at the top.** Everything
+   below it in this list assumes its outcome.
+
+1. **Calibrate conf against human labels** (#162: the manual-trace
+   tool, then ~30 labels across both campaigns). After round 2 the
+   medians are 0.93–0.99, but conf certifies consistency, not
+   correctness — the calibration curve is what lets `accept_conf` rise
+   to a bar that MEANS something. Second task, after the self-audit.
 
 2. **Pair mismatches (2–6 per run) need eyes.** Most sit around the
    ~5 kV event, where the pre-ramp and post-ramp snapshots are 57 s

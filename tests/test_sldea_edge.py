@@ -623,6 +623,85 @@ def test_texture_channel_detects_pure_wrinkle_the_gate_would_drop():
         "with tex_seg off the gate must drop the frame as before"
 
 
+def _bridged_pair(r_active=112, gain=0.9, offset=5.0, seed=7):
+    """Baseline + activated frame of the bridged scene: the ink disc
+    EXPANDS (the boundary feature is the ink edge itself), its interior
+    ripples, the passive surround stays paper, and the whole frame sits
+    at a photometric mismatch the detector must normalize away."""
+    rng = np.random.default_rng(seed)
+    base = _bridged_scene(with_disc=True, seed=seed)
+    h, w = base.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    img = np.full((h, w), 190.0, np.float32)
+    disc = (xx - 480) ** 2 + (yy - 270) ** 2 <= r_active * r_active
+    img[disc] = 172.0 + 6.0 * np.sin((xx[disc] + yy[disc]) / 2.5)
+    img[230:310, 0:330] = base[230:310, 0:330]
+    img[230:310, 630:960] = base[230:310, 630:960]
+    img[262:278, 330:392] = 174.0
+    img[262:278, 568:630] = 174.0
+    img[310:352, 270:345] = 165.0
+    img[310:352, 615:690] = 165.0
+    img += rng.normal(0, 1.5, img.shape).astype(np.float32)
+    img = np.clip(img * gain + offset, 0, 255).astype(np.float32)
+    return base, img
+
+
+def test_disc_fit_tracks_the_moving_ink_edge():
+    """The active area is the FULL responding disc, and its boundary
+    feature is the ink edge on the normalized frame (2026-07-28 bench:
+    at 4.25 kV the edge visibly moved ~80 px and the intensity profiles
+    confirm it). The fit must recover the expanded radius from the known
+    resting disc, at high confidence, with a tight CI -- and win."""
+    base, img = _bridged_pair(r_active=112)
+    s = dict(se.DEFAULT_SETTINGS)
+    cands = se.candidates(base, img, s)
+    assert cands, "no candidates on an expanding disc"
+    best = cands[0]
+    assert best['method'] == 'disc-fit', best['method']
+    assert abs(best['diam_px'] - 224) / 224 < 0.06, best['diam_px']
+    assert abs(best['cx'] - 480) < 12 and abs(best['cy'] - 270) < 12
+    assert best['conf'] >= 0.75, best['conf']
+    assert best['spread_pct'] == best['ci85_pct'] < 4.0, best
+    assert not se.needs_review(cands, s)
+
+
+def test_resting_candidate_states_the_known_area_on_gated_frames():
+    """A gated frame with a known resting disc is not 'nothing': the
+    honest measurement is that the area equals the resting area. It must
+    auto-accept -- low-kV frames used to queue for review over frames
+    that show no change at all."""
+    rng = np.random.default_rng(11)
+    base = _bridged_scene(with_disc=True)
+    img = np.clip(base + rng.normal(0, 1.0, base.shape), 0,
+                  255).astype(np.float32)
+    s = dict(se.DEFAULT_SETTINGS)
+    cands = se.candidates(base, img, s)
+    assert len(cands) == 1 and cands[0]['method'] == 'resting', cands
+    ref = se.baseline_disc(base, s)
+    assert abs(cands[0]['area_px'] - ref['area_px']) < 1e-6
+    assert cands[0]['conf'] >= 0.75
+    assert not se.needs_review(cands, s)
+    # and with no baseline disc there is nothing to state: gated frames
+    # stay empty exactly as before (the no-change-gate test pins that)
+
+
+def test_ramp_consistency_flags_pairs_and_dips():
+    rows = [{'nominal_kV': '1'}, {'nominal_kV': '1'},
+            {'nominal_kV': '2'}, {'nominal_kV': '2'},
+            {'nominal_kV': '3'}, {'nominal_kV': '3'}]
+    results = {0: {'area_px': 100.0}, 1: {'area_px': 102.0},
+               2: {'area_px': 140.0}, 3: {'area_px': 90.0},
+               4: {'area_px': 60.0}, 5: {'area_px': 61.0}}
+    annos = se.ramp_consistency(rows, results)
+    assert 2 in annos and 'pair mismatch' in annos[2]
+    assert 3 in annos and 'pair mismatch' in annos[3]
+    assert 4 in annos and 'dip' in annos[4]
+    assert 0 not in annos and 1 not in annos
+    # agreeing, monotone results raise nothing
+    ok = {i: {'area_px': 100.0 + 10 * (i // 2)} for i in range(6)}
+    assert se.ramp_consistency(rows, ok) == {}
+
+
 def test_load_run_says_what_is_missing():
     d = tempfile.mkdtemp(prefix='runcsv_none_')
     try:

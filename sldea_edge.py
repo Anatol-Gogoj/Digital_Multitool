@@ -18,6 +18,22 @@ with a confidence score; frames whose best candidate is weak (or whose
 candidates disagree) are queued for the human-in-the-loop pass in the GUI. Breakdown heuristics flag
 suspect steps: a Trek current spike and an area collapse while voltage rises.
 
+Since 2026-07-29 the primary channel is the BOUNDARY TRACKER
+('disc-fit'): the resting disc is measured on the baseline
+(baseline_disc, radial rays + robust circle fit), and each frame's
+active area is the ink edge of that known object, tracked by rays and a
+robust ellipse — the full responding disc, leads and the passive
+wrinkle ring excluded, with a real 85% CI on area from the edge
+scatter. Gated frames with a known disc report 'resting' instead of an
+empty row. Same-kV pair agreement and channel hysteresis are folded
+into confidence (reconcile_pairs / prev_method).
+
+A note on 'conf': it is a review-ordering score — the strength of
+internally consistent evidence — NOT a calibrated probability that the
+boundary is correct. The pair bonus certifies against random error
+only; correlated failure modes agree too. See SLDEA_HANDOFF.md
+("Does higher conf mean more correct edges?") before leaning on it.
+
 Areas are stored in px^2 and converted to mm^2 using the DEA's nominal
 resting diameter (default 16 mm) against the baseline detection.
 
@@ -777,8 +793,14 @@ def _disc_fit_candidate(prep, settings, ref):
     w_hi = min(int(np.searchsorted(rs, 1.38 * r0)), nr - 6)
     if in_hi <= in_lo or w_hi <= w_lo + 4:
         return None
-    pts = []
-    steps = []
+    # Two passes over the rays: measure every sustained step first, then
+    # cut at a threshold derived from the scene's own ink contrast. A
+    # fixed cut cannot serve both campaigns -- the P3 ink sits 10-25 gray
+    # levels below paper with a faint top arc, while the 07-23 devices
+    # step 40+ and their spurious lead/shadow edges alone reach 6-8. The
+    # adaptive cut keeps a uniformly faint edge and rejects junk edges on
+    # a high-contrast scene, in the same rule.
+    raw = []
     for k in range(nray):
         if blocked[k]:
             continue
@@ -790,9 +812,26 @@ def _disc_fit_candidate(prep, settings, ref):
         if ins.size < 4 or outs.size < 4:
             continue
         stepc = float(np.median(outs)) - float(np.median(ins))
-        if stepc < 4.0:
+        if stepc <= 2.0:
             continue                    # no sustained dark->light edge
-        redge = rs[gi] + 0.5
+        raw.append((k, gi, stepc))
+    if len(raw) < 8:
+        return None
+    cut = max(3.0, 0.35 * float(np.median([s for _k, _g, s in raw])))
+    pts = []
+    steps = []
+    for k, gi, stepc in raw:
+        if stepc < cut:
+            continue
+        # sub-pixel edge: parabolic refinement over the neighboring step
+        # values (istep[gi] is the rise between rs[gi] and rs[gi]+1)
+        s0 = float(istep[k, gi])
+        sm1 = float(istep[k, gi - 1]) if gi > 0 else s0
+        sp1 = float(istep[k, gi + 1]) if gi < istep.shape[1] - 1 else s0
+        den = sm1 - 2.0 * s0 + sp1
+        delta = 0.5 * (sm1 - sp1) / den if abs(den) > 1e-9 else 0.0
+        delta = min(0.75, max(-0.75, delta))
+        redge = rs[gi] + 0.5 + delta
         pts.append((cx0 + redge * np.cos(th[k]),
                     cy0 + redge * np.sin(th[k])))
         steps.append(stepc)
@@ -946,8 +985,16 @@ def _texture_candidate(prep, settings):
     return c
 
 
-def candidates(base_gray, img_gray, settings):
+def candidates(base_gray, img_gray, settings, prev_method=None):
     """Up to 3 candidate outlines for the active area, best first.
+
+    `prev_method`: the winning method of the PREVIOUS frame in ramp
+    order, when the caller iterates one. The incumbent channel gets a
+    +0.05 hysteresis bonus, so a challenger must beat it by a margin
+    rather than by a coin flip -- single-frame tier flips between two
+    near-tied channels caused most same-kV pair mismatches on the bench
+    runs (2026-07-29). The bonus is tagged on the candidate
+    ('hyst_bonus') so a reader can see exactly what moved.
 
     Difference-imaging only (bench 2026-07-23: the old HoughCircles candidate
     fabricated a confident circle on EVERY frame -- it teleported around the
@@ -1125,6 +1172,24 @@ def candidates(base_gray, img_gray, settings):
         c['conf'] = round(0.3 * c['solidity'] + 0.3 * c['contrast']
                           + 0.2 * agr + 0.2 * wbonus, 3)
         c['spread_pct'] = round(100 * spread, 1)
+    if prev_method:
+        for c in out:
+            if c['method'] == prev_method:
+                c['hyst_bonus'] = 0.05
+                c['conf'] = round(min(0.99, c['conf'] + 0.05), 3)
+                break
+    # The recorded quantity is the BOUNDARY's area (2026-07-28 ruling), so
+    # a wrinkled-interior patch sitting inside a valid boundary fit is
+    # supporting evidence, never the better answer: cap it just below the
+    # fit. Where the fit refuses (event frames), tex still wins outright.
+    if dfit is not None:
+        for c in out:
+            if (c['method'] == 'tex-ratio' and c['conf'] >= dfit['conf']
+                    and np.hypot(c['cx'] - dfit['cx'],
+                                 c['cy'] - dfit['cy']) <= 0.5 * dfit['diam_px']
+                    and c['area_px'] <= 1.2 * dfit['area_px']):
+                c['conf'] = round(max(0.0, dfit['conf'] - 0.01), 3)
+                c['capped_by'] = 'disc-fit'
     out.sort(key=lambda c: c['conf'], reverse=True)
     return out[:3]
 
@@ -1203,6 +1268,56 @@ def wrinkle_onset(rows, results, settings):
             else:
                 annos[i] = f"wrinkle-mode (idx {w:g})"
     return onset, annos
+
+
+def reconcile_pairs(rows, cands_by_idx, settings):
+    """Fold same-kV pair agreement into confidence, BEFORE auto-accept.
+
+    The two snapshots of one step are independent detections of one
+    physical state -- the strongest per-frame evidence the run offers.
+    When their best candidates agree within a tolerance derived from
+    their own fit CIs, both gain +0.05 (tagged 'pair_confirmed'); when
+    they disagree past twice that tolerance, both are capped just below
+    accept_conf (tagged 'pair_mismatch_pct'), so a confident-looking
+    tier flip can never auto-accept on both sides of a contradiction.
+    Candidates without a CI (blob tiers) get a 6% default tolerance each,
+    matching ramp_consistency's 12% pair rule. Mutates the best
+    candidates in place; -> {'confirmed': n, 'capped': n}."""
+    acc = float(settings.get('accept_conf', 0.75))
+    by_kv = {}
+    for i, row in enumerate(rows):
+        try:
+            kv = float(row.get('nominal_kV') or '')
+        except (TypeError, ValueError):
+            continue
+        cl = cands_by_idx.get(i)
+        if cl:
+            by_kv.setdefault(kv, []).append(cl[0])
+    stats = {'confirmed': 0, 'capped': 0}
+    for kv, members in sorted(by_kv.items()):
+        if len(members) < 2:
+            continue
+        areas = [float(b['area_px']) for b in members]
+        lo, hi = min(areas), max(areas)
+        mid = (hi + lo) / 2.0
+        if mid <= 0:
+            continue
+        rel = (hi - lo) / mid
+        tol = max(0.04, sum(
+            (1.5 * b['ci85_pct'] / 100.0)
+            if b.get('ci85_pct') is not None else 0.06 for b in members))
+        if rel <= tol:
+            for b in members:
+                b['pair_confirmed'] = True
+                b['conf'] = round(min(0.99, b['conf'] + 0.05), 3)
+            stats['confirmed'] += len(members)
+        elif rel > 2.0 * tol:
+            for b in members:
+                b['pair_mismatch_pct'] = round(100 * rel, 1)
+                if b['conf'] > acc - 0.01:
+                    b['conf'] = round(acc - 0.01, 3)
+            stats['capped'] += len(members)
+    return stats
 
 
 def ramp_consistency(rows, results, settings=None,

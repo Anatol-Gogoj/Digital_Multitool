@@ -397,7 +397,12 @@ Three mechanisms, one commit, all three validated on both campaigns:
 - Plus the **containment cap**: a tex-ratio patch sitting inside a valid
   disc-fit is capped just below it (`capped_by`) — the recorded area is
   the boundary's, per the active-area ruling; tex still wins outright
-  where the fit refuses.
+  where the fit refuses. **Extended to the diff tiers 2026-07-29** after
+  an operator spot-read (155425 @ 5.25 kV post: diff-hi outlined an
+  interior patch at half the fit's area and outranked the correct
+  rank-3 disc-fit boundary). Same containment geometry (centroid inside
+  the fit, area <= 1.2x); a larger diff region is a disagreement, not
+  support, and still competes.
 
 | run (pre-event where marked) | review | median conf | conf ≥0.85 |
 |------|--------|-------------|-----------|
@@ -530,6 +535,7 @@ column is what settled it. Do not relitigate these without new evidence.
 | Incumbent channel gets +0.05 hysteresis, tagged | Near-tied channels flipped on single frames and caused most pair mismatches | Pair mismatches 2–6/run → 0–2 after |
 | Same-kV pair agreement folded into conf: +0.05 within CI tolerance, both capped below accept past 2× | The pair is the run's own control — but it certifies against random error only, not correlated error | Round-2 tables; caveat in the epistemics section above |
 | A tex patch contained in a valid disc-fit is capped below it | The recorded area is the boundary's, per the active-area ruling; interior wrinkle is supporting evidence | 5.75 kV frames now record the boundary, not the patch |
+| The containment cap covers the diff tiers too (2026-07-29) | Same ruling, same geometry: a contained diff patch is supporting evidence; only a region LARGER than 1.2x the fit is a genuine disagreement and still competes | Operator spot-read: 155425 @ 5.25 kV post ranked an 81 kpx2 interior patch (diff-hi 0.76, diff-otsu 0.73) over the correct 161 kpx2 disc-fit (0.70) |
 | conf is a review-ordering score, not a probability of correctness | Only the #162 label calibration can make it one; pair-confirm boosts correlated errors too | Epistemics section above |
 | The self-audit gates ACCEPTANCE, not ranking: a capped winner keeps rank and area, loses auto-accept | The fit is still the best measurement on offer; the recorded area stays the boundary's, but the audit's contradiction sends it to a human | 2026-07-29 fold; audit_nostep / audit_bias tags |
 | Per-frame no-step cap at 15% (audit_nostep_pct), per-run tunable | Sends the interpolated-arc onset frames to review, as specified in the previous handoff | 31 frames capped across six runs, all in the onset band or the 155425 floor |

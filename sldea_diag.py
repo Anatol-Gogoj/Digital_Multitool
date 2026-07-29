@@ -388,6 +388,8 @@ def analyze(rundir, max_frames=24):
     paper = se._paper_mask(base, base.shape, settings)
     k = int(settings.get('blur_px', 5)) | 1
     per = []
+    cands_store = {}
+    prev_m = None
     for fr in frames:
         dx, dy, resp, aligned = drift(base, fr['gray'])
         raw = cv2.absdiff(fr['gray'], base)
@@ -400,8 +402,12 @@ def analyze(rundir, max_frames=24):
         aff = np.abs((a * base[ys, xs] + b) - fr['gray'][ys, xs])
         nb = norm_bg_scale(base, fr['gray'], roi_frac)
         nbr = np.abs(np.clip(fr['gray'][ys, xs] * nb, 0, 255) - base[ys, xs])
-        cands = se.candidates(base, fr['gray'], settings)
+        cands = se.candidates(base, fr['gray'], settings,
+                              prev_method=prev_m)
         best = cands[0] if cands else None
+        if best:
+            prev_m = best['method']
+        cands_store[fr['idx']] = cands
         # A/B the normalization the detector applies: the run's own setting
         # against the legacy scalar. One command then answers "did the
         # gain+offset fit actually change what gets detected", instead of
@@ -467,11 +473,21 @@ def analyze(rundir, max_frames=24):
               for p in hot if p['idx'] in by_idx]
 
     repeats = repeat_pairs(run, base.shape, roi_frac)
+    # pair reconciliation happens exactly where the GUI does it: after
+    # detection, before the accept decision the report quotes
+    recon = se.reconcile_pairs(rows, cands_store, settings)
+    for p in per:
+        cl = cands_store.get(p['idx'])
+        if cl:
+            p['conf'] = float(cl[0]['conf'])
+            p['needs_review'] = bool(se.needs_review(cl, settings))
     res_best = {p['idx']: {'area_px': p['area_px']}
                 for p in per if p['area_px']}
     cons_annos = se.ramp_consistency(rows, res_best)
     consistency = {
         'checked': len(res_best),
+        'pairs_confirmed': recon['confirmed'],
+        'pairs_capped': recon['capped'],
         'pair_mismatches': sum(1 for n in cons_annos.values()
                                if 'pair mismatch' in n),
         'dips': sum(1 for n in cons_annos.values() if 'area dip' in n),
@@ -658,7 +674,9 @@ def verdicts(d):
             out.append(('OK', 'The ramp is self-consistent',
                         f"same-kV pairs agree and the area never dips "
                         f"against a rising voltage across "
-                        f"{cons['checked']} detected frames."))
+                        f"{cons['checked']} detected frames "
+                        f"({cons.get('pairs_confirmed', 0)} pair-confirmed, "
+                        f"{cons.get('pairs_capped', 0)} capped to review)."))
 
     si = float(np.median([p['sep_intensity'] for p in per]))
     sr = float(np.median([p['sep_registered'] for p in per]))
@@ -1138,12 +1156,15 @@ def contact_sheet(rundir, png, count=8, max_frames=24):
         head0 += f"  foil {100 * float(foil.mean()):.0f}%"
     ax0.set_title(head0, fontsize=8, loc='left')
 
+    prev_m = None
     for k, i in enumerate(idx):
         gray = se.load_gray(se.frame_path(run, rows[i]) or '')
         ax = axs[(k + 1) // cols][(k + 1) % cols]
         if gray is None or gray.shape != base.shape:
             continue
-        cands = se.candidates(base, gray, settings)
+        cands = se.candidates(base, gray, settings, prev_method=prev_m)
+        if cands:
+            prev_m = cands[0]['method']
         ax.imshow(gray, cmap='gray', vmin=0, vmax=255)
         ax.axis('off')
         for j, c in enumerate(cands[:3]):

@@ -486,6 +486,222 @@ def test_bench_shortcuts_resolve_and_stay_inert_elsewhere():
         se.BENCH_RUNS.update(saved)
 
 
+def _crinkle(shape_hw, rng, lo=120.0, hi=255.0, cell=3):
+    """Foil stand-in: dense blocky speckle spanning the strip's real range
+    (P3: p10 144, median 173, p90 239 -- most of it DIMMER than paper)."""
+    h, w = shape_hw
+    r = rng.uniform(lo, hi, (int(np.ceil(h / cell)),
+                             int(np.ceil(w / cell)))).astype(np.float32)
+    return np.kron(r, np.ones((cell, cell), np.float32))[:h, :w]
+
+
+def _bridged_scene(with_disc=True, seed=7):
+    """The REAL P3 failure shape (2026-07-28): low-contrast disc, crinkled
+    strips contacting it, smooth CNT traces and under-strip shadows
+    bridging the dark class from strip to strip. Region-growing merged all
+    of it into one 85%-of-frame blob at conf 0.93."""
+    rng = np.random.default_rng(seed)
+    h, w = 540, 960
+    img = np.full((h, w), 190.0, np.float32)
+    yy, xx = np.mgrid[0:h, 0:w]
+    if with_disc:
+        img[(xx - 480) ** 2 + (yy - 270) ** 2 <= 100 * 100] = 172.0
+    img[230:310, 0:330] = _crinkle((80, 330), rng)      # left strip
+    img[230:310, 630:960] = _crinkle((80, 330), rng)    # right strip
+    img[262:278, 330:392] = 174.0                       # CNT traces bridge
+    img[262:278, 568:630] = 174.0                       # ...to the disc
+    img[310:352, 270:345] = 165.0                       # under-strip
+    img[310:352, 615:690] = 165.0                       # shadows
+    img += rng.normal(0, 1.5, img.shape).astype(np.float32)
+    return np.clip(img, 0, 255).astype(np.float32)
+
+
+def test_foil_mask_covers_crinkle_and_refuses_edges_and_flat():
+    """Brightness cannot define the foil (median foil pixel 173 vs paper
+    176-190); texture can -- but only texture that fills a REGION. A flat
+    scene, sensor grain, and a hard-edged flat rectangle (whose rim is a
+    band exactly one box window wide) must all yield an empty mask."""
+    rng = np.random.default_rng(9)
+    flat = np.full((480, 640), 180.0, np.float32)
+    assert not se.foil_mask(flat).any()
+    noisy = flat + rng.normal(0, 2.0, flat.shape).astype(np.float32)
+    assert not se.foil_mask(noisy).any()
+    rect = flat.copy()
+    rect[200:280, 100:540] = 250.0
+    assert not se.foil_mask(rect).any(), "a flat rectangle's rim is not foil"
+    crink = flat.copy()
+    crink[195:285, 60:580] = _crinkle((90, 520), rng)
+    fo = se.foil_mask(crink)
+    strip = np.zeros(crink.shape, bool)
+    strip[195:285, 60:580] = True
+    import cv2
+    grown = cv2.dilate(strip.astype(np.uint8),
+                       np.ones((71, 71), np.uint8)).astype(bool)
+    assert fo[strip].mean() > 0.9, fo[strip].mean()
+    assert not fo[~grown].any(), "foil mask leaked far off the strip"
+
+
+def test_baseline_disc_survives_bridging_tendrils_and_shadows():
+    """The exact failure the frames exposed: dark tendrils and shadows
+    bridge the disc to both strips, so any region-grown dark class spans
+    the frame. The radial trace must recover the disc itself -- and the
+    px->mm scale with it."""
+    base = _bridged_scene(with_disc=True)
+    ref = se.baseline_disc(base, dict(se.DEFAULT_SETTINGS))
+    assert ref is not None, "disc not found on the bridged scene"
+    assert abs(ref['diam_px'] - 200) / 200 < 0.08, ref['diam_px']
+    assert abs(ref['cx'] - 480) < 15 and abs(ref['cy'] - 270) < 15, \
+        (ref['cx'], ref['cy'])
+    assert ref['circ'] > 0.9, ref['circ']
+    assert ref['conf'] >= 0.6, ref['conf']
+
+
+def test_baseline_disc_refuses_when_there_is_no_disc():
+    """Strips, tendrils and shadows but NO disc: the old code returned the
+    merged blob at conf 0.93 and silently corrupted every mm^2 written.
+    Refusal is the contract -- mm falls back loudly, not wrongly."""
+    base = _bridged_scene(with_disc=False)
+    assert se.baseline_disc(base, dict(se.DEFAULT_SETTINGS)) is None
+
+
+def test_photometric_fit_mask_excludes_a_large_changed_region():
+    """Q1 (bench 2026-07-28): run 3's gain dived 0.77->0.55 at 5.25 kV
+    because the device sat inside its own fit region; restricting the fit
+    to paper flattened it. The trim cannot save a fit whose changed
+    region is too big -- the mask can."""
+    yy, xx = np.mgrid[0:240, 0:240]
+    base = (60.0 + 140.0 * xx / 239.0).astype(np.float32)
+    img = np.clip(base * 0.78 + 12.0, 0, 255)
+    disc = (xx - 120) ** 2 + (yy - 120) ** 2 <= 78 * 78   # ~46% of the ROI
+    img[disc] = np.clip(img[disc] - 45, 0, 255)
+    roi = (slice(18, 222), slice(18, 222))
+    a_un, _b_un = se.photometric_fit(base, img, roi)
+    mask = np.zeros(base.shape, bool)
+    mask[roi] = True
+    mask[disc] = False
+    a_m, _b_m = se.photometric_fit(base, img, roi, mask=mask)
+    assert abs(a_m - 0.78) < 0.05, a_m
+    assert abs(a_un - 0.78) > 2 * abs(a_m - 0.78), (a_un, a_m)
+
+
+def test_paper_mask_excludes_disc_and_foil():
+    base = _bridged_scene(with_disc=True)
+    pm = se._paper_mask(base, (360, 640), dict(se.DEFAULT_SETTINGS))
+    assert pm is not None
+    fo = se._foil_small(base, (640, 360))
+    assert not (pm & fo).any(), "fit region overlaps the foil"
+    assert not pm[180, 320], "fit region includes the disc centre"
+    assert pm[40, 60], "paper inside the ROI must stay in the fit region"
+
+
+def test_texture_channel_detects_pure_wrinkle_the_gate_would_drop():
+    """The P3 activation mode: the disc WRINKLES with almost no intensity
+    displacement, sep_intensity reads 0.000, and the downscaled diff sits
+    under min_diff -- the honest gate then dropped frames that are
+    visibly active. The texture channel must catch exactly this, and
+    turning it off must restore the plain gate behaviour."""
+    rng = np.random.default_rng(4)
+    h, w = 720, 1280
+    base = (np.full((h, w), 180.0, np.float32)
+            + rng.normal(0, 1.5, (h, w)).astype(np.float32))
+    yy, xx = np.mgrid[0:h, 0:w]
+    img = base.copy()
+    disc = (xx - 640) ** 2 + (yy - 360) ** 2 <= 150 * 150
+    img[disc] += 10.0 * np.sin((xx[disc] + yy[disc]) / 2.8)
+    img = np.clip(img, 0, 255).astype(np.float32)
+    s = dict(se.DEFAULT_SETTINGS)
+    prep = se.prepared_diff(base, img, s)
+    assert float(np.percentile(prep['sub'], 99)) < float(s['min_diff']), \
+        "scene not gated -- the wrinkle must be subtler for this test"
+    cands = se.candidates(base, img, s)
+    assert cands, "texture channel found nothing on a wrinkled disc"
+    assert cands[0]['method'] == 'tex-ratio', cands[0]['method']
+    assert abs(cands[0]['cx'] - 640) < 60 and abs(cands[0]['cy'] - 360) < 60
+    s2 = dict(s)
+    s2['tex_seg'] = 0
+    assert se.candidates(base, img, s2) == [], \
+        "with tex_seg off the gate must drop the frame as before"
+
+
+def _bridged_pair(r_active=112, gain=0.9, offset=5.0, seed=7):
+    """Baseline + activated frame of the bridged scene: the ink disc
+    EXPANDS (the boundary feature is the ink edge itself), its interior
+    ripples, the passive surround stays paper, and the whole frame sits
+    at a photometric mismatch the detector must normalize away."""
+    rng = np.random.default_rng(seed)
+    base = _bridged_scene(with_disc=True, seed=seed)
+    h, w = base.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    img = np.full((h, w), 190.0, np.float32)
+    disc = (xx - 480) ** 2 + (yy - 270) ** 2 <= r_active * r_active
+    img[disc] = 172.0 + 6.0 * np.sin((xx[disc] + yy[disc]) / 2.5)
+    img[230:310, 0:330] = base[230:310, 0:330]
+    img[230:310, 630:960] = base[230:310, 630:960]
+    img[262:278, 330:392] = 174.0
+    img[262:278, 568:630] = 174.0
+    img[310:352, 270:345] = 165.0
+    img[310:352, 615:690] = 165.0
+    img += rng.normal(0, 1.5, img.shape).astype(np.float32)
+    img = np.clip(img * gain + offset, 0, 255).astype(np.float32)
+    return base, img
+
+
+def test_disc_fit_tracks_the_moving_ink_edge():
+    """The active area is the FULL responding disc, and its boundary
+    feature is the ink edge on the normalized frame (2026-07-28 bench:
+    at 4.25 kV the edge visibly moved ~80 px and the intensity profiles
+    confirm it). The fit must recover the expanded radius from the known
+    resting disc, at high confidence, with a tight CI -- and win."""
+    base, img = _bridged_pair(r_active=112)
+    s = dict(se.DEFAULT_SETTINGS)
+    cands = se.candidates(base, img, s)
+    assert cands, "no candidates on an expanding disc"
+    best = cands[0]
+    assert best['method'] == 'disc-fit', best['method']
+    assert abs(best['diam_px'] - 224) / 224 < 0.06, best['diam_px']
+    assert abs(best['cx'] - 480) < 12 and abs(best['cy'] - 270) < 12
+    assert best['conf'] >= 0.75, best['conf']
+    assert best['spread_pct'] == best['ci85_pct'] < 4.0, best
+    assert not se.needs_review(cands, s)
+
+
+def test_resting_candidate_states_the_known_area_on_gated_frames():
+    """A gated frame with a known resting disc is not 'nothing': the
+    honest measurement is that the area equals the resting area. It must
+    auto-accept -- low-kV frames used to queue for review over frames
+    that show no change at all."""
+    rng = np.random.default_rng(11)
+    base = _bridged_scene(with_disc=True)
+    img = np.clip(base + rng.normal(0, 1.0, base.shape), 0,
+                  255).astype(np.float32)
+    s = dict(se.DEFAULT_SETTINGS)
+    cands = se.candidates(base, img, s)
+    assert len(cands) == 1 and cands[0]['method'] == 'resting', cands
+    ref = se.baseline_disc(base, s)
+    assert abs(cands[0]['area_px'] - ref['area_px']) < 1e-6
+    assert cands[0]['conf'] >= 0.75
+    assert not se.needs_review(cands, s)
+    # and with no baseline disc there is nothing to state: gated frames
+    # stay empty exactly as before (the no-change-gate test pins that)
+
+
+def test_ramp_consistency_flags_pairs_and_dips():
+    rows = [{'nominal_kV': '1'}, {'nominal_kV': '1'},
+            {'nominal_kV': '2'}, {'nominal_kV': '2'},
+            {'nominal_kV': '3'}, {'nominal_kV': '3'}]
+    results = {0: {'area_px': 100.0}, 1: {'area_px': 102.0},
+               2: {'area_px': 140.0}, 3: {'area_px': 90.0},
+               4: {'area_px': 60.0}, 5: {'area_px': 61.0}}
+    annos = se.ramp_consistency(rows, results)
+    assert 2 in annos and 'pair mismatch' in annos[2]
+    assert 3 in annos and 'pair mismatch' in annos[3]
+    assert 4 in annos and 'dip' in annos[4]
+    assert 0 not in annos and 1 not in annos
+    # agreeing, monotone results raise nothing
+    ok = {i: {'area_px': 100.0 + 10 * (i // 2)} for i in range(6)}
+    assert se.ramp_consistency(rows, ok) == {}
+
+
 def test_load_run_says_what_is_missing():
     d = tempfile.mkdtemp(prefix='runcsv_none_')
     try:

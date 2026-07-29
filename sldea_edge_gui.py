@@ -318,15 +318,18 @@ class EdgeReviewApp:
         try:
             base = self._base_gray()
             self._base_ref_pending = se.baseline_disc(base, self.settings)
+            prev = None
             for i in self.frame_rows:
                 try:
                     img = se.load_gray(
                         se.frame_path(self.run, self.run['rows'][i]))
                     cands = [] if img is None else se.candidates(
-                        base, img, self.settings)
+                        base, img, self.settings, prev_method=prev)
                 except Exception as e:
                     print(f"detect: frame {i} failed: {e}")
                     cands = []
+                if cands:
+                    prev = cands[0]['method']
                 self._detq.put((i, cands))
         finally:
             self._detq.put(None)
@@ -363,10 +366,13 @@ class EdgeReviewApp:
         self.auto_idx, self.auto_rej = set(), set()
         base = self._base_gray()
         self._base_ref_pending = se.baseline_disc(base, self.settings)
+        prev = None
         for i in self.frame_rows:
             img = se.load_gray(se.frame_path(self.run, self.run['rows'][i]))
             self.cands_all[i] = [] if img is None else se.candidates(
-                base, img, self.settings)
+                base, img, self.settings, prev_method=prev)
+            if self.cands_all[i]:
+                prev = self.cands_all[i][0]['method']
         self._finish_detect()
 
     def _finish_detect(self):
@@ -374,6 +380,9 @@ class EdgeReviewApp:
         # px→mm reference traced on the BASELINE frame itself (non-diff);
         # manual calibration (📏) overrides it.
         self.base_ref = getattr(self, '_base_ref_pending', None)
+        # the pre/post pair is the run's own control: agreement raises
+        # confidence, contradiction forces review on both members
+        se.reconcile_pairs(self.run['rows'], self.cands_all, self.settings)
         for i in self.frame_rows:
             cands = self.cands_all.get(i, [])
             if cands and not se.needs_review(cands, self.settings):

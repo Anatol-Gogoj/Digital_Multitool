@@ -685,6 +685,83 @@ def test_resting_candidate_states_the_known_area_on_gated_frames():
     # stay empty exactly as before (the no-change-gate test pins that)
 
 
+def test_disc_fit_adaptive_cut_keeps_a_uniformly_faint_edge():
+    """The P3 ink sits only 10-25 gray levels below paper and its top arc
+    is fainter still; a fixed 4-level step cut drops those rays. The cut
+    now adapts to the scene's own ink contrast: a uniformly faint edge
+    (~3 levels) must still be tracked, because the scene says that IS
+    the contrast, not noise."""
+    rng = np.random.default_rng(7)
+    base = _bridged_scene(with_disc=True, seed=7)
+    h, w = base.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    img = np.full((h, w), 190.0, np.float32)
+    r_act = 112
+    disc = (xx - 480) ** 2 + (yy - 270) ** 2 <= r_act * r_act
+    img[disc] = 187.0                                  # 3 levels below paper
+    core = (xx - 480) ** 2 + (yy - 270) ** 2 <= (0.8 * r_act) ** 2
+    img[core] += 6.0 * np.sin((xx[core] + yy[core]) / 2.5)   # responding
+    img[230:310, 0:330] = base[230:310, 0:330]
+    img[230:310, 630:960] = base[230:310, 630:960]
+    img += rng.normal(0, 1.5, img.shape).astype(np.float32)
+    img = np.clip(img, 0, 255).astype(np.float32)
+    s = dict(se.DEFAULT_SETTINGS)
+    prep = se.prepared_diff(base, img, s)
+    ref = se.baseline_disc(base, s)
+    c = se._disc_fit_candidate(prep, s, ref)
+    assert c is not None, "faint ink edge lost"
+    f = prep['base_small'].shape[1] / float(base.shape[1])
+    diam_full = c['diam_px'] / f
+    assert abs(diam_full - 2 * r_act) / (2 * r_act) < 0.10, diam_full
+
+
+def test_hysteresis_bonus_favors_the_incumbent_channel():
+    """Single-frame tier flips between near-tied channels caused most
+    same-kV pair mismatches. The incumbent method gets +0.05 -- visible,
+    tagged, and only when that channel produced a candidate at all."""
+    base, img = _bridged_pair(r_active=112)
+    s = dict(se.DEFAULT_SETTINGS)
+    plain = se.candidates(base, img, s)
+    held = se.candidates(base, img, s, prev_method='disc-fit')
+    p = next(c for c in plain if c['method'] == 'disc-fit')
+    hcand = next(c for c in held if c['method'] == 'disc-fit')
+    assert abs(hcand['conf'] - min(0.99, p['conf'] + 0.05)) < 1e-9
+    assert hcand.get('hyst_bonus') == 0.05
+    # and the boundary fit leads in both calls: a contained tex patch is
+    # supporting evidence for the recorded area, never the better answer
+    assert plain[0]['method'] == 'disc-fit', plain[0]['method']
+    assert held[0]['method'] == 'disc-fit', held[0]['method']
+    tex = next((c for c in plain if c['method'] == 'tex-ratio'), None)
+    assert tex is not None and tex.get('capped_by') == 'disc-fit'
+    # a previous method with no candidate this frame changes nothing
+    ghost = se.candidates(base, img, s, prev_method='no-such-channel')
+    assert [c['conf'] for c in ghost] == [c['conf'] for c in plain]
+
+
+def test_reconcile_pairs_boosts_agreement_and_caps_contradiction():
+    rows = [{'nominal_kV': '1'}, {'nominal_kV': '1'},
+            {'nominal_kV': '2'}, {'nominal_kV': '2'}]
+    cands = {
+        0: [{'method': 'disc-fit', 'area_px': 100000.0, 'conf': 0.80,
+             'ci85_pct': 0.5}],
+        1: [{'method': 'disc-fit', 'area_px': 101000.0, 'conf': 0.78,
+             'ci85_pct': 0.5}],
+        2: [{'method': 'disc-fit', 'area_px': 140000.0, 'conf': 0.92,
+             'ci85_pct': 0.4}],
+        3: [{'method': 'diff-lo', 'area_px': 60000.0, 'conf': 0.88,
+             'ci85_pct': None}],
+    }
+    stats = se.reconcile_pairs(rows, cands, dict(se.DEFAULT_SETTINGS))
+    assert stats == {'confirmed': 2, 'capped': 2}, stats
+    assert cands[0][0]['conf'] == 0.85 and cands[0][0]['pair_confirmed']
+    assert cands[1][0]['conf'] == 0.83
+    # the contradiction can no longer auto-accept on either side
+    acc = se.DEFAULT_SETTINGS['accept_conf']
+    assert cands[2][0]['conf'] == round(acc - 0.01, 3)
+    assert cands[3][0]['conf'] == round(acc - 0.01, 3)
+    assert cands[2][0]['pair_mismatch_pct'] == cands[3][0]['pair_mismatch_pct'] == 80.0
+
+
 def test_ramp_consistency_flags_pairs_and_dips():
     rows = [{'nominal_kV': '1'}, {'nominal_kV': '1'},
             {'nominal_kV': '2'}, {'nominal_kV': '2'},

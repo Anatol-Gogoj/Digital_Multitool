@@ -11,6 +11,44 @@ Read this file, then `sldea_edge.py` (`candidates`, `_texture_candidate`,
 `prepared_diff`, `photometric_fit`, `foil_mask`, `baseline_disc`,
 `mm_per_px`) and `sldea_diag.py`.
 
+## START HERE — first task of the next session (decided 2026-07-29)
+
+**Build the boundary self-audit, run it on all six runs, and report the
+bias numbers — before any labeling happens.** Rationale: conf is
+currently a consistency score (see "Does higher conf mean more correct
+edges?" below); the audit is the only correctness check that costs the
+operator nothing, and if it finds a systematic bias, that gets fixed
+BEFORE operator labeling time (#162) is spent measuring a known flaw.
+
+Spec, agreed with Anatol:
+
+- New function in `sldea_edge` (so the GUI/tuner can reuse it), e.g.
+  `audit_boundary(prep, cand, settings)`; reported by `sldea_diag`.
+- For every frame whose best candidate is `disc-fit` or `resting`:
+  along the FITTED boundary, per kept ray, locate the local ink step's
+  half-height position and report the SIGNED offset to the fitted
+  radius (+ = fit outside the step), plus the fraction of boundary arc
+  with NO measurable step beneath it (step below the scene's adaptive
+  cut within a ±window).
+- Per frame: median signed offset (px, full-res), MAD, no-step arc %.
+  Per run: median bias, p95 |offset|, median no-step arc — new report
+  section + JSON block + two per-frame columns.
+- Decision rule: |median bias| <= 2 px AND no-step arc <= 10% on all
+  six runs -> detections trustworthy at the current bar; proceed to
+  #162 labeling. Anything worse -> investigate the feature bias first
+  (prime suspects: halo interference, asymmetric-soft-edge smoothing
+  shift; see the rejected-designs history in the decision log).
+- Tests: a synthetic with a known boundary audits to ~0 bias; a
+  candidate deliberately shifted +5 px audits to ~+5; the ring-artifact
+  scene audits to a large no-step arc.
+- "Circled the noise" maps exactly to: large no-step arc. Systematic
+  wrong-feature maps to: nonzero bias with small MAD. Say which, with
+  numbers, in the handoff when done.
+
+Then, second: the #162 manual-trace tool + ~30 operator labels across
+both campaigns -> the conf-vs-IoU calibration curve -> raise
+`accept_conf` to whatever the curve supports. In that order.
+
 Start from `main`. The work described here was developed on
 `claude/automated-tuning-tasks-3f935d`.
 
@@ -189,12 +227,14 @@ and with the ~5 kV event all previous evidence pointed at.
 
 ## Open — in rough priority order
 
-1. **Calibrate conf against human labels.** Median conf is at 0.87–0.91
-   but only 54–79% of frames clear 0.85. ~30 accepted/adjusted frames in
-   Edge Review across the three runs would let the conf weights be fit
-   so conf ≈ P(IoU with the human ≥ 0.8) — after which raising
-   `accept_conf` to 0.85 (or wherever the bar moves) is a measured
-   decision, not a guess. This is the next session's main lever.
+0. **The boundary self-audit — see START HERE at the top.** Everything
+   below it in this list assumes its outcome.
+
+1. **Calibrate conf against human labels** (#162: the manual-trace
+   tool, then ~30 labels across both campaigns). After round 2 the
+   medians are 0.93–0.99, but conf certifies consistency, not
+   correctness — the calibration curve is what lets `accept_conf` rise
+   to a bar that MEANS something. Second task, after the self-audit.
 
 2. **Pair mismatches (2–6 per run) need eyes.** Most sit around the
    ~5 kV event, where the pre-ramp and post-ramp snapshots are 57 s
@@ -213,6 +253,137 @@ and with the ~5 kV event all previous evidence pointed at.
 5. **Leads**: excluded by sector-blocking plus the robust fit. If a
    device is ever built whose leads leave the disc away from the strip
    azimuths, the exclusion needs the lead's own azimuth.
+
+## Confidence round 2 (2026-07-29) — pair-confirm, hysteresis, sub-pixel
+
+Three mechanisms, one commit, all three validated on both campaigns:
+
+- **Sub-pixel, contrast-adaptive disc-fit rays**: parabolic refinement
+  on the ink step, and the per-ray step cut derived from the scene's own
+  median ink contrast (`max(3, 0.35·median)`) instead of a fixed 4 —
+  the P3 ink steps 10–25 with a fainter top arc while the 07-23 devices
+  step 40+ and their spurious lead/shadow edges alone reach 6–8. Effect:
+  coverage up (disc-fit now holds through the P3 5.75 kV event frames it
+  used to refuse), residuals down.
+- **Channel hysteresis** (`candidates(..., prev_method=)`): the previous
+  frame's winning channel gets +0.05, tagged `hyst_bonus`, so a
+  challenger must win by a margin, not a coin flip. Threaded through the
+  GUI detect loops, the diagnostic and the contact sheet.
+- **Pair agreement folded into conf** (`reconcile_pairs`, called by the
+  GUI between detection and auto-accept, and by the diagnostic): best
+  candidates of a same-kV pair that agree within a CI-derived tolerance
+  gain +0.05 (`pair_confirmed`); past twice the tolerance both are
+  capped below `accept_conf` (`pair_mismatch_pct`) — a confident tier
+  flip can never auto-accept on both sides of a contradiction.
+- Plus the **containment cap**: a tex-ratio patch sitting inside a valid
+  disc-fit is capped just below it (`capped_by`) — the recorded area is
+  the boundary's, per the active-area ruling; tex still wins outright
+  where the fit refuses.
+
+| run (pre-event where marked) | review | median conf | conf ≥0.85 |
+|------|--------|-------------|-----------|
+| P3_1 | 4/48 (was 8) | 0.97 (was 0.91) | 79% (was 63%) |
+| P3_2 | 8/48 (was 9) | 0.99 (was 0.90) | 83% (was 79%) |
+| P3_3 | 6/48 (was 7) | 0.95 (was 0.87) | 90% (was 54%) |
+| 152205 <5.2 kV | 1/40 (was 6) | 0.93 (was 0.84) | 83% |
+| 155425 <5.2 kV | 2/40 (was 6) | 0.93 (was 0.83) | 78% |
+| 233451 <5.2 kV | 2/32 (was 6) | 0.95 (was 0.87) | 78% |
+
+Contact-sheet check (P3_2): every sampled frame disc-fit or resting,
+boundaries on the visible edge including 5.75 kV (1.33× resting, conf
+0.97, smooth between the 4.5 peak and the 7.25 plateau). The known
+caveat of pair-confirm: correlated errors would be boosted together —
+which is exactly what the human-label calibration (issue #162) exists
+to audit. Do that next, before trusting any bar above 0.85.
+
+## Does higher conf mean more correct edges? (operator question, 2026-07-29)
+
+Anatol asked the right question after round 2: "for all I know, we could
+be more confident that we've circled the noise." Here is exactly what is
+and is not certified, so nobody mistakes the number for more than it is.
+
+**What is ground-truthed (human- or profile-verified):**
+- The resting-disc scale, on all six baselines across both campaigns —
+  by-eye overlay measurement, agreement within 0.4% (P3) and repeat
+  agreement 0.3% between two runs of one device (07-23).
+- One activated frame verified against physics directly: run 2 @
+  4.25 kV, where the fitted boundary sits exactly on the intensity step
+  in the profile plot, and the step itself visibly moved ~80 px
+  (`edge_profiles.png`). This is a SPOT CHECK, not a systematic audit.
+- Contact sheets for five runs read frame-by-frame — but by the agent,
+  from rendered PNGs. The operator has seen selected sheets in chat.
+
+**What the round-2 boosts actually certify — consistency, not truth:**
+- The hysteresis bonus is a prior, no new evidence at all.
+- Pair-confirmation is real evidence against RANDOM error (two
+  exposures, independent sensor noise) and no evidence against
+  CORRELATED error: same scene, same lighting, same algorithm — two
+  snapshots fooled the same way agree beautifully and both get +0.05.
+- The sub-pixel/adaptive rays changed the measurement itself (more
+  rays, tighter residuals). Probably more accurate; not proven against
+  ground truth.
+- The containment cap is a ranking rule, not a correctness claim.
+
+**Why "circled the noise" is bounded but not excluded.** A disc-fit
+boundary must be a sustained >=3-gray-level dark->light step, at
+0.8–1.38x the verified resting radius, roughly concentric, round, and
+reproducible across pairs, runs and devices — sensor noise cannot
+manufacture that. What CAN survive every one of those checks is a
+systematically wrong FEATURE: the halo's outer rim instead of the ink
+edge, or a few-px bias from smoothing an asymmetric soft edge. The
+change-map and valley failures caught during development (1.6–2x and
+shrinking-with-kV areas) were exactly this class, caught by physics
+plausibility and profile reads — the ink-edge design survived those
+tests, but only one activated frame has been profile-verified since.
+
+**Conf today = "strength of internally consistent evidence."** It is
+valid for ORDERING frames for review. It is NOT a calibrated
+probability of a correct boundary. Treat conf >= 0.85 as "no internal
+contradiction found", not "validated correct".
+
+**What converts it into the real thing, in order of power:**
+1. Manual-trace labels (#162) -> the conf-vs-IoU calibration curve.
+   This audits everything at once, including correlated-pair boosts.
+2. A cheap automated self-audit (no human needed): for every ACCEPTED
+   frame, report the signed offset between the fitted radius and the
+   local step's half-height along each kept ray, plus the fraction of
+   boundary arc that has no measurable step under it. A systematic
+   feature bias shows up as a nonzero mean offset; "circled noise"
+   shows up as no-step arc. Not yet implemented; small.
+3. Operator spot-reads of the contact sheets (minutes per run).
+
+## Generalization check (2026-07-29) — the 2026-07-23 dataset
+
+Ran unmodified on `D:\Downloads\SLDEA_data\SLDEA_20260723_*` — a
+different campaign entirely: color frames, the full 3D-printed annulus
+in frame, a TEXTURED blue foam background instead of paper, tape strips
+entering vertically (152205/155425) or horizontally (233451), a much
+smaller higher-contrast disc, one run at camera gain 44, and a steady
+camera (fitted gain 1.00 — the P3 photometric pedestal was that
+campaign's artifact, and the fit correctly no-ops here). Zero retuning.
+
+- **Scale**: disc 371/372 px on the two afternoon runs of the same
+  device 32 min apart (0.3% repeatability), 362 px at night; circ 0.98,
+  conf 0.85–0.88 on all three. Verified on the contact-sheet baseline
+  panels.
+- **Detection**: resting auto-accepts the low ramp; disc-fit tracks the
+  expansion (CI 0.5–0.7%) mid-ramp; review 6/40 and 6/32 frames below
+  5.2 kV at median conf 0.83–0.87.
+- **The flags above 5.2 kV are the device, not the detector**: both
+  devices break down — the CSVs record −78 µA at 6.0 kV (152205) and
+  −26 → −123 µA over 5.6–6.4 kV (233451, which stopped at 7.6 of a
+  planned 10 kV). Wrinkle onset ~5.2–5.6 kV is visible in the frames;
+  post-breakdown frames yield small flagged non-disc changes, never a
+  fabricated disc.
+- **Known limits observed** (both fail toward review, not toward wrong
+  numbers): the annulus' print texture partially enters the foil mask
+  (harmless — a static object; costs a few blocked ray azimuths), and
+  under violent bright wrinkling near breakdown the ink edge washes out
+  and disc-fit yields to tex/diff candidates with review. A
+  "bright-wrinkle boundary" mode could extend coverage there if those
+  frames ever matter; they are post-failure frames today.
+- The aborted 2-frame run (233426) and the frameless folder (145259)
+  are handled gracefully (no crash; nothing invented).
 
 ## Decision log (2026-07-28, both sessions)
 
@@ -236,6 +407,11 @@ column is what settled it. Do not relitigate these without new evidence.
 | Gated frames with a known disc are stated as `resting`, not blanked | "No detectable change + known object" is a measurement (area = resting), not an absence | Low-kV frames auto-accept at conf 0.82–0.91; empty-scene behavior unchanged (no ref → no fabrication) |
 | Pair mismatches and dips are ANNOTATED, never averaged away | A mismatch usually means the detection changed, not the device; a dip usually IS the event | `ramp_consistency`; flags cluster in the 4.6–5.9 kV band |
 | Report text stays ASCII | cp1252 consoles: one `→` crashed the whole diagnostic | UnicodeEncodeError on the analysis PC |
+| Per-ray step cut adapts to the scene's median ink contrast (`max(3, 0.35·median)`) | One fixed cut cannot serve ink at 10–25 levels (P3, faint top arc) and 40+ levels (07-23, junk lead edges at 6–8) | Round-2 tables; disc-fit now holds through the P3 5.75 kV frames it refused |
+| Incumbent channel gets +0.05 hysteresis, tagged | Near-tied channels flipped on single frames and caused most pair mismatches | Pair mismatches 2–6/run → 0–2 after |
+| Same-kV pair agreement folded into conf: +0.05 within CI tolerance, both capped below accept past 2× | The pair is the run's own control — but it certifies against random error only, not correlated error | Round-2 tables; caveat in the epistemics section above |
+| A tex patch contained in a valid disc-fit is capped below it | The recorded area is the boundary's, per the active-area ruling; interior wrinkle is supporting evidence | 5.75 kV frames now record the boundary, not the patch |
+| conf is a review-ordering score, not a probability of correctness | Only the #162 label calibration can make it one; pair-confirm boosts correlated errors too | Epistemics section above |
 
 ## Repo state you are inheriting
 

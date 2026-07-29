@@ -132,41 +132,87 @@ runs `tex-ratio` wins exactly in the 4.5–5.75 kV window — the Q2 event.
 new verdicts (localization; scale anchoring), and the contact sheet now
 leads with a baseline panel showing the disc trace and foil footprint.
 
+## Added the same evening — the boundary tracker (disc-fit)
+
+The lab ruled (2026-07-28): **active area = the full responding disc,
+wrinkled and non-wrinkled together; the electrode leads that feed the
+copper tape are not part of it.** That unlocked the strongest prior in
+the scene — the object being tracked is known — and detection became
+"fit the boundary of the known disc" instead of "pick the best blob".
+
+**`disc-fit`** (in `candidates()`, wins by conf when the disc responds):
+rays from the resting-disc centre; per ray, the strongest sustained
+dark→light step of the **ink edge on the photometrically normalized
+frame**, searched at 0.80–1.38 r₀; strips and the leads that feed them
+excluded by azimuth (±10° around foil-blocked sectors); robust trimmed
+ellipse fit; area from the fitted shape, so no merge-close area steps.
+Its `spread_pct` is its own **85% CI on area** from the edge-point
+scatter (0.2–0.5% on the bench runs) — a statistical statement, where
+the cross-tier spread it replaces measured threshold sensitivity.
+
+Two designs were tried and rejected on the frames before this one, and
+both failure modes are worth remembering. A *change-map* boundary rides
+out to the **passive membrane ring** that hoop-wrinkles around the
+expanding disc (saturated response out to 1.27 r₀ at 4.25 kV — real
+mechanics, but not active area) and reports impossible 1.6–2× areas; a
+*valley* tracker between disc response and ring response follows the
+taut rim of the active disc, which migrates inward with kV, so the area
+shrinks as the voltage rises. The ink edge is the only feature that IS
+the boundary. **Verified against intensity profiles**: at 4.25 kV the
+edge visibly moved ~80 px and the fit sits exactly on the step
+(`edge_profiles.png` in the session scratchpad; regenerate any time).
+
+**`resting`**: a gated frame with a known resting disc now states
+"area = resting area" (conf 0.82–0.91, growing with the gate margin)
+instead of leaving an empty row queued for review over nothing.
+
+**`ramp_consistency`** (sldea_edge): pre/post same-kV pairs must agree
+and area must not dip against rising voltage; violations are annotated,
+never averaged away. Wired into Edge Review's save path and the
+diagnostic (verdict + `consistency` block; the diag now samples both
+members of each chosen pair).
+
+**Where the bench runs now stand** (24 sampled steps → 48 frames each):
+
+| run | review rate | median conf | conf ≥0.85 | pair mismatches | dips |
+|-----|------------|-------------|-----------|-----------------|------|
+| 1   | 8/48       | 0.91        | 30/48     | 4               | 0    |
+| 2   | 9/48       | 0.90        | 38/48     | 6               | 0    |
+| 3   | 7/48       | 0.87        | 26/48     | 2               | 1    |
+
+(Previous state: 24/24 review, median conf 0.42–0.48, 44% of up-ramp
+steps going backwards.) The area-vs-kV curve is now reproducible across
+all three runs: growth from 1.0× to a **peak ~1.4–1.5× around
+4.5–5 kV, then partial retraction to ~1.15–1.3×** — consistent with
+wrinkle onset converting in-plane expansion into out-of-plane buckling,
+and with the ~5 kV event all previous evidence pointed at.
+
 ## Open — in rough priority order
 
-1. **Everything still goes to review.** 24/24 frames flagged on all three
-   runs; median best-candidate confidence 0.42–0.48 against
-   `accept_conf` 0.75. Localization is fixed, but the conf formula
-   (solidity + contrast + cross-method agreement + wrinkle bonus) was
-   tuned for the diff tiers and the candidates disagree on *extent*
-   (spread 27%+): diff-lo traces the full disc while tex-ratio traces
-   the wrinkled patches inside it. Decide what "the active area" means
-   operationally (full changed disc vs wrinkled interior), then
-   calibrate conf/spread so clean frames auto-accept.
+1. **Calibrate conf against human labels.** Median conf is at 0.87–0.91
+   but only 54–79% of frames clear 0.85. ~30 accepted/adjusted frames in
+   Edge Review across the three runs would let the conf weights be fit
+   so conf ≈ P(IoU with the human ≥ 0.8) — after which raising
+   `accept_conf` to 0.85 (or wherever the bar moves) is a measured
+   decision, not a guess. This is the next session's main lever.
 
-2. **Detected area is not monotonic with voltage** (44% of up-ramp steps
-   go backwards on run 2). Each frame is detected independently; nothing
-   enforces the physics. A temporal prior (previous accepted area as a
-   soft anchor) or picking the tier by cross-frame consistency would
-   likely fix both this and half of item 1.
+2. **Pair mismatches (2–6 per run) need eyes.** Most sit around the
+   ~5 kV event, where the pre-ramp and post-ramp snapshots are 57 s
+   apart and the state may genuinely differ mid-transition — but some
+   may be tier flips between channels. The annotations name the frames;
+   the contact sheet shows them.
 
-3. **Per-frame Otsu instability — still open** (previous handoff task 5).
-   The diff tiers remain multiples of a per-frame Otsu that swings
-   0.3–3.2σ across a run. The texture channel sidesteps this (its
-   threshold is a ratio), which is partly why it wins mid-ramp. If the
-   diff tiers stay, express their thresholds in σ above the measured
-   noise floor (`sldea_diag` already prints every threshold in σ).
+3. **The ~5 kV event**: now visible as the area peak + tex-ratio wins +
+   run 2's surviving paper-gain dip. #157 (continuous kV/µA logging)
+   would date it electrically against the area curve.
 
-4. **The ~5 kV event is real and now has two independent signatures:**
-   detection jumps onto the disc / tex-ratio starts winning, and run 2's
-   paper-only gain dips 0.78→0.67. Wrinkle onset / pull-in /
-   snap-through remain the candidates. #157 (continuous kV/µA logging)
-   would date it electrically.
+4. **Per-frame Otsu instability** (previous task 5) — still open but
+   demoted: the diff tiers are secondaries now. If they stay, express
+   their thresholds in σ above the measured noise floor.
 
-5. **Secondary candidates sometimes outline the shadow left of the disc**
-   (runs 1/3, mid-ramp, 2nd/3rd candidates only — the best stays on the
-   device). Harmless for auto-accept but noisy in the GUI; the shadow is
-   neither foil (smooth) nor paper.
+5. **Leads**: excluded by sector-blocking plus the robust fit. If a
+   device is ever built whose leads leave the disc away from the strip
+   azimuths, the exclusion needs the lead's own azimuth.
 
 ## Repo state you are inheriting
 
@@ -225,7 +271,7 @@ sat on the strips; the frames are the check no residual substitutes for.
 ## Verification
 
 ```
-python tests/test_sldea_edge.py      # 31
+python tests/test_sldea_edge.py      # 34
 python tests/test_sldea_diag.py      # 16
 python tests/test_sldea_tuner.py     # 8
 python sldea_diag.py --selftest out.png

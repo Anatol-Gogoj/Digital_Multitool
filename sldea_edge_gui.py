@@ -591,6 +591,11 @@ class EdgeReviewApp:
                               baseline_ref=ref)
         onset, annos = se.wrinkle_onset(self.run['rows'], self.results,
                                         self.settings)
+        # physics the per-frame detector cannot see: pre/post pairs must
+        # agree, and the area must not dip while the voltage rises
+        for i, note in se.ramp_consistency(self.run['rows'], self.results,
+                                           self.settings).items():
+            annos[i] = (annos[i] + '; ' + note) if i in annos else note
         if 'wrinkle_idx' not in self.run['columns']:
             # older runs predate the column; slot it in before notes
             cols = self.run['columns']

@@ -348,9 +348,21 @@ def analyze(rundir, max_frames=24):
     idx = [i for i, r in enumerate(rows)
            if i != base_i and (r.get('frame_file') or '').strip()]
     if len(idx) > max_frames:                      # even coverage of the ramp
-        idx = [idx[round(j * (len(idx) - 1) / (max_frames - 1.0))]
-               for j in range(max_frames)]
-        idx = sorted(set(idx))
+        picked = [idx[round(j * (len(idx) - 1) / (max_frames - 1.0))]
+                  for j in range(max_frames)]
+        # ...plus each pick's same-kV partner: the pre/post pair is the
+        # run's own control, and ramp consistency cannot be judged on one
+        # member of it
+        by_kv = {}
+        for i in idx:
+            kv = _fkv(rows[i])
+            if not np.isnan(kv):
+                by_kv.setdefault(kv, []).append(i)
+        for i in list(picked):
+            kv = _fkv(rows[i])
+            if not np.isnan(kv):
+                picked.extend(by_kv.get(kv, []))
+        idx = sorted(set(picked))
 
     frames = []
     for i in idx:
@@ -409,6 +421,9 @@ def analyze(rundir, max_frames=24):
             'gain_paper': round(ap, 3),
             'foil_frac': None if ff is None else round(ff, 3),
             'method': best['method'] if best else '',
+            'ci85_pct': (float(best['ci85_pct'])
+                         if best and best.get('ci85_pct') is not None
+                         else None),
             'alt_norm_bg': alt['norm_bg'],
             'alt_area_px': round(float(alt_best['area_px']), 0)
             if alt_best else 0.0,
@@ -452,6 +467,16 @@ def analyze(rundir, max_frames=24):
               for p in hot if p['idx'] in by_idx]
 
     repeats = repeat_pairs(run, base.shape, roi_frac)
+    res_best = {p['idx']: {'area_px': p['area_px']}
+                for p in per if p['area_px']}
+    cons_annos = se.ramp_consistency(rows, res_best)
+    consistency = {
+        'checked': len(res_best),
+        'pair_mismatches': sum(1 for n in cons_annos.values()
+                               if 'pair mismatch' in n),
+        'dips': sum(1 for n in cons_annos.values() if 'area dip' in n),
+        'annos': {str(k): v for k, v in sorted(cons_annos.items())},
+    }
     ref_out = None
     if disc_ref is not None:
         ref_out = {kk: vv for kk, vv in disc_ref.items() if kk != 'contour'}
@@ -464,7 +489,7 @@ def analyze(rundir, max_frames=24):
             'sigma_source': sigma_src, 'settings': dict(settings),
             'foil_pct': round(100.0 * float(foil.mean()), 1)
             if foil is not None else 0.0,
-            'baseline_disc': ref_out,
+            'baseline_disc': ref_out, 'consistency': consistency,
             'sweep_thresholds': SWEEP_T, 'sweeps': sweeps, 'frames': per}
 
 
@@ -617,6 +642,23 @@ def verdicts(d):
                         f"figures fall back to the first accepted frame "
                         f"-- an ACTIVATED region. Treat active_area_mm2 "
                         f"as uncalibrated until the baseline is fixed."))
+
+    cons = d.get('consistency')
+    if cons and cons.get('checked', 0) >= 4:
+        nmm, nd = cons['pair_mismatches'], cons['dips']
+        if nmm or nd:
+            worst = next(iter(cons.get('annos', {}).values()), '')
+            out.append(('MED', 'The ramp is not self-consistent',
+                        f"{nmm} frames in mismatching same-kV pairs, {nd} "
+                        f"area dips while the voltage rose (e.g. {worst}). "
+                        f"The two snapshots of one step photograph the "
+                        f"same state -- when their areas differ, the "
+                        f"detection, not the device, changed."))
+        else:
+            out.append(('OK', 'The ramp is self-consistent',
+                        f"same-kV pairs agree and the area never dips "
+                        f"against a rising voltage across "
+                        f"{cons['checked']} detected frames."))
 
     si = float(np.median([p['sep_intensity'] for p in per]))
     sr = float(np.median([p['sep_registered'] for p in per]))
@@ -775,19 +817,21 @@ def report(d):
     A("-" * 74)
     A(f"{'kV':>6} {'shift':>6} {'pcr':>5} {'diff':>6} {'d-nbg':>6} "
       f"{'d-aff':>6} {'gain':>5} {'g-pap':>6} {'otsu':>5} {'sep-I':>6} "
-      f"{'sep-A':>6} {'sep-T':>6} {'tex':>5} {'foil%':>6} {'area':>8} "
-      f"{'rev':>4}  method")
+      f"{'sep-A':>6} {'sep-T':>6} {'tex':>5} {'foil%':>6} {'ci%':>5} "
+      f"{'area':>8} {'rev':>4}  method")
     for p in d['frames']:
         kv = '?' if np.isnan(p['kv']) else f"{p['kv']:.2f}"
         ff = ('     -' if p.get('foil_frac') is None
               else f"{100 * p['foil_frac']:>6.0f}")
+        ci = ('    -' if p.get('ci85_pct') is None
+              else f"{p['ci85_pct']:>5.2f}")
         A(f"{kv:>6} {p['shift_px']:>6.2f} {p['pc_response']:>5.2f} "
           f"{p['diff_mean']:>6.2f} {p['diff_mean_normbg']:>6.2f} "
           f"{p['diff_mean_photofit']:>6.2f} {p['gain']:>5.2f} "
           f"{p.get('gain_paper', float('nan')):>6.2f} "
           f"{p['otsu']:>5.0f} {p['sep_intensity']:>6.2f} "
           f"{p['sep_photofit']:>6.2f} {p['sep_texture']:>6.2f} "
-          f"{p['texture_ratio']:>5.2f} {ff} "
+          f"{p['texture_ratio']:>5.2f} {ff} {ci} "
           f"{p['area_px']:>8.0f} {'yes' if p['needs_review'] else 'no':>4}"
           f"  {p.get('method', '')}"
           + ('  GATED' if p['gated'] else ''))
@@ -807,7 +851,12 @@ def report(d):
       "change)")
     A("  foil%  fraction of the detected area lying on the electrode")
     A("         strips -- the localization number; method is the winning")
-    A("         candidate tier ('tex-ratio' = the texture channel)")
+    A("         candidate tier ('disc-fit' = the ink-edge boundary")
+    A("         tracker, 'tex-ratio' = the texture channel, 'resting' =")
+    A("         gated frame stated at the known resting area)")
+    A("  ci%    the disc-fit's own 85% confidence interval on area, from")
+    A("         the edge-point scatter -- a statistical statement, unlike")
+    A("         conf, which is a quality score")
     A("  area   what candidates() detects with the run's own settings;")
     A("         the A/B verdict above compares that against the other")
     A("         normalization mode, on the same frames")

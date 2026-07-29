@@ -431,10 +431,15 @@ def analyze(rundir, max_frames=24):
         norm = _detector_diff(base, fr['gray'], settings)
         gate_p99 = float(np.percentile(norm, 99))
         ff = _foil_fraction(best, foil)
-        aud = se.audit_boundary(se.prepared_diff(base, fr['gray'],
-                                                 settings), best, settings)
+        # candidates() audits the winning boundary itself now (the audit
+        # is folded into acceptance); reuse the attached result rather
+        # than re-running it on a second prepared_diff
+        aud = best.get('audit') if best else None
         per.append({
             'audit': aud,
+            'audit_nostep': (best.get('audit_nostep')
+                             if best else None),
+            'audit_bias': best.get('audit_bias') if best else None,
             'gain': round(a, 3), 'offset': round(b, 2),
             'gain_paper': round(ap, 3),
             'foil_frac': None if ff is None else round(ff, 3),
@@ -500,6 +505,8 @@ def analyze(rundir, max_frames=24):
         'checked': len(res_best),
         'pairs_confirmed': recon['confirmed'],
         'pairs_capped': recon['capped'],
+        'audit_capped': sum(1 for p in per if p.get('audit_nostep')
+                            or p.get('audit_bias') is not None),
         'pair_mismatches': sum(1 for n in cons_annos.values()
                                if 'pair mismatch' in n),
         'dips': sum(1 for n in cons_annos.values() if 'area dip' in n),
@@ -677,18 +684,34 @@ def verdicts(d):
         bias = float(np.median([a['bias_px'] for a in auds]))
         p95 = float(np.percentile([abs(a['bias_px']) for a in auds], 95))
         ns = float(np.median([a['nostep_pct'] for a in auds]))
+        n_ns = sum(1 for p in per if p.get('audit_nostep'))
+        n_bi = sum(1 for p in per if p.get('audit_bias') is not None)
         detail = (f"median signed offset fit-vs-step {bias:+.1f} px "
                   f"(p95 |offset| {p95:.1f}), median no-step arc "
                   f"{ns:.0f}% over {len(auds)} audited boundaries. ")
+        capnote = ((f" Capped to review: {n_ns} frames on no-step arc "
+                    f"(audit_nostep), {n_bi} on |bias| > audit_bias_px "
+                    f"(audit_bias -- mostly resting claims gone stale "
+                    f"while the disc crept out under the gate).")
+                   if (n_ns or n_bi) else "")
         if abs(bias) <= 2.0 and ns <= 10.0:
             out.append(('OK', 'Accepted boundaries sit on a real ink step',
                         detail + "Within the 2 px / 10% trust rule: not "
-                        "noise, and no systematic feature bias."))
+                        "noise, and no systematic feature bias." + capnote))
+        elif abs(bias) <= 2.0:
+            out.append(('MED', 'No feature bias, but onset arcs are '
+                        'interpolated',
+                        detail + "The fits sit ON the ink step where one "
+                        "exists, but more than 10% of the median boundary "
+                        "arc has no measurable step under it -- the ink "
+                        "washes out near wrinkle onset and the ellipse "
+                        "interpolates those sectors." + capnote))
         else:
             out.append(('HIGH', 'Accepted boundaries fail the self-audit',
-                        detail + "Past the 2 px / 10% rule -- a large "
-                        "no-step arc means circled noise; a clean bias "
-                        "means the wrong feature. Fix before labeling."))
+                        detail + "A nonzero median bias with small MAD "
+                        "means the fits track the wrong feature (halo, "
+                        "smoothing shift). Fix before labeling."
+                        + capnote))
 
     cons = d.get('consistency')
     if cons and cons.get('checked', 0) >= 4:

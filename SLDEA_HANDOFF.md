@@ -1,48 +1,135 @@
 # SLDEA detection — handoff
 
-Third session (2026-07-28, evening). The previous handoff's tasks 1–4 are
-**done and verified on the frames**: the detector no longer locks onto the
-electrodes, the px→mm scale is anchored on a real measurement of the
-resting disc, the photometric fit is restricted to the paper background,
-and a texture-ratio channel segments the wrinkle map directly. What
-remains is calibration, not localization — see "Open" below.
+Fourth session (2026-07-29). The previous handoff's two initial tasks
+are **done, tested, and verified on all six runs**: (1) the boundary
+self-audit is folded into ACCEPTANCE — two per-frame gates cap the
+winner below `accept_conf` when the audit contradicts it; (2) the #162
+manual-trace tool is built and wired into Edge Review — the labeling
+instrument exists, end-to-end. Folding the audit in surfaced a
+systematic error no previous conf number ever saw: **stale 'resting'
+claims** (below). What remains is operator time, not code — see
+"IMMEDIATE NEXT TASKS".
 
-Read this file, then `sldea_edge.py` (`candidates`, `_texture_candidate`,
-`prepared_diff`, `photometric_fit`, `foil_mask`, `baseline_disc`,
-`mm_per_px`) and `sldea_diag.py`.
+Read this file, then `sldea_edge.py` (`candidates` — the audit fold is
+at its end — `audit_boundary`, `reconcile_pairs`), `sldea_trace.py`,
+and the `TraceWindow` class in `sldea_edge_gui.py`.
 
-## SELF-AUDIT RESULTS (run 2026-07-29, same session) — READ FIRST
+## The audit fold (done this session)
 
-`audit_boundary` is implemented, tested (38/16 suites), wired into the
-diagnostic (per-frame `audit` JSON + verdict), and run on all six runs:
+Inside `candidates()`, after ranking: the winning `disc-fit`/`resting`
+candidate is audited (`audit_boundary`, attached as `cand['audit']`)
+and CAPPED to `accept_conf - 0.01` when either gate trips — the winner
+keeps its rank and its area (it is still the best measurement on
+offer); it only loses the right to auto-accept, and the tag says why:
 
-| run | median bias (px) | p95 abs | median no-step arc | verdict |
-|-----|-----------------|---------|--------------------|---------|
-| P3_1 | −0.4 | 8.8 | 2.4% | OK |
-| P3_2 | +0.1 | 4.9 | 2.8% | OK |
-| P3_3 | +0.4 | 6.7 | 0.0% | OK |
-| 152205 | −0.3 | 5.6 | **14.2%** | HIGH |
-| 155425 | +0.0 | 4.8 | **15.5%** | HIGH |
-| 233451 | +0.1 | 2.6 | 8.0% | OK |
+- **`audit_nostep`** (`audit_nostep_pct`, default 15): more than 15% of
+  the fitted arc has no measurable ink step under it — the interpolated
+  onset sectors. Exactly the frames the previous handoff ordered to
+  review.
+- **`audit_bias`** (`audit_bias_px`, default 3): the median signed
+  offset between the fitted boundary and the measured step exceeds
+  3 px — the fit (or the resting circle) is not where the ink is.
 
-**Verdict: no systematic feature bias anywhere** (|median| ≤ 0.4 px —
-the halo/wrong-feature fear is ruled out; the fits sit ON the ink
-step). **"Circled the noise" is also ruled out globally** — but near
-wrinkle onset (4.75–5.75 kV) part of the boundary arc has NO measurable
-step under it (worst frames 21–43%): the ink locally washes out and the
-ellipse INTERPOLATES those sectors. The two HIGH runs are short 6 kV
-ramps where onset frames dominate the sample; their low-kV frames audit
-clean.
+`reconcile_pairs` cannot boost a capped frame back over the bar: two
+snapshots interpolated over the same washed-out arc — or stated resting
+while the edge sat outside the circle in both — agree beautifully;
+that is precisely the correlated error pair agreement cannot certify
+against. The clean partner still gets its bonus. Both knobs are in
+DEFAULT_SETTINGS / Advanced… / setup.txt; 0 disables either gate.
 
-**Immediate first task for the new session (small, specified):** fold
-the audit into acceptance — compute `nostep_pct` for the winning
-disc-fit inside `candidates()` (or cap in `reconcile_pairs`' caller)
-and cap conf below `accept_conf` when no-step arc > 15%, tagging
-`audit_nostep`. That sends exactly the interpolated-arc onset frames to
-review. THEN the #162 tracer + labels — onset frames are now known to
-be where the labels matter most.
+## The stale-resting discovery — READ THIS
 
-## The original self-audit spec (for reference; now implemented)
+The nostep gate was the assignment; running the audit against
+acceptance exposed a second failure mode on **all six runs, both
+campaigns**: in the 1.5–3 kV band the gated frames win as `resting`
+("area = resting area", conf 0.84–0.99, auto-accept) while the audit
+measures the actual ink step **outside** the claimed circle, drifting
+monotonically with kV — bias −4 px at 1.5–2.2 kV growing to **−11 px
+(P3_2 at 2.0 kV)** before disc-fit takes over. The disc starts creeping
+out below the no-change gate's sensitivity (a few px of a 10–25-level
+edge is invisible to the downscaled diff p99), and "resting" silently
+understates the area by up to ~7%. The audit saw it all along; nothing
+was listening. Those frames now cap to review tagged `audit_bias`, and
+each one is a two-minute manual trace away from being both a correct
+measurement and a calibration label.
+
+## Where the six runs stand (re-run this session, both gates on)
+
+| run | review | capped: no-step | capped: bias | notes |
+|-----|--------|-----------------|--------------|-------|
+| P3_1 | 7/48 (was 4) | 2 (5.25–5.75 kV) | 4 | bias caps incl. 5.75 kV disc-fit at +10.4 px |
+| P3_2 | 12/48 (was 8) | 0 | 4 | the −11 px resting pair at 2.0 kV |
+| P3_3 | 8/48 (was 6) | 0 | 2 | 1.5 kV resting pair |
+| 152205 | 21/48 | 9 (2.25–5.25 kV) | 8 | onset 4.75–5.25 kV nostep 19–31% |
+| 155425 | 33/48 | 20 | 8 | **see floor note below** |
+| 233451 | 31/48 | 8 | 8 | all 8 bias caps are the 2.2–3 kV resting drift |
+
+Median audit bias per run stays −0.4..+0.4 px — the no-feature-bias
+verdict stands; these caps are per-frame exceptions, not a systematic.
+
+**The 155425 floor:** that device's resting boundary has a stable
+~15.5–16% faint-arc sector (constant 24–25 of 155 audited rays on
+every low-kV frame, bias clean there). The 15% default sits just under
+that floor, so its whole low ramp caps to review. After eyeballing one
+such frame, either raise `audit_nostep_pct` to ~20 for that run
+(Advanced… → save to setup.txt) or accept the review load. Do NOT
+raise the default: P3's floor is 0–2.8% and the default catches real
+onset interpolation there.
+
+## The #162 manual-trace tool (built this session)
+
+`sldea_trace.py` (headless model, 10 tests) + `TraceWindow` in
+`sldea_edge_gui.py` (button "✏ Trace (T)" beside Accept/Reject).
+Everything in the issue spec: click-to-place points closing into the
+outer boundary, wheel zoom about the cursor, middle/space-drag pan, F
+fit, drag to move a point, right-click to delete one, Undo/Redo as
+buttons AND Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, Restart-with-confirm that
+is itself one undoable op, min 3 points, self-intersection warning
+with override, optional edge-snap magnet (OFF by default, labels
+tagged `snapped`), overlays (resting disc ON by default; candidates
+and previous outline OFF so labels are not anchored to what the
+machine drew — visibility state recorded per label).
+
+On close the polygon becomes the frame's accepted result (`method
+'manual-trace'`, conf 1.0, `chosen_by: user`, wrinkle index computed
+over the traced region) and flows through the normal
+`apply_results`/`write_back` path — CSV note `edge:manual-trace conf
+1.00 (user)`. Simultaneously a label record (full-res polygon, frame
+shape, kV/tag, timestamp, OS user, zoom, overlay state, elapsed
+seconds, snapped flag, and the machine's best candidate at trace time)
+is appended to `edge_labels.json` beside data.csv — atomic tmp+replace,
+append-only across sessions, refuses (never clobbers) a corrupt file.
+Tracing itself never touches data.csv/setup.txt.
+
+The calibration consumer already exists:
+
+```
+python sldea_trace.py <run-or-parent> [...]
+```
+
+pools every `edge_labels.json` it finds and prints the conf-vs-IoU
+table (P(IoU >= 0.8) per conf bin, per-method medians) — the curve
+that decides what `accept_conf` may rise to.
+
+## IMMEDIATE NEXT TASKS (operator time, in order)
+
+1. **Label ~30 frames across both campaigns** with the tracer, chosen
+   where the labels matter most: the onset band (4.5–5.75 kV, both
+   campaigns — the interpolated-arc frames now queued for review), a
+   few of the 1.5–3 kV `audit_bias` resting frames (each trace is both
+   the corrected measurement and a label), and a handful of clean
+   mid-ramp disc-fits as controls. Every review-queue frame traced =
+   one measurement fixed + one label earned.
+2. **Run `python sldea_trace.py` over the runs** → the conf-vs-IoU
+   curve → raise `accept_conf` to whatever the curve supports. This
+   also audits the pair-confirm/hysteresis boosts (correlated errors
+   included), which no internal check can.
+3. Spot-read the new review queue on the contact sheets — the capped
+   frames are annotated with their tags in Edge Review and the
+   diagnostic (`audit_nostep` / `audit_bias` per frame in the JSON,
+   counts in the verdicts).
+
+## The original self-audit spec (historical; implemented and now folded into acceptance)
 
 **Build the boundary self-audit, run it on all six runs, and report the
 bias numbers — before any labeling happens.** Rationale: conf is
@@ -258,14 +345,15 @@ and with the ~5 kV event all previous evidence pointed at.
 
 ## Open — in rough priority order
 
-0. **The boundary self-audit — see START HERE at the top.** Everything
-   below it in this list assumes its outcome.
+0. ~~The boundary self-audit~~ — **done and folded into acceptance
+   (2026-07-29)**, see the top of this file.
 
-1. **Calibrate conf against human labels** (#162: the manual-trace
-   tool, then ~30 labels across both campaigns). After round 2 the
-   medians are 0.93–0.99, but conf certifies consistency, not
-   correctness — the calibration curve is what lets `accept_conf` rise
-   to a bar that MEANS something. Second task, after the self-audit.
+1. **Calibrate conf against human labels** — the #162 tool is BUILT;
+   what remains is the operator's ~30 labels across both campaigns,
+   then `python sldea_trace.py <runs>` for the curve, then raising
+   `accept_conf` to what the curve supports. Conf still certifies
+   consistency, not correctness, until this is done. See IMMEDIATE
+   NEXT TASKS at the top.
 
 2. **Pair mismatches (2–6 per run) need eyes.** Most sit around the
    ~5 kV event, where the pre-ramp and post-ramp snapshots are 57 s
@@ -443,13 +531,20 @@ column is what settled it. Do not relitigate these without new evidence.
 | Same-kV pair agreement folded into conf: +0.05 within CI tolerance, both capped below accept past 2× | The pair is the run's own control — but it certifies against random error only, not correlated error | Round-2 tables; caveat in the epistemics section above |
 | A tex patch contained in a valid disc-fit is capped below it | The recorded area is the boundary's, per the active-area ruling; interior wrinkle is supporting evidence | 5.75 kV frames now record the boundary, not the patch |
 | conf is a review-ordering score, not a probability of correctness | Only the #162 label calibration can make it one; pair-confirm boosts correlated errors too | Epistemics section above |
+| The self-audit gates ACCEPTANCE, not ranking: a capped winner keeps rank and area, loses auto-accept | The fit is still the best measurement on offer; the recorded area stays the boundary's, but the audit's contradiction sends it to a human | 2026-07-29 fold; audit_nostep / audit_bias tags |
+| Per-frame no-step cap at 15% (audit_nostep_pct), per-run tunable | Sends the interpolated-arc onset frames to review, as specified in the previous handoff | 31 frames capped across six runs, all in the onset band or the 155425 floor |
+| A second audit gate on per-frame bias (audit_bias_px, 3 px) | Stale 'resting' claims: all six runs drift −4..−11 px in the 1.5–3 kV band while auto-accepting at conf 0.84–0.99 — the disc creeps out below the diff gate's sensitivity | Stale-resting section above; P3_2 2.0 kV pair at −11 px |
+| An audit cap survives pair confirmation | Two frames wrong the same way agree; the audit's per-boundary verdict outranks cross-frame consistency | reconcile_pairs; test_pair_agreement_cannot_lift_an_audit_capped_boundary |
+| Labels are full polygons + the machine's candidate at trace time, in an append-only atomic sidecar | IoU must be computable offline without re-detection; a mid-write failure must never destroy accumulated ground truth | #162 spec; edge_labels.json; corrupt file refuses rather than clobbers |
+| Manual traces flow through the NORMAL accept path (method 'manual-trace', conf 1.0) | One save path, one CSV semantics; tracing is also the recovery path for frames where the detector honestly gives up | apply_results note 'edge:manual-trace conf 1.00 (user)' |
 
 ## Repo state you are inheriting
 
 - All of the above is code + tests on this branch; nothing else changed.
-- Suites: `test_sldea_edge.py` 31, `test_sldea_diag.py` 16,
-  `test_sldea_tuner.py` 8; both `--selftest`s pass.
-- `run_tests.py` on the analysis PC: 23/27 — the four failures are
+- Suites: `test_sldea_edge.py` 41, `test_sldea_diag.py` 16,
+  `test_sldea_trace.py` 10 (new), `test_sldea_tuner.py` 8; both
+  `--selftest`s pass.
+- `run_tests.py` on the analysis PC: 24/28 — the four failures are
   environmental and pre-existing (`test_arb_bin`, `test_camera_controls`,
   `test_presets_path` expect read-only-dir writes to fail, which Windows
   ACLs don't enforce the way the test assumes; `test_tk_fontfix` fails
@@ -501,8 +596,9 @@ sat on the strips; the frames are the check no residual substitutes for.
 ## Verification
 
 ```
-python tests/test_sldea_edge.py      # 34
+python tests/test_sldea_edge.py      # 41
 python tests/test_sldea_diag.py      # 16
+python tests/test_sldea_trace.py     # 10
 python tests/test_sldea_tuner.py     # 8
 python sldea_diag.py --selftest out.png
 python sldea_tuner.py --selftest out.png
@@ -511,6 +607,9 @@ python run_tests.py
 
 ## Related issues
 
+- #162 — manual boundary tracing: **the tool is built (this session)**;
+  the issue stays open until the ~30 operator labels and the
+  calibration curve exist.
 - #157 — log kV/µA continuously at ≥1 Hz. The watchdog already samples
   current at 2 Hz and discards every sample. Would date the ~5 kV event.
 - #158 — breakdown detection should trigger on a step change, not an

@@ -258,8 +258,34 @@ def test_report_renders_for_every_synthetic_run():
     root = tempfile.mkdtemp(prefix='diag_report_')
     d = sd.analyze(sd._synth_run(_os.path.join(root, 'SLDEA_r'), 'wrinkle'))
     text = sd.report(d)
-    for want in ('VERDICTS', 'PER FRAME', 'sensor sigma', 'sep-T'):
+    for want in ('VERDICTS', 'PER FRAME', 'sensor sigma', 'sep-T', 'foil%',
+                 'resting disc'):
         assert want in text, want
+
+
+def test_analyze_reports_localization_and_scale_context():
+    """Statistics said nothing while 83-100% of every detection sat on the
+    electrodes and the px->mm scale was 1.5x off at conf 0.93 (bench
+    2026-07-28). The report must carry both context numbers -- where the
+    detection LANDED and what anchors the scale -- and say so plainly
+    when the anchors are missing."""
+    root = tempfile.mkdtemp(prefix='diag_loc_')
+    d = sd.analyze(sd._synth_run(_os.path.join(root, 'SLDEA_l'), 'expand'))
+    assert 'foil_pct' in d and 'baseline_disc' in d
+    for p in d['frames']:
+        assert 'foil_frac' in p and 'gain_paper' in p and 'method' in p
+    # no foil in the synthetic scene: every detection is off-foil
+    assert all((p['foil_frac'] or 0.0) == 0.0 for p in d['frames'])
+    heads = [h.lower() for _s, h, _det in sd.verdicts(d)]
+    assert any('off the electrodes' in h for h in heads), heads
+    # the synthetic baseline holds no resting disc -> refusal must be
+    # reported, not papered over
+    assert d['baseline_disc'] is None
+    assert any('resting-disc' in h for h in heads), heads
+    # and the contact sheet leads with the baseline panel
+    png = _os.path.join(root, 'cs.png')
+    sd.contact_sheet(_os.path.join(root, 'SLDEA_l'), png, count=4)
+    assert _os.path.exists(png)
 
 
 def _run():

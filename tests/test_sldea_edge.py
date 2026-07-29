@@ -792,6 +792,125 @@ def test_audit_boundary_measures_bias_and_circled_noise():
     assert a3 and a3['nostep_pct'] > 50.0, a3
 
 
+def _washed_arc_pair(wedge_deg=45.0):
+    """The onset failure shape (self-audit 2026-07-29, runs 152205 /
+    155425): the disc responds, but over a wedge of the boundary the ink
+    washes out entirely -- no dark->light step anywhere near the fitted
+    radius -- and the ellipse INTERPOLATES that arc from the sectors it
+    could measure."""
+    base, img = _bridged_pair(r_active=112)
+    h, w = img.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    ang = np.degrees(np.arctan2(yy - 270.0, xx - 480.0))
+    rr = np.hypot(xx - 480.0, yy - 270.0)
+    wedge = (np.abs(ang + 90.0) <= wedge_deg) & (rr >= 40) & (rr <= 170)
+    img = img.copy()
+    img[wedge] = 190.0 * 0.9 + 5.0     # ink -> paper, same photometry
+    return base, img
+
+
+def test_audit_nostep_caps_acceptance_on_interpolated_arc():
+    """The self-audit is folded into ACCEPTANCE: a winning boundary with
+    no measurable ink step under > audit_nostep_pct of its arc keeps its
+    rank and area (it is still the best measurement on offer) but loses
+    the right to auto-accept -- capped below accept_conf, tagged, sent
+    to review. Exactly the interpolated-arc onset frames."""
+    base, img = _washed_arc_pair()
+    s = dict(se.DEFAULT_SETTINGS)
+    cands = se.candidates(base, img, s)
+    best = cands[0]
+    assert best['method'] == 'disc-fit', best['method']
+    aud = best.get('audit')
+    assert aud and aud['nostep_pct'] > 15.0, aud
+    # no feature bias where the step exists -- the arc is the problem
+    assert aud['bias_px'] is not None and abs(aud['bias_px']) < 2.0, aud
+    assert best.get('audit_nostep') == aud['nostep_pct']
+    assert best['conf'] == round(s['accept_conf'] - 0.01, 3), best['conf']
+    assert se.needs_review(cands, s)
+    # the cap, not a weak fit, is what forces review: with the gate off
+    # the same frame auto-accepts on the same fit
+    s0 = dict(se.DEFAULT_SETTINGS)
+    s0['audit_nostep_pct'] = 0.0
+    c0 = se.candidates(base, img, s0)
+    assert c0[0]['method'] == 'disc-fit'
+    assert c0[0].get('audit_nostep') is None
+    assert c0[0]['conf'] >= s0['accept_conf'], c0[0]['conf']
+    assert not se.needs_review(c0, s0)
+    # a clean boundary carries its audit but no tag, and still accepts
+    cb, ci = _bridged_pair(r_active=112)
+    cc = se.candidates(cb, ci, s)
+    assert cc[0]['method'] == 'disc-fit'
+    a2 = cc[0].get('audit')
+    assert a2 and a2['nostep_pct'] <= 10.0, a2
+    assert cc[0].get('audit_nostep') is None
+    assert not se.needs_review(cc, s)
+
+
+def test_audit_bias_caps_a_stale_resting_claim():
+    """On all six bench runs the 1.5-3 kV band audits at bias -4..-11 px
+    while auto-accepting at conf 0.84-0.99: the disc expands below the
+    no-change gate's sensitivity, and 'area = resting area' goes stale.
+    The audit sees the ink step sitting OUTSIDE the claimed circle; a
+    |bias| past audit_bias_px caps the frame to review."""
+    base = _bridged_scene(with_disc=True)
+    h, w = base.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    rng = np.random.default_rng(5)
+    img = np.full((h, w), 190.0, np.float32)
+    # the disc has crept out by 6 px -- a shift far below what the
+    # downscaled diff can gate on when min_diff is raised to match a
+    # noisy bench scene, but plainly visible to the boundary audit
+    img[(xx - 480) ** 2 + (yy - 270) ** 2 <= 106 * 106] = 172.0
+    img[230:310, 0:330] = base[230:310, 0:330]
+    img[230:310, 630:960] = base[230:310, 630:960]
+    img[262:278, 330:392] = 174.0
+    img[262:278, 568:630] = 174.0
+    img[310:352, 270:345] = 165.0
+    img[310:352, 615:690] = 165.0
+    img += rng.normal(0, 1.5, img.shape).astype(np.float32)
+    img = np.clip(img, 0, 255).astype(np.float32)
+    s = dict(se.DEFAULT_SETTINGS)
+    s['min_diff'] = 30.0                 # the gate stays blind to the creep
+    cands = se.candidates(base, img, s)
+    best = cands[0]
+    assert best['method'] == 'resting', best['method']
+    aud = best.get('audit')
+    assert aud and aud['bias_px'] is not None and aud['bias_px'] < -3.0, aud
+    assert best.get('audit_bias') == aud['bias_px']
+    assert best['conf'] == round(s['accept_conf'] - 0.01, 3), best['conf']
+    assert se.needs_review(cands, s)
+    # with the bias gate off the stale claim would have auto-accepted
+    s0 = dict(s)
+    s0['audit_bias_px'] = 0.0
+    c0 = se.candidates(base, img, s0)
+    assert c0[0]['method'] == 'resting'
+    assert c0[0].get('audit_bias') is None
+    assert c0[0]['conf'] >= s0['accept_conf'], c0[0]['conf']
+    assert not se.needs_review(c0, s0)
+
+
+def test_pair_agreement_cannot_lift_an_audit_capped_boundary():
+    """Two snapshots interpolated over the same washed-out arc agree
+    beautifully -- correlated error, the one thing pair agreement cannot
+    certify against. The +0.05 confirmation bonus must not carry an
+    audit_nostep frame back over accept_conf."""
+    rows = [{'nominal_kV': '5'}, {'nominal_kV': '5'}]
+    acc = se.DEFAULT_SETTINGS['accept_conf']
+    capped = round(acc - 0.01, 3)
+    cands = {
+        0: [{'method': 'disc-fit', 'area_px': 100000.0, 'conf': capped,
+             'ci85_pct': 0.5, 'audit_nostep': 26.8}],
+        1: [{'method': 'disc-fit', 'area_px': 100500.0, 'conf': 0.93,
+             'ci85_pct': 0.5}],
+    }
+    stats = se.reconcile_pairs(rows, cands, dict(se.DEFAULT_SETTINGS))
+    assert stats['confirmed'] == 2, stats
+    assert cands[0][0]['pair_confirmed'] and cands[1][0]['pair_confirmed']
+    # the audited member stays below accept; its clean partner still gains
+    assert cands[0][0]['conf'] == capped, cands[0][0]['conf']
+    assert cands[1][0]['conf'] == 0.98, cands[1][0]['conf']
+
+
 def test_ramp_consistency_flags_pairs_and_dips():
     rows = [{'nominal_kV': '1'}, {'nominal_kV': '1'},
             {'nominal_kV': '2'}, {'nominal_kV': '2'},

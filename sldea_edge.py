@@ -58,6 +58,15 @@ DEFAULT_SETTINGS = {
     'electrode_lum': 220.0,  # mask px this bright in the BASELINE; 0=off
     'accept_conf': 0.75,    # auto-accept at/above this confidence
     'spread_pct': 12.0,     # candidate area disagreement that forces review
+    # self-audit gates on acceptance: a winning boundary whose fitted arc
+    # has no measurable ink step under more than audit_nostep_pct of its
+    # length (the interpolated onset sectors), or whose median offset to
+    # the measured step exceeds audit_bias_px (a 'resting' claim gone
+    # stale -- the disc expands below the no-change gate's sensitivity in
+    # the 1.5-3 kV band on all six bench runs), is capped below
+    # accept_conf and tagged 'audit_nostep' / 'audit_bias'. 0 disables.
+    'audit_nostep_pct': 15.0,
+    'audit_bias_px': 3.0,
     'breakdown_ua': 50.0,   # Trek current above this flags breakdown
     'area_jump_pct': 35.0,  # area collapse (V rising) that flags breakdown
     'wrinkle_ratio': 1.4,   # wrinkle index >= this = wrinkle-mode (active)
@@ -1191,6 +1200,34 @@ def candidates(base_gray, img_gray, settings, prev_method=None):
                 c['conf'] = round(max(0.0, dfit['conf'] - 0.01), 3)
                 c['capped_by'] = 'disc-fit'
     out.sort(key=lambda c: c['conf'], reverse=True)
+    # The self-audit is folded into ACCEPTANCE (2026-07-29): the winner
+    # keeps its rank and area (it is still the best measurement on
+    # offer), but it loses the right to auto-accept when the audit
+    # contradicts it. Two gates. Near wrinkle onset the ink locally
+    # washes out and the ellipse INTERPOLATES those sectors: no-step arc
+    # > audit_nostep_pct. And a 'resting' claim goes STALE when the disc
+    # expands below the no-change gate's sensitivity -- on all six bench
+    # runs the 1.5-3 kV band audits at bias -4..-11 px while auto-
+    # accepting at conf 0.84-0.99: |bias| > audit_bias_px. Tagged, so
+    # the review queue says exactly why.
+    best = out[0]
+    if best['method'] in ('disc-fit', 'resting'):
+        aud = audit_boundary(prep, best, settings)
+        if aud is not None:
+            best['audit'] = aud
+            lim = float(settings.get('audit_nostep_pct', 15.0) or 0)
+            btol = float(settings.get('audit_bias_px', 3.0) or 0)
+            capped = False
+            if lim and aud['nostep_pct'] > lim:
+                best['audit_nostep'] = aud['nostep_pct']
+                capped = True
+            if (btol and aud.get('bias_px') is not None
+                    and abs(aud['bias_px']) > btol):
+                best['audit_bias'] = aud['bias_px']
+                capped = True
+            acc = float(settings.get('accept_conf', 0.75))
+            if capped and best['conf'] > acc - 0.01:
+                best['conf'] = round(acc - 0.01, 3)
     return out[:3]
 
 
@@ -1282,7 +1319,15 @@ def reconcile_pairs(rows, cands_by_idx, settings):
     tier flip can never auto-accept on both sides of a contradiction.
     Candidates without a CI (blob tiers) get a 6% default tolerance each,
     matching ramp_consistency's 12% pair rule. Mutates the best
-    candidates in place; -> {'confirmed': n, 'capped': n}."""
+    candidates in place; -> {'confirmed': n, 'capped': n}.
+
+    A member tagged 'audit_nostep' or 'audit_bias' stays capped below
+    accept_conf even when its pair agrees: two snapshots interpolated
+    over the same washed-out arc (or stated resting while the edge sat
+    outside the circle in both) agree beautifully -- that is the
+    correlated-error case pair agreement cannot certify against, and
+    the audit's verdict about THIS boundary outranks consistency
+    between two of them."""
     acc = float(settings.get('accept_conf', 0.75))
     by_kv = {}
     for i, row in enumerate(rows):
@@ -1309,7 +1354,10 @@ def reconcile_pairs(rows, cands_by_idx, settings):
         if rel <= tol:
             for b in members:
                 b['pair_confirmed'] = True
-                b['conf'] = round(min(0.99, b['conf'] + 0.05), 3)
+                cap = round(acc - 0.01, 3) \
+                    if (b.get('audit_nostep') or b.get('audit_bias')) \
+                    else 0.99
+                b['conf'] = round(min(cap, b['conf'] + 0.05), 3)
             stats['confirmed'] += len(members)
         elif rel > 2.0 * tol:
             for b in members:

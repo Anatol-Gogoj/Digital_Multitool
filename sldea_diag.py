@@ -70,6 +70,15 @@ What it measures, and the failure each one pins down:
              here is also printed in sigma, because a gray-level constant
              does not transfer between runs, cameras or exposures.
 
+  Since 2026-07-29 the report also carries LOCALIZATION (foil% of each
+  detection -- statistics looked fine while every outline sat on the
+  electrodes), the BASELINE anchor (resting-disc trace and the mm/px it
+  implies, with its own gates), per-frame ci% (the disc-fit's 85% CI on
+  area -- a statistical statement, unlike conf, which is a
+  review-ordering score), and CONSISTENCY (same-kV pair agreement and
+  monotonicity, with pair reconciliation applied exactly as the GUI
+  applies it before auto-accept).
+
 Nothing is modified: the run's setup.txt is read, never written.
 """
 import json

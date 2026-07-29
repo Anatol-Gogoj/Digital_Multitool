@@ -5,3 +5,14 @@ __pycache__/
 logs/
 presets/
 *.code-workspace
+# Bench run data. One set of three runs is ~half a gigabyte of 1080p
+# frames; runs get extracted into the working directory for analysis and
+# must never be committed. The diagnostic writes its outputs beside the
+# run it analysed, so those are ignored here too.
+*.zip
+SLDEA_*/
+P3_*/
+sldea_diag*.png
+sldea_diag*.json
+sldea_diag*.txt
+*_selftest.png

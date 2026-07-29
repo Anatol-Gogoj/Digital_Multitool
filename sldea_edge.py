@@ -42,7 +42,11 @@ DEFAULT_SETTINGS = {
     'breakdown_ua': 50.0,   # Trek current above this flags breakdown
     'area_jump_pct': 35.0,  # area collapse (V rising) that flags breakdown
     'wrinkle_ratio': 1.4,   # wrinkle index >= this = wrinkle-mode (active)
-    'norm_bg': 1,           # normalize frame brightness to baseline (1=on)
+    # photometric normalization vs the baseline: 0=off, 1=legacy scalar
+    # border-band ratio, 2=gain+offset fit on ROI quantiles. 2 is the
+    # default since 2026-07-28: on the bench runs the scalar left a
+    # 26-gray-level pedestal that no threshold could sit above.
+    'norm_bg': 2,
 }
 _NUM = r'[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?'
 
@@ -96,15 +100,91 @@ def save_settings(rundir, settings):
 # run loading
 # ---------------------------------------------------------------------------
 
+_RUN_CSV = re.compile(r'^data(\d*)\.csv$', re.IGNORECASE)
+
+
+def run_csv(rundir):
+    """Path to this run's data CSV, or None when the directory is not a run.
+
+    Canonically data.csv. The bench also keeps renamed copies -- data1.csv,
+    data2.csv -- because Excel refuses to open two workbooks with the same
+    filename, and a renamed run is still a run. Every reader resolves the
+    name through here, so one rename cannot make a folder invisible to the
+    tuner, Edge Review and the diagnostic all at once (bench 2026-07-28).
+
+    An exact data.csv always wins; otherwise the lowest number, so the
+    choice is stable rather than depending on directory order."""
+    try:
+        names = [n for n in os.listdir(rundir) if _RUN_CSV.match(n)]
+    except OSError:
+        return None
+    if not names:
+        return None
+    names.sort(key=lambda n: (n.lower() != 'data.csv',
+                              int(_RUN_CSV.match(n).group(1) or 0), n))
+    return os.path.join(rundir, names[0])
+
+
+# Bench shortcuts (2026-07-28): the three P3 runs live at a fixed spot and
+# get reopened constantly, so `1`, `2`, `3` stand in for them anywhere a run
+# directory is accepted -- the tuner, the diagnostic and the Windows
+# launcher. Entries whose path does not exist are skipped, so this is inert
+# on the bench PC, on CI and on anyone else's machine.
+_ONEDRIVE = (r'C:\Users\anato\OneDrive - University of Connecticut'
+             r'\Recordings\SLDEA_data')
+BENCH_RUNS = {
+    '1': _ONEDRIVE + r'\P3_1_2.5mL_20260728',
+    '2': _ONEDRIVE + r'\P3_2_2.5mL_20260728',
+    '3': _ONEDRIVE + r'\P3_3_2.5mL_20260728',
+}
+
+
+def newest_run(root):
+    """Newest run directory under `root`, or None.
+
+    A run is ANY sub-directory holding a run CSV -- not only SLDEA_*. Bench
+    folders are named things like P3_1_2.5mL_20260728, and requiring the
+    prefix made them invisible to the Tune buttons while Edge Review opened
+    them happily (bench 2026-07-28)."""
+    try:
+        subs = [os.path.join(root, n) for n in os.listdir(root)
+                if os.path.isdir(os.path.join(root, n))]
+    except OSError:
+        return None
+    subs = [s for s in subs if run_csv(s)]
+    return max(subs, key=os.path.getmtime) if subs else None
+
+
+def resolve_run(path):
+    """The run to work on -> path, or None.
+
+    Accepts a bench shortcut ('1'), a run directory, or a parent full of
+    runs (giving the newest). One resolver for the CLI, the app's Tune
+    buttons and the Windows launcher, so the three cannot disagree about
+    what a given argument means."""
+    if not path:
+        return None
+    shortcut = BENCH_RUNS.get(str(path).strip())
+    if shortcut and run_csv(shortcut):
+        return shortcut
+    if run_csv(path):
+        return path
+    return newest_run(path)
+
+
 def load_run(rundir):
-    """-> {'rows': [dict...], 'columns': [...], 'frames_dir': path}.
-    Rows are data.csv rows in order (all columns kept as strings)."""
-    csv_path = os.path.join(rundir, 'data.csv')
+    """-> {'rows': [...], 'columns': [...], 'csv_path', 'frames_dir'}.
+    Rows are the data CSV's rows in order (all columns kept as strings)."""
+    csv_path = run_csv(rundir)
+    if csv_path is None:
+        raise FileNotFoundError(
+            f"no run CSV in {rundir} (expected data.csv, or data1.csv / "
+            f"data2.csv / ... if the file was renamed)")
     with open(csv_path, newline='') as f:
         reader = csv.DictReader(f)
         rows = list(reader)
         columns = list(reader.fieldnames or [])
-    return {'rows': rows, 'columns': columns,
+    return {'rows': rows, 'columns': columns, 'csv_path': csv_path,
             'frames_dir': os.path.join(rundir, 'frames')}
 
 
@@ -123,6 +203,48 @@ def load_gray(path):
 # ---------------------------------------------------------------------------
 # candidate detection
 # ---------------------------------------------------------------------------
+
+def photometric_fit(base, img, roi):
+    """Gain and offset taking the baseline onto the frame: img ~ a*base + b.
+
+    Fitted on MATCHED QUANTILES, not pixels, so a genuinely changed
+    minority of the frame moves only the extreme quantiles and cannot drag
+    the correction meant to remove everything else.
+
+    Why affine rather than the scalar border-band ratio: bench runs P3_*
+    (2026-07-28) sat at gain 0.72-0.82 with a +8..+41 offset against their
+    own baseline, and a single ratio cannot express that. Two snapshots at
+    one voltage in those runs agree to ~0.5 sigma, so the camera is steady
+    -- the mismatch is between the BASELINE and the rest of the run, and it
+    put a 26-gray-level pedestal under every threshold.
+
+    Saturated highlights bias the slope down (clipped pixels cannot move),
+    so a fitted gain is a lower bound when the electrodes blow out. And
+    the trimming assumes the changed region is a MINORITY of the ROI: if
+    more than about a third of it moves, the trim can keep the changed
+    population instead. sldea_diag reports the residual, which is where
+    that would show up."""
+    qs = np.linspace(2, 98, 49)
+    xb = np.percentile(base[roi], qs)
+    xi = np.percentile(img[roi], qs)
+    keep = np.ones(xb.shape, bool)
+    a, b = 1.0, 0.0
+    # Trimmed refit: the changed region still shifts the quantiles it
+    # occupies, and on a scene with wide dynamic range a small slope error
+    # leaves a large residual at the bright end. Drop the worst-fitting
+    # third and refit, so the correction is defined by the part of the
+    # picture that did NOT change.
+    for _pass in range(3):
+        design = np.vstack([xb[keep], np.ones(int(keep.sum()))]).T
+        a, b = np.linalg.lstsq(design, xi[keep], rcond=None)[0]
+        resid = np.abs((a * xb + b) - xi)
+        cut = np.quantile(resid, 0.67)
+        nxt = resid <= max(cut, 1e-6)
+        if nxt.sum() < 8 or (nxt == keep).all():
+            break
+        keep = nxt
+    return float(a), float(b)
+
 
 def _region_candidate(mask, method, offset=(0, 0)):
     """Changed-region outline for one threshold tier -> candidate dict.
@@ -211,6 +333,90 @@ def _wrinkle_ratio(base_full, img_full, contour):
     return round(min(e_img / max(e_base, 1e-3), 9.99), 2)
 
 
+def prepared_diff(base_gray, img_gray, settings):
+    """The difference map candidates() actually thresholds.
+
+    -> {sub, x0, y0, f, img_full, base_full}: the ROI-cropped,
+    normalized, electrode-masked, blurred difference at the
+    detector's own scale, plus what is needed to map results back to
+    full resolution.
+
+    Extracted so the diagnostic can report the no-change gate and the
+    Otsu threshold on the SAME map the detector cuts. Reporting them
+    on a raw difference the detector never sees was misleading once
+    normalization started doing real work (bench 2026-07-28).
+    """
+    import cv2
+    img_full, base_full = img_gray, base_gray   # full-res kept for wrinkle
+    h0, w0 = img_gray.shape
+    f = 1.0
+    if w0 > DETECT_MAX_W:
+        f = DETECT_MAX_W / float(w0)
+        size = (DETECT_MAX_W, max(1, int(round(h0 * f))))
+        img_gray = cv2.resize(img_gray, size, interpolation=cv2.INTER_AREA)
+        if base_gray is not None:
+            base_gray = cv2.resize(base_gray, size,
+                                   interpolation=cv2.INTER_AREA)
+    # Photometric normalization: the DFK's internal auto-gain (no UVC off
+    # switch) drifts global brightness a few %, which would light up the
+    # whole diff as fake change. Scale the frame so the BORDER band (outside
+    # the ROI -- static membrane/holder) matches the baseline's, before
+    # differencing; the wrinkle ratio uses the same scale.
+    h, w = img_gray.shape
+    rf = min(1.0, max(0.2, float(settings.get('roi_frac', 0.85))))
+    bx = int(w * (1 - rf) / 2)
+    by = int(h * (1 - rf) / 2)
+    mode = int(settings.get('norm_bg', 2) or 0)
+    if base_gray is not None and mode and bx and by:
+        if mode >= 2:
+            # Affine (gain+offset) fit on ROI quantiles, then map the frame
+            # back into the baseline's photometric space. On the bench runs
+            # this took the mean ROI difference from 26 gray levels to 1.6
+            # -- below the sensor noise -- while leaving a residual that
+            # still grows with voltage, so it removes the artifact and not
+            # the device.
+            roi = (slice(by, h - by), slice(bx, w - bx))
+            a, b = photometric_fit(base_gray, img_gray, roi)
+            if a > 0.2 and (abs(a - 1.0) > 0.005 or abs(b) > 0.5):
+                img_gray = np.clip((img_gray - b) / a, 0, 255)
+                img_full = np.clip((img_full - b) / a, 0, 255)
+        else:
+            # legacy scalar: border-band median ratio (norm_bg: 1). Kept so
+            # a run tuned under it reprocesses identically.
+            band = np.ones_like(img_gray, bool)
+            band[by:h - by, bx:w - bx] = False
+            med_i = float(np.median(img_gray[band])) or 1.0
+            med_b = float(np.median(base_gray[band]))
+            scale = min(1.4, max(0.7, med_b / med_i))
+            if abs(scale - 1.0) > 0.005:
+                img_gray = np.clip(img_gray * scale, 0, 255)
+                img_full = np.clip(img_full * scale, 0, 255)
+    k = int(settings.get('blur_px', 5)) | 1
+    diff = cv2.absdiff(img_gray, base_gray).astype(np.uint8) \
+        if base_gray is not None else img_gray.astype(np.uint8)
+    # Electrode suppression: the copper/foil strips read bright and their
+    # glints SHIFT with voltage, lighting up the diff although the membrane
+    # there is hidden anyway. Mask pixels that are bright in the BASELINE --
+    # the electrodes are static objects, so the baseline knows where they
+    # are. (Never mask on the current frame: the wrinkled activated region
+    # saturates too, and masking it would erase the very signal we score --
+    # bench 2026-07-23, 5.5 kV wrinkle index dropped 1.9 -> 1.2 that way.)
+    lum = float(settings.get('electrode_lum', 0) or 0)
+    if lum > 0 and base_gray is not None:
+        glint = (base_gray >= lum).astype(np.uint8)
+        glint = cv2.dilate(glint, np.ones((7, 7), np.uint8))
+        diff[glint > 0] = 0
+    diff = cv2.GaussianBlur(diff, (k, k), 0)
+    # central ROI: the DEA sits mid-frame; electrode glare lives at the edges
+    h, w = diff.shape
+    rf = min(1.0, max(0.2, float(settings.get('roi_frac', 0.85))))
+    x0 = int(w * (1 - rf) / 2)
+    y0 = int(h * (1 - rf) / 2)
+    sub = diff[y0:h - y0 or h, x0:w - x0 or w]
+    return {'sub': sub, 'x0': x0, 'y0': y0, 'f': f,
+            'img_full': img_full, 'base_full': base_full}
+
+
 def candidates(base_gray, img_gray, settings):
     """Up to 3 candidate outlines for the active area, best first.
 
@@ -234,56 +440,10 @@ def candidates(base_gray, img_gray, settings):
     every px quantity is rescaled to full resolution.
     """
     import cv2
-    img_full, base_full = img_gray, base_gray   # full-res kept for wrinkle
-    h0, w0 = img_gray.shape
-    f = 1.0
-    if w0 > DETECT_MAX_W:
-        f = DETECT_MAX_W / float(w0)
-        size = (DETECT_MAX_W, max(1, int(round(h0 * f))))
-        img_gray = cv2.resize(img_gray, size, interpolation=cv2.INTER_AREA)
-        if base_gray is not None:
-            base_gray = cv2.resize(base_gray, size,
-                                   interpolation=cv2.INTER_AREA)
-    # Photometric normalization: the DFK's internal auto-gain (no UVC off
-    # switch) drifts global brightness a few %, which would light up the
-    # whole diff as fake change. Scale the frame so the BORDER band (outside
-    # the ROI -- static membrane/holder) matches the baseline's, before
-    # differencing; the wrinkle ratio uses the same scale.
-    h, w = img_gray.shape
-    rf = min(1.0, max(0.2, float(settings.get('roi_frac', 0.85))))
-    bx = int(w * (1 - rf) / 2)
-    by = int(h * (1 - rf) / 2)
-    if base_gray is not None and settings.get('norm_bg', 1) and bx and by:
-        band = np.ones_like(img_gray, bool)
-        band[by:h - by, bx:w - bx] = False
-        med_i = float(np.median(img_gray[band])) or 1.0
-        med_b = float(np.median(base_gray[band]))
-        scale = min(1.4, max(0.7, med_b / med_i))
-        if abs(scale - 1.0) > 0.005:
-            img_gray = np.clip(img_gray * scale, 0, 255)
-            img_full = np.clip(img_full * scale, 0, 255)
-    k = int(settings.get('blur_px', 5)) | 1
-    diff = cv2.absdiff(img_gray, base_gray).astype(np.uint8) \
-        if base_gray is not None else img_gray.astype(np.uint8)
-    # Electrode suppression: the copper/foil strips read bright and their
-    # glints SHIFT with voltage, lighting up the diff although the membrane
-    # there is hidden anyway. Mask pixels that are bright in the BASELINE --
-    # the electrodes are static objects, so the baseline knows where they
-    # are. (Never mask on the current frame: the wrinkled activated region
-    # saturates too, and masking it would erase the very signal we score --
-    # bench 2026-07-23, 5.5 kV wrinkle index dropped 1.9 -> 1.2 that way.)
-    lum = float(settings.get('electrode_lum', 0) or 0)
-    if lum > 0 and base_gray is not None:
-        glint = (base_gray >= lum).astype(np.uint8)
-        glint = cv2.dilate(glint, np.ones((7, 7), np.uint8))
-        diff[glint > 0] = 0
-    diff = cv2.GaussianBlur(diff, (k, k), 0)
-    # central ROI: the DEA sits mid-frame; electrode glare lives at the edges
-    h, w = diff.shape
-    rf = min(1.0, max(0.2, float(settings.get('roi_frac', 0.85))))
-    x0 = int(w * (1 - rf) / 2)
-    y0 = int(h * (1 - rf) / 2)
-    sub = diff[y0:h - y0 or h, x0:w - x0 or w]
+    prep = prepared_diff(base_gray, img_gray, settings)
+    sub, x0, y0, f = (prep['sub'], prep['x0'], prep['y0'],
+                      prep['f'])
+    img_full, base_full = prep['img_full'], prep['base_full']
     if float(np.percentile(sub, 99)) < float(settings.get('min_diff', 10)):
         return []                       # no detectable change vs baseline
     otsu_t, _m = cv2.threshold(sub, 0, 255,
@@ -616,8 +776,10 @@ def write_back(rundir, run):
 
     Atomic: writes data.csv.tmp then os.replace — a NAS hiccup mid-write
     used to leave a truncated data.csv with the frames already renamed
-    (audit 2026-07-25)."""
-    csv_path = os.path.join(rundir, 'data.csv')
+    (audit 2026-07-25). Writes back to the file the run was READ from, so
+    a renamed CSV is updated in place rather than sprouting a second one."""
+    csv_path = (run.get('csv_path') or run_csv(rundir)
+                or os.path.join(rundir, 'data.csv'))
     shutil.copy2(csv_path, csv_path + '.bak')
     tmp = csv_path + '.tmp'
     with open(tmp, 'w', newline='') as f:

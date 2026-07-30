@@ -289,14 +289,24 @@ on rendered cards from a real P3_1 1080p frame:
   arialbd/DejaVu to PIL's default). Contact sheet untouched, as
   scoped.
 
+The operator hand-tested this build (sandbox copy of P3_1, deleted
+after) and filed one new issue, not coded here: **#176** — "Tune…"
+spawns a new tuner process on EVERY click (unconditional Popen, N
+tuners racing on one setup.txt) and "Advanced…" stacks Toplevels the
+same way; Calibrate and the tracer are already modal. Fix sketch in
+the issue: singleton semantics for both.
+
 ## IMMEDIATE NEXT TASKS (in order)
 
-1. **Operator**: label the auto-accept population — 4–6 clean
+1. **Code session (small)**: #176 — singleton guards for Tune…/
+   Advanced… (lift+focus the live dialog; refuse a second tuner while
+   the child process runs).
+2. **Operator**: label the auto-accept population — 4–6 clean
    auto-accepted controls, P3_1's 2.0 kV resting pair, the 0.25 kV
    frame — the one stratum still dark, and the gate on any future
    `accept_conf` change. (The D-row flow is live: stage with 4/D/T,
    commit with Enter.)
-2. Spot-read the new review queue on the contact sheets — the capped
+3. Spot-read the new review queue on the contact sheets — the capped
    frames are annotated with their tags in Edge Review and the
    diagnostic (`audit_nostep` / `audit_bias` per frame in the JSON,
    counts in the verdicts).

@@ -209,14 +209,28 @@ P3_1's 2.0 kV pair went untraced) and any clean auto-accepted
 control; the method-conditional `accept_conf` decision waits on
 those.
 
+**The repeatability ceiling (evening, +8 repeat traces; 27 labels
+total):** the operator re-traced eight already-labeled onset frames,
+which measures the labels' own precision — **intra-operator
+repeatability is median IoU 0.973** (9 repeat pairs, 0.960–0.981;
+area deltas 0.2–2.5%, i.e. ~1% area precision, the same order as
+disc-fit's CI). Consequences: the IoU >= 0.8 calibration target is
+comfortably below the ceiling (sane); **disc-fit's median 0.91 on
+those frames is ~0.06 below the operator's self-agreement** — near
+human-level wherever it can fit — while the patch tiers (~0.5) are
+nowhere near it; and the 6.0 kV wash-out frame reads human-vs-human
+0.966 but machine 0.32, so that failure is entirely the machine's
+(and is held in review). No machine number should ever be judged
+against a bar above ~0.97.
+
 ## IMMEDIATE NEXT TASKS (operator time, in order)
 
-1. **Finish the ~30 labels** — 19/~30 done (155425 + P3_1, all
-   onset/high-kV). What remains is specifically the UNREPRESENTED
-   strata: a few 1.5–3 kV `audit_bias` resting frames (P3_1's 2.0 kV
-   pair; each trace is both the corrected measurement and a label),
-   the odd 0.25 kV +4.2 px frame, and 4–6 clean auto-accepted
-   mid-ramp/resting frames as controls.
+1. **Finish the ~30 labels** — 27 done (155425 + P3_1, all
+   onset/high-kV incl. repeats). What remains is specifically the
+   UNREPRESENTED strata: a few 1.5–3 kV `audit_bias` resting frames
+   (P3_1's 2.0 kV pair; each trace is both the corrected measurement
+   and a label), the odd 0.25 kV +4.2 px frame, and 4–6 clean
+   auto-accepted mid-ramp/resting frames as controls.
 2. **At ~30 labels**: re-run `python sldea_trace.py <runs>` plus a
    re-score against current winners, then decide `accept_conf`
    method-conditionally (including whether audit-capped disc-fits at

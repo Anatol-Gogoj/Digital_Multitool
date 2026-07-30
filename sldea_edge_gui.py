@@ -5,8 +5,9 @@ The companion program to the Digital Multitool's SLDEA tab: point it at a run
 directory (SLDEA_<ts>/), it traces the active-area disc in every frame
 (difference-imaging vs the 0 kV baseline + a Hough candidate), auto-accepts
 confident detections, and queues the shaky ones for a human pick -- each
-candidate outline is drawn over the photo and the user chooses A/B/C or
-Reject. Breakdown heuristics (current spike, area collapse) annotate suspect
+candidate outline is drawn over the photo and the user chooses A/B/C, a
+hand-traced candidate D, or Reject. Breakdown heuristics (current spike,
+area collapse) annotate suspect
 steps. Results are written back to the run's data.csv only after an explicit
 prompt (a .bak is kept), together with an area-vs-voltage plot and outline
 overlays for audit.
@@ -15,7 +16,8 @@ overlays for audit.
 
 With --auto (used by the SLDEA tab's "auto process"), detection starts
 immediately on launch. Keyboard: 1/2/3 pick a candidate, R reject,
-T trace the boundary by hand (#162 -- also the labeling instrument),
+4/D/T open the manual tracer (#162/#172 -- its Done stages the polygon
+as candidate D; Accept commits it like any other candidate),
 Left/Right navigate, Enter accept + next.
 """
 import os
@@ -35,9 +37,52 @@ import sldea_trace as strc
 
 DEFAULT_PARENT = os.environ.get('SCPI_SLDEA_DIR',
                                 '/mnt/shareDrive/robot_incubator/SLDEA_data')
-CAND_COLORS = ['#00c853', '#2196f3', '#ff9100']     # A green, B blue, C orange
-CAND_KEYS = ['A', 'B', 'C']
+# A green, B blue, C orange, D magenta (D = the manual trace, #172)
+CAND_COLORS = ['#00c853', '#2196f3', '#ff9100', '#e040fb']
+CAND_KEYS = ['A', 'B', 'C', 'D']
+TRACE_SLOT = 3          # radio value / paint slot of the manual trace
 VIEW_W = 780
+TAG_PX = 20             # letter-tag font size on the review card (#173)
+
+_TAG_FONT = None
+
+
+def _tag_font():
+    """Bold letter-tag font for the review card (#173: the default PIL
+    font was unreadably small on 1080p frames downscaled to the card).
+    Cached; falls back to PIL's builtin when no TrueType font resolves."""
+    global _TAG_FONT
+    if _TAG_FONT is None:
+        from PIL import ImageFont
+        for name in ('arialbd.ttf', 'DejaVuSans-Bold.ttf', 'arial.ttf',
+                     'DejaVuSans.ttf'):
+            try:
+                _TAG_FONT = ImageFont.truetype(name, TAG_PX)
+                break
+            except OSError:
+                continue
+        else:
+            try:
+                _TAG_FONT = ImageFont.load_default(TAG_PX)
+            except TypeError:              # Pillow < 10.1: no size arg
+                _TAG_FONT = ImageFont.load_default()
+    return _TAG_FONT
+
+
+def hot_slot(entries, chosen, sel):
+    """Which outline reads as SELECTED on the card. `entries` is
+    [(slot, candidate)], `chosen` the frame's accepted result (or None),
+    `sel` the radio selection (a slot). An accepted frame follows its
+    result; an unreviewed frame follows the radio -- candidate A used to
+    render at the thin weight until its already-selected radio was
+    clicked, because only an accepted result set the weight (#171)."""
+    if chosen:
+        for slot, c in entries:
+            if c['method'] == chosen['method']:
+                return slot
+    if any(slot == sel for slot, _c in entries):
+        return sel
+    return None
 
 
 class EdgeReviewApp:
@@ -50,6 +95,8 @@ class EdgeReviewApp:
         self.rundir = None
         self.cands_all = {}     # frame row index -> candidate list
         self.results = {}       # row index -> chosen candidate | None=rejected
+        self.traces = {}        # row index -> STAGED candidate D (#172)
+        self._select_trace_once = False   # next _show selects D (just staged)
         self.auto_idx = set()   # auto-accepted row indices
         self.auto_rej = set()   # auto-rejected (no change / no edge)
         self.frame_rows = []    # row indices that have a frame file
@@ -111,7 +158,7 @@ class EdgeReviewApp:
         self.cand_frame = ttk.LabelFrame(side, text="Candidates", padding=6)
         self.cand_frame.pack(fill='x')
         self.cand_radios = []
-        for k in range(3):
+        for k in range(4):
             row = ttk.Frame(self.cand_frame)
             row.pack(fill='x')
             # swatch carries the color; the TEXT stays readable (colored
@@ -123,7 +170,10 @@ class EdgeReviewApp:
             rb = tk.Radiobutton(
                 row, text="—", anchor='w',
                 variable=self.cand_var, value=k,
-                command=self._choose_current)
+                # D is a tool, not a precomputed candidate: its radio
+                # opens the tracer; Done stages, Accept commits (#172)
+                command=self._trace if k == TRACE_SLOT
+                else self._choose_current)
             rb.pack(side='left', fill='x', expand=True)
             self.cand_radios.append(rb)
         bt = ttk.Frame(side)
@@ -132,8 +182,6 @@ class EdgeReviewApp:
                    command=self._accept_next).pack(side=tk.LEFT)
         ttk.Button(bt, text="✘ Reject (R)",
                    command=self._reject).pack(side=tk.LEFT, padx=6)
-        ttk.Button(bt, text="✏ Trace (T)",
-                   command=self._trace).pack(side=tk.LEFT)
         nav = ttk.Frame(side)
         nav.pack(fill='x')
         ttk.Button(nav, text="◀ Prev",
@@ -157,6 +205,9 @@ class EdgeReviewApp:
                         ('<Key-c>', lambda e: self._pick_k(2)),
                         ('<Key-r>', lambda e: self._reject()),
                         ('<Key-R>', lambda e: self._reject()),
+                        ('<Key-4>', lambda e: self._trace()),
+                        ('<Key-d>', lambda e: self._trace()),
+                        ('<Key-D>', lambda e: self._trace()),
                         ('<Key-t>', lambda e: self._trace()),
                         ('<Key-T>', lambda e: self._trace()),
                         ('<Return>', lambda e: self._accept_next()),
@@ -248,6 +299,7 @@ class EdgeReviewApp:
         self.frame_rows = [i for i, r in enumerate(self.run['rows'])
                            if (r.get('frame_file') or '').strip()]
         self.cands_all, self.results, self.flags = {}, {}, {}
+        self.traces = {}
         self.auto_idx, self.auto_rej = set(), set()
         self.base_ref = None
         self.manual_ref = None
@@ -299,7 +351,10 @@ class EdgeReviewApp:
         # Every Detect pass starts CLEAN: stale results from a previous
         # pass (old settings, manual picks) used to survive re-detection
         # and get saved as a silent mix of two passes (audit 2026-07-25).
+        # Staged traces clear too — their polygons are already safe in
+        # edge_labels.json (appended at trace-Done, #172).
         self.cands_all, self.results, self.flags = {}, {}, {}
+        self.traces = {}
         self.auto_idx, self.auto_rej = set(), set()
         self.base_ref = None
         self._t0 = time.time()
@@ -371,6 +426,7 @@ class EdgeReviewApp:
         """Synchronous detection (used by --auto tests and headless runs)."""
         self._t0 = self._t0 or time.time()
         self.cands_all, self.results, self.flags = {}, {}, {}
+        self.traces = {}
         self.auto_idx, self.auto_rej = set(), set()
         base = self._base_gray()
         self._base_ref_pending = se.baseline_disc(base, self.settings)
@@ -462,12 +518,38 @@ class EdgeReviewApp:
             else:
                 self.cand_radios[k].config(text=f"{CAND_KEYS[k]}: —",
                                            state='disabled')
+        # row D: the staged manual trace, or the invitation to make one
+        trace = self.traces.get(i)
+        if trace is not None:
+            mmscale = se.mm_per_px(self.results, self.run['rows'],
+                                   self.settings,
+                                   baseline_ref=self.manual_ref or
+                                   self.base_ref)
+            mm = (f"  {trace['area_px'] * mmscale * mmscale:.1f} mm²"
+                  if mmscale else "")
+            self.cand_radios[TRACE_SLOT].config(
+                text=f"D: manual-trace  {trace['area_px']:.0f} px²{mm}"
+                     f"  ({trace['n_points']} pts)",
+                state='normal')
+        else:
+            self.cand_radios[TRACE_SLOT].config(
+                text="D: ✏ trace by hand…", state='normal')
+        # selection: just-staged D wins once, else the accepted result,
+        # else a pending D on an unreviewed frame, else A
         sel = 0
-        if chosen:
-            for k, c in enumerate(cands):
-                if c['method'] == chosen['method']:
-                    sel = k
-                    break
+        if self._select_trace_once:
+            self._select_trace_once = False
+            sel = TRACE_SLOT
+        elif chosen:
+            if chosen['method'] == 'manual-trace':
+                sel = TRACE_SLOT
+            else:
+                for k, c in enumerate(cands):
+                    if c['method'] == chosen['method']:
+                        sel = k
+                        break
+        elif i not in self.results and trace is not None:
+            sel = TRACE_SLOT
         self.cand_var.set(sel)
         q = self._queue_list()
         self.queue_lbl.config(
@@ -476,34 +558,52 @@ class EdgeReviewApp:
                     else ""))
         self._draw(i, cands, chosen)
 
-    def _draw(self, i, cands, chosen):
-        from PIL import Image, ImageDraw, ImageTk
+    def _render_card(self, i, cands, chosen):
+        """The review card as a PIL image (no Tk): frame + candidate
+        outlines + letter tags. Split from _draw so the rendering is
+        checkable headlessly -- the card is what the operator judges."""
+        from PIL import Image, ImageDraw
         import numpy as np
         path = se.frame_path(self.run, self.run['rows'][i])
-        try:
-            img = Image.open(path).convert('RGB')
-        except Exception:
-            self.canvas.delete('all')
-            return
+        img = Image.open(path).convert('RGB')
         scale = VIEW_W / img.width
         img = img.resize((VIEW_W, int(img.height * scale)))
         dr = ImageDraw.Draw(img)
-        for k, c in enumerate(cands):
+        entries = list(enumerate(cands))
+        trace = self.traces.get(i)
+        if trace is not None:              # the staged D outline (#172)
+            entries.append((TRACE_SLOT, trace))
+        hot = hot_slot(entries, chosen, self.cand_var.get())
+        font = _tag_font()
+        for slot, c in entries:
             pts = [(float(x) * scale, float(y) * scale)
                    for x, y in np.asarray(c['contour'])]
-            # fine lines: the detailed outlines read better thin
-            wdt = 2 if (chosen and c['method'] == chosen['method']) else 1
-            if len(pts) > 2:
-                dr.line(pts + [pts[0]], fill=CAND_COLORS[k], width=wdt)
-                # letter tag: candidate↔outline mapping must not rely on
-                # color alone (audit 2026-07-25)
-                tx, ty = max(pts, key=lambda p: p[0])
-                tx = min(tx + 4, img.width - 14)
-                for dx in (-1, 1):
-                    for dy in (-1, 1):
-                        dr.text((tx + dx, ty + dy), CAND_KEYS[k],
-                                fill='black')
-                dr.text((tx, ty), CAND_KEYS[k], fill=CAND_COLORS[k])
+            if len(pts) <= 2:
+                continue
+            # thicker lines, selection visibly heavier (#171/#173)
+            wdt = 3 if slot == hot else 2
+            dr.line(pts + [pts[0]], fill=CAND_COLORS[slot], width=wdt)
+            # letter tag: candidate↔outline mapping must not rely on
+            # color alone (audit 2026-07-25); large + solid halo (#173)
+            tx, ty = max(pts, key=lambda p: p[0])
+            tx = min(tx + 6, img.width - TAG_PX - 2)
+            ty = min(max(ty - TAG_PX / 2, 0), img.height - TAG_PX - 4)
+            for dx in range(-2, 3):
+                for dy in range(-2, 3):
+                    if dx or dy:
+                        dr.text((tx + dx, ty + dy), CAND_KEYS[slot],
+                                fill='black', font=font)
+            dr.text((tx, ty), CAND_KEYS[slot], fill=CAND_COLORS[slot],
+                    font=font)
+        return img
+
+    def _draw(self, i, cands, chosen):
+        from PIL import ImageTk
+        try:
+            img = self._render_card(i, cands, chosen)
+        except OSError:        # frame missing/undecodable; draw bugs stay loud
+            self.canvas.delete('all')
+            return
         self._photo = ImageTk.PhotoImage(img)
         self.canvas.delete('all')
         self.canvas.config(width=img.width, height=img.height)
@@ -518,11 +618,21 @@ class EdgeReviewApp:
 
     def _choose_current(self):
         i = self._current()
-        cands = self.cands_all.get(i, [])
-        k = self.cand_var.get()
-        if i is None or k >= len(cands):
+        if i is None:
             return
-        chosen = dict(cands[k])
+        k = self.cand_var.get()
+        if k == TRACE_SLOT:
+            # Accept commits the STAGED trace (#172) -- staging alone
+            # (closing the tracer) never touches results
+            trace = self.traces.get(i)
+            if trace is None:
+                return
+            chosen = dict(trace)
+        else:
+            cands = self.cands_all.get(i, [])
+            if k >= len(cands):
+                return
+            chosen = dict(cands[k])
         chosen['chosen_by'] = 'user'
         self.results[i] = chosen
         self.auto_idx.discard(i)
@@ -545,12 +655,15 @@ class EdgeReviewApp:
         self._recount()
         self._advance()
 
-    # ---------------- manual trace (#162) ----------------
+    # ---------------- manual trace (#162, candidate D per #172) --------
     def _trace(self):
-        """Trace the boundary by hand: the recovery path when every
-        candidate is rejected, and the labeling instrument for the
-        conf-vs-IoU calibration. Allowed even when a candidate exists --
-        correcting a near-miss is a valuable label, not a rejection."""
+        """Open the manual tracer: the recovery path when every candidate
+        is rejected, and the labeling instrument for the conf-vs-IoU
+        calibration. Allowed even when a candidate exists -- correcting a
+        near-miss is a valuable label, not a rejection. The closed trace
+        is STAGED as candidate D (row D + drawn on the card); Accept
+        commits it like any other candidate (#172). Re-opening D edits
+        the pending polygon rather than starting over."""
         i = self._current()
         if self.run is None or i is None:
             messagebox.showinfo("Trace", "Pick a run first")
@@ -558,16 +671,24 @@ class EdgeReviewApp:
         path = se.frame_path(self.run, self.run['rows'][i])
         if not path or not os.path.exists(path):
             messagebox.showinfo("Trace", "This row has no frame on disk.")
+            self._show()               # the D radio may have grabbed sel
             return
         scale = se.mm_per_px(self.results, self.run['rows'], self.settings,
                              baseline_ref=self.manual_ref or self.base_ref)
-        TraceWindow(self, i, path, mm_per_px=scale)
+        trace = self.traces.get(i) or {}
+        TraceWindow(self, i, path, mm_per_px=scale,
+                    seed=trace.get('trace_points'),
+                    seed_snapped=bool(trace.get('snapped')))
 
-    def _trace_done(self, i, points, meta):
-        """The closed polygon becomes the frame's accepted result AND a
-        ground-truth label appended to edge_labels.json (atomic; tracing
-        itself never touches data.csv/setup.txt -- the result flows
-        through the normal Save path)."""
+    def _trace_staged(self, i, points, meta):
+        """TraceWindow Done -> the polygon is staged as candidate D and
+        the ground-truth label is appended to edge_labels.json. Staging
+        does NOT touch results -- Accept commits (#172). The label
+        appends HERE, at Done, so a completed trace is never lost even
+        if it is not accepted; a re-trace appends another record (repeat
+        labels are how operator repeatability was measured). Tracing
+        never touches data.csv/setup.txt -- the committed result flows
+        through the normal Save path."""
         poly = np.asarray(points, np.float64)
         area = strc.polygon_area(poly)
         cx, cy = strc.polygon_centroid(poly)
@@ -580,16 +701,17 @@ class EdgeReviewApp:
                                             poly.astype(np.int32))
         except Exception:
             wrinkle = None
-        res = {'method': 'manual-trace', 'conf': 1.0, 'chosen_by': 'user',
-               'area_px': float(area),
-               'diam_px': strc.equivalent_diam(area),
-               'cx': float(cx), 'cy': float(cy),
-               'contour': poly.astype(np.int32), 'solidity': 1.0,
-               'spread_pct': 0.0, 'ci85_pct': None, 'wrinkle': wrinkle,
-               'n_points': len(poly)}
-        self.results[i] = res
-        self.auto_idx.discard(i)
-        self._recount()
+        self.traces[i] = {
+            'method': 'manual-trace', 'conf': 1.0, 'chosen_by': 'user',
+            'area_px': float(area),
+            'diam_px': strc.equivalent_diam(area),
+            'cx': float(cx), 'cy': float(cy),
+            'contour': poly.astype(np.int32), 'solidity': 1.0,
+            'spread_pct': 0.0, 'ci85_pct': None, 'wrinkle': wrinkle,
+            'n_points': len(poly),
+            # full-precision points so re-opening D edits, not re-clicks
+            'trace_points': [(float(x), float(y)) for x, y in poly],
+            'snapped': bool(meta.get('snapped'))}
         # every trace is a label, stored with the machine's best candidate
         # at trace time so IoU is computable offline (#162)
         cands = self.cands_all.get(i, [])
@@ -597,16 +719,17 @@ class EdgeReviewApp:
         rec = strc.label_record(i, self.run['rows'][i], poly, shape,
                                 machine=cands[0] if cands else None,
                                 **meta)
+        self._select_trace_once = True
         try:
             strc.append_label(self.rundir, rec)
             n = len(strc.load_labels(self.rundir))
             self.status.config(
-                text=f"manual trace accepted ({area:.0f} px², "
-                     f"{len(poly)} points) — label {n} in "
-                     f"{strc.LABELS_NAME}")
+                text=f"trace staged as candidate D ({area:.0f} px², "
+                     f"{len(poly)} points) — Accept (Enter) commits; "
+                     f"label {n} in {strc.LABELS_NAME}")
         except (OSError, ValueError) as e:
             messagebox.showerror(
-                "Trace label", f"The trace is ACCEPTED for this frame, but "
+                "Trace label", f"The trace is staged as candidate D, but "
                 f"appending the label sidecar failed:\n\n{e}")
         self._show()
 
@@ -929,7 +1052,9 @@ class TraceWindow(tk.Toplevel):
     """Manual boundary tracing (#162): click points that close into the
     outer edge of the active area. All geometry/undo/coordinate state
     lives in sldea_trace (headless-tested); this class only translates
-    Tk events into model calls and repaints.
+    Tk events into model calls and repaints. Done STAGES the polygon as
+    candidate D in the review card (app._trace_staged); the operator
+    commits it with Accept, same as any candidate (#172).
 
     Interaction: left-click add point (drag an existing point to move
     it, right-click deletes it), wheel zooms about the cursor, middle-
@@ -942,7 +1067,8 @@ class TraceWindow(tk.Toplevel):
     GRAB_PX = 8            # view-px radius: press on a point = drag it
     DEL_PX = 12            # view-px radius for right-click delete
 
-    def __init__(self, app, row_index, img_path, mm_per_px=None):
+    def __init__(self, app, row_index, img_path, mm_per_px=None,
+                 seed=None, seed_snapped=False):
         super().__init__(app.root)
         from PIL import Image
         self.app = app
@@ -954,10 +1080,18 @@ class TraceWindow(tk.Toplevel):
         self.title(f"Trace boundary — step {row.get('step')} "
                    f"[{row.get('tag')}] {row.get('nominal_kV')} kV")
         self.model = strc.TraceModel()
+        self._seeded = bool(seed)
+        if seed:
+            # re-trace (#172): edit the pending D polygon instead of
+            # re-clicking it. Seeded points are the baseline state (not
+            # undoable ops); Restart still clears them in one step.
+            self.model.points = [(float(x), float(y)) for x, y in seed]
         self.vt = strc.ViewTransform()
         self.vt.fit(self.img.width, self.img.height, self.CV_W, self.CV_H)
         self._t_open = time.time()
-        self._snap_used = False
+        # a seeded polygon traced with the magnet keeps its 'snapped'
+        # tag -- the label must not launder snapped points as freehand
+        self._snap_used = bool(seed_snapped)
         self._drag_idx = None
         self._drag_orig = None
         self._pan_from = None
@@ -1250,14 +1384,20 @@ class TraceWindow(tk.Toplevel):
                 'snapped': self._snap_used}
         self.grab_release()
         self.destroy()
-        self.app._trace_done(self.row_index, pts, meta)
+        self.app._trace_staged(self.row_index, pts, meta)
 
     def _cancel(self):
+        msg = ("Close the tracer? The previously staged D outline is "
+               "kept; this session's edits are discarded."
+               if self._seeded else "Discard the traced points?")
         if self.model.points and not messagebox.askyesno(
-                "Trace", "Discard the traced points?", parent=self):
+                "Trace", msg, parent=self):
             return
         self.grab_release()
         self.destroy()
+        # clicking the D radio set the selection before opening the
+        # tracer; a cancel must put it back where the frame's state says
+        self.app._show()
 
 
 def main():

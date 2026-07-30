@@ -1,5 +1,13 @@
 # SLDEA detection — handoff
 
+Fifth session (2026-07-29, continuation). The three GUI issues from the
+operator review are **done and tested**: #171 (selection highlight),
+#173 (thicker outlines + big letter tags), and #172 (manual trace is
+now **candidate D** — its radio/4/D/T opens the tracer, Done STAGES the
+polygon as D on the card, Accept commits it; the #162 label still
+appends at Done, so no completed trace is ever lost). What remains is
+operator time, not code — see "IMMEDIATE NEXT TASKS".
+
 Fourth session (2026-07-29). The previous handoff's two initial tasks
 are **done, tested, and verified on all six runs**: (1) the boundary
 self-audit is folded into ACCEPTANCE — two per-frame gates cap the
@@ -7,8 +15,7 @@ winner below `accept_conf` when the audit contradicts it; (2) the #162
 manual-trace tool is built and wired into Edge Review — the labeling
 instrument exists, end-to-end. Folding the audit in surfaced a
 systematic error no previous conf number ever saw: **stale 'resting'
-claims** (below). What remains is operator time, not code — see
-"IMMEDIATE NEXT TASKS".
+claims** (below).
 
 Read this file, then `sldea_edge.py` (`candidates` — the audit fold is
 at its end — `audit_boundary`, `reconcile_pairs`), `sldea_trace.py`,
@@ -94,30 +101,39 @@ sheet cannot arbitrate: the 2.25–2.75 kV resting circles carry a real
 invisible there — so their `audit_bias` caps stand even though the
 circles look clean by eye.
 
-## The #162 manual-trace tool (built this session)
+## The #162 manual-trace tool (built session 4; candidate-D flow session 5)
 
 `sldea_trace.py` (headless model, 10 tests) + `TraceWindow` in
-`sldea_edge_gui.py` (button "✏ Trace (T)" beside Accept/Reject).
-Everything in the issue spec: click-to-place points closing into the
-outer boundary, wheel zoom about the cursor, middle/space-drag pan, F
-fit, drag to move a point, right-click to delete one, Undo/Redo as
-buttons AND Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, Restart-with-confirm that
-is itself one undoable op, min 3 points, self-intersection warning
-with override, optional edge-snap magnet (OFF by default, labels
-tagged `snapped`), overlays (resting disc ON by default; candidates
-and previous outline OFF so labels are not anchored to what the
-machine drew — visibility state recorded per label).
+`sldea_edge_gui.py` (**candidate row D** in the Candidates panel — the
+radio, or keys 4/D/T, opens the tracer; the old separate button is
+gone, per #172). Everything in the issue spec: click-to-place points
+closing into the outer boundary, wheel zoom about the cursor,
+middle/space-drag pan, F fit, drag to move a point, right-click to
+delete one, Undo/Redo as buttons AND Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z,
+Restart-with-confirm that is itself one undoable op, min 3 points,
+self-intersection warning with override, optional edge-snap magnet
+(OFF by default, labels tagged `snapped`), overlays (resting disc ON
+by default; candidates and previous outline OFF so labels are not
+anchored to what the machine drew — visibility state recorded per
+label).
 
-On close the polygon becomes the frame's accepted result (`method
-'manual-trace'`, conf 1.0, `chosen_by: user`, wrinkle index computed
-over the traced region) and flows through the normal
-`apply_results`/`write_back` path — CSV note `edge:manual-trace conf
-1.00 (user)`. Simultaneously a label record (full-res polygon, frame
-shape, kV/tag, timestamp, OS user, zoom, overlay state, elapsed
-seconds, snapped flag, and the machine's best candidate at trace time)
-is appended to `edge_labels.json` beside data.csv — atomic tmp+replace,
-append-only across sessions, refuses (never clobbers) a corrupt file.
-Tracing itself never touches data.csv/setup.txt.
+On Done the polygon is **STAGED as candidate D** (#172): row D shows
+px²/mm²/point count, the outline is drawn on the review card (magenta,
+letter D) like any candidate, and **Accept (Enter) commits it** as the
+frame's result (`method 'manual-trace'`, conf 1.0, `chosen_by: user`,
+wrinkle index computed over the traced region), flowing through the
+normal `apply_results`/`write_back` path — CSV note
+`edge:manual-trace conf 1.00 (user)`. Re-opening D edits the pending
+polygon (seeded, full precision); Cancel keeps the previous staging.
+The label record (full-res polygon, frame shape, kV/tag, timestamp, OS
+user, zoom, overlay state, elapsed seconds, snapped flag, and the
+machine's best candidate at trace time) is appended to
+`edge_labels.json` **at Done, not at Accept** — a completed trace is
+ground truth whether or not it is committed, and a re-trace appends
+another record (repeat labels are how the repeatability ceiling was
+measured). Atomic tmp+replace, append-only across sessions, refuses
+(never clobbers) a corrupt file. Tracing itself never touches
+data.csv/setup.txt.
 
 The calibration consumer already exists:
 
@@ -256,30 +272,40 @@ understatement of the recorded quantity.
   those controls (plus P3_1's 2.0 kV bias-capped resting pair and
   the 0.25 kV oddity) before revisiting.
 
-## GUI TODOs from operator review (2026-07-29) — filed, not coded
+## GUI TODOs from operator review (2026-07-29) — DONE (session 5)
 
-Operator feedback from the tracing sessions, recorded as issues per
-instruction (no code touched):
+All three coded, tested (`tests/test_sldea_edge_gui.py`) and verified
+on rendered cards from a real P3_1 1080p frame:
 
-- **#171** — BUG: candidate A is default-selected but renders at the
-  thin unselected weight until its radio is clicked (`_draw` follows
-  the accepted result, not `cand_var`).
-- **#172** — manual trace should be **candidate D**: the radio opens
-  the tracer, the closed trace shows its px²/mm² in row D and is
-  drawn on the review card like any candidate, and Accept commits it
-  (today the trace commits on close and never renders on the card).
-- **#173** — thicker candidate outlines and larger/bolder letter
-  labels on the review card.
+- **#171** — fixed: the card highlight follows the accepted result
+  when there is one, else the radio selection (`hot_slot`); an
+  unreviewed frame now renders its default-selected A at the heavy
+  weight immediately.
+- **#172** — done: manual trace is **candidate D** (see the #162 tool
+  section above for the full stage-at-Done / commit-at-Accept
+  semantics; the label appends at Done).
+- **#173** — done: outlines 3 px selected / 2 px unselected; letter
+  tags 20 px bold with a solid 2 px black halo (falls back through
+  arialbd/DejaVu to PIL's default). Contact sheet untouched, as
+  scoped.
+
+The operator hand-tested this build (sandbox copy of P3_1, deleted
+after) and filed one new issue, not coded here: **#176** — "Tune…"
+spawns a new tuner process on EVERY click (unconditional Popen, N
+tuners racing on one setup.txt) and "Advanced…" stacks Toplevels the
+same way; Calibrate and the tracer are already modal. Fix sketch in
+the issue: singleton semantics for both.
 
 ## IMMEDIATE NEXT TASKS (in order)
 
-1. **Code session**: the three GUI issues above — #171 (small bug),
-   #173 (small), #172 (the real feature; mind the #162 label-append
-   semantics noted in the issue).
+1. **Code session (small)**: #176 — singleton guards for Tune…/
+   Advanced… (lift+focus the live dialog; refuse a second tuner while
+   the child process runs).
 2. **Operator**: label the auto-accept population — 4–6 clean
    auto-accepted controls, P3_1's 2.0 kV resting pair, the 0.25 kV
    frame — the one stratum still dark, and the gate on any future
-   `accept_conf` change.
+   `accept_conf` change. (The D-row flow is live: stage with 4/D/T,
+   commit with Enter.)
 3. Spot-read the new review queue on the contact sheets — the capped
    frames are annotated with their tags in Edge Review and the
    diagnostic (`audit_nostep` / `audit_bias` per frame in the JSON,
@@ -712,14 +738,20 @@ column is what settled it. Do not relitigate these without new evidence.
 | accept_conf = 0.75 FINAL at 34 labels; nothing loosened | Raising blocks nothing (wrong high-conf patches already in review via spread/pair); lowering/recovering capped disc-fits rejected — IoU flattered them while the recorded AREA runs −6.9% median vs the human on exactly those frames | "The accept_conf DECISION" section |
 | The recover-the-audit-capped-disc-fits idea is REVERSED | IoU 0.85–0.95 coexists with −3..−16% area error at onset; the caps route those frames to the trace pipeline, which is both the fix and the label | Same section; area-error table |
 | The IoU >= 0.8 calibration target is validated against a measured human ceiling | Intra-operator repeatability median IoU 0.973 (9 repeat pairs); no machine number gets judged against a bar above ~0.97 | Repeatability ceiling note |
+| Manual trace is candidate D: radio/4/D/T opens the tracer, Done STAGES, Accept commits (2026-07-29) | The old commit-on-close asymmetry surprised the operator; one accept idiom for every candidate, and the staged outline renders on the card before committing | #172; test_trace_stages_as_candidate_D_then_accept_commits |
+| The #162 label appends at trace-Done, not at Accept | A completed trace is ground truth whether or not it is committed (Done is explicit; Cancel never labels); re-traces append again — repeat labels ARE the repeatability measurement; no operator work can be lost to a navigation slip | Same test: label count 2 after stage+restage, still 2 after Accept |
+| Card highlight follows the accepted result, else the radio selection (hot_slot) | Only an accepted result used to set the line weight, so an unreviewed frame drew its default-selected A thin until the radio was clicked | #171; operator report |
+| Card outlines 3/2 px, letter tags 20 px bold + solid halo | 1–2 px lines and default-font letters were hard to see on 1080p frames downscaled to the ~780 px card; contact sheet left as-is per scope | #173; rendered-card check on P3_1 @ 5.0 kV |
 
 ## Repo state you are inheriting
 
 - All of the above is code + tests on this branch; nothing else changed.
-- Suites: `test_sldea_edge.py` 41, `test_sldea_diag.py` 16,
-  `test_sldea_trace.py` 10 (new), `test_sldea_tuner.py` 8; both
+- Suites: `test_sldea_edge.py` 42, `test_sldea_diag.py` 16,
+  `test_sldea_trace.py` 10, `test_sldea_tuner.py` 8,
+  `test_sldea_edge_gui.py` 2 (new — hot_slot rule headless + the full
+  staged-D flow on a real Tk, skips cleanly without a display); both
   `--selftest`s pass.
-- `run_tests.py` on the analysis PC: 24/28 — the four failures are
+- `run_tests.py` on the analysis PC: 25/29 — the four failures are
   environmental and pre-existing (`test_arb_bin`, `test_camera_controls`,
   `test_presets_path` expect read-only-dir writes to fail, which Windows
   ACLs don't enforce the way the test assumes; `test_tk_fontfix` fails

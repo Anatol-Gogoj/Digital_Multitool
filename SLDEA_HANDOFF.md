@@ -5,8 +5,10 @@ operator review are **done and tested**: #171 (selection highlight),
 #173 (thicker outlines + big letter tags), and #172 (manual trace is
 now **candidate D** — its radio/4/D/T opens the tracer, Done STAGES the
 polygon as D on the card, Accept commits it; the #162 label still
-appends at Done, so no completed trace is ever lost). What remains is
-operator time, not code — see "IMMEDIATE NEXT TASKS".
+appends at Done, so no completed trace is ever lost). The operator
+hand-tested the build and found #176 (unbounded Tune…/Advanced…
+windows) — **fixed 2026-07-30**, singleton guards + test. What remains
+is operator time, not code — see "IMMEDIATE NEXT TASKS".
 
 Fourth session (2026-07-29). The previous handoff's two initial tasks
 are **done, tested, and verified on all six runs**: (1) the boundary
@@ -290,23 +292,23 @@ on rendered cards from a real P3_1 1080p frame:
   scoped.
 
 The operator hand-tested this build (sandbox copy of P3_1, deleted
-after) and filed one new issue, not coded here: **#176** — "Tune…"
-spawns a new tuner process on EVERY click (unconditional Popen, N
-tuners racing on one setup.txt) and "Advanced…" stacks Toplevels the
-same way; Calibrate and the tracer are already modal. Fix sketch in
-the issue: singleton semantics for both.
+after) and filed **#176**: "Tune…" spawned a new tuner process on
+EVERY click (unconditional Popen, N tuners racing on one setup.txt)
+and "Advanced…" stacked Toplevels the same way; Calibrate and the
+tracer were already modal. **Fixed 2026-07-30**: `_advanced` fronts
+the live dialog (lift+focus) instead of building another; `_open_tuner`
+keeps the Popen and refuses while the child runs (status note — a
+foreign process's window cannot be focused from Tk), spawning fresh
+once it exits. Tested (`test_aux_windows_are_singletons_not_unbounded`).
 
 ## IMMEDIATE NEXT TASKS (in order)
 
-1. **Code session (small)**: #176 — singleton guards for Tune…/
-   Advanced… (lift+focus the live dialog; refuse a second tuner while
-   the child process runs).
-2. **Operator**: label the auto-accept population — 4–6 clean
+1. **Operator**: label the auto-accept population — 4–6 clean
    auto-accepted controls, P3_1's 2.0 kV resting pair, the 0.25 kV
    frame — the one stratum still dark, and the gate on any future
    `accept_conf` change. (The D-row flow is live: stage with 4/D/T,
    commit with Enter.)
-3. Spot-read the new review queue on the contact sheets — the capped
+2. Spot-read the new review queue on the contact sheets — the capped
    frames are annotated with their tags in Edge Review and the
    diagnostic (`audit_nostep` / `audit_bias` per frame in the JSON,
    counts in the verdicts).
@@ -742,15 +744,16 @@ column is what settled it. Do not relitigate these without new evidence.
 | The #162 label appends at trace-Done, not at Accept | A completed trace is ground truth whether or not it is committed (Done is explicit; Cancel never labels); re-traces append again — repeat labels ARE the repeatability measurement; no operator work can be lost to a navigation slip | Same test: label count 2 after stage+restage, still 2 after Accept |
 | Card highlight follows the accepted result, else the radio selection (hot_slot) | Only an accepted result used to set the line weight, so an unreviewed frame drew its default-selected A thin until the radio was clicked | #171; operator report |
 | Card outlines 3/2 px, letter tags 20 px bold + solid halo | 1–2 px lines and default-font letters were hard to see on 1080p frames downscaled to the ~780 px card; contact sheet left as-is per scope | #173; rendered-card check on P3_1 @ 5.0 kV |
+| Auxiliary windows are modal or SINGLETON, never unbounded (2026-07-30) | Stacked Advanced… dialogs apply stale values last-writer-wins; N tuner processes race their Saves on one setup.txt; the operator could open both without limit | #176; hand-test report; test_aux_windows_are_singletons_not_unbounded |
 
 ## Repo state you are inheriting
 
 - All of the above is code + tests on this branch; nothing else changed.
 - Suites: `test_sldea_edge.py` 42, `test_sldea_diag.py` 16,
   `test_sldea_trace.py` 10, `test_sldea_tuner.py` 8,
-  `test_sldea_edge_gui.py` 2 (new — hot_slot rule headless + the full
-  staged-D flow on a real Tk, skips cleanly without a display); both
-  `--selftest`s pass.
+  `test_sldea_edge_gui.py` 3 (hot_slot rule headless + the staged-D
+  flow and the #176 singleton guards on a real Tk, skips cleanly
+  without a display); both `--selftest`s pass.
 - `run_tests.py` on the analysis PC: 25/29 — the four failures are
   environmental and pre-existing (`test_arb_bin`, `test_camera_controls`,
   `test_presets_path` expect read-only-dir writes to fail, which Windows

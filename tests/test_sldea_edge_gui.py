@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Review-card semantics for sldea_edge_gui (#171 / #172 / #173).
+"""Review-card + window semantics for sldea_edge_gui (#171-#173, #176).
 
 The selection-highlight rule (hot_slot) is pure and tested headlessly.
 The candidate-D flow -- trace Done STAGES + labels, Accept commits, a
-re-trace replaces the pending polygon -- drives a real EdgeReviewApp on
-a synthetic run; that part needs a Tk display and skips cleanly when
-one cannot be opened (headless CI without Xvfb).
+re-trace replaces the pending polygon -- and the #176 singleton guards
+for Advanced.../Tune... drive a real EdgeReviewApp on a synthetic run;
+those parts need a Tk display and skip cleanly when one cannot be
+opened (headless CI without Xvfb).
 
 Run: .venv/bin/python tests/test_sldea_edge_gui.py
 """
@@ -142,6 +143,71 @@ def test_trace_stages_as_candidate_D_then_accept_commits():
         app.cand_var.set(gui.TRACE_SLOT)
         app._choose_current()
         assert app.results.get(j) is before_j
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_aux_windows_are_singletons_not_unbounded():
+    """#176: re-clicking Advanced... fronts the live dialog instead of
+    stacking another; Tune... refuses a second tuner while the child
+    process runs and spawns fresh only after it exits."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_gui_win_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None, "synthetic run failed to load"
+        # Advanced...: one dialog, re-click fronts it
+        app._advanced()
+        w1 = app._adv_win
+        assert w1 is not None and w1.winfo_exists()
+        app._advanced()
+        assert app._adv_win is w1
+        tops = [w for w in root.winfo_children()
+                if isinstance(w, tk.Toplevel)]
+        assert len(tops) == 1, f"stacked dialogs: {len(tops)}"
+        # a closed dialog is not a live singleton: reopen builds anew
+        w1.destroy()
+        app._advanced()
+        assert app._adv_win is not w1 and app._adv_win.winfo_exists()
+        app._adv_win.destroy()
+        # Tune...: no second process while the child lives
+        import subprocess as sp
+
+        class FakeProc:
+            def __init__(self):
+                self.rc = None
+
+            def poll(self):
+                return self.rc
+
+        calls = []
+        orig = sp.Popen
+
+        def fake_popen(*a, **k):
+            calls.append(a)
+            return FakeProc()
+
+        sp.Popen = fake_popen
+        try:
+            app._open_tuner()
+            assert len(calls) == 1
+            app._open_tuner()                      # child still alive
+            assert len(calls) == 1, "second tuner spawned"
+            assert 'already running' in app.status['text']
+            app._tuner_proc.rc = 0                 # child exited
+            app._open_tuner()
+            assert len(calls) == 2, "respawn after exit refused"
+        finally:
+            sp.Popen = orig
     finally:
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)

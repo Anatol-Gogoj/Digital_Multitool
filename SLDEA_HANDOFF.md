@@ -196,12 +196,27 @@ sidecar exists for:
   method-conditional acceptance decision after the full ~30 labels
   can recover those without loosening anything else.
 
+**Pooled at 19 labels (evening, + 6 P3_1 traces):** the method split
+is now cross-campaign and unambiguous — **disc-fit winners score
+IoU >= 0.82 on 9 of 9 labels (median 0.89)**, including the P3_1 onset
+frames the audit caps to review at conf 0.74 (they trace at
+0.89–0.92); **patch-tier winners score < 0.6 on 10 of 10** (median
+~0.55), whatever their conf (0.44–0.99). Method identity predicts
+correctness; conf does not. The one hard failure is P3_1 6.0 kV post
+(wash-out, diff-hi at conf 0.44, IoU 0.31 — in review). Still
+unlabeled: every `resting` frame (the 1.5–3 kV bias-capped band —
+P3_1's 2.0 kV pair went untraced) and any clean auto-accepted
+control; the method-conditional `accept_conf` decision waits on
+those.
+
 ## IMMEDIATE NEXT TASKS (operator time, in order)
 
-1. **Finish the ~30 labels**: P3 onset frames (4.5–5.75 kV), a few
-   1.5–3 kV `audit_bias` resting frames (each trace is both the
-   corrected measurement and a label), and a handful of clean
-   auto-accepted frames as controls — 13/~30 done (155425).
+1. **Finish the ~30 labels** — 19/~30 done (155425 + P3_1, all
+   onset/high-kV). What remains is specifically the UNREPRESENTED
+   strata: a few 1.5–3 kV `audit_bias` resting frames (P3_1's 2.0 kV
+   pair; each trace is both the corrected measurement and a label),
+   the odd 0.25 kV +4.2 px frame, and 4–6 clean auto-accepted
+   mid-ramp/resting frames as controls.
 2. **At ~30 labels**: re-run `python sldea_trace.py <runs>` plus a
    re-score against current winners, then decide `accept_conf`
    method-conditionally (including whether audit-capped disc-fits at

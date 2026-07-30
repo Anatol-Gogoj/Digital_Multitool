@@ -274,6 +274,66 @@ understatement of the recorded quantity.
   those controls (plus P3_1's 2.0 kV bias-capped resting pair and
   the 0.25 kV oddity) before revisiting.
 
+## Calibration round 4 (2026-07-30) — the controls, and what they exposed
+
+The operator labeled the last dark stratum: P3_1's auto-accept
+controls plus the audit-flagged low-kV frames (and, earlier the same
+day, 7 more onset/wash-out review frames that replicate the round-3
+findings). Six low-kV labels, machine vs trace:
+
+| kV / tag | machine | conf | IoU | trace vs machine area | audit bias (px) |
+|---|---|---|---|---|---|
+| 0.25 post | resting | 0.99 | 0.95 | +5.2% | +2.7 (clean) |
+| 0.25 pre  | resting | capped 0.74 | 0.94 | +5.7% | +4.2 |
+| 1.0 post  | resting | 0.97 | 0.94 | +5.6% | +1.4 (clean) |
+| 2.0 post  | resting | capped 0.74 | 0.89 | **+11.9%** | −5.9 |
+| 2.0 pre   | resting | capped 0.74 | 0.91 | **+9.4%** | −5.3 |
+| 3.0 post  | disc-fit | 0.94 | 0.95 | +5.2% | −0.1 (clean) |
+
+**Three findings, in order of importance:**
+
+1. **A consistent +5.2–5.7% human-over-machine offset exists on CLEAN
+   frames** — controls where the audit certifies the fit sits ON the
+   measured ink step (bias −0.1..+2.7 px). Spread across the four
+   controls is 0.5%: this is a systematic edge-DEFINITION difference
+   (~+7 px radius — the operator traces the outer toe of the soft
+   edge; the machine takes the half-height point), not noise. The
+   operator's own read: "the resolution is a bit tough — those pixel
+   errors are inevitable." Consequences: (a) the repeatability
+   ceiling (0.973) measured PRECISION; these controls expose the
+   accuracy annulus — human-vs-machine IoU on clean frames is
+   0.94–0.95 and that gap to the ceiling IS the annulus; (b) the
+   round-3 "−6.9% onset understatement" DECOMPOSES: ~5.5% of it is
+   this definitional offset present on every frame, leaving only
+   ~1–2% onset-specific excess (within trace noise). The
+   `accept_conf` conclusion is UNCHANGED (the onset caps stand on the
+   nostep audit and review-conservatism), but the area-evidence line
+   under it is corrected — see the new decision-log row; (c) absolute
+   mm² carries a ~5% definitional uncertainty either way; expansion
+   RATIOS are barely affected (a fixed annulus roughly cancels,
+   second-order ~1%).
+
+2. **The 2.0 kV bias gate is VINDICATED.** Against the operator's own
+   definitional baseline (+5.4% mean on controls), the 2.0 kV pair
+   shows an EXCESS of +4.0/+6.5% (pre/post) — the audit's measured
+   −5.3/−5.9 px creep predicts +3.8/+4.2%. The disc really does creep
+   out below the diff gate's sensitivity while "resting"
+   auto-accepts. Follow-up worth building: when `audit_bias` trips on
+   a gated frame, run the disc-fitter anyway ("resting-refit") — that
+   band becomes correct auto-accepts instead of review load.
+
+3. **The auto-accept population is ground-truthed at last**: first
+   labels ever at conf >= 0.75 with boundary methods — IoU 0.94–0.95
+   at conf 0.94–0.99, 4/4 over the 0.8 target. The trusted majority
+   is validated (up to the definitional annulus, which review cannot
+   fix anyway). The 0.25 kV "oddity" is a marginal gate trip (+4.2 px
+   vs the 3 px gate; pre/post trace differential ~0, below trace
+   precision) — leave the gate; it costs one review frame.
+
+Pooled: 47 labels (34 P3_1 + 13 155425). disc-fit median IoU 0.89
+(n=26); patch tiers 0.43 (n=15); conf 0.50–0.75 bin P(IoU>=0.8)=0.90.
+Method identity still predicts correctness; `accept_conf` stays 0.75.
+
 ## GUI TODOs from operator review (2026-07-29) — DONE (session 5)
 
 All three coded, tested (`tests/test_sldea_edge_gui.py`) and verified
@@ -303,12 +363,23 @@ once it exits. Tested (`test_aux_windows_are_singletons_not_unbounded`).
 
 ## IMMEDIATE NEXT TASKS (in order)
 
-1. **Operator**: label the auto-accept population — 4–6 clean
-   auto-accepted controls, P3_1's 2.0 kV resting pair, the 0.25 kV
-   frame — the one stratum still dark, and the gate on any future
-   `accept_conf` change. (The D-row flow is live: stage with 4/D/T,
-   commit with Enter.)
-2. Spot-read the new review queue on the contact sheets — the capped
+1. ~~Operator: label the auto-accept population + the 2.0 kV pair +
+   0.25 kV~~ — **DONE 2026-07-30**, see "Calibration round 4" above.
+2. **Code**: the "resting-refit" fix motivated by round 4 — when
+   `audit_bias` trips on a gated frame, run the disc-fitter instead
+   of asserting the resting circle; converts the stale-resting band
+   (1.5–3 kV, all six runs) into correct auto-accepts. Validate
+   against the stored 2.0 kV labels (offline re-score, no new
+   operator time).
+3. **Code (small)**: the two GUI issues from the 2026-07-30 labeling
+   session — #178 (card fixed at 780 px, blank preview space) and
+   #179 (side panel resizes to content; Prev/Next jump underneath the
+   cursor).
+4. Optional operator sanity check: repeat the 4-control set on one
+   07-23 run — is the +5.5% definitional offset stable across
+   campaigns/optics, or P3-specific? (Decides whether it is a
+   constant of the operator's edge definition or of the scene.)
+5. Spot-read the new review queue on the contact sheets — the capped
    frames are annotated with their tags in Edge Review and the
    diagnostic (`audit_nostep` / `audit_bias` per frame in the JSON,
    counts in the verdicts).
@@ -745,6 +816,9 @@ column is what settled it. Do not relitigate these without new evidence.
 | Card highlight follows the accepted result, else the radio selection (hot_slot) | Only an accepted result used to set the line weight, so an unreviewed frame drew its default-selected A thin until the radio was clicked | #171; operator report |
 | Card outlines 3/2 px, letter tags 20 px bold + solid halo | 1–2 px lines and default-font letters were hard to see on 1080p frames downscaled to the ~780 px card; contact sheet left as-is per scope | #173; rendered-card check on P3_1 @ 5.0 kV |
 | Auxiliary windows are modal or SINGLETON, never unbounded (2026-07-30) | Stacked Advanced… dialogs apply stale values last-writer-wins; N tuner processes race their Saves on one setup.txt; the operator could open both without limit | #176; hand-test report; test_aux_windows_are_singletons_not_unbounded |
+| The auto-accept stratum is ground-truthed; accept_conf = 0.75 stands with its trusted population validated | First boundary-method labels at conf >= 0.75: IoU 0.94–0.95 at conf 0.94–0.99 (4/4 over target) | Calibration round 4 |
+| The audit_bias gate is vindicated at 2.0 kV; "resting-refit" is the follow-up | Trace excess over the operator's own definitional baseline +4.0/+6.5% matches the audit-predicted +3.8/+4.2% creep — stale resting is real, and the fitter can measure it | Round-4 table; next task 2 |
+| A +5.2–5.7% human-over-machine edge-definition offset exists on clean frames; the −6.9% onset area evidence decomposes (~5.5% definitional + ~1–2% onset excess) | Repeats measured precision, controls exposed accuracy: the operator traces the soft edge's outer toe, the machine the half-height step; conclusion of the accept_conf decision unchanged (nostep audit + conservatism), its area-evidence line corrected | Round-4 finding 1; do not compare absolute mm² across the two definitions |
 
 ## Repo state you are inheriting
 

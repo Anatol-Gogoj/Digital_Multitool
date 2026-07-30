@@ -223,18 +223,63 @@ nowhere near it; and the 6.0 kV wash-out frame reads human-vs-human
 (and is held in review). No machine number should ever be judged
 against a bar above ~0.97.
 
-## IMMEDIATE NEXT TASKS (operator time, in order)
+## The accept_conf DECISION (2026-07-29, final for this label set)
 
-1. **Finish the ~30 labels** — 27 done (155425 + P3_1, all
-   onset/high-kV incl. repeats). What remains is specifically the
-   UNREPRESENTED strata: a few 1.5–3 kV `audit_bias` resting frames
-   (P3_1's 2.0 kV pair; each trace is both the corrected measurement
-   and a label), the odd 0.25 kV +4.2 px frame, and 4–6 clean
-   auto-accepted mid-ramp/resting frames as controls.
-2. **At ~30 labels**: re-run `python sldea_trace.py <runs>` plus a
-   re-score against current winners, then decide `accept_conf`
-   method-conditionally (including whether audit-capped disc-fits at
-   IoU >= 0.8 may auto-accept).
+34 labels (21 P3_1 + 13 155425, current winners). The pooled table:
+conf 0.50–0.75 bin P(IoU>=0.8)=0.88 median 0.89 (all boundary
+methods); every bin above 0.85 P=0.00 (all patch tiers). Per method:
+disc-fit n=22, IoU median 0.89, **minimum 0.82**; patch tiers n=12,
+never above 0.6, area error −40..−69%.
+
+**The labels also measure AREA error, and it settles the open
+question the IoU alone flattered**: the audit-capped onset disc-fits
+(>= 5 kV, n=21) run **median −6.9% area vs the human** (range −15.7
+to +12.4%) — the ellipse interpolates the washed sectors and cuts the
+bulge the operator traces. IoU 0.85–0.95 coexists with a real ~7%
+understatement of the recorded quantity.
+
+**Decision: `accept_conf` stays 0.75, and nothing is loosened.**
+- Raising it buys nothing: every wrong high-conf winner (the patches
+  at 0.94–0.99) is already held in review by the cross-tier spread /
+  pair rules; a higher bar would only push the audit-clean
+  auto-accept population into review with no evidence against it.
+- Lowering it (or recovering the audit-capped disc-fits at 0.74, the
+  idea floated at 19 labels) is **REJECTED on the area evidence**:
+  those frames carry the −7% median area error. The audit caps are
+  earning their keep on exactly the frames they cap — review + trace
+  IS the correct pipeline there, and each trace both fixes the row
+  and deepens the calibration set.
+- The precondition for ever moving the knob is unchanged and still
+  unmet: the auto-accept population (clean resting / mid-ramp
+  disc-fit at conf >= 0.75) has ZERO labels after three tracing
+  rounds — every trace so far is an onset/review frame. Label 4–6 of
+  those controls (plus P3_1's 2.0 kV bias-capped resting pair and
+  the 0.25 kV oddity) before revisiting.
+
+## GUI TODOs from operator review (2026-07-29) — filed, not coded
+
+Operator feedback from the tracing sessions, recorded as issues per
+instruction (no code touched):
+
+- **#171** — BUG: candidate A is default-selected but renders at the
+  thin unselected weight until its radio is clicked (`_draw` follows
+  the accepted result, not `cand_var`).
+- **#172** — manual trace should be **candidate D**: the radio opens
+  the tracer, the closed trace shows its px²/mm² in row D and is
+  drawn on the review card like any candidate, and Accept commits it
+  (today the trace commits on close and never renders on the card).
+- **#173** — thicker candidate outlines and larger/bolder letter
+  labels on the review card.
+
+## IMMEDIATE NEXT TASKS (in order)
+
+1. **Code session**: the three GUI issues above — #171 (small bug),
+   #173 (small), #172 (the real feature; mind the #162 label-append
+   semantics noted in the issue).
+2. **Operator**: label the auto-accept population — 4–6 clean
+   auto-accepted controls, P3_1's 2.0 kV resting pair, the 0.25 kV
+   frame — the one stratum still dark, and the gate on any future
+   `accept_conf` change.
 3. Spot-read the new review queue on the contact sheets — the capped
    frames are annotated with their tags in Edge Review and the
    diagnostic (`audit_nostep` / `audit_bias` per frame in the JSON,
@@ -664,6 +709,9 @@ column is what settled it. Do not relitigate these without new evidence.
 | Labels are full polygons + the machine's candidate at trace time, in an append-only atomic sidecar | IoU must be computable offline without re-detection; a mid-write failure must never destroy accumulated ground truth | #162 spec; edge_labels.json; corrupt file refuses rather than clobbers |
 | Manual traces flow through the NORMAL accept path (method 'manual-trace', conf 1.0) | One save path, one CSV semantics; tracing is also the recovery path for frames where the detector honestly gives up | apply_results note 'edge:manual-trace conf 1.00 (user)' |
 | accept_conf stays 0.75 until a method-conditional re-calibration after the containment-cap fix | Calibration round 1: conf is anti-calibrated across methods — diff-hi at 0.97–0.99 scores IoU 0.39–0.47 (interior patch, correlated pair boosts), disc-fit at 0.70–0.74 scores 0.82–0.89 | 13 labels, 155425; "Calibration round 1" section |
+| accept_conf = 0.75 FINAL at 34 labels; nothing loosened | Raising blocks nothing (wrong high-conf patches already in review via spread/pair); lowering/recovering capped disc-fits rejected — IoU flattered them while the recorded AREA runs −6.9% median vs the human on exactly those frames | "The accept_conf DECISION" section |
+| The recover-the-audit-capped-disc-fits idea is REVERSED | IoU 0.85–0.95 coexists with −3..−16% area error at onset; the caps route those frames to the trace pipeline, which is both the fix and the label | Same section; area-error table |
+| The IoU >= 0.8 calibration target is validated against a measured human ceiling | Intra-operator repeatability median IoU 0.973 (9 repeat pairs); no machine number gets judged against a bar above ~0.97 | Repeatability ceiling note |
 
 ## Repo state you are inheriting
 

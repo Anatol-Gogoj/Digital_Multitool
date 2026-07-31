@@ -334,6 +334,38 @@ Pooled: 47 labels (34 P3_1 + 13 155425). disc-fit median IoU 0.89
 (n=26); patch tiers 0.43 (n=15); conf 0.50–0.75 bin P(IoU>=0.8)=0.90.
 Method identity still predicts correctness; `accept_conf` stays 0.75.
 
+## The resting-refit (2026-07-30, same day) — SHIPPED
+
+Round 4's follow-up, built and validated: in `candidates()`, when the
+audit trips the BIAS gate on a `resting` winner, the fitter runs on
+that frame (`_resting_refit` -> `_disc_fit_candidate(...,
+assume_responding=True)` — the change-map "responding" gates are
+waived because the audit just proved a measurable step exists off the
+circle; every ink-profile quality gate stays). The refit is audited
+like any winner and takes the frame only on its own merits; the
+capped resting claim stays as the tagged runner-up, and a refused or
+audit-dirty fit changes nothing (both paths pinned by tests). Note:
+the refit's `solidity` is change-fill and reads ~0 on a gated frame
+by construction — it is not filtered on; `resting_refit: True` marks
+provenance on the candidate.
+
+Validation on the real runs (read-only probe vs the stored labels):
+
+- P3_1 2.0 kV: refit **+4.6/+4.1%** vs resting (audit predicted
+  +3.8/+4.2), conf 0.96, clean audit — auto-accepts. The operator's
+  traces now sit **+4.6/+7.5%** over the refit, i.e. at the
+  definitional offset (+5.4% ± spread) with residual excess ~0 — the
+  refit closes exactly the gap round 4 measured.
+- P3_1 0.25 kV pre: refit −1.0% (the circle sat ~4 px outside the
+  ink), conf 0.96 — auto-accepts.
+- Clean controls (0.25/1.0 post): untouched, still `resting`.
+- P3_2 2.0 kV (the −11 px pair, never traced): refit **+9.1/+10.5%**,
+  conf 0.92/0.95 — the worst stale-resting band in the fleet now
+  auto-accepts with a measured area.
+
+Review load drops by the whole 1.5–3 kV bias-capped band wherever the
+fit can run (P3_1: 3 frames; 233451's 8 bias caps are the same class).
+
 ## GUI TODOs from operator review (2026-07-29) — DONE (session 5)
 
 All three coded, tested (`tests/test_sldea_edge_gui.py`) and verified
@@ -365,12 +397,8 @@ once it exits. Tested (`test_aux_windows_are_singletons_not_unbounded`).
 
 1. ~~Operator: label the auto-accept population + the 2.0 kV pair +
    0.25 kV~~ — **DONE 2026-07-30**, see "Calibration round 4" above.
-2. **Code**: the "resting-refit" fix motivated by round 4 — when
-   `audit_bias` trips on a gated frame, run the disc-fitter instead
-   of asserting the resting circle; converts the stale-resting band
-   (1.5–3 kV, all six runs) into correct auto-accepts. Validate
-   against the stored 2.0 kV labels (offline re-score, no new
-   operator time).
+2. ~~Code: the "resting-refit" fix~~ — **SHIPPED 2026-07-30**, see
+   the section above.
 3. **Code (small)**: the two GUI issues from the 2026-07-30 labeling
    session — #178 (card fixed at 780 px, blank preview space) and
    #179 (side panel resizes to content; Prev/Next jump underneath the
@@ -819,11 +847,13 @@ column is what settled it. Do not relitigate these without new evidence.
 | The auto-accept stratum is ground-truthed; accept_conf = 0.75 stands with its trusted population validated | First boundary-method labels at conf >= 0.75: IoU 0.94–0.95 at conf 0.94–0.99 (4/4 over target) | Calibration round 4 |
 | The audit_bias gate is vindicated at 2.0 kV; "resting-refit" is the follow-up | Trace excess over the operator's own definitional baseline +4.0/+6.5% matches the audit-predicted +3.8/+4.2% creep — stale resting is real, and the fitter can measure it | Round-4 table; next task 2 |
 | A +5.2–5.7% human-over-machine edge-definition offset exists on clean frames; the −6.9% onset area evidence decomposes (~5.5% definitional + ~1–2% onset excess) | Repeats measured precision, controls exposed accuracy: the operator traces the soft edge's outer toe, the machine the half-height step; conclusion of the accept_conf decision unchanged (nostep audit + conservatism), its area-evidence line corrected | Round-4 finding 1; do not compare absolute mm² across the two definitions |
+| A bias-tripped resting claim is REFIT, not asserted: the fitter runs with the change-map responding gates waived, is audited itself, and wins only clean; the capped claim stays as runner-up (2026-07-30) | Round 4 made the creep a measured fact; measuring beats asserting, and the audit's proof-of-step is exactly the evidence the waived gates were checking for | test_bias_tripped_resting_is_refit_to_the_moved_edge / test_refit_refusal_keeps_the_capped_resting_claim; P3_1 2.0 kV refit +4.1/+4.6% (predicted +3.8/+4.2), P3_2 +9.1/+10.5% |
+| Reject = the human verdict that NO defensible measurement exists (occlusion, breakdown debris, corrupt frame): derived columns blank, note 'rejected (no reliable edge)' — distinct from unreviewed (untouched row) and auto-reject (machine found nothing to detect). Wrong-candidates-with-a-visible-edge is a TRACE (candidate D), not a Reject | Operator question 2026-07-30 exposed that the button's post-#162 doctrine was never written down: since the tracer exists, Reject's only remaining legitimate use is "no boundary can honestly be drawn even by hand" — a trace both fixes the row AND labels; a Reject records an examined refusal | apply_results rejected branch; the 6.0 kV wash-out traces (human-human IoU 0.966) prove even extreme frames are usually traceable, so true Rejects should be rare |
 
 ## Repo state you are inheriting
 
 - All of the above is code + tests on this branch; nothing else changed.
-- Suites: `test_sldea_edge.py` 42, `test_sldea_diag.py` 16,
+- Suites: `test_sldea_edge.py` 43, `test_sldea_diag.py` 16,
   `test_sldea_trace.py` 10, `test_sldea_tuner.py` 8,
   `test_sldea_edge_gui.py` 3 (hot_slot rule headless + the staged-D
   flow and the #176 singleton guards on a real Tk, skips cleanly

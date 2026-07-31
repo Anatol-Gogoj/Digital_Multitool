@@ -892,20 +892,16 @@ def test_audit_nostep_caps_acceptance_on_interpolated_arc():
     assert not se.needs_review(cc, s)
 
 
-def test_audit_bias_caps_a_stale_resting_claim():
-    """On all six bench runs the 1.5-3 kV band audits at bias -4..-11 px
-    while auto-accepting at conf 0.84-0.99: the disc expands below the
-    no-change gate's sensitivity, and 'area = resting area' goes stale.
-    The audit sees the ink step sitting OUTSIDE the claimed circle; a
-    |bias| past audit_bias_px caps the frame to review."""
+def _crept_resting_scene():
+    """The stale-resting scene: the disc has crept from r=100 to r=106
+    -- a shift far below what the downscaled diff can gate on when
+    min_diff is raised to match a noisy bench scene, but plainly
+    visible to the boundary audit. -> (base, img, settings)"""
     base = _bridged_scene(with_disc=True)
     h, w = base.shape
     yy, xx = np.mgrid[0:h, 0:w]
     rng = np.random.default_rng(5)
     img = np.full((h, w), 190.0, np.float32)
-    # the disc has crept out by 6 px -- a shift far below what the
-    # downscaled diff can gate on when min_diff is raised to match a
-    # noisy bench scene, but plainly visible to the boundary audit
     img[(xx - 480) ** 2 + (yy - 270) ** 2 <= 106 * 106] = 172.0
     img[230:310, 0:330] = base[230:310, 0:330]
     img[230:310, 630:960] = base[230:310, 630:960]
@@ -917,15 +913,38 @@ def test_audit_bias_caps_a_stale_resting_claim():
     img = np.clip(img, 0, 255).astype(np.float32)
     s = dict(se.DEFAULT_SETTINGS)
     s['min_diff'] = 30.0                 # the gate stays blind to the creep
+    return base, img, s
+
+
+def test_bias_tripped_resting_is_refit_to_the_moved_edge():
+    """On all six bench runs the 1.5-3 kV band audits at bias -4..-11 px
+    while auto-accepting 'area = resting area' -- the disc expands below
+    the no-change gate's sensitivity and the claim goes stale. Since
+    calibration round 4 verified the creep is real (operator traces:
+    +4.0/+6.5% beyond the definitional baseline, matching the audit's
+    prediction), a bias trip REFITS: the fitter tracks the ink step
+    where it actually is, is audited itself, and takes the frame; the
+    capped resting claim stays as the tagged runner-up."""
+    base, img, s = _crept_resting_scene()
     cands = se.candidates(base, img, s)
     best = cands[0]
-    assert best['method'] == 'resting', best['method']
-    aud = best.get('audit')
-    assert aud and aud['bias_px'] is not None and aud['bias_px'] < -3.0, aud
-    assert best.get('audit_bias') == aud['bias_px']
-    assert best['conf'] == round(s['accept_conf'] - 0.01, 3), best['conf']
-    assert se.needs_review(cands, s)
-    # with the bias gate off the stale claim would have auto-accepted
+    assert best['method'] == 'disc-fit' and best.get('resting_refit'), \
+        [(c['method'], c['conf']) for c in cands]
+    # the fit measured the crept edge, not the stale circle
+    r_meas = best['diam_px'] / 2.0
+    assert 103.0 <= r_meas <= 109.0, r_meas       # true creep: 100 -> 106
+    ref = se.baseline_disc(base, s)
+    assert best['area_px'] > 1.06 * ref['area_px']
+    # audited clean on its own boundary -> the frame leaves review
+    assert best.get('audit') and best.get('audit_bias') is None, best
+    assert best['conf'] >= s['accept_conf'], best['conf']
+    assert not se.needs_review(cands, s)
+    # the stale claim survives as the capped, tagged runner-up
+    rest = next(c for c in cands if c['method'] == 'resting')
+    assert rest.get('audit_bias') is not None and rest['audit_bias'] < -3.0
+    assert rest['conf'] == round(s['accept_conf'] - 0.01, 3), rest['conf']
+    # with the bias gate off the stale claim auto-accepts unchallenged --
+    # the gate is what makes the refit possible at all
     s0 = dict(s)
     s0['audit_bias_px'] = 0.0
     c0 = se.candidates(base, img, s0)
@@ -933,6 +952,35 @@ def test_audit_bias_caps_a_stale_resting_claim():
     assert c0[0].get('audit_bias') is None
     assert c0[0]['conf'] >= s0['accept_conf'], c0[0]['conf']
     assert not se.needs_review(c0, s0)
+    assert not any(c.get('resting_refit') for c in c0)
+
+
+def test_refit_refusal_keeps_the_capped_resting_claim():
+    """A refused refit (washed edge, blocked arc -- anything the fitter
+    honestly cannot measure) must change nothing: the stale claim stays
+    capped in review exactly as before the refit existed. Pinned by
+    refusing only the assume_responding call."""
+    base, img, s = _crept_resting_scene()
+    orig = se._disc_fit_candidate
+
+    def refuse(prep, settings, ref, assume_responding=False):
+        if assume_responding:
+            return None
+        return orig(prep, settings, ref, assume_responding)
+
+    se._disc_fit_candidate = refuse
+    try:
+        cands = se.candidates(base, img, s)
+    finally:
+        se._disc_fit_candidate = orig
+    best = cands[0]
+    assert best['method'] == 'resting', best['method']
+    aud = best.get('audit')
+    assert aud and aud['bias_px'] is not None and aud['bias_px'] < -3.0, aud
+    assert best.get('audit_bias') == aud['bias_px']
+    assert best['conf'] == round(s['accept_conf'] - 0.01, 3), best['conf']
+    assert se.needs_review(cands, s)
+    assert not any(c.get('resting_refit') for c in cands)
 
 
 def test_pair_agreement_cannot_lift_an_audit_capped_boundary():

@@ -473,7 +473,12 @@ tracer were already modal. **Fixed 2026-07-30**: `_advanced` fronts
 the live dialog (lift+focus) instead of building another; `_open_tuner`
 keeps the Popen and refuses while the child runs (status note — a
 foreign process's window cannot be focused from Tk), spawning fresh
-once it exits. Tested (`test_aux_windows_are_singletons_not_unbounded`).
+once it exits. **Superseded for Tune on 2026-07-31**: the operator
+ruled Edge Review has ONE settings-editing path, so the Tune button
+(and `_open_tuner`) is removed outright — see the decision log. The
+tuner itself is untouched: it stays reachable from the Multitool's
+SLDEA tab ("Tune params…", the acquisition context where it belongs)
+and the bench launcher `deploy/Tune_SLDEA_Windows.bat`.
 
 ## The original self-audit spec (historical; implemented and now folded into acceptance)
 
@@ -913,6 +918,8 @@ column is what settled it. Do not relitigate these without new evidence.
 | A bias-tripped resting claim is REFIT, not asserted: the fitter runs with the change-map responding gates waived, is audited itself, and wins only clean; the capped claim stays as runner-up (2026-07-30) | Round 4 made the creep a measured fact; measuring beats asserting, and the audit's proof-of-step is exactly the evidence the waived gates were checking for | test_bias_tripped_resting_is_refit_to_the_moved_edge / test_refit_refusal_keeps_the_capped_resting_claim; P3_1 2.0 kV refit +4.1/+4.6% (predicted +3.8/+4.2), P3_2 +9.1/+10.5% |
 | Reject = the human verdict that NO defensible measurement exists (occlusion, breakdown debris, corrupt frame): derived columns blank, note 'rejected (no reliable edge)' — distinct from unreviewed (untouched row) and auto-reject (machine found nothing to detect). Wrong-candidates-with-a-visible-edge is a TRACE (candidate D), not a Reject | Operator question 2026-07-30 exposed that the button's post-#162 doctrine was never written down: since the tracer exists, Reject's only remaining legitimate use is "no boundary can honestly be drawn even by hand" — a trace both fixes the row AND labels; a Reject records an examined refusal | apply_results rejected branch; the 6.0 kV wash-out traces (human-human IoU 0.966) prove even extreme frames are usually traceable, so true Rejects should be rare |
 | Review-UI geometry flows ONE way (2026-07-31): the canvas sizes the card (contain-fit, 2x upscale cap, tags/line widths in view px), and the fixed side panel sizes its text (pixel-measured tail-first elide, fixed info height) — content never drives geometry | The card sat letterboxed at 780 px in any window (#178) while the panel resized to its widest radio text and slid the buttons out from under a rapid-clicking cursor (#179); both are the same inversion, so the fix is one doctrine, not two patches | Operator labeling-session reports; test_card_tracks_the_view_and_draws_centered / test_side_panel_geometry_is_fixed_across_frames |
+| Edge Review has ONE settings-editing path: the Tune button is REMOVED (2026-07-31, operator decision); Advanced… (every knob, tooltips, Apply+Save) is the sole in-review writer of setup.txt. The tuner survives as a development instrument — Multitool SLDEA tab "Tune params…" and deploy/Tune_SLDEA_Windows.bat unchanged | The tuner's per-run threshold hunting is obsoleted for review by the self-calibrating detector (adaptive cuts, ratio thresholds, zero-retune generalization); a second settings writer one click from review was pure accident surface (#176 was found by clicking it) | test_aux_windows_are_singletons_and_tune_is_gone (no Tune affordance; Calibrate stays) |
+| Calibrate STAYS: it is the manual half of baseline_disc's refuse-don't-fabricate contract | When the auto-trace refuses, the status bar sends the operator to 📏 Calibrate; without it a refused baseline means no mm² at all (or the flagged activated-frame fallback). Two clicks, modal, zero maintenance | Same operator review 2026-07-31; the 07-23 campaign shows both the detector working unmodified AND refusing correctly on disc-less scenes |
 
 ## Repo state you are inheriting
 

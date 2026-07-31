@@ -140,10 +140,8 @@ class EdgeReviewApp:
         self.flags = {}
         self._photo = None
         self._detq = _queue.Queue()
-        # auxiliary windows are modal or SINGLETON, never unbounded --
-        # every click used to stack another dialog / tuner process (#176)
+        # auxiliary windows are modal or SINGLETON, never unbounded (#176)
         self._adv_win = None
-        self._tuner_proc = None
         self._build_ui()
         start = path or DEFAULT_PARENT
         self._populate_runs(start)
@@ -163,10 +161,12 @@ class EdgeReviewApp:
         self.detect_btn = ttk.Button(top, text="▶ Detect Edges",
                                      command=self.detect)
         self.detect_btn.pack(side=tk.LEFT, padx=10)
+        # ONE settings-editing path in Edge Review: Advanced… covers every
+        # knob with Apply+Save. The Tune button was removed (operator
+        # decision 2026-07-31) — the tuner is a development instrument,
+        # launched directly (deploy/Tune_SLDEA_Windows.bat unchanged).
         ttk.Button(top, text="Advanced…",
                    command=self._advanced).pack(side=tk.LEFT)
-        ttk.Button(top, text="🎚 Tune…",
-                   command=self._open_tuner).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(top, text="📏 Calibrate…",
                    command=self._calibrate_scale).pack(side=tk.LEFT,
                                                        padx=(6, 0))
@@ -1052,31 +1052,6 @@ class EdgeReviewApp:
         cv.focus_set()
         win.grab_set()
         self.root.wait_window(win)
-
-    def _open_tuner(self):
-        """Launch the live slider tuner on the current run (own process).
-        SINGLETON while the child lives (#176): N tuners on one run are
-        N detection passes racing their Saves on the same setup.txt.
-        Another process's window cannot be focused from Tk, so a repeat
-        click is refused with a status note; once the tuner exits, the
-        next click spawns a fresh one."""
-        if not self.rundir:
-            messagebox.showinfo("Tune", "Pick a run first")
-            return
-        if self._tuner_proc is not None and self._tuner_proc.poll() is None:
-            self.status.config(
-                text="tuner already running — close its window first "
-                     "(its Save writes this run's setup.txt)")
-            return
-        import subprocess
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              'sldea_tuner.py')
-        try:
-            self._tuner_proc = subprocess.Popen(
-                [sys.executable, script, self.rundir],
-                start_new_session=True)
-        except Exception as e:
-            messagebox.showerror("Tune", f"Could not launch: {e}")
 
     # ---------------- advanced settings ----------------
     def _advanced(self):

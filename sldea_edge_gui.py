@@ -29,6 +29,7 @@ import tk_fontfix                      # must precede tkinter:
 tk_fontfix.apply()                     # colour emoji crash Tk
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from tkinter import font as tkfont
 
 import numpy as np
 
@@ -41,8 +42,18 @@ DEFAULT_PARENT = os.environ.get('SCPI_SLDEA_DIR',
 CAND_COLORS = ['#00c853', '#2196f3', '#ff9100', '#e040fb']
 CAND_KEYS = ['A', 'B', 'C', 'D']
 TRACE_SLOT = 3          # radio value / paint slot of the manual trace
-VIEW_W = 780
+VIEW_W = 780            # initial card view only -- once mapped, the card
+VIEW_H = 560            # tracks the LIVE canvas size (#178)
+MAX_UPSCALE = 2.0       # card upscale cap: past ~2x native a big monitor
+                        # only interpolates mush (#178)
 TAG_PX = 20             # letter-tag font size on the review card (#173)
+SIDE_W = 330            # right panel width -- FIXED, propagation off (#179)
+RADIO_TEXT_PX = SIDE_W - 100   # text budget in a candidate radio row: the
+                               # panel + LabelFrame padding, colour swatch
+                               # and radio indicator eat ~100 px of the row
+INFO_LINES = 5          # info label height (text lines): 3 fixed lines +
+                        # room for a flag line and its wrap -- a flag must
+                        # change content, not layout (#179)
 
 _TAG_FONT = None
 
@@ -67,6 +78,31 @@ def _tag_font():
             except TypeError:              # Pillow < 10.1: no size arg
                 _TAG_FONT = ImageFont.load_default()
     return _TAG_FONT
+
+
+def card_geometry(img_w, img_h, view_w, view_h, max_upscale=MAX_UPSCALE):
+    """Contain-fit an img_w x img_h frame in a view_w x view_h canvas
+    (#178): aspect kept, upscale capped at max_upscale, centered.
+    Returns (scale, w, h, x, y) with (x, y) the card's top-left inside
+    the view. Pure so the math is testable without Tk."""
+    scale = min(view_w / float(img_w), view_h / float(img_h), max_upscale)
+    w = max(1, int(round(img_w * scale)))
+    h = max(1, int(round(img_h * scale)))
+    return scale, w, h, (view_w - w) // 2, (view_h - h) // 2
+
+
+def elide(text, width_px, measure):
+    """Longest prefix of `text` (plus an ellipsis) that `measure`s within
+    width_px. The side panel is a fixed box (#179): text must fit the
+    panel, never size it -- the tail (the wrinkle term, the point count)
+    is the sacrificial end."""
+    if measure(text) <= width_px:
+        return text
+    for n in range(len(text) - 1, 0, -1):
+        s = text[:n].rstrip() + '…'
+        if measure(s) <= width_px:
+            return s
+    return '…'
 
 
 def hot_slot(entries, chosen, sel):
@@ -148,15 +184,29 @@ class EdgeReviewApp:
 
         mid = ttk.Frame(self.root)
         mid.pack(fill='both', expand=True)
-        self.canvas = tk.Canvas(mid, width=VIEW_W, height=560, bg='#222',
+        self.canvas = tk.Canvas(mid, width=VIEW_W, height=VIEW_H, bg='#222',
                                 highlightthickness=0)
         self.canvas.pack(side=tk.LEFT, fill='both', expand=True,
                          padx=(6, 0), pady=4)
+        # the card follows the canvas, not a constant (#178): re-render on
+        # resize, debounced -- <Configure> streams during a drag
+        self._view_wh = (VIEW_W, VIEW_H)
+        self._resize_job = None
+        self.canvas.bind('<Configure>', self._canvas_resized)
 
-        side = ttk.Frame(mid, padding=8, width=330)
+        side = ttk.Frame(mid, padding=8, width=SIDE_W)
         side.pack(side=tk.RIGHT, fill='y')
-        self.info = tk.Label(side, text="pick a run and Detect", justify='left',
-                             anchor='nw', font=('TkDefaultFont', 10))
+        # FIXED box (#179): with geometry propagation on, the width above
+        # is inert and the panel tracked its widest child -- the radio
+        # text, which changes every frame -- sliding the buttons out from
+        # under a rapid-clicking cursor
+        side.pack_propagate(False)
+        self._side = side
+        self._side_font = tkfont.nametofont('TkDefaultFont')
+        self.info = tk.Label(side, text="pick a run and Detect",
+                             justify='left', anchor='nw',
+                             font=('TkDefaultFont', 10),
+                             height=INFO_LINES, wraplength=SIDE_W - 24)
         self.info.pack(fill='x', pady=(0, 6))
         self.cand_var = tk.IntVar(value=0)
         self.cand_frame = ttk.LabelFrame(side, text="Candidates", padding=6)
@@ -333,8 +383,7 @@ class EdgeReviewApp:
         """Big unmissable state banner drawn over the image area."""
         self.canvas.delete('banner')
         if text:
-            w = int(self.canvas['width'] or VIEW_W)
-            h = int(self.canvas['height'] or 560)
+            w, h = self._view_size()
             self.canvas.create_rectangle(0, h // 2 - 42, w, h // 2 + 42,
                                          fill='#b36b00', outline='',
                                          tags='banner')
@@ -511,13 +560,17 @@ class EdgeReviewApp:
         if i in self.flags:
             txt += f"\n⚠ {self.flags[i]}"
         self.info.config(text=txt)
+        # radio text is elided to the FIXED panel (#179): the tail (the
+        # wrinkle term first) yields before the panel ever resizes
+        meas = self._side_font.measure
         for k in range(3):
             if k < len(cands):
                 c = cands[k]
                 self.cand_radios[k].config(
-                    text=f"{CAND_KEYS[k]}: {c['method']}  "
-                         f"{c['area_px']:.0f} px²  conf {c['conf']:.2f}"
-                         f"  w{c.get('wrinkle', 1):.1f}",
+                    text=elide(f"{CAND_KEYS[k]}: {c['method']}  "
+                               f"{c['area_px']:.0f} px²  conf {c['conf']:.2f}"
+                               f"  w{c.get('wrinkle', 1):.1f}",
+                               RADIO_TEXT_PX, meas),
                     state='normal')
             else:
                 self.cand_radios[k].config(text=f"{CAND_KEYS[k]}: —",
@@ -532,8 +585,9 @@ class EdgeReviewApp:
             mm = (f"  {trace['area_px'] * mmscale * mmscale:.1f} mm²"
                   if mmscale else "")
             self.cand_radios[TRACE_SLOT].config(
-                text=f"D: manual-trace  {trace['area_px']:.0f} px²{mm}"
-                     f"  ({trace['n_points']} pts)",
+                text=elide(f"D: manual-trace  {trace['area_px']:.0f} px²{mm}"
+                           f"  ({trace['n_points']} pts)",
+                           RADIO_TEXT_PX, meas),
                 state='normal')
         else:
             self.cand_radios[TRACE_SLOT].config(
@@ -562,16 +616,48 @@ class EdgeReviewApp:
                     else ""))
         self._draw(i, cands, chosen)
 
-    def _render_card(self, i, cands, chosen):
+    def _view_size(self):
+        """The card's view box: the live canvas size once mapped, else
+        the last <Configure> size -- winfo reports 1x1 before layout
+        (withdrawn roots in tests land there)."""
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        if cw <= 1 or ch <= 1:
+            cw, ch = self._view_wh
+        return cw, ch
+
+    def _canvas_resized(self, ev):
+        """<Configure> on the canvas (#178): remember the size and
+        re-render the card to fill it. Debounced -- the event streams
+        continuously during a drag-resize."""
+        wh = (ev.width, ev.height)
+        if wh == self._view_wh:
+            return
+        self._view_wh = wh
+        if self._resize_job is not None:
+            self.root.after_cancel(self._resize_job)
+        self._resize_job = self.root.after(120, self._redraw_card)
+
+    def _redraw_card(self):
+        self._resize_job = None
+        i = self._current()
+        if self.run is None or i is None or i not in self.cands_all:
+            return
+        self._draw(i, self.cands_all.get(i, []), self.results.get(i))
+
+    def _render_card(self, i, cands, chosen, view=None):
         """The review card as a PIL image (no Tk): frame + candidate
-        outlines + letter tags. Split from _draw so the rendering is
-        checkable headlessly -- the card is what the operator judges."""
+        outlines + letter tags, contain-fit to `view` (default: the live
+        canvas size, #178). Line widths and TAG_PX stay in VIEW pixels
+        so legibility is constant at any card size. Split from _draw so
+        the rendering is checkable headlessly -- the card is what the
+        operator judges."""
         from PIL import Image, ImageDraw
         import numpy as np
         path = se.frame_path(self.run, self.run['rows'][i])
         img = Image.open(path).convert('RGB')
-        scale = VIEW_W / img.width
-        img = img.resize((VIEW_W, int(img.height * scale)))
+        vw, vh = view or self._view_size()
+        scale, w, h, _x, _y = card_geometry(img.width, img.height, vw, vh)
+        img = img.resize((w, h))
         dr = ImageDraw.Draw(img)
         entries = list(enumerate(cands))
         trace = self.traces.get(i)
@@ -603,15 +689,18 @@ class EdgeReviewApp:
 
     def _draw(self, i, cands, chosen):
         from PIL import ImageTk
+        vw, vh = self._view_size()
         try:
-            img = self._render_card(i, cands, chosen)
+            img = self._render_card(i, cands, chosen, view=(vw, vh))
         except OSError:        # frame missing/undecodable; draw bugs stay loud
             self.canvas.delete('all')
             return
         self._photo = ImageTk.PhotoImage(img)
         self.canvas.delete('all')
-        self.canvas.config(width=img.width, height=img.height)
-        self.canvas.create_image(0, 0, anchor='nw', image=self._photo)
+        # centered on the canvas; the canvas itself is sized by the
+        # packer, never by the card (#178)
+        self.canvas.create_image(vw // 2, vh // 2, anchor='center',
+                                 image=self._photo)
 
     def _pick_k(self, k):
         i = self._current()

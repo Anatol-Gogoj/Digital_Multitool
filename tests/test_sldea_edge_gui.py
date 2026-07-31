@@ -5,11 +5,11 @@
 The selection-highlight rule (hot_slot), the card contain-fit math
 (card_geometry) and the panel-text elide are pure and tested headlessly.
 The candidate-D flow -- trace Done STAGES + labels, Accept commits, a
-re-trace replaces the pending polygon -- the #176 singleton guards for
-Advanced.../Tune..., the #178 view-tracking card and the #179 fixed side
-panel drive a real EdgeReviewApp on a synthetic run; those parts need a
-Tk display and skip cleanly when one cannot be opened (headless CI
-without Xvfb).
+re-trace replaces the pending polygon -- the #176 Advanced... singleton
+(and the one-settings-path doctrine: no Tune button since 2026-07-31),
+the #178 view-tracking card and the #179 fixed side panel drive a real
+EdgeReviewApp on a synthetic run; those parts need a Tk display and
+skip cleanly when one cannot be opened (headless CI without Xvfb).
 
 Run: .venv/bin/python tests/test_sldea_edge_gui.py
 """
@@ -196,10 +196,13 @@ def test_trace_stages_as_candidate_D_then_accept_commits():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_aux_windows_are_singletons_not_unbounded():
+def test_aux_windows_are_singletons_and_tune_is_gone():
     """#176: re-clicking Advanced... fronts the live dialog instead of
-    stacking another; Tune... refuses a second tuner while the child
-    process runs and spawns fresh only after it exits."""
+    stacking another. And Edge Review has ONE settings-editing path
+    (operator decision 2026-07-31): the Tune button is gone -- the tuner
+    is a development instrument, launched directly -- while Calibrate
+    stays, the manual half of baseline_disc's refuse-don't-fabricate
+    contract."""
     import sldea_edge_gui as gui
     import tkinter as tk
     try:
@@ -227,35 +230,21 @@ def test_aux_windows_are_singletons_not_unbounded():
         app._advanced()
         assert app._adv_win is not w1 and app._adv_win.winfo_exists()
         app._adv_win.destroy()
-        # Tune...: no second process while the child lives
-        import subprocess as sp
+        # one settings path: no Tune affordance anywhere; Calibrate stays
+        texts = []
 
-        class FakeProc:
-            def __init__(self):
-                self.rc = None
+        def walk(w):
+            for ch in w.winfo_children():
+                try:
+                    texts.append(str(ch.cget('text')))
+                except tk.TclError:
+                    pass
+                walk(ch)
 
-            def poll(self):
-                return self.rc
-
-        calls = []
-        orig = sp.Popen
-
-        def fake_popen(*a, **k):
-            calls.append(a)
-            return FakeProc()
-
-        sp.Popen = fake_popen
-        try:
-            app._open_tuner()
-            assert len(calls) == 1
-            app._open_tuner()                      # child still alive
-            assert len(calls) == 1, "second tuner spawned"
-            assert 'already running' in app.status['text']
-            app._tuner_proc.rc = 0                 # child exited
-            app._open_tuner()
-            assert len(calls) == 2, "respawn after exit refused"
-        finally:
-            sp.Popen = orig
+        walk(root)
+        assert not any('Tune' in t for t in texts), texts
+        assert any('Calibrate' in t for t in texts), texts
+        assert not hasattr(app, '_open_tuner')
     finally:
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)

@@ -1,27 +1,89 @@
 # SLDEA detection — handoff
 
-Fifth session (2026-07-29, continuation). The three GUI issues from the
-operator review are **done and tested**: #171 (selection highlight),
-#173 (thicker outlines + big letter tags), and #172 (manual trace is
-now **candidate D** — its radio/4/D/T opens the tracer, Done STAGES the
-polygon as D on the card, Accept commits it; the #162 label still
-appends at Done, so no completed trace is ever lost). The operator
-hand-tested the build and found #176 (unbounded Tune…/Advanced…
-windows) — **fixed 2026-07-30**, singleton guards + test. What remains
-is operator time, not code — see "IMMEDIATE NEXT TASKS".
+State as of 2026-07-30, all merged to `main` and verified: the
+detection pipeline needs **no work**. Candidate-D tracing (#171–#173),
+singleton aux windows (#176), calibration rounds 1–4 (47 operator
+labels, both campaigns), `accept_conf = 0.75` (FINAL for this label
+set, now validated in every stratum), and the resting-refit (a
+bias-tripped 'resting' claim is measured by the fitter, not asserted —
+validated on P3_1/P3_2 against the operator's traces) are all done.
+**What remains in code is GUI polish: issues #178 and #179.** Start
+there.
 
-Fourth session (2026-07-29). The previous handoff's two initial tasks
-are **done, tested, and verified on all six runs**: (1) the boundary
-self-audit is folded into ACCEPTANCE — two per-frame gates cap the
-winner below `accept_conf` when the audit contradicts it; (2) the #162
-manual-trace tool is built and wired into Edge Review — the labeling
-instrument exists, end-to-end. Folding the audit in surfaced a
-systematic error no previous conf number ever saw: **stale 'resting'
-claims** (below).
+## THE NEXT TASK: the two review-card GUI issues (#178, #179)
 
-Read this file, then `sldea_edge.py` (`candidates` — the audit fold is
-at its end — `audit_boundary`, `reconcile_pairs`), `sldea_trace.py`,
-and the `TraceWindow` class in `sldea_edge_gui.py`.
+Both filed from the operator's 2026-07-30 labeling session, both in
+`sldea_edge_gui.py`, both display-only — do NOT touch accept
+semantics, the candidate-D flow, or anything in `sldea_edge.py`.
+
+1. **#178 — the card does not fill the preview area.** `_render_card`
+   renders every frame at fixed `VIEW_W = 780` while the canvas packs
+   `fill='both', expand=True` (initial height 560): the default
+   1150x760 window already shows a ~120 px dead band, and maximizing
+   grows blank canvas, never the image. Fix: parameterize the view
+   size in `_render_card` (it is pure PIL, split out for exactly this),
+   track the canvas size from `<Configure>` (debounce with `after` —
+   the event fires continuously during drags), `scale =
+   min(cw/img_w, ch/img_h)`, center the image, cap upscale at ~2x
+   native. Keep the #173 outline widths and `TAG_PX` letter tags in
+   VIEW pixels so legibility is constant at any size. The TraceWindow
+   has its own viewport — untouched.
+2. **#179 — the right panel jumps under the cursor.** Two mechanisms:
+   `side = ttk.Frame(mid, padding=8, width=330)` has inert width
+   (geometry propagation is on), so the panel tracks its widest child
+   — the candidate radio text, which changes every frame; and the
+   info label grows a line on flagged frames, pushing the button rows
+   down. Fix: `side.pack_propagate(False)` + elide over-long radio
+   text, and a fixed info-label line count (`height=5`) or
+   bottom-anchored nav row. Acceptance: Prev/Next/Accept never move,
+   whatever the frame shows.
+
+How to work: branch from `main`; python is
+`C:\ProgramData\anaconda3\python.exe` on the analysis PC (the PATH
+python has no cv2). Extend `tests/test_sldea_edge_gui.py` (its Tk
+tests skip cleanly without a display — follow that pattern; the
+`_fake_run` helper builds a synthetic run). Verify with the five sldea
+suites + `run_tests.py` (25/29 is the clean baseline — the four
+failures are documented environmental ones). For visual checks,
+instantiate `EdgeReviewApp` on a real run READ-ONLY and save
+`_render_card` output to a scratch PNG — never call `_trace_staged`
+against a real run (it appends to the ground-truth label sidecar) and
+never Save.
+
+After #178/#179, the remaining open items are operator-optional: a
+4-control repeat on one 07-23 run (is the +5.5% definitional offset
+campaign-stable?), and contact-sheet spot-reads of the (much smaller)
+review queues. Instrumentation issues #157–#159 remain open upstream.
+
+## Reading order
+
+This file top to bottom, then `sldea_edge_gui.py` (`_build_ui`,
+`_show`, `_render_card`/`_draw`) and `tests/test_sldea_edge_gui.py`.
+`sldea_edge.py` (`candidates`, `audit_boundary`, `_resting_refit`,
+`reconcile_pairs`) and `sldea_trace.py` are background for this task —
+read them before touching anything non-GUI.
+
+## Session history (compressed; details in the sections below)
+
+- **2026-07-28**: resting-disc scale measured (old areas were 2.3–2.7x
+  understated), texture foil mask, paper-only photometry, tex-ratio
+  channel, the disc-fit boundary tracker, `resting` statements,
+  pair/ramp consistency.
+- **2026-07-29 (round 2)**: sub-pixel adaptive rays, hysteresis,
+  pair-confirm, containment cap; unmodified generalization to the
+  07-23 campaign; the "does higher conf mean more correct?"
+  epistemics.
+- **2026-07-29**: the boundary self-audit folded into ACCEPTANCE
+  (nostep + bias gates); the stale-resting discovery; the #162 tracer
+  built; calibration rounds 1–3 → `accept_conf = 0.75` FINAL;
+  repeatability ceiling IoU 0.973; GUI issues #171–#173 filed.
+- **2026-07-29/30**: #171–#173 shipped (candidate D — Done STAGES,
+  Accept commits, the label appends at Done); #176 singleton windows;
+  operator hand-test.
+- **2026-07-30**: calibration round 4 (controls + the 2.0 kV pair) →
+  the +5.5% definitional-offset discovery, the bias gate vindicated,
+  the auto-accept stratum validated; the resting-refit SHIPPED and
+  validated; #178/#179 filed; the Reject doctrine recorded.
 
 ## The audit fold (done this session)
 
@@ -392,25 +454,6 @@ the live dialog (lift+focus) instead of building another; `_open_tuner`
 keeps the Popen and refuses while the child runs (status note — a
 foreign process's window cannot be focused from Tk), spawning fresh
 once it exits. Tested (`test_aux_windows_are_singletons_not_unbounded`).
-
-## IMMEDIATE NEXT TASKS (in order)
-
-1. ~~Operator: label the auto-accept population + the 2.0 kV pair +
-   0.25 kV~~ — **DONE 2026-07-30**, see "Calibration round 4" above.
-2. ~~Code: the "resting-refit" fix~~ — **SHIPPED 2026-07-30**, see
-   the section above.
-3. **Code (small)**: the two GUI issues from the 2026-07-30 labeling
-   session — #178 (card fixed at 780 px, blank preview space) and
-   #179 (side panel resizes to content; Prev/Next jump underneath the
-   cursor).
-4. Optional operator sanity check: repeat the 4-control set on one
-   07-23 run — is the +5.5% definitional offset stable across
-   campaigns/optics, or P3-specific? (Decides whether it is a
-   constant of the operator's edge definition or of the scene.)
-5. Spot-read the new review queue on the contact sheets — the capped
-   frames are annotated with their tags in Edge Review and the
-   diagnostic (`audit_nostep` / `audit_bias` per frame in the JSON,
-   counts in the verdicts).
 
 ## The original self-audit spec (historical; implemented and now folded into acceptance)
 
@@ -845,7 +888,7 @@ column is what settled it. Do not relitigate these without new evidence.
 | Card outlines 3/2 px, letter tags 20 px bold + solid halo | 1–2 px lines and default-font letters were hard to see on 1080p frames downscaled to the ~780 px card; contact sheet left as-is per scope | #173; rendered-card check on P3_1 @ 5.0 kV |
 | Auxiliary windows are modal or SINGLETON, never unbounded (2026-07-30) | Stacked Advanced… dialogs apply stale values last-writer-wins; N tuner processes race their Saves on one setup.txt; the operator could open both without limit | #176; hand-test report; test_aux_windows_are_singletons_not_unbounded |
 | The auto-accept stratum is ground-truthed; accept_conf = 0.75 stands with its trusted population validated | First boundary-method labels at conf >= 0.75: IoU 0.94–0.95 at conf 0.94–0.99 (4/4 over target) | Calibration round 4 |
-| The audit_bias gate is vindicated at 2.0 kV; "resting-refit" is the follow-up | Trace excess over the operator's own definitional baseline +4.0/+6.5% matches the audit-predicted +3.8/+4.2% creep — stale resting is real, and the fitter can measure it | Round-4 table; next task 2 |
+| The audit_bias gate is vindicated at 2.0 kV; "resting-refit" is the follow-up | Trace excess over the operator's own definitional baseline +4.0/+6.5% matches the audit-predicted +3.8/+4.2% creep — stale resting is real, and the fitter can measure it | Round-4 table; the refit section (shipped same day) |
 | A +5.2–5.7% human-over-machine edge-definition offset exists on clean frames; the −6.9% onset area evidence decomposes (~5.5% definitional + ~1–2% onset excess) | Repeats measured precision, controls exposed accuracy: the operator traces the soft edge's outer toe, the machine the half-height step; conclusion of the accept_conf decision unchanged (nostep audit + conservatism), its area-evidence line corrected | Round-4 finding 1; do not compare absolute mm² across the two definitions |
 | A bias-tripped resting claim is REFIT, not asserted: the fitter runs with the change-map responding gates waived, is audited itself, and wins only clean; the capped claim stays as runner-up (2026-07-30) | Round 4 made the creep a measured fact; measuring beats asserting, and the audit's proof-of-step is exactly the evidence the waived gates were checking for | test_bias_tripped_resting_is_refit_to_the_moved_edge / test_refit_refusal_keeps_the_capped_resting_claim; P3_1 2.0 kV refit +4.1/+4.6% (predicted +3.8/+4.2), P3_2 +9.1/+10.5% |
 | Reject = the human verdict that NO defensible measurement exists (occlusion, breakdown debris, corrupt frame): derived columns blank, note 'rejected (no reliable edge)' — distinct from unreviewed (untouched row) and auto-reject (machine found nothing to detect). Wrong-candidates-with-a-visible-edge is a TRACE (candidate D), not a Reject | Operator question 2026-07-30 exposed that the button's post-#162 doctrine was never written down: since the tracer exists, Reject's only remaining legitimate use is "no boundary can honestly be drawn even by hand" — a trace both fixes the row AND labels; a Reject records an examined refusal | apply_results rejected branch; the 6.0 kV wash-out traces (human-human IoU 0.966) prove even extreme frames are usually traceable, so true Rejects should be rare |

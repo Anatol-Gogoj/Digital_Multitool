@@ -693,11 +693,19 @@ def _fit_ellipse_robust(pts):
     return ell, keep
 
 
-def _disc_fit_candidate(prep, settings, ref):
+def _disc_fit_candidate(prep, settings, ref, assume_responding=False):
     """Boundary of the RESPONDING DISC, tracked from the known resting
     disc -- the active area as the lab records it (2026-07-28 decision:
     the full responding disc, wrinkled and non-wrinkled together, leads
     excluded).
+
+    `assume_responding` (the resting-refit path, 2026-07-30): waive the
+    two change-map "is the disc responding" gates -- the whole point of
+    that path is a frame whose change map is BELOW the no-change gate
+    while the audit has already measured the ink step off the claimed
+    circle, so the change map is known-silent and the step is known-
+    measurable. Every ink-profile quality gate (adaptive step cut, ray
+    count, arc coverage, ellipse residual/shape/size) still applies.
 
     The blob channels answer 'which changed region is biggest'; this one
     answers 'where is the edge of the object we know is there'. Rays are
@@ -774,7 +782,7 @@ def _disc_fit_candidate(prep, settings, ref):
     # p75, not median: a partially responding disc (wrinkle patches over
     # part of the interior) still counts as responding
     i_lvl = float(np.percentile(change[inner], 75))
-    if i_lvl < 0.2:
+    if i_lvl < 0.2 and not assume_responding:
         return None                     # no response above the noise scale
     level = max(0.45 * i_lvl, 0.10)
     sm_prof = cv2.blur(prof, (1, 7))
@@ -813,7 +821,8 @@ def _disc_fit_candidate(prep, settings, ref):
     for k in range(nray):
         if blocked[k]:
             continue
-        if float(np.median(sm_prof[k, in_lo:in_hi])) < level:
+        if not assume_responding and \
+                float(np.median(sm_prof[k, in_lo:in_hi])) < level:
             continue                    # this sector is not responding
         gi = w_lo + int(np.argmax(istep[k, w_lo:w_hi]))
         ins = iprof[k, max(gi - 20, 0):gi - 4]
@@ -994,6 +1003,61 @@ def _texture_candidate(prep, settings):
     return c
 
 
+def _apply_audit_gates(cand, aud, settings):
+    """Attach the boundary self-audit and cap the candidate below
+    accept_conf when either gate trips (the acceptance fold,
+    2026-07-29). -> True when capped."""
+    cand['audit'] = aud
+    lim = float(settings.get('audit_nostep_pct', 15.0) or 0)
+    btol = float(settings.get('audit_bias_px', 3.0) or 0)
+    capped = False
+    if lim and aud['nostep_pct'] > lim:
+        cand['audit_nostep'] = aud['nostep_pct']
+        capped = True
+    if (btol and aud.get('bias_px') is not None
+            and abs(aud['bias_px']) > btol):
+        cand['audit_bias'] = aud['bias_px']
+        capped = True
+    acc = float(settings.get('accept_conf', 0.75))
+    if capped and cand['conf'] > acc - 0.01:
+        cand['conf'] = round(acc - 0.01, 3)
+    return capped
+
+
+def _resting_refit(prep, settings, ref):
+    """The fitter run on a bias-tripped gated frame (2026-07-30,
+    calibration round 4): 'resting' claimed the baseline circle while
+    the audit measured the ink step off it -- the disc creeping out
+    (or the circle sitting off the ink) below the no-change gate's
+    sensitivity. Measuring beats asserting: track the step where it
+    actually is. Change-map responding gates are waived (the audit
+    already proved a measurable step; the change map is silent by
+    construction on a gated frame), so `solidity` -- change-fill of
+    the ring interior -- reads ~0 here and is NOT filtered on; the
+    fit's evidence is its arc coverage, step contrast and residual,
+    plus its own audit, applied by the caller. Post-processing mirrors
+    the main candidates() path exactly."""
+    c = _disc_fit_candidate(prep, settings, ref, assume_responding=True)
+    if c is None:
+        return None
+    f = prep['f']
+    if f != 1.0 and not c.pop('fullres', False):
+        inv = 1.0 / f
+        c['area_px'] *= inv * inv
+        c['diam_px'] *= inv
+        c['cx'] *= inv
+        c['cy'] *= inv
+        c['contour'] = (np.asarray(c['contour'], float) * inv).astype(int)
+    c['wrinkle'] = _wrinkle_ratio(prep['base_full'], prep['img_full'],
+                                  c['contour'])
+    # no diff tiers exist on a gated frame: agreement term is moot, the
+    # fit's own quality score stands (same as agree_fit=1 in the main path)
+    c['conf'] = round(min(0.99, c.pop('conf_own')), 3)
+    c['spread_pct'] = c['ci85_pct']
+    c['resting_refit'] = True
+    return c
+
+
 def candidates(base_gray, img_gray, settings, prev_method=None):
     """Up to 3 candidate outlines for the active area, best first.
 
@@ -1026,7 +1090,10 @@ def candidates(base_gray, img_gray, settings, prev_method=None):
     excluded -- the active area as the lab defines it, the full
     responding disc. Its spread_pct is its own 85% CI on area. On a
     gated frame with a known disc, a 'resting' candidate states that the
-    area equals the resting area instead of leaving an empty row.
+    area equals the resting area instead of leaving an empty row -- and
+    when the audit measures the ink step OFF that circle (audit_bias),
+    the fitter re-measures the boundary (resting-refit) instead of
+    letting the stale claim stand.
 
     Honest no-change gate: if the ROI diff's 99th percentile is below
     min_diff, the intensity tiers return nothing (low-kV frames really
@@ -1221,20 +1288,27 @@ def candidates(base_gray, img_gray, settings, prev_method=None):
     if best['method'] in ('disc-fit', 'resting'):
         aud = audit_boundary(prep, best, settings)
         if aud is not None:
-            best['audit'] = aud
-            lim = float(settings.get('audit_nostep_pct', 15.0) or 0)
-            btol = float(settings.get('audit_bias_px', 3.0) or 0)
-            capped = False
-            if lim and aud['nostep_pct'] > lim:
-                best['audit_nostep'] = aud['nostep_pct']
-                capped = True
-            if (btol and aud.get('bias_px') is not None
-                    and abs(aud['bias_px']) > btol):
-                best['audit_bias'] = aud['bias_px']
-                capped = True
-            acc = float(settings.get('accept_conf', 0.75))
-            if capped and best['conf'] > acc - 0.01:
-                best['conf'] = round(acc - 0.01, 3)
+            capped = _apply_audit_gates(best, aud, settings)
+            # Resting-refit (2026-07-30, calibration round 4): a bias-
+            # tripped 'resting' claim means the ink step is measurably
+            # off the claimed circle -- operator-verified at 2.0 kV
+            # (+4.0/+6.5% area beyond the trace's own definitional
+            # baseline, matching the audit's predicted creep). The
+            # fitter tracks that ink step directly, so measure the
+            # boundary instead of asserting it. The refit is audited
+            # like any winner and takes the frame only on its own
+            # merits; the capped resting claim stays as runner-up for
+            # the human, and a refused or audit-dirty fit changes
+            # nothing.
+            if (capped and best['method'] == 'resting'
+                    and best.get('audit_bias') is not None):
+                rf = _resting_refit(prep, settings, ref)
+                if rf is not None:
+                    aud2 = audit_boundary(prep, rf, settings)
+                    if aud2 is not None:
+                        _apply_audit_gates(rf, aud2, settings)
+                        out.append(rf)
+                        out.sort(key=lambda c: c['conf'], reverse=True)
     return out[:3]
 
 

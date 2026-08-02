@@ -80,6 +80,12 @@ This file top to bottom. For GUI work: `sldea_edge_gui.py`
 `sldea_trace.py` are the detection core — read them before touching
 anything non-GUI.
 
+**`SLDEA_MEASUREMENT.md`** is the research-facing companion: the
+measured error budget (what uncertainty to quote for which quantity),
+method trust tables, and the algorithm explained at five levels. Any
+change that moves a calibration number (new labels, ranking changes,
+new campaigns) must update that file in the same PR.
+
 ## Session history (compressed; details in the sections below)
 
 - **2026-07-28**: resting-disc scale measured (old areas were 2.3–2.7x

@@ -17,7 +17,7 @@ in the same PR.
 | You are reporting | Quote | Dominated by | Conditions |
 |---|---|---|---|
 | **Expansion ratio A/A₀** (area-vs-kV curves) | **±1–2%** | fit CI + second-order residual of the edge-definition offset | auto-accepted `disc-fit` / `resting` / refit frames |
-| **Absolute area (mm²), edge convention stated** | **±1–2%** (+ one pending check, see §2.4) | scale anchor + fit CI | methods section states the half-height convention |
+| **Absolute area (mm²), edge convention stated** | **±1–2%** | scale anchor + fit CI | methods section states the half-height convention |
 | **Absolute area (mm²), convention not stated** | **±3%** (or a one-sided +5.5% band) | the edge-definition offset | avoid this — state the convention instead |
 | **Hand-traced areas** (wash-out frames ≥5.5 kV) | **±1%** precision, outer-toe convention | operator repeatability | machine has no boundary there; traces are the measurement |
 
@@ -47,9 +47,9 @@ in the same PR.
   comparison without the +5.5% definitional correction.
 - **DON'T** judge any machine boundary against a bar above IoU ~0.97 —
   that is the measured limit of human self-agreement.
-- **DO** physically verify one resting-disc diameter (calipers / stage
-  micrometer) before publishing absolute mm² — see §2.4, the one
-  unquantified term.
+- The resting diameter is **anchored at 16 mm by the laser-cut CNT
+  application mask** (lab confirmation, 2026-08-01) — no per-device
+  verification needed for this series; see §2.4.
 
 ---
 
@@ -61,7 +61,7 @@ in the same PR.
 |---|---|---|---|
 | Edge definition (visual outer toe vs half-height ink step) | systematic | **+5.2–5.7% area** between conventions; spread across controls only 0.5% | round 4, four audit-clean controls |
 | Scale anchor (baseline disc trace vs by-eye) | systematic, per run | ~0.4% diameter → **~0.8% area**; 0.3% repeat on one device 32 min apart | baseline overlays, both campaigns |
-| Nominal diameter (the design value the mm scale hangs on) | systematic | **unmeasured** | — (see §2.4) |
+| Nominal diameter (the value the mm scale hangs on) | systematic | **closed** — anchored by the laser-cut application mask | lab confirmation 2026-08-01 (see §2.4) |
 | `disc-fit` statistical CI (edge-point scatter) | random, per frame | **0.2–0.7%** (85% CI) | fit CI, both campaigns |
 | Operator trace precision (the validation floor) | random | **~1%** area (0.2–2.5%); IoU ceiling 0.973 | repeatability round, 9 repeat pairs |
 | Clean `resting` claims | bounded | ≤ ~2% (the 3 px audit-bias gate; the refit measures anything past it) | audit + resting-refit |
@@ -94,16 +94,21 @@ is a **convention choice**. Pick one, state it, and absolute areas
 inherit only the scale terms (~1%) and the per-frame CI. Fail to pick
 one and you owe the reader the ±3% band.
 
-### 2.4 The one open item
+### 2.4 The nominal-diameter anchor — CLOSED (2026-08-01)
 
-The px→mm scale anchors to the device's **nominal** resting diameter
-(e.g. 16 mm). The trace of the disc in pixels is verified to 0.4%,
-but the fabricated disc's true diameter vs its design value has never
-been independently measured. This multiplies all mm² identically
-(and cancels in every ratio), so it does not affect any conclusion
-drawn so far — but it is the remaining unquantified term under
-absolute mm², and a one-time caliper or stage-micrometer measurement
-of one device closes it.
+The px→mm scale anchors to the device's nominal resting diameter of
+16 mm. Originally flagged as the one unquantified term, this is now
+**closed by fabrication**: the CNT electrodes are applied through a
+laser-cut mask, so the discs sit at 16 mm by manufacture for this
+entire series (lab confirmation, Anatol, 2026-08-01) — the anchor is
+a machined constraint, not an assumption. Two consequences worth
+stating in a methods section: (a) because every device in the series
+is cut by the same mask, any residual mask-aperture tolerance is
+common-mode — it cancels in cross-device comparisons as well as in
+ratios, and only the absolute SI traceability rests on the laser-cut
+spec; (b) absolute mm² therefore carries only the scale-trace term
+(~0.8% area) and the per-frame fit CI, i.e. the ±1–2% of table 1.1
+with nothing pending.
 
 ### 2.5 Scope limits
 
@@ -248,6 +253,7 @@ architecture**, held together by three invariants:
 | Refit accuracy (+4.1/+4.6% vs predicted +3.8/+4.2%) | Resting-refit validation vs stored labels (2026-07-30) |
 | Onset excess ~1–2% | Round 3 (−6.9%) decomposed by round 4's controls |
 | Old-CSV 2.3–2.7× scale error | Baseline re-measurement, 2026-07-28 |
+| 16 mm anchor closed (laser-cut mask) | Lab confirmation (Anatol), 2026-08-01 |
 
 Full narrative and the decision log: `SLDEA_HANDOFF.md`. Ground truth:
 `edge_labels.json` beside each run's `data.csv` (append-only; re-score

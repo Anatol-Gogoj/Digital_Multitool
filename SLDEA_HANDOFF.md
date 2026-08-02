@@ -1,41 +1,69 @@
 # SLDEA detection — handoff
 
-State as of 2026-07-31, all merged to `main` and verified: the
-detection pipeline needs **no work**, and the review GUI is polished.
-Candidate-D tracing (#171–#173), singleton aux windows (#176),
-calibration rounds 1–4 (47 operator labels, both campaigns),
-`accept_conf = 0.75` (FINAL for this label set, validated in every
-stratum), the resting-refit, and the two review-card issues #178/#179
-(the card contain-fits the live canvas; the side panel is a fixed box)
-are all done. **No code task is queued.**
+State as of 2026-08-01, all merged to `main` and verified: **the code
+side is complete.** Candidate-D tracing (#171–#173), singleton aux
+windows (#176), the review-card fixes #178/#179, one settings path
+(the Tune button removed — operator decision), calibration rounds 1–4
+(47 operator labels, both campaigns), `accept_conf = 0.75` (FINAL for
+this label set, validated in every stratum), the resting-refit, and
+the research-facing error budget (`SLDEA_MEASUREMENT.md`, every term
+measured, the 16 mm anchor closed by the laser-cut mask) are all
+done. **No code task is queued — the next session is an OPERATOR
+session**, with the agent supporting.
 
-## THE NEXT TASK: none queued — what remains is operator work
+## THE NEXT TASKS: operator work (agent-assisted)
 
-- **Operator-optional labeling:** a 4-control repeat on one 07-23 run
-  (is the +5.5% definitional offset campaign-stable, or P3-specific?),
-  and contact-sheet spot-reads of the (much smaller) review queues.
-  Both are minutes of operator time, no code.
-- **Upstream instrumentation, not this codebase's GUI:** #157
-  (continuous kV/µA logging at >= 1 Hz — would date the ~5 kV event
-  electrically), #158 (breakdown detection on a step change, depends
-  on #157), #159 (`measured_kV` stops recording ~snapshot 34; leading
-  hypothesis is the unset scope vertical scale returning the 9.9E37
-  sentinel). See "Related issues" at the bottom.
-- If new GUI reports arrive, work them the way #171–#179 were worked:
-  file the issue, fix display-only, never touch accept semantics or
-  `sldea_edge.py` from a GUI task.
+In order of value:
+
+1. **Cross-campaign definitional-offset check (~15 min tracing).**
+   The +5.2–5.7% human-over-machine edge-definition offset is
+   measured on P3 only. Repeat the 4-control protocol on one 07-23
+   run — suggest `SLDEA_20260723_152205` (cleanest low ramp, review
+   1/40 below 5.2 kV): trace ~2 `resting` and ~2 mid-ramp `disc-fit`
+   auto-accepted frames below ~5 kV. Agent playbook: launch Edge
+   Review on the REAL run (labels are the point — trace, Done, arrow
+   on; no Enter needed on auto-accepted controls, no Save), then
+   compute per-label trace-vs-machine deltas (the round-4 scripts'
+   pattern) and compare to +5.2–5.7%. Verdict updates
+   `SLDEA_MEASUREMENT.md` §2.3/§2.5 and this file: stable → the
+   offset is an operator/edge constant and the budget generalizes;
+   different → it is scene/optics-dependent, quote it per campaign.
+2. **Declare the edge convention (a sentence, not a measurement).**
+   The one remaining choice for any publication quoting absolute mm²:
+   half-height (the machine's, audited) or outer toe (the eye's,
+   +5.5%). When Anatol declares it, record a decision-log row here
+   and the convention line in `SLDEA_MEASUREMENT.md` §1.3 — after
+   that, absolute mm² is a clean ±1–2%.
+3. **Spot-read the post-refit review queues.** Regenerate diagnostics
+   (`python sldea_diag.py <run> --out <scratch>` — ALWAYS `--out`)
+   and read the contact sheets, especially the 1.5–3 kV band where
+   bias-tripped resting frames now auto-accept as refit boundaries —
+   eyes on a few of those confirms the refit on frames no label
+   covers.
+4. **Upstream instrumentation, not this codebase's GUI:** #157
+   (continuous kV/µA logging at >= 1 Hz — would date the ~5 kV event
+   electrically), #158 (breakdown detection on a step change, depends
+   on #157), #159 (`measured_kV` stops recording ~snapshot 34;
+   leading hypothesis: the unset scope vertical scale returning the
+   9.9E37 sentinel). See "Related issues" at the bottom.
+
+If new GUI reports arrive, work them the way #171–#179 were worked:
+file the issue, fix display-only, never touch accept semantics or
+`sldea_edge.py` from a GUI task.
 
 How to work: branch from `main`; python is
 `C:\ProgramData\anaconda3\python.exe` on the analysis PC (the PATH
-python has no cv2). Extend `tests/test_sldea_edge_gui.py` (its Tk
-tests skip cleanly without a display — follow that pattern; the
-`_fake_run` helper builds a synthetic run). Verify with the five sldea
-suites + `run_tests.py` (25/29 is the clean baseline — the four
-failures are documented environmental ones). For visual checks,
-instantiate `EdgeReviewApp` on a real run READ-ONLY and save
-`_render_card` output to a scratch PNG — never call `_trace_staged`
-against a real run (it appends to the ground-truth label sidecar) and
-never Save.
+python has no cv2). Launching Edge Review for the operator: run
+`sldea_edge_gui.py <run-dir> --auto` detached with that python. The
+REAL runs are correct targets when labeling is the goal — operator
+traces through the GUI are the ground truth. What stays forbidden:
+calling `_trace_staged`/`append_label` programmatically against a
+real run, using the GUI Save path on real data without the operator
+asking, and committing run data or outputs. For code work: extend
+`tests/test_sldea_edge_gui.py` (Tk tests skip cleanly without a
+display; `_fake_run` builds a synthetic run) and verify with the five
+sldea suites + `run_tests.py` (25/29 is the clean baseline — the four
+failures are documented environmental ones).
 
 ## The review-card fixes #178/#179 (2026-07-31) — DONE
 

@@ -1,0 +1,1496 @@
+{
+ "app-shell": {
+  "key": "app-shell",
+  "area": "app-shell",
+  "purpose": "The frame around the instrument tabs: the launch splash, each tab's connection line with its one-click Reconnect, the Tools menu (whole-bench profiles and the software updater), and the footer status bar with the exact build version.",
+  "controls": [
+   {
+    "label": "Splash screen (Digital Multitool)",
+    "what": "Appears instantly at launch and names each tab as it builds (a few seconds), then closes itself."
+   },
+   {
+    "label": "Window title",
+    "what": "Shows the app name plus the exact version and build hash you are running."
+   },
+   {
+    "label": "Connection line (top of each instrument tab)",
+    "what": "Green 'Connected (USB/LAN/Serial)' with the instrument's identity, red 'Not connected' with the reason, amber 'Linux bench only' on Windows."
+   },
+   {
+    "label": "Reconnect (top-right of each instrument tab)",
+    "what": "Closes and reopens that one instrument; use after powering a box on or replugging its cable."
+   },
+   {
+    "label": "Status bar (footer, left)",
+    "what": "Running commentary: save/load confirmations, busy notices, and shared-drive fallback warnings."
+   },
+   {
+    "label": "Version readout (footer, right)",
+    "what": "Version plus build hash; quote it when reporting a problem."
+   },
+   {
+    "label": "Tools > Save Bench Profile…",
+    "what": "Names and stores a snapshot of the whole bench (LCR, scope, both sig-gen channels) in the shared library."
+   },
+   {
+    "label": "Tools > Load Bench Profile…",
+    "what": "Restores a named snapshot into the fields and pushes it to whatever is connected; outputs are never switched."
+   },
+   {
+    "label": "Tools > Delete Bench Profile…",
+    "what": "Removes a named profile after a confirmation."
+   },
+   {
+    "label": "Tools > Save Bench Profile to File… / Load Bench Profile from File…",
+    "what": "Exports or imports a single profile as a .json file for a USB stick or email."
+   },
+   {
+    "label": "Tools > Update Software…",
+    "what": "Pulls the latest release, redeploys the shared-drive copy for all users, then offers Restart now (Linux bench only)."
+   },
+   {
+    "label": "Shared preset storage",
+    "what": "Presets and profiles live in the ShareDrive presets folder so both bench users see them; if the NAS is down, saves land in a local copy and the status bar says so."
+   }
+  ],
+  "workflow": [
+   "1. Double-click the launcher; the Digital Multitool splash names each tab as it loads.",
+   "2. The main window opens and all instruments auto-connect in the background.",
+   "3. Check each tab's Connection line turns green with the instrument's identity.",
+   "4. If a line is red, power that instrument on and click its Reconnect.",
+   "5. Tools > Load Bench Profile… to recall a saved whole-bench setup.",
+   "6. Work; watch the footer status bar for confirmations and warnings.",
+   "7. Close the window when done — outputs are switched off automatically."
+  ],
+  "cautions": [
+   "Closing the main window is a shutdown: signal-generator outputs go off, LCR bias goes off, a running SLDEA test is stopped and ramped down, and instruments return to front-panel control.",
+   "Loading a bench profile immediately rewrites the settings of every connected instrument (outputs stay as they are) — do not load one mid-measurement.",
+   "If the status bar says the shared drive was unavailable and the save went to a local copy, the profile/preset is on this PC only — colleagues cannot see it until it is saved again with the share back.",
+   "Update Software… replaces the shared deployment for everyone on the bench, not just you; after it finishes you must restart the app to actually run the new version.",
+   "On Windows the connection lines show 'Linux bench only — view/edit (presets OK)' and Update Software… is greyed out — this is normal; presets and bench profiles can still be prepared and shared."
+  ],
+  "callouts": [
+   {
+    "widget_text": "Connection",
+    "note": "Each tab's link status lives here"
+   },
+   {
+    "widget_text": "Not connected",
+    "note": "Turns green when the instrument answers"
+   },
+   {
+    "widget_text": "Reconnect",
+    "note": "One click re-opens this instrument"
+   },
+   {
+    "widget_text": "Ready",
+    "note": "Status bar: confirmations and warnings"
+   },
+   {
+    "widget_text": "Digital Multitool",
+    "note": "Splash shown while tabs build"
+   },
+   {
+    "widget_text": "Starting...",
+    "note": "Reports each tab as it loads"
+   }
+  ],
+  "subwindows": [
+   {
+    "name": "Update Software (live output + Restart now)",
+    "how_opened": "Tools > Update Software…"
+   },
+   {
+    "name": "Save Bench Profile (name prompt)",
+    "how_opened": "Tools > Save Bench Profile…"
+   },
+   {
+    "name": "Load Bench Profile (profile picker)",
+    "how_opened": "Tools > Load Bench Profile…"
+   },
+   {
+    "name": "Delete Bench Profile (profile picker)",
+    "how_opened": "Tools > Delete Bench Profile…"
+   },
+   {
+    "name": "File browser (profile export/import)",
+    "how_opened": "Tools > Save Bench Profile to File… / Load Bench Profile from File…"
+   },
+   {
+    "name": "SCPI Control failed to start (crash report)",
+    "how_opened": "Appears automatically if the app cannot start"
+   }
+  ]
+ },
+ "LCR Meter (BK 894)": {
+  "key": "LCR Meter (BK 894)",
+  "area": "LCR Meter (BK 894)",
+  "purpose": "Controls the B&K Precision 894 LCR meter: set the AC test signal (mode, frequency, level, DC bias), take single or live readings of a component, and run automated frequency-by-voltage sweeps that save to a CSV file.",
+  "controls": [
+   {
+    "label": "Connection / Reconnect",
+    "what": "Shows meter link state (red = not connected); Reconnect re-detects the meter and reads its current settings into the tab."
+   },
+   {
+    "label": "Mode",
+    "what": "Picks the measurement pair (e.g. CPD = capacitance + dissipation); CP/LP are parallel-model, CS/LS series-model variants."
+   },
+   {
+    "label": "Frequency (Hz)",
+    "what": "AC test frequency, 100 Hz to 500 kHz; 1 kHz is the standard capacitor test, 100 Hz for electrolytics."
+   },
+   {
+    "label": "Voltage (V)",
+    "what": "AC test level, 0.01 to 2.0 V; 1.0 V is standard and the meter clamps anything higher to 2.0 V."
+   },
+   {
+    "label": "DC Bias (V) + Bias ON",
+    "what": "Steady DC voltage held across the part during the AC test (for C-vs-bias curves); active only while Bias ON is ticked, pushed on Apply."
+   },
+   {
+    "label": "Speed / Avg",
+    "what": "Reading integration time (SLOW = quietest, FAST = quickest) and how many raw readings (1-256) the meter averages into each result."
+   },
+   {
+    "label": "Auto range",
+    "what": "ON lets the meter pick its range; turn OFF to hold the current range and avoid mid-sweep range-change glitches on a fixed part."
+   },
+   {
+    "label": "Open Correction... / Short Correction...",
+    "what": "Fixture de-embedding sweeps (fixture empty / terminals shorted); the label beside them shows which corrections are currently ON."
+   },
+   {
+    "label": "Apply Configuration",
+    "what": "Pushes everything above to the meter — no setting takes effect until this is clicked."
+   },
+   {
+    "label": "Current Measurement (Primary / Secondary / Status)",
+    "what": "Latest reading, labeled by the mode actually applied to the meter; Status OK means a valid measurement."
+   },
+   {
+    "label": "Single Measurement / Start Continuous / Stop",
+    "what": "One reading now, live readings every 0.2 s, or halt the live readout."
+   },
+   {
+    "label": "Frequency axis / Voltage axis (Range | List)",
+    "what": "Defines each sweep axis either as start-stop-points (linear or log) or as an explicit comma-separated list."
+   },
+   {
+    "label": "Order / Dwell (s) / Samples/point / Inter-sample (s)",
+    "what": "Which axis is the outer loop, settling wait after each setpoint change, readings taken per point, and pause between them."
+   },
+   {
+    "label": "Output CSV / Browse...",
+    "what": "Where the sweep file goes; left blank it lands in the log directory as sweep_<timestamp>.csv."
+   },
+   {
+    "label": "Start Sweep / Stop / progress bar",
+    "what": "Runs the sweep in the background with live progress; Stop finishes the current sample and keeps everything written so far."
+   }
+  ],
+  "workflow": [
+   "1. Check Connection is green; click Reconnect if not.",
+   "2. Pick Mode, then set Frequency and Voltage.",
+   "3. Optional: run Open then Short Correction on the empty/shorted fixture.",
+   "4. Click Apply Configuration.",
+   "5. Connect the part; click Single Measurement or Start Continuous.",
+   "6. Read Primary/Secondary; Status OK means a good reading.",
+   "7. For curves: set the sweep axes and click Start Sweep — results go to CSV."
+  ],
+  "cautions": [
+   "The meter silently clamps the AC level at 2.0 V and frequency at 500 kHz — no error appears; readings simply use the clamped value.",
+   "Nothing reaches the meter until Apply Configuration; the Primary/Secondary readouts are labeled by the last APPLIED mode, not whatever the dropdown currently shows.",
+   "A sweep switches the meter to the dropdown's mode and leaves frequency/voltage at the last sweep point — re-Apply your configuration before trusting spot readings afterwards.",
+   "DC bias stays on until you untick Bias ON and click Apply — do not leave bias across a bias-sensitive part.",
+   "Open/Short corrections belong to the current fixture and leads — redo both after changing either, or every reading carries the wrong offset. The sweep takes tens of seconds and the meter is busy meanwhile."
+  ],
+  "callouts": [
+   {
+    "widget_text": "Reconnect",
+    "note": "Re-detect the meter if status is red"
+   },
+   {
+    "widget_text": "Apply Configuration",
+    "note": "Nothing reaches the meter until this"
+   },
+   {
+    "widget_text": "Bias ON",
+    "note": "Tick + Apply to enable DC bias"
+   },
+   {
+    "widget_text": "Open Correction...",
+    "note": "Run with the fixture empty"
+   },
+   {
+    "widget_text": "Single Measurement",
+    "note": "Take one reading now"
+   },
+   {
+    "widget_text": "Start Continuous",
+    "note": "Live readings every 0.2 s"
+   },
+   {
+    "widget_text": "Start Sweep",
+    "note": "Freq × voltage sweep, saved to CSV"
+   }
+  ],
+  "subwindows": [
+   {
+    "name": "Open correction confirmation (prep + start)",
+    "how_opened": "Open Correction..."
+   },
+   {
+    "name": "Short correction confirmation (prep + start)",
+    "how_opened": "Short Correction..."
+   },
+   {
+    "name": "Save-file dialog for the sweep CSV",
+    "how_opened": "Browse..."
+   },
+   {
+    "name": "Long sweep confirmation (shown when estimate exceeds ~5 min)",
+    "how_opened": "Start Sweep"
+   },
+   {
+    "name": "LCR Meter Tips (usage notes)",
+    "how_opened": "📖 Show Usage Tips"
+   }
+  ]
+ },
+ "Oscilloscope (MSO24)": {
+  "key": "Oscilloscope (MSO24)",
+  "area": "Oscilloscope (MSO24)",
+  "purpose": "Controls the Tektronix MSO24 4-channel oscilloscope: set up each channel, timebase and trigger, start/stop acquisition, read automated measurements, and pull a waveform record into a plot window for saving as CSV.",
+  "controls": [
+   {
+    "label": "Connection / Reconnect",
+    "what": "Shows scope link status (red = not connected); Reconnect retries auto-detection over USB."
+   },
+   {
+    "label": "Channel 1–4 tabs",
+    "what": "One settings page per input channel; the tab you are on is the channel you are editing."
+   },
+   {
+    "label": "Enable Channel",
+    "what": "Turns the channel display on or off on the scope immediately."
+   },
+   {
+    "label": "Vertical (V/div)",
+    "what": "Voltage per grid division for this channel; aim for the signal filling ~60–80% of the screen."
+   },
+   {
+    "label": "Coupling",
+    "what": "DC shows everything, AC blocks the DC level (ripple on a bias), GND gives a flat zero reference."
+   },
+   {
+    "label": "Position (div)",
+    "what": "Moves the trace up or down, in divisions from center."
+   },
+   {
+    "label": "Use as trigger",
+    "what": "Marks this channel as the edge-trigger source; if several are ticked, the lowest number wins."
+   },
+   {
+    "label": "Apply CH1 Config",
+    "what": "Sends this one channel's enable, scale, position and coupling to the scope (one such button per channel tab)."
+   },
+   {
+    "label": "Horizontal (s/div)",
+    "what": "Timebase — seconds per division; whole screen is 10 divisions. Show 2–3 cycles of a periodic signal."
+   },
+   {
+    "label": "Trigger Level (V)",
+    "what": "Voltage the trigger-source signal must cross to start an acquisition; set it mid-signal for a stable display."
+   },
+   {
+    "label": "Trigger Slope",
+    "what": "Trigger on the RISE (rising) or FALL (falling) edge."
+   },
+   {
+    "label": "Apply All Settings",
+    "what": "Pushes every channel plus timebase, trigger source, level and slope in one go — the only button that sets the trigger source."
+   },
+   {
+    "label": "CH1–CH4 Measurements tabs",
+    "what": "Frequency, Period, Mean, Pk-Pk, RMS and Amplitude readouts per channel; Get CHx Measurements refreshes them, Capture CHx Waveform opens the sample record in a plot window with Save CSV."
+   },
+   {
+    "label": "Run / Stop / Single",
+    "what": "Run acquires continuously, Stop freezes the display, Single arms one triggered capture then stops."
+   },
+   {
+    "label": "AutoSet",
+    "what": "Lets the scope pick scale and trigger for an unknown signal — good starting point, then fine-tune."
+   }
+  ],
+  "workflow": [
+   "Check Connection shows connected; click Reconnect if it is red.",
+   "On each Channel tab: tick Enable Channel, set V/div, Coupling, Position.",
+   "Tick Use as trigger on the channel you want to trigger from.",
+   "Set Horizontal (s/div), Trigger Level (V) and Trigger Slope.",
+   "Click Apply All Settings (or AutoSet for an unknown signal).",
+   "Click Run, or Single for one triggered event.",
+   "On the channel's Measurements tab, click Get CHx Measurements; use Capture CHx Waveform to plot and Save CSV."
+  ],
+  "cautions": [
+   "Typed values do nothing until you click an Apply button — and only Apply All Settings sends the trigger source/level/slope; Apply CHx Config does not touch the trigger.",
+   "AutoSet changes scale, timebase and trigger on the instrument but the fields on this tab do NOT update to match — clicking Apply All Settings afterwards will overwrite what AutoSet chose.",
+   "Measurement readouts are snapshots — they only update when you click Get CHx Measurements. Frequency/Period show \"No signal\" on non-periodic input.",
+   "If you ever send the scope a manual measurement command, the type token must be FREQUENCY — FREQ is accepted without error but returns a garbage ~2 Hz reading (the tab's own buttons already use the correct token).",
+   "On Windows (no instrument attached) this tab is view/edit-only: every action button just reports \"Oscilloscope not connected\"."
+  ],
+  "callouts": [
+   {
+    "widget_text": "Reconnect",
+    "note": "Retry scope connection"
+   },
+   {
+    "widget_text": "Apply CH1 Config",
+    "note": "Send this channel's settings"
+   },
+   {
+    "widget_text": "Use as trigger:",
+    "note": "Pick trigger source channel"
+   },
+   {
+    "widget_text": "Apply All Settings",
+    "note": "Send everything incl. trigger"
+   },
+   {
+    "widget_text": "AutoSet",
+    "note": "Scope auto-configures itself"
+   },
+   {
+    "widget_text": "Single",
+    "note": "Arm one triggered capture"
+   },
+   {
+    "widget_text": "Get CH1 Measurements",
+    "note": "Refresh readouts once"
+   },
+   {
+    "widget_text": "Capture CH1 Waveform",
+    "note": "Plot record, Save CSV there"
+   }
+  ],
+  "subwindows": [
+   {
+    "name": "Scope CHx waveform plot (min/max envelope, Save CSV..., Close)",
+    "how_opened": "Capture CH1 Waveform (one button per channel measurements tab)"
+   },
+   {
+    "name": "Oscilloscope Tips info dialog",
+    "how_opened": "📖 Show Usage Tips"
+   }
+  ]
+ },
+ "Signal Gen (BK 4055B)": {
+  "key": "Signal Gen (BK 4055B)",
+  "area": "Signal Gen (BK 4055B)",
+  "purpose": "Controls both output channels of the BK 4055B function generator: waveform type, frequency, amplitude, offset, burst shots, and the physical output switch. Named presets let you save and recall complete two-channel setups.",
+  "controls": [
+   {
+    "label": "Reconnect",
+    "what": "Retry the connection to the generator (tries LAN first, then USB)."
+   },
+   {
+    "label": "Advanced mode",
+    "what": "Reveals the extra fields: Phase, pulse Rise/Fall/Delay, Load and Polarity; Apply pushes them even when hidden."
+   },
+   {
+    "label": "Channel 1 / Channel 2",
+    "what": "Inner tabs — each output is configured independently."
+   },
+   {
+    "label": "Waveform",
+    "what": "Pick SINE, SQUARE, RAMP, PULSE, NOISE, DC or ARB; the fields below change to match."
+   },
+   {
+    "label": "Frequency / Amplitude / DC Offset (and per-waveform fields)",
+    "what": "Type values; the gray text beside each field shows what the instrument actually accepted after Apply."
+   },
+   {
+    "label": "Waveform Editor...",
+    "what": "Shown only when Waveform = ARB — opens the arbitrary-waveform designer window; the label beside it names the chosen arb."
+   },
+   {
+    "label": "Preview (~3 periods)",
+    "what": "Live drawing of your typed-in settings — it is not a measurement."
+   },
+   {
+    "label": "Apply CH1 Settings / Apply CH2 Settings",
+    "what": "Push the configuration to the instrument; never switches the output on or off."
+   },
+   {
+    "label": "Read Instrument",
+    "what": "Pull the generator's current state back into the fields — use after changing things on the front panel."
+   },
+   {
+    "label": "Output: OFF / ON",
+    "what": "Switches the real output; asks for confirmation before turning ON and goes green while ON."
+   },
+   {
+    "label": "Burst + Cycles / Trigger / Interval",
+    "what": "Emit exactly N cycles per trigger, then idle — bounded energy per shot; MAN = Fire button, INT = auto-repeat, EXT = rear Aux In."
+   },
+   {
+    "label": "Fire",
+    "what": "Sends one manual burst trigger (needs Burst on, trigger MAN, output ON)."
+   },
+   {
+    "label": "Sync out",
+    "what": "Puts a trigger edge on the rear Sync BNC every period — feed it to the scope for stable triggering."
+   },
+   {
+    "label": "Save Preset / Load Preset / Delete Preset",
+    "what": "Named presets store BOTH channels; Load fills the fields and pushes the configuration to the instrument (output state untouched)."
+   },
+   {
+    "label": "Save to File... / Load from File...",
+    "what": "Export/import a preset as a .json file so it can travel on a USB stick or live in a project folder."
+   }
+  ],
+  "workflow": [
+   "Pick the Channel 1 or Channel 2 inner tab.",
+   "Choose a Waveform; the fields adapt to it.",
+   "Enter frequency, amplitude and offset; check the preview.",
+   "Click Apply CH1 Settings and compare the gray applied readouts.",
+   "Click Output: OFF and confirm to energize the output.",
+   "For shot testing: tick Burst, set Cycles, Apply, then Fire.",
+   "Click the green Output button to switch off when done."
+  ],
+  "cautions": [
+   "Turning Output ON can energize the Trek HV amplifier: 1 V from this generator = 1 kV at the DEA. The confirmation defaults to No — check amplitude and offset first.",
+   "Apply and Output are separate: field edits do nothing until you click Apply, and Apply never switches the output.",
+   "If a gray applied readout differs from what you typed, the instrument clamped or coerced your value — believe the gray number.",
+   "Amplitude is calibrated for the selected Load (Advanced mode). With Load set to 50 Ω but the output actually open/High-Z, the real voltage is about twice what you asked for.",
+   "Loading a preset immediately pushes that configuration to the connected instrument (output on/off is left alone).",
+   "During a live SLDEA run the channel driving the Trek is locked; abort the run on the SLDEA tab before taking over.",
+   "Custom (ARB) waveform data cannot be sent over USB — the instrument's firmware caps USB commands at 52 bytes and larger transfers freeze it until a power cycle. The app blocks such uploads; use LAN or the Waveform Editor's flash-drive .bin route instead."
+  ],
+  "callouts": [
+   {
+    "widget_text": "Reconnect",
+    "note": "retry connection: LAN first, USB fallback"
+   },
+   {
+    "widget_text": "Advanced mode",
+    "note": "reveals load, polarity, phase, pulse edges"
+   },
+   {
+    "widget_text": "Apply CH1 Settings",
+    "note": "push settings only; output untouched"
+   },
+   {
+    "widget_text": "Read Instrument",
+    "note": "sync fields from the front panel"
+   },
+   {
+    "widget_text": "Output: OFF",
+    "note": "real output switch; confirms, green when ON"
+   },
+   {
+    "widget_text": "Burst",
+    "note": "N cycles per trigger — HV-safe shots"
+   },
+   {
+    "widget_text": "Fire",
+    "note": "send one manual burst trigger"
+   },
+   {
+    "widget_text": "Load Preset",
+    "note": "restore and push a saved setup"
+   }
+  ],
+  "subwindows": [
+   {
+    "name": "Waveform Editor (arbitrary waveform designer)",
+    "how_opened": "Select Waveform = ARB, then click \"Waveform Editor...\""
+   },
+   {
+    "name": "Enable SG output confirmation",
+    "how_opened": "Click \"Output: OFF\" (asks before energizing; warns 1 V = 1 kV at the Trek)"
+   },
+   {
+    "name": "Signal Generator Tips popup",
+    "how_opened": "Click \"📖 Show Usage Tips\""
+   },
+   {
+    "name": "Preset file browser (save/open)",
+    "how_opened": "Click \"Save to File...\" or \"Load from File...\""
+   }
+  ]
+ },
+ "Arb Editor": {
+  "key": "Arb Editor",
+  "area": "Arb Editor",
+  "purpose": "Design a custom waveform for the BK 4055B signal generator by placing points on a plot and choosing the shape between them. Save it to the app's library, then deliver it to the instrument by flash-drive file (.bin or EasyWaveX CSV) or by LAN upload. Opened from the Signal Gen tab: set a channel's waveform to ARB and click \"Waveform Editor...\".",
+  "controls": [
+   {
+    "label": "Points + Set",
+    "what": "Total samples in the waveform (resolution), 2 to 16384."
+   },
+   {
+    "label": "Full-scale ±V: + Set",
+    "what": "Volts at the top/bottom of the plot; capped at ±10 V (4055B limit)."
+   },
+   {
+    "label": "Header readout",
+    "what": "Live summary: samples, period (= X span), derived frequency, sample rate."
+   },
+   {
+    "label": "Points table",
+    "what": "Lists every breakpoint; double-click an X or Y cell to type an exact value."
+   },
+   {
+    "label": "Add / Del",
+    "what": "Insert a point mid-interval after the selected row, or delete the selected point."
+   },
+   {
+    "label": "Segment after point",
+    "what": "Shape from the selected point to the next: LINE, HOLD, SINE, SQUARE, RAMP, PULSE, or EXP, with per-shape parameters."
+   },
+   {
+    "label": "Advanced (offset, phase, edges)",
+    "what": "Reveals the extra segment parameters (offset, phase, rise/fall)."
+   },
+   {
+    "label": "Preview plot",
+    "what": "Click empty space to add a point, drag a dot to move it, right-click a dot to delete it."
+   },
+   {
+    "label": "Fit All / Zoom - / Zoom + / scrollbar",
+    "what": "Zoom and pan the preview; Fit All shows the whole waveform."
+   },
+   {
+    "label": "Periods / Time unit",
+    "what": "Preview 1-3 repeats; time unit (µs/ms/s) sets what X means — the X span is one period, so it sets the output frequency."
+   },
+   {
+    "label": "Undo / Redo",
+    "what": "Step edits back/forward (Ctrl+Z / Ctrl+Y, 50 levels)."
+   },
+   {
+    "label": "Name + Save to Library",
+    "what": "Store the waveform (re-editable) in the app library under this name."
+   },
+   {
+    "label": "Library list + Load / Delete",
+    "what": "Recall a saved waveform into the editor, or remove it from the library."
+   },
+   {
+    "label": "Import CSV... / Export CSV... / Save Template...",
+    "what": "Bring in or write out the raw sample list; Template writes an example CSV to fill in."
+   },
+   {
+    "label": "Send to CH + Upload && Select",
+    "what": "Push the waveform to the chosen channel over LAN and select it (needs a LAN-connected 4055B)."
+   }
+  ],
+  "workflow": [
+   "On the Signal Gen tab, set the channel waveform to ARB and click \"Waveform Editor...\".",
+   "Set Points, Full-scale ±V, and the Time unit.",
+   "Click the plot to add points and drag the dots into shape.",
+   "Select a point and pick the segment type (and parameters) to the next point.",
+   "Check the header readout — the X span is one period, which sets the output frequency.",
+   "Type a Name and click Save to Library.",
+   "Click \"Export .bin for 4055B flash drive...\" and save to a USB stick (or \"Upload && Select\" if on LAN).",
+   "Recall the file on the 4055B's front USB port, then click Apply CHx Settings in the main tab."
+  ],
+  "cautions": [
+   "The two export buttons only save a file — nothing is sent to the instrument. The file holds the shape only: frequency/amplitude/offset are not in it. The GUI pre-fills the target channel, so after recalling the file on the 4055B, one click on Apply CHx Settings pushes them.",
+   "\"Upload && Select\" works only over a LAN connection. Over USB the upload is refused (the 4055B's 52-byte firmware cap can wedge the box) — use the flash-drive .bin route instead. With no instrument connected (e.g. the Windows viewing copy) it reports \"not connected\"; designing and exporting still work.",
+   "The EasyWaveX CSV uses the Trek convention: 1 V in the file = 1 kV at the Trek output. Check the amplitude field before saving.",
+   "Closing the editor with unsaved edits discards them after one confirmation — anything not saved to the library is gone.",
+   "Library \"Delete\" permanently removes the saved waveform after one confirmation."
+  ],
+  "callouts": [
+   {
+    "widget_text": "Full-scale ±V:",
+    "note": "Volts at plot top/bottom (max 10)"
+   },
+   {
+    "widget_text": "Segment after point",
+    "note": "Shape between selected point and next"
+   },
+   {
+    "widget_text": "Fit All",
+    "note": "Show the whole waveform"
+   },
+   {
+    "widget_text": "Save to Library",
+    "note": "Store waveform for reuse"
+   },
+   {
+    "widget_text": "Export .bin for 4055B flash drive...",
+    "note": "Main delivery route: file for front USB"
+   },
+   {
+    "widget_text": "Export for EasyWaveX (flash drive)...",
+    "note": "Fallback CSV for the EasyWaveX PC"
+   },
+   {
+    "widget_text": "Upload && Select",
+    "note": "Direct upload — LAN connection only"
+   }
+  ],
+  "subwindows": [
+   {
+    "name": "Export .bin for 4055B flash drive",
+    "how_opened": "Export .bin for 4055B flash drive..."
+   },
+   {
+    "name": "Export for EasyWaveX (flash drive)",
+    "how_opened": "Export for EasyWaveX (flash drive)..."
+   },
+   {
+    "name": "Discard changes? confirmation",
+    "how_opened": "Closing the editor window with unsaved edits"
+   }
+  ]
+ },
+ "DC Supply (BK 9174B)": {
+  "key": "DC Supply (BK 9174B)",
+  "area": "DC Supply (BK 9174B)",
+  "purpose": "Controls the B&K 9174B dual-output bench DC supply: per channel you stage a voltage and current limit, set hardware protection trips, watch live measured volts/amps/watts, and switch the output on or off. Setting values and energizing the terminals are deliberately separate actions.",
+  "controls": [
+   {
+    "label": "Connection / Reconnect",
+    "what": "Shows link status (red = not connected); Reconnect reopens the supply's USB-serial port."
+   },
+   {
+    "label": "Live readout (checkbox)",
+    "what": "Polls measured voltage, current, and power on both channels every 0.5 s (read-only)."
+   },
+   {
+    "label": "Channel 1 / Channel 2 (sub-tabs)",
+    "what": "Pick which of the two independent outputs the panel below controls."
+   },
+   {
+    "label": "Set Voltage (V)",
+    "what": "Voltage to program on this channel (0–70 V); takes effect on Apply."
+   },
+   {
+    "label": "Current Limit (A)",
+    "what": "Constant-current ceiling for this channel; the supply drops voltage to hold it."
+   },
+   {
+    "label": "Apply V / I limit",
+    "what": "Sends voltage and current limit to the channel — never touches the output switch."
+   },
+   {
+    "label": "Dual-range note",
+    "what": "Allowed combinations: up to 3 A at ≤35 V, only 1.5 A from 35–70 V; Apply refuses values outside this."
+   },
+   {
+    "label": "OVP (V) / OCP (A)",
+    "what": "Over-voltage / over-current hardware trip points (defaults 71 V / 3.1 A)."
+   },
+   {
+    "label": "Set Protection",
+    "what": "Writes the OVP/OCP trip points to the channel; do this before enabling output."
+   },
+   {
+    "label": "Readout (Set / Meas V / Meas I / Power)",
+    "what": "Programmed voltage plus measured volts, amps, and computed watts; updates with Live readout on."
+   },
+   {
+    "label": "Output: OFF / ON (button)",
+    "what": "Toggles the channel output; asks for confirmation before energizing and turns green when ON."
+   },
+   {
+    "label": "📖 Show Usage Tips",
+    "what": "Pops up a quick-reference summary of this tab."
+   }
+  ],
+  "workflow": [
+   "1. Check Connection is not red; press Reconnect if needed.",
+   "2. Pick the Channel 1 or Channel 2 sub-tab.",
+   "3. Enter OVP and OCP, press Set Protection.",
+   "4. Enter Set Voltage and Current Limit, press Apply V / I limit.",
+   "5. Press the Output button and confirm — it turns green ON.",
+   "6. Tick Live readout to watch measured V, A, and W.",
+   "7. Press the green Output button again to switch off when done."
+  ],
+  "cautions": [
+   "Apply V / I limit never switches the output — only the Output button energizes the terminals, and it asks first.",
+   "Closing the app leaves the supply exactly as-is: an ON output keeps powering the load.",
+   "The current limit is constant-current, not a fuse — at the limit the supply lowers voltage to hold the current, so set it just above the expected draw.",
+   "Above 35 V each output is capped at 1.5 A; Apply refuses voltage/current pairs outside the dual-range envelope.",
+   "To record readings over time use the Data Logging tab (writes per-channel psu CSVs) — Live readout only displays, it does not save."
+  ],
+  "callouts": [
+   {
+    "widget_text": "Apply V / I limit",
+    "note": "Stages V and limit; never switches output"
+   },
+   {
+    "widget_text": "Output: OFF",
+    "note": "Energizes terminals — confirms first, turns green"
+   },
+   {
+    "widget_text": "Set Protection",
+    "note": "Writes OVP/OCP hardware trip points"
+   },
+   {
+    "widget_text": "Live readout",
+    "note": "Poll measured V/A/W every 0.5 s"
+   },
+   {
+    "widget_text": "Reconnect",
+    "note": "Reopen serial link to the supply"
+   },
+   {
+    "widget_text": "Dual-range:  ≤35 V → up to 3 A,   35–70 V → up to 1.5 A",
+    "note": "Allowed voltage/current envelope per channel"
+   }
+  ],
+  "subwindows": [
+   {
+    "name": "Enable output confirmation",
+    "how_opened": "Pressing \"Output: OFF\" (asks before energizing the terminals)"
+   },
+   {
+    "name": "DC Supply Tips",
+    "how_opened": "📖 Show Usage Tips"
+   },
+   {
+    "name": "Out of range / Configuration Error dialogs",
+    "how_opened": "Apply V / I limit or Set Protection with invalid values"
+   }
+  ]
+ },
+ "DMM (BK 5493C)": {
+  "key": "DMM (BK 5493C)",
+  "area": "DMM (BK 5493C)",
+  "purpose": "Reads the bench B&K 5493C 6.5-digit multimeter over the lab network (this unit is Ethernet-only). Pick a measurement function and take a single reading or watch a live, continuously updated display.",
+  "controls": [
+   {
+    "label": "Not connected (status)",
+    "what": "Shows link state to the meter; red until a connection succeeds."
+   },
+   {
+    "label": "IP:",
+    "what": "The meter's LAN address (default 192.168.68.58); set it on the meter's front panel first."
+   },
+   {
+    "label": "Reconnect",
+    "what": "Connects (or retries) to the meter at the IP shown, on port 45454."
+   },
+   {
+    "label": "Function:",
+    "what": "What to measure: DC/AC Voltage, DC/AC Current, 2W/4W Resistance, Frequency, Capacitance — all auto-ranged."
+   },
+   {
+    "label": "Live reading",
+    "what": "Polls the selected function every 0.5 s (~2 Hz) while ticked."
+   },
+   {
+    "label": "Read once",
+    "what": "Takes a single measurement of the selected function."
+   },
+   {
+    "label": "Big readout",
+    "what": "Latest reading in engineering notation (e.g. 16.74 mV); turns red \"OVLD\" on overload or a non-numeric reply."
+   },
+   {
+    "label": "Small line under readout",
+    "what": "The function name plus the raw value and unit."
+   },
+   {
+    "label": "📖 Show Usage Tips",
+    "what": "Opens a short reference on connection, use, and logging."
+   }
+  ],
+  "workflow": [
+   "On the meter's front panel: Menu -> I/O / LAN, use \"DHCP Once\" to get an address on the bench subnet.",
+   "Type that IP into the IP: field and click Reconnect; status turns green.",
+   "Pick a Function from the dropdown (starts on DC Voltage).",
+   "Click Read once, or tick Live reading for a continuous ~2 Hz display.",
+   "Read the big number; the grey line beneath shows the raw value and unit.",
+   "To record: tick \"DMM\" on the Data Logging tab — it logs the function selected here to CSV."
+  ],
+  "cautions": [
+   "This unit is LAN-only — its USB never enumerated (known hardware issue). Do not troubleshoot USB; fix the network instead.",
+   "The meter's socket accepts one client at a time. If Reconnect keeps failing, close any other program (or stale session) talking to it, or power-cycle the meter.",
+   "Data Logging records the Function selected at the moment you start logging; changing the dropdown mid-log does not change what is recorded.",
+   "OVLD means overload or no valid reading — the previous number is gone, not held.",
+   "On Windows this tab is view-only: instrument connections are disabled, so Reconnect and readings only work on the lab (Linux) machine."
+  ],
+  "callouts": [
+   {
+    "widget_text": "Not connected",
+    "note": "Connection status — green when linked"
+   },
+   {
+    "widget_text": "IP:",
+    "note": "Meter's LAN address, port 45454"
+   },
+   {
+    "widget_text": "Reconnect",
+    "note": "Connect / retry at this IP"
+   },
+   {
+    "widget_text": "Function:",
+    "note": "Choose what to measure"
+   },
+   {
+    "widget_text": "Live reading",
+    "note": "Continuous display, 2 per second"
+   },
+   {
+    "widget_text": "Read once",
+    "note": "Single measurement"
+   },
+   {
+    "widget_text": "—",
+    "note": "Reading appears here; OVLD on overload"
+   },
+   {
+    "widget_text": "📖 Show Usage Tips",
+    "note": "Quick reference dialog"
+   }
+  ],
+  "subwindows": [
+   {
+    "name": "DMM Tips (info dialog)",
+    "how_opened": "📖 Show Usage Tips"
+   }
+  ]
+ },
+ "SLDEA Test": {
+  "key": "SLDEA Test",
+  "area": "SLDEA Test",
+  "purpose": "Runs an automated voltage-staircase test on a single-layer DEA: the signal generator drives the Trek HV amplifier (1 V control = 1 kV, max 10 kV), the scope logs the Trek's V_Out/I_Out monitors, and the webcam photographs the electrode at each voltage landing. Each run produces a self-contained folder (setup.txt, data.csv, frames/) ready for the Edge Review analysis program.",
+  "controls": [
+   {
+    "label": "Start / End / Step (kV)",
+    "what": "Defines the voltage staircase; End must be 10 kV or below."
+   },
+   {
+    "label": "Ramp (s) / Landing (s)",
+    "what": "Transition time between levels and hold time at each level."
+   },
+   {
+    "label": "Settle (s) / Snap lead (s)",
+    "what": "When the two photos per landing are taken: settle = wait after the ramp before the post-ramp photo; snap lead = how long before the next ramp the pre-ramp photo fires."
+   },
+   {
+    "label": "Repeat / Up/down (hysteresis)",
+    "what": "Repeat the whole sweep N times; Up/down adds a descending leg for hysteresis curves."
+   },
+   {
+    "label": "0 kV baseline frame",
+    "what": "Takes the reference photo at 0 kV — Edge Review measures all areas against it, so leave it ticked."
+   },
+   {
+    "label": "Preview — kV vs time",
+    "what": "Live plot of the staircase; dots mark photo moments (gray baseline, green post-ramp, red pre-ramp) and a red playhead tracks a running test."
+   },
+   {
+    "label": "Output dir / Run name (blank = auto)",
+    "what": "Where the run folder is created; blank name auto-stamps SLDEA_YYYYMMDD_HHMMSS."
+   },
+   {
+    "label": "V_Out / I_Out scope CH, SG CH",
+    "what": "Which scope channels carry the Trek monitor outputs and which SG channel drives the Trek."
+   },
+   {
+    "label": "DEA diam (mm)",
+    "what": "Nominal resting diameter of the active area — written to setup.txt and used as the px-to-mm scale in Edge Review."
+   },
+   {
+    "label": "Trek inverts (negate control)",
+    "what": "Tick when the Trek is configured inverting; the run then drives negative control so the HV output stays positive."
+   },
+   {
+    "label": "⚡ Breakdown watchdog (LIVE runs)",
+    "what": "Watches Trek current during live runs; current above Trip (µA) sustained for Confirm (s) snapshots the breakdown, ramps to 0 and aborts. Transient spikes never trip it."
+   },
+   {
+    "label": "DRY RUN — HV OFF / ▶ Run / ■ Abort",
+    "what": "Dry run rehearses timing and photos with HV off; unticking turns the row red for a live run. Abort ramps to 0 kV before stopping."
+   },
+   {
+    "label": "Auto-open Edge Review",
+    "what": "When a run finishes with frames, launches Edge Review on it and starts a default detection pass."
+   },
+   {
+    "label": "🔍 Edge Review… / 🎚 Tune params…",
+    "what": "Open the analysis program, or the live slider tuner that redraws outlines as you drag thresholds and saves them into the run's setup.txt."
+   },
+   {
+    "label": "Run log",
+    "what": "Timestamped record of the run: directory path, each landing, watchdog status, warnings."
+   }
+  ],
+  "workflow": [
+   "1. Enter the staircase: Start/End/Step kV, Ramp and Landing times.",
+   "2. Check the preview and summary line — dots are photos, total time shown.",
+   "3. Set Output dir, DEA diam (mm), and the scope/SG channels.",
+   "4. Do a dry run first to rehearse timing and camera captures.",
+   "5. Untick DRY RUN; answer the scope-monitor and Energize HV prompts.",
+   "6. In camera pre-flight, center the DEA in the circle, check focus, start.",
+   "7. Let it finish (or ■ Abort); Edge Review opens on the new run folder."
+  ],
+  "cautions": [
+   "A live run drives real HV up to 10 kV through the Trek. Always stop with ■ Abort (it ramps to 0 kV first); closing the app mid-run can leave the Trek energized.",
+   "If the scope-monitor check warns and you pick 'run anyway', the run completes but logs blank measured kV and wrong currents — this silently ruined five runs on 2026-07-25.",
+   "A wrong DEA diameter corrupts the px-to-mm scale: every area number from that run is wrong and setup.txt must be hand-fixed before re-analysis.",
+   "Running live with no scope means no measured kV/µA columns and no breakdown watchdog — the run continues even through a breakdown.",
+   "Untick '0 kV baseline frame' and Edge Review has no reference image — the first mid-run frame silently becomes the baseline and every outline is wrong.",
+   "During a live run the driven SG channel is locked; its Signal Gen tab controls refuse changes until the run ends.",
+   "On Windows (no instruments connected) only DRY RUN works — a live run refuses to start."
+  ],
+  "callouts": [
+   {
+    "widget_text": "DRY RUN — HV OFF",
+    "note": "Safety toggle — untick for live HV"
+   },
+   {
+    "widget_text": "▶ Run (DRY)",
+    "note": "Starts the run; label shows mode"
+   },
+   {
+    "widget_text": "■ Abort",
+    "note": "Ramps to 0 kV, then stops"
+   },
+   {
+    "widget_text": "⚡ Breakdown watchdog (LIVE runs)",
+    "note": "Aborts on sustained overcurrent"
+   },
+   {
+    "widget_text": "🎚 Tune params…",
+    "note": "Tune edge thresholds; saves to setup.txt"
+   },
+   {
+    "widget_text": "🔍 Edge Review…",
+    "note": "Analyze a finished run"
+   },
+   {
+    "widget_text": "DEA diam (mm):",
+    "note": "Sets the px-to-mm scale"
+   },
+   {
+    "widget_text": "0 kV baseline frame",
+    "note": "Reference photo — keep ticked"
+   }
+  ],
+  "subwindows": [
+   {
+    "name": "Camera pre-flight — SLDEA run",
+    "how_opened": "▶ Run (any mode) — snapshot with centering reticle; ✔ Looks good — start run / ✎ Adjust (open Webcam tab) / ✖ Cancel"
+   },
+   {
+    "name": "Scope monitor setup (auto-fix prompt)",
+    "how_opened": "▶ Run — LIVE HV, when the scope scaling cannot record the run"
+   },
+   {
+    "name": "Energize HV? confirmation",
+    "how_opened": "▶ Run — LIVE HV, final confirmation before driving the Trek"
+   },
+   {
+    "name": "SLDEA Edge Review (separate program)",
+    "how_opened": "🔍 Edge Review…, or automatically at run end when Auto-open Edge Review is ticked"
+   },
+   {
+    "name": "Edge parameter tuner (separate program)",
+    "how_opened": "🎚 Tune params…"
+   }
+  ]
+ },
+ "Data Logging": {
+  "key": "Data Logging",
+  "area": "Data Logging",
+  "purpose": "Records readings from the connected instruments to CSV files at a fixed interval — one timestamped file per source, so a run captures stimulus (sig gen, supply) and response (LCR, scope, DMM) side by side. Files are for offline analysis (Excel, Python); there is no live plot on this tab.",
+  "controls": [
+   {
+    "label": "Log Directory: + Browse",
+    "what": "Folder where the CSV files are written (default ./logs); created automatically if missing."
+   },
+   {
+    "label": "Sample Interval (s):",
+    "what": "Seconds between samples; every ticked source is read once per interval."
+   },
+   {
+    "label": "LCR Meter",
+    "what": "Log the LCR reading each tick: mode, frequency, primary, secondary, status."
+   },
+   {
+    "label": "Oscilloscope Channels (CH1–CH4)",
+    "what": "Log scope measurements per ticked channel: frequency, period, mean, pk-pk, RMS, amplitude."
+   },
+   {
+    "label": "Sig Gen (stimulus) (CH1/CH2)",
+    "what": "Log what was driving the DUT: waveform, frequency, amplitude, offset, output ON/OFF."
+   },
+   {
+    "label": "DC Supply (BK 9174B) (CH1/CH2)",
+    "what": "Log set voltage, measured voltage, measured current, and calculated power per channel."
+   },
+   {
+    "label": "DMM (BK 5493C — selected function)",
+    "what": "Log the function currently selected on the DMM tab (value + unit)."
+   },
+   {
+    "label": "Start Logging",
+    "what": "Opens one fresh timestamped CSV per ticked source and begins sampling; sources not connected are skipped with a notice."
+   },
+   {
+    "label": "Stop Logging",
+    "what": "Closes the files and ends the run (takes effect within about a second)."
+   },
+   {
+    "label": "Log Status",
+    "what": "Run messages: where each CSV was opened, per-source errors, dropped sources."
+   },
+   {
+    "label": "📖 Show Usage Tips",
+    "what": "Popup listing the exact CSV columns per instrument and analysis hints."
+   }
+  ],
+  "workflow": [
+   "1. Connect and configure the instruments on their own tabs first.",
+   "2. Pick a Log Directory (Browse) or keep ./logs.",
+   "3. Enter the Sample Interval in seconds (e.g. 1.0).",
+   "4. Tick every source you want recorded.",
+   "5. Click Start Logging and note the CSV paths in Log Status.",
+   "6. Watch Log Status during the run for errors or dropped sources.",
+   "7. Click Stop Logging, then open the CSVs in Excel or Python."
+  ],
+  "cautions": [
+   "A source that errors 5 times in a row is silently dropped for the rest of the run (one notice in Log Status) — check Log Status after long runs; if every source dies, logging stops itself.",
+   "The DMM is logged with whatever function was selected on the DMM tab at the moment you pressed Start Logging — changing the function mid-run does not change what is recorded.",
+   "Sources are read one after another each tick, so with many sources or slow instruments the real spacing can be longer than the Sample Interval you typed.",
+   "On a PC with no instruments connected, Start Logging refuses with \"Nothing to log\" — every ticked source must be connected on its tab.",
+   "Files are flushed after every sample, so a crash or power loss loses at most the last row — but each Start opens new files; nothing is ever appended to an old run."
+  ],
+  "callouts": [
+   {
+    "widget_text": "Log Directory:",
+    "note": "CSV files are saved here"
+   },
+   {
+    "widget_text": "Sample Interval (s):",
+    "note": "seconds between samples"
+   },
+   {
+    "widget_text": "Log Instruments:",
+    "note": "tick every source to record"
+   },
+   {
+    "widget_text": "Start Logging",
+    "note": "opens fresh CSVs, begins sampling"
+   },
+   {
+    "widget_text": "Stop Logging",
+    "note": "closes files, ends the run"
+   },
+   {
+    "widget_text": "Log Status",
+    "note": "file paths, errors, dropped sources"
+   },
+   {
+    "widget_text": "📖 Show Usage Tips",
+    "note": "CSV column reference and tips"
+   }
+  ],
+  "subwindows": [
+   {
+    "name": "Folder picker (system dialog)",
+    "how_opened": "Browse"
+   },
+   {
+    "name": "Data Logging Tips (info popup)",
+    "how_opened": "📖 Show Usage Tips"
+   }
+  ]
+ },
+ "Battery Data": {
+  "key": "Battery Data",
+  "area": "Battery Data",
+  "purpose": "Post-processes exports from the battery cycler: load the tester's .xls/.xlsx file and the tab translates the Mandarin headers and status labels to English, merges all detail sheets into one table, and converts mV to V. From there you can export a clean CSV or make plots. Works on any PC — no instrument connection involved.",
+  "controls": [
+   {
+    "label": "Load File…",
+    "what": "Opens a cycler .xls/.xlsx export and processes it in the background; the gray label beside it shows the filename plus row and column counts when done."
+   },
+   {
+    "label": "Export Processed CSV…",
+    "what": "Saves the full translated table as a CSV (default name: <file>_processed.csv)."
+   },
+   {
+    "label": "Batch Plot / Custom Plot",
+    "what": "Inner tabs that switch between one-click per-cycle plotting and a build-your-own plot panel."
+   },
+   {
+    "label": "Plot style: Line / Scatter (Batch Plot)",
+    "what": "Draw batch plots as connected lines or as dots."
+   },
+   {
+    "label": "Time unit (Batch Plot)",
+    "what": "Seconds, minutes, or hours for the time axis of batch plots."
+   },
+   {
+    "label": "Generate All Cycle Plots",
+    "what": "Asks for an output folder, then saves two 300-dpi PNGs per cycle: voltage vs time and voltage vs capacity."
+   },
+   {
+    "label": "Progress bar (Batch Plot)",
+    "what": "Fills as batch plots are written; the status text ends with a count and the folder."
+   },
+   {
+    "label": "X Axis / Y Axis (Custom Plot)",
+    "what": "Pick any numeric column for each axis; defaults to relative_time_s vs voltage_V."
+   },
+   {
+    "label": "Style: Line / Scatter (Custom Plot)",
+    "what": "Line or dot rendering for the custom plot."
+   },
+   {
+    "label": "Color by status",
+    "what": "Splits the trace into colored segments per charge/discharge/rest state, with a legend."
+   },
+   {
+    "label": "Time unit (Custom Plot)",
+    "what": "Rescales time-based axes to seconds, minutes, or hours."
+   },
+   {
+    "label": "Cycles: All cycles / Selected:",
+    "what": "Plot everything, or type cycle numbers like 1,2,3 or 1-5 in the entry box."
+   },
+   {
+    "label": "Preview Plot",
+    "what": "Draws the plot in the panel on the right; use the toolbar under it to zoom and pan."
+   },
+   {
+    "label": "Save as PNG (300 dpi)…",
+    "what": "Redraws the custom plot and saves it as a 300-dpi PNG."
+   }
+  ],
+  "workflow": [
+   "Click Load File… and pick the untouched cycler export (.xls/.xlsx).",
+   "Wait until the label shows the filename with row and column counts.",
+   "Optional: click Export Processed CSV… to save the translated table.",
+   "For per-cycle PNGs: on Batch Plot, set style and time unit, click Generate All Cycle Plots, pick a folder.",
+   "For one specific plot: on Custom Plot, choose X and Y columns, style, and cycles.",
+   "Click Preview Plot to check it in the panel.",
+   "Click Save as PNG (300 dpi)… to export it."
+  ],
+  "cautions": [
+   "Batch plotting overwrites existing PNGs with the same cycle-numbered names in the chosen folder without asking.",
+   "During batch plotting the window ignores clicks until it finishes — watch the progress bar, do not force-close.",
+   "Batch plots deliberately leave out rest periods; only charge/discharge segments appear. Use Custom Plot with Color by status to see rests.",
+   "In the Selected cycles box, unreadable entries are silently skipped — if nothing parses, ALL cycles are plotted, not none.",
+   "Load only the raw tester export: it must keep its original sheet layout (Info first, Cycle summary last). Re-saved or trimmed files fail to load or pull in the wrong sheets."
+  ],
+  "callouts": [
+   {
+    "widget_text": "Load File…",
+    "note": "open the cycler export here"
+   },
+   {
+    "widget_text": "Export Processed CSV…",
+    "note": "save translated table as CSV"
+   },
+   {
+    "widget_text": "Generate All Cycle Plots",
+    "note": "two PNGs per cycle, 300 dpi"
+   },
+   {
+    "widget_text": "Color by status",
+    "note": "colors charge/discharge/rest segments"
+   },
+   {
+    "widget_text": "Preview Plot",
+    "note": "draw plot in right panel"
+   },
+   {
+    "widget_text": "Save as PNG (300 dpi)…",
+    "note": "export the previewed plot"
+   }
+  ],
+  "subwindows": [
+   {
+    "name": "Select Battery Tester File (open dialog)",
+    "how_opened": "Load File…"
+   },
+   {
+    "name": "Save Processed CSV (save dialog)",
+    "how_opened": "Export Processed CSV…"
+   },
+   {
+    "name": "Select Output Folder for Cycle Plots (folder picker)",
+    "how_opened": "Generate All Cycle Plots"
+   },
+   {
+    "name": "Save Plot (save dialog)",
+    "how_opened": "Save as PNG (300 dpi)…"
+   }
+  ]
+ },
+ "Webcam": {
+  "key": "Webcam",
+  "area": "Webcam",
+  "purpose": "Live view and photo capture from the bench USB/industrial camera. Take single snapshots, timelapse series, or automated runs where each photo is tied to a signal-generator voltage or to a delay after a start trigger — with an on-screen focus score to help you sharpen the lens first.",
+  "controls": [
+   {
+    "label": "Camera + Refresh",
+    "what": "Pick the video device number; Refresh rescans after plugging or unplugging a camera."
+   },
+   {
+    "label": "Start Preview",
+    "what": "Live view of the selected camera; the same button stops it."
+   },
+   {
+    "label": "Snapshot",
+    "what": "Saves the current preview frame as a timestamped PNG in the save folder."
+   },
+   {
+    "label": "Show focus score",
+    "what": "Overlays a live sharpness number and a green area-of-interest circle — higher = sharper; turn the lens to maximise it."
+   },
+   {
+    "label": "Camera controls panel",
+    "what": "One field per camera knob (exposure, gain, white balance…), built from what the camera reports."
+   },
+   {
+    "label": "🔒 Apply & Lock",
+    "what": "Writes every panel value to the camera, keeps re-asserting them during all captures, and saves them for the next start."
+   },
+   {
+    "label": "Read camera",
+    "what": "Refills the fields from the camera's current state."
+   },
+   {
+    "label": "Auto-expose",
+    "what": "Searches for an exposure giving a mid-grey image and fills it in; then Apply & Lock."
+   },
+   {
+    "label": "Auto-WB once",
+    "what": "One-shot grey-world colour balance on the current scene; stop the preview first."
+   },
+   {
+    "label": "Stabilize (pin gain 0)",
+    "what": "Pins gain at 0 (defeats the firmware auto-gain) and finds a matching exposure — the only drift-free combo."
+   },
+   {
+    "label": "Save to / Prefix",
+    "what": "Output folder and the start of every saved filename (e.g. cap_0003_1p9V_….png)."
+   },
+   {
+    "label": "Interval capture",
+    "what": "Automatic snapshot every N seconds; count 0 keeps going until you press Stop."
+   },
+   {
+    "label": "Stepped capture (Run sweep)",
+    "what": "Sets the chosen sig-gen channel to each voltage (start/stop/step or an explicit list), waits the dwell, saves a photo per level."
+   },
+   {
+    "label": "log focus CSV",
+    "what": "Also writes a CSV with one row per shot: level or delay, filename, sharpness score."
+   },
+   {
+    "label": "Waveform-synced capture",
+    "what": "Photos at chosen delays after t=0 (Start click or a channel burst trigger) — for imaging fixed points of a slow ramp/hold run."
+   }
+  ],
+  "workflow": [
+   "Pick the camera number and click Start Preview.",
+   "Tick Show focus score; turn the lens until the number peaks.",
+   "Set exposure/colour (or use Stabilize), then 🔒 Apply & Lock.",
+   "Set the save folder and filename prefix.",
+   "Snapshot for one photo, or Start interval for a timelapse.",
+   "For voltage-vs-image runs: fill start/stop/step and dwell, click Run sweep.",
+   "Each filename carries shot number, timestamp, and the level."
+  ],
+  "cautions": [
+   "Run sweep and the burst-trigger option need the signal generator connected — on an offline (e.g. Windows) machine they refuse to start.",
+   "Before a sweep, turn the channel's Output ON in the Signal Gen tab — otherwise the levels are written but never reach the device, and you get a folder of identical photos.",
+   "A sweep leaves the generator sitting at the LAST level when it ends — it does not return the output to zero.",
+   "Starting a sweep or timed capture stops the live preview to free the camera; a running interval capture stops with it.",
+   "Without 🔒 Apply & Lock the camera's firmware auto-gain/auto-WB drifts brightness and colour mid-run.",
+   "The focus CSV is rewritten on every run with the same prefix — change the prefix to keep the previous one."
+  ],
+  "callouts": [
+   {
+    "widget_text": "Start Preview",
+    "note": "Live view; click again to stop"
+   },
+   {
+    "widget_text": "Snapshot",
+    "note": "Save one timestamped PNG"
+   },
+   {
+    "widget_text": "Show focus score",
+    "note": "Higher = sharper; peak it while focusing"
+   },
+   {
+    "widget_text": "🔒 Apply & Lock",
+    "note": "Locks every camera knob for all captures"
+   },
+   {
+    "widget_text": "Save to:",
+    "note": "All images land in this folder"
+   },
+   {
+    "widget_text": "Start interval",
+    "note": "Automatic photo every N seconds"
+   },
+   {
+    "widget_text": "Run sweep",
+    "note": "Steps sig-gen voltage, photo per level"
+   },
+   {
+    "widget_text": "Start timed capture",
+    "note": "Photos at set delays after t=0"
+   }
+  ],
+  "subwindows": [
+   {
+    "name": "Folder picker (choose save folder)",
+    "how_opened": "Browse"
+   }
+  ]
+ },
+ "Companion tools": {
+  "key": "Companion tools",
+  "area": "Companion tools",
+  "purpose": "Three stand-alone programs ship beside the Multitool for working on recorded SLDEA runs; they touch no instruments, so any PC holding a copy of the run data works. Reach for the edge tuner when outlines look wrong (drag sliders, watch live), Edge Review to trace and human-check every frame of a run, and the headless diagnostic when no amount of slider-dragging helps — it measures why the run will not tune.",
+  "controls": [
+   {
+    "label": "Tune_SLDEA_Windows.bat",
+    "what": "Double-click, or drag a run folder onto it; builds its own small Python environment on first run. Add /diag to run the diagnostic instead of the tuner."
+   },
+   {
+    "label": "Bench shortcuts 1 / 2 / 3",
+    "what": "Typing 1, 2 or 3 as the run argument opens one of the three bench runs; only live on PCs where the OneDrive folder is synced, inert elsewhere."
+   },
+   {
+    "label": "SCPI_SLDEA_DIR",
+    "what": "Set once (setx SCPI_SLDEA_DIR \"C:\\SLDEA\", new window required) and every no-argument launch — launcher, tuner, tab buttons — resolves the newest run under it."
+   },
+   {
+    "label": "Blur (px, odd)",
+    "what": "Tuner slider: noise smoothing before differencing — higher is smoother."
+   },
+   {
+    "label": "Diff thresh (0=auto Otsu)",
+    "what": "Tuner slider: fixed change threshold; 0 lets the algorithm pick one per frame."
+   },
+   {
+    "label": "No-change gate (diff p99)",
+    "what": "Tuner slider: below this the frame counts as unchanged vs baseline (no outline)."
+   },
+   {
+    "label": "Min fill / Search ROI / Electrode mask / Wrinkle-mode sliders",
+    "what": "The remaining shape and mask settings; the grey hint beside each slider says what it does."
+   },
+   {
+    "label": "Match frame to baseline: gain+offset (norm_bg)",
+    "what": "Cancels camera exposure drift before differencing; leave on unless comparing to an old run."
+   },
+   {
+    "label": "💾 Save to setup.txt / Reset to defaults",
+    "what": "Save writes the tuned values into the run's setup.txt for Edge Review and auto-process; Reset restores stock values."
+   },
+   {
+    "label": "Run: + Browse… + ▶ Detect Edges (Edge Review)",
+    "what": "Pick a run (✓ processed marks finished ones) and trace every frame; a progress bar and elapsed clock run until Save."
+   },
+   {
+    "label": "Candidates A/B/C + D: trace by hand (Edge Review)",
+    "what": "Pick the correct outline per queued frame — keys 1/2/3 pick, R rejects, 4/D opens the hand tracer, Enter accepts and moves on."
+   },
+   {
+    "label": "📏 Calibrate… (Edge Review)",
+    "what": "Click the resting disc's two opposite edges on the baseline frame to set the mm-per-pixel scale manually."
+   },
+   {
+    "label": "Advanced… (Edge Review)",
+    "what": "Every detection setting with an explanation; Apply for this session, Apply + Save to write setup.txt. Re-run Detect afterwards."
+   },
+   {
+    "label": "💾 Save to data.csv… (Edge Review)",
+    "what": "Writes accepted areas into the run's data.csv after a confirm prompt; keeps data.csv.bak and saves an area-vs-voltage plot plus outline overlays."
+   },
+   {
+    "label": "sldea_diag.py (headless)",
+    "what": "Run it on a run folder (or via /diag) when tuning fails; writes sldea_diag.txt/.json/.png into the run, changes nothing — the .json is small enough to send on."
+   }
+  ],
+  "workflow": [
+   "Copy the run folder to local disk (tuning re-reads frames constantly; the share is slow).",
+   "Double-click Tune_SLDEA_Windows.bat, or drag the run folder onto it (bench runs: just type 1, 2 or 3).",
+   "Check the panel labelled baseline really shows the 0 kV image.",
+   "Drag sliders until the outlines hug the active area in all three panels.",
+   "Click 💾 Save to setup.txt.",
+   "Open Edge Review on the same folder (--auto starts detection immediately) and work the review queue.",
+   "💾 Save to data.csv… when the queue is empty; if it still will not tune, run the /diag diagnostic instead of another slider session."
+  ],
+  "cautions": [
+   "Tuner Save writes into that run folder's setup.txt. If you tuned a local copy, copy setup.txt back to the master run or the review pass will not use your tuning.",
+   "If the run's baseline frame is missing or unreadable, the first loadable frame silently becomes the reference and every outline is wrong — always verify the baseline panel shows the 0 kV image.",
+   "In Edge Review, ▶ Detect Edges starts clean: picks and rejects from a previous pass are discarded (hand-traced polygons are already safe in edge_labels.json). Save before re-detecting.",
+   "Edge Review's Save rewrites data.csv (a .bak is kept) and renames frame files from the first breakdown onward with a _BREAKDOWN suffix — read the counts in the confirm prompt before answering Yes.",
+   "The tuner and Edge Review need Python installed with the \"tcl/tk and IDLE\" option ticked; the diagnostic opens no window and runs fine without it — use /diag on such machines.",
+   "Bench shortcuts 1/2/3 only resolve on the PCs with the OneDrive run folder synced; anywhere else pass the real folder path."
+  ],
+  "callouts": [
+   {
+    "widget_text": "💾 Save to setup.txt",
+    "note": "writes tuned values into this run"
+   },
+   {
+    "widget_text": "Reset to defaults",
+    "note": "back to stock settings"
+   },
+   {
+    "widget_text": "Diff thresh (0=auto Otsu)",
+    "note": "change threshold; 0 = auto per frame"
+   },
+   {
+    "widget_text": "No-change gate (diff p99)",
+    "note": "below this, frame reads unchanged"
+   },
+   {
+    "widget_text": "Match frame to baseline: gain+offset (norm_bg)",
+    "note": "cancels camera exposure drift"
+   },
+   {
+    "widget_text": "Shade detected region",
+    "note": "fills the chosen outline"
+   },
+   {
+    "widget_text": "outlines here = exactly what Edge Review will produce",
+    "note": "same algorithm, not a preview"
+   }
+  ],
+  "subwindows": [
+   {
+    "name": "Saved (tuner confirmation)",
+    "how_opened": "💾 Save to setup.txt"
+   },
+   {
+    "name": "Edge detection settings (Edge Review)",
+    "how_opened": "Advanced…"
+   },
+   {
+    "name": "Calibrate scale — click the disc's two opposite edges (Edge Review)",
+    "how_opened": "📏 Calibrate…"
+   },
+   {
+    "name": "Trace boundary (manual tracer, Edge Review)",
+    "how_opened": "D: ✏ trace by hand… (or keys 4 / D / T)"
+   },
+   {
+    "name": "Save results confirm prompt (Edge Review)",
+    "how_opened": "💾 Save to data.csv…"
+   },
+   {
+    "name": "Run folder picker (launcher)",
+    "how_opened": "Launching Tune_SLDEA_Windows.bat with no folder and no SCPI_SLDEA_DIR set"
+   }
+  ]
+ }
+}

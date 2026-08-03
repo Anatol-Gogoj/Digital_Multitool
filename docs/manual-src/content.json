@@ -880,8 +880,8 @@
     "what": "Repeat the whole sweep N times; Up/down adds a descending leg for hysteresis curves."
    },
    {
-    "label": "0 kV baseline frame",
-    "what": "Takes the reference photo at 0 kV — Edge Review measures all areas against it, so leave it ticked."
+    "label": "0 kV baseline photo",
+    "what": "Captured automatically at the start of every run — Edge Review measures all areas against it. (No longer a checkbox: unticking it silently broke every outline.)"
    },
    {
     "label": "Preview — kV vs time",
@@ -917,7 +917,7 @@
    },
    {
     "label": "🔍 Edge Review… / 🎚 Tune params…",
-    "what": "Open the analysis program, or the live slider tuner that redraws outlines as you drag thresholds and saves them into the run's setup.txt."
+    "what": "Open the analysis program, or the live slider tuner. Tune params is advanced and confirmation-gated — its Save rewrites the run's setup.txt."
    },
    {
     "label": "Run log",
@@ -938,7 +938,7 @@
    "If the scope-monitor check warns and you pick 'run anyway', the run completes but logs blank measured kV and wrong currents — this silently ruined five runs on 2026-07-25.",
    "A wrong DEA diameter corrupts the px-to-mm scale: every area number from that run is wrong and setup.txt must be hand-fixed before re-analysis.",
    "Running live with no scope means no measured kV/µA columns and no breakdown watchdog — the run continues even through a breakdown.",
-   "Untick '0 kV baseline frame' and Edge Review has no reference image — the first mid-run frame silently becomes the baseline and every outline is wrong.",
+   "🎚 Tune params… is an advanced tool: it asks for confirmation first, and its Save rewrites the run's setup.txt — the detection settings every later analysis pass will use.",
    "During a live run the driven SG channel is locked; its Signal Gen tab controls refuse changes until the run ends.",
    "On Windows (no instruments connected) only DRY RUN works — a live run refuses to start."
   ],

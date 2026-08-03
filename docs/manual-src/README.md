@@ -11,6 +11,8 @@ coordinates. When the GUI changes visibly, regenerate rather than hand-edit.
 | Script | What it does | Output (in `build/`, untracked) |
 |---|---|---|
 | `capture.py` | Launches the real `gui.py` (window pops up briefly), screenshots the splash, all 9 tabs, the Arb Editor and both export dialogs, and records the bbox of every labelled widget | `shots/*.png`, `shots/widgets.json` |
+| `capture_edge_review.py` | Opens Edge Review on a real run (defaults to bench run 1), runs a blocking detection pass, screenshots a frame showing all three candidates. Never clicks Save | `shots/40_edge_review.png` (+ appends to `widgets.json`) |
+| `capture_tuner_dialog.py` | Screenshots the Tune-params advanced-tool gate, then takes the Cancel path | `shots/41_tuner_warning.png` |
 | `annotate.py` | Draws the red capsules, arrows and numbered badges from curated per-image specs, matching callouts to exact widget `text=` strings | `annotated/*.png`, `annotated/legends.json` |
 | `build_manual.py` | Assembles the HTML from `content.json` (the manual copy) + legends + images | `../digital-multitool-manual.html` |
 
@@ -22,6 +24,8 @@ Windows, with a Python 3.10+ that has tkinter ("tcl/tk and IDLE" ticked):
 py -3 -m venv .venv
 .venv\Scripts\pip install numpy pillow opencv-python-headless pandas matplotlib openpyxl pyvisa pyvisa-py pyserial
 .venv\Scripts\python capture.py
+.venv\Scripts\python capture_edge_review.py     [run folder]
+.venv\Scripts\python capture_tuner_dialog.py
 .venv\Scripts\python "%REPO%\sldea_tuner.py" --selftest build\shots\30_tuner_selftest.png
 .venv\Scripts\python "%REPO%\sldea_diag.py"  --selftest build\shots\31_diag_selftest.png
 .venv\Scripts\python annotate.py
@@ -44,4 +48,9 @@ Notes:
 - `annotate.py` uses `C:/Windows/Fonts/arialbd.ttf`; on another OS point it
   at any bold TrueType font.
 - After rebuilding, spot-check the annotated PNGs in `build/annotated/` —
-  layout drift can put a badge on top of a label.
+  layout drift can put a badge on top of a label. Badge placement is
+  automatic but overridable per callout with `badge_side` (`left`/`right`/
+  `top`/`bottom`/`tl`/`tr`/`bl`/`br`) or an exact `badge_at: [x, y]`.
+- `capture_edge_review.py` needs a hydrated run folder with frames. It runs
+  a real detection pass (~15 s for 81 frames) and never clicks Save, so the
+  run's `data.csv` and `setup.txt` are left alone.

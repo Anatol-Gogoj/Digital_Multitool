@@ -74,7 +74,7 @@ S["overview"] = {
         {"match": "Reconnect", "label": "Re-detects this one instrument after power-on or replug"},
         {"match": "Non-Linux platform", "badge_side": "top",
          "label": "Status bar — confirmations and warnings appear here"},
-        {"match": "v0.32.2+9725a59", "label": "Exact version — quote it when reporting a problem"},
+        {"match": "v0.32.2", "label": "Exact version — quote it when reporting a problem"},
     ],
 }
 
@@ -102,7 +102,7 @@ S["02_Oscilloscope__MSO24_"] = {
          "label": "Tick the channel that should trigger acquisition"},
         {"match": "Apply CH1 Config", "label": "Sends this channel only — does not touch the trigger"},
         {"match": "Apply All Settings", "label": "The only button that sends trigger source, level and slope"},
-        {"match": "Get CH1 Measurements", "badge_at": [49, 722],
+        {"match": "Get CH1 Measurements", "badge_at": [160, 634],
          "label": "Readouts are snapshots — click to refresh"},
         {"match": "Capture CH1 Waveform", "label": "Pulls the trace into a plot window with Save CSV"},
         {"match": "Acquisition Control", "label": "Run / Stop / Single / AutoSet"},
@@ -139,7 +139,7 @@ S["05_DMM__BK_5493C_"] = {
     "callouts": [
         {"match": "IP:", "extend_right": 95, "label": "The meter's LAN address — this unit is Ethernet-only"},
         {"match": "Reconnect", "label": "Connect / retry at this IP"},
-        {"match": "Function:", "extend_right": 170, "label": "What to measure — V, A, Ω, Hz, F (auto-ranged)"},
+        {"match": "Function:", "extend_right": 130, "label": "What to measure — V, A, Ω, Hz, F (auto-ranged)"},
         {"match": "Live reading", "badge_at": [302, 178],
          "label": "Continuous display, ~2 readings per second"},
         {"match": "Read once", "label": "Single measurement"},
@@ -161,7 +161,7 @@ S["06_Data_Logging"] = {
 
 S["07_Battery_Data"] = {
     "callouts": [
-        {"match": "Load File…", "badge_side": "tl", "label": "Open the raw cycler .xls/.xlsx export"},
+        {"match": "Load File…", "badge_at": [19, 260], "label": "Open the raw cycler .xls/.xlsx export"},
         {"match": "No file loaded", "label": "Shows filename + rows × columns when processed"},
         {"match": "Export Processed CSV…", "label": "Translated, merged table → CSV"},
         {"union": ["Plot style:", "Time unit:"], "extend_right": 85,
@@ -187,14 +187,16 @@ S["08_Webcam"] = {
 S["09_SLDEA_Test"] = {
     "callouts": [
         {"match": "Test Profile (voltages in kV",
-         "label": "The voltage staircase — start/end/step, ramp and landing times"},
-        {"match": "0 kV baseline frame", "label": "Reference photo — keep ticked or every outline is wrong"},
+         "label": "The voltage staircase — start/end/step, ramp and landing times (the 0 kV reference photo is always taken)"},
         {"match": "DEA diam (mm):", "extend_right": 95, "label": "Sets the px→mm scale — a wrong value corrupts all areas"},
         {"match": "⚡ Breakdown watchdog (LIVE runs)", "label": "Aborts on sustained overcurrent — leave Enabled"},
         {"match": "DRY RUN — HV OFF", "label": "Safety toggle — untick only for a live HV run"},
         {"match": "▶ Run (DRY)", "label": "Starts the run — the label shows the mode"},
         {"match": "■ Abort", "label": "Ramps to 0 kV first, then stops"},
-        {"union": ["🔍 Edge Review…", "🎚 Tune params…"], "label": "Analyze or tune a finished run"},
+        {"match": "🔍 Edge Review…", "badge_side": "bottom",
+         "label": "Open Edge Review on a finished run — see the Edge Review section"},
+        {"match": "🎚 Tune params…", "badge_side": "bottom",
+         "label": "Advanced — confirmation-gated; Save rewrites the run's detection settings"},
     ],
 }
 
@@ -211,6 +213,25 @@ S["20_arb_editor"] = {
         {"match": "Export .bin for 4055B flash drive...", "label": "Preferred delivery: file for the 4055B's front USB port"},
         {"match": "Export for EasyWaveX (flash drive)...", "label": "Fallback: CSV template for the EasyWaveX PC"},
         {"match": "Upload && Select", "label": "Direct upload — works over LAN only"},
+    ],
+}
+
+S["40_edge_review"] = {
+    "callouts": [
+        {"match": "Run:", "extend_right": 310,
+         "label": "Pick the run — ✓ marks already-processed runs"},
+        {"match": "▶ Detect Edges",
+         "label": "Traces every frame — picks/rejects from earlier passes reset"},
+        {"match": "Candidates",
+         "label": "Machine outlines — colors match the A/B/C tags on the image"},
+        {"union": ["✔ Accept (Enter)", "✘ Reject (R)"],
+         "label": "Keys: 1/2/3 pick a candidate, Enter accepts, R rejects, D traces by hand"},
+        {"match": "Next unreviewed", "label": "Jump to the next frame needing a human"},
+        {"match": "review queue", "label": "Frames still waiting for a decision"},
+        {"match": "📏 Calibrate…",
+         "label": "Set the mm-per-px scale — click two opposite disc edges"},
+        {"match": "💾 Save to data.csv…",
+         "label": "Writes accepted areas back (keeps a .bak) — confirms first"},
     ],
 }
 

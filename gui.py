@@ -2408,12 +2408,10 @@ LOGGING:
                         command=self._sldea_refresh).grid(row=2, column=4,
                                                           columnspan=2,
                                                           sticky='w')
-        self.sldea_baseline = tk.BooleanVar(value=True)
-        ttk.Checkbutton(inp, text="0 kV baseline frame",
-                        variable=self.sldea_baseline,
-                        command=self._sldea_refresh).grid(row=3, column=4,
-                                                          columnspan=2,
-                                                          sticky='w')
+        # The 0 kV baseline frame is always captured (checkbox removed
+        # 2026-08-02): Edge Review measures every area against it, and an
+        # unticked baseline silently made the first mid-run frame the
+        # reference — every outline wrong with no error anywhere.
         self.sldea_summary = tk.Label(inp, text="", fg='#1f3a5f', anchor='w',
                                       justify='left')
         self.sldea_summary.grid(row=4, column=0, columnspan=6, sticky='w',
@@ -2559,7 +2557,7 @@ LOGGING:
                 snap_lead_s=float(g('snap_lead_s')),
                 repeat=int(float(g('repeat'))),
                 updown=self.sldea_updown.get(),
-                baseline=self.sldea_baseline.get())
+                baseline=True)
             return p, None
         except (ValueError, KeyError) as e:
             return None, str(e)
@@ -2928,11 +2926,49 @@ LOGGING:
         except Exception as e:
             messagebox.showerror("Edge Review", f"Could not launch: {e}")
 
+    def _sldea_tuner_confirmed(self):
+        """Modal 'are you sure' gate in front of the parameter tuner.
+
+        The tuner's Save rewrites the run's setup.txt — the detection
+        settings every later analysis pass will silently use — so casual
+        slider-dragging can quietly invalidate a whole run's numbers.
+        Returns True only on an explicit 'I understand'."""
+        win = tk.Toplevel(self.root)
+        win.title("Tune params — advanced")
+        win.transient(self.root)
+        win.resizable(False, False)
+        tk.Label(win, justify='left', wraplength=420, padx=18, pady=14,
+                 text="The parameter tuner is an ADVANCED tool.\n\n"
+                      "Saving from it rewrites the run's setup.txt — the "
+                      "edge-detection settings that Edge Review and every "
+                      "later analysis pass will use for that run. Badly "
+                      "tuned values silently change every area number.\n\n"
+                      "Be sure you know what you are doing.").pack()
+        result = {'ok': False}
+        btns = tk.Frame(win, pady=10)
+        btns.pack()
+
+        def _ok():
+            result['ok'] = True
+            win.destroy()
+
+        ttk.Button(btns, text="I understand", command=_ok).pack(
+            side=tk.LEFT, padx=8)
+        cancel = ttk.Button(btns, text="Cancel", command=win.destroy)
+        cancel.pack(side=tk.LEFT, padx=8)
+        cancel.focus_set()
+        win.bind('<Escape>', lambda _e: win.destroy())
+        win.grab_set()
+        self.root.wait_window(win)
+        return result['ok']
+
     def _sldea_open_tuner(self, rundir):
         """Launch the live parameter tuner (its own process). rundir=None
         resolves the newest run under the output dir HERE — passing the
         parent dir made the tuner exit code 2 invisibly, so the button
         never worked (audit 2026-07-25)."""
+        if not self._sldea_tuner_confirmed():
+            return
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               'sldea_tuner.py')
         target = rundir

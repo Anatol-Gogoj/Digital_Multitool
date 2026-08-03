@@ -14,7 +14,8 @@ coordinates. When the GUI changes visibly, regenerate rather than hand-edit.
 | `capture_edge_review.py` | Opens Edge Review on a real run (defaults to bench run 1), runs a blocking detection pass, screenshots a frame showing all three candidates. Never clicks Save | `shots/40_edge_review.png` (+ appends to `widgets.json`) |
 | `capture_tuner_dialog.py` | Screenshots the Tune-params advanced-tool gate, then takes the Cancel path | `shots/41_tuner_warning.png` |
 | `annotate.py` | Draws the red capsules, arrows and numbered badges from curated per-image specs, matching callouts to exact widget `text=` strings | `annotated/*.png`, `annotated/legends.json` |
-| `build_manual.py` | Assembles the HTML from `content.json` (the manual copy) + legends + images | `../digital-multitool-manual.html` |
+| `build_manual.py` | Assembles the HTML from `content.json` (the manual copy) + legends + images | `../digital-multitool-manual.html`, `sections.json` |
+| `make_pdf.py` | Renders the HTML to the hand-out PDF via headless Edge, then adds chapter bookmarks, clickable contents, running footers with page numbers, and metadata. `<details>` tables are forced open so the PDF is complete | `../digital-multitool-manual.pdf` |
 
 ## Regenerating
 
@@ -22,7 +23,7 @@ Windows, with a Python 3.10+ that has tkinter ("tcl/tk and IDLE" ticked):
 
 ```
 py -3 -m venv .venv
-.venv\Scripts\pip install numpy pillow opencv-python-headless pandas matplotlib openpyxl pyvisa pyvisa-py pyserial
+.venv\Scripts\pip install numpy pillow opencv-python-headless pandas matplotlib openpyxl pyvisa pyvisa-py pyserial pypdf reportlab
 .venv\Scripts\python capture.py
 .venv\Scripts\python capture_edge_review.py     [run folder]
 .venv\Scripts\python capture_tuner_dialog.py
@@ -30,7 +31,15 @@ py -3 -m venv .venv
 .venv\Scripts\python "%REPO%\sldea_diag.py"  --selftest build\shots\31_diag_selftest.png
 .venv\Scripts\python annotate.py
 .venv\Scripts\python build_manual.py
+.venv\Scripts\python make_pdf.py
 ```
+
+**Hand the PDF to people** (`docs/digital-multitool-manual.pdf`) — it is the
+labmate-facing copy: cover + clickable contents, one chapter per page run,
+bookmarks sidebar, running footer with section + page numbers. The HTML is
+the same content for browser use and stays the build source. Keep both
+committed and regenerate them together. `make_pdf.py` needs Microsoft Edge
+on the machine (used headless as the renderer) and works while Edge is open.
 
 Notes:
 

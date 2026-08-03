@@ -238,7 +238,7 @@ body.append(section("sldea", "SLDEA Test", "SLDEA Test", "09_SLDEA_Test",
                     caution_keep=[0, 1, 2, 4]))
 
 ct = content["Companion tools"]
-ct_caut = cautions("Companion tools", keep=[0, 1, 3])
+ct_caut = cautions("Companion tools", keep=[0, 1, 2, 3])
 body.append(f"""
 <section id="tools">
   <header class="band"><h2>SLDEA companion tools</h2>
@@ -252,15 +252,40 @@ body.append(f"""
       <code>Tune_SLDEA_Windows.bat</code> — or drag a run folder onto it.</p></div>
     <div class="tool"><h4>🔍 Edge Review</h4>
       <p>Traces every frame of a run, queues the uncertain ones for a human
-      pick (keys 1/2/3, R rejects, D traces by hand), then
-      <b>💾 Save to data.csv…</b> writes the areas back (a .bak is kept).
-      Open it from the SLDEA tab (<b>🔍 Edge Review…</b>) or run
-      <code>python sldea_edge_gui.py &lt;run folder&gt; --auto</code>.</p></div>
+      pick, then writes the accepted areas back into the run's
+      <code>data.csv</code>. Full walkthrough below.</p></div>
     <div class="tool"><h4>🩺 Diagnostic</h4>
       <p>When sliders can't fix a run, stop tuning and measure why:
       <code>Tune_SLDEA_Windows.bat /diag</code> writes
       <code>sldea_diag.txt/.json/.png</code> into the run folder and changes
       nothing. No window needed.</p></div>
+  </div>
+  <h3 class="subh">Edge Review — reviewing a run</h3>
+  {fig('40_edge_review', 'SLDEA Edge Review on a real bench run — annotated')}
+  <p class="cap">A real review frame (bench run P3_1 at 2.25 kV, pre-ramp): A = disc-fit
+  (green), B/C = difference outlines. The machine's best pick is preselected — Enter agrees
+  and moves on.</p>
+  {legend_grid('40_edge_review')}
+  <div class="use"><h4>Reviewing a run</h4><ol>
+    <li>Open it from the SLDEA tab (🔍 Edge Review…) — or run <code>python sldea_edge_gui.py &lt;run folder&gt; --auto</code>.</li>
+    <li>Pick the run and click ▶ Detect Edges. Most frames auto-accept; the review queue holds the uncertain ones.</li>
+    <li>On each queued frame, pick the outline that hugs the electrode: keys 1/2/3 (A/B/C), R rejects, 4/D opens the hand tracer.</li>
+    <li>Enter accepts and moves on; Next unreviewed jumps ahead.</li>
+    <li>If areas look wrong by a constant factor, 📏 Calibrate… — click two opposite edges of the resting disc on the baseline frame.</li>
+    <li>Queue empty → 💾 Save to data.csv… — read the counts in the confirm prompt before answering Yes.</li>
+  </ol></div>
+  <h3 class="subh">When outlines look wrong — tuning and diagnosis</h3>
+  <div class="advbox">
+    <div>{fig('41_tuner_warning', 'Tune params advanced-tool confirmation dialog')}</div>
+    <div>
+      <h4>🎚 Tune params is an advanced tool</h4>
+      <p>It asks you to confirm before it opens. Its <b>Save</b> rewrites the
+      run's <code>setup.txt</code> — the detection settings Edge Review and
+      every later analysis pass will use for that run — so badly tuned values
+      silently change every area number. Reach for it only when Edge Review's
+      outlines are consistently wrong across a run, and prefer per-frame
+      picks or a hand trace for one-off bad frames.</p>
+    </div>
   </div>
   {fig('30_tuner_selftest', 'Detection panels: baseline, mid-run, late frame with outlines', 'wide')}
   <p class="cap">What the detector shows per frame: cyan = detected outline, orange = resting-disc
@@ -383,6 +408,12 @@ td.cl { white-space:nowrap; font-weight:600; color:var(--navy); }
 .tool h4 { margin-bottom:6px; }
 .tool p { margin:0; font-size:14px; }
 .cap { color:var(--steel); font-size:13px; margin:6px 2px 0; }
+.subh { color:var(--navy); font-size:19px; letter-spacing:-.01em;
+  margin:34px 0 0; }
+.advbox { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr));
+  gap:20px; margin-top:18px; align-items:center; }
+.advbox .shot { margin-top:0; }
+.advbox p { margin:0; font-size:14.5px; max-width:60ch; }
 .foot { max-width:1060px; margin:60px auto 0; border-top:1px solid var(--line);
   padding-top:14px; color:var(--steel); font-size:13px; }
 @media (max-width:700px) { .hero h1 { font-size:34px; } }

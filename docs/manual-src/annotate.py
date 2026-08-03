@@ -7,8 +7,13 @@ and manual/annotated/legends.json for the HTML builder.
 import json
 import math
 import os
+import sys
 
 from PIL import Image, ImageDraw, ImageFont
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(_HERE)))
+from version import __version__  # noqa: E402  (repo root version.py)
 
 BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build")
 SHOTS = os.path.join(BASE, "shots")
@@ -74,7 +79,7 @@ S["overview"] = {
         {"match": "Reconnect", "label": "Re-detects this one instrument after power-on or replug"},
         {"match": "Non-Linux platform", "badge_side": "top",
          "label": "Status bar — confirmations and warnings appear here"},
-        {"match": "v0.32.2", "label": "Exact version — quote it when reporting a problem"},
+        {"match": f"v{__version__}", "label": "Exact version — quote it when reporting a problem"},
     ],
 }
 

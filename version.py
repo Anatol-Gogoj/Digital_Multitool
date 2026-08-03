@@ -4,6 +4,12 @@
 Bump ``__version__`` on each release. ``version_string()`` appends the short
 git commit hash when run from a checkout, so the footer pins the exact build
 the user is running (useful when running from a feature branch).
+
+Release checklist: after bumping (and committing the bump), regenerate BOTH
+user manuals — HTML and PDF — via the pipeline in ``docs/manual-src/`` and
+commit them with the release; the manual's cover/footers read this file, but
+the screenshots only pick up the new version when re-captured. See
+``docs/manual-src/README.md`` ("Releasing").
 """
 
 __version__ = "1.0.0"

@@ -4,11 +4,17 @@ import base64
 import html
 import json
 import os
+import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = os.path.join(_HERE, "build")
 ANN = os.path.join(BASE, "annotated")
 SHOTS = os.path.join(BASE, "shots")
+
+# Version comes from the app itself (repo root version.py) so the manual
+# cover and footer always name the build being documented.
+sys.path.insert(0, os.path.dirname(os.path.dirname(_HERE)))
+from version import __version__, version_string  # noqa: E402
 
 content = json.load(open(os.path.join(_HERE, "content.json"), encoding="utf-8"))
 legends = json.load(open(os.path.join(ANN, "legends.json"), encoding="utf-8"))
@@ -194,7 +200,7 @@ body = []
 body.append(f"""
 <header class="hero">
   <div class="hero-text">
-    <p class="eyebrow">SCPI_Control · v0.32.2</p>
+    <p class="eyebrow">SCPI_Control · v{__version__}</p>
     <h1>Digital Multitool</h1>
     <p class="sub">User manual for the lab bench-control app — one window for the
     LCR meter, oscilloscope, signal generator, DC supply, DMM, data logging,
@@ -326,9 +332,9 @@ body.append(f"""
   </table></div></details>
 </section>""")
 
-body.append("""
+body.append(f"""
 <footer class="foot">
-  <p>Built from the live app (v0.32.2+9725a59) — every screenshot is a real capture, every
+  <p>Built from the live app ({esc(version_string())}) — every screenshot is a real capture, every
   callout is anchored to the actual control. Sources: <code>README.md</code>,
   <code>SLDEA_HANDOFF.md</code>, <code>SLDEA_MEASUREMENT.md</code> and the code itself.</p>
 </footer>""")

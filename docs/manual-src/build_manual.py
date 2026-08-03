@@ -164,6 +164,26 @@ NAV = [
 ]
 nav_html = "".join(f'<a href="#{i}">{esc(t)}</a>' for i, t in NAV)
 
+# Full section titles, in document order. Must match the <h2> band titles
+# exactly — make_pdf.py locates each section's page by this text and the
+# print-only table of contents links to these ids.
+SECTIONS = [
+    ("start", "Getting started"),
+    ("lcr", "LCR Meter — BK 894"),
+    ("scope", "Oscilloscope — Tektronix MSO24"),
+    ("siggen", "Signal Generator — BK 4055B"),
+    ("arb", "Arbitrary Waveform Editor"),
+    ("psu", "DC Supply — BK 9174B"),
+    ("dmm", "Digital Multimeter — BK 5493C"),
+    ("logging", "Data Logging"),
+    ("battery", "Battery Data"),
+    ("webcam", "Webcam"),
+    ("sldea", "SLDEA Test"),
+    ("tools", "SLDEA companion tools"),
+]
+print_toc_html = "".join(
+    f'<li><a href="#{i}">{esc(t)}</a></li>' for i, t in SECTIONS)
+
 shell = content["app-shell"]
 shell_steps = steps("app-shell")
 shell_caut = cautions("app-shell", keep=[0, 1, 4])
@@ -183,6 +203,9 @@ body.append(f"""
   <figure class="splash"><img src="{b64(os.path.join(SHOTS, '00_splash.png'))}" alt="Digital Multitool splash screen"></figure>
 </header>
 <nav class="toc">{nav_html}</nav>
+<nav class="print-toc"><h4>Contents</h4><ol>{print_toc_html}</ol>
+<p class="print-note">Tip: this PDF has the same chapters in the bookmarks
+sidebar of your PDF viewer — keep it open for one-click navigation.</p></nav>
 """)
 
 body.append(f"""
@@ -419,6 +442,32 @@ td.cl { white-space:nowrap; font-weight:600; color:var(--navy); }
 @media (max-width:700px) { .hero h1 { font-size:34px; } }
 @media (prefers-reduced-motion: no-preference) {
   html { scroll-behavior:smooth; } }
+
+/* ---- print / PDF (Edge headless via make_pdf.py, or Ctrl+P) ---------- */
+.print-toc { display:none; }
+@page { size:A4; margin:12mm 11mm 16mm; }
+@media print {
+  :root { --paper:#FFFFFF; }
+  * { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  body { padding:0; font-size:13px; }
+  .toc { display:none; }
+  .hero { margin:28mm auto 8mm; }
+  .print-toc { display:block; max-width:1060px; margin:10mm auto 0;
+    border-top:1px solid var(--line); padding-top:14px; }
+  .print-toc ol { columns:2; column-gap:40px; margin:0; padding-left:22px;
+    font-size:14.5px; }
+  .print-toc li { margin:4px 0; }
+  .print-toc a { color:var(--navy); text-decoration:none; }
+  .print-note { color:var(--steel); font-size:12px; margin:14px 0 0; }
+  section { break-before:page; margin-top:0; }
+  .band { break-after:avoid; }
+  .shot, .chip, .cautions .c, .tool, .use, details tr { break-inside:avoid; }
+  .dialogpair > div, .advbox { break-inside:avoid; }
+  .subh { break-after:avoid; }
+  details { border:none; }
+  summary { color:var(--steel); }
+  .foot { break-inside:avoid; }
+}
 """
 
 page = ("<title>Digital Multitool — User Manual</title>\n"
@@ -428,3 +477,8 @@ out = os.path.join(os.path.dirname(_HERE), "digital-multitool-manual.html")
 with open(out, "w", encoding="utf-8") as f:
     f.write(page)
 print("wrote", out, f"{os.path.getsize(out)/1e6:.2f} MB")
+
+# Section manifest for make_pdf.py (bookmarks + running footers).
+with open(os.path.join(BASE, "sections.json"), "w", encoding="utf-8") as f:
+    json.dump([{"id": i, "title": t} for i, t in SECTIONS], f, indent=1,
+              ensure_ascii=False)

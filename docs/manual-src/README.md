@@ -41,6 +41,18 @@ the same content for browser use and stays the build source. Keep both
 committed and regenerate them together. `make_pdf.py` needs Microsoft Edge
 on the machine (used headless as the renderer) and works while Edge is open.
 
+## Releasing
+
+**Every release ships both manuals.** After bumping `__version__` in the
+repo's `version.py` (and committing, so the footer hash is real), re-run the
+full pipeline above and commit the regenerated
+`docs/digital-multitool-manual.html` **and** `.pdf` in the release PR. The
+cover, build line and version callout all read `version.py` automatically —
+there is nothing to edit by hand, but screenshots keep the old version stamp
+in their footers until the pipeline is re-run, so a release without a manual
+regeneration ships docs that contradict the app. Attach the fresh PDF to the
+GitHub release so labmates always download the matching copy.
+
 Notes:
 
 - `capture.py` needs a **headed** desktop session (it screenshots the actual

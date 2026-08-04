@@ -12,6 +12,16 @@ presets/
 *.zip
 SLDEA_*/
 P3_*/
+DOT_*/
+Upload */
+_baselines/
+_analysis/
+frames/
+overlays/
+run.log
+edge_labels.json
+data*.csv.bak
+area_vs_voltage.png
 sldea_diag*.png
 sldea_diag*.json
 sldea_diag*.txt

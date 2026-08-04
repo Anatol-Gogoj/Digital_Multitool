@@ -137,7 +137,8 @@ class EdgeReviewApp:
         self.auto_rej = set()   # auto-rejected (no change / no edge)
         self.frame_rows = []    # row indices that have a frame file
         self.pos = 0
-        self.flags = {}
+        self.flags = {}         # CONFIRMED breakdown rows (rename + brand)
+        self.advisories = {}    # notes-only (transient / uncorroborated)
         self._photo = None
         self._detq = _queue.Queue()
         # auxiliary windows are modal or SINGLETON, never unbounded (#176)
@@ -353,6 +354,7 @@ class EdgeReviewApp:
         self.frame_rows = [i for i, r in enumerate(self.run['rows'])
                            if (r.get('frame_file') or '').strip()]
         self.cands_all, self.results, self.flags = {}, {}, {}
+        self.advisories = {}
         self.traces = {}
         self.auto_idx, self.auto_rej = set(), set()
         self.base_ref = None
@@ -407,6 +409,7 @@ class EdgeReviewApp:
         # Staged traces clear too — their polygons are already safe in
         # edge_labels.json (appended at trace-Done, #172).
         self.cands_all, self.results, self.flags = {}, {}, {}
+        self.advisories = {}
         self.traces = {}
         self.auto_idx, self.auto_rej = set(), set()
         self.base_ref = None
@@ -479,6 +482,7 @@ class EdgeReviewApp:
         """Synchronous detection (used by --auto tests and headless runs)."""
         self._t0 = self._t0 or time.time()
         self.cands_all, self.results, self.flags = {}, {}, {}
+        self.advisories = {}
         self.traces = {}
         self.auto_idx, self.auto_rej = set(), set()
         base = self._base_gray()
@@ -532,7 +536,8 @@ class EdgeReviewApp:
 
     def _recount(self):
         areas = {i: r['area_px'] for i, r in self.results.items() if r}
-        self.flags = se.breakdown_flags(self.run['rows'], areas, self.settings)
+        self.flags, self.advisories = se.breakdown_flags(
+            self.run['rows'], areas, self.settings)
 
     # ---------------- review ----------------
     def _current(self):
@@ -559,6 +564,8 @@ class EdgeReviewApp:
                f"state: {state}")
         if i in self.flags:
             txt += f"\n⚠ {self.flags[i]}"
+        elif i in self.advisories:      # elif keeps the fixed info height
+            txt += f"\nⓘ {self.advisories[i]}"
         self.info.config(text=txt)
         # radio text is elided to the FIXED panel (#179): the tail (the
         # wrinkle term first) yields before the panel ever resizes
@@ -873,7 +880,9 @@ class EdgeReviewApp:
                f"accepted: {accepted}  (auto {len(self.auto_idx)})\n"
                f"rejected: {rejected}\n"
                f"unreviewed (left blank): {len(q)}\n"
-               f"breakdown-flagged: {len(self.flags)}\n"
+               f"breakdown-flagged: {len(self.flags)}"
+               + (f"  (+{len(self.advisories)} advisory note(s), no renames)"
+                  if self.advisories else "") + "\n"
                + (f"\n⚠ {n_bd} frame file(s) from the first breakdown onward "
                   f"will be RENAMED with a _BREAKDOWN suffix (kept, never "
                   f"deleted — usable later as ML training data).\n"
@@ -893,6 +902,10 @@ class EdgeReviewApp:
         # agree, and the area must not dip while the voltage rises
         for i, note in se.ramp_consistency(self.run['rows'], self.results,
                                            self.settings).items():
+            annos[i] = (annos[i] + '; ' + note) if i in annos else note
+        # advisory breakdown notes ride the anno channel: written to the
+        # CSV, never renaming frames or seeding post-breakdown branding
+        for i, note in self.advisories.items():
             annos[i] = (annos[i] + '; ' + note) if i in annos else note
         if 'wrinkle_idx' not in self.run['columns']:
             # older runs predate the column; slot it in before notes
@@ -1092,9 +1105,19 @@ class EdgeReviewApp:
                                  "measured ink step above which the frame "
                                  "is capped to review (catches resting "
                                  "claims gone stale); 0 disables",
-                'breakdown_ua': "flag breakdown above this Trek current (µA)",
-                'area_jump_pct': "flag breakdown on area collapse (%) while "
-                                 "voltage rises",
+                'breakdown_dev_ua': "current deviation (µA) from the run's "
+                                    "median that marks a breakdown event "
+                                    "row; two adjacent event rows (or one "
+                                    "ending the run) confirm, a single "
+                                    "recovered one is an advisory note",
+                'breakdown_ua': "gross ABSOLUTE current limit (µA) — "
+                                "fallback used only when the run has "
+                                "fewer than 5 readable µA rows (no "
+                                "median baseline)",
+                'area_jump_pct': "area collapse (%) while voltage rises: "
+                                 "confirms breakdown only with a current "
+                                 "event at the same kV level, otherwise "
+                                 "an advisory note",
                 'wrinkle_ratio': "wrinkle index (texture vs baseline) at/"
                                  "above this = wrinkle-mode; first such "
                                  "frame is noted as the onset",

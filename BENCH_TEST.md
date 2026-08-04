@@ -81,6 +81,15 @@ Launch: `.venv/bin/python gui.py`
 
 ## K. Arbitrary waveforms (PR: sg-arb-upload, #13)
 
+> **⚠ HISTORICAL — superseded.** This section predates the arb editor
+> rework and the 52-byte USB cap discovery: the button labels below no
+> longer exist ("Save CSV Template…" → "Save Template...", "Load CSV…" →
+> "Import CSV...", "Save Current" → "Save to Library", "Upload & Select
+> on CH1" → "Send to CH:" + "Upload && Select"), direct upload is now
+> LAN-only (refused over USB), and the K.8 max-length probe is exactly
+> the experiment that wedges the 4055B. Use the current arb workflow in
+> README §"BK 4055B arbitrary waveforms" and section L instead.
+
 1. CH1 → waveform **ARB** → [ ] "Arb Waveform:" row appears with **Waveform Editor…** button
 2. Open editor → **Save CSV Template…** to e.g. `~/arb_template.csv`
    - [ ] File has `value` header + 32 rows (one sine period)

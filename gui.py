@@ -230,6 +230,17 @@ class InstrumentControlGUI:
         self._sldea_stop = False
         self._sldea_plot = None        # preview geometry, for the run cursor
         self._sldea_elapsed = 0.0      # current run time (worker -> cursor)
+        # run-log persistence (D4 2026-08-04): the Tk log dies with the
+        # session, but the watchdog-blind alarm / rescale-dialog outcome
+        # must survive it. Lines logged before the run dir exists are
+        # buffered (_sldea_prelog) and flushed into <run>/run.log.
+        self._sldea_runlog = None      # active run.log path, worker-set
+        self._sldea_prelog = None      # pre-run-dir line buffer
+        # _sldea_log runs on the Tk thread AND the worker; the worker's
+        # prelog->runlog swap raced a concurrent append and could silently
+        # drop lines. One lock around buffer access + the flush/swap
+        # (writes stay best-effort inside it). Review 2026-08-04.
+        self._sldea_loglock = threading.Lock()
         self.recording = False
         self.record_thread = None
         # Keys of background instrument operations in flight (issue #40) --
@@ -2485,8 +2496,13 @@ LOGGING:
         wd_ua = ttk.Entry(wdf, width=7)
         wd_ua.insert(0, '100')
         wd_ua.pack(side=tk.LEFT)
-        add_tooltip(wd_ua, "Current at/above this counts toward breakdown "
-                           "(I_Out scale: 10 V = 2000 µA).")
+        add_tooltip(wd_ua, "Current DEVIATION from the run-start baseline "
+                           "(median of ~8 reads at 0 kV) at/above this "
+                           "counts toward breakdown — cancels the bench's "
+                           "standing I_Out offset (−16 µA on the 07-29 "
+                           "runs). Falls back to absolute |I| when the "
+                           "baseline could not be read. I_Out scale: "
+                           "10 V = 2000 µA.")
         self.sldea_vars['wd_ua'] = wd_ua
         ttk.Label(wdf, text="Confirm (s):").pack(side=tk.LEFT, padx=(12, 2))
         wd_s = ttk.Entry(wdf, width=6)
@@ -2674,89 +2690,145 @@ LOGGING:
             messagebox.showerror("SLDEA", f"Fix the profile first:\n{err}")
             return
         dry = self.sldea_dryrun.get()
-        if not dry:
-            if not INSTRUMENTS_SUPPORTED:
-                messagebox.showinfo("Linux only", NOT_LINUX_NOTE)
-                return
-            if not self.sg:
-                messagebox.showerror(
-                    "SLDEA", "Signal generator not connected — it drives the "
-                    "Trek. Connect it (Signal Gen tab) or use Dry Run.")
-                return
-            if not self.scope and not messagebox.askyesno(
-                    "No current monitoring",
-                    "No oscilloscope connected — this LIVE run will have NO "
-                    "measured kV/µA columns and NO breakdown watchdog.\n\n"
-                    "Proceed without monitoring?", default='no'):
-                return
-            if self.scope and not self._sldea_check_monitors(p):
-                return
-            if not messagebox.askyesno(
-                    "Energize HV?",
-                    f"LIVE run — this drives the Trek up to "
-                    f"{max(p.levels):g} kV via SG CH{self.sldea_vars['sgch'].get()}"
-                    f".\n\n{p.summary()}\n\nProceed?", default='no'):
-                return
-        sgch = int(self.sldea_vars['sgch'].get())
-        vch = int(self.sldea_vars['vch'].get())
-        ich = int(self.sldea_vars['ich'].get())
-        # Read the camera entries HERE, on the main thread -- Tk widgets must
-        # never be touched from the worker (it can hang the Tcl interpreter).
-        cam_exp = self._sldea_cam_value('cam_exposure', 6)
-        cam_gain = self._sldea_cam_value('cam_gain', 60)
+        # start buffering log lines NOW: the monitor-check outcome must land
+        # in run.log even though the run dir does not exist yet (D4).
+        # `started` disarms the buffer on EVERY early exit below (no SG,
+        # monitor-dialog cancel, Energize-HV cancel, camera pre-flight
+        # cancel): an armed prelog with no worker to flush it silently
+        # swallowed session log lines forever (review 2026-08-04).
+        self._sldea_prelog = []
+        started = False
         try:
-            diam_mm = float(self.sldea_vars['diam_mm'].get())
-        except (KeyError, ValueError):
-            diam_mm = 16.0
-        autoproc = self.sldea_autoproc.get()
-        trek_sign = -1.0 if self.sldea_trek_inv.get() else 1.0
-        # Breakdown watchdog (live only). Only claim it is armed when it
-        # actually will be: the worker needs a scope to read the current
-        # (audit 2026-07-25 — the old banner printed either way).
-        wd_on = self.sldea_wd_on.get() and not dry and self.scope is not None
-        if self.sldea_wd_on.get() and not dry and self.scope is None:
-            self._sldea_log("⚠ watchdog requested but NO SCOPE — running "
-                            "without breakdown protection")
-        try:
-            wd_ua = float(self.sldea_vars['wd_ua'].get())
-            wd_s = float(self.sldea_vars['wd_s'].get())
-        except (KeyError, ValueError):
-            wd_ua, wd_s = 100.0, 3.0
-        # Free the camera: the Webcam preview holds /dev/video0 open and a
-        # one-shot grab can't run while it streams (empty frames otherwise).
-        try:
-            self.cam_stop_preview()
-            if self.cam is not None:
-                self.cam.close()
-                self.cam = None
-        except Exception:
-            pass
-        # Camera pre-flight gate: check focus / exposure / centering on a
-        # live snapshot before anything runs.
-        if not getattr(self, '_sldea_skip_preflight', False):
-            if not self._sldea_preflight(cam_exp, cam_gain):
-                self._sldea_log("run cancelled at camera pre-flight")
-                return
-        self._sldea_stop = False
-        self._sldea_bd_tripped = False
-        self._sldea_running = True
-        # LIVE interlock: the driven SG channel belongs to the run until it
-        # ends (user decision 2026-07-25: lock the active channel, leave the
-        # other usable, loud note on any attempt).
-        self._sldea_live_ch = sgch if not dry else None
-        self.sldea_run_btn.config(state='disabled')
-        self.sldea_abort_btn.config(state='normal')
-        self._sldea_elapsed = 0.0
-        self._sldea_log(f"{'DRY-RUN' if dry else 'LIVE HV'} start — {p.summary()}"
-                        + (f"  [watchdog: >{wd_ua:g} µA for {wd_s:g}s]"
-                           if wd_on else ""))
-        threading.Thread(
-            target=self._sldea_worker,
-            args=(p, self.sldea_outdir.get(), self.sldea_runname.get().strip(),
-                  sgch, vch, ich, dry, cam_exp, cam_gain, diam_mm, autoproc,
-                  wd_on, wd_ua, wd_s, trek_sign),
-            daemon=True).start()
-        self.root.after(100, self._sldea_animate_cursor)   # scroll the playhead
+            if not dry:
+                if not INSTRUMENTS_SUPPORTED:
+                    messagebox.showinfo("Linux only", NOT_LINUX_NOTE)
+                    return
+                if not self.sg:
+                    messagebox.showerror(
+                        "SLDEA", "Signal generator not connected — it drives "
+                        "the Trek. Connect it (Signal Gen tab) or use Dry "
+                        "Run.")
+                    return
+                if not self.scope and not messagebox.askyesno(
+                        "No current monitoring",
+                        "No oscilloscope connected — this LIVE run will have "
+                        "NO measured kV/µA columns and NO breakdown "
+                        "watchdog.\n\n"
+                        "Proceed without monitoring?", default='no'):
+                    return
+                if self.scope and not self._sldea_check_monitors(p):
+                    return
+                if not messagebox.askyesno(
+                        "Energize HV?",
+                        f"LIVE run — this drives the Trek up to "
+                        f"{max(p.levels):g} kV via SG "
+                        f"CH{self.sldea_vars['sgch'].get()}"
+                        f".\n\n{p.summary()}\n\nProceed?", default='no'):
+                    return
+            sgch = int(self.sldea_vars['sgch'].get())
+            vch = int(self.sldea_vars['vch'].get())
+            ich = int(self.sldea_vars['ich'].get())
+            # Provenance (2026-08-04): read back the vertical setup actually
+            # in force — after any auto-fix — and persist it in setup.txt.
+            # The 07-29 row-34 investigation was ambiguous only because no
+            # run recorded its scope state.
+            scope_setup = (self._sldea_scope_readback(vch, ich)
+                           if (self.scope and not dry) else None)
+            if scope_setup:
+                for ln in scope_setup:
+                    self._sldea_log(f"scope readback: {ln}")
+            # Read the camera entries HERE, on the main thread -- Tk widgets
+            # must never be touched from the worker (it can hang the Tcl
+            # interpreter).
+            cam_exp = self._sldea_cam_value('cam_exposure', 6)
+            cam_gain = self._sldea_cam_value('cam_gain', 60)
+            try:
+                diam_mm = float(self.sldea_vars['diam_mm'].get())
+            except (KeyError, ValueError):
+                diam_mm = 16.0
+            autoproc = self.sldea_autoproc.get()
+            trek_sign = -1.0 if self.sldea_trek_inv.get() else 1.0
+            # Breakdown watchdog (live only). Only claim it is armed when it
+            # actually will be: the worker needs a scope to read the current
+            # (audit 2026-07-25 — the old banner printed either way).
+            wd_on = (self.sldea_wd_on.get() and not dry
+                     and self.scope is not None)
+            if self.sldea_wd_on.get() and not dry and self.scope is None:
+                self._sldea_log("⚠ watchdog requested but NO SCOPE — running "
+                                "without breakdown protection")
+            try:
+                wd_ua = float(self.sldea_vars['wd_ua'].get())
+                wd_s = float(self.sldea_vars['wd_s'].get())
+            except (KeyError, ValueError):
+                wd_ua, wd_s = 100.0, 3.0
+            # Free the camera: the Webcam preview holds /dev/video0 open and
+            # a one-shot grab can't run while it streams (empty frames
+            # otherwise).
+            try:
+                self.cam_stop_preview()
+                if self.cam is not None:
+                    self.cam.close()
+                    self.cam = None
+            except Exception:
+                pass
+            # Camera pre-flight gate: check focus / exposure / centering on
+            # a live snapshot before anything runs.
+            if not getattr(self, '_sldea_skip_preflight', False):
+                if not self._sldea_preflight(cam_exp, cam_gain):
+                    self._sldea_log("run cancelled at camera pre-flight")
+                    return
+            self._sldea_stop = False
+            self._sldea_bd_tripped = False
+            self._sldea_running = True
+            # LIVE interlock: the driven SG channel belongs to the run until
+            # it ends (user decision 2026-07-25: lock the active channel,
+            # leave the other usable, loud note on any attempt).
+            self._sldea_live_ch = sgch if not dry else None
+            self.sldea_run_btn.config(state='disabled')
+            self.sldea_abort_btn.config(state='normal')
+            self._sldea_elapsed = 0.0
+            self._sldea_log(
+                f"{'DRY-RUN' if dry else 'LIVE HV'} start — {p.summary()}"
+                + (f"  [watchdog: dev ≥{wd_ua:g} µA for {wd_s:g}s, "
+                   f"baseline learned at 0 kV]" if wd_on else ""))
+            started = True
+            threading.Thread(
+                target=self._sldea_worker,
+                args=(p, self.sldea_outdir.get(),
+                      self.sldea_runname.get().strip(),
+                      sgch, vch, ich, dry, cam_exp, cam_gain, diam_mm,
+                      autoproc, wd_on, wd_ua, wd_s, trek_sign, scope_setup),
+                daemon=True).start()
+            self.root.after(100, self._sldea_animate_cursor)  # playhead
+        finally:
+            if not started:
+                with self._sldea_loglock:
+                    self._sldea_prelog = None
+
+    def _sldea_scope_readback(self, vch, ich):
+        """Read back SCALE/POSITION/OFFSET/EXTATTEN for both monitor
+        channels — the setup the run will actually record with. Returns
+        printable lines; a channel whose queries all fail is stated as
+        unverified rather than omitted."""
+        lines = []
+        for label, ch in (('V_Out', vch), ('I_Out', ich)):
+            vals = {}
+            for key, cmd in (('scale', 'SCALE?'), ('position', 'POSITION?'),
+                             ('offset', 'OFFSET?'),
+                             ('atten', 'PROBEFUNC:EXTATTEN?')):
+                try:
+                    vals[key] = float(self.scope.ask(f'CH{ch}:{cmd}'))
+                except Exception:
+                    vals[key] = None
+            if all(v is None for v in vals.values()):
+                lines.append(f"CH{ch} ({label}): could not be read back")
+            else:
+                f = lambda v: '?' if v is None else f'{v:g}'
+                lines.append(
+                    f"CH{ch} ({label}): {f(vals['scale'])} V/div, position "
+                    f"{f(vals['position'])} div, offset {f(vals['offset'])} "
+                    f"V, ext atten {f(vals['atten'])}x")
+        return lines
 
     def _sldea_check_monitors(self, p):
         """Verify the scope can actually SEE the Trek monitors before a LIVE
@@ -2779,19 +2851,49 @@ LOGGING:
             except Exception:
                 return None
 
-        v_scale, v_atten = _q(vch, 'SCALE?'), _q(vch, 'PROBEFUNC:EXTATTEN?')
-        i_scale, i_atten = _q(ich, 'SCALE?'), _q(ich, 'PROBEFUNC:EXTATTEN?')
+        # POSITION/OFFSET queried since 2026-08-04: the 07-29 batch clipped
+        # from 4.25 kV with this check PASSING — span was fine, but CH2 at
+        # 1 V/div / position 0 put the top of screen at 4 V for a 6 kV run.
+        qs = {}
+        for role, ch in (('v', vch), ('i', ich)):
+            for key, cmd in (('scale', 'SCALE?'), ('atten',
+                             'PROBEFUNC:EXTATTEN?'), ('position',
+                             'POSITION?'), ('offset', 'OFFSET?')):
+                qs[f'{role}_{key}'] = _q(ch, cmd)
+        # a failed query still skips its check (never guess), but no longer
+        # silently: the operator learns which channels went unverified
+        for role, ch, lbl in (('v', vch, 'V_Out'), ('i', ich, 'I_Out')):
+            missing = [k for k in ('scale', 'atten', 'position', 'offset')
+                       if qs[f'{role}_{k}'] is None]
+            if missing:
+                self._sldea_log(f"⚠ monitor check: CH{ch} ({lbl}) "
+                                f"{'/'.join(missing)} query failed — those "
+                                f"checks were SKIPPED, not passed")
+        # Polarity-aware window (review 2026-08-04): with 'Trek inverts'
+        # the drive is negative and V_Out swings 0..−need, so the check
+        # and the fix plan must frame the window on the OTHER side of 0.
+        v_sign = -1.0 if self.sldea_trek_inv.get() else 1.0
         probs = sldea_profile.monitor_problems(
-            max(p.levels), v_scale=v_scale, v_atten=v_atten,
-            i_scale=i_scale, i_atten=i_atten, breakdown_ua=wd_ua)
+            max(p.levels), v_scale=qs['v_scale'], v_atten=qs['v_atten'],
+            i_scale=qs['i_scale'], i_atten=qs['i_atten'], breakdown_ua=wd_ua,
+            v_position=qs['v_position'], v_offset=qs['v_offset'],
+            i_position=qs['i_position'], i_offset=qs['i_offset'],
+            v_sign=v_sign)
         if not probs:
+            self._sldea_log("monitor check: OK")
             return True
-        plan = sldea_profile.monitor_fix_plan(max(p.levels), wd_ua)
+        plan = sldea_profile.monitor_fix_plan(max(p.levels), wd_ua,
+                                              v_sign=v_sign)
+        pol = ("Trek INVERTED: V_Out swings 0 to −{:g} V".format(
+                   max(p.levels)) if v_sign < 0
+               else "V_Out swings 0 to +{:g} V".format(max(p.levels)))
         msg = ("The oscilloscope cannot correctly record this run:\n\n• "
                + "\n\n• ".join(probs)
-               + f"\n\nFix it automatically?\n"
-                 f"  CH{vch} (V_Out) → {plan['v_scale']:g} V/div, 1x\n"
-                 f"  CH{ich} (I_Out) → {plan['i_scale']:g} V/div, 1x\n\n"
+               + f"\n\nFix it automatically?  ({pol})\n"
+                 f"  CH{vch} (V_Out) → {plan['v_scale']:g} V/div, 1x, "
+                 f"position {plan['v_position']:g} div\n"
+                 f"  CH{ich} (I_Out) → {plan['i_scale']:g} V/div, 1x, "
+                 f"position 0 (centred: breakdowns swing negative)\n\n"
                  f"Yes = fix and continue · No = run anyway · Cancel = stop")
         ans = messagebox.askyesnocancel("Scope monitor setup", msg,
                                         default='yes')
@@ -2799,23 +2901,29 @@ LOGGING:
             return False
         if ans:
             try:
-                for ch, sc in ((vch, plan['v_scale']), (ich, plan['i_scale'])):
+                for ch, sc, pos in (
+                        (vch, plan['v_scale'], plan['v_position']),
+                        (ich, plan['i_scale'], plan['i_position'])):
                     self.scope.write(f'CH{ch}:PROBEFUNC:EXTATTEN '
                                      f"{plan['atten']:g}")
                     self.scope.write(f'CH{ch}:SCALE {sc:g}')
                     self.scope.write(f'CH{ch}:OFFSET 0')
-                    self.scope.write(f"CH{ch}:POSITION {plan['position']:g}")
+                    self.scope.write(f"CH{ch}:POSITION {pos:g}")
                     self.scope.write(f'CH{ch}:COUPLING DC')
                     self.scope.write(f'SELECT:CH{ch} ON')
-                self._sldea_log(f"scope monitors rescaled: CH{vch} "
-                                f"{plan['v_scale']:g} V/div, CH{ich} "
-                                f"{plan['i_scale']:g} V/div, 1x attenuation")
+                self._sldea_log(f"monitor check: fixed — CH{vch} "
+                                f"{plan['v_scale']:g} V/div position "
+                                f"{plan['v_position']:g} div, CH{ich} "
+                                f"{plan['i_scale']:g} V/div position "
+                                f"{plan['i_position']:g} div, 1x "
+                                f"attenuation, offset 0"
+                                + (" (Trek inverted)" if v_sign < 0 else ""))
             except Exception as e:
                 messagebox.showerror("Scope", f"Could not rescale: {e}")
                 return False
         else:
-            self._sldea_log("⚠ proceeding with a scope setup that cannot "
-                            "record this run correctly")
+            self._sldea_log("⚠ monitor check: user chose run-anyway with "
+                            "problems: " + " | ".join(probs))
         return True
 
     def _sldea_preflight(self, cam_exp, cam_gain):
@@ -2999,6 +3107,11 @@ LOGGING:
     def _sldea_finished(self):
         self._sldea_running = False
         self._sldea_live_ch = None
+        # runs after the worker's final finally-block logs, so the SG
+        # never-zeroed alarm still reaches run.log before detaching
+        with self._sldea_loglock:
+            self._sldea_runlog = None
+            self._sldea_prelog = None
         self.sldea_run_btn.config(state='normal')
         self.sldea_abort_btn.config(state='disabled')
 
@@ -3016,10 +3129,27 @@ LOGGING:
         return True
 
     def _sldea_log(self, msg):
+        line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n"
+        # Best-effort persistence to <run>/run.log: the messages that
+        # matter most (watchdog BLIND, rescale-dialog outcome, the SG
+        # never-zeroed alarm) only lived in this Tk widget before. The
+        # lock keeps a Tk-thread append from racing the worker's
+        # prelog->runlog swap (a line landing between flush and swap was
+        # silently dropped).
+        try:
+            with self._sldea_loglock:
+                if self._sldea_runlog:
+                    with open(self._sldea_runlog, 'a',
+                              encoding='utf-8') as f:
+                        f.write(line)
+                elif self._sldea_prelog is not None:
+                    self._sldea_prelog.append(line)
+        except Exception:
+            pass
+
         def up():
             self.sldea_log.config(state='normal')
-            self.sldea_log.insert(
-                tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
+            self.sldea_log.insert(tk.END, line)
             self.sldea_log.see(tk.END)
             self.sldea_log.config(state='disabled')
         self.root.after(0, up)
@@ -3029,7 +3159,8 @@ LOGGING:
 
     def _sldea_worker(self, p, outdir, runname, sgch, vch, ich, dry,
                       cam_exp=6, cam_gain=60, diam_mm=16.0, autoproc=False,
-                      wd_on=False, wd_ua=100.0, wd_s=3.0, trek_sign=1.0):
+                      wd_on=False, wd_ua=100.0, wd_s=3.0, trek_sign=1.0,
+                      scope_setup=None):
         """Host-sequenced staircase runner (daemon thread; no Tk calls except
         via _sldea_log/_sldea_set_status/after). Drives the SG DC offset along
         p.kv_at(t), fires webcam+scope snapshots on schedule, writes the run
@@ -3058,7 +3189,27 @@ LOGGING:
                     dea_diam_mm=diam_mm))
                 if trek_sign < 0:
                     sf.write("Trek control polarity: INVERTED (control = "
-                             "-kV/gain; V_Out sign-corrected in log)\n")
+                             "-kV/gain; monitor readings sign-corrected "
+                             "in log)\n")
+                if scope_setup:
+                    sf.write("\n--- Scope vertical (read back at run "
+                             "start) ---\n")
+                    for ln in scope_setup:
+                        sf.write(ln + "\n")
+            # run.log goes live: flush everything logged since Run was
+            # pressed (monitor-check outcome included), then append-through.
+            # Flush AND swap inside one locked section: a Tk-thread log
+            # line arriving between them appended to a buffer that was
+            # about to be discarded (review 2026-08-04).
+            runlog = os.path.join(rundir, 'run.log')
+            with self._sldea_loglock:
+                try:
+                    with open(runlog, 'a', encoding='utf-8') as lf:
+                        lf.writelines(self._sldea_prelog or [])
+                except Exception:
+                    pass
+                self._sldea_runlog = runlog
+                self._sldea_prelog = None
             fh = open(os.path.join(rundir, 'data.csv'), 'w', newline='')
             writer = _csv.DictWriter(fh, fieldnames=p.CSV_COLUMNS)
             writer.writeheader()
@@ -3084,13 +3235,62 @@ LOGGING:
                 self.sg.set_basic_wave(sgch, WVTP='DC', OFST=0.0)
                 self.sg.set_output(sgch, True)
 
+            watchdog = (sldea_profile.BreakdownWatchdog(wd_ua, wd_s)
+                        if (wd_on and not dry and self.scope) else None)
+            if watchdog is not None:
+                # Learn the I_Out rest level at 0 kV (SG is at 0 V here) so
+                # the trip is |I − baseline|, not |I|: the whole 07-29
+                # campaign sat on a stiff −16 µA instrument offset that
+                # silently skewed the absolute threshold (34 µA of real
+                # headroom one polarity, 66 the other). Unreadable scope →
+                # no baseline → absolute behaviour, exactly as before.
+                # Settle first: set_output just energized the SG path and
+                # the first reads ride that transient — 0.5 s plus two
+                # discarded reads keep it out of the median (review
+                # 2026-08-04).
+                time.sleep(0.5)
+                base = []
+                for k in range(10):
+                    try:
+                        mi, _st = self.scope.measure_raw('MEAN', ich)
+                    except Exception:
+                        mi = None
+                    if k >= 2 and mi is not None:
+                        base.append(measured_ua(mi))
+                    time.sleep(0.1)
+                if len(base) >= 4:
+                    base.sort()
+                    n = len(base)
+                    med = (base[n // 2] if n % 2 else
+                           0.5 * (base[n // 2 - 1] + base[n // 2]))
+                    # Credibility bound (sldea_profile.credible_baseline_ua):
+                    # a large 'rest level' at 0 kV is a standing fault
+                    # current, and anchoring the deviation trip to it would
+                    # normalize the fault. The absolute rule then trips on
+                    # it — the correct outcome.
+                    if sldea_profile.credible_baseline_ua(med, wd_ua):
+                        watchdog.baseline_ua = med
+                        self._sldea_log(
+                            f"watchdog baseline {med:.1f} µA "
+                            f"(median of {n} reads at 0 kV); trip "
+                            f"|I−baseline| ≥ {wd_ua:g} µA for {wd_s:g}s")
+                    else:
+                        self._sldea_log(
+                            f"⚠ watchdog baseline {med:.1f} µA is not a "
+                            f"credible 0 kV rest level — keeping absolute "
+                            f"trip |I| ≥ {wd_ua:g} µA")
+                else:
+                    self._sldea_log(
+                        f"watchdog baseline unavailable ({len(base)}/8 "
+                        f"reads ok) — absolute trip |I| ≥ {wd_ua:g} µA "
+                        f"for {wd_s:g}s")
+            self._sldea_voff_logged = False   # V_Out clip: log once per run
+            self._sldea_ioff_logged = False   # I_Out clip: log once per run
             snaps = sorted(p.snapshots, key=lambda s: s['t'])
             si = 0
             t0 = time.monotonic()
             last_status = -1.0
             last_kv = None
-            watchdog = (sldea_profile.BreakdownWatchdog(wd_ua, wd_s)
-                        if (wd_on and not dry and self.scope) else None)
             last_wd = -1.0
             wd_bad_since, wd_blind = None, False
             while not self._sldea_stop:
@@ -3103,17 +3303,25 @@ LOGGING:
                 if watchdog is not None and el - last_wd >= 0.5:
                     last_wd = el
                     try:
-                        mi = self.scope.measure('MEAN', ich)
-                        ua = measured_ua(mi) if mi is not None else None
+                        mi, wst = self.scope.measure_raw('MEAN', ich)
                     except Exception as e:
-                        ua = None
+                        mi, wst = None, 'invalid'
                         if wd_bad_since is None:
                             self._sldea_log(f"⚠ watchdog scope read failed: "
                                             f"{e}")
+                    ioff = wst == 'offscreen'
+                    ua = measured_ua(mi) if mi is not None else None
+                    if ioff and not self._sldea_ioff_logged:
+                        self._sldea_ioff_logged = True
+                        self._sldea_log("⚠ I_Out off-screen (9.9E37 "
+                                        "sentinel) — a clipping current is "
+                                        "over any trip level, counted as an "
+                                        "over-trip sample")
                     # Monitoring-loss alarm (policy 2026-07-25: warn loudly,
                     # keep running). Unreadable samples used to disarm the
-                    # watchdog in total silence.
-                    if ua is None:
+                    # watchdog in total silence. An OFFSCREEN current is
+                    # evidence (huge current), NOT monitoring loss.
+                    if ua is None and not ioff:
                         if wd_bad_since is None:
                             wd_bad_since = el
                         elif el - wd_bad_since >= 10.0 and not wd_blind:
@@ -3128,11 +3336,23 @@ LOGGING:
                             self._sldea_log("watchdog: current monitoring "
                                             "recovered")
                         wd_bad_since, wd_blind = None, False
-                    if watchdog.update(el, ua):
+                    if watchdog.update(el, ua, offscreen=ioff):
                         self._sldea_bd_tripped = True
+                        # Branch on the NATURE of the tripping evidence,
+                        # not on last_ua being unset: after any earlier
+                        # readable sample, an off-screen streak tripping
+                        # used to print that stale below-trip number as
+                        # the alarm current (review 2026-08-04).
+                        if watchdog.last_offscreen:
+                            itxt = "OFF-SCREEN (clipping)" + (
+                                f"; last readable "
+                                f"{watchdog.last_ua:.0f} µA"
+                                if watchdog.last_ua is not None else "")
+                        else:
+                            itxt = f"{watchdog.last_ua:.0f} µA"
                         self._sldea_log(
-                            f"⚡ BREAKDOWN CONFIRMED — I={watchdog.last_ua:.0f}"
-                            f" µA sustained >{wd_s:g}s. Capturing frame, "
+                            f"⚡ BREAKDOWN CONFIRMED — I={itxt}"
+                            + f" sustained >{wd_s:g}s. Capturing frame, "
                             f"ramping to 0, aborting.")
                         self._sldea_capture(
                             p, {'t': el, 'step': 99,
@@ -3141,7 +3361,7 @@ LOGGING:
                             si + 1, spec, framedir, writer, fh, vch, ich,
                             dry, vsign=trek_sign,
                             note=f"WATCHDOG: breakdown confirmed "
-                                      f"(>{wd_ua:g}µA for {wd_s:g}s)")
+                                      f"(dev >{wd_ua:g}µA for {wd_s:g}s)")
                         self._sldea_stop = True
                         break
                 if sg is not None:
@@ -3245,10 +3465,25 @@ LOGGING:
         mkv = mua = None
         if self.scope:
             try:
-                mv = self.scope.measure('MEAN', vch)
-                mi = self.scope.measure('MEAN', ich)
+                mv, vst = self.scope.measure_raw('MEAN', vch)
+                mi, _ist = self.scope.measure_raw('MEAN', ich)
+                # vsign applies to BOTH monitors — the Trek inverts V_Out
+                # and I_Out alike (D5 2026-08-04). Detection is deviation/
+                # abs-based, so the old kV-only correction never changed a
+                # verdict; this is provenance hygiene.
                 mkv = vsign * measured_kv(mv) if mv is not None else None
-                mua = measured_ua(mi) if mi is not None else None
+                mua = vsign * measured_ua(mi) if mi is not None else None
+                if vst == 'offscreen':
+                    # numeric columns stay numeric: blank cell + a note,
+                    # never text in the kV column
+                    note = (note + '; ' if note else '') + \
+                        'V_Out off-screen (clipped)'
+                    if not getattr(self, '_sldea_voff_logged', True):
+                        self._sldea_voff_logged = True
+                        self._sldea_log(
+                            "⚠ V_Out off-screen (9.9E37 sentinel) — "
+                            "measured_kV logs blank from here; vertical "
+                            "window too small (see setup.txt readback)")
             except Exception as e:
                 self._sldea_log(f"scope read error: {e}")
         # Only record a filename if a frame was actually written -- otherwise
@@ -3278,8 +3513,11 @@ LOGGING:
             'notes': note,
         })
         fh.flush()
-        meas = (f"  meas {mkv:.2f} kV / {mua:.0f} µA"
-                if mkv is not None else "")
+        # Each value formats independently ('?' for None): an off-screen
+        # I_Out beside a fine V_Out is expected-by-design since the window
+        # checks, and the old mkv-only guard TypeError'd on it, killing
+        # the LIVE run's snapshot loop (review 2026-08-04).
+        meas = sldea_profile.fmt_meas(mkv, mua)
         tail = (f"→ {fname}" if fname
                 else "→ NO FRAME (camera busy? close the Webcam preview)")
         self._sldea_log(

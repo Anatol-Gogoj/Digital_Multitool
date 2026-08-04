@@ -67,7 +67,12 @@ DEFAULT_SETTINGS = {
     # accept_conf and tagged 'audit_nostep' / 'audit_bias'. 0 disables.
     'audit_nostep_pct': 15.0,
     'audit_bias_px': 3.0,
-    'breakdown_ua': 50.0,   # Trek current above this flags breakdown
+    # current deviation from the run's median that marks an event row
+    # (2026-08-04 ground truth: true events sustain 26.5-208 uA of
+    # deviation, false/borderline stay <= 14.6 -- 20 splits the margin):
+    'breakdown_dev_ua': 20.0,
+    'breakdown_ua': 50.0,   # gross ABSOLUTE fallback, used only when the
+                            # run has < 5 parseable uA rows (no median)
     'area_jump_pct': 35.0,  # area collapse (V rising) that flags breakdown
     'wrinkle_ratio': 1.4,   # wrinkle index >= this = wrinkle-mode (active)
     'tex_seg': 1,           # also segment the texture-ratio map (0 = the
@@ -1330,35 +1335,108 @@ def needs_review(cands, settings):
 # ---------------------------------------------------------------------------
 
 def breakdown_flags(rows, accepted_areas, settings):
-    """-> {row_index: reason}. Two heuristics:
-    1) current spike: measured_uA > breakdown_ua (dielectric breakdown draws
-       real current through the DEA);
-    2) area collapse: accepted area drops > area_jump_pct vs the previous
-       accepted frame while nominal_kV did NOT decrease."""
-    flags = {}
+    """-> (confirmed, advisory), both {row_index: reason}. Only `confirmed`
+    drives mark_breakdown_files / post-breakdown branding; `advisory` is
+    notes-only and must never rename a frame.
+
+    Current rule (rebuilt 2026-08-04, ground-truthed on the 13-run batch):
+    baseline = per-run MEDIAN of every parseable measured_uA (robust even
+    at the worst observed 31% event contamination); an event row deviates
+    from it by >= breakdown_dev_ua. CONFIRMED needs two event rows on
+    ADJACENT csv rows, or the run's last parseable-uA row being an event
+    (terminal, no recovery evidence -- 152205/155425 both end mid-event).
+    A single event row followed by recovery is a self-clearing transient
+    (104531: one -153 uA sample, then healthy to 10 kV) -> advisory only.
+    A blank-uA row between two event rows BREAKS adjacency -- deliberate:
+    at ~30 s between snapshots there is no evidence the excursion spanned
+    the gap. Absolute thresholds cannot do this job: the 07-29 campaign
+    sits on a stiff -16 uA instrument offset, so abs(ua) > 50 was really
+    34 uA more-negative / 66 uA positive depending on the run. With < 5
+    parseable rows there is no meaningful median and the legacy absolute
+    breakdown_ua rule applies unchanged (dry runs, sparse logs).
+
+    Area rule: a collapse > area_jump_pct while nominal_kV did not
+    decrease is CONFIRMED only when corroborated by a current event at
+    the same nominal-kV level; uncorroborated it is demoted to advisory
+    (P3_5: a 36% "collapse" from the manual-trace -> disc-fit method
+    switch renamed 35 healthy frames while the current never left
+    +-11 uA of baseline). In the no-median fallback the legacy behaviour
+    (collapse alone confirms) is kept."""
+    flags, advis = {}, {}
     ua_lim = float(settings['breakdown_ua'])
+    dev_lim = float(settings.get('breakdown_dev_ua',
+                                 DEFAULT_SETTINGS['breakdown_dev_ua']))
     jump = float(settings['area_jump_pct'])
-    prev_area = prev_kv = None
+
+    def _adv(i, msg):
+        advis[i] = (advis[i] + '; ' + msg) if i in advis else msg
+
+    uas = {}
     for i, row in enumerate(rows):
         try:
-            ua = float(row.get('measured_uA') or '')
+            uas[i] = float(row.get('measured_uA') or '')
+        except (TypeError, ValueError):
+            pass
+    median = None
+    events = {}                    # event rows: i -> signed deviation
+    if len(uas) >= 5:
+        vals = sorted(uas.values())
+        n = len(vals)
+        median = (vals[n // 2] if n % 2 else
+                  0.5 * (vals[n // 2 - 1] + vals[n // 2]))
+        events = {i: ua - median for i, ua in uas.items()
+                  if abs(ua - median) >= dev_lim}
+        confirmed = set()
+        ev = sorted(events)
+        for a, b in zip(ev, ev[1:]):
+            if b - a == 1:                       # adjacent rows, no gap
+                confirmed.update((a, b))
+        if max(uas) in events:                   # terminal: run ends over
+            confirmed.add(max(uas))
+        for i in ev:
+            d = abs(events[i])
+            if i in confirmed:
+                flags[i] = (f"breakdown? I dev {d:.0f}uA >= {dev_lim:g}uA "
+                            f"(baseline {median:.1f}uA)")
+            else:
+                _adv(i, f"transient discharge? I dev {d:.0f}uA")
+    else:
+        for i, ua in uas.items():
             if abs(ua) > ua_lim:
                 flags[i] = f"breakdown? I={ua:.0f}uA > {ua_lim:g}uA"
-        except ValueError:
-            pass
-        area = accepted_areas.get(i)
+
+    def _kv(row):
         try:
-            kv = float(row.get('nominal_kV') or '')
-        except ValueError:
-            kv = None
+            return float(row.get('nominal_kV') or '')
+        except (TypeError, ValueError):
+            return None
+
+    prev_area = prev_kv = None
+    for i, row in enumerate(rows):
+        area = accepted_areas.get(i)
+        kv = _kv(row)
         if (area and prev_area and kv is not None and prev_kv is not None
                 and kv >= prev_kv
                 and area < prev_area * (1.0 - jump / 100.0)):
-            flags.setdefault(
-                i, f"breakdown? area collapsed {100*(1-area/prev_area):.0f}%")
+            pct = 100 * (1 - area / prev_area)
+            corroborated = median is None or any(
+                (k := _kv(rows[j])) is not None and abs(k - kv) < 1e-9
+                for j in events)
+            if corroborated:
+                flags.setdefault(i, f"breakdown? area collapsed {pct:.0f}%")
+            elif i not in flags:
+                _adv(i, f"collapse? area -{pct:.0f}% (no current signature)")
         if area:
             prev_area, prev_kv = area, kv
-    return flags
+    # A confirmed row supersedes its own advisories: a single recovered
+    # current event that corroborates an area collapse ON THE SAME ROW
+    # landed in both dicts (the transient note is written before the
+    # collapse pass can confirm the row), and 'breakdown? area collapsed'
+    # next to 'transient discharge?' on one row reads as a contradiction
+    # (review 2026-08-04).
+    for i in flags:
+        advis.pop(i, None)
+    return flags, advis
 
 
 def wrinkle_onset(rows, results, settings):
@@ -1889,7 +1967,12 @@ def mark_breakdown_files(run, flags):
     are of a broken-down DEA. Files are renamed, never deleted (they stay
     useful, e.g. as ML training data); frame_file in the rows is updated to
     match, and rows after the flag gain a 'post-breakdown' note. Idempotent.
-    Returns the number of files renamed."""
+    Returns the number of files renamed.
+
+    Takes only the CONFIRMED dict from breakdown_flags — advisory rows
+    (transient discharge, uncorroborated collapse) must never seed the
+    renaming or the post-breakdown branding (P3_5, 2026-08-04: one false
+    collapse flag branded 35 healthy frames)."""
     if not flags:
         return 0
     start = min(flags)

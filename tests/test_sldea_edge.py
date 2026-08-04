@@ -370,15 +370,150 @@ def test_settings_roundtrip_and_diam_from_setup():
 
 
 def test_breakdown_flags_current_and_collapse():
+    """Semantics changed 2026-08-04: breakdown_flags returns (confirmed,
+    advisory) and the median-deviation rule needs >= 5 parseable uA rows.
+    This 4-row fixture now pins the LEGACY FALLBACK path (no median):
+    absolute breakdown_ua spike + uncorroborated collapse both stay
+    confirmed, exactly the pre-2026-08-04 behaviour."""
     rows = [{'nominal_kV': '1', 'measured_uA': '2'},
             {'nominal_kV': '2', 'measured_uA': '120'},     # current spike
             {'nominal_kV': '3', 'measured_uA': '3'},
             {'nominal_kV': '4', 'measured_uA': '4'}]       # area collapse
     areas = {0: 1000.0, 2: 1050.0, 3: 300.0}
-    flags = se.breakdown_flags(rows, areas, se.DEFAULT_SETTINGS)
+    flags, advis = se.breakdown_flags(rows, areas, se.DEFAULT_SETTINGS)
     assert 1 in flags and 'uA' in flags[1]
     assert 3 in flags and 'collapse' in flags[3]
     assert 0 not in flags and 2 not in flags
+    assert advis == {}
+
+
+def _ua_rows(uas, kv_step=0.25):
+    """Rows with a staircase nominal_kV and the given measured_uA values
+    (None -> blank cell, as a dry-run/glitched snapshot writes it)."""
+    return [{'nominal_kV': f"{(i + 1) * kv_step:g}",
+             'measured_uA': '' if ua is None else str(ua)}
+            for i, ua in enumerate(uas)]
+
+
+def test_breakdown_staircase_confirms_at_first_event_row():
+    # SLDEA_20260723_233451: median +0.35, staircase -5 -> -27 -> -62 ->
+    # -207 uA then recovery (sample burned open). Confirmed via the
+    # consecutive-rows clause; onset = first row with dev >= 20.
+    uas = [0.8, 0.4, 0.3, 0.5, 0.2, -5.0, -26.7, -61.9, -123.4, -207.7,
+           -3.3, -4.1]
+    flags, advis = se.breakdown_flags(_ua_rows(uas), {},
+                                      se.DEFAULT_SETTINGS)
+    assert sorted(flags) == [6, 7, 8, 9]      # -5.0 (dev 5.4) is no event
+    assert min(flags) == 6                     # onset at the -26.7 row
+    assert 'breakdown?' in flags[6] and 'dev' in flags[6]
+    assert advis == {}                         # recovery rows are clean
+
+
+def test_breakdown_terminal_event_confirms_without_recovery_evidence():
+    # SLDEA_20260723_155425: quiet run whose LAST parseable row is a
+    # single -57 uA event -- no recovery sample exists, so it confirms
+    # (unlike a mid-run one-row spike, which recovers and is advisory).
+    uas = [0.9, 0.9, 1.0, 0.9, 0.8, 0.9, -57.4]
+    flags, advis = se.breakdown_flags(_ua_rows(uas), {},
+                                      se.DEFAULT_SETTINGS)
+    assert list(flags) == [6] and advis == {}
+    # trailing blank rows (aborted capture) do not hide the terminal event
+    uas2 = uas + [None, None]
+    flags2, _ = se.breakdown_flags(_ua_rows(uas2), {}, se.DEFAULT_SETTINGS)
+    assert list(flags2) == [6]
+
+
+def test_breakdown_single_recovered_spike_is_advisory_only():
+    # SLDEA_20260729_104531: one -153 uA sample (dev 137 vs the -16 uA
+    # baseline) then healthy to 10 kV. Magnitude alone must NOT confirm:
+    # any tier low enough to keep 155425 also fires here (research 2026-
+    # 08-04, rule 2 rejected). Advisory note, zero renames.
+    uas = [-16.0, -15.9, -16.1, -16.0, -153.4, -15.8, -16.0, -15.9]
+    flags, advis = se.breakdown_flags(_ua_rows(uas), {},
+                                      se.DEFAULT_SETTINGS)
+    assert flags == {}
+    assert list(advis) == [4]
+    assert 'transient discharge?' in advis[4] and '137' in advis[4]
+
+
+def test_breakdown_median_baseline_handles_both_campaign_offsets():
+    # The same +30 uA excursion must read identically on a -16 uA-offset
+    # run (07-29 campaign) and a +0.9 uA-offset run (07-23): the absolute
+    # rule was 34/66 uA asymmetric on the former.
+    for base in (-16.0, 0.9):
+        uas = [base] * 6 + [base + 30.0, base + 31.0] + [base] * 2
+        flags, _ = se.breakdown_flags(_ua_rows(uas), {},
+                                      se.DEFAULT_SETTINGS)
+        assert sorted(flags) == [6, 7], (base, flags)
+
+
+def test_breakdown_blank_row_breaks_consecutiveness():
+    # A blank-uA row between two event rows breaks 'consecutive' --
+    # deliberate conservatism: at ~30 s/row there is no evidence the
+    # excursion spanned the gap, so each side stays a recovered
+    # transient (advisory), not a confirmed breakdown.
+    uas = [0.0, 0.1, -0.1, 0.0, 0.1, 50.0, None, 51.0, 0.0]
+    flags, advis = se.breakdown_flags(_ua_rows(uas), {},
+                                      se.DEFAULT_SETTINGS)
+    assert flags == {}
+    assert sorted(advis) == [5, 7]
+
+
+def test_area_collapse_without_current_signature_is_advisory():
+    # P3_5_2.5mL_0729: 36% area 'collapse' from the manual-trace ->
+    # disc-fit method switch while the current never left +-11 uA of its
+    # -16 uA baseline. The old rule renamed 35 healthy frames; now it is
+    # an advisory note and mark_breakdown_files never sees it.
+    uas = [-16.0, -16.1, -15.9, -16.0, -16.2, -16.0, -16.1, -16.0]
+    rows = _ua_rows(uas)
+    areas = {2: 1000.0, 3: 990.0, 5: 620.0}          # -37% at row 5
+    flags, advis = se.breakdown_flags(rows, areas, se.DEFAULT_SETTINGS)
+    assert flags == {}
+    assert 5 in advis and 'no current signature' in advis[5]
+    assert 'collapse' in advis[5]
+
+
+def test_area_collapse_with_current_event_at_same_level_confirms():
+    # Same collapse, but a row at the SAME nominal kV carries a >= 20 uA
+    # deviation -- current corroboration keeps it a confirmed breakdown.
+    uas = [-16.0, -16.1, -15.9, -16.0, -16.2, -80.0, -16.1, -16.0]
+    rows = _ua_rows(uas)
+    rows[5]['nominal_kV'] = rows[4]['nominal_kV']    # same level pair
+    areas = {2: 1000.0, 3: 990.0, 4: 620.0}          # -37% at row 4
+    flags, advis = se.breakdown_flags(rows, areas, se.DEFAULT_SETTINGS)
+    assert 4 in flags and 'collapsed' in flags[4]
+    assert 4 not in advis
+    # the single recovered event ON the collapse row itself: its
+    # 'transient discharge?' advisory is written before the collapse pass
+    # can confirm the row, and used to survive next to the flag -- a
+    # confirmed row must supersede its own advisories (review 2026-08-04)
+    rows2 = _ua_rows(uas)                            # event row 5 as-is
+    areas2 = {2: 1000.0, 3: 990.0, 5: 620.0}         # -37% at row 5
+    flags2, advis2 = se.breakdown_flags(rows2, areas2, se.DEFAULT_SETTINGS)
+    assert 5 in flags2 and 'collapsed' in flags2[5]
+    assert 5 not in advis2, advis2
+
+
+def test_old_setup_txt_without_dev_key_loads_and_roundtrips():
+    """Settings compat: a pre-2026-08-04 setup.txt knows only
+    breakdown_ua; it must load with the new breakdown_dev_ua default,
+    and the new key must survive a save/load round-trip."""
+    d = tempfile.mkdtemp(prefix='edge_compat_')
+    try:
+        with open(os.path.join(d, 'setup.txt'), 'w') as f:
+            f.write("SLDEA Test -- x\n\n" + se.EDGE_HDR +
+                    "\nbreakdown_ua: 75\narea_jump_pct: 30\n")
+        s = se.load_settings(d)
+        assert s['breakdown_ua'] == 75.0 and s['area_jump_pct'] == 30.0
+        assert s['breakdown_dev_ua'] == \
+            se.DEFAULT_SETTINGS['breakdown_dev_ua']
+        s['breakdown_dev_ua'] = 25.0
+        se.save_settings(d, s)
+        s2 = se.load_settings(d)
+        assert s2['breakdown_dev_ua'] == 25.0
+        assert s2['breakdown_ua'] == 75.0
+    finally:
+        shutil.rmtree(d)
 
 
 def test_scale_apply_and_write_back():

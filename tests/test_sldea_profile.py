@@ -11,7 +11,7 @@ _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
 from sldea_profile import (SldeaProfile, BreakdownWatchdog, compute_levels,
                            monitor_problems, monitor_fix_plan,
                            control_v_for_kv, measured_kv, measured_ua,
-                           TREK_MAX_KV)
+                           credible_baseline_ua, fmt_meas, TREK_MAX_KV)
 
 
 def test_monitor_problems_catches_the_2026_07_25_bench_bug():
@@ -31,14 +31,77 @@ def test_monitor_problems_catches_the_2026_07_25_bench_bug():
 
 
 def test_monitor_fix_plan_satisfies_its_own_check():
+    """Re-pinned 2026-08-04: the plan carries SEPARATE positions now —
+    V_Out keeps the -3 div headroom shift (+3 when the Trek inverts),
+    I_Out sits at position 0 with a scale sized for the full ±i_need
+    swing, because every ground-truthed breakdown is negative-going and
+    the old shared -3 left one division below 0 V."""
     for kv in (1.0, 5.5, 10.0):
-        plan = monitor_fix_plan(kv)
-        assert monitor_problems(kv, v_scale=plan['v_scale'],
-                                v_atten=plan['atten'],
-                                i_scale=plan['i_scale'],
-                                i_atten=plan['atten']) == []
+        for sign in (1.0, -1.0):
+            plan = monitor_fix_plan(kv, v_sign=sign)
+            assert plan['i_position'] == 0.0
+            assert plan['v_position'] == (-3.0 if sign > 0 else 3.0)
+            assert monitor_problems(kv, v_scale=plan['v_scale'],
+                                    v_atten=plan['atten'],
+                                    i_scale=plan['i_scale'],
+                                    i_atten=plan['atten'],
+                                    v_position=plan['v_position'],
+                                    v_offset=0.0,
+                                    i_position=plan['i_position'],
+                                    i_offset=0.0, v_sign=sign) == []
     # and it does not over-range: 1 kV must not pick the 10 V/div step
     assert monitor_fix_plan(1.0)['v_scale'] < 1.0
+
+
+def test_monitor_window_math_catches_the_2026_07_29_clipping():
+    # The exact hole that let all three 07-29 runs clip at 4.25 kV with a
+    # PASSING check: CH2 at 1 V/div, position 0 -> span 8 V >= 6 V (old
+    # check happy) but the visible window is +-4 V, so V_Out left the
+    # screen between 4.00 and 4.25 V and logged blank to the end.
+    probs = monitor_problems(6.0, v_scale=1.0, v_atten=1.0,
+                             v_position=0.0, v_offset=0.0)
+    assert len(probs) == 1 and 'visible window' in probs[0], probs
+    # position -3 (the fix plan's) restores the headroom: window -1..7 V
+    assert monitor_problems(6.0, v_scale=1.0, v_atten=1.0,
+                            v_position=-3.0, v_offset=0.0) == []
+    # a window that excludes 0 V (huge offset) fails too: the 0 kV
+    # baseline row would read off-screen
+    probs = monitor_problems(6.0, v_scale=1.0, v_atten=1.0,
+                             v_position=-3.0, v_offset=20.0)
+    assert len(probs) == 1 and 'visible window' in probs[0]
+    # I_Out must cover the FULL ±i_need swing (real breakdowns are
+    # negative-going, -27..-208 uA on the 08-04 batch): a window shifted
+    # clean off zero flags...
+    probs = monitor_problems(6.0, i_scale=0.5, i_atten=1.0,
+                             i_position=0.0, i_offset=10.0)
+    assert len(probs) == 1 and 'I_Out' in probs[0] and 'clip' in probs[0]
+    # ...and so does the OLD fix plan's -3 position: window -0.5..3.5 V
+    # shows the positive half only, exactly the side breakdowns avoid
+    probs = monitor_problems(6.0, i_scale=0.5, i_atten=1.0,
+                             i_position=-3.0, i_offset=0.0)
+    assert len(probs) == 1 and 'I_Out' in probs[0] and 'negative' in probs[0]
+    # centred (position 0, offset 0) the same scale shows ±2 V: clean
+    assert monitor_problems(6.0, i_scale=0.5, i_atten=1.0,
+                            i_position=0.0, i_offset=0.0) == []
+    # unknown position/offset (query failed): never guessed at -- the
+    # span check alone applies, as before
+    assert monitor_problems(6.0, v_scale=1.0, v_atten=1.0) == []
+
+
+def test_monitor_v_window_is_polarity_aware():
+    # 'Trek inverts' (gui sldea_trek_inv): the drive is negative and V_Out
+    # swings 0..-need. Framed for a positive monitor, the -3 position
+    # passes the check while the whole negative swing sits off-screen; the
+    # v_sign=-1 framing must flag it and accept the mirrored +3 setup.
+    probs = monitor_problems(6.0, v_scale=1.0, v_atten=1.0,
+                             v_position=-3.0, v_offset=0.0, v_sign=-1.0)
+    assert len(probs) == 1 and 'Trek inverted' in probs[0], probs
+    assert monitor_problems(6.0, v_scale=1.0, v_atten=1.0,
+                            v_position=3.0, v_offset=0.0, v_sign=-1.0) == []
+    # and the +3 window that saves an inverted run fails an upright one
+    probs = monitor_problems(6.0, v_scale=1.0, v_atten=1.0,
+                             v_position=3.0, v_offset=0.0)
+    assert len(probs) == 1 and 'visible window' in probs[0], probs
 
 
 def test_watchdog_trips_only_after_sustained_current():
@@ -68,6 +131,79 @@ def test_watchdog_ignores_unreadable_samples():
     wd2 = BreakdownWatchdog(trip_ua=100, confirm_s=2.0)
     assert not wd2.update(0.0, None)        # None never starts a streak
     assert not wd2.tripped
+
+
+def test_watchdog_baseline_makes_the_trip_deviation_based():
+    # The 07-29 bench sits at a stiff -16 uA I_Out offset: with
+    # baseline_ua the trip is |ua - baseline|, so the offset stops eating
+    # a third of the threshold in one polarity.
+    wd = BreakdownWatchdog(trip_ua=100, confirm_s=2.0, baseline_ua=-16.0)
+    assert not wd.update(0.0, -116)         # dev exactly 100: streak starts
+    assert wd.update(2.5, -120)             # sustained -> CONFIRMED
+    # |ua| = 105 would trip the absolute rule, but dev is only 89: clean
+    wd2 = BreakdownWatchdog(trip_ua=100, confirm_s=2.0, baseline_ua=-16.0)
+    wd2.update(0.0, -105)
+    assert not wd2.update(2.5, -105) and not wd2.tripped
+    # no baseline -> absolute behaviour unchanged (dry runs, old tests)
+    wd3 = BreakdownWatchdog(trip_ua=100, confirm_s=2.0)
+    wd3.update(0.0, -105)
+    assert wd3.update(2.5, -105)
+
+
+def test_watchdog_offscreen_counts_as_over_trip():
+    # A 9.9E37 sentinel on the CURRENT channel means the current clipped
+    # off-screen -- far beyond any trip level. It must count as an
+    # over-trip sample, not as an unreadable one.
+    wd = BreakdownWatchdog(trip_ua=100, confirm_s=2.0, baseline_ua=-16.0)
+    assert not wd.update(0.0, None, offscreen=True)     # streak starts
+    assert not wd.update(1.0, None, offscreen=True)
+    assert wd.update(2.2, None, offscreen=True)         # sustained clip
+    # a readable below-trip sample still resets an offscreen streak
+    wd2 = BreakdownWatchdog(trip_ua=100, confirm_s=2.0)
+    wd2.update(0.0, None, offscreen=True)
+    assert not wd2.update(1.0, 5)                        # recovered
+    wd2.update(1.5, None, offscreen=True)
+    assert not wd2.update(3.0, None)                     # plain None: 1.5 s
+    assert wd2.update(3.6, None, offscreen=True)         # 2.1 s streak
+    # the NATURE of the tripping evidence is tracked: a readable 5 uA
+    # followed by an off-screen streak must report OFF-SCREEN, not print
+    # the stale below-trip 5 uA as the alarm current (review 2026-08-04)
+    wd3 = BreakdownWatchdog(trip_ua=100, confirm_s=2.0)
+    assert not wd3.update(0.0, 5)                        # readable, quiet
+    assert not wd3.update(1.0, None, offscreen=True)
+    assert not wd3.update(2.0, None, offscreen=True)
+    assert wd3.update(3.1, None, offscreen=True)
+    assert wd3.last_offscreen and wd3.last_ua == 5
+    # while a trip on readable current keeps the number authoritative
+    wd4 = BreakdownWatchdog(trip_ua=100, confirm_s=2.0)
+    wd4.update(0.0, 150)
+    assert wd4.update(2.5, 150)
+    assert not wd4.last_offscreen and wd4.last_ua == 150
+
+
+def test_watchdog_baseline_credibility_bound():
+    # A learned '0 kV rest level' beyond min(30, trip/2) uA is not an
+    # instrument offset (worst honest one observed: -16 uA, 07-29) but a
+    # standing fault current -- a sample already leaking before the ramp.
+    # Anchoring |I - baseline| to it would normalize the fault; refusing
+    # it keeps the absolute rule, which then trips on the fault. Correct.
+    assert credible_baseline_ua(-16.0, 100.0)       # the 07-29 offset
+    assert credible_baseline_ua(30.0, 100.0)        # at the cap: allowed
+    assert not credible_baseline_ua(-80.0, 100.0)   # standing fault
+    assert not credible_baseline_ua(31.0, 100.0)
+    assert not credible_baseline_ua(-25.0, 40.0)    # trip/2 = 20 binds
+    assert credible_baseline_ua(19.0, 40.0)
+    assert not credible_baseline_ua(None, 100.0)
+
+
+def test_fmt_meas_survives_partial_readings():
+    # An off-screen I_Out beside a fine V_Out is expected-by-design once
+    # a window clips; the old single-guard f-string raised TypeError on
+    # (kV ok, uA None) and killed the LIVE run's snapshot loop.
+    assert fmt_meas(4.25, -153.4) == "  meas 4.25 kV / -153 µA"
+    assert fmt_meas(4.25, None) == "  meas 4.25 kV / ? µA"
+    assert fmt_meas(None, -16.0) == "  meas ? kV / -16 µA"
+    assert fmt_meas(None, None) == ""
 
 
 def test_scaling():

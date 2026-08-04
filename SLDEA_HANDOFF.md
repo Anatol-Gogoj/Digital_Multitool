@@ -11,6 +11,85 @@ measured, the 16 mm anchor closed by the laser-cut mask) are all
 done. **No code task is queued — the next session is an OPERATOR
 session**, with the agent supporting.
 
+## Breakdown detection rebuilt on current deviation (2026-08-04)
+
+Triggered by the 2026-08-04 upload batch (13 runs, both campaigns).
+Observations, each from the real CSVs:
+
+- **P3_5 false positive.** `breakdown? area collapsed 36%` at 5.75 kV
+  renamed 35 healthy frames `_BREAKDOWN` while the measured current
+  never left ±11 µA of its baseline — the "collapse" was the
+  manual-trace → disc-fit method switch at the wrinkle transition, not
+  physics (all three observed collapses carry a `pair mismatch` note).
+- **233451 is a real breakdown the tools half-missed.** A −207 µA
+  staircase (−5 → −27 → −62 → −123 → −208 µA, 13 rows ≥ 20 µA of
+  deviation over ~78 s, then recovery — sample burned open), yet the
+  LIVE watchdog never fired and the post-hoc `abs(ua) > 50` rule flags
+  it late because…
+- **…every 07-29 run sits on a stiff −16 µA I_Out offset** (present at
+  the 0 kV baseline row; instrument, not physics). The absolute 50 µA
+  rule was really 34 µA more-negative / 66 µA positive depending on
+  campaign polarity.
+- **104531 / P3_7 self-clearing transients.** Single rows at −153 /
+  −64 µA, fully recovered by the next sample, runs healthy to 10 kV.
+  Magnitude alone cannot confirm: any tier that keeps 155425's
+  terminal −57 µA also fires on these. Recovery/persistence is the
+  signal.
+- **The 4.25 kV clipping mechanism (#159 confirmed).** All three 07-29
+  runs blanked `measured_kV` from row 34 (4.25 kV) with the pre-run
+  monitor check PASSING: CH2 at 1 V/div / position 0 gives span
+  8 V ≥ 6 V but a visible window of ±4 V — the check never queried
+  POSITION/OFFSET, and nothing persisted the scope state to prove it.
+
+Decisions (observation → decision, all shipped this session):
+
+| Decision | Why | Evidence |
+|---|---|---|
+| Post-hoc current rule = deviation from the run's median (`breakdown_dev_ua`, 20 µA), CONFIRMED only on 2 adjacent event rows or a terminal event; single recovered spike → advisory `transient discharge?` note, no renames | Absolute µA is offset- and polarity-dependent; persistence/recovery separates the corpus perfectly (true events sustain 26.5–208 µA dev, false ≤ 14.6, transients 48–137 recover) | Ground-truth table 2026-08-04; every value in (14.6, 26.5) works, 20 splits it |
+| A blank-µA row between two event rows BREAKS "consecutive" | At ~30 s/row there is no evidence the excursion spanned the gap — conservative | test_breakdown_blank_row_breaks_consecutiveness |
+| Area collapse alone is demoted to advisory `collapse? … (no current signature)`; it confirms only with a ≥ dev event at the same kV level | All three observed collapses were detector-mode artifacts with flat current; collapse corroborated zero real breakdowns in this corpus | P3_5 36% / DOT_P3_1 34% / P3_6 27%, all with `pair mismatch` |
+| `breakdown_ua` (50 µA absolute) survives ONLY as the fallback when < 5 parseable µA rows exist (no median) | Dry runs and sparse logs still need a rule; legacy behaviour preserved there | test_breakdown_flags_current_and_collapse (repinned as the fallback test) |
+| `breakdown_flags` returns (confirmed, advisory); only confirmed reaches `mark_breakdown_files` | One advisory must never brand the rest of a run `post-breakdown` | The P3_5 35-frame rename |
+| Live watchdog trips on deviation from a baseline median learned at 0 kV (~8 reads before the ramp); no baseline → absolute, exactly as before | Same −16 µA offset argument at 2 Hz; dry runs/tests unchanged | test_watchdog_baseline_makes_the_trip_deviation_based |
+| `TekMSO24.measure_raw` distinguishes the 9.9E37 sentinel (`offscreen`) from parse failure; an OFFSCREEN current is an over-trip watchdog sample, an OFFSCREEN V_Out is a per-row note + one log line, numeric columns stay blank | A clipping current is a huge current, not a missing one — the old path made the watchdog go blind precisely at the event | test_watchdog_offscreen_counts_as_over_trip |
+| `monitor_problems` computes the actual visible window from SCALE+POSITION+OFFSET; unverifiable channels are logged, not silently passed | The exact 07-29 hole: span check passed while the top of screen sat at 4 V for a 6 kV run | test_monitor_window_math_catches_the_2026_07_29_clipping |
+| SCALE/POSITION/OFFSET/EXTATTEN are read back after the check (post-auto-fix) into `setup.txt` + the run log | The row-34 investigation was ambiguous only because no run recorded its scope state | `--- Scope vertical (read back at run start) ---` section |
+| `_sldea_log` persists to `<run>/run.log` (buffered until the run dir exists), including the monitor-dialog outcome and the watchdog-BLIND alarm | Those alarms only lived in the Tk widget and died with the session | D4; run.log |
+| `vsign` now applies to `measured_uA` too (the Trek inverts both monitors) | Provenance hygiene — detection is deviation/abs-based, so no verdict ever depended on it, but the logged sign was wrong on inverted-Trek runs | D5; `_sldea_capture` comment |
+
+Ground-truth validation (read-only, run after the suite):
+233451 confirmed (onset 5.6 kV region), 152205 + 155425 confirmed
+(terminal), P3_5 advisory-only (zero renames), P3_6 clean/advisory,
+104531 + P3_7 advisory-only, DOT_P3_1 not confirmed.
+
+Adversarial-review hardening (same session, two reviews deduped):
+the monitor window check and fix plan are polarity-aware (`v_sign`:
+with "Trek inverts" V_Out swings 0..−need, so the plan writes V
+position +3 instead of −3); the I_Out window must contain the full
+±i_need swing and the plan centres it (I position 0, scale sized for
+2·i_need — the old shared −3 left one division below 0 V for an
+excursion that is always negative); the learned watchdog baseline
+settles 0.5 s + 2 discarded reads and is REFUSED beyond
+min(30, trip/2) µA (`credible_baseline_ua` — a large "rest level" at
+0 kV is a standing fault current, and the absolute fallback then
+trips on it, correctly); the trip alarm reports "I=OFF-SCREEN
+(clipping)" when the tripping streak was the sentinel rather than a
+stale readable number (`last_offscreen`); the snap status line formats
+kV and µA independently ('?' for None — an off-screen I beside a fine
+V is expected-by-design and used to TypeError the snapshot loop); a
+confirmed `breakdown_flags` row drops its own superseded advisories;
+the run.log prelog is disarmed on every early sldea_run exit and all
+buffer access is under one lock (the flush→swap raced appends).
+
+**Deferred to #189 (bench session required — do not ship untested
+instrument paths):** MEAS-slot fast polling (1 query/sample instead of
+the 3-command IMMED triple + scope-side MAX/MIN/STDEV between polls),
+Hi-Res acquisition (fixes the 12.5 µA/LSB quantization at 2 V/div),
+scope-side single-shot current trigger (hardware-latency detection +
+a µs-resolution CURVE? record of the arc), continuous CURVE? I(t)
+logging between landings (#157). All need SCPI verification on the
+real MSO24 first.
+
 ## THE NEXT TASKS: operator work (agent-assisted)
 
 In order of value:

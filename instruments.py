@@ -177,8 +177,8 @@ class VisaInstrument:
         single USBTMC transfer longer than one 64-byte USB packet hard-wedges
         the firmware (bench-verified 2026-07-02, even for pure-ASCII queries);
         only a front-panel power cycle recovers it. Kept solely so
-        ``bench/test_arb_usb_probe.py`` can demonstrate the wedge. For real uploads
-        use ``write_raw_single_packet``.
+        ``bench/archive/test_arb_usb_probe.py`` can demonstrate the wedge.
+        For real uploads use ``write_raw_single_packet``.
         """
         try:
             sess = self.inst.visalib.sessions[self.inst.session]

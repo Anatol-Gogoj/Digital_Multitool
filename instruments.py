@@ -495,6 +495,18 @@ class TekMSO24(VisaInstrument):
 
     def measure(self, meas_type, channel):
         """Automated measurement. Returns float or None for invalid signals.
+        Callers that must tell WHY it failed use measure_raw."""
+        return self.measure_raw(meas_type, channel)[0]
+
+    def measure_raw(self, meas_type, channel):
+        """Automated measurement with its failure mode: (value, status),
+        status one of 'ok' | 'offscreen' | 'invalid'.
+
+        'offscreen' is the Tek 9.9E37 invalid-measurement sentinel — on
+        this scope it means the trace left the visible vertical window
+        (bench 2026-07-25 / 07-29: V_Out walked off a too-small window and
+        logged blank from 4.25 kV). The SLDEA runner treats it as a
+        clipped-but-real signal, unlike 'invalid' (unparseable reply).
 
         Holds the instrument lock across the whole TYPE/SOURCE/VALUE?
         triple: it programs GLOBAL state, so an interleaved caller used to
@@ -506,11 +518,11 @@ class TekMSO24(VisaInstrument):
             result = self.ask('MEASUREMENT:IMMED:VALUE?')
         try:
             val = float(result)
-            if abs(val) > 1e30:
-                return None
-            return val
         except ValueError:
-            return None
+            return None, 'invalid'
+        if abs(val) > 1e30:
+            return None, 'offscreen'
+        return val, 'ok'
 
     def get_all_measurements(self, channel):
         # The MSO24 frequency measurement token is FREQUENCY -- 'FREQ' is

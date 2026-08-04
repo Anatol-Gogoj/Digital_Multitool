@@ -81,7 +81,9 @@ def suggested_scale(volts_needed, divisions=SCOPE_DIVISIONS):
 
 def monitor_problems(max_kv, v_scale=None, v_atten=None, i_scale=None,
                      i_atten=None, breakdown_ua=100.0,
-                     divisions=SCOPE_DIVISIONS):
+                     divisions=SCOPE_DIVISIONS,
+                     v_position=None, v_offset=None,
+                     i_position=None, i_offset=None, v_sign=1.0):
     """Problems with the scope's Trek-monitor channel setup, as readable
     strings (empty list = ready to run).
 
@@ -90,13 +92,37 @@ def monitor_problems(max_kv, v_scale=None, v_atten=None, i_scale=None,
     FIVE runs recorded no usable measured_kV at all; CH3 additionally
     carried a 10x attenuation factor with a plain BNC cable, inflating
     every logged current tenfold. Both are invisible from the GUI, so a
-    live run now checks them up front."""
+    live run now checks them up front.
+
+    Bench 2026-07-29: the raw-span check is not enough — all three runs
+    that day clipped from 4.25 kV with the check passing, because CH2 sat
+    at 1 V/div with POSITION 0 (visible window ±4 V) for a 6 kV run: span
+    8 V >= 6 V, but the top of screen was 4 V. When position and offset
+    are known, the ACTUAL visible window (centre = offset, shifted down
+    by position divisions) is checked instead of the span. Unknown values
+    (query failed) are still never guessed at — the caller is expected to
+    say which channels went unverified.
+
+    `v_sign` (+1/-1) is the Trek monitor polarity: with the 'Trek
+    inverts' option the amplifier is driven negative and V_Out swings
+    0..-need, so the V window must contain 0 and v_sign*need — a window
+    framed for a positive-going monitor would clip every reading of an
+    inverted run while this check passed (review 2026-08-04).
+
+    The I window must contain ±i_need regardless of drive polarity:
+    every real breakdown in the 2026-08-04 ground-truth batch swings
+    NEGATIVE (-27..-208 uA) while the old check only demanded that 0 V
+    be on screen — a window 0..top would clip the one excursion the
+    watchdog exists to see."""
     out = []
     v_need = float(max_kv) / VMON_KV_PER_V
     i_need = max(1.0, 2.0 * float(breakdown_ua) / IMON_UA_PER_V)
-    for label, scale, atten, need in (
-            ('V_Out', v_scale, v_atten, v_need),
-            ('I_Out', i_scale, i_atten, i_need)):
+    v_lo, v_hi = (0.0, v_need) if v_sign >= 0 else (-v_need, 0.0)
+    for label, scale, atten, span_need, lo, hi, pos, off in (
+            ('V_Out', v_scale, v_atten, v_need, v_lo, v_hi,
+             v_position, v_offset),
+            ('I_Out', i_scale, i_atten, 2.0 * i_need, -i_need, i_need,
+             i_position, i_offset)):
         if atten is not None and abs(float(atten) - BNC_ATTEN) > 1e-6:
             out.append(
                 f"{label}: scope thinks a {float(atten):g}x probe is fitted, "
@@ -104,54 +130,137 @@ def monitor_problems(max_kv, v_scale=None, v_atten=None, i_scale=None,
                 f"{float(atten):g}x off.")
         if scale is not None:
             span = float(scale) * divisions
-            if span < need:
+            if span < span_need:
                 out.append(
                     f"{label}: {float(scale):g} V/div shows only ±"
-                    f"{span / 2:.3g} V, but this run needs {need:.3g} V "
-                    f"({'up to %g kV' % max_kv if label == 'V_Out' else 'breakdown headroom'})"
+                    f"{span / 2:.3g} V, but this run needs {span_need:.3g} V "
+                    f"({'up to %g kV' % max_kv if label == 'V_Out' else 'bipolar breakdown headroom'})"
                     f" — readings will go off-screen and log as blank.")
+            elif pos is not None and off is not None:
+                top = float(off) + (divisions / 2.0 - float(pos)) * float(scale)
+                bot = float(off) - (divisions / 2.0 + float(pos)) * float(scale)
+                if label == 'V_Out' and (top < hi or bot > lo):
+                    out.append(
+                        f"V_Out: visible window {bot:g}..{top:g} V "
+                        f"({float(scale):g} V/div, position {float(pos):g} "
+                        f"div, offset {float(off):g} V) cannot show "
+                        f"{lo:g}..{hi:g} V"
+                        f"{' (Trek inverted)' if v_sign < 0 else ''} — "
+                        f"readings past the screen edge log as blank.")
+                elif label == 'I_Out' and (top < hi or bot > lo):
+                    out.append(
+                        f"I_Out: visible window {bot:g}..{top:g} V cannot "
+                        f"show ±{hi:g} V — real breakdowns swing negative "
+                        f"(-27..-208 uA on the 08-04 batch); the excursion "
+                        f"would clip off-screen and log as blank.")
     return out
 
 
-def monitor_fix_plan(max_kv, breakdown_ua=100.0, divisions=SCOPE_DIVISIONS):
-    """{'v_scale','i_scale','atten','position'} that would satisfy
-    monitor_problems() for this run."""
+def monitor_fix_plan(max_kv, breakdown_ua=100.0, divisions=SCOPE_DIVISIONS,
+                     v_sign=1.0):
+    """{'v_scale','i_scale','atten','v_position','i_position'} that would
+    satisfy monitor_problems() for this run.
+
+    V_Out gets position -3 (or +3 when the Trek is inverted, v_sign=-1)
+    so the unipolar 0..±need swing uses the screen asymmetrically;
+    I_Out gets position 0 with a scale sized for the full ±i_need swing
+    — the current excursion is bipolar-negative and a -3 position left
+    only one division below 0 V (review 2026-08-04)."""
     v_need = float(max_kv) / VMON_KV_PER_V
     i_need = max(1.0, 2.0 * float(breakdown_ua) / IMON_UA_PER_V)
     return {'v_scale': suggested_scale(v_need, divisions),
-            'i_scale': suggested_scale(max(i_need, v_need), divisions),
+            'i_scale': suggested_scale(2.0 * i_need, divisions),
             'atten': BNC_ATTEN,
-            'position': -3.0}
+            'v_position': 3.0 if v_sign < 0 else -3.0,
+            'i_position': 0.0}
+
+
+def credible_baseline_ua(baseline_ua, trip_ua):
+    """True when a learned 0 kV rest level may anchor the deviation trip.
+
+    The bound is min(30, trip/2) uA: the worst honest instrument offset
+    observed is the 07-29 campaign's stiff -16 uA, so 30 covers it with
+    margin, while anything larger at 0 kV is indistinguishable from a
+    standing fault current (a damaged sample leaking before the ramp).
+    Anchoring |I - baseline| to a fault current would normalize the very
+    signal the watchdog exists for; refusing the baseline leaves the
+    absolute |I| >= trip rule, which then trips on the fault — the
+    correct outcome (review 2026-08-04). Never more than trip/2 so a
+    small trip level cannot be half-eaten by its own baseline."""
+    if baseline_ua is None:
+        return False
+    return abs(float(baseline_ua)) <= min(30.0, 0.5 * float(trip_ua))
+
+
+def fmt_meas(mkv, mua):
+    """Status-line fragment for one snapshot's scope readings.
+
+    Either value may be None INDEPENDENTLY — an off-screen I_Out with a
+    fine V_Out is expected-by-design once a window clips — so each is
+    formatted on its own ('?' for unreadable). The old single-guard
+    f-string raised TypeError on (mkv ok, mua None) and killed the LIVE
+    run's snapshot loop (review 2026-08-04)."""
+    if mkv is None and mua is None:
+        return ""
+    fk = '?' if mkv is None else f"{mkv:.2f}"
+    fi = '?' if mua is None else f"{mua:.0f}"
+    return f"  meas {fk} kV / {fi} µA"
 
 
 class BreakdownWatchdog:
     """Deliberately SLOW-to-trip breakdown detector for live runs.
 
     Watches the Trek current (via the scope's I_Out monitor) and only
-    declares breakdown after the current has stayed at/above `trip_ua` for
-    `confirm_s` seconds of CONSECUTIVE samples -- any single reading below
-    the threshold resets the streak, and unreadable samples (None) are
-    ignored without resetting. The point is to be essentially certain before
-    aborting a long run: a transient spike or one glitchy scope read never
-    trips it.
+    declares breakdown after the current has stayed at/above the trip
+    level for `confirm_s` seconds of CONSECUTIVE samples -- any single
+    reading below the threshold resets the streak, and unreadable samples
+    (None) are ignored without resetting. The point is to be essentially
+    certain before aborting a long run: a transient spike or one glitchy
+    scope read never trips it.
+
+    With `baseline_ua` (learned by the runner at 0 kV before the ramp)
+    the trip is on |ua - baseline| instead of |ua|: the whole 07-29
+    campaign sits on a stiff -16 uA I_Out offset, which silently made an
+    absolute threshold polarity-asymmetric (34 uA of real headroom one
+    way, 66 the other). Without a baseline the absolute behaviour is
+    unchanged, so dry runs and scope-less tests behave exactly as before.
     """
 
-    def __init__(self, trip_ua=100.0, confirm_s=3.0):
+    def __init__(self, trip_ua=100.0, confirm_s=3.0, baseline_ua=None):
         self.trip_ua = float(trip_ua)
         self.confirm_s = float(confirm_s)
+        self.baseline_ua = None if baseline_ua is None else float(baseline_ua)
         self._over_since = None
         self.tripped = False
         self.last_ua = None
+        # nature of the LAST evidence-bearing sample: True when it was the
+        # off-screen sentinel. The trip message must not print a stale
+        # below-trip last_ua when the streak that tripped was a clipping
+        # current after an earlier readable sample (review 2026-08-04).
+        self.last_offscreen = False
 
-    def update(self, t_s, ua):
+    def update(self, t_s, ua, offscreen=False):
         """Feed one sample (time in s, current in uA; ua may be None).
-        Returns True the moment breakdown is CONFIRMED."""
+        Returns True the moment breakdown is CONFIRMED.
+
+        offscreen=True marks a read where the scope reported its 9.9E37
+        off-screen sentinel on the CURRENT channel: a clipping current is
+        far beyond any sane trip level, so it counts as an over-trip
+        sample rather than as an unreadable one."""
         if self.tripped:
             return True
-        if ua is None:
+        if ua is None and not offscreen:
             return False                 # unreadable: no evidence either way
-        self.last_ua = ua
-        if abs(ua) >= self.trip_ua:
+        if ua is not None:
+            self.last_ua = ua
+        self.last_offscreen = bool(offscreen)
+        if offscreen:
+            over = True
+        elif self.baseline_ua is not None:
+            over = abs(ua - self.baseline_ua) >= self.trip_ua
+        else:
+            over = abs(ua) >= self.trip_ua
+        if over:
             if self._over_since is None:
                 self._over_since = t_s
             elif t_s - self._over_since >= self.confirm_s:

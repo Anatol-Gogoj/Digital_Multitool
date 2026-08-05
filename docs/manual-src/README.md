@@ -29,6 +29,7 @@ py -3 -m venv .venv
 .venv\Scripts\python capture_tuner_dialog.py
 .venv\Scripts\python "%REPO%\sldea_tuner.py" --selftest build\shots\30_tuner_selftest.png
 .venv\Scripts\python "%REPO%\sldea_diag.py"  --selftest build\shots\31_diag_selftest.png
+.venv\Scripts\python "%REPO%\sldea_plot.py"  --selftest build\shots\32_plot_selftest.png
 .venv\Scripts\python annotate.py
 .venv\Scripts\python build_manual.py
 .venv\Scripts\python make_pdf.py

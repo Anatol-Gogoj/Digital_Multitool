@@ -1364,7 +1364,7 @@
  "Companion tools": {
   "key": "Companion tools",
   "area": "Companion tools",
-  "purpose": "Three stand-alone programs ship beside the Multitool for working on recorded SLDEA runs; they touch no instruments, so any PC holding a copy of the run data works. Reach for the edge tuner when outlines look wrong (drag sliders, watch live), Edge Review to trace and human-check every frame of a run, and the headless diagnostic when no amount of slider-dragging helps — it measures why the run will not tune.",
+  "purpose": "Four stand-alone programs ship beside the Multitool for working on recorded SLDEA runs; they touch no instruments, so any PC holding a copy of the run data works. Reach for the edge tuner when outlines look wrong (drag sliders, watch live), Edge Review to trace and human-check every frame of a run, the headless diagnostic when no amount of slider-dragging helps — it measures why the run will not tune — and the plot tool once runs are reviewed, to put several of them on one figure.",
   "controls": [
    {
     "label": "Tune_SLDEA_Windows.bat",
@@ -1425,6 +1425,14 @@
    {
     "label": "sldea_diag.py (headless)",
     "what": "Run it on a run folder (or via /diag) when tuning fails; writes sldea_diag.txt/.json/.png into the run, changes nothing — the .json is small enough to send on."
+   },
+   {
+    "label": "sldea_plot.py (headless)",
+    "what": "Puts one or more finished runs on a single figure. Takes the same run arguments as the tuner and the diagnostic (a run folder, a parent full of runs, or a bench shortcut) and writes a 300 dpi PNG plus the tidy per-snapshot CSV behind it, so a figure can always be traced back to its numbers. Colours are the house colourblind-safe set, assigned in the order runs are listed."
+   },
+   {
+    "label": "--mode area | current | power",
+    "what": "area (default) needs reviewed runs and draws active area against voltage plus the same curves normalised to each run's own baseline; current and power work on RAW runs too, so a run can be looked at electrically before anyone has reviewed a single frame. Breakdown crosses are always RECOMPUTED from the saved currents, never read off the frame names — an old area-based brand once marked 35 healthy frames."
    }
   ],
   "workflow": [
@@ -1434,7 +1442,8 @@
    "Drag sliders until the outlines hug the active area in all three panels.",
    "Click 💾 Save to setup.txt.",
    "Open Edge Review on the same folder (--auto opens the scale-calibration dialog first — click the resting disc's two opposite edges and detection starts automatically) and work the review queue.",
-   "💾 Save to data.csv… when the queue is empty; if it still will not tune, run the /diag diagnostic instead of another slider session."
+   "💾 Save to data.csv… when the queue is empty; if it still will not tune, run the /diag diagnostic instead of another slider session.",
+   "Once two or more runs are reviewed, put them on one figure: sldea_plot.py RUN1 RUN2 --mode area (or --mode current on raw runs, before any review)."
   ],
   "cautions": [
    "Tuner Save writes into that run folder's setup.txt. If you tuned a local copy, copy setup.txt back to the master run or the review pass will not use your tuning.",
@@ -1442,7 +1451,8 @@
    "In Edge Review, ▶ Detect Edges starts clean: picks and rejects from a previous pass are discarded (hand-traced polygons are already safe in edge_labels.json). Save before re-detecting.",
    "Edge Review's Save rewrites data.csv (a .bak is kept) and renames frame files from the first breakdown onward with a _BREAKDOWN suffix — read the counts in the confirm prompt before answering Yes.",
    "The tuner and Edge Review need Python installed with the \"tcl/tk and IDLE\" option ticked; the diagnostic opens no window and runs fine without it — use /diag on such machines.",
-   "Bench shortcuts 1/2/3 only resolve on the PCs with the OneDrive run folder synced; anywhere else pass the real folder path."
+   "Bench shortcuts 1/2/3 only resolve on the PCs with the OneDrive run folder synced; anywhere else pass the real folder path.",
+   "The plot tool writes its PNG and CSV into the current directory unless --out says otherwise, and a custom --stem inside the repo checkout is not gitignored — keep the default sldea_plot prefix there, or point --out somewhere else."
   ],
   "callouts": [
    {

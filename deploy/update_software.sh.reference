@@ -12,7 +12,7 @@
 # ============================================================================
 set -euo pipefail
 
-REPO_URL="https://github.com/Anatol-Gogoj/SCPI_Control.git"
+REPO_URL="https://github.com/Anatol-Gogoj/Digital_Multitool.git"
 DEST="/mnt/shareDrive/_software"
 APP="$DEST/SCPI_Control"
 LIBS="$DEST/pylibs"

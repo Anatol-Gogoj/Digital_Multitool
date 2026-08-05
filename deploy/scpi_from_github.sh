@@ -14,7 +14,7 @@
 # ============================================================================
 set -uo pipefail
 
-REPO="${SCPI_GITHUB_REPO:-https://github.com/Anatol-Gogoj/SCPI_Control}"
+REPO="${SCPI_GITHUB_REPO:-https://github.com/Anatol-Gogoj/Digital_Multitool}"
 GHDIR="${SCPI_GITHUB_DIR:-$HOME/.cache/scpi_control_git}"
 CACHE_LIBS="$HOME/.cache/scpi_control/pylibs"
 # Presets live here (outside the git checkout, so a git reset can't wipe

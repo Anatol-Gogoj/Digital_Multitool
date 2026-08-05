@@ -52,19 +52,24 @@ retire-able — the 555 MB zip, OneDrive and loose copies), `_baselines\`,
    `C:\Users\Anatol Gogoj\Desktop\Digital-Multitool` (worktrees repaired,
    venv verified, remote set-url done); repo scripts
    (`deploy/scpi_from_github.sh`, `deploy/update_software.sh.reference`)
-   point at the new URL. Bench-side pointers repointed
-   2026-08-05: the RHEL clone remote + pull (at #204) and the ShareDrive
-   `_software/update_software.sh` are done; the live
-   `/usr/local/bin/scpi-from-github.sh` still carries the old URL —
-   needs one interactive-sudo `sed` on the bench (works fine meanwhile
-   via redirect). **Drift finding from that session:** the live
-   scpi-from-github.sh is a hand-condensed variant of its
-   `deploy/scpi_from_github.sh` reference copy (comments stripped, two
-   `say` strings differ) — the reference-copy convention is broken for
-   this one file; reconcile deliberately on a bench visit (either
-   redeploy from reference or back-port the live edits). ShareDrive/cache
-   FOLDER names (`SCPI_Control`) are deployment layout, not the repo
-   name — leave them.
+   point at the new URL. Bench-side repointing
+   2026-08-05: RHEL clone remote + pull (#204), ShareDrive
+   `_software/update_software.sh`, the live
+   `/usr/local/bin/scpi-from-github.sh` (interactive-sudo sed, verified
+   1-line change), and the launcher's runtime cache clone
+   (`~/.cache/scpi_control_git` stored its own old origin — repointed;
+   kiosk account has no cache, clones fresh) are ALL done. Still stale
+   pending Anatol's go-ahead on the bench: `~/install_lab_launchers.sh`
+   heredocs (lines 36/91), `/usr/local/bin/scpi-launch.sh:9` (sudo), and
+   `~/scpi_from_github.sh:17` — redirects cover all three meanwhile.
+   **Key discovery (tracked in #206):** the live launchers are heredoc
+   OUTPUT of the unversioned `~/install_lab_launchers.sh`, not copies of
+   the `deploy/` "reference" files — re-running that installer would
+   revert the URL fixes, and `BENCH_PC_NOTES.md`'s "canonical copy"
+   story is wrong. Fix = version the installer in `deploy/` and
+   reconcile (see the issue's done-criteria). ShareDrive/cache FOLDER
+   names (`SCPI_Control`) are deployment layout, not the repo name —
+   leave them.
 2. **Split the SLDEA analysis suite** into its own repo. Seam:
    `sldea_edge / sldea_edge_gui / sldea_tuner / sldea_diag / sldea_trace`
    move out (instrument-free); `sldea_profile` + the capture tab stay

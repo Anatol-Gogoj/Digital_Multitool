@@ -37,6 +37,21 @@ mirrors the app to the local cache **only when `version.py`'s stamp changed**,
 then runs Python from local disk while keeping the working directory on the
 share so presets stay shared between users.
 
+**How the launchers actually reach `/usr/local/bin` (corrected 2026-08-05).**
+Both `scpi-launch.sh` and `scpi-from-github.sh` are *generated* by
+`install_lab_launchers.sh` (repo copy: `deploy/install_lab_launchers.sh`),
+which writes each from an inline heredoc — so `deploy/scpi_from_github.sh` is
+**not** what lands on disk, despite what step 2 above says, and the live file
+has drifted from it (condensed formatting, different `say` strings). Edit the
+installer, not the repo copy: re-running the installer to provision a PC or
+repair desktop icons silently overwrites both launchers and reverts any hand
+edit. Reconciling the two copies is tracked in issue #206. Related trap: the
+GitHub fallback's runtime clone `~/.cache/scpi_control_git` stores its **own**
+`origin`, and `REPO` is only consulted on the *first* clone — so changing the
+URL in the scripts does nothing on a machine that already has that cache.
+Repoint it (`git -C ~/.cache/scpi_control_git remote set-url origin <url>`) or
+delete the directory and let it re-clone.
+
 ## Start-up time — where it actually goes
 
 Measured on the bench PC:

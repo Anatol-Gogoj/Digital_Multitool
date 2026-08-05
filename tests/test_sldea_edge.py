@@ -248,17 +248,26 @@ def test_baseline_disc_traces_resting_dea():
     assert se.baseline_disc(flat, bright) is None
 
 
-def test_electrode_mask_default_is_a_device_class_tradeoff():
-    """Pinning the cost of the 2026-08-05 default change, so nobody
-    rediscovers it on a bench day.
+def test_electrode_mask_255_only_costs_a_flat_synthetic_strip():
+    """What the 220 -> 255 default change does and does NOT cost.
 
-    With the mask OFF (the new 255 default) a BRIGHT electrode strip is
-    no longer rejected, and its edge is itself a strong dark->light step
-    — so the resting-disc fit on a bright-electrode device fails rather
-    than returning a wrong diameter. Failing is the safe direction (the
-    disc fit is the px->mm CROSS-CHECK since the #214 scale gate, not the
-    anchor), but a bright-electrode run must set electrode_lum ≈ 220 in
-    the tuner to get its cross-check back."""
+    A flat synthetic bright rectangle is the worst case, and the ONLY
+    case where the change bites: `foil_mask` is texture-derived, so it
+    does not recognise a painted rectangle as foil, leaving the
+    brightness cut as the only thing rejecting it. Remove that and the
+    strip's own edge becomes a strong dark->light step, so the fit
+    refuses rather than returning a wrong diameter.
+
+    On REAL data it costs nothing, which is the point of this test's
+    name. Measured across all 12 readable runs of the 2026-08-05 batch
+    (P3_1/2/3/5/6/7, DOT_P3_1, the four 07-23 runs, 104531): the
+    brightness cut at 220 is a SUBSET of the texture footprint on every
+    P3 run (0.00-0.09% of frame lost by the change), and the
+    resting-disc cross-check moves by at most ONE pixel anywhere in the
+    batch (578->578, 577->577, 584->584, 606->606, 543->543, 527->527,
+    and 370->371 / 361->362 on the 07-23 optics). The texture footprint
+    is what actually covers the strips -- the brightness cut only ever
+    caught the specular streaks inside them."""
     img = np.full((480, 640), 200.0, np.float32)
     yy, xx = np.mgrid[0:480, 0:640]
     img[(xx - 320) ** 2 + (yy - 240) ** 2 <= 100 * 100] = 165.0

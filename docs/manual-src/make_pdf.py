@@ -139,7 +139,7 @@ def main():
         if sec["title"] in starts:
             writer.add_outline_item(sec["title"], starts[sec["title"]])
     writer.page_mode = "/UseOutlines"         # open with bookmarks visible
-    writer.add_metadata({"/Title": TITLE, "/Author": "SCPI_Control",
+    writer.add_metadata({"/Title": TITLE, "/Author": "Digital Multitool",
                          "/Subject": "Lab bench-control app user manual"})
 
     with open(OUT, "wb") as f:

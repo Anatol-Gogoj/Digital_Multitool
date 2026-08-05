@@ -13,6 +13,36 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## The diagnostic crashed on its own report text again (2026-08-05)
+
+**TL;DR:** `sldea_diag.py --selftest` died on the Windows analysis PC
+while the v1.1.0 manual was being built. The 2026-08-05 scale-gate
+wording put a 📏 emoji into three printed verdicts, the bench and
+analysis consoles are cp1252, and one such character takes the whole
+diagnostic down. Same failure mode as the arrow that did this once
+before. Fixed at a choke point this time, with a test.
+
+- **Observation.** The crash is not cosmetic and not confined to the
+  selftest: `report()`'s text goes to stdout **and** to `sldea_diag.txt`,
+  which is opened with the locale codec — so on the bench PC (Windows,
+  cp1252, launched from `Tune_SLDEA_Windows.bat /diag`) a run whose
+  verdicts include the scale-gate wording would die after doing all the
+  analysis and before writing any of it. The characters came in with the
+  manual-anchor verdicts, so they only fire on runs that reached the new
+  scale gate — which is why nothing noticed until now.
+- **Decision.** `report()` returns through `_ascii()`: a small
+  substitution table for the characters that actually turn up (— → --,
+  → → ->, µ → u, ² → 2, ±, ≥, ≤, ×, …, quotes, 📏 → "ruler") and then a
+  hard `encode('ascii', 'replace')` so anything unmapped degrades to '?'
+  instead of raising. One clamp at the single point every consumer goes
+  through. The previous fix policed individual f-strings and did not
+  survive one round of new copy — that is the reason for the change of
+  approach, not the character set.
+- **Pinned by** `test_report_is_ascii_so_a_cp1252_console_cannot_kill_it`
+  in `tests/test_sldea_diag.py`, which asserts the whole rendered report
+  encodes as ASCII and that the substitutions stay readable rather than
+  collapsing to '?'.
+
 ## Live telemetry sidecar — the watchdog's 2 Hz samples are written down (2026-08-05)
 
 **TL;DR:** Every live run has been measuring the Trek current twice a

@@ -1,4 +1,4 @@
-# Digital Multitool (repo: SCPI_Control) — agent context
+# Digital Multitool — agent context
 
 Tk bench-control app for SCPI lab instruments plus the SLDEA test and
 analysis suite, supporting DEA actuator research. Two halves: instrument

@@ -11,6 +11,58 @@ measured, the 16 mm anchor closed by the laser-cut mask) are all
 done. **No code task is queued — the next session is an OPERATOR
 session**, with the agent supporting.
 
+## Scale gate: manual calibration required per run; it now really overrides (2026-08-05)
+
+**TL;DR:** Edge Review's px→mm anchor is now clicked by hand on every
+run — Detect diverts to 📏 Calibrate until it is, Save hard-blocks
+without it, and the anchor resets on run switch. This also fixes a real
+bug: the manual calibration used to be silently IGNORED at Save whenever
+the baseline row had an accepted result.
+
+Observation → decision (Anatol flagged the unverified anchor as a major
+issue: camera zoom moves between runs and nothing forced a human to
+check the scale):
+
+- **Bug found while implementing:** `mm_per_px`'s preference order put
+  the baseline-row accepted result ahead of `baseline_ref`, so in the
+  normal case (baseline disc detected and accepted) an operator's 📏
+  clicks never reached the saved mm² — while the status line claimed
+  "used at Save". → Preference revised: a `manual-calibration` ref now
+  outranks everything; automatic refs keep the old order. Pinned by
+  `test_mm_per_px_manual_calibration_overrides_baseline_row`.
+- **Gate:** Detect and Save both require `manual_ref` for the CURRENT
+  run (`_pick_run` resets it, so the gate re-arms per run). Detect
+  chains automatically after the two clicks; `--auto` (SLDEA tab "auto
+  process") opens the calibrate dialog on launch and proceeds the same
+  way. `detect_all_sync` (tests/headless) stays ungated by design.
+- **Auto disc fit demoted to cross-check:** after detection, the fitted
+  baseline disc is compared against the manual anchor; >3% diameter
+  disagreement raises a warning dialog (bad clicks, moved optics, or a
+  wrong-feature fit) — the manual anchor is still what Save uses.
+- **Diameter provenance:** the gate dialog warns when the run's
+  setup.txt lacks the capture-side `DEA nominal diameter:` line (the
+  SLDEA tab's "DEA diam (mm)" field writes it per run — that half of
+  the loop already existed), so a default-16 assumption is never silent.
+- **Hardened by the adversarial review pass (same day):** (1) an
+  unreadable baseline PNG (0-byte/truncated — the disk-full failure
+  mode) used to crash the gate as a stderr-only traceback and
+  permanently lock the run; the gate now falls back to the next
+  readable frame (flagged non-baseline in the dialog: only calibrate
+  there if the disc is visibly at rest) and shows an error dialog when
+  nothing is readable. (2) `_pick_run` now resets ALL review state
+  BEFORE anything that can raise — an exception mid-load (e.g. an
+  undecodable setup.txt; `load_settings` also hardened to utf-8/replace)
+  could pair the new run with the previous run's manual anchor, results
+  and live Save button. (3) The gate dialog is a singleton like
+  Advanced… (#176): review keys pierce the pointer-only grab, and a
+  stacked second dialog could chain two detect workers onto one queue.
+  (4) The user-manual source no longer claims --auto "starts detection
+  immediately".
+- Impact on past data: none retroactively — but note the whole reviewed
+  batch was anchored by the automatic disc fit (resting = π·8² exactly
+  everywhere says it anchored correctly); the batch control round
+  remains the independent check for absolute mm².
+
 ## Cross-run plot tool ships — breakdown marks recompute, never trust brands (2026-08-05)
 
 **TL;DR:** `sldea_plot.py` (#199) now draws the campaign's cross-run

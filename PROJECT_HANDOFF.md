@@ -32,15 +32,18 @@ at milestones.
 - **Bench fleet deployed + confirmed at main tip** (v1.0.0+4f5f213,
   2026-08-05): `Tools → Update Software…` / `update_software.sh` ran and
   the RHEL bench footer was verified by Anatol.
-- **Manuals are behind the tooltips by two changes** — #195's watchdog/
-  settings text AND the scale-gate/calibrate flow (source already updated
-  in `docs/manual-src/content.json`); per the release checklist both
-  manuals regenerate at the next version bump. **Do the bump soon.**
-- Suite baseline: `run_tests.py` → **26/30** on the Windows lab PC (the 4
+- **Manuals are behind the tooltips by three changes** — #195's
+  watchdog/settings text, the scale-gate/calibrate flow, AND the
+  telemetry-log control (source already updated in
+  `docs/manual-src/content.json` for all three); per the release
+  checklist both manuals regenerate at the next version bump. **Do the
+  bump soon.**
+- Suite baseline: `run_tests.py` → **27/31** on the Windows lab PC (the 4
   failures — test_arb_bin, test_camera_controls, test_presets_path,
   test_tk_fontfix — are environmental and documented; all SLDEA suites
-  green). Was stated 25/29 before #199 added the sldea_plot suite
-  (audit 2026-08-05 nit).
+  green). Was 26/30 before the telemetry sidecar added
+  `test_sldea_telemetry.py`, and 25/29 before #199 added the sldea_plot
+  suite.
 
 ## Batch-QA campaign (data side, lives OUTSIDE the repo)
 
@@ -80,17 +83,35 @@ missed 233451's −207 µA staircase in real time — tracked in **#189**
 logging) and closes out **#159** (kV telemetry dropout, pre-run check
 shipped, live verify pending). Staged per #189's own increment plan:
 
-1. **(agent, desk, buildable now)** #189 increment (2): append every
-   ~2 Hz watchdog sample (I_Out + a kV read) to a sidecar CSV next to
-   data.csv — the samples are already being read and discarded, so no
-   new SCPI path is involved; it implements the core of #157 and gives
-   the step-change detector dense live data. HV-safety path → the
-   adversarial review gate applies before the PR opens; bench smoke on
-   the next visit before it is trusted.
+1. **(agent, desk) #189 increment (2): BUILT 2026-08-05 — PR open,
+   bench smoke owed.** The ~2 Hz watchdog samples (I_Out every sample,
+   a kV read at ≤1 Hz) now append to `telemetry.csv` beside data.csv;
+   no new SCPI path, `data.csv` and its readers untouched. Implements
+   #157. Two adversarial review rounds ran before the PR and caught six
+   real defects — the sharpest three found by measurement against the
+   real runner: the slow-share flush throttle was inert once a write
+   cost more than its own window (a 3 s share stretched the watchdog's
+   0.5 s tick to 3 s), the breakdown path flushed twice with the HV
+   still up (+4 s of arcing at a 2 s/flush share), and a half-dead link
+   could log `v_status=ok` beside a blank `measured_kV`. All fixed with
+   tests. Suite 27/31, the new `test_sldea_telemetry.py` (27) covering
+   the writer AND the real worker against a fake scope. **Nothing
+   depends on the file until the bench smoke below passes.**
 2. **(bench, first item of the visit)** fix the rig fault then verify
    #195 live: recenter the scope's V_Out window and I_Out offset
    (≈ −16 µA), run one live SLDEA ramp, confirm the pre-run window
-   check + deviation watchdog behave → **close #159**.
+   check + deviation watchdog behave → **close #159**. Same visit,
+   **smoke the telemetry sidecar** — a DRY run with the scope connected
+   is enough for most of it (telemetry is armed on dry runs, which now
+   take scope readings between snapshots where they took none before):
+   `telemetry.csv` appears, achieved Hz reads sensibly with no shortfall
+   or SLOW-DISK warning in run.log, `data.csv` is byte-identical in
+   schema to a pre-change run. Then the live ramp adds the rest —
+   `measured_kV` tracking `nominal_kV`, an off-screen I_Out logging
+   `i_status=offscreen` with a blank µA, and ■ Abort still ramping
+   promptly. Note the bench output dir is a network share: if run.log
+   reports SLOW DISK, say so — that is the one behaviour desk testing
+   cannot reproduce.
 3. **(bench, same visit)** #189 increments (1) then (3)+(4): switch the
    watchdog read MEAN → MAXIMUM/PK2PK (new SCPI token — bench-first per
    convention, streak semantics re-tuned for peak noise), then the real
@@ -161,11 +182,15 @@ open decisions below.
 ## Active issues roster (curated subset — full list on GitHub)
 
 **The priority thread:** #189 live breakdown watchdog + fast scope
-capture (increment plan in the issue: sample logging → MEAN→MAXIMUM →
-trigger-armed single-shot + waveform forensics) · #157 ≥1 Hz kV/µA
-logging (implemented by #189's increment 2) · #159 measured_kV dropout
-(pre-run check shipped in #195; live verify pending). **#158 is CLOSED**
-(post-hoc step-change detection shipped + ground-truthed).
+capture — **increment (2) built 2026-08-05**, increments (1)
+MEAN→MAXIMUM/PK2PK and (3)+(4) trigger-armed single-shot + waveform
+forensics still open and bench-first · #157 ≥1 Hz kV/µA logging —
+**implemented by that increment; closeable once the bench smoke passes**
+· #159 measured_kV dropout (pre-run check shipped in #195; live verify
+pending). **#158 is CLOSED** (post-hoc step-change detection shipped +
+ground-truthed). New follow-up worth filing: a scope left in STOP freezes
+MEAN and telemetry would record a plausible flat trace — detecting it
+needs an `ACQUIRE:STATE?` query, so bench-first.
 
 **The rest:** #32 GUI framework restyle (demos/ tied) · #193 camera
 manual exposure (try Stabilize first; C920/ELP/machine-vision if

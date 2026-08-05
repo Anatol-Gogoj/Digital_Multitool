@@ -2517,6 +2517,44 @@ LOGGING:
                  text="waits until it is SURE — sustained overcurrent only"
                  ).pack(side=tk.LEFT, padx=12)
 
+        # Continuous monitor log (#157/#189). The watchdog samples the
+        # current at 2 Hz on every run and used to discard every sample,
+        # so nothing electrical was recorded between snapshots and a
+        # breakdown could not even be dated afterwards.
+        telf = ttk.LabelFrame(f, text="📈 Telemetry log (telemetry.csv)",
+                              padding=8)
+        telf.pack(fill='x', padx=10, pady=(0, 8))
+        self.sldea_tel_on = tk.BooleanVar(value=True)
+        add_tooltip(ttk.Checkbutton(telf, text="Enabled",
+                                    variable=self.sldea_tel_on),
+                    "Write the scope's kV/µA continuously to telemetry.csv "
+                    "beside data.csv, so the current between snapshots is "
+                    "recorded and a breakdown can be dated electrically. "
+                    "Needs the scope; works on dry runs too. data.csv and "
+                    "everything that reads it are unaffected.").pack(
+            side=tk.LEFT)
+        ttk.Label(telf, text="Rate (Hz):").pack(side=tk.LEFT, padx=(14, 2))
+        tel_hz = ttk.Entry(telf, width=6)
+        tel_hz.insert(0, f"{sldea_profile.TELEMETRY_MAX_HZ:g}")
+        tel_hz.pack(side=tk.LEFT)
+        add_tooltip(tel_hz,
+                    f"Samples per second, "
+                    f"{sldea_profile.TELEMETRY_MIN_HZ:g}–"
+                    f"{sldea_profile.TELEMETRY_MAX_HZ:g}. At the "
+                    f"{sldea_profile.TELEMETRY_MAX_HZ:g} Hz default the "
+                    f"current rows are FREE — they are the watchdog's own "
+                    f"samples, which were previously thrown away. Faster is "
+                    f"not offered: it would be new scope traffic inside the "
+                    f"live run loop and is not bench-verified. V_Out is read "
+                    f"at most every "
+                    f"{sldea_profile.TELEMETRY_KV_MIN_PERIOD_S:g} s (a second "
+                    f"locked round-trip); nominal_kV is on every row. The "
+                    f"rate ACHIEVED is reported in the run log at the end.")
+        self.sldea_vars['tel_hz'] = tel_hz
+        tk.Label(telf, fg='#555',
+                 text="every sample the watchdog already takes — kept, "
+                      "not discarded").pack(side=tk.LEFT, padx=12)
+
         runf = ttk.Frame(f)
         runf.pack(fill='x', padx=10, pady=8)
         self.sldea_dryrun = tk.BooleanVar(value=True)
@@ -2712,8 +2750,8 @@ LOGGING:
                 if not self.scope and not messagebox.askyesno(
                         "No current monitoring",
                         "No oscilloscope connected — this LIVE run will have "
-                        "NO measured kV/µA columns and NO breakdown "
-                        "watchdog.\n\n"
+                        "NO measured kV/µA columns, NO breakdown watchdog "
+                        "and NO telemetry log.\n\n"
                         "Proceed without monitoring?", default='no'):
                     return
                 if self.scope and not self._sldea_check_monitors(p):
@@ -2761,6 +2799,19 @@ LOGGING:
                 wd_s = float(self.sldea_vars['wd_s'].get())
             except (KeyError, ValueError):
                 wd_ua, wd_s = 100.0, 3.0
+            # Telemetry needs the scope, not HV: a dry run logs its monitor
+            # readings too, which is how the rig gets checked before the
+            # Trek is energized. clamp_telemetry_hz absorbs an empty or
+            # nonsense entry box rather than failing the run.
+            tel_on = self.sldea_tel_on.get() and self.scope is not None
+            try:
+                tel_hz = sldea_profile.clamp_telemetry_hz(
+                    self.sldea_vars['tel_hz'].get())
+            except KeyError:
+                tel_hz = sldea_profile.TELEMETRY_MAX_HZ
+            if self.sldea_tel_on.get() and self.scope is None:
+                self._sldea_log("telemetry requested but NO SCOPE — no "
+                                "monitor log for this run")
             # Free the camera: the Webcam preview holds /dev/video0 open and
             # a one-shot grab can't run while it streams (empty frames
             # otherwise).
@@ -2790,14 +2841,17 @@ LOGGING:
             self._sldea_log(
                 f"{'DRY-RUN' if dry else 'LIVE HV'} start — {p.summary()}"
                 + (f"  [watchdog: dev ≥{wd_ua:g} µA for {wd_s:g}s, "
-                   f"baseline learned at 0 kV]" if wd_on else ""))
+                   f"baseline learned at 0 kV]" if wd_on else "")
+                + (f"  [telemetry: {tel_hz:g} Hz → "
+                   f"{sldea_profile.TELEMETRY_FILENAME}]" if tel_on else ""))
             started = True
             threading.Thread(
                 target=self._sldea_worker,
                 args=(p, self.sldea_outdir.get(),
                       self.sldea_runname.get().strip(),
                       sgch, vch, ich, dry, cam_exp, cam_gain, diam_mm,
-                      autoproc, wd_on, wd_ua, wd_s, trek_sign, scope_setup),
+                      autoproc, wd_on, wd_ua, wd_s, trek_sign, scope_setup,
+                      tel_on, tel_hz),
                 daemon=True).start()
             self.root.after(100, self._sldea_animate_cursor)  # playhead
         finally:
@@ -3160,14 +3214,17 @@ LOGGING:
     def _sldea_worker(self, p, outdir, runname, sgch, vch, ich, dry,
                       cam_exp=6, cam_gain=60, diam_mm=16.0, autoproc=False,
                       wd_on=False, wd_ua=100.0, wd_s=3.0, trek_sign=1.0,
-                      scope_setup=None):
+                      scope_setup=None, tel_on=False,
+                      tel_hz=sldea_profile.TELEMETRY_MAX_HZ):
         """Host-sequenced staircase runner (daemon thread; no Tk calls except
         via _sldea_log/_sldea_set_status/after). Drives the SG DC offset along
         p.kv_at(t), fires webcam+scope snapshots on schedule, writes the run
-        dir (setup.txt + data.csv + frames/)."""
+        dir (setup.txt + data.csv + telemetry.csv + frames/)."""
         import os
         import csv as _csv
         started = datetime.now()
+        tel_hz = sldea_profile.clamp_telemetry_hz(tel_hz)
+        tel = None                    # telemetry sidecar (opened below)
         rundir = os.path.join(outdir, runname or p.run_dirname(started))
         framedir = os.path.join(rundir, 'frames')
         fh = None
@@ -3196,6 +3253,14 @@ LOGGING:
                              "start) ---\n")
                     for ln in scope_setup:
                         sf.write(ln + "\n")
+                if tel_on and self.scope:
+                    sf.write(
+                        f"\n--- Telemetry ---\n"
+                        f"{sldea_profile.TELEMETRY_FILENAME}: continuous "
+                        f"monitor log at {tel_hz:g} Hz "
+                        f"(I_Out every sample, V_Out at most every "
+                        f"{max(sldea_profile.TELEMETRY_KV_MIN_PERIOD_S, 1.0 / tel_hz):g} s); "
+                        f"same sign convention and units as data.csv\n")
             # run.log goes live: flush everything logged since Run was
             # pressed (monitor-check outcome included), then append-through.
             # Flush AND swap inside one locked section: a Tk-thread log
@@ -3215,6 +3280,33 @@ LOGGING:
             writer.writeheader()
             fh.flush()
             self._sldea_log(f"run dir: {rundir}")
+            # Telemetry sidecar (#157/#189): the monitor samples this loop
+            # already takes, written down instead of discarded. Its own
+            # file, so data.csv keeps its one-row-per-frame schema and
+            # every reader of it is untouched. A telemetry failure is
+            # never a run failure — worst case the run continues blind to
+            # its own record.
+            if tel_on and self.scope:
+                try:
+                    tel = sldea_profile.TelemetryLog(
+                        os.path.join(rundir,
+                                     sldea_profile.TELEMETRY_FILENAME),
+                        target_hz=tel_hz)
+                    self._sldea_log(
+                        f"telemetry: logging to "
+                        f"{sldea_profile.TELEMETRY_FILENAME} at "
+                        f"{tel.target_hz:g} Hz (kV every "
+                        f"{tel.kv_period_s:g} s)")
+                except Exception as e:
+                    tel = None
+                    self._sldea_log(f"⚠ telemetry log could not be opened "
+                                    f"({e}) — run continues without it")
+            elif tel_on:
+                # setup.txt was written from the same condition a moment
+                # ago; if the scope went away in between (a Reconnect),
+                # say so rather than leaving a promised file missing.
+                self._sldea_log("⚠ telemetry armed but the scope is gone — "
+                                "no monitor log for this run")
             # --- camera: lock fully manual (WB off) so nothing drifts ---
             spec = None
             try:
@@ -3291,23 +3383,40 @@ LOGGING:
             t0 = time.monotonic()
             last_status = -1.0
             last_kv = None
-            last_wd = -1.0
+            last_mon = -1.0
+            # One monitor cadence for both consumers. With the watchdog
+            # armed it stays exactly 0.5 s — its bench-validated sampling
+            # is NOT re-timed by a logging feature — and telemetry (capped
+            # at 2 Hz, so never faster) decimates off it. Telemetry alone
+            # sets its own period.
+            mon_dt = 0.5 if watchdog is not None else (
+                tel.period_s if tel is not None else 0.5)
             wd_bad_since, wd_blind = None, False
             while not self._sldea_stop:
                 el = time.monotonic() - t0
                 self._sldea_elapsed = el          # feeds the preview playhead
                 if el > p.total_duration_s + 0.3:
                     break
-                # Breakdown watchdog: ~2 Hz current check; deliberately slow
-                # to trip (sustained overcurrent only -- see BreakdownWatchdog)
-                if watchdog is not None and el - last_wd >= 0.5:
-                    last_wd = el
+                # Monitor tick: ~2 Hz current check for the breakdown
+                # watchdog (deliberately slow to trip -- sustained
+                # overcurrent only, see BreakdownWatchdog) and, on the same
+                # single read, the telemetry row. The read happens ONCE per
+                # tick: telemetry costs no extra current round-trip, which
+                # is the whole premise of #157.
+                # `tel.failed` matters here: once the log has given up, a
+                # telemetry-only run must stop taking scope reads for
+                # nobody (three locked round-trips every tick, contending
+                # with the Data Logging tab for the same instrument).
+                if (watchdog is not None
+                        or (tel is not None and not tel.failed)) \
+                        and el - last_mon >= mon_dt:
+                    last_mon = el
                     try:
                         mi, wst = self.scope.measure_raw('MEAN', ich)
                     except Exception as e:
-                        mi, wst = None, 'invalid'
+                        mi, wst = None, 'error'
                         if wd_bad_since is None:
-                            self._sldea_log(f"⚠ watchdog scope read failed: "
+                            self._sldea_log(f"⚠ monitor scope read failed: "
                                             f"{e}")
                     ioff = wst == 'offscreen'
                     ua = measured_ua(mi) if mi is not None else None
@@ -3328,15 +3437,21 @@ LOGGING:
                             wd_blind = True
                             self._sldea_log(
                                 "⚠⚠ CURRENT MONITORING LOST — scope "
-                                "unreadable for 10 s, breakdown watchdog is "
-                                "BLIND. Run continues; watch the DEA and "
+                                "unreadable for 10 s"
+                                + (", breakdown watchdog is BLIND"
+                                   if watchdog is not None else "")
+                                + ". Run continues; watch the DEA and "
                                 "abort manually if in doubt.")
                     else:
                         if wd_blind:
-                            self._sldea_log("watchdog: current monitoring "
-                                            "recovered")
+                            self._sldea_log("current monitoring recovered")
                         wd_bad_since, wd_blind = None, False
-                    if watchdog.update(el, ua, offscreen=ioff):
+                    # Telemetry BEFORE the trip branch would delay the abort
+                    # by a kV round-trip, so the watchdog decides first and
+                    # the periodic row is written below (the trip writes its
+                    # own event row, off the reading that tripped it).
+                    if watchdog is not None \
+                            and watchdog.update(el, ua, offscreen=ioff):
                         self._sldea_bd_tripped = True
                         # Branch on the NATURE of the tripping evidence,
                         # not on last_ua being unset: after any earlier
@@ -3354,6 +3469,27 @@ LOGGING:
                             f"⚡ BREAKDOWN CONFIRMED — I={itxt}"
                             + f" sustained >{wd_s:g}s. Capturing frame, "
                             f"ramping to 0, aborting.")
+                        # Date the trip electrically, from the very reading
+                        # that tripped it — the frame capture below takes
+                        # hundreds of ms and a fresh scope read, so its row
+                        # is a different (later) instant.
+                        #
+                        # hold_flush FIRST: from here to the SG reaching
+                        # 0 V the Trek is still arcing, and on a stalled
+                        # share the two telemetry writes on this path
+                        # measured +4 s of HV-live time (review
+                        # 2026-08-05). The rows are still WRITTEN — they
+                        # are the record of the event — but nothing waits
+                        # on the file system until tel.close(), which the
+                        # finally block runs after the SG is zeroed.
+                        if tel is not None:
+                            tel.hold_flush = True
+                            tel.event(
+                                el, datetime.now().isoformat(
+                                    timespec='milliseconds'),
+                                p.kv_at(el), 'BREAKDOWN CONFIRMED',
+                                ua=None if ua is None else trek_sign * ua,
+                                i_status=wst)
                         self._sldea_capture(
                             p, {'t': el, 'step': 99,
                                 'nominal_kv': p.kv_at(el),
@@ -3361,9 +3497,30 @@ LOGGING:
                             si + 1, spec, framedir, writer, fh, vch, ich,
                             dry, vsign=trek_sign,
                             note=f"WATCHDOG: breakdown confirmed "
-                                      f"(dev >{wd_ua:g}µA for {wd_s:g}s)")
+                                      f"(dev >{wd_ua:g}µA for {wd_s:g}s)",
+                            tel=tel, t0=t0)
                         self._sldea_stop = True
                         break
+                    # Periodic telemetry row, off the current already read.
+                    # V_Out costs a SECOND locked round-trip, so it is
+                    # sub-sampled (>= 1 s) — nominal_kV carries the exact
+                    # commanded voltage on every row regardless.
+                    if tel is not None and tel.due(el):
+                        kv_t, vst_t = None, None
+                        if tel.kv_due(el):
+                            try:
+                                mv, vst_t = self.scope.measure_raw('MEAN',
+                                                                   vch)
+                                kv_t = (trek_sign * measured_kv(mv)
+                                        if mv is not None else None)
+                            except Exception:
+                                kv_t, vst_t = None, 'error'
+                        tel.sample(
+                            el,
+                            datetime.now().isoformat(timespec='milliseconds'),
+                            p.kv_at(el),
+                            ua=None if ua is None else trek_sign * ua,
+                            i_status=wst, kv=kv_t, v_status=vst_t or '')
                 if sg is not None:
                     kv = p.kv_at(el)
                     if last_kv is None or abs(kv - last_kv) > 1e-4:
@@ -3376,7 +3533,7 @@ LOGGING:
                 while si < len(snaps) and el >= snaps[si]['t']:
                     self._sldea_capture(p, snaps[si], si + 1, spec, framedir,
                                         writer, fh, vch, ich, dry,
-                                        vsign=trek_sign)
+                                        vsign=trek_sign, tel=tel, t0=t0)
                     si += 1
                 if el - last_status >= 1.0:
                     self._sldea_set_status(
@@ -3441,6 +3598,26 @@ LOGGING:
                     fh.close()
                 except Exception:
                     pass
+            # Telemetry last: it is a record, not a safety device, so it
+            # closes AFTER the SG is zeroed and data.csv is safe. #157 asks
+            # for the ACHIEVED rate to be visible — a run the hardware
+            # could not keep up with says so here instead of quietly
+            # leaving a sparse file.
+            if tel is not None:
+                try:
+                    self._sldea_log(tel.summary())
+                    if tel.rate_shortfall():
+                        self._sldea_log(
+                            f"⚠ telemetry ran below its {tel.target_hz:g} Hz "
+                            f"target — the scope/loop could not keep up; "
+                            f"treat gaps in {sldea_profile.TELEMETRY_FILENAME}"
+                            f" as unsampled, not as quiet current.")
+                    if tel.failed:
+                        self._sldea_log(
+                            f"⚠ telemetry stopped early: {tel.last_error}")
+                except Exception:
+                    pass
+                tel.close()
             self.root.after(0, self._sldea_finished)
 
     def _sldea_cam_value(self, attr, default):
@@ -3450,9 +3627,17 @@ LOGGING:
             return default
 
     def _sldea_capture(self, p, snap, index, spec, framedir, writer, fh,
-                       vch, ich, dry, note='', vsign=1.0):
+                       vch, ich, dry, note='', vsign=1.0, tel=None,
+                       t0=None):
         import os
         frame = None
+        vst = ist = ''
+        # Telemetry timestamp for this capture, measured at the scope read
+        # below -- NOT the tick that scheduled it. The webcam grab above
+        # takes hundreds of ms, so the two are not the same instant and a
+        # dense trace joined on the tick time would be skewed by exactly
+        # the capture duration.
+        tel_t = snap['t']
         if spec is not None:
             for _attempt in range(2):                 # one retry
                 try:
@@ -3465,13 +3650,23 @@ LOGGING:
         mkv = mua = None
         if self.scope:
             try:
-                mv, vst = self.scope.measure_raw('MEAN', vch)
-                mi, _ist = self.scope.measure_raw('MEAN', ich)
+                if t0 is not None:
+                    tel_t = time.monotonic() - t0
                 # vsign applies to BOTH monitors — the Trek inverts V_Out
                 # and I_Out alike (D5 2026-08-04). Detection is deviation/
                 # abs-based, so the old kV-only correction never changed a
                 # verdict; this is provenance hygiene.
+                #
+                # Each reading is converted straight after its OWN read,
+                # not after both: the two measure_raw calls are separate
+                # lock acquisitions, so a half-dead link can answer V_Out
+                # and then raise on I_Out — which used to discard the good
+                # kV AND log v_status='ok' beside the blank cell it left,
+                # the exact ambiguity the status column exists to remove
+                # (#159, review 2026-08-05).
+                mv, vst = self.scope.measure_raw('MEAN', vch)
                 mkv = vsign * measured_kv(mv) if mv is not None else None
+                mi, ist = self.scope.measure_raw('MEAN', ich)
                 mua = vsign * measured_ua(mi) if mi is not None else None
                 if vst == 'offscreen':
                     # numeric columns stay numeric: blank cell + a note,
@@ -3486,6 +3681,7 @@ LOGGING:
                             "window too small (see setup.txt readback)")
             except Exception as e:
                 self._sldea_log(f"scope read error: {e}")
+                vst, ist = vst or 'error', ist or 'error'
         # Only record a filename if a frame was actually written -- otherwise
         # the CSV would name a file that does not exist.
         fname = ''
@@ -3513,6 +3709,17 @@ LOGGING:
             'notes': note,
         })
         fh.flush()
+        # Mark the snapshot in the telemetry stream too, off the readings
+        # just taken (no extra scope traffic). The frame filename is the
+        # join key back to data.csv, so a dense current trace can be lined
+        # up against the frames without matching on timestamps.
+        if tel is not None:
+            tel.event(tel_t,
+                      datetime.now().isoformat(timespec='milliseconds'),
+                      snap['nominal_kv'],
+                      f"snap s{int(snap['step']):02d} {snap['tag']}"
+                      + (f" {fname}" if fname else ""),
+                      ua=mua, i_status=ist, kv=mkv, v_status=vst)
         # Each value formats independently ('?' for None): an off-screen
         # I_Out beside a fine V_Out is expected-by-design since the window
         # checks, and the old mkv-only guard TypeError'd on it, killing

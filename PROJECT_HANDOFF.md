@@ -46,15 +46,18 @@ retire-able — the 555 MB zip, OneDrive and loose copies), `_baselines\`,
 
 ## Open decisions (Anatol's calls)
 
-1. **Repo rename → Digital-Multitool: local side DONE 2026-08-05** —
-   checkout moved to `C:\Users\Anatol Gogoj\Desktop\Digital-Multitool`
-   (worktrees repaired, venv verified). **GitHub rename still needs one
-   click by Anatol** (Settings → General → Rename): this machine's gh
-   session is Pingwinos40 with WRITE, and renaming needs admin. After
-   the click (redirects cover the interim): optionally `git remote
-   set-url origin https://github.com/Anatol-Gogoj/Digital-Multitool.git`
-   on clones, update the URL in `deploy/scpi_from_github.sh`, and update
-   the ShareDrive launcher copy on the bench.
+1. **Repo rename: DONE 2026-08-05.** GitHub repo is now
+   `Anatol-Gogoj/Digital_Multitool` (underscore); old SCPI_Control URLs
+   redirect indefinitely. Local checkout lives at
+   `C:\Users\Anatol Gogoj\Desktop\Digital-Multitool` (worktrees repaired,
+   venv verified, remote set-url done); repo scripts
+   (`deploy/scpi_from_github.sh`, `deploy/update_software.sh.reference`)
+   point at the new URL. **Remaining: bench-side pointers** — the RHEL
+   box's clone remote, the live `/usr/local/bin/scpi-from-github.sh`, and
+   the ShareDrive `_software/update_software.sh` copy (redirects keep all
+   of them working meanwhile). ShareDrive/cache FOLDER names
+   (`SCPI_Control`) are deployment layout, not the repo name — leave them
+   unless deliberately migrating every launcher at once.
 2. **Split the SLDEA analysis suite** into its own repo. Seam:
    `sldea_edge / sldea_edge_gui / sldea_tuner / sldea_diag / sldea_trace`
    move out (instrument-free); `sldea_profile` + the capture tab stay

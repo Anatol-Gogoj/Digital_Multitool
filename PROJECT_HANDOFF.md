@@ -58,17 +58,18 @@ retire-able — the 555 MB zip, OneDrive and loose copies), `_baselines\`,
    `/usr/local/bin/scpi-from-github.sh` (interactive-sudo sed, verified
    1-line change), and the launcher's runtime cache clone
    (`~/.cache/scpi_control_git` stored its own old origin — repointed;
-   kiosk account has no cache, clones fresh) are ALL done. The bench installer
-   (`~/install_lab_launchers.sh`) and hand-run `~/scpi_from_github.sh`
-   were fixed 2026-08-05 and the installer is now VERSIONED at
-   `deploy/install_lab_launchers.sh` with the real launch chain
-   documented in `BENCH_PC_NOTES.md` (bench-authored PR). **Exactly one
-   stale pointer remains anywhere:** `/usr/local/bin/scpi-launch.sh:9`,
-   awaiting one interactive-sudo sed on the bench (redirect covers it).
-   Remaining #206 work: deduplicate the heredoc-vs-`deploy/` script
-   copies and an installer idempotence check on the next bench visit.
-   ShareDrive/cache FOLDER names (`SCPI_Control`) are deployment
-   layout, not the repo name — leave them.
+   kiosk account has no cache, clones fresh) are ALL done. **Rename saga COMPLETE
+   2026-08-05: zero stale pointers remain anywhere** — GitHub, both PCs,
+   the ShareDrive updater, the bench installer, both live launchers, the
+   hand-run copy, and the runtime cache clone all read
+   `Digital_Multitool` (bench sweep verified; full ledger in
+   `~/Documents/repo_rename_pointer_hygiene_2026-08-04.md` on the bench,
+   backups kept). The installer is versioned at
+   `deploy/install_lab_launchers.sh` (#208). Remaining #206 work for the
+   next bench visit: deduplicate the heredoc-vs-`deploy/` script copies
+   and re-run the installer as an idempotence check. ShareDrive/cache
+   FOLDER names (`SCPI_Control`) are deployment layout, not the repo
+   name — leave them.
 2. **Split the SLDEA analysis suite** into its own repo. Seam:
    `sldea_edge / sldea_edge_gui / sldea_tuner / sldea_diag / sldea_trace`
    move out (instrument-free); `sldea_profile` + the capture tab stay

@@ -96,7 +96,12 @@ def load_settings(rundir):
     s = dict(DEFAULT_SETTINGS)
     path = os.path.join(rundir, 'setup.txt')
     try:
-        text = open(path).read()
+        # utf-8 + replace: setup.txt is bench-written UTF-8 and a stray
+        # undecodable byte must degrade to defaults, not raise out of a
+        # Tk callback (UnicodeDecodeError is NOT an OSError -- review
+        # 2026-08-05 found it leaking a stale scale anchor via _pick_run)
+        with open(path, encoding='utf-8', errors='replace') as f:
+            text = f.read()
     except OSError:
         return s
     m = re.search(r'DEA nominal diameter:\s*(' + _NUM + r')\s*mm', text)
@@ -1880,19 +1885,30 @@ def _baseline_disc_uncached(base_gray, settings):
             'n_edge': int(len(pin)), 'paper_lum': round(paper, 1)}
 
 
+def _is_manual_cal(baseline_ref):
+    return bool(baseline_ref
+                and baseline_ref.get('method') == 'manual-calibration'
+                and baseline_ref.get('diam_px'))
+
+
 def mm_per_px(results, rows, settings, baseline_ref=None):
     """Scale from the DEA's nominal resting diameter.
 
-    Preference order (audit 2026-07-25): an accepted result on the row
-    tagged 'baseline' → the `baseline_ref` (a baseline_disc() detection or
-    a manual calibration dict with 'diam_px') → the first accepted result
+    Preference order (audit 2026-07-25, revised 2026-08-05): a MANUAL
+    calibration (`baseline_ref` with method 'manual-calibration') beats
+    everything — the operator explicitly measured the disc, and the old
+    order silently ignored those clicks whenever the baseline row had an
+    accepted result (the status line claimed otherwise; flagged major).
+    Then: an accepted result on the row tagged 'baseline' → an automatic
+    `baseline_ref` (baseline_disc() detection) → the first accepted result
     (last resort — its outline is an ACTIVATED region, so the scale may be
     off; callers should record the source). None when nothing is usable."""
-    ref = None
-    for i, row in enumerate(rows):
-        if results.get(i) and (row.get('tag') == 'baseline'):
-            ref = results[i]
-            break
+    ref = baseline_ref if _is_manual_cal(baseline_ref) else None
+    if ref is None:
+        for i, row in enumerate(rows):
+            if results.get(i) and (row.get('tag') == 'baseline'):
+                ref = results[i]
+                break
     if ref is None and baseline_ref and baseline_ref.get('diam_px'):
         ref = baseline_ref
     if ref is None:
@@ -1907,6 +1923,8 @@ def mm_per_px(results, rows, settings, baseline_ref=None):
 
 def scale_source(results, rows, baseline_ref=None):
     """Human-readable description of which reference mm_per_px would use."""
+    if _is_manual_cal(baseline_ref):
+        return f"manual-calibration ({baseline_ref['diam_px']:.0f} px)"
     for i, row in enumerate(rows):
         if results.get(i) and (row.get('tag') == 'baseline'):
             return f"baseline row (idx {i})"

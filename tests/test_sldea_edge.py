@@ -258,6 +258,29 @@ def test_mm_per_px_prefers_baseline_ref_over_first_accept():
     assert 'FIRST ACCEPTED' in se.scale_source(results, rows)
 
 
+def test_mm_per_px_manual_calibration_overrides_baseline_row():
+    # Revised 2026-08-05 (flagged major): the operator's 📏 calibration
+    # used to be silently IGNORED whenever the baseline row had an
+    # accepted result — the old order put that result first.
+    rows = [{'tag': 'baseline'}, {'tag': 'post-ramp'}]
+    results = {0: {'diam_px': 100.0, 'area_px': 7854.0}}   # baseline row
+    s = dict(se.DEFAULT_SETTINGS); s['diam_mm'] = 16.0
+    # no ref: the baseline-row result anchors (unchanged)
+    assert abs(se.mm_per_px(results, rows, s) - 0.16) < 1e-9
+    # manual calibration OUTRANKS the baseline-row result
+    manual = {'method': 'manual-calibration', 'diam_px': 200.0}
+    assert abs(se.mm_per_px(results, rows, s, baseline_ref=manual)
+               - 0.08) < 1e-9
+    assert 'manual-calibration' in se.scale_source(results, rows,
+                                                   baseline_ref=manual)
+    # an AUTOMATIC ref keeps the old order: the baseline row still wins
+    auto = {'method': 'baseline-disc', 'diam_px': 200.0}
+    assert abs(se.mm_per_px(results, rows, s, baseline_ref=auto)
+               - 0.16) < 1e-9
+    assert 'baseline row' in se.scale_source(results, rows,
+                                             baseline_ref=auto)
+
+
 def test_apply_results_reprocess_blanks_and_dedups():
     # audit 2026-07-25: rejected rows kept stale mm2/wrinkle; repeated
     # saves duplicated breakdown notes.

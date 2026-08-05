@@ -1404,7 +1404,7 @@
    },
    {
     "label": "📏 Calibrate… (Edge Review)",
-    "what": "Click the resting disc's two opposite edges on the baseline frame to set the mm-per-pixel scale manually."
+    "what": "Click the resting disc's two opposite edges on the baseline frame to set the mm-per-pixel scale. Required per run (the scale gate): Detect and Save are blocked until it is done, and it overrides every automatic scale reference."
    },
    {
     "label": "Advanced… (Edge Review)",
@@ -1425,7 +1425,7 @@
    "Check the panel labelled baseline really shows the 0 kV image.",
    "Drag sliders until the outlines hug the active area in all three panels.",
    "Click 💾 Save to setup.txt.",
-   "Open Edge Review on the same folder (--auto starts detection immediately) and work the review queue.",
+   "Open Edge Review on the same folder (--auto opens the scale-calibration dialog first — click the resting disc's two opposite edges and detection starts automatically) and work the review queue.",
    "💾 Save to data.csv… when the queue is empty; if it still will not tune, run the /diag diagnostic instead of another slider session."
   ],
   "cautions": [

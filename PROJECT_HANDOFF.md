@@ -116,10 +116,18 @@ shipped, live verify pending). Staged per #189's own increment plan:
    verification (HV, authorized operator only). §M and §N can go to a
    colleague at the bench as-is; neither depends on §O. `RUN_SHEET.md`
    is the same list in tick-off form.
-2. **(bench, first item of the visit)** fix the rig fault then verify
-   #195 live: recenter the scope's V_Out window and I_Out offset
-   (≈ −16 µA), run one live SLDEA ramp, confirm the pre-run window
-   check + deviation watchdog behave → **close #159**. Same visit,
+2. **(bench, first item of the visit)** verify #195 live → **close
+   #159**. Be clear about what this is NOT: **nobody recentres the scope
+   by hand.** `_sldea_check_monitors` reads the vertical setup back
+   before every live run and, when the visible window cannot show the
+   run's range, offers **"Fix it automatically"** — which programs
+   SCALE / POSITION / OFFSET / attenuation / coupling on both monitor
+   channels itself. The ≈ −16 µA I_Out offset is separately cancelled by
+   the watchdog's learned 0 kV baseline. Both shipped in #195; the
+   earlier wording here implied manual scope work and was wrong. What is
+   actually owed is confirming it live: one SLDEA ramp, watch the dialog
+   fire, and check `measured_kV` tracks `nominal_kV` for the WHOLE ramp
+   with no blank tail. Same visit,
    **smoke the telemetry sidecar** — a DRY run with the scope connected
    is enough for most of it (telemetry is armed on dry runs, which now
    take scope readings between snapshots where they took none before):

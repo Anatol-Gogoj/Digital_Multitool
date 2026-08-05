@@ -87,12 +87,15 @@ git vs LFS vs release-assets-only · `demos/` fate once #32 is decided.
 > ramp.
 
 - [ ] **§O — live-run verification.** Closes **#159**. Full steps in
-      `BENCH_TEST.md`. Good news: the "recentre the scope windows by
-      hand" step is mostly gone — the pre-run check now offers **"Fix it
-      automatically"** and sets scale, position, attenuation and coupling
-      on both monitor channels, and the −16 µA I_Out offset is cancelled
-      by the watchdog's learned baseline. The job is to *confirm the app
-      does the right thing*, and to note what the dialog said it fixed.
+      `BENCH_TEST.md`. **There is no manual scope work in this.** The
+      pre-run check reads the vertical setup back and, on a window that
+      cannot show the run's range, offers **"Fix it automatically"**,
+      which programs scale, position, offset, attenuation and coupling
+      on both monitor channels itself; the −16 µA I_Out offset is
+      cancelled by the watchdog's learned 0 kV baseline. Both shipped in
+      #195. The job is to *confirm the app does the right thing* — watch
+      the dialog fire, note what it said it fixed, and check
+      `measured_kV` tracks `nominal_kV` for the whole ramp.
 - [ ] **#189 increment (1)** — MEAN → MAXIMUM/PK2PK, streak semantics
       re-tuned for peak noise. **Do §N first**; its section A is the
       input this needs.

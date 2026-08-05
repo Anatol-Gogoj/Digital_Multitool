@@ -24,7 +24,7 @@ reviews, and a stack of enhancement issues. Durable conventions live in
 
 ## Batch-QA campaign (data side, lives OUTSIDE the repo)
 
-Canonical home: `C:\Users\Anatol Gogoj\Desktop\SLDEA_data\Upload 20260804\`
+Canonical home: `C:\Users\Anatol Gogoj\Desktop\Digital Multitool\SLDEA_data\Upload 20260804\`
 (moved from D:\Downloads 2026-08-05; `SCPI_SLDEA_DIR` points there) — contains
 `HANDOFF.md` (the campaign runbook), `SCORECARD.md` (per-run verdicts),
 `PROVENANCE.md` (consolidation ledger: every source path, what is now
@@ -52,12 +52,19 @@ retire-able — the 555 MB zip, OneDrive and loose copies), `_baselines\`,
    `C:\Users\Anatol Gogoj\Desktop\Digital-Multitool` (worktrees repaired,
    venv verified, remote set-url done); repo scripts
    (`deploy/scpi_from_github.sh`, `deploy/update_software.sh.reference`)
-   point at the new URL. **Remaining: bench-side pointers** — the RHEL
-   box's clone remote, the live `/usr/local/bin/scpi-from-github.sh`, and
-   the ShareDrive `_software/update_software.sh` copy (redirects keep all
-   of them working meanwhile). ShareDrive/cache FOLDER names
-   (`SCPI_Control`) are deployment layout, not the repo name — leave them
-   unless deliberately migrating every launcher at once.
+   point at the new URL. Bench-side pointers repointed
+   2026-08-05: the RHEL clone remote + pull (at #204) and the ShareDrive
+   `_software/update_software.sh` are done; the live
+   `/usr/local/bin/scpi-from-github.sh` still carries the old URL —
+   needs one interactive-sudo `sed` on the bench (works fine meanwhile
+   via redirect). **Drift finding from that session:** the live
+   scpi-from-github.sh is a hand-condensed variant of its
+   `deploy/scpi_from_github.sh` reference copy (comments stripped, two
+   `say` strings differ) — the reference-copy convention is broken for
+   this one file; reconcile deliberately on a bench visit (either
+   redeploy from reference or back-port the live edits). ShareDrive/cache
+   FOLDER names (`SCPI_Control`) are deployment layout, not the repo
+   name — leave them.
 2. **Split the SLDEA analysis suite** into its own repo. Seam:
    `sldea_edge / sldea_edge_gui / sldea_tuner / sldea_diag / sldea_trace`
    move out (instrument-free); `sldea_profile` + the capture tab stay
@@ -85,11 +92,15 @@ run-data auto-plot tool (full toggle wishlist in the issue; Tol bright)
 
 ## This machine (Windows lab/analysis PC)
 
-- Repo checkout `C:\Users\Anatol Gogoj\Desktop\Digital-Multitool` with
-  venv at `.venv` (numpy/cv2/matplotlib/Pillow installed; verified after
-  the move). Agent worktrees live under `.claude\worktrees\`. No `py`
-  launcher — use `python`. Leftover `D:\Downloads\gui\` could not be
-  deleted during the move (session file lock) — delete it whenever.
+- Everything lives under the umbrella folder
+  `C:\Users\Anatol Gogoj\Desktop\Digital Multitool\` (note the space):
+  repo checkout at `Digital-Multitool\` inside it (venv at `.venv`,
+  verified; agent worktrees under `.claude\worktrees\`), data at
+  `SLDEA_data\` beside it. `SCPI_SLDEA_DIR` points at
+  `...\SLDEA_data\Upload 20260804`. No `py` launcher — use `python`.
+  Quote every path — two levels of this tree contain spaces. Leftover
+  `D:\Downloads\gui\` could not be deleted during the move (session
+  file lock) — delete it whenever.
 - C: fills up (was at 0 GB free on 2026-08-04); keep work on D:.
 - `robocopy` needs `/R:2 /W:5` or it hangs on one locked file.
 - OneDrive `Recordings\SLDEA_data` copies are now redundant per

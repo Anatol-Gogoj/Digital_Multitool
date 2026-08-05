@@ -117,12 +117,20 @@ def load_settings(rundir):
 
 
 def save_settings(rundir, settings):
-    """Append/replace the edge-settings section in the run's setup.txt."""
+    """Append/replace the edge-settings section in the run's setup.txt.
+
+    Reads and writes UTF-8 with errors='replace' — the bare locale-codec
+    open here carried the same UnicodeDecodeError hazard load_settings
+    was hardened against, and a cp1252 WRITE of any replacement char
+    raised right back out (audit 2026-08-05). Preserves the scale-anchor
+    block (save_scale_anchor), which sits before this section."""
     path = os.path.join(rundir, 'setup.txt')
     try:
-        text = open(path).read()
+        with open(path, encoding='utf-8', errors='replace') as f:
+            text = f.read()
     except OSError:
         text = ''
+    text, anchor = _split_anchor(text)
     if EDGE_HDR in text:
         text = text.split(EDGE_HDR, 1)[0].rstrip() + '\n'
     lines = [EDGE_HDR] + [f"{k}: {settings[k]:g}" for k in DEFAULT_SETTINGS]
@@ -130,10 +138,116 @@ def save_settings(rundir, settings):
     # run's only metadata record on a mid-write NAS failure (audit
     # 2026-07-25).
     tmp = path + '.tmp'
-    with open(tmp, 'w') as f:
-        f.write(text.rstrip() + '\n\n' + '\n'.join(lines) + '\n')
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(text.rstrip() + '\n\n'
+                + (anchor + '\n' if anchor else '')
+                + '\n'.join(lines) + '\n')
     os.replace(tmp, path)
     return path
+
+
+# The px→mm anchor Save used, persisted per run. Before 2026-08-05 the
+# mandatory manual calibration was a pair of ephemeral clicks recorded
+# NOWHERE: two sessions produced different absolute mm² from identical
+# inputs with byte-identical notes, manual- and auto-anchored runs were
+# indistinguishable in the saved data, and the anchor could never be
+# audited or reused. The block sits BEFORE the edge-settings section so
+# save_settings' section-replace preserves it.
+ANCHOR_HDR = '--- Edge Review scale anchor (SLDEA) ---'
+_ANCHOR_KEYS = ('method', 'diam_px', 'diam_mm', 'mm_per_px',
+                'anchor_frame', 'anchor_is_baseline', 'auto_diam_px',
+                'saved', 'user')
+
+
+def _split_anchor(text):
+    """(text without the anchor block, the block or None)."""
+    if text and not text.endswith('\n'):
+        text += '\n'         # a header at EOF must still match HDR\n —
+        # otherwise a save appends a SECOND block and the loader serves
+        # the stale first one (review 2026-08-05)
+    m = re.search(re.escape(ANCHOR_HDR) + r'\n(?:[a-z_]+:[^\n]*\n?)*',
+                  text)
+    if not m:
+        return text, None
+    return (text[:m.start()] + text[m.end():],
+            m.group(0).rstrip() + '\n')
+
+
+def save_scale_anchor(rundir, anchor):
+    """Persist the anchor dict (method/diam_px/diam_mm/mm_per_px/…) into
+    setup.txt, atomically, replacing any previous block. Timestamp and
+    user are stamped here unless supplied."""
+    import getpass
+    import time
+    path = os.path.join(rundir, 'setup.txt')
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            text = f.read()
+    except OSError:
+        text = ''
+    text, _old = _split_anchor(text)
+    vals = dict(anchor)
+    vals.setdefault('saved', time.strftime('%Y-%m-%dT%H:%M:%S'))
+    try:
+        vals.setdefault('user', getpass.getuser())
+    except Exception:
+        pass
+    lines = [ANCHOR_HDR]
+    for k in _ANCHOR_KEYS:
+        v = vals.get(k)
+        if v is None or v == '':
+            continue
+        if isinstance(v, bool):
+            v = int(v)
+        if isinstance(v, float):
+            v = f"{v:g}"
+        lines.append(f"{k}: {v}")
+    block = '\n'.join(lines) + '\n'
+    if EDGE_HDR in text:
+        head, tail = text.split(EDGE_HDR, 1)
+        body = head.rstrip() + '\n\n' + block + '\n' + EDGE_HDR + tail
+    else:
+        body = ((text.rstrip() + '\n\n') if text.strip() else '') + block
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(body)
+    os.replace(tmp, path)
+    return path
+
+
+def load_scale_anchor(rundir):
+    """-> the recorded anchor dict or None. Shaped so it can be passed
+    straight to mm_per_px as `baseline_ref` (method + diam_px), letting
+    the tuner and diagnostic report the scale Edge Review actually
+    saved instead of their own re-derivation."""
+    path = os.path.join(rundir, 'setup.txt')
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            text = f.read()
+    except OSError:
+        return None
+    if text and not text.endswith('\n'):
+        text += '\n'                     # same EOF corner as _split_anchor
+    m = re.search(re.escape(ANCHOR_HDR) + r'\n((?:[a-z_]+:[^\n]*\n?)*)',
+                  text)
+    if not m:
+        return None
+    out = {}
+    for line in m.group(1).splitlines():
+        mm = re.match(r'([a-z_]+):\s*(.*)$', line)
+        if not mm:
+            continue
+        k, v = mm.group(1), mm.group(2).strip()
+        if k in ('diam_px', 'diam_mm', 'mm_per_px', 'auto_diam_px'):
+            try:
+                out[k] = float(v)
+            except ValueError:
+                continue
+        elif k == 'anchor_is_baseline':
+            out[k] = v not in ('0', '', 'False')
+        else:
+            out[k] = v
+    return out if out.get('diam_px') else None
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +342,12 @@ def load_run(rundir):
         raise FileNotFoundError(
             f"no run CSV in {rundir} (expected data.csv, or data1.csv / "
             f"data2.csv / ... if the file was renamed)")
-    with open(csv_path, newline='') as f:
+    # utf-8-sig + replace: the bench writes UTF-8, and the two readers of
+    # one file must decode it identically — sldea_plot already did; the
+    # locale-codec default here mojibaked the notes on the Windows
+    # analysis PC (audit 2026-08-05)
+    with open(csv_path, newline='', encoding='utf-8-sig',
+              errors='replace') as f:
         reader = csv.DictReader(f)
         rows = list(reader)
         columns = list(reader.fieldnames or [])
@@ -509,6 +628,26 @@ def _wrinkle_ratio(base_full, img_full, contour):
     return round(min(e_img / max(e_base, 1e-3), 9.99), 2)
 
 
+def wrinkle_index(base_gray, img_gray, contour, settings):
+    """Wrinkle index for an arbitrary outline, measured EXACTLY as
+    candidates() measures it: on the photometrically normalized frame
+    (prepared_diff maps the frame into the baseline's space first).
+
+    The one entry point for callers outside the detector — the GUI's
+    hand-trace path used the raw frame, and |Laplacian| is linear in
+    gain, so traced rows carried the correct index times the run's
+    photometric gain: 20-30% understated on the P3 campaign (gain
+    0.72-0.83), the other direction on DOT_P3_1 — and the saved
+    wrinkle_idx column silently mixed two normalizations (audit
+    2026-08-05; P3_5's traced wash-out rows lost their wrinkle-mode
+    onset annotation to it)."""
+    if base_gray is None or img_gray is None:
+        return None
+    prep = prepared_diff(base_gray, img_gray, settings)
+    return _wrinkle_ratio(prep['base_full'], prep['img_full'],
+                          np.asarray(contour, np.int32))
+
+
 def _paper_mask(base_full, small_shape, settings):
     """Detector-scale mask of the PAPER background -- the ROI minus the
     foil strips minus the resting disc -- for the photometric fit under
@@ -578,8 +717,14 @@ def prepared_diff(base_gray, img_gray, settings):
     rf = min(1.0, max(0.2, float(settings.get('roi_frac', 0.85))))
     bx = int(w * (1 - rf) / 2)
     by = int(h * (1 - rf) / 2)
+    # The border-band widths gate only the LEGACY scalar mode: its band
+    # is empty at roi_frac 1.0. The affine fit works on ROI quantiles and
+    # needs no band — gating it on bx/by silently switched ALL
+    # photometric correction off at the tuner slider's own maximum, and
+    # the residual pedestal auto-accepted a 5.3x-too-large outline
+    # (audit 2026-08-05).
     mode = int(settings.get('norm_bg', 2) or 0)
-    if base_gray is not None and mode and bx and by:
+    if base_gray is not None and mode and (mode >= 2 or (bx and by)):
         if mode >= 2:
             # Affine (gain+offset) fit on ROI quantiles, then map the frame
             # back into the baseline's photometric space. On the bench runs
@@ -1120,6 +1265,16 @@ def candidates(base_gray, img_gray, settings, prev_method=None):
     resolution.
     """
     import cv2
+    if base_gray is None:
+        # REFUSE-DON'T-FABRICATE (audit 2026-08-05, critical): without a
+        # readable baseline there is no difference to image. The old
+        # base-less fallback thresholded the raw photograph; every honest
+        # channel (disc-fit / resting / tex-ratio) refused, and the
+        # surviving Otsu tiers outlined the ROI *background* at conf
+        # 0.85-0.90, spread 0.0 — auto-accepting a 2.74x-wrong area with
+        # a trustworthy-looking note. No baseline, no candidates;
+        # callers surface the refusal to the operator.
+        return []
     prep = prepared_diff(base_gray, img_gray, settings)
     sub, x0, y0, f = (prep['sub'], prep['x0'], prep['y0'],
                       prep['f'])
@@ -1938,6 +2093,16 @@ def scale_source(results, rows, baseline_ref=None):
     return "none"
 
 
+def _num(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    # a hand-damaged cell like '1e999' parses to inf and used to abort
+    # the whole save with a bare ZeroDivisionError (review 2026-08-05)
+    return f if np.isfinite(f) else None
+
+
 def apply_results(rows, results, scale, flags, annos=None):
     """Fill the active_area_* / wrinkle_idx / notes columns in `rows`
     (in place). `annos` are informational notes (e.g. wrinkle-mode) appended
@@ -1947,7 +2112,18 @@ def apply_results(rows, results, scale, flags, annos=None):
     column (a previous pass's mm²/wrinkle used to survive next to the
     'rejected' note), accepted rows blank mm²/diam when no scale is
     available (instead of keeping stale ones), and flag/anno notes are not
-    appended twice on repeated saves."""
+    appended twice on repeated saves.
+
+    ONE SCALE PER SAVE (audit 2026-08-05, critical): a row NOT in
+    `results` (still in the review queue at Save) keeps its previous
+    pass's px measurement, but its mm² / diam are RE-DERIVED from the
+    preserved active_area_px at THIS save's scale. Under the manual
+    scale gate the anchor is a fresh pair of clicks per session, so a
+    partial re-save used to write two different absolute scales into one
+    active_area_mm2 column with nothing marking the boundary — a 56.1%
+    artificial area step on the real-data repro, larger than the 35%
+    collapse threshold. A stale mm² whose px is missing (pre-2026-07-25
+    bug era) is blanked rather than left on a foreign scale."""
     annos = annos or {}
     for i, row in enumerate(rows):
         r = results.get(i)
@@ -1959,8 +2135,14 @@ def apply_results(rows, results, scale, flags, annos=None):
             else:
                 row['active_area_mm2'] = ''
                 row['active_diam_mm'] = ''
-            if r.get('wrinkle') is not None:
-                row['wrinkle_idx'] = f"{float(r['wrinkle']):.2f}"
+            w = r.get('wrinkle')
+            if w is not None:
+                row['wrinkle_idx'] = f"{float(w):.2f}"
+            elif 'wrinkle_idx' in row:
+                # this measurement carries no wrinkle index (e.g.
+                # 'resting'): a previous pass's value must not survive
+                # next to the new area (audit 2026-08-05)
+                row['wrinkle_idx'] = ''
             note = f"edge:{r['method']} conf {r['conf']:.2f}"
             if r.get('chosen_by'):
                 note += f" ({r['chosen_by']})"
@@ -1972,6 +2154,28 @@ def apply_results(rows, results, scale, flags, annos=None):
             note = 'rejected (no reliable edge)'
         else:
             note = row.get('notes') or ''
+            if scale:
+                px = _num(row.get('active_area_px'))
+                old_mm2 = _num(row.get('active_area_mm2'))
+                old_diam = _num(row.get('active_diam_mm'))
+                if px and px > 0:
+                    row['active_area_mm2'] = f"{px * scale * scale:.3f}"
+                    if old_mm2 and old_mm2 > 0 and old_diam:
+                        # preserve the row's own diam definition exactly:
+                        # rescale by the ratio of the two anchors
+                        old_scale = (old_mm2 / px) ** 0.5
+                        row['active_diam_mm'] = \
+                            f"{old_diam * scale / old_scale:.3f}"
+                    elif 'active_diam_mm' in row:
+                        # every detector reports the equivalent diameter
+                        row['active_diam_mm'] = \
+                            f"{2.0 * (px / np.pi) ** 0.5 * scale:.3f}"
+                elif old_mm2 or old_diam:
+                    # no px to re-derive from: refuse to keep an absolute
+                    # number on an unknowable previous anchor
+                    for col in ('active_area_mm2', 'active_diam_mm'):
+                        if col in row:
+                            row[col] = ''
         for extra in (flags.get(i), annos.get(i)):
             if extra and extra not in note:
                 note = (note + '; ' if note else '') + extra
@@ -1979,40 +2183,139 @@ def apply_results(rows, results, scale, flags, annos=None):
     return rows
 
 
-def mark_breakdown_files(run, flags):
-    """Rename every frame at/after the FIRST breakdown flag with a
-    '_BREAKDOWN' suffix so the frames/ listing shows at a glance which images
-    are of a broken-down DEA. Files are renamed, never deleted (they stay
-    useful, e.g. as ML training data); frame_file in the rows is updated to
-    match, and rows after the flag gain a 'post-breakdown' note. Idempotent.
-    Returns the number of files renamed.
+def _strip_brand(note):
+    """Remove breakdown branding tokens ('post-breakdown', 'breakdown? …')
+    from a notes string — the un-branding half of the marking pass."""
+    parts = [p for p in (note or '').split('; ')
+             if p and p != 'post-breakdown'
+             and not p.startswith('breakdown?')]
+    return '; '.join(parts)
+
+
+def plan_breakdown_marks(run, flags):
+    """Bring every row's branding in line with the CURRENT `flags`
+    (mutates notes + frame_file in the rows) and return the file-rename
+    plan [(src, dst)] for apply_rename_plan.
+
+    Split from the disk half so save() can commit data.csv BEFORE any
+    frame is renamed — a failed CSV write used to leave renamed frames,
+    a stale CSV and a dialog promising a .bak that was never made
+    (audit 2026-08-05).
+
+    Symmetric since 2026-08-05. Rows at/after the first flag are branded
+    (rename + frame_file + 'post-breakdown' note) as before; rows
+    OUTSIDE that zone — including every row when `flags` is empty — are
+    UN-branded: the '_BREAKDOWN' suffix comes back off the file and the
+    CSV link, and stale 'post-breakdown' / 'breakdown?' note tokens are
+    stripped even on rows the operator never re-reviewed. The
+    current-confirmed semantics exist precisely to RETRACT flags the old
+    heuristics raised (P3_5: 35 healthy frames), and a retraction must
+    reach the artifacts the previous save created.
+
+    frame_file is only ever rewritten to a name that exists on disk or
+    is about to via the plan — never to a name nothing answers to (the
+    unconditional rewrite made a missing frame's row permanently
+    unmeasurable; live on SLDEA_20260723_155425 row 48). The
+    CSV-branded/disk-unbranded state heals in whichever direction the
+    flags say, so no state is unrepairable.
 
     Takes only the CONFIRMED dict from breakdown_flags — advisory rows
     (transient discharge, uncorroborated collapse) must never seed the
-    renaming or the post-breakdown branding (P3_5, 2026-08-04: one false
-    collapse flag branded 35 healthy frames)."""
-    if not flags:
-        return 0
-    start = min(flags)
-    renamed = 0
+    renaming or the post-breakdown branding (P3_5, 2026-08-04)."""
+    start = min(flags) if flags else None
+    plan = []
+    frames_dir = run['frames_dir']
     for i, row in enumerate(run['rows']):
-        if i < start:
-            continue
-        if i not in flags:
-            note = row.get('notes') or ''
-            if 'post-breakdown' not in note:
-                row['notes'] = (note + '; ' if note else '') + 'post-breakdown'
         name = (row.get('frame_file') or '').strip()
-        if not name or '_BREAKDOWN' in name:
-            continue
-        base, ext = os.path.splitext(name)
-        new = base + '_BREAKDOWN' + ext
-        src = os.path.join(run['frames_dir'], name)
-        dst = os.path.join(run['frames_dir'], new)
-        if os.path.exists(src):
+        if start is not None and i >= start:
+            if i not in flags:
+                note = row.get('notes') or ''
+                if 'post-breakdown' not in note:
+                    row['notes'] = (note + '; ' if note
+                                    else '') + 'post-breakdown'
+            if not name:
+                continue
+            if '_BREAKDOWN' in name:
+                # CSV already branded: heal a disk that is not (this
+                # state used to short-circuit before any disk check and
+                # was permanently unrepairable)
+                if not os.path.exists(os.path.join(frames_dir, name)):
+                    plain = name.replace('_BREAKDOWN', '')
+                    if os.path.exists(os.path.join(frames_dir, plain)):
+                        plan.append((os.path.join(frames_dir, plain),
+                                     os.path.join(frames_dir, name)))
+                continue
+            base, ext = os.path.splitext(name)
+            new = base + '_BREAKDOWN' + ext
+            src = os.path.join(frames_dir, name)
+            dst = os.path.join(frames_dir, new)
+            # dst-exists first: when BOTH twins exist (a restore raced a
+            # brand), renaming would CLOBBER the branded file's bytes —
+            # 'renamed, never deleted' means prefer the link fix and
+            # leave both files intact (review 2026-08-05)
+            if os.path.exists(dst):
+                row['frame_file'] = new    # disk already renamed: heal
+            elif os.path.exists(src):
+                plan.append((src, dst))
+                row['frame_file'] = new
+        else:
+            note = row.get('notes') or ''
+            stripped = _strip_brand(note)
+            if stripped != note:
+                row['notes'] = stripped
+            if not name:
+                continue
+            if '_BREAKDOWN' not in name:
+                # heal the REVERSE orphan too: CSV plain, disk holding
+                # only the branded twin (a rename that outlived a failed
+                # or interrupted un-brand save). Without this the plain
+                # name dangles forever and the row reads UNREADABLE on
+                # every later pass — 'self-heals in either direction'
+                # was only true for the branded zone (review 2026-08-05).
+                base, ext = os.path.splitext(name)
+                branded = os.path.join(frames_dir,
+                                       base + '_BREAKDOWN' + ext)
+                if (not os.path.exists(os.path.join(frames_dir, name))
+                        and os.path.exists(branded)):
+                    plan.append((branded,
+                                 os.path.join(frames_dir, name)))
+                continue
+            plain = name.replace('_BREAKDOWN', '')
+            src = os.path.join(frames_dir, name)
+            dst = os.path.join(frames_dir, plain)
+            if os.path.exists(dst):
+                row['frame_file'] = plain  # disk already plain: heal
+            elif os.path.exists(src):
+                plan.append((src, dst))
+                row['frame_file'] = plain
+    return plan
+
+
+def apply_rename_plan(plan):
+    """Execute the renames from plan_breakdown_marks. Per-file tolerant:
+    one unrenamable frame (share hiccup, Explorer lock) must not abandon
+    the rest — failures are collected, not raised, and the next Save's
+    plan self-heals whatever stayed out of line.
+    -> (n_renamed, [error strings])."""
+    renamed, errors = 0, []
+    for src, dst in plan:
+        try:
             os.replace(src, dst)
             renamed += 1
-        row['frame_file'] = new     # keep the CSV link valid either way
+        except OSError as e:
+            errors.append(f"{os.path.basename(src)}: {e}")
+    return renamed, errors
+
+
+def mark_breakdown_files(run, flags):
+    """plan_breakdown_marks + apply_rename_plan in one call (the
+    pre-2026-08-05 API). Files are renamed, never deleted (they stay
+    useful, e.g. as ML training data). Idempotent. Returns the number of
+    files renamed (in either direction); raises OSError when a rename
+    fails."""
+    renamed, errors = apply_rename_plan(plan_breakdown_marks(run, flags))
+    if errors:
+        raise OSError('; '.join(errors))
     return renamed
 
 
@@ -2022,13 +2325,31 @@ def write_back(rundir, run):
     Atomic: writes data.csv.tmp then os.replace — a NAS hiccup mid-write
     used to leave a truncated data.csv with the frames already renamed
     (audit 2026-07-25). Writes back to the file the run was READ from, so
-    a renamed CSV is updated in place rather than sprouting a second one."""
+    a renamed CSV is updated in place rather than sprouting a second one.
+
+    Column-safe (audit 2026-08-05): any row key missing from the header
+    (wrinkle_idx on a 07-23-era 14-column CSV) is inserted before
+    'notes' instead of letting DictWriter raise mid-save — that
+    ValueError used to land AFTER the frame renames, leaving the run
+    half-saved. Written UTF-8, matching sldea_plot's decode."""
     csv_path = (run.get('csv_path') or run_csv(rundir)
                 or os.path.join(rundir, 'data.csv'))
     shutil.copy2(csv_path, csv_path + '.bak')
+    cols = run['columns']
+    extra = []
+    for row in run['rows']:
+        for k in row:
+            if k is not None and k not in cols and k not in extra:
+                extra.append(k)
+    if extra:
+        at = cols.index('notes') if 'notes' in cols else len(cols)
+        cols[at:at] = extra
     tmp = csv_path + '.tmp'
-    with open(tmp, 'w', newline='') as f:
-        w = csv.DictWriter(f, fieldnames=run['columns'])
+    # utf-8-sig, not bare utf-8: the bench opens data.csv in Excel,
+    # which mojibakes BOM-less UTF-8 punctuation; both in-suite readers
+    # (load_run, sldea_plot) already decode utf-8-sig (review 2026-08-05)
+    with open(tmp, 'w', newline='', encoding='utf-8-sig') as f:
+        w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
         for row in run['rows']:
             w.writerow(row)

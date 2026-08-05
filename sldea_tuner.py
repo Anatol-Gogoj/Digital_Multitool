@@ -118,18 +118,52 @@ def load_panels(run, picks):
     return panels
 
 
-def detect_panels(panels, base_gray, settings, rows):
+def baseline_panel(panels):
+    """The panel that IS the baseline, by label — or None when the
+    baseline frame did not load. Positional panels[0] silently promoted
+    a mid-run (activated) frame to baseline whenever the real one was
+    0-byte/truncated, referencing every diff, outline and mm² of the
+    tuning session to an activated state while the footer promised Edge
+    Review parity (audit 2026-08-05). No baseline -> refuse, exactly
+    like Edge Review."""
+    return next((p for p in panels if p['label'] == 'baseline'), None)
+
+
+def detect_panels(panels, base_gray, settings, rows, anchor=None):
     """Run candidates() for each panel; return (results_by_idx, cands_by_idx,
-    mm_scale). The scale prefers the non-diff baseline-disc trace, exactly
-    like Edge Review (audit 2026-07-25)."""
+    mm_scale).
+
+    The scale prefers the run's RECORDED manual anchor (`anchor`, from
+    se.load_scale_anchor — what Edge Review's Save actually used and
+    persisted since 2026-08-05), then the automatic baseline-disc trace.
+    Before that, this docstring claimed baseline-disc parity 'exactly
+    like Edge Review', which stopped being true the day the scale gate
+    made the manual anchor mandatory there (audit 2026-08-05)."""
     results, cands = {}, {}
     for p in panels:
         cl = se.candidates(base_gray, p['gray'], settings)
         cands[p['idx']] = cl
         results[p['idx']] = cl[0] if cl else None
     ref = se.baseline_disc(base_gray, settings)
+    if anchor and anchor.get('diam_px'):
+        ref = anchor
     scale = se.mm_per_px(results, rows, settings, baseline_ref=ref)
     return results, cands, scale
+
+
+def norm_bg_value(checked, orig):
+    """The norm_bg value the tuner's two-state checkbox stands for.
+
+    The checkbox collapses a three-state int (0=off, 1=legacy scalar,
+    2=affine); merely OPENING the tuner on a norm_bg:1 run used to
+    rewrite it to 2 in the startup recompute, and Save persisted the
+    silent upgrade into setup.txt — breaking sldea_edge's promise that
+    'a run tuned under it reprocesses identically' (audit 2026-08-05).
+    Checked keeps the run's own normalizing mode; only a run that never
+    had one gets the affine default."""
+    if not checked:
+        return 0
+    return orig if orig in (1, 2) else 2
 
 
 def _panel_title(panel, cands, scale, settings=None):
@@ -230,7 +264,9 @@ def _selftest(out_png):
     panels = load_panels(run, picks)
     assert len(panels) == 3, panels
     settings = build_settings(d)
-    base_gray = panels[0]['gray']
+    bp = baseline_panel(panels)
+    assert bp is not None and bp['label'] == 'baseline', panels
+    base_gray = bp['gray']
     _, cands, scale = detect_panels(panels, base_gray, settings,
                                     run['rows'])
     assert cands[panels[2]['idx']], "late frame should detect a region"
@@ -293,8 +329,19 @@ def main(argv):
     if not panels:
         print("no loadable frames in", rundir)
         return 2
+    bp = baseline_panel(panels)
+    if bp is None:
+        # refuse-don't-fabricate, same ruling as Edge Review (audit
+        # 2026-08-05): tuning against a mid-run frame references every
+        # diff to an ACTIVATED state and persists thresholds Edge
+        # Review will never reproduce
+        print(f"the baseline frame of {rundir} is unreadable "
+              f"(missing/0-byte/truncated) — no difference imaging is "
+              f"possible. Restore it before tuning.")
+        return 2
     settings = build_settings(rundir)
-    base_gray = panels[0]['gray']
+    base_gray = bp['gray']
+    anchor = se.load_scale_anchor(rundir)
 
     root = tk.Tk()
     root.title(f"SLDEA edge tuner — {os.path.basename(rundir)}")
@@ -308,16 +355,20 @@ def main(argv):
     ctl.pack(fill='x')
     scales, vallabels = {}, {}
     fill_var = tk.BooleanVar(value=True)
-    # the checkbox is on/off; ON means the affine fit (2). A run whose
-    # setup.txt still says 1 keeps the legacy scalar until it is retuned.
+    # the checkbox is on/off; ON keeps the run's OWN normalizing mode
+    # (norm_bg_value): a norm_bg:1 run keeps the legacy scalar until it
+    # is retuned — the old unconditional `2 if checked` upgraded it at
+    # the startup recompute and Save persisted that silently (audit
+    # 2026-08-05)
     norm_var = tk.BooleanVar(value=bool(settings.get('norm_bg', 2)))
+    orig_norm = [int(settings.get('norm_bg', 2) or 0)]
     job = {'id': None}
 
     def recompute():
         job['id'] = None
-        settings['norm_bg'] = 2 if norm_var.get() else 0
+        settings['norm_bg'] = norm_bg_value(norm_var.get(), orig_norm[0])
         _, cands, scale = detect_panels(panels, base_gray, settings,
-                                        run['rows'])
+                                        run['rows'], anchor=anchor)
         for ax, p in zip(axs, panels):
             render(ax, p, cands[p['idx']], scale, fill=fill_var.get(),
                    settings=settings)
@@ -380,6 +431,9 @@ def main(argv):
             settings[key] = int(dv) if is_int else dv
             scales[key].set(dv)
             vallabels[key].config(text=(f"{int(dv)}" if is_int else f"{dv:g}"))
+        # reset to DEFAULTS is an explicit retune: the affine default
+        # applies from here on, unlike the mere open/Save path
+        orig_norm[0] = int(se.DEFAULT_SETTINGS.get('norm_bg', 2))
         norm_var.set(bool(se.DEFAULT_SETTINGS.get('norm_bg', 2)))
         schedule()
 

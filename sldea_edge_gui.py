@@ -145,14 +145,30 @@ class EdgeReviewApp:
         self._select_trace_once = False   # next _show selects D (just staged)
         self.auto_idx = set()   # auto-accepted row indices
         self.auto_rej = set()   # auto-rejected (no change / no edge)
+        self.load_fail = {}     # row -> 'unreadable' | 'processing
+        # failed: …' — frames not MEASURED this pass for file- or
+        # code-level reasons, never a measurement verdict (audit
+        # 2026-08-05: these used to launder into 'no change vs baseline'
+        # / 'rejected (no reliable edge)'; the reason is kept so a
+        # processing crash is not misreported as a missing file)
         self.frame_rows = []    # row indices that have a frame file
         self.pos = 0
         self.flags = {}         # CONFIRMED breakdown rows (rename + brand)
         self.advisories = {}    # notes-only (transient / uncorroborated)
         self.manual_ref = None  # px→mm anchor from 📏 — the SCALE GATE;
         self.base_ref = None    # reset per run (zoom moves between runs)
+        self._base_ref_pending = None
         self._photo = None
         self._detq = _queue.Queue()
+        # Detect-in-flight guard (audit 2026-08-05, critical): the Run
+        # combobox and Browse… stayed live during a multi-minute detect,
+        # and the stale worker/poll chain refilled cands_all, base_ref
+        # and the Save button AFTER _pick_run's fail-closed reset —
+        # writing run A's px areas through run B's anchor. Run switching
+        # is disabled while a worker runs, and every queue item carries a
+        # generation token so a stale chain can never resurrect state.
+        self._detect_busy = False
+        self._detect_gen = 0
         # auxiliary windows are modal or SINGLETON, never unbounded (#176)
         self._adv_win = None
         self._cal_win = None    # the gate dialog is a singleton too: the
@@ -172,8 +188,9 @@ class EdgeReviewApp:
         self.run_box = ttk.Combobox(top, width=44, state='readonly')
         self.run_box.pack(side=tk.LEFT, padx=6)
         self.run_box.bind('<<ComboboxSelected>>', lambda _e: self._pick_run())
-        ttk.Button(top, text="Browse…",
-                   command=self._browse).pack(side=tk.LEFT)
+        self.browse_btn = ttk.Button(top, text="Browse…",
+                                     command=self._browse)
+        self.browse_btn.pack(side=tk.LEFT)
         self.detect_btn = ttk.Button(top, text="▶ Detect Edges",
                                      command=self.detect)
         self.detect_btn.pack(side=tk.LEFT, padx=10)
@@ -354,6 +371,15 @@ class EdgeReviewApp:
         if d:
             self._populate_runs(d)
 
+    def _detect_ui(self, busy):
+        """Run switching is closed while a detect worker runs — the
+        combobox and Browse… used to stay live and cross-contaminate the
+        freshly picked run with the old worker's output (audit
+        2026-08-05)."""
+        self.detect_btn.config(state='disabled' if busy else 'normal')
+        self.run_box.config(state='disabled' if busy else 'readonly')
+        self.browse_btn.config(state='disabled' if busy else 'normal')
+
     def _pick_run(self):
         name = (self.run_box.get() or '').split('  ')[0]
         if not name:
@@ -364,12 +390,21 @@ class EdgeReviewApp:
         # the new run paired with the previous run's manual anchor,
         # results and live Save button (review 2026-08-05: that writes
         # run A's scale into run B, the exact error the gate prevents).
+        # A programmatic switch mid-detect also invalidates the worker:
+        # the generation bump makes every queued item stale, and
+        # _base_ref_pending can never carry a previous run's disc into
+        # _finish_detect (audit 2026-08-05).
+        self._detect_gen += 1
+        self._detect_busy = False
+        self._base_ref_pending = None
+        self._detect_ui(busy=False)
         self.run = None
         self.frame_rows = []
         self.cands_all, self.results, self.flags = {}, {}, {}
         self.advisories = {}
         self.traces = {}
         self.auto_idx, self.auto_rej = set(), set()
+        self.load_fail = {}
         self.base_ref = None
         self.manual_ref = None
         self.pos = 0
@@ -384,9 +419,18 @@ class EdgeReviewApp:
         self.frame_rows = [i for i, r in enumerate(self.run['rows'])
                            if (r.get('frame_file') or '').strip()]
         n = len(self.frame_rows)
+        # the CSV listing a frame does not mean the disk holds it —
+        # count the missing ones up front instead of discovering them as
+        # blank cards mid-review (audit 2026-08-05)
+        missing = sum(
+            1 for i in self.frame_rows
+            if not os.path.exists(se.frame_path(self.run,
+                                                self.run['rows'][i]) or ''))
+        miss_txt = (f" ({missing} MISSING on disk — kept unreadable, "
+                    f"never re-measured)" if missing else "")
         self.status.config(
             text=f"{name}: {len(self.run['rows'])} snapshots, {n} frames "
-                 f"on disk — 📏 Calibrate, then Detect "
+                 f"listed{miss_txt} — 📏 Calibrate, then Detect "
                  f"(diam {self.settings['diam_mm']:g} mm; scale gate "
                  f"re-arms per run)")
         self.canvas.delete('all')
@@ -416,9 +460,37 @@ class EdgeReviewApp:
                                     font=('TkDefaultFont', 20, 'bold'),
                                     tags='banner')
 
+    def _no_baseline_refusal(self):
+        """REFUSE-DON'T-FABRICATE (audit 2026-08-05, critical): with the
+        baseline frame missing/0-byte/undecodable there is no difference
+        to image — the old fallback auto-accepted the ROI *background*
+        at 2.74x the true area under the operator's perfectly good
+        manual anchor. Nothing is detected; every frame stays in the
+        review queue for hand-tracing or until the baseline is
+        restored."""
+        messagebox.showerror(
+            "Detect",
+            "The BASELINE frame is unreadable (missing, 0-byte or "
+            "truncated) — no difference imaging is possible, and every "
+            "detected area would be a guess.\n\nRestore the baseline "
+            "frame, or hand-trace frames individually (D). Nothing was "
+            "detected or auto-accepted.")
+        self.status.config(
+            text="detection REFUSED: baseline frame unreadable — restore "
+                 "it or hand-trace (D); nothing was measured")
+        # the hand-trace escape hatch must be able to SAVE: traced +
+        # accepted rows flow through the normal (gated, scaled) path,
+        # while everything untouched stays untouched
+        self.save_btn.config(state='normal')
+        if self.frame_rows:
+            self.pos = 0
+            self._show()
+
     def detect(self):
         if not self.run:
             messagebox.showinfo("Detect", "Pick a run first")
+            return
+        if self._detect_busy:
             return
         if not self.frame_rows:
             messagebox.showinfo(
@@ -433,7 +505,10 @@ class EdgeReviewApp:
             # clicks land.
             self._calibrate_scale(then_detect=True)
             return
-        self.detect_btn.config(state='disabled')
+        base = self._base_gray()
+        if base is None:
+            self._no_baseline_refusal()
+            return
         # Every Detect pass starts CLEAN: stale results from a previous
         # pass (old settings, manual picks) used to survive re-detection
         # and get saved as a silent mix of two passes (audit 2026-07-25).
@@ -443,7 +518,15 @@ class EdgeReviewApp:
         self.advisories = {}
         self.traces = {}
         self.auto_idx, self.auto_rej = set(), set()
+        self.load_fail = {}
         self.base_ref = None
+        self._base_ref_pending = None
+        self._detect_gen += 1
+        self._detect_busy = True
+        self._detect_ui(busy=True)
+        # a re-detect must not leave the PREVIOUS pass's Save live while
+        # the new results stream in (audit 2026-08-05)
+        self.save_btn.config(state='disabled')
         self._t0 = time.time()
         self._clock_on = True
         self._tick_clock()
@@ -451,8 +534,13 @@ class EdgeReviewApp:
         self.canvas.delete('all')
         self._banner(f"DETECTING…  0/{len(self.frame_rows)}")
         self.status.config(text="detecting…")
-        threading.Thread(target=self._detect_worker, daemon=True).start()
-        self.root.after(100, self._poll_detect)
+        gen = self._detect_gen
+        threading.Thread(
+            target=self._detect_worker,
+            args=(gen, self.run, list(self.frame_rows),
+                  dict(self.settings), base),
+            daemon=True).start()
+        self.root.after(100, lambda: self._poll_detect(gen))
 
     def _base_gray(self):
         for i in self.frame_rows:
@@ -461,41 +549,67 @@ class EdgeReviewApp:
                                                   self.run['rows'][i]))
         return None
 
-    def _detect_worker(self):
+    def _detect_worker(self, gen, run, frame_rows, settings, base):
         # Per-frame try + sentinel in finally: one bad frame (shape
         # mismatch, decode error) used to kill the thread silently and
-        # leave 'DETECTING…' stuck forever (audit 2026-07-25).
+        # leave 'DETECTING…' stuck forever (audit 2026-07-25). The
+        # worker binds run/frame_rows/settings at start and tags every
+        # queue item with its generation — it must never read live app
+        # state, which a mid-flight run switch swaps out from under it
+        # (audit 2026-08-05).
         try:
-            base = self._base_gray()
-            self._base_ref_pending = se.baseline_disc(base, self.settings)
+            self._detq.put((gen, 'base_ref',
+                            se.baseline_disc(base, settings)))
             prev = None
-            for i in self.frame_rows:
+            for i in frame_rows:
+                fail = None
                 try:
-                    img = se.load_gray(
-                        se.frame_path(self.run, self.run['rows'][i]))
-                    cands = [] if img is None else se.candidates(
-                        base, img, self.settings, prev_method=prev)
+                    img = se.load_gray(se.frame_path(run, run['rows'][i]))
+                    if img is None:
+                        # a file that will not read is NOT an empty
+                        # detection — the distinction must survive to
+                        # the review queue (audit 2026-08-05)
+                        fail = 'unreadable'
+                        cands = []
+                    else:
+                        cands = se.candidates(base, img, settings,
+                                              prev_method=prev)
                 except Exception as e:
+                    # a readable frame whose DETECTION raised is not a
+                    # disk problem — record the true cause, or the
+                    # operator chases a missing file that exists
+                    # (review 2026-08-05)
                     print(f"detect: frame {i} failed: {e}")
+                    fail = f'processing failed: {e}'
                     cands = []
                 if cands:
                     prev = cands[0]['method']
-                self._detq.put((i, cands))
+                self._detq.put((gen, i, (cands, fail)))
         finally:
-            self._detq.put(None)
+            self._detq.put((gen, None, None))
 
-    def _poll_detect(self):
+    def _poll_detect(self, gen):
+        if gen != self._detect_gen:
+            return                  # a run switch invalidated this chain
         done = False
         while True:
             try:
                 item = self._detq.get_nowait()
             except _queue.Empty:
                 break
-            if item is None:
+            g, key, payload = item
+            if g != self._detect_gen:
+                continue            # stale worker output: drop, never apply
+            if key is None:
                 done = True
                 break
-            i, cands = item
-            self.cands_all[i] = cands
+            if key == 'base_ref':
+                self._base_ref_pending = payload
+                continue
+            cands, fail = payload
+            self.cands_all[key] = cands
+            if fail:
+                self.load_fail[key] = fail
         n, total = len(self.cands_all), len(self.frame_rows)
         self.prog.config(value=n)
         el = time.time() - self._t0
@@ -507,7 +621,7 @@ class EdgeReviewApp:
         if done:
             self._finish_detect()
         else:
-            self.root.after(100, self._poll_detect)
+            self.root.after(100, lambda: self._poll_detect(gen))
 
     def detect_all_sync(self):
         """Synchronous detection (used by --auto tests and headless runs)."""
@@ -516,26 +630,56 @@ class EdgeReviewApp:
         self.advisories = {}
         self.traces = {}
         self.auto_idx, self.auto_rej = set(), set()
+        self.load_fail = {}
         base = self._base_gray()
+        if base is None:
+            self._base_ref_pending = None
+            self._no_baseline_refusal()
+            return
         self._base_ref_pending = se.baseline_disc(base, self.settings)
         prev = None
         for i in self.frame_rows:
-            img = se.load_gray(se.frame_path(self.run, self.run['rows'][i]))
-            self.cands_all[i] = [] if img is None else se.candidates(
-                base, img, self.settings, prev_method=prev)
+            try:
+                img = se.load_gray(
+                    se.frame_path(self.run, self.run['rows'][i]))
+                if img is None:
+                    self.load_fail[i] = 'unreadable'
+                    self.cands_all[i] = []
+                    continue
+                self.cands_all[i] = se.candidates(
+                    base, img, self.settings, prev_method=prev)
+            except Exception as e:
+                # same per-frame containment as the threaded worker —
+                # one bad frame must not abort the whole sync pass
+                # (review 2026-08-05)
+                print(f"detect: frame {i} failed: {e}")
+                self.load_fail[i] = f'processing failed: {e}'
+                self.cands_all[i] = []
+                continue
             if self.cands_all[i]:
                 prev = self.cands_all[i][0]['method']
         self._finish_detect()
 
     def _finish_detect(self):
         self.auto_rej = set()
+        self._detect_busy = False
+        self._detect_ui(busy=False)
         # px→mm reference traced on the BASELINE frame itself (non-diff);
         # manual calibration (📏) overrides it.
-        self.base_ref = getattr(self, '_base_ref_pending', None)
+        self.base_ref = self._base_ref_pending
         # the pre/post pair is the run's own control: agreement raises
         # confidence, contradiction forces review on both members
         se.reconcile_pairs(self.run['rows'], self.cands_all, self.settings)
         for i in self.frame_rows:
+            if i in self.load_fail:
+                # an unreadable file or a per-frame processing crash is
+                # not a measurement outcome: the row stays in the review
+                # queue, clearly labeled with its true cause, and its
+                # previously saved values survive a Save untouched
+                # (audit 2026-08-05: these auto-rejected as 'no change
+                # vs baseline' and Save blanked a hand-traced terminal-
+                # breakdown measurement)
+                continue
             cands = self.cands_all.get(i, [])
             if cands and not se.needs_review(cands, self.settings):
                 self.results[i] = dict(cands[0])
@@ -546,7 +690,6 @@ class EdgeReviewApp:
                 self.results[i] = None
                 self.auto_rej.add(i)
         self._recount()
-        self.detect_btn.config(state='normal')
         self.save_btn.config(state='normal')
         self.prog.config(value=len(self.frame_rows))
         self._banner(None)
@@ -554,16 +697,21 @@ class EdgeReviewApp:
         took = self._fmt_t(time.time() - self._t0) if self._t0 else '?'
         if self.manual_ref:
             # the auto disc fit is a CROSS-CHECK of the operator's clicks,
-            # not the anchor (scale gate, 2026-08-05): >3% diameter
-            # disagreement means bad clicks, moved optics or a wrong-
-            # feature fit — surface it loudly, keep the manual anchor
+            # not the anchor (scale gate, 2026-08-05). Two tiers: above
+            # 3% diameter a modal warning (bad clicks, moved optics,
+            # wrong-feature fit); above 1% — the scale-anchor term of
+            # the ±1-2% absolute-area budget (SLDEA_MEASUREMENT §1.1) —
+            # a status-line ⚠, because a silent green tick used to
+            # cover disagreements 7x the budget (audit 2026-08-05).
             sc = f"; scale: manual {self.manual_ref['diam_px']:.0f} px"
             auto_px = (self.base_ref or {}).get('diam_px')
             if auto_px:
                 mism = (100 * abs(auto_px - self.manual_ref['diam_px'])
                         / self.manual_ref['diam_px'])
                 sc += (f" vs auto disc {auto_px:.0f} px "
-                       + (f"⚠ {mism:.1f}% apart" if mism > 3.0 else "✓"))
+                       + (f"⚠ {mism:.1f}% apart" if mism > 3.0 else
+                          f"⚠ {mism:.1f}% apart (>1% budget)"
+                          if mism > 1.0 else "✓"))
                 if mism > 3.0:
                     messagebox.showwarning(
                         "Scale cross-check",
@@ -574,16 +722,20 @@ class EdgeReviewApp:
                         f"Re-check the two clicks, the optics, and the "
                         f"{self.settings['diam_mm']:g} mm nominal. The "
                         f"MANUAL anchor is what Save uses.")
+            else:
+                sc += " (auto disc cross-check unavailable)"
         else:
             # detect_all_sync (tests/headless) can reach here ungated
             sc = (f"; scale ref: baseline disc "
                   f"{self.base_ref['diam_px']:.0f} px"
                   if self.base_ref
                   else "; scale ref: NONE — use 📏 Calibrate")
+        unread = (f"{len(self.load_fail)} UNREADABLE/FAILED (kept, not "
+                  f"re-measured), " if self.load_fail else "")
         self.status.config(
             text=f"detected {len(self.frame_rows)} frames in {took}: "
                  f"{len(self.auto_idx)} auto-accepted, "
-                 f"{len(self.auto_rej)} no-change/no-edge, "
+                 f"{len(self.auto_rej)} no-change/no-edge, {unread}"
                  f"{len(q)} need review{sc}")
         self.pos = self.frame_rows.index(q[0]) if q else 0
         self._show()
@@ -607,12 +759,27 @@ class EdgeReviewApp:
         row = self.run['rows'][i]
         cands = self.cands_all.get(i, [])
         chosen = self.results.get(i)
+        trace_now = self.traces.get(i)
+        # a staged D that is NOT the committed polygon must never read as
+        # the accepted result — the card used to show the corrected
+        # outline as 'accepted' while Save wrote the old one (audit
+        # 2026-08-05)
+        stale_d = (chosen is not None and trace_now is not None
+                   and (chosen.get('method') != 'manual-trace'
+                        or chosen.get('trace_points')
+                        != trace_now.get('trace_points')))
         # info panel
-        state = ('auto-accepted' if i in self.auto_idx else
+        state = (('FRAME UNREADABLE — not measured (file missing/0-byte)'
+                  if self.load_fail.get(i) == 'unreadable'
+                  else 'FRAME PROCESSING FAILED — not measured')
+                 if i in self.load_fail and i not in self.results else
+                 'auto-accepted' if i in self.auto_idx else
                  'accepted' if chosen else
                  'no change vs baseline (auto)' if i in self.auto_rej
                  and i in self.results else
                  'REJECTED' if i in self.results else 'needs review')
+        if stale_d:
+            state += ' — ⚠ staged D NOT committed (Enter commits it)'
         txt = (f"frame {self.pos+1}/{len(self.frame_rows)}   step "
                f"{row.get('step')} [{row.get('tag')}]\n"
                f"nominal {row.get('nominal_kV')} kV   "
@@ -648,8 +815,10 @@ class EdgeReviewApp:
                                    self.base_ref)
             mm = (f"  {trace['area_px'] * mmscale * mmscale:.1f} mm²"
                   if mmscale else "")
+            staged = ' STAGED≠accepted' if stale_d else ''
             self.cand_radios[TRACE_SLOT].config(
-                text=elide(f"D: manual-trace  {trace['area_px']:.0f} px²{mm}"
+                text=elide(f"D: manual-trace{staged}  "
+                           f"{trace['area_px']:.0f} px²{mm}"
                            f"  ({trace['n_points']} pts)",
                            RADIO_TEXT_PX, meas),
                 state='normal')
@@ -728,6 +897,17 @@ class EdgeReviewApp:
         if trace is not None:              # the staged D outline (#172)
             entries.append((TRACE_SLOT, trace))
         hot = hot_slot(entries, chosen, self.cand_var.get())
+        # A committed manual trace with a NEWER D staged: the staged
+        # polygon used to be the only one drawn — at the heavy selected
+        # weight — while Save wrote the committed one (audit 2026-08-05).
+        # Draw the committed outline too (heavy) and thin the staged one.
+        stale_d = (chosen is not None and trace is not None
+                   and (chosen.get('method') != 'manual-trace'
+                        or chosen.get('trace_points')
+                        != trace.get('trace_points')))
+        committed_trace = (chosen if stale_d
+                           and chosen.get('method') == 'manual-trace'
+                           else None)
         font = _tag_font()
         for slot, c in entries:
             pts = [(float(x) * scale, float(y) * scale)
@@ -736,6 +916,8 @@ class EdgeReviewApp:
                 continue
             # thicker lines, selection visibly heavier (#171/#173)
             wdt = 3 if slot == hot else 2
+            if stale_d and slot == TRACE_SLOT and c is trace:
+                wdt = 1                    # staged-but-uncommitted: thin
             dr.line(pts + [pts[0]], fill=CAND_COLORS[slot], width=wdt)
             # letter tag: candidate↔outline mapping must not rely on
             # color alone (audit 2026-07-25); large + solid halo (#173)
@@ -749,6 +931,12 @@ class EdgeReviewApp:
                                 fill='black', font=font)
             dr.text((tx, ty), CAND_KEYS[slot], fill=CAND_COLORS[slot],
                     font=font)
+        if committed_trace is not None:
+            pts = [(float(x) * scale, float(y) * scale)
+                   for x, y in np.asarray(committed_trace['contour'])]
+            if len(pts) > 2:
+                dr.line(pts + [pts[0]], fill=CAND_COLORS[TRACE_SLOT],
+                        width=3)
         return img
 
     def _draw(self, i, cands, chosen):
@@ -756,8 +944,26 @@ class EdgeReviewApp:
         vw, vh = self._view_size()
         try:
             img = self._render_card(i, cands, chosen, view=(vw, vh))
-        except OSError:        # frame missing/undecodable; draw bugs stay loud
+        except OSError:
+            # frame missing/undecodable: SAY so on the card — a silently
+            # blank canvas next to a physical-sounding state line is how
+            # a missing file laundered into a measurement verdict (audit
+            # 2026-08-05). Draw bugs stay loud.
             self.canvas.delete('all')
+            row = self.run['rows'][i] if self.run else {}
+            name = (row.get('frame_file') or '(no file)').strip()
+            reason = self.load_fail.get(i)
+            if reason and reason != 'unreadable':
+                head, detail = 'FRAME PROCESSING FAILED', reason[:90]
+            else:
+                head = 'FRAME UNREADABLE'
+                detail = '(missing / 0-byte / truncated on disk)'
+            self.canvas.create_rectangle(0, vh // 2 - 46, vw, vh // 2 + 46,
+                                         fill='#7a1f1f', outline='')
+            self.canvas.create_text(
+                vw // 2, vh // 2, fill='white', justify='center',
+                font=('TkDefaultFont', 14, 'bold'),
+                text=f"{head}\n{name}\n{detail}")
             return
         self._photo = ImageTk.PhotoImage(img)
         self.canvas.delete('all')
@@ -774,6 +980,13 @@ class EdgeReviewApp:
         self._choose_current()
 
     def _choose_current(self):
+        # review inputs are inert while a worker streams: the panel
+        # still shows the PREVIOUS pass, so Enter/1/2/3 would accept a
+        # candidate the operator has never seen — and _finish_detect
+        # would then overwrite the pick as 'auto-accepted' (review
+        # 2026-08-05)
+        if self._detect_busy:
+            return
         i = self._current()
         if i is None:
             return
@@ -804,6 +1017,8 @@ class EdgeReviewApp:
         self._advance()
 
     def _reject(self):
+        if self._detect_busy:          # same guard as _choose_current
+            return
         i = self._current()
         if i is None:
             return
@@ -821,6 +1036,8 @@ class EdgeReviewApp:
         is STAGED as candidate D (row D + drawn on the card); Accept
         commits it like any other candidate (#172). Re-opening D edits
         the pending polygon rather than starting over."""
+        if self._detect_busy:          # same guard as _choose_current
+            return
         i = self._current()
         if self.run is None or i is None:
             messagebox.showinfo("Trace", "Pick a run first")
@@ -853,9 +1070,13 @@ class EdgeReviewApp:
         gray = se.load_gray(se.frame_path(self.run, self.run['rows'][i]))
         try:
             base = self._base_gray()
-            if base is not None and gray is not None:
-                wrinkle = se._wrinkle_ratio(base, gray,
-                                            poly.astype(np.int32))
+            # se.wrinkle_index, NOT the raw-frame ratio: |Laplacian| is
+            # linear in gain, and the un-normalized frame gave traced
+            # rows an index 20-30% off at the P3 campaign's photometric
+            # gain — the saved column silently mixed two normalizations
+            # and P3_5 lost its wrinkle-mode onset to it (audit
+            # 2026-08-05)
+            wrinkle = se.wrinkle_index(base, gray, poly, self.settings)
         except Exception:
             wrinkle = None
         self.traces[i] = {
@@ -937,14 +1158,33 @@ class EdgeReviewApp:
         q = self._queue_list()
         accepted = sum(1 for r in self.results.values() if r)
         rejected = sum(1 for r in self.results.values() if r is None)
+        n_unread = sum(1 for i in q if i in self.load_fail)
+        # unreviewed rows KEEP their previous pass's px measurement,
+        # re-scaled to this session's anchor (one scale per save, audit
+        # 2026-08-05) — the dialog used to claim they were 'left blank'
+        n_kept = sum(
+            1 for i in q
+            if (self.run['rows'][i].get('active_area_px') or '').strip())
+        unrev = (f"unreviewed: {len(q)}"
+                 + (f" ({n_kept} keep the previous pass's px, re-scaled "
+                    f"to THIS anchor)" if n_kept else " (left blank)")
+                 + (f"\n  incl. {n_unread} UNREADABLE frame(s) — kept, "
+                    f"not re-measured" if n_unread else ""))
         n_bd = 0
         if self.flags:
             start = min(self.flags)
             n_bd = sum(1 for i in self.frame_rows if i >= start)
+        # retracted brands rename BACK — the dialog must say so, not
+        # only announce the branding direction (review 2026-08-05)
+        first = min(self.flags) if self.flags else None
+        n_unbrand = sum(
+            1 for i, row in enumerate(self.run['rows'])
+            if '_BREAKDOWN' in (row.get('frame_file') or '')
+            and (first is None or i < first))
         msg = (f"Write results into this run's data.csv?\n\n"
                f"accepted: {accepted}  (auto {len(self.auto_idx)})\n"
                f"rejected: {rejected}\n"
-               f"unreviewed (left blank): {len(q)}\n"
+               f"{unrev}\n"
                f"breakdown-flagged: {len(self.flags)}"
                + (f"  (+{len(self.advisories)} advisory note(s), no renames)"
                   if self.advisories else "") + "\n"
@@ -952,6 +1192,9 @@ class EdgeReviewApp:
                   f"will be RENAMED with a _BREAKDOWN suffix (kept, never "
                   f"deleted — usable later as ML training data).\n"
                   if n_bd else "\n")
+               + (f"⚠ {n_unbrand} file(s) carry a breakdown brand the "
+                  f"current flags RETRACT — renamed back (un-branded), "
+                  f"stale notes cleaned.\n" if n_unbrand else "")
                + "A backup is kept as data.csv.bak; an area-vs-voltage plot "
                  "and outline overlays are saved beside it.")
         if not messagebox.askyesno("Save results", msg):
@@ -972,6 +1215,15 @@ class EdgeReviewApp:
         # CSV, never renaming frames or seeding post-breakdown branding
         for i, note in self.advisories.items():
             annos[i] = (annos[i] + '; ' + note) if i in annos else note
+        # a not-measured frame's row records WHY — a file- or code-level
+        # fact, never a physical verdict (audit 2026-08-05). ASCII-safe
+        # in the CSV.
+        for i in q:
+            if i in self.load_fail:
+                note = ('frame unreadable - kept, not re-measured'
+                        if self.load_fail[i] == 'unreadable' else
+                        'frame processing failed - kept, not re-measured')
+                annos[i] = (annos[i] + '; ' + note) if i in annos else note
         if 'wrinkle_idx' not in self.run['columns']:
             # older runs predate the column; slot it in before notes
             cols = self.run['columns']
@@ -979,22 +1231,58 @@ class EdgeReviewApp:
                         'wrinkle_idx')
         for row in self.run['rows']:
             row.setdefault('wrinkle_idx', '')
-        # The destructive phase (renames + CSV rewrite) must NEVER fail
-        # silently: an hour of review used to vanish without a dialog on a
-        # NAS hiccup (audit 2026-07-25). write_back is atomic now, and
-        # data.csv.bak always predates the renames.
+        # The destructive phase must NEVER fail silently, and its ORDER
+        # is load-bearing (audit 2026-08-05): data.csv commits FIRST
+        # (backup + atomic tmp+replace inside write_back), the frame
+        # renames run after. A failure before the commit leaves the run
+        # byte-identical on disk with zero files renamed; a failure
+        # during the renames leaves a saved CSV whose links the next
+        # Save's symmetric heal repairs. The old order renamed first, so
+        # a full disk left renamed frames, a stale CSV and a dialog
+        # promising a .bak that was never made.
+        csv_path = self.run.get('csv_path') or ''
         try:
             se.apply_results(self.run['rows'], self.results, scale,
                              self.flags, annos)
-            renamed = se.mark_breakdown_files(self.run, self.flags)
+            plan = se.plan_breakdown_marks(self.run, self.flags)
             se.write_back(self.rundir, self.run)
         except Exception as e:
+            has_bak = csv_path and os.path.exists(csv_path + '.bak')
             messagebox.showerror(
                 "Save FAILED",
-                f"Writing results failed:\n\n{e}\n\nYour review is still in "
-                f"memory — fix the problem (share up? disk full?) and Save "
-                f"again. A pre-save backup is at data.csv.bak.")
+                f"Writing results failed:\n\n{e}\n\nYour review is still "
+                f"in memory — fix the problem (share up? disk full?) and "
+                f"Save again. No frame files were renamed."
+                + (f"\nA pre-save backup is at data.csv.bak."
+                   if has_bak else ""))
             return
+        renamed, rn_errors = se.apply_rename_plan(plan)
+        if rn_errors:
+            messagebox.showwarning(
+                "Save: renames incomplete",
+                f"data.csv is saved, but {len(rn_errors)} frame "
+                f"rename(s) failed:\n\n" + '\n'.join(rn_errors[:4])
+                + ('\n…' if len(rn_errors) > 4 else '')
+                + "\n\nSave again once the files are reachable — the "
+                  "branding self-heals in either direction.")
+        # persist the anchor that produced every mm² in this save — the
+        # run's absolute scale used to be a pair of clicks recorded
+        # nowhere (audit 2026-08-05); the 📏 dialog offers it for reuse
+        try:
+            se.save_scale_anchor(self.rundir, {
+                'method': self.manual_ref.get('method',
+                                              'manual-calibration'),
+                'diam_px': self.manual_ref['diam_px'],
+                'diam_mm': self.settings['diam_mm'],
+                'mm_per_px': scale,
+                'anchor_frame': self.manual_ref.get('frame', ''),
+                'anchor_is_baseline': self.manual_ref.get('is_baseline'),
+                'auto_diam_px': (self.base_ref or {}).get('diam_px'),
+            })
+        except OSError as e:
+            self.status.config(
+                text=f"saved, but recording the scale anchor in "
+                     f"setup.txt failed: {e}")
         self._clock_on = False
         took = self._fmt_t(time.time() - self._t0) if self._t0 else '?'
         self.clock_lbl.config(text=f"done in {took}")
@@ -1006,7 +1294,7 @@ class EdgeReviewApp:
             return
         scale_txt = (f"scale {scale:.5f} mm/px [{src}]" if scale
                      else "no mm scale — use 📏 Calibrate")
-        bd_txt = f", {renamed} frame(s) renamed _BREAKDOWN" if renamed else ""
+        bd_txt = f", {renamed} frame(s) renamed" if renamed else ""
         self.status.config(
             text=f"saved in {took} — data.csv updated ({scale_txt}){bd_txt}")
 
@@ -1069,21 +1357,30 @@ class EdgeReviewApp:
         """True when this run's setup.txt carries the capture-side
         'DEA nominal diameter' line (written from the SLDEA tab's
         'DEA diam (mm)' field) — if not, diam_mm is only the settings
-        default and the gate dialog says so."""
+        default and the gate dialog says so.
+
+        utf-8 + errors='replace', like load_settings: the bare locale-
+        codec open raised UnicodeDecodeError (a ValueError, NOT an
+        OSError) on any hand-annotated non-ASCII byte, mid-dialog-build
+        — which published a half-built singleton and silently bricked
+        Detect for the rest of the session (audit 2026-08-05)."""
         try:
-            with open(os.path.join(self.rundir, 'setup.txt')) as f:
+            with open(os.path.join(self.rundir, 'setup.txt'),
+                      encoding='utf-8', errors='replace') as f:
                 return 'DEA nominal diameter:' in f.read()
-        except (OSError, TypeError):
+        except (OSError, TypeError, UnicodeError):
             return False
 
     def _anchor_frame(self):
-        """-> (PIL image, is_baseline, tried) — the first READABLE frame
-        to calibrate on: baseline-tagged rows first, then the rest of the
-        ramp. A baseline PNG can be listed in the CSV yet be 0-byte or
-        truncated on disk (interrupted capture, e.g. the 2026-08-04
-        disk-full incident) — the gate must fall back, not crash, or the
-        whole run becomes permanently unprocessable (review 2026-08-05).
-        `tried` collects the unreadable names for the error dialog."""
+        """-> (PIL image, is_baseline, tried, frame_name) — the first
+        READABLE frame to calibrate on: baseline-tagged rows first, then
+        the rest of the ramp. A baseline PNG can be listed in the CSV
+        yet be 0-byte or truncated on disk (interrupted capture, e.g.
+        the 2026-08-04 disk-full incident) — the gate must fall back,
+        not crash, or the whole run becomes permanently unprocessable
+        (review 2026-08-05). `tried` collects the unreadable names for
+        the error dialog; `frame_name` feeds the anchor's provenance
+        record."""
         from PIL import Image
         ordered = ([i for i in self.frame_rows
                     if self.run['rows'][i].get('tag') == 'baseline']
@@ -1101,8 +1398,9 @@ class EdgeReviewApp:
             except Exception as e:          # 0-byte, truncated, not-a-PNG
                 tried.append(f"{os.path.basename(path)} ({e})")
                 continue
-            return img, row.get('tag') == 'baseline', tried
-        return None, False, tried
+            return (img, row.get('tag') == 'baseline', tried,
+                    os.path.basename(path))
+        return None, False, tried, ''
 
     def _gate_status(self):
         self.status.config(text="Detect is gated on the scale "
@@ -1117,7 +1415,22 @@ class EdgeReviewApp:
         With then_detect, detection chains automatically once the two
         clicks land (Detect's gate path and --auto). SINGLETON like
         Advanced… (#176): the grab is pointer-only, so a pierced dialog
-        must front the live one, never stack a second wait chain."""
+        must front the live one, never stack a second wait chain.
+
+        Fail-CLOSED construction (audit 2026-08-05): the singleton
+        handle publishes only once the dialog is fully built, and a
+        try/finally destroys a half-built window and clears the handle
+        no matter what raises — an exception mid-build used to leave a
+        dead Toplevel in self._cal_win, and every later Detect lifted
+        the corpse and returned, silently and forever.
+
+        The frame is ZOOMABLE (wheel about the cursor, right-drag pans,
+        F fits): the fixed 0.41x preview put one display pixel at ~2.5
+        full-res px while the soft ink edge spans 8-15, so click scatter
+        alone could move every absolute area by several % (audit
+        2026-08-05). Clicks land in full-res image coordinates at any
+        zoom. A previously RECORDED anchor (setup.txt) can be reused
+        with P — reproducible re-saves instead of fresh scatter."""
         if not self.run:
             messagebox.showinfo("Calibrate", "Pick a run first")
             return
@@ -1126,7 +1439,7 @@ class EdgeReviewApp:
             self._cal_win.focus_set()
             return
         from PIL import Image, ImageTk
-        img, anchor_is_baseline, tried = self._anchor_frame()
+        img, anchor_is_baseline, tried, frame_name = self._anchor_frame()
         if img is None:
             messagebox.showerror(
                 "Calibrate",
@@ -1137,64 +1450,156 @@ class EdgeReviewApp:
             if then_detect:
                 self._gate_status()
             return
-        scale_v = VIEW_W / img.width
-        disp = img.resize((VIEW_W, int(img.height * scale_v)))
+        recorded = se.load_scale_anchor(self.rundir)
         win = tk.Toplevel(self.root)
-        win.title("Calibrate scale — click the disc's two opposite edges")
-        win.transient(self.root)
-        self._cal_win = win
-        gate = (f"SCALE GATE — this run's px→mm anchor.\n"
-                f"Click LEFT edge then RIGHT edge of the resting disc "
-                f"(nominal {self.settings['diam_mm']:g} mm across). "
-                f"Esc cancels.")
-        if not anchor_is_baseline:
-            gate += ("\n⚠ The baseline frame is missing/unreadable — this "
-                     "is a LATER frame. Only calibrate here if the disc "
-                     "is visibly AT REST; otherwise Esc and restore the "
-                     "baseline frame.")
-        if not self._diam_recorded():
-            gate += (f"\n⚠ The diameter was NOT recorded at capture — "
-                     f"{self.settings['diam_mm']:g} mm is the settings "
-                     f"default. If this device used a different mask, fix "
-                     f"diam_mm in Advanced… BEFORE calibrating.")
-        tk.Label(win, text=gate, justify='left').pack(pady=(6, 2))
-        cv = tk.Canvas(win, width=disp.width, height=disp.height)
-        cv.pack(padx=8, pady=8)
-        photo = ImageTk.PhotoImage(disp)
-        cv.create_image(0, 0, anchor='nw', image=photo)
-        cv.image = photo
-        pts = []
+        try:
+            win.title("Calibrate scale — click the disc's two opposite "
+                      "edges")
+            win.transient(self.root)
+            gate = (f"SCALE GATE — this run's px→mm anchor.\n"
+                    f"Click LEFT edge then RIGHT edge of the resting disc "
+                    f"(nominal {self.settings['diam_mm']:g} mm across). "
+                    f"Click at the ink edge's HALF-HEIGHT (mid-gray), "
+                    f"matching the machine convention — not the outer "
+                    f"toe.\n"
+                    f"Wheel zooms about the cursor, right-drag pans, F "
+                    f"fits. Esc cancels.")
+            if not anchor_is_baseline:
+                gate += ("\n⚠ The baseline frame is missing/unreadable — "
+                         "this is a LATER frame. Only calibrate here if "
+                         "the disc is visibly AT REST; otherwise Esc and "
+                         "restore the baseline frame.")
+            if not self._diam_recorded():
+                gate += (f"\n⚠ The diameter was NOT recorded at capture — "
+                         f"{self.settings['diam_mm']:g} mm is the "
+                         f"settings default. If this device used a "
+                         f"different mask, fix diam_mm in Advanced… "
+                         f"BEFORE calibrating.")
+            if recorded:
+                gate += (f"\n📏 On record from the last Save: "
+                         f"{recorded['diam_px']:.1f} px "
+                         f"({recorded.get('mm_per_px', 0):.5f} mm/px, "
+                         f"saved {recorded.get('saved', '?')}) — "
+                         f"press P to REUSE it.")
+            tk.Label(win, text=gate, justify='left').pack(pady=(6, 2))
+            ch = max(200, min(VIEW_H, int(VIEW_W * img.height / img.width)))
+            cv = tk.Canvas(win, width=VIEW_W, height=ch, bg='#111',
+                           cursor='crosshair')
+            cv.pack(padx=8, pady=8)
+            vt = strc.ViewTransform()
+            vt.fit(img.width, img.height, VIEW_W, ch)
+            pts = []            # clicks in FULL-RES image coordinates
+            state = {'photo': None, 'pan': None}
 
-        def click(ev):
-            pts.append((ev.x, ev.y))
-            cv.create_oval(ev.x - 4, ev.y - 4, ev.x + 4, ev.y + 4,
-                           outline='#00e676', width=2)
-            if len(pts) == 2:
-                cv.create_line(*pts[0], *pts[1], fill='#00e676', width=2)
-                dpx_disp = ((pts[0][0] - pts[1][0]) ** 2 +
-                            (pts[0][1] - pts[1][1]) ** 2) ** 0.5
-                dpx_full = dpx_disp / scale_v
-                if dpx_full < 10:
-                    messagebox.showwarning("Calibrate",
-                                           "Points are too close — retry.")
-                    win.destroy()
-                    return
+            def repaint():
+                ix0, iy0 = vt.to_image(0, 0)
+                ix1, iy1 = vt.to_image(VIEW_W, ch)
+                cx0, cy0 = max(0, int(ix0)), max(0, int(iy0))
+                cx1 = min(img.width, int(ix1) + 2)
+                cy1 = min(img.height, int(iy1) + 2)
+                cv.delete('all')
+                if cx1 > cx0 and cy1 > cy0:
+                    crop = img.crop((cx0, cy0, cx1, cy1))
+                    dw = max(1, int(round((cx1 - cx0) * vt.zoom)))
+                    dh = max(1, int(round((cy1 - cy0) * vt.zoom)))
+                    res = (Image.NEAREST if vt.zoom >= 2.0
+                           else Image.BILINEAR)
+                    state['photo'] = ImageTk.PhotoImage(
+                        crop.resize((dw, dh), res))
+                    vx, vy = vt.to_view(cx0, cy0)
+                    cv.create_image(int(vx), int(vy), anchor='nw',
+                                    image=state['photo'])
+                for px, py in pts:
+                    vx, vy = vt.to_view(px, py)
+                    cv.create_oval(vx - 4, vy - 4, vx + 4, vy + 4,
+                                   outline='#00e676', width=2)
+                if len(pts) == 2:
+                    a = vt.to_view(*pts[0])
+                    b = vt.to_view(*pts[1])
+                    cv.create_line(*a, *b, fill='#00e676', width=2)
+
+            def accept(dpx_full, source_frame, src_is_baseline=None):
                 self.manual_ref = {'method': 'manual-calibration',
-                                   'diam_px': dpx_full}
+                                   'diam_px': float(dpx_full),
+                                   'frame': source_frame,
+                                   'is_baseline': (anchor_is_baseline
+                                                   if src_is_baseline
+                                                   is None
+                                                   else src_is_baseline)}
                 self.status.config(
                     text=f"scale calibrated: "
                          f"{self.settings['diam_mm']:g} mm = "
                          f"{dpx_full:.0f} px "
-                         f"({self.settings['diam_mm'] / dpx_full:.5f} mm/px)"
-                         f" — overrides every automatic reference at Save")
+                         f"({self.settings['diam_mm'] / dpx_full:.5f} "
+                         f"mm/px) — overrides every automatic reference "
+                         f"at Save")
                 win.destroy()
 
-        cv.bind('<Button-1>', click)
-        win.bind('<Escape>', lambda e: win.destroy())
-        cv.focus_set()
-        win.grab_set()
-        self.root.wait_window(win)
-        self._cal_win = None
+            def click(ev):
+                pts.append(vt.to_image(ev.x, ev.y))
+                repaint()
+                if len(pts) == 2:
+                    dpx_full = ((pts[0][0] - pts[1][0]) ** 2 +
+                                (pts[0][1] - pts[1][1]) ** 2) ** 0.5
+                    if dpx_full < 10:
+                        messagebox.showwarning(
+                            "Calibrate", "Points are too close — retry.")
+                        win.destroy()
+                        return
+                    accept(dpx_full, frame_name)
+
+            def reuse(_ev=None):
+                if recorded:
+                    # a reused anchor keeps ITS OWN provenance — the
+                    # frame it was clicked on and whether that was the
+                    # baseline, not this session's (review 2026-08-05)
+                    accept(recorded['diam_px'],
+                           recorded.get('anchor_frame', '') or frame_name,
+                           src_is_baseline=recorded.get(
+                               'anchor_is_baseline'))
+
+            def wheel(vx, vy, steps):
+                vt.zoom_at(vx, vy, 1.15 ** steps)
+                repaint()
+
+            def pan_start(ev):
+                state['pan'] = (ev.x, ev.y)
+
+            def pan_move(ev):
+                if state['pan'] is None:
+                    return
+                dx, dy = ev.x - state['pan'][0], ev.y - state['pan'][1]
+                state['pan'] = (ev.x, ev.y)
+                vt.pan_view(dx, dy)
+                repaint()
+
+            cv.bind('<Button-1>', click)
+            cv.bind('<MouseWheel>',
+                    lambda e: wheel(e.x, e.y, e.delta / 120.0))
+            cv.bind('<Button-4>', lambda e: wheel(e.x, e.y, 1))
+            cv.bind('<Button-5>', lambda e: wheel(e.x, e.y, -1))
+            cv.bind('<Button-3>', pan_start)
+            cv.bind('<B3-Motion>', pan_move)
+            win.bind('<Key-f>', lambda e: (vt.fit(img.width, img.height,
+                                                  VIEW_W, ch), repaint()))
+            win.bind('<Key-F>', lambda e: (vt.fit(img.width, img.height,
+                                                  VIEW_W, ch), repaint()))
+            if recorded:
+                win.bind('<Key-p>', reuse)
+                win.bind('<Key-P>', reuse)
+            win.bind('<Escape>', lambda e: win.destroy())
+            repaint()
+            cv.focus_set()
+            self._cal_win = win
+            win.grab_set()
+            self.root.wait_window(win)
+        finally:
+            self._cal_win = None
+            try:
+                if win.winfo_exists():
+                    win.destroy()
+            except tk.TclError:
+                pass
         if then_detect:
             if self.manual_ref is not None:
                 self.detect()
@@ -1222,9 +1627,11 @@ class EdgeReviewApp:
                             "(frame auto-rejected; lower it to dig for "
                             "subtle changes; frames above it always yield "
                             "at least one candidate for review)",
-                'electrode_lum': "mask pixels near-saturated in either frame "
-                                 "(copper electrode glints shift with "
-                                 "voltage); 0 disables",
+                'electrode_lum': "mask pixels this bright in the BASELINE "
+                                 "(plus the texture-derived foil "
+                                 "footprint) — the electrodes are static, "
+                                 "so the baseline knows where they are; "
+                                 "0 disables",
                 'min_solidity': "drop candidates below this solidity (0–1); "
                                 "oblong shapes still score 1.0",
                 'roi_frac': "central search window as a fraction of the "
@@ -1256,10 +1663,11 @@ class EdgeReviewApp:
                 'wrinkle_ratio': "wrinkle index (texture vs baseline) at/"
                                  "above this = wrinkle-mode; first such "
                                  "frame is noted as the onset",
-                'norm_bg': "1 = rescale each frame's brightness to the "
-                           "baseline (via the static border) before diffing "
-                           "— cancels the camera's internal auto-gain drift; "
-                           "0 = off"}
+                'norm_bg': "photometric normalization vs the baseline "
+                           "before diffing (cancels the camera's internal "
+                           "auto-gain drift): 2 = gain+offset fit on ROI "
+                           "quantiles (default), 1 = legacy scalar "
+                           "border-band ratio, 0 = off"}
         for r, key in enumerate(se.DEFAULT_SETTINGS):
             ttk.Label(win, text=f"{key}:").grid(row=r, column=0, sticky='e',
                                                 padx=6, pady=3)
@@ -1271,20 +1679,85 @@ class EdgeReviewApp:
                 row=r, column=2, sticky='w', padx=6)
             entries[key] = e
 
+        # knobs that change what DETECTION produces — applying one of
+        # these invalidates the current pass; the rest (breakdown
+        # thresholds, wrinkle onset, diam_mm) are pure post-processing
+        # and are recomputed live instead (audit 2026-08-05: Apply used
+        # to leave Save armed with flags computed under the OLD
+        # thresholds, and mark_breakdown_files renamed frames on them)
+        detect_keys = ('blur_px', 'diff_thresh', 'min_diff',
+                       'min_solidity', 'roi_frac', 'electrode_lum',
+                       'accept_conf', 'spread_pct', 'audit_nostep_pct',
+                       'audit_bias_px', 'wrinkle_ratio', 'tex_seg',
+                       'norm_bg')
+
         def apply(save=False):
+            if self._detect_busy:
+                # the generation token protects run SWITCHES; a mid-
+                # detect settings change would let the still-streaming
+                # worker (bound to the OLD settings) refill a pass the
+                # apply just cleared — auto-accepting old-settings
+                # candidates under new-settings gates, and recording
+                # settings that do not reproduce the outputs (review
+                # 2026-08-05)
+                messagebox.showinfo(
+                    "Settings", "Detection is running — wait for it to "
+                    "finish (or switch runs) before applying settings.",
+                    parent=win)
+                return
             try:
+                new = {}
                 for key, e in entries.items():
                     cast = type(se.DEFAULT_SETTINGS[key])
-                    self.settings[key] = cast(float(e.get()))
+                    new[key] = cast(float(e.get()))
             except ValueError as err:
                 messagebox.showerror("Settings", str(err), parent=win)
                 return
+            has_pass = bool(self.results or self.cands_all)
+            invalidates = has_pass and any(
+                new[k] != self.settings[k] for k in detect_keys)
+            if invalidates:
+                n_rev = sum(1 for i in self.results
+                            if i not in self.auto_idx
+                            and i not in self.auto_rej)
+                if not messagebox.askyesno(
+                        "Settings",
+                        f"These change what detection produces — the "
+                        f"current pass ({len(self.results)} decided "
+                        f"frame(s), {n_rev} by hand) will be CLEARED and "
+                        f"Detect must re-run.\n\nApply anyway?",
+                        parent=win):
+                    return
+            self.settings.update(new)
             if save and self.rundir:
                 se.save_settings(self.rundir, self.settings)
             win.destroy()
-            self.status.config(
-                text="settings applied" + (" + saved to setup.txt" if save
-                                           else "") + " — re-run Detect")
+            saved_txt = " + saved to setup.txt" if save else ""
+            if invalidates:
+                self.cands_all, self.results, self.flags = {}, {}, {}
+                self.advisories = {}
+                self.traces = {}
+                self.auto_idx, self.auto_rej = set(), set()
+                self.load_fail = {}
+                self.save_btn.config(state='disabled')
+                self.status.config(
+                    text=f"settings applied{saved_txt} — pass "
+                         f"invalidated, re-run Detect")
+                self._show()
+            elif self.run and (self.results or self.cands_all):
+                # post-processing knobs: flags, advisories and the info
+                # panel refresh NOW, so Save can never rename frames on
+                # thresholds the operator just changed away from
+                self._recount()
+                self._show()
+                self.status.config(
+                    text=f"settings applied{saved_txt} — breakdown/"
+                         f"wrinkle flags recomputed "
+                         f"({len(self.flags)} confirmed, "
+                         f"{len(self.advisories)} advisory)")
+            else:
+                self.status.config(
+                    text=f"settings applied{saved_txt} — run Detect")
 
         bf = ttk.Frame(win)
         bf.grid(row=len(se.DEFAULT_SETTINGS), column=0, columnspan=3, pady=8)

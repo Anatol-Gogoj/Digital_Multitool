@@ -2,8 +2,11 @@
 
 **TL;DR:** Big day 2026-08-05: the cross-run plot tool (#199), the Edge
 Review scale gate, **all 28 double-confirmed findings of a 67-agent
-correctness audit**, and then the **live telemetry sidecar** (#218) and
-its bench hand-over (#220) all merged to main. Batch-QA sits at 5 of 13
+correctness audit**, the **live telemetry sidecar** (#218) and its bench
+hand-over (#220) all merged to main, and **v1.1.0 tagged and published
+as a GitHub PRE-RELEASE** (#222). The bench fleet is still on
+v1.0.0+4f5f213 — **one release behind; pulling v1.1.0 onto the bench and
+analysis PCs is a live action item.** Batch-QA sits at 5 of 13
 runs reviewed. **The priority thread is still current-based breakdown
 detection** (#189/#157/#159) — increment (2) is now built, and
 **everything left in it is bench-gated**. The desk cannot advance it
@@ -22,9 +25,18 @@ remote / bench-no-HV / bench-HV. Durable conventions live in
   artifact (`telemetry.csv`), and the Edge Review scale gate, which
   **requires the operator to do a manual per-run calibration that did
   not exist before**. Both manuals regenerated against the live app at
-  this version (39-page PDF, telemetry control documented and callout-
-  annotated). **The fleet re-syncs off this version stamp** — lab PCs
-  pull it via `Tools → Update Software…` / `update_software.sh`.
+  this version (**40**-page PDF, telemetry control and the plot tool
+  documented and callout-annotated; cover rebranded off the old
+  SCPI_Control name). **Published as a PRE-RELEASE** because the
+  telemetry sidecar is desk-tested only — so GitHub still reports v1.0.0
+  as "Latest" and `releases/latest` still serves the OLD manual PDF.
+  Promote it once `BENCH_TEST.md` §M passes.
+- **How the fleet actually updates** (checked, because the wording here
+  used to be wrong): `update_software.sh` does a shallow **clone of main
+  HEAD** — it never reads tags or the releases API, so pre-release
+  status does not gate deployment. The `+<hash>` stamp it writes into
+  the deployed `version.py` last is a deploy-complete marker for each
+  launcher's cache check, not the thing being fetched.
 - **v1.0.0** tagged 2026-08-03 (GitHub release, manual PDF attached).
   Merged since, in order: **#195** current-based breakdown detection +
   scope-clipping fixes (ground-truth-validated on all 11 real runs; see
@@ -33,7 +45,12 @@ remote / bench-no-HV / bench-HV. Durable conventions live in
   `telemetry.csv` beside data.csv instead of being discarded —
   implements #157, #189 increment (2); desk-tested only, §M is its
   gate) and **#220** its bench hand-over (`BENCH_TEST.md` §M/§N/§O +
-  `bench/test_sldea_watchdog_probe.py`); **#196** repo `CLAUDE.md` +
+  `bench/test_sldea_watchdog_probe.py`); **#222** the v1.1.0 bump, both
+  regenerated manuals, and a real crash fix — `sldea_diag.py` died on
+  cp1252 consoles because the scale-gate wording put a 📏 into three
+  printed verdicts, so on the bench PC a run that reached the new gate
+  would finish its analysis and then die before writing any of it;
+  **#196** repo `CLAUDE.md` +
   `.gitignore` hardening; **#201** deep clean (4 historical probes →
   `bench/archive/`, stale docs fixed); **#204** deploy-script URLs for
   the rename; **#208** lab installer versioned (bench-authored); **#209**
@@ -104,8 +121,16 @@ detector is done (#158 CLOSED: step-change-from-median shipped in #195,
 ground-truthed twice). What remains is the LIVE half — the watchdog that
 missed 233451's −207 µA staircase in real time — tracked in **#189**
 (trip logic + fast scope capture), which also carries **#157** (≥1 Hz
-logging) and closes out **#159** (kV telemetry dropout, pre-run check
-shipped, live verify pending). Staged per #189's own increment plan:
+logging — implemented by increment (2), issue still OPEN) and **#159**
+(kV dropout; the fix shipped in #195, the live verify is what remains).
+
+> **#159 was auto-closed by accident on 2026-08-05 and has been
+> reopened.** PR #220's body said "closes #159" while merely describing
+> the §O checklist, and GitHub took it literally. The verification has
+> never run. Watch for this shape of error: a docs PR that *describes*
+> pending work must not use closing keywords.
+
+Staged per #189's own increment plan:
 
 1. **(agent, desk) #189 increment (2): MERGED 2026-08-05 (PR #218) —
    bench smoke owed.** The ~2 Hz watchdog samples (I_Out every sample,
@@ -183,9 +208,9 @@ re-run · #193/#194 exposure/contrast-ring experiments (unblocks P3_7,
 may shrink #198) · physically test the 104531 device (dead device vs HV
 not reaching the sample).
 
-**Desk backlog (after the above):** **release bump** (fleet already on
-main tip, but the bump regenerates both manuals and stamps the fleet
-v1.0.1) · #215 circle-fit calibration ×3 · #216 Edge Review UX (primary
+**Desk backlog (after the above):** **promote the v1.1.0 pre-release to
+Latest** once §M passes (the bump itself is done — shipped 2026-08-05
+with both manuals) · #215 circle-fit calibration ×3 · #216 Edge Review UX (primary
 Detect, tooltips) · #197 tuner run picker · #200 connection takeover ·
 #198 ML experiment (after the #194 verdict).
 
@@ -256,7 +281,13 @@ issue stays open as the wishlist tracker) · #200 cross-session
 instrument-connection takeover with warning · #206 deploy-script
 dedup/idempotence · #215 circle-fit calibration ×3 (scale gate v2) ·
 #216 Edge Review UX (primary Detect, tooltips, flow) · #219 live
-watchdog display + where the trip level comes from.
+watchdog display + where the trip level comes from · **#223** give the
+plot tool a GUI instead of eight CLI flags · **#224** telemetry control
+wording (drop the filler caption, say it is the scope log) · **#225**
+tabs have no horizontal scrollbar — wide content is clipped and
+unreachable (same family as #26/#27; the mechanism is that
+`ScrollableTab` pins content width to the canvas, so adding a bar alone
+would not help).
 
 ## This machine (Windows lab/analysis PC)
 
@@ -269,7 +300,8 @@ watchdog display + where the trip level comes from.
   Quote every path — two levels of this tree contain spaces. The
   leftover `D:\Downloads\gui\` is gone (verified 2026-08-05, see
   Housekeeping).
-- C: space is tight (hit 0 GB free 2026-08-04; ~21 GB free 2026-08-05)
+- C: space is tight (hit 0 GB free 2026-08-04; **~19 GB free**, measured
+  2026-08-05 evening)
   and repo + data now deliberately live on C: — the redundant copies
   were retired to the Recycle Bin 2026-08-05; **empty the bin** to
   reclaim the ~3.26 GB. `SLDEA_data\` now contains only
@@ -279,6 +311,76 @@ watchdog display + where the trip level comes from.
   or something before the 2026-08-05 agent session** (see Housekeeping
   above) — verify that was sanctioned; OneDrive web recycle bin is the
   recovery path if not.
+
+## Cold start — read this first if you are new here
+
+Verified 2026-08-05 by re-running everything below; if a fact here
+disagrees with prose elsewhere in this file, trust this section and fix
+the other one.
+
+**Where things actually are.** `main` is at the v1.1.0 merge. There is
+**one open PR** and it is docs-only. The designated priority is the
+live breakdown-detection thread (#189), and **it has no desk work left
+in it** — see "what you cannot do" below.
+
+**Five traps that have already caught someone:**
+
+1. **Your local `main` is probably stale.** `git fetch` updates
+   `origin/main`, not `main`. Reading `version.py` or this file from a
+   stale checkout shows pre-v1.1.0 reality and looks completely
+   plausible. Check `git rev-list --count main..origin/main` before
+   trusting anything, and edit docs from an up-to-date ref or you will
+   silently revert the release documentation.
+2. **`python` on PATH is not the repo's Python.** It lacks cv2 and
+   pandas, so suites fail for reasons that have nothing to do with your
+   change. Use `.venv\Scripts\python.exe` (Windows) — every command in
+   this file assumes it.
+3. **Selftests write into the current directory.** Run them from a
+   scratch dir, not the repo root. Related: the watchdog probe's
+   outputs were not gitignored until this was noticed — if you add a
+   tool that writes a new artifact type, extend `.gitignore` in the
+   same PR (`CLAUDE.md` says so; #220 still got it wrong).
+4. **Never put "closes #N" in a PR that only *describes* pending work.**
+   #220 did, and GitHub closed #159 — an issue whose verification has
+   never been run. It has been reopened.
+5. **Passing tests are not proof the GUI opens.** `test_sldea_edge_gui`
+   passes headlessly by skipping the display cases. Only
+   `test_app_launch.py` (under Xvfb) actually answers that, and it
+   self-skips on Windows.
+
+**What you can do at a desk, with no hardware** — all verified to run:
+
+```
+.venv\Scripts\python run_tests.py                       # 27/31; the 4 failures are environmental
+.venv\Scripts\python tests\test_sldea_telemetry.py      # or any suite directly
+.venv\Scripts\python sldea_plot.py --selftest OUT.png
+.venv\Scripts\python sldea_diag.py --selftest OUT.png
+.venv\Scripts\python sldea_tuner.py --selftest
+.venv\Scripts\python bench\test_sldea_watchdog_probe.py --selftest
+.venv\Scripts\python sldea_plot.py RUN1 RUN2 --mode area --out <scratch>
+.venv\Scripts\python sldea_diag.py <run folder>
+```
+
+The four selftests synthesise their own data — no run folders, no
+instruments. The 13 real runs live outside the repo (path in the
+Batch-QA section above).
+
+**The 4 failing suites are environmental and expected**: `test_arb_bin`,
+`test_camera_controls`, `test_presets_path`, `test_tk_fontfix`. If a
+FIFTH fails, that one is yours.
+
+**What you cannot do at a desk, and must not fake.** #189's remaining
+increments need a new SCPI token (MEAN→MAXIMUM/PK2PK), a trigger-state
+query the driver does not have, and a peak-noise floor that has to be
+*measured*. `CLAUDE.md` forbids shipping bench-unverified instrument
+I/O, and there is no way around it — `bench/test_sldea_watchdog_probe.py`
+exists precisely to get those numbers, and until someone runs it at the
+bench, increment (1) is not designable. Do not start it.
+
+**If you want useful desk work**, take it from `RUN_SHEET.md` bucket A,
+or from #215 / #216 / #197 / #200 / #223 / #224 / #225 — all of which
+are real, scoped and hardware-free. #219 becomes designable as soon as
+§N's numbers land.
 
 ## Picking up work
 

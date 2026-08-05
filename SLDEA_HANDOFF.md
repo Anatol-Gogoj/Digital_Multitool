@@ -143,9 +143,19 @@ zeroed). Follow-up, not this change. Note also that "the file closes
 after the SG is zeroed" covers `close()`; the per-row writes are handled
 by `hold_flush` above.
 
-Also: **dry runs now take scope readings between snapshots** (they took
-none before) — deliberate, since telemetry needs only the scope, and it
-makes a dry run the natural smoke test for this feature.
+**Two calls Anatol made on the PR (2026-08-05), settled — do not
+re-litigate:**
+
+- **The rate control stays in Hz.** Every other periodic control in the
+  app is an interval in seconds (`Sample Interval (s):`, `--interval`),
+  so this one breaks that pattern; #157 is phrased in Hz and the rate is
+  the thing being reasoned about here, so Hz wins. The tooltip gives the
+  seconds equivalent for the kV sub-rate.
+- **Telemetry stays ON for dry runs.** It needs only the scope, not HV,
+  so **dry runs now take scope readings between snapshots where they took
+  none before** — deliberate: it makes a dry run the natural smoke test
+  for this feature, and lets the rig be checked before the Trek is
+  energized.
 
 **Impact on past data: none.** No run in the 13-run batch has telemetry
 and none ever will; nothing in the analysis chain reads the file, so no

@@ -25,4 +25,6 @@ area_vs_voltage.png
 sldea_diag*.png
 sldea_diag*.json
 sldea_diag*.txt
+sldea_plot*.png
+sldea_plot*.csv
 *_selftest.png

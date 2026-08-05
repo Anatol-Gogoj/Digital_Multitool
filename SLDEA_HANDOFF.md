@@ -11,6 +11,42 @@ measured, the 16 mm anchor closed by the laser-cut mask) are all
 done. **No code task is queued — the next session is an OPERATOR
 session**, with the agent supporting.
 
+## Cross-run plot tool ships — breakdown marks recompute, never trust brands (2026-08-05)
+
+**TL;DR:** `sldea_plot.py` (#199) now draws the campaign's cross-run
+figures (area + A/A₀ panels, pre/post view, current/power modes, 300 dpi
+PNG + tidy CSV). Its breakdown X marks are RECOMPUTED from the saved
+current trace at plot time; saved `*_BREAKDOWN` brands are never trusted
+and no row is ever dropped for a breakdown note.
+
+Observation → decision, from the 13-run batch:
+
+- **Saved breakdown branding is not ground truth.** P3_5 carries 35
+  stale-branded frames + `post-breakdown` notes from the old area-jump
+  heuristic (current flat the whole time); the two real raw breakdown
+  runs (233451, 152205) carry NO branding at all; 155425's single real
+  terminal event is branded but its frames/-vs-CSV names disagree.
+  → The tool calls `sldea_edge.breakdown_flags` on the saved CSV (same
+  code path as Save, 2026-08-05 semantics) for its X marks; a saved
+  brand the recompute does not confirm prints a stale-brand warning and
+  gets no mark. Saved brands are still exported in the tidy CSV
+  (`saved_breakdown_brand` column) so nothing is hidden.
+- **Filtering on breakdown notes is forbidden** (would silently discard
+  half of P3_5) → every row of every run is plotted and exported;
+  breakdown/advisory only ever ADD marks.
+- **Band semantics** follow `SLDEA_MEASUREMENT.md` §1.1: ±2 % on
+  machine (half-height) stretches, ±1 % on hand-traced (outer-toe)
+  stretches, open markers = traced, captions state the convention. The
+  X axis is nominal kV (measured_kV telemetry is incomplete on every
+  run in the batch). Areas predating the 2026-07-28 scale fix are
+  excluded unless the baseline matches the nominal disc
+  (`--allow-suspect-scale` overrides).
+- **Validated against the batch ground truth:** recompute confirms
+  233451 rows 56–68 (−207 µA staircase), 152205 rows 45–48, 155425's
+  terminal row 48; demotes 104531 (−153 µA) and P3_7 (−64 µA) to
+  advisory; and flags P3_5's brand as stale. Matches the 2026-08-04
+  ground-truth table on every run.
+
 ## Breakdown detection rebuilt on current deviation (2026-08-04)
 
 Triggered by the 2026-08-04 upload batch (13 runs, both campaigns).

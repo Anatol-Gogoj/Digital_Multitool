@@ -271,6 +271,309 @@ class BreakdownWatchdog:
         return False
 
 
+TELEMETRY_FILENAME = 'telemetry.csv'
+TELEMETRY_COLUMNS = ['t_s', 'timestamp', 'nominal_kV', 'measured_kV',
+                     'measured_uA', 'v_status', 'i_status', 'event']
+# The run loop ticks at 10 Hz and the watchdog already samples I_Out at
+# 2 Hz, so 2 Hz costs nothing extra; anything faster is a NEW instrument
+# duty cycle and stays bench-unverified until someone times it (#157).
+TELEMETRY_MAX_HZ = 2.0
+TELEMETRY_MIN_HZ = 0.1
+# V_Out is sampled at most this often even when current is sampled faster:
+# a kV read is a second MEASUREMENT:IMMED triple under the instrument lock,
+# and nominal_kV already gives the exact commanded voltage on every row.
+TELEMETRY_KV_MIN_PERIOD_S = 1.0
+# A single row write+flush slower than this means the output directory is
+# not behaving like local disk (the bench default lives on a network
+# share). Past it the log stops flushing every row -- see TelemetryLog.
+TELEMETRY_SLOW_WRITE_S = 0.25
+TELEMETRY_SLOW_FLUSH_PERIOD_S = 1.0
+# ...and the flush window has to CLEAR the worst write it is throttling.
+# A fixed 1 s window is already expired on arrival once a single write
+# costs 1 s+, so every row flushed again and the monitor tick tracked the
+# share 1:1 — the throttle was inert in exactly the regime it exists for
+# (review 2026-08-05, measured).
+TELEMETRY_SLOW_FLUSH_MARGIN = 4.0
+# The achieved rate always lands a little under target: the run loop polls
+# at 10 Hz, so a 0.5 s gate actually fires at 0.5-0.6 s, and every snapshot
+# steals a tick for its camera grab. Only a real inability to keep up
+# should raise a warning, so the bar is 70% of target, not 80%.
+TELEMETRY_SHORTFALL_FRAC = 0.7
+
+
+def _telemetry_num(value, places):
+    """Number for a telemetry cell, or '' when it is not one.
+
+    Blank, never an exception and never a bogus number: a caller that
+    hands over None, a NaN measurement or a stray string costs that one
+    cell, not the whole record of the run."""
+    if value is None:
+        return ''
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return ''
+    if val != val or val in (float('inf'), float('-inf')):
+        return ''
+    return round(val, places)
+
+
+def clamp_telemetry_hz(hz):
+    """Requested telemetry rate -> the rate actually offered (Hz).
+
+    Capped at TELEMETRY_MAX_HZ: the samples above that rate do not exist
+    yet — they would be new scope round-trips inside the live run loop,
+    which is bench-verified territory, not a desk decision."""
+    try:
+        val = float(hz)
+    except (TypeError, ValueError):
+        return TELEMETRY_MAX_HZ
+    if val != val:                       # NaN
+        return TELEMETRY_MAX_HZ
+    return min(TELEMETRY_MAX_HZ, max(TELEMETRY_MIN_HZ, val))
+
+
+class TelemetryLog:
+    """Sidecar CSV of the live monitor samples, beside data.csv.
+
+    The watchdog already reads I_Out at ~2 Hz on every live run and throws
+    every sample away; nothing electrical is recorded between snapshots, so
+    a breakdown cannot even be DATED after the fact (#157/#189). This
+    writes those samples to their own file: `data.csv` keeps its one-row-
+    per-frame schema and every downstream reader (`sldea_edge.load_run`,
+    Edge Review, the tuner, `sldea_diag`) is untouched.
+
+    Clock-free like `psu_logger` -- the caller passes elapsed seconds and
+    the ISO timestamp -- so the whole thing is unit-testable with no Tk, no
+    hardware and no sleeping.
+
+    Statuses are recorded, not just values: a blank `measured_kV` with
+    `v_status=offscreen` (the Tek 9.9E37 sentinel, i.e. clipped off the
+    visible window) is a different fact from `invalid` (unparseable) and
+    from `skipped` (not sampled on this row), and the 07-29 dropout
+    investigation was ambiguous precisely because that distinction was
+    never written down (#159).
+
+    NOTHING here may raise into the live run loop: a full disk or a
+    yanked USB stick must cost the record, never the HV shutdown path.
+    Write failures set `.failed` and are reported once by the caller.
+
+    For the same reason the per-row flush is not unconditional. Flushing
+    every row is what makes an aborted run's file complete, but the run
+    loop is also the thread that services ■ Abort, and the bench's
+    default output directory is a network share -- one stalled flush is
+    the ramp-down waiting on the file system. So each write is TIMED, and
+    a directory that behaves like a slow share flushes only periodically
+    (`.slow`), on a window sized to CLEAR the worst write seen so far --
+    a fixed window shorter than the write is no throttle at all. The
+    window in force is said out loud in `summary()`.
+
+    `hold_flush` is the harder version of the same idea, for the seconds
+    between a confirmed breakdown and the SG reaching 0 V: rows are still
+    written (they are the record of the event) but nothing is flushed
+    until `close()`, which the runner calls after the HV is down.
+
+    This bounds the flush DUTY CYCLE, not the worst single stall: one
+    unlucky flush still parks the run thread for its full duration.
+    Taking that out needs the write off this thread entirely -- a queue
+    drained after the SG is zeroed -- which is a follow-up, not this
+    change. `max_write_s` is deliberately monotonic (the window never
+    re-tightens), so one pathological write keeps the file lazily
+    flushed for the rest of the run; `close()` still commits everything
+    on any ordinary end, abort or exception.
+    """
+
+    def __init__(self, path, target_hz=TELEMETRY_MAX_HZ,
+                 kv_min_period_s=TELEMETRY_KV_MIN_PERIOD_S,
+                 slow_write_s=TELEMETRY_SLOW_WRITE_S, clock=None):
+        import csv as _csv
+        import time as _time
+        self.path = path
+        self._clock = clock or _time.monotonic
+        self.slow_write_s = float(slow_write_s)
+        self.slow = False              # degraded to periodic flushing
+        self.hold_flush = False        # HV-shutdown path: buffer only
+        self.max_write_s = 0.0
+        self._last_flush_t = None
+        self.target_hz = clamp_telemetry_hz(target_hz)
+        self.period_s = 1.0 / self.target_hz
+        # never ask for kV faster than the samples themselves
+        self.kv_period_s = max(float(kv_min_period_s), self.period_s)
+        self.rows = 0                    # every row, event rows included
+        self.samples = 0                 # periodic samples only (rate math)
+        self.kv_rows = 0
+        self.unreadable = 0              # i_status invalid/error
+        self.offscreen = 0               # i_status offscreen
+        self.failed = False
+        self.last_error = None
+        self.max_gap_s = 0.0
+        self._first_t = None
+        self._last_t = None
+        self._next_due = 0.0
+        self._next_kv_due = 0.0
+        # utf-8 explicitly (not the platform codec): the bench writes on
+        # Linux and the analysis PC reads on Windows, and the same file
+        # must decode identically on both (audit 2026-08-05, data.csv).
+        # `event` is ASCII-clamped on the way in, so the file stays plain
+        # ASCII in practice and Excel is happy either way.
+        self._f = open(path, 'w', newline='', encoding='utf-8')
+        self._w = _csv.DictWriter(self._f, fieldnames=TELEMETRY_COLUMNS)
+        self._w.writeheader()
+        self._f.flush()
+
+    # ---- schedule -------------------------------------------------------
+    def due(self, t_s):
+        """Is a periodic sample due at elapsed time `t_s`?"""
+        return not self.failed and float(t_s) >= self._next_due
+
+    def kv_due(self, t_s):
+        """Should this sample also spend a round-trip on V_Out?
+
+        Asked BEFORE the read so a skipped kV costs nothing at all."""
+        return not self.failed and float(t_s) >= self._next_kv_due
+
+    # ---- writing --------------------------------------------------------
+    def sample(self, t_s, timestamp, nominal_kv, ua=None, i_status='',
+               kv=None, v_status='', event=''):
+        """Write one periodic sample and advance the schedule.
+
+        Unreadable samples are written too -- a gap in the record is the
+        evidence that monitoring was lost, and blanking it silently is the
+        bug #159 was filed about. Returns True when the row was written."""
+        t = float(t_s)
+        if self._last_t is not None:
+            self.max_gap_s = max(self.max_gap_s, t - self._last_t)
+        # schedule from the ACTUAL sample time, like the watchdog's own
+        # gate: a stalled scope must not leave a burst of catch-up rows.
+        self._next_due = t + self.period_s
+        if v_status and v_status != 'skipped':
+            self._next_kv_due = t + self.kv_period_s
+        ok = self._write(t, timestamp, nominal_kv, ua, i_status, kv,
+                         v_status or 'skipped', event)
+        if ok:
+            self.samples += 1
+            self._first_t = t if self._first_t is None else self._first_t
+            self._last_t = t
+            if v_status and v_status != 'skipped':
+                self.kv_rows += 1
+            if i_status == 'offscreen':
+                self.offscreen += 1
+            elif i_status in ('invalid', 'error'):
+                self.unreadable += 1
+        return ok
+
+    def event(self, t_s, timestamp, nominal_kv, event, ua=None, i_status='',
+              kv=None, v_status=''):
+        """Write a row that marks something (a snapshot, the breakdown
+        trip) without disturbing the periodic schedule or the rate math --
+        it reuses readings that were taken for another purpose."""
+        return self._write(float(t_s), timestamp, nominal_kv, ua,
+                           i_status or 'skipped', kv, v_status or 'skipped',
+                           event)
+
+    def _write(self, t_s, timestamp, nominal_kv, ua, i_status, kv, v_status,
+               event):
+        if self.failed:
+            return False
+        # Flush every row while the file system is keeping up (an aborted
+        # run then has a complete file); once it is not, only once per
+        # flush window, so the run loop is not the thing waiting on the
+        # share. On the HV-shutdown path, not at all until close().
+        do_flush = (not self.hold_flush
+                    and (not self.slow or self._last_flush_t is None
+                         or t_s - self._last_flush_t
+                         >= self.flush_period_s()))
+        started = self._clock()
+        try:
+            self._w.writerow({
+                't_s': round(t_s, 3),
+                'timestamp': timestamp,
+                'nominal_kV': _telemetry_num(nominal_kv, 4),
+                'measured_kV': _telemetry_num(kv, 4),
+                'measured_uA': _telemetry_num(ua, 2),
+                'v_status': v_status,
+                'i_status': i_status or 'skipped',
+                # ASCII-clamped so the file cannot depend on the caller's
+                # vocabulary staying ASCII (the run log's own is not: ⚡, µA)
+                'event': str(event).encode('ascii', 'replace').decode(),
+            })
+            if do_flush:
+                self._f.flush()
+                self._last_flush_t = t_s
+        except Exception as e:       # disk full, device gone, encoding...
+            self.failed = True
+            self.last_error = e
+            return False
+        took = self._clock() - started
+        if took > self.max_write_s:
+            self.max_write_s = took
+        if took >= self.slow_write_s:
+            self.slow = True
+        self.rows += 1
+        return True
+
+    # ---- reporting ------------------------------------------------------
+    def flush_period_s(self):
+        """Seconds between flushes while degraded.
+
+        Sized to clear the worst write seen: a window shorter than a
+        single write has always already expired by the next row, which
+        made the throttle a no-op on a badly stalled share (measured,
+        review 2026-08-05). `summary()` reports THIS number rather than
+        the constant, so the run log cannot claim a throttle that is not
+        in force."""
+        return max(TELEMETRY_SLOW_FLUSH_PERIOD_S,
+                   TELEMETRY_SLOW_FLUSH_MARGIN * self.max_write_s)
+
+    def achieved_hz(self):
+        """Mean sample rate actually achieved, or None with < 2 samples."""
+        if self.samples < 2 or self._first_t is None:
+            return None
+        span = self._last_t - self._first_t
+        return (self.samples - 1) / span if span > 0 else None
+
+    def summary(self):
+        """One log line: what was recorded and whether the rate held.
+
+        #157's acceptance asks for the ACHIEVED rate to be visible, so a
+        run where the hardware could not keep up says so in run.log
+        instead of quietly producing a sparse file."""
+        if self.failed and self.rows == 0:
+            return (f"telemetry: FAILED before any row was written "
+                    f"({self.last_error})")
+        hz = self.achieved_hz()
+        parts = [f"telemetry: {self.samples} samples"]
+        if hz is not None:
+            parts.append(f"{hz:.2f} Hz achieved (target {self.target_hz:g})")
+        parts.append(f"max gap {self.max_gap_s:.1f} s")
+        parts.append(f"{self.kv_rows} with kV")
+        if self.offscreen:
+            parts.append(f"{self.offscreen} off-screen")
+        if self.unreadable:
+            parts.append(f"{self.unreadable} unreadable")
+        if self.slow:
+            parts.append(f"SLOW DISK ({self.max_write_s:.2f} s worst write) "
+                         f"— flushed every {self.flush_period_s():.1f} s, "
+                         f"not per row")
+        if self.failed:
+            parts.append(f"STOPPED EARLY ({self.last_error})")
+        return ", ".join(parts) + f" -> {TELEMETRY_FILENAME}"
+
+    def rate_shortfall(self):
+        """True when the achieved rate missed the target badly enough to
+        mention -- the loop or the scope could not keep up. See
+        TELEMETRY_SHORTFALL_FRAC for why the bar is not tighter."""
+        hz = self.achieved_hz()
+        return (hz is not None
+                and hz < TELEMETRY_SHORTFALL_FRAC * self.target_hz)
+
+    def close(self):
+        try:
+            self._f.close()
+        except Exception:
+            pass
+
+
 class SldeaProfile:
     """A full staircase test built from the tab's input fields."""
 

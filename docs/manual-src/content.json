@@ -861,7 +861,7 @@
  "SLDEA Test": {
   "key": "SLDEA Test",
   "area": "SLDEA Test",
-  "purpose": "Runs an automated voltage-staircase test on a single-layer DEA: the signal generator drives the Trek HV amplifier (1 V control = 1 kV, max 10 kV), the scope logs the Trek's V_Out/I_Out monitors, and the webcam photographs the electrode at each voltage landing. Each run produces a self-contained folder (setup.txt, data.csv, frames/) ready for the Edge Review analysis program.",
+  "purpose": "Runs an automated voltage-staircase test on a single-layer DEA: the signal generator drives the Trek HV amplifier (1 V control = 1 kV, max 10 kV), the scope logs the Trek's V_Out/I_Out monitors, and the webcam photographs the electrode at each voltage landing. Each run produces a self-contained folder (setup.txt, data.csv, run.log, frames/ — plus telemetry.csv when the scope is connected) ready for the Edge Review analysis program.",
   "controls": [
    {
     "label": "Start / End / Step (kV)",
@@ -908,6 +908,10 @@
     "what": "Watches Trek current during live runs; current above Trip (µA) sustained for Confirm (s) snapshots the breakdown, ramps to 0 and aborts. Transient spikes never trip it."
    },
    {
+    "label": "📈 Telemetry log (telemetry.csv)",
+    "what": "Writes the scope’s kV/µA continuously to telemetry.csv beside data.csv, so the current BETWEEN photos is recorded and a breakdown can be dated electrically. Rate (Hz) is capped at 2 — at that setting the current rows are free, because they are the breakdown watchdog’s own readings, which used to be thrown away. Voltage is read less often (at most once a second) because it costs a second scope query; the commanded voltage is on every row regardless. Needs the scope; works on dry runs too. Nothing reads the file — data.csv is still the run, and Edge Review, the tuner and the diagnostic are unaffected."
+   },
+   {
     "label": "DRY RUN — HV OFF / ▶ Run / ■ Abort",
     "what": "Dry run rehearses timing and photos with HV off; unticking turns the row red for a live run. Abort ramps to 0 kV before stopping."
    },
@@ -937,7 +941,7 @@
    "A live run drives real HV up to 10 kV through the Trek. Always stop with ■ Abort (it ramps to 0 kV first); closing the app mid-run can leave the Trek energized.",
    "If the scope-monitor check warns and you pick 'run anyway', the run completes but logs blank measured kV and wrong currents — this silently ruined five runs on 2026-07-25.",
    "A wrong DEA diameter corrupts the px-to-mm scale: every area number from that run is wrong and setup.txt must be hand-fixed before re-analysis.",
-   "Running live with no scope means no measured kV/µA columns and no breakdown watchdog — the run continues even through a breakdown.",
+   "Running live with no scope means no measured kV/µA columns and no breakdown watchdog — the run continues even through a breakdown, and no telemetry.csv is written.",
    "🎚 Tune params… is an advanced tool: it asks for confirmation first, and its Save rewrites the run's setup.txt — the detection settings every later analysis pass will use.",
    "During a live run the driven SG channel is locked; its Signal Gen tab controls refuse changes until the run ends.",
    "On Windows (no instruments connected) only DRY RUN works — a live run refuses to start."
@@ -958,6 +962,10 @@
    {
     "widget_text": "⚡ Breakdown watchdog (LIVE runs)",
     "note": "Aborts on sustained overcurrent"
+   },
+   {
+    "widget_text": "📈 Telemetry log",
+    "note": "Continuous kV/µA log beside data.csv"
    },
    {
     "widget_text": "🎚 Tune params…",

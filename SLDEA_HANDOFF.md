@@ -35,17 +35,31 @@ Observation → decision:
   → **Default raised to 255**, which is conservative-to-the-point-of-off.
   Reported as making the edges work normally; **lighter values are
   untested on that device.**
-- **The cost, measured rather than assumed.** `electrode_lum` is also
-  used by the resting-disc fit, and there a bright electrode strip is
-  exactly what needs rejecting: with the mask off, the strip's own edge
-  is a strong dark→light step and `baseline_disc` **fails to fit** on a
-  bright-electrode baseline. Failing is the safe direction — since the
-  #214 scale gate the disc fit is the px→mm **cross-check**, not the
-  anchor (the anchor is the operator's manual calibration), so a missing
-  fit costs a cross-check, not a measurement. **But a bright/copper
-  electrode run now needs `electrode_lum ≈ 220` set in the tuner to get
-  its cross-check back.** Pinned by
-  `test_electrode_mask_default_is_a_device_class_tradeoff`.
+- **The cost on the real batch: none. Measured, after an initial
+  over-estimate.** A synthetic bright rectangle made `baseline_disc`
+  refuse to fit at 255, and the first version of this entry generalised
+  that into "bright/copper devices lose their px→mm cross-check". **That
+  was wrong**, and running it on the actual P3 data is what showed it.
+  `foil_mask` is TEXTURE-derived, so on a real foil strip it already
+  covers the whole strip; the brightness cut only ever caught the
+  specular streaks *inside* that footprint. It never recognises a flat
+  painted rectangle, which is why the synthetic case behaved so
+  differently.
+
+  Across all 12 readable runs of the batch (P3_1/2/3/5/6/7, DOT_P3_1,
+  the four 07-23 runs, 104531):
+
+  | | 220 → 255 |
+  |---|---|
+  | frame area lost on P3 runs | **0.00–0.09 %** |
+  | resting-disc cross-check, P3 | **identical to the pixel** (578, 577, 584, 606, 543, 527 px) |
+  | resting-disc, 07-23 optics | moves ≤ **1 px** (370→371, 361→362) |
+
+  The 07-23 runs lose more raw area (6–19 %, their brightness cut was
+  catching 25 % of the frame) and still land within a pixel. P3_7 fails
+  to fit at BOTH settings — that is the known low-contrast device
+  (#193/#194), not this change. So no run needs `electrode_lum` put back
+  to 220, and nothing in the reviewed batch moves.
 - **Only untuned runs move.** Per-run values live in that run's
   `setup.txt` and still win, so nothing already tuned or reviewed
   changes. The default only reaches runs nobody has tuned.

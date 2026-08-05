@@ -1,4 +1,4 @@
-# Run sheet — 2026-08-05
+# Run sheet — 2026-08-05 (v1.1.0)
 
 **What this is:** an ordered, tick-off view of the open work, split by
 where you have to be to do it. **`PROJECT_HANDOFF.md` is the source of
@@ -37,10 +37,14 @@ Roughly in the order that unblocks the most.
       recovery path and it expires.
 - [ ] **Decide #219's direction** — needs §N's numbers first, so this
       sits behind bucket B.
-- [ ] **Release bump** — **after §M passes.** The bump regenerates both
-      manuals, and the manual now documents the telemetry control; no
-      point shipping that description before the feature has run on
-      hardware. Bumping also re-stamps the fleet (v1.0.1).
+- [ ] **Pull v1.1.0 onto the bench and analysis PCs** — `Tools → Update
+      Software…` / `update_software.sh`, then check the footer reads
+      `v1.1.0+…`. The fleet is one release behind. (The updater clones
+      main HEAD, so the pre-release flag does not block it.)
+- [ ] **Promote the v1.1.0 pre-release to Latest** — *after §M passes.*
+      Until then GitHub serves v1.0.0 as "Latest", so anyone told to
+      "grab the manual from the latest release" gets the old PDF.
+      The bump itself is DONE (shipped 2026-08-05 with both manuals).
 
 **Open decisions with no deadline** (all in `PROJECT_HANDOFF.md`):
 split the SLDEA analysis suite into its own repo · manual binaries in
@@ -57,7 +61,8 @@ git vs LFS vs release-assets-only · `demos/` fate once #32 is decided.
 
 - [ ] **§M — telemetry dry-run smoke.** Full numbered steps in
       `BENCH_TEST.md`. ~20 min.
-      **Unblocks:** trusting `telemetry.csv` at all, and the release bump.
+      **Unblocks:** trusting `telemetry.csv` at all, and promoting the
+      v1.1.0 pre-release to Latest.
       **Send back:** `run.log`, `data.csv`, `telemetry.csv`, `setup.txt`
       from the run folder (a few kB — skip `frames/`).
       **The answer I most want:** whether the run log says `SLOW DISK`.
@@ -86,7 +91,8 @@ git vs LFS vs release-assets-only · `demos/` fate once #32 is decided.
 > ended with **■ Abort** — closing the app only attempts a best-effort
 > ramp.
 
-- [ ] **§O — live-run verification.** Closes **#159**. Full steps in
+- [ ] **§O — live-run verification.** Verifies **#159** (which was
+      auto-closed by mistake and reopened — it closes when this RUNS). Full steps in
       `BENCH_TEST.md`. **There is no manual scope work in this.** The
       pre-run check reads the vertical setup back and, on a window that
       cannot show the run's range, offers **"Fix it automatically"**,
@@ -118,8 +124,16 @@ git vs LFS vs release-assets-only · `demos/` fate once #32 is decided.
   gate.
 - **#220** — this run sheet's bench half: `BENCH_TEST.md` §M/§N/§O and
   `bench/test_sldea_watchdog_probe.py`.
-- **#219** filed — the watchdog is invisible on screen until it trips,
+- **#222 / v1.1.0** — tagged and published as a GitHub **pre-release**
+  (because telemetry is desk-only), with both manuals regenerated at
+  40 pages and a real crash fix: `sldea_diag.py` was dying on cp1252
+  consoles, so on the bench PC a run that reached the new scale gate
+  would finish its analysis and then die before writing any of it.
+- **Filed:** **#219** the watchdog is invisible on screen until it trips,
   and its trip level is typed by hand while every confirmed breakdown in
-  the 08-04 ground truth was a deviation of 11–192 µA. So the smallest
-  real events sit *below* the 100 µA default; they were only ever caught
-  post-hoc by the relative step-change detector.
+  the 08-04 ground truth was a deviation of 11–192 µA — so the smallest
+  real events sit *below* the 100 µA default and were only ever caught
+  post-hoc · **#223** the plot tool needs a GUI · **#224** telemetry
+  control wording · **#225** tabs have no horizontal scrollbar.
+- **Reopened:** **#159**, which #220 auto-closed by accident — its
+  verification (§O) has never run.

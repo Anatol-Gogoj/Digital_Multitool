@@ -357,7 +357,19 @@ def test_mark_breakdown_files_renames_from_first_flag():
         assert 'post-breakdown' not in (run['rows'][1].get('notes') or '')
         # idempotent: nothing further to rename
         assert se.mark_breakdown_files(run, {2: 'x'}) == 0
-        # nothing at all without flags
+        # RETRACTED flags un-brand (audit 2026-08-05): the current-
+        # confirmed semantics exist to retract false flags, and the
+        # retraction must reach the files, the CSV links and the notes —
+        # before this, P3_5's 35 falsely-branded frames stayed branded
+        # forever
+        assert se.mark_breakdown_files(run, {}) == 2
+        frames = sorted(os.listdir(os.path.join(d, 'frames')))
+        assert 'f2.png' in frames and 'f3.png' in frames
+        assert not any('_BREAKDOWN' in f for f in frames)
+        assert run['rows'][2]['frame_file'] == 'f2.png'
+        assert run['rows'][3]['frame_file'] == 'f3.png'
+        assert 'post-breakdown' not in (run['rows'][3].get('notes') or '')
+        # and that too is idempotent
         assert se.mark_breakdown_files(run, {}) == 0
     finally:
         shutil.rmtree(d)
@@ -1188,6 +1200,358 @@ def test_load_run_says_what_is_missing():
         assert 'data1.csv' in str(e), str(e)     # names the rename it accepts
     else:
         raise AssertionError("load_run accepted a directory with no CSV")
+
+
+# ---------------------------------------------------------------------------
+# audit 2026-08-05 regressions
+# ---------------------------------------------------------------------------
+
+def test_partial_resave_carries_exactly_one_scale():
+    """CRITICAL (audit 2026-08-05): a Save that leaves rows unreviewed
+    used to keep the PREVIOUS session's mm² on them while rewriting the
+    rest at the new manual anchor — two absolute scales in one column,
+    a 56.1% artificial area step on the real-data repro, invisible to
+    breakdown_flags and sldea_plot (both read px). Every row's mm² must
+    imply THE SAME mm/px after any save."""
+    old_scale = 0.04306                 # the shipped 155425 anchor
+    new_scale = 0.05333                 # the audit's session-2 anchor
+    rows = []
+    for px in (136439.0, 136679.0, 134304.0, 132715.0, 154688.0):
+        rows.append({'tag': 'post-ramp', 'nominal_kV': '3.5',
+                     'active_area_px': f"{px:.0f}",
+                     'active_area_mm2': f"{px * old_scale ** 2:.3f}",
+                     'active_diam_mm':
+                         f"{2 * (px / np.pi) ** 0.5 * old_scale:.3f}",
+                     'wrinkle_idx': '1.20',
+                     'notes': 'edge:disc-fit conf 0.91'})
+    # a bug-era row: mm2 with NO px — unscalable, must be blanked, not
+    # left on a foreign anchor
+    rows.append({'tag': 'post-ramp', 'nominal_kV': '4.0',
+                 'active_area_px': '', 'active_area_mm2': '123.456',
+                 'active_diam_mm': '9.999', 'wrinkle_idx': '',
+                 'notes': ''})
+    # this session re-reviews only rows 0 and 1
+    results = {0: {'area_px': 140000.0, 'diam_px': 422.2, 'conf': 0.9,
+                   'method': 'disc-fit', 'wrinkle': 1.4},
+               1: None}
+    se.apply_results(rows, results, new_scale, {})
+    implied = []
+    for r in rows:
+        px = float(r['active_area_px']) if r['active_area_px'] else None
+        mm2 = (float(r['active_area_mm2'])
+               if r['active_area_mm2'] else None)
+        if px and mm2:
+            implied.append((mm2 / px) ** 0.5)
+    assert implied, "no scaled rows survived"
+    assert all(abs(s - new_scale) / new_scale < 1e-4 for s in implied), \
+        f"mixed scales in one column: {implied}"
+    # untouched rows keep their px (real measurements are preserved)...
+    assert rows[2]['active_area_px'] == '134304'
+    # ...their diam rescaled consistently with the mm²...
+    d = float(rows[2]['active_diam_mm'])
+    want = 2 * (134304.0 / np.pi) ** 0.5 * new_scale
+    assert abs(d - want) / want < 1e-3, (d, want)
+    # ...their notes/wrinkle untouched (they describe the kept px)...
+    assert rows[2]['notes'] == 'edge:disc-fit conf 0.91'
+    assert rows[2]['wrinkle_idx'] == '1.20'
+    # ...and the unscalable bug-era row is blanked, not kept foreign
+    assert rows[5]['active_area_mm2'] == ''
+    assert rows[5]['active_diam_mm'] == ''
+
+
+def test_candidates_refuse_without_baseline():
+    """CRITICAL (audit 2026-08-05): with base_gray None, prepared_diff's
+    fallback thresholded the raw photograph — every honest channel
+    refused and the Otsu tiers auto-accepted the ROI *background* at
+    conf 0.85-0.90 (2.74x the true area). No baseline, no candidates."""
+    img = _disc_frame(40)               # a scene the tiers WOULD outline
+    assert se.candidates(None, img, dict(se.DEFAULT_SETTINGS)) == []
+
+
+def test_accepted_result_without_wrinkle_blanks_stale_wrinkle_idx():
+    """audit 2026-08-05: a re-measured row whose new result carries no
+    wrinkle (e.g. 'resting') used to keep the previous pass's
+    wrinkle_idx next to the new area."""
+    rows = [{'active_area_px': '100', 'wrinkle_idx': '1.90', 'notes': ''}]
+    se.apply_results(rows, {0: {'area_px': 100.0, 'diam_px': 11.3,
+                                'conf': 0.9, 'method': 'resting',
+                                'wrinkle': None}}, None, {})
+    assert rows[0]['wrinkle_idx'] == ''
+
+
+def test_norm_bg_affine_survives_roi_frac_full_frame():
+    """audit 2026-08-05: bx/by gated ALL photometric normalization, so
+    roi_frac=1.0 — the tuner slider's own maximum — silently disabled
+    the affine fit and the residual pedestal auto-accepted a 5.3x
+    outline. Only the legacy scalar needs the border band. Same scene as
+    test_affine_norm_survives_a_gain_and_offset_baseline_mismatch."""
+    yy, xx = np.mgrid[0:240, 0:240]
+    base = (60.0 + 140.0 * xx / 239.0).astype(np.float32)
+    base[:, 8:20] = 235.0
+    img = base.copy()
+    img[(xx - 120) ** 2 + (yy - 120) ** 2 <= 40 * 40] += 30
+    img = np.clip(img * 0.78 + 12.0, 0, 255)
+    truth = np.pi * 40 * 40
+    areas = {}
+    for rf, mode in ((0.85, 2), (1.0, 2), (1.0, 0)):
+        s = dict(se.DEFAULT_SETTINGS)
+        s['roi_frac'] = rf
+        s['norm_bg'] = mode
+        cands = se.candidates(base, img, s)
+        areas[(rf, mode)] = cands[0]['area_px'] if cands else 0.0
+        if mode == 2:
+            assert cands, f"no candidates at roi_frac {rf}"
+            err = abs(cands[0]['area_px'] - truth) / truth
+            assert err < 0.15, (rf, cands[0]['method'],
+                                cands[0]['area_px'], truth)
+    # and norm_bg=0 is still genuinely OFF — the pedestal-driven outline
+    # differs grossly from the corrected one, pinning the modes apart
+    off = areas[(1.0, 0)]
+    assert off == 0.0 or abs(off - truth) / truth > 0.5, \
+        f"norm_bg=0 indistinguishable from the affine fit: {off}"
+
+
+def test_wrinkle_index_is_photometric_gain_invariant():
+    """audit 2026-08-05: the GUI's hand-trace path measured the wrinkle
+    index on the RAW frame; |Laplacian| is linear in gain, so traced
+    rows carried the correct value times the run's photometric gain
+    (20-30% off on the P3 campaign) while machine rows were normalized —
+    one column, two normalizations. se.wrinkle_index must measure like
+    the detector."""
+    yy, xx = np.mgrid[0:240, 0:240]
+    # multi-pixel baseline texture (survives the wrinkle blur) so the
+    # ratio has a real denominator and stays below its 9.99 cap
+    base = np.clip(150 + 6 * np.sin(2 * np.pi * xx / 14)
+                   * np.sin(2 * np.pi * yy / 14), 0,
+                   255).astype(np.float32)
+    disc = (xx - 120) ** 2 + (yy - 120) ** 2 <= 50 * 50
+    img = base.copy()
+    img[disc] += (14 * np.sin(2 * np.pi * xx / 11)
+                  * np.sin(2 * np.pi * yy / 11))[disc]
+    img = np.clip(img, 0, 255)
+    gained = np.clip(0.75 * img + 20, 0, 255)   # the P3-style mismatch
+    contour = np.array([[75, 75], [165, 75], [165, 165], [75, 165]],
+                       np.int32)
+    s = dict(se.DEFAULT_SETTINGS)
+    w_plain = se.wrinkle_index(base, img, contour, s)
+    w_gained = se.wrinkle_index(base, gained, contour, s)
+    raw_plain = se._wrinkle_ratio(base, img, contour)
+    raw_gained = se._wrinkle_ratio(base, gained, contour)
+    assert 1.3 < w_plain < 9.0, w_plain
+    # the bug's mechanism: |Laplacian| is linear in gain, so the RAW
+    # ratio carries the photometric gain as a multiplicative error
+    assert abs(raw_gained / raw_plain - 0.75) < 0.03, (raw_plain,
+                                                       raw_gained)
+    # the fix: the normalized index shrugs the same gain off
+    assert abs(w_gained - w_plain) / w_plain < 0.10, (w_plain, w_gained)
+
+
+def test_breakdown_branding_heals_both_directions():
+    """audit 2026-08-05: (a) frame_file was rewritten to a _BREAKDOWN
+    name even when the file was missing everywhere — a permanently
+    dangling link, live on the shipped 155425 row 48; (b) the
+    CSV-branded/disk-unbranded state short-circuited before any disk
+    check and was unrepairable in either direction."""
+    d = tempfile.mkdtemp(prefix='edge_heal_')
+    try:
+        names = ['b.png', 'f1.png', 'f2.png', 'f3.png']
+        _fake_run(d, [{'snapshot': i + 1, 'step': i,
+                       'tag': 'baseline' if i == 0 else 'post',
+                       'nominal_kV': str(float(i)), 'frame_file': n}
+                      for i, n in enumerate(names)])
+        for n in ('b.png', 'f1.png', 'f2.png'):   # f3 missing on disk
+            open(os.path.join(d, 'frames', n), 'wb').write(b'x')
+        run = se.load_run(d)
+        # the 155425 state: CSV branded, disk plain, flag confirmed
+        run['rows'][2]['frame_file'] = 'f2_BREAKDOWN.png'
+        renamed = se.mark_breakdown_files(run, {2: 'breakdown? terminal'})
+        assert renamed == 1                     # f2 healed FORWARD
+        assert os.path.exists(os.path.join(d, 'frames',
+                                           'f2_BREAKDOWN.png'))
+        assert run['rows'][2]['frame_file'] == 'f2_BREAKDOWN.png'
+        # f3 is missing under BOTH names: frame_file must stay put,
+        # never pointed at a ghost
+        assert run['rows'][3]['frame_file'] == 'f3.png'
+        assert 'post-breakdown' in run['rows'][3]['notes']
+        # retraction: flags empty -> disk un-branded, links + notes clean
+        renamed = se.mark_breakdown_files(run, {})
+        assert renamed == 1
+        assert os.path.exists(os.path.join(d, 'frames', 'f2.png'))
+        assert run['rows'][2]['frame_file'] == 'f2.png'
+        assert 'post-breakdown' not in (run['rows'][3]['notes'] or '')
+        # dangling branded CSV name + plain file on disk + no flags ->
+        # the link heals back without a rename
+        run['rows'][1]['frame_file'] = 'f1_BREAKDOWN.png'
+        run['rows'][1]['notes'] = ('edge:disc-fit conf 0.96; '
+                                   'post-breakdown')
+        assert se.mark_breakdown_files(run, {}) == 0
+        assert run['rows'][1]['frame_file'] == 'f1.png'
+        assert run['rows'][1]['notes'] == 'edge:disc-fit conf 0.96'
+        # REVERSE orphan (review 2026-08-05): CSV plain while the disk
+        # holds only the branded twin (an un-brand whose CSV committed
+        # but whose rename failed). This direction had NO repair path —
+        # the row read UNREADABLE forever while the code promised
+        # 'self-heals in either direction'.
+        os.replace(os.path.join(d, 'frames', 'f1.png'),
+                   os.path.join(d, 'frames', 'f1_BREAKDOWN.png'))
+        assert se.mark_breakdown_files(run, {}) == 1
+        assert os.path.exists(os.path.join(d, 'frames', 'f1.png'))
+        assert run['rows'][1]['frame_file'] == 'f1.png'
+        # no-clobber (review 2026-08-05): when BOTH twins exist, a brand
+        # fixes the link only — renaming would overwrite the branded
+        # file's bytes, violating 'renamed, never deleted'
+        open(os.path.join(d, 'frames', 'f2_BREAKDOWN.png'),
+             'wb').write(b'branded-bytes')
+        assert se.mark_breakdown_files(run, {2: 'breakdown? x'}) == 0
+        assert run['rows'][2]['frame_file'] == 'f2_BREAKDOWN.png'
+        assert open(os.path.join(d, 'frames', 'f2_BREAKDOWN.png'),
+                    'rb').read() == b'branded-bytes'
+        assert os.path.exists(os.path.join(d, 'frames', 'f2.png'))
+    finally:
+        shutil.rmtree(d)
+
+
+def test_scale_anchor_roundtrip_and_mutual_preservation():
+    """audit 2026-08-05: the mandatory manual anchor was a pair of
+    clicks recorded NOWHERE — manual- and auto-anchored runs were
+    indistinguishable on disk and no session could reproduce another's
+    absolute mm². The anchor persists in setup.txt, survives
+    save_settings, and loads shaped for mm_per_px."""
+    d = tempfile.mkdtemp(prefix='edge_anchor_')
+    try:
+        with open(os.path.join(d, 'setup.txt'), 'w') as f:
+            f.write("SLDEA Test\nDEA nominal diameter: 16 mm\n")
+        assert se.load_scale_anchor(d) is None
+        se.save_scale_anchor(d, {
+            'method': 'manual-calibration', 'diam_px': 371.5,
+            'diam_mm': 16.0, 'mm_per_px': 0.043062,
+            'anchor_frame': 'SLDEA_s00_00.00kV_baseline.png',
+            'anchor_is_baseline': True, 'auto_diam_px': 371.0})
+        a = se.load_scale_anchor(d)
+        assert a and a['diam_px'] == 371.5
+        assert a['method'] == 'manual-calibration'
+        assert a['anchor_is_baseline'] is True
+        assert a['anchor_frame'] == 'SLDEA_s00_00.00kV_baseline.png'
+        assert 'saved' in a
+        # loadable anchor IS a usable mm_per_px reference
+        scale = se.mm_per_px({}, [], {'diam_mm': 16.0}, baseline_ref=a)
+        assert abs(scale - 16.0 / 371.5) < 1e-12
+        # save_settings must not eat the block; a re-save replaces it
+        se.save_settings(d, dict(se.DEFAULT_SETTINGS))
+        assert se.load_scale_anchor(d)['diam_px'] == 371.5
+        se.save_scale_anchor(d, {'method': 'manual-calibration',
+                                 'diam_px': 380.0, 'diam_mm': 16.0,
+                                 'mm_per_px': 16.0 / 380.0})
+        text = open(os.path.join(d, 'setup.txt'),
+                    encoding='utf-8').read()
+        assert text.count(se.ANCHOR_HDR) == 1
+        assert text.count(se.EDGE_HDR) == 1
+        assert se.load_scale_anchor(d)['diam_px'] == 380.0
+        assert 'DEA nominal diameter' in text
+        # settings still round-trip cleanly around it
+        s = se.load_settings(d)
+        assert s['blur_px'] == se.DEFAULT_SETTINGS['blur_px']
+    finally:
+        shutil.rmtree(d)
+
+
+def test_setup_txt_with_non_ascii_never_raises():
+    """audit 2026-08-05: a hand-annotated setup.txt with any byte cp1252
+    cannot decode (an emoji, pasted lab-notebook text) raised
+    UnicodeDecodeError out of save_settings / _diam_recorded — the
+    latter mid-dialog-build, permanently bricking the scale gate.
+    Every setup.txt reader/writer must survive it."""
+    d = tempfile.mkdtemp(prefix='edge_uni_')
+    try:
+        with open(os.path.join(d, 'setup.txt'), 'w',
+                  encoding='utf-8') as f:
+            f.write("SLDEA Test \U0001F4CF ruler\n"
+                    "DEA nominal diameter: 16 mm\n")
+        s = se.load_settings(d)
+        assert s['diam_mm'] == 16.0
+        se.save_settings(d, s)                   # must not raise
+        se.save_scale_anchor(d, {'method': 'manual-calibration',
+                                 'diam_px': 100.0, 'diam_mm': 16.0,
+                                 'mm_per_px': 0.16})
+        assert se.load_scale_anchor(d)['diam_px'] == 100.0
+        assert se.load_settings(d)['diam_mm'] == 16.0
+    finally:
+        shutil.rmtree(d)
+
+
+def test_writers_are_atomic_under_replace_failure():
+    """audit 2026-08-05 (mutation finding): replacing tmp+os.replace
+    with an in-place truncating write survived every test. Pin the
+    atomicity: when os.replace raises, the destination is byte-
+    identical and the payload sits in a .tmp — proof the write never
+    touched the destination."""
+    d = tempfile.mkdtemp(prefix='edge_atomic_')
+    try:
+        _fake_run(d, [{'snapshot': 1, 'step': 0, 'tag': 'baseline',
+                       'nominal_kV': '0', 'frame_file': 'b.png',
+                       'notes': 'precious'}])
+        with open(os.path.join(d, 'setup.txt'), 'w') as f:
+            f.write("SLDEA Test\nDEA nominal diameter: 16 mm\n")
+        run = se.load_run(d)
+        run['rows'][0]['notes'] = 'edited'
+        csv_before = open(run['csv_path'], 'rb').read()
+        setup_before = open(os.path.join(d, 'setup.txt'), 'rb').read()
+
+        real_replace = se.os.replace
+
+        def boom(src, dst):
+            raise OSError(28, 'No space left on device')
+
+        se.os.replace = boom
+        try:
+            for call in (lambda: se.write_back(d, run),
+                         lambda: se.save_settings(
+                             d, dict(se.DEFAULT_SETTINGS)),
+                         lambda: se.save_scale_anchor(
+                             d, {'method': 'manual-calibration',
+                                 'diam_px': 100.0})):
+                try:
+                    call()
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError("writer swallowed the failure")
+        finally:
+            se.os.replace = real_replace
+        assert open(run['csv_path'], 'rb').read() == csv_before
+        assert open(os.path.join(d, 'setup.txt'),
+                    'rb').read() == setup_before
+        assert os.path.exists(run['csv_path'] + '.tmp')
+        assert os.path.exists(os.path.join(d, 'setup.txt.tmp'))
+    finally:
+        shutil.rmtree(d)
+
+
+def test_write_back_extends_columns_for_era_rows():
+    """audit 2026-08-05: apply_results writes wrinkle_idx into rows a
+    07-23-era 14-column CSV never declared, and DictWriter then raised
+    ValueError MID-SAVE (after the renames, before the CSV). write_back
+    now inserts unknown keys before 'notes' instead."""
+    d = tempfile.mkdtemp(prefix='edge_era_')
+    try:
+        _fake_run(d, [{'snapshot': 1, 'step': 0, 'tag': 'baseline',
+                       'nominal_kV': '0', 'frame_file': 'b.png'}])
+        run = se.load_run(d)
+        assert 'wrinkle_idx' not in run['columns']    # 14-col era fixture
+        se.apply_results(run['rows'],
+                         {0: {'area_px': 100.0, 'diam_px': 11.3,
+                              'conf': 0.9, 'method': 'diff-hi',
+                              'wrinkle': 1.7}}, None, {})
+        path = se.write_back(d, run)                  # must not raise
+        with open(path, newline='') as f:
+            r = csv.DictReader(f)
+            cols = r.fieldnames
+            row = next(iter(r))
+        assert 'wrinkle_idx' in cols
+        assert cols.index('wrinkle_idx') == cols.index('notes') - 1
+        assert row['wrinkle_idx'] == '1.70'
+    finally:
+        shutil.rmtree(d)
 
 
 def _run():

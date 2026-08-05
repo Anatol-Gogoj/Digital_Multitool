@@ -239,6 +239,15 @@ def test_mixed_level_keeps_machine_band():
         run = sp.load_run(d, lambda m: None)
         lv = next(l for l in sp.levels(run) if l['kv'] == 3.0)
         assert lv['traced'] and not lv['all_traced'], lv
+        # audit 2026-08-05: NEVER average across edge conventions — the
+        # mixed level's mean is the MACHINE member alone (the traced
+        # member is +5.2-5.7% by definition, and the blend belonged to
+        # neither convention while the caption claimed 'outer toe ±1%')
+        assert lv['mixed'], lv
+        assert lv['mean'] == lv['pre'], lv     # the machine member
+        pure = next(l for l in sp.levels(run) if l['kv'] == 3.5)
+        assert pure['all_traced'] and not pure['mixed']
+        assert pure['mean'] == (pure['pre'] + pure['post']) / 2
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -419,6 +428,79 @@ def test_selftest_renders():
         assert os.path.exists(os.path.join(out, 'st.csv'))
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+def test_power_is_offset_corrected_by_the_run_median():
+    """audit 2026-08-05: power_mW was |kV × raw µA| — on the −16 µA-idle
+    era that is ~100% instrument zero × the voltage axis (158.7 'mW' at
+    10 kV for a device dissipating ~0.3), and it rank-inverted real
+    dissipation. Power now mirrors breakdown_flags' median baseline."""
+    d = _mktmp()
+    try:
+        rows = [{'snapshot': 1, 'tag': 'baseline', 'nominal_kV': 0,
+                 'measured_uA': -16.0, 'timestamp': '2026-08-05T10:00:00'}]
+        for n, (kv, ua) in enumerate(((1.0, -16.0), (2.0, -15.9),
+                                      (5.0, -15.9), (10.0, -15.87),
+                                      (10.0, -10.5)), start=2):
+            rows.append({'snapshot': n, 'tag': 'pre-ramp',
+                         'nominal_kV': kv, 'measured_uA': ua,
+                         'timestamp': '2026-08-05T10:00:00'})
+        _fake_run(d, rows)
+        run = sp.load_run(d, lambda m: None)
+        med = sp.run_ua_median(run)
+        assert med is not None and abs(med - (-15.9)) < 1e-9, med
+        r_idle = run['rows'][4]        # 10 kV at essentially the idle
+        r_real = run['rows'][5]        # 10 kV, 5.4 µA off baseline
+        p_idle = sp.power_mw(r_idle, med)
+        p_real = sp.power_mw(r_real, med)
+        # the idle row's power is ~0, not 158.7; the genuinely
+        # dissipating row now ranks ABOVE it (the raw product inverted)
+        assert p_idle < 1.0, p_idle
+        assert abs(p_real - 54.0) < 1e-6, p_real
+        assert p_real > p_idle
+        # no median (<5 parseable rows): the raw product is kept
+        assert sp.power_mw({'kv': 10.0, 'ua': -15.87}, None) == 158.7
+        # and the tidy export carries the corrected value
+        out = _mktmp()
+        try:
+            path = sp.write_tidy([dict(run, color='#4477AA')],
+                                 os.path.join(out, 't.csv'))
+            with open(path, newline='', encoding='utf-8') as f:
+                tidy = list(csv.DictReader(f))
+            ten = [t for t in tidy if t['nominal_kV'] == '10.0']
+            assert any(abs(float(t['power_mW']) - 54.0) < 1e-6
+                       for t in ten), ten
+            assert not any(float(t['power_mW']) > 100 for t in ten
+                           if t['power_mW']), ten
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_tidy_names_each_areas_edge_convention():
+    """audit 2026-08-05: the tidy CSV had no way to tell an outer-toe
+    hand trace from a half-height machine area — the +5.2-5.7%
+    definitional gap was invisible downstream."""
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))     # traced rows start at 3.0 kV
+        run = sp.load_run(d, lambda m: None)
+        out = _mktmp()
+        try:
+            path = sp.write_tidy([dict(run, color='#4477AA')],
+                                 os.path.join(out, 't.csv'))
+            with open(path, newline='', encoding='utf-8') as f:
+                tidy = list(csv.DictReader(f))
+            assert 'convention' in tidy[0]
+            by_traced = {t['traced']: t['convention'] for t in tidy
+                         if t['area_mm2']}
+            assert by_traced.get('True') == 'outer-toe'
+            assert by_traced.get('False') == 'half-height'
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def _run():

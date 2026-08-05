@@ -23,7 +23,12 @@ Modes:
               with a warning.
     current   measured_uA vs nominal kV, one point per snapshot. Works on
               raw runs; the run-median current baseline is drawn dotted.
-    power     |nominal_kV x measured_uA| (mW) vs nominal kV.
+    power     |nominal_kV x (measured_uA - run median)| (mW) vs nominal
+              kV -- offset-corrected, mirroring breakdown_flags' median
+              baseline (audit 2026-08-05: the raw product was ~100%
+              instrument zero x kV on the -16 uA-idle era and rank-
+              inverted real dissipation). Runs with < 5 parseable uA
+              rows keep the raw product, flagged in the caption.
     --vs-area swaps the x axis to active area (current/power modes only;
               needs reviewed areas like area mode).
 
@@ -187,6 +192,9 @@ def load_run(arg, warn):
     a0 = _median(base_areas) if base_areas else None
     return {'dir': rundir, 'name': name, 'rows': rows, 'a0': a0,
             'settings': settings, 'flags': flags, 'advis': advis,
+            # the px→mm anchor Edge Review recorded at Save (2026-08-05)
+            # — cross-run absolute mm² inherits its provenance
+            'anchor': se.load_scale_anchor(rundir),
             'saved_brand': saved_brand}
 
 
@@ -212,22 +220,34 @@ def suspect_old_scale(run):
 # ---------------------------------------------------------------------------
 
 def levels(run, value=lambda r: r['area_mm2']):
-    """-> sorted [{kv, mean, post, pre, traced, all_traced, traced_post,
-    traced_pre, confirmed}] over rows with a kV and a value. Baseline-
-    tagged rows join their kV level like any snapshot (the resting tier).
-    `traced` ORs the pair (drives the open marker); `all_traced` ANDs it
-    (drives the band width -- a mixed level keeps the machine band)."""
+    """-> sorted [{kv, mean, post, pre, traced, all_traced, mixed,
+    traced_post, traced_pre, confirmed}] over rows with a kV and a value.
+    Baseline-tagged rows join their kV level like any snapshot (the
+    resting tier). `traced` ORs the pair (drives the open marker on
+    --prepost snapshots); `all_traced` ANDs it (drives the band width
+    and, since 2026-08-05, the mean marker's fill).
+
+    NEVER average across edge conventions (audit 2026-08-05): a
+    hand-traced (outer-toe) and a machine (half-height) area differ by a
+    documented +5.2-5.7% of DEFINITION, and the blended number belongs
+    to neither — the old mean did it on 11 levels of the real batch and
+    the caption labeled the result 'outer toe, ±1%'. A `mixed` level's
+    mean now uses the machine member(s) only (the campaign's primary
+    convention), plots FILLED, and keeps the machine band."""
     by_kv = {}
     for r in run['rows']:
         v = value(r)
         if r['kv'] is None or v is None:
             continue
         lv = by_kv.setdefault(round(r['kv'], 3), {
-            'kv': r['kv'], 'vals': [], 'post': None, 'pre': None,
-            'traced': False, 'all_traced': True,
+            'kv': r['kv'], 'vals': [], 'vals_machine': [],
+            'post': None, 'pre': None,
+            'traced': False, 'all_traced': True, 'mixed': False,
             'traced_post': False, 'traced_pre': False,
             'confirmed': False})
         lv['vals'].append(v)
+        if not r['traced']:
+            lv['vals_machine'].append(v)
         lv['traced'] = lv['traced'] or r['traced']
         lv['all_traced'] = lv['all_traced'] and r['traced']
         lv['confirmed'] = lv['confirmed'] or r['index'] in run['flags']
@@ -240,7 +260,9 @@ def levels(run, value=lambda r: r['area_mm2']):
     out = []
     for k in sorted(by_kv):
         lv = by_kv[k]
-        lv['mean'] = sum(lv['vals']) / len(lv['vals'])
+        lv['mixed'] = lv['traced'] and not lv['all_traced']
+        use = lv['vals_machine'] if lv['mixed'] else lv['vals']
+        lv['mean'] = sum(use) / len(use)
         out.append(lv)
     return out
 
@@ -318,13 +340,27 @@ def figure_area(runs, opts, path, warn=lambda m: None):
                     _series(axr, px, [y / run['a0'] for y in py], pt,
                             color, ls, opts['bands'])
         if opts['mean'] or not opts['prepost']:
-            tr = [l['traced'] for l in lvs]
+            # marker fill follows the CONVENTION of the plotted value:
+            # a mixed level's mean uses the machine member(s) only, so
+            # it plots filled — the OR-aggregate used to open-mark a
+            # blended number as 'outer toe ±1%' (audit 2026-08-05)
+            tr = [l['all_traced'] for l in lvs]
             band_tr = [l['all_traced'] for l in lvs]
             ys = [l['mean'] for l in lvs]
             show_bands = opts['bands'] and not opts['prepost']
             _series(axl, xs, ys, tr, color, '-', show_bands, band_tr)
             _series(axr, xs, [y / run['a0'] for y in ys], tr, color, '-',
                     show_bands, band_tr)
+            mixed = [l['kv'] for l in lvs if l['mixed']]
+            if mixed:
+                warn(f"{run['name']}: {len(mixed)} level(s) mix a "
+                     f"hand-traced (outer-toe) and a machine "
+                     f"(half-height) snapshot "
+                     f"({', '.join(f'{k:g}' for k in mixed)} kV) — the "
+                     f"mean plots the machine member(s) only; conventions "
+                     f"differ +5.2-5.7% area and must not be averaged "
+                     f"(see --prepost for both, and the tidy "
+                     f"'convention' column)")
         if opts['breakdown']:
             drawn, unanchored = [], []
             for r in run['rows']:
@@ -376,9 +412,11 @@ def figure_area(runs, opts, path, warn=lambda m: None):
            + (" (post solid, pre dashed)" if opts['prepost']
               else " mean") + ".  "
            "Open markers = hand-traced boundary (outer toe, ±1%); "
-           "filled = machine half-height convention"
-           + (", bands ±2% machine / ±1% traced (mixed levels keep ±2%)"
-              if opts['bands'] else "") + ".\n"
+           "filled = machine half-height convention; a level mixing the "
+           "two plots its machine member(s) only (conventions differ "
+           "+5.5% area, never averaged)"
+           + (", bands ±2% machine / ±1% traced" if opts['bands']
+              else "") + ".\n"
            "X = current-confirmed breakdown (recomputed, 2026-08-05 "
            "semantics).  X axis: nominal kV (measured_kV telemetry "
            "incomplete on all runs).")
@@ -389,8 +427,32 @@ def figure_area(runs, opts, path, warn=lambda m: None):
     return path
 
 
+def run_ua_median(run):
+    """The run's median measured_uA — the same >=5-parseable-rows rule as
+    breakdown_flags — or None. The per-era instrument zero this
+    estimates is the ONLY current reference the suite trusts; absolute
+    µA is documented untrustworthy (07-29 idles at −16 µA)."""
+    uas = [r['ua'] for r in run['rows'] if r['ua'] is not None]
+    return _median(uas) if len(uas) >= 5 else None
+
+
+def power_mw(r, med):
+    """|kV × (µA − run median)| in mW — the DEVICE's dissipation, not the
+    instrument's. The raw |kV × µA| product multiplied the era's zero
+    error by the voltage axis: on the P3 campaign it manufactured a
+    near-perfect 155-160 mW line at 10 kV on runs whose true deviation
+    never left ~5 µA of baseline, and it rank-INVERTED real dissipation
+    (audit 2026-08-05). With no median (<5 parseable rows) the raw
+    product is kept and the caller must say so."""
+    if r['ua'] is None or r['kv'] is None:
+        return None
+    ua = r['ua'] - med if med is not None else r['ua']
+    return abs(r['kv'] * ua)
+
+
 def figure_signal(runs, opts, path, warn=lambda m: None):
-    """current / power vs kV (or vs area with --vs-area), per snapshot."""
+    """current / power vs kV (or vs area with --vs-area), per snapshot.
+    Power is offset-corrected per run (see power_mw)."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -398,12 +460,11 @@ def figure_signal(runs, opts, path, warn=lambda m: None):
 
     power = opts['mode'] == 'power'
 
-    def yval(r):
+    def yval(r, med):
         if r['ua'] is None:
             return None
         if power:
-            return (abs(r['kv'] * r['ua'])
-                    if r['kv'] is not None else None)
+            return power_mw(r, med)
         return r['ua']
 
     def xval(r):
@@ -412,10 +473,17 @@ def figure_signal(runs, opts, path, warn=lambda m: None):
     fig, ax = plt.subplots(figsize=(9, 5.4))
     run_handles = []
     had_x = had_adv = False
+    raw_power = []
     for run in runs:
         color = run['color']
-        pts = [(xval(r), yval(r), r) for r in run['rows']
-               if xval(r) is not None and yval(r) is not None]
+        med = run_ua_median(run)
+        if power and med is None:
+            raw_power.append(run['name'])
+            warn(f"{run['name']}: fewer than 5 parseable µA rows — no "
+                 f"median baseline, power is the RAW |kV × µA| product "
+                 f"(instrument offset included)")
+        pts = [(xval(r), yval(r, med), r) for r in run['rows']
+               if xval(r) is not None and yval(r, med) is not None]
         if not pts:
             warn(f"{run['name']}: no plottable points in this mode -- "
                  f"omitted from the figure")
@@ -450,7 +518,7 @@ def figure_signal(runs, opts, path, warn=lambda m: None):
 
     xlabel = ('Active area (mm²)' if opts['vs_area']
               else 'Nominal voltage (kV)')
-    ylabel = ('|kV × µA|  (mW)' if power
+    ylabel = ('|kV × (µA − run median)|  (mW)' if power
               else 'Measured current (µA)')
     _style_axes(ax, xlabel, ylabel)
     ax.set_title(opts['title'] or ('Power' if power else 'Current')
@@ -469,8 +537,14 @@ def figure_signal(runs, opts, path, warn=lambda m: None):
     _legend(ax, run_handles, style_rows)
     cap = ("One point per snapshot, CSV order.  X = current-confirmed "
            "breakdown, open diamond = advisory (both recomputed).\n"
-           "Currents carry each era's instrument offset "
-           "(07-29 ≈ −16 µA idle).")
+           + ("Power uses the run-median-corrected current — the raw "
+              "product was ~100% instrument zero × kV on the P3 era "
+              "(−16 µA idle)."
+              + (f"  RAW product (no median): "
+                 f"{', '.join(raw_power)}." if raw_power else "")
+              if power else
+              "Currents carry each era's instrument offset "
+              "(07-29 ≈ −16 µA idle)."))
     fig.text(0.01, 0.005, cap, fontsize=7, color='#555555')
     fig.tight_layout(rect=(0, 0.05, 1, 1))
     fig.savefig(path, dpi=300)
@@ -483,9 +557,10 @@ def figure_signal(runs, opts, path, warn=lambda m: None):
 # ---------------------------------------------------------------------------
 
 TIDY_COLS = ['run', 'snapshot', 'nominal_kV', 'phase', 'tag', 'area_mm2',
-             'expansion_A_A0', 'measured_uA', 'power_mW', 'traced',
-             'method', 'conf', 'user_reviewed', 'breakdown_confirmed',
-             'breakdown_advisory', 'saved_breakdown_brand', 'notes']
+             'convention', 'expansion_A_A0', 'measured_uA', 'power_mW',
+             'traced', 'method', 'conf', 'user_reviewed',
+             'breakdown_confirmed', 'breakdown_advisory',
+             'saved_breakdown_brand', 'notes']
 
 
 def write_tidy(runs, path):
@@ -493,25 +568,34 @@ def write_tidy(runs, path):
     including 'post-breakdown'-annotated ones (the P3_5 rule). Runs kept
     despite a suspect pre-scale-fix era ('suspect_kept', current/power
     modes) get their area columns blanked so bug-era areas cannot leak
-    into downstream analysis."""
+    into downstream analysis.
+
+    'convention' names each area's edge definition ('half-height'
+    machine / 'outer-toe' hand trace; +5.2-5.7% apart — never compare
+    absolute mm² across them), and power_mW is the run-median-corrected
+    product (see power_mw): both audit 2026-08-05."""
     with open(path, 'w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
         w.writerow(TIDY_COLS)
         for run in runs:
             hide_areas = run.get('suspect_kept', False)
+            med = run_ua_median(run)
             for r in run['rows']:
                 area = None if hide_areas else r['area_mm2']
+                conv = ('' if area is None
+                        else 'outer-toe' if r['traced']
+                        else 'half-height' if r['method'] else '')
                 exp = (area / run['a0'] if area and run['a0'] else '')
-                pw = (abs(r['kv'] * r['ua'])
-                      if r['kv'] is not None and r['ua'] is not None else '')
+                pw = power_mw(r, med)
                 w.writerow([
                     run['name'], r['snapshot'],
                     '' if r['kv'] is None else r['kv'],
                     r['phase'], r['tag'],
                     '' if area is None else area,
+                    conv,
                     f"{exp:.4f}" if exp != '' else '',
                     '' if r['ua'] is None else r['ua'],
-                    f"{pw:.3f}" if pw != '' else '',
+                    f"{pw:.3f}" if pw is not None else '',
                     r['traced'], r['method'],
                     '' if r['conf'] is None else r['conf'],
                     r['user'],
@@ -729,6 +813,19 @@ def main(argv):
         warns.append(f"{len(runs)} runs > {len(TOL_BRIGHT)} palette "
                      f"colors -- colors repeat; consider fewer runs per "
                      f"figure")
+    if uses_areas and len(runs) > 1:
+        # cross-run absolute mm² inherits each run's anchor provenance
+        # (audit 2026-08-05): a recorded manual 📏 anchor and a pre-gate
+        # automatic one are different instruments
+        with_anchor = [r['name'] for r in runs if r.get('anchor')]
+        without = [r['name'] for r in runs if not r.get('anchor')]
+        if with_anchor and without:
+            warns.append(
+                f"absolute-scale provenance differs across runs: "
+                f"{len(with_anchor)} carry a recorded manual anchor "
+                f"({', '.join(with_anchor)}), {len(without)} predate it "
+                f"({', '.join(without)}) — cross-run absolute mm² "
+                f"comparisons inherit that difference (A/A0 is safe)")
     for i, run in enumerate(runs):
         run['color'] = TOL_BRIGHT[i % len(TOL_BRIGHT)]
 

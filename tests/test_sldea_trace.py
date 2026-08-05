@@ -213,6 +213,42 @@ def test_calibration_summary_bins_conf_against_iou():
     assert st.calibration_summary([])[-1].startswith('  no labels')
 
 
+def test_append_label_is_atomic_under_replace_failure():
+    """audit 2026-08-05 (mutation finding): swapping the tmp+os.replace
+    for an in-place write survived the suite. append_label rewrites the
+    WHOLE sidecar each call, so a mid-write failure would destroy every
+    accumulated label, not just the new one — pin that the destination
+    never changes when os.replace fails."""
+    import os
+    d = tempfile.mkdtemp(prefix='trace_atomic_')
+    try:
+        row = {'frame_file': 'f.png', 'nominal_kV': '1', 'tag': 'pre'}
+        poly = [(10, 10), (110, 12), (108, 90)]
+        st.append_label(d, st.label_record(1, row, poly, (240, 320)))
+        p = os.path.join(d, st.LABELS_NAME)
+        before = open(p, 'rb').read()
+
+        real_replace = st.os.replace
+
+        def boom(src, dst):
+            raise OSError(28, 'No space left on device')
+
+        st.os.replace = boom
+        try:
+            st.append_label(d, st.label_record(2, row, poly, (240, 320)))
+        except OSError:
+            pass
+        else:
+            raise AssertionError("append_label swallowed the failure")
+        finally:
+            st.os.replace = real_replace
+        assert open(p, 'rb').read() == before
+        assert len(st.load_labels(d)) == 1
+        assert os.path.exists(p + '.tmp')
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     for fn in fns:

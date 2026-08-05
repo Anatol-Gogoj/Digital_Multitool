@@ -263,6 +263,27 @@ def test_report_renders_for_every_synthetic_run():
         assert want in text, want
 
 
+def test_report_is_ascii_so_a_cp1252_console_cannot_kill_it():
+    """The bench and analysis consoles are cp1252, and report() goes both
+    to stdout and to sldea_diag.txt written with the locale codec — so
+    one non-ASCII character in one verdict takes the whole diagnostic
+    down. It happened once with an arrow; the 2026-08-05 scale-gate
+    wording brought it back with a ruler emoji in three verdicts, and
+    `sldea_diag.py --selftest` crashed on this Windows box while the
+    v1.1.0 manual was being built."""
+    root = tempfile.mkdtemp(prefix='diag_ascii_')
+    d = sd.analyze(sd._synth_run(_os.path.join(root, 'SLDEA_r'), 'wrinkle'))
+    text = sd.report(d)
+    text.encode('ascii')                      # raises if anything leaked
+    # the substitutions stay readable rather than turning into '?'
+    assert sd._ascii('a — b') == 'a -- b'
+    assert sd._ascii('5 µA → ok') == '5 uA -> ok'
+    assert sd._ascii('the \U0001f4cf anchor') == 'the ruler anchor'
+    assert sd._ascii('area mm²') == 'area mm2'
+    # anything unmapped still degrades instead of raising
+    sd._ascii('☃').encode('ascii')
+
+
 def test_analyze_reports_localization_and_scale_context():
     """Statistics said nothing while 83-100% of every detection sat on the
     electrodes and the px->mm scale was 1.5x off at conf 0.93 (bench

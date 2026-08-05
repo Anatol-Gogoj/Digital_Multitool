@@ -868,8 +868,32 @@ def verdicts(d):
     return out
 
 
+_ASCII_SUBS = {
+    '—': '--', '–': '-', '→': '->', 'µ': 'u',
+    '²': '2', '±': '+/-', '≥': '>=', '≤': '<=',
+    '×': 'x', '…': '...', '‘': "'", '’': "'",
+    '“': '"', '”': '"', '\U0001f4cf': 'ruler',
+}
+
+
+def _ascii(text):
+    """Report text, guaranteed ASCII.
+
+    The bench and analysis consoles are cp1252, and `report()`'s output
+    goes both to stdout and to sldea_diag.txt written with the locale
+    codec -- so ONE non-ASCII character in one verdict takes down the
+    whole diagnostic. That happened once with an arrow (see
+    SLDEA_HANDOFF), and the 2026-08-05 scale-gate wording reintroduced it
+    with a ruler emoji in three verdicts. Clamping here, at the single
+    point every consumer goes through, is the fix that stays fixed --
+    policing each f-string does not."""
+    for bad, good in _ASCII_SUBS.items():
+        text = text.replace(bad, good)
+    return text.encode('ascii', 'replace').decode()
+
+
 def report(d):
-    """The human-readable report."""
+    """The human-readable report (ASCII -- see _ascii)."""
     L = []
     A = L.append
     A("=" * 74)
@@ -979,7 +1003,7 @@ def report(d):
     A("  area   what candidates() detects with the run's own settings;")
     A("         the A/B verdict above compares that against the other")
     A("         normalization mode, on the same frames")
-    return "\n".join(L)
+    return _ascii("\n".join(L))
 
 
 def _wrap(text, width):

@@ -60,18 +60,22 @@ DEFAULT_SETTINGS = {
     'min_diff': 6.0,        # diff p99 below this = "no change vs baseline"
     'min_solidity': 0.35,   # min FILL of the traced outline (changed/region)
     'roi_frac': 0.85,       # central search window (frame fraction)
-    # Mask baseline px at/above this luminance; 0 = off. 255 = effectively
-    # off but still available as a knob. Default RAISED from 220 to 255
-    # (bench 2026-08-05): the mask targets BRIGHT electrodes (copper/foil),
-    # but a carbon-black electrode is the darkest thing in frame, so at 220
-    # the mask caught paper and glint instead of the electrode and broke
-    # edge detection outright. Conservative is the safe default -- masking
-    # too little costs some electrode contamination the other channels
-    # already handle, masking the device costs the measurement. Lower it
-    # per-run in the tuner for a bright-electrode device; those values are
-    # saved in that run's setup.txt, so this default only affects runs
-    # nobody has tuned. NOT yet characterised for the copper devices at
-    # this setting -- see SLDEA_HANDOFF 2026-08-05.
+    # Mask baseline px at/above this luminance; 0 = off (which also turns
+    # off the texture footprint below -- one knob, both halves).
+    #
+    # Default RAISED 220 -> 255 (2026-08-05). The carbon-black run's
+    # baseline is SATURATED (median 255), so a 220 cut masked 88% of the
+    # frame including the context around the device, and detection
+    # collapsed to a 1930 px sliver against a true ~134500 px. At 255 the
+    # same frame traces at conf 0.99. On foil devices the change is a
+    # measured no-op -- the texture footprint already covers the strips
+    # and the brightness cut only ever caught the specular streaks inside
+    # them (P3 areas identical to the pixel at both settings).
+    #
+    # Lower it per-run in the tuner if a device ever needs it; per-run
+    # values live in that run's setup.txt and win over this. Note the CB
+    # case is really an exposure problem (#193) that 255 works around --
+    # see SLDEA_HANDOFF 2026-08-05.
     'electrode_lum': 255.0,
     'accept_conf': 0.75,    # auto-accept at/above this confidence
     'spread_pct': 12.0,     # candidate area disagreement that forces review

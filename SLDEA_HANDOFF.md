@@ -25,16 +25,43 @@ resolver. Tuning has never needed a prior detection pass.
 
 Observation → decision:
 
-- **Electrode mask, bench observation 2026-08-05.** With a pitch-black
-  (carbon black) electrode, `electrode_lum = 220` breaks edge detection.
-  The mask rule is `reject |= baseline_px >= electrode_lum`, i.e. it
-  targets BRIGHT contaminants — copper strips and foil glint, which is
-  what the 220 default was tuned for. A carbon-black electrode is the
-  *darkest* thing in frame, so brightness masking cannot find it, and at
-  220 it rejects whatever else is bright (paper, backing, glare) instead.
-  → **Default raised to 255**, which is conservative-to-the-point-of-off.
-  Reported as making the edges work normally; **lighter values are
-  untested on that device.**
+- **Electrode mask, bench observation 2026-08-05, mechanism measured
+  after the fact on `SLCBvalidationTest`.** With a pitch-black (carbon
+  black) electrode, `electrode_lum = 220` breaks edge detection.
+  → **Default raised to 255.**
+
+  The first explanation written here — "the electrode is dark, so
+  brightness masking rejects whatever else is bright" — was the right
+  conclusion for the wrong reason. Running the real CB run says what
+  actually happens: **that baseline is saturated.** Its luminance is
+  `median 255, p99 255, max 255` — more than half the frame is clipped
+  pure white. So `reject |= baseline_px >= 220` swallows **88 % of the
+  frame**, including the ring of context immediately around the device
+  that difference imaging needs. Detection collapses to a 1930 px sliver
+  at conf 0.69 against a true area of ~134 500 px. At 255 the cut keeps
+  only the genuinely clipped pixels (still 70 % of the frame) and the
+  disc traces cleanly: **134 521 px at conf 0.99**.
+
+  Measured side by side at 3.0 kV, same code, same frames:
+
+  | run | electrode | lum 220 | lum 255 |
+  |---|---|---|---|
+  | `SLCBvalidationTest` | carbon black | 1 930 px, conf 0.69 | **134 521 px, conf 0.99** |
+  | `P3 1.5mL Triazole Bake1-1` | foil | 125 917 px, conf 0.96 | 125 917 px, conf 0.96 |
+  | `P3_1_2.5mL_20260728` | foil | 299 509 px, conf 0.84 | 299 509 px, conf 0.84 |
+
+  So the change is decisive where it matters and a no-op everywhere
+  else. **Lighter values remain untested on the CB device.**
+
+- **The CB run is overexposed, and 255 is working around that.** A
+  baseline whose MEDIAN is 255 is not a mask-tuning problem, it is a
+  camera problem — and even at 255 the brightness cut still removes 70 %
+  of that frame. Detection succeeds only because the dark device itself
+  survives the mask. Fixing the exposure (**#193**, defeat the firmware
+  auto-exposure — a black electrode on a bright backing is exactly the
+  scene that drives auto-exposure to blow out) would give this device
+  real headroom, and would be worth re-testing 220 against afterwards.
+  Until then treat CB areas as usable but the run as fragile.
 - **The cost on the real batch: none. Measured, after an initial
   over-estimate.** A synthetic bright rectangle made `baseline_disc`
   refuse to fit at 255, and the first version of this entry generalised

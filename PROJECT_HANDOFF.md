@@ -1,21 +1,31 @@
 # Project handoff — state as of 2026-08-05
 
 **TL;DR:** Big day 2026-08-05: the cross-run plot tool (#199), the Edge
-Review scale gate, and **all 28 double-confirmed findings of a 67-agent
-correctness audit** merged to main; the bench fleet is deployed at that
-tip (v1.0.0+4f5f213, confirmed on the RHEL bench). Batch-QA sits at 5 of
-13 runs reviewed. **The designated priority is the current-based
-breakdown-detection thread** — live watchdog + fast scope capture
-(#189/#157/#159) — laid out first in the docket below. Durable
-conventions live in `CLAUDE.md`; this file is the snapshot — update it
-at milestones.
+Review scale gate, **all 28 double-confirmed findings of a 67-agent
+correctness audit**, and then the **live telemetry sidecar** (#218) and
+its bench hand-over (#220) all merged to main. Batch-QA sits at 5 of 13
+runs reviewed. **The priority thread is still current-based breakdown
+detection** (#189/#157/#159) — increment (2) is now built, and
+**everything left in it is bench-gated**. The desk cannot advance it
+further: the remaining increments need SCPI paths and a noise floor
+nobody has measured. **The single highest-leverage next action is
+`BENCH_TEST.md` §M** — the telemetry dry-run smoke, which involves no
+high voltage, needs no HV training, and is the whole gate on trusting
+`telemetry.csv`. `RUN_SHEET.md` has the tick-off version split by
+remote / bench-no-HV / bench-HV. Durable conventions live in
+`CLAUDE.md`; this file is the snapshot — update it at milestones.
 
 ## Code state (main)
 
 - **v1.0.0** tagged 2026-08-03 (GitHub release, manual PDF attached).
   Merged since, in order: **#195** current-based breakdown detection +
   scope-clipping fixes (ground-truth-validated on all 11 real runs; see
-  the 2026-08-04 entry in `SLDEA_HANDOFF.md`); **#196** repo `CLAUDE.md` +
+  the 2026-08-04 entry in `SLDEA_HANDOFF.md`); **#218** the live
+  telemetry sidecar (the watchdog's ~2 Hz samples now land in
+  `telemetry.csv` beside data.csv instead of being discarded —
+  implements #157, #189 increment (2); desk-tested only, §M is its
+  gate) and **#220** its bench hand-over (`BENCH_TEST.md` §M/§N/§O +
+  `bench/test_sldea_watchdog_probe.py`); **#196** repo `CLAUDE.md` +
   `.gitignore` hardening; **#201** deep clean (4 historical probes →
   `bench/archive/`, stale docs fixed); **#204** deploy-script URLs for
   the rename; **#208** lab installer versioned (bench-authored); **#209**
@@ -98,13 +108,14 @@ shipped, live verify pending). Staged per #189's own increment plan:
    the writer AND the real worker against a fake scope. **Nothing
    depends on the file until the bench smoke below passes.**
 
-   **The bench half is now written down and delegable.** `BENCH_TEST.md`
-   gained three sections: **§M** the telemetry dry-run smoke (no HV — a
-   dry run never commands the SG, so this needs no HV training and is
-   the whole gate on trusting the file), **§N** the watchdog probe (also
-   no HV), **§O** the live verification (HV, authorized operator only).
-   §M and §N can go to a colleague at the bench as-is; neither depends
-   on §O.
+   **The bench half is written down and delegable (#220, merged
+   2026-08-05).** `BENCH_TEST.md` gained three sections: **§M** the
+   telemetry dry-run smoke (no HV — a dry run never commands the SG, so
+   this needs no HV training and is the whole gate on trusting the
+   file), **§N** the watchdog probe (also no HV), **§O** the live
+   verification (HV, authorized operator only). §M and §N can go to a
+   colleague at the bench as-is; neither depends on §O. `RUN_SHEET.md`
+   is the same list in tick-off form.
 2. **(bench, first item of the visit)** fix the rig fault then verify
    #195 live: recenter the scope's V_Out window and I_Out offset
    (≈ −16 µA), run one live SLDEA ramp, confirm the pre-run window
@@ -253,3 +264,11 @@ Read `CLAUDE.md` (conventions), then this file, then whichever doc the
 task needs (doc map in `CLAUDE.md`). For campaign work, start from the
 campaign `HANDOFF.md` + `SCORECARD.md` in the Upload folder. PRs follow
 the TL;DR-first convention; Anatol merges.
+
+**If you are an agent picking this up at a desk:** the priority thread
+has no desk work left in it. #189's remaining increments need new SCPI
+paths (bench-first per `CLAUDE.md`) and a peak-noise floor that has to
+be measured, not guessed — `bench/test_sldea_watchdog_probe.py` exists
+to get it. Do not start increment (1) from a desk. The desk-side work
+that IS open is in `RUN_SHEET.md` bucket A, and #219 (watchdog display /
+threshold derivation) becomes designable once §N's numbers land.

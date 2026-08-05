@@ -14,8 +14,18 @@ overlays for audit.
 
     python sldea_edge_gui.py [run-or-parent-dir] [--auto]
 
-With --auto (used by the SLDEA tab's "auto process"), detection starts
-immediately on launch. Keyboard: 1/2/3 pick a candidate, R reject,
+SCALE GATE (operator decision 2026-08-05): the camera zoom moves between
+runs, so every run's px→mm anchor is clicked by hand — Detect diverts to
+the 📏 Calibrate dialog until the resting disc has been measured on THIS
+run's baseline frame, Save hard-blocks without it, and the anchor resets
+on every run switch. The manual calibration overrides every automatic
+reference at Save (it used to be silently ignored when the baseline row
+had an accepted result); the automatic disc fit is demoted to a
+cross-check that warns when it disagrees with the clicks by >3%.
+
+With --auto (used by the SLDEA tab's "auto process"), the calibrate
+dialog opens on launch and detection chains automatically once the two
+clicks land. Keyboard: 1/2/3 pick a candidate, R reject,
 4/D/T open the manual tracer (#162/#172 -- its Done stages the polygon
 as candidate D; Accept commits it like any other candidate),
 Left/Right navigate, Enter accept + next.
@@ -139,10 +149,15 @@ class EdgeReviewApp:
         self.pos = 0
         self.flags = {}         # CONFIRMED breakdown rows (rename + brand)
         self.advisories = {}    # notes-only (transient / uncorroborated)
+        self.manual_ref = None  # px→mm anchor from 📏 — the SCALE GATE;
+        self.base_ref = None    # reset per run (zoom moves between runs)
         self._photo = None
         self._detq = _queue.Queue()
         # auxiliary windows are modal or SINGLETON, never unbounded (#176)
         self._adv_win = None
+        self._cal_win = None    # the gate dialog is a singleton too: the
+        # grab is pointer-only, so review keys can pierce it and a second
+        # gate dialog would chain a second detect worker (review 2026-08-05)
         self._build_ui()
         start = path or DEFAULT_PARENT
         self._populate_runs(start)
@@ -344,15 +359,13 @@ class EdgeReviewApp:
         if not name:
             return
         self.rundir = os.path.join(self.parent, name)
-        try:
-            self.run = se.load_run(self.rundir)
-        except Exception as e:
-            messagebox.showerror("Run", f"Cannot read {name}: {e}")
-            self.run = None
-            return
-        self.settings = se.load_settings(self.rundir)
-        self.frame_rows = [i for i, r in enumerate(self.run['rows'])
-                           if (r.get('frame_file') or '').strip()]
+        # Fail CLOSED: reset the review state and the SCALE GATE before
+        # anything that can raise -- an exception mid-load used to leave
+        # the new run paired with the previous run's manual anchor,
+        # results and live Save button (review 2026-08-05: that writes
+        # run A's scale into run B, the exact error the gate prevents).
+        self.run = None
+        self.frame_rows = []
         self.cands_all, self.results, self.flags = {}, {}, {}
         self.advisories = {}
         self.traces = {}
@@ -361,11 +374,21 @@ class EdgeReviewApp:
         self.manual_ref = None
         self.pos = 0
         self.save_btn.config(state='disabled')
+        try:
+            self.run = se.load_run(self.rundir)
+            self.settings = se.load_settings(self.rundir)
+        except Exception as e:
+            messagebox.showerror("Run", f"Cannot read {name}: {e}")
+            self.run = None
+            return
+        self.frame_rows = [i for i, r in enumerate(self.run['rows'])
+                           if (r.get('frame_file') or '').strip()]
         n = len(self.frame_rows)
         self.status.config(
             text=f"{name}: {len(self.run['rows'])} snapshots, {n} frames "
-                 f"on disk — Detect to trace edges "
-                 f"(diam {self.settings['diam_mm']:g} mm)")
+                 f"on disk — 📏 Calibrate, then Detect "
+                 f"(diam {self.settings['diam_mm']:g} mm; scale gate "
+                 f"re-arms per run)")
         self.canvas.delete('all')
         self.info.config(text=f"{name}\n{n} frames ready")
 
@@ -401,6 +424,14 @@ class EdgeReviewApp:
             messagebox.showinfo(
                 "Detect", "This run has no frames on disk (the camera was "
                 "busy or dry-run frames were skipped).")
+            return
+        if self.manual_ref is None:
+            # SCALE GATE (operator decision 2026-08-05): the camera zoom
+            # moves between runs, so the px→mm anchor is clicked by hand
+            # on every run before any detection; the automatic disc fit
+            # is a cross-check, not the anchor. Detection chains once the
+            # clicks land.
+            self._calibrate_scale(then_detect=True)
             return
         self.detect_btn.config(state='disabled')
         # Every Detect pass starts CLEAN: stale results from a previous
@@ -521,8 +552,34 @@ class EdgeReviewApp:
         self._banner(None)
         q = self._queue_list()
         took = self._fmt_t(time.time() - self._t0) if self._t0 else '?'
-        sc = (f"; scale ref: baseline disc {self.base_ref['diam_px']:.0f} px"
-              if self.base_ref else "; scale ref: NONE — use 📏 Calibrate")
+        if self.manual_ref:
+            # the auto disc fit is a CROSS-CHECK of the operator's clicks,
+            # not the anchor (scale gate, 2026-08-05): >3% diameter
+            # disagreement means bad clicks, moved optics or a wrong-
+            # feature fit — surface it loudly, keep the manual anchor
+            sc = f"; scale: manual {self.manual_ref['diam_px']:.0f} px"
+            auto_px = (self.base_ref or {}).get('diam_px')
+            if auto_px:
+                mism = (100 * abs(auto_px - self.manual_ref['diam_px'])
+                        / self.manual_ref['diam_px'])
+                sc += (f" vs auto disc {auto_px:.0f} px "
+                       + (f"⚠ {mism:.1f}% apart" if mism > 3.0 else "✓"))
+                if mism > 3.0:
+                    messagebox.showwarning(
+                        "Scale cross-check",
+                        f"Your calibration "
+                        f"({self.manual_ref['diam_px']:.0f} px) and the "
+                        f"automatic baseline-disc fit ({auto_px:.0f} px) "
+                        f"disagree by {mism:.1f}% in diameter (>3%).\n\n"
+                        f"Re-check the two clicks, the optics, and the "
+                        f"{self.settings['diam_mm']:g} mm nominal. The "
+                        f"MANUAL anchor is what Save uses.")
+        else:
+            # detect_all_sync (tests/headless) can reach here ungated
+            sc = (f"; scale ref: baseline disc "
+                  f"{self.base_ref['diam_px']:.0f} px"
+                  if self.base_ref
+                  else "; scale ref: NONE — use 📏 Calibrate")
         self.status.config(
             text=f"detected {len(self.frame_rows)} frames in {took}: "
                  f"{len(self.auto_idx)} auto-accepted, "
@@ -869,6 +926,14 @@ class EdgeReviewApp:
     def save(self):
         if not self.run:
             return
+        if self.manual_ref is None:
+            # the scale gate holds at Save too — no entry point may write
+            # mm² off an unverified anchor (operator decision 2026-08-05)
+            messagebox.showinfo(
+                "Save", "Scale gate: 📏 Calibrate this run's resting disc "
+                        "first — the manual px→mm anchor is required "
+                        "before results are written.")
+            return
         q = self._queue_list()
         accepted = sum(1 for r in self.results.values() if r)
         rejected = sum(1 for r in self.results.values() if r is None)
@@ -1000,35 +1065,99 @@ class EdgeReviewApp:
                           (80, 200, 0), 2)
             cv2.imwrite(os.path.join(outdir, os.path.basename(path)), img)
 
-    def _calibrate_scale(self):
+    def _diam_recorded(self):
+        """True when this run's setup.txt carries the capture-side
+        'DEA nominal diameter' line (written from the SLDEA tab's
+        'DEA diam (mm)' field) — if not, diam_mm is only the settings
+        default and the gate dialog says so."""
+        try:
+            with open(os.path.join(self.rundir, 'setup.txt')) as f:
+                return 'DEA nominal diameter:' in f.read()
+        except (OSError, TypeError):
+            return False
+
+    def _anchor_frame(self):
+        """-> (PIL image, is_baseline, tried) — the first READABLE frame
+        to calibrate on: baseline-tagged rows first, then the rest of the
+        ramp. A baseline PNG can be listed in the CSV yet be 0-byte or
+        truncated on disk (interrupted capture, e.g. the 2026-08-04
+        disk-full incident) — the gate must fall back, not crash, or the
+        whole run becomes permanently unprocessable (review 2026-08-05).
+        `tried` collects the unreadable names for the error dialog."""
+        from PIL import Image
+        ordered = ([i for i in self.frame_rows
+                    if self.run['rows'][i].get('tag') == 'baseline']
+                   + [i for i in self.frame_rows
+                      if self.run['rows'][i].get('tag') != 'baseline'])
+        tried = []
+        for i in ordered:
+            row = self.run['rows'][i]
+            path = se.frame_path(self.run, row)
+            if not path or not os.path.exists(path):
+                tried.append(os.path.basename(path or '(no file)'))
+                continue
+            try:
+                img = Image.open(path).convert('RGB')
+            except Exception as e:          # 0-byte, truncated, not-a-PNG
+                tried.append(f"{os.path.basename(path)} ({e})")
+                continue
+            return img, row.get('tag') == 'baseline', tried
+        return None, False, tried
+
+    def _gate_status(self):
+        self.status.config(text="Detect is gated on the scale "
+                                "calibration — 📏 Calibrate to proceed")
+
+    def _calibrate_scale(self, then_detect=False):
         """Manual px→mm calibration: click the two opposite edges of the
         RESTING disc on the baseline frame; the known nominal diameter
-        (diam_mm) between them sets the scale. Overrides the automatic
-        baseline-disc detection."""
+        (diam_mm) between them sets the scale. This is the SCALE GATE
+        (operator decision 2026-08-05): Detect and Save both require it
+        per run, and it overrides EVERY automatic reference at Save.
+        With then_detect, detection chains automatically once the two
+        clicks land (Detect's gate path and --auto). SINGLETON like
+        Advanced… (#176): the grab is pointer-only, so a pierced dialog
+        must front the live one, never stack a second wait chain."""
         if not self.run:
             messagebox.showinfo("Calibrate", "Pick a run first")
             return
-        base_row = None
-        for i in self.frame_rows:
-            if self.run['rows'][i].get('tag') == 'baseline':
-                base_row = self.run['rows'][i]
-                break
-        if base_row is None and self.frame_rows:
-            base_row = self.run['rows'][self.frame_rows[0]]
-        path = se.frame_path(self.run, base_row) if base_row else None
-        if not path or not os.path.exists(path):
-            messagebox.showinfo("Calibrate", "No baseline frame on disk.")
+        if self._cal_win is not None and self._cal_win.winfo_exists():
+            self._cal_win.lift()
+            self._cal_win.focus_set()
             return
         from PIL import Image, ImageTk
-        img = Image.open(path).convert('RGB')
+        img, anchor_is_baseline, tried = self._anchor_frame()
+        if img is None:
+            messagebox.showerror(
+                "Calibrate",
+                "No readable frame to calibrate on — Detect and Save "
+                "stay gated until one exists (restore or re-export a "
+                "frame).\nTried: " + '; '.join(tried[:4])
+                + ('…' if len(tried) > 4 else ''))
+            if then_detect:
+                self._gate_status()
+            return
         scale_v = VIEW_W / img.width
         disp = img.resize((VIEW_W, int(img.height * scale_v)))
         win = tk.Toplevel(self.root)
         win.title("Calibrate scale — click the disc's two opposite edges")
         win.transient(self.root)
-        tk.Label(win, text=f"Click LEFT edge then RIGHT edge of the resting "
-                           f"disc (nominal {self.settings['diam_mm']:g} mm "
-                           f"across). Esc cancels.").pack(pady=(6, 2))
+        self._cal_win = win
+        gate = (f"SCALE GATE — this run's px→mm anchor.\n"
+                f"Click LEFT edge then RIGHT edge of the resting disc "
+                f"(nominal {self.settings['diam_mm']:g} mm across). "
+                f"Esc cancels.")
+        if not anchor_is_baseline:
+            gate += ("\n⚠ The baseline frame is missing/unreadable — this "
+                     "is a LATER frame. Only calibrate here if the disc "
+                     "is visibly AT REST; otherwise Esc and restore the "
+                     "baseline frame.")
+        if not self._diam_recorded():
+            gate += (f"\n⚠ The diameter was NOT recorded at capture — "
+                     f"{self.settings['diam_mm']:g} mm is the settings "
+                     f"default. If this device used a different mask, fix "
+                     f"diam_mm in Advanced… BEFORE calibrating.")
+        tk.Label(win, text=gate, justify='left').pack(pady=(6, 2))
         cv = tk.Canvas(win, width=disp.width, height=disp.height)
         cv.pack(padx=8, pady=8)
         photo = ImageTk.PhotoImage(disp)
@@ -1053,11 +1182,11 @@ class EdgeReviewApp:
                 self.manual_ref = {'method': 'manual-calibration',
                                    'diam_px': dpx_full}
                 self.status.config(
-                    text=f"scale calibrated manually: "
+                    text=f"scale calibrated: "
                          f"{self.settings['diam_mm']:g} mm = "
                          f"{dpx_full:.0f} px "
                          f"({self.settings['diam_mm'] / dpx_full:.5f} mm/px)"
-                         f" — used at Save")
+                         f" — overrides every automatic reference at Save")
                 win.destroy()
 
         cv.bind('<Button-1>', click)
@@ -1065,6 +1194,12 @@ class EdgeReviewApp:
         cv.focus_set()
         win.grab_set()
         self.root.wait_window(win)
+        self._cal_win = None
+        if then_detect:
+            if self.manual_ref is not None:
+                self.detect()
+            else:
+                self._gate_status()
 
     # ---------------- advanced settings ----------------
     def _advanced(self):

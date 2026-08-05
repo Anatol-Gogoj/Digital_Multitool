@@ -104,11 +104,15 @@ def _fake_run(dirpath):
             'active_diam_mm', 'wrinkle_idx', 'notes']
     rows = []
     yy, xx = np.mgrid[0:240, 0:320]
+    # resting disc r=80 (160 px dia): INSIDE baseline_disc's upper size
+    # gate (2r <= 0.85*dmin = 173 px for a 240-px frame) so the scale
+    # cross-check has a real auto fit to test against — r=90 silently
+    # made that branch dead code (review 2026-08-05)
     for k, (tag, kv, r) in enumerate((('baseline', 0.0, 0),
                                       ('post-ramp', 3.0, 45),
                                       ('post-ramp', 6.0, 70))):
         img = np.full((240, 320), 190.0, np.float32)
-        img[(xx - 160) ** 2 + (yy - 120) ** 2 <= 90 * 90] = 165.0
+        img[(xx - 160) ** 2 + (yy - 120) ** 2 <= 80 * 80] = 165.0
         if r:
             img[(xx - 160) ** 2 + (yy - 120) ** 2 <= r * r] += 35
         fn = f'SLDEA_s{k:02d}_{kv:05.2f}kV_{tag}.png'
@@ -373,6 +377,140 @@ def test_side_panel_geometry_is_fixed_across_frames():
         assert app._side.winfo_reqwidth() == side_w
         assert app.info.winfo_reqheight() == info_h
     finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_scale_gate_blocks_detect_and_save_until_calibrated():
+    """Operator decision 2026-08-05: the px→mm anchor is clicked by hand
+    on every run — Detect diverts to the Calibrate dialog, Save hard-
+    blocks, detection chains once the anchor exists, and the status line
+    reports the manual anchor with the auto disc demoted to cross-check."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_gui_')
+    infos, warns = [], []
+    real_mb = gui.messagebox
+
+    class _MB:
+        @staticmethod
+        def showinfo(*a, **k):
+            infos.append(a)
+
+        @staticmethod
+        def showwarning(*a, **k):
+            warns.append(a)
+
+        def __getattr__(self, name):
+            return getattr(real_mb, name)
+
+    gui.messagebox = _MB()
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None, "synthetic run failed to load"
+        assert app.manual_ref is None
+        assert app._diam_recorded()      # fixture setup.txt has the line
+        # Detect must divert to the Calibrate dialog, not run detection
+        opened = []
+        app._calibrate_scale = lambda then_detect=False: opened.append(
+            then_detect)
+        app.detect()
+        assert opened == [True], "gate did not divert to Calibrate"
+        assert not app.cands_all, "detection ran without calibration"
+        # Save hard-blocks without the anchor
+        app.save()
+        assert infos, "save() did not block on the scale gate"
+        # with the anchor, detection runs and the auto disc fit MUST
+        # exist (r=80 fixture sits inside baseline_disc's size gates) —
+        # unconditional, so the cross-check can never silently lose its
+        # only coverage again (review 2026-08-05)
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect_all_sync()
+        assert app.cands_all, "detection did not run once calibrated"
+        assert 'scale: manual 160 px' in app.status.cget('text')
+        auto_px = (app.base_ref or {}).get('diam_px')
+        assert auto_px, ("fixture disc no longer fittable by "
+                         "baseline_disc — the cross-check is untested")
+        # an exact-match anchor passes the >3% cross-check silently
+        warns.clear()
+        app.manual_ref = {'method': 'manual-calibration',
+                          'diam_px': float(auto_px)}
+        app.detect_all_sync()
+        assert not warns, warns
+        assert '✓' in app.status.cget('text')
+        # a wildly different anchor trips it (mismatch is measured
+        # against the MANUAL anchor: |auto−250|/250)
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 250.0}
+        app.detect_all_sync()
+        assert warns, "cross-check did not warn on a >3% mismatch"
+        assert 'apart' in app.status.cget('text')
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_scale_gate_survives_unreadable_baseline_frame():
+    """Review 2026-08-05: a 0-byte/truncated baseline PNG (interrupted
+    capture — the disk-full failure mode) used to crash the gate path as
+    a stderr-only traceback and permanently lock the run out of Detect,
+    Save and --auto. The gate now falls back to the next readable frame
+    (flagged non-baseline in the dialog) and, with nothing readable,
+    surfaces an error dialog instead of an exception."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_gui_')
+    errors = []
+    real_mb = gui.messagebox
+
+    class _MB:
+        @staticmethod
+        def showerror(*a, **k):
+            errors.append(a)
+
+        def __getattr__(self, name):
+            return getattr(real_mb, name)
+
+    gui.messagebox = _MB()
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        frames = os.path.join(run, 'frames')
+        base_png = os.path.join(frames, 'SLDEA_s00_00.00kV_baseline.png')
+        open(base_png, 'wb').close()             # 0-byte baseline
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None
+        # anchor selection skips the unreadable baseline and falls back
+        # to a later, readable frame — flagged as non-baseline
+        img, is_baseline, tried = app._anchor_frame()
+        assert img is not None and not is_baseline, (is_baseline, tried)
+        assert any('baseline' in t for t in tried), tried
+        # with EVERY frame unreadable, the gate surfaces an error dialog
+        # and neither _calibrate_scale nor the Detect gate path raises
+        for fn in os.listdir(frames):
+            open(os.path.join(frames, fn), 'wb').close()
+        img, _, tried = app._anchor_frame()
+        assert img is None and len(tried) == 3, tried
+        app._calibrate_scale()
+        assert errors, "no error dialog for an uncalibratable run"
+        errors.clear()
+        app.detect()                             # gate path, must not raise
+        assert errors and app.manual_ref is None
+        assert 'gated' in app.status.cget('text')
+    finally:
+        gui.messagebox = real_mb
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)
 

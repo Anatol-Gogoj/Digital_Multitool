@@ -57,11 +57,12 @@ and the 13 runs (nested in `SLDEA_data (1)\`).
 1. **(Anatol, ~15 min)** the campaign **control round** traces — it
    gates every remaining verdict (optics moved between sessions). Then
    the **P3_2** review; agent runs `compare_errorbars.py` after each.
-2. **(agent, buildable now)** **#199 auto-plot tool** — the campaign
-   consumes it immediately for the remaining comparisons and the PhD
-   figures; a working prototype already exists at the Upload folder's
-   top-level `compare_errorbars.py` (Tol bright, per the issue's toggle
-   wishlist).
+2. **#199 auto-plot tool: BUILT 2026-08-05** — `sldea_plot.py` (PR
+   pending merge): area+A/A₀ panels, pre/post view, current/power
+   modes, Tol bright, 300 dpi PNG + tidy CSV; breakdown X marks
+   recompute `breakdown_flags` (P3_5's stale brand correctly ignored;
+   dated entry in `SLDEA_HANDOFF.md`). Validated on all 6 processed +
+   4 breakdown-candidate runs.
 3. **(Anatol)** reviews of the two 07-23 **breakdown runs** (152205,
    233451) — first real exercise of the new confirmed-breakdown review
    path.
@@ -90,10 +91,16 @@ connection takeover · #198 ML experiment (after the #194 verdict) ·
 next release bump regenerates both manuals (tooltip text drifted in
 #195).
 
-**Housekeeping:** delete `D:\Downloads\gui\` (locked by the 2026-08-05
-session — delete after it closes) · retire redundant SLDEA copies only
-against `PROVENANCE.md` (555 MB zip, OneDrive copies) · the open
-decisions below.
+**Housekeeping: DONE 2026-08-05** (Anatol-authorized). All 12 DDL-side
+`PROVENANCE.md` items verified then moved to the **Recycle Bin**
+(~3.26 GB — empty the bin to actually reclaim C: space); the sole-copy
+gen-1/gen-2 diag snapshots were salvaged into the Upload folder's
+`_diag_history\` first. Ledger updated with a dated retirement entry.
+NOTE: the OneDrive `Recordings\SLDEA_data` tree and `D:\Downloads\gui\`
+were **already gone before the session acted** (both mtimes 2026-08-05
+~00:41–00:43) — if that wasn't a sanctioned cleanup, the OneDrive web
+recycle bin (~30-day retention) is the recovery path. Remaining: the
+open decisions below.
 
 ## Open decisions (Anatol's calls)
 
@@ -142,15 +149,19 @@ run-data auto-plot tool (full toggle wishlist in the issue; Tol bright)
   verified; agent worktrees under `.claude\worktrees\`), data at
   `SLDEA_data\` beside it. `SCPI_SLDEA_DIR` points at
   `...\SLDEA_data\Upload 20260804`. No `py` launcher — use `python`.
-  Quote every path — two levels of this tree contain spaces. Leftover
-  `D:\Downloads\gui\` could not be deleted during the move (session
-  file lock) — delete it whenever.
-- C: space is tight (hit 0 GB free 2026-08-04; ~23 GB after cleanup)
-  and repo + data now deliberately live on C: — watch free space, and
-  retire the `PROVENANCE.md`-verified redundant copies to keep headroom.
+  Quote every path — two levels of this tree contain spaces. The
+  leftover `D:\Downloads\gui\` is gone (verified 2026-08-05, see
+  Housekeeping).
+- C: space is tight (hit 0 GB free 2026-08-04; ~21 GB free 2026-08-05)
+  and repo + data now deliberately live on C: — the redundant copies
+  were retired to the Recycle Bin 2026-08-05; **empty the bin** to
+  reclaim the ~3.26 GB. `SLDEA_data\` now contains only
+  `Upload 20260804\`.
 - `robocopy` needs `/R:2 /W:5` or it hangs on one locked file.
-- OneDrive `Recordings\SLDEA_data` copies are now redundant per
-  `PROVENANCE.md` — retire only against that ledger.
+- OneDrive `Recordings\SLDEA_data` copies: **already deleted by someone
+  or something before the 2026-08-05 agent session** (see Housekeeping
+  above) — verify that was sanctioned; OneDrive web recycle bin is the
+  recovery path if not.
 
 ## Picking up work
 

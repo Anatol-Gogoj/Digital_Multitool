@@ -22,8 +22,11 @@ this file is the snapshot — update it at milestones.
 - **Manuals are one release behind the tooltips** — #195 changed watchdog
   and Edge Review settings text; per the release checklist the manuals
   regenerate at the next version bump (pipeline: `docs/manual-src/`).
-- Suite baseline: `run_tests.py` → **25/29** on the Windows lab PC (the 4
-  failures are environmental and documented; all SLDEA suites green).
+- Suite baseline: `run_tests.py` → **26/30** on the Windows lab PC (the 4
+  failures — test_arb_bin, test_camera_controls, test_presets_path,
+  test_tk_fontfix — are environmental and documented; all SLDEA suites
+  green). Was stated 25/29 before #199 added the sldea_plot suite
+  (audit 2026-08-05 nit).
 
 ## Batch-QA campaign (data side, lives OUTSIDE the repo)
 

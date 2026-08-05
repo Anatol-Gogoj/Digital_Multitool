@@ -493,15 +493,17 @@ def test_scale_gate_survives_unreadable_baseline_frame():
         app = gui.EdgeReviewApp(root, path=run)
         assert app.run is not None
         # anchor selection skips the unreadable baseline and falls back
-        # to a later, readable frame — flagged as non-baseline
-        img, is_baseline, tried = app._anchor_frame()
+        # to a later, readable frame — flagged as non-baseline, with the
+        # frame's name reported for the anchor's provenance record
+        img, is_baseline, tried, name = app._anchor_frame()
         assert img is not None and not is_baseline, (is_baseline, tried)
         assert any('baseline' in t for t in tried), tried
+        assert name and name.endswith('.png'), name
         # with EVERY frame unreadable, the gate surfaces an error dialog
         # and neither _calibrate_scale nor the Detect gate path raises
         for fn in os.listdir(frames):
             open(os.path.join(frames, fn), 'wb').close()
-        img, _, tried = app._anchor_frame()
+        img, _, tried, _n = app._anchor_frame()
         assert img is None and len(tried) == 3, tried
         app._calibrate_scale()
         assert errors, "no error dialog for an uncalibratable run"
@@ -513,6 +515,565 @@ def test_scale_gate_survives_unreadable_baseline_frame():
         gui.messagebox = real_mb
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# audit 2026-08-05 regressions
+# ---------------------------------------------------------------------------
+
+def _tk_root_or_skip(gui_name):
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped {gui_name}: no display for Tk: {e})")
+        return None
+    root.withdraw()
+    return root
+
+
+class _StubMB:
+    """messagebox stub: records calls, answers askyesno with `yes`."""
+
+    def __init__(self, yes=True):
+        self.infos, self.warnings, self.errors, self.asked = [], [], [], []
+        self._yes = yes
+
+    def showinfo(self, *a, **k):
+        self.infos.append(a)
+
+    def showwarning(self, *a, **k):
+        self.warnings.append(a)
+
+    def showerror(self, *a, **k):
+        self.errors.append(a)
+
+    def askyesno(self, *a, **k):
+        self.asked.append(a)
+        return self._yes
+
+
+def _set_ua(rundir, uas):
+    """Rewrite the fixture CSV's measured_uA column (row order)."""
+    p = os.path.join(rundir, 'data.csv')
+    with open(p, newline='') as f:
+        r = csv.DictReader(f)
+        rows, cols = list(r), r.fieldnames
+    for row, ua in zip(rows, uas):
+        row['measured_uA'] = ua
+    with open(p, 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        w.writerows(rows)
+
+
+def test_scale_gate_rearms_on_every_run_switch():
+    """audit 2026-08-05 (mutation finding): deleting the manual_ref
+    reset in _pick_run left the WHOLE suite green — the branch's
+    headline property ('the anchor resets on every run switch') had no
+    test. Two runs, calibrate+detect the first, switch: every piece of
+    per-run state must re-arm, and Save must block."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('gate rearm')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_rearm_')
+    mb = _StubMB()
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    try:
+        _fake_run(os.path.join(d, 'SLDEA_A'))
+        _fake_run(os.path.join(d, 'SLDEA_B'))
+        app = gui.EdgeReviewApp(root, path=os.path.join(d, 'SLDEA_B'))
+        assert app.run is not None
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect_all_sync()
+        assert app.results and app.manual_ref is not None
+        assert str(app.save_btn['state']) == 'normal'
+        other = [i for i, v in enumerate(app.run_box['values'])
+                 if 'SLDEA_A' in v][0]
+        app.run_box.current(other)
+        app._pick_run()
+        assert app.manual_ref is None, "gate did NOT re-arm on run switch"
+        assert app.base_ref is None and app._base_ref_pending is None
+        assert app.results == {} and app.cands_all == {}
+        assert app.traces == {} and app.load_fail == {}
+        assert str(app.save_btn['state']) == 'disabled'
+        # Save blocks on the re-armed gate; Detect diverts to Calibrate
+        mb.infos.clear()
+        app.save()
+        assert mb.infos, "save() did not block after the run switch"
+        opened = []
+        app._calibrate_scale = lambda then_detect=False: opened.append(1)
+        app.detect()
+        assert opened, "detect() did not divert after the run switch"
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_run_switch_mid_detect_cannot_cross_contaminate():
+    """CRITICAL (audit 2026-08-05): the Run combobox and Browse… stayed
+    live during a multi-minute detect, and the stale worker/poll chain
+    refilled cands_all, base_ref and the Save button AFTER _pick_run's
+    fail-closed reset — run A's areas written through run B's anchor.
+    Now: switching is disabled while a worker runs, and even a forced
+    switch (the pierced-event case) leaves stale output dropped by the
+    generation token."""
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('mid-detect switch')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_switch_')
+    mb = _StubMB()
+    real_mb = gui.messagebox
+    real_cands = se.candidates
+    gui.messagebox = mb
+
+    def slow_cands(*a, **k):
+        time.sleep(0.15)
+        return real_cands(*a, **k)
+
+    se.candidates = slow_cands
+    try:
+        import cv2
+        run_a = _fake_run(os.path.join(d, 'SLDEA_A'))
+        _fake_run(os.path.join(d, 'SLDEA_B'))
+        # run A gets a FOURTH frame so stale run-B output (3 frames,
+        # same indices) is distinguishable — without this, a mutant
+        # that drops the per-item generation check passed end to end
+        # (review 2026-08-05)
+        yy, xx = np.mgrid[0:240, 0:320]
+        img = np.full((240, 320), 190.0, np.float32)
+        img[(xx - 160) ** 2 + (yy - 120) ** 2 <= 80 * 80] = 165.0
+        img[(xx - 160) ** 2 + (yy - 120) ** 2 <= 75 * 75] += 35
+        fn4 = 'SLDEA_s03_08.00kV_post-ramp.png'
+        cv2.imwrite(os.path.join(run_a, 'frames', fn4),
+                    np.clip(img, 0, 255).astype(np.uint8))
+        pa = os.path.join(run_a, 'data.csv')
+        with open(pa, newline='') as f:
+            r = csv.DictReader(f)
+            rows_a, cols_a = list(r), r.fieldnames
+        rows_a.append({**{c: '' for c in cols_a}, 'tag': 'post-ramp',
+                       'nominal_kV': '8.0', 'frame_file': fn4,
+                       'step': 3, 'snapshot': 4})
+        with open(pa, 'w', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=cols_a)
+            w.writeheader()
+            w.writerows(rows_a)
+        app = gui.EdgeReviewApp(root, path=os.path.join(d, 'SLDEA_B'))
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect()
+        assert app._detect_busy
+        # the UI path is CLOSED during detection
+        assert str(app.run_box.cget('state')) == 'disabled'
+        assert str(app.browse_btn['state']) == 'disabled'
+        assert str(app.save_btn['state']) == 'disabled'
+        # force the switch anyway (a queued event / programmatic path)
+        app.run_box.config(state='readonly')
+        other = [i for i, v in enumerate(app.run_box['values'])
+                 if 'SLDEA_A' in v][0]
+        app.run_box.current(other)
+        app._pick_run()
+        assert not app._detect_busy and app.cands_all == {}
+        assert app._base_ref_pending is None
+        assert len(app.frame_rows) == 4        # run A's extra frame
+        # let the STALE worker finish; its output must never apply
+        t0 = time.time()
+        while time.time() - t0 < 3.0:
+            root.update()
+            time.sleep(0.02)
+        assert app.cands_all == {}, "stale worker refilled cands_all"
+        assert app.base_ref is None and app._base_ref_pending is None
+        assert str(app.save_btn['state']) == 'disabled'
+        # a fresh detect on the new run drains the stale items without
+        # applying them and completes cleanly. Run B's stale queue
+        # entries (3 frames + sentinel) all precede run A's — a poll
+        # that fails to drop them per-item would finish early with B's
+        # 3-frame pass and report 'detected 3 frames' (review
+        # 2026-08-05: this exact mutant survived the earlier version).
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect()
+        t0 = time.time()
+        while app._detect_busy and time.time() - t0 < 15.0:
+            root.update()
+            time.sleep(0.02)
+        assert not app._detect_busy, "fresh detect never finished"
+        assert sorted(app.cands_all) == app.frame_rows
+        assert len(app.cands_all) == 4, \
+            "stale sentinel finished the pass on the OLD run's output"
+        assert 'detected 4 frames' in app.status.cget('text')
+    finally:
+        se.candidates = real_cands
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_unreadable_frame_is_refused_not_laundered():
+    """CRITICAL (audit 2026-08-05): a missing/undecodable frame produced
+    cands=[], which auto-rejected as 'no change vs baseline (auto)',
+    skipped the review queue, and Save blanked a previously saved
+    hand-traced measurement into 'rejected (no reliable edge)' — a
+    confident physical verdict about a file that was never opened (the
+    live state of 155425 row 48). Now the row stays queued as UNREADABLE
+    and its saved values survive, re-scaled to this session's anchor."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('unreadable frame')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_unread_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        # a previous pass's saved measurement on the row whose frame is
+        # about to go missing (old anchor: 0.05 mm/px)
+        p = os.path.join(run, 'data.csv')
+        with open(p, newline='') as f:
+            r = csv.DictReader(f)
+            rows, cols = list(r), r.fieldnames
+        rows[2]['active_area_px'] = '5000'
+        rows[2]['active_area_mm2'] = '12.500'
+        rows[2]['active_diam_mm'] = '3.989'
+        rows[2]['wrinkle_idx'] = '1.63'
+        rows[2]['notes'] = 'edge:manual-trace conf 1.00 (user)'
+        with open(p, 'w', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            w.writeheader()
+            w.writerows(rows)
+        os.remove(os.path.join(run, 'frames',
+                               'SLDEA_s02_06.00kV_post-ramp.png'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert 'MISSING on disk' in app.status.cget('text')
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect_all_sync()
+        i = app.frame_rows[2]
+        assert i in app.load_fail
+        assert i not in app.results, "unreadable frame left the queue"
+        assert i in app._queue_list()
+        assert i not in app.auto_rej, "unreadable frame auto-rejected"
+        assert 'UNREADABLE' in app.status.cget('text')
+        # the card SAYS unreadable, not 'no change vs baseline'
+        app.pos = app.frame_rows.index(i)
+        app._show()
+        assert 'UNREADABLE' in app.info.cget('text')
+        assert 'no change' not in app.info.cget('text')
+        # Save keeps the measurement: px preserved, mm² on THIS anchor
+        app.save()
+        with open(p, newline='', encoding='utf-8-sig') as f:
+            saved = list(csv.DictReader(f))
+        assert saved[2]['active_area_px'] == '5000'
+        scale = 16.0 / 160.0
+        assert saved[2]['active_area_mm2'] == f"{5000 * scale * scale:.3f}"
+        assert saved[2]['wrinkle_idx'] == '1.63'
+        assert 'frame unreadable' in saved[2]['notes']
+        assert 'rejected (no reliable edge)' not in saved[2]['notes']
+        # and the dialog told the operator the truth
+        dlg = mb.asked[-1][1]
+        assert 'UNREADABLE' in dlg and 're-scaled' in dlg
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_missing_baseline_refuses_detection():
+    """CRITICAL (audit 2026-08-05): with the baseline unreadable,
+    prepared_diff's fallback let the Otsu tiers outline the ROI
+    *background* at conf 0.85-0.90 — every frame AUTO-ACCEPTED at 2.74x
+    the true area under a perfectly good manual anchor. Detection must
+    refuse outright."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('missing baseline')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_nobase_')
+    mb = _StubMB()
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        base_png = os.path.join(run, 'frames',
+                                'SLDEA_s00_00.00kV_baseline.png')
+        open(base_png, 'wb').close()             # 0-byte baseline
+        app = gui.EdgeReviewApp(root, path=run)
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect_all_sync()
+        assert mb.errors, "no refusal dialog for an unreadable baseline"
+        assert not app.results and not app.auto_idx, \
+            "detection fabricated results without a baseline"
+        assert 'REFUSED' in app.status.cget('text')
+        # the threaded path refuses identically
+        mb.errors.clear()
+        app.detect()
+        assert mb.errors and not app._detect_busy
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_save_commits_csv_before_renames():
+    """audit 2026-08-05: save() renamed frames BEFORE the CSV commit —
+    a failed write_back left renamed frames, a stale CSV and a dialog
+    promising a .bak that was never made. Now a write_back failure
+    leaves the run byte-identical with ZERO files renamed."""
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('save ordering')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_order_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    real_wb = se.write_back
+    gui.messagebox = mb
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        # legacy absolute rule (<5 uA rows): row 2 at -90 uA confirms
+        _set_ua(run, ['-16', '-10', '-90'])
+        app = gui.EdgeReviewApp(root, path=run)
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect_all_sync()
+        assert app.flags, "fixture no longer produces a breakdown flag"
+        csv_path = app.run['csv_path']
+        before = open(csv_path, 'rb').read()
+
+        def boom(*a, **k):
+            raise OSError(28, 'No space left on device')
+
+        se.write_back = boom
+        app.save()
+        assert mb.errors and 'FAILED' in mb.errors[-1][0]
+        assert 'No frame files were renamed' in mb.errors[-1][1]
+        frames = os.listdir(os.path.join(run, 'frames'))
+        assert not any('_BREAKDOWN' in f for f in frames), frames
+        assert open(csv_path, 'rb').read() == before, \
+            "failed save mutated data.csv"
+        # with the disk back, the SAME session saves clean
+        se.write_back = real_wb
+        app.save()
+        frames = os.listdir(os.path.join(run, 'frames'))
+        assert any('_BREAKDOWN' in f for f in frames), frames
+        with open(csv_path, newline='', encoding='utf-8-sig') as f:
+            saved = list(csv.DictReader(f))
+        assert '_BREAKDOWN' in saved[2]['frame_file']
+        assert os.path.exists(os.path.join(
+            run, 'frames', saved[2]['frame_file']))
+        assert 'saved' in app.status.cget('text')
+    finally:
+        se.write_back = real_wb
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_0723_era_run_saves_end_to_end():
+    """audit 2026-08-05 (mutation finding): the 14-column-era compat
+    branch in save() never executed under any test, and without it a
+    07-23 run's Save raised mid-way. Drive a full save on the era
+    schema: wrinkle_idx lands before notes, every frame_file resolves
+    on disk, and the era tags plot."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('era save')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_era_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    try:
+        import cv2
+        rundir = os.path.join(d, 'SLDEA_20260723_000000')
+        frames = os.path.join(rundir, 'frames')
+        os.makedirs(frames)
+        cols = ['snapshot', 'step', 'tag', 'nominal_kV', 'control_V',
+                'measured_kV', 'measured_uA', 't_planned_s', 'timestamp',
+                'frame_file', 'active_area_px', 'active_area_mm2',
+                'active_diam_mm', 'notes']            # 14 cols, no wrinkle
+        yy, xx = np.mgrid[0:240, 0:320]
+        rows = []
+        specs = (('baseline', 0.0, 0, '-1'), ('pre', 3.0, 45, '-2'),
+                 ('post', 6.0, 70, '-90'))            # terminal event
+        for k, (tag, kv, r, ua) in enumerate(specs):
+            img = np.full((240, 320), 190.0, np.float32)
+            img[(xx - 160) ** 2 + (yy - 120) ** 2 <= 80 * 80] = 165.0
+            if r:
+                img[(xx - 160) ** 2 + (yy - 120) ** 2 <= r * r] += 35
+            fn = f'SLDEA_s{k:02d}_{kv:05.2f}kV_{tag}.png'
+            cv2.imwrite(os.path.join(frames, fn),
+                        np.clip(img, 0, 255).astype(np.uint8))
+            rows.append({**{c: '' for c in cols}, 'tag': tag,
+                         'nominal_kV': kv, 'frame_file': fn, 'step': k,
+                         'snapshot': k + 1, 'measured_uA': ua})
+        with open(os.path.join(rundir, 'data.csv'), 'w', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            w.writeheader()
+            w.writerows(rows)
+        with open(os.path.join(rundir, 'setup.txt'), 'w') as f:
+            f.write("SLDEA Test\nDEA nominal diameter: 16 mm\n")
+
+        app = gui.EdgeReviewApp(root, path=rundir)
+        assert 'wrinkle_idx' not in app.run['columns']
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect_all_sync()
+        # hand-trace one frame so a manual wrinkle value rides through
+        i = app.frame_rows[1]
+        app.pos = app.frame_rows.index(i)
+        app._trace_staged(i, [(60.0, 40.0), (260.0, 40.0),
+                              (260.0, 200.0), (60.0, 200.0)],
+                          {'zoom': 1.0, 'overlays': {},
+                           'elapsed_s': 1.0, 'snapped': False})
+        app.cand_var.set(gui.TRACE_SLOT)
+        app._choose_current()
+        app.save()
+        path = app.run['csv_path']
+        with open(path, newline='', encoding='utf-8-sig') as f:
+            r = csv.DictReader(f)
+            saved_cols = r.fieldnames
+            saved = list(r)
+        assert 'wrinkle_idx' in saved_cols
+        assert (saved_cols.index('wrinkle_idx')
+                == saved_cols.index('notes') - 1)
+        for row in saved:
+            name = (row['frame_file'] or '').strip()
+            if name:
+                assert os.path.exists(os.path.join(frames, name)), name
+        assert os.path.exists(os.path.join(rundir,
+                                           'area_vs_voltage.png'))
+        assert 'saved' in app.status.cget('text')
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _advanced_widgets(app):
+    """(entries by settings key, buttons by label) of the open dialog."""
+    import sldea_edge as se
+    import tkinter as tk
+    from tkinter import ttk
+    win = app._adv_win
+    entries, buttons = {}, {}
+    keys = list(se.DEFAULT_SETTINGS)
+
+    def walk(w):
+        for ch in w.winfo_children():
+            if isinstance(ch, ttk.Entry):
+                entries[keys[len(entries)]] = ch
+            elif isinstance(ch, (ttk.Button, tk.Button)):
+                buttons[str(ch.cget('text'))] = ch
+            walk(ch)
+
+    walk(win)
+    return entries, buttons
+
+
+def test_advanced_apply_recomputes_flags_or_invalidates_pass():
+    """audit 2026-08-05: Advanced… Apply changed the breakdown
+    thresholds but never recomputed flags — Save stayed armed and
+    renamed frames *_BREAKDOWN on thresholds the operator had just
+    changed away from. Post-processing knobs now recompute live;
+    detection knobs invalidate the pass after an explicit confirm."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('advanced apply')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_adv_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        _set_ua(run, ['-16', '-10', '-90'])       # legacy rule: row 2
+        app = gui.EdgeReviewApp(root, path=run)
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect_all_sync()
+        assert app.flags, "fixture no longer produces a breakdown flag"
+        # post-processing knob: flags recompute NOW, review survives
+        app._advanced()
+        entries, buttons = _advanced_widgets(app)
+        entries['breakdown_ua'].delete(0, 'end')
+        entries['breakdown_ua'].insert(0, '400')
+        n_results = len(app.results)
+        buttons['Apply'].invoke()
+        assert app.settings['breakdown_ua'] == 400.0
+        assert app.flags == {}, "stale flags survived Apply"
+        assert len(app.results) == n_results
+        assert str(app.save_btn['state']) == 'normal'
+        assert 'recomputed' in app.status.cget('text')
+        # detection knob: explicit confirm, then the pass is cleared
+        app._advanced()
+        entries, buttons = _advanced_widgets(app)
+        entries['blur_px'].delete(0, 'end')
+        entries['blur_px'].insert(0, '9')
+        buttons['Apply'].invoke()
+        assert mb.asked, "no confirm before invalidating the pass"
+        assert app.results == {} and app.cands_all == {}
+        assert str(app.save_btn['state']) == 'disabled'
+        assert 'invalidated' in app.status.cget('text')
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_retrace_after_accept_is_visibly_staged_not_silently_shown():
+    """audit 2026-08-05: after committing a trace, re-tracing and
+    pressing Done showed the NEW polygon as 'accepted' (radio D filled
+    from it, drawn at the heavy selected weight) while Save wrote the
+    OLD one. The divergence must be visible everywhere the operator
+    looks."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('retrace staging')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_retrace_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None
+        app.detect_all_sync()
+        i = app.frame_rows[1]
+        app.pos = app.frame_rows.index(i)
+        meta = {'zoom': 1.0, 'overlays': {}, 'elapsed_s': 1.0,
+                'snapped': False}
+        poly1 = [(40.0, 40.0), (280.0, 40.0), (280.0, 200.0),
+                 (40.0, 200.0)]                       # 38400 px²
+        app._trace_staged(i, poly1, meta)
+        app.cand_var.set(gui.TRACE_SLOT)
+        app._choose_current()                          # commit P1
+        committed = app.results[i]['area_px']
+        poly2 = [(100.0, 80.0), (220.0, 80.0), (220.0, 160.0),
+                 (100.0, 160.0)]                       # 9600 px²
+        app._trace_staged(i, poly2, meta)              # stage P2 only
+        # results untouched (the #172 contract)…
+        assert app.results[i]['area_px'] == committed
+        # …but the UI now SAYS so instead of impersonating acceptance
+        assert 'staged D NOT committed' in app.info.cget('text')
+        assert 'STAGED≠accepted' in \
+            app.cand_radios[gui.TRACE_SLOT]['text']
+        # the card renders both outlines without error
+        img = app._render_card(i, app.cands_all.get(i, []),
+                               app.results.get(i))
+        assert img is not None
+        # Enter commits the staged P2, and the warning clears
+        app.cand_var.set(gui.TRACE_SLOT)
+        app._choose_current()
+        assert app.results[i]['area_px'] == strc_area(poly2)
+        assert 'staged D NOT committed' not in app.info.cget('text')
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def strc_area(poly):
+    import sldea_trace as strc
+    return strc.polygon_area(poly)
 
 
 def _run():

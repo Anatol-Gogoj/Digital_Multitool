@@ -160,6 +160,116 @@ def test_windows_launcher_contract():
     assert '%~dp0' not in text[first_shift:], "%~dp0 used after a shift"
 
 
+# ---------------------------------------------------------------------------
+# audit 2026-08-05 regressions
+# ---------------------------------------------------------------------------
+
+def test_norm_bg_checkbox_preserves_the_legacy_scalar():
+    """audit 2026-08-05: norm_var was a two-state bool and recompute()
+    wrote `2 if checked else 0` — merely OPENING the tuner on a
+    norm_bg:1 run rewrote it to 2 in the startup recompute, and Save
+    persisted the silent upgrade, breaking sldea_edge's 'a run tuned
+    under it reprocesses identically'. Checked keeps the run's OWN
+    mode."""
+    assert st.norm_bg_value(True, 1) == 1      # the legacy run keeps 1
+    assert st.norm_bg_value(True, 2) == 2
+    assert st.norm_bg_value(True, 0) == 2      # never-normalized: default
+    assert st.norm_bg_value(False, 1) == 0
+    assert st.norm_bg_value(False, 2) == 0
+
+
+def test_baseline_panel_is_picked_by_label_not_position():
+    """audit 2026-08-05: load_panels drops unloadable picks, and
+    panels[0] then silently promoted the MID-RUN (activated) frame to
+    baseline — every diff, outline and mm² of the tuning session
+    referenced to an activated state, while the footer promised Edge
+    Review parity."""
+    import numpy as np
+    g = np.zeros((4, 4), np.float32)
+    healthy = [{'label': 'baseline', 'idx': 0, 'row': {}, 'gray': g},
+               {'label': 'mid-run', 'idx': 1, 'row': {}, 'gray': g},
+               {'label': 'late', 'idx': 2, 'row': {}, 'gray': g}]
+    assert st.baseline_panel(healthy) is healthy[0]
+    # the failure state: the baseline pick did not load
+    assert st.baseline_panel(healthy[1:]) is None
+    assert st.baseline_panel([]) is None
+
+
+def test_unreadable_baseline_drops_and_is_refused():
+    """End to end on disk: a 0-byte baseline PNG drops out of
+    load_panels, and baseline_panel reports the refusal instead of the
+    old positional promotion of the next (activated) frame."""
+    import csv
+    import tempfile
+    import cv2
+    import numpy as np
+    import shutil
+    import sldea_edge as se
+    d = tempfile.mkdtemp(prefix='tuner_nobase_')
+    try:
+        frames = _os.path.join(d, 'frames')
+        _os.makedirs(frames)
+        cols = ['snapshot', 'step', 'tag', 'nominal_kV', 'frame_file',
+                'active_area_px', 'active_area_mm2', 'notes']
+        rows = []
+        for k, (tag, kv) in enumerate((('baseline', 0.0),
+                                       ('post-ramp', 3.0),
+                                       ('post-ramp', 6.0))):
+            fn = f'SLDEA_s{k:02d}_{kv:05.2f}kV_{tag}.png'
+            cv2.imwrite(_os.path.join(frames, fn),
+                        np.full((60, 80), 120, np.uint8))
+            rows.append({**{c: '' for c in cols}, 'tag': tag,
+                         'nominal_kV': kv, 'frame_file': fn, 'step': k,
+                         'snapshot': k + 1})
+        with open(_os.path.join(d, 'data.csv'), 'w', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            w.writeheader()
+            w.writerows(rows)
+        run = se.load_run(d)
+        picks = st.choose_indices(run['rows'])
+        assert st.baseline_panel(st.load_panels(run, picks)) is not None
+        open(_os.path.join(frames, 'SLDEA_s00_00.00kV_baseline.png'),
+             'wb').close()                       # truncate the baseline
+        panels = st.load_panels(run, picks)
+        assert len(panels) == 2
+        assert st.baseline_panel(panels) is None
+        assert panels[0]['label'] == 'mid-run', \
+            "positional panels[0] would have been the activated frame"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_detect_panels_prefers_the_recorded_manual_anchor():
+    """audit 2026-08-05: the tuner's mm² titles came from its own
+    baseline_disc fit while Edge Review saved from the manual 📏 anchor
+    — the two GUIs disagreed about one run's scale and neither said so.
+    With a recorded anchor, detect_panels reports Edge Review's
+    scale."""
+    import numpy as np
+    import sldea_edge as se
+    yy, xx = np.mgrid[0:240, 0:320]
+    base = np.full((240, 320), 190.0, np.float32)
+    base[(xx - 160) ** 2 + (yy - 120) ** 2 <= 80 * 80] = 165.0
+    img = base.copy()
+    img[(xx - 160) ** 2 + (yy - 120) ** 2 <= 45 * 45] += 35
+    panels = [{'label': 'baseline', 'idx': 0,
+               'row': {'tag': 'baseline'}, 'gray': base},
+              {'label': 'late', 'idx': 1,
+               'row': {'tag': 'post-ramp'}, 'gray': img}]
+    rows = [{'tag': 'baseline', 'nominal_kV': '0'},
+            {'tag': 'post-ramp', 'nominal_kV': '3'}]
+    s = dict(se.DEFAULT_SETTINGS)
+    _r, _c, scale_auto = st.detect_panels(panels, base, s, rows)
+    anchor = {'method': 'manual-calibration', 'diam_px': 200.0,
+              'mm_per_px': 0.08}
+    _r, _c, scale_anch = st.detect_panels(panels, base, s, rows,
+                                          anchor=anchor)
+    assert scale_anch is not None
+    assert abs(scale_anch - s['diam_mm'] / 200.0) < 1e-12, scale_anch
+    assert scale_auto is None or abs(scale_auto - scale_anch) > 1e-9, \
+        "anchor preference is indistinguishable from the auto fit"
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items())
            if k.startswith('test_') and callable(v)]

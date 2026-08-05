@@ -278,10 +278,14 @@ def test_analyze_reports_localization_and_scale_context():
     assert all((p['foil_frac'] or 0.0) == 0.0 for p in d['frames'])
     heads = [h.lower() for _s, h, _det in sd.verdicts(d)]
     assert any('off the electrodes' in h for h in heads), heads
-    # the synthetic baseline holds no resting disc -> refusal must be
-    # reported, not papered over
+    # the synthetic baseline holds no resting disc AND no manual anchor
+    # is recorded -> the refusal must be reported, not papered over —
+    # and worded for the scale-gate era: saved mm² comes from the manual
+    # 📏 anchor, so 'no scale reference' is the honest verdict, not
+    # 'falls back to the first accepted frame' (audit 2026-08-05)
     assert d['baseline_disc'] is None
-    assert any('resting-disc' in h for h in heads), heads
+    assert d.get('scale_anchor') is None
+    assert any('no scale reference' in h for h in heads), heads
     # and the contact sheet leads with the baseline panel
     png = _os.path.join(root, 'cs.png')
     sd.contact_sheet(_os.path.join(root, 'SLDEA_l'), png, count=4)

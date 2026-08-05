@@ -388,7 +388,6 @@ def analyze(rundir, max_frames=24):
     sigma, sigma_src = noise_sigma(base, frames, roi_frac)
     sigma = max(sigma, 0.05)
     ys, xs = _roi(base.shape, roi_frac)
-    tex_base = texture_map(base)
     # where the electrodes are, where the resting disc is, and the paper
     # left between them -- the localization context every per-frame
     # number below is judged against
@@ -404,8 +403,19 @@ def analyze(rundir, max_frames=24):
         raw = cv2.absdiff(fr['gray'], base)
         reg = cv2.absdiff(aligned, base)
         blurred = cv2.GaussianBlur(raw.astype(np.uint8), (k, k), 0)
-        tex = texture_map(fr['gray']) / np.maximum(tex_base, 1e-3)
-        r_roi, g_roi, t_roi = raw[ys, xs], reg[ys, xs], tex[ys, xs]
+        # the DETECTOR's texture-ratio map (se._ratio_small: regularized,
+        # foil+glint neutralized, photometrically normalized) — the one
+        # map wrinkle_ratio is ever compared against. The hand-rolled raw
+        # quotient this replaces read up to 30% higher, with a third of
+        # its top decile on the electrode strips the detector zeroes —
+        # inviting exactly the wrong wrinkle_ratio tuning (audit
+        # 2026-08-05).
+        prep = se.prepared_diff(base, fr['gray'], settings)
+        ratio = se._ratio_small(prep, settings)
+        sh, sw = prep['base_small'].shape
+        t_roi = ratio[prep['y0']:sh - prep['y0'] or sh,
+                      prep['x0']:sw - prep['x0'] or sw]
+        r_roi, g_roi = raw[ys, xs], reg[ys, xs]
         a, b = photometric_fit(base, fr['gray'], (ys, xs))
         ap, _bp = photometric_fit(base, fr['gray'], (ys, xs), mask=paper)
         aff = np.abs((a * base[ys, xs] + b) - fr['gray'][ys, xs])
@@ -427,8 +437,8 @@ def analyze(rundir, max_frames=24):
         alt_best = alt_cands[0] if alt_cands else None
         # the gate and Otsu describe DETECTOR behaviour, so they are read
         # off the diff the detector actually thresholds -- normalized --
-        # rather than the raw one
-        norm = _detector_diff(base, fr['gray'], settings)
+        # rather than the raw one (the same prep as the texture map)
+        norm = prep['sub']
         gate_p99 = float(np.percentile(norm, 99))
         ff = _foil_fraction(best, foil)
         # candidates() audits the winning boundary itself now (the audit
@@ -525,6 +535,10 @@ def analyze(rundir, max_frames=24):
             'foil_pct': round(100.0 * float(foil.mean()), 1)
             if foil is not None else 0.0,
             'baseline_disc': ref_out, 'consistency': consistency,
+            # the anchor Edge Review's Save actually used and recorded
+            # (setup.txt, since 2026-08-05) — the saved mm² comes from
+            # THIS, not from the automatic disc fit above
+            'scale_anchor': se.load_scale_anchor(rundir),
             'sweep_thresholds': SWEEP_T, 'sweeps': sweeps, 'frames': per}
 
 
@@ -660,23 +674,54 @@ def verdicts(d):
                         f"foil across {len(ffs)} frames with a detection."))
 
     if 'baseline_disc' in d:
+        # Since the 2026-08-05 scale gate, Edge Review's saved mm² comes
+        # from the operator's mandatory manual 📏 anchor — the automatic
+        # disc fit here is the CROSS-CHECK, not the anchor. Stating
+        # otherwise sent operators to distrust properly hand-calibrated
+        # runs (audit 2026-08-05).
         ref = d.get('baseline_disc')
-        if ref:
-            out.append(('OK', 'px->mm is anchored on the resting disc',
+        anchor = d.get('scale_anchor')
+        if ref and anchor and anchor.get('mm_per_px'):
+            mism = (100 * abs(ref['diam_px'] - anchor['diam_px'])
+                    / anchor['diam_px'])
+            sev = 'OK' if mism <= 3.0 else 'MED'
+            out.append((sev, 'px->mm: recorded manual anchor'
+                        + ('' if mism <= 3.0
+                           else ' DISAGREES with the auto disc fit'),
+                        f"saved scale {anchor['mm_per_px']:.5f} mm/px from "
+                        f"the recorded manual anchor "
+                        f"({anchor['diam_px']:.0f} px, saved "
+                        f"{anchor.get('saved', '?')}); automatic "
+                        f"cross-check fit {ref['diam_px']:.0f} px "
+                        f"({ref.get('mm_per_px', 0):.5f} mm/px) — "
+                        f"{mism:.1f}% apart in diameter."))
+        elif ref:
+            out.append(('OK', 'Automatic cross-check anchor available '
+                        '(Edge Review saves use the manual 📏 anchor)',
                         f"baseline-disc diam {ref['diam_px']:.0f} px "
                         f"(circ {ref.get('circ', 0):.2f}, fill "
                         f"{ref.get('solidity', 0):.2f}, arc "
                         f"{ref.get('arc_cov', 0):.2f}, conf "
                         f"{ref.get('conf', 0):.2f}) -> "
-                        f"{ref.get('mm_per_px', 0):.5f} mm/px. The blob "
-                        f"trace this replaces read 896-951 px on these "
-                        f"runs -- a 1.5-1.6x diameter error at conf 0.93."))
+                        f"{ref.get('mm_per_px', 0):.5f} mm/px. No manual "
+                        f"anchor is recorded in setup.txt yet (pre-gate "
+                        f"save, or not yet saved)."))
+        elif anchor and anchor.get('mm_per_px'):
+            out.append(('OK', 'px->mm from the recorded manual anchor; '
+                        'automatic cross-check unavailable',
+                        f"saved scale {anchor['mm_per_px']:.5f} mm/px "
+                        f"({anchor['diam_px']:.0f} px, saved "
+                        f"{anchor.get('saved', '?')}); baseline_disc "
+                        f"refused this baseline, so there is no "
+                        f"independent fit to check it against — verify "
+                        f"the anchor by eye on the contact sheet."))
         else:
-            out.append(('MED', 'No trustworthy resting-disc trace',
-                        f"baseline_disc refused this baseline, so mm "
-                        f"figures fall back to the first accepted frame "
-                        f"-- an ACTIVATED region. Treat active_area_mm2 "
-                        f"as uncalibrated until the baseline is fixed."))
+            out.append(('MED', 'No scale reference at all',
+                        f"baseline_disc refused this baseline AND no "
+                        f"manual anchor is recorded in setup.txt. "
+                        f"Edge Review's gate will demand the 📏 clicks; "
+                        f"until a save records them, treat any existing "
+                        f"active_area_mm2 as unverifiable."))
 
     auds = [p.get('audit') for p in per]
     auds = [a for a in auds if a and a.get('bias_px') is not None]
@@ -919,8 +964,10 @@ def report(d):
     A("  sep-I/A/T  separability of the raw / photometry-corrected absdiff")
     A("             and the wrinkle map: 0 = one noise population (no")
     A("             threshold splits it), 1 = two clean ones. Highest wins.")
-    A("  tex    wrinkle-energy ratio at the ROI p90 (1.0 = no texture "
-      "change)")
+    A("  tex    the DETECTOR's texture-ratio map (regularized, foil+")
+    A("         glint neutralized) at the ROI p90 -- the same map the")
+    A("         wrinkle_ratio knob cuts, so the two are comparable")
+    A("         (1.0 = no texture change)")
     A("  foil%  fraction of the detected area lying on the electrode")
     A("         strips -- the localization number; method is the winning")
     A("         candidate tier ('disc-fit' = the ink-edge boundary")
@@ -970,12 +1017,17 @@ def figure(d, png, rundir=None):
         if base is not None and img is not None and base.shape == img.shape:
             ys, xs = _roi(base.shape, d['settings'].get('roi_frac', 0.85))
             a, b = photometric_fit(base, img, (ys, xs))
-            tex = texture_map(img) / np.maximum(texture_map(base), 1e-3)
+            # the DETECTOR's map, same as the 'tex' column — a raw
+            # quotient here drew a panel wrinkle_ratio could not be
+            # compared against (audit 2026-08-05)
+            prep = se.prepared_diff(base, img, d['settings'])
+            tex = se._ratio_small(prep, d['settings'])
             for ax, (m, t) in zip(axs[0], [
                     (cv2.absdiff(img, base), 'raw absdiff'),
                     (np.abs((a * base + b) - img),
                      'absdiff after gain+offset fit'),
-                    (np.clip(tex, 0, 3), 'wrinkle map (texture ratio)')]):
+                    (np.clip(tex, 0, 3),
+                     'wrinkle map (detector texture ratio)')]):
                 ax.imshow(m, cmap='magma')
                 ax.set_title(f"{t}\n{hot['kv']:g} kV", fontsize=9)
                 ax.set_xticks([])

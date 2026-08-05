@@ -11,6 +11,180 @@ measured, the 16 mm anchor closed by the laser-cut mask) are all
 done. **No code task is queued — the next session is an OPERATOR
 session**, with the agent supporting.
 
+## Edge-suite audit round: 28 double-confirmed defects fixed — save/reprocess path made honest (2026-08-05)
+
+**TL;DR:** The 2026-08-05 audit (67 subagents, every finding verified
+twice independently) found the analysis math sound but 28 real defects
+in the save/reprocess path and around the new scale gate — three
+critical. All are fixed on the scale-gate branch with a regression test
+each: one scale per save (a partial re-review can no longer write two
+anchors into one mm² column), unreadable frames refuse instead of
+fabricating "no change", run switching is locked during detection, and
+breakdown branding now retracts as well as brands. Suite: 26/30 Windows
+baseline, all SLDEA suites green (131 SLDEA tests, +25 new).
+
+Observation → decision, in audit priority order:
+
+- **[critical] Partial re-save mixed two absolute scales in one
+  column.** `apply_results` left not-re-reviewed rows untouched; under
+  the per-session manual anchor, Save then wrote the new anchor's mm²
+  on reviewed rows next to the old anchor's on the rest — a 56.1%
+  artificial step on the real-data repro, invisible to breakdown_flags
+  and sldea_plot (both read px). → One scale per save: unreviewed rows
+  keep their px measurement and their mm²/diam are RE-DERIVED from px
+  at this save's scale; a bug-era mm² with no px is blanked, never kept
+  on an unknowable anchor. The Save dialog now says "kept, re-scaled"
+  instead of the false "left blank".
+- **[critical] Unreadable frames laundered into measurement verdicts.**
+  A missing/0-byte/undecodable frame became `cands=[]`, auto-rejected
+  as "no change vs baseline (auto)", never entered the review queue,
+  drew a silently blank card, and Save blanked previously saved values
+  into "rejected (no reliable edge)" — a physical claim about a file
+  that was never opened (155425 row 48 sits in exactly this state).
+  → Unreadable frames are a distinct state end to end: counted
+  separately, kept in the review queue, card shows FRAME UNREADABLE
+  with the filename, saved values survive (re-scaled), and the note
+  says "frame unreadable — kept, not re-measured".
+- **[critical] No baseline ⇒ refuse, don't fabricate.** With the
+  baseline unreadable, `prepared_diff`'s fallback thresholded the raw
+  photograph; every honest channel refused and the Otsu tiers
+  auto-accepted the ROI *background* at conf 0.85–0.90 — 2.74× the true
+  area under a perfectly good manual anchor. → `candidates()` returns
+  nothing without a baseline, and both GUI detect paths refuse with an
+  explicit dialog. The tuner refuses the same way instead of silently
+  promoting the mid-run panel to baseline (`panels[0]` was positional).
+- **[critical] Detect-in-flight run switch cross-contaminated runs.**
+  The Run combobox and Browse… stayed live during a multi-minute
+  detect; the stale worker/poll chain refilled `cands_all`, `base_ref`
+  and the Save button AFTER `_pick_run`'s reset — run A's px areas
+  through run B's anchor. → Run switching is disabled while a worker
+  runs; every worker binds its inputs at start and tags output with a
+  generation token that `_poll_detect` enforces; `_base_ref_pending`
+  resets on every switch and detect.
+- **Scale-gate lockout via setup.txt encoding.** `_diam_recorded` read
+  setup.txt with the locale codec and caught only OSError; one
+  hand-annotated non-ASCII byte raised UnicodeDecodeError mid-dialog-
+  build, publishing a half-built singleton that made every later Detect
+  lift a dead window and return — silently, forever. → Read hardened
+  (utf-8/replace, like load_settings), and `_calibrate_scale` is fail-
+  closed: the singleton handle publishes only when fully built, and a
+  try/finally destroys the window and clears the handle on any raise.
+  `save_settings` and `load_run` got the same encoding treatment
+  (write_back and the label sidecar write UTF-8; load_run decodes
+  utf-8-sig exactly like sldea_plot).
+- **Breakdown branding now retracts, heals, and orders correctly.**
+  (a) `frame_file` was rewritten to a `_BREAKDOWN` name even when the
+  file was missing everywhere — a permanently dangling link (155425
+  row 48; the row auto-blanked on every later save). (b) The CSV-
+  branded/disk-unbranded state short-circuited before any disk check —
+  unrepairable in either direction. (c) Retracted flags left files,
+  links and 'post-breakdown' notes branded forever (P3_5's 35 falsely
+  branded frames). (d) Save renamed frames BEFORE the CSV commit, so a
+  failed write left renamed frames, a stale CSV and a dialog promising
+  a .bak that was never made. → `mark_breakdown_files` is split into
+  plan (rows) + execute (disk) and made symmetric: rows outside the
+  branded zone are UN-branded (files, links, notes — including rows
+  never re-reviewed), `frame_file` only ever points at a name that
+  exists (or is about to), and both mismatch directions self-heal on
+  the next save. save() now commits data.csv (backup + atomic) before
+  any rename; a write failure leaves the run byte-identical with zero
+  files renamed. **155425 row 48 heals itself on its next save** (the
+  flag is terminal-confirmed, so the plain file on disk is renamed
+  forward to match the CSV).
+- **The manual anchor is now recorded, reusable, and checkable.** The
+  mandatory 📏 anchor was a pair of clicks recorded nowhere — two
+  sessions produced different absolute mm² from identical inputs with
+  byte-identical files, and manual- vs auto-anchored runs were
+  indistinguishable. → Save writes a scale-anchor block into setup.txt
+  (diam_px, mm/px, anchor frame, auto cross-check, user, timestamp;
+  atomic, coexists with the settings section). The 📏 dialog shows the
+  recorded anchor and reuses it with P; it also states the click
+  convention (ink-edge HALF-HEIGHT, matching the machine) and is now
+  zoomable (wheel/pan/F) instead of a fixed 0.41× preview. The
+  cross-check got a second tier: status-line ⚠ above 1% diameter (the
+  budget), modal above 3%. The diagnostic and tuner read the recorded
+  anchor and report Edge Review's actual saved scale (the diag verdict
+  no longer claims "px→mm is anchored on the resting disc", which
+  stopped being true the day the gate landed); sldea_plot warns when a
+  multi-run figure mixes recorded-anchor and pre-gate runs.
+- **Hand-traced wrinkle_idx measured like the machine's.** The trace
+  path computed the wrinkle index on the RAW frame; |Laplacian| is
+  linear in gain, so traced rows carried the correct value × the run's
+  photometric gain (20–30% off on the P3 campaign, sign varies) in the
+  same column as normalized machine values — P3_5's traced wash-out
+  rows lost their wrinkle-mode onset annotation to it. → New
+  `se.wrinkle_index` measures on the normalized frame exactly as
+  `candidates()` does; the GUI uses it. An accepted result carrying no
+  wrinkle (e.g. 'resting') now blanks a stale wrinkle_idx instead of
+  keeping the previous pass's. **Follow-up for the operator round:
+  traced rows of the 07-28/07-29 runs carry the raw-frame values on
+  disk; they recompute on the next re-review of those runs.**
+- **norm_bg no longer dies at roi_frac 1.0.** The border-band widths
+  gated ALL photometric normalization; at the tuner slider's own
+  maximum both are 0, silently disabling the affine fit — the residual
+  pedestal auto-accepted a 5.3× outline. Only the legacy scalar needs
+  the band; mode 2 runs at any roi_frac. The tuner also no longer
+  silently upgrades a legacy norm_bg:1 run to 2 at open (the checkbox
+  preserves the run's own mode), so "a run tuned under it reprocesses
+  identically" holds again.
+- **Power mode measures the device, not the instrument.** `power_mW`
+  was |kV × raw µA|: on the −16 µA-idle era that is ~100% instrument
+  zero × the voltage axis (158.7 "mW" at 10 kV for ~0.3 real), and it
+  rank-inverted real dissipation. → Power now uses the run-median-
+  corrected current (same rule as breakdown_flags), labeled as such;
+  runs with <5 parseable µA rows keep the raw product and the caption
+  says so.
+- **Absolute mm² never blends edge conventions.** The per-level mean
+  averaged an outer-toe hand trace with a half-height machine area
+  (+5.2–5.7% definitional gap) into a number belonging to neither, then
+  captioned it "outer toe ±1%" — 11 levels across 6 of 13 real runs.
+  → A mixed level's mean uses the machine member(s) only and plots
+  filled; the tidy CSV gained a `convention` column; the diag's `tex`
+  column and wrinkle-map panel now show the DETECTOR's regularized,
+  foil-neutralized ratio (the map `wrinkle_ratio` actually cuts) rather
+  than a raw quotient reading up to 30% higher off the electrode
+  strips.
+- **GUI truthfulness:** Advanced… Apply now recomputes flags/advisories
+  immediately for post-processing knobs (Save could rename frames on
+  thresholds the operator had just changed away from) and, for
+  detection knobs, invalidates the pass after an explicit confirm.
+  Re-tracing an already-accepted frame no longer impersonates
+  acceptance: the info line, radio D and the card all mark the staged
+  polygon as NOT committed until Enter commits it.
+- **Test gaps the mutation pass exposed, closed:** the gate's per-run
+  re-arm (deleting the reset left everything green), tmp+os.replace
+  atomicity in all three writers (write_back / save_settings /
+  append_label), the save-order fault injection, the 07-23-era
+  14-column save round-trip (write_back now also self-heals unknown
+  columns in front of 'notes' so a non-GUI caller cannot crash
+  mid-save), and detect-state clearing. Suite baseline is **26/30**
+  (PROJECT_HANDOFF updated; was stated 25/29 since #199 added the
+  30th suite).
+
+A second adversarial review pass over the fix diff itself (same day)
+found 12 more issues, all folded in before the PR opened. The two that
+mattered: the un-branding heal was one-directional (a CSV-plain/
+disk-branded orphan — mintable by an interrupted retraction save — had
+no repair path, contradicting the code's own "self-heals in either
+direction"), and Advanced… Apply during an in-flight detect could let
+the still-streaming worker resurrect a just-invalidated pass with
+old-settings candidates (the settings dialog now refuses while a worker
+runs, and the review keys are inert during detection too). Also fixed:
+a processing crash is no longer misreported as a missing file (the
+not-measured reason is tracked per row), an `inf` px cell no longer
+aborts the whole save, data.csv is written utf-8-sig so Excel renders
+it, the rename plan never clobbers when both name twins exist, a
+P-reused anchor keeps its own provenance, the Save dialog announces
+un-brand renames, and the mid-detect regression test was de-vacuumed
+(the two fixture runs now differ in size so stale application is
+observable).
+
+Refuted by the audit's verifiers, for the record: the area-collapse
+corroboration accepting advisory current events is DESIGN (decision-
+logged 2026-08-04, test-pinned), and the "operators click the outer toe
+when calibrating" premise did not survive contact with the project's own
+repeatability data.
+
 ## Scale gate: manual calibration required per run; it now really overrides (2026-08-05)
 
 **TL;DR:** Edge Review's px→mm anchor is now clicked by hand on every

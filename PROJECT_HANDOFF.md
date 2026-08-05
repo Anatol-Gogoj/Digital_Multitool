@@ -1,13 +1,14 @@
 # Project handoff — state as of 2026-08-05
 
-**TL;DR:** v1.0.0 shipped with an illustrated manual; the breakdown
-detector was rebuilt around current (not visuals) and ground-truth
-validated; the repo is now `Anatol-Gogoj/Digital_Multitool` with **zero
-stale pointers anywhere**; repo + data live under
-`C:\Users\Anatol Gogoj\Desktop\Digital Multitool\` (umbrella folder).
-Batch-QA: 5 of 13 runs reviewed and passed. Priorities are designated in
-**Next on the docket** below. Durable conventions live in `CLAUDE.md`;
-this file is the snapshot — update it at milestones.
+**TL;DR:** Big day 2026-08-05: the cross-run plot tool (#199), the Edge
+Review scale gate, and **all 28 double-confirmed findings of a 67-agent
+correctness audit** merged to main; the bench fleet is deployed at that
+tip (v1.0.0+4f5f213, confirmed on the RHEL bench). Batch-QA sits at 5 of
+13 runs reviewed. **The designated priority is the current-based
+breakdown-detection thread** — live watchdog + fast scope capture
+(#189/#157/#159) — laid out first in the docket below. Durable
+conventions live in `CLAUDE.md`; this file is the snapshot — update it
+at milestones.
 
 ## Code state (main)
 
@@ -18,10 +19,23 @@ this file is the snapshot — update it at milestones.
   `.gitignore` hardening; **#201** deep clean (4 historical probes →
   `bench/archive/`, stale docs fixed); **#204** deploy-script URLs for
   the rename; **#208** lab installer versioned (bench-authored); **#209**
-  rename-complete handoff sync.
-- **Manuals are one release behind the tooltips** — #195 changed watchdog
-  and Edge Review settings text; per the release checklist the manuals
-  regenerate at the next version bump (pipeline: `docs/manual-src/`).
+  rename-complete handoff sync; **#210** docket designation; **#211**
+  `sldea_plot.py` cross-run auto-plot tool (#199 v1; issue stays open as
+  the wishlist tracker); **#214** Edge Review scale gate (manual per-run
+  calibration, really overrides at Save; supersedes #212, which GitHub
+  auto-closed when its stacked base branch was deleted); **#213** the
+  edge-suite audit round — 28 double-confirmed + 12 review-pass findings
+  fixed (67-agent Opus audit, dual-verified; all runtime gates green and
+  the real 13-run batch revalidated: breakdown ground truth exact, scale
+  chain self-consistent, 0 sanity violations in 454 rows). Dated entries
+  for all of it in `SLDEA_HANDOFF.md`.
+- **Bench fleet deployed + confirmed at main tip** (v1.0.0+4f5f213,
+  2026-08-05): `Tools → Update Software…` / `update_software.sh` ran and
+  the RHEL bench footer was verified by Anatol.
+- **Manuals are behind the tooltips by two changes** — #195's watchdog/
+  settings text AND the scale-gate/calibrate flow (source already updated
+  in `docs/manual-src/content.json`); per the release checklist both
+  manuals regenerate at the next version bump. **Do the bump soon.**
 - Suite baseline: `run_tests.py` → **26/30** on the Windows lab PC (the 4
   failures — test_arb_bin, test_camera_controls, test_presets_path,
   test_tk_fontfix — are environmental and documented; all SLDEA suites
@@ -33,10 +47,13 @@ this file is the snapshot — update it at milestones.
 Canonical home: `C:\Users\Anatol Gogoj\Desktop\Digital Multitool\SLDEA_data\Upload 20260804\`
 (moved from D:\Downloads 2026-08-05; `SCPI_SLDEA_DIR` points there) — contains
 `HANDOFF.md` (the campaign runbook), `SCORECARD.md` (per-run verdicts),
-`PROVENANCE.md` (consolidation ledger: every source path, what is now
-retire-able — the 555 MB zip, OneDrive and loose copies),
-`compare_errorbars.py` (top level), `_baselines\`, `_analysis\` (plots),
-and the 13 runs (nested in `SLDEA_data (1)\`).
+`PROVENANCE.md` (consolidation ledger, retirement executed 2026-08-05 —
+recycled copies pending a Recycle Bin empty), `compare_errorbars.py`
+(top level; §3b text comparison), `_baselines\`, `_analysis\` (plots),
+`_diag_history\` (salvaged gen-1/gen-2 diag snapshots), and the 13 runs
+(nested in `SLDEA_data (1)\`). Cross-run figures now come from the
+repo's `sldea_plot.py` (area/A-A₀, pre/post, current, power modes) —
+stop hand-rolling matplotlib.
 
 - **Reviewed (5):** P3_1 (prior), P3_3, DOT_P3_1 passed clean; P3_5 and
   P3_6 are **conditional passes** (audit bias slightly out of gate —
@@ -53,46 +70,56 @@ and the 13 runs (nested in `SLDEA_data (1)\`).
   verify on next bench session): scope V_Out clipping killed `measured_kV`
   from 4.25 kV in the P3_5 / P3_6 / 104531 runs; I_Out offset ≈ −16 µA.
 
-## Next on the docket (designated 2026-08-05)
+## Next on the docket (re-designated 2026-08-05: breakdown detection first)
 
-**Immediate next actions:**
+**PRIORITY THREAD — current-based breakdown detection.** The post-hoc
+detector is done (#158 CLOSED: step-change-from-median shipped in #195,
+ground-truthed twice). What remains is the LIVE half — the watchdog that
+missed 233451's −207 µA staircase in real time — tracked in **#189**
+(trip logic + fast scope capture), which also carries **#157** (≥1 Hz
+logging) and closes out **#159** (kV telemetry dropout, pre-run check
+shipped, live verify pending). Staged per #189's own increment plan:
 
-1. **(Anatol, ~15 min)** the campaign **control round** traces — it
-   gates every remaining verdict (optics moved between sessions). Then
-   the **P3_2** review; agent runs `compare_errorbars.py` after each.
-2. **#199 auto-plot tool: BUILT 2026-08-05** — `sldea_plot.py` (PR
-   pending merge): area+A/A₀ panels, pre/post view, current/power
-   modes, Tol bright, 300 dpi PNG + tidy CSV; breakdown X marks
-   recompute `breakdown_flags` (P3_5's stale brand correctly ignored;
-   dated entry in `SLDEA_HANDOFF.md`). Validated on all 6 processed +
-   4 breakdown-candidate runs.
-3. **(Anatol)** reviews of the two 07-23 **breakdown runs** (152205,
-   233451) — first real exercise of the new confirmed-breakdown review
-   path.
+1. **(agent, desk, buildable now)** #189 increment (2): append every
+   ~2 Hz watchdog sample (I_Out + a kV read) to a sidecar CSV next to
+   data.csv — the samples are already being read and discarded, so no
+   new SCPI path is involved; it implements the core of #157 and gives
+   the step-change detector dense live data. HV-safety path → the
+   adversarial review gate applies before the PR opens; bench smoke on
+   the next visit before it is trusted.
+2. **(bench, first item of the visit)** fix the rig fault then verify
+   #195 live: recenter the scope's V_Out window and I_Out offset
+   (≈ −16 µA), run one live SLDEA ramp, confirm the pre-run window
+   check + deviation watchdog behave → **close #159**.
+3. **(bench, same visit)** #189 increments (1) then (3)+(4): switch the
+   watchdog read MEAN → MAXIMUM/PK2PK (new SCPI token — bench-first per
+   convention, streak semantics re-tuned for peak noise), then the real
+   fix: trigger-armed single-shot capture of I_Out + post-trip
+   `get_waveform()` forensics. Together these finish **#157/#189**.
+4. **(Anatol, desk)** the two 07-23 **breakdown-run reviews** (152205,
+   233451) — first real exercise of the confirmed-breakdown review path
+   on the audit-fixed save chain; `sldea_plot --mode current` previews
+   both events. Agent runs `compare_errorbars.py` after each save.
 
-**Next bench session (bundle everything into one visit):**
+**Campaign items (unchanged gates):**
 
-- **Fix the rig fault, then verify #195 live:** recenter the scope's
-  V_Out window and I_Out offset (≈ −16 µA), run one live SLDEA ramp,
-  confirm the pre-run window check + deviation watchdog behave →
-  **close #158 and #159** (both are code-complete in #195, pending this
-  verification).
-- **#189** scope-side fast current capture experiments (MEAS slots,
-  Hi-Res, single-shot trigger, CURVE logging) — this is also the path
-  that finishes **#157** (≥1 Hz logging).
-- **#206** remaining criteria: deduplicate the heredoc-vs-`deploy/`
-  script copies, then re-run `install_lab_launchers.sh` as the
-  idempotence check.
-- **#193/#194** experiments: try Stabilize exposure first; one-device
-  fiducial contrast-ring validation — unblocks P3_7's review and may
-  shrink #198's niche.
-- **104531 device decision:** physically test it (barely actuated —
-  dead device, or HV not reaching the sample?).
+- **(Anatol, ~15 min)** the **control round** traces — still gates every
+  remaining absolute-mm² verdict (optics moved between sessions). Then
+  the **P3_2** review (eyeball mid-ramp overlays first, +0.7 px flag).
+- **P3_6 holdout frame** (`SLDEA_s31_07.75kV_pre-ramp`): accept or
+  hand-trace → upgrades the conditional pass. Safe now — the #213
+  partial-re-save fix landed and merged.
 
-**Desk backlog (after the above):** #197 tuner run picker · #200
-connection takeover · #198 ML experiment (after the #194 verdict) ·
-next release bump regenerates both manuals (tooltip text drifted in
-#195).
+**Rest of the bench visit:** #206 script dedup + installer idempotence
+re-run · #193/#194 exposure/contrast-ring experiments (unblocks P3_7,
+may shrink #198) · physically test the 104531 device (dead device vs HV
+not reaching the sample).
+
+**Desk backlog (after the above):** **release bump** (fleet already on
+main tip, but the bump regenerates both manuals and stamps the fleet
+v1.0.1) · #215 circle-fit calibration ×3 · #216 Edge Review UX (primary
+Detect, tooltips) · #197 tuner run picker · #200 connection takeover ·
+#198 ML experiment (after the #194 verdict).
 
 **Housekeeping: DONE 2026-08-05** (Anatol-authorized). All 12 DDL-side
 `PROVENANCE.md` items verified then moved to the **Recycle Bin**
@@ -133,16 +160,24 @@ open decisions below.
 
 ## Active issues roster (curated subset — full list on GitHub)
 
-#32 GUI framework restyle (demos/ tied) · #189 scope-side fast current
-sampling — MEAS slots, Hi-Res, single-shot trigger, CURVE logging (needs
-a bench session; the SW-side half shipped in #195) · #193 camera manual
-exposure (try Stabilize first; C920/ELP/machine-vision if firmware wins)
-· #194 fiducial contrast ring for low-CNT devices (one-device validation
-planned; DOT-dot "evidence" was retracted — DOT is an acronym, different
-device) · #197 tuner run picker · #198 ML edge-channel experiment (~93
-labels and growing; do #194 first — it may shrink the niche) · #199
-run-data auto-plot tool (full toggle wishlist in the issue; Tol bright)
-· #200 cross-session instrument-connection takeover with warning.
+**The priority thread:** #189 live breakdown watchdog + fast scope
+capture (increment plan in the issue: sample logging → MEAN→MAXIMUM →
+trigger-armed single-shot + waveform forensics) · #157 ≥1 Hz kV/µA
+logging (implemented by #189's increment 2) · #159 measured_kV dropout
+(pre-run check shipped in #195; live verify pending). **#158 is CLOSED**
+(post-hoc step-change detection shipped + ground-truthed).
+
+**The rest:** #32 GUI framework restyle (demos/ tied) · #193 camera
+manual exposure (try Stabilize first; C920/ELP/machine-vision if
+firmware wins) · #194 fiducial contrast ring for low-CNT devices
+(one-device validation planned; DOT-dot "evidence" was retracted — DOT
+is an acronym, different device) · #197 tuner run picker · #198 ML
+edge-channel experiment (~93 labels and growing; do #194 first — it may
+shrink the niche) · #199 run-data auto-plot tool (v1 shipped in #211;
+issue stays open as the wishlist tracker) · #200 cross-session
+instrument-connection takeover with warning · #206 deploy-script
+dedup/idempotence · #215 circle-fit calibration ×3 (scale gate v2) ·
+#216 Edge Review UX (primary Detect, tooltips, flow).
 
 ## This machine (Windows lab/analysis PC)
 

@@ -80,7 +80,7 @@ for _c in content["Webcam"]["controls"]:
             "cap_0003_1p9V_….png", "cap_0003_20260728-141230_1p9V.png")
 
 content["Companion tools"]["purpose"] = (
-    "Three stand-alone programs for recorded SLDEA runs — they touch no "
+    "Four stand-alone programs for recorded SLDEA runs — they touch no "
     "instruments, so any PC with a copy of the run data works.")
 # --------------------------------------------------------------------------
 
@@ -200,7 +200,7 @@ body = []
 body.append(f"""
 <header class="hero">
   <div class="hero-text">
-    <p class="eyebrow">SCPI_Control · v{__version__}</p>
+    <p class="eyebrow">Digital Multitool · v{__version__}</p>
     <h1>Digital Multitool</h1>
     <p class="sub">User manual for the lab bench-control app — one window for the
     LCR meter, oscilloscope, signal generator, DC supply, DMM, data logging,
@@ -288,6 +288,12 @@ body.append(f"""
       <code>Tune_SLDEA_Windows.bat /diag</code> writes
       <code>sldea_diag.txt/.json/.png</code> into the run folder and changes
       nothing. No window needed.</p></div>
+    <div class="tool"><h4>📊 Plot tool</h4>
+      <p>Puts several finished runs on one figure:
+      <code>python sldea_plot.py RUN1 RUN2 --mode area</code>. Writes a
+      300 dpi PNG <i>and</i> the tidy CSV behind it, so any figure can be
+      traced back to its numbers. <code>--mode current</code> works on raw
+      runs, before anyone has reviewed a frame.</p></div>
   </div>
   <h3 class="subh">Edge Review — reviewing a run</h3>
   {fig('40_edge_review', 'SLDEA Edge Review on a real bench run — annotated')}
@@ -322,6 +328,18 @@ body.append(f"""
   {fig('31_diag_selftest', 'Diagnostic self-test sheet', 'wide')}
   <p class="cap">The diagnostic's verdict panels — run <code>--selftest</code> any time to check the
   stack without data.</p>
+  <h3 class="subh">Comparing finished runs — the plot tool</h3>
+  {fig('32_plot_selftest', 'Two runs on one figure: active area and expansion vs voltage', 'wide')}
+  <p class="cap">The plot tool's own self-test figure. Left: active area against voltage. Right: the
+  same curves normalised to each run's baseline, so runs that started at different sizes can be
+  compared. Shaded bands are the measurement uncertainty; open markers mean a hand-traced boundary;
+  ✕ marks a current-confirmed breakdown.</p>
+  <div class="use"><h4>Putting runs on one figure</h4><ol>
+    <li>Review the runs first for <code>--mode area</code> — it plots measured areas, so it skips runs nobody has reviewed. <code>--mode current</code> and <code>--mode power</code> need no review at all.</li>
+    <li><code>python sldea_plot.py RUN1 RUN2 --mode area --out ~/figures</code> — each RUN is a run folder, a parent full of runs, or a bench shortcut, exactly as for the tuner.</li>
+    <li>You get a PNG and a CSV of the same name. Keep them together: the CSV is the figure's evidence.</li>
+    <li>Breakdown ✕ marks are recomputed from the recorded currents every time, never read off the frame filenames — a saved brand the currents do not support is reported as stale rather than drawn.</li>
+  </ol></div>
   <div class="use"><h4>Typical tuning session</h4><ol>
   {"".join(f"<li>{esc(strip_num(s))}</li>" for s in ct["workflow"])}
   </ol></div>

@@ -130,4 +130,95 @@ Launch: `.venv/bin/python gui.py`
 
 ---
 
+## M. SLDEA telemetry sidecar — DRY-RUN smoke (PR #218, issues #157/#189)
+
+> **No high voltage is involved in this section.** A dry run never
+> commands the signal generator, so the app puts no control voltage into
+> the Trek. Leave the HV off. This is the only thing gating whether
+> `telemetry.csv` can be trusted, and it needs no HV training to run.
+
+**Setup:** the **Linux** bench PC (instrument control does not work on
+Windows), oscilloscope connected and powered, Trek/HV off. ~20 min.
+Launch: `.venv/bin/python gui.py`
+
+1. **Oscilloscope** tab shows **Connected** — [ ] if not, stop here; without a scope there is no telemetry to test
+2. **SLDEA Test** tab → find the **📈 Telemetry log (telemetry.csv)** box
+   - [ ] **Enabled** is ticked and **Rate (Hz)** reads `2`
+3. Make the run short so this takes minutes, not an hour: **Start 0**, **End 1**, **Step 0.5**, **Ramp 2**, **Landing 10**
+   - [ ] the summary line under the fields shows a total well under two minutes
+4. **The `DRY RUN — HV OFF` checkbox stays TICKED.** The run button must read **▶ Run (DRY)** in amber
+   - [ ] if it reads **▶ Run — LIVE HV** in red, re-tick the box — do not continue
+5. Press **▶ Run (DRY)** and let it finish. The run log's first line is `run dir: …` — that folder is what everything below refers to
+6. Open the run folder:
+   - [ ] `telemetry.csv` sits beside `data.csv`
+   - [ ] its first line is exactly `t_s,timestamp,nominal_kV,measured_kV,measured_uA,v_status,i_status,event`
+   - [ ] rows land about twice a second, and nearly all have a `measured_uA`
+   - [ ] `measured_kV` is filled on roughly every **other** row, blank with `v_status=skipped` in between — **this is by design**, not a fault
+   - [ ] there is one row per photo whose `event` names the frame, e.g. `snap s01 post-ramp SLDEA_s01_…png`
+   - [ ] `setup.txt` contains a `--- Telemetry ---` section
+   - [ ] `data.csv` still has its usual 15 columns, unchanged from any earlier run
+7. In the run log, find the last line starting `telemetry:` — it reads something like
+   `telemetry: 118 samples, 1.94 Hz achieved (target 2), max gap 0.6 s, 59 with kV -> telemetry.csv`
+   - [ ] the achieved rate is **1.4 Hz or better**
+   - [ ] the line does **not** contain `SLOW DISK`
+   - [ ] there is no `⚠ telemetry ran below its 2 Hz target` warning after it
+
+**If something is off, this is the interesting part — write down what you
+saw rather than retrying:**
+
+- `SLOW DISK (… s worst write)` → the output directory is on the lab
+  share and it stalled. **Note the worst-write number** — that is exactly
+  the case desk testing cannot reproduce, and the reason the throttle
+  exists. Worth re-running once with the output dir set to local disk to
+  confirm that is the cause.
+- achieved rate below 1.4 Hz → note the number and the `max gap`.
+- no `telemetry.csv` at all → the run log will say why
+  (`telemetry log could not be opened …` or `NO SCOPE`).
+
+**Send back:** `run.log`, `data.csv`, `telemetry.csv` and `setup.txt` from
+the run folder. Skip `frames/` — the four files are a few kB. The run
+folder can be deleted afterwards; it is a rehearsal, not data.
+
+## N. SLDEA watchdog probe — the numbers #189 is blocked on (no HV)
+
+> **Scope only, HV off.** The script never opens the signal generator. A
+> quiet 0 kV rig is the condition being measured — a live one would
+> invalidate the result.
+
+```
+.venv/bin/python bench/test_sldea_watchdog_probe.py --ich 3 --vch 2
+```
+
+- [ ] adjust `--ich` / `--vch` if the Trek monitors are on other channels (they are whatever the SLDEA tab's *I_Out / V_Out scope CH* fields say)
+- [ ] it prints three sections and writes `sldea_watchdog_probe.txt` + `.json`
+- [ ] **send both files back** — section A decides the trip level for the peak-reading watchdog, section C decides how much driver work increment (3) needs
+
+Runs in about a minute and changes nothing on the scope. `--selftest`
+runs it against a synthetic scope with no instruments attached, if you
+want to see the output shape first.
+
+## O. SLDEA live-run verification — ⚡ REQUIRES HV ⚡ (#159, #195, PR #218)
+
+> **This section energizes the Trek to real kV.** Only for someone
+> trained and authorized on that rig. Two rules: instrument control is
+> **Linux-bench-only**, and a live run must be ended with **■ Abort** —
+> closing the app only attempts a best-effort ramp.
+
+This closes #159 and finishes the telemetry smoke. Sections M and N do
+not depend on it and should be done first.
+
+1. Same short profile as §M, but untick DRY RUN → button reads **▶ Run — LIVE HV** (red)
+2. The **scope monitor check** runs first. If it reports a problem it offers **"Fix it automatically"**
+   - [ ] take the automatic fix — it sets scale, position, attenuation and coupling on both monitor channels
+   - [ ] note what the dialog said it was fixing (this is the #159 evidence)
+3. Confirm the **Energize HV?** prompt, then watch the run log
+   - [ ] a `watchdog baseline … µA` line appears before the ramp
+   - [ ] `measured_kV` in `data.csv` tracks `nominal_kV` for the **whole** ramp — no blank tail (that was the 07-29 dropout)
+4. **■ Abort** partway through
+   - [ ] the ramp goes to 0 promptly and the log says `aborted`
+   - [ ] `telemetry.csv` is complete up to the abort
+5. If anything trips the watchdog, keep everything — the run folder is then the first live-recorded breakdown.
+
+---
+
 **Pass =** every box ticked. Anything off: note section letter + what the applied readout / front panel / scope showed.

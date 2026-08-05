@@ -3126,9 +3126,20 @@ LOGGING:
 
     def _sldea_open_tuner(self, rundir):
         """Launch the live parameter tuner (its own process). rundir=None
-        resolves the newest run under the output dir HERE — passing the
-        parent dir made the tuner exit code 2 invisibly, so the button
-        never worked (audit 2026-07-25)."""
+        resolves the output dir HERE — passing the parent dir straight
+        through made the tuner exit code 2 invisibly, so the button never
+        worked (audit 2026-07-25).
+
+        Resolution goes through `resolve_run`, NOT `newest_run`: the
+        latter only inspects SUB-directories, so with the output dir set
+        to a run folder itself — the obvious thing to do while working on
+        one run — the button reported "no finished runs (data.csv)" about
+        a directory with data.csv sitting in it (bench 2026-08-05).
+        `resolve_run` is the shared resolver the CLI and the Windows
+        launcher already use, and it accepts a run dir, a parent full of
+        runs, or a bench shortcut. Tuning has never required a prior
+        detection pass; the resolver was the only thing saying otherwise.
+        """
         if not self._sldea_tuner_confirmed():
             return
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -3138,13 +3149,16 @@ LOGGING:
             parent = self.sldea_outdir.get()
             try:
                 import sldea_tuner as _st
-                target = _st._newest_run(parent)
+                target = _st.resolve_run(parent)
             except Exception:
                 target = None
             if not target:
                 messagebox.showinfo(
                     "Edge tuner",
-                    f"No finished runs (data.csv) found under\n{parent}")
+                    f"No run found at or under\n{parent}\n\n"
+                    f"A run is any folder holding data.csv (or data1.csv, "
+                    f"data2.csv …) and a frames/ folder. Point the output "
+                    f"dir at the run itself or at a folder of runs.")
                 return
         try:
             subprocess.Popen([sys.executable, script, target],

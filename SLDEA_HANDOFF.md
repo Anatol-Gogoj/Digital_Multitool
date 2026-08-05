@@ -13,6 +13,66 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## Electrode mask default 220 → 255, and the Tune button's bad resolver (2026-08-05)
+
+**TL;DR:** Two bench-reported bugs. The electrode mask masks pixels that
+are BRIGHT, which is the wrong tool for a carbon-black electrode — at the
+old 220 default it was rejecting the wrong things and breaking edge
+detection outright, so the default is now 255 (effectively off). And the
+SLDEA tab's **🎚 Tune params…** button said "no finished runs (data.csv)"
+about a folder with `data.csv` sitting in it; it was using the wrong
+resolver. Tuning has never needed a prior detection pass.
+
+Observation → decision:
+
+- **Electrode mask, bench observation 2026-08-05.** With a pitch-black
+  (carbon black) electrode, `electrode_lum = 220` breaks edge detection.
+  The mask rule is `reject |= baseline_px >= electrode_lum`, i.e. it
+  targets BRIGHT contaminants — copper strips and foil glint, which is
+  what the 220 default was tuned for. A carbon-black electrode is the
+  *darkest* thing in frame, so brightness masking cannot find it, and at
+  220 it rejects whatever else is bright (paper, backing, glare) instead.
+  → **Default raised to 255**, which is conservative-to-the-point-of-off.
+  Reported as making the edges work normally; **lighter values are
+  untested on that device.**
+- **The cost, measured rather than assumed.** `electrode_lum` is also
+  used by the resting-disc fit, and there a bright electrode strip is
+  exactly what needs rejecting: with the mask off, the strip's own edge
+  is a strong dark→light step and `baseline_disc` **fails to fit** on a
+  bright-electrode baseline. Failing is the safe direction — since the
+  #214 scale gate the disc fit is the px→mm **cross-check**, not the
+  anchor (the anchor is the operator's manual calibration), so a missing
+  fit costs a cross-check, not a measurement. **But a bright/copper
+  electrode run now needs `electrode_lum ≈ 220` set in the tuner to get
+  its cross-check back.** Pinned by
+  `test_electrode_mask_default_is_a_device_class_tradeoff`.
+- **Only untuned runs move.** Per-run values live in that run's
+  `setup.txt` and still win, so nothing already tuned or reviewed
+  changes. The default only reaches runs nobody has tuned.
+- **What is deliberately NOT claimed.** The gain side — that 255 makes
+  detection work on the dark-electrode device — is a bench observation
+  and is not asserted by any test. It was not reproducible on synthetic
+  frames, and a test pretending otherwise would be the kind of
+  measurement that lies. Treat it as reported-and-plausible until a run
+  from that device goes through review.
+- **Two hardcoded `220` fallbacks removed.** The disc-fit path had
+  `settings.get('electrode_lum', 220) or 220` in two places, so a caller
+  omitting the key silently got the OLD default no matter what
+  `DEFAULT_SETTINGS` said. Both now read `DEFAULT_SETTINGS`, and a test
+  fails if a literal `220` fallback comes back.
+- **The Tune button.** `gui.py` resolved its target with
+  `sldea_tuner._newest_run`, which only inspects SUB-directories — so
+  with the output dir pointed at a run folder (the obvious thing to do
+  while working on one run) it found nothing and reported "No finished
+  runs (data.csv) found under …" about a directory containing exactly
+  that. → It now uses `resolve_run`, the shared resolver the CLI and the
+  Windows launcher already use, which accepts a run folder, a parent full
+  of runs, or a bench shortcut. `sldea_edge.resolve_run`'s own docstring
+  says it exists so "the three cannot disagree about what a given
+  argument means" — the app's Tune button was the one caller not using
+  it. The correlation with "no prior edge detection" was incidental:
+  nothing in the tuner ever required a detection pass.
+
 ## The diagnostic crashed on its own report text again (2026-08-05)
 
 **TL;DR:** `sldea_diag.py --selftest` died on the Windows analysis PC

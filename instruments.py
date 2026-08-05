@@ -21,7 +21,7 @@ than one unit of the same model is connected):
     lcr = BK894(resource='USB0::1137::10279::SOMESERIAL::0::INSTR')
 
 The DC power supply behind the CP2102 USB-UART bridge uses serial transport
-via pyserial (NOT USB-TMC); see SerialDCSupply below.
+via pyserial (NOT USB-TMC); see BK9174B below.
 """
 import re
 import time

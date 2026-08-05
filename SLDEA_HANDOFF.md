@@ -8,8 +8,175 @@ windows (#176), the review-card fixes #178/#179, one settings path
 this label set, validated in every stratum), the resting-refit, and
 the research-facing error budget (`SLDEA_MEASUREMENT.md`, every term
 measured, the 16 mm anchor closed by the laser-cut mask) are all
-done. **No code task is queued — the next session is an OPERATOR
-session**, with the agent supporting.
+done. That was true of the DETECTION side and still is; the live
+capture side has moved since (breakdown detection 2026-08-04, the
+telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
+docket** — read it, not this line, for what is queued.
+
+## Live telemetry sidecar — the watchdog's 2 Hz samples are written down (2026-08-05)
+
+**TL;DR:** Every live run has been measuring the Trek current twice a
+second and throwing all of it away, so a breakdown could only ever be
+dated to the frame it happened to land next to. Those samples now go
+into `telemetry.csv` beside `data.csv`, with a kV read at ≤1 Hz on top.
+`data.csv` and every reader of it are untouched. This is #189's
+increment (2) and it implements #157. **Desk work: tested against a
+fake scope, NOT bench-verified** — the first live run smoke-tests it,
+and until then nothing depends on the file.
+
+Observation → decision:
+
+- **The samples already existed.** The run loop reads I_Out at ~2 Hz for
+  the breakdown watchdog and hands the value to `watchdog.update()`,
+  which returns a bool; the reading itself is dropped on the floor. A
+  40-step run therefore recorded ~80 electrical points (two per landing)
+  over an hour, and the 07-23 233451 staircase — a −207 µA excursion —
+  had to be reconstructed from frames. → The samples are appended to a
+  SIDECAR file. Separate file, not new `data.csv` columns: `data.csv` is
+  one row per frame and every consumer (`load_run`, Edge Review, the
+  tuner, `sldea_diag`, `sldea_plot`) assumes that. `sldea_edge.run_csv`
+  matches `^data(\d*)\.csv$`, so the sidecar can never be mistaken for
+  the run CSV — pinned by a test.
+- **One scope read per tick, not two.** Telemetry rides the watchdog's
+  existing read rather than taking its own. When the watchdog is armed
+  the monitor cadence stays exactly 0.5 s: a logging feature does not
+  get to re-time a bench-validated safety sampler (its confirm-streak
+  semantics are tuned to that cadence). Telemetry decimates off the
+  tick, so the current rows are literally free. The rate is capped at
+  **2 Hz** — anything faster is new instrument duty cycle inside the
+  live loop, which is a bench decision, not a desk one.
+- **kV is not free, so it is sub-sampled.** A V_Out read is a second
+  `MEASUREMENT:IMMED` triple under the instrument lock (the lock is held
+  across TYPE/SOURCE/VALUE? because the scope's measurement state is
+  global). It is taken at most every 1 s; `nominal_kV` — the exact
+  commanded voltage, free from `p.kv_at(t)` — is on every row, so the
+  intermediate rows are not blind, they are just not independently
+  measured.
+- **A blank cell must say why it is blank.** Each row carries
+  `i_status` / `v_status`: `ok`, `offscreen` (the Tek 9.9E37 sentinel —
+  clipped off the visible window), `invalid` (unparseable reply),
+  `error` (the read raised) or `skipped` (not sampled this row). The
+  whole 07-29 `measured_kV` dropout investigation (#159) was ambiguous
+  precisely because an empty cell recorded no reason. Unreadable
+  samples still get a ROW — the gap in the record is the evidence that
+  monitoring was lost, and silently omitting it is the same bug in a
+  new place.
+- **Telemetry is a record, not a safety device, and the code says so in
+  that order.** In a tick the watchdog decides FIRST and the telemetry
+  row is written after, so a trip is never delayed by a logging
+  round-trip; on trip, an event row is written from the very reading
+  that tripped (the frame capture that follows takes hundreds of ms and
+  a fresh read, so its row is a different, later instant). The writer
+  never raises into the run loop — a full disk or a yanked USB stick
+  sets a flag, logs once and stops the file; it does not touch the ramp
+  or the abort. The file closes AFTER the SG is zeroed.
+- **Same sign convention as `data.csv`.** Values are Trek-polarity
+  corrected on both monitors (D5 2026-08-04), so the dense trace and the
+  snapshot rows are directly comparable. Note the watchdog itself still
+  decides on the RAW reading — its rule is deviation/absolute, so
+  polarity cannot change a verdict, but the two numbers are written from
+  the same sample and would differ in sign on an inverted run.
+- **The achieved rate is reported, not assumed.** The run log ends with
+  `telemetry: N samples, X.XX Hz achieved (target 2), max gap …`, and a
+  run below 80 % of target says so explicitly — a sparse file must not
+  be readable as quiet current. #157's acceptance asked for exactly
+  this.
+- **Snapshots are marked in the stream.** Each capture writes an event
+  row (no extra scope traffic — it reuses the readings it just took)
+  naming the frame file, so the dense trace lines up with the frames
+  without matching on timestamps.
+
+**Adversarial-review hardening (HV-safety path, per `CLAUDE.md`).** Two
+review rounds; six real defects, each fixed with a test. The first three
+came from the design/impact pass:
+
+- **A stalled flush would have made the ramp-down wait on the file
+  system.** The loop that writes telemetry is the same loop that services
+  ■ Abort, and the bench's default output directory is a network share
+  (`sldea_edge` already carries a "NAS hiccup mid-write" comment). Going
+  from one flush per snapshot to two a second raised that exposure ~100×.
+  → Each write is timed and a slow directory drops to periodic flushing.
+- **A failed log kept the scope busy for nobody.** With the watchdog off,
+  the tick fired on `tel is not None` — so after the file gave up, the
+  run still spent three locked round-trips every tick, contending with
+  the Data Logging tab. → The gate checks `not tel.failed`.
+- **Event-row times were skewed by the camera grab.** A snapshot's row
+  used the tick that scheduled it while its timestamp came from after a
+  multi-hundred-ms frame capture. → `t_s` is now measured at the scope
+  read itself, so the dense trace and the frames line up on either key.
+
+The second round (five lenses, every finding independently refuted or
+confirmed — 4 of 20 survived) found three more, all confirmed by
+measurement against the real runner, not by reading:
+
+- **The slow-share throttle was inert in exactly the regime it exists
+  for.** A fixed 1 s flush window has already expired by the time the
+  next row arrives if a single write costs ≥1 s, so every row flushed
+  anyway and the monitor tick tracked the share 1:1 — 0.5 s → 3.0 s at a
+  3 s/flush share, which stretches a watchdog trip from ~3 s to up to 6 s
+  of sustained overcurrent at 10 kV. → The window is sized to CLEAR the
+  worst write seen (`flush_period_s()`, 4× `max_write_s`), and the run
+  log reports the window actually in force instead of a constant it was
+  not honouring. Measured: mean tick gap at a 3 s share 3.10 s → 0.73 s.
+- **The breakdown path blocked on two writes with the HV still up.** The
+  trip row and the capture row were both flushed between "ramping to 0"
+  and the SG actually reaching 0 V: +0.6 s / +2.0 s / +4.0 s of arcing at
+  0.6 / 1.0 / 2.0 s per flush, which can outlive the ~3 s the app-close
+  path allows the worker before it cuts outputs itself. → `hold_flush` is
+  set the moment the trip fires: the rows are still written (they are the
+  record) but nothing waits on the file system until `close()`, which
+  runs after the SG is zeroed. Marginal delay measured back to ~0.
+- **A snapshot row could claim `v_status=ok` beside a blank
+  `measured_kV`.** The two `measure_raw` calls are separate lock
+  acquisitions; a link that answered V_Out and then timed out on I_Out
+  fell into the shared handler, which discarded the good kV while `vst`
+  kept saying `ok` — a positive denial that anything was wrong with the
+  channel whose cell was empty, i.e. the exact #159 ambiguity this column
+  was added to end. → Each reading is converted straight after its own
+  read. `data.csv` gets the kV that really arrived, too.
+
+**Honest limit, stated rather than fixed:** the throttle bounds the flush
+DUTY CYCLE, not the worst single stall — one unlucky flush still parks
+the run thread for its full duration. A hard bound on ■ Abort latency
+needs the write off that thread entirely (a queue drained after the SG is
+zeroed). Follow-up, not this change. Note also that "the file closes
+after the SG is zeroed" covers `close()`; the per-row writes are handled
+by `hold_flush` above.
+
+Also: **dry runs now take scope readings between snapshots** (they took
+none before) — deliberate, since telemetry needs only the scope, and it
+makes a dry run the natural smoke test for this feature.
+
+**Impact on past data: none.** No run in the 13-run batch has telemetry
+and none ever will; nothing in the analysis chain reads the file, so no
+verdict, area, scale or breakdown flag can move because of it. A run
+captured with the box unticked is complete without it.
+
+**Terminology collision, for whoever greps.** "Telemetry" now names this
+file. `sldea_plot.py`'s caption already uses the word loosely for
+measured_kV coverage — unrelated.
+
+**What this does NOT fix.** The sampling is still 2 Hz MEAN, so a
+ms-scale arc still falls between samples and is still averaged away when
+it does land on one. That is the rest of #189 — increment (1)
+MEAN→MAXIMUM/PK2PK, then (3) trigger-armed single-shot capture and (4)
+post-trip `get_waveform()` forensics — all of which touch new SCPI
+paths and are therefore bench-first. Note what this does **not**
+supersede in the 2026-08-04 "Deferred to #189" list: the polling half of
+#157 is shipped, but continuous `CURVE?` I(t) logging between landings,
+MEAS-slot fast polling and Hi-Res acquisition all stay deferred and
+still need SCPI verification on the real MSO24. One more follow-up the
+review surfaced: a scope left in STOP (Scope tab ■) freezes MEAN, and telemetry
+would faithfully record a plausible flat trace for the whole run.
+Detecting that needs an `ACQUIRE:STATE?` query — a new SCPI path, so
+bench-first, not squeezed in here.
+
+**Verification:** `python tests/test_sldea_telemetry.py` — 27 tests: 22
+on the writer (schedule, statuses, slow-disk degrade including a write
+slower than its own flush window, `hold_flush`, ASCII clamping, garbage
+input, failure latching, rate maths) and 5 that drive the REAL
+`_sldea_worker` against a fake scope — a breakdown trip and a half-dead
+link among them.
 
 ## Edge-suite audit round: 28 double-confirmed defects fixed — save/reprocess path made honest (2026-08-05)
 
@@ -381,12 +548,12 @@ In order of value:
    bias-tripped resting frames now auto-accept as refit boundaries —
    eyes on a few of those confirms the refit on frames no label
    covers.
-4. **Upstream instrumentation, not this codebase's GUI:** #157
-   (continuous kV/µA logging at >= 1 Hz — would date the ~5 kV event
-   electrically), #158 (breakdown detection on a step change, depends
-   on #157), #159 (`measured_kV` stops recording ~snapshot 34;
-   leading hypothesis: the unset scope vertical scale returning the
-   9.9E37 sentinel). See "Related issues" at the bottom.
+4. **Upstream instrumentation** — this framing is superseded: all three
+   turned out to be this codebase's GUI after all. #158 shipped in #195
+   (post-hoc step-change detection, CLOSED); #157 shipped 2026-08-05 as
+   the telemetry sidecar (entry at the top, bench smoke pending); #159's
+   pre-run window check shipped in #195 with the live verify still owed.
+   See "Related issues" at the bottom.
 
 If new GUI reports arrive, work them the way #171–#179 were worked:
 file the issue, fix display-only, never touch accept semantics or
@@ -1089,7 +1256,9 @@ and with the ~5 kV event all previous evidence pointed at.
 
 3. **The ~5 kV event**: now visible as the area peak + tex-ratio wins +
    run 2's surviving paper-gain dip. #157 (continuous kV/µA logging)
-   would date it electrically against the area curve.
+   would date it electrically against the area curve — shipped
+   2026-08-05, but only for runs captured from now on; these ones were
+   recorded before it existed and stay undatable.
 
 4. **Per-frame Otsu instability** (previous task 5) — still open but
    demoted: the diff tiers are secondaries now. If they stay, express
@@ -1358,10 +1527,12 @@ sat on the strips; the frames are the check no residual substitutes for.
 ## Verification
 
 ```
-python tests/test_sldea_edge.py      # 41
+python tests/test_sldea_edge.py      # 63
 python tests/test_sldea_diag.py      # 16
-python tests/test_sldea_trace.py     # 10
-python tests/test_sldea_tuner.py     # 8
+python tests/test_sldea_trace.py     # 11
+python tests/test_sldea_tuner.py     # 12
+python tests/test_sldea_profile.py   # 20
+python tests/test_sldea_telemetry.py # 24  (writer + real-worker wiring)
 python sldea_diag.py --selftest out.png
 python sldea_tuner.py --selftest out.png
 python run_tests.py
@@ -1372,10 +1543,14 @@ python run_tests.py
 - #162 — manual boundary tracing: **the tool is built (this session)**;
   the issue stays open until the ~30 operator labels and the
   calibration curve exist.
-- #157 — log kV/µA continuously at ≥1 Hz. The watchdog already samples
-  current at 2 Hz and discards every sample. Would date the ~5 kV event.
-- #158 — breakdown detection should trigger on a step change, not an
-  absolute µA threshold. Depends on #157.
+- #157 — log kV/µA continuously at ≥1 Hz. **Shipped 2026-08-05, pending
+  bench smoke** (see the telemetry-sidecar entry at the top): the
+  watchdog's 2 Hz samples now go to `telemetry.csv` instead of being
+  discarded. Runs captured from now on can be dated electrically; the
+  runs already in hand cannot.
+- #158 — breakdown detection on a step change rather than an absolute µA
+  threshold: **CLOSED** — shipped in #195 and ground-truthed twice
+  (2026-08-04 entry).
 - #159 — `measured_kV` stops being recorded around snapshot 34. Leading
   hypothesis: the SLDEA path never sets the scope's vertical scale, so
   V_Out eventually leaves the screen and `measure()` returns the 9.9E37

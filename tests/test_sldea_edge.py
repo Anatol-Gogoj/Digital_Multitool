@@ -609,6 +609,25 @@ def test_run_csv_accepts_a_renamed_data_csv():
     assert os.path.basename(se.run_csv(d)) == 'data.csv'
 
 
+def test_telemetry_sidecar_is_never_mistaken_for_the_run_csv():
+    """The live runner now writes telemetry.csv beside data.csv (#189
+    increment 2). It is a second CSV in every run folder, so pin that no
+    reader can resolve to it: a run without data.csv is still not a run,
+    and a run with both still loads its frame rows."""
+    import sldea_profile as sp
+    parent = tempfile.mkdtemp(prefix='runcsv_tel_')
+    d = os.path.join(parent, 'SLDEA_20260805_120000')
+    os.makedirs(d)
+    with open(os.path.join(d, sp.TELEMETRY_FILENAME), 'w',
+              newline='', encoding='utf-8') as f:
+        f.write(','.join(sp.TELEMETRY_COLUMNS) + '\n0,ts,0,0,0,ok,ok,\n')
+    assert se.run_csv(d) is None                  # sidecar alone != a run
+    assert se.newest_run(parent) is None          # ...and not a run to open
+    _fake_run(d, [{'step': 0, 'tag': 'baseline', 'nominal_kV': '0'}])
+    assert os.path.basename(se.run_csv(d)) == 'data.csv'
+    assert len(se.load_run(d)['rows']) == 1
+
+
 def test_write_back_updates_the_file_the_run_was_read_from():
     d = tempfile.mkdtemp(prefix='runcsv_wb_')
     _fake_run(d, [{'step': 0, 'tag': 'baseline', 'nominal_kV': '0',

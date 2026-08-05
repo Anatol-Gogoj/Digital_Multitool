@@ -7,6 +7,11 @@ directory the Digital Multitool's SLDEA tab wrote:
 
     SLDEA_<ts>/setup.txt + data.csv + frames/SLDEA_sNN_XX.XXkV_tag.png
 
+A live run also drops `telemetry.csv` there (the ~2 Hz monitor log, since
+2026-08-05). NOTHING in this module reads it: `data.csv` is still the run,
+`run_csv` cannot resolve to the sidecar, and a folder holding only
+telemetry is not a run.
+
 Approach: difference-imaging against the 0 kV baseline frame at three
 threshold tiers, plus (2026-07-28) one candidate segmented from the
 texture-ratio map -- the P3 devices activate by wrinkling with almost no

@@ -83,7 +83,7 @@ missed 233451's −207 µA staircase in real time — tracked in **#189**
 logging) and closes out **#159** (kV telemetry dropout, pre-run check
 shipped, live verify pending). Staged per #189's own increment plan:
 
-1. **(agent, desk) #189 increment (2): BUILT 2026-08-05 — PR open,
+1. **(agent, desk) #189 increment (2): MERGED 2026-08-05 (PR #218) —
    bench smoke owed.** The ~2 Hz watchdog samples (I_Out every sample,
    a kV read at ≤1 Hz) now append to `telemetry.csv` beside data.csv;
    no new SCPI path, `data.csv` and its readers untouched. Implements
@@ -97,6 +97,14 @@ shipped, live verify pending). Staged per #189's own increment plan:
    tests. Suite 27/31, the new `test_sldea_telemetry.py` (27) covering
    the writer AND the real worker against a fake scope. **Nothing
    depends on the file until the bench smoke below passes.**
+
+   **The bench half is now written down and delegable.** `BENCH_TEST.md`
+   gained three sections: **§M** the telemetry dry-run smoke (no HV — a
+   dry run never commands the SG, so this needs no HV training and is
+   the whole gate on trusting the file), **§N** the watchdog probe (also
+   no HV), **§O** the live verification (HV, authorized operator only).
+   §M and §N can go to a colleague at the bench as-is; neither depends
+   on §O.
 2. **(bench, first item of the visit)** fix the rig fault then verify
    #195 live: recenter the scope's V_Out window and I_Out offset
    (≈ −16 µA), run one live SLDEA ramp, confirm the pre-run window
@@ -117,6 +125,12 @@ shipped, live verify pending). Staged per #189's own increment plan:
    convention, streak semantics re-tuned for peak noise), then the real
    fix: trigger-armed single-shot capture of I_Out + post-trip
    `get_waveform()` forensics. Together these finish **#157/#189**.
+   **Run `bench/test_sldea_watchdog_probe.py` (§N) first** — it measures
+   the three things this step is blocked on: the quiet-rig spread per
+   measurement token (which sets the peak-based trip level and cannot be
+   guessed at a desk), the real cost of the MEASUREMENT:IMMED triple
+   (whether #157's 2 Hz cap has headroom), and whether `TRIGGER:STATE?`
+   / `ACQUIRE:STATE?` answer at all. No HV needed for the probe.
 4. **(Anatol, desk)** the two 07-23 **breakdown-run reviews** (152205,
    233451) — first real exercise of the confirmed-breakdown review path
    on the audit-fixed save chain; `sldea_plot --mode current` previews
@@ -190,7 +204,13 @@ forensics still open and bench-first · #157 ≥1 Hz kV/µA logging —
 pending). **#158 is CLOSED** (post-hoc step-change detection shipped +
 ground-truthed). New follow-up worth filing: a scope left in STOP freezes
 MEAN and telemetry would record a plausible flat trace — detecting it
-needs an `ACQUIRE:STATE?` query, so bench-first.
+needs an `ACQUIRE:STATE?` query, so bench-first (the §N probe reports
+whether that query answers). · **#219 (new 2026-08-05)** the watchdog's
+operator-facing half: it is invisible on screen until it trips, and its
+trip level is typed by hand — while every confirmed breakdown in the
+08-04 ground truth was a deviation of 11–192 µA, so the smallest real
+events sit BELOW the 100 µA default. Display and threshold-derivation
+filed together because an automatic number needs a visible one.
 
 **The rest:** #32 GUI framework restyle (demos/ tied) · #193 camera
 manual exposure (try Stabilize first; C920/ELP/machine-vision if
@@ -202,7 +222,8 @@ shrink the niche) · #199 run-data auto-plot tool (v1 shipped in #211;
 issue stays open as the wishlist tracker) · #200 cross-session
 instrument-connection takeover with warning · #206 deploy-script
 dedup/idempotence · #215 circle-fit calibration ×3 (scale gate v2) ·
-#216 Edge Review UX (primary Detect, tooltips, flow).
+#216 Edge Review UX (primary Detect, tooltips, flow) · #219 live
+watchdog display + where the trip level comes from.
 
 ## This machine (Windows lab/analysis PC)
 

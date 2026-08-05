@@ -21,6 +21,7 @@ overlays/
 run.log
 edge_labels.json
 data*.csv.bak
+telemetry*.csv
 area_vs_voltage.png
 sldea_diag*.png
 sldea_diag*.json

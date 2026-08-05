@@ -294,6 +294,15 @@ def test_naming_and_csv_columns():
     # the edge-detection columns exist but are meant to start empty
     for col in ('active_area_px', 'active_area_mm2', 'active_diam_mm', 'notes'):
         assert col in SldeaProfile.CSV_COLUMNS
+    # data.csv's schema is consumed by Edge Review, the tuner, the
+    # diagnostic and the plot tool, and the 2026-08-05 telemetry sidecar
+    # exists precisely so continuous logging does NOT grow it. Membership
+    # checks cannot see an added column, so the list is pinned exactly.
+    assert SldeaProfile.CSV_COLUMNS == [
+        'snapshot', 'step', 'tag', 'nominal_kV', 'control_V', 'measured_kV',
+        'measured_uA', 't_planned_s', 'timestamp', 'frame_file',
+        'active_area_px', 'active_area_mm2', 'active_diam_mm', 'wrinkle_idx',
+        'notes']
 
 
 def test_setup_text_covers_key_facts():

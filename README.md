@@ -1,6 +1,6 @@
-# SCPI_Control
+# Digital Multitool
 
-Python tool for SCPI-based control of bench-top lab instruments. Targets a USB-TMC + USB-serial bench currently consisting of:
+Python tool for SCPI-based control of bench-top lab instruments (repo historically named SCPI_Control). Targets a USB-TMC + USB-serial bench currently consisting of:
 
 | Instrument | VID:PID | Class | Transport |
 |---|---|---|---|

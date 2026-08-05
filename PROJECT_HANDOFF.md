@@ -24,7 +24,8 @@ reviews, and a stack of enhancement issues. Durable conventions live in
 
 ## Batch-QA campaign (data side, lives OUTSIDE the repo)
 
-Canonical home: `D:\Downloads\SLDEA_data\Upload 20260804\` — contains
+Canonical home: `C:\Users\Anatol Gogoj\Desktop\SLDEA_data\Upload 20260804\`
+(moved from D:\Downloads 2026-08-05; `SCPI_SLDEA_DIR` points there) — contains
 `HANDOFF.md` (the campaign runbook), `SCORECARD.md` (per-run verdicts),
 `PROVENANCE.md` (consolidation ledger: every source path, what is now
 retire-able — the 555 MB zip, OneDrive and loose copies), `_baselines\`,
@@ -45,11 +46,15 @@ retire-able — the 555 MB zip, OneDrive and loose copies), `_baselines\`,
 
 ## Open decisions (Anatol's calls)
 
-1. **Repo rename → Digital Multitool.** Safe: GitHub redirects old URLs
-   indefinitely. Follow-ups when triggered: `deploy/scpi_from_github.sh`
-   hardcoded URL, ShareDrive launcher references, `git remote set-url` on
-   clones. Local folder rename is optional and riskier (breaks worktree
-   registrations) — skip or do separately.
+1. **Repo rename → Digital-Multitool: local side DONE 2026-08-05** —
+   checkout moved to `C:\Users\Anatol Gogoj\Desktop\Digital-Multitool`
+   (worktrees repaired, venv verified). **GitHub rename still needs one
+   click by Anatol** (Settings → General → Rename): this machine's gh
+   session is Pingwinos40 with WRITE, and renaming needs admin. After
+   the click (redirects cover the interim): optionally `git remote
+   set-url origin https://github.com/Anatol-Gogoj/Digital-Multitool.git`
+   on clones, update the URL in `deploy/scpi_from_github.sh`, and update
+   the ShareDrive launcher copy on the bench.
 2. **Split the SLDEA analysis suite** into its own repo. Seam:
    `sldea_edge / sldea_edge_gui / sldea_tuner / sldea_diag / sldea_trace`
    move out (instrument-free); `sldea_profile` + the capture tab stay
@@ -77,9 +82,11 @@ run-data auto-plot tool (full toggle wishlist in the issue; Tol bright)
 
 ## This machine (Windows lab/analysis PC)
 
-- Repo checkout `D:\Downloads\gui\SCPI_Control` with venv at `.venv`
-  (numpy/cv2/matplotlib/Pillow installed). Agent worktrees live under
-  `.claude\worktrees\`. No `py` launcher — use `python`.
+- Repo checkout `C:\Users\Anatol Gogoj\Desktop\Digital-Multitool` with
+  venv at `.venv` (numpy/cv2/matplotlib/Pillow installed; verified after
+  the move). Agent worktrees live under `.claude\worktrees\`. No `py`
+  launcher — use `python`. Leftover `D:\Downloads\gui\` could not be
+  deleted during the move (session file lock) — delete it whenever.
 - C: fills up (was at 0 GB free on 2026-08-04); keep work on D:.
 - `robocopy` needs `/R:2 /W:5` or it hangs on one locked file.
 - OneDrive `Recordings\SLDEA_data` copies are now redundant per

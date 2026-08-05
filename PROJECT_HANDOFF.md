@@ -17,6 +17,14 @@ remote / bench-no-HV / bench-HV. Durable conventions live in
 
 ## Code state (main)
 
+- **v1.1.0** tagged 2026-08-05 — minor, not patch: since v1.0.0 main
+  gained a new tool (`sldea_plot.py`), a new GUI control and output
+  artifact (`telemetry.csv`), and the Edge Review scale gate, which
+  **requires the operator to do a manual per-run calibration that did
+  not exist before**. Both manuals regenerated against the live app at
+  this version (39-page PDF, telemetry control documented and callout-
+  annotated). **The fleet re-syncs off this version stamp** — lab PCs
+  pull it via `Tools → Update Software…` / `update_software.sh`.
 - **v1.0.0** tagged 2026-08-03 (GitHub release, manual PDF attached).
   Merged since, in order: **#195** current-based breakdown detection +
   scope-clipping fixes (ground-truth-validated on all 11 real runs; see
@@ -39,15 +47,21 @@ remote / bench-no-HV / bench-HV. Durable conventions live in
   the real 13-run batch revalidated: breakdown ground truth exact, scale
   chain self-consistent, 0 sanity violations in 454 rows). Dated entries
   for all of it in `SLDEA_HANDOFF.md`.
-- **Bench fleet deployed + confirmed at main tip** (v1.0.0+4f5f213,
-  2026-08-05): `Tools → Update Software…` / `update_software.sh` ran and
-  the RHEL bench footer was verified by Anatol.
-- **Manuals are behind the tooltips by three changes** — #195's
-  watchdog/settings text, the scale-gate/calibrate flow, AND the
-  telemetry-log control (source already updated in
-  `docs/manual-src/content.json` for all three); per the release
-  checklist both manuals regenerate at the next version bump. **Do the
-  bump soon.**
+- **Bench fleet was deployed + confirmed at v1.0.0+4f5f213**
+  (2026-08-05): `Tools → Update Software…` / `update_software.sh` ran and
+  the RHEL bench footer was verified by Anatol. **It is now one release
+  behind** — pull v1.1.0 onto the bench and analysis PCs and check the
+  footer reads `v1.1.0+…`.
+- **Manuals are current as of v1.1.0** (2026-08-05) — the three changes
+  they were behind on (#195's watchdog/settings text, the scale-gate/
+  calibrate flow, the telemetry-log control) are all in, captured from
+  the live app rather than hand-edited. Regenerating surfaced a real
+  bug, now fixed: `sldea_diag.py --selftest` **crashed** on this Windows
+  box because the 2026-08-05 scale-gate wording put a 📏 emoji into three
+  printed verdicts, and the bench/analysis consoles are cp1252. The
+  report is now ASCII-clamped at one choke point (`sldea_diag._ascii`)
+  with a regression test — policing individual f-strings is what failed
+  last time.
 - Suite baseline: `run_tests.py` → **27/31** on the Windows lab PC (the 4
   failures — test_arb_bin, test_camera_controls, test_presets_path,
   test_tk_fontfix — are environmental and documented; all SLDEA suites

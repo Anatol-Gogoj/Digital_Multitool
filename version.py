@@ -12,7 +12,7 @@ the screenshots only pick up the new version when re-captured. See
 ``docs/manual-src/README.md`` ("Releasing").
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 
 def version_string():

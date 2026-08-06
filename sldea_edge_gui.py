@@ -1190,10 +1190,14 @@ class EdgeReviewApp:
         # machine:null, so no path can write a dead label by omission.
         mach, why = self._machine_pairing(i)
         shape = gray.shape if gray is not None else (0, 0)
-        rec = strc.label_record(i, self.run['rows'][i], poly, shape,
-                                machine=mach, unpaired=why, **meta)
         self._select_trace_once = True
         try:
+            # label_record inside the try on purpose: its refusal is a
+            # ValueError, and an unhandled one here would print to a
+            # console nobody is watching and lose the label silently --
+            # the exact shape of failure this gate exists to end
+            rec = strc.label_record(i, self.run['rows'][i], poly, shape,
+                                    machine=mach, unpaired=why, **meta)
             strc.append_label(self.rundir, rec)
             n = len(strc.load_labels(self.rundir))
             self.status.config(

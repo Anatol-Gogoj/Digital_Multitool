@@ -1,4 +1,4 @@
-# Signal Gen Bench Test — PR #7 + PR #14 features
+# Bench test checklist — signal gen (§A–§L, historical) + SLDEA telemetry/watchdog (§M–§O, current)
 
 **Setup:** BNC from sig gen **CH1 → scope CH1** (1 MΩ input). ~15 min total.
 Launch: `.venv/bin/python gui.py`
@@ -204,7 +204,7 @@ want to see the output shape first.
 > **Linux-bench-only**, and a live run must be ended with **■ Abort** —
 > closing the app only attempts a best-effort ramp.
 
-This closes #159 and finishes the telemetry smoke. Sections M and N do
+This verifies #159 and finishes the telemetry smoke. Sections M and N do
 not depend on it and should be done first.
 
 1. Same short profile as §M, but untick DRY RUN → button reads **▶ Run — LIVE HV** (red)

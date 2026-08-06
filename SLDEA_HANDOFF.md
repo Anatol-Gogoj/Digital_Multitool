@@ -199,6 +199,64 @@ Observation → decision:
 - **Cost:** +2 s per run and one extra frame. The warm-up frame does
   enter `data.csv`, so it will appear in Edge Review's queue as an
   unremarkable 0 kV frame.
+## Saturation measured: the detector did NOT break, the exposure discipline did (2026-08-05)
+
+**TL;DR:** Operator question, and the right one: does the CV actually
+break down on a saturated background if the electrode is nicely
+contrasted against it? **No.** Measured on the CB run: the disc is
+0.00 % saturated, detection runs at conf 0.98–0.99 at every level with a
+monotonic area curve, and it is BETTER behaved than the CNT run shot the
+same session. The gate stays, but for the honest reason, and its wording
+has been corrected — it was claiming the measurement was worthless.
+
+Observation → decision:
+
+- **Where the saturation actually is.** Frame-wide 73.7 % is a
+  misleading number. Localised against the fitted disc:
+
+  | region | saturated | median level |
+  |---|---|---|
+  | inside the disc | **0.00 %** | 89 |
+  | expansion annulus (1.0–1.7 r) | 60.07 % | 254 |
+  | far background | 79.11 % | — |
+
+  The electrode is nowhere near clipping. The boundary is a dark disc
+  against a clipped-white surround — a ~165-level step, i.e. the
+  easiest edge in the whole corpus to find, not the hardest.
+- **Detection across the ramp, CB vs the CNT run from the same
+  session.** CB: conf **0.98–0.99** at all five levels, area strictly
+  monotonic 122 610 → 140 263 px, method `disc-fit` throughout. The CNT
+  run: conf 0.86–0.96 falling to **0.74** at 8 kV, with non-monotonic
+  dips at 7.2–7.4 kV. **The saturated run is the cleaner of the two.**
+- **No measurable bloom bias.** The concern that highlight bloom would
+  eat the dark disc's edge and shrink A₀: the baseline disc measures
+  393 px, and the 1 kV frame (0.27 % saturated) implies 395 px from its
+  detected area. **0.5 % apart** — no evidence of it.
+- **So the earlier claim was wrong** and is retracted: "areas measured
+  against a mostly-white baseline carry an uncertainty nothing in
+  `SLDEA_MEASUREMENT.md` covers" is not supported by the data. It was
+  reasoning from the frame-wide number instead of measuring where the
+  saturation sat.
+- **What IS wrong, and why the gate stays.** Two things, neither of them
+  "detection fails":
+  1. **Clipped pixels cannot be photometrically normalised.**
+     `photometric_fit` can only scale what still varies; a clipped pixel
+     is information that is gone.
+  2. **The exposure was not pinned.** The CB baseline is 73.7 %
+     saturated while its own ramp frames are **0.27 %** — the reference
+     frame was shot at a different exposure from everything it is
+     differenced against, and the affine fit is absorbing a ~0.67 gain
+     to compensate. That is #193 caught in the act, and it is a real
+     defect in the run's provenance even though the areas survived it.
+- **Wording corrected in code.** `exposure_verdict`'s `clipped` message
+  said "Difference imaging has nothing to work with; every area from
+  this run would be measured against a white frame". Measured false on
+  the very run that motivated it. It now says the accurate thing —
+  clipped pixels can't be normalised, and a baseline exposed differently
+  from the ramp frames is not a comparable reference. The pre-flight
+  dialog likewise no longer implies detection will collapse. Thresholds
+  unchanged: the gate still fires on the right run and on none of the 13
+  healthy ones.
 
 ## A blown-out baseline is now a gate, and the cv2 camera path honours the exposure fields (2026-08-05)
 

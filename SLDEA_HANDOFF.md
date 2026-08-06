@@ -13,6 +13,74 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## A trace can no longer be labelled without a machine candidate (2026-08-06)
+
+**TL;DR:** Tracing a frame in a run that had never been detected wrote
+the label with `machine: null`, and such a label can never give an IoU —
+so it is useless as ground truth and nothing said so. Four real labels
+were lost that way and had to be re-traced. Now the tracer detects that
+one frame on demand, and when the detector genuinely has nothing to
+offer, the operator is told before tracing instead of finding out
+offline.
+
+Observation → decision:
+
+- **Observation, measured 2026-08-06.** Repro: open an already-reviewed
+  run in Edge Review **without** `--auto`, navigate to a frame, trace it,
+  close. `cands_all` is empty because detection never ran, so
+  `_trace_staged` passed `machine=None`; `machine_summary(None)` returns
+  None and `label_iou` then returns None forever. Driven against
+  `origin/main` on the synthetic fixture: `machine = None`,
+  `label_iou = None`, **zero** warnings shown. The real cost: the batch
+  control round traced across three runs (`DOT_P3_1_20260729` row 28,
+  `P3_3_2.5mL_20260728` rows 28 and 65, `P3_5_2.5mL_0729` row 25) — all
+  four labels unpaired, so the machine-vs-operator IoU and the
+  definitional-offset gate could not be computed at all.
+- **Decision — create the pairing, don't just report it.** A single
+  frame's detection is cheap (`candidates()` runs at
+  `DETECT_MAX_W = 640`) and writes nothing to disk, so `_trace()` now
+  detects the current frame before the tracer opens when nothing has.
+  Same settings, same code path, identical geometry to a full pass.
+- **Decision — but say what a single frame cannot reproduce.** The
+  ramp-order hysteresis bonus and the same-kV pair reconciliation each
+  move conf by up to 0.05 and both need neighbouring frames. On-demand
+  candidates are therefore tagged and the label records
+  `machine.detect_scope` (`run-pass` vs `frame-on-demand`), so the
+  calibration curve is never a silent mix of two conf conventions —
+  the same class of error as the two wrinkle normalizations mixed in one
+  column (audit 2026-08-05). **The AREA is unaffected**; only conf is.
+- **Decision — an unpaired label is now impossible to write by
+  omission.** `label_record` raises `ValueError` unless a missing pairing
+  is NAMED (`unpaired=`, one of `sldea_trace.UNPAIRED_REASONS`). Two
+  causes survive on purpose and cannot be detected away: an unreadable
+  baseline (refuse-don't-fabricate — the detector legitimately produces
+  nothing for any frame) and an honest no-change frame. Those get an
+  ok/cancel dialog **before** the tracing effort, naming the cause and
+  the fix, and the label carries the reason so
+  `python sldea_trace.py <run>` reports it instead of it merely being
+  absent from the curve. Pre-gate labels report as `unrecorded`.
+- **Unchanged: the recovery path.** #162's first job — tracing when every
+  automated candidate has been REJECTED — has a non-empty candidate list
+  (rejection lives in `results`, never in `cands_all`), so it pairs
+  normally and shows no dialog. And a trace whose pairing is impossible
+  is still SAVED: recovery outranks calibration.
+- **Also fixed, same session:** the new report text put a `⚠` into a
+  printed line and took the whole CLI down with a `UnicodeEncodeError` on
+  the cp1252 console — the third time this trap has fired here (the
+  arrow, the 📏, this). Every operator sentence in `sldea_trace` is now
+  ASCII and a test encodes them.
+- **Pinned by** `tests/test_sldea_trace.py` (headless, 15 tests):
+  `test_machine_pairing_keeps_rejected_candidates_pairable` (the recovery
+  vs never-detected distinction),
+  `test_label_record_refuses_an_unexplained_missing_pairing`,
+  `test_on_demand_single_frame_detection_supplies_the_pairing` (and its
+  honest limit: no baseline, no candidate),
+  `test_unpaired_summary_names_the_dead_labels_including_legacy`. Plus
+  `test_trace_without_a_detection_pass_is_still_paired` in
+  `tests/test_sldea_edge_gui.py`, which is the repro itself against a
+  real `EdgeReviewApp` (it skips without a display, so the guarantee
+  rests on the headless four).
+
 ## Electrode mask default 220 → 255, and the Tune button's bad resolver (2026-08-05)
 
 **TL;DR:** Two bench-reported bugs. The electrode mask masks pixels that
@@ -1844,7 +1912,7 @@ sat on the strips; the frames are the check no residual substitutes for.
 ```
 python tests/test_sldea_edge.py      # 63
 python tests/test_sldea_diag.py      # 16
-python tests/test_sldea_trace.py     # 11
+python tests/test_sldea_trace.py     # 15
 python tests/test_sldea_tuner.py     # 12
 python tests/test_sldea_profile.py   # 20
 python tests/test_sldea_telemetry.py # 24  (writer + real-worker wiring)

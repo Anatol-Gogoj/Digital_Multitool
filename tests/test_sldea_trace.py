@@ -148,6 +148,7 @@ def test_label_sidecar_appends_atomically_and_refuses_corrupt():
         assert os.path.basename(p) == st.LABELS_NAME
         assert not os.path.exists(p + '.tmp')
         rec2 = st.label_record(5, row, poly, (540, 960), machine=None,
+                               unpaired=st.UNPAIRED_NO_CANDIDATE,
                                user='op')
         st.append_label(d, rec2)
         labels = st.load_labels(d)
@@ -157,6 +158,14 @@ def test_label_sidecar_appends_atomically_and_refuses_corrupt():
         assert labels[0]['frame_shape'] == [540, 960]
         assert labels[0]['user'] == 'op' and labels[0]['n_points'] == 4
         assert labels[1]['machine'] is None
+        # a label made WITH a candidate keeps it, all the way through the
+        # JSON round trip, and says nothing is missing (#162)
+        assert st.is_paired(labels[0]) and labels[0]['unpaired'] is None
+        assert labels[0]['machine']['detect_scope'] == st.SCOPE_RUN
+        # ...and the unpaired one carries the named reason it can never
+        # be ground truth, instead of an unexplained null
+        assert labels[1]['unpaired'] == st.UNPAIRED_NO_CANDIDATE
+        assert not st.is_paired(labels[1])
         # every entry is sufficient to compute IoU offline (#162)
         v = st.label_iou(labels[0])
         assert v is not None and 0.85 < v <= 1.0, v
@@ -224,7 +233,9 @@ def test_append_label_is_atomic_under_replace_failure():
     try:
         row = {'frame_file': 'f.png', 'nominal_kV': '1', 'tag': 'pre'}
         poly = [(10, 10), (110, 12), (108, 90)]
-        st.append_label(d, st.label_record(1, row, poly, (240, 320)))
+        st.append_label(d, st.label_record(
+            1, row, poly, (240, 320),
+            unpaired=st.UNPAIRED_NO_CANDIDATE))
         p = os.path.join(d, st.LABELS_NAME)
         before = open(p, 'rb').read()
 
@@ -235,7 +246,9 @@ def test_append_label_is_atomic_under_replace_failure():
 
         st.os.replace = boom
         try:
-            st.append_label(d, st.label_record(2, row, poly, (240, 320)))
+            st.append_label(d, st.label_record(
+                2, row, poly, (240, 320),
+                unpaired=st.UNPAIRED_NO_CANDIDATE))
         except OSError:
             pass
         else:
@@ -247,6 +260,162 @@ def test_append_label_is_atomic_under_replace_failure():
         assert os.path.exists(p + '.tmp')
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+def _disc_scene(r=40, size=240):
+    """Flat baseline + a disc `r` px brighter -- the same synthetic scene
+    tests/test_sldea_edge.py detects on."""
+    base = np.full((size, size), 100.0, np.float32)
+    img = base.copy()
+    yy, xx = np.mgrid[0:size, 0:size]
+    img[(xx - size / 2) ** 2 + (yy - size / 2) ** 2 <= r * r] += 40.0
+    return base, img
+
+
+def _ngon(cx, cy, r, n=24):
+    a = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    return [(float(cx + r * np.cos(t)), float(cy + r * np.sin(t)))
+            for t in a]
+
+
+def test_machine_pairing_keeps_rejected_candidates_pairable():
+    """#162's TWO jobs, told apart.
+
+    Job 1 (recovery) is tracing when every automated candidate has been
+    REJECTED -- rejection lives in the review results, never in the
+    candidate list, so such a frame still has a candidate to pair with
+    and its label is full ground truth. The 2026-08-06 bug was the other
+    case: a frame whose candidate list is EMPTY because detection never
+    ran. Both used to end up as machine:null; only the second one may."""
+    rejected = [{'method': 'disc-fit', 'conf': 0.62, 'area_px': 5000.0,
+                 'contour': np.array([[10, 10], [110, 10], [110, 90],
+                                      [10, 90]], float)},
+                {'method': 'diff-hi', 'conf': 0.41, 'area_px': 3000.0,
+                 'contour': np.array([[20, 20], [90, 20], [90, 80]],
+                                     float)}]
+    mach, why = st.machine_pairing(rejected)
+    assert why is None and mach is rejected[0], (mach, why)
+    # the empty-list cases each name themselves
+    assert st.machine_pairing([])[1] == st.UNPAIRED_NO_CANDIDATE
+    assert st.machine_pairing([], detected=False)[1] == \
+        st.UNPAIRED_NOT_DETECTED
+    assert st.machine_pairing([], baseline_ok=False)[1] == \
+        st.UNPAIRED_NO_BASELINE
+    # a candidate with an area but no outline is not a pairing either --
+    # label_iou needs a contour -- yet it is still worth recording
+    no_c = [{'method': 'resting', 'conf': 0.8, 'area_px': 700.0}]
+    mach, why = st.machine_pairing(no_c)
+    assert why == st.UNPAIRED_NO_CONTOUR and mach is no_c[0]
+    # every reason the model can produce has an operator sentence
+    for r in (st.UNPAIRED_NO_CANDIDATE, st.UNPAIRED_NOT_DETECTED,
+              st.UNPAIRED_NO_BASELINE, st.UNPAIRED_NO_CONTOUR,
+              st.UNPAIRED_FRAME_UNREADABLE, st.UNPAIRED_DETECT_FAILED):
+        assert len(st.unpaired_message(r)) > 40, r
+
+
+def test_label_record_refuses_an_unexplained_missing_pairing():
+    """The 2026-08-06 gate: a label with machine:null returns None from
+    label_iou forever, so it can never be ground truth. Writing one is
+    allowed only when the caller NAMES the reason -- which is the point
+    where the GUI has to tell the operator."""
+    row = {'frame_file': 'f.png', 'nominal_kV': '3', 'tag': 'post-ramp'}
+    poly = [(10, 10), (110, 12), (108, 90), (12, 88)]
+    for bad in ({}, {'machine': None},
+                {'machine': {'method': 'resting', 'conf': 0.8}},
+                {'machine': {'method': 'x', 'conf': 0.1, 'contour': []}}):
+        try:
+            st.label_record(28, row, poly, (240, 320), **bad)
+        except ValueError as e:
+            assert '#162' in str(e), str(e)
+        else:
+            raise AssertionError(f"machine:null slipped through: {bad}")
+    # a reason outside the vocabulary is refused too (a typo must not
+    # become a silent free-text excuse)
+    try:
+        st.label_record(28, row, poly, (240, 320), unpaired='dunno')
+    except ValueError as e:
+        assert 'unknown unpaired reason' in str(e)
+    else:
+        raise AssertionError("an unknown reason was accepted")
+    # named -> written, and the record says so out loud
+    rec = st.label_record(28, row, poly, (240, 320),
+                          unpaired=st.UNPAIRED_NOT_DETECTED)
+    assert rec['machine'] is None
+    assert rec['unpaired'] == st.UNPAIRED_NOT_DETECTED
+    assert not st.is_paired(rec) and st.label_iou(rec) is None
+    # a real pairing wins over any reason the caller happened to pass
+    mach = {'method': 'disc-fit', 'conf': 0.9, 'area_px': 9000.0,
+            'contour': np.array([[10, 10], [110, 10], [110, 90],
+                                 [10, 90]], float)}
+    rec = st.label_record(28, row, poly, (240, 320), machine=mach,
+                          unpaired=st.UNPAIRED_NOT_DETECTED)
+    assert rec['unpaired'] is None and st.is_paired(rec)
+    assert st.label_iou(rec) > 0.8
+
+
+def test_on_demand_single_frame_detection_supplies_the_pairing():
+    """The fix's (a) half, headlessly: the tracer no longer needs a whole
+    detection pass to have a machine candidate. Detecting the ONE frame
+    the operator is about to trace yields a pairing, and the label marks
+    the conf as coming from that narrower pass (no ramp hysteresis, no
+    same-kV pair reconciliation -- both worth up to 0.05 of conf).
+
+    It also pins the honest LIMIT: with an unreadable baseline the
+    detector refuses by design, so no on-demand detection can rescue
+    that frame and the reason must be reported instead."""
+    import sldea_edge as se
+    base, img = _disc_scene(r=40)
+    cands = se.candidates(base, img, dict(se.DEFAULT_SETTINGS))
+    assert cands, "no candidate on a clean synthetic disc"
+    for c in cands:                       # what the GUI tags them with
+        c['detect_scope'] = st.SCOPE_FRAME
+    mach, why = st.machine_pairing(cands)
+    assert why is None
+    row = {'frame_file': 'f.png', 'nominal_kV': '3', 'tag': 'post-ramp'}
+    rec = st.label_record(28, row, _ngon(120, 120, 40), (240, 240),
+                          machine=mach, unpaired=why)
+    assert rec['machine']['detect_scope'] == st.SCOPE_FRAME
+    v = st.label_iou(rec)
+    assert v is not None and v > 0.8, v
+    # no baseline -> the detector refuses (audit 2026-08-05), so the
+    # pairing genuinely cannot be created; it must be NAMED
+    assert se.candidates(None, img, dict(se.DEFAULT_SETTINGS)) == []
+    assert st.machine_pairing([], baseline_ok=False)[1] == \
+        st.UNPAIRED_NO_BASELINE
+
+
+def test_unpaired_summary_names_the_dead_labels_including_legacy():
+    """The calibration pass must REPORT unusable labels, not just fail to
+    see them -- the 2026-07/08 control round lost four traces to
+    machine:null and nothing said so. Pre-gate labels carry no reason, so
+    they are reported as 'unrecorded' rather than dropped."""
+    sq = [[10, 10], [110, 10], [110, 90], [10, 90]]
+    good = {'row_index': 5, 'polygon': sq, 'frame_shape': [200, 400],
+            'machine': {'method': 'disc-fit', 'conf': 0.9,
+                        'contour': sq}}
+    named = {'row_index': 65, 'polygon': sq, 'frame_shape': [200, 400],
+             'machine': None, 'unpaired': st.UNPAIRED_NO_CANDIDATE}
+    legacy = {'row_index': 28, 'polygon': sq, 'frame_shape': [200, 400],
+              'machine': None}            # written before the gate
+    gaps = st.unpaired_labels([good, named, legacy])
+    assert set(gaps) == {st.UNPAIRED_NO_CANDIDATE, 'unrecorded'}
+    assert gaps['unrecorded'][0]['row_index'] == 28
+    # the curve itself still only counts comparable labels
+    assert len(st.conf_vs_iou([good, named, legacy])) == 1
+    text = '\n'.join(st.unpaired_summary([good, named, legacy]))
+    assert '2 of 3' in text and 'row 28' in text and 'row 65' in text
+    assert '--auto' in text, "the actual cause must be named"
+    assert st.unpaired_summary([good])[0].startswith('all 1 label')
+    assert 'no labels yet' in st.unpaired_summary([])[0]
+    # measured 2026-08-06: the bench PC's console is cp1252, and one '⚠'
+    # in this report aborted the whole CLI with a UnicodeEncodeError.
+    # Every line the CLI can print stays ASCII (Tk dialogs may not).
+    printable = text + '\n'.join(
+        [st.unpaired_message(r) for r in st.UNPAIRED_REASONS]
+        + [st.unpaired_message('unrecorded'),
+           st.unpaired_message('degenerate-polygon')]
+        + st.calibration_summary(st.conf_vs_iou([good])))
+    printable.encode('ascii')          # raises if a glyph creeps back in
 
 
 def _run():

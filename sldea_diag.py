@@ -82,6 +82,7 @@ What it measures, and the failure each one pins down:
 Nothing is modified: the run's setup.txt is read, never written.
 """
 import json
+import math
 import os
 import sys
 
@@ -784,27 +785,67 @@ def verdicts(d):
                 f"-- there is simply no measurement of how repeatable it "
                 f"was. Recalibrating in Edge Review would produce one."))
         else:
-            sev2 = 'OK' if spr <= se.CAL_SPREAD_PCT else 'MED'
-            out.append((
-                sev2, 'Operator repeatability: '
-                      f"{spr:.2f}% spread across "
-                      f"{anchor.get('n_rounds', len(rounds))} fits"
-                      + ('' if spr <= se.CAL_SPREAD_PCT
-                         else f" -- over the {se.CAL_SPREAD_PCT:g}% gate"),
-                f"fitted diameters "
-                + (', '.join(f"{v:.1f}" for v in rounds) + ' px'
-                   if rounds else '(values not recorded)')
-                + f"; mean {anchor['diam_px']:.1f} px, spread "
-                  f"{anchor.get('spread_px', 0):.1f} px. This is a "
-                  f"measurement of the OPERATOR, not of the device -- the "
-                  f"one number SLDEA_MEASUREMENT 2.5 asks for and has "
-                  f"never had. A tight spread is precision, not accuracy: "
-                  f"a consistently mis-placed circle scores well here and "
-                  f"is caught by the mask-area guard instead -- and where "
-                  f"there is no automatic fit, nothing catches it at all. "
-                  f"DO NOT feed this into the error budget until a real "
-                  f"spread has been measured on a real disc "
-                  f"(SLDEA_MEASUREMENT 2.1a)."))
+            # n-AWARE since 2026-08-06 evening: the round count is
+            # configurable and the two calibration modes default to
+            # different counts, so a bare range says nothing on its own --
+            # the range of 5 fits is 1.37x the range of 3 at the SAME
+            # precision (d2(5)/d2(3)). Judge the MEAN SE, which is what
+            # SLDEA_MEASUREMENT 2.1 budgets, and derive it from the
+            # RECORDED range and n rather than recomputing from rounds_px:
+            # the persisted range is the statistic the anchor carries, and
+            # rounds_px is optional.
+            nr = anchor.get('n_rounds') or len(rounds) or 0
+            sig = anchor.get('sigma_pct')
+            if sig is None:
+                sig = se.sigma_from_range(spr, nr)
+            sep = anchor.get('se_pct')
+            if sep is None and sig is not None and nr:
+                sep = sig / math.sqrt(nr)
+            mode = anchor.get('cal_mode')
+            how = f"method {mode}, " if mode else ''
+            if sep is None:
+                # no d2 factor for this n, so the conversion the budget
+                # needs does not exist. Reported as a gap, above OK: an
+                # unconvertible number is not a passing one.
+                out.append((
+                    'MED', 'Operator repeatability cannot be converted: '
+                           f"no d2 factor for n={nr}",
+                    f"{how}range {spr:.2f}% across {nr} fit(s), but "
+                    f"SLDEA_MEASUREMENT 2.1a's range-to-sigma table covers "
+                    f"n = {min(se.D2_RANGE_FACTORS)}-"
+                    f"{max(se.D2_RANGE_FACTORS)} only, so neither the "
+                    f"per-fit sigma nor the mean's standard error could be "
+                    f"computed. Nothing here has been compared with 2.1's "
+                    f"~0.4% diameter budget. Recalibrate with a round "
+                    f"count in the table if this anchor's precision "
+                    f"matters."))
+            else:
+                sev2 = 'OK' if sep <= se.CAL_SE_PCT else 'MED'
+                out.append((
+                    sev2, 'Operator repeatability: '
+                          f"sigma {sig:.2f}%/fit, mean SE {sep:.2f}% "
+                          f"diameter across {nr} fits"
+                          + ('' if sep <= se.CAL_SE_PCT
+                             else f" -- over the {se.CAL_SE_PCT:g}% gate"),
+                    f"{how}fitted diameters "
+                    + (', '.join(f"{v:.1f}" for v in rounds) + ' px'
+                       if rounds else '(values not recorded)')
+                    + f"; mean {anchor['diam_px']:.1f} px, range "
+                      f"{anchor.get('spread_px', 0):.1f} px = {spr:.2f}%. "
+                      f"sigma = range/d2({nr}); mean SE = sigma/sqrt(n); "
+                      f"area SE = {2 * sep:.2f}%. Compare CALIBRATION "
+                      f"METHODS on sigma -- it is the per-fit precision "
+                      f"and the only figure that survives a different "
+                      f"round count. This is a measurement of the "
+                      f"OPERATOR, not of the device -- the one number "
+                      f"SLDEA_MEASUREMENT 2.5 asks for and has never had. "
+                      f"Tight is precision, not accuracy: a consistently "
+                      f"mis-placed mark scores well here and is caught by "
+                      f"the mask-area guard instead -- and where there is "
+                      f"no automatic fit, nothing catches it at all. "
+                      f"DO NOT feed this into the error budget until a "
+                      f"real spread has been measured on a real disc "
+                      f"(SLDEA_MEASUREMENT 2.1a)."))
 
     auds = [p.get('audit') for p in per]
     auds = [a for a in auds if a and a.get('bias_px') is not None]
@@ -1016,11 +1057,25 @@ def report(d):
           f"[{anchor.get('method', '?')}, saved "
           f"{anchor.get('saved', '?')}]")
         if rounds or anchor.get('spread_pct') is not None:
+            nr = anchor.get('n_rounds') or len(rounds) or 0
+            sig = anchor.get('sigma_pct')
+            if sig is None:
+                sig = se.sigma_from_range(anchor.get('spread_pct'), nr)
+            sep = anchor.get('se_pct')
+            if sep is None and sig is not None and nr:
+                sep = sig / math.sqrt(nr)
             A(f"  rounds        : "
+              + (f"method {anchor['cal_mode']}, "
+                 if anchor.get('cal_mode') else '')
               + (', '.join(f"{v:.1f}" for v in rounds) + ' px  '
                  if rounds else '')
               + f"spread {anchor.get('spread_px', 0):.1f} px "
                 f"({anchor.get('spread_pct', 0):.2f}%)"
+              # the n-aware conversion, or a plain statement that there is
+              # none: a range on its own is not comparable across n
+              + (f"  sigma {sig:.2f}%/fit, SE {sep:.2f}%"
+                 if sep is not None else
+                 f"  (no d2 factor for n={nr}: sigma/SE not computed)")
               + (f"  guard: {anchor['guard']}" if anchor.get('guard')
                  else ''))
         else:

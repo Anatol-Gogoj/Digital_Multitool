@@ -181,12 +181,20 @@ ANCHOR_HDR = '--- Edge Review scale anchor (SLDEA) ---'
 # read: 15 runs carry the 2026-08-05 two-click anchor with none of them,
 # and two runs (P3_6_2.5mL_20260729, DOT_P3_1_20260729) predate the gate
 # and carry no block at all. load_scale_anchor must keep serving both.
-_ANCHOR_KEYS = ('method', 'diam_px', 'diam_mm', 'mm_per_px',
+# cal_mode/sigma_pct/se_pct arrived with the two-point mode B
+# (2026-08-06 evening): with the round count configurable, a bare range is
+# not comparable between anchors, so the n-aware conversion is recorded
+# alongside it. `method` is NOT where the mode goes — mm_per_px matches it
+# exactly against 'manual-calibration' to give a hand calibration priority
+# over every automatic reference, so a mode suffix there would silently
+# demote every mode-B anchor back below the disc fit.
+_ANCHOR_KEYS = ('method', 'cal_mode', 'diam_px', 'diam_mm', 'mm_per_px',
                 'anchor_frame', 'anchor_is_baseline', 'auto_diam_px',
                 'n_rounds', 'rounds_px', 'spread_px', 'spread_pct',
+                'sigma_pct', 'se_pct',
                 'guard', 'saved', 'user')
 _ANCHOR_FLOATS = ('diam_px', 'diam_mm', 'mm_per_px', 'auto_diam_px',
-                  'spread_px', 'spread_pct')
+                  'spread_px', 'spread_pct', 'sigma_pct', 'se_pct')
 
 
 def _split_anchor(text):
@@ -326,7 +334,59 @@ def load_scale_anchor(rundir):
 CAL_ROUNDS = 3
 # (max-min)/mean of the fitted diameters above which the rounds
 # DISAGREE and a further round is offered (#215 spread gate).
+#
+# NO LONGER THE ACCEPTANCE GATE (2026-08-06 evening, `#215`). The range is
+# still RECORDED and still reported, but the gate is now se_ok below. Two
+# reasons, both from real measurements: a range is not comparable across
+# different n (the range of 5 fits is ~1.37x the range of 3 at the same
+# precision — see D2_RANGE_FACTORS), and a range cannot shrink when a
+# round is added, so a range gate's own remedy could never clear it.
 CAL_SPREAD_PCT = 1.0
+
+# ---- mode A / mode B: two calibration methods, comparable statistics ----
+# The operator drove mode A (circle fit) six times on a scratch copy of
+# P3_2_2.5mL_20260728 (`#215` comment, 2026-08-06). Recorded 3-round
+# ranges: 1.94, 2.09, 1.62, 1.81, 1.44 % plus one under 1 %. Via d2(3)
+# that is per-fit sigma ~ 1.05 % of diameter, so the 3-round mean SE is
+# 0.61 % diameter / 1.21 % area against §2.1's ~0.4 % / ~0.8 % budget.
+# The operator's diagnosis: "the bright green circle occludes the edges" —
+# a 3 px stroke laid on the boundary hides the feature being aligned to.
+# Mode B is the alternative to A/B against it: two clicks on roughly
+# opposite edge points, N rounds, the image RANDOMLY ROTATED between
+# rounds, and markers that do not cover the boundary.
+CAL_MODE_CIRCLE = 'A'
+CAL_MODE_TWOPOINT = 'B'
+CAL_MODES = (CAL_MODE_CIRCLE, CAL_MODE_TWOPOINT)
+# Default rounds per mode. A keeps 3 so mode A's behaviour is unchanged;
+# B defaults to 5 because at the target per-fit sigma < 0.9 %, 5 rounds
+# gives SE = 0.40 % and lands on §2.1's budget.
+CAL_ROUNDS_TWOPOINT = 5
+CAL_MODE_ROUNDS = {CAL_MODE_CIRCLE: CAL_ROUNDS,
+                   CAL_MODE_TWOPOINT: CAL_ROUNDS_TWOPOINT}
+# Which mode the dialog opens on. Mode A, the incumbent: switching the
+# default would change every existing calibration path silently. One edit
+# once mode B wins the A/B comparison.
+CAL_DEFAULT_MODE = CAL_MODE_CIRCLE
+
+# Expected range of n samples from a normal distribution, in units of
+# sigma — the control-chart d2 factors. Source: ASTM E2587 "Standard
+# Practice for Use of Control Charts in Statistical Process Control",
+# table of factors for the range chart; identically tabulated in Duncan,
+# *Quality Control and Industrial Statistics*, and the value at n=3
+# (1.693) is the one SLDEA_MEASUREMENT §2.1a was originally written
+# around. A LOOKUP, never a formula fitted by eye: there is no closed
+# form, and an interpolated d2 would put an invented number into the
+# error budget.
+D2_RANGE_FACTORS = {2: 1.128, 3: 1.693, 4: 2.059, 5: 2.326,
+                    6: 2.534, 7: 2.704, 8: 2.847}
+# The acceptance gate, on the MEAN's standard error rather than the raw
+# range (2026-08-06 evening). The threshold is DERIVED FROM §2.1's
+# standing scale-anchor budget of ~0.4 % diameter / ~0.8 % area — it is
+# not a measured number and not a second invented one: the budget already
+# existed, and SE is the quantity the budget is expressed in. Area SE is
+# twice this by area ∝ diameter², i.e. 0.8 %, so one threshold covers
+# both rows of §2.1.
+CAL_SE_PCT = 0.4
 # Anchor sanity guard (2026-08-06, added on top of #215's flow). Two
 # tolerances, both generous: §2.1 puts the whole scale-anchor term at
 # ~0.4 % diameter / ~0.8 % area, so 1 % is already outside the budget.
@@ -342,39 +402,138 @@ ANCHOR_GUARD_AREA_PCT = 1.0
 ANCHOR_MODAL_DIAM_PCT = 3.0
 
 
-def calibration_stats(diams):
-    """Mean and spread of the per-round fitted diameters (#215).
+def d2(n):
+    """The expected range of `n` normal samples, in units of sigma —
+    D2_RANGE_FACTORS[n], or **None** when the table has no factor for n.
 
-    The mean is the anchor; the spread is a free per-run measurement of
+    None is the whole point. §2.1a used to hard-wire the n=3 constants
+    (sigma ~ R/1.693, mean SE ~ R/2.93, area ~ R/1.47); with the round
+    count configurable those are simply wrong for any other n, and a
+    silent fallback — nearest neighbour, an interpolation, or just reusing
+    1.693 — would push a wrong error term into the budget without anyone
+    seeing it happen. Every caller here refuses to convert instead."""
+    try:
+        return D2_RANGE_FACTORS.get(int(n))
+    except (TypeError, ValueError):
+        return None
+
+
+def calibration_stats(diams):
+    """Mean, range and the n-aware precision conversion of the per-round
+    fitted diameters (#215; n-aware since 2026-08-06 evening).
+
+    The mean is the anchor; the scatter is a free per-run measurement of
     operator repeatability, the one term of the error budget that has
     never had data (`sldea_trace` finds zero repeat pairs across 140
     labels). Plain mean of EVERY round performed — no outlier rejection,
     because silently dropping a round would edit the very number the
-    spread is supposed to report. -> None for no rounds."""
+    spread is supposed to report. -> None for no rounds.
+
+    The conversion (SLDEA_MEASUREMENT §2.1a):
+
+        sigma  ~ R / d2(n)          per-fit precision — the METHOD's own
+                                    property, and the only figure that is
+                                    comparable between two modes run at
+                                    different round counts
+        SE     = sigma / sqrt(n)    precision of the MEAN, which is the
+                                    number the anchor actually carries
+        area SE = 2 x SE            area ∝ diameter²
+
+    `d2`/`sigma_px`/`sigma_pct`/`se_px`/`se_pct`/`area_se_pct` are all
+    **None together** when d2(n) has no factor — n=1 (no scatter to
+    convert) or n outside the table. A None here is a refusal to convert,
+    not a zero, and se_ok() will not call it a pass."""
     vals = [float(v) for v in (diams or []) if v]
     if not vals:
         return None
-    mean = sum(vals) / len(vals)
+    n = len(vals)
+    mean = sum(vals) / n
     lo, hi = min(vals), max(vals)
-    return {'n': len(vals), 'values': vals, 'mean': mean,
-            'min': lo, 'max': hi, 'spread_px': hi - lo,
-            'spread_pct': (100.0 * (hi - lo) / mean) if mean else 0.0}
+    rng = hi - lo
+    out = {'n': n, 'values': vals, 'mean': mean,
+           'min': lo, 'max': hi, 'spread_px': rng,
+           'spread_pct': (100.0 * rng / mean) if mean else 0.0,
+           'd2': d2(n), 'sigma_px': None, 'sigma_pct': None,
+           'se_px': None, 'se_pct': None, 'area_se_pct': None}
+    if out['d2'] and mean:
+        out['sigma_px'] = rng / out['d2']
+        out['se_px'] = out['sigma_px'] / math.sqrt(n)
+        out['sigma_pct'] = 100.0 * out['sigma_px'] / mean
+        out['se_pct'] = 100.0 * out['se_px'] / mean
+        out['area_se_pct'] = 2.0 * out['se_pct']
+    return out
+
+
+def sigma_from_range(spread_pct, n):
+    """Per-fit sigma (%) from a RECORDED range (%) and its round count —
+    the read-back path for an anchor already in setup.txt, where the
+    individual diameters may not have survived. None when d2(n) refuses,
+    and None is then carried all the way out to the operator rather than
+    being papered over."""
+    f = d2(n)
+    if not f or spread_pct is None:
+        return None
+    try:
+        return float(spread_pct) / f
+    except (TypeError, ValueError):
+        return None
+
+
+def se_ok(stats, limit=CAL_SE_PCT):
+    """THE ACCEPTANCE GATE (2026-08-06 evening): True when the mean's
+    standard error is inside §2.1's scale-anchor budget.
+
+    Three-valued on purpose — True / False / **None = cannot be judged**.
+    None is returned for a single round and for any n the d2 table has no
+    factor for, and the dialog treats it as its own gate with its own
+    modal. An unjudgeable set must NOT read as a pass: `spread_ok` let
+    n < 2 through vacuously, which was honest for a range (there is no
+    range) but would be a lie here, because the budget this gate enforces
+    is on a quantity that was never computed.
+
+    Why SE and not the range this replaced (measured, 2026-08-06): a range
+    is not comparable across n, and a range cannot shrink when a round is
+    added — so the remedy a range gate offers can never clear it. SE falls
+    as 1/sqrt(n), so `rounds_for_se` can name the n that WOULD clear it,
+    and SE is the quantity §2.1 budgets in the first place."""
+    if not stats:
+        return None
+    if stats.get('n', 0) < 2 or stats.get('se_pct') is None:
+        return None
+    return float(stats['se_pct']) <= float(limit)
+
+
+def rounds_for_se(sigma_pct, limit=CAL_SE_PCT):
+    """Smallest round count whose mean SE would meet `limit` at a measured
+    per-fit `sigma_pct` — the remedy an SE gate can name and a range gate
+    could not. None when sigma is unusable.
+
+    Not capped to the d2 table here: a caller that gets 11 back needs to
+    be told the method cannot reach budget within the table, not handed a
+    quietly clipped 8."""
+    try:
+        s = float(sigma_pct)
+    except (TypeError, ValueError):
+        return None
+    if s <= 0 or float(limit) <= 0:
+        return None
+    return max(2, int(math.ceil((s / float(limit)) ** 2)))
 
 
 def spread_ok(stats, limit=CAL_SPREAD_PCT):
-    """True when the rounds agree closely enough to accept as they are.
-    A single round has no spread, so it passes vacuously — that is the
-    honest answer, not a certificate.
+    """Whether the raw RANGE of the rounds is inside CAL_SPREAD_PCT.
 
-    The gate statistic is a RANGE, deliberately: SLDEA_MEASUREMENT §2.1a
-    converts the recorded range into the budget's error term (σ ≈ R/1.693,
-    mean SE ≈ R/2.93, area ≈ R/1.47), so the number the gate judges is the
-    number the budget consumes. The consequence, which the dialog must not
-    misrepresent (review 2026-08-06): max−min NEVER shrinks when a round
-    is added, so ADDING ROUNDS CANNOT CLEAR THIS GATE. The only remedy
-    that can is refitting the rounds — which is what the dialog offers.
-    A statistic that does shrink with n (SD, SEM) would need its own
-    threshold, and no real spread has been measured yet to choose one."""
+    NO LONGER THE ACCEPTANCE GATE — `se_ok` is (2026-08-06 evening). Kept
+    because the range is still the persisted statistic and still worth
+    quoting, and because the property pinned here is worth keeping pinned:
+    max−min NEVER shrinks when a round is added, so ADDING ROUNDS COULD
+    NOT CLEAR THIS GATE. That, plus the fact that a range is not
+    comparable between an n=3 and an n=5 anchor (d2(5)/d2(3) = 1.37), is
+    why the gate moved to the mean's standard error — which does fall as
+    1/sqrt(n) and is the quantity §2.1 budgets.
+
+    A single round has no range, so it passes vacuously — honest for a
+    range, and exactly why `se_ok` refuses to do the same."""
     return not stats or stats['n'] < 2 or stats['spread_pct'] <= limit
 
 
@@ -477,6 +636,119 @@ def anchor_guard_note(guard, overridden):
         return 'clear (' + body + ')'
     return ('OVERRIDDEN by operator: ' if overridden
             else 'tripped: ') + body
+
+
+# ---------------------------------------------------------------------------
+# the calibration log — every completed round-set, accepted or declined
+#
+# Why this file exists: the six mode-A spreads that drove the whole
+# two-point redesign (`#215` comment, 2026-08-06 — 1.94, 2.09, 1.62, 1.81,
+# 1.44 % and one under 1 %) survive ONLY because they were read off the
+# screen and typed into a chat. The run's setup.txt was never written,
+# because every one of those calibrations was DECLINED at a gate, and
+# setup.txt is written at Save. A declined round-set is exactly the
+# measurement an A/B comparison needs — it is a fit the method produced —
+# so it is written here the moment the round-set completes, whatever the
+# operator then decides about it.
+#
+# Run data, not repo data: this lands in the run folder and .gitignore
+# blocks it (repo convention — a PR adding a capture artifact extends
+# .gitignore in the same PR).
+# ---------------------------------------------------------------------------
+
+CAL_LOG_NAME = 'scale_calibration_log.txt'
+
+
+def _fmt_list(vals, fmt='{:.2f}'):
+    return ','.join(fmt.format(float(v)) for v in (vals or []))
+
+
+def calibration_log_line(rec):
+    """ONE line recording a completed round-set — the same line the dialog
+    prints to stdout and appends to the run's log, so a bench operator can
+    report an A/B result by copying either one.
+
+    Field order is the reporting order: mode and n first (what was done),
+    then **sigma** (the method's per-fit precision — the only figure
+    comparable between two modes at different round counts, which is why
+    it leads), then the mean SE the gate judges, then the raw material.
+    Deliberately one flat line of key=value: greppable out of a terminal
+    scrollback with no tooling, and stable enough to parse later.
+
+    Pure — takes a dict, returns a str, touches no disk."""
+    st = rec.get('stats') or {}
+    n = st.get('n') or rec.get('n') or 0
+
+    def pct(key):
+        v = st.get(key)
+        return f"{v:.2f}%" if v is not None else 'unconvertible'
+
+    verdict = rec.get('verdict')
+    bits = [
+        'SLDEA-CAL',
+        str(rec.get('when') or ''),
+        f"mode={rec.get('mode', '?')}",
+        f"n={n}",
+        f"sigma={pct('sigma_pct')}",
+        f"se={pct('se_pct')}",
+        f"area_se={pct('area_se_pct')}",
+        f"gate={float(rec.get('gate', CAL_SE_PCT)):.2f}%",
+        f"verdict={verdict or 'UNJUDGEABLE'}",
+        f"range={st.get('spread_pct', 0.0):.2f}%",
+        f"mean={st.get('mean', 0.0):.2f}px",
+        f"diams={_fmt_list(st.get('values'))}px",
+    ]
+    # mode B only; '-' rather than an empty field so the line's shape is
+    # the same for both modes and a column-splitter cannot slip
+    bits.append('rot=' + (_fmt_list(rec.get('rot_deg'), '{:.1f}')
+                          or '-') + 'deg')
+    bits.append(f"stroke={rec.get('stroke') or '-'}")
+    auto = rec.get('auto_diam_px')
+    if auto:
+        pctd = rec.get('auto_pct')
+        bits.append(f"auto={float(auto):.1f}px"
+                    + (f"({pctd:+.2f}%)" if pctd is not None else ''))
+    else:
+        bits.append('auto=none')
+    bits.append(f"outcome={rec.get('outcome', '?')}")
+    if rec.get('frame'):
+        bits.append(f"frame={rec['frame']}")
+    line = ' '.join(b for b in bits if b)
+    # the block grammar of setup.txt does not apply here, but a stray
+    # newline would still split one record into two
+    return line.replace('\r', ' ').replace('\n', ' ')
+
+
+def append_calibration_log(rundir, rec):
+    """Append one round-set to <rundir>/scale_calibration_log.txt.
+
+    -> (path, line) on success, (None, line) when the write fails. The
+    line comes back either way BECAUSE it can fail: the caller prints the
+    same line to stdout, so a read-only or full disk costs the file and
+    not the measurement (the 2026-08-04 disk-full incident is why that is
+    not hypothetical). Never raises — losing a calibration to a logging
+    error would be worse than the gap this file exists to close."""
+    line = calibration_log_line(rec)
+    if not rundir:
+        return None, line
+    path = os.path.join(rundir, CAL_LOG_NAME)
+    try:
+        new = not os.path.exists(path)
+        with open(path, 'a', encoding='utf-8') as f:
+            if new:
+                f.write('# SLDEA Edge Review scale calibrations, one line '
+                        'per completed round-set, accepted or declined.\n'
+                        '# mode=A circle fit, mode=B two-point diameter '
+                        'with the display randomly rotated per round.\n'
+                        '# sigma = per-fit precision (range/d2(n)); se = '
+                        'sigma/sqrt(n) on the mean; area_se = 2*se.\n'
+                        '# Compare methods on SIGMA -- it is the only '
+                        'figure that survives a different n.\n')
+            f.write(line + '\n')
+        return path, line
+    except OSError as e:
+        print(f"calibrate: could not append to {path}: {e}")
+        return None, line
 
 
 # ---------------------------------------------------------------------------

@@ -53,7 +53,9 @@ Observation → decision:
   operator. → `diam_px` = plain mean of every round performed, no outlier
   rejection (dropping the odd one out would edit the very number the
   spread reports). If (max−min)/mean exceeds **`CAL_SPREAD_PCT` = 1 %**,
-  the dialog offers another round before accepting, up to 6.
+  the dialog offers a **refit** of all rounds before accepting (see the
+  review sub-entry below: an extra round cannot clear a range gate, so
+  the original "add another round, up to 6" offer was withdrawn).
 
 - **The spread is persisted, and it is the number `SLDEA_MEASUREMENT`
   §2.5 has been asking for.** The batch control round's operator-repeat
@@ -144,6 +146,127 @@ headlessly**, and `tests/test_app_launch.py` self-skips on Windows — so a
 green suite is *not* evidence that the window looks right. The stroke
 weight, the handle size and the drag feel have not been judged by a human
 eye on real bench frames. **First bench use should check exactly that.**
+
+### Adversarial review of the above, applied the same day (2026-08-06)
+
+**TL;DR:** Three reviewers took the calibration apart before it shipped
+and found four ways it could hand you a calibration that *looks*
+validated and is not. All four are fixed. The short version: Enter used to
+answer every warning with "yes"; the three rounds could see each other's
+answers, so the repeatability number was fabricable; the guard was dead on
+runs whose baseline frame will not load; and the repeatability verdict was
+missing from the diagnostic on exactly those runs.
+
+- **`<Return>` answered every warning with its dangerous option.** The
+  Toplevel bound Enter to Continue/Finish while the gates used
+  `askyesno`, which defaults to **YES** and was passed no `default=`.
+  Driven with a stub returning each prompt's default: six Enter presses
+  produced four "Rounds disagree" prompts and then the "Anchor sanity
+  check", and the out-of-tolerance anchor was **accepted** — the guard
+  that exists to catch a P3_2-style error could be dismissed without
+  being read. → Every yes/no gate now passes an **explicit `default=`**,
+  and it is the *declining* button on every accept-anyway prompt; `ask()`
+  **unbinds `<Return>`** for the duration of each modal; and the LAST
+  round requires the button, so Enter can no longer reach `finish()` at
+  all. Pinned by `test_calibration_warnings_default_to_declining_them`
+  (the reviewer's own harness — every question answered with its default,
+  and the anchor must not be accepted) and
+  `test_return_key_cannot_finish_a_calibration`.
+
+- **The three rounds were not independent, which corrupted an
+  error-budget term.** The header rendered `accepted so far: N px` beside
+  a live `circle: N px across` readout, so an operator could wheel round 2
+  until the numbers matched. Randomizing the spawn is worthless against a
+  printed target: the spread is then biased toward zero *by
+  construction*, the spread gate can never fire, and the figure §2.1a
+  converts into an error term (R/2.93, R/1.47) becomes fabricated
+  precision entering the budget. → **Nothing about a previous round is
+  shown while rounds are being fitted** — progress is `Round n of 3` plus
+  a plain statement that the earlier rounds are hidden and why. All three
+  values, the mean and the spread appear the moment the last fit is in
+  (and in the status line afterwards). The live readout of the *current*
+  circle stays: that is the fit being made, not a target to match. The
+  mid-round "add a round" prompt was also stripped of the min/max, so no
+  fitting ever proceeds against a disclosed number. Pinned by
+  `test_mid_round_display_never_reveals_a_previous_fit`.
+
+- **The guard was structurally dead on the fallback-frame path.**
+  `_anchor_frame()` falls back to a later, activated frame when the
+  baseline PNG is unreadable (the disk-full failure mode), but
+  `_auto_disc()` goes through `_base_gray()`, which needs the baseline row
+  itself. So on that path `anchor_guard` returned `available=False` with
+  an **empty** warn list and `finish()` accepted in silence — one line
+  after the dialog announced *"cross-checking the mean against the
+  automatic disc fit…"*, which reads as a check that passed. → An absent
+  cross-check is now its own **modal, defaulting to No** ("Anchor NOT
+  cross-checked"), the status line says `⚠ NOT cross-checked`, the run's
+  record says `NOT CROSS-CHECKED: no automatic disc fit was available`,
+  and `sldea_diag` reports it at **MED** ("Scale anchor has never been
+  cross-checked") instead of an OK line reading "cross-check
+  unavailable". Note what this path means: with no automatic fit, the
+  mask-area test cannot run either, so *neither* reference exists.
+
+- **The repeatability verdict was blind where it matters most.** Both new
+  verdicts sat inside `if ref and anchor and anchor.get('mm_per_px')` in
+  `sldea_diag.verdicts`, so when `baseline_disc` refused, control fell to
+  the pre-existing `elif` and **no repeatability verdict was emitted at
+  any severity** — on exactly the runs with no automatic reference, where
+  the operator's own repeatability is the only evidence there is. → The
+  spread verdict is **hoisted out**: it needs no automatic fit, being a
+  property of the three fits alone, and now fires whenever an anchor
+  exists.
+
+- **[minor, applied] The spread gate's remedy could not clear it.**
+  `spread_pct = 100·(max−min)/mean` has a floor of `100·(max−min)/max`, so
+  once tripped, adding rounds essentially never brings it back under the
+  threshold — yet the dialog offered *"Add another round?"* and then always
+  landed on *"Accept the mean anyway?"*. → The offer is withdrawn. One
+  yes/no/**cancel** question: **refit all rounds** (the only remedy that
+  can clear a range gate), **accept the mean as measured**, or **leave the
+  gate closed** — which is the default. `CAL_MAX_ROUNDS` is gone with it.
+  The gate **statistic** stays the range on purpose: §2.1a consumes a
+  range, and a statistic that shrinks with *n* (SD, SEM) would need a
+  threshold of its own, which would be a second invented number on a
+  feature whose first one is still unvalidated. Revisit when real spreads
+  exist. Pinned by `test_adding_a_round_can_never_clear_the_spread_gate`
+  — the old test built a *fresh* tight 4-value list, which is how the
+  flaw stayed invisible.
+
+- **[minor, applied] The pre-gate runs got no number.**
+  `P3_6_2.5mL_20260729` and `DOT_P3_1_20260729` carry px rows and **no
+  anchor block**, so the re-scale percentage was `None` in the dialog and
+  at Save — no number on exactly the runs whose whole mm² column is about
+  to hang on a hand-fitted anchor for the first time. → The percentage is
+  quoted against the **automatic disc fit** instead, which is the scale a
+  pre-gate Save derived those mm² at, in the calibration dialog and at
+  Save; with no automatic fit either, both say plainly that there is no
+  percentage and the whole column is derived fresh.
+
+**What is still NOT verified after this round** (unchanged unless noted):
+the drag/press/release gesture, the view-px hit test at non-unit zoom,
+wheel resize, Ctrl+wheel zoom, right-drag pan and the F/Z bindings have
+never been exercised as **events** — only the math they call, so a swapped
+argument or a wrong `event.state` mask would pass every test written
+(`<Return>` and the arrow-key path are now the exception). No operator has
+fitted a circle to a real disc, so **there is still no measured
+three-round spread anywhere**: the 1 % gate, the 0.5/5.0 px wheel steps
+and the 0.30–0.40 spawn band are chosen, not validated. The two guard
+references are not independent (πr² makes the area test the diameter test
+squared, binding at ~0.5 % diameter). Nothing has been run against a real
+run directory — every backwards-compatibility claim rests on synthetic
+`setup.txt` files. **The dialog has now been rendered and looked at**
+(2026-08-06, synthetic 320×240 frame, this workstation): the header, the
+live readout, the buttons, the bright-green stroke, the 8 handles and the
+centre cross all draw as intended at 3.12× fit zoom, and with *every*
+warning showing the window measures 1020×1006 px — which fits a 1440p
+screen comfortably and a 1080p bench screen with ~35 px to spare. That is
+a rendering check, not a usability one.
+
+**Consequence for the error budget, restated because it is the point:**
+the per-run operator-repeatability figure must **not** be fed into
+`SLDEA_MEASUREMENT.md` until a real spread has been measured on a real
+disc. Until then it is a number the tool produces, not a number the tool
+has measured.
 
 ## Electrode mask default 220 → 255, and the Tune button's bad resolver (2026-08-05)
 

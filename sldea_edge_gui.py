@@ -27,13 +27,24 @@ CALIBRATION v2 (#215, 2026-08-06): the anchor is a CIRCLE the operator
 fits onto the resting disc — drag to move, handles to resize — over
 CAL_ROUNDS rounds, each respawning at a randomized position/size in the
 central ROI, and the MEAN of the fitted diameters is the anchor. The
-spread across rounds is the run's operator-repeatability number and is
-persisted with it. Two sanity guards fire before Save: the spread gate
-(rounds that disagree by >CAL_SPREAD_PCT offer another round) and the
-ANCHOR GUARD (se.anchor_guard) — a deviation over ~1% from either the
-automatic disc fit or the mask's π·(diam_mm/2)² resting area demands an
-explicit override. Run P3_2_2.5mL_20260728 shipped 4.42% low in every
-absolute mm² because the old 3% cross-check said nothing.
+rounds are kept INDEPENDENT: no previously accepted diameter and no
+running mean is shown until the last round is in, because a visible
+target turns the spread into a number the operator can hit (review
+2026-08-06). The spread across rounds is the run's operator-repeatability
+number and is persisted with it. Two sanity guards fire before Save: the
+spread gate (rounds disagreeing by >CAL_SPREAD_PCT — refit or accept as
+measured; adding rounds cannot clear a range gate) and the ANCHOR GUARD
+(se.anchor_guard) — a deviation over ~1% from either the automatic disc
+fit or the mask's π·(diam_mm/2)² resting area demands an explicit
+override, and an UNAVAILABLE cross-check demands one too. Run
+P3_2_2.5mL_20260728 shipped 4.42% low in every absolute mm² because the
+old 3% cross-check said nothing.
+
+Every yes/no gate in the dialog is asked with an EXPLICIT default= and
+with <Return> taken away from the window underneath while it is up:
+tkinter's askyesno defaults to YES, and the Toplevel's Enter binding used
+to answer all of them in sequence — six Enter presses accepted an
+out-of-tolerance anchor without a word being read (review 2026-08-06).
 
 With --auto (used by the SLDEA tab's "auto process"), the calibrate
 dialog opens on launch and detection chains automatically once
@@ -138,10 +149,11 @@ def elide(text, width_px, measure):
 # are independent rather than three nudges of the first one.
 # ---------------------------------------------------------------------------
 
-CAL_ROUNDS = se.CAL_ROUNDS          # 3 (the spread needs >= 2)
-CAL_MAX_ROUNDS = 6                  # the spread gate may add rounds; this
-                                    # caps the loop so a shaky hand cannot
-                                    # trap the operator in it forever
+CAL_ROUNDS = se.CAL_ROUNDS          # 3 (the spread needs >= 2). Fixed:
+                                    # the spread gate's remedy is a REFIT,
+                                    # not a 4th round, because max-min
+                                    # cannot shrink when a round is added
+                                    # (se.spread_ok, review 2026-08-06)
 CAL_MIN_R_PX = 8.0                  # smallest fittable radius, full-res px
 CAL_HANDLE_TOL = 10                 # handle grab radius, VIEW px
 CAL_SPAWN_R_FRAC = (0.30, 0.40)     # spawn radius / ROI min-dimension
@@ -923,7 +935,13 @@ class EdgeReviewApp:
                           f"uses — every absolute mm² in this run "
                           f"inherits it.")
             else:
-                sc += " (auto disc cross-check unavailable)"
+                # NOT a neutral parenthetical (review 2026-08-06): with no
+                # automatic fit, nothing on this run has ever checked the
+                # anchor against anything, and the mask-area test could
+                # not run either. Same voice as a trip.
+                sc += (" ⚠ NOT cross-checked: no automatic disc fit on "
+                       "this run — the anchor is unverified against the "
+                       "disc AND against the mask area")
         else:
             # detect_all_sync (tests/headless) can reach here ungated
             sc = (f"; scale ref: baseline disc "
@@ -1373,20 +1391,46 @@ class EdgeReviewApp:
         # ... and SAY BY HOW MUCH (#215). "re-scaled to THIS anchor" is
         # true but abstract; an operator who re-reviewed one frame needs
         # the number, because the whole mm² column moves by it.
-        rescale = None
+        rescale, prev = None, None
         try:
             prev = se.load_scale_anchor(self.rundir)
             if prev and self.manual_ref:
                 rescale = se.rescale_pct(prev['diam_px'],
                                          self.manual_ref['diam_px'])
         except OSError:
-            rescale = None
+            rescale, prev = None, None
         if n_kept and rescale is not None and abs(rescale) >= 0.005:
             unrev += (f"\n  ⚠ this anchor differs from the recorded one "
                       f"({prev['diam_px']:.1f} → "
                       f"{self.manual_ref['diam_px']:.1f} px): EVERY "
                       f"re-derived mm² moves {rescale:+.2f}%, including "
                       f"rows you did not re-review.")
+        elif n_kept and not prev and self.manual_ref:
+            # The PRE-GATE runs (P3_6_2.5mL_20260729, DOT_P3_1_20260729):
+            # px rows, no anchor block, so there is no recorded diameter
+            # to quote against — and they are precisely the runs whose
+            # whole mm² column is about to hang on a hand-fitted anchor
+            # for the first time. Quote it against the automatic fit,
+            # which is the scale a pre-gate save derived them at; with no
+            # automatic fit either, say plainly that there is no number
+            # (review 2026-08-06, minor 6). It used to show nothing.
+            auto_px = (self.base_ref or {}).get('diam_px')
+            pct = se.rescale_pct(auto_px, self.manual_ref['diam_px'])
+            if pct is not None:
+                unrev += (f"\n  ⚠ NO anchor is on record for this run (a "
+                          f"pre-gate save): those mm² were derived at the "
+                          f"AUTOMATIC disc fit's scale ({auto_px:.1f} px), "
+                          f"so this Save moves every one of them "
+                          f"{pct:+.2f}% — the first time this column hangs "
+                          f"on a hand-fitted anchor "
+                          f"({self.manual_ref['diam_px']:.1f} px).")
+            else:
+                unrev += (f"\n  ⚠ NO anchor is on record for this run AND "
+                          f"there is no automatic fit, so there is no "
+                          f"percentage to quote: the WHOLE mm² column is "
+                          f"derived fresh at this anchor "
+                          f"({self.manual_ref['diam_px']:.1f} px), "
+                          f"including rows you did not re-review.")
         n_bd = 0
         if self.flags:
             start = min(self.flags)
@@ -1684,6 +1728,17 @@ class EdgeReviewApp:
         operator. The spread across rounds is kept — it is the only
         measurement of operator repeatability this project has.
 
+        And the rounds are kept BLIND (review 2026-08-06): the header used
+        to render "accepted so far: N px" while the live readout rendered
+        the current circle's diameter, so an operator could wheel round 2
+        until the two numbers matched. Randomizing the spawn is worthless
+        against a printed target — the spread would be biased toward zero
+        by construction, the spread gate could never fire, and the
+        repeatability figure SLDEA_MEASUREMENT §2.1a converts into an
+        error term (R/2.93, R/1.47) would be fabricated precision entering
+        the budget. Nothing about a previous round is shown until the last
+        fit is in; then all of it is.
+
         SINGLETON like Advanced… (#176): the grab is pointer-only, so a
         pierced dialog must front the live one, never stack a second wait
         chain. Fail-CLOSED construction (audit 2026-08-05): the singleton
@@ -1769,6 +1824,20 @@ class EdgeReviewApp:
                          f"next Save — even frames you do not re-review. "
                          f"Re-reviewing one frame moves the whole "
                          f"column.")
+                if not recorded:
+                    # the two pre-gate runs (P3_6_2.5mL_20260729,
+                    # DOT_P3_1_20260729) have px rows and NO anchor
+                    # block, so there is no recorded diameter to quote a
+                    # re-scale percentage against — which is exactly the
+                    # case where the whole mm² column is about to hang on
+                    # a hand-fitted anchor for the first time. Say so
+                    # here; the number itself is quoted against the
+                    # AUTOMATIC fit at accept time and at Save, because
+                    # that is the scale a pre-gate Save derived them at.
+                    gate += (f"\n⚠ NO anchor is on record (pre-gate save): "
+                             f"those mm² were derived at the AUTOMATIC "
+                             f"fit's scale, so the move is quoted against "
+                             f"THAT, here and at Save.")
             tk.Label(win, text=gate, justify='left',
                      wraplength=980).pack(pady=(6, 2), padx=8, anchor='w')
             hdr = tk.Label(win, text='', justify='left',
@@ -1791,7 +1860,16 @@ class EdgeReviewApp:
             roi_box = cal_roi(img.width, img.height,
                               self.settings.get('roi_frac', 0.85))
             st = {'photo': None, 'pan': None, 'grab': None,
-                  'round': 1, 'diams': [], 'circle': None}
+                  'round': 1, 'diams': [], 'circle': None,
+                  # a modal warning is up: <Return> must not reach the
+                  # dialog underneath while one is (review 2026-08-06)
+                  'modal': False,
+                  # the anchor guard's modal has to print the mean and the
+                  # reference diameter for its warning to be actionable at
+                  # all, so declining it and refitting means the next
+                  # rounds ARE fitted against a disclosed number. That
+                  # cannot be prevented; it is recorded instead.
+                  'disclosed': False}
 
             def respawn():
                 st['circle'] = spawn_circle(
@@ -1802,12 +1880,39 @@ class EdgeReviewApp:
                 st['circle'] = clamp_circle(cx, cy, r, full_box,
                                             contain=False)
 
+            def is_last_round():
+                """True when accepting the current circle FINISHES the
+                calibration — i.e. when the next press runs the gates."""
+                return len(st['diams']) + 1 >= max(CAL_ROUNDS, st['round'])
+
             def head_text():
-                done = ', '.join(f"{d:.1f}" for d in st['diams'])
-                return (f"Calibration {st['round']} of "
-                        f"{max(CAL_ROUNDS, len(st['diams']) + 1)}"
-                        + (f"   ·   accepted so far: {done} px"
-                           if done else ''))
+                """PROGRESS ONLY — no previously accepted diameter, no
+                running mean (review 2026-08-06). A visible target makes
+                the three rounds dependent, which biases the spread toward
+                zero, stops the spread gate from ever firing, and turns
+                the repeatability figure into fabricated precision. The
+                live readout of the CURRENT circle is fine on its own."""
+                return (f"Round {st['round']} of "
+                        f"{max(CAL_ROUNDS, st['round'])}   ·   the earlier "
+                        f"rounds are HIDDEN until the last fit is in — "
+                        f"each fit has to be independent, or the spread is "
+                        f"a fiction"
+                        + ('   ·   this is the LAST round: use the ✔ '
+                           'Finish calibration button' if is_last_round()
+                           else ''))
+
+            def reveal_text(stats):
+                """All of it, at once, once the fitting is OVER — the
+                values, the mean, the range, and the gate it is judged
+                against (SLDEA_MEASUREMENT §2.1a). Shown on the main
+                window's status line by accept(), which is the one place
+                that outlives the dialog; deliberately NOT shown while any
+                further round could still be fitted."""
+                return (f"mean of {stats['n']}: "
+                        + ', '.join(f"{v:.1f}" for v in stats['values'])
+                        + f" px, spread {stats['spread_px']:.1f} px = "
+                          f"{stats['spread_pct']:.2f}% "
+                          f"(gate {se.CAL_SPREAD_PCT:g}%)")
 
             def repaint():
                 ix0, iy0 = vt.to_image(0, 0)
@@ -1870,10 +1975,28 @@ class EdgeReviewApp:
                         'spread_px': stats['spread_px'],
                         'spread_pct': stats['spread_pct']})
                 if guard is not None:
-                    self.manual_ref['guard'] = se.anchor_guard_note(
-                        guard, overridden)
-                extra = (f" (mean of {stats['n']}, spread "
-                         f"{stats['spread_pct']:.2f}%)" if stats else '')
+                    note = se.anchor_guard_note(guard, overridden)
+                    if st['disclosed']:
+                        # these rounds were fitted AFTER a cross-check had
+                        # printed the mean and the reference, so their
+                        # spread is not a blind measurement any more. A
+                        # suspiciously tight spread on such a run has an
+                        # explanation, and it belongs in the record.
+                        note += '; refit after a disclosed cross-check'
+                    self.manual_ref['guard'] = note
+                # THE REVEAL (#215 + review 2026-08-06): the values were
+                # hidden while they were being fitted, so the record of
+                # what they were belongs here — after the fitting, on the
+                # one surface that survives the dialog closing
+                extra = ((' (' + reveal_text(stats)
+                          + ('' if se.spread_ok(stats) else ' ⚠ OVER GATE')
+                          + ')') if stats else '')
+                # an anchor that met no cross-check must not look like one
+                # that passed a cross-check
+                if guard is not None and not guard.get('available'):
+                    extra += " ⚠ NOT cross-checked (no automatic disc fit)"
+                elif guard is not None and overridden:
+                    extra += " ⚠ guard OVERRIDDEN"
                 self.status.config(
                     text=f"scale calibrated: "
                          f"{self.settings['diam_mm']:g} mm = "
@@ -1883,71 +2006,188 @@ class EdgeReviewApp:
                          f"at Save")
                 win.destroy()
 
+            def ask(title, msg, default, three=False, **kw):
+                """askyesno / askyesnocancel with an EXPLICIT default, and
+                with <Return> taken off the window underneath while the
+                question is up.
+
+                Review 2026-08-06, demonstrated not speculated: tkinter's
+                askyesno defaults to YES and was passed no default=, while
+                the Toplevel bound <Return> to Continue/Finish. Six Enter
+                presses therefore produced four "Rounds disagree" prompts
+                and the "Anchor sanity check", and ACCEPTED an
+                out-of-tolerance anchor — the guard that exists to catch a
+                P3_2-style error could be dismissed without being read.
+                Every accept-anyway prompt now defaults to the DECLINING
+                button, and Enter cannot reach the dialog beneath."""
+                st['modal'] = True
+                try:
+                    win.unbind('<Return>')
+                except tk.TclError:
+                    pass
+                fn = (messagebox.askyesnocancel if three
+                      else messagebox.askyesno)
+                try:
+                    return fn(title, msg, default=default, **kw)
+                finally:
+                    st['modal'] = False
+                    try:
+                        if win.winfo_exists():
+                            win.bind('<Return>', continue_key)
+                    except tk.TclError:
+                        pass
+
+            def rescale_note(mean_px, auto_px):
+                """What accepting `mean_px` does to the mm² already in the
+                CSV, as a NUMBER wherever one exists.
+
+                Two references, in order of authority: the run's recorded
+                anchor (the column was last derived at that scale), else
+                the automatic disc fit — which is the scale a PRE-GATE save
+                derived them at, and the two pre-gate runs
+                (P3_6_2.5mL_20260729, DOT_P3_1_20260729) are exactly the
+                ones whose whole column is about to hang on a hand-fitted
+                anchor for the first time (review 2026-08-06, minor 6).
+                With neither reference, say plainly that there is no
+                percentage rather than showing None."""
+                if not n_px_rows:
+                    return ''
+                if recorded:
+                    pct = se.rescale_pct(recorded['diam_px'], mean_px)
+                    if pct is not None:
+                        return (f"\n\nAccepting also moves the "
+                                f"{n_px_rows} already-measured row(s) by "
+                                f"{pct:+.2f}% in mm² at the next Save "
+                                f"(re-derived from px at this anchor, "
+                                f"against the recorded "
+                                f"{recorded['diam_px']:.1f} px).")
+                pct = se.rescale_pct(auto_px, mean_px)
+                if pct is not None:
+                    return (f"\n\nNo anchor is on record for this run, so "
+                            f"those {n_px_rows} mm² were derived at the "
+                            f"AUTOMATIC fit's scale ({auto_px:.1f} px): "
+                            f"accepting moves every one of them "
+                            f"{pct:+.2f}% at the next Save, and it is the "
+                            f"first time the column hangs on a hand-fitted "
+                            f"anchor.")
+                return (f"\n\nNo anchor is on record for this run AND "
+                        f"there is no automatic fit, so there is no "
+                        f"percentage to quote: all {n_px_rows} mm² are "
+                        f"re-derived from px at this anchor, sight unseen, "
+                        f"including rows you do not re-review.")
+
             def finish():
                 """Average the rounds, run the spread gate, then the
-                anchor guard, then accept. Every gate is a DECISION the
+                anchor guard, then accept — and only then REVEAL the
+                values (accept() puts them on the status line, which
+                outlives this window). Every gate is a DECISION the
                 operator makes explicitly — the failure this replaces was
-                silence, not a missing number."""
+                silence, not a missing number — and every accept-anyway
+                question defaults to declining it."""
                 stats = se.calibration_stats(st['diams'])
                 if not stats:
                     return
+
+                def say(text):
+                    live.config(text=text)
+                    try:
+                        win.update_idletasks()
+                    except tk.TclError:
+                        pass
+
+                say(f"{stats['n']} fits recorded — checking how far apart "
+                    f"they are…")
                 if not se.spread_ok(stats):
-                    if len(st['diams']) >= CAL_MAX_ROUNDS:
-                        if not messagebox.askyesno(
-                                "Rounds disagree",
-                                f"The {stats['n']} rounds still spread "
-                                f"{stats['spread_pct']:.2f}% "
-                                f"(>{se.CAL_SPREAD_PCT:g}%) after "
-                                f"{CAL_MAX_ROUNDS} rounds — "
-                                f"{stats['min']:.1f}–{stats['max']:.1f} "
-                                f"px.\n\nAccept the mean "
-                                f"({stats['mean']:.1f} px) anyway?\n\n"
-                                f"No = cancel calibration (the gate "
-                                f"holds)."):
-                            win.destroy()
-                            return
-                    elif messagebox.askyesno(
-                            "Rounds disagree",
-                            f"Your {stats['n']} fitted diameters spread "
-                            f"{stats['spread_pct']:.2f}% "
-                            f"({stats['min']:.1f}–{stats['max']:.1f} px), "
-                            f"over the {se.CAL_SPREAD_PCT:g}% gate — that "
-                            f"is the run's operator-repeatability number "
-                            f"and it is worse than the error budget "
-                            f"expects.\n\nAdd another round?\n\nNo = "
-                            f"accept the mean of the "
-                            f"{stats['n']} as they are."):
-                        st['round'] = len(st['diams']) + 1
-                        respawn()
-                        sync_buttons()
-                        repaint()
+                    # The remedy for a RANGE gate is a refit, not another
+                    # round: max-min never shrinks when a fit is added, so
+                    # "Add another round?" could not clear this gate and
+                    # the flow always landed on "Accept the mean anyway?"
+                    # (review 2026-08-06). Three honest options, and the
+                    # default is the fail-closed one — the gate holding is
+                    # never the wrong outcome.
+                    # Quoted as a PERCENTAGE ONLY, on purpose: a refit is
+                    # one of the answers, so the individual diameters and
+                    # the mean must stay hidden here too or the refit is
+                    # fitted against a disclosed target (review
+                    # 2026-08-06). The percentage is what the decision
+                    # turns on, and it is not a number you can aim at.
+                    ans = ask(
+                        "Rounds disagree",
+                        f"Your {stats['n']} fits spread "
+                        f"{stats['spread_pct']:.2f}% of their mean, over "
+                        f"the {se.CAL_SPREAD_PCT:g}% gate. That spread IS "
+                        f"this run's operator-repeatability number and it "
+                        f"is worse than the error budget expects "
+                        f"(SLDEA_MEASUREMENT §2.1a).\n\n"
+                        f"Adding a further round cannot clear this gate — "
+                        f"a range only grows — so:\n\n"
+                        f"YES = refit all {stats['n']} rounds from round 1 "
+                        f"(the one remedy that can clear it)\n"
+                        f"NO = accept the mean as MEASURED (the spread is "
+                        f"recorded over the gate, and sldea_diag reports "
+                        f"it)\n"
+                        f"CANCEL = leave the gate closed and calibrate "
+                        f"later\n\n"
+                        f"(The fitted diameters stay hidden until you "
+                        f"accept — a refit has to be as independent as the "
+                        f"first three were.)",
+                        default='cancel', three=True, icon='warning')
+                    if ans is None:
+                        win.destroy()
                         return
-                live.config(text="cross-checking the mean against the "
-                                 "automatic disc fit…")
-                try:
-                    win.update_idletasks()
-                except tk.TclError:
-                    pass
+                    if ans:
+                        restart_all()
+                        return
+                say("cross-checking the mean against the automatic disc "
+                    "fit…")
                 guard = se.anchor_guard(stats['mean'], self._auto_disc(),
                                         self.settings['diam_mm'])
                 overridden = False
-                if guard['warn']:
+                if not guard['available']:
+                    # The cross-check DID NOT RUN. Reached whenever
+                    # _base_gray() refuses — most importantly on the
+                    # fallback-frame path, where _anchor_frame() found a
+                    # later frame precisely because the baseline row will
+                    # not load, so the automatic fit can never run on this
+                    # run. This used to accept in silence one line after
+                    # announcing the cross-check, which reads as a check
+                    # that passed (review 2026-08-06). An absent check is
+                    # now as loud as a failed one, and it is recorded as a
+                    # gap in setup.txt (se.anchor_guard_note).
+                    say("⚠ NO automatic cross-check was possible — this "
+                        "anchor is UNCHECKED")
+                    if not ask(
+                            "Anchor NOT cross-checked",
+                            f"The mean of your {stats['n']} fits is "
+                            f"{stats['mean']:.1f} px, and NOTHING checked "
+                            f"it.\n\nThe automatic baseline disc fit is "
+                            f"unavailable on this run (the baseline frame "
+                            f"will not load, or the fit refused it), so "
+                            f"neither reference could be applied: not the "
+                            f"independent disc fit, and not the "
+                            f"{self.settings['diam_mm']:g} mm mask's "
+                            f"π·(d/2)² resting area. A P3_2-style "
+                            f"systematic error — the stroke on the outer "
+                            f"toe, the wrong feature encircled, the wrong "
+                            f"diam_mm — would pass unnoticed here.\n\n"
+                            f"Your three fits agreeing says only that you "
+                            f"are REPEATABLE, not that you are right."
+                            + rescale_note(stats['mean'], None)
+                            + f"\n\nUse this UNCHECKED anchor anyway?\n\n"
+                              f"No = cancel (restore the baseline frame, "
+                              f"or verify the anchor by eye on the "
+                              f"contact sheet first).",
+                            default='no', icon='warning'):
+                        win.destroy()
+                        return
+                    overridden = True
+                elif guard['warn']:
                     # the P3_2 case: 2.28% diameter / -4.42% area, INSIDE
                     # the old 3% cross-check, so it shipped silently and
                     # the run now carries a permanent caveat. This is the
                     # guard that would have caught it — twice.
                     lines = '\n'.join('• ' + w for w in guard['warn'])
-                    impact = ''
-                    if n_px_rows and recorded:
-                        pct = se.rescale_pct(recorded['diam_px'],
-                                             stats['mean'])
-                        if pct is not None:
-                            impact = (f"\n\nAccepting also moves the "
-                                      f"{n_px_rows} already-measured "
-                                      f"row(s) by {pct:+.2f}% in mm² at "
-                                      f"the next Save (re-derived from "
-                                      f"px at this anchor).")
-                    if not messagebox.askyesno(
+                    if not ask(
                             "Anchor sanity check",
                             f"The accepted mean ({stats['mean']:.1f} px) "
                             f"disagrees with a reference the app "
@@ -1958,17 +2198,40 @@ class EdgeReviewApp:
                             f"stroke sat on the outer toe instead of the "
                             f"half-height, the wrong feature was "
                             f"encircled, or diam_mm does not match this "
-                            f"device's mask.{impact}\n\nUse this anchor "
-                            f"ANYWAY?\n\nNo = recalibrate from round 1.",
-                            icon='warning'):
-                        st['round'], st['diams'] = 1, []
-                        respawn()
-                        sync_buttons()
-                        repaint()
+                            f"device's mask."
+                            + rescale_note(stats['mean'],
+                                           guard['auto_diam_px'])
+                            + f"\n\nUse this anchor ANYWAY?\n\n"
+                              f"No = recalibrate from round 1.",
+                            default='no', icon='warning'):
+                        st['disclosed'] = True
+                        restart_all()
                         return
                     overridden = True
                 accept(stats['mean'], frame_name, stats=stats,
                        guard=guard, overridden=overridden)
+
+            def continue_key(_ev=None):
+                """What <Return> does — and what it must NOT.
+
+                It advances an intermediate round, and that is all. It
+                cannot finish the calibration, so it can never reach the
+                spread gate or the anchor guard, so it can never answer
+                them (review 2026-08-06: with Enter bound to
+                Continue/Finish and askyesno defaulting to YES, six Enter
+                presses accepted an out-of-tolerance anchor). The last
+                round needs the button; the modals default to declining."""
+                if st['modal']:
+                    return 'break'
+                if is_last_round():
+                    live.config(
+                        text="⚠ the LAST round must be confirmed with the "
+                             "✔ Finish calibration BUTTON — Enter cannot "
+                             "accept an anchor, or answer the checks that "
+                             "follow it")
+                    return 'break'
+                continue_round()
+                return 'break'
 
             def continue_round(_ev=None):
                 dpx = 2.0 * st['circle'][2]
@@ -2048,8 +2311,7 @@ class EdgeReviewApp:
                       command=win.destroy).pack(side=tk.RIGHT)
 
             def sync_buttons():
-                last = len(st['diams']) + 1 >= max(CAL_ROUNDS, st['round'])
-                cont.config(text=("✔ Finish calibration" if last
+                cont.config(text=("✔ Finish calibration" if is_last_round()
                                   else "Continue →"))
                 win.title(f"Calibrate scale — fit the circle to the "
                           f"resting disc ({st['round']} of "
@@ -2144,7 +2406,9 @@ class EdgeReviewApp:
                       '<Shift-Left>', '<Shift-Right>', '<Shift-Up>',
                       '<Shift-Down>'):
                 win.bind(k, key_nudge)
-            win.bind('<Return>', continue_round)
+            # NOT continue_round: Enter must not be able to finish, and
+            # `ask` unbinds this for the duration of every modal warning
+            win.bind('<Return>', continue_key)
             if recorded:
                 win.bind('<Key-p>', reuse)
                 win.bind('<Key-P>', reuse)

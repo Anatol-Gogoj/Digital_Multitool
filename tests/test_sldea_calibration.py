@@ -139,9 +139,13 @@ def test_guard_note_records_the_decision_not_just_the_number():
     assert se.anchor_guard_note(g, False).startswith('tripped:')
     clean = se.anchor_guard(P3_2_AUTO_PX, _auto_ref(), MASK_MM)
     assert se.anchor_guard_note(clean, False).startswith('clear (')
-    assert se.anchor_guard_note(
-        se.anchor_guard(500.0, None, MASK_MM), False) == \
-        'no auto disc fit to cross-check'
+    # an UNAVAILABLE cross-check is recorded as a gap, in the same voice
+    # as a trip -- never as a quiet nil (review 2026-08-06, finding 3)
+    gone = se.anchor_guard(500.0, None, MASK_MM)
+    assert se.anchor_guard_note(gone, False) == \
+        'NOT CROSS-CHECKED: no automatic disc fit was available'
+    assert se.anchor_guard_note(gone, True).startswith('NOT CROSS-CHECKED')
+    assert 'accepted anyway by operator' in se.anchor_guard_note(gone, True)
     # setup.txt is ASCII-only for this field
     for n in (note, se.anchor_guard_note(clean, False)):
         n.encode('ascii')
@@ -189,10 +193,32 @@ def test_spread_gate():
     # one round passes vacuously -- the honest answer, not a certificate
     assert se.spread_ok(se.calibration_stats([577.0]))
     assert se.spread_ok(None)
-    # a 4th round can rescue a loose set, which is what the gate offers
-    rescued = se.calibration_stats([581.0, 582.0, 583.0, 582.0])
-    assert se.spread_ok(rescued) and rescued['n'] == 4
     assert se.CAL_ROUNDS == 3
+
+
+def test_adding_a_round_can_never_clear_the_spread_gate():
+    """Review 2026-08-06 (minor 5): the gate statistic is a RANGE, and
+    max-min cannot shrink when a fit is added, so the dialog's old "Add
+    another round?" offer could not clear the gate it was offered for --
+    it always landed on "Accept the mean anyway?" instead. A test that
+    built a FRESH tight 4-value list hid that; a 4th round APPENDS.
+
+    The range is kept as the recorded statistic on purpose:
+    SLDEA_MEASUREMENT 2.1a converts it into the budget's error term
+    (sigma ~ R/1.693, mean SE ~ R/2.93, area ~ R/1.47). What changed is
+    the remedy the dialog offers -- a refit, which can clear it."""
+    loose = [575.0, 590.0, 582.0]
+    assert not se.spread_ok(se.calibration_stats(loose))
+    # every possible 4th value, inside the range and far outside it
+    for extra in (575.0, 578.0, 582.0, 582.3333, 590.0, 400.0, 900.0):
+        s4 = se.calibration_stats(loose + [extra])
+        assert not se.spread_ok(s4), (extra, s4['spread_pct'])
+    # the floor is structural: 100*(max-min)/max, whatever n becomes
+    s = se.calibration_stats(loose + [582.0] * 50)
+    assert s['n'] == 53
+    assert s['spread_pct'] >= 100.0 * 15.0 / 590.0 > se.CAL_SPREAD_PCT
+    # ... whereas a REFIT starts a new set, which can pass
+    assert se.spread_ok(se.calibration_stats([581.0, 582.0, 583.0]))
 
 
 def test_three_round_mean_beats_a_single_fit_on_scatter():
@@ -673,11 +699,44 @@ def test_diag_reports_new_and_old_anchors_without_a_detection_pass():
     assert any('No scale reference at all' in h for _s, h, _d in vs)
     assert not any('sanity guard' in h for _s, h, _d in vs)
     # (f) an anchor with NO automatic fit to check it against: reported
-    # as uncheckable, never as clean
+    # as uncheckable, never as clean -- and ABOVE OK, because 'cross-check
+    # unavailable' at OK severity is the shape of finding that gets
+    # skimmed past (review 2026-08-06, finding 3). Nothing else on this
+    # run ever checks the anchor, in the app or in this report.
     vs = sd.verdicts(_diag_d(baseline_disc=None, scale_anchor=p3_2))
-    assert any('automatic cross-check unavailable' in h
-               for _s, h, _d in vs)
+    hit = [(s, h, dt) for s, h, dt in vs if 'cross-check' in h]
+    assert len(hit) == 1, hit
+    assert hit[0][0] == 'MED', hit[0]
+    assert 'never been cross-checked' in hit[0][1], hit[0]
+    assert 'mask' in hit[0][2] and 'unverified' in hit[0][2]
     assert not any('sanity guard' in h for _s, h, _d in vs)
+
+    # (g) finding 4 (review 2026-08-06): the three-round spread needs no
+    # automatic fit to be judged -- it is a property of the three fits
+    # alone. Nested inside `if ref and anchor` it was emitted at NO
+    # severity on exactly the runs where baseline_disc refuses, i.e. the
+    # runs with no automatic reference at all.
+    for kw in ({'baseline_disc': None}, {}):
+        vs = sd.verdicts(_diag_d(scale_anchor=good, **kw))
+        rep = [(s, h) for s, h, _d in vs if 'Operator repeatability' in h]
+        assert len(rep) == 1, (kw, vs)
+        assert rep[0][0] == 'OK', rep
+        vs = sd.verdicts(_diag_d(scale_anchor=loose, **kw))
+        rep = [s for s, h, _d in vs if 'Operator repeatability' in h]
+        assert rep == ['MED'], (kw, rep)
+        # ... and the two-click era's ABSENCE is reported with or without
+        # an automatic fit too
+        vs = sd.verdicts(_diag_d(scale_anchor=p3_2, **kw))
+        assert any('no repeatability record' in h for _s, h, _d in vs)
+    # it must not fire without an anchor to report on, in either case
+    for kw in ({'baseline_disc': None}, {}):
+        vs = sd.verdicts(_diag_d(scale_anchor=None, **kw))
+        assert not any('repeatability record' in h for _s, h, _d in vs)
+        assert not any('Operator repeatability' in h for _s, h, _d in vs)
+    # the verdict says out loud that the number is not budget-ready
+    vs = sd.verdicts(_diag_d(scale_anchor=good, baseline_disc=None))
+    dt = [t for _s, h, t in vs if 'Operator repeatability' in h][0]
+    assert 'DO NOT feed this into the error budget' in dt
 
 
 def test_diag_text_report_prints_the_anchor_block_for_both_eras():
@@ -710,7 +769,10 @@ def test_gui_constants_agree_with_the_shared_ones():
     spread gate -- one number, one place."""
     import sldea_edge_gui as gui
     assert gui.CAL_ROUNDS is se.CAL_ROUNDS
-    assert gui.CAL_MAX_ROUNDS > se.CAL_ROUNDS
+    # the round count is FIXED since review 2026-08-06: the spread gate's
+    # remedy is a refit, not an extra round (a range cannot shrink), so
+    # there is no variable-round cap to keep in sync any more
+    assert not hasattr(gui, 'CAL_MAX_ROUNDS')
     assert se.ANCHOR_GUARD_DIAM_PCT == 1.0
     assert se.ANCHOR_GUARD_AREA_PCT == 1.0
     assert se.ANCHOR_MODAL_DIAM_PCT > se.ANCHOR_GUARD_DIAM_PCT

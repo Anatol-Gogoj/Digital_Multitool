@@ -364,7 +364,17 @@ def calibration_stats(diams):
 def spread_ok(stats, limit=CAL_SPREAD_PCT):
     """True when the rounds agree closely enough to accept as they are.
     A single round has no spread, so it passes vacuously — that is the
-    honest answer, not a certificate."""
+    honest answer, not a certificate.
+
+    The gate statistic is a RANGE, deliberately: SLDEA_MEASUREMENT §2.1a
+    converts the recorded range into the budget's error term (σ ≈ R/1.693,
+    mean SE ≈ R/2.93, area ≈ R/1.47), so the number the gate judges is the
+    number the budget consumes. The consequence, which the dialog must not
+    misrepresent (review 2026-08-06): max−min NEVER shrinks when a round
+    is added, so ADDING ROUNDS CANNOT CLEAR THIS GATE. The only remedy
+    that can is refitting the rounds — which is what the dialog offers.
+    A statistic that does shrink with n (SD, SEM) would need its own
+    threshold, and no real spread has been measured yet to choose one."""
     return not stats or stats['n'] < 2 or stats['spread_pct'] <= limit
 
 
@@ -449,9 +459,18 @@ def anchor_guard_note(guard, overridden):
     """One ASCII line recording what the guard said and what the
     operator did about it, for the setup.txt `guard` field. The point of
     the guard is that a deviation becomes a DECISION rather than
-    silence, so the decision has to be in the run's record too."""
+    silence, so the decision has to be in the run's record too.
+
+    An UNAVAILABLE cross-check is recorded as a gap, in the same voice as
+    a trip — never as a quiet nil. Review 2026-08-06 found the opposite:
+    on the fallback-frame path (`_anchor_frame` finds a later frame,
+    `_base_gray` refuses because the baseline row itself will not load)
+    the guard returns available=False with an empty warn list and the
+    dialog accepted in silence, directly after announcing that it was
+    cross-checking. Nothing above OK severity ever fired."""
     if not guard or not guard.get('available'):
-        return 'no auto disc fit to cross-check'
+        return ('NOT CROSS-CHECKED: no automatic disc fit was available'
+                + (' - accepted anyway by operator' if overridden else ''))
     body = (f"auto {guard['diam_pct']:+.2f}% diam, "
             f"mask {guard['area_pct']:+.2f}% area")
     if not guard.get('warn'):

@@ -87,14 +87,34 @@ recorded range *R* on *n* = 3 fits:
 - the mean of 3 has standard error **σ/√3 = R / 2.93**;
 - diameter → area doubles it: **area SE ≈ 2 · R / 2.93 = R / 1.47**.
 
+> **NOT YET USABLE — do not quote a per-run spread anywhere.** No run has
+> been calibrated with this mechanism, so no real three-round spread
+> exists. The conversion below is arithmetic, not a measurement, and the
+> per-run figure the tool now prints must **not** be fed into this budget
+> (or into a methods section, or into `sldea_diag`'s numbers as if it were
+> an established term) until a real spread has been measured on a real
+> disc. Until then §2.1's ~0.4% diameter / ~0.8% area **remain the numbers
+> to quote**, and this section is a plan for replacing them.
+
 Worked at the acceptance gate: a run accepted right at the 1% spread gate
-carries **σ ≈ 0.59%** per fit, **0.34% on the mean diameter** and
-**≈0.68% in area** — i.e. the gate *caps* the random part of this term at
-just under the ~0.4% / ~0.8% previously assumed. A typical 0.3% recorded
-spread gives 0.10% diameter / 0.20% area, about four times better than
-the old estimate. The old numbers are therefore kept in §2.1 as the
-conservative ceiling, and a specific run may quote its own spread instead
+would carry **σ ≈ 0.59%** per fit, **0.34% on the mean diameter** and
+**≈0.68% in area** — i.e. the gate would *cap* the random part of this
+term at just under the ~0.4% / ~0.8% previously assumed. A typical 0.3%
+recorded spread would give 0.10% diameter / 0.20% area, about four times
+better than the old estimate. The old numbers therefore stay in §2.1 as
+the number to quote, not merely as a ceiling; once ~5 real runs exist,
+this section can be rewritten to let a specific run quote its own spread
 — divided by 2.93 for diameter, 1.47 for area.
+
+The recorded statistic is the **range**, and the acceptance gate judges
+the range too, deliberately: the number the gate judges is the number
+this conversion consumes. The consequence is that **adding rounds cannot
+clear the gate** — max−min never shrinks — so the dialog's remedy is a
+*refit*, not a further round (`SLDEA_HANDOFF.md` 2026-08-06 review
+sub-entry). A statistic that does shrink with *n* (SD, or the SEM this
+section derives) would be the better gate, and is the obvious follow-up —
+but choosing its threshold needs the real distribution, which is exactly
+what does not exist yet.
 
 Three caveats, all load-bearing:
 
@@ -113,6 +133,11 @@ Three caveats, all load-bearing:
   distribution once ~5 runs have been calibrated — and if the gate turns
   out to trip routinely, the honest fix is to raise `CAL_SPREAD_PCT` and
   record the measured spread, not to tighten the operator.
+- **Precision is only measurable if the rounds are blind.** The dialog
+  hides every previously accepted diameter and the running mean until the
+  last fit is in, because a visible target makes the spread a number the
+  operator can hit rather than a number they produce (review 2026-08-06).
+  If that ever changes, this whole section stops meaning anything.
 
 ### 2.2 Why ratios are tight: the annulus cancellation
 
@@ -300,7 +325,7 @@ architecture**, held together by three invariants:
 | Operator precision ~1% area, IoU ceiling 0.973 | Repeatability round (9 repeat pairs, 2026-07-29) |
 | Fit CI 0.2–0.7% | disc-fit 85% CI, P3 (0.2–0.5%) and 07-23 (0.5–0.7%) runs |
 | Scale 0.4% / repeat 0.3% | Baseline-disc overlays vs by-eye, both campaigns |
-| Scale anchor per run (§2.1a): σ ≈ R/1.693, mean SE R/2.93, area R/1.47 | Range of the 3 circle fits recorded in each run's `setup.txt` (Edge Review, 2026-08-06 onward). **No run measured yet** |
+| Scale anchor per run (§2.1a): σ ≈ R/1.693, mean SE R/2.93, area R/1.47 | Range of the 3 circle fits recorded in each run's `setup.txt` (Edge Review, 2026-08-06 onward). **No run measured yet — arithmetic only, NOT to be quoted; §2.1's 0.4%/0.8% still apply** |
 | Audit bias bound ±0.4 px per run | Boundary self-audit medians, all six runs |
 | Refit accuracy (+4.1/+4.6% vs predicted +3.8/+4.2%) | Resting-refit validation vs stored labels (2026-07-30) |
 | Onset excess ~1–2% | Round 3 (−6.9%) decomposed by round 4's controls |

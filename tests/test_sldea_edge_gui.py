@@ -19,6 +19,7 @@ _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
     _os.path.abspath(__file__))))
 import csv
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -591,6 +592,79 @@ def _set_ua(rundir, uas):
         w.writerows(rows)
 
 
+def _widgets(w, kind):
+    import tkinter as tk
+    cls = tk.Button if kind == 'button' else tk.Label
+    out = []
+    for c in w.winfo_children():
+        if isinstance(c, cls):
+            out.append(c)
+        out.extend(_widgets(c, kind))
+    return out
+
+
+def _cal_step_button(win):
+    btn = [b for b in _widgets(win, 'button')
+           if b.cget('text').startswith('Continue')
+           or 'Finish' in b.cget('text')]
+    assert btn, "no Continue/Finish button in the dialog"
+    return btn[0]
+
+
+def _cal_display(win):
+    """Everything the operator can READ in the dialog right now — the
+    instruction block, the round header and the live readout. Used to
+    prove that a previous round's diameter is nowhere in it."""
+    try:
+        return ' | '.join(w.cget('text') for w in _widgets(win, 'label'))
+    except Exception:
+        return ''
+
+
+class _ModalSpy:
+    """messagebox stand-in that records every yes/no question, its
+    kwargs, and what the dialog looked like when it was asked.
+
+    `answers` is popped per question; when it runs out the spy answers
+    with the question's OWN default=, which is the reviewer's harness for
+    finding 1: a prompt with no explicit default, or one defaulting to
+    the dangerous button, accepts an anchor nobody read."""
+
+    def __init__(self, real, app=None, answers=None):
+        self._real = real
+        self._app = app
+        self.answers = list(answers or [])
+        self.asked = []          # [(title, kwargs)]
+        self.msgs = []           # the question text itself
+        self.seen = []           # dialog text at the moment of asking
+
+    def _record(self, title, kw, three, msg=''):
+        self.asked.append((title, dict(kw)))
+        self.msgs.append(msg)
+        win = getattr(self._app, '_cal_win', None)
+        self.seen.append(_cal_display(win) if win is not None else '')
+        assert 'default' in kw, (f"{title}: asked with NO default= — "
+                                 f"tkinter's askyesno defaults to YES")
+        if self.answers:
+            return self.answers.pop(0)
+        dflt = kw['default']
+        if three:
+            return {'yes': True, 'no': False}.get(dflt)   # cancel -> None
+        return dflt == 'yes'
+
+    def askyesno(self, title, msg='', **kw):
+        return self._record(title, kw, False, msg)
+
+    def askyesnocancel(self, title, msg='', **kw):
+        return self._record(title, kw, True, msg)
+
+    def defaults(self):
+        return [kw.get('default') for _t, kw in self.asked]
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 def test_calibration_dialog_drives_three_rounds_and_both_gates():
     """#215 end to end THROUGH THE REAL DIALOG (display required; this
     case skips headlessly, so 'tests pass' is not evidence the window
@@ -613,26 +687,9 @@ def test_calibration_dialog_drives_three_rounds_and_both_gates():
     root.withdraw()
     d = tempfile.mkdtemp(prefix='edge_cal_')
     real_mb = gui.messagebox
-    answers, asked = [], []
-
-    class _MB:
-        @staticmethod
-        def askyesno(title, _msg, **_k):
-            asked.append(title)
-            return answers.pop(0) if answers else False
-
-        def __getattr__(self, name):
-            return getattr(real_mb, name)
-
-    gui.messagebox = _MB()
-
-    def all_buttons(w):
-        out = []
-        for c in w.winfo_children():
-            if isinstance(c, tk.Button):
-                out.append(c)
-            out.extend(all_buttons(c))
-        return out
+    spy = _ModalSpy(real_mb)
+    answers, asked = spy.answers, spy.asked
+    gui.messagebox = spy
 
     def advance(win, taken):
         """Stand in for root.wait_window: press the Continue/Finish
@@ -640,19 +697,17 @@ def test_calibration_dialog_drives_three_rounds_and_both_gates():
         for _ in range(12):
             if not win.winfo_exists():
                 return
-            btn = [b for b in all_buttons(win)
-                   if b.cget('text').startswith('Continue')
-                   or 'Finish' in b.cget('text')]
-            assert btn, "no Continue/Finish button in the dialog"
-            taken.append(btn[0].cget('text'))
-            btn[0].invoke()
+            btn = _cal_step_button(win)
+            taken.append(btn.cget('text'))
+            btn.invoke()
 
     try:
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
         assert app.run is not None and app.manual_ref is None
-        # spread gate: "add another round?" -> No (accept as they are);
-        # anchor guard: "use anyway?" -> Yes (deliberate override)
+        # spread gate (yes/no/cancel: refit / accept as measured / leave
+        # the gate closed) -> No, accept as measured; anchor guard
+        # ("use anyway?") -> Yes, a deliberate override
         answers[:] = [False, True]
         taken = []
         app.root.wait_window = lambda win: advance(win, taken)
@@ -699,8 +754,332 @@ def test_calibration_dialog_drives_three_rounds_and_both_gates():
         # 3 rounds, restart, 3 rounds again = 6 presses, and 4 questions
         assert len(taken) == 6, taken
         assert len(asked) == 4, asked
+        # EVERY question carried an explicit default (finding 1)
+        assert all(kw.get('default') for _t, kw in asked), asked
+        # the guard's modal had to print the mean and the reference for
+        # its warning to be actionable, so the rounds fitted AFTER it
+        # were not blind — and the record says so (review 2026-08-06)
+        assert 'refit after a disclosed cross-check' \
+            in app.manual_ref['guard'], app.manual_ref['guard']
+        app.manual_ref['guard'].encode('ascii')
     finally:
         gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _fixed_spawn(gui, circles):
+    """Replace the randomized spawn with a scripted one so a dialog run
+    is deterministic. Returns the original for restoring."""
+    seq = list(circles)
+    orig = gui.spawn_circle
+
+    def fake(_w, _h, _rf, _rnd=None):
+        return seq.pop(0) if seq else circles[-1]
+
+    gui.spawn_circle = fake
+    return orig
+
+
+def test_calibration_warnings_default_to_declining_them():
+    """FINDING 1 (review 2026-08-06), the reviewer's own harness: stub the
+    messagebox so every question is answered with its OWN default, and the
+    anchor must NOT be accepted.
+
+    The demonstrated failure: the Toplevel bound <Return> to
+    Continue/Finish while the gates used askyesno, which defaults to YES
+    and was passed no default=. Six Enter presses produced four "Rounds
+    disagree" prompts and then the "Anchor sanity check", and the
+    out-of-tolerance anchor was ACCEPTED — the guard that exists to catch
+    a P3_2-style error could be dismissed without being read."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_cal_dflt_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        spy = _ModalSpy(real_mb, app)             # no answers: all defaults
+        gui.messagebox = spy
+
+        def advance(win, taken):
+            for _ in range(12):
+                if not win.winfo_exists():
+                    return
+                btn = _cal_step_button(win)
+                taken.append(btn.cget('text'))
+                btn.invoke()
+
+        app.root.wait_window = lambda win: advance(win, [])
+        # (a) three fits that disagree, so the SPREAD gate asks first: its
+        # default must leave the gate closed, not accept. Scripted rather
+        # than randomized so the question order is deterministic.
+        _fixed_spawn(gui, [(160.0, 120.0, 65.0), (160.0, 120.0, 70.0),
+                           (160.0, 120.0, 75.0)])
+        app._calibrate_scale()
+        assert app.manual_ref is None, ("an anchor nobody read was "
+                                        "accepted: " + str(app.manual_ref))
+        assert spy.asked and spy.asked[0][0] == 'Rounds disagree'
+        assert spy.defaults()[0] == 'cancel', spy.asked[0]
+
+        # (b) now make the rounds AGREE so the spread gate passes and the
+        # ANCHOR GUARD is the question: a 130 px circle against the
+        # fixture's ~160 px disc is a P3_2-shaped miss, 18% out
+        spy.asked.clear()
+        gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 65.0)
+        app._calibrate_scale()
+        assert app.manual_ref is None, app.manual_ref
+        titles = [t for t, _kw in spy.asked]
+        assert titles and set(titles) == {'Anchor sanity check'}, titles
+        assert set(spy.defaults()) == {'no'}, spy.asked
+        # the guard question is asked EVERY time (it restarts the rounds),
+        # and never resolves into an acceptance by repetition
+        assert len(titles) >= 2, titles
+        # (c) an unavailable cross-check is its own question, and it
+        # defaults to declining too (finding 3)
+        spy.asked.clear()
+        app._auto_disc = lambda: None
+        app._calibrate_scale()
+        assert app.manual_ref is None, app.manual_ref
+        assert [t for t, _kw in spy.asked][0] == 'Anchor NOT cross-checked'
+        assert set(spy.defaults()) == {'no'}, spy.asked
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_return_key_cannot_finish_a_calibration():
+    """FINDING 1, the other half: Enter may advance an intermediate round,
+    but it must never reach finish() — so it can never reach the spread
+    gate or the anchor guard, and therefore can never answer them. The
+    last round needs the button."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_cal_ret_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    seen = {}
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        spy = _ModalSpy(real_mb, app)
+        gui.messagebox = spy
+        # a fit that would pass both gates if it were ever accepted, so a
+        # failure here is unambiguous: only Enter is under test
+        gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
+
+        def hammer(win, _n=14):
+            # A synthetic key press only reaches a VIEWABLE, FOCUSED
+            # window, and every other case here runs on a withdrawn root
+            # (after the first Tk interpreter in a process, an unviewable
+            # Toplevel cannot take focus and event_generate is silently
+            # dropped). So this one case actually puts the dialog on
+            # screen — the only way to test a key binding as an event.
+            root.deiconify()
+            root.update()
+            win.deiconify()
+            win.update()
+            win.focus_force()
+            win.update()
+            rounds = set()
+            for _ in range(_n):
+                if not win.winfo_exists():
+                    break
+                win.event_generate('<Return>', when='now')
+                win.update()
+                if win.winfo_exists():
+                    mm = re.search(r'Round (\d+) of',
+                                   _cal_display(win))
+                    if mm:
+                        rounds.add(int(mm.group(1)))
+            seen['rounds'] = rounds
+            seen['alive'] = win.winfo_exists()
+            seen['btn'] = (_cal_step_button(win).cget('text')
+                           if seen['alive'] else '')
+            seen['text'] = _cal_display(win) if seen['alive'] else ''
+
+        app.root.wait_window = hammer
+        app._calibrate_scale()
+        assert seen.get('alive'), "Enter closed the calibration dialog"
+        # self-check FIRST: if this environment refuses to deliver a
+        # synthetic key press, the rest of the case proves nothing
+        assert seen['rounds'] == {2, 3}, (
+            "no <Return> reached the dialog, so nothing here was tested "
+            f"(rounds seen: {seen['rounds']})")
+        # two Enters advanced rounds 1 and 2; every one after that was
+        # refused, so the dialog is parked on the LAST round
+        assert 'Finish' in seen['btn'], seen['btn']
+        assert app.manual_ref is None, ("Enter accepted an anchor: "
+                                        + str(app.manual_ref))
+        assert not spy.asked, ("Enter reached a modal warning: "
+                               + str(spy.asked))
+        assert 'Enter cannot accept an anchor' in seen['text'], seen['text']
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_mid_round_display_never_reveals_a_previous_fit():
+    """FINDING 2 (review 2026-08-06): the header rendered "accepted so
+    far: N px" beside a live "circle: N px across" readout, so an operator
+    could wheel round 2 until the two numbers matched. Randomizing the
+    spawn is worthless against a printed target — the spread would be
+    biased toward zero by construction, the spread gate could never fire,
+    and the repeatability figure SLDEA_MEASUREMENT §2.1a converts into an
+    error term would be fabricated precision entering the budget.
+
+    Nothing about a previous round may appear in the dialog while rounds
+    are still being fitted; everything appears once the last one is in."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_cal_blind_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    # scripted, distinguishable fits: 130.0, 140.0 then 150.0 px across
+    real_spawn = _fixed_spawn(gui, [(160.0, 120.0, 65.0),
+                                    (160.0, 120.0, 70.0),
+                                    (160.0, 120.0, 75.0)])
+    snaps = []
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        # spread gate -> accept as measured; anchor guard -> override
+        spy = _ModalSpy(real_mb, app, answers=[False, True])
+        gui.messagebox = spy
+
+        def advance(win):
+            for _ in range(6):
+                if not win.winfo_exists():
+                    return
+                snaps.append(_cal_display(win))
+                _cal_step_button(win).invoke()
+
+        app.root.wait_window = advance
+        app._calibrate_scale()
+        assert len(snaps) == 3, snaps
+        assert app.manual_ref['rounds_px'] == [130.0, 140.0, 150.0]
+        # round 1 shows only its own circle; rounds 2 and 3 must contain
+        # NO earlier diameter and no running mean (140.0 = the mean of
+        # 130/150 too, so its absence in round 3 covers both)
+        for i, prior in ((1, ('130.0',)), (2, ('130.0', '140.0'))):
+            for v in prior:
+                assert v not in snaps[i], (i, v, snaps[i])
+        for s in snaps:
+            assert 'accepted so far' not in s, s
+            assert 'mean' not in s.lower(), s
+            assert 'HIDDEN until the last fit' in s, s
+        # each round DOES show the circle currently under the cursor —
+        # that is the fit being made, not a target to match
+        assert 'circle: 130.0 px across' in snaps[0], snaps[0]
+        assert 'circle: 140.0 px across' in snaps[1], snaps[1]
+        # the spread gate is one of the questions a REFIT can answer, so
+        # it too quotes only the percentage — a refit fitted against a
+        # disclosed target would be no more independent than round 2 was
+        assert spy.asked[0][0] == 'Rounds disagree', spy.asked
+        prompt = spy.msgs[0]
+        assert '14.29%' in prompt, prompt
+        for v in ('130.0', '140.0', '150.0'):
+            assert v not in prompt, (v, prompt)
+        # nor on the dialog behind it — where the only diameter on screen
+        # is the CURRENT circle's own live readout
+        for s in spy.seen:
+            for v in ('130.0', '140.0', '150.0'):
+                assert v not in s.replace(f"circle: {v} px across", ''), \
+                    (v, s)
+        # THE REVEAL lands once the fitting is over, on the surface that
+        # outlives the dialog
+        txt = app.status.cget('text')
+        assert 'mean of 3: 130.0, 140.0, 150.0 px' in txt, txt
+        assert 'spread 20.0 px = 14.29%' in txt, txt
+        assert 'OVER GATE' in txt, txt
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_unavailable_cross_check_is_stated_not_implied():
+    """FINDING 3 (review 2026-08-06): on the fallback-frame path
+    _anchor_frame() serves a later frame precisely because the baseline
+    row will not load, and _auto_disc() goes through _base_gray(), which
+    needs that row — so anchor_guard returned available=False with an
+    EMPTY warn list and finish() accepted in silence, one line after the
+    dialog announced "cross-checking the mean against the automatic disc
+    fit…". Which reads as a check that passed.
+
+    An absent cross-check must now be as loud as a failed one, and it must
+    be recorded as a gap in the run's own anchor record."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_cal_nox_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        # the real fallback path: a 0-byte baseline PNG. _anchor_frame
+        # falls back to a later frame; _base_gray (and so _auto_disc)
+        # cannot serve one at all.
+        open(os.path.join(run, 'frames',
+                          'SLDEA_s00_00.00kV_baseline.png'), 'wb').close()
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app._base_gray() is None and app._auto_disc() is None
+        img, is_base, _tried, _nm = app._anchor_frame()
+        assert img is not None and not is_base, "fixture no longer falls back"
+        # three identical fits: the spread gate passes, so the ONLY thing
+        # standing between this anchor and Save is the cross-check
+        gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
+        spy = _ModalSpy(real_mb, app, answers=[True])
+        gui.messagebox = spy
+
+        def advance(win):
+            for _ in range(6):
+                if not win.winfo_exists():
+                    return
+                _cal_step_button(win).invoke()
+
+        app.root.wait_window = advance
+        app._calibrate_scale()
+        # it ASKED — silence was the bug
+        assert [t for t, _kw in spy.asked] == ['Anchor NOT cross-checked'], \
+            spy.asked
+        assert spy.defaults() == ['no'], spy.asked
+        msg = spy.seen[0]
+        assert 'NO automatic cross-check' in msg, msg
+        ref = app.manual_ref
+        assert ref is not None and ref['n_rounds'] == 3
+        # ... and the record says so, in the same voice as a trip
+        assert ref['guard'].startswith('NOT CROSS-CHECKED'), ref['guard']
+        ref['guard'].encode('ascii')
+        assert 'NOT cross-checked' in app.status.cget('text'), \
+            app.status.cget('text')
+        # (the offline half of finding 3 — sldea_diag reporting the same
+        # gap above OK severity — is pinned in
+        # tests/test_sldea_calibration.py, which needs no display)
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)
 

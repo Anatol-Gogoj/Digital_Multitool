@@ -673,6 +673,7 @@ def verdicts(d):
                         f"median {100 * med_ff:.0f}% of detected area on "
                         f"foil across {len(ffs)} frames with a detection."))
 
+    anchor = d.get('scale_anchor')
     if 'baseline_disc' in d:
         # Since the 2026-08-05 scale gate, Edge Review's saved mm² comes
         # from the operator's mandatory manual 📏 anchor — the automatic
@@ -680,7 +681,6 @@ def verdicts(d):
         # otherwise sent operators to distrust properly hand-calibrated
         # runs (audit 2026-08-05).
         ref = d.get('baseline_disc')
-        anchor = d.get('scale_anchor')
         if ref and anchor and anchor.get('mm_per_px'):
             mism = (100 * abs(ref['diam_px'] - anchor['diam_px'])
                     / anchor['diam_px'])
@@ -719,42 +719,6 @@ def verdicts(d):
                     f"Guard note on record: "
                     f"{anchor.get('guard', '(none -- pre-2026-08-06 anchor)')}"
                 ))
-            # #215: three averaged circle fits carry their own spread --
-            # the run's operator-repeatability number. Absent on every
-            # pre-2026-08-06 anchor, and its absence is reported as
-            # absence, never as agreement.
-            spr = anchor.get('spread_pct')
-            if spr is None:
-                out.append((
-                    'OK', 'Anchor has no repeatability record (two-click '
-                          'era)',
-                    f"this anchor was recorded before the "
-                    f"{se.CAL_ROUNDS}-round fit-a-circle calibration "
-                    f"(2026-08-06), so it carries a single diameter and "
-                    f"no spread. Nothing is wrong with it -- there is "
-                    f"simply no measurement of how repeatable it was. "
-                    f"Recalibrating in Edge Review would produce one."))
-            else:
-                rounds = anchor.get('rounds_px') or []
-                sev2 = 'OK' if spr <= se.CAL_SPREAD_PCT else 'MED'
-                out.append((
-                    sev2, 'Operator repeatability: '
-                          f"{spr:.2f}% spread across "
-                          f"{anchor.get('n_rounds', len(rounds))} fits"
-                          + ('' if spr <= se.CAL_SPREAD_PCT
-                             else f" -- over the "
-                                  f"{se.CAL_SPREAD_PCT:g}% gate"),
-                    f"fitted diameters "
-                    + (', '.join(f"{v:.1f}" for v in rounds) + ' px'
-                       if rounds else '(values not recorded)')
-                    + f"; mean {anchor['diam_px']:.1f} px, spread "
-                      f"{anchor.get('spread_px', 0):.1f} px. This is a "
-                      f"measurement of the OPERATOR, not of the device -- "
-                      f"the one number SLDEA_MEASUREMENT 2.5 asks for and "
-                      f"has never had. A tight spread is precision, not "
-                      f"accuracy: a consistently mis-placed circle scores "
-                      f"well here and is caught by the mask-area guard "
-                      f"instead."))
         elif ref:
             out.append(('OK', 'Automatic cross-check anchor available '
                         '(Edge Review saves use the manual 📏 anchor)',
@@ -767,14 +731,29 @@ def verdicts(d):
                         f"anchor is recorded in setup.txt yet (pre-gate "
                         f"save, or not yet saved)."))
         elif anchor and anchor.get('mm_per_px'):
-            out.append(('OK', 'px->mm from the recorded manual anchor; '
-                        'automatic cross-check unavailable',
+            # NOT 'OK' (review 2026-08-06). This run's anchor has never
+            # been checked against anything: baseline_disc refused, so
+            # neither the independent disc fit NOR the mask's pi*(d/2)^2
+            # area test could run, and a P3_2-style systematic miss would
+            # sit here unreported. An OK line reading 'cross-check
+            # unavailable' is exactly the shape of finding that gets
+            # skimmed past -- the same silence the calibration dialog used
+            # to produce on this path.
+            gnote = anchor.get('guard') or '(none -- pre-2026-08-06 anchor)'
+            dmm = (d.get('settings') or {}).get('diam_mm', 16.0)
+            out.append(('MED', 'Scale anchor has never been cross-checked',
                         f"saved scale {anchor['mm_per_px']:.5f} mm/px "
                         f"({anchor['diam_px']:.0f} px, saved "
                         f"{anchor.get('saved', '?')}); baseline_disc "
-                        f"refused this baseline, so there is no "
-                        f"independent fit to check it against — verify "
-                        f"the anchor by eye on the contact sheet."))
+                        f"refused this baseline, so NEITHER reference "
+                        f"could be applied -- not the independent disc "
+                        f"fit and not the {dmm:g} mm mask's pi*(d/2)^2 "
+                        f"resting area. A repeatable operator can be a "
+                        f"consistently wrong one, so treat ABSOLUTE mm2 "
+                        f"in this run as unverified: quote ratios A/A0, "
+                        f"or restore/re-export the baseline frame and "
+                        f"recalibrate so the guard can run. Guard note on "
+                        f"record: {gnote}"))
         else:
             out.append(('MED', 'No scale reference at all',
                         f"baseline_disc refused this baseline AND no "
@@ -782,6 +761,50 @@ def verdicts(d):
                         f"Edge Review's gate will demand the 📏 clicks; "
                         f"until a save records them, treat any existing "
                         f"active_area_mm2 as unverifiable."))
+
+    # #215: three averaged circle fits carry their own spread -- the run's
+    # operator-repeatability number. Absent on every pre-2026-08-06
+    # anchor, and its absence is reported as absence, never as agreement.
+    #
+    # OUTSIDE the baseline_disc branches ON PURPOSE (review 2026-08-06):
+    # the spread is a property of the operator's own fits and needs no
+    # automatic reference to judge. Nested under `if ref and anchor` it
+    # was emitted at NO severity on exactly the runs where baseline_disc
+    # refuses -- the runs with no automatic reference, where the
+    # operator's own repeatability is the only evidence there is.
+    if anchor and anchor.get('diam_px'):
+        spr = anchor.get('spread_pct')
+        rounds = anchor.get('rounds_px') or []
+        if spr is None:
+            out.append((
+                'OK', 'Anchor has no repeatability record (two-click era)',
+                f"this anchor was recorded before the {se.CAL_ROUNDS}-round "
+                f"fit-a-circle calibration (2026-08-06), so it carries a "
+                f"single diameter and no spread. Nothing is wrong with it "
+                f"-- there is simply no measurement of how repeatable it "
+                f"was. Recalibrating in Edge Review would produce one."))
+        else:
+            sev2 = 'OK' if spr <= se.CAL_SPREAD_PCT else 'MED'
+            out.append((
+                sev2, 'Operator repeatability: '
+                      f"{spr:.2f}% spread across "
+                      f"{anchor.get('n_rounds', len(rounds))} fits"
+                      + ('' if spr <= se.CAL_SPREAD_PCT
+                         else f" -- over the {se.CAL_SPREAD_PCT:g}% gate"),
+                f"fitted diameters "
+                + (', '.join(f"{v:.1f}" for v in rounds) + ' px'
+                   if rounds else '(values not recorded)')
+                + f"; mean {anchor['diam_px']:.1f} px, spread "
+                  f"{anchor.get('spread_px', 0):.1f} px. This is a "
+                  f"measurement of the OPERATOR, not of the device -- the "
+                  f"one number SLDEA_MEASUREMENT 2.5 asks for and has "
+                  f"never had. A tight spread is precision, not accuracy: "
+                  f"a consistently mis-placed circle scores well here and "
+                  f"is caught by the mask-area guard instead -- and where "
+                  f"there is no automatic fit, nothing catches it at all. "
+                  f"DO NOT feed this into the error budget until a real "
+                  f"spread has been measured on a real disc "
+                  f"(SLDEA_MEASUREMENT 2.1a)."))
 
     auds = [p.get('audit') for p in per]
     auds = [a for a in auds if a and a.get('bias_px') is not None]

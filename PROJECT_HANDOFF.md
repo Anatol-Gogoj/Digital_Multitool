@@ -152,8 +152,27 @@ stop hand-rolling matplotlib.
   still required, because the optics moved across the *remaining* sessions
   too); P3_2 review; the P3_6 holdout frame; P3_7 (blocked on contrast
   — see issues #193/#194); 104531 (bench decision: device barely actuated,
-  suspect dead device / HV not reaching sample); folding the two 08-05 runs
-  (CB, Triazole) into `SCORECARD.md`.
+  suspect dead device / HV not reaching sample).
+- **The two 08-05 runs are folded in (2026-08-06)** — `SCORECARD.md` now
+  carries a measured verdict for each. **CB** (the first non-CNT
+  electrode): A/A₀ **1.158** at 5 kV, resting 202.55 mm² = 16.06 mm, ci85
+  median 0.05 %, pair CV median 0.24 %, all 11 frames conf 0.95–0.99 —
+  **PASS**, with the clean-exposure re-shoot still owed (baseline median
+  255, 73.7 % of pixels ≥250, re-verified 2026-08-06). **Triazole** (CNT,
+  81 frames): A/A₀ **1.523** at 8 kV, resting 200.95 mm², ci85 median
+  0.23 %, pair CV median 0.71 % — **PASS**, but its onset is 2.2 kV and the
+  20 sub-onset frames are *stated* resting values rather than measurements,
+  so they must not be plotted as points.
+- **Two caveats that apply to both runs, and to anything reading their
+  CSVs:** (a) the **0 % auto-accept** figure they report is an artifact —
+  every row carries `(user)`, which `compare_errorbars.py` counts as a
+  human pick, so the mix reads 0 auto *by construction*; the diagnostic
+  flagged 0/10 and 4/48 respectively, so do not compare either to the
+  ~84 % baseline. (b) **§3b check 2 is UNEVALUATED** on both — per-frame
+  `audit_bias` is null throughout, so no boundary-audit bias number exists.
+  That is another check that is *absent* rather than passed. Triazole's
+  no-step arc median of **34.7 %** (setting 15 %, P3_1 reference 2 %) is
+  the one number that wants human eyes.
 - The control round's **operator-repeat leg has nothing to compute from
   yet**: `sldea_trace.py` finds 140 labels across 8 runs and **0 repeat
   pairs anywhere**. The 2 repeat pairs still need tracing. Of those 140,
@@ -363,13 +382,15 @@ genuinely independent of it.**
    left on this line is the **control round** (including the 2 repeat
    pairs, which do not exist yet), **P3_2**, and the **P3_6 holdout
    frame** — unchanged, unblocked, and independent of everything above.
-4. **(desk)** fold BOTH new runs into `SCORECARD.md` — the CB run
-   (reviewed 2026-08-05, conf 0.95–0.99, A/A₀ 1.156 at 5 kV, resting
-   16.059 mm) and the CNT Triazole run. The CB run is the campaign's
-   first non-CNT curve, so it wants a provenance note: its baseline was
-   exposed differently from its own ramp frames. Re-shooting it for
-   clean provenance is worth doing when convenient, but the areas
-   stand.
+4. **(desk) DONE 2026-08-06.** Both 08-05 runs are folded into
+   `SCORECARD.md` with measured verdicts — `sldea_diag.py` and
+   `compare_errorbars.py` were run on each rather than transcribing this
+   file's figures. Both PASS; both carry §3b check 2 unevaluated. (The CB
+   peak reads A/A₀ **1.158** in the scorecard where this file said 1.156,
+   because the scorecard averages each level's pre/post pair while the
+   earlier note quoted single frames — same data, different reduction.)
+   The CB clean-provenance re-shoot is still worth doing when convenient;
+   the areas stand. Caveats in the Batch-QA section above.
 5. **(desk)** #224's rename word choice, then #225, #223, #216, #215,
    #197, #200 — all real, scoped and hardware-free. #219 becomes
    designable the moment §N's numbers land.

@@ -160,15 +160,38 @@ stop hand-rolling matplotlib.
   **PASS**, with the clean-exposure re-shoot still owed (baseline median
   255, 73.7 % of pixels ≥250, re-verified 2026-08-06). **Triazole** (CNT,
   81 frames): A/A₀ **1.523** at 8 kV, resting 200.95 mm², ci85 median
-  0.23 %, pair CV median 0.71 % — **PASS**, but its onset is 2.2 kV and the
-  20 sub-onset frames are *stated* resting values rather than measurements,
-  so they must not be plotted as points.
+  0.24 %, pair CV median 0.76 % — **PASS**. Its **headline is A/A₀ 1.404 @
+  7.8 kV**, not the 8.0 kV peak (Anatol's call 2026-08-06, after the
+  re-trace below). Onset is 2.2 kV and the 20 sub-onset frames are *stated*
+  resting values rather than measurements, so they must not be plotted as
+  points.
+- **The 8.0 kV re-trace (2026-08-06) moved the peak UP, not down.** The
+  promotion path from the first fold was to hand-trace the run's weakest
+  frame. Traced, it went **316.27 → 352.13 mm² (+11.3 %)**, A/A₀ 1.574 →
+  1.751, and the 8.0 kV pair CV went 4.8 % → **11.9 %** against its own
+  post-ramp partner at the same voltage. A careful operator and the detector
+  differ by 11 % on that frame, which says the 8.0 kV boundary is genuinely
+  ill-defined — the device is wrinkling hard at the end of the ramp and the
+  run stops with no relaxation phase. So **8.0 kV is recorded as a traced
+  upper bound (1.479–1.751, level mean 1.615) rather than a headline**, and
+  7.8 kV — pair CV 0.4 %, both frames conf 0.96 — is the quotable figure.
+  Comparison figure: `_analysis\triazole_8kV_after_trace.png`.
+- **Two side effects of that re-save.** (a) **Reproducibility, measured for
+  free and good:** re-detection reproduced the other 80 frames to a median
+  of **0.092 %** (worst 0.61 %), and the scale anchor came through
+  **unchanged in value** because the existing calibration was confirmed
+  rather than redrawn — the `[critical]` partial-re-save hazard in
+  `SLDEA_HANDOFF.md` was avoided. (b) **Rows carrying `(user)` went 81 → 6**,
+  so the 08-05 whole-run confirmation is no longer in `data.csv` (it
+  survives in `data.csv.pre-8kV-retrace-20260806` beside the run). Upside:
+  the acceptance mix is now honest at **93 % auto**, so caveat (a) below no
+  longer applies to this run — only to CB.
 - **Two caveats that apply to both runs, and to anything reading their
-  CSVs:** (a) the **0 % auto-accept** figure they report is an artifact —
-  every row carries `(user)`, which `compare_errorbars.py` counts as a
-  human pick, so the mix reads 0 auto *by construction*; the diagnostic
-  flagged 0/10 and 4/48 respectively, so do not compare either to the
-  ~84 % baseline. (b) **A missing `audit_*` field means the frame PASSED,
+  CSVs:** (a) **the CB run's 0 % auto-accept figure is an artifact** — every
+  row carries `(user)`, which `compare_errorbars.py` counts as a human pick,
+  so the mix reads 0 auto *by construction*; the diagnostic flagged 0/10, so
+  do not compare it to the ~84 % baseline. (Triazole had the same artifact
+  until its 08-06 re-save cleared it.) (b) **A missing `audit_*` field means the frame PASSED,
   not that the check was skipped** — `sldea_edge.py:1190-1196` sets
   `audit_nostep` / `audit_bias` only when a frame *exceeds* its gate, and
   the real per-frame numbers live in `frames[].audit`. An earlier version

@@ -38,6 +38,41 @@ def measured_ua(imon_scope_v):
     return imon_scope_v * IMON_UA_PER_V
 
 
+# The study compares COMPLIANT ELECTRODE MATERIALS: CNT so far, carbon
+# black since 2026-08-05, liquid metal expected. Recorded per run so the
+# campaign's device class lives in the data instead of in folder names,
+# and so per-family detection defaults have something to key on later
+# (#229). Free text is allowed -- the list is a convenience, not a
+# constraint; an unrecognised entry is kept verbatim and families out to
+# 'other'.
+ELECTRODE_CHOICES = ('', 'CNT', 'carbon black', 'eGaIn', 'other')
+_ELECTRODE_FAMILIES = (
+    ('cnt', ('cnt', 'carbon nanotube', 'nanotube')),
+    ('carbon_black', ('carbon black', 'carbonblack', 'cb ', ' cb', 'c-black')),
+    ('liquid_metal', ('egain', 'e-gain', 'galinstan', 'liquid metal',
+                      'liquidmetal')),
+)
+
+
+def electrode_family(text):
+    """Free-text electrode -> a canonical family, or None when blank.
+
+    'CNT' / 'carbon black' / 'eGaIn' and their obvious spellings map to
+    'cnt' / 'carbon_black' / 'liquid_metal'; anything else non-blank is
+    'other'. Nothing keys off this yet -- it exists so that when the
+    detector needs per-family behaviour (#229: a mirror-bright electrode
+    inverts the dark-disc assumption) there is one place that decides
+    what family a run belongs to."""
+    t = (text or '').strip().lower()
+    if not t:
+        return None
+    padded = f' {t} '
+    for family, needles in _ELECTRODE_FAMILIES:
+        if any(nd in padded for nd in needles):
+            return family
+    return 'other'
+
+
 def compute_levels(start_kv, end_kv, step_kv=None, n_steps=None):
     """Ordered list of landing voltages (kV).
 
@@ -62,6 +97,15 @@ def fmt_duration(seconds):
     s = int(round(seconds))
     return f"{s // 3600:d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
 
+
+# Seconds between the throw-away 0 kV frame and the real baseline. The
+# camera's firmware re-decides exposure on every open and walks written
+# values back within ~0.5 s (webcam.apply_locked), so the FIRST frame of
+# a session is the one most likely to be mis-exposed -- measured on the
+# 2026-08-05 CB run, whose baseline was 73.7% saturated while its own
+# ramp frames were 0.27%. Two seconds costs nothing and the staircase
+# does not start until after it.
+BASELINE_WARMUP_S = 2.0
 
 SCOPE_DIVISIONS = 8          # MSO24 vertical divisions
 BNC_ATTEN = 1.0              # bench convention: monitors are direct BNC
@@ -644,7 +688,8 @@ class SldeaProfile:
     def __init__(self, start_kv=0.0, end_kv=10.0, step_kv=0.25, n_steps=None,
                  ramp_s=5.0, landing_s=60.0, settle_s=2.0, snap_lead_s=1.0,
                  repeat=1, updown=False, baseline=True,
-                 snap_post=True, snap_pre=True):
+                 snap_post=True, snap_pre=True,
+                 baseline_warmup_s=BASELINE_WARMUP_S):
         for name, val in (('start_kv', start_kv), ('end_kv', end_kv)):
             if not 0.0 <= val <= TREK_MAX_KV:
                 raise ValueError(f"{name}={val} kV out of range 0..{TREK_MAX_KV}")
@@ -680,6 +725,7 @@ class SldeaProfile:
         self.repeat = max(1, int(repeat))
         self.updown, self.baseline = bool(updown), bool(baseline)
         self.snap_post, self.snap_pre = bool(snap_post), bool(snap_pre)
+        self.baseline_warmup_s = max(0.0, float(baseline_warmup_s))
         self._build()
 
     def sequence(self):
@@ -694,8 +740,22 @@ class SldeaProfile:
         self.snapshots = []   # {t, step, nominal_kv, tag}
         t = 0.0
         if self.baseline:
+            # TWO frames at 0 kV when a warm-up is configured. The first
+            # is thrown at the camera to make it settle; the SECOND is
+            # the reference every area in the run is differenced against.
+            # The 2026-08-05 CB run is why: its baseline came out 73.7%
+            # saturated while its own ramp frames were 0.27%, i.e. the
+            # reference was exposed differently from everything compared
+            # against it. Tagged 'warmup', NOT 'baseline-warmup' --
+            # sldea_plot phases rows with tag.startswith('baseline'), so
+            # a baseline-prefixed tag would be averaged into A0.
+            if self.baseline_warmup_s > 0:
+                self.snapshots.append(
+                    {'t': 0.0, 'step': 0, 'nominal_kv': 0.0,
+                     'tag': 'warmup'})
+                t = self.baseline_warmup_s
             self.snapshots.append(
-                {'t': 0.0, 'step': 0, 'nominal_kv': 0.0, 'tag': 'baseline'})
+                {'t': t, 'step': 0, 'nominal_kv': 0.0, 'tag': 'baseline'})
         prev = 0.0
         for step, lvl in enumerate(self.sequence(), start=1):
             self.segments.append(('ramp', t, t + self.ramp_s, prev, lvl))
@@ -718,8 +778,15 @@ class SldeaProfile:
 
     def kv_at(self, t):
         """Target Trek voltage (kV) at time t -- for the runner's ramp and the
-        preview curve."""
+        preview curve.
+
+        SAFETY: t before the first segment returns 0.0. With a warm-up
+        baseline the staircase no longer starts at t=0, and the
+        fall-through below returns the FINAL level -- which would have
+        commanded the SG to full scale for the whole warm-up window."""
         if t <= 0:
+            return 0.0
+        if self.segments and t < self.segments[0][1]:
             return 0.0
         for kind, t0, t1, a, b in self.segments:
             if t0 <= t <= t1:
@@ -747,7 +814,7 @@ class SldeaProfile:
                 f"total {fmt_duration(self.total_duration_s)}")
 
     def setup_text(self, run_name, started_iso, sg_ch, vmon_ch, imon_ch,
-                   dry_run, cam_info='', dea_diam_mm=None):
+                   dry_run, cam_info='', dea_diam_mm=None, electrode=None):
         step_desc = (f"{self.step_kv:g} kV/step" if self.step_kv
                      else f"{self.n_steps_req} steps")
         return "\n".join([
@@ -777,9 +844,18 @@ class SldeaProfile:
             "--- Camera ---",
             cam_info or "(settings not recorded)",
             ""] + ([f"DEA nominal diameter: {dea_diam_mm:g} mm", ""]
-                   if dea_diam_mm else []) + [
+                   if dea_diam_mm else []) + (
+            [f"Compliant electrode: {str(electrode).strip()}",
+             f"Electrode family: {electrode_family(electrode)}", ""]
+            if str(electrode or '').strip()
+            else ["Compliant electrode: (not specified)", ""]) + [
             "--- Snapshots ---",
-            "baseline @ 0 kV" if self.baseline else "(no baseline)",
+            ("baseline @ 0 kV"
+             + (f" (after a {self.baseline_warmup_s:g}s camera warm-up "
+                f"frame tagged 'warmup'; the staircase starts at "
+                f"{self.baseline_warmup_s:g}s)"
+                if self.baseline_warmup_s > 0 else ""))
+            if self.baseline else "(no baseline)",
             "per landing: "
             + ", ".join(([f"post-ramp (ramp-end + {self.settle_s:g}s)"]
                          if self.snap_post else [])

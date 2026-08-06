@@ -2468,6 +2468,26 @@ LOGGING:
                           "setup.txt and used by Edge Review for the px→mm "
                           "scale.")
         self.sldea_vars['diam_mm'] = diam
+        # Which compliant electrode this device uses. Deliberately blank
+        # by default and free-text: the study compares materials (CNT so
+        # far, carbon black since 2026-08-05, liquid metal expected), and
+        # until now the material lived only in folder names. Run asks for
+        # confirmation if it is left empty rather than silently recording
+        # an unknown device class.
+        ttk.Label(outf, text="Electrode:").grid(row=3, column=0, sticky='e')
+        electrode = ttk.Combobox(
+            outf, width=14,
+            values=[c for c in sldea_profile.ELECTRODE_CHOICES if c])
+        electrode.set('')
+        electrode.grid(row=3, column=1, sticky='w', padx=6)
+        add_tooltip(electrode,
+                    "Compliant electrode material for this device — CNT, "
+                    "carbon black, eGaIn, or type your own. Written to "
+                    "setup.txt so the campaign's device class lives in the "
+                    "data rather than in folder names. Optional, but the "
+                    "run will ask before starting without it. Nothing in "
+                    "detection keys off it yet (see issue #229).")
+        self.sldea_vars['electrode'] = electrode
         self.sldea_trek_inv = tk.BooleanVar(value=False)
         add_tooltip(ttk.Checkbutton(outf, text="Trek inverts (negate "
                                                 "control)",
@@ -2781,6 +2801,23 @@ LOGGING:
                 diam_mm = float(self.sldea_vars['diam_mm'].get())
             except (KeyError, ValueError):
                 diam_mm = 16.0
+            try:
+                electrode = self.sldea_vars['electrode'].get().strip()
+            except KeyError:
+                electrode = ''
+            # The study compares electrode materials; a run that does not
+            # say which one it used is a data point that cannot be sorted
+            # later. Ask rather than refuse -- there are legitimate
+            # reasons (rig shakedown, unknown sample).
+            if not electrode and not messagebox.askyesno(
+                    "No electrode specified",
+                    "This run will not record which compliant electrode "
+                    "the device uses (CNT / carbon black / eGaIn / …).\n\n"
+                    "The study compares electrode materials, so the run "
+                    "folder would be the only place that knowledge "
+                    "lives.\n\nStart the run without it?", default='no'):
+                self._sldea_log("run cancelled — electrode not specified")
+                return
             autoproc = self.sldea_autoproc.get()
             trek_sign = -1.0 if self.sldea_trek_inv.get() else 1.0
             # Breakdown watchdog (live only). Only claim it is armed when it
@@ -2848,7 +2885,7 @@ LOGGING:
                       self.sldea_runname.get().strip(),
                       sgch, vch, ich, dry, cam_exp, cam_gain, diam_mm,
                       autoproc, wd_on, wd_ua, wd_s, trek_sign, scope_setup,
-                      tel_on, tel_hz),
+                      tel_on, tel_hz, electrode),
                 daemon=True).start()
             self.root.after(100, self._sldea_animate_cursor)  # playhead
         finally:
@@ -3249,7 +3286,7 @@ LOGGING:
                       cam_exp=6, cam_gain=60, diam_mm=16.0, autoproc=False,
                       wd_on=False, wd_ua=100.0, wd_s=3.0, trek_sign=1.0,
                       scope_setup=None, tel_on=False,
-                      tel_hz=sldea_profile.TELEMETRY_MAX_HZ):
+                      tel_hz=sldea_profile.TELEMETRY_MAX_HZ, electrode=''):
         """Host-sequenced staircase runner (daemon thread; no Tk calls except
         via _sldea_log/_sldea_set_status/after). Drives the SG DC offset along
         p.kv_at(t), fires webcam+scope snapshots on schedule, writes the run
@@ -3278,7 +3315,7 @@ LOGGING:
                     started.isoformat(timespec='seconds'),
                     sgch, vch, ich, dry,
                     f"exposure {cam_exp}, gain {cam_gain}, WB off (manual)",
-                    dea_diam_mm=diam_mm))
+                    dea_diam_mm=diam_mm, electrode=electrode))
                 if trek_sign < 0:
                     sf.write("Trek control polarity: INVERTED (control = "
                              "-kV/gain; monitor readings sign-corrected "

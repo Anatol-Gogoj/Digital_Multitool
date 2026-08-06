@@ -144,6 +144,61 @@ before. Fixed at a choke point this time, with a test.
   encodes as ASCII and that the substitutions stay readable rather than
   collapsing to '?'.
 
+## Electrode material is recorded, and the baseline gets a warm-up frame (2026-08-05)
+
+**TL;DR:** Two changes that follow from the CB run. Runs now record which
+**compliant electrode** the device uses — the study compares CNT vs
+carbon black vs (later) liquid metal, and until now that lived only in
+folder names. And the 0 kV baseline is now the SECOND frame: a throw-away
+frame fires at t=0, the reference is taken 2 s later, and the staircase
+does not start until after it. Both are groundwork, not fixes: nothing in
+detection keys off the electrode yet (#229), and the warm-up is a
+mitigation for #193, not a cure.
+
+Observation → decision:
+
+- **The campaign compares materials and the material was not in the
+  data.** `setup.txt` records diameter, camera settings, scope setup and
+  every detection setting — but not what the electrode is made of. →
+  Optional free-text `Electrode:` on the SLDEA tab, written to
+  `setup.txt` as `Compliant electrode:` plus a canonical
+  `Electrode family:` (`cnt` / `carbon_black` / `liquid_metal` /
+  `other`) from `sldea_profile.electrode_family()`. Left blank by
+  design; **Run asks for confirmation before starting without it**
+  rather than refusing — a shakedown or an unknown sample is a real
+  case. Blank is recorded as "(not specified)" rather than omitted, so
+  a run that predates the field and a run that declined to answer are
+  distinguishable.
+- **Nothing keys off it yet, deliberately.** The measured position
+  (2026-08-05) is that the mask default at 255 is a no-op on CNT and
+  decisive on CB, so no per-family branching is justified today. The
+  family function exists so #229 has one place to hang it when liquid
+  metal arrives and inverts the dark-disc assumption.
+- **The baseline was the mis-exposed frame.** On `SLCBvalidationTest`
+  the baseline is 73.7 % saturated while its own ramp frames are
+  0.27 % — the reference was exposed differently from everything
+  differenced against it. The camera's firmware re-decides exposure on
+  every open and walks written values back within ~0.5 s
+  (`webcam.apply_locked`), so the FIRST frame of a session is the one
+  most likely to be wrong. → `SldeaProfile` takes
+  `baseline_warmup_s` (default **2.0 s**): a frame at t=0 tagged
+  **`warmup`**, the real baseline at t=2, and the staircase starts at
+  t=2. Set it to 0 for the old single-baseline behaviour.
+- **Tagged `warmup`, NOT `baseline-warmup`.** `sldea_plot` phases rows
+  with `tag.startswith('baseline')`, so a baseline-prefixed tag would
+  have been averaged into A₀ — the exact quantity the warm-up exists to
+  protect. Every other consumer keys on `tag == 'baseline'` exactly and
+  therefore picks the settled frame.
+- **[HV] `kv_at()` had to be fixed in the same change.** It falls through
+  to `segments[-1][4]` when no segment matches, so the moment the
+  staircase stopped starting at t=0, every warm-up tick would have
+  commanded the SG to the **FINAL level** — the runner writes
+  `kv_at(el)` to the SG without questioning it. It now returns 0.0
+  before the first segment, pinned by
+  `test_no_voltage_is_commanded_during_the_camera_warm_up`.
+- **Cost:** +2 s per run and one extra frame. The warm-up frame does
+  enter `data.csv`, so it will appear in Edge Review's queue as an
+  unremarkable 0 kV frame.
 ## Saturation measured: the detector did NOT break, the exposure discipline did (2026-08-05)
 
 **TL;DR:** Operator question, and the right one: does the CV actually

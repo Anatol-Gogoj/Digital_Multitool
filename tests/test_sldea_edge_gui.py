@@ -1240,6 +1240,10 @@ def test_on_demand_pairing_does_not_fake_a_detection_pass():
         assert app.settings['min_diff'] == 4
         assert not mb.asked, mb.asked
         assert sorted(app.traces) == staged, "staged traces were wiped"
+        # the pairings themselves ARE settings-dependent, so they drop:
+        # the next trace must not pair with a candidate these settings do
+        # not reproduce
+        assert not app.pair_cands, "stale-settings pairings survived"
         # a REAL pass still clears both, and still says what it clears
         app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
         app.detect_all_sync()

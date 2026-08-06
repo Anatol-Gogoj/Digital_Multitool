@@ -1915,8 +1915,13 @@ class EdgeReviewApp:
                 messagebox.showerror("Settings", str(err), parent=win)
                 return
             has_pass = bool(self.results or self.cands_all)
-            invalidates = has_pass and any(
-                new[k] != self.settings[k] for k in detect_keys)
+            detect_changed = any(new[k] != self.settings[k]
+                                 for k in detect_keys)
+            # pair_cands is NOT a pass (see _detect_one) so it never makes
+            # has_pass true -- but it IS settings-dependent, so a changed
+            # detect key must drop it either way, or the next trace would
+            # pair with a candidate the current settings do not reproduce
+            invalidates = has_pass and detect_changed
             if invalidates:
                 n_rev = sum(1 for i in self.results
                             if i not in self.auto_idx
@@ -1938,6 +1943,8 @@ class EdgeReviewApp:
                         parent=win):
                     return
             self.settings.update(new)
+            if detect_changed:
+                self.pair_cands = {}
             if save and self.rundir:
                 se.save_settings(self.rundir, self.settings)
             win.destroy()

@@ -144,6 +144,66 @@ before. Fixed at a choke point this time, with a test.
   encodes as ASCII and that the substitutions stay readable rather than
   collapsing to '?'.
 
+## A blown-out baseline is now a gate, and the cv2 camera path honours the exposure fields (2026-08-05)
+
+**TL;DR:** The carbon-black run started from a baseline that is MEDIAN
+255 — more than half the frame clipped pure white — and the app let it
+through with a one-line hint. Every area a run reports is a difference
+against that frame, so this is the optical twin of the scope-window
+clipping #195 gates on, and it now gates the same way. Separately, the
+tab's exposure/gain fields were silently ignored on ordinary webcams,
+and the exposure lock was only re-stamped per grab on the Bayer path.
+
+Observation → decision:
+
+- **The warn tier was already right; there was no stop tier.** Measured
+  across all 14 baselines held on 2026-08-05 the two populations do not
+  overlap remotely: the 13 healthy runs sit at mean 128–190 with
+  **0.12–3.62 %** of pixels ≥ 250; the CB validation run sits at mean
+  235, median 255, **73.7 %**. The existing hint (`mean > 215 or
+  sat > 8`) already fired on the CB run and on nothing else — it was
+  just advisory text beside a Proceed button. → New
+  `sldea_profile.exposure_verdict()` adds a **`clipped` tier** at
+  `sat ≥ 20 %` or `mean ≥ 225`: 5.5× above the worst healthy baseline
+  and 3.7× below the blown-out one. The pre-flight now demands a
+  deliberate second confirmation defaulted to No, and **run.log records
+  both the verdict and the override** — a run started from a white frame
+  says so in its own log forever.
+- **Why a gate rather than a louder hint.** A baseline that is mostly
+  255 threw the signal away before the ramp started. No later tuning
+  recovers it: CB detection collapsed to a 1930 px sliver against a true
+  ~134 500 px and only came back by disabling the electrode mask, which
+  is a workaround, not a fix. Thresholds are pinned against the measured
+  corpus in `test_exposure_verdict_separates_the_real_corpus`, so they
+  can be re-argued from data rather than from taste.
+- **The cv2 path ignored the exposure fields entirely.** Both the run
+  worker and the pre-flight applied `auto_exposure` /
+  `exposure_time_absolute` / `gain` **only when `spec['kind'] ==
+  'bayer'`**, and `oneshot_rgb`'s cv2 branch opened a fresh
+  `VideoCapture` per grab with no control setting at all — so on an
+  ordinary webcam the tab's numbers did nothing and the firmware chose
+  the exposure afresh on every frame. → `resolve_camera` now carries the
+  `/dev/videoN` path for cv2 devices too, both call sites gate on
+  **having a device** rather than on the kind, and the cv2 grab
+  re-stamps the locked controls exactly like the Bayer one.
+- **Re-stamp per grab, not in advance** — worth writing down because the
+  obvious fix is wrong. `apply_locked`'s own bench note says the DFK's
+  firmware auto-gain **overrides a written value within ~0.5 s**, so a
+  lock applied half a second before the shutter is a lock the firmware
+  has time to walk back. The Bayer path had this right already ("user-
+  locked knobs win on every grab"); the cv2 path now matches.
+- **The run's camera lock is saved and restored.** `LOCKED_CONTROLS` is
+  shared with the Webcam tab's Apply & Lock, so the runner snapshots it,
+  overlays the run's four controls, and restores the operator's set in
+  the `finally` block. A run must not silently redefine what the tab
+  locked.
+- **What this does NOT fix.** If the firmware ignores UVC manual control
+  outright, none of this helps — that is **#193**, still the real answer
+  for that camera. This stops the app *hiding* the problem: it applies
+  the controls everywhere it should, re-applies them where the firmware
+  actually wins, and refuses to start a run from a frame that has
+  already lost the measurement.
+
 ## Live telemetry sidecar — the watchdog's 2 Hz samples are written down (2026-08-05)
 
 **TL;DR:** Every live run has been measuring the Trek current twice a

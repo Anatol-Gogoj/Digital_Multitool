@@ -116,6 +116,51 @@ def test_list_cameras_returns_list():
     assert isinstance(wc.list_cameras(max_index=2), list)
 
 
+def test_ordinary_webcams_carry_their_device_path():
+    """A cv2-captured webcam still has V4L2 controls. Without the device
+    path there is nothing to re-stamp the locked exposure onto, so the
+    firmware picked the exposure on every open and the SLDEA tab's
+    exposure/gain fields were silently ignored (2026-08-05: the
+    carbon-black run's baseline came out saturated, median 255)."""
+    real_v4l2, real_exists, real_bayer = (wc.v4l2_available,
+                                          _os.path.exists, wc.bayer_format)
+    try:
+        wc.v4l2_available = lambda: True
+        _os.path.exists = lambda p: True
+        wc.bayer_format = lambda dev: None          # ordinary webcam
+        spec = wc.resolve_camera(0)
+        assert spec['kind'] == 'cv2' and spec['index'] == 0
+        assert spec['device'] == '/dev/video0', spec
+        # no v4l2 on this host -> no device path, and nothing breaks
+        wc.v4l2_available = lambda: False
+        bare = wc.resolve_camera(0)
+        assert bare['kind'] == 'cv2' and 'device' not in bare, bare
+    finally:
+        wc.v4l2_available, wc.bayer_format = real_v4l2, real_bayer
+        _os.path.exists = real_exists
+
+
+def test_locked_controls_are_restamped_before_every_grab():
+    """The lock has to be re-applied per grab, not once in advance: the
+    DFK's firmware auto-gain walks a written value back within ~0.5 s
+    (bench 2026-07-24), so a lock set half a second early is a lock the
+    firmware has time to undo before the shutter."""
+    calls = []
+    real_apply, real_locked = wc.apply_locked, dict(wc.LOCKED_CONTROLS)
+    try:
+        wc.apply_locked = lambda dev, exclude=None: calls.append(dev)
+        # index 999 will not open; the point is the stamp happened first
+        wc.oneshot_rgb({'kind': 'cv2', 'index': 999,
+                        'device': '/dev/video9'}, count=1)
+        assert calls == ['/dev/video9'], calls
+        calls.clear()
+        wc.oneshot_rgb({'kind': 'cv2', 'index': 999}, count=1)
+        assert calls == [], calls
+    finally:
+        wc.apply_locked = real_apply
+        wc.set_locked(real_locked)
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     for fn in fns:

@@ -2986,7 +2986,7 @@ LOGGING:
         frame = None
         try:
             spec = webcam.resolve_camera(0)
-            if spec.get('kind') == 'bayer':
+            if spec.get('device'):
                 dev = spec['device']
                 for ctrl, val in (('auto_exposure', 1),
                                   ('white_balance_automatic', 0),
@@ -3011,13 +3011,12 @@ LOGGING:
             focus = webcam.focus_score(frame)
         except Exception:
             focus = None
-        hints = []
-        if mean < 40:
-            hints.append("⚠ looks DARK — raise exposure/lighting")
-        if mean > 215 or sat > 8:
-            hints.append("⚠ looks BRIGHT/clipped — lower exposure")
-        if not hints:
-            hints.append("exposure OK")
+        level, hint = sldea_profile.exposure_verdict(mean, sat)
+        clipped = level == 'clipped'
+        if clipped:
+            # into run.log via the prelog buffer, so the run carries the
+            # fact that it started from a blown-out baseline
+            self._sldea_log(f"⚠⚠ camera pre-flight: {hint}")
 
         win = tk.Toplevel(self.root)
         win.title("Camera pre-flight — SLDEA run")
@@ -3038,15 +3037,34 @@ LOGGING:
         lbl.image = photo               # keep a reference
         lbl.pack(padx=8, pady=8)
         stats = (f"focus {focus:.0f}   " if focus is not None else "") + \
-            f"mean {mean:.0f}   saturated {sat:.1f}%   —   " + \
-            "; ".join(hints)
+            f"mean {mean:.0f}   saturated {sat:.1f}%"
         tk.Label(win, text=stats, fg='#1f3a5f').pack()
+        tk.Label(win, text=hint, fg='#c62828' if clipped else '#1f3a5f',
+                 wraplength=520,
+                 font=('TkDefaultFont', 9, 'bold' if clipped else 'normal')
+                 ).pack(pady=(2, 0))
         tk.Label(win, text="Check: DEA centred in the circle · in focus · "
                            "no glare / clipping", fg='#555').pack(pady=(0, 6))
         bf = ttk.Frame(win)
         bf.pack(pady=(0, 10))
 
         def go():
+            # A blown-out baseline is a gate, not a hint: every area this
+            # run reports is a difference against this frame. Same
+            # treatment as the scope-window check -- you may still
+            # proceed, but on purpose, and run.log records it.
+            if clipped and not messagebox.askyesno(
+                    "Baseline is blown out",
+                    f"{hint}\n\nThe 2026-08-05 carbon-black run started "
+                    f"from a baseline like this and its detection "
+                    f"collapsed until the electrode mask was turned off "
+                    f"to work around it.\n\nLower the exposure on the "
+                    f"Webcam tab first.\n\nStart the run anyway?",
+                    default='no', parent=win):
+                return
+            if clipped:
+                self._sldea_log("⚠⚠ operator started the run ANYWAY "
+                                "on a blown-out baseline")
             result['go'] = True
             win.destroy()
 
@@ -3057,7 +3075,9 @@ LOGGING:
                     self.notebook.select(i)
                     break
 
-        gob = ttk.Button(bf, text="✔ Looks good — start run", command=go)
+        gob = ttk.Button(bf, text="✔ Looks good — start run" if not clipped
+                         else "⚠ Start anyway (baseline blown out)",
+                         command=go)
         gob.pack(side=tk.LEFT, padx=6)
         ttk.Button(bf, text="✎ Adjust (open Webcam tab)",
                    command=adjust).pack(side=tk.LEFT, padx=6)
@@ -3225,6 +3245,7 @@ LOGGING:
         started = datetime.now()
         tel_hz = sldea_profile.clamp_telemetry_hz(tel_hz)
         tel = None                    # telemetry sidecar (opened below)
+        cam_lock_saved = None         # Webcam-tab lock, restored at the end
         rundir = os.path.join(outdir, runname or p.run_dirname(started))
         framedir = os.path.join(rundir, 'frames')
         fh = None
@@ -3311,13 +3332,29 @@ LOGGING:
             spec = None
             try:
                 spec = webcam.resolve_camera(0)
-                if spec.get('kind') == 'bayer':
+                # Gate on a device path, NOT on the bayer kind: an
+                # ordinary webcam has the same V4L2 controls, and gating
+                # on kind meant the tab's exposure/gain were silently
+                # ignored on it (2026-08-05).
+                if spec.get('device'):
                     dev = spec['device']
                     for ctrl, val in (('auto_exposure', 1),
                                       ('white_balance_automatic', 0),
                                       ('exposure_time_absolute', cam_exp),
                                       ('gain', cam_gain)):
                         webcam.set_control(dev, ctrl, val)
+                    # Re-stamp before EVERY grab -- that is where the
+                    # firmware actually wins, since it walks a written
+                    # value back within ~0.5 s. LOCKED_CONTROLS is shared
+                    # with the Webcam tab's Apply & Lock, so the previous
+                    # set is saved and restored in the finally block; a
+                    # run must not silently redefine the operator's lock.
+                    cam_lock_saved = dict(webcam.LOCKED_CONTROLS)
+                    webcam.set_locked(dict(cam_lock_saved,
+                                           auto_exposure=1,
+                                           white_balance_automatic=0,
+                                           exposure_time_absolute=cam_exp,
+                                           gain=cam_gain))
             except Exception as e:
                 self._sldea_log(f"camera setup failed ({e}) — frames skipped")
                 spec = None
@@ -3603,6 +3640,11 @@ LOGGING:
             # for the ACHIEVED rate to be visible — a run the hardware
             # could not keep up with says so here instead of quietly
             # leaving a sparse file.
+            if cam_lock_saved is not None:
+                try:
+                    webcam.set_locked(cam_lock_saved)
+                except Exception:
+                    pass
             if tel is not None:
                 try:
                     self._sldea_log(tel.summary())

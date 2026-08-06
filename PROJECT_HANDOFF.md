@@ -148,11 +148,28 @@ stop hand-rolling matplotlib.
   quote them for area or absolute mm²; do keep using them for breakdown and
   trip-level work. Rationale, numbers and carve-out in `SCORECARD.md`
   §"07-23 family retired from the measurement campaign".
+- **P3_2 reviewed 2026-08-06 — conditional pass, with a scale caveat.**
+  81/81 filled, 64 auto (79 %), 17 picks + **10 traces** (all in the
+  4.5–5.75 kV collapse band, where `tex-ratio` had won on one frame with a
+  jagged non-boundary and `disc-fit` was riding an outer halo on the rest:
+  no-step 41–43 %, bias −31.85 / −10.09 px). ci85 median 0.30 %, pair CV
+  median 0.86 %. **A/A₀ peak 2.302 @ 5.25 kV** — in family with P3_5's
+  2.34× — then the usual wrinkle collapse (pair CV 15 % @ 5.5, 26 % @ 5.75,
+  matching P3_3/P3_5/P3_6) relaxing to 1.159 by 10 kV.
+- **⚠ P3_2's absolute mm² reads −4.42 % low, accepted as-is (Anatol's call
+  2026-08-06).** Its manual calibration was drawn at **590.26 px = 16 mm**
+  where the resting disc auto-fits at **577.1 px** (circ 0.999), so resting
+  comes out 192.18 mm² / 15.643 mm instead of π·8² = 201.06 / 16.000. It is
+  the only run in the corpus that misses the mask anchor. **Ratios are
+  scale-invariant and are this run's quotable output; do not cross-compare
+  its absolute areas** — against the CB curve especially — without applying
+  the offset (×1.0462 recovers the anchored scale). Fixing it later is one
+  recalibration plus a save, no re-review, since mm² re-derives from px.
 - **Remaining:** the batch-level **control round** (~15 min of traces —
   still required, because the optics moved across the *remaining* sessions
-  too); P3_2 review; the P3_6 holdout frame; P3_7 (blocked on contrast
-  — see issues #193/#194); 104531 (bench decision: device barely actuated,
-  suspect dead device / HV not reaching sample).
+  too); the P3_6 holdout frame; P3_7 (blocked on contrast — see issues
+  #193/#194); 104531 (bench decision: device barely actuated, suspect dead
+  device / HV not reaching sample).
 - **The two 08-05 runs are folded in (2026-08-06)** — `SCORECARD.md` now
   carries a measured verdict for each. **CB** (the first non-CNT
   electrode): A/A₀ **1.158** at 5 kV, resting 202.55 mm² = 16.06 mm, ci85
@@ -435,11 +452,12 @@ genuinely independent of it.**
    CB attempt should be preceded by lowering exposure on the Webcam tab
    until the pre-flight goes quiet. If the firmware will not honour the
    manual controls, that IS #193 and no app change fixes it.
-3. **(desk, Anatol)** the two 07-23 breakdown reviews are **done
-   (2026-08-06)** and that family is retired from measurement. What is
-   left on this line is the **control round** (including the 2 repeat
-   pairs, which do not exist yet), **P3_2**, and the **P3_6 holdout
-   frame** — unchanged, unblocked, and independent of everything above.
+3. **(desk, Anatol)** the two 07-23 breakdown reviews and the **P3_2
+   review** are all **done (2026-08-06)**; the 07-23 family is retired from
+   measurement. What is left on this line is the **control round**
+   (including the 2 repeat pairs, which do not exist yet) and the **P3_6
+   holdout frame** — unchanged, unblocked, and independent of everything
+   above. With P3_2 done, **every P3-family run in the batch is reviewed**.
 4. **(desk) DONE 2026-08-06.** Both 08-05 runs are folded into
    `SCORECARD.md` with measured verdicts — `sldea_diag.py` and
    `compare_errorbars.py` were run on each rather than transcribing this

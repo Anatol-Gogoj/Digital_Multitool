@@ -168,11 +168,25 @@ stop hand-rolling matplotlib.
   every row carries `(user)`, which `compare_errorbars.py` counts as a
   human pick, so the mix reads 0 auto *by construction*; the diagnostic
   flagged 0/10 and 4/48 respectively, so do not compare either to the
-  ~84 % baseline. (b) **§3b check 2 is UNEVALUATED** on both — per-frame
-  `audit_bias` is null throughout, so no boundary-audit bias number exists.
-  That is another check that is *absent* rather than passed. Triazole's
-  no-step arc median of **34.7 %** (setting 15 %, P3_1 reference 2 %) is
-  the one number that wants human eyes.
+  ~84 % baseline. (b) **A missing `audit_*` field means the frame PASSED,
+  not that the check was skipped** — `sldea_edge.py:1190-1196` sets
+  `audit_nostep` / `audit_bias` only when a frame *exceeds* its gate, and
+  the real per-frame numbers live in `frames[].audit`. An earlier version
+  of this entry got that backwards and recorded §3b check 2 as
+  unevaluated on both runs. Recomputed properly, **both pass**: CB
+  **+0.01 px** median with a p95 of **0.28 px** — the cleanest boundary
+  audit in the corpus, where every other run sits at 1.92–5.90 px — and
+  Triazole **−0.15 px** (p95 2.12). The method reproduces the scorecard's
+  original Pass-0 audit column exactly on all eleven earlier runs.
+- **Triazole's no-step arc was a false alarm too.** The 34.7 % first
+  reported was the median over only the 2 frames that tripped the gate. The
+  run-level median over all 48 audited boundaries is **10.8 %**, under the
+  15 % gate (P3_1 2.0 %, P3_6 7.7 %, the 07-23 family 9.9–14.8 %), and it
+  is elevated for a documented mechanical reason: below onset the boundary
+  washes out and the ellipse interpolates those sectors
+  (`sldea_edge.py:1467`), which is the same sub-onset stretch that produces
+  the stated resting areas. The run's one real open question is the
+  **5.6–7.4 kV plateau**, which is about the device, not the measurement.
 - The control round's **operator-repeat leg has nothing to compute from
   yet**: `sldea_trace.py` finds 140 labels across 8 runs and **0 repeat
   pairs anywhere**. The 2 repeat pairs still need tracing. Of those 140,

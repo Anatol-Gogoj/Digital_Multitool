@@ -142,7 +142,7 @@ Windows), oscilloscope connected and powered, Trek/HV off. ~20 min.
 Launch: `.venv/bin/python gui.py`
 
 1. **Oscilloscope** tab shows **Connected** — [ ] if not, stop here; without a scope there is no telemetry to test
-2. **SLDEA Test** tab → find the **📈 Telemetry log (telemetry.csv)** box
+2. **SLDEA Test** tab → find the **📈 Scope kV/µA log (telemetry.csv)** box
    - [ ] **Enabled** is ticked and **Rate (Hz)** reads `2`
 3. Make the run short so this takes minutes, not an hour: **Start 0**, **End 1**, **Step 0.5**, **Ramp 2**, **Landing 10**
    - [ ] the summary line under the fields shows a total well under two minutes

@@ -45,9 +45,15 @@ Roughly in the order that unblocks the most.
       convenient — 11 frames, 0–5 kV — but do not discard this one.
 - [ ] **Fold the new CNT run into `SCORECARD.md`** — `P3 1.5mL Triazole
       Bake1-1`, 81 frames, already reviewed, healthy baseline.
-- [ ] **#224's rename word choice** — the filler caption is gone; the
-      label still needs a name that says "scope log". Three copies must
-      move together (Tk, `content.json`, `annotate.py`'s matcher).
+- [ ] **#224's rename word choice** — *30 seconds, taste only.* The
+      rename is IMPLEMENTED as `📈 Scope kV/µA log (telemetry.csv)`; all
+      you do is accept it or pick different words. If you pick different
+      words, do not work from a list of copies — every list so far has
+      undercounted (the issue said three, the first fix said four, it is
+      five).
+      Run `git grep -n "Scope kV"` and change every hit (ASCII-only —
+      `git grep` matches bytes, so a pattern with `µ` in it finds
+      nothing). The comment above the string in `gui.py` says the same.
 - [ ] **Pull v1.1.0 onto the bench and analysis PCs** — `Tools → Update
       Software…` / `update_software.sh`, then check the footer reads
       `v1.1.0+…`. The fleet is one release behind. (The updater clones

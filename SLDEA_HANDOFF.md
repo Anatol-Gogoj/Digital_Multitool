@@ -13,6 +13,107 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## Electrode mask default 220 → 255, and the Tune button's bad resolver (2026-08-05)
+
+**TL;DR:** Two bench-reported bugs. The electrode mask masks pixels that
+are BRIGHT, which is the wrong tool for a carbon-black electrode — at the
+old 220 default it was rejecting the wrong things and breaking edge
+detection outright, so the default is now 255 (effectively off). And the
+SLDEA tab's **🎚 Tune params…** button said "no finished runs (data.csv)"
+about a folder with `data.csv` sitting in it; it was using the wrong
+resolver. Tuning has never needed a prior detection pass.
+
+Observation → decision:
+
+- **Electrode mask, bench observation 2026-08-05, mechanism measured
+  after the fact on `SLCBvalidationTest`.** With a pitch-black (carbon
+  black) electrode, `electrode_lum = 220` breaks edge detection.
+  → **Default raised to 255.**
+
+  The first explanation written here — "the electrode is dark, so
+  brightness masking rejects whatever else is bright" — was the right
+  conclusion for the wrong reason. Running the real CB run says what
+  actually happens: **that baseline is saturated.** Its luminance is
+  `median 255, p99 255, max 255` — more than half the frame is clipped
+  pure white. So `reject |= baseline_px >= 220` swallows **88 % of the
+  frame**, including the ring of context immediately around the device
+  that difference imaging needs. Detection collapses to a 1930 px sliver
+  at conf 0.69 against a true area of ~134 500 px. At 255 the cut keeps
+  only the genuinely clipped pixels (still 70 % of the frame) and the
+  disc traces cleanly: **134 521 px at conf 0.99**.
+
+  Measured side by side at 3.0 kV, same code, same frames:
+
+  | run | electrode | lum 220 | lum 255 |
+  |---|---|---|---|
+  | `SLCBvalidationTest` | carbon black | 1 930 px, conf 0.69 | **134 521 px, conf 0.99** |
+  | `P3 1.5mL Triazole Bake1-1` | foil | 125 917 px, conf 0.96 | 125 917 px, conf 0.96 |
+  | `P3_1_2.5mL_20260728` | foil | 299 509 px, conf 0.84 | 299 509 px, conf 0.84 |
+
+  So the change is decisive where it matters and a no-op everywhere
+  else. **Lighter values remain untested on the CB device.**
+
+- **The CB run is overexposed, and 255 is working around that.** A
+  baseline whose MEDIAN is 255 is not a mask-tuning problem, it is a
+  camera problem — and even at 255 the brightness cut still removes 70 %
+  of that frame. Detection succeeds only because the dark device itself
+  survives the mask. Fixing the exposure (**#193**, defeat the firmware
+  auto-exposure — a black electrode on a bright backing is exactly the
+  scene that drives auto-exposure to blow out) would give this device
+  real headroom, and would be worth re-testing 220 against afterwards.
+  Until then treat CB areas as usable but the run as fragile.
+- **The cost on the real batch: none. Measured, after an initial
+  over-estimate.** A synthetic bright rectangle made `baseline_disc`
+  refuse to fit at 255, and the first version of this entry generalised
+  that into "bright/copper devices lose their px→mm cross-check". **That
+  was wrong**, and running it on the actual P3 data is what showed it.
+  `foil_mask` is TEXTURE-derived, so on a real foil strip it already
+  covers the whole strip; the brightness cut only ever caught the
+  specular streaks *inside* that footprint. It never recognises a flat
+  painted rectangle, which is why the synthetic case behaved so
+  differently.
+
+  Across all 12 readable runs of the batch (P3_1/2/3/5/6/7, DOT_P3_1,
+  the four 07-23 runs, 104531):
+
+  | | 220 → 255 |
+  |---|---|
+  | frame area lost on P3 runs | **0.00–0.09 %** |
+  | resting-disc cross-check, P3 | **identical to the pixel** (578, 577, 584, 606, 543, 527 px) |
+  | resting-disc, 07-23 optics | moves ≤ **1 px** (370→371, 361→362) |
+
+  The 07-23 runs lose more raw area (6–19 %, their brightness cut was
+  catching 25 % of the frame) and still land within a pixel. P3_7 fails
+  to fit at BOTH settings — that is the known low-contrast device
+  (#193/#194), not this change. So no run needs `electrode_lum` put back
+  to 220, and nothing in the reviewed batch moves.
+- **Only untuned runs move.** Per-run values live in that run's
+  `setup.txt` and still win, so nothing already tuned or reviewed
+  changes. The default only reaches runs nobody has tuned.
+- **What is deliberately NOT claimed.** The gain side — that 255 makes
+  detection work on the dark-electrode device — is a bench observation
+  and is not asserted by any test. It was not reproducible on synthetic
+  frames, and a test pretending otherwise would be the kind of
+  measurement that lies. Treat it as reported-and-plausible until a run
+  from that device goes through review.
+- **Two hardcoded `220` fallbacks removed.** The disc-fit path had
+  `settings.get('electrode_lum', 220) or 220` in two places, so a caller
+  omitting the key silently got the OLD default no matter what
+  `DEFAULT_SETTINGS` said. Both now read `DEFAULT_SETTINGS`, and a test
+  fails if a literal `220` fallback comes back.
+- **The Tune button.** `gui.py` resolved its target with
+  `sldea_tuner._newest_run`, which only inspects SUB-directories — so
+  with the output dir pointed at a run folder (the obvious thing to do
+  while working on one run) it found nothing and reported "No finished
+  runs (data.csv) found under …" about a directory containing exactly
+  that. → It now uses `resolve_run`, the shared resolver the CLI and the
+  Windows launcher already use, which accepts a run folder, a parent full
+  of runs, or a bench shortcut. `sldea_edge.resolve_run`'s own docstring
+  says it exists so "the three cannot disagree about what a given
+  argument means" — the app's Tune button was the one caller not using
+  it. The correlation with "no prior edge detection" was incidental:
+  nothing in the tuner ever required a detection pass.
+
 ## The diagnostic crashed on its own report text again (2026-08-05)
 
 **TL;DR:** `sldea_diag.py --selftest` died on the Windows analysis PC

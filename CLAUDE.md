@@ -15,11 +15,13 @@ milestones, not this one.
 | Doc | What it answers |
 |---|---|
 | `PROJECT_HANDOFF.md` | where things stand right now; open decisions |
+| `RUN_SHEET.md` | the same docket as a tick-off list, split remote / bench-no-HV / bench-HV. A dated snapshot — regenerate it, never maintain it alongside the handoff |
 | `README.md` | setup, transports, every bench-verified instrument quirk |
 | `SLDEA_HANDOFF.md` | measurement-chain decision log (append-only, dated) |
 | `SLDEA_MEASUREMENT.md` | the error budget — what uncertainty to quote and why |
 | `docs/manual-src/README.md` | user-manual pipeline + the release checklist |
-| `BENCH_TEST.md` | manual hardware-in-the-loop checklist (§K historical) |
+| `BENCH_TEST.md` | manual hardware-in-the-loop checklist — §A–§L signal gen (historical), **§M/§N/§O the current SLDEA telemetry + watchdog gate** |
+| `deploy/BENCH_PC_NOTES.md` | bench-PC launch chain and its traps |
 
 ## Conventions that override defaults
 
@@ -31,7 +33,9 @@ milestones, not this one.
   code. Bench-verified claims cite their verification date.
 - **Releases:** bump `version.py`, re-run the manual pipeline, commit BOTH
   regenerated manuals, tag, GitHub release with the PDF attached. The
-  launchers re-sync lab PCs off the version stamp.
+  updater clones main HEAD — it never reads tags or the releases API, so
+  a pre-release still reaches the fleet; the version+hash stamp only
+  invalidates each launcher's cache.
 - **Run data never enters the repo.** `.gitignore` blocks run folders and
   their outputs; a PR that introduces a new capture artifact type extends
   `.gitignore` in the same PR.

@@ -114,22 +114,45 @@ stop hand-rolling matplotlib.
   verify on next bench session): scope V_Out clipping killed `measured_kV`
   from 4.25 kV in the P3_5 / P3_6 / 104531 runs; I_Out offset ≈ −16 µA.
 
+### Electrode material is a study variable, not a rig detail
+
+**The SLDEA study compares COMPLIANT ELECTRODE TYPES.** Everything
+measured so far is **CNT** (the `P3 *-mL` runs). **Carbon black (CB)**
+is the second type and is now in the campaign. **Liquid metal is
+expected later** and will be the hard one. So the tool is not "a CNT
+tool that also coped with a CB run" — it has to capture every type, and
+each new type is a first-class campaign device, not a shakedown to be
+discarded.
+
+Read the 2026-08-05 mask/exposure work in that light: nothing about it
+is CB-specific. The `electrode_lum` mask keys on BRIGHTNESS and actually
+targets the **foil contact tape**, not the compliant electrode itself —
+the electrode is the disc, and on both CNT and CB it reads DARKER than
+the membrane, which is exactly what `baseline_disc` seeds on
+(`dark = sm < paper - 5`). **Liquid metal breaks that assumption**: a
+specular, mirror-bright electrode would be brighter than the membrane
+and would be masked by its own brightness cut. Worth designing for
+before the first EGaIn run rather than after — filed as an issue.
+
 **NEW: `SLDEA_data\Upload 20260805\`** — a second upload folder, not yet
 folded into the campaign runbook:
 
-- `SL Ramp Test Initial CB\SLCBvalidationTest` — the **carbon-black
-  electrode** validation run. 11 frames, 0–5 kV, raw (never reviewed).
-  Its `setup.txt` already carries `electrode_lum: 255`. **Its baseline
-  is saturated — mean 235, MEDIAN 255, 73.7 % of pixels at/above 250**,
-  against 0.12–3.62 % on every other baseline in the corpus. That is
-  what broke detection at the old mask default, and it is an exposure
-  fault, not an electrode one (see the 08-05 entry in
-  `SLDEA_HANDOFF.md`). **Open question for Anatol: is this run worth
-  reviewing at all**, or is it a rig shakedown to repeat once the
-  exposure is fixed? Areas measured against a mostly-white baseline
-  carry an uncertainty nothing in `SLDEA_MEASUREMENT.md` covers.
+- `SL Ramp Test Initial CB\SLCBvalidationTest` — the first **carbon
+  black** run, and the campaign's first non-CNT electrode. 11 frames,
+  0–5 kV, raw (never reviewed). Its `setup.txt` already carries
+  `electrode_lum: 255`. **Its baseline is saturated — mean 235, MEDIAN
+  255, 73.7 % of pixels at/above 250**, against 0.12–3.62 % on every
+  other baseline in the corpus. That is an EXPOSURE fault, not an
+  electrode one (08-05 entry in `SLDEA_HANDOFF.md`), and since #227 the
+  app refuses to start such a run without a logged override.
+  **Decision needed: review these 11 frames, or re-shoot the device
+  with corrected exposure and review that?** Areas measured against a
+  mostly-white baseline carry an uncertainty nothing in
+  `SLDEA_MEASUREMENT.md` covers, so if these frames are kept the CB
+  numbers need a caveat the CNT numbers do not. Re-shooting is cheap by
+  comparison — 11 frames, 0–5 kV.
 - `Single Layer Testing\P3 1.5mL Triazole Bake1\P3 1.5mL Triazole
-  Bake1-1` — an 81-frame P3 run, already reviewed (areas + `edge:
+  Bake1-1` — an 81-frame CNT run, already reviewed (areas + `edge:
   resting conf 0.95 (user)` in `data.csv`), healthy baseline. Not in
   `SCORECARD.md`; folding it in is desk work.
 
@@ -259,9 +282,11 @@ open decisions below.
 3. **(desk, Anatol)** the two 07-23 breakdown reviews (152205, 233451),
    then the control round, P3_2, and the P3_6 holdout frame — unchanged,
    unblocked, and independent of everything above.
-4. **(desk)** decide whether the CB run is worth reviewing at all (see
-   the campaign section), and fold the new P3 Triazole run into
-   `SCORECARD.md`.
+4. **(desk/bench)** decide the CB run's fate — review the 11 saturated
+   frames with a caveat, or re-shoot the device at a corrected exposure
+   and review that (see the campaign section). Either way CB is a
+   campaign electrode type, not a shakedown. Also fold the new CNT
+   Triazole run into `SCORECARD.md`.
 5. **(desk)** #224's rename word choice, then #225, #223, #216, #215,
    #197, #200 — all real, scoped and hardware-free. #219 becomes
    designable the moment §N's numbers land.
@@ -357,6 +382,63 @@ alone does nothing; likely the root cause of #27, same family as #26).
   or something before the 2026-08-05 agent session** (see Housekeeping
   above) — verify that was sanctioned; OneDrive web recycle bin is the
   recovery path if not.
+
+## Cold start — read this first if you are new here
+
+Verified by re-running it, not recalled. If a fact here disagrees with
+prose elsewhere in this file, trust this and fix the other one.
+
+**Five traps that have already caught someone:**
+
+1. **Your local `main` is probably stale.** `git fetch` updates
+   `origin/main`, not `main`. Reading `version.py` or this file from a
+   stale checkout shows an older reality and looks entirely plausible.
+   Check `git rev-list --count main..origin/main` first.
+2. **`python` on PATH is not the repo's Python** — it lacks cv2 and
+   pandas, so suites fail for reasons unrelated to your change. Use
+   `.venv\Scripts\python.exe`.
+3. **Selftests write into the current directory.** Run them from a
+   scratch dir. If you add a tool that writes a new artifact type,
+   extend `.gitignore` in the same PR (the watchdog probe's outputs were
+   missed and had to be added later).
+4. **Never put "closes #N" in a PR that only DESCRIBES pending work.**
+   #220 did, and GitHub closed #159 — whose verification has never run.
+   It has been reopened.
+5. **Passing tests are not proof the GUI opens.** `test_sldea_edge_gui`
+   passes headlessly by skipping the display cases; only
+   `test_app_launch.py` (under Xvfb) answers that, and it self-skips on
+   Windows.
+
+**What you can do at a desk, no hardware** — all verified to run:
+
+```
+.venv\Scripts\python run_tests.py                       # 27/31; the 4 failures are environmental
+.venv\Scripts\python tests\test_sldea_telemetry.py      # or any suite directly
+.venv\Scripts\python sldea_plot.py --selftest OUT.png
+.venv\Scripts\python sldea_diag.py --selftest OUT.png
+.venv\Scripts\python sldea_tuner.py --selftest
+.venv\Scripts\python bench\test_sldea_watchdog_probe.py --selftest
+.venv\Scripts\python sldea_plot.py RUN1 RUN2 --mode area --out <scratch>
+.venv\Scripts\python sldea_diag.py <run folder>
+```
+
+The four selftests synthesise their own data. The real runs live outside
+the repo (paths in the Batch-QA section).
+
+**The 4 failing suites are environmental and expected**: `test_arb_bin`,
+`test_camera_controls`, `test_presets_path`, `test_tk_fontfix`. A FIFTH
+failure is yours.
+
+**What you CANNOT do at a desk, and must not fake.** #189's remaining
+increments need a new SCPI token (MEAN→MAXIMUM/PK2PK), a trigger-state
+query the driver does not have, and a peak-noise floor that has to be
+MEASURED. `CLAUDE.md` forbids shipping bench-unverified instrument I/O.
+`bench/test_sldea_watchdog_probe.py` exists to get those numbers; until
+someone runs it, increment (1) is not designable. Do not start it.
+
+**Useful desk work** is in `RUN_SHEET.md` bucket A, or #215 / #216 /
+#197 / #200 / #223 / #224 / #225 — all real, scoped, hardware-free.
+#219 becomes designable as soon as §N's numbers land.
 
 ## Picking up work
 

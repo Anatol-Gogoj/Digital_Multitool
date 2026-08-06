@@ -1,12 +1,22 @@
 # Project handoff — state as of 2026-08-05
 
-**TL;DR:** Big day 2026-08-05: the cross-run plot tool (#199), the Edge
-Review scale gate, and **all 28 double-confirmed findings of a 67-agent
-correctness audit** merged to main; the bench fleet is deployed at that
-tip (v1.0.0+4f5f213, confirmed on the RHEL bench). Batch-QA sits at 5 of
-13 runs reviewed. **The designated priority is the current-based
-breakdown-detection thread** — live watchdog + fast scope capture
-(#189/#157/#159) — laid out first in the docket below. Durable
+**TL;DR:** Big day 2026-08-05. Merged, in order: the plot tool (#199),
+the scale gate, the 28-finding audit round, the **live telemetry
+sidecar** (#218), its **bench hand-over** (#220), **v1.1.0** as a GitHub
+**pre-release** (#222), the **tuner fixes** (#226) and the **camera
+exposure gate** (#227). Batch-QA sits at 5 of 13 runs reviewed, plus two
+NEW runs from the 08-05 session (a carbon-black device and a P3
+Triazole).
+
+**Everything now blocks on one bench visit, and most of it needs no high
+voltage.** `BENCH_TEST.md` **§M** (telemetry dry-run smoke) and **§N**
+(watchdog probe) are ~25 minutes together, need no HV training, and
+between them unblock: trusting `telemetry.csv`, promoting v1.1.0 out of
+pre-release, and #189 increment (1). The desk cannot advance the
+priority thread any further — see "Picking up work".
+
+The fleet is still on **v1.0.0+4f5f213**, one release behind; pulling
+v1.1.0 onto the bench and analysis PCs is a live action item. Durable
 conventions live in `CLAUDE.md`; this file is the snapshot — update it
 at milestones.
 
@@ -17,9 +27,15 @@ at milestones.
   artifact (`telemetry.csv`), and the Edge Review scale gate, which
   **requires the operator to do a manual per-run calibration that did
   not exist before**. Both manuals regenerated against the live app at
-  this version (39-page PDF, telemetry control documented and callout-
-  annotated). **The fleet re-syncs off this version stamp** — lab PCs
-  pull it via `Tools → Update Software…` / `update_software.sh`.
+  this version (**40**-page PDF; telemetry control and the plot tool both
+  documented and callout-annotated, cover rebranded off the old
+  SCPI_Control name). **Published as a PRE-RELEASE** because the
+  telemetry sidecar is desk-tested only — GitHub still reports v1.0.0 as
+  "Latest", so `releases/latest` still serves the OLD manual PDF.
+  Promote it once §M passes. The updater does a shallow **clone of main
+  HEAD** and never reads tags or the releases API, so pre-release status
+  does not gate deployment; the `+<hash>` stamp is a deploy-complete
+  marker for each launcher's cache.
 - **v1.0.0** tagged 2026-08-03 (GitHub release, manual PDF attached).
   Merged since, in order: **#195** current-based breakdown detection +
   scope-clipping fixes (ground-truth-validated on all 11 real runs; see
@@ -35,8 +51,19 @@ at milestones.
   edge-suite audit round — 28 double-confirmed + 12 review-pass findings
   fixed (67-agent Opus audit, dual-verified; all runtime gates green and
   the real 13-run batch revalidated: breakdown ground truth exact, scale
-  chain self-consistent, 0 sanity violations in 454 rows). Dated entries
-  for all of it in `SLDEA_HANDOFF.md`.
+  chain self-consistent, 0 sanity violations in 454 rows); **#218** the
+  live telemetry sidecar (the watchdog's ~2 Hz samples now land in
+  `telemetry.csv` beside data.csv instead of being discarded —
+  implements #157, #189 increment (2); DESK-TESTED ONLY, §M is its
+  gate); **#220** its bench hand-over (`BENCH_TEST.md` §M/§N/§O +
+  `bench/test_sldea_watchdog_probe.py`); **#226** the tuner fixes
+  (electrode mask default 220→255, and the Tune button's resolver — it
+  used `newest_run`, which only inspects SUB-directories, so pointing
+  the output dir at a run folder reported "no finished runs (data.csv)"
+  about a folder containing exactly that); **#227** the camera gate (a
+  blown-out baseline now stops a run instead of whispering, and the cv2
+  camera path stopped ignoring the tab's exposure/gain fields). Dated
+  entries for all of it in `SLDEA_HANDOFF.md`.
 - **Bench fleet was deployed + confirmed at v1.0.0+4f5f213**
   (2026-08-05): `Tools → Update Software…` / `update_software.sh` ran and
   the RHEL bench footer was verified by Anatol. **It is now one release
@@ -87,6 +114,25 @@ stop hand-rolling matplotlib.
   verify on next bench session): scope V_Out clipping killed `measured_kV`
   from 4.25 kV in the P3_5 / P3_6 / 104531 runs; I_Out offset ≈ −16 µA.
 
+**NEW: `SLDEA_data\Upload 20260805\`** — a second upload folder, not yet
+folded into the campaign runbook:
+
+- `SL Ramp Test Initial CB\SLCBvalidationTest` — the **carbon-black
+  electrode** validation run. 11 frames, 0–5 kV, raw (never reviewed).
+  Its `setup.txt` already carries `electrode_lum: 255`. **Its baseline
+  is saturated — mean 235, MEDIAN 255, 73.7 % of pixels at/above 250**,
+  against 0.12–3.62 % on every other baseline in the corpus. That is
+  what broke detection at the old mask default, and it is an exposure
+  fault, not an electrode one (see the 08-05 entry in
+  `SLDEA_HANDOFF.md`). **Open question for Anatol: is this run worth
+  reviewing at all**, or is it a rig shakedown to repeat once the
+  exposure is fixed? Areas measured against a mostly-white baseline
+  carry an uncertainty nothing in `SLDEA_MEASUREMENT.md` covers.
+- `Single Layer Testing\P3 1.5mL Triazole Bake1\P3 1.5mL Triazole
+  Bake1-1` — an 81-frame P3 run, already reviewed (areas + `edge:
+  resting conf 0.95 (user)` in `data.csv`), healthy baseline. Not in
+  `SCORECARD.md`; folding it in is desk work.
+
 ## Next on the docket (re-designated 2026-08-05: breakdown detection first)
 
 **PRIORITY THREAD — current-based breakdown detection.** The post-hoc
@@ -119,10 +165,20 @@ shipped, live verify pending). Staged per #189's own increment plan:
    no HV), **§O** the live verification (HV, authorized operator only).
    §M and §N can go to a colleague at the bench as-is; neither depends
    on §O.
-2. **(bench, first item of the visit)** fix the rig fault then verify
-   #195 live: recenter the scope's V_Out window and I_Out offset
-   (≈ −16 µA), run one live SLDEA ramp, confirm the pre-run window
-   check + deviation watchdog behave → **close #159**. Same visit,
+2. **(bench, first item of the visit)** verify #195 live → **close
+   #159**. Be clear what this is NOT: **nobody recentres the scope by
+   hand.** `_sldea_check_monitors` reads the vertical setup back before
+   every live run and, when the visible window cannot show the run's
+   range, offers **"Fix it automatically"**, which programs SCALE /
+   POSITION / OFFSET / attenuation / coupling on both monitor channels
+   itself; the ≈ −16 µA I_Out offset is separately cancelled by the
+   watchdog's learned 0 kV baseline. Both shipped in #195. What is
+   actually owed is confirming it live: one ramp, watch the dialog fire,
+   check `measured_kV` tracks `nominal_kV` for the WHOLE ramp with no
+   blank tail. (**#159 was auto-closed by mistake on 2026-08-05** — PR
+   #220's body said "closes #159" while merely describing the §O
+   checklist — and has been reopened. A docs PR describing pending work
+   must not use closing keywords.) Same visit,
    **smoke the telemetry sidecar** — a DRY run with the scope connected
    is enough for most of it (telemetry is armed on dry runs, which now
    take scope readings between snapshots where they took none before):
@@ -181,6 +237,40 @@ were **already gone before the session acted** (both mtimes 2026-08-05
 recycle bin (~30-day retention) is the recovery path. Remaining: the
 open decisions below.
 
+## What to continue with (2026-08-05, after #226/#227 merged)
+
+**In order. The first two are the whole bottleneck.**
+
+1. **§M + §N at the bench — ~25 min, NO high voltage, delegable.** A dry
+   run never commands the SG, so neither needs HV training. Between them
+   they unblock trusting `telemetry.csv`, promoting v1.1.0 out of
+   pre-release, and #189 increment (1). Full steps in `BENCH_TEST.md`;
+   send back `run.log`, `data.csv`, `telemetry.csv`, `setup.txt` and the
+   probe's two files. **The single answer most wanted: does run.log say
+   `SLOW DISK`** — the bench output dir is a network share and that is
+   the one behaviour desk testing cannot reproduce.
+2. **Fix the CB exposure before capturing that device again (#193).**
+   Now concrete rather than theoretical: its baseline is median 255 and
+   73.7 % saturated. Since #227 the app will REFUSE to start such a run
+   without an explicit override, and will log the override — so the next
+   CB attempt should be preceded by lowering exposure on the Webcam tab
+   until the pre-flight goes quiet. If the firmware will not honour the
+   manual controls, that IS #193 and no app change fixes it.
+3. **(desk, Anatol)** the two 07-23 breakdown reviews (152205, 233451),
+   then the control round, P3_2, and the P3_6 holdout frame — unchanged,
+   unblocked, and independent of everything above.
+4. **(desk)** decide whether the CB run is worth reviewing at all (see
+   the campaign section), and fold the new P3 Triazole run into
+   `SCORECARD.md`.
+5. **(desk)** #224's rename word choice, then #225, #223, #216, #215,
+   #197, #200 — all real, scoped and hardware-free. #219 becomes
+   designable the moment §N's numbers land.
+6. **PR #221 is deliberately set aside** — it holds `RUN_SHEET.md` (the
+   tick-off version of this docket, split remote / bench-no-HV /
+   bench-HV) and a cold-start briefing for a new agent. It was mergeable
+   at the time it was parked; it will want main merged into it again
+   before it lands, because this file has moved since.
+
 ## Open decisions (Anatol's calls)
 
 1. **Repo rename: DONE 2026-08-05 — zero stale pointers remain
@@ -236,8 +326,15 @@ shrink the niche) · #199 run-data auto-plot tool (v1 shipped in #211;
 issue stays open as the wishlist tracker) · #200 cross-session
 instrument-connection takeover with warning · #206 deploy-script
 dedup/idempotence · #215 circle-fit calibration ×3 (scale gate v2) ·
-#216 Edge Review UX (primary Detect, tooltips, flow) · #219 live
-watchdog display + where the trip level comes from.
+#216 Edge Review UX (primary Detect, tooltips, flow) · **#219** live
+watchdog display + where the trip level comes from · **#223** give the
+plot tool a GUI instead of eight CLI flags · **#224** telemetry control
+wording (the filler caption is gone; the rename still needs a word
+choice, and the label has THREE copies that must move together — Tk,
+`content.json`, and `annotate.py`'s callout matcher) · **#225** tabs
+have no horizontal scrollbar, wide content is clipped and unreachable
+(`ScrollableTab` pins content width to the canvas, so adding a bar
+alone does nothing; likely the root cause of #27, same family as #26).
 
 ## This machine (Windows lab/analysis PC)
 

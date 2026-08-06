@@ -236,9 +236,13 @@ stop hand-rolling matplotlib.
   the real per-frame numbers live in `frames[].audit`. An earlier version
   of this entry got that backwards and recorded §3b check 2 as
   unevaluated on both runs. Recomputed properly, **both pass**: CB
-  **+0.01 px** median with a p95 of **0.28 px** — the cleanest boundary
-  audit in the corpus, where every other run sits at 1.92–5.90 px — and
-  Triazole **−0.15 px** (p95 2.12). The method reproduces the scorecard's
+  **+0.01 px** median with a p95 of **0.25 px** — the cleanest boundary
+  audit in the corpus, where every other run sits at 1.90–5.60 px — and
+  Triazole **−0.15 px** (p95 2.03). Those p95s are `np.percentile`-linear,
+  matching `sldea_diag.py:730` and every run's `sldea_diag.txt`; an earlier
+  version of this entry quoted nearest-rank figures (0.28 / 2.12), which
+  differ from the machine record on six runs. The method reproduces the
+  scorecard's
   original Pass-0 audit column exactly on all eleven earlier runs.
 - **Triazole's no-step arc was a false alarm too.** The 34.7 % first
   reported was the median over only the 2 frames that tripped the gate. The

@@ -334,9 +334,11 @@ genuinely independent of it.**
    exposed differently from its own ramp frames. Re-shooting it for
    clean provenance is worth doing when convenient, but the areas
    stand.
-5. **(desk)** #224's rename word choice, then #225, #223, #216, #215,
-   #197, #200 — all real, scoped and hardware-free. #219 becomes
-   designable the moment §N's numbers land.
+5. **(Anatol, 30 seconds)** accept or overrule #224's proposed label
+   `📈 Scope kV/µA log (telemetry.csv)` — implemented, all three copies
+   moved, but the word choice is a taste call and nobody but Anatol owns
+   it. Then #225, #223, #216, #215, #197, #200 — all real, scoped and
+   hardware-free. #219 becomes designable the moment §N's numbers land.
 6. **PR #221 is deliberately set aside** — it holds `RUN_SHEET.md` (the
    tick-off version of this docket, split remote / bench-no-HV /
    bench-HV) and a cold-start briefing for a new agent. It was mergeable
@@ -401,9 +403,14 @@ dedup/idempotence · #215 circle-fit calibration ×3 (scale gate v2) ·
 #216 Edge Review UX (primary Detect, tooltips, flow) · **#219** live
 watchdog display + where the trip level comes from · **#223** give the
 plot tool a GUI instead of eight CLI flags · **#224** telemetry control
-wording (the filler caption is gone; the rename still needs a word
-choice, and the label has THREE copies that must move together — Tk,
-`content.json`, and `annotate.py`'s callout matcher) · **#225** tabs
+wording (DONE pending one taste call: the filler caption went on
+2026-08-05, and the label is now `📈 Scope kV/µA log (telemetry.csv)`
+across all four copies — Tk, `content.json`'s control entry, its inert
+callout entry, and `annotate.py`'s callout matcher, which matches the
+literal on-screen string. The FILE stays `telemetry.csv` on purpose.
+Anatol accepts the wording or picks another; the shipped manual
+binaries still show the old label until the next version bump
+regenerates them) · **#225** tabs
 have no horizontal scrollbar, wide content is clipped and unreachable
 (`ScrollableTab` pins content width to the canvas, so adding a bar
 alone does nothing; likely the root cause of #27, same family as #26).

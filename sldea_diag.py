@@ -695,6 +695,66 @@ def verdicts(d):
                         f"cross-check fit {ref['diam_px']:.0f} px "
                         f"({ref.get('mm_per_px', 0):.5f} mm/px) — "
                         f"{mism:.1f}% apart in diameter."))
+            # The ANCHOR GUARD, offline (2026-08-06). The 3% tier above
+            # passed run P3_2_2.5mL_20260728 at 2.28%, and that run's
+            # every absolute mm2 is 4.42% low against the 16 mm mask's
+            # pi*8^2 resting area. Run the same ~1% guard the calibration
+            # dialog now runs, so the 15 pre-#215 two-click anchors get
+            # audited too -- retroactively, with no re-review needed.
+            g = se.anchor_guard(anchor['diam_px'], ref,
+                                (d.get('settings') or {}).get('diam_mm',
+                                                              16.0))
+            if g['warn']:
+                out.append((
+                    'MED', 'Scale anchor is outside the ~1% sanity guard',
+                    f"the recorded anchor implies a resting area of "
+                    f"{g['rest_area_mm2']:.2f} mm2 against the mask "
+                    f"anchor's {g['nominal_mm2']:.2f} mm2 "
+                    f"({g['area_pct']:+.2f}%), and sits "
+                    f"{g['diam_pct']:+.2f}% from the automatic disc fit. "
+                    f"The scale-anchor budget is ~0.4% diameter / ~0.8% "
+                    f"area (SLDEA_MEASUREMENT 2.1), so ABSOLUTE mm2 in "
+                    f"this run are outside it -- quote expansion ratios "
+                    f"A/A0 (the scale cancels exactly) or recalibrate. "
+                    f"Guard note on record: "
+                    f"{anchor.get('guard', '(none -- pre-2026-08-06 anchor)')}"
+                ))
+            # #215: three averaged circle fits carry their own spread --
+            # the run's operator-repeatability number. Absent on every
+            # pre-2026-08-06 anchor, and its absence is reported as
+            # absence, never as agreement.
+            spr = anchor.get('spread_pct')
+            if spr is None:
+                out.append((
+                    'OK', 'Anchor has no repeatability record (two-click '
+                          'era)',
+                    f"this anchor was recorded before the "
+                    f"{se.CAL_ROUNDS}-round fit-a-circle calibration "
+                    f"(2026-08-06), so it carries a single diameter and "
+                    f"no spread. Nothing is wrong with it -- there is "
+                    f"simply no measurement of how repeatable it was. "
+                    f"Recalibrating in Edge Review would produce one."))
+            else:
+                rounds = anchor.get('rounds_px') or []
+                sev2 = 'OK' if spr <= se.CAL_SPREAD_PCT else 'MED'
+                out.append((
+                    sev2, 'Operator repeatability: '
+                          f"{spr:.2f}% spread across "
+                          f"{anchor.get('n_rounds', len(rounds))} fits"
+                          + ('' if spr <= se.CAL_SPREAD_PCT
+                             else f" -- over the "
+                                  f"{se.CAL_SPREAD_PCT:g}% gate"),
+                    f"fitted diameters "
+                    + (', '.join(f"{v:.1f}" for v in rounds) + ' px'
+                       if rounds else '(values not recorded)')
+                    + f"; mean {anchor['diam_px']:.1f} px, spread "
+                      f"{anchor.get('spread_px', 0):.1f} px. This is a "
+                      f"measurement of the OPERATOR, not of the device -- "
+                      f"the one number SLDEA_MEASUREMENT 2.5 asks for and "
+                      f"has never had. A tight spread is precision, not "
+                      f"accuracy: a consistently mis-placed circle scores "
+                      f"well here and is caught by the mask-area guard "
+                      f"instead."))
         elif ref:
             out.append(('OK', 'Automatic cross-check anchor available '
                         '(Edge Review saves use the manual 📏 anchor)',
@@ -921,6 +981,28 @@ def report(d):
         else:
             A("resting disc    : NOT FOUND (baseline_disc refused -- mm "
               "figures fall back to an activated frame)")
+    anchor = d.get('scale_anchor')
+    if anchor:
+        # #215 fields are all optional: a pre-2026-08-06 anchor prints
+        # the same line minus the rounds, and a pre-gate run prints
+        # nothing here at all (anchor is None)
+        rounds = anchor.get('rounds_px') or []
+        A(f"saved anchor    : {anchor['diam_px']:.1f} px = "
+          f"{anchor.get('diam_mm', 0):g} mm  ->  "
+          f"{anchor.get('mm_per_px', 0):.5f} mm/px  "
+          f"[{anchor.get('method', '?')}, saved "
+          f"{anchor.get('saved', '?')}]")
+        if rounds or anchor.get('spread_pct') is not None:
+            A(f"  rounds        : "
+              + (', '.join(f"{v:.1f}" for v in rounds) + ' px  '
+                 if rounds else '')
+              + f"spread {anchor.get('spread_px', 0):.1f} px "
+                f"({anchor.get('spread_pct', 0):.2f}%)"
+              + (f"  guard: {anchor['guard']}" if anchor.get('guard')
+                 else ''))
+        else:
+            A("  rounds        : none recorded (pre-2026-08-06 two-click "
+              "anchor -- no repeatability number)")
     A("")
     A("VERDICTS")
     A("-" * 74)

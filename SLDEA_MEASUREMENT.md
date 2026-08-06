@@ -1,8 +1,9 @@
 # SLDEA active-area measurement — error budget and how the algorithm works
 
-Status: 2026-08-01. Every number in this document is **measured**, not
-estimated — sources are the four calibration rounds (47 operator
-labels across both campaigns), the operator repeatability round, the
+Status: 2026-08-06 (§2.1a; the rest 2026-08-01). Every number in this
+document is **measured**, not estimated — sources are the four
+calibration rounds (47 operator labels across both campaigns), the
+three-round scale calibration, the operator repeatability round, the
 per-frame boundary self-audit, and the baseline-scale overlays. The
 provenance table at the end maps each number to its origin. When
 calibration numbers move (new labels, new campaigns), update this file
@@ -60,13 +61,58 @@ in the same PR.
 | Error term | Type | Measured size | Source |
 |---|---|---|---|
 | Edge definition (visual outer toe vs half-height ink step) | systematic | **+5.2–5.7% area** between conventions; spread across controls only 0.5% | round 4, four audit-clean controls |
-| Scale anchor (baseline disc trace vs by-eye) | systematic, per run | ~0.4% diameter → **~0.8% area**; 0.3% repeat on one device 32 min apart | baseline overlays, both campaigns |
+| Scale anchor (baseline disc trace vs by-eye) | systematic, per run | ~0.4% diameter → **~0.8% area**; 0.3% repeat on one device 32 min apart. From 2026-08-06 **measured per run** — see §2.1a | baseline overlays, both campaigns; per-run spread from the 3-round calibration |
 | Nominal diameter (the value the mm scale hangs on) | systematic | **closed** — anchored by the laser-cut application mask | lab confirmation 2026-08-01 (see §2.4) |
 | `disc-fit` statistical CI (edge-point scatter) | random, per frame | **0.2–0.7%** (85% CI) | fit CI, both campaigns |
 | Operator trace precision (the validation floor) | random | **~1%** area (0.2–2.5%); IoU ceiling 0.973 | repeatability round, 9 repeat pairs |
 | Clean `resting` claims | bounded | ≤ ~2% (the 3 px audit-bias gate; the refit measures anything past it) | audit + resting-refit |
 | Onset frames (audit-capped fits, interpolated arc) | systematic, local | ~1–2% excess understatement after decomposition | round 3, corrected by round 4 |
 | Wrong-feature tracking (halo, smoothing shift) | systematic | bounded **< ~0.3%** area (per-run median audit bias −0.4..+0.4 px) | boundary self-audit, all six runs |
+
+### 2.1a The scale anchor became a per-run measurement (2026-08-06)
+
+Since the fit-a-circle calibration (`#215`), Edge Review takes **three
+independent circle fits** of the resting disc per run — each respawned at
+a randomized position and size — and anchors on their **mean**. The
+**range** of the three is recorded in `setup.txt`
+(`rounds_px` / `spread_px` / `spread_pct`) and reported by `sldea_diag`.
+
+What changes is the term's **character, not its size**. Before, ~0.4%
+diameter was an estimate borrowed from baseline overlays across
+campaigns; now every run carries its own number. The conversion, for a
+recorded range *R* on *n* = 3 fits:
+
+- the expected range of 3 normal samples is **1.693 σ**, so
+  **σ ≈ R / 1.693** per fit;
+- the mean of 3 has standard error **σ/√3 = R / 2.93**;
+- diameter → area doubles it: **area SE ≈ 2 · R / 2.93 = R / 1.47**.
+
+Worked at the acceptance gate: a run accepted right at the 1% spread gate
+carries **σ ≈ 0.59%** per fit, **0.34% on the mean diameter** and
+**≈0.68% in area** — i.e. the gate *caps* the random part of this term at
+just under the ~0.4% / ~0.8% previously assumed. A typical 0.3% recorded
+spread gives 0.10% diameter / 0.20% area, about four times better than
+the old estimate. The old numbers are therefore kept in §2.1 as the
+conservative ceiling, and a specific run may quote its own spread instead
+— divided by 2.93 for diameter, 1.47 for area.
+
+Three caveats, all load-bearing:
+
+- **This measures precision, not accuracy.** A consistently mis-placed
+  circle (the outer toe instead of the half-height, say) produces a tight
+  spread and a wrong mean. The **anchor guard** covers that axis by
+  cross-checking the mean against the automatic disc fit and against the
+  16 mm mask's π·8² resting area at ~1% (see §2.4 and the 2026-08-06
+  `SLDEA_HANDOFF.md` entry). Run `P3_2_2.5mL_20260728` is the standing
+  example: +2.28% diameter, −4.42% area, a *systematic* miss that no
+  spread would have caught.
+- **The remaining systematic part does not shrink with n.** Averaging
+  divides the random scatter, not the edge-convention offset of §2.3.
+- **No run has a measured spread yet.** The mechanism ships 2026-08-06;
+  the 1% gate is chosen, not validated. Update this section with the real
+  distribution once ~5 runs have been calibrated — and if the gate turns
+  out to trip routinely, the honest fix is to raise `CAL_SPREAD_PCT` and
+  record the measured spread, not to tighten the operator.
 
 ### 2.2 Why ratios are tight: the annulus cancellation
 
@@ -101,7 +147,12 @@ The px→mm scale anchors to the device's nominal resting diameter of
 **closed by fabrication**: the CNT electrodes are applied through a
 laser-cut mask, so the discs sit at 16 mm by manufacture for this
 entire series (lab confirmation, Anatol, 2026-08-01) — the anchor is
-a machined constraint, not an assumption. Two consequences worth
+a machined constraint, not an assumption. Since 2026-08-06 the mask
+anchor is also an **active check on the operator**: Edge Review's
+calibration compares the accepted scale against π·(diam_mm/2)² —
+201.06 mm² at 16 mm — via the automatic disc fit, and demands an explicit
+override past ~1%. Run `P3_2_2.5mL_20260728` is why (see §2.1a).
+Two consequences worth
 stating in a methods section: (a) because every device in the series
 is cut by the same mask, any residual mask-aperture tolerance is
 common-mode — it cancels in cross-device comparisons as well as in
@@ -249,6 +300,7 @@ architecture**, held together by three invariants:
 | Operator precision ~1% area, IoU ceiling 0.973 | Repeatability round (9 repeat pairs, 2026-07-29) |
 | Fit CI 0.2–0.7% | disc-fit 85% CI, P3 (0.2–0.5%) and 07-23 (0.5–0.7%) runs |
 | Scale 0.4% / repeat 0.3% | Baseline-disc overlays vs by-eye, both campaigns |
+| Scale anchor per run (§2.1a): σ ≈ R/1.693, mean SE R/2.93, area R/1.47 | Range of the 3 circle fits recorded in each run's `setup.txt` (Edge Review, 2026-08-06 onward). **No run measured yet** |
 | Audit bias bound ±0.4 px per run | Boundary self-audit medians, all six runs |
 | Refit accuracy (+4.1/+4.6% vs predicted +3.8/+4.2%) | Resting-refit validation vs stored labels (2026-07-30) |
 | Onset excess ~1–2% | Round 3 (−6.9%) decomposed by round 4's controls |

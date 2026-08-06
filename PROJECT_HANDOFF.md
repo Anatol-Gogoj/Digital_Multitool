@@ -26,6 +26,17 @@ between them unblock: trusting `telemetry.csv`, promoting v1.1.0 out of
 pre-release, and #189 increment (1). The desk cannot advance the
 priority thread any further — see "Picking up work".
 
+**2026-08-06 (desk, remote session — no bench access).** Both 07-23
+breakdown reviews landed by hand, and the whole 07-23 family was then
+**retired from the measurement campaign** — files kept, with 152205 and
+233451 retained as the breakdown ground-truth fixture. Numbers and
+rationale in the Batch-QA section and `SCORECARD.md`. Two defects found and
+fixed/recorded on the way: `compare_errorbars.py` had been skipping its
+pair-CV check on `pre`/`post`-tagged runs with nothing in the report to say
+so, and **#159 + #193 were both auto-closed by keyword parsing and have
+been reopened** (roster has the mechanism). Bench debt is unchanged — §M,
+§N and §O are all still owed.
+
 The fleet is still on **v1.0.0+4f5f213**, one release behind; pulling
 v1.1.0 onto the bench and analysis PCs is a live action item. Durable
 conventions live in `CLAUDE.md`; this file is the snapshot — update it
@@ -125,11 +136,29 @@ stop hand-rolling matplotlib.
   P3_6 are **conditional passes** (audit bias slightly out of gate —
   details in `SCORECARD.md`). Error bars carry over: ci85 medians
   0.22–0.35 %.
+- **⚠ The five 07-23 runs are RETIRED from the measurement campaign
+  (2026-08-06, Anatol's call).** Earliest testing, from a session whose
+  inconsistencies were ironed out later — and the numbers agree: all three
+  processed ones break the ci85 ceiling (0.90 / 1.16 / 0.97 % against a
+  0.2–0.7 % budget) and two miss the 16 mm mask anchor in opposite
+  directions (−3.4 %, +2.4 %) where every P3-family run hits π·8² exactly.
+  **Nothing was deleted, and 152205 + 233451 are retained as the breakdown
+  ground-truth fixture** — they are the corpus's only two designated
+  breakdown runs and the evidence behind #219's sub-100 µA argument. Do not
+  quote them for area or absolute mm²; do keep using them for breakdown and
+  trip-level work. Rationale, numbers and carve-out in `SCORECARD.md`
+  §"07-23 family retired from the measurement campaign".
 - **Remaining:** the batch-level **control round** (~15 min of traces —
-  required because optics moved between sessions); P3_2 review; the two
-  07-23 breakdown-run reviews (152205, 233451); P3_7 (blocked on contrast
+  still required, because the optics moved across the *remaining* sessions
+  too); P3_2 review; the P3_6 holdout frame; P3_7 (blocked on contrast
   — see issues #193/#194); 104531 (bench decision: device barely actuated,
-  suspect dead device / HV not reaching sample).
+  suspect dead device / HV not reaching sample); folding the two 08-05 runs
+  (CB, Triazole) into `SCORECARD.md`.
+- The control round's **operator-repeat leg has nothing to compute from
+  yet**: `sldea_trace.py` finds 140 labels across 8 runs and **0 repeat
+  pairs anywhere**. The 2 repeat pairs still need tracing. Of those 140,
+  60 sit in the retired 07-23 runs and 80 in the retained measurement set
+  — #198 should say which number it means.
 - **P3_6's raw capture exists nowhere** (review overwrote in place) — its
   processed CSV is the only record.
 - Known systemic rig fault (fixed in code by #195's pre-run check, but
@@ -261,10 +290,15 @@ shipped, live verify pending). Staged per #189's own increment plan:
    guessed at a desk), the real cost of the MEASUREMENT:IMMED triple
    (whether #157's 2 Hz cap has headroom), and whether `TRIGGER:STATE?`
    / `ACQUIRE:STATE?` answer at all. No HV needed for the probe.
-4. **(Anatol, desk)** the two 07-23 **breakdown-run reviews** (152205,
-   233451) — first real exercise of the confirmed-breakdown review path
-   on the audit-fixed save chain; `sldea_plot --mode current` previews
-   both events. Agent runs `compare_errorbars.py` after each save.
+4. **(Anatol, desk) DONE 2026-08-06 — and those runs are now retired.**
+   Both 07-23 breakdown reviews (152205, 233451) were completed by hand
+   and saved. The confirmed-breakdown review path worked on the
+   audit-fixed save chain: 4 and 21 frames renamed on current-confirmed
+   events (26/79 µA deviations against a 0.9 µA baseline; the −207 µA
+   staircase). `compare_errorbars.py` ran on both, and what it showed is
+   what retired the 07-23 family from measurement — see the Batch-QA
+   section above. **The breakdown ground truth is retained, so #189 and
+   #219 lose nothing.**
 
 **Campaign items (unchanged gates):**
 
@@ -324,9 +358,11 @@ genuinely independent of it.**
    CB attempt should be preceded by lowering exposure on the Webcam tab
    until the pre-flight goes quiet. If the firmware will not honour the
    manual controls, that IS #193 and no app change fixes it.
-3. **(desk, Anatol)** the two 07-23 breakdown reviews (152205, 233451),
-   then the control round, P3_2, and the P3_6 holdout frame — unchanged,
-   unblocked, and independent of everything above.
+3. **(desk, Anatol)** the two 07-23 breakdown reviews are **done
+   (2026-08-06)** and that family is retired from measurement. What is
+   left on this line is the **control round** (including the 2 repeat
+   pairs, which do not exist yet), **P3_2**, and the **P3_6 holdout
+   frame** — unchanged, unblocked, and independent of everything above.
 4. **(desk)** fold BOTH new runs into `SCORECARD.md` — the CB run
    (reviewed 2026-08-05, conf 0.95–0.99, A/A₀ 1.156 at 5 kV, resting
    16.059 mm) and the CNT Triazole run. The CB run is the campaign's
@@ -378,7 +414,27 @@ forensics still open and bench-first · #157 ≥1 Hz kV/µA logging —
 **implemented by that increment; closeable once the bench smoke passes**
 · #159 measured_kV dropout (pre-run check shipped in #195; live verify
 pending). **#158 is CLOSED** (post-hoc step-change detection shipped +
-ground-truthed). New follow-up worth filing: a scope left in STOP freezes
+ground-truthed).
+
+**⚠ #159 and #193 were BOTH auto-closed again and have been reopened
+(2026-08-06).** Neither closure was anyone's decision, and cold-start trap
+4 has now fired three times in two days — including inside the PR that
+documented it:
+
+- **#159** was closed by PR #228's body, which quoted the phrase
+  `closes #159` while explaining that #220 had wrongly closed it that way.
+  Quotation marks and surrounding context mean nothing to the keyword
+  parser. Its history now reads closed → reopened → closed → reopened, and
+  §O has still never run.
+- **#193** was closed by commit `5902104` (merged as #227), whose message
+  says *"Does NOT fix #193…"*. The negation is invisible to the parser.
+  #227's own body is explicit: "Neither of these is #193; they stop the app
+  *hiding* #193." The hardware question — whether the firmware honours
+  manual UVC controls at all — is untouched.
+
+The rule that actually works: **in a PR body or commit message that only
+describes pending work, put the reference in backticks** — `#159` — and
+never write a closing keyword next to an issue number, even negated. New follow-up worth filing: a scope left in STOP freezes
 MEAN and telemetry would record a plausible flat trace — detecting it
 needs an `ACQUIRE:STATE?` query, so bench-first (the §N probe reports
 whether that query answers). · **#219 (new 2026-08-05)** the watchdog's

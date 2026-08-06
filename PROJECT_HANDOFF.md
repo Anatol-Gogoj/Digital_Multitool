@@ -335,9 +335,12 @@ genuinely independent of it.**
    clean provenance is worth doing when convenient, but the areas
    stand.
 5. **(Anatol, 30 seconds)** accept or overrule #224's proposed label
-   `📈 Scope kV/µA log (telemetry.csv)` — implemented, all four copies
-   moved, but the word choice is a taste call and nobody but Anatol owns
-   it. Then #225, #223, #216, #215, #197, #200 — all real, scoped and
+   `📈 Scope kV/µA log (telemetry.csv)` — implemented, every hand-kept
+   copy moved (Tk, `content.json` ×2, `annotate.py`, `BENCH_TEST.md`),
+   but the word choice is a taste call and nobody but Anatol owns it.
+   If you overrule it, the comment above the string in `gui.py` lists
+   the copies and the `git grep` that finds them — use the grep, not the
+   list. Then #225, #223, #216, #215, #197, #200 — all real, scoped and
    hardware-free. #219 becomes designable the moment §N's numbers land.
 6. **PR #221 is deliberately set aside** — it holds `RUN_SHEET.md` (the
    tick-off version of this docket, split remote / bench-no-HV /
@@ -405,9 +408,16 @@ watchdog display + where the trip level comes from · **#223** give the
 plot tool a GUI instead of eight CLI flags · **#224** telemetry control
 wording (DONE pending one taste call: the filler caption went on
 2026-08-05, and the label is now `📈 Scope kV/µA log (telemetry.csv)`
-across all four copies — Tk, `content.json`'s control entry, its inert
-callout entry, and `annotate.py`'s callout matcher, which matches the
-literal on-screen string. The FILE stays `telemetry.csv` on purpose.
+in all FIVE hand-kept places — Tk, `content.json`'s control entry, its
+inert callout entry, `annotate.py`'s callout matcher (which matches the
+literal on-screen string), and `BENCH_TEST.md` §M step 2, which sends a
+bench operator looking for the box by name. The issue text itself says
+three copies and the first fix said four; both undercounted, so re-derive
+the
+set with `git grep -n "Scope kV"` rather than trusting any list in
+prose — ASCII-only, because `git grep` matches bytes and a pattern
+containing `µ` or `.` in its place silently matches nothing. The FILE
+stays `telemetry.csv` on purpose.
 Anatol accepts the wording or picks another; the shipped manual
 binaries still show the old label until the next version bump
 regenerates them) · **#225** tabs

@@ -131,8 +131,11 @@ the electrode is the disc, and on both CNT and CB it reads DARKER than
 the membrane, which is exactly what `baseline_disc` seeds on
 (`dark = sm < paper - 5`). **Liquid metal breaks that assumption**: a
 specular, mirror-bright electrode would be brighter than the membrane
-and would be masked by its own brightness cut. Worth designing for
-before the first EGaIn run rather than after — filed as an issue.
+and would be masked by its own brightness cut. Worth designing for before
+the first EGaIn run rather than after — **#229**. That issue also notes
+that nothing in `data.csv` or `setup.txt` currently records which
+electrode material a run used, which is awkward for a campaign whose
+whole point is comparing materials.
 
 **NEW: `SLDEA_data\Upload 20260805\`** — a second upload folder, not yet
 folded into the campaign runbook:

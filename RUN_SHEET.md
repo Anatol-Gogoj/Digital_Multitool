@@ -132,8 +132,8 @@ The study compares **compliant electrode materials**. Everything measured
 so far is **CNT** (`P3 *-mL`). **Carbon black** is now in. **Liquid
 metal** is expected later and will be the hard one: `baseline_disc` seeds
 on a region DARKER than the membrane, and the `electrode_lum` mask keys
-on brightness — a mirror-bright electrode inverts both assumptions. Filed
-so it is designed for before the first run, not after.
+on brightness — a mirror-bright electrode inverts both assumptions.
+**#229**, filed so it is designed for before the first run, not after.
 
 ## What just landed (2026-08-05)
 

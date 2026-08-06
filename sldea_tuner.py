@@ -50,7 +50,11 @@ SLIDER_HINTS = {
     'min_diff': 'below this the frame counts as unchanged vs baseline',
     'min_solidity': 'outlines emptier than this go to review, never auto',
     'roi_frac': 'central search window (electrode glare lives at edges)',
-    'electrode_lum': 'baseline pixels this bright are masked (copper)',
+    'electrode_lum': 'baseline pixels this BRIGHT are masked; default 255 '
+                     '= off (a carbon-black electrode is dark, so masking '
+                     'by brightness catches paper instead and breaks '
+                     'detection). Lower it only for a bright/copper '
+                     'electrode.',
     'wrinkle_ratio': 'texture-vs-baseline index that counts as wrinkled',
 }
 PANEL_COLORS = ['#00e676', '#40c4ff', '#ff9100']   # best, 2nd, 3rd

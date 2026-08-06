@@ -228,12 +228,16 @@ def test_legacy_scalar_norm_is_still_reachable():
 def test_baseline_disc_traces_resting_dea():
     # Non-diff detector for the px->mm scale (audit 2026-07-25): the
     # resting disc is DARKER than the membrane; electrode strips cross it.
+    # This frame is the BRIGHT-electrode case (strip at 250), so it must
+    # be given the bright-electrode setting -- since 2026-08-05 the
+    # DEFAULT is 255 (mask off) for dark carbon-black electrodes.
     img = np.full((480, 640), 200.0, np.float32)          # membrane
     yy, xx = np.mgrid[0:480, 0:640]
     disc = (xx - 320) ** 2 + (yy - 240) ** 2 <= 100 * 100
     img[disc] = 165.0                                     # resting disc
     img[:, 312:326] = 250.0                               # electrode strip
-    ref = se.baseline_disc(img, dict(se.DEFAULT_SETTINGS))
+    bright = dict(se.DEFAULT_SETTINGS, electrode_lum=220.0)
+    ref = se.baseline_disc(img, bright)
     assert ref is not None, "disc not found on baseline"
     assert ref['method'] == 'baseline-disc'
     # the strip splits the dark disc; merged contour must still recover a
@@ -241,7 +245,42 @@ def test_baseline_disc_traces_resting_dea():
     assert abs(ref['diam_px'] - 200) / 200 < 0.20, ref['diam_px']
     # flat frame (no disc) must yield None, never a fabrication
     flat = np.full((480, 640), 200.0, np.float32)
-    assert se.baseline_disc(flat, dict(se.DEFAULT_SETTINGS)) is None
+    assert se.baseline_disc(flat, bright) is None
+
+
+def test_electrode_mask_255_only_costs_a_flat_synthetic_strip():
+    """What the 220 -> 255 default change does and does NOT cost.
+
+    A flat synthetic bright rectangle is the worst case, and the ONLY
+    case where the change bites: `foil_mask` is texture-derived, so it
+    does not recognise a painted rectangle as foil, leaving the
+    brightness cut as the only thing rejecting it. Remove that and the
+    strip's own edge becomes a strong dark->light step, so the fit
+    refuses rather than returning a wrong diameter.
+
+    On REAL data it costs nothing, which is the point of this test's
+    name. Measured across all 12 readable runs of the 2026-08-05 batch
+    (P3_1/2/3/5/6/7, DOT_P3_1, the four 07-23 runs, 104531): the
+    brightness cut at 220 is a SUBSET of the texture footprint on every
+    P3 run (0.00-0.09% of frame lost by the change), and the
+    resting-disc cross-check moves by at most ONE pixel anywhere in the
+    batch (578->578, 577->577, 584->584, 606->606, 543->543, 527->527,
+    and 370->371 / 361->362 on the 07-23 optics). The texture footprint
+    is what actually covers the strips -- the brightness cut only ever
+    caught the specular streaks inside them."""
+    img = np.full((480, 640), 200.0, np.float32)
+    yy, xx = np.mgrid[0:480, 0:640]
+    img[(xx - 320) ** 2 + (yy - 240) ** 2 <= 100 * 100] = 165.0
+    img[:, 312:326] = 250.0                               # BRIGHT strip
+    assert se.baseline_disc(img, dict(se.DEFAULT_SETTINGS)) is None
+    assert se.baseline_disc(
+        img, dict(se.DEFAULT_SETTINGS, electrode_lum=220.0)) is not None
+    # The gain side — that 255 lets edge detection work on a dark
+    # carbon-black electrode — is a BENCH observation (2026-08-05) and is
+    # deliberately NOT asserted here: it has not been reproduced on
+    # synthetic frames, and a test that pretended otherwise would be the
+    # kind of measurement that lies. See SLDEA_HANDOFF.
+    assert se.DEFAULT_SETTINGS['electrode_lum'] == 255.0
 
 
 def test_mm_per_px_prefers_baseline_ref_over_first_accept():
@@ -607,6 +646,42 @@ def test_run_csv_accepts_a_renamed_data_csv():
     # an exact data.csv always wins over a numbered copy
     _fake_run(d, [{'step': 0, 'tag': 'baseline', 'nominal_kV': '0'}])
     assert os.path.basename(se.run_csv(d)) == 'data.csv'
+
+
+def test_resolve_run_accepts_the_run_folder_itself():
+    """`newest_run` only looks at SUB-directories, so handed a run folder
+    it returns None even though data.csv is right there. The SLDEA tab's
+    Tune button used it and told the operator "no finished runs
+    (data.csv)" about a directory containing data.csv (bench 2026-08-05).
+    `resolve_run` is the shared resolver and takes either shape."""
+    parent = tempfile.mkdtemp(prefix='resolve_')
+    d = os.path.join(parent, 'SLDEA_20260805_101500')
+    os.makedirs(d)
+    _fake_run(d, [{'step': 0, 'tag': 'baseline', 'nominal_kV': '0'}])
+    # the run folder itself: newest_run cannot see it, resolve_run can
+    assert se.newest_run(d) is None
+    assert se.resolve_run(d) == d
+    # a parent full of runs: both work, and agree
+    assert se.newest_run(parent) == d
+    assert se.resolve_run(parent) == d
+    # and a folder that is neither still resolves to nothing
+    empty = tempfile.mkdtemp(prefix='resolve_empty_')
+    assert se.resolve_run(empty) is None
+
+
+def test_electrode_mask_defaults_to_off_for_dark_electrodes():
+    """255 = effectively off. The mask keys on BRIGHTNESS (copper/foil),
+    but a carbon-black electrode is the darkest thing in frame, so the
+    old 220 default masked paper and glint instead and broke detection
+    outright (bench 2026-08-05). Conservative is the safe default; lower
+    it per-run in the tuner for a bright electrode."""
+    assert se.DEFAULT_SETTINGS['electrode_lum'] == 255.0
+    # the two baseline-disc fallbacks must not re-introduce the old
+    # default for a caller that omits the key
+    import inspect
+    src = inspect.getsource(se)
+    assert "'electrode_lum', 220" not in src, \
+        "a hardcoded 220 fallback is back — keep one source of truth"
 
 
 def test_telemetry_sidecar_is_never_mistaken_for_the_run_csv():

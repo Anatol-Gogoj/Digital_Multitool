@@ -60,7 +60,23 @@ DEFAULT_SETTINGS = {
     'min_diff': 6.0,        # diff p99 below this = "no change vs baseline"
     'min_solidity': 0.35,   # min FILL of the traced outline (changed/region)
     'roi_frac': 0.85,       # central search window (frame fraction)
-    'electrode_lum': 220.0,  # mask px this bright in the BASELINE; 0=off
+    # Mask baseline px at/above this luminance; 0 = off (which also turns
+    # off the texture footprint below -- one knob, both halves).
+    #
+    # Default RAISED 220 -> 255 (2026-08-05). The carbon-black run's
+    # baseline is SATURATED (median 255), so a 220 cut masked 88% of the
+    # frame including the context around the device, and detection
+    # collapsed to a 1930 px sliver against a true ~134500 px. At 255 the
+    # same frame traces at conf 0.99. On foil devices the change is a
+    # measured no-op -- the texture footprint already covers the strips
+    # and the brightness cut only ever caught the specular streaks inside
+    # them (P3 areas identical to the pixel at both settings).
+    #
+    # Lower it per-run in the tuner if a device ever needs it; per-run
+    # values live in that run's setup.txt and win over this. Note the CB
+    # case is really an exposure problem (#193) that 255 works around --
+    # see SLDEA_HANDOFF 2026-08-05.
+    'electrode_lum': 255.0,
     'accept_conf': 0.75,    # auto-accept at/above this confidence
     'spread_pct': 12.0,     # candidate area disagreement that forces review
     # self-audit gates on acceptance: a winning boundary whose fitted arc
@@ -1892,7 +1908,9 @@ def baseline_disc(base_gray, settings):
     Returns a candidate-like dict (method 'baseline-disc') or None."""
     key = (_fingerprint(base_gray) if base_gray is not None else None,
            float(settings.get('roi_frac', 0.85)),
-           float(settings.get('electrode_lum', 220) or 220))
+           float(settings.get('electrode_lum',
+                          DEFAULT_SETTINGS['electrode_lum'])
+                 or DEFAULT_SETTINGS['electrode_lum']))
     if key in _DISC_CACHE:
         hit = _DISC_CACHE[key]
         return dict(hit) if hit is not None else None
@@ -1926,7 +1944,9 @@ def _baseline_disc_uncached(base_gray, settings):
     # sigma 6 at full resolution; a third of that at a third the size)
     sm = cv2.GaussianBlur(cv2.medianBlur(sub.astype(np.uint8), 3),
                           (0, 0), 2.0).astype(np.float32)
-    lum = float(settings.get('electrode_lum', 220) or 220)
+    lum = float(settings.get('electrode_lum',
+                             DEFAULT_SETTINGS['electrode_lum'])
+                or DEFAULT_SETTINGS['electrode_lum'])
     reject = _foil_small(base_gray, (w, h))[y0:h - y0 or None,
                                             x0:w - x0 or None].copy()
     reject |= sm >= lum

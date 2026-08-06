@@ -2551,9 +2551,6 @@ LOGGING:
                     f"locked round-trip); nominal_kV is on every row. The "
                     f"rate ACHIEVED is reported in the run log at the end.")
         self.sldea_vars['tel_hz'] = tel_hz
-        tk.Label(telf, fg='#555',
-                 text="every sample the watchdog already takes — kept, "
-                      "not discarded").pack(side=tk.LEFT, padx=12)
 
         runf = ttk.Frame(f)
         runf.pack(fill='x', padx=10, pady=8)

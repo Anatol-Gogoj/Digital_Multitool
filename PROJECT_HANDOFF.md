@@ -185,8 +185,29 @@ stop hand-rolling matplotlib.
   is elevated for a documented mechanical reason: below onset the boundary
   washes out and the ellipse interpolates those sectors
   (`sldea_edge.py:1467`), which is the same sub-onset stretch that produces
-  the stated resting areas. The run's one real open question is the
-  **5.6–7.4 kV plateau**, which is about the device, not the measurement.
+  the stated resting areas. By band: sub-onset 12.2 %, **mid-ramp 5.1 %**,
+  top 13.6 % — the measurement band is clean, and the only 2 frames over
+  the gate are both at 8.0 kV.
+- **The 5.6–7.4 kV plateau is RESOLVED (2026-08-06): device dynamics, not
+  detector wander.** Overlays for the band are archived at
+  `_analysis\triazole_plateau_5.6-8.0kV_overlays_20260806.png`. Three lines
+  agree: the band's boundaries are well supported (no-step 2.0–5.4 %,
+  |bias| ≤ 0.65 px, ci85 0.22–0.31 %); precision is ~0.25 % while
+  level-to-level variation is ~5 %, twenty times larger; and the dips are
+  pre-ramp frames whose post partners are high (6.2 pre 1.221 vs post
+  1.333; 7.0 pre 1.190 vs post 1.346), both capped at conf exactly 0.74 —
+  `accept_conf` minus 0.01 — i.e. capped on **pair mismatch**, not by the
+  audit. Same pattern already attributed to hold-time device motion on
+  P3_3 and DOT_P3_1.
+- **Peak caveat (Anatol's call 2026-08-06: keep 1.523, footnote it).** The
+  investigation relocated the concern from the plateau to the top of the
+  ramp. The 8.0 kV **pre-ramp** frame carries the worst confidence (0.59),
+  worst bias (+2.34 px), worst no-step (51.7 %) and worst ci85 (0.67 %) of
+  all 48 audited boundaries, and the level-averaged headline is half-made
+  of it. **7.8 kV is the last fully-supported level (A/A₀ 1.401–1.411)** —
+  prefer 1.41 wherever a defensible fully-audited figure is needed, e.g.
+  comparing against the CB curve. Hand-tracing that single frame would
+  promote 1.523 to fully-supported; not owed, just available.
 - The control round's **operator-repeat leg has nothing to compute from
   yet**: `sldea_trace.py` finds 140 labels across 8 runs and **0 repeat
   pairs anywhere**. The 2 repeat pairs still need tracing. Of those 140,

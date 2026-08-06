@@ -2541,7 +2541,15 @@ LOGGING:
         # current at 2 Hz on every run and used to discard every sample,
         # so nothing electrical was recorded between snapshots and a
         # breakdown could not even be dated afterwards.
-        telf = ttk.LabelFrame(f, text="📈 Telemetry log (telemetry.csv)",
+        # The label names the instrument and the quantities on purpose:
+        # "telemetry" alone could mean run progress or link health. The
+        # FILE keeps its name (#224) -- telemetry.csv is already written by
+        # shipped code and referenced in README/BENCH_TEST/the manual, and
+        # renaming it would strand every run captured with v1.1.0. If this
+        # text changes, three other copies move with it: content.json's
+        # control entry, its callout entry, and annotate.py's callout
+        # matcher, which matches this literal on-screen string.
+        telf = ttk.LabelFrame(f, text="📈 Scope kV/µA log (telemetry.csv)",
                               padding=8)
         telf.pack(fill='x', padx=10, pady=(0, 8))
         self.sldea_tel_on = tk.BooleanVar(value=True)

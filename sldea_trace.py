@@ -13,6 +13,20 @@ Two jobs in one feature (issue #162, Anatol 2026-07-29):
    re-detection. That curve is what can turn conf from a review-ordering
    score into a bar that MEANS something (SLDEA_HANDOFF.md, Open #1).
 
+Job 2 is not optional and not silent (2026-08-06): label_record REFUSES
+to build a label whose machine pairing is missing unless the caller
+names the reason (`unpaired=`, one of UNPAIRED_REASONS). A label with
+machine:null yields None from label_iou forever -- it is invisible to
+the calibration pass and worthless as ground truth, and four of them
+were written unnoticed during the 2026-07/08 batch control round because
+the runs were opened without --auto and no detection had ever run. The
+GUI now detects the ONE frame on demand before the tracer opens, so the
+pairing is created rather than reported; when the detector honestly has
+nothing to offer (unreadable baseline, no-change frame) the operator is
+told before tracing that the trace will be recovery-only. An on-demand
+pairing follows a narrower conf convention than a run pass (see SCOPE_*),
+so the CLI marks those points instead of pooling them silently.
+
 No Tk in here: geometry, the undo/redo op stack, view<->image coordinate
 mapping, the edge-snap magnet and the label sidecar are all headless and
 unit-tested (tests/test_sldea_trace.py). sldea_edge_gui.TraceWindow is a
@@ -34,7 +48,66 @@ import time
 import numpy as np
 
 LABELS_NAME = 'edge_labels.json'
+# Still 1 after the 2026-08-06 pairing gate: 'unpaired' and
+# machine.detect_scope are ADDITIVE (every reader reaches them through
+# .get), no file was migrated, and a sidecar written today legitimately
+# holds records from before the gate -- unpaired_labels() reports those
+# as 'unrecorded'. Bumping it would claim a migration that did not happen.
 LABELS_VERSION = 1
+
+# Which detection pass the stored machine candidate came from. A single
+# frame detected on demand cannot carry the ramp-order hysteresis bonus
+# or the same-kV pair reconciliation (both move conf by up to 0.05), so
+# the label says which convention its conf follows instead of letting the
+# calibration curve mix two of them silently. And because the hysteresis
+# bonus is applied BEFORE candidates() sorts, its absence can also change
+# WHICH candidate wins: measured 3-9% best-area difference on synthetic
+# diff-tier scenes where the disc fit refuses (2026-08-06). So an
+# on-demand point is self-consistent (its conf and its contour are the
+# same candidate's) but is NOT the point a full pass would have made --
+# calibration_summary marks it, label_scope reads it.
+SCOPE_RUN = 'run-pass'
+SCOPE_FRAME = 'frame-on-demand'
+
+# Why a label has no machine candidate to compare against. Each of these
+# is a case the GUI must state to the operator BEFORE the trace is made:
+# the trace still recovers the measurement, but it can never serve as
+# ground truth. The sentences are printed by the CLI as well as shown in
+# Tk, so they are ASCII-only -- the bench PC's console is cp1252 and a
+# '...' or a warning glyph in here aborts the whole calibration report
+# with a UnicodeEncodeError (measured 2026-08-06).
+UNPAIRED_NO_BASELINE = 'no-baseline'
+UNPAIRED_FRAME_UNREADABLE = 'frame-unreadable'
+UNPAIRED_DETECT_FAILED = 'detect-failed'
+UNPAIRED_NOT_DETECTED = 'not-detected'
+UNPAIRED_NO_CANDIDATE = 'no-candidate'
+UNPAIRED_NO_CONTOUR = 'no-contour'
+
+UNPAIRED_REASONS = {
+    UNPAIRED_NO_BASELINE:
+        "The run's BASELINE frame is unreadable, so difference imaging "
+        "is impossible and the detector cannot produce a candidate for "
+        "any frame. Restore the baseline frame and re-run Detect if this "
+        "frame is needed as ground truth.",
+    UNPAIRED_FRAME_UNREADABLE:
+        "This frame did not decode for detection (missing, 0-byte or "
+        "truncated), so there is nothing for the detector to measure.",
+    UNPAIRED_DETECT_FAILED:
+        "Detection for this frame raised an error (see the console). The "
+        "trace is still valid as a measurement; the pairing is not.",
+    UNPAIRED_NOT_DETECTED:
+        "Detection has never run for this frame, so there is no machine "
+        "candidate in memory. Run Detect (or reopen the run with --auto) "
+        "before tracing if this frame is needed as ground truth.",
+    UNPAIRED_NO_CANDIDATE:
+        "Detection ran and honestly found nothing on this frame (no "
+        "change against the baseline above the gate). There is no "
+        "machine outline to compare a trace against; lower min_diff in "
+        "Advanced and re-detect if you disagree.",
+    UNPAIRED_NO_CONTOUR:
+        "The machine's best candidate for this frame carries no outline, "
+        "only an area, so no IoU can be computed from it.",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +382,10 @@ def machine_summary(cand):
         return None
     out = {'method': cand.get('method'),
            'conf': float(cand.get('conf', 0.0)),
-           'area_px': float(cand.get('area_px', 0.0))}
+           'area_px': float(cand.get('area_px', 0.0)),
+           # which pass produced this conf (see SCOPE_*): written
+           # explicitly, never inferred from a missing key
+           'detect_scope': str(cand.get('detect_scope') or SCOPE_RUN)}
     for k in ('audit_nostep', 'audit_bias'):
         if cand.get(k) is not None:
             out[k] = float(cand[k])
@@ -319,14 +395,117 @@ def machine_summary(cand):
     return out
 
 
+def machine_pairing(cands, *, detected=True, baseline_ok=True):
+    """Which candidate a trace of this frame pairs with, and why none
+    does when none does (#162, 2026-08-06).
+
+    `cands` is the frame's candidate list (best first, as
+    sldea_edge.candidates returns it); `detected` says whether detection
+    has actually run for this frame; `baseline_ok` whether the run's
+    baseline frame reads at all. -> (candidate | None, reason | None),
+    the reason a key of UNPAIRED_REASONS.
+
+    A REJECTED candidate still pairs. #162's first job is recovery --
+    tracing when every automated candidate has been thrown out -- and a
+    rejected candidate is exactly the machine answer the operator's
+    polygon is the ground truth against. Rejection lives in the review
+    results, never in this list, so it cannot reach this function."""
+    best = cands[0] if cands else None
+    if best is not None:
+        c = best.get('contour')
+        if c is not None and len(c):
+            return best, None
+        return best, UNPAIRED_NO_CONTOUR
+    if not baseline_ok:
+        return None, UNPAIRED_NO_BASELINE
+    if not detected:
+        return None, UNPAIRED_NOT_DETECTED
+    return None, UNPAIRED_NO_CANDIDATE
+
+
+def unpaired_message(reason):
+    """The operator-facing sentence for an UNPAIRED_* reason -- what is
+    missing and what would fix it. Unknown reasons pass through rather
+    than raising: a message is never worth losing a trace over."""
+    if reason in UNPAIRED_REASONS:
+        return UNPAIRED_REASONS[reason]
+    return _REPORT_ONLY_REASONS.get(
+        reason, f"No machine candidate for this frame ({reason}).")
+
+
+# Classifications a REPORT can produce but a caller may never write:
+# they describe labels that already exist on disk.
+_REPORT_ONLY_REASONS = {
+    'unrecorded':
+        "Written before the 2026-08-06 pairing gate, with no reason "
+        "recorded - most likely the run was opened without --auto, so "
+        "detection had never run. Re-detect the run and re-trace these "
+        "frames if they are needed as ground truth.",
+    'degenerate-polygon':
+        "The stored polygon has fewer than 3 points, so it encloses no "
+        "area and cannot be compared with anything.",
+}
+
+
+def is_paired(rec):
+    """True when this label record carries everything an offline IoU
+    needs: a real polygon AND a machine contour to compare it with. The
+    #162 ground-truth criterion, in one predicate."""
+    m = rec.get('machine') or {}
+    return bool(m.get('contour')) and len(rec.get('polygon') or []) >= 3
+
+
+def label_scope(rec):
+    """Which detection pass this label's conf came from (SCOPE_*).
+    Missing tag -> SCOPE_RUN: on-demand detection did not exist before
+    2026-08-06, so every earlier label is a run-pass one."""
+    return (rec.get('machine') or {}).get('detect_scope') or SCOPE_RUN
+
+
+def label_where(rec):
+    """'row 28', or 'DOT_P3_1_20260729 row 28' once main() has attached
+    the run name (in memory only, never written back). A pooled report of
+    several runs printed two bare 'row 28's from different runs, and an
+    operator cannot tell which run to re-detect from that (review
+    2026-08-06)."""
+    run = (rec.get('_run') or '').strip()
+    return f"{run} row {rec.get('row_index')}" if run \
+        else f"row {rec.get('row_index')}"
+
+
 def label_record(row_index, row, polygon, frame_shape, *, machine=None,
-                 zoom=1.0, overlays=None, elapsed_s=None, snapped=False,
-                 user=None, now=None):
+                 unpaired=None, zoom=1.0, overlays=None, elapsed_s=None,
+                 snapped=False, user=None, now=None):
     """One edge_labels.json entry. `row` is the run CSV row dict; the
     polygon is full-res [(x, y), ...]. Self-contained for offline IoU:
-    carries the frame shape and the machine candidate it competes with."""
+    carries the frame shape and the machine candidate it competes with.
+
+    REFUSES (ValueError) to build a label with no usable machine pairing
+    unless the caller names the reason in `unpaired` (a key of
+    UNPAIRED_REASONS, obtained from machine_pairing). Such a label is
+    invisible to conf_vs_iou forever, so it must never be written by
+    omission: the caller has to have looked at why, which is the point
+    where the operator gets told (#162, 2026-08-06)."""
     poly = [[float(x), float(y)] for x, y in polygon]
     area = polygon_area(poly)
+    mach = machine_summary(machine)
+    # the gate is about the PAIRING only; a degenerate polygon is the
+    # tracer's own precondition (>= 3 points before Done) and would
+    # produce a misleading 'no machine candidate' message here
+    paired = bool(mach and mach.get('contour'))
+    if not paired:
+        if not unpaired:
+            raise ValueError(
+                "refusing to write a trace label with no machine pairing "
+                "(#162): label_iou() can never return a value for it, so "
+                "it is worthless as ground truth. Pass unpaired=<reason> "
+                f"(one of {sorted(UNPAIRED_REASONS)}) from "
+                "machine_pairing(), and tell the operator, or supply the "
+                "machine candidate.")
+        if unpaired not in UNPAIRED_REASONS:
+            raise ValueError(
+                f"unknown unpaired reason {unpaired!r}; expected one of "
+                f"{sorted(UNPAIRED_REASONS)}")
     return {
         'row_index': int(row_index),
         'frame_file': (row.get('frame_file') or '').strip(),
@@ -344,7 +523,11 @@ def label_record(row_index, row, polygon, frame_shape, *, machine=None,
         'elapsed_s': None if elapsed_s is None else round(float(elapsed_s),
                                                           1),
         'snapped': bool(snapped),
-        'machine': machine_summary(machine),
+        'machine': mach,
+        # null on a usable label; otherwise the named reason IoU can
+        # never be computed, so the calibration pass can report the gap
+        # instead of the label just not showing up (#162)
+        'unpaired': None if paired else unpaired,
     }
 
 
@@ -387,11 +570,60 @@ def append_label(rundir, rec, path=None):
 def label_iou(rec):
     """IoU between a label's polygon and its stored machine candidate,
     or None when the machine had no contour to compare."""
-    m = rec.get('machine') or {}
-    if not m.get('contour') or len(rec.get('polygon') or []) < 3:
+    if not is_paired(rec):
         return None
     shape = tuple(rec.get('frame_shape') or (1080, 1920))
-    return iou(rec['polygon'], m['contour'], shape)
+    return iou(rec['polygon'], rec['machine']['contour'], shape)
+
+
+def unpaired_labels(labels):
+    """-> {reason: [rec, ...]} for every label whose IoU is NOT
+    computable, i.e. every trace that cannot serve as ground truth.
+
+    Labels written before the 2026-08-06 pairing gate carry no reason at
+    all -- they are reported as 'unrecorded' rather than dropped, because
+    the four that exist are exactly the ones an operator has to go back
+    and redo."""
+    out = {}
+    for rec in labels:
+        if is_paired(rec):
+            continue
+        if rec.get('unpaired'):
+            reason = rec['unpaired']
+        elif len(rec.get('polygon') or []) < 3:
+            reason = 'degenerate-polygon'
+        else:
+            reason = 'unrecorded'
+        out.setdefault(reason, []).append(rec)
+    return out
+
+
+def unpaired_summary(labels):
+    """ASCII report of the labels that can never yield an IoU -- printed
+    next to the calibration curve so an unusable label is visible in the
+    one place the curve is read, not just absent from it."""
+    gaps = unpaired_labels(labels)
+    n = sum(len(v) for v in gaps.values())
+    if not labels:
+        # ASCII, like every other line here: this is the FIRST-USE branch
+        # (a not-yet-traced run, a typo'd path), so it is the one most
+        # likely to be read on the bench console -- an em dash aborted the
+        # whole report with a UnicodeEncodeError under cp437/cp850
+        # (measured 2026-08-06, the fourth time this trap has fired)
+        return ["no labels yet - trace frames in Edge Review first"]
+    if not n:
+        return [f"all {len(labels)} label(s) carry a machine candidate "
+                f"- none wasted"]
+    lines = [f"WARNING: {n} of {len(labels)} label(s) have NO comparable "
+             f"machine candidate - recovery measurements only, invisible "
+             f"to the calibration above:"]
+    for reason, recs in sorted(gaps.items()):
+        rows = ', '.join(label_where(r) for r in recs[:6])
+        if len(recs) > 6:
+            rows += f", +{len(recs) - 6} more"
+        lines.append(f"  {reason:<20} {len(recs):>3}  ({rows})")
+        lines.append(f"      {unpaired_message(reason)}")
+    return lines
 
 
 def conf_vs_iou(labels):
@@ -428,15 +660,39 @@ def calibration_summary(pairs, target_iou=0.8, bins=(0.0, 0.5, 0.75,
             continue
         ious = [t[1] for t in sel]
         p = sum(1 for v in ious if v >= target_iou) / len(ious)
+        n_od = sum(1 for t in sel if label_scope(t[3]) == SCOPE_FRAME)
         lines.append(f"  {f'{lo:.2f}-{min(hi, 1.0):.2f}':>12} "
                      f"{len(sel):>4} {p:>10.2f} "
-                     f"{float(np.median(ious)):>11.2f}")
+                     f"{float(np.median(ious)):>11.2f}"
+                     + (f"   * {n_od} on-demand" if n_od else ""))
     by_m = {}
-    for conf, v, m, _r in arr:
-        by_m.setdefault(m, []).append(v)
+    for conf, v, m, rec in arr:
+        by_m.setdefault(m, []).append((v, rec))
     for m, vs in sorted(by_m.items()):
+        n_od = sum(1 for _v, r in vs if label_scope(r) == SCOPE_FRAME)
         lines.append(f"  {m:<12} n={len(vs):<3} median IoU "
-                     f"{float(np.median(vs)):.2f}")
+                     f"{float(np.median([v for v, _r in vs])):.2f}"
+                     + (f"   * {n_od} on-demand" if n_od else ""))
+    # The scope tag is only worth writing if the curve's READER sees it
+    # (review 2026-08-06: it was recorded in the sidecar and read by
+    # nothing, which is the silent mix it was added to prevent).
+    od = [t for t in arr if label_scope(t[3]) == SCOPE_FRAME]
+    if od:
+        lines += [
+            f"  * {len(od)} of {len(arr)} point(s) come from a "
+            f"single-frame on-demand detect ({SCOPE_FRAME}), not the run",
+            "      pass: no ramp-order hysteresis bonus and no same-kV "
+            "pair reconciliation, so the",
+            "      conf can read up to 0.05 low AND a different candidate "
+            "can rank first (measured",
+            "      3-9% area difference where the disc fit refuses). "
+            "Re-detect the run and",
+            "      re-trace those frames to put them on the run-pass "
+            "convention:"]
+        shown = ', '.join(label_where(t[3]) for t in od[:8])
+        if len(od) > 8:
+            shown += f", +{len(od) - 8} more"
+        lines.append(f"      {shown}")
     return lines
 
 
@@ -457,14 +713,25 @@ def main(argv):
     if not argv:
         print(__doc__.strip().split('\n\n')[-1])
         return 2
-    pairs, n_labels, n_runs = [], 0, 0
+    pairs, all_labels, n_runs = [], [], 0
     for rundir, labels in _iter_label_files(argv):
         n_runs += 1
-        n_labels += len(labels)
+        # display-only provenance: the pooled report names the run each
+        # row came from (label_where), never written back to the sidecar
+        # (isinstance because a hand-edited sidecar can hold anything)
+        for rec in labels:
+            if isinstance(rec, dict):
+                rec['_run'] = os.path.basename(rundir.rstrip('\\/'))
+        all_labels.extend(labels)
         pairs.extend(conf_vs_iou(labels))
-        print(f"{os.path.basename(rundir)}: {len(labels)} label(s)")
-    print(f"\n{n_labels} labels across {n_runs} run(s)")
+        gaps = sum(len(v) for v in unpaired_labels(labels).values())
+        print(f"{os.path.basename(rundir)}: {len(labels)} label(s)"
+              + (f"  ({gaps} UNPAIRED)" if gaps else ""))
+    print(f"\n{len(all_labels)} labels across {n_runs} run(s)")
     for line in calibration_summary(pairs):
+        print(line)
+    print()
+    for line in unpaired_summary(all_labels):
         print(line)
     return 0
 

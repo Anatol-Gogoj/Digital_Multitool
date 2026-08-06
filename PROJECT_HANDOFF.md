@@ -335,7 +335,7 @@ genuinely independent of it.**
    clean provenance is worth doing when convenient, but the areas
    stand.
 5. **(Anatol, 30 seconds)** accept or overrule #224's proposed label
-   `📈 Scope kV/µA log (telemetry.csv)` — implemented, all three copies
+   `📈 Scope kV/µA log (telemetry.csv)` — implemented, all four copies
    moved, but the word choice is a taste call and nobody but Anatol owns
    it. Then #225, #223, #216, #215, #197, #200 — all real, scoped and
    hardware-free. #219 becomes designable the moment §N's numbers land.

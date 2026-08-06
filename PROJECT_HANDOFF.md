@@ -165,11 +165,33 @@ stop hand-rolling matplotlib.
   its absolute areas** — against the CB curve especially — without applying
   the offset (×1.0462 recovers the anchored scale). Fixing it later is one
   recalibration plus a save, no re-review, since mm² re-derives from px.
+- **P3_6 holdout RESOLVED 2026-08-06 — and it is a breakdown.** Anatol's
+  determination: the 21 % collapse between post- and pre-ramp at 7.75 kV is a
+  breakdown event, so the 257.786 mm² value is true. Accepted as saved —
+  **closed without saving**, so the run keeps its pre-#214 auto scale and its
+  resting 201.062 mm² = π·8² exactly. **P3_6 upgrades to a full pass**, and
+  its worst pair CV (16.4 % @ 7.75 kV) is now explained rather than
+  tolerated. Usable curve is the ramp **up to 7.75 kV post-ramp** (peak
+  A/A₀ 2.255 @ 5.5 kV); everything above is post-event.
+- **⚠ That breakdown is advisory-only, and it is new evidence for the
+  priority thread.** `measured_uA` reads **exactly −16.00 µA on every frame
+  from 7.00 to 8.50 kV** — this run's I_Out offset, i.e. the channel sitting
+  on its own zero — so deviation at the event is **+0.0 µA** and per
+  `CLAUDE.md` semantics the frames are **NOT** renamed `*_BREAKDOWN`. But the
+  channel demonstrably works on this run (it caught the −30.62 µA transient
+  at 5.25–5.5 kV), so either there was no electrical event or **it fell
+  between snapshots** — samples are ~8 s apart, a breakdown is milliseconds.
+  This is the corpus's **first probable breakdown the current channel
+  missed**; both 07-23 ground-truth runs had working traces. Cite it when
+  `#219`'s trip level is derived, and note it as motivation on `#157`/`#189`.
+  Second-order trap: because the event is advisory, those post-event rows
+  carry no `post-breakdown` annotation, so downstream filters will **not**
+  drop them — the opposite of P3_5's false-fire problem.
 - **Remaining:** the batch-level **control round** (~15 min of traces —
   still required, because the optics moved across the *remaining* sessions
-  too); the P3_6 holdout frame; P3_7 (blocked on contrast — see issues
-  #193/#194); 104531 (bench decision: device barely actuated, suspect dead
-  device / HV not reaching sample).
+  too); P3_7 (blocked on contrast — see issues #193/#194); 104531 (bench
+  decision: device barely actuated, suspect dead device / HV not reaching
+  sample).
 - **The two 08-05 runs are folded in (2026-08-06)** — `SCORECARD.md` now
   carries a measured verdict for each. **CB** (the first non-CNT
   electrode): A/A₀ **1.158** at 5 kV, resting 202.55 mm² = 16.06 mm, ci85
@@ -397,11 +419,14 @@ shipped, live verify pending). Staged per #189's own increment plan:
 **Campaign items (unchanged gates):**
 
 - **(Anatol, ~15 min)** the **control round** traces — still gates every
-  remaining absolute-mm² verdict (optics moved between sessions). Then
-  the **P3_2** review (eyeball mid-ramp overlays first, +0.7 px flag).
-- **P3_6 holdout frame** (`SLDEA_s31_07.75kV_pre-ramp`): accept or
-  hand-trace → upgrades the conditional pass. Safe now — the #213
-  partial-re-save fix landed and merged.
+  remaining absolute-mm² verdict (optics moved between sessions). **This is
+  now the only desk-side measurement item left**, and it still needs its 2
+  repeat pairs traced, which do not exist anywhere in the corpus yet.
+- ~~P3_2 review~~ **DONE 2026-08-06** — conditional pass; A/A₀ 2.302 @
+  5.25 kV quotable, absolute mm² −4.42 % low (accepted as-is).
+- ~~P3_6 holdout frame~~ **RESOLVED 2026-08-06** — it is a breakdown and the
+  value is true; accepted without saving, so the run's π·8² resting survived.
+  P3_6 upgrades to a full pass. Details in the Batch-QA section above.
 
 **Rest of the bench visit:** #206 script dedup + installer idempotence
 re-run · #193/#194 exposure/contrast-ring experiments (unblocks P3_7,
@@ -453,11 +478,12 @@ genuinely independent of it.**
    until the pre-flight goes quiet. If the firmware will not honour the
    manual controls, that IS #193 and no app change fixes it.
 3. **(desk, Anatol)** the two 07-23 breakdown reviews and the **P3_2
-   review** are all **done (2026-08-06)**; the 07-23 family is retired from
-   measurement. What is left on this line is the **control round**
-   (including the 2 repeat pairs, which do not exist yet) and the **P3_6
-   holdout frame** — unchanged, unblocked, and independent of everything
-   above. With P3_2 done, **every P3-family run in the batch is reviewed**.
+   review** are all **done (2026-08-06)**, as is the **P3_6 holdout**; the
+   07-23 family is retired from measurement. What is left on this line is the
+   **control round** alone — unchanged, unblocked, independent of everything
+   above, and still needing its 2 repeat pairs, which do not exist anywhere
+   in the corpus yet. **Every P3-family run in the batch is now reviewed, and
+   the control round is the only desk-side measurement item remaining.**
 4. **(desk) DONE 2026-08-06.** Both 08-05 runs are folded into
    `SCORECARD.md` with measured verdicts — `sldea_diag.py` and
    `compare_errorbars.py` were run on each rather than transcribing this

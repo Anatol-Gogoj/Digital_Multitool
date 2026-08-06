@@ -148,12 +148,24 @@ folded into the campaign runbook:
   other baseline in the corpus. That is an EXPOSURE fault, not an
   electrode one (08-05 entry in `SLDEA_HANDOFF.md`), and since #227 the
   app refuses to start such a run without a logged override.
-  **Decision needed: review these 11 frames, or re-shoot the device
-  with corrected exposure and review that?** Areas measured against a
-  mostly-white baseline carry an uncertainty nothing in
-  `SLDEA_MEASUREMENT.md` covers, so if these frames are kept the CB
-  numbers need a caveat the CNT numbers do not. Re-shooting is cheap by
-  comparison — 11 frames, 0–5 kV.
+
+  **REVIEWED AND ACCEPTED, 2026-08-05 23:00 (Anatol, full Edge Review).**
+  The saturation worry was mine and it did not survive contact with the
+  data. All 11 frames reviewed by hand, every one accepted at **conf
+  0.95–0.99** (`disc-fit` throughout), areas monotonic, and pre/post
+  pairs agreeing to 0.2–0.3 %:
+
+  | | baseline | 1 kV | 2 kV | 3 kV | 4 kV | 5 kV |
+  |---|---|---|---|---|---|---|
+  | mm² | 202.55 | 204.64 | 211.70 | 224.51 | 231.27 | 234.10 |
+  | A/A₀ | 1.000 | 1.010 | 1.045 | 1.108 | 1.142 | 1.156 |
+
+  The resting diameter comes out **16.059 mm against a 16 mm nominal**
+  (0.4 %). So CB has a usable expansion curve and the run stays in the
+  campaign. What remains is provenance, not measurement: its baseline
+  was exposed differently from its own ramp frames, which is why the
+  warm-up baseline landed (see `SLDEA_HANDOFF.md`). Re-shoot when
+  convenient for a clean-provenance CB curve; do not discard this one.
 - `Single Layer Testing\P3 1.5mL Triazole Bake1\P3 1.5mL Triazole
   Bake1-1` — an 81-frame CNT run, already reviewed (areas + `edge:
   resting conf 0.95 (user)` in `data.csv`), healthy baseline. Not in
@@ -285,11 +297,13 @@ open decisions below.
 3. **(desk, Anatol)** the two 07-23 breakdown reviews (152205, 233451),
    then the control round, P3_2, and the P3_6 holdout frame — unchanged,
    unblocked, and independent of everything above.
-4. **(desk/bench)** decide the CB run's fate — review the 11 saturated
-   frames with a caveat, or re-shoot the device at a corrected exposure
-   and review that (see the campaign section). Either way CB is a
-   campaign electrode type, not a shakedown. Also fold the new CNT
-   Triazole run into `SCORECARD.md`.
+4. **(desk)** fold BOTH new runs into `SCORECARD.md` — the CB run
+   (reviewed 2026-08-05, conf 0.95–0.99, A/A₀ 1.156 at 5 kV, resting
+   16.059 mm) and the CNT Triazole run. The CB run is the campaign's
+   first non-CNT curve, so it wants a provenance note: its baseline was
+   exposed differently from its own ramp frames. Re-shooting it for
+   clean provenance is worth doing when convenient, but the areas
+   stand.
 5. **(desk)** #224's rename word choice, then #225, #223, #216, #215,
    #197, #200 — all real, scoped and hardware-free. #219 becomes
    designable the moment §N's numbers land.

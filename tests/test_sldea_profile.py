@@ -258,25 +258,84 @@ def test_timeline_simple_up():
                      landing_s=60, settle_s=2, snap_lead_s=1)
     assert p.levels == [2, 4, 6, 8, 10]            # 0 kV is baseline, not held
     assert p.n_levels == 5
-    assert p.total_duration_s == 5 * (5 + 60)
-    assert p.n_frames == 1 + 2 * 5                  # baseline + 2 per landing
+    # the staircase starts after the camera warm-up frame
+    assert p.total_duration_s == p.baseline_warmup_s + 5 * (5 + 60)
+    # warm-up + baseline + 2 per landing
+    assert p.n_frames == 2 + 2 * 5
 
 
 def test_snapshot_times_and_tags():
     p = SldeaProfile(start_kv=0, end_kv=4, step_kv=2.0, ramp_s=5,
                      landing_s=60, settle_s=2, snap_lead_s=1)
+    w = p.baseline_warmup_s
     tags = [s['tag'] for s in p.snapshots]
-    assert tags[0] == 'baseline'
-    assert p.snapshots[0]['t'] == 0.0
-    # first landing is 2 kV (0 kV is baseline): ramp 0->5, hold 5..65
+    # a throw-away frame at t=0 lets the camera settle; the SECOND 0 kV
+    # frame is the reference everything is differenced against
+    assert tags[0] == 'warmup' and p.snapshots[0]['t'] == 0.0
+    assert tags[1] == 'baseline' and p.snapshots[1]['t'] == w
+    # first landing is 2 kV (0 kV is baseline): ramp w->w+5, hold to w+65
     post = next(s for s in p.snapshots if s['step'] == 1 and s['tag'] == 'post-ramp')
     pre = next(s for s in p.snapshots if s['step'] == 1 and s['tag'] == 'pre-ramp')
-    assert post['t'] == 5 + 2 and post['nominal_kv'] == 2   # ramp_end + settle
-    assert pre['t'] == 65 - 1                                # hold_end - lead
-    # second landing (4 kV): starts at t=65
+    assert post['t'] == w + 5 + 2 and post['nominal_kv'] == 2
+    assert pre['t'] == w + 65 - 1                            # hold_end - lead
+    # second landing (4 kV)
     post2 = next(s for s in p.snapshots if s['step'] == 2 and s['tag'] == 'post-ramp')
-    assert post2['t'] == 65 + 5 + 2
+    assert post2['t'] == w + 65 + 5 + 2
     assert post2['nominal_kv'] == 4
+
+
+def test_no_voltage_is_commanded_during_the_camera_warm_up():
+    """HV SAFETY. kv_at() falls through to `segments[-1][4]` when no
+    segment matches, so once the staircase stopped starting at t=0 that
+    fall-through would have commanded the SG to the FINAL level for the
+    whole warm-up window. Nothing in the loop would have questioned it:
+    the runner just writes kv_at(el) to the SG."""
+    p = SldeaProfile(start_kv=0, end_kv=8, step_kv=2.0, ramp_s=5,
+                     landing_s=60, settle_s=2, snap_lead_s=1)
+    w = p.baseline_warmup_s
+    assert w > 0
+    for t in (0.0, 0.01, w / 2, w - 1e-6):
+        assert p.kv_at(t) == 0.0, (t, p.kv_at(t))
+    assert p.kv_at(w) == 0.0                       # ramp starts here
+    assert 0.0 < p.kv_at(w + 2.5) < 2.0            # mid first ramp
+    # and a profile with the warm-up disabled behaves exactly as before
+    q = SldeaProfile(start_kv=0, end_kv=8, step_kv=2.0, ramp_s=5,
+                     landing_s=60, settle_s=2, snap_lead_s=1,
+                     baseline_warmup_s=0)
+    assert [s['tag'] for s in q.snapshots][0] == 'baseline'
+    assert q.snapshots[0]['t'] == 0.0
+    assert q.segments[0][1] == 0.0
+
+
+def test_electrode_family_maps_the_campaign_materials():
+    from sldea_profile import electrode_family
+    assert electrode_family('CNT') == 'cnt'
+    assert electrode_family(' carbon nanotube ') == 'cnt'
+    assert electrode_family('Carbon Black') == 'carbon_black'
+    assert electrode_family('CB') == 'carbon_black'
+    assert electrode_family('eGaIn') == 'liquid_metal'
+    assert electrode_family('liquid metal') == 'liquid_metal'
+    assert electrode_family('Galinstan') == 'liquid_metal'
+    # anything else non-blank is a real answer, just not a known family
+    assert electrode_family('PEDOT:PSS') == 'other'
+    # blank is NOT 'other' -- "not specified" and "something else" are
+    # different facts and the run asks about the first one
+    assert electrode_family('') is None
+    assert electrode_family('   ') is None
+    assert electrode_family(None) is None
+
+
+def test_setup_text_records_the_electrode_and_the_warm_up():
+    p = SldeaProfile(start_kv=0, end_kv=4, step_kv=2, ramp_s=5, landing_s=60)
+    txt = p.setup_text('r', 'ts', 1, 2, 3, True, electrode='carbon black')
+    assert 'Compliant electrode: carbon black' in txt
+    assert 'Electrode family: carbon_black' in txt
+    assert "tagged 'warmup'" in txt
+    # blank says so explicitly rather than omitting the line -- an absent
+    # line reads as an older run that never had the field
+    blank = p.setup_text('r', 'ts', 1, 2, 3, True)
+    assert 'Compliant electrode: (not specified)' in blank
+    assert 'Electrode family' not in blank
 
 
 def test_updown_and_repeat():

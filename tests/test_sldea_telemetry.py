@@ -505,7 +505,8 @@ def test_worker_writes_the_sidecar_without_touching_data_csv():
             "kV must be sub-sampled, not read on every tick"
         # one event row per snapshot, naming the snapshot it belongs to
         assert len(events) == len(p.snapshots), events
-        assert events[0]['event'].startswith('snap s00 baseline')
+        assert events[0]['event'].startswith('snap s00 warmup')
+        assert any(e['event'].startswith('snap s00 baseline') for e in events)
         assert any('post-ramp' in r['event'] for r in events)
         # the achieved rate is reported, not assumed -- and a healthy run
         # at the default settings must NOT cry shortfall (the 10 Hz loop

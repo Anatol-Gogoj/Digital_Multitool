@@ -186,9 +186,15 @@ def test_exposure_verdict_separates_the_real_corpus():
 
     Every (mean, %>=250) pair below is the real baseline frame of a run
     held on 2026-08-05. The 13 healthy ones must not be gated; the
-    carbon-black validation run, whose baseline is MEDIAN 255, must be --
-    its detection collapsed to a 1930 px sliver against a true ~134500 px
-    until the electrode mask was turned off to work around it."""
+    carbon-black validation run, whose baseline is MEDIAN 255, must be.
+
+    Note WHY it is gated, because the intuitive reason is wrong: that
+    run detects fine (conf 0.98-0.99 at every level, monotonic areas) --
+    the electrode is dark and unclipped, so the boundary is a ~165-level
+    step. It is gated because clipped pixels cannot be photometrically
+    normalised, and because its baseline was 73.7% saturated while its
+    own ramp frames were 0.27% -- the reference was shot at a different
+    exposure from everything it is differenced against."""
     from sldea_profile import exposure_verdict, BASELINE_CLIP_SAT_PCT
     healthy = [
         (180.1, 0.17), (131.4, 0.17), (178.6, 0.63), (173.9, 1.21),
@@ -201,7 +207,10 @@ def test_exposure_verdict_separates_the_real_corpus():
         assert level == 'ok', (mean, sat, level)
     level, msg = exposure_verdict(235.3, 73.74)
     assert level == 'clipped', (level, msg)
-    assert 'BLOWN OUT' in msg
+    assert 'CLIPPED' in msg
+    # and it must not claim the measurement is worthless -- measured
+    # false on that very run
+    assert 'nothing to work with' not in msg
     # the warn tier still exists between the two populations
     assert exposure_verdict(200.0, 12.0)[0] == 'bright'
     assert exposure_verdict(220.0, 1.0)[0] == 'bright'

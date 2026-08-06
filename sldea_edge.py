@@ -45,6 +45,7 @@ resting diameter (default 16 mm) against the baseline detection.
 Headless self-test: .venv/bin/python tests/test_sldea_edge.py
 """
 import csv
+import math
 import os
 import re
 import shutil
@@ -175,9 +176,17 @@ def save_settings(rundir, settings):
 # audited or reused. The block sits BEFORE the edge-settings section so
 # save_settings' section-replace preserves it.
 ANCHOR_HDR = '--- Edge Review scale anchor (SLDEA) ---'
+# rounds_px/n_rounds/spread_px/spread_pct/guard arrived with the #215
+# fit-a-circle calibration (2026-08-06). EVERY key here is optional on
+# read: 15 runs carry the 2026-08-05 two-click anchor with none of them,
+# and two runs (P3_6_2.5mL_20260729, DOT_P3_1_20260729) predate the gate
+# and carry no block at all. load_scale_anchor must keep serving both.
 _ANCHOR_KEYS = ('method', 'diam_px', 'diam_mm', 'mm_per_px',
                 'anchor_frame', 'anchor_is_baseline', 'auto_diam_px',
-                'saved', 'user')
+                'n_rounds', 'rounds_px', 'spread_px', 'spread_pct',
+                'guard', 'saved', 'user')
+_ANCHOR_FLOATS = ('diam_px', 'diam_mm', 'mm_per_px', 'auto_diam_px',
+                  'spread_px', 'spread_pct')
 
 
 def _split_anchor(text):
@@ -220,8 +229,18 @@ def save_scale_anchor(rundir, anchor):
             continue
         if isinstance(v, bool):
             v = int(v)
+        if isinstance(v, (list, tuple)):
+            # the per-round diameters (#215) ride ONE line: the block's
+            # grammar is 'key: rest-of-line', so a multi-value field has
+            # to be joined, never wrapped
+            v = '; '.join(f"{float(x):.2f}" for x in v)
         if isinstance(v, float):
             v = f"{v:g}"
+        # a stray newline in a text field (a pasted guard note) would
+        # split the block and orphan everything after it
+        v = str(v).replace('\r', ' ').replace('\n', ' ').strip()
+        if not v:
+            continue
         lines.append(f"{k}: {v}")
     block = '\n'.join(lines) + '\n'
     if EDGE_HDR in text:
@@ -240,7 +259,12 @@ def load_scale_anchor(rundir):
     """-> the recorded anchor dict or None. Shaped so it can be passed
     straight to mm_per_px as `baseline_ref` (method + diam_px), letting
     the tuner and diagnostic report the scale Edge Review actually
-    saved instead of their own re-derivation."""
+    saved instead of their own re-derivation.
+
+    Every field beyond `diam_px` is OPTIONAL and absent fields are
+    simply absent from the dict — no defaults are invented. That is what
+    keeps the pre-#215 two-click anchors (no rounds/spread) and the
+    pre-gate runs (no block at all -> None) loading and reporting."""
     path = os.path.join(rundir, 'setup.txt')
     try:
         with open(path, encoding='utf-8', errors='replace') as f:
@@ -259,16 +283,181 @@ def load_scale_anchor(rundir):
         if not mm:
             continue
         k, v = mm.group(1), mm.group(2).strip()
-        if k in ('diam_px', 'diam_mm', 'mm_per_px', 'auto_diam_px'):
+        if k in _ANCHOR_FLOATS:
             try:
                 out[k] = float(v)
             except ValueError:
                 continue
+        elif k == 'n_rounds':
+            try:
+                out[k] = int(float(v))
+            except ValueError:
+                continue
+        elif k == 'rounds_px':
+            # hand-edited setup.txt is a fact of bench life: keep the
+            # values that parse, drop the ones that do not, and omit the
+            # key entirely rather than serve a half-list as a fit record
+            vals = []
+            for tok in re.split(r'[;,]', v):
+                tok = tok.strip()
+                if not tok:
+                    continue
+                try:
+                    vals.append(float(tok))
+                except ValueError:
+                    continue
+            if vals:
+                out[k] = vals
         elif k == 'anchor_is_baseline':
             out[k] = v not in ('0', '', 'False')
         else:
             out[k] = v
     return out if out.get('diam_px') else None
+
+
+# ---------------------------------------------------------------------------
+# the scale anchor's own arithmetic (#215) — three averaged circle fits,
+# their spread, and the two independent references that can contradict them
+# ---------------------------------------------------------------------------
+
+# Rounds the operator fits per run. Three is the minimum that yields a
+# spread at all; the mean of n fits shrinks the random part of the
+# scale-anchor term by sqrt(n) (SLDEA_MEASUREMENT §2.1).
+CAL_ROUNDS = 3
+# (max-min)/mean of the fitted diameters above which the rounds
+# DISAGREE and a further round is offered (#215 spread gate).
+CAL_SPREAD_PCT = 1.0
+# Anchor sanity guard (2026-08-06, added on top of #215's flow). Two
+# tolerances, both generous: §2.1 puts the whole scale-anchor term at
+# ~0.4 % diameter / ~0.8 % area, so 1 % is already outside the budget.
+# Run P3_2_2.5mL_20260728 sat at +2.28 % diameter / -4.42 % area and
+# nothing warned, because the pre-existing cross-check only fired at 3 %.
+ANCHOR_GUARD_DIAM_PCT = 1.0
+ANCHOR_GUARD_AREA_PCT = 1.0
+# The pre-existing detect-time tier (scale gate 2026-08-05), kept as the
+# threshold for a MODAL after detection. The guard above is the one that
+# demands a decision, at calibration time; repeating it as a modal on
+# every 1% would nag every honest run, because baseline_disc agrees with
+# the by-eye measurement only to ~1% itself (SLDEA_MEASUREMENT §2.1).
+ANCHOR_MODAL_DIAM_PCT = 3.0
+
+
+def calibration_stats(diams):
+    """Mean and spread of the per-round fitted diameters (#215).
+
+    The mean is the anchor; the spread is a free per-run measurement of
+    operator repeatability, the one term of the error budget that has
+    never had data (`sldea_trace` finds zero repeat pairs across 140
+    labels). Plain mean of EVERY round performed — no outlier rejection,
+    because silently dropping a round would edit the very number the
+    spread is supposed to report. -> None for no rounds."""
+    vals = [float(v) for v in (diams or []) if v]
+    if not vals:
+        return None
+    mean = sum(vals) / len(vals)
+    lo, hi = min(vals), max(vals)
+    return {'n': len(vals), 'values': vals, 'mean': mean,
+            'min': lo, 'max': hi, 'spread_px': hi - lo,
+            'spread_pct': (100.0 * (hi - lo) / mean) if mean else 0.0}
+
+
+def spread_ok(stats, limit=CAL_SPREAD_PCT):
+    """True when the rounds agree closely enough to accept as they are.
+    A single round has no spread, so it passes vacuously — that is the
+    honest answer, not a certificate."""
+    return not stats or stats['n'] < 2 or stats['spread_pct'] <= limit
+
+
+def rescale_pct(old_diam_px, new_diam_px):
+    """% every absolute mm² already in the run MOVES when the anchor
+    changes from old_diam_px to new_diam_px.
+
+    This is the [critical] partial-re-save interaction (SLDEA_HANDOFF
+    2026-08-05): unreviewed rows keep their px measurement and their
+    mm²/diam are RE-DERIVED at the current save's scale, so re-reviewing
+    ONE frame under a new calibration rewrites the whole run's absolute
+    column. area ∝ mm_per_px² ∝ 1/diam_px², hence the square — a bigger
+    diameter means a smaller mm/px and every area shrinks. None when
+    either diameter is unusable."""
+    if not old_diam_px or not new_diam_px:
+        return None
+    return 100.0 * ((float(old_diam_px) / float(new_diam_px)) ** 2 - 1.0)
+
+
+def anchor_guard(mean_diam_px, auto_ref, diam_mm,
+                 diam_tol=ANCHOR_GUARD_DIAM_PCT,
+                 area_tol=ANCHOR_GUARD_AREA_PCT):
+    """Sanity-check an accepted px→mm anchor against the two references
+    the app already holds but never used to check the operator.
+
+    1. the automatic baseline disc fit (`baseline_disc`) — an
+       independent measurement of the same disc, in px;
+    2. the 16 mm laser-cut application-mask anchor
+       (SLDEA_MEASUREMENT §2.4), which fixes the resting area at
+       π·(diam_mm/2)² = 201.06 mm² for this whole series.
+
+    Honest about what these are: `baseline_disc` returns a CIRCLE fit,
+    so its area_px is π·r² and the area test is algebraically the
+    diameter test squared. They are one measurement in two units, not
+    two independent votes — which is exactly why both are shown. A 1 %
+    area tolerance is the binding one (~0.5 % in diameter), and the area
+    figure is the one the operator's downstream numbers are quoted in.
+    The guard measures ACCURACY against an external reference; the
+    three-round spread measures PRECISION. A consistently biased
+    operator scores a tight spread and still trips this.
+
+    Returns a dict of the computed numbers, always, with 'warn' a list
+    of operator-facing strings (empty = clear) and 'available' False
+    when there is no automatic fit to check against."""
+    mean = float(mean_diam_px or 0.0)
+    dmm = float(diam_mm or 0.0)
+    nominal = math.pi * (dmm / 2.0) ** 2 if dmm > 0 else None
+    out = {'mean_diam_px': mean or None, 'auto_diam_px': None,
+           'diam_pct': None, 'rest_area_mm2': None,
+           'nominal_mm2': nominal, 'area_pct': None,
+           'available': False, 'warn': []}
+    if mean <= 0 or dmm <= 0:
+        return out
+    auto_px = float((auto_ref or {}).get('diam_px') or 0.0)
+    if auto_px <= 0:
+        return out
+    out['available'] = True
+    out['auto_diam_px'] = auto_px
+    out['diam_pct'] = 100.0 * (mean - auto_px) / auto_px
+    mm_per_px = dmm / mean
+    # prefer the fit's own measured area; fall back to its circle
+    area_px = float((auto_ref or {}).get('area_px') or 0.0)
+    if area_px <= 0:
+        area_px = math.pi * (auto_px / 2.0) ** 2
+    out['rest_area_mm2'] = area_px * mm_per_px * mm_per_px
+    out['area_pct'] = 100.0 * (out['rest_area_mm2'] - nominal) / nominal
+    if abs(out['diam_pct']) > float(diam_tol):
+        out['warn'].append(
+            f"accepted diameter {mean:.1f} px is {out['diam_pct']:+.2f}% "
+            f"from the automatic disc fit ({auto_px:.1f} px) — over the "
+            f"{float(diam_tol):g}% guard")
+    if abs(out['area_pct']) > float(area_tol):
+        out['warn'].append(
+            f"the resting area this scale implies is "
+            f"{out['rest_area_mm2']:.2f} mm², {out['area_pct']:+.2f}% "
+            f"from the {dmm:g} mm mask anchor's "
+            f"{nominal:.2f} mm² — over the {float(area_tol):g}% guard")
+    return out
+
+
+def anchor_guard_note(guard, overridden):
+    """One ASCII line recording what the guard said and what the
+    operator did about it, for the setup.txt `guard` field. The point of
+    the guard is that a deviation becomes a DECISION rather than
+    silence, so the decision has to be in the run's record too."""
+    if not guard or not guard.get('available'):
+        return 'no auto disc fit to cross-check'
+    body = (f"auto {guard['diam_pct']:+.2f}% diam, "
+            f"mask {guard['area_pct']:+.2f}% area")
+    if not guard.get('warn'):
+        return 'clear (' + body + ')'
+    return ('OVERRIDDEN by operator: ' if overridden
+            else 'tripped: ') + body
 
 
 # ---------------------------------------------------------------------------

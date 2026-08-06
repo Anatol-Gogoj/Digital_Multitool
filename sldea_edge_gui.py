@@ -15,17 +15,29 @@ overlays for audit.
     python sldea_edge_gui.py [run-or-parent-dir] [--auto]
 
 SCALE GATE (operator decision 2026-08-05): the camera zoom moves between
-runs, so every run's px→mm anchor is clicked by hand — Detect diverts to
+runs, so every run's px→mm anchor is measured by hand — Detect diverts to
 the 📏 Calibrate dialog until the resting disc has been measured on THIS
 run's baseline frame, Save hard-blocks without it, and the anchor resets
 on every run switch. The manual calibration overrides every automatic
 reference at Save (it used to be silently ignored when the baseline row
 had an accepted result); the automatic disc fit is demoted to a
-cross-check that warns when it disagrees with the clicks by >3%.
+cross-check.
+
+CALIBRATION v2 (#215, 2026-08-06): the anchor is a CIRCLE the operator
+fits onto the resting disc — drag to move, handles to resize — over
+CAL_ROUNDS rounds, each respawning at a randomized position/size in the
+central ROI, and the MEAN of the fitted diameters is the anchor. The
+spread across rounds is the run's operator-repeatability number and is
+persisted with it. Two sanity guards fire before Save: the spread gate
+(rounds that disagree by >CAL_SPREAD_PCT offer another round) and the
+ANCHOR GUARD (se.anchor_guard) — a deviation over ~1% from either the
+automatic disc fit or the mask's π·(diam_mm/2)² resting area demands an
+explicit override. Run P3_2_2.5mL_20260728 shipped 4.42% low in every
+absolute mm² because the old 3% cross-check said nothing.
 
 With --auto (used by the SLDEA tab's "auto process"), the calibrate
-dialog opens on launch and detection chains automatically once the two
-clicks land. Keyboard: 1/2/3 pick a candidate, R reject,
+dialog opens on launch and detection chains automatically once
+calibration finishes. Keyboard: 1/2/3 pick a candidate, R reject,
 4/D/T open the manual tracer (#162/#172 -- its Done stages the polygon
 as candidate D; Accept commits it like any other candidate),
 Left/Right navigate, Enter accept + next.
@@ -113,6 +125,169 @@ def elide(text, width_px, measure):
         if measure(s) <= width_px:
             return s
     return '…'
+
+
+# ---------------------------------------------------------------------------
+# the 📏 fit-a-circle calibration (#215) — pure geometry, no Tk
+#
+# The operator sits a thick-stroke circle on the resting disc edge, three
+# times, and the mean of the fitted diameters is the run's anchor. Two
+# clicks on exactly-opposite points is a thing humans do badly; a circle
+# is compared against the WHOLE visible boundary. Each round respawns at
+# a randomized position and size inside the central ROI so the three fits
+# are independent rather than three nudges of the first one.
+# ---------------------------------------------------------------------------
+
+CAL_ROUNDS = se.CAL_ROUNDS          # 3 (the spread needs >= 2)
+CAL_MAX_ROUNDS = 6                  # the spread gate may add rounds; this
+                                    # caps the loop so a shaky hand cannot
+                                    # trap the operator in it forever
+CAL_MIN_R_PX = 8.0                  # smallest fittable radius, full-res px
+CAL_HANDLE_TOL = 10                 # handle grab radius, VIEW px
+CAL_SPAWN_R_FRAC = (0.30, 0.40)     # spawn radius / ROI min-dimension
+CAL_SPAWN_JITTER = 0.06             # spawn centre jitter / ROI min-dimension
+                                    # 0.40 + 0.06 < 0.5 keeps the spawned
+                                    # circle inside the ROI by arithmetic,
+                                    # not by the clamp; and 2*0.40 = 0.80
+                                    # stays inside the plausibility gate
+                                    # below, so a raw spawn is always an
+                                    # acceptable (if wrong) fit
+CAL_WHEEL_FINE_PX = 0.5             # wheel notch -> radius, fine
+CAL_WHEEL_COARSE_PX = 5.0           # Shift+wheel notch -> radius
+CAL_MIN_DIAM_FRAC = 0.06            # an acceptable diameter, as a fraction
+CAL_MAX_DIAM_FRAC = 0.85            # of the ROI's short side — the SAME
+                                    # gate se.baseline_disc applies
+_SQ = 0.5 ** 0.5
+# 8 handles like any drawing tool; all of them resize about the centre,
+# because the shape is a CIRCLE by construction (#215: ellipse handles /
+# tilt correction are explicitly out of scope — the camera is normal to
+# the sample and the mask is laser-cut round)
+CAL_HANDLE_DIRS = (('e', 1.0, 0.0), ('se', _SQ, _SQ),
+                   ('s', 0.0, 1.0), ('sw', -_SQ, _SQ),
+                   ('w', -1.0, 0.0), ('nw', -_SQ, -_SQ),
+                   ('n', 0.0, -1.0), ('ne', _SQ, -_SQ))
+
+
+def cal_roi(img_w, img_h, roi_frac):
+    """(x0, y0, x1, y1) of the central ROI, in full-res image px, using
+    the SAME window se.baseline_disc searches — so "inside the ROI" means
+    the same thing to the spawn and to the automatic fit it is checked
+    against."""
+    rf = min(1.0, max(0.2, float(roi_frac)))
+    x0 = img_w * (1.0 - rf) / 2.0
+    y0 = img_h * (1.0 - rf) / 2.0
+    return (x0, y0, float(img_w) - x0, float(img_h) - y0)
+
+
+def clamp_circle(cx, cy, r, box, min_r=CAL_MIN_R_PX, contain=True):
+    """Keep a circle sane inside box=(x0, y0, x1, y1).
+
+    contain=True (the spawn) fits the WHOLE circle inside the box.
+    contain=False (dragging) boxes the CENTRE only and caps the radius at
+    the box's longest side: a disc that runs off the frame edge is a
+    broken run, but refusing to let the operator draw it would hide that
+    instead of showing it."""
+    x0, y0, x1, y1 = (float(v) for v in box)
+    r = max(float(min_r), float(r))
+    if contain:
+        r = min(r, (x1 - x0) / 2.0, (y1 - y0) / 2.0)
+        r = max(r, float(min_r))
+        lox, hix, loy, hiy = x0 + r, x1 - r, y0 + r, y1 - r
+    else:
+        r = min(r, max(x1 - x0, y1 - y0))
+        lox, hix, loy, hiy = x0, x1, y0, y1
+    cx = (x0 + x1) / 2.0 if hix < lox else min(max(float(cx), lox), hix)
+    cy = (y0 + y1) / 2.0 if hiy < loy else min(max(float(cy), loy), hiy)
+    return (cx, cy, r)
+
+
+def spawn_circle(img_w, img_h, roi_frac, rnd=None):
+    """A randomized (cx, cy, r) start for one calibration round, wholly
+    inside the central ROI (#215).
+
+    Randomizing per round is the point: an operator who only nudges the
+    previous circle produces three correlated fits and a spread that
+    understates their real scatter. `rnd` is any random.Random (pass a
+    seeded one to make a session reproducible in a test)."""
+    import random as _random
+    rnd = rnd or _random
+    x0, y0, x1, y1 = cal_roi(img_w, img_h, roi_frac)
+    span = min(x1 - x0, y1 - y0)
+    lo, hi = CAL_SPAWN_R_FRAC
+    r = span * rnd.uniform(lo, hi)
+    j = span * CAL_SPAWN_JITTER
+    cx = (x0 + x1) / 2.0 + rnd.uniform(-j, j)
+    cy = (y0 + y1) / 2.0 + rnd.uniform(-j, j)
+    return clamp_circle(cx, cy, r, (x0, y0, x1, y1), contain=True)
+
+
+def cal_diam_plausible(diam_px, img_w, img_h, roi_frac):
+    """Could this diameter be the resting disc at all?
+
+    Mirrors se.baseline_disc's own size gate — 0.06 to 0.85 of the ROI's
+    short side — so the dialog refuses exactly what the automatic fit
+    would refuse. The two-click dialog had a 10 px floor for the same
+    reason (a fat-fingered pair of clicks 3 px apart would have set
+    mm_per_px to ~5 mm/px and every area with it); a circle can be
+    collapsed onto its own centre just as easily."""
+    x0, y0, x1, y1 = cal_roi(img_w, img_h, roi_frac)
+    span = min(x1 - x0, y1 - y0)
+    return (CAL_MIN_DIAM_FRAC * span <= float(diam_px)
+            <= CAL_MAX_DIAM_FRAC * span)
+
+
+def circle_handles(cx, cy, r):
+    """[(name, x, y)] of the 8 resize handles, in the same coordinate
+    space as the inputs."""
+    return [(nm, cx + dx * r, cy + dy * r) for nm, dx, dy in CAL_HANDLE_DIRS]
+
+
+def hit_test_circle(cx, cy, r, px, py, tol=CAL_HANDLE_TOL):
+    """What a press at (px, py) grabs: a handle name, 'move' (interior),
+    or None (a press that grabs nothing at all — it must NOT teleport the
+    circle, which is the one interaction bug that would silently corrupt
+    a fit the operator thought was finished).
+
+    tol is in the coordinate space of the arguments; the dialog hit-tests
+    in VIEW px so a handle stays the same physical size at every zoom."""
+    hit, best = None, None
+    for nm, hx, hy in circle_handles(cx, cy, r):
+        d = ((px - hx) ** 2 + (py - hy) ** 2) ** 0.5
+        if d <= tol and (best is None or d < best):
+            hit, best = nm, d
+    if hit:
+        return hit
+    if ((px - cx) ** 2 + (py - cy) ** 2) ** 0.5 <= r:
+        return 'move'
+    return None
+
+
+def resize_radius(cx, cy, px, py, min_r=CAL_MIN_R_PX):
+    """Radius for a handle dragged to (px, py): the distance from the
+    centre. Resize is ALWAYS about the centre and always circular."""
+    return max(float(min_r), ((px - cx) ** 2 + (py - cy) ** 2) ** 0.5)
+
+
+def cal_key_delta(keysym, shift=False):
+    """(dcx, dcy, dr) in full-res px for an arrow key: arrows nudge the
+    centre 1 px, Shift+arrows resize 1 px (Up/Right grow, Down/Left
+    shrink). None for any other key."""
+    k = (keysym or '').lower()
+    if k not in ('left', 'right', 'up', 'down'):
+        return None
+    if shift:
+        return (0.0, 0.0, 1.0 if k in ('up', 'right') else -1.0)
+    return ({'left': (-1.0, 0.0, 0.0), 'right': (1.0, 0.0, 0.0),
+             'up': (0.0, -1.0, 0.0), 'down': (0.0, 1.0, 0.0)}[k])
+
+
+def cal_wheel_dr(steps, coarse=False):
+    """Radius change for `steps` wheel notches: fine by default, coarse
+    with Shift. The wheel is the FINE RESIZE here (#215) — zoom moved to
+    Ctrl+wheel, because a wheel that zoomed while the operator was
+    sizing a circle would fight the primary gesture."""
+    return float(steps) * (CAL_WHEEL_COARSE_PX if coarse
+                           else CAL_WHEEL_FINE_PX)
 
 
 def hot_slot(entries, chosen, sel):
@@ -696,32 +871,57 @@ class EdgeReviewApp:
         q = self._queue_list()
         took = self._fmt_t(time.time() - self._t0) if self._t0 else '?'
         if self.manual_ref:
-            # the auto disc fit is a CROSS-CHECK of the operator's clicks,
-            # not the anchor (scale gate, 2026-08-05). Two tiers: above
-            # 3% diameter a modal warning (bad clicks, moved optics,
-            # wrong-feature fit); above 1% — the scale-anchor term of
-            # the ±1-2% absolute-area budget (SLDEA_MEASUREMENT §1.1) —
-            # a status-line ⚠, because a silent green tick used to
-            # cover disagreements 7x the budget (audit 2026-08-05).
+            # the auto disc fit is a CROSS-CHECK of the operator's fit,
+            # not the anchor (scale gate, 2026-08-05). Since #215 the
+            # SAME guard runs at calibration time (se.anchor_guard, ~1%
+            # in diameter and in mask area) — this repeat is the
+            # detect-time restatement, and it also covers the paths that
+            # skip the dialog's guard: a REUSED recorded anchor, and a
+            # settings change (diam_mm) made after calibrating. The old
+            # tiering fired a modal only past 3%, which is how P3_2's
+            # 2.28% shipped in silence.
             sc = f"; scale: manual {self.manual_ref['diam_px']:.0f} px"
-            auto_px = (self.base_ref or {}).get('diam_px')
-            if auto_px:
-                mism = (100 * abs(auto_px - self.manual_ref['diam_px'])
-                        / self.manual_ref['diam_px'])
-                sc += (f" vs auto disc {auto_px:.0f} px "
-                       + (f"⚠ {mism:.1f}% apart" if mism > 3.0 else
-                          f"⚠ {mism:.1f}% apart (>1% budget)"
-                          if mism > 1.0 else "✓"))
-                if mism > 3.0:
+            spr = self.manual_ref.get('spread_pct')
+            if spr is not None:
+                sc += (f" (mean of {self.manual_ref.get('n_rounds', '?')}"
+                       f", spread {spr:.2f}%"
+                       + ('' if spr <= se.CAL_SPREAD_PCT else ' ⚠') + ')')
+            guard = se.anchor_guard(self.manual_ref['diam_px'],
+                                    self.base_ref, self.settings['diam_mm'])
+            if guard['available']:
+                sc += (f" vs auto disc {guard['auto_diam_px']:.0f} px: "
+                       f"{guard['diam_pct']:+.1f}% apart in diam, mask "
+                       f"area {guard['area_pct']:+.1f}% "
+                       + ('⚠' if guard['warn'] else '✓'))
+                # The MODAL stays at the historical 3% tier, plus one new
+                # case: an anchor REUSED from setup.txt never passed
+                # through the dialog's guard, so this is its only
+                # chance to be questioned. Firing a modal on every 1%
+                # deviation here would nag every honestly-calibrated
+                # run (baseline_disc itself agrees with the by-eye
+                # measurement only to ~1%); the status ⚠ carries that
+                # tier, and the DECISION is made at calibration time.
+                if (abs(guard['diam_pct']) > se.ANCHOR_MODAL_DIAM_PCT
+                        or (guard['warn']
+                            and self.manual_ref.get('reused'))):
                     messagebox.showwarning(
                         "Scale cross-check",
-                        f"Your calibration "
-                        f"({self.manual_ref['diam_px']:.0f} px) and the "
-                        f"automatic baseline-disc fit ({auto_px:.0f} px) "
-                        f"disagree by {mism:.1f}% in diameter (>3%).\n\n"
-                        f"Re-check the two clicks, the optics, and the "
-                        f"{self.settings['diam_mm']:g} mm nominal. The "
-                        f"MANUAL anchor is what Save uses.")
+                        "The anchor these results were measured with "
+                        "disagrees with a reference the app measured "
+                        "independently:\n\n"
+                        + '\n'.join('• ' + w for w in guard['warn']
+                                    or [f"diameter "
+                                        f"{guard['diam_pct']:+.2f}% from "
+                                        f"the automatic disc fit"])
+                        + ("\n\n(this anchor was REUSED from setup.txt, "
+                           "so it never passed the calibration-time "
+                           "guard)" if self.manual_ref.get('reused')
+                           else "")
+                        + f"\n\nRe-check the fitted circle, the optics, "
+                          f"and the {self.settings['diam_mm']:g} mm "
+                          f"nominal. The MANUAL anchor is what Save "
+                          f"uses — every absolute mm² in this run "
+                          f"inherits it.")
             else:
                 sc += " (auto disc cross-check unavailable)"
         else:
@@ -1170,6 +1370,23 @@ class EdgeReviewApp:
                     f"to THIS anchor)" if n_kept else " (left blank)")
                  + (f"\n  incl. {n_unread} UNREADABLE frame(s) — kept, "
                     f"not re-measured" if n_unread else ""))
+        # ... and SAY BY HOW MUCH (#215). "re-scaled to THIS anchor" is
+        # true but abstract; an operator who re-reviewed one frame needs
+        # the number, because the whole mm² column moves by it.
+        rescale = None
+        try:
+            prev = se.load_scale_anchor(self.rundir)
+            if prev and self.manual_ref:
+                rescale = se.rescale_pct(prev['diam_px'],
+                                         self.manual_ref['diam_px'])
+        except OSError:
+            rescale = None
+        if n_kept and rescale is not None and abs(rescale) >= 0.005:
+            unrev += (f"\n  ⚠ this anchor differs from the recorded one "
+                      f"({prev['diam_px']:.1f} → "
+                      f"{self.manual_ref['diam_px']:.1f} px): EVERY "
+                      f"re-derived mm² moves {rescale:+.2f}%, including "
+                      f"rows you did not re-review.")
         n_bd = 0
         if self.flags:
             start = min(self.flags)
@@ -1278,6 +1495,18 @@ class EdgeReviewApp:
                 'anchor_frame': self.manual_ref.get('frame', ''),
                 'anchor_is_baseline': self.manual_ref.get('is_baseline'),
                 'auto_diam_px': (self.base_ref or {}).get('diam_px'),
+                # #215: the three (or more) fitted diameters, their
+                # spread and what the anchor guard said. The spread is
+                # the ONLY per-run measurement of operator repeatability
+                # in this project — SLDEA_MEASUREMENT §2.5's "operator
+                # repeat ~1%" has never had data. Absent on a reused
+                # pre-#215 anchor, and save_scale_anchor simply omits
+                # the keys then.
+                'n_rounds': self.manual_ref.get('n_rounds'),
+                'rounds_px': self.manual_ref.get('rounds_px'),
+                'spread_px': self.manual_ref.get('spread_px'),
+                'spread_pct': self.manual_ref.get('spread_pct'),
+                'guard': self.manual_ref.get('guard'),
             })
         except OSError as e:
             self.status.config(
@@ -1406,31 +1635,72 @@ class EdgeReviewApp:
         self.status.config(text="Detect is gated on the scale "
                                 "calibration — 📏 Calibrate to proceed")
 
+    def _px_rows(self):
+        """How many rows already carry a px measurement — i.e. how many
+        absolute mm² a new anchor would REWRITE at the next Save."""
+        try:
+            return sum(1 for row in self.run['rows']
+                       if (row.get('active_area_px') or '').strip())
+        except Exception:
+            return 0
+
+    def _auto_disc(self):
+        """The automatic baseline disc fit, for the anchor guard — or
+        None. Cached inside se.baseline_disc, so asking here also warms
+        the cache detection is about to use. Never allowed to raise out
+        of the dialog: a cv2 failure must cost the CROSS-CHECK, not the
+        calibration (the gate is fail-closed by construction, audit
+        2026-08-05)."""
+        try:
+            base = self._base_gray()
+            if base is None:
+                return None
+            return se.baseline_disc(base, self.settings)
+        except Exception as e:
+            print(f"calibrate: automatic disc cross-check failed: {e}")
+            return None
+
     def _calibrate_scale(self, then_detect=False):
-        """Manual px→mm calibration: click the two opposite edges of the
-        RESTING disc on the baseline frame; the known nominal diameter
-        (diam_mm) between them sets the scale. This is the SCALE GATE
-        (operator decision 2026-08-05): Detect and Save both require it
-        per run, and it overrides EVERY automatic reference at Save.
-        With then_detect, detection chains automatically once the two
-        clicks land (Detect's gate path and --auto). SINGLETON like
-        Advanced… (#176): the grab is pointer-only, so a pierced dialog
-        must front the live one, never stack a second wait chain.
+        """Manual px→mm calibration (#215, 2026-08-06): FIT A CIRCLE onto
+        the resting disc — drag to move, 8 handles to resize about the
+        centre — three times, and the MEAN of the fitted diameters is the
+        run's anchor. This is the SCALE GATE (operator decision
+        2026-08-05): Detect and Save both require it per run, and it
+        overrides EVERY automatic reference at Save. With then_detect,
+        detection chains automatically once calibration finishes
+        (Detect's gate path and --auto).
 
-        Fail-CLOSED construction (audit 2026-08-05): the singleton
+        Why a circle and not the two clicks it replaces: judging
+        "exactly opposite" on a disc is something humans do badly, and
+        run P3_2_2.5mL_20260728 is the measured proof — its two-click
+        anchor landed 2.28% off the automatic fit, which put every
+        absolute mm² in that run 4.42% low, and nothing warned because
+        2.28% sat inside the old 3% cross-check. A circle is judged
+        against the WHOLE visible boundary.
+
+        Each round RESPAWNS at a randomized position and size inside the
+        central ROI (spawn_circle): three nudges of one circle would
+        produce three correlated fits and a spread that flatters the
+        operator. The spread across rounds is kept — it is the only
+        measurement of operator repeatability this project has.
+
+        SINGLETON like Advanced… (#176): the grab is pointer-only, so a
+        pierced dialog must front the live one, never stack a second wait
+        chain. Fail-CLOSED construction (audit 2026-08-05): the singleton
         handle publishes only once the dialog is fully built, and a
-        try/finally destroys a half-built window and clears the handle
-        no matter what raises — an exception mid-build used to leave a
-        dead Toplevel in self._cal_win, and every later Detect lifted
-        the corpse and returned, silently and forever.
+        try/finally destroys a half-built window and clears the handle no
+        matter what raises — an exception mid-build used to leave a dead
+        Toplevel in self._cal_win, and every later Detect lifted the
+        corpse and returned, silently and forever.
 
-        The frame is ZOOMABLE (wheel about the cursor, right-drag pans,
-        F fits): the fixed 0.41x preview put one display pixel at ~2.5
-        full-res px while the soft ink edge spans 8-15, so click scatter
-        alone could move every absolute area by several % (audit
-        2026-08-05). Clicks land in full-res image coordinates at any
-        zoom. A previously RECORDED anchor (setup.txt) can be reused
-        with P — reproducible re-saves instead of fresh scatter."""
+        The frame is ZOOMABLE (Ctrl+wheel about the cursor, right-drag
+        pans, F fits, Z goes to 1:1 on the circle): the fixed 0.41x
+        preview put one display pixel at ~2.5 full-res px while the soft
+        ink edge spans 8-15 (audit 2026-08-05). The plain wheel is the
+        FINE RESIZE, so it cannot fight the sizing gesture. Geometry is
+        always full-res image coordinates. A previously RECORDED anchor
+        (setup.txt) can be reused with P, which skips the rounds."""
+        import random
         if not self.run:
             messagebox.showinfo("Calibrate", "Pick a run first")
             return
@@ -1451,19 +1721,23 @@ class EdgeReviewApp:
                 self._gate_status()
             return
         recorded = se.load_scale_anchor(self.rundir)
+        n_px_rows = self._px_rows()
         win = tk.Toplevel(self.root)
         try:
-            win.title("Calibrate scale — click the disc's two opposite "
-                      "edges")
+            win.title(f"Calibrate scale — fit the circle to the resting "
+                      f"disc (1 of {CAL_ROUNDS})")
             win.transient(self.root)
-            gate = (f"SCALE GATE — this run's px→mm anchor.\n"
-                    f"Click LEFT edge then RIGHT edge of the resting disc "
-                    f"(nominal {self.settings['diam_mm']:g} mm across). "
-                    f"Click at the ink edge's HALF-HEIGHT (mid-gray), "
-                    f"matching the machine convention — not the outer "
-                    f"toe.\n"
-                    f"Wheel zooms about the cursor, right-drag pans, F "
-                    f"fits. Esc cancels.")
+            gate = (f"SCALE GATE — this run's px→mm anchor, "
+                    f"{CAL_ROUNDS} rounds averaged.\n"
+                    f"ENCIRCLE the shaded resting region — sit the STROKE "
+                    f"on the disc edge (nominal "
+                    f"{self.settings['diam_mm']:g} mm across). Aim the "
+                    f"stroke at the ink edge's HALF-HEIGHT (mid-gray), "
+                    f"the machine convention — not the outer toe.\n"
+                    f"Drag inside = move · drag a handle = resize · wheel "
+                    f"= fine resize (Shift = coarse) · arrows nudge, "
+                    f"Shift+arrows resize · Ctrl+wheel zooms, right-drag "
+                    f"pans, F fits, Z = 1:1. Esc cancels.")
             if not anchor_is_baseline:
                 gate += ("\n⚠ The baseline frame is missing/unreadable — "
                          "this is a LATER frame. Only calibrate here if "
@@ -1481,19 +1755,63 @@ class EdgeReviewApp:
                          f"({recorded.get('mm_per_px', 0):.5f} mm/px, "
                          f"saved {recorded.get('saved', '?')}) — "
                          f"press P to REUSE it.")
-            tk.Label(win, text=gate, justify='left').pack(pady=(6, 2))
-            ch = max(200, min(VIEW_H, int(VIEW_W * img.height / img.width)))
-            cv = tk.Canvas(win, width=VIEW_W, height=ch, bg='#111',
+            if n_px_rows:
+                # the [critical] partial-re-save interaction
+                # (SLDEA_HANDOFF 2026-08-05): unreviewed rows keep their
+                # px and are RE-DERIVED at the save's scale, so a new
+                # anchor moves the WHOLE run's mm² column — including
+                # frames this session never opens. An operator
+                # re-reviewing one frame has to be told that here, not
+                # discover it in the spreadsheet.
+                gate += (f"\n⚠ {n_px_rows} row(s) in this run already "
+                         f"carry a px measurement. Whatever you accept "
+                         f"here RE-SCALES EVERY ONE of their mm² at the "
+                         f"next Save — even frames you do not re-review. "
+                         f"Re-reviewing one frame moves the whole "
+                         f"column.")
+            tk.Label(win, text=gate, justify='left',
+                     wraplength=980).pack(pady=(6, 2), padx=8, anchor='w')
+            hdr = tk.Label(win, text='', justify='left',
+                           font=('TkDefaultFont', 11, 'bold'))
+            hdr.pack(anchor='w', padx=8)
+            cw = max(400, min(1000, self.root.winfo_screenwidth() - 220))
+            ch = max(300, min(760, self.root.winfo_screenheight() - 360))
+            cv = tk.Canvas(win, width=cw, height=ch, bg='#111',
                            cursor='crosshair')
-            cv.pack(padx=8, pady=8)
+            cv.pack(padx=8, pady=6)
+            live = tk.Label(win, text='', justify='left')
+            live.pack(anchor='w', padx=8)
+            btns = tk.Frame(win)
+            btns.pack(fill='x', padx=8, pady=(2, 8))
             vt = strc.ViewTransform()
-            vt.fit(img.width, img.height, VIEW_W, ch)
-            pts = []            # clicks in FULL-RES image coordinates
-            state = {'photo': None, 'pan': None}
+            vt.fit(img.width, img.height, cw, ch)
+            rnd = random.Random()
+            # box the drag CAN reach vs the box a spawn must sit in
+            full_box = (0.0, 0.0, float(img.width), float(img.height))
+            roi_box = cal_roi(img.width, img.height,
+                              self.settings.get('roi_frac', 0.85))
+            st = {'photo': None, 'pan': None, 'grab': None,
+                  'round': 1, 'diams': [], 'circle': None}
+
+            def respawn():
+                st['circle'] = spawn_circle(
+                    img.width, img.height,
+                    self.settings.get('roi_frac', 0.85), rnd)
+
+            def set_circle(cx, cy, r):
+                st['circle'] = clamp_circle(cx, cy, r, full_box,
+                                            contain=False)
+
+            def head_text():
+                done = ', '.join(f"{d:.1f}" for d in st['diams'])
+                return (f"Calibration {st['round']} of "
+                        f"{max(CAL_ROUNDS, len(st['diams']) + 1)}"
+                        + (f"   ·   accepted so far: {done} px"
+                           if done else ''))
 
             def repaint():
                 ix0, iy0 = vt.to_image(0, 0)
-                ix1, iy1 = vt.to_image(VIEW_W, ch)
+                ix1, iy1 = vt.to_image(cw, ch)
                 cx0, cy0 = max(0, int(ix0)), max(0, int(iy0))
                 cx1 = min(img.width, int(ix1) + 2)
                 cy1 = min(img.height, int(iy1) + 2)
@@ -1504,21 +1822,40 @@ class EdgeReviewApp:
                     dh = max(1, int(round((cy1 - cy0) * vt.zoom)))
                     res = (Image.NEAREST if vt.zoom >= 2.0
                            else Image.BILINEAR)
-                    state['photo'] = ImageTk.PhotoImage(
+                    st['photo'] = ImageTk.PhotoImage(
                         crop.resize((dw, dh), res))
                     vx, vy = vt.to_view(cx0, cy0)
                     cv.create_image(int(vx), int(vy), anchor='nw',
-                                    image=state['photo'])
-                for px, py in pts:
-                    vx, vy = vt.to_view(px, py)
-                    cv.create_oval(vx - 4, vy - 4, vx + 4, vy + 4,
-                                   outline='#00e676', width=2)
-                if len(pts) == 2:
-                    a = vt.to_view(*pts[0])
-                    b = vt.to_view(*pts[1])
-                    cv.create_line(*a, *b, fill='#00e676', width=2)
+                                    image=st['photo'])
+                ccx, ccy, r = st['circle']
+                vx, vy = vt.to_view(ccx, ccy)
+                vr = r * vt.zoom
+                # thick stroke (#215) — the stroke IS the comparison, so
+                # it must be visible against the ink without hiding the
+                # edge it sits on: 3 px core inside a dark 5 px halo
+                cv.create_oval(vx - vr, vy - vr, vx + vr, vy + vr,
+                               outline='#000000', width=5)
+                cv.create_oval(vx - vr, vy - vr, vx + vr, vy + vr,
+                               outline='#00e676', width=3)
+                cv.create_line(vx - 6, vy, vx + 6, vy, fill='#00e676')
+                cv.create_line(vx, vy - 6, vx, vy + 6, fill='#00e676')
+                for _nm, hx, hy in circle_handles(ccx, ccy, r):
+                    hvx, hvy = vt.to_view(hx, hy)
+                    cv.create_rectangle(hvx - 4, hvy - 4, hvx + 4, hvy + 4,
+                                        fill='#00e676', outline='#000000')
+                hdr.config(text=head_text())
+                dpx = 2.0 * r
+                live.config(
+                    text=f"circle: {dpx:.1f} px across  →  "
+                         f"{self.settings['diam_mm'] / max(dpx, 1e-9):.5f} "
+                         f"mm/px   ·   centre "
+                         f"({ccx:.0f}, {ccy:.0f})   ·   zoom "
+                         f"{vt.zoom:.2f}x"
+                         + ('' if vt.zoom >= 1.0 else
+                            "  ⚠ below 1:1 — press Z before accepting"))
 
-            def accept(dpx_full, source_frame, src_is_baseline=None):
+            def accept(dpx_full, source_frame, src_is_baseline=None,
+                       stats=None, guard=None, overridden=False):
                 self.manual_ref = {'method': 'manual-calibration',
                                    'diam_px': float(dpx_full),
                                    'frame': source_frame,
@@ -1526,68 +1863,294 @@ class EdgeReviewApp:
                                                    if src_is_baseline
                                                    is None
                                                    else src_is_baseline)}
+                if stats:
+                    self.manual_ref.update({
+                        'rounds_px': list(stats['values']),
+                        'n_rounds': stats['n'],
+                        'spread_px': stats['spread_px'],
+                        'spread_pct': stats['spread_pct']})
+                if guard is not None:
+                    self.manual_ref['guard'] = se.anchor_guard_note(
+                        guard, overridden)
+                extra = (f" (mean of {stats['n']}, spread "
+                         f"{stats['spread_pct']:.2f}%)" if stats else '')
                 self.status.config(
                     text=f"scale calibrated: "
                          f"{self.settings['diam_mm']:g} mm = "
-                         f"{dpx_full:.0f} px "
+                         f"{dpx_full:.0f} px{extra} "
                          f"({self.settings['diam_mm'] / dpx_full:.5f} "
                          f"mm/px) — overrides every automatic reference "
                          f"at Save")
                 win.destroy()
 
-            def click(ev):
-                pts.append(vt.to_image(ev.x, ev.y))
-                repaint()
-                if len(pts) == 2:
-                    dpx_full = ((pts[0][0] - pts[1][0]) ** 2 +
-                                (pts[0][1] - pts[1][1]) ** 2) ** 0.5
-                    if dpx_full < 10:
-                        messagebox.showwarning(
-                            "Calibrate", "Points are too close — retry.")
-                        win.destroy()
+            def finish():
+                """Average the rounds, run the spread gate, then the
+                anchor guard, then accept. Every gate is a DECISION the
+                operator makes explicitly — the failure this replaces was
+                silence, not a missing number."""
+                stats = se.calibration_stats(st['diams'])
+                if not stats:
+                    return
+                if not se.spread_ok(stats):
+                    if len(st['diams']) >= CAL_MAX_ROUNDS:
+                        if not messagebox.askyesno(
+                                "Rounds disagree",
+                                f"The {stats['n']} rounds still spread "
+                                f"{stats['spread_pct']:.2f}% "
+                                f"(>{se.CAL_SPREAD_PCT:g}%) after "
+                                f"{CAL_MAX_ROUNDS} rounds — "
+                                f"{stats['min']:.1f}–{stats['max']:.1f} "
+                                f"px.\n\nAccept the mean "
+                                f"({stats['mean']:.1f} px) anyway?\n\n"
+                                f"No = cancel calibration (the gate "
+                                f"holds)."):
+                            win.destroy()
+                            return
+                    elif messagebox.askyesno(
+                            "Rounds disagree",
+                            f"Your {stats['n']} fitted diameters spread "
+                            f"{stats['spread_pct']:.2f}% "
+                            f"({stats['min']:.1f}–{stats['max']:.1f} px), "
+                            f"over the {se.CAL_SPREAD_PCT:g}% gate — that "
+                            f"is the run's operator-repeatability number "
+                            f"and it is worse than the error budget "
+                            f"expects.\n\nAdd another round?\n\nNo = "
+                            f"accept the mean of the "
+                            f"{stats['n']} as they are."):
+                        st['round'] = len(st['diams']) + 1
+                        respawn()
+                        sync_buttons()
+                        repaint()
                         return
-                    accept(dpx_full, frame_name)
+                live.config(text="cross-checking the mean against the "
+                                 "automatic disc fit…")
+                try:
+                    win.update_idletasks()
+                except tk.TclError:
+                    pass
+                guard = se.anchor_guard(stats['mean'], self._auto_disc(),
+                                        self.settings['diam_mm'])
+                overridden = False
+                if guard['warn']:
+                    # the P3_2 case: 2.28% diameter / -4.42% area, INSIDE
+                    # the old 3% cross-check, so it shipped silently and
+                    # the run now carries a permanent caveat. This is the
+                    # guard that would have caught it — twice.
+                    lines = '\n'.join('• ' + w for w in guard['warn'])
+                    impact = ''
+                    if n_px_rows and recorded:
+                        pct = se.rescale_pct(recorded['diam_px'],
+                                             stats['mean'])
+                        if pct is not None:
+                            impact = (f"\n\nAccepting also moves the "
+                                      f"{n_px_rows} already-measured "
+                                      f"row(s) by {pct:+.2f}% in mm² at "
+                                      f"the next Save (re-derived from "
+                                      f"px at this anchor).")
+                    if not messagebox.askyesno(
+                            "Anchor sanity check",
+                            f"The accepted mean ({stats['mean']:.1f} px) "
+                            f"disagrees with a reference the app "
+                            f"measured independently:\n\n{lines}\n\n"
+                            f"The scale-anchor budget is ~0.4% diameter "
+                            f"/ ~0.8% area (SLDEA_MEASUREMENT §2.1), so "
+                            f"this is outside it. Common causes: the "
+                            f"stroke sat on the outer toe instead of the "
+                            f"half-height, the wrong feature was "
+                            f"encircled, or diam_mm does not match this "
+                            f"device's mask.{impact}\n\nUse this anchor "
+                            f"ANYWAY?\n\nNo = recalibrate from round 1.",
+                            icon='warning'):
+                        st['round'], st['diams'] = 1, []
+                        respawn()
+                        sync_buttons()
+                        repaint()
+                        return
+                    overridden = True
+                accept(stats['mean'], frame_name, stats=stats,
+                       guard=guard, overridden=overridden)
+
+            def continue_round(_ev=None):
+                dpx = 2.0 * st['circle'][2]
+                if not cal_diam_plausible(dpx, img.width, img.height,
+                                          self.settings.get('roi_frac',
+                                                            0.85)):
+                    # a circle collapsed onto its own centre (or grown
+                    # past the frame) is not a fit. The two-click dialog
+                    # refused clicks under 10 px apart for the same
+                    # reason: a nonsense anchor scales EVERY area.
+                    messagebox.showwarning(
+                        "Calibrate",
+                        f"{dpx:.0f} px across cannot be the resting disc "
+                        f"— it is outside the size range the automatic "
+                        f"fit accepts too. Resize the circle onto the "
+                        f"disc edge (drag a handle, or the wheel) before "
+                        f"continuing.")
+                    return
+                st['diams'].append(dpx)
+                if len(st['diams']) >= max(CAL_ROUNDS, st['round']):
+                    finish()
+                    return
+                st['round'] = len(st['diams']) + 1
+                respawn()
+                sync_buttons()
+                repaint()
+
+            def redo_round(_ev=None):
+                respawn()
+                repaint()
+
+            def restart_all(_ev=None):
+                st['round'], st['diams'] = 1, []
+                respawn()
+                sync_buttons()
+                repaint()
 
             def reuse(_ev=None):
                 if recorded:
                     # a reused anchor keeps ITS OWN provenance — the
                     # frame it was clicked on and whether that was the
-                    # baseline, not this session's (review 2026-08-05)
-                    accept(recorded['diam_px'],
-                           recorded.get('anchor_frame', '') or frame_name,
-                           src_is_baseline=recorded.get(
-                               'anchor_is_baseline'))
+                    # baseline, not this session's (review 2026-08-05).
+                    # Its rounds/spread stay ITS record too: this session
+                    # fitted nothing, so it must not claim a spread.
+                    self.manual_ref = {
+                        'method': 'manual-calibration',
+                        'diam_px': float(recorded['diam_px']),
+                        'frame': (recorded.get('anchor_frame', '')
+                                  or frame_name),
+                        'is_baseline': recorded.get('anchor_is_baseline',
+                                                    anchor_is_baseline),
+                        'reused': True}
+                    for k in ('rounds_px', 'n_rounds', 'spread_px',
+                              'spread_pct', 'guard'):
+                        if recorded.get(k) is not None:
+                            self.manual_ref[k] = recorded[k]
+                    dpx = float(recorded['diam_px'])
+                    self.status.config(
+                        text=f"scale REUSED from the recorded anchor: "
+                             f"{self.settings['diam_mm']:g} mm = "
+                             f"{dpx:.0f} px "
+                             f"({self.settings['diam_mm'] / dpx:.5f} "
+                             f"mm/px) — overrides every automatic "
+                             f"reference at Save")
+                    win.destroy()
 
-            def wheel(vx, vy, steps):
-                vt.zoom_at(vx, vy, 1.15 ** steps)
+            cont = tk.Button(btns, text='', command=continue_round)
+            cont.pack(side=tk.LEFT)
+            tk.Button(btns, text="↻ Redo this round",
+                      command=redo_round).pack(side=tk.LEFT, padx=6)
+            tk.Button(btns, text="⟲ Restart all rounds",
+                      command=restart_all).pack(side=tk.LEFT)
+            if recorded:
+                tk.Button(btns, text="📏 Reuse recorded anchor (P)",
+                          command=reuse).pack(side=tk.LEFT, padx=6)
+            tk.Button(btns, text="Cancel (Esc)",
+                      command=win.destroy).pack(side=tk.RIGHT)
+
+            def sync_buttons():
+                last = len(st['diams']) + 1 >= max(CAL_ROUNDS, st['round'])
+                cont.config(text=("✔ Finish calibration" if last
+                                  else "Continue →"))
+                win.title(f"Calibrate scale — fit the circle to the "
+                          f"resting disc ({st['round']} of "
+                          f"{max(CAL_ROUNDS, st['round'])})")
+
+            def press(ev):
+                ccx, ccy, r = st['circle']
+                # hit-test in VIEW px: a handle must stay the same
+                # physical size to the hand at every zoom
+                vx, vy = vt.to_view(ccx, ccy)
+                what = hit_test_circle(vx, vy, r * vt.zoom, ev.x, ev.y)
+                if what is None:
+                    st['grab'] = None
+                    return
+                ix, iy = vt.to_image(ev.x, ev.y)
+                st['grab'] = (what, ix - ccx, iy - ccy)
+
+            def drag(ev):
+                if not st['grab']:
+                    return
+                what, offx, offy = st['grab']
+                ix, iy = vt.to_image(ev.x, ev.y)
+                ccx, ccy, r = st['circle']
+                if what == 'move':
+                    set_circle(ix - offx, iy - offy, r)
+                else:
+                    set_circle(ccx, ccy,
+                               resize_radius(ccx, ccy, ix, iy))
+                repaint()
+
+            def release(_ev):
+                st['grab'] = None
+
+            def wheel(vx, vy, steps, ctrl=False, shift=False):
+                if ctrl:
+                    vt.zoom_at(vx, vy, 1.15 ** steps)
+                else:
+                    ccx, ccy, r = st['circle']
+                    set_circle(ccx, ccy, r + cal_wheel_dr(steps, shift))
+                repaint()
+
+            def key_nudge(ev):
+                d = cal_key_delta(ev.keysym, bool(ev.state & 0x0001))
+                if d is None:
+                    return
+                ccx, ccy, r = st['circle']
+                set_circle(ccx + d[0], ccy + d[1], r + d[2])
+                repaint()
+                return 'break'
+
+            def one_to_one(_ev=None):
+                """Zoom to at least 1:1 centred on the circle — the fixed
+                0.41x preview was itself an audit finding."""
+                ccx, ccy, _r = st['circle']
+                vt.zoom = max(1.0, vt.zoom)
+                vt.ox = ccx - cw / (2.0 * vt.zoom)
+                vt.oy = ccy - ch / (2.0 * vt.zoom)
                 repaint()
 
             def pan_start(ev):
-                state['pan'] = (ev.x, ev.y)
+                st['pan'] = (ev.x, ev.y)
 
             def pan_move(ev):
-                if state['pan'] is None:
+                if st['pan'] is None:
                     return
-                dx, dy = ev.x - state['pan'][0], ev.y - state['pan'][1]
-                state['pan'] = (ev.x, ev.y)
+                dx, dy = ev.x - st['pan'][0], ev.y - st['pan'][1]
+                st['pan'] = (ev.x, ev.y)
                 vt.pan_view(dx, dy)
                 repaint()
 
-            cv.bind('<Button-1>', click)
+            cv.bind('<Button-1>', press)
+            cv.bind('<B1-Motion>', drag)
+            cv.bind('<ButtonRelease-1>', release)
             cv.bind('<MouseWheel>',
-                    lambda e: wheel(e.x, e.y, e.delta / 120.0))
-            cv.bind('<Button-4>', lambda e: wheel(e.x, e.y, 1))
-            cv.bind('<Button-5>', lambda e: wheel(e.x, e.y, -1))
+                    lambda e: wheel(e.x, e.y, e.delta / 120.0,
+                                    bool(e.state & 0x0004),
+                                    bool(e.state & 0x0001)))
+            cv.bind('<Button-4>', lambda e: wheel(
+                e.x, e.y, 1, bool(e.state & 0x0004),
+                bool(e.state & 0x0001)))
+            cv.bind('<Button-5>', lambda e: wheel(
+                e.x, e.y, -1, bool(e.state & 0x0004),
+                bool(e.state & 0x0001)))
             cv.bind('<Button-3>', pan_start)
             cv.bind('<B3-Motion>', pan_move)
-            win.bind('<Key-f>', lambda e: (vt.fit(img.width, img.height,
-                                                  VIEW_W, ch), repaint()))
-            win.bind('<Key-F>', lambda e: (vt.fit(img.width, img.height,
-                                                  VIEW_W, ch), repaint()))
+            for k in ('<Key-f>', '<Key-F>'):
+                win.bind(k, lambda e: (vt.fit(img.width, img.height,
+                                              cw, ch), repaint()))
+            win.bind('<Key-z>', one_to_one)
+            win.bind('<Key-Z>', one_to_one)
+            for k in ('<Left>', '<Right>', '<Up>', '<Down>',
+                      '<Shift-Left>', '<Shift-Right>', '<Shift-Up>',
+                      '<Shift-Down>'):
+                win.bind(k, key_nudge)
+            win.bind('<Return>', continue_round)
             if recorded:
                 win.bind('<Key-p>', reuse)
                 win.bind('<Key-P>', reuse)
             win.bind('<Escape>', lambda e: win.destroy())
+            respawn()
+            sync_buttons()
             repaint()
             cv.focus_set()
             self._cal_win = win

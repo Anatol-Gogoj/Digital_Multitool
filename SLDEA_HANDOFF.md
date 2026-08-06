@@ -13,6 +13,138 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## Scale gate v2: fit a circle, three rounds averaged, plus an anchor sanity guard (2026-08-06)
+
+**TL;DR:** The px→mm calibration is no longer two clicks on opposite
+edges. The operator now drags and resizes a thick circle onto the resting
+disc, three times, and the mean of the three fitted diameters is the
+run's anchor. The spread between the three is written down — it is the
+first operator-repeatability number this project has ever had. And a new
+guard warns, before Save, when the accepted anchor disagrees with the
+automatic disc fit or with the 16 mm mask's π·8² resting area by more
+than ~1 %, because a run shipped 4.4 % low last week and nothing said a
+word.
+
+Observation → decision:
+
+- **The two-click calibration failed in the field, exactly as `#215`
+  predicted.** Run `P3_2_2.5mL_20260728`, reviewed 2026-08-06: the
+  operator's two clicks landed at **590.26 px** where the automatic
+  resting-disc fit sits at **577.1 px** (circ 0.999, conf 0.871). That is
+  **+2.28 % in diameter → −4.42 % in every absolute mm²** in the run: its
+  resting area recorded 192.18 mm² / 15.643 mm where the 16 mm laser-cut
+  mask requires π·8² = 201.06 mm² / 16.000 mm. Every other run in the
+  corpus lands on that anchor. **Nothing warned**, because 2.28 % sits
+  comfortably inside the dialog's own 3 % cross-check tolerance. Anatol's
+  call was to keep it as a recorded offset rather than recalibrate, so
+  the run carries a "quote ratios, not absolute mm²" caveat.
+  → **Judging "exactly opposite" is the weak link, so it is gone.** The
+  calibration is a circle fitted against the *whole* visible boundary:
+  drag the interior to move, drag any of 8 handles to resize about the
+  centre, wheel for fine resize, arrows to nudge, Shift+arrows to resize
+  1 px, Ctrl+wheel to zoom, right-drag to pan, F to fit, **Z for 1:1**.
+  Geometry is always full-res image px at any zoom, which also closes the
+  audit's 0.41×-preview finding.
+
+- **One fit is a number; three fits are a measurement.** Each round
+  respawns at a **randomized position and size inside the central ROI**
+  (the same ROI `baseline_disc` searches), because three nudges of one
+  circle are three correlated fits and their spread would flatter the
+  operator. → `diam_px` = plain mean of every round performed, no outlier
+  rejection (dropping the odd one out would edit the very number the
+  spread reports). If (max−min)/mean exceeds **`CAL_SPREAD_PCT` = 1 %**,
+  the dialog offers another round before accepting, up to 6.
+
+- **The spread is persisted, and it is the number `SLDEA_MEASUREMENT`
+  §2.5 has been asking for.** The batch control round's operator-repeat
+  leg has never had data — `sldea_trace.py` finds 140 labels across 8
+  runs and **zero repeat pairs**, and tracing them by hand was abandoned
+  as too tedious on 2026-08-06. Three averaged fits generate that number
+  automatically, forever, as a side effect of calibrating. → `setup.txt`'s
+  scale-anchor block gains `n_rounds`, `rounds_px`, `spread_px`,
+  `spread_pct` and `guard`; `sldea_diag` reports them as an explicit
+  repeatability verdict.
+
+- **[new, additional to `#215`] The app knew two independent references
+  and checked the operator against neither.** → **Anchor guard**
+  (`se.anchor_guard`): at calibration time, before Save, the accepted
+  mean is compared against (1) the automatic `baseline_disc` fit and (2)
+  the 16 mm mask anchor of §2.4 via the resting area
+  `auto_area_px · (diam_mm/mean)²` vs π·(diam_mm/2)². Over
+  **`ANCHOR_GUARD_DIAM_PCT` = 1 %** or **`ANCHOR_GUARD_AREA_PCT` = 1 %**
+  the operator must **override deliberately** — and the override is
+  recorded in the run (`guard: OVERRIDDEN by operator: auto +2.28% diam,
+  mask -4.41% area`), so a deviation becomes a decision instead of
+  silence. P3_2 trips both, and its numbers are the regression test.
+  **Honest about the algebra:** `baseline_disc` returns a *circle* fit,
+  so its `area_px` is πr² and the area test is the diameter test squared
+  — one measurement in two units, not two independent votes. The area
+  gate is therefore the binding one (1 % area ≈ 0.5 % diameter) and is
+  quoted in the units the downstream numbers are quoted in. The guard
+  measures **accuracy**; the three-round spread measures **precision**. A
+  consistently mis-placed circle scores a tight spread and is caught only
+  by the guard.
+
+- **The detect-time modal stays at 3 %, on purpose.** Firing the 1 %
+  guard as a modal after every detection would nag every honestly
+  calibrated run — `baseline_disc` agrees with the by-eye measurement
+  only to ~1 % itself (§2.1) — and an operator trained to click through
+  warnings will click through the one that matters. The status line
+  carries the 1 % tier as a ⚠ with both numbers; the modal fires past
+  `ANCHOR_MODAL_DIAM_PCT` = 3 %, **or** whenever the guard trips on a
+  **reused** anchor, which is the one path that never met the
+  calibration-time guard.
+
+- **The partial-re-save consequence is now stated where the damage is
+  done.** The [critical] 2026-08-05 entry below: unreviewed rows keep
+  their px and their mm²/diam are RE-DERIVED at the current save's
+  scale, so re-reviewing one frame under a new anchor rewrites the whole
+  run's absolute column — which happened to a user. → The calibration
+  dialog counts the rows that already carry px and says so up front, and
+  the Save dialog now states the actual number: *"this anchor differs
+  from the recorded one (577.1 → 590.3 px): EVERY re-derived mm² moves
+  −4.42 %, including rows you did not re-review."* `se.rescale_pct` is
+  that arithmetic, tested against P3_2.
+
+- **Backwards compatibility is not optional and is tested.** 15 runs
+  carry the 2026-08-05 two-click anchor with none of the new fields, and
+  `P3_6_2.5mL_20260729` / `DOT_P3_1_20260729` predate the gate with no
+  anchor block at all. Every new field is optional on read; a missing
+  spread is reported as **missing**, never as a zero that would read as
+  perfect repeatability. A hand-garbled `rounds_px` costs that field, not
+  the anchor.
+
+**How tight is the 1 % spread gate, really?** Simulated against a
+converged operator whose residual *radius* error is Gaussian, on the
+580 px disc these runs actually have (2000 trials per row):
+
+| per-fit radius σ | as % of diameter | median 3-round spread | how often the 1 % gate trips |
+|---|---|---|---|
+| 0.5 px | 0.09 % | 0.27 % | 0 % of runs |
+| 1.0 px | 0.17 % | 0.55 % | 10 % |
+| 1.5 px | 0.26 % | 0.82 % | 35 % |
+| 2.0 px | 0.34 % | 1.09 % | 56 % |
+
+So 1 % assumes the operator repeats the radius to about **1 px** on a
+580 px disc. That is plausible at ≥1:1 zoom against a whole boundary but
+it is **not measured yet** — the first few real calibrations decide it.
+`CAL_SPREAD_PCT` is a named constant precisely so loosening it is one
+edit, not a redesign. If it proves noisy, raise it and say so here.
+
+**Verification, and its limits.** `tests/test_sldea_calibration.py` (25
+tests) pins the geometry (spawn stays in the ROI and never repeats,
+handles, hit-test — including that a press which grabs nothing does
+*not* teleport the circle, clamping, key/wheel deltas), the averaging and
+the spread gate, the guard against P3_2's real numbers, `rescale_pct`,
+and the backwards-compatible read path for all three eras of anchor. One
+new case in `tests/test_sldea_edge_gui.py` drives the **real dialog** on
+a synthetic run through three rounds and both gates, and asserts the
+override lands in the record. **That case needs a display and skips
+headlessly**, and `tests/test_app_launch.py` self-skips on Windows — so a
+green suite is *not* evidence that the window looks right. The stroke
+weight, the handle size and the drag feel have not been judged by a human
+eye on real bench frames. **First bench use should check exactly that.**
+
 ## Electrode mask default 220 → 255, and the Tune button's bad resolver (2026-08-05)
 
 **TL;DR:** Two bench-reported bugs. The electrode mask masks pixels that

@@ -438,19 +438,43 @@ def test_scale_gate_blocks_detect_and_save_until_calibrated():
         auto_px = (app.base_ref or {}).get('diam_px')
         assert auto_px, ("fixture disc no longer fittable by "
                          "baseline_disc — the cross-check is untested")
-        # an exact-match anchor passes the >3% cross-check silently
+        # an exact-match anchor passes the cross-check silently
         warns.clear()
         app.manual_ref = {'method': 'manual-calibration',
                           'diam_px': float(auto_px)}
         app.detect_all_sync()
         assert not warns, warns
         assert '✓' in app.status.cget('text')
-        # a wildly different anchor trips it (mismatch is measured
-        # against the MANUAL anchor: |auto−250|/250)
+        # a wildly different anchor trips it. Deviation is measured
+        # against the automatic fit — the REFERENCE — since #215:
+        # (250−auto)/auto, matching how the P3_2 field failure was
+        # reported (+2.28% of 577.1 px, not of the operator's 590.26)
         app.manual_ref = {'method': 'manual-calibration', 'diam_px': 250.0}
         app.detect_all_sync()
         assert warns, "cross-check did not warn on a >3% mismatch"
         assert 'apart' in app.status.cget('text')
+        assert 'mask area' in app.status.cget('text')
+        # #215: a fresh three-round anchor reports its own spread, and a
+        # deviation between the ~1% guard and the 3% modal tier shows the
+        # ⚠ WITHOUT a modal (nagging every honest run would train the
+        # operator to click through the one that matters)
+        warns.clear()
+        mid = float(auto_px) * 1.015
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': mid,
+                          'n_rounds': 3, 'spread_pct': 0.31,
+                          'rounds_px': [mid, mid, mid], 'spread_px': 0.5}
+        app.detect_all_sync()
+        txt = app.status.cget('text')
+        assert 'spread 0.31%' in txt and 'mean of 3' in txt, txt
+        assert '⚠' in txt and not warns, (txt, warns)
+        # ... but the SAME deviation on a REUSED anchor does warn: that
+        # path skipped the calibration-time guard entirely, so this is
+        # its only chance to be questioned
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': mid,
+                          'reused': True}
+        app.detect_all_sync()
+        assert warns, "a reused anchor never met the guard and never will"
+        assert 'REUSED' in warns[0][1]
     finally:
         gui.messagebox = real_mb
         root.destroy()
@@ -565,6 +589,120 @@ def _set_ua(rundir, uas):
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
         w.writerows(rows)
+
+
+def test_calibration_dialog_drives_three_rounds_and_both_gates():
+    """#215 end to end THROUGH THE REAL DIALOG (display required; this
+    case skips headlessly, so 'tests pass' is not evidence the window
+    opens — the geometry and the arithmetic are pinned separately in
+    tests/test_sldea_calibration.py).
+
+    Drives the operator's actual path: accept each randomized spawn as
+    the fit, three times. Because the spawns are randomized and nothing
+    is dragged onto the disc, this deliberately trips BOTH gates — the
+    spread gate first, then the anchor guard — and the test answers them,
+    which is the point: every gate is a decision, and the decision is
+    recorded in the anchor."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_cal_')
+    real_mb = gui.messagebox
+    answers, asked = [], []
+
+    class _MB:
+        @staticmethod
+        def askyesno(title, _msg, **_k):
+            asked.append(title)
+            return answers.pop(0) if answers else False
+
+        def __getattr__(self, name):
+            return getattr(real_mb, name)
+
+    gui.messagebox = _MB()
+
+    def all_buttons(w):
+        out = []
+        for c in w.winfo_children():
+            if isinstance(c, tk.Button):
+                out.append(c)
+            out.extend(all_buttons(c))
+        return out
+
+    def advance(win, taken):
+        """Stand in for root.wait_window: press the Continue/Finish
+        button until the dialog closes itself."""
+        for _ in range(12):
+            if not win.winfo_exists():
+                return
+            btn = [b for b in all_buttons(win)
+                   if b.cget('text').startswith('Continue')
+                   or 'Finish' in b.cget('text')]
+            assert btn, "no Continue/Finish button in the dialog"
+            taken.append(btn[0].cget('text'))
+            btn[0].invoke()
+
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None and app.manual_ref is None
+        # spread gate: "add another round?" -> No (accept as they are);
+        # anchor guard: "use anyway?" -> Yes (deliberate override)
+        answers[:] = [False, True]
+        taken = []
+        app.root.wait_window = lambda win: advance(win, taken)
+        app._calibrate_scale()
+        assert len(asked) == 2, asked
+        assert taken[:2] == ['Continue →', 'Continue →'], taken
+        assert '✔ Finish calibration' in taken[2]
+        ref = app.manual_ref
+        assert ref is not None, "three rounds produced no anchor"
+        assert ref['n_rounds'] == gui.CAL_ROUNDS == 3
+        assert len(ref['rounds_px']) == 3
+        # the rounds RESPAWN randomized, so three untouched fits must
+        # differ — if they were ever equal the decorrelation is gone and
+        # the spread would be a fiction
+        assert len(set(ref['rounds_px'])) == 3, ref['rounds_px']
+        assert abs(ref['diam_px'] - sum(ref['rounds_px']) / 3.0) < 1e-9
+        assert ref['spread_px'] > 0 and ref['spread_pct'] > 0
+        assert ref['guard'].startswith('OVERRIDDEN by operator'), ref
+        ref['guard'].encode('ascii')          # setup.txt field
+        # the override is what Save persists, and it survives the round
+        # trip that sldea_diag reads back
+        app.manual_ref = dict(ref)
+        se_mod = gui.se
+        se_mod.save_scale_anchor(app.rundir, {
+            'method': 'manual-calibration', 'diam_px': ref['diam_px'],
+            'diam_mm': 16.0, 'mm_per_px': 16.0 / ref['diam_px'],
+            'n_rounds': ref['n_rounds'], 'rounds_px': ref['rounds_px'],
+            'spread_px': ref['spread_px'],
+            'spread_pct': ref['spread_pct'], 'guard': ref['guard']})
+        back = se_mod.load_scale_anchor(app.rundir)
+        assert back['n_rounds'] == 3 and len(back['rounds_px']) == 3
+        assert back['guard'] == ref['guard']
+
+        # answering NO to the anchor guard must RESTART, not accept: the
+        # override has to be an affirmative act
+        app.manual_ref = None
+        asked.clear()
+        # spread No, guard No (restart), then spread No, guard Yes
+        answers[:] = [False, False, False, True]
+        taken = []
+        app._calibrate_scale()
+        assert app.manual_ref is not None
+        assert app.manual_ref['n_rounds'] == 3, app.manual_ref
+        # 3 rounds, restart, 3 rounds again = 6 presses, and 4 questions
+        assert len(taken) == 6, taken
+        assert len(asked) == 4, asked
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_scale_gate_rearms_on_every_run_switch():

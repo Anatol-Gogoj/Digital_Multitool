@@ -238,22 +238,35 @@ BASELINE_CLIP_SAT_PCT = 20.0
 def exposure_verdict(mean, sat_pct):
     """Baseline exposure -> ('ok'|'dark'|'bright'|'clipped', message).
 
-    'clipped' is a GATE, not a hint. Every area this run ever reports is
-    a difference against the baseline frame, so a baseline that is mostly
-    pure white has already thrown the signal away before the ramp starts
-    -- there is nothing to difference against, and no amount of later
-    tuning recovers it. It is the optical twin of the scope-window
-    clipping that #195 gates on, and it deserves the same treatment.
+    'clipped' is a GATE, but be precise about WHY, because the obvious
+    reason turned out to be wrong when it was measured (2026-08-05, the
+    CB run): a clipped BACKGROUND does not stop the detector. That run's
+    baseline was 73.7% saturated and it still traced every level at conf
+    0.98-0.99 with a monotonic area curve -- the electrode disc itself
+    sat at median 89, nowhere near clipping, so the boundary was a
+    ~165-level step and if anything easier to find than usual.
+
+    What is actually wrong with a clipped baseline:
+      * clipped pixels carry no information the gain/offset
+        normalisation can recover -- `photometric_fit` can only scale
+        what still varies;
+      * and it is evidence the exposure was not pinned. On that same
+        run the baseline was 73.7% saturated while its own ramp frames
+        were 0.27%, so the reference frame was shot at a different
+        exposure from everything it is differenced against.
+    Both are reasons to fix the exposure. Neither is a reason to claim
+    the measurement is worthless, so this no longer says that.
 
     Kept here, clock-free and Tk-free, so the thresholds can be tested
     against the measured corpus instead of eyeballed in a dialog."""
     m, s = float(mean), float(sat_pct)
     if s >= BASELINE_CLIP_SAT_PCT or m >= BASELINE_CLIP_MEAN:
         return ('clipped',
-                f"BASELINE IS BLOWN OUT - {s:.0f}% of pixels are at or "
-                f"above 250 (mean {m:.0f}). Difference imaging has "
-                f"nothing to work with; every area from this run would "
-                f"be measured against a white frame.")
+                f"BASELINE IS CLIPPED - {s:.0f}% of pixels are at or "
+                f"above 250 (mean {m:.0f}). Clipped pixels carry nothing "
+                f"the gain/offset normalisation can recover, and a "
+                f"baseline exposed differently from the ramp frames is "
+                f"not a comparable reference. Lower the exposure.")
     if m < BASELINE_DARK_MEAN:
         return ('dark', "⚠ looks DARK - raise exposure/lighting")
     if m > BASELINE_BRIGHT_MEAN or s > BASELINE_BRIGHT_SAT_PCT:

@@ -543,6 +543,13 @@ def resolve_camera(index):
                 or (640, 480)
             return {'kind': 'bayer', 'device': device, 'fourcc': fourcc,
                     'w': w, 'h': h}
+        # An ordinary webcam still has V4L2 controls even though it is
+        # captured through cv2. Carrying the device path is what lets the
+        # locked exposure be re-stamped before each grab -- without it the
+        # cv2 path took whatever the firmware chose on every open, and the
+        # SLDEA tab's exposure/gain fields were silently ignored
+        # (2026-08-05: the carbon-black run's baseline came out saturated).
+        return {'kind': 'cv2', 'index': int(index), 'device': device}
     return {'kind': 'cv2', 'index': int(index)}
 
 
@@ -565,6 +572,14 @@ def oneshot_rgb(spec, count=2):
         code = getattr(cv2, BAYER_CV_CODE.get(spec['fourcc'],
                                               'COLOR_BayerBG2BGR'))
         return cv2.cvtColor(cv2.cvtColor(raw, code), cv2.COLOR_BGR2RGB)
+    # Same contract as the bayer path: the locked knobs win on EVERY grab.
+    # This call opens a fresh VideoCapture, so anything the firmware
+    # re-decided since the last grab is undone here rather than half a
+    # second earlier -- the DFK's auto-gain overrides a written value
+    # within ~0.5 s (see apply_locked), so a lock applied in advance is a
+    # lock the firmware has time to walk back before the shutter.
+    if spec.get('device'):
+        apply_locked(spec['device'])
     cap = cv2.VideoCapture(spec['index'])
     try:
         if not cap.isOpened():

@@ -181,6 +181,36 @@ def test_watchdog_offscreen_counts_as_over_trip():
     assert not wd4.last_offscreen and wd4.last_ua == 150
 
 
+def test_exposure_verdict_separates_the_real_corpus():
+    """Thresholds calibrated on measured baselines, not eyeballed.
+
+    Every (mean, %>=250) pair below is the real baseline frame of a run
+    held on 2026-08-05. The 13 healthy ones must not be gated; the
+    carbon-black validation run, whose baseline is MEDIAN 255, must be --
+    its detection collapsed to a 1930 px sliver against a true ~134500 px
+    until the electrode mask was turned off to work around it."""
+    from sldea_profile import exposure_verdict, BASELINE_CLIP_SAT_PCT
+    healthy = [
+        (180.1, 0.17), (131.4, 0.17), (178.6, 0.63), (173.9, 1.21),
+        (184.7, 0.85), (168.2, 1.33), (132.0, 0.44), (128.5, 0.12),
+        (189.5, 3.60), (189.5, 3.62), (160.3, 2.92), (160.1, 2.91),
+        (167.4, 1.36),
+    ]
+    for mean, sat in healthy:
+        level, _msg = exposure_verdict(mean, sat)
+        assert level == 'ok', (mean, sat, level)
+    level, msg = exposure_verdict(235.3, 73.74)
+    assert level == 'clipped', (level, msg)
+    assert 'BLOWN OUT' in msg
+    # the warn tier still exists between the two populations
+    assert exposure_verdict(200.0, 12.0)[0] == 'bright'
+    assert exposure_verdict(220.0, 1.0)[0] == 'bright'
+    assert exposure_verdict(20.0, 0.0)[0] == 'dark'
+    # and the gate is clear of BOTH populations by a wide margin
+    assert max(s for _m, s in healthy) < 0.25 * BASELINE_CLIP_SAT_PCT
+    assert 73.74 > 3.0 * BASELINE_CLIP_SAT_PCT
+
+
 def test_watchdog_baseline_credibility_bound():
     # A learned '0 kV rest level' beyond min(30, trip/2) uA is not an
     # instrument offset (worst honest one observed: -16 uA, 07-29) but a

@@ -1,10 +1,12 @@
 # Manual regeneration pipeline
 
 `../digital-multitool-manual.html` is the illustrated user manual — a single
-self-contained file (all screenshots embedded as base64). It was built from
-the **live app** at v0.32.2+9725a59 on 2026-08-02: every screenshot is a real
-capture and every red callout is anchored to the actual widget's on-screen
-coordinates. When the GUI changes visibly, regenerate rather than hand-edit.
+self-contained file (all screenshots embedded as base64). It was last built
+from the **live app** at v1.1.0+73f12db on 2026-08-05 (40 pages): every
+screenshot is a real capture and every red callout is anchored to the actual
+widget's on-screen coordinates. When the GUI changes visibly, regenerate
+rather than hand-edit. This line is easy to forget — check it against the
+manual's own footer after every rebuild.
 
 ## The three stages
 

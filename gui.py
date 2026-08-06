@@ -3052,11 +3052,14 @@ LOGGING:
             # proceed, but on purpose, and run.log records it.
             if clipped and not messagebox.askyesno(
                     "Baseline is blown out",
-                    f"{hint}\n\nThe 2026-08-05 carbon-black run started "
-                    f"from a baseline like this and its detection "
-                    f"collapsed until the electrode mask was turned off "
-                    f"to work around it.\n\nLower the exposure on the "
-                    f"Webcam tab first.\n\nStart the run anyway?",
+                    f"{hint}\n\nMeasured on the 2026-08-05 CB run: a "
+                    f"clipped BACKGROUND did not stop detection (conf "
+                    f"0.98-0.99 at every level) because the device "
+                    f"itself was in range. What it did cost was a "
+                    f"baseline shot at a different exposure from its own "
+                    f"ramp frames, which no normalisation can undo."
+                    f"\n\nLower the exposure on the Webcam tab and this "
+                    f"stops being a question.\n\nStart the run anyway?",
                     default='no', parent=win):
                 return
             if clipped:

@@ -8,6 +8,17 @@ exposure gate** (#227). Batch-QA sits at 5 of 13 runs reviewed, plus two
 NEW runs from the 08-05 session (a carbon-black device and a P3
 Triazole).
 
+**Session closed 2026-08-05 with main green and no open PRs.** Merged
+after the above: **#230** (the exposure-gate wording — measurement showed
+a clipped background does NOT break the detector, so the gate no longer
+claims it does) and **#231** (the compliant-electrode field, and a
+camera warm-up frame before the baseline).
+
+**⚠ The run schema changed in #231.** Every new run now has a `warmup`
+frame at t=0 and its real `baseline` at t=2, with the staircase starting
+at t=2. If a run folder looks like it has "two baselines", that is why —
+and only the row tagged exactly `baseline` is the reference.
+
 **Everything now blocks on one bench visit, and most of it needs no high
 voltage.** `BENCH_TEST.md` **§M** (telemetry dry-run smoke) and **§N**
 (watchdog probe) are ~25 minutes together, need no HV training, and
@@ -62,8 +73,19 @@ at milestones.
   the output dir at a run folder reported "no finished runs (data.csv)"
   about a folder containing exactly that); **#227** the camera gate (a
   blown-out baseline now stops a run instead of whispering, and the cv2
-  camera path stopped ignoring the tab's exposure/gain fields). Dated
-  entries for all of it in `SLDEA_HANDOFF.md`.
+  camera path stopped ignoring the tab's exposure/gain fields); **#230**
+  the exposure-gate wording, corrected after measuring that a clipped
+  background does not break detection (the CB run traces at conf
+  0.98–0.99 with the disc itself 0.00 % saturated) — the gate stays for
+  the two reasons that survived measurement: clipped pixels cannot be
+  photometrically normalised, and that baseline was exposed differently
+  from its own ramp frames; **#231** the compliant-electrode field
+  (`setup.txt` now records `Compliant electrode:` + a canonical
+  `Electrode family:`; blank is allowed but Run asks first) and the
+  **camera warm-up frame** — a throw-away 0 kV frame at t=0, the real
+  baseline at t=2, staircase starting at t=2, which also forced an HV
+  fix in `kv_at()` (it fell through to the FINAL level for any t before
+  the first segment). Dated entries for all of it in `SLDEA_HANDOFF.md`.
 - **Bench fleet was deployed + confirmed at v1.0.0+4f5f213**
   (2026-08-05): `Tools → Update Software…` / `update_software.sh` ran and
   the RHEL bench footer was verified by Anatol. **It is now one release
@@ -275,9 +297,10 @@ were **already gone before the session acted** (both mtimes 2026-08-05
 recycle bin (~30-day retention) is the recovery path. Remaining: the
 open decisions below.
 
-## What to continue with (2026-08-05, after #226/#227 merged)
+## What to continue with (final, 2026-08-05 — main green, no open PRs)
 
-**In order. The first two are the whole bottleneck.**
+**In order. The first item is the whole bottleneck; everything else is
+genuinely independent of it.**
 
 1. **§M + §N at the bench — ~25 min, NO high voltage, delegable.** A dry
    run never commands the SG, so neither needs HV training. Between them
@@ -287,6 +310,13 @@ open decisions below.
    probe's two files. **The single answer most wanted: does run.log say
    `SLOW DISK`** — the bench output dir is a network share and that is
    the one behaviour desk testing cannot reproduce.
+1b. **While at the bench, smoke the two #231 changes** — they are
+   desk-tested only and both touch the run itself. Start any short run
+   and check: `setup.txt` carries `Compliant electrode:`; the run folder
+   has a `warmup` frame at t=0 AND a `baseline` at t=2; leaving the
+   Electrode box blank prompts before starting; and — the one that
+   matters — **the SG stays at 0 V for the whole warm-up window**. That
+   last one is pinned by a test, but it is an HV path and deserves eyes.
 2. **Fix the CB exposure before capturing that device again (#193).**
    Now concrete rather than theoretical: its baseline is median 255 and
    73.7 % saturated. Since #227 the app will REFUSE to start such a run
@@ -426,6 +456,24 @@ prose elsewhere in this file, trust this and fix the other one.
    `test_app_launch.py` (under Xvfb) answers that, and it self-skips on
    Windows.
 
+**Three facts about the data you will otherwise get wrong:**
+
+- **A run has TWO 0 kV frames since #231** — `warmup` at t=0 (a
+  throw-away that lets the camera settle) and `baseline` at t=2 (the
+  reference). Only the row tagged exactly `baseline` is the reference.
+  The tag is `warmup`, deliberately NOT `baseline-warmup`, because
+  `sldea_plot` phases rows with `tag.startswith('baseline')` and would
+  otherwise average the throw-away into A₀.
+- **`electrode_lum` masks the FOIL CONTACT TAPE, not the compliant
+  electrode.** The name misleads. The electrode is the disc, and on both
+  CNT and carbon black it reads *darker* than the membrane — which is
+  what `baseline_disc` seeds on. Liquid metal will invert that (#229).
+- **A saturated background does not break detection.** Measured on the
+  CB run: 73.7 % of the frame clipped, the disc itself 0.00 %, and every
+  level traced at conf 0.98–0.99. If you are tempted to write that
+  saturation ruins a run, measure first — that exact claim was made and
+  retracted here twice.
+
 **What you can do at a desk, no hardware** — all verified to run:
 
 ```
@@ -455,7 +503,17 @@ someone runs it, increment (1) is not designable. Do not start it.
 
 **Useful desk work** is in `RUN_SHEET.md` bucket A, or #215 / #216 /
 #197 / #200 / #223 / #224 / #225 — all real, scoped, hardware-free.
-#219 becomes designable as soon as §N's numbers land.
+#219 becomes designable as soon as §N's numbers land, and #229 (liquid
+metal inverts the dark-disc assumption) is designable now but should not
+be built before there is a device to test it against.
+
+**How this session worked, in case it helps.** Almost everything of
+value came from measuring rather than reasoning: the electrode-mask
+change looked catastrophic on a synthetic frame and was a no-op on real
+data; the saturation worry survived two rounds of confident prose and
+died on the first histogram; the `newest_run` bug was found by reading
+the resolver rather than by reproducing the symptom. Where a claim here
+cites a number, it was run. Where it does not, treat it as a hypothesis.
 
 ## Picking up work
 

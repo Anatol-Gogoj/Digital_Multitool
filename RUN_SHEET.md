@@ -37,11 +37,12 @@ Roughly in the order that unblocks the most.
       recovery path and it expires.
 - [ ] **Decide #219's direction** — needs §N's numbers first, so this
       sits behind bucket B.
-- [ ] **Decide the CB run's fate** — review the 11 saturated frames with
-      a caveat, or re-shoot the device at a corrected exposure and review
-      that. CB is a campaign electrode type (the study compares CNT vs
-      carbon black vs, later, liquid metal), so this is a real device
-      decision, not housekeeping. Re-shooting is 11 frames, 0–5 kV.
+- [x] ~~Decide the CB run's fate~~ — **DONE 2026-08-05**: reviewed and
+      accepted, all 11 frames at conf 0.95–0.99, resting 16.059 mm vs a
+      16 mm nominal, A/A₀ 1.156 at 5 kV. The areas stand; only the
+      provenance is imperfect (its baseline was exposed differently from
+      its own ramp frames). Re-shoot for a clean-provenance CB curve when
+      convenient — 11 frames, 0–5 kV — but do not discard this one.
 - [ ] **Fold the new CNT run into `SCORECARD.md`** — `P3 1.5mL Triazole
       Bake1-1`, 81 frames, already reviewed, healthy baseline.
 - [ ] **#224's rename word choice** — the filler caption is gone; the
@@ -78,6 +79,11 @@ git vs LFS vs release-assets-only · `demos/` fate once #32 is decided.
       **The answer I most want:** whether the run log says `SLOW DISK`.
       The bench output directory is a network share and that is the one
       behaviour desk testing cannot reproduce.
+- [ ] **Smoke the two #231 changes on any short run** — `setup.txt`
+      carries `Compliant electrode:`; the folder has a `warmup` frame at
+      t=0 AND a `baseline` at t=2; a blank Electrode box prompts before
+      starting; and **the SG stays at 0 V for the whole warm-up window**
+      (pinned by a test, but it is an HV path).
 - [ ] **§N — watchdog probe.** One command, ~1 min:
       ```
       .venv/bin/python bench/test_sldea_watchdog_probe.py --ich 3 --vch 2
@@ -135,7 +141,7 @@ on a region DARKER than the membrane, and the `electrode_lum` mask keys
 on brightness — a mirror-bright electrode inverts both assumptions.
 **#229**, filed so it is designed for before the first run, not after.
 
-## What just landed (2026-08-05)
+## What just landed (2026-08-05) — main green, no open PRs
 
 - **#218** — the telemetry sidecar. The watchdog's ~2 Hz samples now go
   to `telemetry.csv` beside `data.csv` instead of being discarded.
@@ -143,6 +149,13 @@ on brightness — a mirror-bright electrode inverts both assumptions.
   gate.
 - **#220** — this run sheet's bench half: `BENCH_TEST.md` §M/§N/§O and
   `bench/test_sldea_watchdog_probe.py`.
+- **#231** — the compliant-electrode field (`setup.txt` now records the
+  material and a canonical family; blank allowed but Run asks first) and
+  a **camera warm-up frame**: throw-away at t=0, real baseline at t=2,
+  staircase starts at t=2. Forced an HV fix — `kv_at()` returned the
+  FINAL level for any t before the first segment.
+- **#230** — the exposure-gate wording, corrected after measuring that a
+  clipped background does not break detection.
 - **#226** — tuner fixes: electrode mask default 220→255 (measured: a
   no-op on CNT/foil runs, decisive on the CB run) and the Tune button's
   resolver, which reported "no finished runs (data.csv)" about folders

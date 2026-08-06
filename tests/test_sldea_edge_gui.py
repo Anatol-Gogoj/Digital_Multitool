@@ -1075,6 +1075,194 @@ def test_retrace_after_accept_is_visibly_staged_not_silently_shown():
         shutil.rmtree(d, ignore_errors=True)
 
 
+class _StubTracer:
+    """Stands in for TraceWindow so the tracer-OPEN path (#162's gate) is
+    testable without a mapped Toplevel: records the args it was built
+    with, and can play Done back through the real _trace_staged."""
+    opened = []
+
+    def __init__(self, app, row_index, img_path, **kw):
+        self.app, self.row_index, self.kw = app, row_index, kw
+        _StubTracer.opened.append(self)
+
+    def done(self, poly, **extra):
+        meta = {'zoom': 1.0, 'overlays': {}, 'elapsed_s': 2.0,
+                'snapped': False,
+                'unpaired_ack': self.kw.get('unpaired_ack')}
+        meta.update(extra)
+        self.app._trace_staged(self.row_index, poly, meta)
+
+
+def test_trace_gate_is_shown_once_and_can_be_declined():
+    """The operator-facing half of #162's pairing gate, through the REAL
+    _trace: an unpairable frame asks BEFORE the tracing effort, Cancel
+    writes nothing at all, and OK carries the acknowledgement into the
+    tracer so Done does not nag a second time about the same gap.
+
+    Driving _trace_staged directly (as the first version of this test
+    did) proves none of that -- with no 'unpaired_ack' key it exercises a
+    path no operator takes, and both the gate and the double-nag
+    suppression could be deleted with the suite still green (review
+    2026-08-06)."""
+    import sldea_edge_gui as gui
+    import sldea_trace as strc
+    root = _tk_root_or_skip('trace pairing gate')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_gate_')
+    mb = _StubMB(yes=False)                      # operator clicks Cancel
+    real_mb, real_tw = gui.messagebox, gui.TraceWindow
+    gui.messagebox, gui.TraceWindow = mb, _StubTracer
+    _StubTracer.opened = []
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None, "synthetic run failed to load"
+        # no baseline on disk -> the one gap no on-demand detect can close
+        open(os.path.join(run, 'frames',
+                          'SLDEA_s00_00.00kV_baseline.png'), 'wb').close()
+        i = app.frame_rows[1]
+        app.pos = app.frame_rows.index(i)
+        app._trace()
+        assert len(mb.asked) == 1, mb.asked
+        gate = ' '.join(str(x) for x in mb.asked[0])
+        assert 'ground truth' in gate and 'BASELINE' in gate, gate
+        assert not _StubTracer.opened, "Cancel still opened the tracer"
+        assert not app.traces and not strc.load_labels(run)
+        # ...and OK opens it WITH the acknowledgement, which Done honours
+        mb._yes = True
+        app._trace()
+        assert len(mb.asked) == 2
+        assert len(_StubTracer.opened) == 1
+        tw = _StubTracer.opened[0]
+        assert tw.kw['unpaired_ack'] == strc.UNPAIRED_NO_BASELINE
+        tw.done([(80.0, 60.0), (240.0, 60.0), (240.0, 180.0),
+                 (80.0, 180.0)])
+        assert app.traces[i]['method'] == 'manual-trace'
+        rec = strc.load_labels(run)[-1]
+        assert rec['unpaired'] == strc.UNPAIRED_NO_BASELINE
+        assert not mb.warnings, "nagged twice about one acknowledged gap"
+        assert 'UNPAIRED' in app.status.cget('text')
+        # a label that reaches the sidecar WITHOUT the operator having
+        # seen the gate (a caller that bypassed _trace) still says so
+        j = app.frame_rows[2]
+        app.pos = app.frame_rows.index(j)
+        app._trace_staged(j, [(80.0, 60.0), (240.0, 60.0), (240.0, 180.0),
+                              (80.0, 180.0)],
+                          {'zoom': 1.0, 'overlays': {}, 'snapped': False})
+        assert len(mb.warnings) == 1, mb.warnings
+    finally:
+        gui.messagebox, gui.TraceWindow = real_mb, real_tw
+        _StubTracer.opened = []
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_trace_of_an_undecodable_frame_says_so_instead_of_crashing():
+    """A frame that EXISTS but does not decode (truncated, 0-byte) passed
+    the os.path.exists check and then raised PIL.UnidentifiedImageError
+    out of TraceWindow.__init__ -- an unhandled traceback into a console
+    nobody is watching, where the operator expected a tracer. The #162
+    gate made it worse by first promising that 'tracing anyway still
+    RECOVERS the measurement', which this branch cannot deliver (review
+    2026-08-06). Now the gate says the tracer may not open at all, and
+    when it does not, the operator is told."""
+    import sldea_edge_gui as gui
+    import sldea_trace as strc
+    root = _tk_root_or_skip('undecodable frame trace')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_trunc_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        i = app.frame_rows[1]
+        with open(os.path.join(run, 'frames',
+                              app.run['rows'][i]['frame_file']), 'r+b') as f:
+            f.truncate(40)                     # exists, does not decode
+        app.pos = app.frame_rows.index(i)
+        assert app._machine_pairing(i)[1] == strc.UNPAIRED_FRAME_UNREADABLE
+        app._trace()                           # must not raise
+        gate = ' '.join(str(x) for x in mb.asked[-1])
+        assert 'may not be able to open it' in gate, gate
+        assert 'still RECOVERS' not in gate, "promised what it cannot do"
+        assert mb.errors, "the tracer failed to open and said nothing"
+        assert not app.traces and not strc.load_labels(run)
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_on_demand_pairing_does_not_fake_a_detection_pass():
+    """#162's on-demand detect must not make a never-detected session
+    LOOK detected. It used to write into cands_all, which flipped
+    Advanced -> Apply's `has_pass`: changing a detect key then offered to
+    clear a 'pass' of '0 decided frame(s)' and wiped self.traces with it,
+    so every staged hand trace had to be re-clicked -- the exact harm
+    #162 exists to end, and the new no-candidate dialog steers the
+    operator into it ('lower min_diff in Advanced and re-detect').
+    Reproduced on this fixture 2026-08-06: traces [1, 2] -> []."""
+    import sldea_edge_gui as gui
+    import sldea_trace as strc
+    root = _tk_root_or_skip('on-demand pairing vs Apply')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_ondemand_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None and not app.cands_all
+        poly = [(80.0, 60.0), (240.0, 60.0), (240.0, 180.0), (80.0, 180.0)]
+        meta = {'zoom': 1.0, 'overlays': {}, 'snapped': False}
+        for k in (1, 2):
+            i = app.frame_rows[k]
+            app.pos = app.frame_rows.index(i)
+            app._trace_staged(i, poly, dict(meta))
+        staged = sorted(app.traces)
+        assert len(staged) == 2
+        assert all(strc.is_paired(r) for r in strc.load_labels(run))
+        # the pairing exists, and it lives OUTSIDE the review pass
+        assert not app.cands_all, "on-demand candidates leaked into the pass"
+        assert app.pair_cands and not app.results
+        # ...so a detect-key change is not a 'pass invalidation' at all
+        app._advanced()
+        entries, buttons = _advanced_widgets(app)
+        entries['min_diff'].delete(0, 'end')
+        entries['min_diff'].insert(0, '4')
+        buttons['Apply'].invoke()
+        assert app.settings['min_diff'] == 4
+        assert not mb.asked, mb.asked
+        assert sorted(app.traces) == staged, "staged traces were wiped"
+        # a REAL pass still clears both, and still says what it clears
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect_all_sync()
+        assert app.cands_all and not app.pair_cands
+        i = app.frame_rows[1]
+        app.pos = app.frame_rows.index(i)
+        app._trace_staged(i, poly, dict(meta))
+        assert app.traces
+        app._advanced()
+        entries, buttons = _advanced_widgets(app)
+        entries['min_diff'].delete(0, 'end')
+        entries['min_diff'].insert(0, '5')
+        buttons['Apply'].invoke()
+        assert mb.asked, "a real pass must still confirm before clearing"
+        said = ' '.join(str(x) for x in mb.asked[-1])
+        assert 'STAGED manual trace' in said, said
+        assert not app.traces and not app.cands_all
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_trace_without_a_detection_pass_is_still_paired():
     """The 2026-08-06 repro (#162): open a run WITHOUT --auto, trace a
     frame, and the label used to go out with machine:null — half of
@@ -1115,11 +1303,15 @@ def test_trace_without_a_detection_pass_is_still_paired():
         # hysteresis and no same-kV pair reconciliation
         assert rec['machine']['detect_scope'] == strc.SCOPE_FRAME
         assert not mb.warnings, "warned about a pairing it just created"
-        # detecting on demand may only ADD candidates — never accept,
-        # reject or move the scale gate
-        assert i in app.cands_all and not app.results
+        # the on-demand pairing may only ADD a PAIRING — never a review
+        # candidate, an acceptance, a rejection or a scale reference
+        assert i in app.pair_cands and i not in app.cands_all
+        assert not app.results
         assert not app.auto_idx and not app.auto_rej
         assert app.base_ref is None and app.manual_ref is None
+        # the tracer may still DRAW it: the operator should see what
+        # their polygon is being compared with
+        assert app.trace_overlay_cands(i), "pairing not drawable"
         # ---- the honest limit: no baseline, no candidate, ever --------
         base_png = os.path.join(run, 'frames',
                                 'SLDEA_s00_00.00kV_baseline.png')
@@ -1127,7 +1319,25 @@ def test_trace_without_a_detection_pass_is_still_paired():
         j = app.frame_rows[2]
         app.pos = app.frame_rows.index(j)
         assert j not in app.cands_all
+        # the verdict is cached, FAILURES INCLUDED: _trace and Done both
+        # ask, and an uncached failure branch made the operator sit
+        # through the baseline decode + detect twice per traced frame
+        # (~1 s each at 3840x2160 -- review 2026-08-06)
+        calls, real_one = [], app._detect_one
+
+        def counted(k):
+            calls.append(k)
+            return real_one(k)
+
+        app._detect_one = counted
+        # NOTE this calls _trace_staged directly, i.e. the BYPASS path (no
+        # 'unpaired_ack' in meta): the warning below is what a caller that
+        # skipped the tracer-open gate must still get. The real operator
+        # flow -- gate at open, no warning at Done -- is
+        # test_trace_gate_is_shown_once_and_can_be_declined.
         app._trace_staged(j, poly, meta)
+        assert app._machine_pairing(j)[1] == strc.UNPAIRED_NO_BASELINE
+        assert calls == [j], calls
         rec = strc.load_labels(run)[-1]
         assert rec['machine'] is None
         assert rec['unpaired'] == strc.UNPAIRED_NO_BASELINE

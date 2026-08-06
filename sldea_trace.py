@@ -23,7 +23,9 @@ the runs were opened without --auto and no detection had ever run. The
 GUI now detects the ONE frame on demand before the tracer opens, so the
 pairing is created rather than reported; when the detector honestly has
 nothing to offer (unreadable baseline, no-change frame) the operator is
-told before tracing that the trace will be recovery-only.
+told before tracing that the trace will be recovery-only. An on-demand
+pairing follows a narrower conf convention than a run pass (see SCOPE_*),
+so the CLI marks those points instead of pooling them silently.
 
 No Tk in here: geometry, the undo/redo op stack, view<->image coordinate
 mapping, the edge-snap magnet and the label sidecar are all headless and
@@ -57,7 +59,13 @@ LABELS_VERSION = 1
 # frame detected on demand cannot carry the ramp-order hysteresis bonus
 # or the same-kV pair reconciliation (both move conf by up to 0.05), so
 # the label says which convention its conf follows instead of letting the
-# calibration curve mix two of them silently.
+# calibration curve mix two of them silently. And because the hysteresis
+# bonus is applied BEFORE candidates() sorts, its absence can also change
+# WHICH candidate wins: measured 3-9% best-area difference on synthetic
+# diff-tier scenes where the disc fit refuses (2026-08-06). So an
+# on-demand point is self-consistent (its conf and its contour are the
+# same candidate's) but is NOT the point a full pass would have made --
+# calibration_summary marks it, label_scope reads it.
 SCOPE_RUN = 'run-pass'
 SCOPE_FRAME = 'frame-on-demand'
 
@@ -447,6 +455,24 @@ def is_paired(rec):
     return bool(m.get('contour')) and len(rec.get('polygon') or []) >= 3
 
 
+def label_scope(rec):
+    """Which detection pass this label's conf came from (SCOPE_*).
+    Missing tag -> SCOPE_RUN: on-demand detection did not exist before
+    2026-08-06, so every earlier label is a run-pass one."""
+    return (rec.get('machine') or {}).get('detect_scope') or SCOPE_RUN
+
+
+def label_where(rec):
+    """'row 28', or 'DOT_P3_1_20260729 row 28' once main() has attached
+    the run name (in memory only, never written back). A pooled report of
+    several runs printed two bare 'row 28's from different runs, and an
+    operator cannot tell which run to re-detect from that (review
+    2026-08-06)."""
+    run = (rec.get('_run') or '').strip()
+    return f"{run} row {rec.get('row_index')}" if run \
+        else f"row {rec.get('row_index')}"
+
+
 def label_record(row_index, row, polygon, frame_shape, *, machine=None,
                  unpaired=None, zoom=1.0, overlays=None, elapsed_s=None,
                  snapped=False, user=None, now=None):
@@ -579,7 +605,12 @@ def unpaired_summary(labels):
     gaps = unpaired_labels(labels)
     n = sum(len(v) for v in gaps.values())
     if not labels:
-        return ["no labels yet — trace frames in Edge Review first"]
+        # ASCII, like every other line here: this is the FIRST-USE branch
+        # (a not-yet-traced run, a typo'd path), so it is the one most
+        # likely to be read on the bench console -- an em dash aborted the
+        # whole report with a UnicodeEncodeError under cp437/cp850
+        # (measured 2026-08-06, the fourth time this trap has fired)
+        return ["no labels yet - trace frames in Edge Review first"]
     if not n:
         return [f"all {len(labels)} label(s) carry a machine candidate "
                 f"- none wasted"]
@@ -587,7 +618,7 @@ def unpaired_summary(labels):
              f"machine candidate - recovery measurements only, invisible "
              f"to the calibration above:"]
     for reason, recs in sorted(gaps.items()):
-        rows = ', '.join(f"row {r.get('row_index')}" for r in recs[:6])
+        rows = ', '.join(label_where(r) for r in recs[:6])
         if len(recs) > 6:
             rows += f", +{len(recs) - 6} more"
         lines.append(f"  {reason:<20} {len(recs):>3}  ({rows})")
@@ -629,15 +660,39 @@ def calibration_summary(pairs, target_iou=0.8, bins=(0.0, 0.5, 0.75,
             continue
         ious = [t[1] for t in sel]
         p = sum(1 for v in ious if v >= target_iou) / len(ious)
+        n_od = sum(1 for t in sel if label_scope(t[3]) == SCOPE_FRAME)
         lines.append(f"  {f'{lo:.2f}-{min(hi, 1.0):.2f}':>12} "
                      f"{len(sel):>4} {p:>10.2f} "
-                     f"{float(np.median(ious)):>11.2f}")
+                     f"{float(np.median(ious)):>11.2f}"
+                     + (f"   * {n_od} on-demand" if n_od else ""))
     by_m = {}
-    for conf, v, m, _r in arr:
-        by_m.setdefault(m, []).append(v)
+    for conf, v, m, rec in arr:
+        by_m.setdefault(m, []).append((v, rec))
     for m, vs in sorted(by_m.items()):
+        n_od = sum(1 for _v, r in vs if label_scope(r) == SCOPE_FRAME)
         lines.append(f"  {m:<12} n={len(vs):<3} median IoU "
-                     f"{float(np.median(vs)):.2f}")
+                     f"{float(np.median([v for v, _r in vs])):.2f}"
+                     + (f"   * {n_od} on-demand" if n_od else ""))
+    # The scope tag is only worth writing if the curve's READER sees it
+    # (review 2026-08-06: it was recorded in the sidecar and read by
+    # nothing, which is the silent mix it was added to prevent).
+    od = [t for t in arr if label_scope(t[3]) == SCOPE_FRAME]
+    if od:
+        lines += [
+            f"  * {len(od)} of {len(arr)} point(s) come from a "
+            f"single-frame on-demand detect ({SCOPE_FRAME}), not the run",
+            "      pass: no ramp-order hysteresis bonus and no same-kV "
+            "pair reconciliation, so the",
+            "      conf can read up to 0.05 low AND a different candidate "
+            "can rank first (measured",
+            "      3-9% area difference where the disc fit refuses). "
+            "Re-detect the run and",
+            "      re-trace those frames to put them on the run-pass "
+            "convention:"]
+        shown = ', '.join(label_where(t[3]) for t in od[:8])
+        if len(od) > 8:
+            shown += f", +{len(od) - 8} more"
+        lines.append(f"      {shown}")
     return lines
 
 
@@ -661,6 +716,12 @@ def main(argv):
     pairs, all_labels, n_runs = [], [], 0
     for rundir, labels in _iter_label_files(argv):
         n_runs += 1
+        # display-only provenance: the pooled report names the run each
+        # row came from (label_where), never written back to the sidecar
+        # (isinstance because a hand-edited sidecar can hold anything)
+        for rec in labels:
+            if isinstance(rec, dict):
+                rec['_run'] = os.path.basename(rundir.rstrip('\\/'))
         all_labels.extend(labels)
         pairs.extend(conf_vs_iou(labels))
         gaps = sum(len(v) for v in unpaired_labels(labels).values())

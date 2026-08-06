@@ -175,6 +175,48 @@ def monitor_fix_plan(max_kv, breakdown_ua=100.0, divisions=SCOPE_DIVISIONS,
             'i_position': 0.0}
 
 
+# Baseline exposure gates, calibrated on the real corpus rather than
+# guessed. Measured over all 14 baselines held on 2026-08-05: every
+# healthy run sits at mean 128-190 with 0.12-3.62% of pixels at/above
+# 250. The carbon-black validation run sits at mean 235, MEDIAN 255,
+# 73.7% saturated -- twenty times the worst healthy run. The warn tier
+# was already well placed (it fires on that run and on nothing else);
+# what was missing is a tier that actually stops you.
+BASELINE_DARK_MEAN = 40.0
+BASELINE_BRIGHT_MEAN = 215.0
+BASELINE_BRIGHT_SAT_PCT = 8.0
+# The gate sits 5.5x above the worst healthy baseline and 3.7x below the
+# blown-out one, so it separates the two populations with room to spare.
+BASELINE_CLIP_MEAN = 225.0
+BASELINE_CLIP_SAT_PCT = 20.0
+
+
+def exposure_verdict(mean, sat_pct):
+    """Baseline exposure -> ('ok'|'dark'|'bright'|'clipped', message).
+
+    'clipped' is a GATE, not a hint. Every area this run ever reports is
+    a difference against the baseline frame, so a baseline that is mostly
+    pure white has already thrown the signal away before the ramp starts
+    -- there is nothing to difference against, and no amount of later
+    tuning recovers it. It is the optical twin of the scope-window
+    clipping that #195 gates on, and it deserves the same treatment.
+
+    Kept here, clock-free and Tk-free, so the thresholds can be tested
+    against the measured corpus instead of eyeballed in a dialog."""
+    m, s = float(mean), float(sat_pct)
+    if s >= BASELINE_CLIP_SAT_PCT or m >= BASELINE_CLIP_MEAN:
+        return ('clipped',
+                f"BASELINE IS BLOWN OUT - {s:.0f}% of pixels are at or "
+                f"above 250 (mean {m:.0f}). Difference imaging has "
+                f"nothing to work with; every area from this run would "
+                f"be measured against a white frame.")
+    if m < BASELINE_DARK_MEAN:
+        return ('dark', "⚠ looks DARK - raise exposure/lighting")
+    if m > BASELINE_BRIGHT_MEAN or s > BASELINE_BRIGHT_SAT_PCT:
+        return ('bright', "⚠ looks BRIGHT/clipped - lower exposure")
+    return ('ok', "exposure OK")
+
+
 def credible_baseline_ua(baseline_ua, trip_ua):
     """True when a learned 0 kV rest level may anchor the deviation trip.
 

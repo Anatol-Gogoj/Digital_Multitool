@@ -407,15 +407,72 @@ def test_unpaired_summary_names_the_dead_labels_including_legacy():
     assert '--auto' in text, "the actual cause must be named"
     assert st.unpaired_summary([good])[0].startswith('all 1 label')
     assert 'no labels yet' in st.unpaired_summary([])[0]
+    # a pooled report of several runs must not print two bare 'row 28's:
+    # main() attaches the run name, label_where prints it (review
+    # 2026-08-06)
+    two_runs = [dict(legacy, _run='DOT_P3_1_20260729'),
+                dict(legacy, _run='P3_3_2.5mL_20260728')]
+    both = '\n'.join(st.unpaired_summary(two_runs))
+    assert 'DOT_P3_1_20260729 row 28' in both, both
+    assert 'P3_3_2.5mL_20260728 row 28' in both, both
     # measured 2026-08-06: the bench PC's console is cp1252, and one '⚠'
     # in this report aborted the whole CLI with a UnicodeEncodeError.
-    # Every line the CLI can print stays ASCII (Tk dialogs may not).
-    printable = text + '\n'.join(
+    # Every line the CLI can print stays ASCII (Tk dialogs may not) --
+    # INCLUDING the no-labels branch, which is the first-use path and was
+    # the one line left out of this check when it was written (an em dash
+    # sat in it, crashing under cp437/cp850).
+    printable = text + both + '\n'.join(
         [st.unpaired_message(r) for r in st.UNPAIRED_REASONS]
         + [st.unpaired_message('unrecorded'),
            st.unpaired_message('degenerate-polygon')]
-        + st.calibration_summary(st.conf_vs_iou([good])))
+        + st.unpaired_summary([])
+        + st.unpaired_summary([good])
+        + st.calibration_summary(st.conf_vs_iou([good]))
+        + st.calibration_summary([]))
     printable.encode('ascii')          # raises if a glyph creeps back in
+    for enc in ('cp437', 'cp850', 'cp1252'):
+        printable.encode(enc)          # the consoles this actually runs on
+
+
+def test_calibration_report_marks_on_demand_points():
+    """A single-frame on-demand pairing follows a NARROWER conf
+    convention than a run pass (no ramp hysteresis, no same-kV
+    reconciliation), and because the hysteresis bonus lands before
+    candidates() sorts, a full pass could also have picked a different
+    candidate. The tag existed but nothing read it (review 2026-08-06):
+    an operator setting accept_conf off this curve could not see that a
+    bin was part on-demand. Now the curve itself says so."""
+    sq = [[10, 10], [110, 10], [110, 90], [10, 90]]
+
+    def rec(conf, shift, scope, row):
+        return {'row_index': row, '_run': 'P3_5_2.5mL_0729',
+                'polygon': [[x + shift, y] for x, y in sq],
+                'frame_shape': [200, 400],
+                'machine': {'method': 'disc-fit', 'conf': conf,
+                            'contour': sq, 'detect_scope': scope}}
+    run_pass = rec(0.90, 2, st.SCOPE_RUN, 5)
+    on_demand = rec(0.79, 3, st.SCOPE_FRAME, 25)
+    legacy = {'row_index': 9, 'polygon': sq, 'frame_shape': [200, 400],
+              'machine': {'method': 'disc-fit', 'conf': 0.95,
+                          'contour': sq}}          # no tag == run pass
+    assert st.label_scope(on_demand) == st.SCOPE_FRAME
+    assert st.label_scope(run_pass) == st.SCOPE_RUN
+    assert st.label_scope(legacy) == st.SCOPE_RUN
+    text = '\n'.join(st.calibration_summary(
+        st.conf_vs_iou([run_pass, on_demand, legacy])))
+    assert st.SCOPE_FRAME in text, text
+    assert '1 of 3' in text, text
+    assert 'P3_5_2.5mL_0729 row 25' in text, text
+    # the marker lands on the affected bin and method line, not only in
+    # the footnote -- the bin is what sets accept_conf
+    marked = [ln for ln in text.split('\n') if 'on-demand' in ln]
+    assert len(marked) >= 3, marked
+    assert any(ln.strip().startswith('0.75') for ln in marked), marked
+    assert any('disc-fit' in ln for ln in marked), marked
+    # a curve made only of run-pass points says nothing about scope
+    clean = '\n'.join(st.calibration_summary(
+        st.conf_vs_iou([run_pass, legacy])))
+    assert 'on-demand' not in clean and st.SCOPE_FRAME not in clean
 
 
 def _run():

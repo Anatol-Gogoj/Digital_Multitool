@@ -21,7 +21,9 @@ so it is useless as ground truth and nothing said so. Four real labels
 were lost that way and had to be re-traced. Now the tracer detects that
 one frame on demand, and when the detector genuinely has nothing to
 offer, the operator is told before tracing instead of finding out
-offline.
+offline. That single-frame candidate is good enough to pair a label
+against but not to review with, so it stays out of the detection pass and
+the calibration report marks the points that came from it.
 
 Observation → decision:
 
@@ -39,16 +41,52 @@ Observation → decision:
 - **Decision — create the pairing, don't just report it.** A single
   frame's detection is cheap (`candidates()` runs at
   `DETECT_MAX_W = 640`) and writes nothing to disk, so `_trace()` now
-  detects the current frame before the tracer opens when nothing has.
-  Same settings, same code path, identical geometry to a full pass.
-- **Decision — but say what a single frame cannot reproduce.** The
-  ramp-order hysteresis bonus and the same-kV pair reconciliation each
-  move conf by up to 0.05 and both need neighbouring frames. On-demand
-  candidates are therefore tagged and the label records
-  `machine.detect_scope` (`run-pass` vs `frame-on-demand`), so the
-  calibration curve is never a silent mix of two conf conventions —
-  the same class of error as the two wrinkle normalizations mixed in one
-  column (audit 2026-08-05). **The AREA is unaffected**; only conf is.
+  detects the current frame before the tracer opens when nothing has
+  (`_detect_one`), same settings, same code path. The verdict is cached
+  per frame, **failures included** — `_trace` and Done both ask, and an
+  uncached failure branch made the operator sit through the baseline
+  decode plus detect twice per traced frame (~1 s each at 3840×2160).
+- **Decision — but say what a single frame cannot reproduce, and do not
+  overstate it.** The ramp-order hysteresis bonus and the same-kV pair
+  reconciliation each move conf by up to 0.05 and both need neighbouring
+  frames. **Correction to the first version of this entry, which claimed
+  "identical geometry to a full pass" and "the AREA is unaffected":** it
+  is not. The hysteresis bonus is applied *before* `candidates()` sorts
+  (`sldea_edge.py:1437-1462`), so its absence can change WHICH candidate
+  ranks first — measured 2026-08-06 on synthetic diff-tier scenes, best
+  area moved **3–9 %** between `prev_method=None` and
+  `prev_method=<tier>`, and the disc-fit cap means the live window is
+  exactly the frames where the fit refuses, i.e. the event/breakdown
+  frames an operator hand-traces. So an on-demand point is
+  self-consistent (its stored conf and its stored contour come from the
+  same candidate) but it is **not the point a full pass would have
+  made**. Two consequences, both now enforced:
+  - the label records `machine.detect_scope` (`run-pass` vs
+    `frame-on-demand`) **and `calibration_summary` marks those points**
+    — per conf bin, per method, plus a footnote naming run + row.
+    Recording the tag without reading it was the same silent mix it was
+    added to prevent (cf. the two wrinkle normalizations in one column,
+    audit 2026-08-05).
+  - on-demand candidates live in `pair_cands`, **never `cands_all`**.
+    They cannot reach the A/B/C radios, cannot be accepted into
+    `active_area_px`, and cannot flip Advanced → Apply's `has_pass`
+    (see the regression below). The tracer may still *draw* them
+    (`trace_overlay_cands`) — the operator should see what their polygon
+    is compared with.
+- **Regression caught in review, fixed here (2026-08-06).** The first
+  version wrote the on-demand candidates into `cands_all`, which made a
+  never-detected session look like a completed pass:
+  `has_pass = bool(self.results or self.cands_all)` flipped to True, so
+  changing a detect key in Advanced offered to clear a "pass" of
+  "0 decided frame(s), 0 by hand" and `self.traces = {}` took every
+  staged hand trace with it. Reproduced on the synthetic fixture: staged
+  traces `[1, 2]` → `[]`, while `origin/main` raised no dialog and kept
+  them — i.e. the change re-created the very "operator's work had to be
+  redone" harm it exists to end, and the new no-candidate dialog steers
+  the operator into it ("lower `min_diff` in Advanced and re-detect").
+  Pinned by `test_on_demand_pairing_does_not_fake_a_detection_pass`.
+  The confirmation dialog now also *counts the staged traces* it is
+  about to discard, which it never did.
 - **Decision — an unpaired label is now impossible to write by
   omission.** `label_record` raises `ValueError` unless a missing pairing
   is NAMED (`unpaired=`, one of `sldea_trace.UNPAIRED_REASONS`). Two
@@ -58,7 +96,19 @@ Observation → decision:
   ok/cancel dialog **before** the tracing effort, naming the cause and
   the fix, and the label carries the reason so
   `python sldea_trace.py <run>` reports it instead of it merely being
-  absent from the curve. Pre-gate labels report as `unrecorded`.
+  absent from the curve. Pre-gate labels report as `unrecorded`, named
+  with their run (a pooled report of three runs printed two bare
+  "row 28"s, which tells an operator nothing about which run to
+  re-detect).
+- **Decision — the one case the dialog must NOT promise a recovery.**
+  For `frame-unreadable` the tracer decodes the same file with PIL that
+  the detector failed to decode with cv2, so "tracing anyway still
+  RECOVERS the measurement" was a promise that branch cannot keep: OK
+  raised `PIL.UnidentifiedImageError` straight out of
+  `TraceWindow.__init__` (pre-existing on `origin/main` too), 0 labels,
+  0 traces, an unhandled traceback to a console nobody is watching. The
+  dialog now says the tracer may not open at all, and the open is
+  guarded — the operator gets an error dialog instead of a traceback.
 - **Unchanged: the recovery path.** #162's first job — tracing when every
   automated candidate has been REJECTED — has a non-empty candidate list
   (rejection lives in `results`, never in `cands_all`), so it pairs
@@ -67,19 +117,37 @@ Observation → decision:
 - **Also fixed, same session:** the new report text put a `⚠` into a
   printed line and took the whole CLI down with a `UnicodeEncodeError` on
   the cp1252 console — the third time this trap has fired here (the
-  arrow, the 📏, this). Every operator sentence in `sldea_trace` is now
-  ASCII and a test encodes them.
-- **Pinned by** `tests/test_sldea_trace.py` (headless, 15 tests):
+  arrow, the 📏, this). It then fired a **fourth** time in the fix
+  itself: an em dash survived in the *no-labels-yet* line, the first-use
+  path, and the ASCII test excluded that one line one statement after
+  asserting on its text (crashes under cp437/cp850, mojibake under
+  cp1252). Every line the CLI can print is now ASCII, and the test
+  encodes the empty-report and empty-curve branches too, in all three
+  code pages. **Durable rule: report text stays ASCII; Tk dialog text may
+  not.**
+- **Pinned by** `tests/test_sldea_trace.py` (headless, 16 tests):
   `test_machine_pairing_keeps_rejected_candidates_pairable` (the recovery
   vs never-detected distinction),
   `test_label_record_refuses_an_unexplained_missing_pairing`,
   `test_on_demand_single_frame_detection_supplies_the_pairing` (and its
   honest limit: no baseline, no candidate),
-  `test_unpaired_summary_names_the_dead_labels_including_legacy`. Plus
-  `test_trace_without_a_detection_pass_is_still_paired` in
-  `tests/test_sldea_edge_gui.py`, which is the repro itself against a
-  real `EdgeReviewApp` (it skips without a display, so the guarantee
-  rests on the headless four).
+  `test_unpaired_summary_names_the_dead_labels_including_legacy`,
+  `test_calibration_report_marks_on_demand_points`. Plus, in
+  `tests/test_sldea_edge_gui.py` (21 tests, **display-only**):
+  `test_trace_without_a_detection_pass_is_still_paired` (the repro
+  itself, plus the per-frame caching),
+  `test_trace_gate_is_shown_once_and_can_be_declined` (drives the real
+  `_trace` with a stub tracer: Cancel writes nothing, OK carries the
+  acknowledgement, Done does not nag twice),
+  `test_on_demand_pairing_does_not_fake_a_detection_pass` (the
+  Advanced → Apply regression above),
+  `test_trace_of_an_undecodable_frame_says_so_instead_of_crashing`.
+  Verified 2026-08-06 that the three deletions a review said would ship
+  green now fail: dropping the gate, restoring the double nag, and
+  leaking the on-demand candidates into `cands_all`. **These four skip
+  where Tk has no display** (headless CI, `tests/test_app_launch.py`
+  self-skips on Windows), so on a display-less box the guarantee rests on
+  the headless five and "tests pass" is not evidence the GUI opens.
 
 ## Electrode mask default 220 → 255, and the Tune button's bad resolver (2026-08-05)
 
@@ -1912,7 +1980,7 @@ sat on the strips; the frames are the check no residual substitutes for.
 ```
 python tests/test_sldea_edge.py      # 63
 python tests/test_sldea_diag.py      # 16
-python tests/test_sldea_trace.py     # 15
+python tests/test_sldea_trace.py     # 16
 python tests/test_sldea_tuner.py     # 12
 python tests/test_sldea_profile.py   # 20
 python tests/test_sldea_telemetry.py # 24  (writer + real-worker wiring)

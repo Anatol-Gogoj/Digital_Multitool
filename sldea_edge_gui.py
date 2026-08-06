@@ -140,6 +140,14 @@ class EdgeReviewApp:
         self.run = None
         self.rundir = None
         self.cands_all = {}     # frame row index -> candidate list
+        self.pair_cands = {}    # row index -> (candidates, failure reason)
+        # from an ON-DEMAND single-frame detect, so a trace of a frame no
+        # pass ever covered still has a machine candidate to be ground
+        # truth against (#162). Deliberately NOT cands_all: a lone frame
+        # carries neither the ramp-order hysteresis bonus nor the same-kV
+        # pair reconciliation, so these candidates must never enter the
+        # review pass, the A/B/C radios, `has_pass` or a saved
+        # active_area_px — see _machine_pairing (review 2026-08-06).
         self.results = {}       # row index -> chosen candidate | None=rejected
         self.traces = {}        # row index -> STAGED candidate D (#172)
         self._select_trace_once = False   # next _show selects D (just staged)
@@ -401,6 +409,7 @@ class EdgeReviewApp:
         self.run = None
         self.frame_rows = []
         self.cands_all, self.results, self.flags = {}, {}, {}
+        self.pair_cands = {}
         self.advisories = {}
         self.traces = {}
         self.auto_idx, self.auto_rej = set(), set()
@@ -515,6 +524,7 @@ class EdgeReviewApp:
         # Staged traces clear too — their polygons are already safe in
         # edge_labels.json (appended at trace-Done, #172).
         self.cands_all, self.results, self.flags = {}, {}, {}
+        self.pair_cands = {}
         self.advisories = {}
         self.traces = {}
         self.auto_idx, self.auto_rej = set(), set()
@@ -627,6 +637,7 @@ class EdgeReviewApp:
         """Synchronous detection (used by --auto tests and headless runs)."""
         self._t0 = self._t0 or time.time()
         self.cands_all, self.results, self.flags = {}, {}, {}
+        self.pair_cands = {}
         self.advisories = {}
         self.traces = {}
         self.auto_idx, self.auto_rej = set(), set()
@@ -1028,6 +1039,74 @@ class EdgeReviewApp:
         self._advance()
 
     # ---------------- manual trace (#162, candidate D per #172) --------
+    def _detect_one(self, i):
+        """Detect THIS ONE frame, only so a trace of it has a machine
+        candidate to be ground truth against (#162, 2026-08-06).
+        -> (candidates, failure reason | None).
+
+        The candidates are tagged SCOPE_FRAME and go into pair_cands, NOT
+        cands_all. A single frame is not a small detection pass: it has no
+        previous frame, so `prev_method` (the ramp-order hysteresis bonus)
+        is absent and se.reconcile_pairs never runs. Measured 2026-08-06
+        on synthetic diff-tier scenes: the missing 0.05 bonus is applied
+        BEFORE candidates() sorts, so it can also change WHICH candidate
+        ranks first -- best area moved 3-9% between prev_method=None and
+        prev_method=<tier> where the disc fit refuses, which is exactly
+        the event/breakdown frames an operator hand-traces. So:
+
+        - as a PAIRING it is honest and self-consistent (the stored conf
+          and the stored contour come from the same candidate) and the
+          label's machine.detect_scope says which convention it follows;
+        - as a REVIEW RESULT it is not, and keeping it out of cands_all is
+          what stops it from reaching the A/B/C radios, an accepted
+          active_area_px, or `has_pass` in Advanced -> Apply (which would
+          then offer to clear a 'pass' that never existed and wipe the
+          staged traces with it -- review 2026-08-06).
+
+        Failures are returned, not raised, and the CALLER caches them: at
+        3840x2160 the baseline decode plus detect costs ~1 s, and _trace
+        and _trace_staged both ask, so an uncached failure branch made the
+        operator wait through it twice per traced frame."""
+        try:
+            base = self._base_gray()
+        except Exception as e:            # a truncated baseline can raise
+            print(f"trace: baseline did not load: {e}")
+            base = None
+        if base is None:
+            # the model owns the vocabulary: one place decides what a
+            # baseline-less frame is, for the GUI and the report alike
+            return [], strc.machine_pairing([], baseline_ok=False)[1]
+        try:
+            img = se.load_gray(se.frame_path(self.run,
+                                             self.run['rows'][i]))
+        except Exception as e:
+            print(f"trace: frame {i} did not load: {e}")
+            img = None
+        if img is None:
+            return [], strc.UNPAIRED_FRAME_UNREADABLE
+        self.status.config(text="detecting this frame on demand "
+                                "(so the trace can be paired)…")
+        self.root.update_idletasks()
+        try:
+            cands = se.candidates(base, img, self.settings)
+        except Exception as e:
+            # same containment as the detect worker: a failed frame must
+            # not block the recovery trace -- but the status line must not
+            # be left claiming a detect is still running either
+            print(f"trace: on-demand detect for frame {i} failed: {e}")
+            self.status.config(
+                text=f"on-demand detect for this frame FAILED ({e}) — the "
+                     f"trace still records the area, but not ground truth")
+            return [], strc.UNPAIRED_DETECT_FAILED
+        for c in cands:
+            c['detect_scope'] = strc.SCOPE_FRAME
+        self.status.config(
+            text=f"detected {len(cands)} candidate(s) for THIS frame on "
+                 f"demand, for the trace's PAIRING only — ▶ Detect Edges "
+                 f"is what fills the review pass (its confidence needs "
+                 f"the ramp order)")
+        return cands, None
+
     def _machine_pairing(self, i):
         """The machine candidate this frame's trace will be PAIRED with,
         and why there is none when there is none (#162, 2026-08-06).
@@ -1040,61 +1119,48 @@ class EdgeReviewApp:
         unpaired with no complaint (four of them in the 2026-07/08 batch
         control round; the operator's work had to be redone).
 
-        So the pairing is CREATED here rather than reported: detecting
-        ONE frame is cheap (candidates() works at DETECT_MAX_W=640) and
-        writes nothing to disk, and it yields exactly the outlines a full
-        pass would for this frame. What a single frame cannot reproduce
-        is the ramp-order hysteresis bonus and the same-kV pair
-        reconciliation, both worth up to 0.05 of conf -- so the
-        candidates are tagged SCOPE_FRAME and the label records which
-        pass its conf came from, instead of letting the calibration curve
-        mix two conventions silently.
+        So the pairing is CREATED rather than reported, by detecting the
+        one frame (_detect_one, cached per frame including its failures).
+        A real pass ALWAYS wins over an on-demand result for the same
+        frame: its conf carries the ramp hysteresis and the same-kV
+        reconciliation, which is the convention the curve is read in.
 
-        Detection state only GROWS here: results, auto_idx/auto_rej and
-        the scale gate (base_ref/manual_ref) are never touched, so an
-        on-demand detect can neither accept nor reject anything.
-        """
-        if i not in self.cands_all and not self._detect_busy:
-            # (the busy case cannot be reached from _trace, which is
-            # inert while a worker streams; detecting here anyway would
-            # put a second thread in sldea_edge's baseline caches)
-            base = self._base_gray()
-            if base is None:
-                return None, strc.UNPAIRED_NO_BASELINE
-            try:
-                img = se.load_gray(se.frame_path(self.run,
-                                                 self.run['rows'][i]))
-            except Exception as e:
-                print(f"trace: frame {i} did not load: {e}")
-                img = None
-            if img is None:
-                return None, strc.UNPAIRED_FRAME_UNREADABLE
-            self.status.config(text="detecting this frame on demand "
-                                    "(so the trace can be paired)…")
-            self.root.update_idletasks()
-            try:
-                cands = se.candidates(base, img, self.settings)
-            except Exception as e:
-                # same containment as the detect worker: a failed frame
-                # must not block the recovery trace
-                print(f"trace: on-demand detect for frame {i} failed: {e}")
-                return None, strc.UNPAIRED_DETECT_FAILED
-            for c in cands:
-                c['detect_scope'] = strc.SCOPE_FRAME
-            self.cands_all[i] = cands
-            self.status.config(
-                text=f"detected {len(cands)} candidate(s) for THIS frame "
-                     f"on demand — ▶ Detect Edges covers the whole run "
-                     f"(pair/ramp confidence needs the full pass)")
-        cands = self.cands_all.get(i, [])
-        if not cands and i in self.load_fail:
-            # a file- or code-level failure is not 'the detector found
-            # nothing' — the distinction survives into the label for the
-            # same reason it survives into the review queue
-            return None, (strc.UNPAIRED_FRAME_UNREADABLE
-                          if self.load_fail[i] == 'unreadable'
-                          else strc.UNPAIRED_DETECT_FAILED)
-        return strc.machine_pairing(cands, detected=i in self.cands_all)
+        Review state is never touched here -- not results, not
+        auto_idx/auto_rej, not the scale gate, not cands_all -- so an
+        on-demand detect can neither accept, reject, nor invalidate
+        anything."""
+        if i in self.cands_all:           # a real pass covered this frame
+            cands = self.cands_all[i]
+            if not cands and i in self.load_fail:
+                # a file- or code-level failure is not 'the detector found
+                # nothing' — the distinction survives into the label for
+                # the same reason it survives into the review queue
+                return None, (strc.UNPAIRED_FRAME_UNREADABLE
+                              if self.load_fail[i] == 'unreadable'
+                              else strc.UNPAIRED_DETECT_FAILED)
+            return strc.machine_pairing(cands)
+        if i not in self.pair_cands:
+            if self._detect_busy:
+                # unreachable from _trace (inert while a worker streams);
+                # detecting here anyway would put a second thread in
+                # sldea_edge's baseline caches, and the pass itself is
+                # about to supply the pairing
+                return None, strc.UNPAIRED_NOT_DETECTED
+            self.pair_cands[i] = self._detect_one(i)
+        cands, fail = self.pair_cands[i]
+        if fail:
+            return None, fail
+        return strc.machine_pairing(cands)
+
+    def trace_overlay_cands(self, i):
+        """What a tracer may DRAW as 'candidates' for frame i: the review
+        pass's list, else the on-demand pairing detected for this trace
+        (#162). Drawing is all it is for -- picking a machine candidate
+        goes through cands_all, which an on-demand detect never fills."""
+        cands = self.cands_all.get(i)
+        if cands is None:
+            cands = self.pair_cands.get(i, ([], None))[0]
+        return [c for c in cands if c.get('contour') is not None]
 
     def _trace(self):
         """Open the manual tracer: the recovery path when every candidate
@@ -1120,27 +1186,50 @@ class EdgeReviewApp:
         # they are told plainly that this trace cannot be ground truth,
         # with a chance to repair the cause first (#162, 2026-08-06)
         _mach, why = self._machine_pairing(i)
-        if why and not messagebox.askokcancel(
-                "Trace with NO machine candidate",
-                f"This frame has no machine candidate, so a trace of it "
-                f"CANNOT serve as ground truth: the machine-vs-operator "
-                f"IoU and the definitional-offset gate are not computable "
-                f"from it, ever (#162).\n\n"
-                f"{strc.unpaired_message(why)}\n\n"
-                f"Tracing anyway still RECOVERS the measurement — the "
-                f"polygon, its area and the label are saved as usual, and "
-                f"the label is marked '{why}' so the calibration pass "
-                f"reports it instead of silently ignoring it.\n\n"
-                f"Trace anyway?"):
-            self._show()               # the D radio may have grabbed sel
-            return
+        if why:
+            outlook = (f"Tracing anyway still RECOVERS the measurement — "
+                       f"the polygon, its area and the label are saved as "
+                       f"usual, and the label is marked '{why}' so the "
+                       f"calibration pass reports it instead of silently "
+                       f"ignoring it.")
+            if why == strc.UNPAIRED_FRAME_UNREADABLE:
+                # the tracer decodes the SAME file (with PIL, not cv2), so
+                # promising a recovery here is a promise this branch
+                # cannot keep — it used to raise straight out of
+                # Image.open into a console nobody watches (review
+                # 2026-08-06)
+                outlook = ("This frame did not decode for detection, so "
+                           "the tracer may not be able to open it either. "
+                           "If it does open, the trace is still saved as "
+                           "a recovery measurement.")
+            if not messagebox.askokcancel(
+                    "Trace with NO machine candidate",
+                    f"This frame has no machine candidate, so a trace of "
+                    f"it CANNOT serve as ground truth: the "
+                    f"machine-vs-operator IoU and the definitional-offset "
+                    f"gate are not computable from it, ever (#162).\n\n"
+                    f"{strc.unpaired_message(why)}\n\n{outlook}\n\n"
+                    f"Trace anyway?"):
+                self._show()           # the D radio may have grabbed sel
+                return
         scale = se.mm_per_px(self.results, self.run['rows'], self.settings,
                              baseline_ref=self.manual_ref or self.base_ref)
         trace = self.traces.get(i) or {}
-        TraceWindow(self, i, path, mm_per_px=scale,
-                    seed=trace.get('trace_points'),
-                    seed_snapped=bool(trace.get('snapped')),
-                    unpaired_ack=why)
+        try:
+            TraceWindow(self, i, path, mm_per_px=scale,
+                        seed=trace.get('trace_points'),
+                        seed_snapped=bool(trace.get('snapped')),
+                        unpaired_ack=why)
+        except Exception as e:
+            # a frame that EXISTS but does not decode (truncated, 0-byte)
+            # raised out of PIL.Image.open with no dialog at all: an
+            # unhandled traceback where the operator expected a tracer
+            # (review 2026-08-06)
+            print(f"trace: tracer did not open for frame {i}: {e}")
+            messagebox.showerror(
+                "Trace", f"This frame did not open for tracing:\n{e}\n\n"
+                         f"Nothing was staged and no label was written.")
+            self._show()
 
     def _trace_staged(self, i, points, meta):
         """TraceWindow Done -> the polygon is staged as candidate D and
@@ -1832,12 +1921,20 @@ class EdgeReviewApp:
                 n_rev = sum(1 for i in self.results
                             if i not in self.auto_idx
                             and i not in self.auto_rej)
+                # staged manual traces die with the pass, and a dialog
+                # that counts only DECIDED frames read as harmless while
+                # it discarded a morning of tracing (review 2026-08-06)
+                staged = (f", and {len(self.traces)} STAGED manual "
+                          f"trace(s) that would have to be re-clicked "
+                          f"(their polygons stay in {strc.LABELS_NAME}, "
+                          f"the staging does not)" if self.traces else "")
                 if not messagebox.askyesno(
                         "Settings",
                         f"These change what detection produces — the "
                         f"current pass ({len(self.results)} decided "
-                        f"frame(s), {n_rev} by hand) will be CLEARED and "
-                        f"Detect must re-run.\n\nApply anyway?",
+                        f"frame(s), {n_rev} by hand{staged}) will be "
+                        f"CLEARED and Detect must re-run.\n\n"
+                        f"Apply anyway?",
                         parent=win):
                     return
             self.settings.update(new)
@@ -1847,6 +1944,7 @@ class EdgeReviewApp:
             saved_txt = " + saved to setup.txt" if save else ""
             if invalidates:
                 self.cands_all, self.results, self.flags = {}, {}, {}
+                self.pair_cands = {}
                 self.advisories = {}
                 self.traces = {}
                 self.auto_idx, self.auto_rej = set(), set()
@@ -2150,12 +2248,16 @@ class TraceWindow(tk.Toplevel):
                 *self._poly_view(self.app.base_ref['contour']),
                 outline='#888888', fill='', dash=(4, 4), tags='vec')
         if self.ov_cand.get():
-            for k, c in enumerate(self.app.cands_all.get(self.row_index,
-                                                         [])):
+            # the on-demand pairing is drawable too (#162): the operator
+            # should SEE the candidate their trace will be compared with.
+            # Colour index wraps -- candidates() can return more than the
+            # three review slots (disc-fit + three diff tiers + tex).
+            for k, c in enumerate(self.app.trace_overlay_cands(
+                    self.row_index)):
                 self.cv.create_polygon(
                     *self._poly_view(c['contour']),
-                    outline=CAND_COLORS[k], fill='', dash=(2, 4),
-                    tags='vec')
+                    outline=CAND_COLORS[k % len(CAND_COLORS)], fill='',
+                    dash=(2, 4), tags='vec')
         if self.ov_prev.get():
             prev = None
             for j in self.app.frame_rows:

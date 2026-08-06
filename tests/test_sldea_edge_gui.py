@@ -552,6 +552,10 @@ class _StubMB:
         self.asked.append(a)
         return self._yes
 
+    def askokcancel(self, *a, **k):
+        self.asked.append(a)
+        return self._yes
+
 
 def _set_ua(rundir, uas):
     """Rewrite the fixture CSV's measured_uA column (row order)."""
@@ -1067,6 +1071,74 @@ def test_retrace_after_accept_is_visibly_staged_not_silently_shown():
         assert app.results[i]['area_px'] == strc_area(poly2)
         assert 'staged D NOT committed' not in app.info.cget('text')
     finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_trace_without_a_detection_pass_is_still_paired():
+    """The 2026-08-06 repro (#162): open a run WITHOUT --auto, trace a
+    frame, and the label used to go out with machine:null — half of
+    #162's stated purpose (ground truth) silently lost, four real labels
+    in the 2026-07/08 batch control round.
+
+    The tracer now detects THAT ONE frame on demand, so the pairing
+    exists and nobody is nagged about it. And when the detector genuinely
+    cannot produce a candidate — unreadable baseline, refuse-don't-
+    fabricate — the label NAMES the reason and the operator is told."""
+    import sldea_edge_gui as gui
+    import sldea_trace as strc
+    root = _tk_root_or_skip('trace pairing without a detect pass')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_pair_')
+    mb = _StubMB()
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None, "synthetic run failed to load"
+        # exactly the operator's state: reviewed run, no detection pass
+        assert not app.cands_all, "fixture pre-detected; repro invalid"
+        meta = {'zoom': 1.0, 'overlays': {}, 'elapsed_s': 3.0,
+                'snapped': False}
+        poly = [(80.0, 60.0), (240.0, 60.0), (240.0, 180.0),
+                (80.0, 180.0)]
+        i = app.frame_rows[1]
+        app.pos = app.frame_rows.index(i)
+        app._trace_staged(i, poly, meta)
+        rec = strc.load_labels(run)[-1]
+        assert rec['machine'] is not None, "machine:null came back (#162)"
+        assert strc.is_paired(rec) and rec['unpaired'] is None
+        assert strc.label_iou(rec) is not None
+        # tagged as the narrower pass: its conf carries no ramp
+        # hysteresis and no same-kV pair reconciliation
+        assert rec['machine']['detect_scope'] == strc.SCOPE_FRAME
+        assert not mb.warnings, "warned about a pairing it just created"
+        # detecting on demand may only ADD candidates — never accept,
+        # reject or move the scale gate
+        assert i in app.cands_all and not app.results
+        assert not app.auto_idx and not app.auto_rej
+        assert app.base_ref is None and app.manual_ref is None
+        # ---- the honest limit: no baseline, no candidate, ever --------
+        base_png = os.path.join(run, 'frames',
+                                'SLDEA_s00_00.00kV_baseline.png')
+        open(base_png, 'wb').close()                  # 0-byte baseline
+        j = app.frame_rows[2]
+        app.pos = app.frame_rows.index(j)
+        assert j not in app.cands_all
+        app._trace_staged(j, poly, meta)
+        rec = strc.load_labels(run)[-1]
+        assert rec['machine'] is None
+        assert rec['unpaired'] == strc.UNPAIRED_NO_BASELINE
+        assert len(mb.warnings) == 1, mb.warnings
+        assert 'UNPAIRED' in app.status.cget('text')
+        # the trace itself still SURVIVED — #162's recovery job outranks
+        # its calibration job
+        assert app.traces[j]['method'] == 'manual-trace'
+        assert abs(app.traces[j]['area_px'] - strc_area(poly)) < 1e-6
+    finally:
+        gui.messagebox = real_mb
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)
 

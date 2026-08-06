@@ -1028,6 +1028,74 @@ class EdgeReviewApp:
         self._advance()
 
     # ---------------- manual trace (#162, candidate D per #172) --------
+    def _machine_pairing(self, i):
+        """The machine candidate this frame's trace will be PAIRED with,
+        and why there is none when there is none (#162, 2026-08-06).
+
+        Every trace is a ground-truth label, and a label with
+        machine:null yields None from sldea_trace.label_iou forever --
+        worthless for the conf-vs-IoU curve #162 exists to build. It used
+        to happen silently: a run opened WITHOUT --auto has never
+        detected anything, cands_all is empty, and the label went out
+        unpaired with no complaint (four of them in the 2026-07/08 batch
+        control round; the operator's work had to be redone).
+
+        So the pairing is CREATED here rather than reported: detecting
+        ONE frame is cheap (candidates() works at DETECT_MAX_W=640) and
+        writes nothing to disk, and it yields exactly the outlines a full
+        pass would for this frame. What a single frame cannot reproduce
+        is the ramp-order hysteresis bonus and the same-kV pair
+        reconciliation, both worth up to 0.05 of conf -- so the
+        candidates are tagged SCOPE_FRAME and the label records which
+        pass its conf came from, instead of letting the calibration curve
+        mix two conventions silently.
+
+        Detection state only GROWS here: results, auto_idx/auto_rej and
+        the scale gate (base_ref/manual_ref) are never touched, so an
+        on-demand detect can neither accept nor reject anything.
+        """
+        if i not in self.cands_all and not self._detect_busy:
+            # (the busy case cannot be reached from _trace, which is
+            # inert while a worker streams; detecting here anyway would
+            # put a second thread in sldea_edge's baseline caches)
+            base = self._base_gray()
+            if base is None:
+                return None, strc.UNPAIRED_NO_BASELINE
+            try:
+                img = se.load_gray(se.frame_path(self.run,
+                                                 self.run['rows'][i]))
+            except Exception as e:
+                print(f"trace: frame {i} did not load: {e}")
+                img = None
+            if img is None:
+                return None, strc.UNPAIRED_FRAME_UNREADABLE
+            self.status.config(text="detecting this frame on demand "
+                                    "(so the trace can be paired)…")
+            self.root.update_idletasks()
+            try:
+                cands = se.candidates(base, img, self.settings)
+            except Exception as e:
+                # same containment as the detect worker: a failed frame
+                # must not block the recovery trace
+                print(f"trace: on-demand detect for frame {i} failed: {e}")
+                return None, strc.UNPAIRED_DETECT_FAILED
+            for c in cands:
+                c['detect_scope'] = strc.SCOPE_FRAME
+            self.cands_all[i] = cands
+            self.status.config(
+                text=f"detected {len(cands)} candidate(s) for THIS frame "
+                     f"on demand — ▶ Detect Edges covers the whole run "
+                     f"(pair/ramp confidence needs the full pass)")
+        cands = self.cands_all.get(i, [])
+        if not cands and i in self.load_fail:
+            # a file- or code-level failure is not 'the detector found
+            # nothing' — the distinction survives into the label for the
+            # same reason it survives into the review queue
+            return None, (strc.UNPAIRED_FRAME_UNREADABLE
+                          if self.load_fail[i] == 'unreadable'
+                          else strc.UNPAIRED_DETECT_FAILED)
+        return strc.machine_pairing(cands, detected=i in self.cands_all)
+
     def _trace(self):
         """Open the manual tracer: the recovery path when every candidate
         is rejected, and the labeling instrument for the conf-vs-IoU
@@ -1047,12 +1115,32 @@ class EdgeReviewApp:
             messagebox.showinfo("Trace", "This row has no frame on disk.")
             self._show()               # the D radio may have grabbed sel
             return
+        # the pairing is settled BEFORE the operator spends a minute
+        # tracing: either it exists (detected on demand if need be), or
+        # they are told plainly that this trace cannot be ground truth,
+        # with a chance to repair the cause first (#162, 2026-08-06)
+        _mach, why = self._machine_pairing(i)
+        if why and not messagebox.askokcancel(
+                "Trace with NO machine candidate",
+                f"This frame has no machine candidate, so a trace of it "
+                f"CANNOT serve as ground truth: the machine-vs-operator "
+                f"IoU and the definitional-offset gate are not computable "
+                f"from it, ever (#162).\n\n"
+                f"{strc.unpaired_message(why)}\n\n"
+                f"Tracing anyway still RECOVERS the measurement — the "
+                f"polygon, its area and the label are saved as usual, and "
+                f"the label is marked '{why}' so the calibration pass "
+                f"reports it instead of silently ignoring it.\n\n"
+                f"Trace anyway?"):
+            self._show()               # the D radio may have grabbed sel
+            return
         scale = se.mm_per_px(self.results, self.run['rows'], self.settings,
                              baseline_ref=self.manual_ref or self.base_ref)
         trace = self.traces.get(i) or {}
         TraceWindow(self, i, path, mm_per_px=scale,
                     seed=trace.get('trace_points'),
-                    seed_snapped=bool(trace.get('snapped')))
+                    seed_snapped=bool(trace.get('snapped')),
+                    unpaired_ack=why)
 
     def _trace_staged(self, i, points, meta):
         """TraceWindow Done -> the polygon is staged as candidate D and
@@ -1063,6 +1151,11 @@ class EdgeReviewApp:
         labels are how operator repeatability was measured). Tracing
         never touches data.csv/setup.txt -- the committed result flows
         through the normal Save path."""
+        meta = dict(meta)
+        # what the operator was told at tracer-open time (#162): a
+        # pairing gap they have NOT seen gets stated here instead of
+        # only landing in the sidecar
+        ack = meta.pop('unpaired_ack', None)
         poly = np.asarray(points, np.float64)
         area = strc.polygon_area(poly)
         cx, cy = strc.polygon_centroid(poly)
@@ -1091,12 +1184,14 @@ class EdgeReviewApp:
             'trace_points': [(float(x), float(y)) for x, y in poly],
             'snapped': bool(meta.get('snapped'))}
         # every trace is a label, stored with the machine's best candidate
-        # at trace time so IoU is computable offline (#162)
-        cands = self.cands_all.get(i, [])
+        # at trace time so IoU is computable offline (#162). The pairing
+        # is resolved through _machine_pairing, which DETECTS this frame
+        # if nothing ever did — label_record refuses an unexplained
+        # machine:null, so no path can write a dead label by omission.
+        mach, why = self._machine_pairing(i)
         shape = gray.shape if gray is not None else (0, 0)
         rec = strc.label_record(i, self.run['rows'][i], poly, shape,
-                                machine=cands[0] if cands else None,
-                                **meta)
+                                machine=mach, unpaired=why, **meta)
         self._select_trace_once = True
         try:
             strc.append_label(self.rundir, rec)
@@ -1104,7 +1199,20 @@ class EdgeReviewApp:
             self.status.config(
                 text=f"trace staged as candidate D ({area:.0f} px², "
                      f"{len(poly)} points) — Accept (Enter) commits; "
-                     f"label {n} in {strc.LABELS_NAME}")
+                     f"label {n} in {strc.LABELS_NAME}"
+                     + (f"  ⚠ UNPAIRED ({why}): recovery only, NOT usable "
+                        f"as ground truth" if why else ""))
+            if why and why != ack:
+                # a label reached the sidecar without the operator having
+                # seen the tracer-open warning (a caller that bypassed
+                # _trace, or candidates that went away mid-trace): say it
+                # now, rather than leaving it findable only offline
+                messagebox.showwarning(
+                    "Trace label is NOT ground truth",
+                    f"This trace was saved as a recovery measurement, "
+                    f"but it has no machine candidate to pair with, so no "
+                    f"IoU can ever be computed from it (#162).\n\n"
+                    f"{strc.unpaired_message(why)}")
         except (OSError, ValueError) as e:
             messagebox.showerror(
                 "Trace label", f"The trace is staged as candidate D, but "
@@ -1786,12 +1894,16 @@ class TraceWindow(tk.Toplevel):
     DEL_PX = 12            # view-px radius for right-click delete
 
     def __init__(self, app, row_index, img_path, mm_per_px=None,
-                 seed=None, seed_snapped=False):
+                 seed=None, seed_snapped=False, unpaired_ack=None):
         super().__init__(app.root)
         from PIL import Image
         self.app = app
         self.row_index = row_index
         self.mm_per_px = mm_per_px
+        # the pairing gap the operator acknowledged before this window
+        # opened (#162) — travels back with Done so _trace_staged knows
+        # whether it still has to say it, and dies with the window
+        self._unpaired_ack = unpaired_ack
         self.img = Image.open(img_path).convert('RGB')
         self.gray = se.load_gray(img_path)
         row = app.run['rows'][row_index]
@@ -2099,7 +2211,8 @@ class TraceWindow(tk.Toplevel):
                              'candidates': bool(self.ov_cand.get()),
                              'prev': bool(self.ov_prev.get())},
                 'elapsed_s': time.time() - self._t_open,
-                'snapped': self._snap_used}
+                'snapped': self._snap_used,
+                'unpaired_ack': self._unpaired_ack}
         self.grab_release()
         self.destroy()
         self.app._trace_staged(self.row_index, pts, meta)

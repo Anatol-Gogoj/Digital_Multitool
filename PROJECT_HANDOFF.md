@@ -491,15 +491,23 @@ genuinely independent of it.**
 4. **(desk) DONE 2026-08-06.** Both 08-05 runs are folded into
    `SCORECARD.md` with measured verdicts — `sldea_diag.py` and
    `compare_errorbars.py` were run on each rather than transcribing this
-   file's figures. Both PASS; both carry §3b check 2 unevaluated. (The CB
-   peak reads A/A₀ **1.158** in the scorecard where this file said 1.156,
-   because the scorecard averages each level's pre/post pair while the
-   earlier note quoted single frames — same data, different reduction.)
-   The CB clean-provenance re-shoot is still worth doing when convenient;
-   the areas stand. Caveats in the Batch-QA section above.
-5. **(desk)** #224's rename word choice, then #225, #223, #216, #215,
-   #197, #200 — all real, scoped and hardware-free. #219 becomes
-   designable the moment §N's numbers land.
+   file's figures. **Both PASS, §3b check 2 included** — that check reads
+   as unevaluated only if you mistake the per-frame `audit_*` exception
+   flags for measurements; the numbers live in `frames[].audit`, and CB's
+   audit is the cleanest in the corpus. (The CB peak reads A/A₀ **1.158**
+   in the scorecard where this file said 1.156, because the scorecard
+   averages each level's pre/post pair while the earlier note quoted single
+   frames — same data, different reduction.) The CB clean-provenance
+   re-shoot is still worth doing when convenient; the areas stand. Caveats
+   in the Batch-QA section above.
+5. **(Anatol, 30 seconds)** accept or overrule #224's proposed label
+   `📈 Scope kV/µA log (telemetry.csv)` — implemented, every hand-kept
+   copy moved (Tk, `content.json` ×2, `annotate.py`, `BENCH_TEST.md`),
+   but the word choice is a taste call and nobody but Anatol owns it.
+   If you overrule it, the comment above the string in `gui.py` lists
+   the copies and the `git grep` that finds them — use the grep, not the
+   list. Then #225, #223, #216, #215, #197, #200 — all real, scoped and
+   hardware-free. #219 becomes designable the moment §N's numbers land.
 6. **PR #221 is deliberately set aside** — it holds `RUN_SHEET.md` (the
    tick-off version of this docket, split remote / bench-no-HV /
    bench-HV) and a cold-start briefing for a new agent. It was mergeable
@@ -584,9 +592,21 @@ dedup/idempotence · #215 circle-fit calibration ×3 (scale gate v2) ·
 #216 Edge Review UX (primary Detect, tooltips, flow) · **#219** live
 watchdog display + where the trip level comes from · **#223** give the
 plot tool a GUI instead of eight CLI flags · **#224** telemetry control
-wording (the filler caption is gone; the rename still needs a word
-choice, and the label has THREE copies that must move together — Tk,
-`content.json`, and `annotate.py`'s callout matcher) · **#225** tabs
+wording (DONE pending one taste call: the filler caption went on
+2026-08-05, and the label is now `📈 Scope kV/µA log (telemetry.csv)`
+in all FIVE hand-kept places — Tk, `content.json`'s control entry, its
+inert callout entry, `annotate.py`'s callout matcher (which matches the
+literal on-screen string), and `BENCH_TEST.md` §M step 2, which sends a
+bench operator looking for the box by name. The issue text itself says
+three copies and the first fix said four; both undercounted, so re-derive
+the
+set with `git grep -n "Scope kV"` rather than trusting any list in
+prose — ASCII-only, because `git grep` matches bytes and a pattern
+containing `µ` or `.` in its place silently matches nothing. The FILE
+stays `telemetry.csv` on purpose.
+Anatol accepts the wording or picks another; the shipped manual
+binaries still show the old label until the next version bump
+regenerates them) · **#225** tabs
 have no horizontal scrollbar, wide content is clipped and unreachable
 (`ScrollableTab` pins content width to the canvas, so adding a bar
 alone does nothing; likely the root cause of #27, same family as #26).

@@ -466,7 +466,13 @@ def test_scale_gate_blocks_detect_and_save_until_calibrated():
                           'rounds_px': [mid, mid, mid], 'spread_px': 0.5}
         app.detect_all_sync()
         txt = app.status.cget('text')
-        assert 'spread 0.31%' in txt and 'mean of 3' in txt, txt
+        # the range is still quoted, but the number the GATE judges and
+        # SLDEA_MEASUREMENT §2.1 budgets is the MEAN SE, so that is quoted
+        # too and derived n-awarely (0.31/d2(3)/sqrt(3) = 0.11%). A bare
+        # range is not comparable between an n=3 and an n=5 anchor
+        # (2026-08-06 evening).
+        assert 'range 0.31%' in txt and 'avg of 3' in txt, txt
+        assert 'SE 0.11%' in txt, txt
         assert '⚠' in txt and not warns, (txt, warns)
         # ... but the SAME deviation on a REUSED anchor does warn: that
         # path skipped the calibration-time guard entirely, so this is
@@ -1082,6 +1088,558 @@ def test_unavailable_cross_check_is_stated_not_implied():
         gui.messagebox, gui.spawn_circle = real_mb, real_spawn
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)
+
+
+def _cal_onscreen(root, win):
+    """Put the calibration dialog on screen so synthetic MOUSE events
+    reach it. A <Button-1> generated on an unviewable widget is silently
+    dropped (verified: the clicks simply never arrived), the same trap
+    test_return_key_cannot_finish_a_calibration documents for keys. Every
+    mode-B case below therefore self-checks that its clicks LANDED, so it
+    fails loudly rather than passing vacuously."""
+    root.deiconify()
+    root.update()
+    win.deiconify()
+    win.update()
+
+
+def _click_at_original(app, orig_xy, img_w=320, img_h=240):
+    """Click the point that currently DISPLAYS the original-image
+    coordinate `orig_xy`, as a real <Button-1> on the dialog's canvas.
+
+    The test does the FORWARD mapping (original -> rotated) and the dialog
+    does the inverse, so what is under test is the dialog's own
+    click->original path: its rotation angle, its rotated canvas, its view
+    transform and its press handler. Uses app._cal_probe — the dialog's own
+    objects — so nothing here is a second copy of that arithmetic.
+    Returns the original coordinate the dialog is expected to store."""
+    import math as _math
+    import sldea_edge_gui as gui
+    p = app._cal_probe
+    assert p, "the calibration dialog published no probe"
+    vt, cv = p['vt'], p['canvas']
+    _im, rw, rh = p['disp']()
+    deg = p['st']['rot']
+    phi = _math.radians(-float(deg))
+    c, s = _math.cos(phi), _math.sin(phi)
+    ox = float(orig_xy[0]) - img_w / 2.0
+    oy = float(orig_xy[1]) - img_h / 2.0
+    rx = c * ox - s * oy + rw / 2.0        # inverse of unrotate_point
+    ry = s * ox + c * oy + rh / 2.0
+    back = gui.unrotate_point(rx, ry, rw, rh, img_w, img_h, deg)
+    assert abs(back[0] - orig_xy[0]) < 1e-6, (back, orig_xy)
+    assert abs(back[1] - orig_xy[1]) < 1e-6, (back, orig_xy)
+    before = len(p['st']['pts'])
+    vx, vy = vt.to_view(rx, ry)
+    cv.event_generate('<Button-1>', x=int(round(vx)), y=int(round(vy)),
+                      when='now')
+    cv.update()
+    # SELF-CHECK: a <Button-1> on an unviewable widget is silently dropped,
+    # so without this the whole case would pass while testing nothing.
+    # A third click starts the pair over, hence 2 -> 1.
+    now = len(p['st']['pts'])
+    want = before + 1 if before < 2 else 1
+    assert now == want, (
+        f"the click never reached the dialog (points {before} -> {now}, "
+        f"expected {want}) — nothing here was tested; is the window on "
+        f"screen?")
+    return orig_xy
+
+
+def test_mode_b_measures_in_original_coordinates_under_rotation():
+    """MODE B end to end THROUGH THE REAL DIALOG (display required; this
+    case skips headlessly, so a green suite is not evidence the window
+    opens — the geometry is pinned separately in
+    tests/test_sldea_calibration.py).
+
+    The display is rotated by a fresh random angle every round and the two
+    clicks are pushed back through the inverse rotation, so clicking the
+    SAME two physical points must produce the SAME diameter whatever the
+    rotation happened to be. The fixture's resting disc is r=80 at
+    (160, 120), so the poles of a diameter are 160 px apart in ORIGINAL px
+    and every round must land on 160."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_cal_b_')
+    real_mb = gui.messagebox
+    seen = {'rots': [], 'heads': []}
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        # 160 px against the fixture's ~160 px automatic fit still misses
+        # the mask-area guard slightly, so answer every question with the
+        # override — the gates are tested elsewhere; this is the geometry
+        spy = _ModalSpy(real_mb, app, answers=[True] * 8)
+        gui.messagebox = spy
+
+        def advance(win):
+            _cal_onscreen(root, win)
+            for _ in range(12):
+                if not win.winfo_exists():
+                    return
+                head = _cal_display(win)
+                seen['heads'].append(head)
+                m = re.search(r'rotated ([0-9.]+)', head)
+                assert m, head
+                seen['rots'].append(float(m.group(1)))
+                _click_at_original(app, (80.0, 120.0))
+                _click_at_original(app, (240.0, 120.0))
+                _cal_step_button(win).invoke()
+
+        app.root.wait_window = advance
+        app._calibrate_scale(mode='B')
+        ref = app.manual_ref
+        assert ref is not None, "mode B produced no anchor"
+        assert ref['cal_mode'] == 'B'
+        assert ref['n_rounds'] == gui.CAL_ROUNDS_TWOPOINT == 5
+        assert len(ref['rounds_px']) == 5
+        # THE POINT: same two physical points, five display rotations, the
+        # same measured diameter. The residual is view-pixel quantization
+        # of the synthetic click (the test rounds to integer view px at
+        # ~2.6x zoom), not method error.
+        for v in ref['rounds_px']:
+            assert abs(v - 160.0) < 2.0, (v, ref['rounds_px'])
+        assert abs(ref['diam_px'] - 160.0) < 1.5, ref['diam_px']
+        # sigma/SE travel with it, n-awarely
+        assert ref['sigma_pct'] is not None and ref['se_pct'] is not None
+        s = gui.se.calibration_stats(ref['rounds_px'])
+        assert abs(ref['se_pct'] - s['se_pct']) < 1e-9
+        assert abs(s['sigma_pct'] - s['spread_pct'] / 2.326) < 1e-9
+        # the rotations really happened, one per sector of the FULL circle
+        # — that is the mechanism, so its absence would be the bug
+        assert len(seen['rots']) == 5, seen['rots']
+        assert len(set(seen['rots'])) == 5, seen['rots']
+        assert sorted(int(a // 72.0) for a in seen['rots']) == [0, 1, 2, 3, 4]
+        assert max(seen['rots']) - min(seen['rots']) > 180.0, seen['rots']
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_mode_b_is_blind_mid_round_and_shows_no_length_at_all():
+    """The blind-rounds rule of the review round, in mode B — and stricter:
+    mode B never shows the chord's LENGTH either, because two clicks on an
+    edge need no numeric feedback to place. So nothing on screen while
+    rounds remain is a number a later round could be steered onto.
+
+    Everything is revealed once the fitting is over, on the status line,
+    which is the surface that outlives the dialog."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_cal_bblind_')
+    real_mb = gui.messagebox
+    snaps, diams = [], []
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        # the chords below differ wildly on purpose, so the SE gate trips:
+        # answer it with "accept as measured" (No), then override the
+        # anchor guard (Yes). Answering Yes to the gate would REFIT, which
+        # is the remedy an SE gate can offer and a range gate could not.
+        spy = _ModalSpy(real_mb, app, answers=[False, True])
+        gui.messagebox = spy
+
+        def advance(win):
+            _cal_onscreen(root, win)
+            for k in range(12):
+                if not win.winfo_exists():
+                    return
+                # deliberately DIFFERENT chords per round (160, 150, 140,
+                # 130, 120 px in original space) so any leak of a previous
+                # round's value would be a distinguishable string
+                half = 80.0 - 5.0 * k
+                _click_at_original(app, (160.0 - half, 120.0))
+                _click_at_original(app, (160.0 + half, 120.0))
+                diams.append(2.0 * half)
+                snaps.append(_cal_display(win))
+                _cal_step_button(win).invoke()
+
+        app.root.wait_window = advance
+        app._calibrate_scale(mode='B')
+        assert len(snaps) == 5, len(snaps)
+        ref = app.manual_ref
+        assert ref is not None and ref['n_rounds'] == 5
+        for got, want in zip(ref['rounds_px'], diams):
+            assert abs(got - want) < 2.0, (got, want, ref['rounds_px'])
+        for i, s in enumerate(snaps):
+            # no previous round's diameter, no running average, and no
+            # length for the CURRENT pair either
+            for v in diams[:i + 1]:
+                assert f"{v:.1f}" not in s, (i, v, s)
+                assert f"{v:.0f} px" not in s, (i, v, s)
+            assert 'accepted so far' not in s, s
+            assert 'mean' not in s.lower(), s
+            assert 'HIDDEN until the last fit' in s, s
+            assert 'px across' not in s, s          # mode A's readout
+            # what it DOES show: progress, the rotation, and the count
+            assert re.search(r'Method B · Round \d of 5', s), s
+            assert 'of 2 points placed' in s, s
+        # THE REVEAL, after the fitting, with sigma leading
+        txt = app.status.cget('text')
+        assert 'mean of 5:' in txt, txt
+        assert 'σ ' in txt and '%/fit' in txt, txt
+        assert 'SE ' in txt and '% area' in txt, txt
+        assert f"gate {gui.se.CAL_SE_PCT:g}%" in txt, txt
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_every_round_set_is_logged_accepted_or_declined():
+    """The capture that was missing last time: the six mode-A spreads that
+    motivated mode B exist only as numbers typed into a chat, because every
+    one of those calibrations was DECLINED at a gate and setup.txt is only
+    written at Save.
+
+    Drives one DECLINED round-set and one ACCEPTED one and requires both in
+    the run folder's log — with the method, n, the individual diameters,
+    the range, sigma, the mean SE, the rotation angles and the automatic
+    disc fit."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_cal_log_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        log = os.path.join(run, gui.se.CAL_LOG_NAME)
+        assert not os.path.exists(log)
+
+        def advance(win):
+            for _ in range(12):
+                if not win.winfo_exists():
+                    return
+                _cal_step_button(win).invoke()
+
+        app.root.wait_window = advance
+        # (a) mode A, three scattered fits, and the operator CANCELS at the
+        # gate — the exact case that lost the six measurements
+        _fixed_spawn(gui, [(160.0, 120.0, 65.0), (160.0, 120.0, 70.0),
+                           (160.0, 120.0, 75.0)])
+        spy = _ModalSpy(real_mb, app, answers=[None])
+        gui.messagebox = spy
+        app._calibrate_scale(mode='A')
+        assert app.manual_ref is None, "cancel accepted an anchor"
+        assert os.path.exists(log), "a declined round-set was not logged"
+        lines = _log_lines(log)
+        assert len(lines) == 1, lines
+        one = lines[0]
+        assert 'mode=A n=3' in one, one
+        assert 'outcome=declined-cancel' in one, one
+        assert 'verdict=OVER-GATE' in one, one
+        assert 'diams=130.00,140.00,150.00px' in one, one
+        assert 'range=14.29%' in one and 'sigma=8.44%' in one, one
+        assert 'se=4.87%' in one and 'area_se=9.74%' in one, one
+        assert 'gate=0.40%' in one, one
+        assert 'stroke=3 px solid' in one and 'rot=-deg' in one, one
+        assert re.search(r'auto=\d+\.\d+px\([-+]\d+\.\d+%\)', one), one
+        assert one.startswith('SLDEA-CAL 20'), one          # timestamp
+
+        # (b) mode B, accepted with an override: a SECOND line, appended,
+        # carrying the rotation angles this time
+        gui.spawn_circle = real_spawn
+        spy = _ModalSpy(real_mb, app, answers=[True] * 8)
+        gui.messagebox = spy
+
+        def advance_b(win):
+            _cal_onscreen(root, win)
+            for _ in range(12):
+                if not win.winfo_exists():
+                    return
+                _click_at_original(app, (80.0, 120.0))
+                _click_at_original(app, (240.0, 120.0))
+                _cal_step_button(win).invoke()
+
+        app.root.wait_window = advance_b
+        app._calibrate_scale(mode='B')
+        assert app.manual_ref is not None
+        lines = _log_lines(log)
+        assert len(lines) == 2, lines
+        two = lines[1]
+        assert 'mode=B n=5' in two, two
+        assert two.startswith('SLDEA-CAL 20')
+        assert 'outcome=accepted' in two, two
+        assert 'stroke=-' in two, two
+        rots = re.search(r'rot=([0-9.,]+)deg', two)
+        assert rots, two
+        angs = [float(v) for v in rots.group(1).split(',')]
+        assert len(angs) == 5 and len(set(angs)) == 5, angs
+        assert sorted(int(a // 72.0) for a in angs) == [0, 1, 2, 3, 4], angs
+        # the whole file is one line per round-set plus a header block,
+        # ASCII, so it can be grepped and pasted into an issue
+        with open(log, encoding='utf-8') as f:
+            body = f.read()
+        body.encode('ascii')
+        assert body.count('# SLDEA Edge Review scale calibrations') == 1
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _log_lines(path):
+    with open(path, encoding='utf-8') as f:
+        return [ln.strip() for ln in f if ln.startswith('SLDEA-CAL')]
+
+
+def test_mode_b_keeps_every_safety_fix_of_the_review_round():
+    """The review round's four fixes are properties of the GATES, not of
+    the circle, so mode B has to inherit all of them. Checked here:
+
+    * FINDING 1a — every yes/no question carries an explicit declining
+      default=, and answering everything with its own default must NOT
+      accept an anchor (tkinter's askyesno defaults to YES);
+    * FINDING 1b — <Return> may advance an intermediate round and can
+      never reach finish(), so it can never answer a gate;
+    * FINDING 3 — an unavailable cross-check is its own modal, and the
+      anchor records the gap in the same voice as a trip."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_cal_bsafe_')
+    real_mb = gui.messagebox
+    seen = {}
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        spy = _ModalSpy(real_mb, app)          # no answers: all defaults
+        gui.messagebox = spy
+
+        # (a) five deliberately scattered chords, every question answered
+        # with its OWN default -> no anchor
+        def advance(win):
+            _cal_onscreen(root, win)
+            for k in range(14):
+                if not win.winfo_exists():
+                    return
+                half = 80.0 - 6.0 * k
+                _click_at_original(app, (160.0 - half, 120.0))
+                _click_at_original(app, (160.0 + half, 120.0))
+                _cal_step_button(win).invoke()
+
+        app.root.wait_window = advance
+        app._calibrate_scale(mode='B')
+        assert app.manual_ref is None, ("an anchor nobody read was "
+                                        "accepted: " + str(app.manual_ref))
+        assert spy.asked and spy.asked[0][0] == 'Rounds disagree', spy.asked
+        assert spy.defaults()[0] == 'cancel', spy.asked[0]
+        assert all(kw.get('default') for _t, kw in spy.asked), spy.asked
+        # the gate quotes PERCENTAGES only — a refit is one of its answers,
+        # so no diameter and no average may appear in it
+        prompt = spy.msgs[0]
+        assert 'σ = ' in prompt and 'standard error' in prompt, prompt
+        assert 'd₂(5) = 2.326' in prompt, prompt
+        for v in (160.0, 148.0, 136.0, 124.0, 112.0):
+            assert f"{v:.1f}" not in prompt, (v, prompt)
+        # ... and it names the round count that WOULD clear it, which is
+        # the remedy only an SE gate can offer
+        assert re.search(r'\d+ rounds would meet the gate|it would take '
+                         r'\d+ rounds', prompt), prompt
+
+        # (b) <Return> may advance a round; it must never finish
+        spy.asked.clear()
+        app.manual_ref = None
+
+        def hammer(win, _n=16):
+            _cal_onscreen(root, win)
+            win.focus_force()
+            win.update()
+            rounds = set()
+            for _ in range(_n):
+                if not win.winfo_exists():
+                    break
+                # place a valid pair each time so Enter has a fittable
+                # round in front of it — the refusal must come from the
+                # BINDING, not from an incomplete round
+                if len(app._cal_probe['st']['pts']) < 2:
+                    _click_at_original(app, (80.0, 120.0))
+                    _click_at_original(app, (240.0, 120.0))
+                win.event_generate('<Return>', when='now')
+                win.update()
+                if win.winfo_exists():
+                    m = re.search(r'Round (\d+) of', _cal_display(win))
+                    if m:
+                        rounds.add(int(m.group(1)))
+            seen['rounds'] = rounds
+            seen['alive'] = win.winfo_exists()
+            seen['btn'] = (_cal_step_button(win).cget('text')
+                           if seen['alive'] else '')
+            seen['text'] = _cal_display(win) if seen['alive'] else ''
+
+        app.root.wait_window = hammer
+        app._calibrate_scale(mode='B')
+        assert seen.get('alive'), "Enter closed the calibration dialog"
+        # self-check FIRST: without a delivered key press this proves
+        # nothing. The header is read AFTER each press, so four presses
+        # advancing rounds 1->2->3->4->5 are seen as {2,3,4,5}; every press
+        # after that was refused, which is why 5 appears and 6 never does.
+        assert seen['rounds'] == {2, 3, 4, 5}, (
+            "no <Return> reached the dialog, so nothing here was tested "
+            f"(rounds seen: {seen['rounds']})")
+        assert 'Finish' in seen['btn'], seen['btn']
+        assert app.manual_ref is None, ("Enter accepted an anchor: "
+                                        + str(app.manual_ref))
+        assert not spy.asked, ("Enter reached a modal warning: "
+                               + str(spy.asked))
+        assert 'Enter cannot accept an anchor' in seen['text'], seen['text']
+
+        # (c) FINDING 3 in mode B: no automatic disc fit -> its own modal,
+        # declining by default, and the gap on the record when overridden
+        spy.asked.clear()
+        app.manual_ref = None
+        app._auto_disc = lambda: None
+        spy.answers[:] = [True]                # override the missing check
+
+        def advance_ok(win):
+            _cal_onscreen(root, win)
+            for _ in range(12):
+                if not win.winfo_exists():
+                    return
+                _click_at_original(app, (80.0, 120.0))
+                _click_at_original(app, (240.0, 120.0))
+                _cal_step_button(win).invoke()
+
+        app.root.wait_window = advance_ok
+        app._calibrate_scale(mode='B')
+        titles = [t for t, _kw in spy.asked]
+        assert titles == ['Anchor NOT cross-checked'], titles
+        assert spy.defaults() == ['no'], spy.asked
+        ref = app.manual_ref
+        assert ref is not None and ref['cal_mode'] == 'B'
+        assert ref['guard'].startswith('NOT CROSS-CHECKED'), ref['guard']
+        ref['guard'].encode('ascii')
+        assert 'NOT cross-checked' in app.status.cget('text')
+        # and the log records the gap too, with no automatic reference
+        line = _log_lines(os.path.join(run, gui.se.CAL_LOG_NAME))[-1]
+        assert 'mode=B n=5' in line and 'auto=none' in line, line
+        assert 'outcome=accepted-override' in line, line
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_mode_chooser_restarts_the_set_and_carries_the_modes_default_n():
+    """The chooser is per calibration so both methods can be driven on the
+    SAME disc minutes apart. Switching mode must RESTART: half a circle set
+    plus half a two-point set is not a measurement of either method. And it
+    adopts that mode's own default round count (3 for A, 5 for B), so the
+    operator who just wants "the other method" gets the count it was
+    designed around."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_cal_mode_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    saw = {}
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        gui.messagebox = _ModalSpy(real_mb, app, answers=[None])
+        gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
+
+        def poke(win):
+            p = app._cal_probe
+            # opens on the DEFAULT mode with that mode's round count
+            saw['open'] = (p['mode_var'].get(), p['n_var'].get(),
+                           p['st']['mode'], p['st']['n'])
+            # one round in ...
+            _cal_step_button(win).invoke()
+            saw['mid'] = (p['st']['round'], len(p['st']['diams']))
+            # ... then switch to B: restarted, 5 rounds, rotated display
+            p['mode_var'].set('B')
+            p['mode_var'].get()
+            win.tk.call('after', 'idle', '')          # let Tk settle
+            app._cal_probe['st']  # (the switch runs on the radio command)
+            saw['switched_before_cmd'] = p['st']['mode']
+            # the radio's command is what the operator's click invokes
+            for rb in _widgets_of(win, tk.Radiobutton):
+                if rb.cget('value') == 'B':
+                    rb.invoke()
+            saw['after'] = (p['st']['mode'], p['st']['n'],
+                            p['n_var'].get(), p['st']['round'],
+                            len(p['st']['diams']),
+                            len(p['st']['pending_rots']),
+                            p['st']['rimg'] is not None)
+            saw['header'] = _cal_display(win)
+            # a round count with no d2 factor is not offerable at all
+            saw['n_choices'] = _option_values(win, p['n_var'])
+            win.destroy()
+
+        app.root.wait_window = poke
+        app._calibrate_scale()
+        assert saw['open'] == (gui.se.CAL_DEFAULT_MODE, '3', 'A', 3), saw
+        assert saw['mid'] == (2, 1), saw
+        mode, n, nv, rnd_i, ndiams, npend, rotated = saw['after']
+        assert mode == 'B' and n == 5 and nv == '5', saw
+        assert rnd_i == 1 and ndiams == 0, ("switching mode kept fits from "
+                                            "the other method: " + str(saw))
+        assert npend == 4, saw            # 5 angles, round 1's already used
+        assert rotated, "mode B did not rotate the display"
+        assert 'Method B · Round 1 of 5' in saw['header'], saw['header']
+        assert 'view rotated' in saw['header'], saw['header']
+        for v in saw['n_choices']:
+            assert gui.se.d2(int(v)) is not None, v
+        assert set(saw['n_choices']) == {str(k) for k
+                                         in gui.se.D2_RANGE_FACTORS}
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _widgets_of(w, cls):
+    out = []
+    for c in w.winfo_children():
+        if isinstance(c, cls):
+            out.append(c)
+        out.extend(_widgets_of(c, cls))
+    return out
+
+
+def _option_values(win, var):
+    """The values an OptionMenu bound to `var` offers, read off its menu."""
+    import tkinter as tk
+    for mb in _widgets_of(win, tk.Menubutton):
+        try:
+            menu = win.nametowidget(mb.cget('menu'))
+            n = menu.index('end')
+            vals = [menu.entrycget(i, 'label') for i in range(n + 1)]
+        except (tk.TclError, KeyError, TypeError):
+            continue
+        if var.get() in vals:
+            return vals
+    return []
 
 
 def test_scale_gate_rearms_on_every_run_switch():

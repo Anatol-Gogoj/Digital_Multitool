@@ -23,22 +23,51 @@ reference at Save (it used to be silently ignored when the baseline row
 had an accepted result); the automatic disc fit is demoted to a
 cross-check.
 
-CALIBRATION v2 (#215, 2026-08-06): the anchor is a CIRCLE the operator
-fits onto the resting disc — drag to move, handles to resize — over
-CAL_ROUNDS rounds, each respawning at a randomized position/size in the
-central ROI, and the MEAN of the fitted diameters is the anchor. The
-rounds are kept INDEPENDENT: no previously accepted diameter and no
-running mean is shown until the last round is in, because a visible
-target turns the spread into a number the operator can hit (review
-2026-08-06). The spread across rounds is the run's operator-repeatability
-number and is persisted with it. Two sanity guards fire before Save: the
-spread gate (rounds disagreeing by >CAL_SPREAD_PCT — refit or accept as
-measured; adding rounds cannot clear a range gate) and the ANCHOR GUARD
-(se.anchor_guard) — a deviation over ~1% from either the automatic disc
-fit or the mask's π·(diam_mm/2)² resting area demands an explicit
-override, and an UNAVAILABLE cross-check demands one too. Run
+CALIBRATION v2 (#215, 2026-08-06): the anchor is measured by hand over
+several INDEPENDENT rounds and averaged, by one of TWO methods the
+operator picks from a chooser in the dialog — so both can be driven on the
+same disc in one session and compared:
+
+  MODE A (se.CAL_MODE_CIRCLE, 3 rounds, the default): fit a CIRCLE onto
+  the resting disc — drag to move, 8 handles to resize — each round
+  respawning at a randomized position/size in the central ROI.
+  MODE B (se.CAL_MODE_TWOPOINT, 5 rounds): click two roughly-opposite
+  edge points, with the DISPLAY ROTATED BY A RANDOM ANGLE between rounds.
+  Rotation is the mechanism: it turns mis-judging "exactly opposite" from
+  a systematic error into a random one that averaging suppresses as
+  sqrt(n), and averages out the human bias toward horizontal/vertical
+  chords. Clicks are mapped back through the inverse rotation and
+  measured in ORIGINAL image px. Markers are a hollow ring plus a gapped
+  crosshair — mode B exists because the operator measured mode A's per-fit
+  scatter at ~1.05% of diameter and diagnosed it as "the bright green
+  circle occludes the edges" (`#215` comment, 2026-08-06).
+
+The rounds are kept BLIND in both modes: no previously accepted diameter
+and no running average is shown until the last round is in, because a
+visible target turns the scatter into a number the operator can hit
+(review 2026-08-06). Mode B shows no length for the current pair either.
+
+The scatter is the run's operator-repeatability number and is persisted
+with the anchor, n-awarely: sigma = range/d2(n), mean SE = sigma/sqrt(n),
+area SE = 2*SE (se.D2_RANGE_FACTORS; the code REFUSES to convert an n it
+has no factor for). Compare the two methods on SIGMA — it is the only
+figure that survives a different round count.
+
+Two sanity gates fire before Save: the ACCEPTANCE GATE on the mean's
+standard error (se.se_ok vs CAL_SE_PCT = 0.4% diameter, derived from
+SLDEA_MEASUREMENT §2.1's budget — it replaced a raw-range gate, which was
+neither comparable across n nor clearable by its own remedy), and the
+ANCHOR GUARD (se.anchor_guard) — a deviation over ~1% from either the
+automatic disc fit or the mask's π·(diam_mm/2)² resting area demands an
+explicit override, and an UNAVAILABLE cross-check demands one too. Run
 P3_2_2.5mL_20260728 shipped 4.42% low in every absolute mm² because the
 old 3% cross-check said nothing.
+
+EVERY completed round-set is appended to <run>/scale_calibration_log.txt
+and printed to stdout, ACCEPTED OR DECLINED (se.append_calibration_log):
+the six mode-A spreads that motivated mode B survive only because they
+were typed into a chat, since every one of those calibrations was declined
+and setup.txt is written at Save.
 
 Every yes/no gate in the dialog is asked with an EXPLICIT default= and
 with <Return> taken away from the window underneath while it is up:
@@ -53,6 +82,7 @@ calibration finishes. Keyboard: 1/2/3 pick a candidate, R reject,
 as candidate D; Accept commits it like any other candidate),
 Left/Right navigate, Enter accept + next.
 """
+import math
 import os
 import sys
 import threading
@@ -302,6 +332,176 @@ def cal_wheel_dr(steps, coarse=False):
                            else CAL_WHEEL_FINE_PX)
 
 
+def cal_stroke_spec(style):
+    """(width_px, dash_or_None) for mode A's circle stroke.
+
+    THE CHEAP THIRD ARM of the A/B comparison (`#215`, 2026-08-06). The
+    operator's diagnosis of mode A's 1.05 % per-fit scatter was that "the
+    bright green circle occludes the edges" — a 3 px stroke laid along the
+    boundary hides the feature being aligned to. If that is the real cause
+    then a 1 px or dashed stroke may rescue mode A outright, and it costs
+    two lines to find out while an operator is measuring anyway. The 3 px
+    solid stroke stays the DEFAULT so mode A's behaviour is unchanged
+    unless the option is touched.
+
+    Unknown styles fall back to the default rather than raising: a stroke
+    width is not worth losing a calibration over."""
+    return {'1 px solid': (1, None),
+            '1 px dashed': (1, (4, 4))}.get(style, (3, None))
+
+
+# ---------------------------------------------------------------------------
+# MODE B — two-point diameter, N rounds, the display randomly rotated
+#
+# The operator clicks two roughly-opposite points on the disc edge, as the
+# pre-#215 dialog did, N times (default 5). The MEAN of the N diameters is
+# the anchor. Two things make that better than the single pair it revives:
+#
+#   1. ROTATION between rounds is the load-bearing idea. Mis-judging
+#      "exactly opposite" is a SYSTEMATIC error while the disc always sits
+#      the same way up — one pair of clicks, one biased chord, forever
+#      (that is run P3_2's +2.28 %). Rotate the display by a random angle
+#      each round and the same misjudgement lands in a different direction
+#      every time, so it becomes RANDOM and averaging suppresses it as
+#      sqrt(n). It also averages out the human preference for horizontal
+#      and vertical chords over diagonal ones.
+#   2. NON-OCCLUDING MARKERS. A point marker with a hole in the middle
+#      leaves the edge visible under the judged point; a stroke laid along
+#      the boundary does not. This is the whole reason mode B exists, so
+#      the markers are specified here (marker_shapes) rather than left to
+#      whatever the canvas call happened to draw.
+#
+# Everything is MEASURED IN ORIGINAL IMAGE COORDINATES: the clicks are
+# mapped back through the inverse rotation and the diameter is computed in
+# original px. A length is rotation-invariant, so a correct implementation
+# gets the same answer either way — the point of doing it in original
+# space is that the RECORDED click positions stay meaningful (comparable
+# between rounds, and against the automatic fit's centre).
+# ---------------------------------------------------------------------------
+
+CAL_ROUNDS_TWOPOINT = se.CAL_ROUNDS_TWOPOINT     # 5
+CAL_STROKE_STYLES = ('3 px solid', '1 px solid', '1 px dashed')
+CAL_MARK_RING_VIEW = 7.0    # hollow ring radius, VIEW px — far enough out
+                            # that its own 1 px stroke crosses the boundary
+                            # ~7 px away from the point being judged
+CAL_MARK_ARM_VIEW = 11.0    # crosshair arm outer end, VIEW px
+CAL_MARK_GAP_VIEW = 3.0     # NOTHING is drawn within this of the click:
+                            # the pixels the operator is actually judging
+CAL_PT_NUDGE_PX = 1.0       # arrow-key nudge of the last placed point
+CAL_PT_NUDGE_COARSE_PX = 5.0
+
+
+def rotation_angles(n, rnd=None):
+    """`n` display-rotation angles in degrees, one per mode-B round —
+    STRATIFIED: one uniform draw inside each of n equal sectors of the
+    FULL circle, then shuffled so the order carries no information.
+
+    Stratified rather than n independent uniform draws, because rotation
+    is the mechanism and independent draws can fail to deliver it: five
+    uniform angles land within 40 degrees of each other often enough to
+    matter, and a round-set that never really rotated is a round-set whose
+    systematic error never got randomized. Stratifying guarantees the
+    coverage the sqrt(n) argument assumes.
+
+    The whole circle, not a half: the human bias toward horizontal and
+    vertical chords is 90-degree periodic, so sectors spanning only 180
+    degrees would leave it half-sampled.
+
+    `rnd` is any random.Random — pass a seeded one to make a session
+    reproducible in a test."""
+    import random as _random
+    rnd = rnd or _random
+    n = max(1, int(n))
+    step = 360.0 / n
+    angles = [i * step + rnd.uniform(0.0, step) for i in range(n)]
+    rnd.shuffle(angles)
+    return [a % 360.0 for a in angles]
+
+
+def unrotate_point(rx, ry, rot_w, rot_h, img_w, img_h, deg):
+    """Map a point in the ROTATED display image back to ORIGINAL image px.
+
+    Matches PIL's `Image.rotate(deg, expand=True)` exactly in the part
+    that matters. PIL rotates counter-clockwise about the ORIGINAL centre
+    and then expands the canvas around the bounding box, whose centre is
+    that same rotated centre; its affine matrix maps output -> input with
+    phi = -deg. So the mapping is a rotation by -deg about the two
+    centres, which is what this computes.
+
+    PIL's expand arithmetic rounds the new size with ceil/floor, which can
+    offset the canvas centre by up to half a pixel. That offset is a pure
+    TRANSLATION and therefore cancels exactly in the difference between
+    two points — the diameter is unaffected — while a single recorded
+    click position can sit up to ~0.5 px out. Recorded positions are
+    provenance, not measurements, so that is the right side to lose on.
+
+    Display rotation also RESAMPLES, which softens the ink edge slightly.
+    That is a real cost and it is not a bias: every round is rotated, so
+    every round's edge is softened the same way, and the operator's
+    judgement is degraded identically in all n rounds rather than in some
+    of them. It inflates sigma a little; it does not move the mean."""
+    phi = math.radians(-float(deg))
+    c, s = math.cos(phi), math.sin(phi)
+    dx = float(rx) - float(rot_w) / 2.0
+    dy = float(ry) - float(rot_h) / 2.0
+    return (c * dx + s * dy + float(img_w) / 2.0,
+            -s * dx + c * dy + float(img_h) / 2.0)
+
+
+def two_point_diameter(p1, p2):
+    """Distance between two ORIGINAL-coordinate clicks — mode B's fitted
+    diameter for one round. Rotation-invariant by construction, which is
+    what lets the display be rotated at all."""
+    return math.hypot(float(p2[0]) - float(p1[0]),
+                      float(p2[1]) - float(p1[1]))
+
+
+def marker_shapes(vx, vy, ring_r=CAL_MARK_RING_VIEW,
+                  arm=CAL_MARK_ARM_VIEW, gap=CAL_MARK_GAP_VIEW):
+    """What to draw at a placed point, in VIEW px:
+    {'ring': (x0, y0, x1, y1), 'arms': [(x0, y0, x1, y1) x4]}.
+
+    A hollow ring plus a crosshair with a HOLE in the middle. Nothing is
+    drawn within `gap` px of (vx, vy) — invariant `marker_clear_radius`
+    asserts, and the reason mode B exists: mode A's 3 px stroke sits ON
+    the boundary and hides the pixels being aligned to. Never a filled
+    dot, never a thick stroke through the edge."""
+    return {'ring': (vx - ring_r, vy - ring_r, vx + ring_r, vy + ring_r),
+            'arms': [(vx + gap, vy, vx + arm, vy),
+                     (vx - gap, vy, vx - arm, vy),
+                     (vx, vy + gap, vx, vy + arm),
+                     (vx, vy - gap, vx, vy - arm)]}
+
+
+def marker_clear_radius(vx, vy, shapes):
+    """Closest approach of any drawn marker ink to the click point — the
+    testable form of "the marker must not occlude the edge". Larger is
+    better; 0 would mean something is drawn right on the judged pixel."""
+    d = min(abs(shapes['ring'][2] - vx), abs(shapes['ring'][3] - vy))
+    for x0, y0, x1, y1 in shapes['arms']:
+        d = min(d, math.hypot(x0 - vx, y0 - vy), math.hypot(x1 - vx,
+                                                            y1 - vy))
+    return d
+
+
+def chord_segment(p1v, p2v, gap=CAL_MARK_GAP_VIEW):
+    """The measured chord as a line that STOPS `gap` px short of each
+    endpoint, in VIEW px — or None when the two points are closer together
+    than the gaps.
+
+    Drawing the chord shows the operator what they measured; stopping it
+    short keeps its ink off both judged points. It runs across the disc
+    interior, not along the boundary, so it occludes nothing that is being
+    judged in any case."""
+    x1, y1 = float(p1v[0]), float(p1v[1])
+    x2, y2 = float(p2v[0]), float(p2v[1])
+    L = math.hypot(x2 - x1, y2 - y1)
+    if L <= 2.0 * gap:
+        return None
+    ux, uy = (x2 - x1) / L, (y2 - y1) / L
+    return (x1 + ux * gap, y1 + uy * gap, x2 - ux * gap, y2 - uy * gap)
+
+
 def hot_slot(entries, chosen, sel):
     """Which outline reads as SELECTED on the card. `entries` is
     [(slot, candidate)], `chosen` the frame's accepted result (or None),
@@ -361,6 +561,8 @@ class EdgeReviewApp:
         self._cal_win = None    # the gate dialog is a singleton too: the
         # grab is pointer-only, so review keys can pierce it and a second
         # gate dialog would chain a second detect worker (review 2026-08-05)
+        self._cal_probe = None  # the live calibration dialog's own state,
+        # published for the tests that drive it (see _calibrate_scale)
         self._build_ui()
         start = path or DEFAULT_PARENT
         self._populate_runs(start)
@@ -895,9 +1097,21 @@ class EdgeReviewApp:
             sc = f"; scale: manual {self.manual_ref['diam_px']:.0f} px"
             spr = self.manual_ref.get('spread_pct')
             if spr is not None:
-                sc += (f" (mean of {self.manual_ref.get('n_rounds', '?')}"
-                       f", spread {spr:.2f}%"
-                       + ('' if spr <= se.CAL_SPREAD_PCT else ' ⚠') + ')')
+                # quote the MEAN SE, which is what the gate judges and what
+                # §2.1 budgets — the raw range is not comparable between an
+                # n=3 and an n=5 anchor (2026-08-06 evening)
+                nr = self.manual_ref.get('n_rounds')
+                sep = self.manual_ref.get('se_pct')
+                if sep is None:
+                    sig = se.sigma_from_range(spr, nr)
+                    sep = (sig / math.sqrt(nr)) if (sig and nr) else None
+                sc += (f" (mode {self.manual_ref.get('cal_mode', '?')}, "
+                       f"avg of {nr if nr is not None else '?'}, range "
+                       f"{spr:.2f}%"
+                       + (f", SE {sep:.2f}%"
+                          + ('' if sep <= se.CAL_SE_PCT else ' ⚠')
+                          if sep is not None
+                          else ', SE not convertible ⚠') + ')')
             guard = se.anchor_guard(self.manual_ref['diam_px'],
                                     self.base_ref, self.settings['diam_mm'])
             if guard['available']:
@@ -1550,6 +1764,13 @@ class EdgeReviewApp:
                 'rounds_px': self.manual_ref.get('rounds_px'),
                 'spread_px': self.manual_ref.get('spread_px'),
                 'spread_pct': self.manual_ref.get('spread_pct'),
+                # which METHOD produced it (A circle / B two-point) and the
+                # n-aware conversion of its scatter. The range alone is not
+                # comparable between anchors taken at different round
+                # counts, so sigma and the mean SE travel with it.
+                'cal_mode': self.manual_ref.get('cal_mode'),
+                'sigma_pct': self.manual_ref.get('sigma_pct'),
+                'se_pct': self.manual_ref.get('se_pct'),
                 'guard': self.manual_ref.get('guard'),
             })
         except OSError as e:
@@ -1704,15 +1925,39 @@ class EdgeReviewApp:
             print(f"calibrate: automatic disc cross-check failed: {e}")
             return None
 
-    def _calibrate_scale(self, then_detect=False):
-        """Manual px→mm calibration (#215, 2026-08-06): FIT A CIRCLE onto
-        the resting disc — drag to move, 8 handles to resize about the
-        centre — three times, and the MEAN of the fitted diameters is the
-        run's anchor. This is the SCALE GATE (operator decision
+    def _calibrate_scale(self, then_detect=False, mode=None):
+        """Manual px→mm calibration — TWO METHODS, chosen per calibration
+        so they can be A/B compared on the same disc in one session
+        (`#215`, 2026-08-06). This is the SCALE GATE (operator decision
         2026-08-05): Detect and Save both require it per run, and it
         overrides EVERY automatic reference at Save. With then_detect,
         detection chains automatically once calibration finishes
-        (Detect's gate path and --auto).
+        (Detect's gate path and --auto). `mode` pre-selects a method;
+        None opens on se.CAL_DEFAULT_MODE and the operator picks.
+
+        **MODE A — fit a circle** (the incumbent, behaviour unchanged):
+        drag to move, 8 handles to resize about the centre, CAL_ROUNDS
+        rounds, mean of the fitted diameters. Optionally with a thin or
+        dashed stroke instead of the 3 px solid one — the cheap third arm
+        of the comparison (cal_stroke_spec).
+
+        **MODE B — two-point diameter, N rounds, randomly rotated**: click
+        two roughly-opposite points on the disc edge, N times (default 5),
+        with the DISPLAY ROTATED BY A RANDOM ANGLE between rounds, and the
+        mean of the N diameters is the anchor. Measured in ORIGINAL image
+        coordinates — the clicks are mapped back through the inverse
+        rotation (unrotate_point) — and the markers are a hollow ring plus
+        a gapped crosshair that leave the judged pixels visible.
+
+        Why mode B exists, from real measurements (`#215` comment,
+        2026-08-06): the operator drove mode A six times on a scratch copy
+        of P3_2_2.5mL_20260728 and its 3-round ranges were 1.94, 2.09,
+        1.62, 1.81, 1.44 % plus one under 1 % — per-fit sigma ~ 1.05 % of
+        diameter, so a 3-round mean SE of 0.61 % diameter / 1.21 % area
+        against §2.1's ~0.4 % / ~0.8 % budget. Mode A would need ~7 rounds
+        to reach budget. The operator's diagnosis: "the bright green
+        circle occludes the edges". Mode B's target is sigma < 0.9 %, at
+        which 5 rounds lands on budget.
 
         Why a circle and not the two clicks it replaces: judging
         "exactly opposite" on a disc is something humans do badly, and
@@ -1722,11 +1967,14 @@ class EdgeReviewApp:
         2.28% sat inside the old 3% cross-check. A circle is judged
         against the WHOLE visible boundary.
 
-        Each round RESPAWNS at a randomized position and size inside the
-        central ROI (spawn_circle): three nudges of one circle would
-        produce three correlated fits and a spread that flatters the
-        operator. The spread across rounds is kept — it is the only
-        measurement of operator repeatability this project has.
+        Mode A's rounds each RESPAWN at a randomized position and size
+        inside the central ROI (spawn_circle); mode B's each rotate the
+        display to a fresh stratified angle (rotation_angles). Either way
+        the point is the same: n nudges of one fit are n correlated fits
+        and their scatter flatters the operator. The scatter across rounds
+        is kept — it is the only measurement of operator repeatability
+        this project has, and now the only figure that can decide the A/B
+        comparison (per-fit sigma, which survives a different n).
 
         And the rounds are kept BLIND (review 2026-08-06): the header used
         to render "accepted so far: N px" while the live readout rendered
@@ -1748,12 +1996,26 @@ class EdgeReviewApp:
         Toplevel in self._cal_win, and every later Detect lifted the
         corpse and returned, silently and forever.
 
+        Mode B is blinder still: it shows NO length for the chord being
+        placed either, because unlike mode A's circle it needs no numeric
+        feedback to place two clicks on an edge. So mode B is measured
+        under stricter blinding than mode A — worth knowing when reading
+        the A/B result, since it can only handicap B.
+
+        EVERY completed round-set is appended to the run's
+        scale_calibration_log.txt and printed to stdout, ACCEPTED OR
+        DECLINED (se.append_calibration_log). The six mode-A spreads that
+        motivated mode B survive only because they were typed into a chat:
+        every one of those calibrations was declined, and setup.txt is
+        written at Save.
+
         The frame is ZOOMABLE (Ctrl+wheel about the cursor, right-drag
-        pans, F fits, Z goes to 1:1 on the circle): the fixed 0.41x
-        preview put one display pixel at ~2.5 full-res px while the soft
-        ink edge spans 8-15 (audit 2026-08-05). The plain wheel is the
-        FINE RESIZE, so it cannot fight the sizing gesture. Geometry is
-        always full-res image coordinates. A previously RECORDED anchor
+        pans, F fits, Z goes to 1:1): the fixed 0.41x preview put one
+        display pixel at ~2.5 full-res px while the soft ink edge spans
+        8-15 (audit 2026-08-05). In mode A the plain wheel is the FINE
+        RESIZE so it cannot fight the sizing gesture; in mode B there is
+        nothing to resize, so the plain wheel zooms. Geometry is always
+        full-res image coordinates. A previously RECORDED anchor
         (setup.txt) can be reused with P, which skips the rounds."""
         import random
         if not self.run:
@@ -1779,20 +2041,24 @@ class EdgeReviewApp:
         n_px_rows = self._px_rows()
         win = tk.Toplevel(self.root)
         try:
-            win.title(f"Calibrate scale — fit the circle to the resting "
-                      f"disc (1 of {CAL_ROUNDS})")
+            win.title("Calibrate scale — pick a method")
             win.transient(self.root)
-            gate = (f"SCALE GATE — this run's px→mm anchor, "
-                    f"{CAL_ROUNDS} rounds averaged.\n"
-                    f"ENCIRCLE the shaded resting region — sit the STROKE "
-                    f"on the disc edge (nominal "
-                    f"{self.settings['diam_mm']:g} mm across). Aim the "
-                    f"stroke at the ink edge's HALF-HEIGHT (mid-gray), "
-                    f"the machine convention — not the outer toe.\n"
-                    f"Drag inside = move · drag a handle = resize · wheel "
-                    f"= fine resize (Shift = coarse) · arrows nudge, "
-                    f"Shift+arrows resize · Ctrl+wheel zooms, right-drag "
-                    f"pans, F fits, Z = 1:1. Esc cancels.")
+            gate = (f"SCALE GATE — this run's px→mm anchor, several rounds "
+                    f"averaged. The nominal disc is "
+                    f"{self.settings['diam_mm']:g} mm across.\n"
+                    f"Aim at the ink edge's HALF-HEIGHT (mid-gray), the "
+                    f"machine convention — not the outer toe.\n"
+                    f"METHOD A (circle): drag inside = move · drag a "
+                    f"handle = resize · wheel = fine resize (Shift = "
+                    f"coarse) · arrows nudge, Shift+arrows resize.\n"
+                    f"METHOD B (two points): click the two OPPOSITE edge "
+                    f"points · arrows nudge the last point (Shift = "
+                    f"coarse) · a 3rd click starts the pair over · the "
+                    f"view is ROTATED a random amount every round, which "
+                    f"is the point — it turns misjudging \"opposite\" from "
+                    f"a fixed error into a random one.\n"
+                    f"Both: Ctrl+wheel zooms, right-drag pans, F fits, "
+                    f"Z = 1:1. Esc cancels.")
             if not anchor_is_baseline:
                 gate += ("\n⚠ The baseline frame is missing/unreadable — "
                          "this is a LATER frame. Only calibrate here if "
@@ -1840,11 +2106,50 @@ class EdgeReviewApp:
                              f"THAT, here and at Save.")
             tk.Label(win, text=gate, justify='left',
                      wraplength=980).pack(pady=(6, 2), padx=8, anchor='w')
+            # ---- the mode chooser (`#215`, 2026-08-06) ----------------
+            # Per calibration, not per session, so both methods can be
+            # driven on the SAME disc minutes apart — which is the only
+            # way the comparison means anything. Switching restarts the
+            # round-set: half a circle set and half a two-point set is not
+            # a measurement of either method.
+            chooser = tk.Frame(win)
+            chooser.pack(anchor='w', padx=8, pady=(0, 2))
+            mode_var = tk.StringVar(value=(mode if mode in se.CAL_MODES
+                                           else se.CAL_DEFAULT_MODE))
+            n_var = tk.StringVar()
+            stroke_var = tk.StringVar(value=CAL_STROKE_STYLES[0])
+            tk.Label(chooser, text="METHOD:").pack(side=tk.LEFT)
+            n_choices = sorted(se.D2_RANGE_FACTORS)
+            for val, txt in (
+                    (se.CAL_MODE_CIRCLE,
+                     "A · fit a circle (3 px stroke on the edge)"),
+                    (se.CAL_MODE_TWOPOINT,
+                     "B · two opposite points, view rotated each round")):
+                tk.Radiobutton(chooser, text=txt, value=val,
+                               variable=mode_var,
+                               command=lambda: switch_mode()).pack(
+                                   side=tk.LEFT, padx=(4, 8))
+            tk.Label(chooser, text="rounds:").pack(side=tk.LEFT)
+            # Only round counts the d2 table has a factor for: an n with
+            # no factor cannot be converted to sigma/SE at all, so it is
+            # refused at the chooser rather than at the gate.
+            n_menu = tk.OptionMenu(chooser, n_var,
+                                   *[str(v) for v in n_choices],
+                                   command=lambda _v: set_rounds())
+            n_menu.pack(side=tk.LEFT, padx=(2, 8))
+            tk.Label(chooser, text="A stroke:").pack(side=tk.LEFT)
+            stroke_menu = tk.OptionMenu(chooser, stroke_var,
+                                        *CAL_STROKE_STYLES,
+                                        command=lambda _v: repaint())
+            stroke_menu.pack(side=tk.LEFT, padx=2)
             hdr = tk.Label(win, text='', justify='left',
                            font=('TkDefaultFont', 11, 'bold'))
             hdr.pack(anchor='w', padx=8)
             cw = max(400, min(1000, self.root.winfo_screenwidth() - 220))
-            ch = max(300, min(760, self.root.winfo_screenheight() - 360))
+            # 400, not 360: the chooser row plus the taller header cost
+            # ~40 px, and the pre-existing budget already left only ~35 px
+            # of slack on a 1080p bench screen with every warning showing
+            ch = max(300, min(760, self.root.winfo_screenheight() - 400))
             cv = tk.Canvas(win, width=cw, height=ch, bg='#111',
                            cursor='crosshair')
             cv.pack(padx=8, pady=6)
@@ -1861,6 +2166,15 @@ class EdgeReviewApp:
                               self.settings.get('roi_frac', 0.85))
             st = {'photo': None, 'pan': None, 'grab': None,
                   'round': 1, 'diams': [], 'circle': None,
+                  # mode B: the rotated display image, the angle it is
+                  # rotated by, the angles still to come in this set, the
+                  # angles already used, and the current round's two
+                  # clicks in ORIGINAL image px ('pts') plus the same two
+                  # in ROTATED display px ('ptsv', for drawing only —
+                  # never for measuring)
+                  'mode': mode_var.get(), 'n': 0, 'rimg': None,
+                  'rot': 0.0, 'pending_rots': [], 'rots': [],
+                  'pts': [], 'ptsv': [], 'auto': '?',
                   # a modal warning is up: <Return> must not reach the
                   # dialog underneath while one is (review 2026-08-06)
                   'modal': False,
@@ -1871,6 +2185,33 @@ class EdgeReviewApp:
                   # cannot be prevented; it is recorded instead.
                   'disclosed': False}
 
+            def two_point():
+                return st['mode'] == se.CAL_MODE_TWOPOINT
+
+            def disp():
+                """(image, w, h) currently DISPLAYED. Mode A shows the
+                frame itself; mode B shows it rotated, and `vt` therefore
+                maps view px to ROTATED px in mode B — every click is
+                pushed back through unrotate_point before it is measured
+                or stored."""
+                if two_point() and st['rimg'] is not None:
+                    return st['rimg'], st['rimg'].width, st['rimg'].height
+                return img, img.width, img.height
+
+            def fit_view(keep_zoom=False):
+                _im, w, h = disp()
+                if keep_zoom and vt.zoom > 0:
+                    # a new rotation changes the canvas size, so the pan
+                    # has to be recentred — but keeping the ZOOM matters:
+                    # at fit zoom on a 1080p frame the operator is below
+                    # 1:1, which the live readout warns about, and losing
+                    # their zoom every round would push them to work there
+                    z = vt.zoom
+                    vt.ox = w / 2.0 - cw / (2.0 * z)
+                    vt.oy = h / 2.0 - ch / (2.0 * z)
+                else:
+                    vt.fit(w, h, cw, ch)
+
             def respawn():
                 st['circle'] = spawn_circle(
                     img.width, img.height,
@@ -1880,49 +2221,104 @@ class EdgeReviewApp:
                 st['circle'] = clamp_circle(cx, cy, r, full_box,
                                             contain=False)
 
+            def set_rotation(deg, keep_zoom=True):
+                """Rotate the DISPLAY for one mode-B round and clear the
+                round's clicks.
+
+                BICUBIC, not NEAREST: the ink edge is a soft 8-15 px ramp
+                and the operator is aiming at its half-height, so the
+                resample has to preserve the ramp rather than staircase
+                it. It does soften the edge slightly — see unrotate_point
+                for why that costs sigma and not the mean."""
+                st['rot'] = float(deg) % 360.0
+                st['rimg'] = img.rotate(st['rot'], resample=Image.BICUBIC,
+                                        expand=True, fillcolor=(17, 17, 17))
+                st['pts'], st['ptsv'] = [], []
+                fit_view(keep_zoom=keep_zoom)
+
+            def rounds_wanted():
+                """Rounds this set wants, read from the CHOOSER — one
+                source of truth. st['n'] mirrors it for the log and for
+                is_last_round; reading st['n'] here instead would have
+                meant the very first set fell back to mode A's 3 whatever
+                the chooser said, because st['n'] is not set until
+                restart_all runs."""
+                try:
+                    n = int(n_var.get())
+                except (TypeError, ValueError):
+                    n = se.CAL_MODE_ROUNDS.get(st['mode'], se.CAL_ROUNDS)
+                return max(2, n)
+
             def is_last_round():
-                """True when accepting the current circle FINISHES the
+                """True when accepting the current fit FINISHES the
                 calibration — i.e. when the next press runs the gates."""
-                return len(st['diams']) + 1 >= max(CAL_ROUNDS, st['round'])
+                return len(st['diams']) + 1 >= max(rounds_wanted(),
+                                                   st['round'])
 
             def head_text():
                 """PROGRESS ONLY — no previously accepted diameter, no
-                running mean (review 2026-08-06). A visible target makes
-                the three rounds dependent, which biases the spread toward
-                zero, stops the spread gate from ever firing, and turns
-                the repeatability figure into fabricated precision. The
-                live readout of the CURRENT circle is fine on its own."""
-                return (f"Round {st['round']} of "
-                        f"{max(CAL_ROUNDS, st['round'])}   ·   the earlier "
-                        f"rounds are HIDDEN until the last fit is in — "
-                        f"each fit has to be independent, or the spread is "
-                        f"a fiction"
+                running average (review 2026-08-06). A visible target
+                makes the rounds dependent, which biases the scatter toward
+                zero, stops the gate from ever firing, and turns the
+                repeatability figure into fabricated precision. The live
+                readout of the CURRENT circle is fine on its own; mode B
+                shows no length at all, because two clicks on an edge need
+                no numeric feedback to place."""
+                where = (f"Method {st['mode']} · Round {st['round']} of "
+                         f"{max(rounds_wanted(), st['round'])}")
+                if two_point():
+                    where += (f"   ·   view rotated {st['rot']:.1f}°   ·   "
+                              f"{len(st['pts'])} of 2 points placed")
+                return (where + "   ·   the earlier rounds are HIDDEN until "
+                        "the last fit is in — each fit has to be "
+                        "independent, or the scatter is a fiction"
                         + ('   ·   this is the LAST round: use the ✔ '
                            'Finish calibration button' if is_last_round()
                            else ''))
 
             def reveal_text(stats):
                 """All of it, at once, once the fitting is OVER — the
-                values, the mean, the range, and the gate it is judged
-                against (SLDEA_MEASUREMENT §2.1a). Shown on the main
-                window's status line by accept(), which is the one place
-                that outlives the dialog; deliberately NOT shown while any
-                further round could still be fitted."""
+                values, their average, the range, and the n-aware
+                conversion the gate judges (SLDEA_MEASUREMENT §2.1a).
+                Shown on the main window's status line by accept(), which
+                is the one place that outlives the dialog; deliberately NOT
+                shown while any further round could still be fitted.
+
+                sigma leads because sigma is what the A/B comparison turns
+                on: it is the METHOD's per-fit precision and it is the only
+                figure here that survives a different round count."""
+                conv = (f"σ {stats['sigma_pct']:.2f}%/fit, SE "
+                        f"{stats['se_pct']:.2f}% diam = "
+                        f"{stats['area_se_pct']:.2f}% area "
+                        f"(gate {se.CAL_SE_PCT:g}%)"
+                        if stats.get('se_pct') is not None
+                        else f"NOT CONVERTIBLE: no d₂ factor for "
+                             f"n={stats['n']}")
                 return (f"mean of {stats['n']}: "
                         + ', '.join(f"{v:.1f}" for v in stats['values'])
                         + f" px, spread {stats['spread_px']:.1f} px = "
-                          f"{stats['spread_pct']:.2f}% "
-                          f"(gate {se.CAL_SPREAD_PCT:g}%)")
+                          f"{stats['spread_pct']:.2f}%, " + conv)
+
+            def auto_ref():
+                """The automatic disc fit, fetched once per dialog. Wanted
+                for the guard AND for every log record — including the
+                round-sets declined before the guard ever runs, which is
+                most of them and exactly the data the A/B comparison
+                needs."""
+                if st['auto'] == '?':
+                    st['auto'] = self._auto_disc()
+                return st['auto']
 
             def repaint():
+                src, sw, sh = disp()
                 ix0, iy0 = vt.to_image(0, 0)
                 ix1, iy1 = vt.to_image(cw, ch)
                 cx0, cy0 = max(0, int(ix0)), max(0, int(iy0))
-                cx1 = min(img.width, int(ix1) + 2)
-                cy1 = min(img.height, int(iy1) + 2)
+                cx1 = min(sw, int(ix1) + 2)
+                cy1 = min(sh, int(iy1) + 2)
                 cv.delete('all')
                 if cx1 > cx0 and cy1 > cy0:
-                    crop = img.crop((cx0, cy0, cx1, cy1))
+                    crop = src.crop((cx0, cy0, cx1, cy1))
                     dw = max(1, int(round((cx1 - cx0) * vt.zoom)))
                     dh = max(1, int(round((cy1 - cy0) * vt.zoom)))
                     res = (Image.NEAREST if vt.zoom >= 2.0
@@ -1932,32 +2328,84 @@ class EdgeReviewApp:
                     vx, vy = vt.to_view(cx0, cy0)
                     cv.create_image(int(vx), int(vy), anchor='nw',
                                     image=st['photo'])
+                if two_point():
+                    paint_points()
+                else:
+                    paint_circle()
+                hdr.config(text=head_text())
+                zoom_note = (f"zoom {vt.zoom:.2f}x"
+                             + ('' if vt.zoom >= 1.0 else
+                                "  ⚠ below 1:1 — press Z before accepting"))
+                if two_point():
+                    # NO LENGTH, deliberately (see head_text): mode B needs
+                    # no numeric feedback to put two clicks on an edge, so
+                    # it does not offer one — nothing on screen is a number
+                    # a later round could be steered onto.
+                    live.config(
+                        text=f"{len(st['pts'])} of 2 edge points placed"
+                             + ("   ·   Continue to record this round"
+                                if len(st['pts']) == 2 else
+                                "   ·   click the point OPPOSITE the first")
+                             + f"   ·   {zoom_note}")
+                else:
+                    dpx = 2.0 * st['circle'][2]
+                    live.config(
+                        text=f"circle: {dpx:.1f} px across  →  "
+                             f"{self.settings['diam_mm'] / max(dpx, 1e-9):.5f}"
+                             f" mm/px   ·   centre "
+                             f"({st['circle'][0]:.0f}, "
+                             f"{st['circle'][1]:.0f})   ·   " + zoom_note)
+
+            def paint_circle():
                 ccx, ccy, r = st['circle']
                 vx, vy = vt.to_view(ccx, ccy)
                 vr = r * vt.zoom
-                # thick stroke (#215) — the stroke IS the comparison, so
-                # it must be visible against the ink without hiding the
-                # edge it sits on: 3 px core inside a dark 5 px halo
-                cv.create_oval(vx - vr, vy - vr, vx + vr, vy + vr,
-                               outline='#000000', width=5)
-                cv.create_oval(vx - vr, vy - vr, vx + vr, vy + vr,
-                               outline='#00e676', width=3)
+                # The stroke IS the comparison in mode A, so it must be
+                # visible against the ink — and the operator's measured
+                # diagnosis is that at 3 px it also HIDES the edge it sits
+                # on, which is what the thin/dashed options are here to
+                # test (cal_stroke_spec, the third arm of the A/B).
+                wid, dash = cal_stroke_spec(stroke_var.get())
+                halo = {'outline': '#000000', 'width': wid + 2}
+                core = {'outline': '#00e676', 'width': wid}
+                if dash:
+                    halo['dash'] = core['dash'] = dash
+                cv.create_oval(vx - vr, vy - vr, vx + vr, vy + vr, **halo)
+                cv.create_oval(vx - vr, vy - vr, vx + vr, vy + vr, **core)
                 cv.create_line(vx - 6, vy, vx + 6, vy, fill='#00e676')
                 cv.create_line(vx, vy - 6, vx, vy + 6, fill='#00e676')
                 for _nm, hx, hy in circle_handles(ccx, ccy, r):
                     hvx, hvy = vt.to_view(hx, hy)
                     cv.create_rectangle(hvx - 4, hvy - 4, hvx + 4, hvy + 4,
                                         fill='#00e676', outline='#000000')
-                hdr.config(text=head_text())
-                dpx = 2.0 * r
-                live.config(
-                    text=f"circle: {dpx:.1f} px across  →  "
-                         f"{self.settings['diam_mm'] / max(dpx, 1e-9):.5f} "
-                         f"mm/px   ·   centre "
-                         f"({ccx:.0f}, {ccy:.0f})   ·   zoom "
-                         f"{vt.zoom:.2f}x"
-                         + ('' if vt.zoom >= 1.0 else
-                            "  ⚠ below 1:1 — press Z before accepting"))
+
+            def paint_points():
+                """Mode B's markers: a 1 px hollow ring and a crosshair
+                with a HOLE in it, at every placed point, plus the chord
+                stopping short of both ends.
+
+                Nothing is drawn within CAL_MARK_GAP_VIEW px of a click —
+                this is the whole reason mode B exists, so it is not left
+                to chance: the shapes come from marker_shapes(), whose
+                clearance is asserted in the tests. Never a filled dot,
+                never a stroke laid along the boundary."""
+                vpts = [vt.to_view(px, py) for px, py in st['ptsv']]
+                if len(vpts) == 2:
+                    seg = chord_segment(vpts[0], vpts[1])
+                    if seg:
+                        cv.create_line(*seg, fill='#00e676', width=1,
+                                       dash=(3, 5))
+                for vx, vy in vpts:
+                    sh = marker_shapes(vx, vy)
+                    # a dark ring one px outside the bright one, so the
+                    # marker reads on pale paper and on dark ink alike
+                    # without either ring thickening
+                    cv.create_oval(sh['ring'][0] - 1, sh['ring'][1] - 1,
+                                   sh['ring'][2] + 1, sh['ring'][3] + 1,
+                                   outline='#000000', width=1)
+                    cv.create_oval(*sh['ring'], outline='#00e676', width=1)
+                    for arm in sh['arms']:
+                        cv.create_line(*arm, fill='#00e676', width=1)
 
             def accept(dpx_full, source_frame, src_is_baseline=None,
                        stats=None, guard=None, overridden=False):
@@ -1970,10 +2418,16 @@ class EdgeReviewApp:
                                                    else src_is_baseline)}
                 if stats:
                     self.manual_ref.update({
+                        'cal_mode': st['mode'],
                         'rounds_px': list(stats['values']),
                         'n_rounds': stats['n'],
                         'spread_px': stats['spread_px'],
-                        'spread_pct': stats['spread_pct']})
+                        'spread_pct': stats['spread_pct'],
+                        # the n-aware conversion travels WITH the range,
+                        # because a bare range cannot be converted later
+                        # by anyone who does not also know n
+                        'sigma_pct': stats.get('sigma_pct'),
+                        'se_pct': stats.get('se_pct')})
                 if guard is not None:
                     note = se.anchor_guard_note(guard, overridden)
                     if st['disclosed']:
@@ -1988,9 +2442,15 @@ class EdgeReviewApp:
                 # hidden while they were being fitted, so the record of
                 # what they were belongs here — after the fitting, on the
                 # one surface that survives the dialog closing
-                extra = ((' (' + reveal_text(stats)
-                          + ('' if se.spread_ok(stats) else ' ⚠ OVER GATE')
-                          + ')') if stats else '')
+                # se_ok is THREE-valued: None means the round count has no
+                # d₂ factor, so the SE was never computed. That must not
+                # render as "over gate" (which implies a number was
+                # judged) and must not render as clean either.
+                ok = se.se_ok(stats) if stats else None
+                verdict_tag = ('' if ok else ' ⚠ OVER GATE' if ok is False
+                               else ' ⚠ NOT JUDGED (no d₂ factor)')
+                extra = ((' (' + reveal_text(stats) + verdict_tag + ')')
+                         if stats else '')
                 # an anchor that met no cross-check must not look like one
                 # that passed a cross-check
                 if guard is not None and not guard.get('available'):
@@ -2076,14 +2536,50 @@ class EdgeReviewApp:
                         f"re-derived from px at this anchor, sight unseen, "
                         f"including rows you do not re-review.")
 
+            def log_set(stats, outcome, guard=None):
+                """Append this completed round-set to the run's calibration
+                log AND print the same line to stdout — both, every time,
+                accepted or declined.
+
+                Why declined sets are logged: the six mode-A spreads that
+                motivated mode B (`#215`, 2026-08-06) exist only as numbers
+                typed into a chat, because every one of those calibrations
+                was DECLINED at a gate and setup.txt is written at Save. A
+                declined round-set is still a measurement of the method.
+
+                Why stdout as well as the file: the run folder can be
+                read-only or full (2026-08-04 disk-full incident), and a
+                logging failure must not be how a measurement is lost."""
+                auto = auto_ref() or {}
+                auto_px = auto.get('diam_px')
+                ok = se.se_ok(stats)
+                try:
+                    _p, line = se.append_calibration_log(self.rundir, {
+                        'when': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                        'mode': st['mode'], 'stats': stats,
+                        'gate': se.CAL_SE_PCT,
+                        'verdict': {True: 'PASS',
+                                    False: 'OVER-GATE'}.get(ok),
+                        'rot_deg': (list(st['rots']) if two_point()
+                                    else None),
+                        'stroke': (stroke_var.get() if not two_point()
+                                   else None),
+                        'auto_diam_px': auto_px,
+                        'auto_pct': (100.0 * (stats['mean'] - auto_px)
+                                     / auto_px) if auto_px else None,
+                        'outcome': outcome, 'frame': frame_name})
+                    print(line)
+                except Exception as e:            # never lose a round-set
+                    print(f"calibrate: logging the round-set failed: {e}")
+
             def finish():
-                """Average the rounds, run the spread gate, then the
-                anchor guard, then accept — and only then REVEAL the
-                values (accept() puts them on the status line, which
-                outlives this window). Every gate is a DECISION the
-                operator makes explicitly — the failure this replaces was
-                silence, not a missing number — and every accept-anyway
-                question defaults to declining it."""
+                """Average the rounds, run the SE gate, then the anchor
+                guard, then accept — and only then REVEAL the values
+                (accept() puts them on the status line, which outlives this
+                window). Every gate is a DECISION the operator makes
+                explicitly — the failure this replaces was silence, not a
+                missing number — and every accept-anyway question defaults
+                to declining it. Every exit path logs the round-set."""
                 stats = se.calibration_stats(st['diams'])
                 if not stats:
                     return
@@ -2095,52 +2591,108 @@ class EdgeReviewApp:
                     except tk.TclError:
                         pass
 
-                say(f"{stats['n']} fits recorded — checking how far apart "
+                say(f"{stats['n']} fits recorded — checking how precise "
                     f"they are…")
-                if not se.spread_ok(stats):
-                    # The remedy for a RANGE gate is a refit, not another
-                    # round: max-min never shrinks when a fit is added, so
-                    # "Add another round?" could not clear this gate and
-                    # the flow always landed on "Accept the mean anyway?"
-                    # (review 2026-08-06). Three honest options, and the
-                    # default is the fail-closed one — the gate holding is
-                    # never the wrong outcome.
-                    # Quoted as a PERCENTAGE ONLY, on purpose: a refit is
+                ok = se.se_ok(stats)
+                if ok is None:
+                    # The round count has no d₂ factor, so sigma and the
+                    # mean's SE were never computed — §2.1a's conversion
+                    # simply does not exist for this n. REFUSING is the
+                    # point: silently reusing 1.693 (the n=3 factor the
+                    # section used to hard-wire) would push a wrong error
+                    # term into the budget with nobody seeing it happen.
+                    say("⚠ this round count cannot be converted to an "
+                        "error term")
+                    if not ask(
+                            "Precision cannot be judged",
+                            f"You fitted {stats['n']} round(s), and there "
+                            f"is no d₂ range-to-sigma factor for that "
+                            f"count (the table covers n = "
+                            f"{min(se.D2_RANGE_FACTORS)}–"
+                            f"{max(se.D2_RANGE_FACTORS)}).\n\nSo this "
+                            f"anchor's per-fit precision and its mean "
+                            f"standard error were NOT computed, and the "
+                            f"acceptance gate could not be applied. "
+                            f"Nothing here has been checked against "
+                            f"SLDEA_MEASUREMENT §2.1's ~0.4% diameter "
+                            f"budget."
+                            + rescale_note(stats['mean'], None)
+                            + f"\n\nUse this UNJUDGED anchor anyway?\n\n"
+                              f"No = cancel and calibrate again with a "
+                              f"round count in the table.",
+                            default='no', icon='warning'):
+                        log_set(stats, 'declined-unjudgeable')
+                        win.destroy()
+                        return
+                elif not ok:
+                    # THE ACCEPTANCE GATE, on the mean's standard error
+                    # rather than the raw range (2026-08-06 evening). Two
+                    # reasons, both established: a range is not comparable
+                    # across different n, and a range cannot shrink when a
+                    # round is added — so a range gate's own remedy could
+                    # never clear it and the flow always landed on "accept
+                    # anyway". SE falls as 1/sqrt(n), so this gate can name
+                    # the round count that WOULD clear it, from the sigma
+                    # just measured (se.rounds_for_se).
+                    #
+                    # Quoted as PERCENTAGES ONLY, on purpose: a refit is
                     # one of the answers, so the individual diameters and
-                    # the mean must stay hidden here too or the refit is
-                    # fitted against a disclosed target (review
-                    # 2026-08-06). The percentage is what the decision
-                    # turns on, and it is not a number you can aim at.
+                    # their average must stay hidden here too or the refit
+                    # is fitted against a disclosed target (review
+                    # 2026-08-06). A percentage is not a number you can aim
+                    # a click at.
+                    need = se.rounds_for_se(stats['sigma_pct'])
+                    top = max(se.D2_RANGE_FACTORS)
+                    if need and need <= top:
+                        remedy = (f"At the σ you just measured, "
+                                  f"{need} rounds would meet the gate "
+                                  f"(SE = σ/√n).")
+                    elif need:
+                        remedy = (f"At the σ you just measured it would "
+                                  f"take {need} rounds to meet the gate — "
+                                  f"more than the {top} the conversion "
+                                  f"table covers. This method is not "
+                                  f"precise enough for the budget at any "
+                                  f"round count you can run here; the "
+                                  f"other method is the remedy, not more "
+                                  f"rounds.")
+                    else:
+                        remedy = ''
                     ans = ask(
                         "Rounds disagree",
-                        f"Your {stats['n']} fits spread "
-                        f"{stats['spread_pct']:.2f}% of their mean, over "
-                        f"the {se.CAL_SPREAD_PCT:g}% gate. That spread IS "
-                        f"this run's operator-repeatability number and it "
-                        f"is worse than the error budget expects "
-                        f"(SLDEA_MEASUREMENT §2.1a).\n\n"
-                        f"Adding a further round cannot clear this gate — "
-                        f"a range only grows — so:\n\n"
-                        f"YES = refit all {stats['n']} rounds from round 1 "
-                        f"(the one remedy that can clear it)\n"
-                        f"NO = accept the mean as MEASURED (the spread is "
-                        f"recorded over the gate, and sldea_diag reports "
-                        f"it)\n"
+                        f"Your {stats['n']} fits scatter by σ = "
+                        f"{stats['sigma_pct']:.2f}% per fit, so the "
+                        f"average of them carries a standard error of "
+                        f"{stats['se_pct']:.2f}% in diameter = "
+                        f"{stats['area_se_pct']:.2f}% in area — over the "
+                        f"{se.CAL_SE_PCT:g}% gate, which is "
+                        f"SLDEA_MEASUREMENT §2.1's standing scale-anchor "
+                        f"budget (~0.4% diameter / ~0.8% area).\n\n"
+                        f"(Raw range across the rounds: "
+                        f"{stats['spread_pct']:.2f}%. σ = range/d₂(n), "
+                        f"d₂({stats['n']}) = {stats['d2']:g}.)\n\n"
+                        f"{remedy}\n\n"
+                        f"YES = refit all {stats['n']} rounds from round 1\n"
+                        f"NO = accept the average as MEASURED (the "
+                        f"precision is recorded over the gate, and "
+                        f"sldea_diag reports it)\n"
                         f"CANCEL = leave the gate closed and calibrate "
                         f"later\n\n"
                         f"(The fitted diameters stay hidden until you "
-                        f"accept — a refit has to be as independent as the "
-                        f"first three were.)",
+                        f"accept — a refit has to be as independent as "
+                        f"these were.)",
                         default='cancel', three=True, icon='warning')
                     if ans is None:
+                        log_set(stats, 'declined-cancel')
                         win.destroy()
                         return
                     if ans:
+                        log_set(stats, 'declined-refit')
                         restart_all()
                         return
-                say("cross-checking the mean against the automatic disc "
+                say("cross-checking the average against the automatic disc "
                     "fit…")
-                guard = se.anchor_guard(stats['mean'], self._auto_disc(),
+                guard = se.anchor_guard(stats['mean'], auto_ref(),
                                         self.settings['diam_mm'])
                 overridden = False
                 if not guard['available']:
@@ -2170,7 +2722,7 @@ class EdgeReviewApp:
                             f"systematic error — the stroke on the outer "
                             f"toe, the wrong feature encircled, the wrong "
                             f"diam_mm — would pass unnoticed here.\n\n"
-                            f"Your three fits agreeing says only that you "
+                            f"Your fits agreeing says only that you "
                             f"are REPEATABLE, not that you are right."
                             + rescale_note(stats['mean'], None)
                             + f"\n\nUse this UNCHECKED anchor anyway?\n\n"
@@ -2178,6 +2730,7 @@ class EdgeReviewApp:
                               f"or verify the anchor by eye on the "
                               f"contact sheet first).",
                             default='no', icon='warning'):
+                        log_set(stats, 'declined-uncrosschecked', guard)
                         win.destroy()
                         return
                     overridden = True
@@ -2189,15 +2742,15 @@ class EdgeReviewApp:
                     lines = '\n'.join('• ' + w for w in guard['warn'])
                     if not ask(
                             "Anchor sanity check",
-                            f"The accepted mean ({stats['mean']:.1f} px) "
+                            f"The accepted average ({stats['mean']:.1f} px) "
                             f"disagrees with a reference the app "
                             f"measured independently:\n\n{lines}\n\n"
                             f"The scale-anchor budget is ~0.4% diameter "
                             f"/ ~0.8% area (SLDEA_MEASUREMENT §2.1), so "
-                            f"this is outside it. Common causes: the "
-                            f"stroke sat on the outer toe instead of the "
+                            f"this is outside it. Common causes: the mark "
+                            f"sat on the outer toe instead of the "
                             f"half-height, the wrong feature was "
-                            f"encircled, or diam_mm does not match this "
+                            f"measured, or diam_mm does not match this "
                             f"device's mask."
                             + rescale_note(stats['mean'],
                                            guard['auto_diam_px'])
@@ -2205,9 +2758,12 @@ class EdgeReviewApp:
                               f"No = recalibrate from round 1.",
                             default='no', icon='warning'):
                         st['disclosed'] = True
+                        log_set(stats, 'declined-guard', guard)
                         restart_all()
                         return
                     overridden = True
+                log_set(stats, ('accepted-override' if overridden
+                                else 'accepted'), guard)
                 accept(stats['mean'], frame_name, stats=stats,
                        guard=guard, overridden=overridden)
 
@@ -2233,8 +2789,30 @@ class EdgeReviewApp:
                 continue_round()
                 return 'break'
 
+            def round_diameter():
+                """The current round's fitted diameter in ORIGINAL image
+                px, or None when the round is not finished.
+
+                Mode B measures in original coordinates by construction:
+                st['pts'] holds the two clicks already mapped back through
+                the inverse rotation, so the length here is the length on
+                the frame as captured. A length is rotation-invariant, so a
+                correct implementation would get the same number from the
+                rotated coordinates — measuring in original space is what
+                keeps the RECORDED click positions meaningful."""
+                if two_point():
+                    if len(st['pts']) < 2:
+                        return None
+                    return two_point_diameter(st['pts'][0], st['pts'][1])
+                return 2.0 * st['circle'][2]
+
             def continue_round(_ev=None):
-                dpx = 2.0 * st['circle'][2]
+                dpx = round_diameter()
+                if dpx is None:
+                    live.config(text="⚠ place BOTH edge points before "
+                                     "continuing — click one edge, then "
+                                     "the point opposite it")
+                    return
                 if not cal_diam_plausible(dpx, img.width, img.height,
                                           self.settings.get('roi_frac',
                                                             0.85)):
@@ -2242,32 +2820,94 @@ class EdgeReviewApp:
                     # past the frame) is not a fit. The two-click dialog
                     # refused clicks under 10 px apart for the same
                     # reason: a nonsense anchor scales EVERY area.
-                    messagebox.showwarning(
-                        "Calibrate",
-                        f"{dpx:.0f} px across cannot be the resting disc "
-                        f"— it is outside the size range the automatic "
-                        f"fit accepts too. Resize the circle onto the "
-                        f"disc edge (drag a handle, or the wheel) before "
-                        f"continuing.")
+                    if two_point():
+                        # NUMBERLESS in mode B: mode B shows no length
+                        # anywhere before acceptance, and a refusal that
+                        # printed one would be the one place the operator
+                        # could read a figure off and carry it into the
+                        # next round.
+                        messagebox.showwarning(
+                            "Calibrate",
+                            "Those two points are too close together (or "
+                            "too far apart) to be the resting disc — they "
+                            "are outside the size range the automatic fit "
+                            "accepts. Click the two OPPOSITE edges of the "
+                            "shaded disc; a third click starts the pair "
+                            "over.")
+                    else:
+                        messagebox.showwarning(
+                            "Calibrate",
+                            f"{dpx:.0f} px across cannot be the resting "
+                            f"disc — it is outside the size range the "
+                            f"automatic fit accepts too. Resize the circle "
+                            f"onto the disc edge (drag a handle, or the "
+                            f"wheel) before continuing.")
                     return
                 st['diams'].append(dpx)
-                if len(st['diams']) >= max(CAL_ROUNDS, st['round']):
+                if two_point():
+                    # the angle this round was judged at, kept for the log:
+                    # a round-set whose rotations turned out to cluster is
+                    # a round-set whose rotation did less than it should
+                    st['rots'].append(st['rot'])
+                if len(st['diams']) >= max(rounds_wanted(), st['round']):
                     finish()
                     return
                 st['round'] = len(st['diams']) + 1
-                respawn()
+                next_round()
                 sync_buttons()
                 repaint()
 
+            def next_round():
+                """Re-randomize for a fresh round: mode A respawns the
+                circle somewhere else at some other size, mode B rotates
+                the display to the next stratified angle. Same purpose in
+                both — n nudges of one fit are n correlated fits."""
+                if two_point():
+                    ang = (st['pending_rots'].pop(0)
+                           if st['pending_rots']
+                           else rotation_angles(1, rnd)[0])
+                    set_rotation(ang)
+                else:
+                    respawn()
+
             def redo_round(_ev=None):
-                respawn()
+                next_round()
                 repaint()
 
             def restart_all(_ev=None):
+                """Start the round-set over. Also what a mode or round-count
+                change does: half a circle set plus half a two-point set is
+                not a measurement of either method."""
+                st['mode'] = mode_var.get()
+                st['n'] = rounds_wanted()
                 st['round'], st['diams'] = 1, []
-                respawn()
+                st['rots'] = []
+                if two_point():
+                    st['pending_rots'] = rotation_angles(st['n'], rnd)
+                    # keep_zoom=False on the FIRST round only: the operator
+                    # has not chosen a zoom yet, and a rotated frame is a
+                    # different size from the one the view was fitted to
+                    set_rotation(st['pending_rots'].pop(0), keep_zoom=False)
+                else:
+                    st['rimg'] = None
+                    st['pts'], st['ptsv'] = [], []
+                    respawn()
                 sync_buttons()
                 repaint()
+
+            def set_rounds(_ev=None):
+                restart_all()          # rounds_wanted() reads n_var itself
+
+            def switch_mode(_ev=None):
+                """Mode radio changed: adopt that mode's DEFAULT round
+                count and start over. Adopting the default rather than
+                keeping whatever was showing means the operator who just
+                wants "the other method" gets the round count that method
+                was designed around (3 for A, 5 for B) without having to
+                know it."""
+                n_var.set(str(se.CAL_MODE_ROUNDS.get(mode_var.get(),
+                                                     se.CAL_ROUNDS)))
+                restart_all()
 
             def reuse(_ev=None):
                 if recorded:
@@ -2284,8 +2924,9 @@ class EdgeReviewApp:
                         'is_baseline': recorded.get('anchor_is_baseline',
                                                     anchor_is_baseline),
                         'reused': True}
-                    for k in ('rounds_px', 'n_rounds', 'spread_px',
-                              'spread_pct', 'guard'):
+                    for k in ('cal_mode', 'rounds_px', 'n_rounds',
+                              'spread_px', 'spread_pct', 'sigma_pct',
+                              'se_pct', 'guard'):
                         if recorded.get(k) is not None:
                             self.manual_ref[k] = recorded[k]
                     dpx = float(recorded['diam_px'])
@@ -2313,11 +2954,43 @@ class EdgeReviewApp:
             def sync_buttons():
                 cont.config(text=("✔ Finish calibration" if is_last_round()
                                   else "Continue →"))
-                win.title(f"Calibrate scale — fit the circle to the "
-                          f"resting disc ({st['round']} of "
-                          f"{max(CAL_ROUNDS, st['round'])})")
+                what = ("fit the circle to the resting disc" if not
+                        two_point() else
+                        "click the two opposite edges of the resting disc")
+                win.title(f"Calibrate scale ({st['mode']}) — {what} "
+                          f"({st['round']} of "
+                          f"{max(rounds_wanted(), st['round'])})")
+                # the stroke option only means anything for mode A's stroke
+                stroke_menu.config(state=('disabled' if two_point()
+                                          else 'normal'))
+
+            def place_point(rx, ry):
+                """Record one mode-B click. `rx, ry` are ROTATED display
+                image px; what gets STORED and measured is the point mapped
+                back to ORIGINAL image px.
+
+                A click whose original-space position falls outside the
+                frame is refused: the expanded rotation canvas has
+                background-filled corners, and a click there is not a point
+                on the disc."""
+                _im, rw, rh = disp()
+                ox, oy = unrotate_point(rx, ry, rw, rh,
+                                        img.width, img.height, st['rot'])
+                if not (0.0 <= ox <= img.width and 0.0 <= oy <= img.height):
+                    live.config(text="⚠ that click is off the frame (the "
+                                     "rotated view has empty corners) — "
+                                     "click on the disc edge itself")
+                    return
+                if len(st['pts']) >= 2:
+                    st['pts'], st['ptsv'] = [], []   # a 3rd click restarts
+                st['pts'].append((ox, oy))
+                st['ptsv'].append((float(rx), float(ry)))
+                repaint()
 
             def press(ev):
+                if two_point():
+                    place_point(*vt.to_image(ev.x, ev.y))
+                    return
                 ccx, ccy, r = st['circle']
                 # hit-test in VIEW px: a handle must stay the same
                 # physical size to the hand at every zoom
@@ -2330,6 +3003,8 @@ class EdgeReviewApp:
                 st['grab'] = (what, ix - ccx, iy - ccy)
 
             def drag(ev):
+                # mode B never sets a grab, so a drag there is a no-op —
+                # a click-and-wobble must not move a placed point
                 if not st['grab']:
                     return
                 what, offx, offy = st['grab']
@@ -2346,7 +3021,11 @@ class EdgeReviewApp:
                 st['grab'] = None
 
             def wheel(vx, vy, steps, ctrl=False, shift=False):
-                if ctrl:
+                # In mode A the plain wheel is the FINE RESIZE and zoom is
+                # on Ctrl, so the wheel cannot fight the sizing gesture. In
+                # mode B there is nothing to resize, so the plain wheel
+                # does the obvious thing and zooms.
+                if ctrl or two_point():
                     vt.zoom_at(vx, vy, 1.15 ** steps)
                 else:
                     ccx, ccy, r = st['circle']
@@ -2354,7 +3033,22 @@ class EdgeReviewApp:
                 repaint()
 
             def key_nudge(ev):
-                d = cal_key_delta(ev.keysym, bool(ev.state & 0x0001))
+                shift = bool(ev.state & 0x0001)
+                if two_point():
+                    # arrows nudge the LAST placed point, in the rotated
+                    # display frame the operator is looking at — one screen
+                    # px, whichever way that points in the original
+                    d = cal_key_delta(ev.keysym, False)
+                    if d is None or not st['ptsv']:
+                        return
+                    step = (CAL_PT_NUDGE_COARSE_PX if shift
+                            else CAL_PT_NUDGE_PX)
+                    rx, ry = st['ptsv'][-1]
+                    st['pts'].pop()
+                    st['ptsv'].pop()
+                    place_point(rx + d[0] * step, ry + d[1] * step)
+                    return 'break'
+                d = cal_key_delta(ev.keysym, shift)
                 if d is None:
                     return
                 ccx, ccy, r = st['circle']
@@ -2363,9 +3057,16 @@ class EdgeReviewApp:
                 return 'break'
 
             def one_to_one(_ev=None):
-                """Zoom to at least 1:1 centred on the circle — the fixed
-                0.41x preview was itself an audit finding."""
-                ccx, ccy, _r = st['circle']
+                """Zoom to at least 1:1 centred on the fit — the fixed
+                0.41x preview was itself an audit finding. Mode B centres
+                on the last placed point, or on the frame centre before any
+                point is placed."""
+                _im, w, h = disp()
+                if two_point():
+                    ccx, ccy = (st['ptsv'][-1] if st['ptsv']
+                                else (w / 2.0, h / 2.0))
+                else:
+                    ccx, ccy = st['circle'][0], st['circle'][1]
                 vt.zoom = max(1.0, vt.zoom)
                 vt.ox = ccx - cw / (2.0 * vt.zoom)
                 vt.oy = ccy - ch / (2.0 * vt.zoom)
@@ -2398,8 +3099,9 @@ class EdgeReviewApp:
             cv.bind('<Button-3>', pan_start)
             cv.bind('<B3-Motion>', pan_move)
             for k in ('<Key-f>', '<Key-F>'):
-                win.bind(k, lambda e: (vt.fit(img.width, img.height,
-                                              cw, ch), repaint()))
+                # disp(), not img: in mode B the view is fitted to the
+                # ROTATED canvas, which is bigger and a different shape
+                win.bind(k, lambda e: (fit_view(), repaint()))
             win.bind('<Key-z>', one_to_one)
             win.bind('<Key-Z>', one_to_one)
             for k in ('<Left>', '<Right>', '<Up>', '<Down>',
@@ -2413,15 +3115,28 @@ class EdgeReviewApp:
                 win.bind('<Key-p>', reuse)
                 win.bind('<Key-P>', reuse)
             win.bind('<Escape>', lambda e: win.destroy())
-            respawn()
-            sync_buttons()
-            repaint()
+            # n_var carries the chosen mode's DEFAULT round count (3 for
+            # the circle, 5 for two-point); restart_all() reads it back and
+            # opens round 1 in that mode
+            n_var.set(str(se.CAL_MODE_ROUNDS.get(mode_var.get(),
+                                                 se.CAL_ROUNDS)))
+            restart_all()
             cv.focus_set()
             self._cal_win = win
+            # TEST SEAM, published only while the dialog is alive (like
+            # _cal_win above). A test that wants to drive mode B has to
+            # click at VIEW coordinates, which means it needs the dialog's
+            # OWN view transform and its own rotated canvas — computing
+            # them a second time in the test would test the re-derivation
+            # instead of the dialog. Nothing in the app reads this.
+            self._cal_probe = {'st': st, 'vt': vt, 'canvas': cv,
+                               'disp': disp, 'mode_var': mode_var,
+                               'n_var': n_var, 'stroke_var': stroke_var}
             win.grab_set()
             self.root.wait_window(win)
         finally:
             self._cal_win = None
+            self._cal_probe = None
             try:
                 if win.winfo_exists():
                     win.destroy()

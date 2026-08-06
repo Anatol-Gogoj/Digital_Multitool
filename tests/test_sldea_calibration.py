@@ -786,6 +786,547 @@ def test_gui_constants_agree_with_the_shared_ones():
     assert (2 * gui.CAL_SPAWN_R_FRAC[0]) > gui.CAL_MIN_DIAM_FRAC
 
 
+# ---------------------------------------------------------------------------
+# MODE B and the n-aware statistics (2026-08-06 evening)
+#
+# The operator drove mode A six times on a scratch copy of P3_2 and the
+# recorded 3-round ranges were 1.94, 2.09, 1.62, 1.81, 1.44 % plus one
+# under 1 % -- per-fit sigma ~ 1.05 %, i.e. a 3-round mean SE of 0.61 %
+# diameter / 1.21 % area against SLDEA_MEASUREMENT 2.1's ~0.4 % / ~0.8 %.
+# Mode B is the alternative that gets A/B'd against it, and the statistics
+# had to stop hard-wiring n = 3 before either could be judged.
+# ---------------------------------------------------------------------------
+
+# The measured mode-A ranges, from the `#215` comment of 2026-08-06.
+MODE_A_RANGES_PCT = (1.94, 2.09, 1.62, 1.81, 1.44)
+
+
+def test_d2_lookup_matches_the_published_factors():
+    """The control-chart d2 factors (ASTM E2587 / Duncan), by lookup. The
+    n=3 value 1.693 is the one SLDEA_MEASUREMENT 2.1a was written around,
+    so it is the anchor of the table."""
+    assert se.d2(3) == 1.693
+    for n, f in ((2, 1.128), (4, 2.059), (5, 2.326), (6, 2.534),
+                 (7, 2.704), (8, 2.847)):
+        assert se.d2(n) == f, (n, se.d2(n))
+    # monotonic: more samples, wider expected range
+    fs = [se.d2(n) for n in sorted(se.D2_RANGE_FACTORS)]
+    assert fs == sorted(fs) and len(set(fs)) == len(fs)
+
+
+def test_d2_REFUSES_outside_the_table_instead_of_guessing():
+    """THE POINT of the lookup. 2.1a used to hard-wire the n=3 constants
+    (R/1.693, R/2.93, R/1.47); with the round count configurable those are
+    wrong for every other n, and a silent fallback -- nearest neighbour, an
+    interpolation, or just reusing 1.693 -- would push a wrong error term
+    into the budget with nobody seeing it happen."""
+    for n in (0, 1, 9, 12, 100, -3):
+        assert se.d2(n) is None, n
+    for junk in (None, '', 'five', object()):
+        assert se.d2(junk) is None, junk
+    # and the refusal propagates: no sigma, no SE, no area SE -- all None
+    # TOGETHER, never a zero that reads as perfect precision
+    s1 = se.calibration_stats([577.0])
+    assert s1['n'] == 1 and s1['d2'] is None
+    for k in ('sigma_px', 'sigma_pct', 'se_px', 'se_pct', 'area_se_pct'):
+        assert s1[k] is None, k
+    # a single round PASSES the old range gate vacuously (there is no
+    # range) but must NOT pass the SE gate -- nothing was computed to judge
+    assert se.spread_ok(s1) is True
+    assert se.se_ok(s1) is None
+    assert se.sigma_from_range(1.0, 9) is None
+    assert se.sigma_from_range(None, 3) is None
+
+
+def test_sigma_and_se_arithmetic_at_several_n():
+    """sigma = R/d2(n), mean SE = sigma/sqrt(n), area SE = 2 x mean SE --
+    checked at four round counts, because the whole failure mode this
+    replaces was arithmetic that only held at n = 3."""
+    for n in (2, 3, 4, 5, 6, 7, 8):
+        # a set whose range is exactly 10 px on a mean of 1000 px = 1.00 %
+        vals = [995.0] + [1000.0] * (n - 2) + [1005.0]
+        s = se.calibration_stats(vals)
+        assert s['n'] == n
+        assert abs(s['spread_pct'] - 1.0) < 1e-9
+        assert abs(s['sigma_pct'] - 1.0 / se.d2(n)) < 1e-9, n
+        assert abs(s['se_pct'] - s['sigma_pct'] / math.sqrt(n)) < 1e-12
+        assert abs(s['area_se_pct'] - 2.0 * s['se_pct']) < 1e-12
+        # px and % agree with each other
+        assert abs(s['sigma_px'] / s['mean'] * 100 - s['sigma_pct']) < 1e-9
+        assert abs(s['se_px'] / s['mean'] * 100 - s['se_pct']) < 1e-9
+
+    # the SAME range means DIFFERENT precision at different n -- which is
+    # exactly why a range gate could not survive a configurable n
+    s3 = se.calibration_stats([995.0, 1000.0, 1005.0])
+    s5 = se.calibration_stats([995.0, 1000.0, 1000.0, 1000.0, 1005.0])
+    assert s3['spread_pct'] == s5['spread_pct']
+    assert s5['sigma_pct'] < s3['sigma_pct']
+    assert abs(s3['sigma_pct'] / s5['sigma_pct']
+               - se.d2(5) / se.d2(3)) < 1e-9        # 1.37x
+
+    # read-back path: sigma from a RECORDED range + n, no diameters needed
+    assert abs(se.sigma_from_range(1.0, 3) - 1.0 / 1.693) < 1e-12
+    assert abs(se.sigma_from_range(2.4, 3) - 2.4 / 1.693) < 1e-12
+
+
+def test_the_measured_mode_A_numbers_reproduce_the_issues_conversion():
+    """The five recorded mode-A ranges convert to the sigmas quoted on the
+    issue, and to a 3-round mean SE outside SLDEA_MEASUREMENT 2.1's
+    budget. If this ever stops holding, the premise of mode B is gone."""
+    sigmas = [se.sigma_from_range(r, 3) for r in MODE_A_RANGES_PCT]
+    for got, want in zip(sigmas, (1.15, 1.23, 0.96, 1.07, 0.85)):
+        assert abs(got - want) < 0.01, (got, want)
+    # the issue's headline figure is the MEAN of the five (1.05 %); its
+    # median is 1.07 %, quoted there too
+    sigma = sum(sigmas) / len(sigmas)
+    assert abs(sigma - 1.05) < 0.01, sigma
+    assert abs(sorted(sigmas)[len(sigmas) // 2] - 1.07) < 0.01
+    # at that per-fit precision, 3 rounds MISSES the budget ...
+    se3 = sigma / math.sqrt(3)
+    assert 0.60 < se3 < 0.62 and se3 > se.CAL_SE_PCT
+    assert 1.20 < 2 * se3 < 1.24            # % area, vs the ~0.8 % budget
+    # ... and it would take ~7 rounds to reach it, which is the number the
+    # issue quotes and the number the gate's own remedy must name (at the
+    # median it is 8 -- either way, more than anyone will sit through)
+    assert se.rounds_for_se(sigma) == 7
+    assert se.rounds_for_se(sorted(sigmas)[len(sigmas) // 2]) == 8
+    # mode B's target: sigma < 0.9 % puts 5 rounds essentially on budget
+    assert 0.9 / math.sqrt(5) < 0.41
+    assert se.rounds_for_se(0.894) == 5
+
+
+def test_the_gate_is_the_SE_not_the_range_and_can_be_cleared():
+    """The gate change (2026-08-06 evening). Two properties a range gate
+    could not have: it is comparable across n, and its own remedy can
+    clear it -- `test_adding_a_round_can_never_clear_the_spread_gate` pins
+    the defect this fixes."""
+    assert se.CAL_SE_PCT == 0.4          # derived from 2.1, not measured
+    tight = se.calibration_stats([999.0, 1000.0, 1001.0])   # SE 0.068 %
+    loose = se.calibration_stats([980.0, 1000.0, 1020.0])   # SE 1.36 %
+    assert se.se_ok(tight) is True and tight['se_pct'] < se.CAL_SE_PCT
+    assert se.se_ok(loose) is False
+    # exactly at the gate passes (the gate is "exceeds")
+    n = 4
+    mean = 1000.0
+    rng = se.CAL_SE_PCT * math.sqrt(n) * se.d2(n) / 100.0 * mean
+    edge = se.calibration_stats([mean - rng / 2.0] + [mean] * (n - 2)
+                                + [mean + rng / 2.0])
+    assert abs(edge['se_pct'] - se.CAL_SE_PCT) < 1e-9
+    assert se.se_ok(edge) is True
+
+    # THE MONOTONICITY THE RANGE GATE LACKED. Holding the per-fit scatter
+    # fixed at the measured mode-A value (sigma ~ 1 % of 600 px), the
+    # EXPECTED mean SE falls through the gate between n=3 and n=8:
+    #   0.577 % at n=3 (over) -> 0.354 % at n=8 (under).
+    # So more rounds is a real remedy here. It was not for the range: the
+    # range GROWS with n, which is what
+    # test_adding_a_round_can_never_clear_the_spread_gate pins.
+    assert 1.0 / math.sqrt(3) > se.CAL_SE_PCT > 1.0 / math.sqrt(8)
+    rnd = random.Random(20260806)
+    trips = {3: 0, 5: 0, 8: 0}
+    N = 600
+    for _ in range(N):
+        for n in sorted(trips):
+            fits = [rnd.gauss(600.0, 6.0) for _ in range(n)]
+            if se.se_ok(se.calibration_stats(fits)) is False:
+                trips[n] += 1
+    # The SE estimate is itself noisy (the range of a few samples is a
+    # scatter), so this is a rate claim, not a certainty -- the
+    # deterministic version is the assertion above. What matters is the
+    # DIRECTION: the same operator precision trips the gate far more often
+    # at 3 rounds than at 8, and the rate falls all the way down.
+    assert trips[3] > N * 0.6, trips              # ~70 %
+    assert trips[8] < N * 0.4, trips              # ~32 %
+    assert trips[3] > trips[5] > trips[8], trips
+    assert trips[3] > 2 * trips[8], trips
+
+
+def test_rounds_for_se_names_the_remedy_and_admits_when_there_is_none():
+    assert se.rounds_for_se(0.4) == 2       # already at the gate; n>=2
+    assert se.rounds_for_se(0.8) == 4
+    assert se.rounds_for_se(1.05) == 7
+    assert se.rounds_for_se(2.0) == 25       # NOT clipped to the table:
+    assert se.rounds_for_se(2.0) > max(se.D2_RANGE_FACTORS)   # a caller
+    # must be able to say "this method cannot reach budget", not be handed
+    # a quietly clipped 8
+    for junk in (0, -1, None, '', 'x'):
+        assert se.rounds_for_se(junk) is None, junk
+
+
+def test_mode_constants_are_shared_and_the_defaults_are_per_mode():
+    import sldea_edge_gui as gui
+    assert se.CAL_MODES == ('A', 'B')
+    assert se.CAL_MODE_ROUNDS[se.CAL_MODE_CIRCLE] == se.CAL_ROUNDS == 3
+    assert se.CAL_MODE_ROUNDS[se.CAL_MODE_TWOPOINT] == 5
+    # mode A stays the default: switching it would change every existing
+    # calibration path silently. One edit once B wins the comparison.
+    assert se.CAL_DEFAULT_MODE == se.CAL_MODE_CIRCLE
+    # every per-mode default has a d2 factor, or its own gate could never
+    # be applied to it
+    for n in se.CAL_MODE_ROUNDS.values():
+        assert se.d2(n) is not None, n
+    assert gui.CAL_ROUNDS_TWOPOINT is se.CAL_ROUNDS_TWOPOINT
+    assert gui.CAL_STROKE_STYLES[0] == '3 px solid'   # A unchanged
+
+
+# ---------------------------------------------------------------------------
+# mode B geometry: rotate for display, measure in ORIGINAL coordinates
+# ---------------------------------------------------------------------------
+
+def test_rotation_angles_are_stratified_over_the_whole_circle():
+    """Rotation is the mechanism, so it has to actually happen. n
+    independent uniform draws can cluster; one draw per equal sector
+    cannot. The whole circle, not a half: the human bias toward horizontal
+    and vertical chords is 90-degree periodic."""
+    import sldea_edge_gui as gui
+    for n in (2, 3, 5, 8):
+        angs = gui.rotation_angles(n, random.Random(7 + n))
+        assert len(angs) == n
+        assert all(0.0 <= a < 360.0 for a in angs), angs
+        # exactly one angle per sector, whatever order they came out in
+        sectors = sorted(int(a // (360.0 / n)) for a in angs)
+        assert sectors == list(range(n)), (n, angs)
+    # shuffled, so the order carries no information about the round
+    orders = set()
+    for seed in range(40):
+        angs = gui.rotation_angles(5, random.Random(seed))
+        orders.add(tuple(sorted(range(5),
+                                key=lambda i: angs[i])))
+    assert len(orders) > 10, orders
+    # and consecutive rounds really are far apart on average
+    angs = gui.rotation_angles(5, random.Random(3))
+    assert max(angs) - min(angs) > 180.0
+
+
+def test_clicks_map_back_through_the_rotation_to_the_same_diameter():
+    """A synthetic disc rotated by a KNOWN angle must yield the same
+    diameter. Driven against PIL's real Image.rotate, not against a
+    re-derivation of it: the markers are located in the ROTATED pixels the
+    operator would click on, then unrotated.
+
+    Length is rotation-invariant, so this is really a check that the
+    inverse mapping matches PIL's forward one -- sign convention included,
+    which is the one thing that would silently produce plausible-looking
+    wrong numbers."""
+    import numpy as np
+    from PIL import Image
+    import sldea_edge_gui as gui
+    W, H = 320, 240
+    p1, p2 = (60.0, 130.0), (250.0, 96.0)       # a 193.0 px chord
+    truth = gui.two_point_diameter(p1, p2)
+    assert abs(truth - 193.018) < 0.01
+
+    def centroid(mask):
+        ys, xs = np.nonzero(mask)
+        assert len(xs), "marker lost in the rotation -- test is broken"
+        return float(xs.mean()), float(ys.mean())
+
+    worst_pt, worst_d = 0.0, 0.0
+    for deg in (0.0, 17.0, 37.4, 90.0, 123.5, 180.0, 201.8, 270.0,
+                318.6, 359.2):
+        a = np.zeros((H, W), np.uint8)
+        for (px, py), val in ((p1, 255), (p2, 128)):
+            a[int(py) - 2:int(py) + 3, int(px) - 2:int(px) + 3] = val
+        rot = Image.fromarray(a).rotate(deg, resample=Image.NEAREST,
+                                        expand=True)
+        ra = np.asarray(rot).astype(float)
+        q1 = gui.unrotate_point(*centroid(ra > 200), rot_w=rot.width,
+                                rot_h=rot.height, img_w=W, img_h=H, deg=deg)
+        q2 = gui.unrotate_point(*centroid((ra > 60) & (ra <= 200)),
+                                rot_w=rot.width, rot_h=rot.height,
+                                img_w=W, img_h=H, deg=deg)
+        worst_pt = max(worst_pt, math.dist(q1, p1), math.dist(q2, p2))
+        worst_d = max(worst_d,
+                      abs(gui.two_point_diameter(q1, q2) - truth))
+    # the recovered POINTS carry PIL's expand rounding (ceil/floor on the
+    # new canvas size, up to ~1.5 px) plus NEAREST pixel quantization ...
+    assert worst_pt < 2.0, worst_pt
+    # ... but that offset is a pure TRANSLATION, so it cancels in the
+    # DIFFERENCE and the measured diameter is good to well under a pixel.
+    # This is the property that makes rotating the display safe at all.
+    assert worst_d < 0.5, worst_d
+    # a zero rotation is the identity, exactly
+    for (px, py) in (p1, p2, (0.0, 0.0), (W, H)):
+        gx, gy = gui.unrotate_point(px, py, W, H, W, H, 0.0)
+        assert abs(gx - px) < 1e-9 and abs(gy - py) < 1e-9
+
+
+def test_two_point_diameter_is_rotation_invariant_by_construction():
+    import sldea_edge_gui as gui
+    assert gui.two_point_diameter((0, 0), (3, 4)) == 5.0
+    assert gui.two_point_diameter((3, 4), (0, 0)) == 5.0     # symmetric
+    assert gui.two_point_diameter((5, 5), (5, 5)) == 0.0
+    # the same chord measured in rotated coordinates gives the same length
+    for deg in (11.0, 47.0, 143.0, 299.0):
+        ph = math.radians(deg)
+        def rot(p):
+            return (p[0] * math.cos(ph) - p[1] * math.sin(ph),
+                    p[0] * math.sin(ph) + p[1] * math.cos(ph))
+        a, b = (12.0, -30.0), (200.0, 61.0)
+        assert abs(gui.two_point_diameter(rot(a), rot(b))
+                   - gui.two_point_diameter(a, b)) < 1e-9
+
+
+def test_markers_do_not_occlude_the_point_being_judged():
+    """The whole reason mode B exists. The operator's diagnosis of mode A's
+    1.05 % scatter was that "the bright green circle occludes the edges" --
+    a 3 px stroke laid along the boundary hides the feature being aligned
+    to. So mode B's marker must leave the judged pixel visible: a hollow
+    ring and a crosshair with a HOLE in it, never a filled dot."""
+    import sldea_edge_gui as gui
+    for vx, vy in ((0.0, 0.0), (120.0, 80.5), (-40.0, 900.0)):
+        sh = gui.marker_shapes(vx, vy)
+        clear = gui.marker_clear_radius(vx, vy, sh)
+        assert clear >= gui.CAL_MARK_GAP_VIEW, (vx, vy, clear)
+        assert clear > 0.0
+        # the ring is CENTRED on the click and hollow: the click point is
+        # strictly inside it, so no ink of the ring lands on it
+        x0, y0, x1, y1 = sh['ring']
+        assert abs((x0 + x1) / 2.0 - vx) < 1e-9
+        assert abs((y0 + y1) / 2.0 - vy) < 1e-9
+        assert (x1 - x0) / 2.0 == gui.CAL_MARK_RING_VIEW
+        # four arms, all pointing away, none crossing the centre
+        assert len(sh['arms']) == 4
+        for ax0, ay0, ax1, ay1 in sh['arms']:
+            near = min(math.dist((ax0, ay0), (vx, vy)),
+                       math.dist((ax1, ay1), (vx, vy)))
+            far = max(math.dist((ax0, ay0), (vx, vy)),
+                      math.dist((ax1, ay1), (vx, vy)))
+            assert abs(near - gui.CAL_MARK_GAP_VIEW) < 1e-9
+            assert abs(far - gui.CAL_MARK_ARM_VIEW) < 1e-9
+    # the chord stops short of BOTH endpoints, so its ink misses them too
+    seg = gui.chord_segment((100.0, 100.0), (300.0, 100.0))
+    assert seg is not None
+    assert abs(seg[0] - 103.0) < 1e-9 and abs(seg[2] - 297.0) < 1e-9
+    # ... and a degenerate pair draws no chord at all rather than a blob
+    assert gui.chord_segment((10.0, 10.0), (11.0, 10.0)) is None
+
+
+def test_mode_A_stroke_option_is_the_third_arm_and_defaults_unchanged():
+    """If occlusion is really the cause of mode A's scatter, a 1 px or
+    dashed stroke may rescue mode A -- worth testing while an operator is
+    measuring. The 3 px solid stroke stays the DEFAULT, so mode A's
+    behaviour is unchanged unless the option is touched."""
+    import sldea_edge_gui as gui
+    assert gui.cal_stroke_spec('3 px solid') == (3, None)
+    assert gui.cal_stroke_spec('1 px solid') == (1, None)
+    w, dash = gui.cal_stroke_spec('1 px dashed')
+    assert w == 1 and dash and len(dash) == 2
+    # unknown styles fall back to the default rather than raising: a stroke
+    # width is not worth losing a calibration over
+    for junk in ('', None, 'hairline', 42):
+        assert gui.cal_stroke_spec(junk) == (3, None), junk
+    assert all(s in gui.CAL_STROKE_STYLES
+               for s in ('3 px solid', '1 px solid', '1 px dashed'))
+
+
+# ---------------------------------------------------------------------------
+# the calibration log -- the capture that was missing last time
+# ---------------------------------------------------------------------------
+
+def _stats_b(n=5):
+    return se.calibration_stats([588.3, 591.0, 589.4, 590.2, 587.9][:n])
+
+
+def test_log_line_leads_with_sigma_and_states_the_mode():
+    """The one-line summary the operator reports an A/B result with. sigma
+    leads because sigma is the only figure comparable between two modes run
+    at different round counts."""
+    s = _stats_b()
+    line = se.calibration_log_line({
+        'when': '2026-08-06T14:22:31', 'mode': 'B', 'stats': s,
+        'gate': se.CAL_SE_PCT, 'verdict': 'PASS',
+        'rot_deg': [37.4, 201.8, 95.2, 318.6, 144.0],
+        'auto_diam_px': 577.1, 'auto_pct': 2.12,
+        'outcome': 'accepted', 'frame': 'base.png'})
+    assert line.startswith('SLDEA-CAL 2026-08-06T14:22:31 mode=B n=5 ')
+    assert 'sigma=0.23%' in line
+    assert 'se=0.10%' in line and 'area_se=0.20%' in line
+    assert 'gate=0.40%' in line and 'verdict=PASS' in line
+    assert 'range=0.53%' in line and 'mean=589.36px' in line
+    assert 'diams=588.30,591.00,589.40,590.20,587.90px' in line
+    assert 'rot=37.4,201.8,95.2,318.6,144.0deg' in line
+    assert 'auto=577.1px(+2.12%)' in line
+    assert 'outcome=accepted' in line and 'frame=base.png' in line
+    # ONE line, always -- a stray newline would split one record in two
+    assert '\n' not in line and '\r' not in line
+    # mode A carries the stroke style instead of rotations, and the line
+    # keeps the same SHAPE either way so a column splitter cannot slip
+    a = se.calibration_log_line({'when': 'T', 'mode': 'A',
+                                 'stats': se.calibration_stats(
+                                     [580.0, 584.0, 582.0]),
+                                 'verdict': 'OVER-GATE',
+                                 'stroke': '1 px dashed',
+                                 'outcome': 'declined-refit'})
+    assert 'mode=A n=3' in a and 'stroke=1 px dashed' in a
+    assert 'rot=-deg' in a and 'auto=none' in a
+    assert 'verdict=OVER-GATE' in a
+
+
+def test_log_line_says_unconvertible_rather_than_inventing_a_sigma():
+    """n=1 has no d2 factor, so there is no sigma, no SE and no verdict --
+    and the line has to SAY that rather than print a zero."""
+    line = se.calibration_log_line({'when': 'T', 'mode': 'B',
+                                    'stats': se.calibration_stats([590.0]),
+                                    'verdict': None,
+                                    'outcome': 'declined-unjudgeable'})
+    assert 'n=1' in line
+    assert 'sigma=unconvertible' in line and 'se=unconvertible' in line
+    assert 'area_se=unconvertible' in line
+    assert 'verdict=UNJUDGEABLE' in line
+    assert '0.00%' not in line.split('range=')[0]
+
+
+def test_log_appends_every_round_set_accepted_or_declined():
+    """The gap this closes: the six mode-A spreads that motivated mode B
+    survive only because they were typed into a chat. Every one of those
+    calibrations was DECLINED at a gate, and setup.txt is written at Save,
+    so the run recorded nothing at all."""
+    d = tempfile.mkdtemp(prefix='cal_log_')
+    try:
+        recs = [('A', 'declined-cancel'), ('A', 'declined-refit'),
+                ('B', 'accepted'), ('B', 'accepted-override')]
+        for mode, outcome in recs:
+            path, line = se.append_calibration_log(d, {
+                'when': '2026-08-06T00:00:00', 'mode': mode,
+                'stats': _stats_b(3 if mode == 'A' else 5),
+                'gate': se.CAL_SE_PCT, 'verdict': 'PASS',
+                'rot_deg': [1.0, 2.0] if mode == 'B' else None,
+                'outcome': outcome})
+            assert path and os.path.basename(path) == se.CAL_LOG_NAME
+            assert outcome in line
+        with open(path, encoding='utf-8') as f:
+            body = f.read()
+        lines = [ln for ln in body.splitlines() if ln.startswith('SLDEA-CAL')]
+        assert len(lines) == 4, lines
+        # DECLINED sets are in there -- that is the whole point
+        assert sum('outcome=declined' in ln for ln in lines) == 2
+        assert sum('mode=A n=3' in ln for ln in lines) == 2
+        assert sum('mode=B n=5' in ln for ln in lines) == 2
+        # a header explains the columns exactly once, on creation
+        assert body.count('# SLDEA Edge Review scale calibrations') == 1
+        assert 'Compare methods on SIGMA' in body
+        # ASCII-safe: this file gets grepped and pasted into issues
+        body.encode('ascii')
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_log_write_failure_costs_the_file_not_the_measurement():
+    """The run folder can be read-only or full (the 2026-08-04 disk-full
+    incident). A logging error must never be how a calibration is lost, so
+    the line comes back regardless and the caller prints it to stdout."""
+    gone = os.path.join(tempfile.gettempdir(),
+                        'no_such_dir_' + os.urandom(4).hex())
+    path, line = se.append_calibration_log(
+        gone, {'when': 'T', 'mode': 'B', 'stats': _stats_b(),
+               'outcome': 'accepted'})
+    assert path is None
+    assert line.startswith('SLDEA-CAL') and 'mode=B' in line
+    # no rundir at all (a run that was never opened) is the same story
+    path, line = se.append_calibration_log(None, {'when': 'T', 'mode': 'A',
+                                                  'stats': _stats_b(3),
+                                                  'outcome': 'accepted'})
+    assert path is None and 'mode=A' in line
+
+
+def test_mode_and_conversion_round_trip_into_setup_txt():
+    """cal_mode / sigma_pct / se_pct persist with the anchor: a bare range
+    cannot be converted later by anyone who does not also know n, and
+    nothing records which METHOD produced an anchor otherwise.
+
+    `method` must stay exactly 'manual-calibration' -- se.mm_per_px matches
+    it against that string to give a hand calibration priority over every
+    automatic reference, so a mode suffix there would silently demote every
+    mode-B anchor back below the disc fit."""
+    d = tempfile.mkdtemp(prefix='cal_mode_')
+    try:
+        _setup(d)
+        s = _stats_b()
+        se.save_scale_anchor(d, {
+            'method': 'manual-calibration', 'cal_mode': 'B',
+            'diam_px': s['mean'], 'diam_mm': 16.0,
+            'mm_per_px': 16.0 / s['mean'], 'n_rounds': s['n'],
+            'rounds_px': s['values'], 'spread_px': s['spread_px'],
+            'spread_pct': s['spread_pct'], 'sigma_pct': s['sigma_pct'],
+            'se_pct': s['se_pct'], 'guard': 'clear (auto +0.00% diam)'})
+        back = se.load_scale_anchor(d)
+        # the exact string mm_per_px matches on, so a mode-B anchor still
+        # beats every automatic reference at Save
+        assert back['method'] == 'manual-calibration'
+        assert back['cal_mode'] == 'B'
+        assert back['n_rounds'] == 5 and len(back['rounds_px']) == 5
+        assert abs(back['sigma_pct'] - s['sigma_pct']) < 0.005
+        assert abs(back['se_pct'] - s['se_pct']) < 0.005
+        # a mode-A/two-click anchor with none of these still loads
+        _setup(d)
+        se.save_scale_anchor(d, {'method': 'manual-calibration',
+                                 'diam_px': 577.1, 'diam_mm': 16.0,
+                                 'mm_per_px': 16.0 / 577.1})
+        old = se.load_scale_anchor(d)
+        assert old['diam_px'] == 577.1
+        for k in ('cal_mode', 'sigma_pct', 'se_pct'):
+            assert k not in old, k
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_diag_judges_the_SE_and_names_the_method():
+    """sldea_diag reads the anchor off setup.txt, so its repeatability
+    verdict has to be n-aware too -- and it derives sigma from the RECORDED
+    range and n, because rounds_px is optional and the persisted range is
+    the statistic the anchor carries."""
+    import sldea_diag as sd
+
+    def one(anchor, needle='repeatability'):
+        return [(s, h, dt) for s, h, dt in
+                sd.verdicts(_diag_d(scale_anchor=anchor)) if needle in h]
+
+    base = {'method': 'manual-calibration', 'diam_px': 577.1,
+            'diam_mm': 16.0, 'mm_per_px': 16.0 / 577.1,
+            'guard': 'clear (auto +0.00% diam)'}
+    # a mode-B anchor at n=5 whose range is 1.0 %: sigma 0.43 %, SE 0.19 %
+    good = dict(base, cal_mode='B', n_rounds=5, spread_pct=1.0,
+                spread_px=5.8, rounds_px=[575, 576, 577, 578, 580])
+    hit = one(good, 'Operator repeatability')
+    assert len(hit) == 1 and hit[0][0] == 'OK', hit
+    assert 'sigma 0.43%/fit' in hit[0][1], hit[0][1]
+    assert 'mean SE 0.19%' in hit[0][1], hit[0][1]
+    assert 'method B' in hit[0][2]
+    assert 'DO NOT feed this into the error budget' in hit[0][2]
+    # the SAME 1.0 % range at n=3 is WORSE precision, and that shows
+    at3 = dict(base, cal_mode='A', n_rounds=3, spread_pct=1.0,
+               spread_px=5.8)
+    hit3 = one(at3, 'Operator repeatability')
+    assert 'sigma 0.59%/fit' in hit3[0][1], hit3[0][1]
+    assert 'mean SE 0.34%' in hit3[0][1], hit3[0][1]
+    assert hit3[0][0] == 'OK'
+    # the measured mode-A reality: a 1.94 % range at n=3 misses the budget
+    real = dict(base, cal_mode='A', n_rounds=3, spread_pct=1.94,
+                spread_px=11.2)
+    hitr = one(real, 'Operator repeatability')
+    assert hitr[0][0] == 'MED', hitr
+    assert f"over the {se.CAL_SE_PCT:g}% gate" in hitr[0][1]
+    # an n with NO d2 factor is reported as a GAP, above OK -- never as a
+    # pass, and never with an invented sigma
+    bad = dict(base, cal_mode='B', n_rounds=9, spread_pct=1.0,
+               spread_px=5.8)
+    hitb = one(bad, 'cannot be converted')
+    assert len(hitb) == 1 and hitb[0][0] == 'MED', hitb
+    assert 'no d2 factor for n=9' in hitb[0][1]
+    # and NO judged verdict is emitted alongside it: nothing was computed,
+    # so nothing may be reported as inside or outside the budget
+    assert not one(bad, 'mean SE')
+    assert not any('gate' in h for _s, h, _d in
+                   sd.verdicts(_diag_d(scale_anchor=bad))
+                   if 'repeatability' in h)
+    # ... and the text report prints the conversion, or says there is none
+    txt = sd.report(_diag_d(scale_anchor=good))
+    assert 'method B' in txt and 'sigma 0.43%/fit' in txt
+    txt = sd.report(_diag_d(scale_anchor=bad))
+    assert 'no d2 factor for n=9' in txt
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     for fn in fns:

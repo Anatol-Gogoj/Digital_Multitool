@@ -268,6 +268,153 @@ the per-run operator-repeatability figure must **not** be fed into
 disc. Until then it is a number the tool produces, not a number the tool
 has measured.
 
+### Measured: the circle misses the budget. A second method to A/B against it (2026-08-06, evening)
+
+**TL;DR:** An operator finally drove the circle dialog on a real disc, six
+times, and it is not precise enough — per fit it scatters about 1.05 % of
+the diameter, which puts the 3-round average 1.5× outside the error
+budget. So there is now a **second calibration method** you pick from a
+chooser in the same dialog: click two opposite edge points, five times,
+with the picture **rotated a random amount between rounds**. Both methods
+are in the same build so the same disc can be measured with each and the
+numbers compared. The acceptance gate stopped judging the raw spread and
+now judges the average's standard error, which is the thing the error
+budget is actually written in — and every round-set, accepted **or
+declined**, is now written to a log file in the run folder, because last
+time the numbers only survived by being typed into a chat.
+
+Observation → decision:
+
+- **The circle method misses the error budget, measured.** Anatol drove
+  mode A six times on a scratch copy of `P3_2_2.5mL_20260728` (its real
+  anchor is +2.28 % off, so it is the sharpest available test). Recorded
+  3-round spreads: **1.94, 2.09, 1.62, 1.81, 1.44 %**, plus a sixth that
+  passed the 1 % gate. Via §2.1a at *n* = 3 that is **per-fit σ ≈ 1.05 %
+  of diameter** → 3-round mean SE **0.61 % diameter / 1.21 % area**
+  against §2.1's standing **~0.4 % / ~0.8 %**. Mode A would need **~7
+  rounds** to reach budget. The 1 % spread gate also nagged on 5 of the 6
+  attempts, which is exactly the "if real spreads land at 1.5 % the gate
+  will nag on every run" outcome the PR predicted.
+  → **The prediction that the fit-a-circle gate would tighten this term is
+  withdrawn until mode B is measured.** §2.1's numbers stay the ones to
+  quote, and §2.1a now records σ ≈ 1.05 % as the first real data point
+  with a blockquote saying it is a data point and not a distribution.
+
+- **Operator diagnosis: the stroke hides the edge.** *"the bright green
+  circle occludes the edges."* Persuasive: a circle fit uses the *whole*
+  boundary and should beat a single chord, so its failing to points at the
+  3 px stroke covering the very feature being aligned to.
+  → **Mode B — two-point diameter, N rounds, randomly rotated.** Click two
+  roughly-opposite edge points, N times (default **5**), the mean of the N
+  diameters is the anchor. Markers are a **1 px hollow ring plus a
+  crosshair with a hole in it**, and nothing is drawn within 3 px of the
+  judged point (`marker_shapes`, asserted by
+  `marker_clear_radius`) — never a filled dot, never a stroke laid along
+  the boundary. Mode A is **unchanged** and stays the dialog's default;
+  `se.CAL_DEFAULT_MODE` is one edit if B wins.
+
+- **Rotation is the load-bearing idea, not decoration.** Mis-judging
+  "exactly opposite" is *systematic* while the disc always sits the same
+  way up — one biased chord, forever. Rotate the display randomly each
+  round and the same misjudgement lands in a different direction every
+  time, so it becomes *random* and averaging suppresses it as √n. It also
+  averages out the human preference for horizontal and vertical chords
+  over diagonal ones. → Angles are **stratified**: one uniform draw per
+  equal sector of the **full** circle (the H/V bias is 90°-periodic), then
+  shuffled. Independent uniform draws can cluster, and a round-set whose
+  rotations clustered is a round-set whose rotation did nothing.
+
+- **Measured in ORIGINAL image coordinates.** The display is rotated; the
+  two clicks are mapped back through the inverse rotation
+  (`unrotate_point`) and the diameter is computed in original px. A length
+  is rotation-invariant so a correct implementation gets the same number
+  either way — doing it in original space is what keeps the *recorded*
+  click positions meaningful. Pinned against PIL's real `Image.rotate` at
+  ten angles: recovered points sit within ~1.5 px (PIL's expand ceil/floor
+  is a pure translation) and the **diameter within 0.35 px**, because a
+  translation cancels in a difference. Rotation also resamples, which
+  softens the ink edge slightly — identically in every round, so it can
+  inflate σ and cannot bias the mean.
+
+- **The statistics are n-aware, and refuse rather than guess.** §2.1a hard-
+  wired the *n* = 3 constants (σ ≈ R/1.693, SE ≈ R/2.93, area ≈ R/1.47).
+  With the round count configurable those are wrong. → **d₂(n) is a
+  documented lookup** (`se.D2_RANGE_FACTORS`, ASTM E2587 / Duncan, n =
+  2–8): σ ≈ R/d₂(n), mean SE = σ/√n, area SE = 2·SE. For an *n* with no
+  factor, `se.d2()` returns None, `calibration_stats` leaves σ/SE None
+  *together*, `se.se_ok()` returns **None — not True**, and the dialog and
+  `sldea_diag` both report the gap. Silently reusing 1.693 would have put a
+  wrong error term into the budget with nobody seeing it happen.
+
+- **The acceptance gate moved from the raw range to the mean SE.** Minor 5
+  of the review above was right and was only half-applied. Two reasons: a
+  range is **not comparable across n** (the range of 5 fits is 1.37× the
+  range of 3 at identical precision), so it cannot survive a configurable
+  round count; and **a range cannot shrink when a round is added**, so a
+  range gate's own remedy can never clear it. → **`CAL_SE_PCT` = SE ≤
+  0.4 % of diameter (≡ 0.8 % area), derived from §2.1's standing budget —
+  not measured, and not a second invented number**: the budget already
+  existed and SE is the quantity it is expressed in. Because SE falls as
+  1/√n, the gate now *names* the round count that would clear it, computed
+  from the σ just measured (`se.rounds_for_se`) — and says plainly when
+  that count is past the factor table, i.e. when the method is the problem
+  and more rounds are not the answer. The range is still recorded and
+  still reported; `spread_ok` survives with its monotonicity test intact.
+  **This changes mode A's gate too, deliberately**: two modes judged by
+  different statistics could not be compared.
+
+- **Report the comparison on σ, not on the spread.** σ is the *method's*
+  per-fit precision and the only figure that survives a different round
+  count, so it leads every readout: the dialog's reveal, the log line,
+  `sldea_diag`'s verdict and the detect-time status line.
+
+- **Every completed round-set is captured, accepted or declined.** The six
+  spreads above exist only because they were read off a screen and typed
+  into a chat: `setup.txt` was never written, because every one of those
+  calibrations was **declined** at a gate and `setup.txt` is written at
+  Save. → `se.append_calibration_log` writes one line per round-set to
+  **`<run>/scale_calibration_log.txt`** — method, n, every diameter in px,
+  the range, σ, mean SE in diameter and area, the rotation angles, the
+  automatic disc fit for reference, the outcome and a timestamp — and the
+  **same line is printed to stdout**, so a read-only or full run folder
+  (the 2026-08-04 disk-full incident) costs the file and not the
+  measurement. `.gitignore` blocks the file: it is run data.
+
+- **The third arm, because it was cheap.** If occlusion really is mode A's
+  problem, a thinner stroke may rescue it. → A stroke chooser offers **3 px
+  solid (the default, unchanged) / 1 px solid / 1 px dashed**, and the
+  choice is recorded in the log line so the A/B data distinguishes them.
+
+**Verification, and its limits.** Suite **28/32**, only the four known
+environmental failures (`test_arb_bin`, `test_camera_controls`,
+`test_presets_path`, `test_tk_fontfix`). `tests/test_sldea_calibration.py`
+27 → **45** cases (the d₂ lookup and its refusal outside the table, σ/SE
+arithmetic at every *n* in the table, the measured mode-A numbers
+reproducing the issue's conversion, the SE gate including its boundary and
+its monotonicity, `rounds_for_se`, the rotation mapping against real PIL,
+marker clearance, the stroke spec, the log line and file, and the
+`cal_mode`/σ/SE round trip through `setup.txt`).
+`tests/test_sldea_edge_gui.py` 22 → **27**, the five new cases all driving
+the **real dialog** in mode B: the click→original mapping under five
+rotations, mid-round blindness, the log for a declined *and* an accepted
+set, the mode chooser's restart, and mode B inheriting all four fixes of
+the review round.
+
+**What is still unverified**, and it is the same list as before plus mode
+B's own: **no operator has used mode B**, so its σ is entirely unmeasured
+and the 5-round default, the marker sizes and the stratified rotation are
+chosen, not validated. Whether a rotated frame is comfortable to work in
+has not been judged by a human eye. The mode-B tests put the dialog **on
+screen** to deliver synthetic mouse clicks (an unviewable widget drops
+them silently) and each self-checks that its clicks landed — but that is a
+click-delivery check, not a usability one. The dialog's "precision cannot
+be judged" modal is **unreachable through the chooser** (which only offers
+round counts in the d₂ table) and so is untested in the dialog; its
+arithmetic is pinned headlessly. Nothing has been run against a real run
+directory. **The bench session that matters is: calibrate the same disc
+with A then B, five rounds each, and compare the two σ figures the tool
+prints.**
+
 ## Electrode mask default 220 → 255, and the Tune button's bad resolver (2026-08-05)
 
 **TL;DR:** Two bench-reported bugs. The electrode mask masks pixels that

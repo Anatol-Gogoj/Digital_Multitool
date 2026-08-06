@@ -3,8 +3,9 @@
 Status: 2026-08-06 (§2.1a; the rest 2026-08-01). Every number in this
 document is **measured**, not estimated — sources are the four
 calibration rounds (47 operator labels across both campaigns), the
-three-round scale calibration, the operator repeatability round, the
-per-frame boundary self-audit, and the baseline-scale overlays. The
+per-run scale calibration (two methods, A/B compared — §2.1a), the
+operator repeatability round, the per-frame boundary self-audit, and the
+baseline-scale overlays. The
 provenance table at the end maps each number to its origin. When
 calibration numbers move (new labels, new campaigns), update this file
 in the same PR.
@@ -61,7 +62,7 @@ in the same PR.
 | Error term | Type | Measured size | Source |
 |---|---|---|---|
 | Edge definition (visual outer toe vs half-height ink step) | systematic | **+5.2–5.7% area** between conventions; spread across controls only 0.5% | round 4, four audit-clean controls |
-| Scale anchor (baseline disc trace vs by-eye) | systematic, per run | ~0.4% diameter → **~0.8% area**; 0.3% repeat on one device 32 min apart. From 2026-08-06 **measured per run** — see §2.1a | baseline overlays, both campaigns; per-run spread from the 3-round calibration |
+| Scale anchor (baseline disc trace vs by-eye) | systematic, per run | ~0.4% diameter → **~0.8% area**; 0.3% repeat on one device 32 min apart. From 2026-08-06 **measured per run** — see §2.1a, which also records the first real per-fit σ (mode A, ~1.05%, which MISSES this budget) | baseline overlays, both campaigns; per-run scatter from the calibration's n rounds |
 | Nominal diameter (the value the mm scale hangs on) | systematic | **closed** — anchored by the laser-cut application mask | lab confirmation 2026-08-01 (see §2.4) |
 | `disc-fit` statistical CI (edge-point scatter) | random, per frame | **0.2–0.7%** (85% CI) | fit CI, both campaigns |
 | Operator trace precision (the validation floor) | random | **~1%** area (0.2–2.5%); IoU ceiling 0.973 | repeatability round, 9 repeat pairs |
@@ -71,55 +72,113 @@ in the same PR.
 
 ### 2.1a The scale anchor became a per-run measurement (2026-08-06)
 
-Since the fit-a-circle calibration (`#215`), Edge Review takes **three
-independent circle fits** of the resting disc per run — each respawned at
-a randomized position and size — and anchors on their **mean**. The
-**range** of the three is recorded in `setup.txt`
-(`rounds_px` / `spread_px` / `spread_pct`) and reported by `sldea_diag`.
+Since the fit-a-circle calibration (`#215`), Edge Review takes **several
+independent fits** of the resting disc per run and anchors on their
+**mean**. Two methods exist, chosen per calibration so they can be A/B
+compared on the same disc:
+
+| | Mode A | Mode B |
+|---|---|---|
+| gesture | drag/resize a circle onto the boundary | click two roughly-opposite edge points |
+| decorrelation | each round respawns at a random position and size | the **display is rotated by a random angle** each round |
+| default rounds | 3 | 5 |
+| shipped | 2026-08-06 | 2026-08-06 (evening) |
+
+The **range** of the rounds is recorded in `setup.txt`
+(`rounds_px` / `spread_px` / `spread_pct`), together with which method
+produced it and the conversion below (`cal_mode` / `sigma_pct` / `se_pct`),
+and `sldea_diag` reports all of it. Every completed round-set — **accepted
+or declined** — is also appended to `scale_calibration_log.txt` in the run
+folder and printed to stdout.
 
 What changes is the term's **character, not its size**. Before, ~0.4%
 diameter was an estimate borrowed from baseline overlays across
-campaigns; now every run carries its own number. The conversion, for a
-recorded range *R* on *n* = 3 fits:
+campaigns; now every run carries its own number.
 
-- the expected range of 3 normal samples is **1.693 σ**, so
-  **σ ≈ R / 1.693** per fit;
-- the mean of 3 has standard error **σ/√3 = R / 2.93**;
-- diameter → area doubles it: **area SE ≈ 2 · R / 2.93 = R / 1.47**.
+#### The conversion is n-aware
 
-> **NOT YET USABLE — do not quote a per-run spread anywhere.** No run has
-> been calibrated with this mechanism, so no real three-round spread
-> exists. The conversion below is arithmetic, not a measurement, and the
-> per-run figure the tool now prints must **not** be fed into this budget
-> (or into a methods section, or into `sldea_diag`'s numbers as if it were
-> an established term) until a real spread has been measured on a real
-> disc. Until then §2.1's ~0.4% diameter / ~0.8% area **remain the numbers
-> to quote**, and this section is a plan for replacing them.
+For a recorded range *R* over *n* fits, using the control-chart **d₂(n)**
+factors (ASTM E2587 / Duncan, *Quality Control and Industrial
+Statistics*; `se.D2_RANGE_FACTORS`):
 
-Worked at the acceptance gate: a run accepted right at the 1% spread gate
-would carry **σ ≈ 0.59%** per fit, **0.34% on the mean diameter** and
-**≈0.68% in area** — i.e. the gate would *cap* the random part of this
-term at just under the ~0.4% / ~0.8% previously assumed. A typical 0.3%
-recorded spread would give 0.10% diameter / 0.20% area, about four times
-better than the old estimate. The old numbers therefore stay in §2.1 as
-the number to quote, not merely as a ceiling; once ~5 real runs exist,
-this section can be rewritten to let a specific run quote its own spread
-— divided by 2.93 for diameter, 1.47 for area.
+| n | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|
+| d₂ | 1.128 | 1.693 | 2.059 | 2.326 | 2.534 | 2.704 | 2.847 |
 
-The recorded statistic is the **range**, and the acceptance gate judges
-the range too, deliberately: the number the gate judges is the number
-this conversion consumes. The consequence is that **adding rounds cannot
-clear the gate** — max−min never shrinks — so the dialog's remedy is a
-*refit*, not a further round (`SLDEA_HANDOFF.md` 2026-08-06 review
-sub-entry). A statistic that does shrink with *n* (SD, or the SEM this
-section derives) would be the better gate, and is the obvious follow-up —
-but choosing its threshold needs the real distribution, which is exactly
-what does not exist yet.
+- per-fit precision **σ ≈ R / d₂(n)** — the *method's* own property, and
+  the only figure comparable between two modes run at different *n*;
+- the mean of *n* has standard error **SE = σ/√n**;
+- diameter → area doubles it: **area SE = 2 · SE**.
 
-Three caveats, all load-bearing:
+At *n* = 3 those are the R/1.693, R/2.93 and R/1.47 this section used to
+hard-wire. **They hold at n = 3 only.** With the round count configurable
+the code refuses to convert an *n* the table has no factor for, rather
+than reusing 1.693 — `se.d2()` returns None, `calibration_stats` leaves
+σ/SE None *together*, `se.se_ok()` returns None (not True), and the dialog
+and `sldea_diag` both report the gap instead of a number. A raw range on
+its own is **not comparable across n**: the range of 5 fits is 1.37× the
+range of 3 at identical precision.
+
+#### The acceptance gate is the mean SE, not the range
+
+`se.se_ok` against **`CAL_SE_PCT` = SE ≤ 0.4% of diameter** (≡ 0.8% area).
+That threshold is **derived from §2.1's standing budget above, not
+measured** — the budget already existed, and SE is the quantity it is
+expressed in, so this is not a second invented number.
+
+The range gate it replaces (`CAL_SPREAD_PCT` = 1%, still recorded and
+still reported) had two defects. A range is not comparable across *n*, so
+it could not survive a configurable round count. And **a range cannot
+shrink when a round is added**, so the remedy a range gate offers could
+never clear it (`SLDEA_HANDOFF.md` 2026-08-06 review sub-entry) — the flow
+always landed on "accept anyway". SE falls as 1/√n, so the gate now names
+the round count that *would* clear it, computed from the σ just measured
+(`se.rounds_for_se`).
+
+#### First real data: mode A's per-fit σ ≈ 1.05% (2026-08-06)
+
+Six mode-A calibration attempts on a scratch copy of
+`P3_2_2.5mL_20260728` (Anatol, 2026-08-06 — recorded in the
+[`#215` comment](https://github.com/Anatol-Gogoj/Digital_Multitool/issues/215)).
+Recorded 3-round ranges **1.94, 2.09, 1.62, 1.81, 1.44%** plus a sixth
+that passed the 1% gate (exact value not captured):
+
+| range R | 1.94 | 2.09 | 1.62 | 1.81 | 1.44 |
+|---|---|---|---|---|---|
+| σ = R/1.693 | 1.15% | 1.23% | 0.96% | 1.07% | 0.85% |
+
+**Per-fit σ ≈ 1.05%** (mean; median 1.07%). Therefore the 3-round mean SE
+is **0.61% diameter → 1.21% area**, against §2.1's ~0.4% / ~0.8% — the
+mechanism intended to *tighten* this term currently sits ~1.5× outside it,
+and mode A would need **~7 rounds** to reach budget at this precision. The
+operator's diagnosis is that the bright green 3 px stroke **occludes the
+edge it is being aligned to**; mode B (non-occluding markers, rotated
+display) targets **σ < 0.9%**, at which 5 rounds lands on budget. A mild
+practice effect is visible across the six attempts (1.94 → 2.09 → 1.62 →
+1.81 → 1.44 → <1.0), so the asymptote may be better than 1.05% — but not
+by the ~2.6× needed.
+
+> **NOT YET QUOTABLE — do not put a per-run spread in the budget.** One
+> operator, one disc, one method: that is a first data point, not a
+> distribution. σ ≈ 1.05% above is what mode A measured *on this disc, by
+> this operator, on that afternoon* — it is quotable as **that**, and it is
+> what justifies building mode B, but the per-run figure the tool prints
+> must **not** be fed into this budget (or into a methods section, or into
+> `sldea_diag`'s numbers as if it were an established term) until several
+> runs and both methods have been measured. Until then §2.1's ~0.4%
+> diameter / ~0.8% area **remain the numbers to quote**, and mode B's own σ
+> is **entirely unmeasured**.
+
+Worked at the new gate: a run accepted right at SE = 0.4% carries
+**0.4% on the mean diameter** and **0.8% in area** by construction — the
+gate *caps* the random part of this term at exactly §2.1's figure, which
+is what makes it the right statistic to gate on. At *n* = 5 that
+corresponds to σ ≈ 0.89% per fit; at *n* = 3, σ ≈ 0.69%.
+
+Four caveats, all load-bearing:
 
 - **This measures precision, not accuracy.** A consistently mis-placed
-  circle (the outer toe instead of the half-height, say) produces a tight
+  mark (the outer toe instead of the half-height, say) produces a tight
   spread and a wrong mean. The **anchor guard** covers that axis by
   cross-checking the mean against the automatic disc fit and against the
   16 mm mask's π·8² resting area at ~1% (see §2.4 and the 2026-08-06
@@ -127,17 +186,22 @@ Three caveats, all load-bearing:
   example: +2.28% diameter, −4.42% area, a *systematic* miss that no
   spread would have caught.
 - **The remaining systematic part does not shrink with n.** Averaging
-  divides the random scatter, not the edge-convention offset of §2.3.
-- **No run has a measured spread yet.** The mechanism ships 2026-08-06;
-  the 1% gate is chosen, not validated. Update this section with the real
-  distribution once ~5 runs have been calibrated — and if the gate turns
-  out to trip routinely, the honest fix is to raise `CAL_SPREAD_PCT` and
-  record the measured spread, not to tighten the operator.
+  divides the random scatter, not the edge-convention offset of §2.3. Mode
+  B's rotation converts *one* systematic term — mis-judging "exactly
+  opposite", and the human preference for horizontal/vertical chords over
+  diagonal — into a random one that averaging does suppress. It does
+  nothing for the edge convention.
+- **Mode B's display rotation resamples the frame**, which softens the ink
+  edge slightly. Every round is rotated, so the softening is identical in
+  all *n* rounds: it can inflate σ, and it does not bias the mean.
 - **Precision is only measurable if the rounds are blind.** The dialog
-  hides every previously accepted diameter and the running mean until the
-  last fit is in, because a visible target makes the spread a number the
-  operator can hit rather than a number they produce (review 2026-08-06).
-  If that ever changes, this whole section stops meaning anything.
+  hides every previously accepted diameter and the running average until
+  the last fit is in, because a visible target makes the spread a number
+  the operator can hit rather than a number they produce (review
+  2026-08-06). Mode B additionally shows *no length at all* for the pair
+  being placed, so it is measured under stricter blinding than mode A —
+  which can only handicap B in the comparison. If any of that changes,
+  this whole section stops meaning anything.
 
 ### 2.2 Why ratios are tight: the annulus cancellation
 
@@ -325,7 +389,8 @@ architecture**, held together by three invariants:
 | Operator precision ~1% area, IoU ceiling 0.973 | Repeatability round (9 repeat pairs, 2026-07-29) |
 | Fit CI 0.2–0.7% | disc-fit 85% CI, P3 (0.2–0.5%) and 07-23 (0.5–0.7%) runs |
 | Scale 0.4% / repeat 0.3% | Baseline-disc overlays vs by-eye, both campaigns |
-| Scale anchor per run (§2.1a): σ ≈ R/1.693, mean SE R/2.93, area R/1.47 | Range of the 3 circle fits recorded in each run's `setup.txt` (Edge Review, 2026-08-06 onward). **No run measured yet — arithmetic only, NOT to be quoted; §2.1's 0.4%/0.8% still apply** |
+| Scale anchor per run (§2.1a): σ ≈ R/d₂(n), mean SE = σ/√n, area SE = 2·SE | d₂ factors from ASTM E2587 / Duncan (`se.D2_RANGE_FACTORS`, n = 2–8; the code refuses any other n). Range of the n fits recorded in each run's `setup.txt`, plus every round-set in `scale_calibration_log.txt` (Edge Review, 2026-08-06 onward) |
+| Mode A per-fit σ ≈ 1.05% of diameter (3-round mean SE 0.61% diam / 1.21% area) | Six mode-A attempts on a scratch copy of `P3_2_2.5mL_20260728`, one operator, 2026-08-06 (`#215` comment). **A first data point, not a distribution — quotable only as that; §2.1's 0.4%/0.8% still apply.** Mode B's σ is entirely unmeasured |
 | Audit bias bound ±0.4 px per run | Boundary self-audit medians, all six runs |
 | Refit accuracy (+4.1/+4.6% vs predicted +3.8/+4.2%) | Resting-refit validation vs stored labels (2026-07-30) |
 | Onset excess ~1–2% | Round 3 (−6.9%) decomposed by round 4's controls |

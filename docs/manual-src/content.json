@@ -1404,7 +1404,7 @@
    },
    {
     "label": "Run: + Browse… + ▶ Detect Edges (Edge Review)",
-    "what": "Pick a run (✓ processed marks finished ones) and trace every frame; a progress bar and elapsed clock run until Save."
+    "what": "Pick a run (✓ processed marks finished ones) and trace every frame. Beside the progress bar sit two clocks: detect: freezes when the detection pass ends and keeps its frame count (81 frames in 2m14s), so runs stay comparable, while session counts how long the window has been open. A run you only re-anchor the scale on never detects, so its detect: line stays at not run."
    },
    {
     "label": "Candidates A/B/C + D: trace by hand (Edge Review)",

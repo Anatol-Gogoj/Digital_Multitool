@@ -949,6 +949,13 @@ class EdgeReviewApp:
         ttk.Button(top, text="📏 Calibrate…",
                    command=self._calibrate_scale).pack(side=tk.LEFT,
                                                        padx=(6, 0))
+        # SCALE-ONLY correction, separate from Calibrate… because it is a
+        # different operation with a different blast radius: Calibrate sets
+        # the anchor this SESSION will save, while this one rewrites every
+        # area already in data.csv and commits immediately. `#215`
+        ttk.Button(top, text="📏 Re-anchor scale…",
+                   command=self._reanchor_scale).pack(side=tk.LEFT,
+                                                      padx=(6, 0))
         self.save_btn = ttk.Button(top, text="💾 Save to data.csv…",
                                    command=self.save, state='disabled')
         self.save_btn.pack(side=tk.RIGHT)
@@ -2346,50 +2353,16 @@ class EdgeReviewApp:
                   "branding self-heals in either direction.")
         # persist the anchor that produced every mm² in this save — the
         # run's absolute scale used to be a pair of clicks recorded
-        # nowhere (audit 2026-08-05); the 📏 dialog offers it for reuse
+        # nowhere (audit 2026-08-05); the 📏 dialog offers it for reuse.
+        #
+        # Built by _anchor_record, which the scale-only re-anchor writes
+        # through too (`#215`): one builder, so a field added for one path
+        # can never be silently missing from the other. A Save deliberately
+        # writes NO `reanchor` marker — this run WAS reviewed, and the
+        # marker's whole job is to distinguish the two.
         try:
-            se.save_scale_anchor(self.rundir, {
-                'method': self.manual_ref.get('method',
-                                              'manual-calibration'),
-                'diam_px': self.manual_ref['diam_px'],
-                'diam_mm': self.settings['diam_mm'],
-                'mm_per_px': scale,
-                'anchor_frame': self.manual_ref.get('frame', ''),
-                'anchor_is_baseline': self.manual_ref.get('is_baseline'),
-                'auto_diam_px': (self.base_ref or {}).get('diam_px'),
-                # #215: the three (or more) fitted diameters, their
-                # spread and what the anchor guard said. The spread is
-                # the ONLY per-run measurement of operator repeatability
-                # in this project — SLDEA_MEASUREMENT §2.5's "operator
-                # repeat ~1%" has never had data. Absent on a reused
-                # pre-#215 anchor, and save_scale_anchor simply omits
-                # the keys then.
-                'n_rounds': self.manual_ref.get('n_rounds'),
-                'rounds_px': self.manual_ref.get('rounds_px'),
-                'spread_px': self.manual_ref.get('spread_px'),
-                'spread_pct': self.manual_ref.get('spread_pct'),
-                # which METHOD produced it (A circle / B two-point) and the
-                # n-aware conversion of its scatter. The range alone is not
-                # comparable between anchors taken at different round
-                # counts, so sigma and the mean SE travel with it.
-                'cal_mode': self.manual_ref.get('cal_mode'),
-                'sigma_pct': self.manual_ref.get('sigma_pct'),
-                'se_pct': self.manual_ref.get('se_pct'),
-                # mode C (`#215`, 2026-08-06 evening): an 'auto-verified'
-                # anchor has no rounds and no spread, so what quantifies it
-                # is the FIT's own quality, and what makes it auditable is
-                # the named human who approved it and when. save_scale_anchor
-                # omits every one of these when they are absent, which is
-                # every hand-measured and every pre-#215 anchor.
-                'fit_circ': self.manual_ref.get('fit_circ'),
-                'fit_conf': self.manual_ref.get('fit_conf'),
-                'fit_resid_px': self.manual_ref.get('fit_resid_px'),
-                'fit_arc_cov': self.manual_ref.get('fit_arc_cov'),
-                'fit_n_edge': self.manual_ref.get('fit_n_edge'),
-                'verified_by': self.manual_ref.get('verified_by'),
-                'verified_at': self.manual_ref.get('verified_at'),
-                'guard': self.manual_ref.get('guard'),
-            })
+            se.save_scale_anchor(self.rundir,
+                                 self._anchor_record(self.manual_ref, scale))
         except OSError as e:
             self.status.config(
                 text=f"saved, but recording the scale anchor in "
@@ -4381,6 +4354,421 @@ class EdgeReviewApp:
                 self.detect()
             else:
                 self._gate_status()
+
+    # ---------------- scale-only re-anchor (`#215`) ----------------
+    def _reanchor_scale(self):
+        """📏 RE-ANCHOR — correct this run's px→mm scale and re-derive every
+        recorded area from the pixel measurements ALREADY in data.csv, with
+        NO detection and NO re-review.
+
+        Why it exists (`#215`, 2026-08-06). The corpus-wide sweep
+        (`_analysis/auto_calibration_sweep_20260806.md`) found three runs whose
+        absolute areas are wrong purely because a human mis-calibrated the
+        scale — P3_2_2.5mL_20260728 by −4.42 % in area, SLDEA_20260723_152205
+        by −3.38 %, SLDEA_20260723_233451 by +2.44 %. Their PIXEL measurements
+        are correct; only the factor is wrong. Correcting one used to cost a
+        full detect-and-save cycle (minutes of detection over 81 frames) even
+        though no review work needed redoing, and an operator who accepted the
+        corrected fit on live P3_2 closed before Save because of that cost —
+        the correction was lost. Eight further runs carry no anchor at all and
+        are one re-save away from acquiring a fresh error, so the friction
+        would have recurred.
+
+        SCALE-ONLY, and that is enforced by what is NOT called rather than by
+        intent. `apply_results(rows, {}, scale, {}, None)` is the whole
+        commit: with an empty results dict every row takes the unreviewed
+        branch, which is the rule the [critical] partial-re-save entry put in
+        force (SLDEA_HANDOFF 2026-08-05) — keep the px, RE-DERIVE mm²/diam at
+        this scale, and blank a bug-era mm² that has no px rather than keep it
+        on an unknowable anchor. That branch reads each row's own `notes` back
+        unchanged and touches no other column, and because
+        `plan_breakdown_marks` / `apply_rename_plan` are never reached, a
+        `*_BREAKDOWN` rename can be neither re-applied nor reverted. No
+        arithmetic is reimplemented here; `se.mm_per_px` derives the scale
+        exactly as Save does.
+
+        The new scale is measured or verified through the EXISTING calibration
+        dialog, unchanged — mode C / A / B chooser, the same gates, the same
+        log line — so a re-anchor is held to the same standard as a first
+        calibration.
+
+        Refuses rather than guesses in three states, all of them cases where
+        one button would otherwise rewrite a whole run's absolute column on a
+        false premise: nothing to re-derive (no row carries px), a detect
+        worker in flight, and an UNSAVED review in memory. The last one is the
+        [critical] mixed-scale bug's own shape — committing a scale while a
+        half-finished review sits in `self.results` would put this write and a
+        later Save's write on either side of the same column."""
+        if not self.run:
+            messagebox.showinfo("Re-anchor scale", "Pick a run first")
+            return
+        if self._detect_busy:
+            messagebox.showinfo(
+                "Re-anchor scale",
+                "A detection pass is running. Re-anchoring rewrites "
+                "data.csv, so it waits until the worker has finished.")
+            return
+        if self._cal_win is not None and self._cal_win.winfo_exists():
+            # The gate dialog is a singleton, so _calibrate_scale() would
+            # LIFT the open one and return without waiting — and this method
+            # would then read manual_ref as a cancel. Harmless but confusing
+            # (a "cancelled" status while a calibration is visibly open), so
+            # it is refused where the operator can see why.
+            self._cal_win.lift()
+            self._cal_win.focus_set()
+            messagebox.showinfo(
+                "Re-anchor scale",
+                "The calibration dialog is already open. Finish or cancel "
+                "it first — a re-anchor drives that same dialog.")
+            return
+        # An unsaved review means two writers for one column. Refused, not
+        # merged: the operator can Save (which applies a new anchor to the
+        # whole column anyway, so a re-anchor is redundant then) or re-pick
+        # the run to drop the pass.
+        dirty = [name for name, n in (('reviewed rows', len(self.results)),
+                                      ('staged trace(s)', len(self.traces)),
+                                      ('breakdown flag(s)', len(self.flags)),
+                                      ('advisory note(s)',
+                                       len(self.advisories))) if n]
+        if dirty:
+            messagebox.showwarning(
+                "Re-anchor scale",
+                "This run has UNSAVED review work in memory ("
+                + ', '.join(dirty) + ").\n\nRe-anchor is a scale-only "
+                "correction of what is already in data.csv, so it refuses "
+                "to write while a review pass is open — the two writes "
+                "would land on either side of the same mm² column.\n\n"
+                "Either 💾 Save the pass (a Save re-scales the whole "
+                "column at the new anchor anyway, so no re-anchor is "
+                "needed), or re-pick the run in the Run box to drop it.")
+            return
+        rows = self.run['rows']
+        dmm = self.settings['diam_mm']
+        # counts BEFORE the dialog opens: refusing after making the operator
+        # measure a disc would waste exactly the work this action saves
+        probe = se.reanchor_plan(rows, None, dmm)
+        if not probe['n_derive']:
+            messagebox.showerror(
+                "Re-anchor scale",
+                f"NOTHING TO RE-DERIVE — no row in this run carries an "
+                f"active_area_px measurement, so there are no pixel areas "
+                f"to convert at a corrected scale.\n\n"
+                f"Re-anchor only fixes the px→mm factor of a run that has "
+                f"already been measured. This run has not been: use "
+                f"▶ Detect Edges (📏 Calibrate first — Detect is gated on "
+                f"it) and 💾 Save.\n\n"
+                f"({probe['n_rows']} row(s) scanned"
+                + (f"; {probe['n_blank']} carry an mm² with no px, which a "
+                   f"re-anchor could only blank" if probe['n_blank'] else '')
+                + ")")
+            return
+        try:
+            prev = se.load_scale_anchor(self.rundir)
+        except OSError:
+            prev = None
+        # ---- the new scale, through the EXISTING dialog, unchanged -------
+        # manual_ref is cleared so a Cancel is distinguishable from an
+        # accept, and restored on every path that does not commit: cancelling
+        # a re-anchor must leave the session's gate state exactly as it was,
+        # including leaving Detect gated on a run that had no anchor.
+        was = self.manual_ref
+        self.manual_ref = None
+        self._calibrate_scale()
+        new_ref = self.manual_ref
+        if new_ref is None:
+            self.manual_ref = was
+            self.status.config(text="re-anchor cancelled — data.csv "
+                                    "untouched")
+            return
+        # the SAME derivation Save performs, on an empty results dict: a
+        # human-signed anchor beats every automatic reference, so this is
+        # diam_mm / new_ref['diam_px'] — but routed through mm_per_px so the
+        # two paths can never drift apart
+        scale = se.mm_per_px({}, rows, self.settings, baseline_ref=new_ref)
+        if not scale:
+            self.manual_ref = was
+            messagebox.showerror(
+                "Re-anchor scale",
+                "The accepted anchor did not yield a usable mm/px scale, "
+                "so nothing was written.")
+            return
+        plan = se.reanchor_plan(rows, scale, dmm, recorded=prev)
+        if not messagebox.askyesno("Re-anchor scale — SCALE ONLY",
+                                   self._reanchor_msg(plan, prev, new_ref),
+                                   default='no', icon='warning'):
+            self.manual_ref = was
+            self.status.config(text="re-anchor declined — data.csv "
+                                    "untouched")
+            return
+        # ---- commit, atomically in memory as well as on disk -------------
+        # apply_results mutates the rows in place, and write_back can fail
+        # AFTER it (data.csv open in Excel is the everyday case). Without
+        # this snapshot a failed re-anchor would leave the in-memory column
+        # at the new scale while the disk held the old, and the next
+        # attempt's confirmation would report a ×1.000 multiplier against
+        # numbers the operator never agreed to. Restored per-row rather than
+        # by rebinding the list so nothing holding a row reference sees a
+        # stale dict.
+        snap = [dict(r) for r in rows]
+        cols = list(self.run['columns'])
+        try:
+            se.apply_results(rows, {}, scale, {}, None)
+            se.write_back(self.rundir, self.run)
+        except Exception as e:
+            for row, old in zip(rows, snap):
+                row.clear()
+                row.update(old)
+            self.run['columns'] = cols
+            self.manual_ref = was
+            csv_path = self.run.get('csv_path') or ''
+            has_bak = csv_path and os.path.exists(csv_path + '.bak')
+            messagebox.showerror(
+                "Re-anchor FAILED",
+                f"Writing the re-derived areas failed:\n\n{e}\n\nNOTHING "
+                f"was changed — the run is exactly as it was, in memory "
+                f"and on disk, and no frame files were touched. If "
+                f"data.csv is open in Excel, close it and try again."
+                + (f"\nAn earlier pre-save backup is at data.csv.bak "
+                   f"(from a previous write, not this one)."
+                   if has_bak else ""))
+            return
+        # ---- provenance: this run must NOT end up looking re-reviewed ----
+        anchor = self._anchor_record(new_ref, scale)
+        if not anchor.get('auto_diam_px'):
+            # base_ref is a DETECT-time reference and a re-anchor never
+            # detects, so it is normally None here — which would drop the
+            # automatic fit out of the record on exactly the writes that
+            # exist because a manual anchor disagreed with it. Asked for
+            # directly instead (se.baseline_disc is cached, so the dialog
+            # already warmed it), and never allowed to raise: a missing
+            # cross-check number must not cost the correction.
+            anchor['auto_diam_px'] = (self._auto_disc() or {}).get('diam_px')
+        anchor.update(se.reanchor_anchor_fields(prev, plan))
+        try:
+            se.save_scale_anchor(self.rundir, anchor)
+        except OSError as e:
+            self.status.config(
+                text=f"areas re-derived, but recording the re-anchor in "
+                     f"setup.txt failed: {e}")
+        try:
+            _p, line = se.append_calibration_log(
+                self.rundir, se.reanchor_log_record(anchor, plan))
+            print(line)
+        except Exception as e:
+            print(f"re-anchor: logging the correction failed: {e}")
+        old_txt = (f"{plan['old_diam_px']:.1f}" if plan['old_diam_px']
+                   else '?')
+        rest = ''
+        # nominal_mm2 in the condition as well as the text: it is None for a
+        # non-positive diam_mm, and so are the deviations — a bare
+        # {None:+.2f} here would raise AFTER the commit, turning a completed
+        # correction into a traceback
+        if (plan['rest_after'] is not None and plan['rest_before'] is not None
+                and plan['nominal_mm2']):
+            rest = (f"; resting {plan['rest_before']:.2f} → "
+                    f"{plan['rest_after']:.2f} mm² "
+                    f"({plan['rest_dev_after']:+.2f}% from "
+                    f"{plan['nominal_mm2']:.2f})")
+        self.status.config(
+            text=f"RE-ANCHORED (scale only, no re-review): {old_txt} → "
+                 f"{new_ref['diam_px']:.1f} px, {plan['n_derive']} row(s) "
+                 f"re-derived"
+                 + (f", {plan['n_blank']} blanked" if plan['n_blank'] else '')
+                 + (f", every area ×{plan['mult']:.4f}" if plan['mult']
+                    else '')
+                 + rest)
+
+    def _reanchor_msg(self, plan, prev, new_ref):
+        """The re-anchor confirmation, WITH NUMBERS.
+
+        One button here rewrites every absolute area in the run, so the
+        dialog has to be sanity-checkable on its own: the counts on both
+        sides of the [critical] blank-vs-re-derive rule, both anchor
+        diameters, the multiplier every area is about to be multiplied by,
+        and the resting area before → after with its deviation from
+        π·(diam_mm/2)² on BOTH sides. That last pair is the check that
+        actually catches a wrong answer — re-anchoring to a run's own
+        automatic fit forces its resting area onto π·(diam_mm/2)², so an
+        'after' that does not land there means the anchor is not the fit.
+
+        Rows that would BLANK are reported here, before the commit, not
+        after: a bug-era mm² with no px cannot be re-derived and is dropped
+        rather than kept on an unknowable anchor, and that is a deletion the
+        operator has to agree to in advance."""
+        nom = plan['nominal_mm2']
+        dmm = self.settings['diam_mm']
+        old_px = plan['old_diam_px']
+        new_px = float(new_ref['diam_px'])
+        L = ["Re-anchor this run's SCALE ONLY?",
+             "",
+             "Every recorded area is RE-DERIVED from the active_area_px "
+             "already in data.csv, at the new scale. Detection does NOT "
+             "re-run, nothing is re-reviewed, and notes / tags / snapshots "
+             "/ current / voltage / frame names are not touched.",
+             ""]
+        L.append(f"  anchor       {(f'{old_px:.2f} px' if old_px else '?')}"
+                 f"  →  {new_px:.2f} px          ({dmm:g} mm disc)")
+        if plan['old_scale']:
+            L.append(f"  scale        {plan['old_scale']:.6f}  →  "
+                     f"{plan['new_scale']:.6f} mm/px")
+        if plan['mult']:
+            L.append(f"  MULTIPLIER   every area × {plan['mult']:.6f}   "
+                     f"({100 * (plan['mult'] - 1):+.2f}%)")
+        else:
+            L.append("  MULTIPLIER   UNKNOWN — no previous scale could be "
+                     "recovered from this run's own numbers, so there is no "
+                     "factor to quote. Every mm² is derived fresh.")
+        L += ["",
+              f"  rows re-derived from px   {plan['n_derive']} of "
+              f"{plan['n_rows']}"]
+        if plan['n_fresh']:
+            L.append(f"  rows gaining an mm² now   {plan['n_fresh']}  "
+                     f"(px present, no previous mm²)")
+        # stated whether or not it is zero: "0 rows will be blanked" is the
+        # reassurance, and its absence would be indistinguishable from the
+        # line not existing
+        L.append(f"  rows BLANKED              {plan['n_blank']}"
+                 + ("   ⚠ an mm² with NO px cannot be re-derived — it is "
+                    "dropped, not kept on an unknowable anchor"
+                    if plan['n_blank'] else ''))
+        if plan['n_untouched']:
+            L.append(f"  rows untouched            "
+                     f"{plan['n_untouched']}  (no px, no mm²)")
+        # `nom` in the condition, not only in the text: with a non-positive
+        # diam_mm there is no mask area to judge against, and the deviation
+        # figures are None — which would formatter-crash mid-dialog, the
+        # exact failure class the 2026-08-05 audit found bricking the gate
+        if (plan['rest_before'] is not None and plan['rest_after'] is not None
+                and nom):
+            which = ("baseline row" if plan['rest_is_baseline']
+                     else f"row {plan['rest_row']} — NOT the baseline row")
+            L += ["",
+                  f"  resting area ({which}), against π·({dmm:g}/2)² = "
+                  f"{nom:.2f} mm²:",
+                  f"     before   {plan['rest_before']:>8.3f} mm²   "
+                  f"({plan['rest_dev_before']:+.2f}%)",
+                  f"     after    {plan['rest_after']:>8.3f} mm²   "
+                  f"({plan['rest_dev_after']:+.2f}%)"]
+            if abs(plan['rest_dev_after']) > 1.0:
+                L.append("     ⚠ the corrected resting area is still more "
+                         "than 1% from the mask anchor. Re-anchoring to "
+                         "this run's own automatic fit lands it on "
+                         "π·(d/2)² by construction, so this anchor is NOT "
+                         "that fit — check the method before committing.")
+        elif plan['rest_before'] is None:
+            L += ["",
+                  "  ⚠ no resting area is recorded (no row tagged "
+                  "'baseline' carries a px measurement), so the one check "
+                  "that can catch a wrong anchor is UNAVAILABLE here."]
+        if plan['mixed']:
+            L += ["",
+                  f"  ⚠ THIS COLUMN ALREADY HOLDS MORE THAN ONE SCALE: the "
+                  f"{plan['n_scales']} measured rows imply scales spanning "
+                  f"{plan['scale_span_pct']:.2f}% in area. That is the "
+                  f"partial-re-save state (SLDEA_HANDOFF 2026-08-05, "
+                  f"[critical]). Re-anchoring FIXES it — every row is "
+                  f"re-derived from px at one scale — but the multiplier "
+                  f"above is quoted against the resting row's scale and "
+                  f"does not describe the others."]
+        if plan['anchor_matches_data'] is False:
+            L += ["",
+                  f"  ⚠ the anchor recorded in setup.txt "
+                  f"({plan['recorded_diam_px']:.2f} px) is NOT the scale "
+                  f"this column was actually derived at "
+                  f"({old_px:.2f} px implied by the data). The DATA is "
+                  f"what gets re-derived, so the multiplier follows the "
+                  f"data, not the block."]
+        if prev is None:
+            L += ["",
+                  "  ⚠ NO anchor was on record for this run (a pre-gate "
+                  "save). The previous scale above is the one implied by "
+                  "the run's own mm²/px, and the anchor being written is "
+                  "the first this run has ever carried."]
+        if plan['mult'] and abs(plan['mult'] - 1.0) < 1e-6:
+            L += ["",
+                  "  Note: this anchor is the one already in force, so no "
+                  "area changes measurably. The write still records the "
+                  "anchor and its provenance."]
+        L += ["",
+              "A backup is kept as data.csv.bak. Expansion ratios A/A₀ are "
+              "unaffected — a uniform scale factor cancels exactly in a "
+              "ratio."]
+        # THE ONE STALE ARTIFACT, disclosed. Save draws
+        # area_vs_voltage.png from the SESSION's accepted results, and a
+        # re-anchor has none by definition — so the plot cannot be
+        # regenerated here and would keep showing the old absolute mm² with
+        # nothing on it saying so. Named rather than deleted: it is a saved
+        # artifact, and silently removing one is worse than a stale one that
+        # the operator has been told about. (The outlines in overlays/ are
+        # px contours and carry no scale, so they stay correct; re-running
+        # sldea_diag picks the new anchor up and reports the re-anchor.)
+        try:
+            if os.path.exists(os.path.join(self.rundir,
+                                           'area_vs_voltage.png')):
+                L += ["",
+                      "  ⚠ area_vs_voltage.png is NOT regenerated — it is "
+                      "drawn from a review pass and there is none here, so "
+                      "it will keep showing the OLD absolute areas until the "
+                      "next Save. Its shape is unaffected; only its mm² "
+                      "axis is stale."]
+        except (OSError, TypeError):
+            pass
+        return '\n'.join(L)
+
+    def _anchor_record(self, ref, scale):
+        """The setup.txt anchor dict for `ref` at `scale` — the ONE builder
+        both Save and the scale-only re-anchor write through.
+
+        Shared rather than duplicated (`#215`, 2026-08-06) so the re-anchor
+        path records the FULL provenance of its anchor — mode C's fit quality
+        and who approved it, or a hand measurement's rounds, spread, σ and
+        SE — and cannot drift into a thinner second version of the same
+        record. The re-anchor adds its own fields on top (see
+        `se.reanchor_anchor_fields`); nothing here knows about that.
+
+        Every key is optional on write: `save_scale_anchor` omits whatever is
+        absent, which is how the pre-#215 two-click anchors, the hand
+        calibrations and the mode-C anchors all share one block format."""
+        return {
+            'method': ref.get('method', se.ANCHOR_METHOD_MANUAL),
+            'diam_px': ref['diam_px'],
+            'diam_mm': self.settings['diam_mm'],
+            'mm_per_px': scale,
+            'anchor_frame': ref.get('frame', ''),
+            'anchor_is_baseline': ref.get('is_baseline'),
+            'auto_diam_px': (self.base_ref or {}).get('diam_px'),
+            # #215: the three (or more) fitted diameters, their spread and
+            # what the anchor guard said. The spread is the ONLY per-run
+            # measurement of operator repeatability in this project —
+            # SLDEA_MEASUREMENT §2.5's "operator repeat ~1%" has never had
+            # data. Absent on a reused pre-#215 anchor, and save_scale_anchor
+            # simply omits the keys then.
+            'n_rounds': ref.get('n_rounds'),
+            'rounds_px': ref.get('rounds_px'),
+            'spread_px': ref.get('spread_px'),
+            'spread_pct': ref.get('spread_pct'),
+            # which METHOD produced it (A circle / B two-point) and the
+            # n-aware conversion of its scatter. The range alone is not
+            # comparable between anchors taken at different round counts, so
+            # sigma and the mean SE travel with it.
+            'cal_mode': ref.get('cal_mode'),
+            'sigma_pct': ref.get('sigma_pct'),
+            'se_pct': ref.get('se_pct'),
+            # mode C (`#215`, 2026-08-06 evening): an 'auto-verified' anchor
+            # has no rounds and no spread, so what quantifies it is the FIT's
+            # own quality, and what makes it auditable is the named human who
+            # approved it and when. save_scale_anchor omits every one of
+            # these when they are absent, which is every hand-measured and
+            # every pre-#215 anchor.
+            'fit_circ': ref.get('fit_circ'),
+            'fit_conf': ref.get('fit_conf'),
+            'fit_resid_px': ref.get('fit_resid_px'),
+            'fit_arc_cov': ref.get('fit_arc_cov'),
+            'fit_n_edge': ref.get('fit_n_edge'),
+            'verified_by': ref.get('verified_by'),
+            'verified_at': ref.get('verified_at'),
+            'guard': ref.get('guard'),
+        }
 
     # ---------------- advanced settings ----------------
     def _advanced(self):

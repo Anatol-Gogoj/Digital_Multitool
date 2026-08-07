@@ -1,6 +1,55 @@
 # Project handoff — state as of 2026-08-07
 
-**TL;DR (2026-08-07, desk session, no bench access — read this first).**
+**TL;DR (2026-08-07 evening, remote parallel-agent session — read this
+first).** Main is green, **no open PRs**, GUI suite **47 tests**, full
+suite **29/33** (the same four environmental failures) — both verified on
+the merged tree. Seven PRs merged: the Edge Review UX trio **#240**
+(`#238` How-to panel) / **#241** (`#237` clock split) / **#242** (`#216`
+primary Detect + tooltips) landed together via the pre-tested integration
+PR **#252**; then **#245** (manual sources caught up to the verify-first
+calibration flow — five stale spots incl. the annotate matcher), **#248**
+(a stale callout matcher now FAILS the manual build, fail-closed:
+`legends.json` is removed on a miss), and **#247** (the `#215`
+dialog-test deflake, 6/300 pre → 0/300 post, both silent-gate modes
+scripted).
+
+**Four PRs were closed as superseded, not lost.** Parallel background
+sessions attacked the same two follow-ups twice, producing duplicate
+generations: #246/#249/#251 (docs-fix halves — the picked pair #245+#248
+composes clean, where #249+#251's "either merge order" claim failed an
+actual merge-tree test and #249 was fail-open where #248 is fail-closed)
+and #250 (a handoff snapshot this entry replaces). Closing notes on each
+carry the reasoning.
+
+**Issue movement:** `#224` CLOSED (Anatol accepted the telemetry label as
+shipped), `#237` CLOSED (delivered), `#243`/`#244` filed, fixed and
+CLOSED the same day. **`#216` and `#238` stay OPEN deliberately** — the
+code is merged and tested, but "unmistakably primary" and "reads as help"
+are operator judgments; close them after driving one real review session
+on the new UI.
+
+**⚠ The manual build is now gated.** Rebuilding from the existing
+2026-08-05 shots fails red with three LEGITIMATE misses (the renamed 📏
+button, the `#224` label, the new ❓ button) until the next release does a
+fresh capture. That is #248 doing its job — capture first, then annotate,
+per the checklist.
+
+**Repo hygiene:** local branches are down to `main` plus
+`claude/run-sheet` (kept on purpose — sole copy of parked PR #221's
+RUN_SHEET draft); ~70 merged branches and 23 worktrees were swept after
+verifying every one clean and merged. Four locked worktree DIRECTORIES
+remain under `.claude\worktrees\` — deregistered from git, held only by
+finished sessions' shell CWDs; plain `rm -rf` once those terminals close.
+
+**Unchanged and still owed:** all bench debt (§M/§N/§O; fleet one release
+behind; v1.1.0 still pre-release), the control round (Anatol's call: do
+it, "later" — the premise note in Batch-QA still applies), and the `#162`
+live-verify (a 10-minute GUI walkthrough is in the 2026-08-07 session
+log; close `#162` after it).
+
+---
+
+**TL;DR (2026-08-07 morning, desk session, no bench access).**
 Main is green, **no open PRs**, suite **29/33** (the four failures are the
 documented environmental ones). Four PRs merged: **#233** the campaign
 docket, **#234** the telemetry wording (`#224`), **#235** trace/machine
@@ -560,11 +609,11 @@ Items 3 and 4 are **DONE** — every desk-side review is complete and both
 #234, and `#215` merged in #236 having grown into the whole calibration
 rework. What is genuinely left at a desk, in order:
 
-- **`#237`** split the elapsed timer (detection time vs session time) ·
-  **`#238`** the Edge Review "How to use" panel · **`#216`** hover
-  tooltips and button flow. All three are small, hardware-free, and were
-  asked for by the operator after a long real session — they are the
-  highest-value desk work now that the measurement side is quiet.
+- ~~`#237` · `#238` · `#216`~~ **DONE 2026-08-07 evening** — the whole
+  trio merged (#240/#241/#242 via the integration PR #252). `#237` is
+  closed; `#216`/`#238` stay open pending operator acceptance in one real
+  session. The highest-value desk work is now that acceptance drive, then
+  the row below.
 - **`#225`** the horizontal-scrollbar family (root-causes `#27`, related
   to `#26`) · **`#197`** tuner run picker · **`#200`** connection takeover
   (touches instrument connection — cannot be bench-verified here) ·
@@ -652,6 +701,35 @@ rework. What is genuinely left at a desk, in order:
    to Git LFS / release-assets-only.
 4. **`demos/` fate** — decision material for open issue #32 (GUI
    framework); archive the trio when #32 is decided.
+
+## Roster changes 2026-08-07 evening
+
+**Closed:** `#224` (label accepted as shipped in #234) · `#237` (clock
+split delivered in #241) · `#243` (docs staleness — filed and fixed by
+#245+#248 the same day) · `#244` (dialog-test flake — measured 5/200 on
+pristine main; #247's independent 300-run harness confirmed the mechanism
+and split it into two silent-gate modes; 0/300 after the fix).
+
+**Delivered but left OPEN for operator acceptance:** `#216` (primary
+Detect, tooltips everywhere, workflow separators, empty-canvas hint) and
+`#238` (the ❓ How to use panel — the wording is the deliverable and wants
+Anatol's eye against a real session). Close both after one real review
+drive. `#215` unchanged — still open pending a second device's worth of
+calibrations; #247 hardened its test without touching the dialog.
+
+**Two traps from the parallel-agent day, worth keeping:**
+
+- **Parallel branches that each add module-level blocks to the same file
+  collide as insert-vs-insert conflicts, and test files are worse** — git
+  aligns the shared Tk boilerplate of two structurally-similar tests and
+  interleaves their bodies. Resolve by reconstruction (re-apply one
+  side's insertion whole at a unique content anchor), never by keeping
+  both sides of the interleaved hunks. PR #252's body records the method.
+- **`git worktree remove` on Windows can deregister the worktree yet fail
+  to delete its directory** (a session shell's CWD holds the lock). The
+  leftover is a plain folder git no longer knows about — `git worktree
+  list` looks clean while the disk is not. `rm -rf` it after the owning
+  terminal closes.
 
 ## Roster changes 2026-08-07
 

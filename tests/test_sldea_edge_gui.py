@@ -717,7 +717,7 @@ def test_calibration_dialog_drives_three_rounds_and_both_gates():
         answers[:] = [False, True]
         taken = []
         app.root.wait_window = lambda win: advance(win, taken)
-        app._calibrate_scale()
+        app._calibrate_scale(mode='A')
         assert len(asked) == 2, asked
         assert taken[:2] == ['Continue →', 'Continue →'], taken
         assert '✔ Finish calibration' in taken[2]
@@ -754,7 +754,7 @@ def test_calibration_dialog_drives_three_rounds_and_both_gates():
         # spread No, guard No (restart), then spread No, guard Yes
         answers[:] = [False, False, False, True]
         taken = []
-        app._calibrate_scale()
+        app._calibrate_scale(mode='A')
         assert app.manual_ref is not None
         assert app.manual_ref['n_rounds'] == 3, app.manual_ref
         # 3 rounds, restart, 3 rounds again = 6 presses, and 4 questions
@@ -828,7 +828,7 @@ def test_calibration_warnings_default_to_declining_them():
         # than randomized so the question order is deterministic.
         _fixed_spawn(gui, [(160.0, 120.0, 65.0), (160.0, 120.0, 70.0),
                            (160.0, 120.0, 75.0)])
-        app._calibrate_scale()
+        app._calibrate_scale(mode='A')
         assert app.manual_ref is None, ("an anchor nobody read was "
                                         "accepted: " + str(app.manual_ref))
         assert spy.asked and spy.asked[0][0] == 'Rounds disagree'
@@ -839,7 +839,7 @@ def test_calibration_warnings_default_to_declining_them():
         # fixture's ~160 px disc is a P3_2-shaped miss, 18% out
         spy.asked.clear()
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 65.0)
-        app._calibrate_scale()
+        app._calibrate_scale(mode='A')
         assert app.manual_ref is None, app.manual_ref
         titles = [t for t, _kw in spy.asked]
         assert titles and set(titles) == {'Anchor sanity check'}, titles
@@ -851,7 +851,7 @@ def test_calibration_warnings_default_to_declining_them():
         # defaults to declining too (finding 3)
         spy.asked.clear()
         app._auto_disc = lambda: None
-        app._calibrate_scale()
+        app._calibrate_scale(mode='A')
         assert app.manual_ref is None, app.manual_ref
         assert [t for t, _kw in spy.asked][0] == 'Anchor NOT cross-checked'
         assert set(spy.defaults()) == {'no'}, spy.asked
@@ -917,7 +917,7 @@ def test_return_key_cannot_finish_a_calibration():
             seen['text'] = _cal_display(win) if seen['alive'] else ''
 
         app.root.wait_window = hammer
-        app._calibrate_scale()
+        app._calibrate_scale(mode='A')
         assert seen.get('alive'), "Enter closed the calibration dialog"
         # self-check FIRST: if this environment refuses to deliver a
         # synthetic key press, the rest of the case proves nothing
@@ -979,7 +979,7 @@ def test_mid_round_display_never_reveals_a_previous_fit():
                 _cal_step_button(win).invoke()
 
         app.root.wait_window = advance
-        app._calibrate_scale()
+        app._calibrate_scale(mode='A')
         assert len(snaps) == 3, snaps
         assert app.manual_ref['rounds_px'] == [130.0, 140.0, 150.0]
         # round 1 shows only its own circle; rounds 2 and 3 must contain
@@ -1597,7 +1597,7 @@ def test_mode_chooser_restarts_the_set_and_carries_the_modes_default_n():
             win.destroy()
 
         app.root.wait_window = poke
-        app._calibrate_scale()
+        app._calibrate_scale(mode='A')
         assert saw['open'] == (gui.se.CAL_DEFAULT_MODE, '3', 'A', 3), saw
         assert saw['mid'] == (2, 1), saw
         mode, n, nv, rnd_i, ndiams, npend, rotated = saw['after']
@@ -2149,6 +2149,380 @@ def test_retrace_after_accept_is_visibly_staged_not_silently_shown():
 def strc_area(poly):
     import sldea_trace as strc
     return strc.polygon_area(poly)
+
+
+# ---------------------------------------------------------------------------
+# MODE C -- the machine measures, the operator VERIFIES (2026-08-06 evening)
+# ---------------------------------------------------------------------------
+
+def _cal_buttons(win):
+    return {b.cget('text'): b for b in _widgets(win, 'button')}
+
+
+def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
+    """`#215` 2026-08-06 evening, THROUGH THE REAL DIALOG.
+
+    Four things at once, because they are one behaviour: the gate opens in
+    mode C when there is a fit to verify; <Return> cannot approve it; the
+    ✔ Accept button produces an `auto-verified` anchor carrying the fit's
+    quality and a named approver; and NOTHING on screen or in the record
+    claims a cross-check -- the only one available is vacuous.
+
+    Skips headlessly like every other dialog case here, so a green suite is
+    not evidence the window opens; the text and arithmetic are pinned
+    separately in tests/test_sldea_calibration.py."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('mode C verify')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_cal_verify_')
+    real_mb = gui.messagebox
+    saw = {}
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        spy = _ModalSpy(real_mb, app)          # no answers: all defaults
+        gui.messagebox = spy
+        fit = app._auto_disc()
+        assert fit and fit.get('diam_px'), "fixture has no automatic fit"
+
+        def poke(win):
+            p = app._cal_probe
+            saw['mode'] = (p['mode_var'].get(), p['st']['mode'])
+            saw['text'] = _cal_display(win)
+            saw['stretch'] = p['st']['stretch']
+            btns = _cal_buttons(win)
+            saw['btns'] = sorted(btns)
+            step = p['step_btn']
+            saw['step_text'] = step.cget('text')
+            saw['step_default'] = str(step.cget('default'))
+            saw['hand_state'] = str(p['hand_btn'].cget('state'))
+            # (1) ENTER MUST NOT APPROVE. Put the dialog on screen first --
+            # a synthetic key press is silently dropped by an unviewable
+            # widget, so without this the case would pass vacuously.
+            _cal_onscreen(root, win)
+            win.focus_force()
+            win.update()
+            for _ in range(6):
+                if not win.winfo_exists():
+                    break
+                win.event_generate('<Return>', when='now')
+                win.update()
+            saw['alive_after_enter'] = win.winfo_exists()
+            saw['ref_after_enter'] = app.manual_ref
+            saw['live'] = _cal_display(win) if win.winfo_exists() else ''
+            # (2) the BUTTON approves
+            step.invoke()
+
+        app.root.wait_window = poke
+        app._calibrate_scale()
+        # --- opened in C, on the strength of a real fit
+        assert saw['mode'] == ('C', 'C'), saw['mode']
+        assert saw['step_text'] == '✔ Accept the automatic fit', saw
+        assert saw['step_default'] == 'active', saw   # primary, as intended
+        assert saw['hand_state'] == 'normal', saw
+        assert any('Measure by hand' in b for b in saw['btns']), saw['btns']
+        # the round-based controls are meaningless here
+        assert saw['stretch'] is not None, "no contrast stretch was applied"
+        # --- Enter was refused, and said why
+        assert saw['alive_after_enter'], "Enter closed the dialog"
+        assert saw['ref_after_enter'] is None, (
+            "Enter approved an anchor nobody had read: "
+            + str(saw['ref_after_enter']))
+        assert 'Enter cannot approve an anchor' in saw['live'], saw['live']
+        assert not spy.asked, ("mode C asked a yes/no question it should "
+                              "not: " + str(spy.asked))
+        # --- the evidence was on screen BEFORE the button was pressed
+        t = saw['text']
+        assert 'VERIFY THE AUTOMATIC FIT' in t
+        for needle in ('THE FIT', 'EVIDENCE', 'UNCERTAINTY', 'NOT CHECKED',
+                       'HOW TO JUDGE', 'BY CONSTRUCTION', 'YOUR EYE',
+                       'display only'):
+            assert needle in t, (needle, t[:400])
+        assert f"{fit['diam_px']:.1f} px" in t, t[:400]
+        # NO VACUOUS CROSS-CHECK IS CLAIMED anywhere the operator can read
+        for lie in ('apart in diam', 'mask area +0.0', 'cross-check passed',
+                    '✓'):
+            assert lie not in t, (lie, t)
+        # --- the anchor: provenance distinct from a hand measurement
+        ref = app.manual_ref
+        assert ref is not None, "Accept produced no anchor"
+        assert ref['method'] == gui.se.ANCHOR_METHOD_VERIFIED == \
+            'auto-verified'
+        assert ref['method'] != gui.se.ANCHOR_METHOD_MANUAL
+        assert ref['cal_mode'] == 'C'
+        assert abs(ref['diam_px'] - fit['diam_px']) < 1e-9
+        assert ref['fit_n_edge'] == fit['n_edge']
+        assert abs(ref['fit_resid_px'] - fit['fit_resid_px']) < 1e-9
+        assert ref['verified_by'] and ref['verified_at'], ref
+        # NO rounds and NO spread -- nothing was fitted
+        for k in ('rounds_px', 'n_rounds', 'spread_px', 'spread_pct',
+                  'sigma_pct', 'se_pct'):
+            assert ref.get(k) is None, (k, ref.get(k))
+        # the record says in words what was not checked
+        assert 'NOT cross-checked' in ref['guard']
+        assert 'vacuous' in ref['guard']
+        ref['guard'].encode('ascii')
+        # the status line says VERIFIED, not calibrated, and claims no tick
+        stat = app.status.cget('text')
+        assert 'VERIFIED' in stat and 'NOT cross-checked' in stat, stat
+        assert 'σ/SE undefined' in stat, stat
+        assert ref['verified_by'] in stat, stat
+        # --- the log line: mode=C, undefined precision, never 0.00%
+        with open(os.path.join(app.rundir, gui.se.CAL_LOG_NAME),
+                  encoding='utf-8') as f:
+            log = f.read()
+        line = [L for L in log.splitlines()
+                if L.startswith('SLDEA-CAL')][-1]
+        assert 'mode=C' in line and 'n=1' in line, line
+        for f_ in ('sigma=undefined', 'se=undefined', 'range=undefined',
+                   'verdict=NOT-GATED', 'outcome=accepted-verified',
+                   '(IS-the-anchor)'):
+            assert f_ in line, (f_, line)
+        assert '0.00%' not in line, line
+        # --- and Save persists all of it
+        gui.se.save_scale_anchor(app.rundir, {
+            'method': ref['method'], 'cal_mode': ref['cal_mode'],
+            'diam_px': ref['diam_px'], 'diam_mm': 16.0,
+            'mm_per_px': 16.0 / ref['diam_px'],
+            'fit_circ': ref['fit_circ'], 'fit_conf': ref['fit_conf'],
+            'fit_resid_px': ref['fit_resid_px'],
+            'fit_arc_cov': ref['fit_arc_cov'],
+            'fit_n_edge': ref['fit_n_edge'],
+            'verified_by': ref['verified_by'],
+            'verified_at': ref['verified_at'], 'guard': ref['guard']})
+        back = gui.se.load_scale_anchor(app.rundir)
+        assert back['method'] == 'auto-verified' and back['cal_mode'] == 'C'
+        assert back['verified_by'] == ref['verified_by']
+        assert gui.se._is_manual_cal(back), "a verified anchor must still " \
+                                           "override every automatic ref"
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_refused_fit_falls_through_to_the_hand_measurement_and_says_why():
+    """When `baseline_disc` refuses there is nothing to verify, so mode C is
+    WITHDRAWN (not offered as an empty screen) and the gate opens on the
+    hand measurement -- stating plainly that the fit refused, and quoting
+    the fitter's own reason. `P3_7_2.3mL_20260729` is the real run this
+    covers."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    import cv2
+    root = _tk_root_or_skip('mode C refusal')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_cal_refuse_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    saw = {}
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        # overwrite the baseline with a FLAT field: readable, but the fit
+        # has nothing to seed on. (Not a 0-byte file -- that is the
+        # fallback-frame path, which test_unavailable_cross_check covers.)
+        base = os.path.join(run, 'frames', 'SLDEA_s00_00.00kV_baseline.png')
+        cv2.imwrite(base, np.full((240, 320), 190, np.uint8))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app._base_gray() is not None, "the baseline must still read"
+        assert app._auto_disc() is None, "the fixture no longer refuses"
+        why = app._auto_disc_refusal()
+        assert why and 'seed' in why, why
+        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
+
+        def poke(win):
+            p = app._cal_probe
+            saw['mode'] = (p['mode_var'].get(), p['st']['mode'])
+            saw['text'] = _cal_display(win)
+            saw['radios'] = [rb.cget('value')
+                             for rb in _widgets_of(win, tk.Radiobutton)]
+            saw['step'] = p['step_btn'].cget('text')
+            saw['hand'] = str(p['hand_btn'].cget('state'))
+            win.destroy()
+
+        app.root.wait_window = poke
+        app._calibrate_scale()
+        # opened on the HAND measurement, mode C not on offer at all
+        assert saw['mode'] == (gui.se.CAL_DEFAULT_MODE, 'A'), saw['mode']
+        assert 'C' not in saw['radios'], saw['radios']
+        assert saw['step'].startswith('Continue'), saw['step']
+        assert saw['hand'] == 'disabled', saw
+        # and it SAID so, with the fitter's own reason
+        t = saw['text']
+        assert 'AUTOMATIC FIT IS NOT AVAILABLE' in t, t[:400]
+        assert 'BY HAND' in t, t[:400]
+        assert 'Reason the fit refused' in t and 'seed' in t, t[:600]
+        # asking for mode C explicitly on such a run is refused the same way
+        app.manual_ref = None
+        saw.clear()
+        app._calibrate_scale(mode=gui.se.CAL_MODE_VERIFY)
+        assert saw['mode'] == (gui.se.CAL_DEFAULT_MODE, 'A'), saw['mode']
+        assert 'AUTOMATIC FIT IS NOT AVAILABLE' in saw['text']
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_reusing_a_verified_anchor_keeps_it_verified_not_hand_measured():
+    """Found while writing mode C: `reuse` hardcoded
+    method='manual-calibration', so pressing P on a run whose anchor was
+    AUTO-VERIFIED would silently relabel it as a hand measurement -- losing
+    the one distinction the provenance field exists for, and then collecting
+    a vacuous cross-check tick at detect time as a bonus."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('reuse provenance')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_cal_reuse_')
+    real_mb = gui.messagebox
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        gui.se.save_scale_anchor(run, {
+            'method': gui.se.ANCHOR_METHOD_VERIFIED, 'cal_mode': 'C',
+            'diam_px': 159.9, 'diam_mm': 16.0, 'mm_per_px': 16.0 / 159.9,
+            'fit_circ': 0.999, 'fit_conf': 0.871, 'fit_resid_px': 0.5,
+            'fit_n_edge': 360, 'verified_by': 'anatol',
+            'verified_at': '2026-08-06T18:30:00',
+            'guard': 'AUTO-VERIFIED by eye: ... NOT cross-checked'})
+        app = gui.EdgeReviewApp(root, path=run)
+        gui.messagebox = _ModalSpy(real_mb, app)
+
+        def poke(win):
+            btns = _cal_buttons(win)
+            key = [t for t in btns if 'Reuse' in t]
+            assert key, sorted(btns)
+            btns[key[0]].invoke()
+
+        app.root.wait_window = poke
+        app._calibrate_scale()
+        ref = app.manual_ref
+        assert ref is not None and ref['reused'] is True
+        assert ref['method'] == gui.se.ANCHOR_METHOD_VERIFIED, ref['method']
+        assert ref['cal_mode'] == 'C'
+        assert ref['verified_by'] == 'anatol', ref
+        assert ref['fit_n_edge'] == 360
+        assert gui.se.guard_is_vacuous(ref)
+        assert 'auto-verified' in app.status.cget('text')
+        # and the detect-time restatement does NOT print a cross-check tick
+        app.detect_all_sync()
+        stat = app.status.cget('text')
+        assert 'AUTO-VERIFIED' in stat, stat
+        assert 'NOT cross-checked' in stat, stat
+        assert 'apart in diam' not in stat, stat
+        assert '✓' not in stat, stat
+        # a two-click anchor on the same run still reuses as one
+        gui.se.save_scale_anchor(run, {
+            'method': gui.se.ANCHOR_METHOD_MANUAL, 'diam_px': 170.0,
+            'diam_mm': 16.0, 'mm_per_px': 16.0 / 170.0})
+        app.manual_ref = None
+        app._calibrate_scale(mode='A')
+        assert app.manual_ref['method'] == gui.se.ANCHOR_METHOD_MANUAL
+        for k in ('fit_n_edge', 'verified_by', 'cal_mode'):
+            assert k not in app.manual_ref, k
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_verified_anchor_still_reports_when_the_fit_has_MOVED():
+    """The one thing that is NOT vacuous on a verified anchor: whether the
+    fit this detection pass just made is still the fit that was approved.
+    Normally it is, to the bit. Daylight means the baseline or the settings
+    changed underneath a reused anchor -- real information, and the only
+    signal the anchor guard's arithmetic can still carry here."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('verified anchor drift')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_cal_drift_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        fit = app._auto_disc()
+        assert fit and fit.get('diam_px')
+        # (a) approved against THIS fit -> no drift warning, no tick either
+        app.manual_ref = {'method': gui.se.ANCHOR_METHOD_VERIFIED,
+                          'cal_mode': 'C', 'diam_px': fit['diam_px'],
+                          'fit_circ': fit['circ'], 'fit_conf': fit['conf'],
+                          'fit_resid_px': fit['fit_resid_px'],
+                          'fit_n_edge': fit['n_edge'],
+                          'verified_by': 'anatol'}
+        app.detect_all_sync()
+        stat = app.status.cget('text')
+        assert 'NOT cross-checked' in stat and 'the automatic fit on this ' \
+                                              'run is NOW' not in stat, stat
+        # (b) the same anchor 4 % off the fit now on the run: the fit moved
+        app.manual_ref = dict(app.manual_ref,
+                              diam_px=fit['diam_px'] * 1.04, reused=True)
+        app.detect_all_sync()
+        stat = app.status.cget('text')
+        assert 'the automatic fit on this run is NOW' in stat, stat
+        assert 'Re-verify it' in stat, stat
+        assert '✓' not in stat, stat
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_measure_by_hand_leaves_mode_C_for_a_BLIND_mode_A_round_set():
+    """Mode C's second action must be a real escape hatch, not a
+    decoration: it drops into the existing hand measurement, from round 1,
+    with NOTHING carried over. In particular the fit's diameter must not
+    survive onto the screen -- a printed target is exactly what review
+    2026-08-06 removed, and mode C is the one place a number the operator
+    could aim at was just on display."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('mode C hand fallback')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_cal_hand_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    saw = {}
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 70.0)
+        fit = app._auto_disc()
+        assert fit and fit.get('diam_px')
+
+        def poke(win):
+            p = app._cal_probe
+            assert p['st']['mode'] == 'C'
+            p['hand_btn'].invoke()
+            saw['mode'] = (p['mode_var'].get(), p['st']['mode'])
+            saw['n'] = (p['n_var'].get(), p['st']['n'])
+            saw['round'] = (p['st']['round'], len(p['st']['diams']))
+            saw['stretch'] = p['st']['stretch']
+            saw['step'] = p['step_btn'].cget('text')
+            saw['hand'] = str(p['hand_btn'].cget('state'))
+            saw['text'] = _cal_display(win)
+            win.destroy()
+
+        app.root.wait_window = poke
+        app._calibrate_scale()
+        assert saw['mode'] == ('A', 'A'), saw['mode']
+        assert saw['n'] == ('3', 3), saw['n']
+        assert saw['round'] == (1, 0), saw['round']
+        assert saw['step'].startswith('Continue'), saw['step']
+        assert saw['hand'] == 'disabled', saw
+        t = saw['text']
+        # the hand measurement's own instructions are back...
+        assert 'METHOD A (circle)' in t and 'HALF-HEIGHT' in t, t[:400]
+        # ... the evidence block is gone, and with it the fit's diameter:
+        # no target to wheel a circle onto
+        assert 'VERIFY THE AUTOMATIC FIT' not in t, t[:400]
+        assert f"{fit['diam_px']:.1f} px" not in t, t
+        assert 'HIDDEN until the last fit' in t, t[:400]
+        assert app.manual_ref is None
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def _run():

@@ -955,11 +955,15 @@ def test_rounds_for_se_names_the_remedy_and_admits_when_there_is_none():
 
 def test_mode_constants_are_shared_and_the_defaults_are_per_mode():
     import sldea_edge_gui as gui
-    assert se.CAL_MODES == ('A', 'B')
+    assert se.CAL_MODES == ('A', 'B', 'C')
+    assert se.CAL_MANUAL_MODES == ('A', 'B')
     assert se.CAL_MODE_ROUNDS[se.CAL_MODE_CIRCLE] == se.CAL_ROUNDS == 3
     assert se.CAL_MODE_ROUNDS[se.CAL_MODE_TWOPOINT] == 5
-    # mode A stays the default: switching it would change every existing
-    # calibration path silently. One edit once B wins the comparison.
+    # mode C has NO round count, deliberately: a 1 in this table would read
+    # as "one round" and invite sigma/SE to be computed for a sample of one
+    assert se.CAL_MODE_VERIFY not in se.CAL_MODE_ROUNDS
+    # mode A stays the MANUAL default (what mode C falls back to): switching
+    # it would change every existing hand-calibration path silently.
     assert se.CAL_DEFAULT_MODE == se.CAL_MODE_CIRCLE
     # every per-mode default has a d2 factor, or its own gate could never
     # be applied to it
@@ -967,6 +971,18 @@ def test_mode_constants_are_shared_and_the_defaults_are_per_mode():
         assert se.d2(n) is not None, n
     assert gui.CAL_ROUNDS_TWOPOINT is se.CAL_ROUNDS_TWOPOINT
     assert gui.CAL_STROKE_STYLES[0] == '3 px solid'   # A unchanged
+
+
+def test_the_gate_opens_on_mode_C_only_when_there_is_a_fit_to_verify():
+    """`#215` 2026-08-06 evening: the machine measures and the operator
+    verifies — but only where the machine produced something. A refused fit
+    cannot be verified, so the gate must fall through to the hand
+    measurement rather than opening an empty mode C."""
+    assert se.cal_open_mode(_auto_ref()) == se.CAL_MODE_VERIFY
+    for none_ish in (None, {}, {'diam_px': 0.0}, {'diam_px': None},
+                     {'method': 'baseline-disc'}):
+        assert se.cal_open_mode(none_ish) == se.CAL_DEFAULT_MODE, none_ish
+    assert se.cal_open_mode(None) in se.CAL_MANUAL_MODES
 
 
 # ---------------------------------------------------------------------------
@@ -1325,6 +1341,399 @@ def test_diag_judges_the_SE_and_names_the_method():
     assert 'method B' in txt and 'sigma 0.43%/fit' in txt
     txt = sd.report(_diag_d(scale_anchor=bad))
     assert 'no d2 factor for n=9' in txt
+
+
+# ---------------------------------------------------------------------------
+# MODE C -- the machine measures, the operator VERIFIES (2026-08-06 evening)
+#
+# The A/B/A' experiment inverted the premise: on P3_2's baseline the
+# automatic fit (577.08 px, circ 0.999, conf 0.871, residual 2.3 px, 204
+# edge points) beat ALL ELEVEN hand calibrations on accuracy and nine of
+# eleven on precision. Everything below pins the honesty of the mode that
+# follows from that, because its whole risk is claiming a verification it
+# did not perform.
+# ---------------------------------------------------------------------------
+
+P3_2_FIT = {'method': 'baseline-disc', 'diam_px': 577.08, 'cx': 960.0,
+            'cy': 540.0, 'area_px': math.pi * (577.08 / 2.0) ** 2,
+            'circ': 0.999, 'conf': 0.871, 'fit_resid_px': 2.3,
+            'n_edge': 204, 'arc_cov': 1.0, 'solidity': 0.99,
+            'paper_lum': 186.0}
+
+
+def test_verify_stats_writes_UNDEFINED_not_zero():
+    """A mode-C anchor is ONE automatic fit. sigma, the mean SE and the
+    range do not exist for a sample of one, and writing 0 for them would
+    read as PERFECT PRECISION everywhere downstream -- the log line, the
+    status line, sldea_diag. None is a refusal to state a number; 0.00 % is
+    a claim. calibration_stats([d]) would honestly return the latter, which
+    is exactly why verify_stats exists."""
+    s = se.verify_stats(P3_2_FIT)
+    assert s['n'] == 1 and s['mean'] == 577.08 and s['values'] == [577.08]
+    assert s['single_fit'] is True
+    for k in ('spread_px', 'spread_pct', 'd2', 'sigma_px', 'sigma_pct',
+              'se_px', 'se_pct', 'area_se_pct'):
+        assert s[k] is None, (k, s[k])
+    # and the contrast: the generic stats function DOES say 0.00 %, which
+    # is why it must not be used here
+    naive = se.calibration_stats([577.08])
+    assert naive['spread_pct'] == 0.0
+    # the gate refuses to judge either of them -- never True
+    assert se.se_ok(s) is None and se.se_ok(naive) is None
+    for junk in (None, {}, {'diam_px': 0}, {'diam_px': None}):
+        assert se.verify_stats(junk) is None, junk
+
+
+def test_fit_resid_pct_is_the_fits_own_uncertainty_not_a_repeatability_term():
+    """An auto-verified anchor's uncertainty is the FIT's residual, not an
+    operator spread. On P3_2's baseline that is 2.3 px on 577.08 px = 0.40 %
+    of diameter, which lands on SLDEA_MEASUREMENT 2.1's ~0.4 % budget."""
+    rp = se.fit_resid_pct(P3_2_FIT)
+    assert abs(rp - 0.3985) < 0.001, rp
+    assert abs(rp - 0.4) < 0.01                  # the quotable figure
+    for junk in (None, {}, {'diam_px': 577.0}, {'fit_resid_px': 2.3},
+                 {'diam_px': 0, 'fit_resid_px': 2.3}):
+        assert se.fit_resid_pct(junk) is None, junk
+
+
+def test_the_anchor_guard_is_VACUOUS_on_an_autofit_derived_anchor():
+    """THE HONEST CONSTRAINT. Declaring the fitted disc to be diam_mm makes
+    the resting area pi*(diam_mm/2)^2 BY CONSTRUCTION, so anchor_guard's two
+    tests both read exactly 0.00 % on a mode-C anchor -- on ANY frame,
+    however wrong the fit is. It is a check that cannot fail, and a green
+    tick from it would be a claim of verification the code never performed.
+
+    Demonstrated rather than asserted: the identity is exercised over a
+    range of fitted diameters, including absurd ones."""
+    for d in (12.0, 100.0, 577.08, 900.0):
+        ref = dict(P3_2_FIT, diam_px=d,
+                   area_px=math.pi * (d / 2.0) ** 2)
+        g = se.anchor_guard(d, ref, MASK_MM)
+        assert g['available'] is True
+        assert abs(g['diam_pct']) < 1e-9, (d, g['diam_pct'])
+        assert abs(g['area_pct']) < 1e-9, (d, g['area_pct'])
+        assert g['warn'] == [], (d, g['warn'])
+        # ... and the implied resting area is the mask's, exactly, always
+        assert abs(g['rest_area_mm2'] - MASK_AREA_MM2) < 1e-6, d
+    # so it must be flagged and not run
+    assert se.guard_is_vacuous({'method': se.ANCHOR_METHOD_VERIFIED})
+    for other in ({'method': se.ANCHOR_METHOD_MANUAL}, {}, None,
+                  {'method': 'baseline-disc'}):
+        assert not se.guard_is_vacuous(other), other
+
+
+def test_the_two_anchor_methods_are_distinct_and_both_override():
+    """PROVENANCE. Anyone auditing a run must be able to tell 'a human
+    MEASURED this' from 'a human APPROVED the machine's measurement' -- two
+    different claims with different failure modes. Both still beat every
+    automatic reference at Save, because both are decisions a person is
+    answerable for; only the provenance differs."""
+    assert se.ANCHOR_METHOD_MANUAL == 'manual-calibration'
+    assert se.ANCHOR_METHOD_VERIFIED == 'auto-verified'
+    assert se.ANCHOR_METHODS == (se.ANCHOR_METHOD_MANUAL,
+                                se.ANCHOR_METHOD_VERIFIED)
+    rows = [{'tag': 'baseline'}, {'tag': 'post-ramp'}]
+    # a baseline-row detection at a DIFFERENT diameter must not outrank
+    # either kind of human-signed anchor (the 2026-08-05 audit's bug)
+    results = {0: {'diam_px': 500.0, 'area_px': 1.0}}
+    st = {'diam_mm': 16.0}
+    for method in se.ANCHOR_METHODS:
+        anchor = {'method': method, 'diam_px': 577.08}
+        assert abs(se.mm_per_px(results, rows, st, anchor)
+                   - 16.0 / 577.08) < 1e-12, method
+        assert method in se.scale_source(results, rows, anchor), method
+    # an automatic fit passed in as baseline_ref still loses to the
+    # baseline row, exactly as before
+    assert abs(se.mm_per_px(results, rows, st, dict(P3_2_FIT))
+               - 16.0 / 500.0) < 1e-12
+
+
+def test_verify_note_records_who_approved_what_and_what_was_not_checked():
+    note = se.verify_note(P3_2_FIT, 'anatol', '2026-08-06T18:30:00')
+    note.encode('ascii')                     # setup.txt field, one line
+    assert '\n' not in note and '\r' not in note
+    assert note.startswith('AUTO-VERIFIED')
+    for needle in ('577.1 px', 'circ 0.999', 'conf 0.871', 'resid 2.3px',
+                   '204 edge pts', 'anatol', '2026-08-06T18:30:00'):
+        assert needle in note, (needle, note)
+    # the vacuity, in words, in the run's own record
+    assert 'NOT cross-checked' in note
+    assert 'vacuous' in note and 'human eye' in note
+    # a fit with no quality numbers still produces a usable line
+    bare = se.verify_note({'diam_px': 577.08})
+    bare.encode('ascii')
+    assert 'AUTO-VERIFIED' in bare and 'NOT cross-checked' in bare
+
+
+def test_mode_C_log_line_says_undefined_and_leaves_A_and_B_untouched():
+    """The log's existing format is load-bearing, so mode C extends it
+    rather than changing it: A/B lines are byte-identical, and mode C's
+    precision columns read `undefined` -- not `0.00%` (perfect precision)
+    and not `unconvertible` (which means a number exists that the d2 table
+    cannot convert; here the quantity itself does not exist)."""
+    stats = se.verify_stats(P3_2_FIT)
+    rec = {'when': '2026-08-06T18:30:00', 'mode': se.CAL_MODE_VERIFY,
+           'stats': stats, 'gate': se.CAL_SE_PCT, 'verdict': 'NOT-GATED',
+           'auto_diam_px': P3_2_FIT['diam_px'], 'auto_pct': None,
+           'fit_circ': 0.999, 'fit_conf': 0.871, 'fit_resid_px': 2.3,
+           'fit_arc_cov': 1.0, 'fit_n_edge': 204,
+           'fit_resid_pct': se.fit_resid_pct(P3_2_FIT),
+           'outcome': 'accepted-verified', 'frame': 'base.png'}
+    line = se.calibration_log_line(rec)
+    assert 'mode=C' in line and 'n=1' in line
+    for f in ('sigma=undefined', 'se=undefined', 'area_se=undefined',
+              'range=undefined'):
+        assert f in line, (f, line)
+    assert '0.00%' not in line, line          # nothing reads as perfect
+    assert 'unconvertible' not in line, line  # the OTHER kind of gap
+    assert 'verdict=NOT-GATED' in line
+    # the deviation column would be +0.00% by construction, so it is not
+    # printed as agreement
+    assert 'auto=577.1px(IS-the-anchor)' in line, line
+    assert '(+0.00%)' not in line
+    # the fit's real quality figures are there instead
+    for f in ('circ=0.999', 'conf=0.871', 'resid=2.3px', 'arc=1.00',
+              'n_edge=204', 'resid_pct=0.40%'):
+        assert f in line, (f, line)
+    # and an A line is exactly what it was before mode C existed
+    a = se.calibration_log_line({
+        'when': 'W', 'mode': 'A', 'stats': se.calibration_stats(
+            [570.0, 575.0, 580.0]), 'gate': 0.4, 'verdict': 'PASS',
+        'auto_diam_px': 577.1, 'auto_pct': -0.35, 'stroke': '3 px solid',
+        'outcome': 'accepted', 'frame': 'b.png'})
+    assert ('SLDEA-CAL W mode=A n=3 sigma=1.03% se=0.59% area_se=1.19% '
+            'gate=0.40% verdict=PASS range=1.74% mean=575.00px '
+            'diams=570.00,575.00,580.00px rot=-deg stroke=3 px solid '
+            'auto=577.1px(-0.35%) outcome=accepted frame=b.png') == a, a
+    assert 'circ=' not in a and 'resid_pct=' not in a
+
+
+def test_auto_verified_anchor_round_trips_through_setup_txt():
+    """The fit's quality numbers and the human who approved them have to
+    survive into setup.txt and back, and the 15 two-click anchors and the
+    two runs with no block at all have to keep loading unchanged."""
+    d = tempfile.mkdtemp(prefix='cal_verified_')
+    try:
+        _setup(d)
+        se.save_scale_anchor(d, {
+            'method': se.ANCHOR_METHOD_VERIFIED,
+            'cal_mode': se.CAL_MODE_VERIFY,
+            'diam_px': P3_2_FIT['diam_px'], 'diam_mm': 16.0,
+            'mm_per_px': 16.0 / P3_2_FIT['diam_px'],
+            'anchor_frame': 'base.png', 'anchor_is_baseline': True,
+            'auto_diam_px': P3_2_FIT['diam_px'],
+            'fit_circ': 0.999, 'fit_conf': 0.871, 'fit_resid_px': 2.3,
+            'fit_arc_cov': 1.0, 'fit_n_edge': 204,
+            'verified_by': 'anatol', 'verified_at': '2026-08-06T18:30:00',
+            'guard': se.verify_note(P3_2_FIT, 'anatol',
+                                    '2026-08-06T18:30:00')})
+        back = se.load_scale_anchor(d)
+        assert back['method'] == se.ANCHOR_METHOD_VERIFIED
+        assert back['cal_mode'] == 'C'
+        assert abs(back['diam_px'] - 577.08) < 0.01
+        assert abs(back['fit_circ'] - 0.999) < 1e-9
+        assert abs(back['fit_resid_px'] - 2.3) < 1e-9
+        assert back['fit_n_edge'] == 204 and isinstance(back['fit_n_edge'],
+                                                       int)
+        assert back['verified_by'] == 'anatol'
+        assert back['verified_at'] == '2026-08-06T18:30:00'
+        assert 'NOT cross-checked' in back['guard']
+        # NO rounds, NO spread -- they were never written, so they are
+        # absent rather than zero
+        for k in ('n_rounds', 'rounds_px', 'spread_px', 'spread_pct',
+                  'sigma_pct', 'se_pct'):
+            assert k not in back, k
+        # it still overrides every automatic reference
+        assert se._is_manual_cal(back)
+        # a two-click anchor written over it loses the fit_* keys entirely
+        se.save_scale_anchor(d, {'method': se.ANCHOR_METHOD_MANUAL,
+                                 'diam_px': 590.26, 'diam_mm': 16.0,
+                                 'mm_per_px': 16.0 / 590.26})
+        old = se.load_scale_anchor(d)
+        assert old['method'] == se.ANCHOR_METHOD_MANUAL
+        for k in ('fit_circ', 'fit_n_edge', 'verified_by', 'verified_at'):
+            assert k not in old, k
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_baseline_disc_names_the_GATE_that_refused_it():
+    """`baseline_disc` returns a bare None, which is right for every
+    automatic caller and useless to an operator being sent to measure by
+    hand instead. Mode C quotes the reason, so the reason has to be real:
+    'the arc covers only 87 degrees' sends them to move whatever is lying
+    across the frame, 'the diameter is outside the plausible range' sends
+    them to the camera zoom."""
+    import numpy as np
+    s = dict(se.DEFAULT_SETTINGS)
+    s['diam_mm'] = 16.0
+    yy, xx = np.mgrid[0:240, 0:320]
+
+    def gray(f):
+        return np.clip(f, 0, 255).astype(np.uint8)
+
+    # (a) a real disc fits, and there is NO refusal on record for it
+    ok = np.full((240, 320), 190.0)
+    ok[(xx - 160) ** 2 + (yy - 120) ** 2 <= 80 * 80] = 165.0
+    assert se.baseline_disc(gray(ok), s) is not None
+    assert se.baseline_disc_refusal(gray(ok), s) is None
+    # (b) a flat field: nothing to seed on, and it SAYS so
+    flat = np.full((240, 320), 190.0)
+    assert se.baseline_disc(gray(flat), s) is None
+    why = se.baseline_disc_refusal(gray(flat), s)
+    assert why and 'seed' in why, why
+    # (c) a dark BAR, not a disc: round enough to seed, not round enough to
+    # pass -- the circularity or arc gate, named either way
+    bar = np.full((240, 320), 190.0)
+    bar[100:140, 40:280] = 165.0
+    assert se.baseline_disc(gray(bar), s) is None
+    why = se.baseline_disc_refusal(gray(bar), s)
+    assert why, 'a refusal with no reason is the thing this closes'
+    assert any(w in why for w in ('circularity', 'arc', 'residual', 'fill',
+                                  'plausible', 'ray', 'edge points')), why
+    # (d) no frame at all
+    assert se.baseline_disc(None, s) is None
+    assert 'no readable baseline' in (se.baseline_disc_refusal(None, s) or '')
+    # every reason is one plain sentence an operator can act on
+    for g in (flat, bar):
+        r = se.baseline_disc_refusal(gray(g), s)
+        assert r and r[0].islower() and '\n' not in r, r
+
+
+def test_contrast_stretch_is_measured_from_the_frame_and_refuses_a_flat_one():
+    """The 20-gray step on a 186 background is nearly invisible, so mode C
+    stretches the DISPLAY. The window comes from the frame's own measured
+    disc and paper levels (the exposure moves between runs -- the carbon-
+    black baseline medians 255), and it REFUSES when there is no step:
+    amplifying noise into a visible edge is the one failure this feature
+    must not have."""
+    import numpy as np
+    import sldea_edge_gui as gui
+    yy, xx = np.mgrid[0:240, 0:320]
+    a = np.full((240, 320), 186.0)
+    a[(xx - 160) ** 2 + (yy - 120) ** 2 <= 80 * 80] = 166.0
+    assert gui.disc_paper_lum(a, 160, 120, 80) == (166.0, 186.0)
+    lo, hi = gui.cal_stretch_window(166.0, 186.0)
+    # the ~160-192 window that makes a P3 baseline's step visible
+    assert 150 <= lo <= 165 and 188 <= hi <= 200, (lo, hi)
+    assert lo < 166.0 and hi > 186.0
+    # NO STRETCH when there is no step to stretch
+    for dl, pl in ((186.0, 186.0), (190.0, 186.0), (183.0, 186.0),
+                   (None, 186.0), (166.0, None), (None, None)):
+        assert gui.cal_stretch_window(dl, pl) is None, (dl, pl)
+    # a saturated frame (the CB baseline) has no measurable step either
+    sat = np.full((240, 320), 255.0)
+    dl, pl = gui.disc_paper_lum(sat, 160, 120, 80)
+    assert gui.cal_stretch_window(dl, pl) is None
+    # the LUT maps the window across the full range, clipping outside
+    lut = gui.cal_stretch_lut(157.0, 195.0)
+    assert len(lut) == 256 and lut[0] == 0 and lut[255] == 255
+    assert lut[157] == 0 and lut[195] == 255
+    assert 0 < lut[176] < 255 and lut[166] < lut[176] < lut[186]
+    assert all(0 <= v <= 255 for v in lut)
+    assert all(lut[i] <= lut[i + 1] for i in range(255))   # monotone
+    # a degenerate window cannot produce a divide-by-zero or an inversion
+    for a_, b_ in ((100.0, 100.0), (200.0, 10.0), (-5.0, 999.0)):
+        L = gui.cal_stretch_lut(a_, b_)
+        assert len(L) == 256 and all(0 <= v <= 255 for v in L), (a_, b_)
+    # and a garbage geometry gets no window rather than a wrong one
+    assert gui.disc_paper_lum(a, 160, 120, 0) == (None, None)
+    assert gui.disc_paper_lum(np.zeros((4, 4)), 2, 2, 1) == (None, None)
+
+
+def test_verify_evidence_shows_the_numbers_and_claims_no_cross_check():
+    """The text the operator judges on, pinned as text so its honesty is a
+    test rather than a screenshot. It must carry the fit, its quality, the
+    correctly-named uncertainty, the re-save consequence -- and a plain
+    statement that no cross-check is run, because the only one available
+    cannot fail."""
+    import sldea_edge_gui as gui
+    t = gui.verify_evidence(P3_2_FIT, 16.0, recorded=None, n_px_rows=0,
+                            stretch=(157.0, 195.0))
+    # the fit and what the run's whole mm2 column hangs on
+    assert '577.1 px' in t and '16 mm' in t and '0.02773 mm/px' in t
+    assert '201.06' in t
+    # the evidence
+    for needle in ('0.999', '0.871', '2.3 px', '0.40 % of diameter',
+                   '204 edge points', 'arc coverage 1.00'):
+        assert needle in t, needle
+    # the uncertainty, correctly named: the FIT's, not the operator's
+    assert 'NO standard error' in t and 'UNDEFINED' in t.upper()
+    assert 'never as zero' in t
+    assert 'repeatab' not in t.lower(), "a mode-C anchor has no such term"
+    # THE VACUITY, in the operator's face
+    assert 'NOT CHECKED' in t and 'BY CONSTRUCTION' in t
+    assert '+0.00 %' in t and 'YOUR EYE' in t
+    # ... and no claim that anything passed
+    for lie in ('cross-check passed', 'verified against', 'agrees with the '
+                'mask', '✓'):
+        assert lie not in t, lie
+    # the stretch is announced as display-only
+    assert 'display only' in t and 'RAW' in t
+    # the consequence, against a recorded anchor: P3_2's own +2.28 % case,
+    # seen from the other side (the fit is 2.23 % BELOW the two-click
+    # anchor, so accepting moves every mm2 up 4.62 %)
+    t2 = gui.verify_evidence(P3_2_FIT, 16.0,
+                             recorded={'diam_px': 590.26,
+                                       'saved': '2026-08-06'},
+                             n_px_rows=12, stretch=None)
+    assert '-2.23 %' in t2 and '+4.62 %' in t2, t2
+    assert '12 row(s)' in t2 and 'next Save' in t2
+    assert 'NOT stretched' in t2
+    # a pre-gate run (px rows, no anchor block) still gets told
+    t3 = gui.verify_evidence(P3_2_FIT, 16.0, n_px_rows=9)
+    assert '9 row(s)' in t3 and 'NO anchor is on record' in t3
+    # and a fit that does not exist produces nothing to approve
+    for junk in (None, {}, {'diam_px': 0}):
+        assert gui.verify_evidence(junk, 16.0) == '', junk
+
+
+def test_diag_tells_a_verified_anchor_from_a_measured_one():
+    """`sldea_diag` is where a run is audited months later, so the
+    provenance distinction has to be visible there -- and the vacuous
+    cross-check must not be printed as a passing one."""
+    import sldea_diag as sd
+    verified = {'method': se.ANCHOR_METHOD_VERIFIED, 'cal_mode': 'C',
+                'diam_px': 577.1, 'diam_mm': 16.0,
+                'mm_per_px': 16.0 / 577.1, 'fit_circ': 0.999,
+                'fit_conf': 0.871, 'fit_resid_px': 2.3, 'fit_arc_cov': 1.0,
+                'fit_n_edge': 204, 'verified_by': 'anatol',
+                'verified_at': '2026-08-06T18:30:00',
+                'guard': se.verify_note(P3_2_FIT, 'anatol',
+                                        '2026-08-06T18:30:00')}
+    vs = sd.verdicts(_diag_d(scale_anchor=verified))
+    heads = [h for _s, h, _d in vs]
+    scale = [(s, h, dt) for s, h, dt in vs if 'VERIFIED by an operator' in h]
+    assert len(scale) == 1, heads
+    dt = scale[0][2]
+    assert 'anatol' in dt and '2026-08-06T18:30:00' in dt
+    assert 'circ 0.999' in dt and '204 edge points' in dt
+    assert 'NOT CROSS-CHECKED' in dt and 'BY CONSTRUCTION' in dt
+    # the % apart line for a MEASURED anchor must not appear for this one
+    assert not any('recorded manual anchor' in h for h in heads), heads
+    assert not any('sanity guard' in h for h in heads), heads
+    assert '% apart in diameter' not in dt
+    # no repeatability term, and NOT described as a missing record
+    rep = [(s, h, d2) for s, h, d2 in vs if 'repeatab' in h.lower()]
+    assert len(rep) == 1 and rep[0][0] == 'OK', rep
+    assert 'VERIFIED automatic fit' in rep[0][1], rep[0][1]
+    assert 'UNDEFINED' in rep[0][2] and 'rather than zero' in rep[0][2]
+    assert 'contributes NOTHING' in rep[0][2]
+    assert 'two-click era' not in rep[0][1]
+    # a HAND anchor on the same run still gets both of its old verdicts
+    hand = {'method': se.ANCHOR_METHOD_MANUAL, 'cal_mode': 'A',
+            'diam_px': 577.1, 'diam_mm': 16.0, 'mm_per_px': 16.0 / 577.1,
+            'n_rounds': 3, 'spread_pct': 0.5, 'spread_px': 2.9,
+            'guard': 'clear (auto +0.00% diam, mask +0.00% area)'}
+    hh = [h for _s, h, _d in sd.verdicts(_diag_d(scale_anchor=hand))]
+    assert any('recorded manual anchor' in h for h in hh), hh
+    assert any('Operator repeatability' in h for h in hh), hh
+    # the TEXT report prints the provenance and the undefined precision
+    txt = sd.report(_diag_d(scale_anchor=verified))
+    assert 'AUTO-VERIFIED' in txt and 'auto-verified' in txt
+    assert 'sigma/SE/range are UNDEFINED' in txt
+    assert 'anatol' in txt and 'circ 0.999' in txt
+    assert 'two-click' not in txt.split('VERDICTS')[0]
 
 
 def _run():

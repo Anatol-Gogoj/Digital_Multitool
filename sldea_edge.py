@@ -188,13 +188,22 @@ ANCHOR_HDR = '--- Edge Review scale anchor (SLDEA) ---'
 # exactly against 'manual-calibration' to give a hand calibration priority
 # over every automatic reference, so a mode suffix there would silently
 # demote every mode-B anchor back below the disc fit.
+# fit_*/verified_* arrived with mode C (2026-08-06 evening): an
+# 'auto-verified' anchor carries NO rounds and NO spread — there is one
+# automatic fit and a human who approved it — so what quantifies it is the
+# fit's own quality, and what makes it auditable is who approved it when.
+# Absent on every other anchor, exactly like rounds_px is absent here.
 _ANCHOR_KEYS = ('method', 'cal_mode', 'diam_px', 'diam_mm', 'mm_per_px',
                 'anchor_frame', 'anchor_is_baseline', 'auto_diam_px',
                 'n_rounds', 'rounds_px', 'spread_px', 'spread_pct',
                 'sigma_pct', 'se_pct',
+                'fit_circ', 'fit_conf', 'fit_resid_px', 'fit_arc_cov',
+                'fit_n_edge', 'verified_by', 'verified_at',
                 'guard', 'saved', 'user')
 _ANCHOR_FLOATS = ('diam_px', 'diam_mm', 'mm_per_px', 'auto_diam_px',
-                  'spread_px', 'spread_pct', 'sigma_pct', 'se_pct')
+                  'spread_px', 'spread_pct', 'sigma_pct', 'se_pct',
+                  'fit_circ', 'fit_conf', 'fit_resid_px', 'fit_arc_cov')
+_ANCHOR_INTS = ('n_rounds', 'fit_n_edge')
 
 
 def _split_anchor(text):
@@ -296,7 +305,7 @@ def load_scale_anchor(rundir):
                 out[k] = float(v)
             except ValueError:
                 continue
-        elif k == 'n_rounds':
+        elif k in _ANCHOR_INTS:
             try:
                 out[k] = int(float(v))
             except ValueError:
@@ -356,17 +365,66 @@ CAL_SPREAD_PCT = 1.0
 # rounds, and markers that do not cover the boundary.
 CAL_MODE_CIRCLE = 'A'
 CAL_MODE_TWOPOINT = 'B'
-CAL_MODES = (CAL_MODE_CIRCLE, CAL_MODE_TWOPOINT)
+# ---- mode C: the machine measures, the operator VERIFIES ----------------
+# The A/B/A' experiment settled it (`#215` comment, 2026-08-06 evening):
+# eleven hand calibrations on P3_2's baseline against an automatic fit of
+# 577.08 px (circ 0.999, conf 0.871, residual 2.3 px, 204 edge points).
+# The automatic fit beat ALL ELEVEN on accuracy and NINE OF ELEVEN on
+# precision. Per-fit human precision is sigma ~ 1.0-1.1 % of diameter
+# regardless of method or stroke width, needing ~7 rounds to average down
+# to the 0.4 % SE gate.
+#
+# The radial intensity profile of that baseline says why: the disc reads
+# 166 gray, the paper 186, and that 20-level step is spread over ~60 px of
+# RADIUS. There is no line to click. Asking an operator to pick "the edge"
+# is asking them to pick a point inside a gradient wider than the stroke
+# they draw with, and the point they pick is the outer toe (SLDEA_MEASUREMENT
+# 1.3: +2.6 % diameter). baseline_disc instead takes the strongest
+# dark->light step on each of ~204 surviving radial rays and fits a circle
+# robustly to them.
+#
+# So the machine MEASURES and the operator VERIFIES, with hand measurement
+# kept for the runs where the fit refuses -- as it does on
+# P3_7_2.3mL_20260729.
+CAL_MODE_VERIFY = 'C'
+CAL_MODES = (CAL_MODE_CIRCLE, CAL_MODE_TWOPOINT, CAL_MODE_VERIFY)
+CAL_MANUAL_MODES = (CAL_MODE_CIRCLE, CAL_MODE_TWOPOINT)
 # Default rounds per mode. A keeps 3 so mode A's behaviour is unchanged;
 # B defaults to 5 because at the target per-fit sigma < 0.9 %, 5 rounds
-# gives SE = 0.40 % and lands on §2.1's budget.
+# gives SE = 0.40 % and lands on §2.1's budget. C has NO rounds: there is
+# one automatic fit and it is either approved or it is not, so it is
+# deliberately absent from this table rather than given a 1.
 CAL_ROUNDS_TWOPOINT = 5
 CAL_MODE_ROUNDS = {CAL_MODE_CIRCLE: CAL_ROUNDS,
                    CAL_MODE_TWOPOINT: CAL_ROUNDS_TWOPOINT}
-# Which mode the dialog opens on. Mode A, the incumbent: switching the
-# default would change every existing calibration path silently. One edit
-# once mode B wins the A/B comparison.
+# Which MANUAL mode the dialog falls back to. Mode A, the incumbent:
+# switching it would change every existing hand-calibration path silently.
 CAL_DEFAULT_MODE = CAL_MODE_CIRCLE
+
+# The two methods that produce an anchor a human is answerable for, and
+# which therefore override every automatic reference at Save (_is_manual_cal).
+# They are DISTINCT VALUES on purpose: anyone auditing a run later has to be
+# able to tell "a human measured this" from "a human approved the machine's
+# measurement", and 15 runs already carry the two-click 'manual-calibration'
+# string. Never fold the calibration MODE into `method` — mm_per_px matches
+# this set exactly.
+ANCHOR_METHOD_MANUAL = 'manual-calibration'
+ANCHOR_METHOD_VERIFIED = 'auto-verified'
+ANCHOR_METHODS = (ANCHOR_METHOD_MANUAL, ANCHOR_METHOD_VERIFIED)
+
+
+def cal_open_mode(auto_ref):
+    """Which method the calibration gate OPENS in.
+
+    Mode C whenever there is an automatic fit to verify, because on the one
+    disc anyone has measured the machine beat every human attempt; the
+    incumbent manual mode when there is not, because a fit that refused
+    cannot be verified and the operator has to measure after all.
+
+    Takes the fit itself rather than a flag so the caller cannot claim mode
+    C is available without holding the thing mode C displays."""
+    return (CAL_MODE_VERIFY if (auto_ref or {}).get('diam_px')
+            else CAL_DEFAULT_MODE)
 
 # Expected range of n samples from a normal distribution, in units of
 # sigma — the control-chart d2 factors. Source: ASTM E2587 "Standard
@@ -462,6 +520,106 @@ def calibration_stats(diams):
         out['se_pct'] = 100.0 * out['se_px'] / mean
         out['area_se_pct'] = 2.0 * out['se_pct']
     return out
+
+
+def verify_stats(ref):
+    """A `calibration_stats`-shaped record for ONE automatic fit — mode C's
+    anchor — or None without a usable fit.
+
+    Every precision field is **None, never 0**. That is the whole point of
+    this function existing rather than calling `calibration_stats([diam])`:
+    a single fit has no range and no scatter, and `spread_pct = 0.0`
+    (which is what `calibration_stats` would honestly return for one value)
+    reads as PERFECT PRECISION to every downstream reader — the log line,
+    the status line and `sldea_diag` would all print 0.00 % where the truth
+    is "undefined". A refusal to state a number is not the same claim as
+    zero, and this code has already been bitten once by conflating them
+    (`se_ok` returns None rather than True for an unjudgeable set).
+
+    What DOES quantify a mode-C anchor is the fit's own quality — its
+    residual over 200-odd edge points, its circularity, its arc coverage —
+    which travels in the record's `fit_*` fields, not here."""
+    d = float((ref or {}).get('diam_px') or 0.0)
+    if d <= 0:
+        return None
+    return {'n': 1, 'values': [d], 'mean': d, 'min': d, 'max': d,
+            'spread_px': None, 'spread_pct': None, 'd2': None,
+            'sigma_px': None, 'sigma_pct': None, 'se_px': None,
+            'se_pct': None, 'area_se_pct': None,
+            'single_fit': True}
+
+
+def fit_resid_pct(ref):
+    """The automatic fit's median edge-point residual as a % of the fitted
+    DIAMETER — the honest size of an auto-verified anchor's uncertainty, or
+    None when the fit did not report one.
+
+    On P3_2's baseline that is 2.3 px on 577.08 px = **0.40 %**, which lands
+    on SLDEA_MEASUREMENT §2.1's ~0.4 % diameter budget. It is NOT an
+    operator-repeatability term: nobody fitted anything, so there is no
+    scatter across rounds to convert, and quoting σ/SE for a mode-C anchor
+    would be quoting a statistic of a sample of one.
+
+    Deliberately CONSERVATIVE. This is the per-point scatter of the edge
+    points about the fitted circle, not the standard error of the fitted
+    radius — with n_edge points the formal SE of the radius is roughly
+    sqrt(n) smaller (~0.03 % at n = 204). The per-point figure is quoted
+    because it is the number the fitter actually measured and because
+    over-stating this term is the safe direction: the systematic part (which
+    feature the step-finder locks onto vs the true mechanical boundary) is
+    not in either figure and is not measured at all."""
+    d = float((ref or {}).get('diam_px') or 0.0)
+    resid = (ref or {}).get('fit_resid_px')
+    if d <= 0 or resid is None:
+        return None
+    try:
+        return 100.0 * float(resid) / d
+    except (TypeError, ValueError):
+        return None
+
+
+def verify_note(ref, who=None, when=None):
+    """One ASCII line for the anchor record's `guard` field when the
+    operator APPROVED the automatic fit (mode C).
+
+    It says what was and was not checked, because for this anchor those are
+    different from every other anchor's and the difference is not intuitive:
+
+    **There is no independent cross-check available for an automatic
+    anchor.** Declaring the fitted disc to be `diam_mm` makes the resting
+    area π·(diam_mm/2)² *by construction*, so running `anchor_guard` on a
+    mode-C anchor returns +0.00 % on both of its tests, always, on any
+    frame, however wrong the fit is. It is not a check that passed; it is a
+    check that cannot fail, and printing it would manufacture confidence out
+    of an identity. (The same algebra is why `anchor_guard`'s two tests were
+    already known to be one measurement in two units — see its docstring.)
+
+    So the verification recorded here is the OPERATOR'S EYE, supported by
+    the fit's own quality numbers, and the line says so in those words."""
+    d = float((ref or {}).get('diam_px') or 0.0)
+    bits = [f"AUTO-VERIFIED by eye: operator approved the automatic disc "
+            f"fit ({d:.1f} px"]
+    for key, label, fmt in (('circ', 'circ', '{:.3f}'),
+                            ('conf', 'conf', '{:.3f}'),
+                            ('fit_resid_px', 'resid', '{:.1f}px'),
+                            ('arc_cov', 'arc', '{:.2f}')):
+        v = (ref or {}).get(key)
+        if v is not None:
+            bits.append(f"{label} " + fmt.format(float(v)))
+    n_edge = (ref or {}).get('n_edge')
+    if n_edge:
+        bits.append(f"{int(n_edge)} edge pts")
+    body = bits[0] + ((', ' + ', '.join(bits[1:])) if len(bits) > 1 else '')
+    who_when = ''
+    if who or when:
+        who_when = (' - verified by ' + (str(who) or '?')
+                    + (f" at {when}" if when else ''))
+    return (body + '). NOT cross-checked against anything independent: '
+            'the anchor IS the automatic fit, so both of anchor_guard\'s '
+            'references are vacuous on it (the mask-area test reduces to '
+            'pi*(d/2)^2 = pi*(d/2)^2). The check is the human eye plus the '
+            'fit quality above.' + who_when).replace('\r', ' ')\
+        .replace('\n', ' ')
 
 
 def sigma_from_range(spread_pct, n):
@@ -614,6 +772,24 @@ def anchor_guard(mean_diam_px, auto_ref, diam_mm,
     return out
 
 
+def guard_is_vacuous(anchor):
+    """True when running `anchor_guard` on this anchor could only ever
+    PASS, so its result must not be shown as a cross-check anywhere.
+
+    The case is an 'auto-verified' anchor (mode C): the anchor's diameter IS
+    the automatic fit's diameter, so `diam_pct` is exactly 0, and declaring
+    that fitted disc to be `diam_mm` makes the implied resting area
+    π·(diam_mm/2)² by construction, so `area_pct` is exactly 0 too. Both of
+    the guard's references reduce to identities. A green tick from a test
+    that cannot fail is worse than no test: it is a claim of verification
+    the code did not perform.
+
+    Takes the ANCHOR (or manual_ref) rather than a boolean so no caller can
+    assert vacuity, or forget to, independently of what the anchor says it
+    is. Every reader of `anchor_guard`'s output must consult this first."""
+    return (anchor or {}).get('method') == ANCHOR_METHOD_VERIFIED
+
+
 def anchor_guard_note(guard, overridden):
     """One ASCII line recording what the guard said and what the
     operator did about it, for the setup.txt `guard` field. The point of
@@ -675,13 +851,26 @@ def calibration_log_line(rec):
     Deliberately one flat line of key=value: greppable out of a terminal
     scrollback with no tooling, and stable enough to parse later.
 
+    MODE C keeps every field, and writes the precision group as
+    **`undefined`** rather than `0.00%` (2026-08-06 evening). A mode-C
+    round-set is one automatic fit approved by a human: there is no range,
+    no σ and no mean SE, and `0.00%` in those columns would read as perfect
+    precision to anyone grepping this file — the opposite of the truth.
+    'undefined' is used rather than mode A/B's 'unconvertible' because the
+    two gaps are different: 'unconvertible' means a number exists but the d₂
+    table cannot convert it, while 'undefined' means the quantity does not
+    exist for a sample of one. Mode A and B lines are byte-identical to
+    before.
+
     Pure — takes a dict, returns a str, touches no disk."""
     st = rec.get('stats') or {}
     n = st.get('n') or rec.get('n') or 0
+    verify = (rec.get('mode') == CAL_MODE_VERIFY) or st.get('single_fit')
+    absent = 'undefined' if verify else 'unconvertible'
 
     def pct(key):
         v = st.get(key)
-        return f"{v:.2f}%" if v is not None else 'unconvertible'
+        return f"{v:.2f}%" if v is not None else absent
 
     verdict = rec.get('verdict')
     bits = [
@@ -694,7 +883,7 @@ def calibration_log_line(rec):
         f"area_se={pct('area_se_pct')}",
         f"gate={float(rec.get('gate', CAL_SE_PCT)):.2f}%",
         f"verdict={verdict or 'UNJUDGEABLE'}",
-        f"range={st.get('spread_pct', 0.0):.2f}%",
+        f"range={pct('spread_pct')}",
         f"mean={st.get('mean', 0.0):.2f}px",
         f"diams={_fmt_list(st.get('values'))}px",
     ]
@@ -706,10 +895,28 @@ def calibration_log_line(rec):
     auto = rec.get('auto_diam_px')
     if auto:
         pctd = rec.get('auto_pct')
+        # In mode C the anchor IS the automatic fit, so a deviation column
+        # would print +0.00% by construction — an identity dressed as
+        # agreement. Say what it is instead.
         bits.append(f"auto={float(auto):.1f}px"
-                    + (f"({pctd:+.2f}%)" if pctd is not None else ''))
+                    + ('(IS-the-anchor)' if verify else
+                       f"({pctd:+.2f}%)" if pctd is not None else ''))
     else:
         bits.append('auto=none')
+    # mode C's real quality figures, in place of a precision it does not
+    # have. Omitted entirely for A/B so their lines do not change.
+    if verify:
+        for key, label, fmt in (('fit_circ', 'circ', '{:.3f}'),
+                                ('fit_conf', 'conf', '{:.3f}'),
+                                ('fit_resid_px', 'resid', '{:.1f}px'),
+                                ('fit_arc_cov', 'arc', '{:.2f}'),
+                                ('fit_n_edge', 'n_edge', '{:.0f}')):
+            v = rec.get(key)
+            if v is not None:
+                bits.append(f"{label}=" + fmt.format(float(v)))
+        rp = rec.get('fit_resid_pct')
+        if rp is not None:
+            bits.append(f"resid_pct={float(rp):.2f}%")
     bits.append(f"outcome={rec.get('outcome', '?')}")
     if rec.get('frame'):
         bits.append(f"frame={rec['frame']}")
@@ -739,7 +946,11 @@ def append_calibration_log(rundir, rec):
                 f.write('# SLDEA Edge Review scale calibrations, one line '
                         'per completed round-set, accepted or declined.\n'
                         '# mode=A circle fit, mode=B two-point diameter '
-                        'with the display randomly rotated per round.\n'
+                        'with the display randomly rotated per round,\n'
+                        '# mode=C the operator VERIFIED the automatic disc '
+                        'fit (no rounds: sigma/se/range are undefined,\n'
+                        '#        NOT zero -- what quantifies a mode-C '
+                        'anchor is the fit resid/circ/conf/n_edge).\n'
                         '# sigma = per-fit precision (range/d2(n)); se = '
                         'sigma/sqrt(n) on the mean; area_se = 2*se.\n'
                         '# Compare methods on SIGMA -- it is the only '
@@ -2353,6 +2564,10 @@ def _fit_circle(pts):
 
 
 _DISC_CACHE = {}
+# Why the fit refused, keyed exactly like _DISC_CACHE and evicted with it.
+# A parallel dict rather than a tuple in _DISC_CACHE so the cached VALUE
+# keeps its old shape: several readers do `dict(hit)` on it.
+_DISC_WHY = {}
 
 
 def baseline_disc(base_gray, settings):
@@ -2385,26 +2600,62 @@ def baseline_disc(base_gray, settings):
     certainty. Verified against the by-eye measurement on the three P3
     baselines (579/578/586 px): agreement within ~1%.
 
-    Returns a candidate-like dict (method 'baseline-disc') or None."""
-    key = (_fingerprint(base_gray) if base_gray is not None else None,
-           float(settings.get('roi_frac', 0.85)),
-           float(settings.get('electrode_lum',
-                          DEFAULT_SETTINGS['electrode_lum'])
-                 or DEFAULT_SETTINGS['electrode_lum']))
+    Returns a candidate-like dict (method 'baseline-disc') or None. When
+    it refuses, WHICH gate refused is recorded and readable through
+    `baseline_disc_refusal` — the calibration dialog's mode C falls back
+    to a hand measurement on a refusal and has to be able to say why
+    (`#215`, 2026-08-06 evening)."""
+    key = _disc_key(base_gray, settings)
     if key in _DISC_CACHE:
         hit = _DISC_CACHE[key]
         return dict(hit) if hit is not None else None
-    ref = _baseline_disc_uncached(base_gray, settings)
+    ref, why = _baseline_disc_uncached(base_gray, settings)
     if len(_DISC_CACHE) >= 4:
-        _DISC_CACHE.pop(next(iter(_DISC_CACHE)))
+        old = next(iter(_DISC_CACHE))
+        _DISC_CACHE.pop(old)
+        _DISC_WHY.pop(old, None)
     _DISC_CACHE[key] = ref
+    _DISC_WHY[key] = why
     return dict(ref) if ref is not None else None
 
 
+def _disc_key(base_gray, settings):
+    return (_fingerprint(base_gray) if base_gray is not None else None,
+            float(settings.get('roi_frac', 0.85)),
+            float(settings.get('electrode_lum',
+                               DEFAULT_SETTINGS['electrode_lum'])
+                  or DEFAULT_SETTINGS['electrode_lum']))
+
+
+def baseline_disc_refusal(base_gray, settings):
+    """Which of `baseline_disc`'s own gates refused this baseline, as one
+    operator-facing sentence — or None when the fit succeeded (or when the
+    fit has never been attempted for this frame/settings pair).
+
+    `baseline_disc` returns a bare None, which is the right contract for
+    every automatic caller but useless to an operator being told to
+    measure by hand instead. The reason is produced by the fit itself and
+    cached beside its result, so asking costs nothing after the fit has
+    run once and asking NEVER re-runs it on a different frame than the
+    answer describes.
+
+    Deliberately NOT a promise that the fit is retried: a caller that has
+    not called `baseline_disc` for this key gets None, which reads the same
+    as "no refusal on record". The dialog calls the fit first, always."""
+    return _DISC_WHY.get(_disc_key(base_gray, settings))
+
+
 def _baseline_disc_uncached(base_gray, settings):
+    """-> (candidate dict or None, refusal reason or None).
+
+    Every refusal names the gate it failed. There are eleven of them and
+    they are not interchangeable: 'the disc is off the size range' sends
+    the operator to check diam_mm and the camera zoom, while 'the arc is
+    only 22% covered' sends them to look at what is lying across the
+    frame. A single 'refused' would send them to guess."""
     import cv2
     if base_gray is None:
-        return None
+        return None, 'there is no readable baseline frame to fit'
     g = np.asarray(base_gray, np.float32)
     h0, w0 = g.shape
     f = 1.0
@@ -2419,7 +2670,8 @@ def _baseline_disc_uncached(base_gray, settings):
     sub = g[y0:h - y0 or None, x0:w - x0 or None]
     hs, ws = sub.shape
     if min(hs, ws) < 48:
-        return None
+        return None, (f"the central search window is only {ws}x{hs} px "
+                      f"(under 48) — too small to cast rays across")
     # denoise at this scale (the by-eye measurement used median 9 +
     # sigma 6 at full resolution; a third of that at a third the size)
     sm = cv2.GaussianBlur(cv2.medianBlur(sub.astype(np.uint8), 3),
@@ -2432,7 +2684,9 @@ def _baseline_disc_uncached(base_gray, settings):
     reject |= sm >= lum
     free = ~reject
     if int(free.sum()) < 400:
-        return None
+        return None, (f"only {int(free.sum())} px of this baseline are "
+                      f"free of foil and glint (need 400) — the frame is "
+                      f"probably overexposed, or electrode_lum is too low")
     paper = float(np.median(sm[free]))
     # seed: biggest, most central dark region (disc sits 10-25 gray
     # levels below the paper; 5 keeps a faint top edge in the class)
@@ -2450,7 +2704,9 @@ def _baseline_disc_uncached(base_gray, settings):
         if s > score:
             seed, score = (float(cx), float(cy)), s
     if seed is None:
-        return None
+        return None, (f"no central dark region big enough to seed on "
+                      f"(the paper reads {paper:.0f} gray and nothing "
+                      f"below it covers 0.2% of the search window)")
 
     r_hi = 0.55 * min(hs, ws)
     rs = np.arange(6.0, r_hi, 1.0)
@@ -2494,17 +2750,23 @@ def _baseline_disc_uncached(base_gray, settings):
 
     pts = cast(*seed)
     if len(pts) < 40:
-        return None
+        return None, (f"only {len(pts)} of 360 radial rays found a clean "
+                      f"dark→light ink step (need 40) — the disc edge is "
+                      f"too faint, or the electrodes cover too much of it")
     cx1, cy1, _r1, _k1 = _fit_circle(pts)
     if not (0 <= cx1 <= ws and 0 <= cy1 <= hs):
-        return None
+        return None, ("the first circle fit put the centre outside the "
+                      "search window — the edge points are not a disc")
     pts = cast(cx1, cy1)                # re-cast from the fitted centre
     if len(pts) < 40:
-        return None
+        return None, (f"only {len(pts)} of 360 rays found a clean ink step "
+                      f"on the re-cast from the fitted centre (need 40)")
     cx, cy, r, keep = _fit_circle(pts)
     pin = pts[keep]
     if len(pin) < 40 or not (0 <= cx <= ws and 0 <= cy <= hs):
-        return None
+        return None, (f"{len(pin)} edge points survived the robust fit's "
+                      f"outlier trim (need 40), or its centre fell outside "
+                      f"the search window")
     resid = float(np.median(np.abs(
         np.hypot(pin[:, 0] - cx, pin[:, 1] - cy) - r)))
     ang = np.degrees(np.arctan2(pin[:, 1] - cy, pin[:, 0] - cx)) % 360.0
@@ -2512,12 +2774,31 @@ def _baseline_disc_uncached(base_gray, settings):
     yy, xx = np.ogrid[0:hs, 0:ws]
     inside = ((xx - cx) ** 2 + (yy - cy) ** 2 <= (0.9 * r) ** 2) & free
     if int(inside.sum()) < 200:
-        return None
+        return None, (f"only {int(inside.sum())} px inside the fitted "
+                      f"circle are free of foil and glint (need 200), so "
+                      f"the fill test could not be applied")
     fill = float(((sm < paper - 4) & inside).sum()) / float(inside.sum())
     dmin = float(min(hs, ws))
-    if (cov < 0.34 or resid > 0.06 * r or fill < 0.55
-            or not 0.06 * dmin <= 2 * r <= 0.85 * dmin):
-        return None
+    # The four documented gates, named individually: 'refused' sends the
+    # operator to guess, while 'the arc is only 22% covered' sends them to
+    # look at what is lying across the frame (`#215` mode C, 2026-08-06).
+    if cov < 0.34:
+        return None, (f"the accepted edge covers only {360 * cov:.0f}° of "
+                      f"arc (needs ≥ 120°) — something is lying across the "
+                      f"disc, or most of its boundary has no ink step")
+    if resid > 0.06 * r:
+        return None, (f"the fit residual is {resid * 100.0 / r:.1f}% of the "
+                      f"radius (limit 6%) — the surviving edge points are "
+                      f"not on one circle")
+    if fill < 0.55:
+        return None, (f"only {100 * fill:.0f}% of the fitted circle's "
+                      f"interior reads as the dark class (needs ≥ 55%) — "
+                      f"the circle is not sitting on the disc")
+    if not 0.06 * dmin <= 2 * r <= 0.85 * dmin:
+        return None, (f"the fitted diameter {2 * r / f:.0f} px is outside "
+                      f"the plausible range {0.06 * dmin / f:.0f}–"
+                      f"{0.85 * dmin / f:.0f} px for this search window — "
+                      f"check the camera zoom and roi_frac")
     try:
         ell = cv2.fitEllipse(pin.astype(np.float32))
         circ = round(min(ell[1]) / max(max(ell[1]), 1e-6), 3)
@@ -2527,7 +2808,9 @@ def _baseline_disc_uncached(base_gray, settings):
     # it used to return read circ 0.32; a shadow rectangle's trimmed fit
     # still only reaches ~0.7. The P3 discs measure 0.966-0.999.
     if circ < 0.85:
-        return None
+        return None, (f"the fitted shape's circularity is {circ:.2f} "
+                      f"(needs ≥ 0.85) — a resting disc is round, and this "
+                      f"is not; the P3 discs measure 0.966–0.999")
     conf = min(0.99, 0.4 * fill + 0.35 * cov
                + 0.25 * (1.0 - min(1.0, resid / (0.06 * r))))
     inv = 1.0 / f
@@ -2542,23 +2825,42 @@ def _baseline_disc_uncached(base_gray, settings):
             'circ': circ, 'solidity': round(fill, 3), 'contour': contour,
             'conf': round(conf, 3), 'wrinkle': None, 'spread_pct': 0.0,
             'arc_cov': round(cov, 2), 'fit_resid_px': round(resid * inv, 1),
-            'n_edge': int(len(pin)), 'paper_lum': round(paper, 1)}
+            'n_edge': int(len(pin)), 'paper_lum': round(paper, 1)}, None
 
 
 def _is_manual_cal(baseline_ref):
+    """Is this anchor one a HUMAN put their name to — and therefore the
+    one that overrides every automatic reference at Save?
+
+    Two methods qualify (`#215` mode C, 2026-08-06 evening):
+    'manual-calibration' (the operator measured the disc themselves) and
+    'auto-verified' (the operator was shown the automatic fit and its
+    quality numbers and approved it). Both are decisions; the difference
+    between them is provenance, not authority, and it is recorded in
+    `method` so an audit can tell them apart.
+
+    Why 'auto-verified' has to be in here rather than left to fall through
+    to the automatic branch below: an approved fit must keep BEATING an
+    accepted result on the baseline row, exactly as a hand measurement
+    does. Falling through would let a baseline-row detection silently
+    outrank the anchor the operator actually signed off — the same class of
+    bug the 2026-08-05 audit found for hand calibrations."""
     return bool(baseline_ref
-                and baseline_ref.get('method') == 'manual-calibration'
+                and baseline_ref.get('method') in ANCHOR_METHODS
                 and baseline_ref.get('diam_px'))
 
 
 def mm_per_px(results, rows, settings, baseline_ref=None):
     """Scale from the DEA's nominal resting diameter.
 
-    Preference order (audit 2026-07-25, revised 2026-08-05): a MANUAL
-    calibration (`baseline_ref` with method 'manual-calibration') beats
-    everything — the operator explicitly measured the disc, and the old
-    order silently ignored those clicks whenever the baseline row had an
-    accepted result (the status line claimed otherwise; flagged major).
+    Preference order (audit 2026-07-25, revised 2026-08-05, extended
+    2026-08-06): an anchor a HUMAN signed off — `baseline_ref` whose method
+    is in `ANCHOR_METHODS`, i.e. 'manual-calibration' (they measured it) or
+    'auto-verified' (they were shown the automatic fit with its quality
+    numbers and approved it, mode C) — beats everything. The operator
+    decided; the old order silently ignored those clicks whenever the
+    baseline row had an accepted result (the status line claimed otherwise;
+    flagged major).
     Then: an accepted result on the row tagged 'baseline' → an automatic
     `baseline_ref` (baseline_disc() detection) → the first accepted result
     (last resort — its outline is an ACTIVATED region, so the scale may be
@@ -2584,7 +2886,11 @@ def mm_per_px(results, rows, settings, baseline_ref=None):
 def scale_source(results, rows, baseline_ref=None):
     """Human-readable description of which reference mm_per_px would use."""
     if _is_manual_cal(baseline_ref):
-        return f"manual-calibration ({baseline_ref['diam_px']:.0f} px)"
+        # the METHOD, not a fixed word: 'auto-verified' and
+        # 'manual-calibration' both win here and an audit has to be able
+        # to tell them apart from the status line alone
+        return (f"{baseline_ref.get('method')} "
+                f"({baseline_ref['diam_px']:.0f} px)")
     for i, row in enumerate(rows):
         if results.get(i) and (row.get('tag') == 'baseline'):
             return f"baseline row (idx {i})"

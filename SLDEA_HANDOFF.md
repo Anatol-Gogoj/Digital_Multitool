@@ -415,6 +415,175 @@ directory. **The bench session that matters is: calibrate the same disc
 with A then B, five rounds each, and compare the two σ figures the tool
 prints.**
 
+### Mode C: the machine measures, the operator verifies (2026-08-06, evening)
+
+**TL;DR:** Eleven hand calibrations on one disc say the automatic disc fit
+is better at this than a person — it beat **all eleven** on accuracy and
+**nine of eleven** on precision. So the scale gate now **opens on the
+machine's own measurement and asks the operator to approve it**, with hand
+measurement kept for the runs where the fit refuses. And there is one thing
+this mode cannot do, which is the important part: **there is no independent
+cross-check for an automatic anchor.** Calling the fitted disc 16 mm makes
+the resting area π·8² by construction, so the anchor guard would read
++0.00 % on any frame however wrong the fit is. It is not run, and — the
+part that matters — it is not claimed anywhere. The verification is the
+operator's eye, supported by the fit's own quality numbers.
+
+Observation → decision:
+
+- **The measurement that inverts the premise.** Anatol's A/B/A′ session on
+  a scratch copy of `P3_2_2.5mL_20260728`, against an automatic fit of
+  **577.08 px** (circ 0.999, conf 0.871, residual 2.3 px, 204 edge points):
+  eleven hand calibrations, and the fit beat **all eleven on accuracy** and
+  **nine of eleven on precision**. Per-fit human precision is
+  **σ ≈ 1.0–1.1 % of diameter regardless of method or stroke width** — mode
+  A at 3 px 1.03 %, mode A′ at 1 px dashed 1.11 %, mode B 2.09 % — so ~7
+  rounds would be needed to average down to the 0.4 % SE gate.
+  → **The scale gate now opens in MODE C, "verify the automatic fit",
+  whenever `se.baseline_disc` returns one.** The operator judges; they do
+  not re-measure.
+
+- **Why no gesture was ever going to fix the human side.** A radial
+  intensity profile of that baseline: the disc reads **166 gray**, the paper
+  **186**, and that **20-level step is spread over ~60 px of radius**. There
+  is no line to click. Asking an operator to pick "the edge" is asking them
+  to pick a point inside a gradient *wider than the stroke they draw with*,
+  and the point a human picks is the outer toe (§1.3, **+2.6 % in
+  diameter**) — which is mode A's measured bias, to within the noise of four
+  samples. `baseline_disc` instead takes the strongest dark→light step on
+  each of 204 surviving radial rays and fits a circle robustly.
+  → Three things follow, and all three are implemented:
+  **(1)** the fit is drawn with a **1 px dashed** stroke, never 3 px — the
+  measured cost of a stroke laid on the boundary is **+2.07 % vs +0.77 %**,
+  so a dialog whose whole job is to present a boundary *for judgement* may
+  not use one; **(2)** the displayed crop gets a **contrast stretch**
+  (~157–195 gray → black–white, measured from the frame's own disc and
+  paper levels, using the fit's foil-rejected `paper_lum` where it has one)
+  because a 20-level step on a 186 background is nearly invisible and an
+  operator squinting at a flat grey field is verifying nothing — it is
+  **display only** and the dialog says so on two lines; **(3)** the numbers
+  are on screen *before* the button: `diam_px`, the implied `mm_per_px`, the
+  resting area, `circ`, `conf`, `fit_resid_px` (also as a % of diameter),
+  `n_edge`, arc coverage, fill, and the deviation from any recorded anchor
+  with the re-save consequence spelled out.
+
+- **[the honest constraint] There is no independent cross-check available
+  for an automatic anchor, and none is invented.** Declaring the fitted disc
+  to be `diam_mm` makes the resting area π·(diam_mm/2)² **by
+  construction**, so `se.anchor_guard` returns **exactly +0.00 % on both of
+  its tests** for a mode-C anchor — on any frame, at any diameter, however
+  wrong the fit is (pinned over a 12→900 px sweep in
+  `test_the_anchor_guard_is_VACUOUS_on_an_autofit_derived_anchor`). A green
+  tick from a test that cannot fail is worse than no test: it reads as
+  verification the code never performed. This is the same algebra an earlier
+  reviewer found in the guard itself — its two tests are one measurement in
+  two units — taken to its limit.
+  → **The guard is not run on a mode-C anchor and not claimed anywhere**:
+  not in the dialog, not on the accept status line, not on the detect-time
+  status line, not in the run's record, not in `sldea_diag`
+  (`se.guard_is_vacuous` is the single predicate every reader consults). All
+  five surfaces instead say, in words, that no cross-check was performed and
+  that no independent one exists. **The verification is the operator's eye**,
+  supported by circ / conf / residual / n_edge.
+
+- **Provenance: "a human measured this" must be distinguishable from "a
+  human approved the machine's measurement."** Two different claims with
+  different failure modes — a hand measurement can carry the +2.6 %
+  outer-toe convention bias; an approved fit carries whatever the
+  step-finder locks onto.
+  → A verified anchor is recorded with **`method: auto-verified`**, against
+  the existing `manual-calibration`. Both are in `se.ANCHOR_METHODS` and
+  both still override every automatic reference at Save (`_is_manual_cal`
+  matches the set, not the one string — a mode-C anchor falling through to
+  the automatic branch would let a baseline-row detection silently outrank
+  the number the operator signed off, which is the 2026-08-05 audit's bug
+  all over again). `setup.txt` gains `fit_circ`, `fit_conf`,
+  `fit_resid_px`, `fit_arc_cov`, `fit_n_edge`, `verified_by`,
+  `verified_at`; `sldea_diag` reports the distinction in both its verdicts
+  and its text report. **Older runs keep loading**: the 15 two-click
+  anchors and the two with no block at all (`P3_6_2.5mL_20260729`,
+  `DOT_P3_1_20260729`) are untouched, every new key being optional on read.
+
+- **σ and SE do not exist for one fit, and must not be written as 0.** A
+  mode-C anchor has no rounds, so `spread_pct = 0.00 %` — which is what
+  `calibration_stats([d])` honestly returns for one value — would read as
+  **perfect precision** in the log, on the status line and in `sldea_diag`.
+  → `se.verify_stats` returns them all as **None**, the log writes
+  **`sigma=undefined se=undefined area_se=undefined range=undefined`**
+  (distinct from mode A/B's `unconvertible`, which means a number exists
+  that d₂ cannot convert), the verdict column is **`NOT-GATED`** rather than
+  `UNJUDGEABLE`, and the deviation column reads **`auto=577.1px(IS-the-anchor)`**
+  instead of a vacuous `(+0.00%)`. **Mode A and B log lines are
+  byte-identical to before** — pinned by an exact-string assertion.
+  What *does* quantify a mode-C anchor is the fit's own residual:
+  `se.fit_resid_pct` = 2.3 px / 577.08 px = **0.40 % of diameter**, which
+  lands on §2.1's budget. It is deliberately **conservative** — the
+  per-point scatter, not the fitted radius's standard error, which is
+  ~√n ≈ 14× smaller at n = 204.
+
+- **A refusal is a fall-through, not a dead end, and it says why.**
+  `baseline_disc` refuses on `P3_7_2.3mL_20260729`, and it used to refuse
+  with a bare `None` — right for every automatic caller, useless to an
+  operator being sent to do the slower, measurably worse job instead.
+  → Mode C is **withdrawn** (its radio is not even offered) when the fit
+  refuses, or when the frame being calibrated on is not the baseline the fit
+  ran on (the fallback-frame path — drawing the baseline's circle over a
+  later activated frame would be an outright lie). The gate opens on mode A
+  and states the fitter's **own reason**, from a new
+  `se.baseline_disc_refusal`: all eleven refusal sites in
+  `_baseline_disc_uncached` now name their gate, and the four documented
+  ones (arc coverage, residual, fill, plausibility) are named individually
+  rather than as one combined test — "the arc covers only 87°" sends the
+  operator to move whatever is lying across the frame, "the diameter is
+  outside the plausible range" sends them to the camera zoom and `diam_mm`.
+
+- **Accept is the primary button — and `<Return>` still cannot reach it.**
+  Unlike every warning gate on this branch, whose safe default is to
+  decline, the measured evidence says accepting the machine is the **good**
+  outcome, so ✔ Accept is first in the row and is Tk's `default='active'`
+  button. But Enter is refused in mode C with a message naming the button,
+  because an operator who taps Enter out of habit would approve a scale they
+  had not read, and "Accept is a judgement rather than a reflex" is the only
+  thing between mode C and a rubber stamp. Nothing else about the branch's
+  `<Return>` discipline changed. Mode C's other actions are **✎ Measure by
+  hand instead** (→ mode A, round 1, and the fit's diameter is *gone from
+  the screen* so there is no printed target to wheel a circle onto) and
+  **Cancel**. Nothing the mouse or the arrow keys do can move the displayed
+  circle: it is the machine's measurement, not the operator's.
+
+**Tests.** `tests/test_sldea_calibration.py` 46 → **57**;
+`tests/test_sldea_edge_gui.py` 27 → **32** (five new cases driving the real
+dialog: mode C is where the gate opens and Enter cannot approve; a refused
+fit falls through to the hand measurement and quotes the reason; ✎ Measure
+by hand lands in a blind mode-A round set with no fit diameter on screen;
+reusing a verified anchor keeps it verified; and a verified anchor still
+reports when the fit has *moved* underneath it). The last two are holes
+found while writing the first three — `reuse()` hardcoded
+`method='manual-calibration'`, which would have relabelled every reused
+mode-C anchor as a hand measurement and then given it a vacuous tick.
+Suite **28/32** with only the four known-environmental failures
+(`test_arb_bin`, `test_camera_controls`, `test_presets_path`,
+`test_tk_fontfix`). Eight existing dialog cases now pass `mode='A'`
+explicitly, because `mode=None` no longer means mode A.
+
+**What is still unverified.** **No operator has used mode C** — whether the
+stretched display makes the edge judgeable by eye is the entire premise and
+it has been tested only against synthetic frames. The window geometry was
+measured (1084×977 at a simulated 1080p, canvas 1004×544, fits with the
+taskbar) but **nobody has looked at the dialog**. **It has never been run
+against a real run directory**: no P3_2, no P3_7, no carbon-black baseline —
+so the contrast window's behaviour on a *saturated* baseline (the CB run
+medians 255) is only covered by a synthetic case that correctly declines to
+stretch. The refusal strings are pinned for three of eleven sites; the other
+eight are unreached by any test. And the **fit's systematic term is not
+measured by anything** — which feature the step-finder locks onto versus the
+true mechanical boundary — so an auto-verified anchor's accuracy rests on
+`baseline_disc` agreeing with the by-eye measurement to ~1 % on three P3
+baselines and on this experiment's eleven-attempt comparison, on one disc,
+in one session. **The bench session that matters is: open a real P3 run,
+look at the stretched frame at 1:1, and say whether the dashed circle is
+visibly on the middle of the ramp.**
+
 ## Electrode mask default 220 → 255, and the Tune button's bad resolver (2026-08-05)
 
 **TL;DR:** Two bench-reported bugs. The electrode mask masks pixels that

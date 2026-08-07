@@ -13,6 +13,125 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## Calibration dialog: six operator cuts, and the commit warning moves to the button that commits (2026-08-07, second pass)
+
+**TL;DR:** The operator drove all three calibration modes on real runs the
+same evening and asked for six more cuts. All six are presentation plus one
+relocation: the commit warning is off every mode's header and lives on the
+primary button and in its confirmation; the "this run already has px" row is
+off the top of the window and the re-anchor confirmation now *opens* by asking
+whether to overwrite the calibration on record; the round header is down to
+the round; the aim rule is an instruction instead of a metrology definition;
+the verify mode's post-accept footer is gone; and controls that do not apply
+to a mode are absent rather than greyed out. Every mode is now **3 on-screen
+lines in the ordinary worst case**. The run record is byte-identical —
+same SHA-256 across the change for all three modes.
+
+Observation → decision:
+
+- **The commit warning was on the round header of every measuring mode** as
+  `📏 CALIBRATE — NOTHING is written until the next 💾 Save` /
+  `📏 RE-ANCHOR — WRITTEN TO data.csv IMMEDIATELY`. Operator: *"the commit
+  warning belongs in one place — on the primary button and in its
+  confirmation."* → `scale_intent_banner` came off `head_text`. It is still
+  stated in **three** places, and all three are places where it decides
+  something: the window **title**, the **primary button** on exactly the press
+  that commits (`✔ Finish & RE-ANCHOR NOW`), and the re-anchor
+  **confirmation**. The function itself is unchanged and still pinned so
+  neither branch can borrow the other's promise.
+- **The "already calibrated" row stood above the picture on every saved run**
+  (`⚠ 81 row(s) already carry px — accepting RE-SCALES every recorded mm² at
+  the next 💾 Save…   ·   an anchor is on record — press P to REUSE it.`), and
+  it stood there through every round of a blind measurement it could not
+  affect. → deleted, and the **re-anchor confirmation now leads with the
+  question**: *"This run ALREADY HAS A CALIBRATION on record (…). OVERWRITE it
+  with the anchor you just measured?"* The operator's reasoning is the one
+  adopted: once you have said *overwrite the existing calibration*, that every
+  area is re-derived follows from what overwriting a scale means. The prose
+  went; the **evidence stayed** — before → after resting area, the multiplier,
+  the row counts on both sides of the `[critical]` blank-vs-re-derive rule.
+  The lead **branches on the truth**: a pre-gate run with no anchor block is
+  asked to *write* one, not to overwrite one that does not exist. `P` keeps its
+  own button, which carries its own key.
+- **The round header was still a run-on.** → `· view rotated 299.3°` and
+  `· disc 16 mm` are off it; what is left is `Method B · Round 1 of 3` (plus
+  the two-point mode's `· 0 of 2 points`, which is progress and is what the
+  line is for). The angle is a fact the operator can *see* — the frame is
+  visibly rotated — and it stays in `rot=` on the log line, which is what the
+  A/B comparison reads. `disc 16 mm` was named for the circle mode and applied
+  to both, because the two measuring screens have to read the same; its one
+  **warning** (`diam_mm` is the settings default, never measured at capture) is
+  conditionally true, so it moved to the gate block, which is the label that
+  exists for conditionally-true warnings.
+- **The aim rule was a definition, not an instruction.** It read *"aim at the
+  ink edge's HALF-HEIGHT (mid-gray), never its outer toe"* — the metrology
+  convention, correctly named, and not something a hand can do. → the screen
+  now says where to put the mark: **`straddle the edge: half the stroke on the
+  disc, half on the paper`** (circle) and **`half the ring on the disc, half on
+  the paper`** (two-point, where the marker ring is centred on the click and
+  therefore straddles it by construction). The half-height convention it
+  achieves is unchanged and stays in `SLDEA_MEASUREMENT.md` §1.3 with its
+  +5.2–5.7 % area / +2.6 % diameter band.
+- **The verify mode's post-accept footer arrived after the decision.** The
+  status line ended with 160 characters — *"σ/SE undefined (one fit, no
+  rounds); NOT cross-checked, and no independent check of an automatic anchor
+  exists — overrides every automatic reference at Save"* — on the one surface a
+  person reads next while doing something else. → dropped. Every honesty clause
+  is still in the record and it was **verified, not assumed**: `se.verify_note`
+  in `setup.txt`'s `guard:` field, `sigma=undefined se=undefined
+  range=undefined verdict=NOT-GATED` on the log line, and `sldea_diag` in two
+  verdicts *and* its text report. **One clause is flagged rather than quietly
+  dropped:** "overrides every automatic reference at Save" is a statement about
+  how the app ranks references (`se._is_manual_cal` matches the method *set*),
+  not a measurement of this run, and what the record carries is the fact it
+  follows from — `method: auto-verified`. The hand-measurement and reuse status
+  lines still say it in words.
+- **A disabled control still costs a line of visual scanning and invites a
+  click; an absent one does not.** → `◀ Back`, `⟲ Restart all rounds`, the
+  round-count selector and the stroke selector are **de-rendered** where they
+  do not apply, not greyed: none of the four in the verify mode, no stroke
+  selector in the two-point mode (its markers are specified by
+  `marker_shapes` and have no width to choose). They are boxed so a mode round
+  trip cannot bring the row back in a different order, and their `state` stays
+  `normal` so nothing is ever *shown* greyed. `back_round`/`restart_all` still
+  sit the verify mode out on their own — a Backspace keybinding is not a button
+  and cannot be unpacked.
+
+**Measured, at a simulated 1080p, ordinary worst case** (a prior anchor that
+differs plus already-measured px rows):
+
+| mode | window | canvas | zoom | on screen | chars | controls rendered |
+|---|---|---|---|---|---|---|
+| **A** verify | 1020 × 892 | 1000 × 760 | 1.18× | **3 lines** | **293** | none |
+| **B** circle | 1020 × 833 | 1000 × 680 | 0.52× | **3 lines** | **247** | Back/Restart, rounds, stroke |
+| **C** twopoint | 1020 × 833 | 1000 × 680 | 0.31× | **3 lines** | **271** | Back/Restart, rounds |
+
+The measuring modes lost a further ~29 px of window height (862 → 833) with
+the gate row. The two character caps **converged** — 400/560 → 300/300 — which
+is itself the result: the three screens finally cost the same.
+`CAL_SCREEN_MAX_LINES` stays 4 as the *pathological* ceiling (it is what
+`verify_evidence` shares) and `CAL_SCREEN_MAX_LINES_ORDINARY` = 3 is the new
+number the budget test drives. The per-line cap came down 200 → 180.
+
+**A test-helper hole this pass had to fix, because the de-rendering created
+it:** `_cal_visible_lines` decided "on screen" from the label's own
+`winfo_manager()`, and a Label inside an *unpacked Frame* still reports
+`pack` for itself — so once the chooser's controls moved into boxes, the
+budget test would have counted text nobody can see. It walks the parent chain
+now (`_cal_rendered`). `winfo_ismapped()` is not usable instead: most of these
+cases never put the window on screen.
+
+**Rendered:** `PrintWindow` on each Toplevel's own HWND at a simulated 1080p.
+Two capture notes for whoever does this next. (1) `GetDIBits` **requires** the
+bitmap not to be selected into a DC — skipping that returns a uniformly black
+image and no error, which is how the first three grabs came back blank.
+(2) A screen-rect `ImageGrab` on this box came back showing an unrelated
+full-screen application instead of the dialog, which is the same trap the
+2026-08-07 morning note recorded, only worse. `PrintWindow` renders the text
+and the canvas *vectors* but not the theme background or the canvas
+PhotoImage, so what the grabs prove is layout, line placement and which
+controls exist — not colour and not the frame bitmap.
+
 ## Calibration dialog: the measuring modes lose their wall of text, and the disagreement gate becomes a glance (2026-08-07)
 
 **TL;DR:** The operator drove the two hand-measurement modes on real data and

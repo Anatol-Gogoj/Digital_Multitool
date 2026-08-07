@@ -651,28 +651,34 @@ SCALE_INTENT_REANCHOR = 'reanchor'
 
 
 def scale_intent_banner(intent):
-    """The one-line, unmistakable statement of which of the two folded
-    actions is about to happen. Rides the ROUND HEADER in the measuring
-    modes, and the title bar everywhere.
+    """The short, unmistakable statement of which of the two folded actions is
+    about to happen. **The WINDOW TITLE's own prefix, in every mode** — and the
+    one place this wording is written down, so the three title call sites
+    cannot drift apart.
 
-    **SHORTENED to a tag, 2026-08-07** (`#215`, operator). It used to be a
-    3–4 line paragraph opening the measuring modes' gate block, and it was
-    part of the "wall of text" the operator asked to be cut: the whole
-    standing prose of those modes is now two short lines plus the live
-    readout, so a 127-character paragraph could not stay. What it may NOT
-    lose is the asymmetry itself — one of the two folded actions writes
-    data.csv the moment it is confirmed — so every load-bearing phrase is
-    still here, and the statement is still made in three places (this tag on
-    the round header, the window title, and the primary button). The full
-    consequence, with the numbers, is what the re-anchor confirmation is
-    for; that is unchanged.
+    It has been shortened twice by the operator in one day (`#215`,
+    2026-08-07), and where it lives has moved with it:
 
-    Pure, so the wording is a headless test: 'writes' and 'not written'
-    must never be able to appear on the wrong branch."""
+    * it began as a 3–4 line paragraph opening the measuring modes' gate
+      block, above the picture, on every run;
+    * the morning's trim made it a 127-character tag on the round header;
+    * the evening's cuts took it off the screen entirely: *"the commit warning
+      belongs in one place — on the primary button and in its confirmation —
+      not repeated in every mode's header."*
+
+    What it may NOT lose is the asymmetry itself — one of the two folded
+    actions writes data.csv the moment it is confirmed and the other does
+    not — and it is still stated in THREE places, all of which are places
+    where it decides something: this title prefix, the PRIMARY BUTTON on
+    exactly the press that commits (`✔ Finish & RE-ANCHOR NOW` vs
+    `✔ Finish calibration (applied at Save)`), and the re-anchor CONFIRMATION,
+    which now opens by asking whether to overwrite the calibration on record.
+
+    Pure, so the wording is a headless test: the writing branch's promise and
+    the non-writing branch's must never be able to appear on the wrong one."""
     if intent == SCALE_INTENT_REANCHOR:
-        return ("📏 RE-ANCHOR — WRITTEN TO data.csv IMMEDIATELY; numbers "
-                "shown before it commits")
-    return "📏 CALIBRATE — NOTHING is written until the next 💾 Save"
+        return "RE-ANCHOR — writes data.csv"
+    return "Calibrate — applied at Save"
 
 
 # ---------------------------------------------------------------------------
@@ -688,38 +694,74 @@ def scale_intent_banner(intent):
 # What survives in a measuring mode is only what a person needs WHILE
 # placing points or sizing a circle:
 #
-#   1. WHICH ROUND THEY ARE ON  — the bold round header, which also carries
-#      the nominal disc size the measurement is being called, and the
-#      folded-action tag (scale_intent_banner) because one of the two
-#      actions writes data.csv.
-#   2. THE IMMEDIATE INSTRUCTION — one line: the gesture, and the aim rule
-#      (the ink edge's half-height, not its outer toe — the one instruction
-#      with a measured cost, §1.3's +2.6 % diameter).
+#   1. WHICH ROUND THEY ARE ON  — the bold round header, and NOTHING ELSE on
+#      it since the operator's second pass the same evening: the nominal disc
+#      size and the folded-action tag both joined it in the morning's trim and
+#      both came off again (see head_text). The commit warning belongs on the
+#      primary button and in its confirmation, in one place, not on every
+#      mode's header.
+#   2. THE IMMEDIATE INSTRUCTION — one line: the gesture, and the aim rule,
+#      which is the one instruction here with a measured cost behind it
+#      (§1.3's +2.6 % diameter). Phrased as WHERE TO PUT THE MARK —
+#      "straddle the edge: half the stroke on the disc, half on the paper" —
+#      because the convention it achieves (the half-height of the ink step) is
+#      a property of an intensity profile and not something a hand can aim at.
+#      §1.3 owns the convention; this line owns the gesture.
 #   3. THE LIVE READOUT — numbers, not prose, and in the two-point mode it
 #      is also what says what the NEXT CLICK does, which is the only moment
 #      auto-advance leaves to say it.
 #
 # Everything else was reference material and is now off screen: what the
 # method is for, why the rounds are randomised and kept blind, what the
-# statistics will do afterwards, and the key-binding catalogue. The keys
-# that matter are named where they are needed instead — Z by the live line's
-# sub-1:1 warning, Backspace by the ◀ Back button's own label. The full
-# catalogue is in _calibrate_scale's docstring and in SLDEA_HANDOFF.md.
+# statistics will do afterwards, the key-binding catalogue, and — second pass
+# — the standing "N row(s) already carry px" consequence, which is now the
+# opening question of the re-anchor confirmation. The keys that matter are
+# named where they are needed instead — Z by the live line's sub-1:1 warning,
+# Backspace by the ◀ Back button's own label. The full catalogue is in
+# _calibrate_scale's docstring and in SLDEA_HANDOFF.md.
 #
 # NOTHING NUMERIC LEFT THE RECORD. Every number taken off a screen is still
 # in scale_calibration_log.txt and in setup.txt's anchor block — verified by
-# diffing a log line and an anchor block across this change, byte for byte.
+# diffing a full accepted round-set's record in all three modes across each
+# of these changes: byte-identical, same SHA-256.
 # ---------------------------------------------------------------------------
-CAL_SCREEN_MAX_LINES = 4        # the HARD on-screen budget, EVERY mode
-CAL_SCREEN_MAX_LINE_CHARS = 200  # ... and no line may become a paragraph
-# Total characters, per mode, in the ordinary worst case (a prior anchor that
-# differs plus already-measured px rows). Not one number, because it is not
-# one screen: a measuring mode carries a live per-click readout and a gesture
-# instruction that the verify mode has no equivalent of, and pretending
-# otherwise would only push that text somewhere it reads worse. The LINE
-# budget and the per-line cap are identical across the three.
-CAL_SCREEN_MAX_CHARS = 400      # verify
-CAL_SCREEN_MAX_CHARS_MEASURING = 560
+CAL_SCREEN_MAX_LINES = 4        # the PATHOLOGICAL ceiling, EVERY mode: the
+#                                 verify block's four (value, quality, a
+#                                 stretch that could not be computed, a prior
+#                                 anchor that differs) is the worst any mode
+#                                 can reach, and it is reached only when all
+#                                 of those are actually TRUE
+CAL_SCREEN_MAX_LINES_ORDINARY = 3   # ... and the ORDINARY worst case, which
+#                                 is what an operator meets: a prior anchor
+#                                 that differs plus already-measured px rows.
+#                                 Three in EVERY mode since the operator's
+#                                 second pass (`#215`, 2026-08-07): the
+#                                 measuring modes' gate row moved into the
+#                                 commit button's own confirmation, so on an
+#                                 ordinary run they show the instruction, the
+#                                 round header and the live readout — nothing
+#                                 else. This is the number the budget test
+#                                 drives; the 4 above is the ceiling it may
+#                                 not pass even when every warning is true.
+CAL_SCREEN_MAX_LINE_CHARS = 180  # ... and no line may become a paragraph
+# Total characters ON SCREEN, per mode, in the ORDINARY worst case — which is
+# what the budget test drives. Two names because the two kinds of screen are
+# not the same thing (a measuring mode carries a live per-click readout and a
+# gesture instruction the verify mode has no equivalent of), but after the
+# 2026-08-07 cuts THE TWO NUMBERS CONVERGED — measured 293 / 247 / 271 for
+# verify / circle / twopoint against 291 / 498 / 546 before — so they are one
+# value now, and that is itself the result: the three modes finally cost the
+# same. They came down from 400 and 560, and they are deliberately tight,
+# because every sentence cut from this screen was TRUE and every number cut is
+# still in the record. A future reader will find them and be tempted, and
+# slack left in a budget is slack that gets spent.
+#
+# NOT a cap on the pathological cases (a stretch that could not be computed,
+# a diam_mm nobody measured, a refused fit): those are FAULTS, each capped at
+# one line, and compressing a fault to fit a character budget is the wrong
+# trade. CAL_SCREEN_MAX_LINES is what bounds them.
+CAL_SCREEN_MAX_CHARS = 300      # verify
+CAL_SCREEN_MAX_CHARS_MEASURING = 300
 CAL_VERIFY_MAX_LINES = CAL_SCREEN_MAX_LINES   # the verify block's own cap,
 #                                 kept as a name because verify_evidence is
 #                                 a pure function with its own test
@@ -3015,9 +3057,13 @@ class EdgeReviewApp:
                                                   and verify_ok)
         win = tk.Toplevel(self.root)
         try:
-            win.title(("RE-ANCHOR — writes data.csv" if reanchoring
-                       else "Calibrate — applied at Save")
-                      + " — pick a method")
+            # THE INTENT IS ON THE TITLE, and the wording comes from ONE
+            # place (scale_intent_banner) rather than being retyped at each of
+            # the three title call sites. It came off the round header in the
+            # operator's second pass (`#215`, 2026-08-07), so the title is now
+            # one of only three surfaces that carry it and none of them may
+            # drift.
+            win.title(scale_intent_banner(intent) + " — pick a method")
             win.transient(self.root)
             # WARNINGS ONLY, since the 2026-08-07 trim (`#215`, operator).
             # This block used to open with the folded-action banner and a
@@ -3027,17 +3073,18 @@ class EdgeReviewApp:
             # is working in, and together they were two of the nine lines the
             # measuring modes were showing.
             #
-            # Neither was DELETED, they moved to where they are read: the
-            # folded action's tag and the nominal disc size are both on the
-            # ROUND HEADER now (head_text), which is one line the operator
-            # is already watching for the round number, and the intent is
-            # still stated three times over (header, title, primary button)
-            # plus in the re-anchor confirmation.
+            # Neither was DELETED. They went to the round header, and then
+            # off it again the same evening (`#215`, operator, second pass):
+            # the folded action's tag is now carried by the window TITLE, the
+            # PRIMARY BUTTON and the re-anchor CONFIRMATION — still three
+            # surfaces, and all three are places where it decides something —
+            # while the nominal disc size is in the settings, in setup.txt and
+            # on every log line. Only its WARNING is on screen, below.
             #
             # What stays here is only what is CONDITIONALLY TRUE — a fit that
-            # refused, a missing baseline, a prior anchor, rows already
-            # measured. On an ordinary run this label carries nothing and is
-            # not packed at all, so it costs the picture no height.
+            # refused, a missing baseline, a diam_mm nobody measured. On an
+            # ordinary run this label carries nothing and is not packed at
+            # all, so it costs the picture no height.
             gate = ''
             if not verify_ok:
                 # THE REFUSAL, STATED. When baseline_disc will not fit this
@@ -3058,46 +3105,44 @@ class EdgeReviewApp:
                 gate += ("\n⚠ The baseline frame is missing — this is a LATER "
                          "frame. Calibrate here only if the disc is visibly "
                          "AT REST; otherwise Esc and restore the baseline.")
-            # THE CONSEQUENCE, ONE LINE (`#215` trim, 2026-08-07). The
-            # [critical] partial-re-save interaction (SLDEA_HANDOFF
-            # 2026-08-05): unreviewed rows keep their px and are RE-DERIVED at
-            # the save's scale, so a new anchor moves the WHOLE run's mm²
-            # column — including frames this session never opens. An operator
-            # re-reviewing one frame has to be told that here, not discover it
-            # in the spreadsheet. That fact is unchanged; what changed is that
-            # it, the prior anchor and the pre-gate case share ONE line
-            # instead of three, exactly as the verify mode's own consequence
-            # line does.
+            # THE "ALREADY CALIBRATED" ROW IS GONE FROM HERE — it moved into
+            # the button's own confirmation (`#215`, operator 2026-08-07,
+            # second pass). It used to read
             #
-            # The recorded anchor's DIAMETER came off this line on purpose,
-            # and it is a small win rather than a loss: it is in setup.txt
-            # (where P reads it from), and a printed px figure standing on
-            # screen through every round of a BLIND measurement was a target
-            # to steer onto. What the operator needs here is that an anchor
-            # exists and that P reuses it.
-            if n_px_rows or recorded:
-                bits = []
-                if n_px_rows:
-                    bits.append(f"⚠ {n_px_rows} row(s) already carry px — "
-                                f"accepting RE-SCALES every recorded mm² at "
-                                f"the next 💾 Save, including frames you "
-                                f"never re-review")
-                    if not recorded:
-                        # the two pre-gate runs (P3_6_2.5mL_20260729,
-                        # DOT_P3_1_20260729) have px rows and NO anchor
-                        # block, so there is no recorded diameter to quote a
-                        # re-scale percentage against — which is exactly the
-                        # case where the whole mm² column is about to hang on
-                        # a hand-fitted anchor for the first time. The number
-                        # itself is quoted against the AUTOMATIC fit at
-                        # accept time and at Save, because that is the scale
-                        # a pre-gate Save derived them at.
-                        bits.append("NO anchor on record (pre-gate save), so "
-                                    "the move is quoted against the "
-                                    "automatic fit")
-                if recorded:
-                    bits.append("an anchor is on record — press P to REUSE it")
-                gate += ('\n' if gate else '') + '   ·   '.join(bits) + '.'
+            #   ⚠ 81 row(s) already carry px — accepting RE-SCALES every
+            #   recorded mm² at the next 💾 Save, including frames you never
+            #   re-review   ·   an anchor is on record — press P to REUSE it.
+            #
+            # and it was the top row of the window on every saved run, i.e.
+            # standing prose above the picture the operator is measuring in.
+            # The operator's reasoning, and it is the right one: the place a
+            # consequence belongs is the moment it is incurred. So the
+            # RE-ANCHOR confirmation (_reanchor_msg) now OPENS by naming the
+            # calibration already on record and asking whether to overwrite
+            # it — and once that question has been answered, "every area is
+            # re-derived" needs no spelling out, because that is what
+            # overwriting a scale MEANS.
+            #
+            # Nothing numeric was lost. The percentage the move costs is
+            # quoted where a number can be checked: `rescale_note` on every
+            # exceptional gate, the verify mode's own consequence line, and
+            # the confirmation's multiplier plus its resting-area
+            # before → after. `P` keeps its own button, which carries its own
+            # key. The `[critical]` partial-re-save rule (SLDEA_HANDOFF
+            # 2026-08-05) is unchanged; only where it is said is.
+            #
+            # THE DISC'S ONE WARNING LANDS HERE INSTEAD. `disc 16 mm` came
+            # off the round header with the rest of its run-on, and this
+            # warning rode on it. It is conditionally true — false whenever
+            # capture recorded a diameter — which makes it exactly what this
+            # warnings-only block is for, and it is the reason the block is
+            # not simply deleted along with the row above.
+            if not diam_rec:
+                gate += (('\n' if gate else '')
+                         + f"⚠ {self.settings['diam_mm']:g} mm is the "
+                           f"settings DEFAULT — the mask was NOT measured at "
+                           f"capture, so every absolute mm² inherits whatever "
+                           f"that value is wrong by.")
             # PACKED ONLY WHEN IT HAS SOMETHING TO SAY (`#215`, 2026-08-07).
             # Previously this label always carried at least the banner and the
             # standing SCALE GATE line, so it was always on screen; now it is
@@ -3172,26 +3217,41 @@ class EdgeReviewApp:
                                variable=mode_var,
                                command=lambda: switch_mode()).pack(
                                    side=tk.LEFT, padx=(4, 8))
-            tk.Label(chooser, text="rounds:").pack(side=tk.LEFT)
+            # ---- the two per-mode controls, each in its own box ----------
+            # BOXED so they can be DE-RENDERED as a unit, caption and all
+            # (`#215`, operator 2026-08-07, second pass). Greying them out
+            # left two dead captions and two dead menus on the top row of
+            # every screen they do not apply to: the round count is
+            # meaningless in the verify mode (there are no rounds) and the
+            # stroke belongs to the circle mode alone. A disabled control is
+            # still a thing to read and still invites a click; an absent one
+            # is not. sync_buttons owns which of them exist.
+            rounds_box = tk.Frame(chooser)
+            rounds_box.pack(side=tk.LEFT)
+            tk.Label(rounds_box, text="rounds:").pack(side=tk.LEFT)
             # Only round counts the d2 table has a factor for: an n with
             # no factor cannot be converted to sigma/SE at all, so it is
             # refused at the chooser rather than at the gate.
-            n_menu = tk.OptionMenu(chooser, n_var,
+            n_menu = tk.OptionMenu(rounds_box, n_var,
                                    *[str(v) for v in n_choices],
                                    command=lambda _v: set_rounds())
             n_menu.pack(side=tk.LEFT, padx=(2, 8))
+            stroke_box = tk.Frame(chooser)
+            stroke_box.pack(side=tk.LEFT)
             # THE LETTER FOLLOWS THE LABEL, not a hardcoded "A". This
             # caption said "A stroke:" and the stroke belongs to the
             # CIRCLE mode, which the 2026-08-06 swap relabelled from A
             # to B -- a stale letter here would point the operator at
             # the verify mode, which has no stroke to choose.
-            tk.Label(chooser,
+            tk.Label(stroke_box,
                      text=f"{LBL[se.CAL_MODE_CIRCLE]} stroke:").pack(
                          side=tk.LEFT)
-            stroke_menu = tk.OptionMenu(chooser, stroke_var,
+            stroke_menu = tk.OptionMenu(stroke_box, stroke_var,
                                         *CAL_STROKE_STYLES,
                                         command=lambda _v: repaint())
             stroke_menu.pack(side=tk.LEFT, padx=2)
+            ROUNDS_PACK = dict(side=tk.LEFT)
+            STROKE_PACK = dict(side=tk.LEFT)
             # The METHOD-SPECIFIC block: the gestures in the measuring modes,
             # and in the verify mode the fit's own evidence. Split out of
             # `gate` (which is the static warnings) because the two say
@@ -3245,16 +3305,29 @@ class EdgeReviewApp:
             vt.fit(img.width, img.height, cw, ch)
             rnd = random.Random()
 
-            def show_line(w, on, opts, before):
-                """Show or hide one text line, keeping its place in the
-                column. pack_forget/pack rather than text='' because an empty
-                Label still reserves a line's height, and in the verify mode
-                that height belongs to the picture — three blank lines is
-                ~65 px of the canvas gone to say nothing."""
+            def show_line(w, on, opts, before=None):
+                """Show or hide one widget, keeping its place in the layout.
+                pack_forget/pack rather than text='' because an empty Label
+                still reserves a line's height, and in the verify mode that
+                height belongs to the picture — three blank lines is ~65 px
+                of the canvas gone to say nothing.
+
+                ALSO HOW THE INAPPLICABLE CONTROLS GO AWAY (`#215`, operator
+                2026-08-07, second pass): *"a disabled control still costs a
+                line of visual scanning and invites a click; an absent one
+                does not."* So ◀ Back, ⟲ Restart, the round-count selector
+                and the stroke selector are DE-RENDERED where they mean
+                nothing rather than greyed out. `before` is the always-packed
+                widget they must stay to the left of — omitted for the
+                chooser row's boxes, which are last in their frame's packing
+                list and so re-pack in order on their own (the stroke box is
+                only ever shown when the rounds box is, so their relative
+                order cannot invert)."""
                 try:
                     if on:
                         if not w.winfo_manager():
-                            w.pack(before=before, **opts)
+                            w.pack(**(dict(opts, before=before)
+                                      if before is not None else opts))
                     elif w.winfo_manager():
                         w.pack_forget()
                 except tk.TclError:
@@ -3436,14 +3509,44 @@ class EdgeReviewApp:
                 at all, because two clicks on an edge need
                 no numeric feedback to place.
 
-                ONE SHORT LINE since the 2026-08-07 trim (`#215`, operator).
-                Two things joined it, from the gate block that no longer stands
-                above the picture: the nominal disc size the measurement is
-                being called, and the folded action's tag — because one of the
-                two 📏 actions writes data.csv the moment it is confirmed, and
-                that has to be stated where the operator is looking.
+                THE ROUND AND NOTHING ELSE, since the 2026-08-07 cuts
+                (`#215`, operator, second pass). The morning's trim folded two
+                things onto this line from the gate block — the nominal disc
+                size and the folded action's tag — and the operator drove all
+                three modes on real runs that evening and cut both again:
 
-                Two things left it, both explanation rather than guidance:
+                * the FOLDED ACTION'S TAG (`scale_intent_banner`). *"The
+                  commit warning belongs in one place — on the primary button
+                  and in its confirmation — not repeated in every mode's
+                  header."* It is still stated three times where it decides
+                  something: the window TITLE, the PRIMARY BUTTON (which says
+                  `✔ Finish & RE-ANCHOR NOW` on exactly the press that
+                  commits), and the re-anchor CONFIRMATION, which now opens by
+                  asking whether to overwrite the calibration on record. What
+                  went is the standing copy on a line the operator watches for
+                  the round number.
+                * `disc 16 mm`. Named for the circle mode and applied to both,
+                  because the two measuring screens have to read the same and
+                  the operator's objection was the run-on itself. The nominal
+                  diameter is not something an operator acts on mid-round; it
+                  is in the settings, in `setup.txt` and on every log line.
+                  Its ONE warning — that `diam_mm` is the settings default and
+                  was never measured at capture — is conditionally true, so it
+                  moved to the gate block, which is exactly the label that
+                  carries conditionally-true warnings and is otherwise
+                  unpacked.
+                * `· view rotated 299.3°` in the two-point mode — *"drop the
+                  bolded run-on after Round 1 of 3"*. The angle is a fact
+                  about the picture, and the picture shows it: the frame is
+                  visibly rotated. It stays in the record (`rot=` on the log
+                  line), where the comparison between the modes needs it.
+
+                What is left is `Method B · Round 1 of 3` (plus the two-point
+                mode's point count, which is progress and is what this line is
+                for).
+
+                Two things left it earlier, both explanation rather than
+                guidance:
 
                 * *"the earlier rounds are HIDDEN until the last fit is in —
                   each fit has to be independent, or the scatter is a
@@ -3475,16 +3578,8 @@ class EdgeReviewApp:
                          f"{st['round']} of "
                          f"{max(rounds_wanted(), st['round'])}")
                 if two_point():
-                    where += (f" · view rotated {st['rot']:.1f}° · "
-                              f"{len(st['pts'])} of 2 points")
-                # THE DISC, and its one warning riding on it — the same fold
-                # the verify mode uses to keep "the diameter was NOT recorded
-                # at capture" off a line of its own: the warning qualifies
-                # this number, and this number is right here.
-                where += f" · disc {self.settings['diam_mm']:g} mm"
-                if not diam_rec:
-                    where += " ⚠ settings DEFAULT, not measured at capture"
-                return where + "   ·   " + scale_intent_banner(intent)
+                    where += f" · {len(st['pts'])} of 2 points"
+                return where
 
             def reveal_text(stats):
                 """All of it, at once, once the fitting is OVER — the
@@ -3776,6 +3871,41 @@ class EdgeReviewApp:
                     # no sample), and NO cross-check tick (it would be an
                     # identity). What it says instead is the fit's own quality
                     # and who approved it.
+                    #
+                    # THE FOOTER IS GONE (`#215`, operator 2026-08-07, second
+                    # pass). This line used to end with
+                    #
+                    #   — σ/SE undefined (one fit, no rounds); NOT
+                    #   cross-checked, and no independent check of an
+                    #   automatic anchor exists — overrides every automatic
+                    #   reference at Save
+                    #
+                    # i.e. 160 characters of honesty arriving AFTER the
+                    # operator had already decided, on the one surface that
+                    # outlives the dialog and is read next by someone doing
+                    # something else. Every word of it is true and none of it
+                    # is lost: `se.verify_note` puts the whole statement —
+                    # undefined σ/SE, the absent cross-check and the algebra
+                    # that makes an independent one impossible — into
+                    # setup.txt's `guard:` field, the log line writes
+                    # `sigma=undefined se=undefined range=undefined
+                    # verdict=NOT-GATED`, and `sldea_diag` repeats it in two
+                    # verdicts AND its text report ("NOT CROSS-CHECKED, and no
+                    # independent check of an automatic anchor exists…",
+                    # "sigma/SE/range are UNDEFINED … not zero"). Verified by
+                    # diffing the record across this change, not assumed.
+                    #
+                    # One clause of that footer is NOT verbatim in the record
+                    # and is flagged rather than quietly dropped: "overrides
+                    # every automatic reference at Save" is a statement about
+                    # how the app RANKS references (se._is_manual_cal matches
+                    # the method SET), not a measurement of this run, and what
+                    # the record carries is the fact it follows from —
+                    # `method: auto-verified`. The hand-measurement and reuse
+                    # status lines still say it in words.
+                    #
+                    # What stays is EVIDENCE: the value adopted, who approved
+                    # it, and the fit's own quality numbers.
                     rp = se.fit_resid_pct(verified)
                     bits = [f"circ {float(verified.get('circ', 0)):.3f}",
                             f"conf {float(verified.get('conf', 0)):.3f}"]
@@ -3793,11 +3923,7 @@ class EdgeReviewApp:
                              f"{self.settings['diam_mm']:g} mm = "
                              f"{dpx_full:.0f} px (" + ', '.join(bits) + ") "
                              f"({self.settings['diam_mm'] / dpx_full:.5f} "
-                             f"mm/px) — σ/SE undefined (one fit, no "
-                             f"rounds); NOT cross-checked, and no "
-                             f"independent check of an automatic anchor "
-                             f"exists — overrides every automatic "
-                             f"reference at Save")
+                             f"mm/px)")
                     win.destroy()
                     return
                 ok = se.se_ok(stats) if stats else None
@@ -4472,8 +4598,10 @@ class EdgeReviewApp:
                 around (3 for the circle, 5 for two-point) without having to
                 know it. The verify
                 mode has no rounds, so the menu keeps whatever manual count was
-                showing and is disabled instead — a '1' there would read as
-                "one round", which is not what the verify mode does."""
+                showing and is DE-RENDERED instead (`#215`, operator
+                2026-08-07) — setting it to '1' would read as "one round",
+                which is not what the verify mode does, and greying it out
+                still left a control to read on the top row."""
                 if mode_var.get() != se.CAL_MODE_VERIFY:
                     n_var.set(str(se.CAL_MODE_ROUNDS.get(mode_var.get(),
                                                          se.CAL_ROUNDS)))
@@ -4537,16 +4665,34 @@ class EdgeReviewApp:
             # notice a bad one, so the round just banked has to be
             # recoverable. Labelled with the round it lands on and with its
             # key, because an undo nobody can find is not an undo.
-            back_btn = tk.Button(btns, text="◀ Back", command=back_round)
+            # THE ROUND CONTROLS, BOXED so they can be DE-RENDERED together
+            # in the verify mode (`#215`, operator 2026-08-07, second pass).
+            # Neither means anything where there are no rounds, and greyed out
+            # they were still two buttons to read and to reach for — the
+            # operator asked for them absent instead. Boxed rather than
+            # forgotten individually so the row cannot come back in a
+            # different order, and packed BEFORE the always-present widget on
+            # its right (`round_after`) so re-showing lands them back between
+            # the primary button and Reuse/Cancel.
+            round_box = tk.Frame(btns)
+            round_box.pack(side=tk.LEFT)
+            back_btn = tk.Button(round_box, text="◀ Back",
+                                 command=back_round)
             back_btn.pack(side=tk.LEFT, padx=6)
-            restart_btn = tk.Button(btns, text="⟲ Restart all rounds",
+            restart_btn = tk.Button(round_box, text="⟲ Restart all rounds",
                                     command=restart_all)
             restart_btn.pack(side=tk.LEFT)
+            reuse_btn = None
             if recorded:
-                tk.Button(btns, text="📏 Reuse recorded anchor (P)",
-                          command=reuse).pack(side=tk.LEFT, padx=6)
-            tk.Button(btns, text="Cancel (Esc)",
-                      command=win.destroy).pack(side=tk.RIGHT)
+                reuse_btn = tk.Button(btns,
+                                      text="📏 Reuse recorded anchor (P)",
+                                      command=reuse)
+                reuse_btn.pack(side=tk.LEFT, padx=6)
+            cancel_btn = tk.Button(btns, text="Cancel (Esc)",
+                                   command=win.destroy)
+            cancel_btn.pack(side=tk.RIGHT)
+            ROUND_PACK = dict(side=tk.LEFT)
+            round_after = reuse_btn if reuse_btn is not None else cancel_btn
 
             def sync_buttons():
                 vfy = verify()
@@ -4611,36 +4757,52 @@ class EdgeReviewApp:
                 # ◀ Back NAMES THE ROUND IT LANDS ON, so the undo is
                 # discoverable without a paragraph explaining it: the label
                 # itself says what pressing it does, and carries its key.
-                back_btn.config(
-                    text=(f"◀ Back — redo round {back_target()} "
-                          f"(Backspace)"),
-                    state=('disabled' if vfy else 'normal'))
-                # neither means anything without rounds
-                restart_btn.config(state=('disabled' if vfy else 'normal'))
+                back_btn.config(text=(f"◀ Back — redo round {back_target()} "
+                                      f"(Backspace)"))
+                # DE-RENDERED, not disabled, where there are no rounds
+                # (`#215`, operator 2026-08-07). Both buttons keep state
+                # 'normal' so that nothing is ever shown greyed: the mode
+                # decides whether they EXIST, and back_round/restart_all sit
+                # the verify mode out on their own anyway (fail-closed — a
+                # Backspace keybinding is not a button and cannot be
+                # unpacked).
+                show_line(round_box, not vfy, ROUND_PACK, round_after)
+                # ... and the two per-mode chooser controls. The round count
+                # is meaningless in the verify mode; the stroke belongs to the
+                # circle mode alone.
+                #
+                # HIDE STROKE, THEN SHOW ROUNDS, THEN SHOW STROKE — the order
+                # is load-bearing. These two re-pack at the END of the
+                # chooser's packing list (there is nothing to their right to
+                # pack `before`), so packing the stroke box while the rounds
+                # box is absent would leave them the wrong way round for good.
+                # The stroke box is only ever wanted when the rounds box is,
+                # so this sequence cannot invert them.
+                want_stroke = (st['mode'] == se.CAL_MODE_CIRCLE)
+                if not want_stroke:
+                    show_line(stroke_box, False, STROKE_PACK)
+                show_line(rounds_box, not vfy, ROUNDS_PACK)
+                show_line(stroke_box, want_stroke, STROKE_PACK)
                 if vfy:
-                    win.title(("RE-ANCHOR — writes data.csv" if reanchoring
-                               else "Calibrate — applied at Save")
-                              + f" ({se.CAL_MODE_LABELS[se.CAL_MODE_VERIFY]})"
-                                f" — verify the automatic fit on the resting "
-                                f"disc")
+                    win.title(
+                        scale_intent_banner(intent)
+                        + f" ({se.CAL_MODE_LABELS[se.CAL_MODE_VERIFY]})"
+                          f" — verify the automatic fit on the resting disc")
                     how.config(text=verify_evidence(
                         auto_ref(), self.settings['diam_mm'],
                         recorded=recorded, n_px_rows=n_px_rows,
                         stretch=st['stretch'],
                         # the gate label is hidden in the verify mode, so its
                         # "the diameter was NOT recorded at capture"
-                        # warning rides on the value line instead (and on the
-                        # round header in the measuring modes, for the same
-                        # reason)
+                        # warning rides on the value line instead (in the
+                        # measuring modes it is the gate block's own line,
+                        # since `disc 16 mm` left the round header)
                         diam_recorded=diam_rec))
-                    stroke_menu.config(state='disabled')
-                    n_menu.config(state='disabled')
                     return
                 what = ("fit the circle to the resting disc" if not
                         two_point() else
                         "click the two opposite edges of the resting disc")
-                win.title(("RE-ANCHOR — writes data.csv" if reanchoring
-                           else "Calibrate — applied at Save")
+                win.title(scale_intent_banner(intent)
                           + f" ({se.cal_mode_label(st['mode'])}) — {what} "
                             f"({st['round']} of "
                             f"{max(rounds_wanted(), st['round'])})")
@@ -4651,15 +4813,41 @@ class EdgeReviewApp:
                 # the outer toe, +2.6 % in diameter, and that is the bias the
                 # whole A/B exists to chase).
                 #
+                # THE AIM RULE IS NOW AN INSTRUCTION, NOT A DEFINITION
+                # (`#215`, operator 2026-08-07, second pass). It read *"aim at
+                # the ink edge's HALF-HEIGHT (mid-gray), never its outer
+                # toe."* — which is the metrology convention, correctly named,
+                # and is not something a hand can do. "Half-height of the
+                # intensity step" describes a property of a profile; what the
+                # operator actually does is place a mark so that it sits half
+                # on the ink and half off it, and STRADDLE is the word for
+                # that. So the screen says where to put the mark and
+                # SLDEA_MEASUREMENT §1.3 keeps the convention it achieves —
+                # the +5.2–5.7 % area / +2.6 % diameter band between the
+                # half-height step and the visual outer toe is unchanged and
+                # is still what the sentence is FOR.
+                #
+                # The mark differs per mode and the sentence names the one in
+                # front of the operator: the circle mode's own stroke (3 px
+                # solid by default, and the stroke chooser's whole point is
+                # that this stroke is what lands on the boundary), the
+                # two-point mode's hollow marker RING, which is centred on the
+                # click and therefore straddles it by construction
+                # (marker_shapes — nothing is drawn within CAL_MARK_GAP_VIEW
+                # of the judged pixel, so the ring is the only thing there is
+                # to aim).
+                #
                 # What came off, and where it is instead:
                 #   the "METHOD C (two points)" / "METHOD B (circle)" prefix
                 #       — the round header one line below says "Method C",
                 #         and the radio row above it has the letter filled;
                 #   the ROTATION's rationale ("it turns misjudging opposite
-                #       from a fixed error into a random one") — the header
-                #       states the angle each round, which is what the
-                #       operator acts on; the reason is in this module's
-                #       two-point section and SLDEA_MEASUREMENT §2.1a;
+                #       from a fixed error into a random one") — and, since
+                #       the second pass, the ANGLE itself: the picture is
+                #       visibly rotated, so the header was printing a fact the
+                #       operator can see. Both the reason and the number are
+                #       in the record (SLDEA_MEASUREMENT §2.1a, this module's
+                #       two-point section, and `rot=` on every log line);
                 #   "that SECOND CLICK BANKS THE ROUND and moves on" — the
                 #       LIVE line says it per click, which is where it is
                 #       true, and ◀ Back's own label carries Backspace;
@@ -4670,16 +4858,11 @@ class EdgeReviewApp:
                 #       Backspace on the ◀ Back button. The rest is in
                 #       _calibrate_scale's docstring and SLDEA_HANDOFF.md.
                 how.config(text=(
-                    "Click one edge, then the point OPPOSITE it — aim at the "
-                    "ink edge's HALF-HEIGHT (mid-gray), never its outer toe."
+                    "Click one edge, then the point OPPOSITE it — straddle "
+                    "the edge: half the ring on the disc, half on the paper."
                     if two_point() else
-                    "Drag to move · a handle to resize — aim at the ink "
-                    "edge's HALF-HEIGHT (mid-gray), never its outer toe."))
-                # the stroke option only means anything for the circle mode's
-                # stroke
-                stroke_menu.config(state=('disabled' if two_point()
-                                          else 'normal'))
-                n_menu.config(state='normal')
+                    "Drag to move · a handle to resize — straddle the edge: "
+                    "half the stroke on the disc, half on the paper."))
 
             def place_point(rx, ry):
                 """Record one twopoint-mode click. `rx, ry` are ROTATED display
@@ -4903,7 +5086,17 @@ class EdgeReviewApp:
                                # both are behaviour a test has to be able to
                                # read without re-deriving it
                                'back_btn': back_btn, 'intent': intent,
-                               'restart_btn': restart_btn}
+                               'restart_btn': restart_btn,
+                               # the four boxes that are DE-RENDERED rather
+                               # than disabled where they do not apply
+                               # (`#215`, operator 2026-08-07): the budget
+                               # test reads winfo_manager() on these, because
+                               # "absent" is the claim now and a disabled
+                               # widget would still satisfy an existence check
+                               'round_box': round_box,
+                               'rounds_box': rounds_box,
+                               'stroke_box': stroke_box,
+                               'n_menu': n_menu, 'stroke_menu': stroke_menu}
             win.grab_set()
             self.root.wait_window(win)
         finally:
@@ -5196,6 +5389,18 @@ class EdgeReviewApp:
     def _reanchor_msg(self, plan, prev, new_ref):
         """The re-anchor confirmation, WITH NUMBERS.
 
+        **IT OPENS BY ASKING WHETHER TO OVERWRITE THE CALIBRATION ON RECORD**
+        (`#215`, operator 2026-08-07, second pass). That question used to be a
+        standing row at the top of the calibration dialog —
+        *"⚠ 81 row(s) already carry px — accepting RE-SCALES every recorded
+        mm² at the next 💾 Save…"* — where it stood above the picture through
+        every round of a measurement it could not affect. It belongs at the
+        moment it is incurred, which is this button, and the operator's
+        reasoning for the shorter wording is the right one: once you have said
+        *overwrite the existing calibration*, that every area is re-derived
+        follows from what overwriting a scale MEANS and does not need spelling
+        out. So the prose went and the EVIDENCE stayed.
+
         One button here rewrites every absolute area in the run, so the
         dialog has to be sanity-checkable on its own: the counts on both
         sides of the [critical] blank-vs-re-derive rule, both anchor
@@ -5209,19 +5414,47 @@ class EdgeReviewApp:
         Rows that would BLANK are reported here, before the commit, not
         after: a bug-era mm² with no px cannot be re-derived and is dropped
         rather than kept on an unknowable anchor, and that is a deletion the
-        operator has to agree to in advance."""
+        operator has to agree to in advance.
+
+        The three-way choice is unchanged and so are its glosses: they are
+        not prose about a consequence, they are what the three buttons DO,
+        and two of the three do not write."""
         nom = plan['nominal_mm2']
         dmm = self.settings['diam_mm']
         old_px = plan['old_diam_px']
         new_px = float(new_ref['diam_px'])
-        L = ["Re-anchor this run's SCALE ONLY?",
+        # THE LEAD, and it branches on the truth. On a run that carries an
+        # anchor this is an overwrite and is named as one; on a pre-gate run
+        # (P3_6_2.5mL_20260729, DOT_P3_1_20260729 — px rows, no anchor block)
+        # there is nothing to overwrite, and claiming otherwise would be a
+        # question about a record that does not exist.
+        if prev and prev.get('diam_px'):
+            head = ("This run ALREADY HAS A CALIBRATION on record"
+                    + (f" ({prev.get('method')}"
+                       + (f", {se.cal_mode_text(prev['cal_mode'])}"
+                          if prev.get('cal_mode') else '')
+                       + (f", saved {prev['saved']}" if prev.get('saved')
+                          else '')
+                       + ")" if prev.get('method') else '')
+                    + ".\n\nOVERWRITE it with the anchor you just measured?")
+        else:
+            head = ("This run has NO calibration on record (a pre-gate "
+                    "save).\n\nWRITE the anchor you just measured, and "
+                    "derive this run's areas from it?")
+        # ONE LINE for what YES does, where there were five. What is kept is
+        # the SCOPE — that this is SCALE ONLY, that no detection runs and
+        # nothing is re-reviewed, and that only the derived columns move.
+        # That is not the consequence of overwriting a scale (which is
+        # self-explanatory and went); it is the premise of the whole action,
+        # and an operator who assumed a re-anchor re-detects would decline it
+        # for the wrong reason. What went with the prose is the enumeration
+        # (notes / tags / snapshots / current / voltage / frame names), which
+        # "only the mm² and diameter columns" says in six words.
+        L = [head,
              "",
-             "⚠ YES WRITES data.csv NOW. Every recorded area is RE-DERIVED "
-             "from the active_area_px already in data.csv, at the new scale. "
-             "Detection does NOT re-run, nothing is re-reviewed, and notes / "
-             "tags / snapshots / current / voltage / frame names are not "
-             "touched.",
-             "",
+             "⚠ YES WRITES data.csv NOW — SCALE ONLY: no detection runs, "
+             "nothing is re-reviewed, and only the mm² and diameter columns "
+             "change (frame names, notes and tags are not touched).",
              "NO = keep this anchor for the session and apply it at the next "
              "💾 Save instead — nothing is written now.",
              "CANCEL = discard the measurement; the run stays exactly as it "
@@ -5300,11 +5533,11 @@ class EdgeReviewApp:
                   f"what gets re-derived, so the multiplier follows the "
                   f"data, not the block."]
         if prev is None:
+            # the pre-gate case is already named in the lead, so what is left
+            # to say here is only where the "before" numbers above came from
             L += ["",
-                  "  ⚠ NO anchor was on record for this run (a pre-gate "
-                  "save). The previous scale above is the one implied by "
-                  "the run's own mm²/px, and the anchor being written is "
-                  "the first this run has ever carried."]
+                  "  ⚠ The previous scale above is the one implied by the "
+                  "run's own mm²/px, not a recorded anchor — there is none."]
         if plan['mult'] and abs(plan['mult'] - 1.0) < 1e-6:
             L += ["",
                   "  Note: this anchor is the one already in force, so no "

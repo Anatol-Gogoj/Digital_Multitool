@@ -806,6 +806,58 @@ def verdicts(d):
                         f"until a save records them, treat any existing "
                         f"active_area_mm2 as unverifiable."))
 
+    # A SCALE-ONLY RE-ANCHOR (`#215`, 2026-08-06). The run's absolute column
+    # was re-derived from its stored px at a corrected scale, with NO
+    # detection and NO re-review -- so its mm2 are NEWER than its review, and
+    # a reader comparing timestamps would otherwise conclude the run had been
+    # reviewed again. Reported at OK because it is a CORRECTION, not a
+    # defect; what would be a defect is the correction being invisible.
+    #
+    # OUTSIDE the baseline_disc branches, like the repeatability verdict
+    # below and for the same reason: whether a run was re-anchored is a fact
+    # about its own record and needs no automatic reference to state. Nested,
+    # it would go unreported on exactly the runs where baseline_disc refuses.
+    if anchor and anchor.get('reanchor'):
+        prev_px = anchor.get('prev_diam_px')
+        impl_px = anchor.get('prev_implied_px')
+        was = anchor.get('prev_method') or 'none on record (pre-gate save)'
+        mult = None
+        for old in (prev_px, impl_px):
+            if old and anchor.get('diam_px'):
+                mult = (float(old) / float(anchor['diam_px'])) ** 2
+                break
+        out.append((
+            'OK', 'Scale was RE-ANCHORED (scale-only) -- the run was NOT '
+                  're-reviewed',
+            f"this run's absolute areas were re-derived from the "
+            f"active_area_px already in data.csv at a corrected scale "
+            f"({anchor.get('reanchor')}), saved "
+            f"{anchor.get('saved', '?')}"
+            + (f" by {anchor['user']}" if anchor.get('user') else '')
+            + ". Detection did not re-run and no frame was re-reviewed, so "
+              "the pixel measurements and every review verdict predate this "
+              "write -- do NOT read the anchor's timestamp as a review date. "
+              "Previous scale: "
+            + (f"{float(prev_px):.2f} px recorded" if prev_px
+               else 'no anchor was on record')
+            + (f" ({float(impl_px):.2f} px implied by the data)"
+               if impl_px is not None
+               and (prev_px is None
+                    or abs(float(impl_px) - float(prev_px)) > 0.05) else '')
+            + f", method {was}"
+            + (f", now {float(anchor['diam_px']):.2f} px"
+               if anchor.get('diam_px') else '')
+            + (f" -- every area moved x{mult:.6f}" if mult else '')
+            + (f". {int(anchor['reanchor_rows'])} row(s) re-derived"
+               if anchor.get('reanchor_rows') is not None else '')
+            + (f", {int(anchor['reanchor_blanked'])} row(s) BLANKED (an mm2 "
+               f"with no px cannot be re-derived and is not kept on an "
+               f"unknowable anchor)"
+               if anchor.get('reanchor_blanked') else '')
+            + ". Expansion ratios A/A0 are unaffected by this: a uniform "
+              "scale factor cancels exactly in a ratio, so any A/A0 quoted "
+              "before the re-anchor still stands."))
+
     # #215: three averaged circle fits carry their own spread -- the run's
     # operator-repeatability number. Absent on every pre-2026-08-06
     # anchor, and its absence is reported as absence, never as agreement.
@@ -1177,6 +1229,28 @@ def report(d):
         else:
             A("  rounds        : none recorded (pre-2026-08-06 two-click "
               "anchor -- no repeatability number)")
+        if anchor.get('reanchor'):
+            # printed for EVERY provenance, not only mode C: a re-anchor can
+            # be committed from any of the three calibration modes, and the
+            # thing a reader needs is that the mm2 are newer than the review
+            A(f"  re-anchored   : {anchor['reanchor']} -- areas re-derived "
+              f"from stored px; NO detection, NO re-review")
+            prev_px = anchor.get('prev_diam_px')
+            impl_px = anchor.get('prev_implied_px')
+            A("  previous scale: "
+              + (f"{float(prev_px):.2f} px" if prev_px
+                 else 'no anchor on record')
+              + (f"  (data implied {float(impl_px):.2f} px)"
+                 if impl_px is not None else '')
+              + f"  [{anchor.get('prev_method') or 'none on record'}"
+              + (f", method {anchor['prev_cal_mode']}"
+                 if anchor.get('prev_cal_mode') else '') + ']')
+            if anchor.get('reanchor_rows') is not None:
+                A(f"  rows          : "
+                  f"{int(anchor['reanchor_rows'])} re-derived"
+                  + (f", {int(anchor['reanchor_blanked'])} blanked "
+                     f"(mm2 with no px)"
+                     if anchor.get('reanchor_blanked') else ''))
     A("")
     A("VERDICTS")
     A("-" * 74)

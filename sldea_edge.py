@@ -193,17 +193,30 @@ ANCHOR_HDR = '--- Edge Review scale anchor (SLDEA) ---'
 # automatic fit and a human who approved it — so what quantifies it is the
 # fit's own quality, and what makes it auditable is who approved it when.
 # Absent on every other anchor, exactly like rounds_px is absent here.
+# reanchor/prev_*/reanchor_* arrived with the scale-only RE-ANCHOR
+# (`#215`, 2026-08-06): correcting a run's scale and re-deriving its mm²
+# from the stored px, with NO detection and NO re-review. Their whole
+# purpose is that a later reader can tell "the scale was corrected" from
+# "the run was reviewed again" — which nothing else in this block records,
+# because every other field describes the anchor and not what was done
+# with it. Absent on every anchor written by a normal Save, exactly like
+# rounds_px is absent on a mode-C anchor.
 _ANCHOR_KEYS = ('method', 'cal_mode', 'diam_px', 'diam_mm', 'mm_per_px',
                 'anchor_frame', 'anchor_is_baseline', 'auto_diam_px',
                 'n_rounds', 'rounds_px', 'spread_px', 'spread_pct',
                 'sigma_pct', 'se_pct',
                 'fit_circ', 'fit_conf', 'fit_resid_px', 'fit_arc_cov',
                 'fit_n_edge', 'verified_by', 'verified_at',
+                'reanchor', 'prev_diam_px', 'prev_implied_px',
+                'prev_method', 'prev_cal_mode', 'reanchor_rows',
+                'reanchor_blanked',
                 'guard', 'saved', 'user')
 _ANCHOR_FLOATS = ('diam_px', 'diam_mm', 'mm_per_px', 'auto_diam_px',
                   'spread_px', 'spread_pct', 'sigma_pct', 'se_pct',
-                  'fit_circ', 'fit_conf', 'fit_resid_px', 'fit_arc_cov')
-_ANCHOR_INTS = ('n_rounds', 'fit_n_edge')
+                  'fit_circ', 'fit_conf', 'fit_resid_px', 'fit_arc_cov',
+                  'prev_diam_px', 'prev_implied_px')
+_ANCHOR_INTS = ('n_rounds', 'fit_n_edge', 'reanchor_rows',
+                'reanchor_blanked')
 
 
 def _split_anchor(text):
@@ -815,6 +828,278 @@ def anchor_guard_note(guard, overridden):
 
 
 # ---------------------------------------------------------------------------
+# RE-ANCHOR — correcting a run's px→mm scale WITHOUT re-reviewing it
+# (`#215`, 2026-08-06)
+#
+# The corpus-wide sweep (_analysis/auto_calibration_sweep_20260806.md) closed
+# the scale chain: every one of the eleven recorded resting areas is explained
+# to two decimals by its anchor's deviation from the automatic fit, and the
+# eight runs that never had a manual anchor are exactly the eight that land on
+# π·(diam_mm/2)² perfectly. So on three runs — P3_2_2.5mL_20260728 (−4.42 % in
+# area), SLDEA_20260723_152205 (−3.38 %) and SLDEA_20260723_233451 (+2.44 %) —
+# the PIXEL measurements are right and only the px→mm factor is wrong.
+#
+# Correcting one used to cost a full detect-and-save cycle (minutes of
+# detection over 81 frames) even though no review work needed redoing, and an
+# operator who accepted the corrected fit on live P3_2 closed before Save
+# because of that cost — losing the correction. Re-deriving mm² from px is
+# arithmetic `apply_results` already performs on every unreviewed row, so a
+# re-anchor is that same arithmetic applied to EVERY row, with an empty
+# results dict:
+#
+#     apply_results(rows, {}, new_scale, {}, None)
+#
+# Nothing is reimplemented. That call takes the `else` branch for every row,
+# which is the rule the [critical] partial-re-save entry put in force
+# (SLDEA_HANDOFF 2026-08-05): a row keeps its px and has its mm²/diam
+# RE-DERIVED at this scale, and a bug-era mm² with NO px is blanked rather
+# than kept on an unknowable anchor. It also leaves `notes` byte-identical
+# (the branch reads the row's own note back), touches no other column, and —
+# because `plan_breakdown_marks`/`apply_rename_plan` are never called — cannot
+# re-apply or revert a `*_BREAKDOWN` frame rename.
+#
+# What lives here is the arithmetic the CONFIRMATION needs, which the Save
+# path never had to compute: how many rows would blank, what the old scale
+# actually was, and where the resting area lands. The functions below are
+# pure — they read rows and return numbers, and mutate nothing.
+# ---------------------------------------------------------------------------
+
+# The `reanchor` field's value in the anchor block. A token, not prose: the
+# point of it is that a later reader can tell "the scale was corrected" from
+# "the run was reviewed again", and sldea_diag greps for it.
+REANCHOR_SCALE_ONLY = 'scale-only'
+# How far two rows' implied old scales may differ (% in area) before the
+# column is reported as carrying MORE THAN ONE absolute scale. Rows are
+# stored to 3 decimals of mm² against a 0-decimal px, so a few 1e-3 of a
+# percent is pure rounding; 0.05 % is far below any real anchor change and
+# far above the rounding floor. This is the [critical] mixed-scale state
+# (a 56.1 % artificial step on the real-data repro) made VISIBLE rather
+# than merely prevented going forward.
+REANCHOR_MIXED_TOL_PCT = 0.05
+
+
+def implied_scale(row):
+    """The mm_per_px a single row's OWN recorded numbers were derived at,
+    or None when the row carries no usable pair.
+
+    area_mm² = area_px · scale², so scale = sqrt(mm²/px) — the same
+    inversion `apply_results` performs to preserve a row's diameter
+    definition across a re-scale. This is what makes a re-anchor possible
+    on the eight runs that carry NO anchor block at all: the scale their
+    column was derived at is recoverable from the column itself, and does
+    not depend on setup.txt having recorded anything."""
+    px = _num((row or {}).get('active_area_px'))
+    mm2 = _num((row or {}).get('active_area_mm2'))
+    if not px or px <= 0 or not mm2 or mm2 <= 0:
+        return None
+    return math.sqrt(mm2 / px)
+
+
+def reanchor_plan(rows, new_scale, diam_mm, recorded=None,
+                  mixed_tol_pct=REANCHOR_MIXED_TOL_PCT):
+    """Everything a re-anchor confirmation must state, computed WITHOUT
+    touching `rows`.
+
+    `new_scale` may be None to count rows before a new anchor exists (the
+    refusal check runs before the calibration dialog opens); every field
+    that depends on the new scale is then None.
+
+    The counts are deliberately computed with the SAME predicates
+    `apply_results`' unreviewed branch uses — `px and px > 0` to re-derive,
+    `old_mm2 or old_diam` to blank — because a confirmation that reports
+    different numbers from the ones the commit produces is worse than no
+    confirmation. Never a percentage against a reference that does not
+    exist: with no old scale recoverable, `mult` is None and the caller
+    says so rather than printing a number it made up."""
+    rows = rows or []
+    dmm = float(diam_mm or 0.0)
+    ns = float(new_scale) if new_scale else None
+    out = {'n_rows': len(rows), 'n_derive': 0, 'n_blank': 0, 'n_fresh': 0,
+           'n_untouched': 0, 'new_scale': ns, 'new_diam_px': None,
+           'old_scale': None, 'old_diam_px': None, 'recorded_diam_px': None,
+           'anchor_matches_data': None, 'mult': None, 'diam_mult': None,
+           'rest_px': None, 'rest_before': None, 'rest_after': None,
+           'rest_row': None, 'rest_is_baseline': None,
+           'nominal_mm2': (math.pi * (dmm / 2.0) ** 2) if dmm > 0 else None,
+           'rest_dev_before': None, 'rest_dev_after': None,
+           'mixed': False, 'scale_span_pct': None, 'n_scales': 0}
+    scales, rest_i, first_px = [], None, None
+    for i, row in enumerate(rows):
+        px = _num(row.get('active_area_px'))
+        old_mm2 = _num(row.get('active_area_mm2'))
+        old_diam = _num(row.get('active_diam_mm'))
+        if px and px > 0:
+            out['n_derive'] += 1
+            if first_px is None:
+                first_px = i
+            sc = implied_scale(row)
+            if sc:
+                scales.append(sc)
+            else:
+                # px with no previous mm²: this row GAINS an absolute area
+                # for the first time, so there is no 'move' to quote for it
+                out['n_fresh'] += 1
+            if rest_i is None and row.get('tag') == 'baseline':
+                rest_i = i
+        elif old_mm2 or old_diam:
+            out['n_blank'] += 1
+        else:
+            out['n_untouched'] += 1
+    if ns and ns > 0 and dmm > 0:
+        out['new_diam_px'] = dmm / ns
+    if scales:
+        out['n_scales'] = len(scales)
+        lo, hi = min(scales), max(scales)
+        # in AREA terms, which is the column being rewritten
+        out['scale_span_pct'] = 100.0 * ((hi / lo) ** 2 - 1.0)
+        out['mixed'] = out['scale_span_pct'] > float(mixed_tol_pct)
+    # The resting row: the one tagged 'baseline'. Its recorded mm² is the
+    # number the sweep table quotes and the number π·(diam_mm/2)² judges.
+    # Falls back to the first row with px so a run whose baseline row was
+    # rejected still gets a before→after pair, flagged as not-the-baseline.
+    if rest_i is None:
+        rest_i = first_px
+        out['rest_is_baseline'] = False if rest_i is not None else None
+    else:
+        out['rest_is_baseline'] = True
+    if rest_i is not None:
+        out['rest_row'] = rest_i
+        out['rest_px'] = _num(rows[rest_i].get('active_area_px'))
+        out['rest_before'] = _num(rows[rest_i].get('active_area_mm2'))
+        # THE OLD SCALE: the resting row's own, not a median. This run's
+        # resting area is the quantity being corrected, so the factor
+        # quoted has to be the one that moves IT.
+        out['old_scale'] = implied_scale(rows[rest_i])
+    if out['old_scale'] is None and scales:
+        out['old_scale'] = float(np.median(scales))
+    if out['old_scale'] and dmm > 0:
+        out['old_diam_px'] = dmm / out['old_scale']
+    rec_px = _num((recorded or {}).get('diam_px'))
+    if rec_px and rec_px > 0:
+        out['recorded_diam_px'] = rec_px
+        if out['old_diam_px']:
+            # A recorded anchor that does NOT match the scale the column was
+            # actually derived at means the block and the data disagree —
+            # either a hand-edited setup.txt or a save that never completed.
+            # Reported, never silently preferred: the DATA wins, because the
+            # data is what is being re-derived.
+            out['anchor_matches_data'] = (
+                abs(100.0 * (rec_px / out['old_diam_px'] - 1.0)) <= 0.05)
+    if ns and out['old_scale']:
+        out['mult'] = (ns / out['old_scale']) ** 2
+        out['diam_mult'] = ns / out['old_scale']
+    if ns and out['rest_px']:
+        out['rest_after'] = out['rest_px'] * ns * ns
+    nom = out['nominal_mm2']
+    if nom:
+        for src, dst in (('rest_before', 'rest_dev_before'),
+                         ('rest_after', 'rest_dev_after')):
+            if out[src] is not None:
+                out[dst] = 100.0 * (out[src] - nom) / nom
+    return out
+
+
+def reanchor_anchor_fields(prev, plan):
+    """The provenance fields that mark an anchor as written by a SCALE-ONLY
+    re-anchor rather than by a review pass.
+
+    Merged into the dict `save_scale_anchor` is given, so a re-anchored run
+    keeps the FULL provenance of its new anchor (mode C's fit quality and
+    who approved it, or a hand measurement's rounds and spread) and gains
+    the record that no review happened and what the scale was before.
+
+    `prev_diam_px` comes only from a recorded anchor block; `prev_implied_px`
+    is the diameter the DATA itself implies. They are separate keys because
+    they are separate claims, and on the eight runs with no anchor block only
+    the second one exists — which is precisely the case where a later reader
+    would otherwise have no way to know what scale was replaced."""
+    out = {'reanchor': REANCHOR_SCALE_ONLY}
+    p = prev or {}
+    if _num(p.get('diam_px')):
+        out['prev_diam_px'] = float(p['diam_px'])
+    if p.get('method'):
+        out['prev_method'] = p['method']
+    if p.get('cal_mode'):
+        out['prev_cal_mode'] = p['cal_mode']
+    pl = plan or {}
+    if pl.get('old_diam_px'):
+        out['prev_implied_px'] = float(pl['old_diam_px'])
+    if pl.get('n_derive') is not None:
+        out['reanchor_rows'] = int(pl['n_derive'])
+    if pl.get('n_blank'):
+        out['reanchor_blanked'] = int(pl['n_blank'])
+    return out
+
+
+def reanchor_log_record(anchor, plan, when=None, frame=None):
+    """A `calibration_log_line` record for a committed re-anchor.
+
+    The calibration dialog already logs the round-set it produced (mode,
+    σ, SE, verdict) the moment it completes, accepted or declined. This is
+    the SECOND line: what was then done with that anchor to the run's
+    existing column. Written through the same formatter so the whole
+    history of a run's scale is one greppable file, and carrying the
+    accepted anchor's own statistics so a reader does not have to pair the
+    two lines up by timestamp to know what the scale came from."""
+    import time                    # module-local, like save_scale_anchor
+    a = anchor or {}
+    p = plan or {}
+    vfy = guard_is_vacuous(a)
+    se_pct = _num(a.get('se_pct'))
+    if vfy:
+        # THE SAME record mode C's own round-set line is built from, so the
+        # two lines describing one anchor use one vocabulary: n=1, and every
+        # precision field 'undefined' rather than 0.00% or a bare n=0.
+        stats = verify_stats(a) or {'n': 1, 'values': [], 'mean': 0.0,
+                                    'single_fit': True}
+    else:
+        rounds = list(a.get('rounds_px') or [])
+        stats = {'n': int(a.get('n_rounds') or len(rounds) or 1),
+                 # a pre-#215 two-click anchor carries no rounds; its own
+                 # diameter is then the one value there is, which is true
+                 # and greppable, where an empty list renders as 'diams=px'
+                 'values': rounds or [float(_num(a.get('diam_px')) or 0.0)],
+                 'mean': float(_num(a.get('diam_px')) or 0.0),
+                 'spread_pct': _num(a.get('spread_pct')),
+                 'sigma_pct': _num(a.get('sigma_pct')),
+                 'se_pct': se_pct,
+                 'area_se_pct': ((2.0 * se_pct) if se_pct is not None
+                                 else None),
+                 'single_fit': False}
+    auto_px = _num(a.get('auto_diam_px'))
+    rec = {'when': when or time.strftime('%Y-%m-%dT%H:%M:%S'),
+           'mode': a.get('cal_mode') or (CAL_MODE_VERIFY if vfy else '?'),
+           'stats': stats, 'gate': CAL_SE_PCT,
+           # se_ok is already three-valued and refuses n < 2 and a missing
+           # SE, so an unjudgeable set renders 'UNJUDGEABLE' rather than
+           # borrowing a pass it never earned
+           'verdict': ('NOT-GATED' if vfy
+                       else {True: 'PASS',
+                             False: 'OVER-GATE'}.get(se_ok(stats))),
+           'rot_deg': None, 'stroke': None,
+           'auto_diam_px': auto_px,
+           'auto_pct': (None if vfy or not auto_px else
+                        100.0 * (stats['mean'] - auto_px) / auto_px),
+           'outcome': 'reanchor-committed',
+           'frame': frame or a.get('anchor_frame'),
+           'reanchor': {'scope': a.get('reanchor') or REANCHOR_SCALE_ONLY,
+                        'n_derive': p.get('n_derive'),
+                        'n_blank': p.get('n_blank'),
+                        'old_diam_px': p.get('old_diam_px'),
+                        'prev_method': a.get('prev_method'),
+                        'mult': p.get('mult'),
+                        'rest_before': p.get('rest_before'),
+                        'rest_after': p.get('rest_after'),
+                        'rest_dev_after': p.get('rest_dev_after')}}
+    if vfy:
+        for k in ('fit_circ', 'fit_conf', 'fit_resid_px', 'fit_arc_cov',
+                  'fit_n_edge'):
+            rec[k] = a.get(k)
+        rec['fit_resid_pct'] = fit_resid_pct(a)
+    return rec
+
+
+# ---------------------------------------------------------------------------
 # the calibration log — every completed round-set, accepted or declined
 #
 # Why this file exists: the six mode-A spreads that drove the whole
@@ -917,6 +1202,32 @@ def calibration_log_line(rec):
         rp = rec.get('fit_resid_pct')
         if rp is not None:
             bits.append(f"resid_pct={float(rp):.2f}%")
+    # A COMMITTED RE-ANCHOR (`#215`, 2026-08-06): a scale-only correction of
+    # a run that was NOT re-reviewed. Emitted only when the key is present,
+    # so every mode A/B/C round-set line stays byte-identical to before —
+    # those formats are pinned by exact-string tests.
+    rn = rec.get('reanchor')
+    if rn:
+        bits.append('reanchor=' + str(rn.get('scope')
+                                      or REANCHOR_SCALE_ONLY))
+        bits.append(f"rows={int(rn.get('n_derive') or 0)}")
+        bits.append(f"blanked={int(rn.get('n_blank') or 0)}")
+        # 'unknown' rather than a 0 or an omission: the previous scale is
+        # the whole basis of the multiplier, and a reader must be able to
+        # see that it could not be recovered
+        prev_px = rn.get('old_diam_px')
+        bits.append('prev=' + (f"{float(prev_px):.2f}px" if prev_px
+                               else 'unknown'))
+        bits.append(f"prev_method={rn.get('prev_method') or 'none-on-record'}")
+        mult = rn.get('mult')
+        bits.append('area_mult=' + (f"x{float(mult):.6f}" if mult
+                                    else 'unknown'))
+        rb, ra = rn.get('rest_before'), rn.get('rest_after')
+        if rb is not None and ra is not None:
+            bits.append(f"resting={float(rb):.3f}->{float(ra):.3f}mm2")
+        dv = rn.get('rest_dev_after')
+        if dv is not None:
+            bits.append(f"resting_dev={float(dv):+.2f}%")
     bits.append(f"outcome={rec.get('outcome', '?')}")
     if rec.get('frame'):
         bits.append(f"frame={rec['frame']}")

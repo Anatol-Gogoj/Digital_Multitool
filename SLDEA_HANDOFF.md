@@ -13,6 +13,97 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## Re-anchor: a run's scale can be corrected without re-reviewing it (2026-08-06)
+
+**TL;DR:** A new 📏 Re-anchor scale… button fixes a run's px→mm factor and
+re-derives every recorded area from the pixel measurements already in
+data.csv. No detection runs and nothing is re-reviewed, because nothing
+needs to be — only the scale was ever wrong. It takes one calibration
+instead of minutes of detection over 81 frames, and the run's record says
+plainly that the scale was corrected rather than the run re-reviewed.
+
+Observation → decision:
+
+- **Three runs are wrong in absolute mm² for one reason only: a human
+  mis-calibrated the scale.** The corpus-wide sweep
+  (`_analysis/auto_calibration_sweep_20260806.md`) explains every one of the
+  eleven recorded resting areas, to two decimal places, by its anchor's
+  deviation from the automatic disc fit — and the eight runs that never had
+  a manual anchor are exactly the eight that land on π·8² perfectly.
+  `P3_2_2.5mL_20260728` is −4.42 % in area, `SLDEA_20260723_152205` −3.38 %,
+  `SLDEA_20260723_233451` +2.44 %. Their PIXEL measurements are correct.
+- **Correcting one cost a full detect-and-save cycle, and that cost lost a
+  correction.** An operator accepted the corrected fit on live P3_2 on
+  2026-08-06 and closed before Save rather than wait for detection over 81
+  frames. Eight further runs carry no anchor at all and are one re-save away
+  from acquiring a fresh error, so the friction would have recurred. →
+  📏 Re-anchor scale… opens the EXISTING calibration dialog (mode C / A / B,
+  unchanged), then re-derives and commits.
+- **The re-derivation is not new code, and that is the point.** The commit is
+  `apply_results(rows, {}, new_scale, {}, None)`: with an empty results dict
+  every row takes the unreviewed branch, which is the rule the [critical]
+  partial-re-save entry (2026-08-05) already put in force — keep the px,
+  RE-DERIVE mm²/diam at this scale, and blank a bug-era mm² that has NO px
+  rather than keep it on an unknowable anchor. That branch reads each row's
+  own `notes` back unchanged, touches no other column, and — because
+  `plan_breakdown_marks`/`apply_rename_plan` are never reached — can neither
+  re-apply nor revert a `*_BREAKDOWN` rename. `se.mm_per_px` derives the
+  scale exactly as Save does. Save and the re-anchor now write their
+  setup.txt anchor through ONE builder (`_anchor_record`) so a field added
+  for one path cannot go missing from the other.
+- **Verified on scratch copies of all three runs, against the real frames.**
+  `baseline_disc` reproduced 577.08 / 370.65 / 362.18 px, and re-anchoring
+  each run to its own fit moved its resting area to **201.06 mm² = π·8²** —
+  192.181 → 201.062 (×1.046211), 194.259 → 201.062 (×1.035021), 205.977 →
+  201.063 (×0.976141). That landing is an arithmetic identity: declaring the
+  fitted disc to be 16 mm forces it, which is why a resting area that does
+  NOT land there means the anchor is not the fit, and why the confirmation
+  warns when it misses by more than 1 %.
+- **A/A₀ is unaffected, and the precise claim matters.** Ratios recomputed
+  from `active_area_px` are BIT-IDENTICAL — the re-anchor never writes that
+  column, and `breakdown_flags` and `sldea_plot` both read px. Ratios
+  recomputed from the stored `active_area_mm2` agree only to ~1e-5 relative
+  (measured worst 1.2e-5 over the three runs), because mm² is quantised to
+  3 decimals and rounding does not commute with multiplication. "Bit
+  identical" is true of the px ratios and not of the rounded mm² ones; the
+  test pins each claim at its own strength.
+- **One button rewrites every area in the run, so the confirmation carries
+  numbers.** Rows to re-derive, rows that would BLANK (before the commit,
+  not after — it is a deletion), both anchor diameters, the multiplier, and
+  the before → after resting area with its deviation from π·8² on both
+  sides. It also detects and reports a column that ALREADY holds more than
+  one scale (the [critical] state itself), a setup.txt anchor that disagrees
+  with the scale the column was really derived at, and the absence of any
+  recorded anchor. The old scale is recovered from the run's own mm²/px
+  (`implied_scale`) rather than trusted from setup.txt, which is what lets
+  the eight pre-gate runs be re-anchored at all.
+- **Refuses rather than guessing.** No row carrying `active_area_px` (nothing
+  to re-derive — refused BEFORE the dialog opens, so no disc is measured for
+  nothing); a detect worker in flight; and an UNSAVED review in memory —
+  that last one is the mixed-scale bug's own shape, two writers on either
+  side of one column. `apply_results` mutates in place and `write_back` can
+  fail after it (data.csv open in Excel), so the rows are snapshotted and
+  restored: a failed re-anchor leaves the run byte-identical in memory AND
+  on disk, where otherwise the next attempt would report a ×1.000
+  multiplier against numbers nobody agreed to.
+- **The run must not end up looking re-reviewed.** The anchor block gains
+  `reanchor: scale-only`, the previous anchor's diameter and method
+  (`prev_diam_px`/`prev_method`/`prev_cal_mode`), the diameter the data
+  itself implied (`prev_implied_px` — the only one that exists on a pre-gate
+  run), and the row counts. A normal Save writes NONE of them, which is how
+  the two are told apart. `sldea_diag` surfaces it as its own verdict,
+  outside the `baseline_disc` branches so it is not lost on the runs where
+  the fit refuses, and warns not to read the anchor's timestamp as a review
+  date. A line goes into `scale_calibration_log.txt` through the same
+  formatter the three modes use (`outcome=reanchor-committed`); the mode
+  A/B/C round-set lines are byte-identical, since the group renders only
+  when `reanchor` is present.
+- **One artifact goes stale and is named rather than deleted.**
+  `area_vs_voltage.png` is drawn from a review pass's accepted results and a
+  re-anchor has none, so it cannot be regenerated and keeps showing the old
+  absolute mm² until the next Save. The confirmation says so. The outlines
+  in `overlays/` are px contours and carry no scale, so they stay correct.
+
 ## Scale gate v2: fit a circle, three rounds averaged, plus an anchor sanity guard (2026-08-06)
 
 **TL;DR:** The px→mm calibration is no longer two clicks on opposite

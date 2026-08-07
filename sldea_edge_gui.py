@@ -256,6 +256,170 @@ def elide(text, width_px, measure):
 
 
 # ---------------------------------------------------------------------------
+# ❓ HOW TO USE — the workflow panel (`#238`)
+#
+# Edge Review had no in-app answer to "what am I supposed to do here". Every
+# control could be identified and none of them said where to START, so the
+# window's own loop — pick a run, calibrate, work the queue, Save — was
+# folklore. This is that loop, written for the operator who has just opened
+# the window, not a feature tour.
+#
+# WHERE THE WORDS LIVE, and why this is a HAND-KEPT COPY (`#238` decision).
+# The repo already has a manual pipeline whose written copy is
+# docs/manual-src/content.json, so a second copy of workflow prose can drift
+# from it — this project has been bitten by one label living in five
+# hand-kept places (gui.py, the telemetry LabelFrame). Three options were on
+# the table; the panel is a hand-kept copy, deliberately, because:
+#
+#   * content.json is MANUAL copy, not app copy. Its Edge Review material
+#     sits inside one "Companion tools" area shared with the tuner, the
+#     diagnostic and the plot tool, and its `workflow` list is that whole
+#     tool-chain in the manual's voice. There is no per-window workflow node
+#     to source, and inventing one would be inventing an app-facing schema
+#     inside a docs-build input.
+#   * Sourcing the panel from content.json at runtime would make a
+#     docs/ build input a RUNTIME dependency of the review program, with a
+#     new failure mode (missing/renamed file -> an empty help window) for a
+#     surface whose whole job is to be there when someone is lost.
+#   * content.json is a RELEASE-CADENCE artifact and is already behind the
+#     code: it still describes the scale entry point as "📏 Calibrate…" and
+#     tells the operator to "click the resting disc's two opposite edges",
+#     which is the pre-#215 flow. Text that ships in the same commit as the
+#     code it describes cannot lag it by a release; text pulled from
+#     content.json would have put that stale instruction on screen.
+#
+# So: the panel is SHORT and points at the manual for depth, the words live
+# in ONE place (HOWTO_SECTIONS, right here, next to the code they describe),
+# and docs/manual-src/README.md names this constant in the release checklist
+# so the manual and the panel move together. HOWTO_QUOTED_CONTROLS is the
+# anti-drift latch: every on-screen control the text names is listed there
+# and the tests assert those strings are still real widget labels.
+#
+# Every factual claim below is load-bearing and was checked against the code
+# before it was written; wrong help is worse than none. In particular the
+# "nothing is written until Save" line carries its own exception, because
+# a re-anchor on a saved run DOES write data.csv immediately
+# (_reanchor_scale).
+# ---------------------------------------------------------------------------
+
+HOWTO_BTN_TEXT = "❓ How to use…"
+HOWTO_TITLE = "Edge Review — how to use"
+HOWTO_W = 860                       # sized for a 1080p bench screen; the
+HOWTO_H = 700                       # height is clamped to the real screen
+
+# The on-screen controls the panel names by their exact label. A renamed
+# button must rename them here too, or the help sends the operator hunting
+# for a control that no longer exists (the failure mode that made the
+# telemetry LabelFrame's five copies worth a comment). Tested both ways:
+# each string appears in the text AND is a live widget label.
+HOWTO_QUOTED_CONTROLS = (
+    "▶ Detect Edges",
+    "📏 Calibrate / re-anchor…",
+    "💾 Save to data.csv…",
+    "Next unreviewed",
+)
+
+HOWTO_SECTIONS = [
+    ("Edge Review turns a run's photos into measured areas", [
+        "The machine measures; your job is to check its work and fix what "
+        "it got wrong. Nothing from a review pass reaches data.csv until "
+        "you press 💾 Save to data.csv… — the one exception is a re-anchor "
+        "on an already-saved run, which says so on its own button before "
+        "it writes.",
+    ]),
+    ("The loop", [
+        "1.   Pick the run in the Run box at the top. Runs that already "
+        "carry measured areas are marked ✓ processed.",
+
+        "2.   Press ▶ Detect Edges. Calibration comes first: the camera "
+        "zoom moves between runs, so Detect diverts to the scale dialog "
+        "until this run has its own px→mm anchor. The dialog opens on the "
+        "machine's own fit of the resting disc, and the job it asks of you "
+        "is to JUDGE that circle, not to measure the disc again. Measuring "
+        "by hand is the fallback for when the fit refuses, and it is "
+        "measurably worse — roughly 1 % of diameter per attempt against "
+        "the fit's 0.03–0.80 % residual, because the disc edge is a ~60 px "
+        "gradient with no line to click. ✔ Accept, and detection starts on "
+        "its own.",
+
+        "3.   Work the review queue. Confident frames are accepted "
+        "automatically; the rest wait for you. Keys 1 / 2 / 3 pick "
+        "candidate A / B / C, Enter accepts and moves on, D (or 4) opens "
+        "the hand tracer, R rejects. Next unreviewed jumps to the next "
+        "frame that still needs a human.",
+
+        "4.   💾 Save to data.csv… when the queue is empty. A .bak is kept, "
+        "and the confirm prompt says what is about to be written and how "
+        "many frames will be renamed before you answer.",
+    ]),
+    ("Three things that cost people real time", [
+        "•   Wash-out frames are TRACED, not rejected. Above about 5.5 kV "
+        "the ink boundary washes out and no boundary-shaped candidate can "
+        "exist — that is the frame being what it is, not the detector "
+        "failing, and your trace IS the measurement there. Reject means "
+        "something narrower: no honest boundary can be drawn even by hand "
+        "(occlusion, breakdown debris, a corrupt frame). Rejecting a "
+        "wash-out frame silently discards a real data point, and it is the "
+        "one instruction a new operator gets wrong.",
+
+        "•   ✔ Accept in the scale dialog only STAGES the anchor — the "
+        "Save is what writes it. Nothing on screen implies that, so it is "
+        "worth over-learning: on a live run on 2026-08-06 an operator "
+        "accepted a corrected fit, closed the window before saving, and "
+        "the correction was lost. If you accepted a scale, Save before you "
+        "close. (The dialog's own primary button says which one you are "
+        "in: \"applied at Save\" versus \"RE-ANCHOR NOW\".)",
+
+        "•   A wrong scale does not mean re-reviewing the run. On a run "
+        "that is already saved, carries pixel measurements and has no "
+        "review pass open, 📏 Calibrate / re-anchor… re-derives every mm² "
+        "straight from the pixels already in data.csv — no detection, no "
+        "second pass over the queue. Which of the two the button is about "
+        "to do follows the run's state and is named in the dialog's title, "
+        "on its primary button and in its confirmation.",
+    ]),
+    ("The two numbers on every candidate line", [
+        ('code', "A: disc-fit   12345 px²   conf 0.87   w1.2"),
+
+        "•   conf is the detector's own 0–1 opinion of that outline, built "
+        "from how solid the shape is, how hard the edge steps, whether the "
+        "other candidates agree with it and whether its interior is "
+        "wrinkled. At or above accept_conf (0.75 by default) a frame is "
+        "auto-accepted; below it, the frame comes to you. It is a score, "
+        "not a probability — a confident wrong answer is possible, which "
+        "is exactly why the queue exists.",
+
+        "•   w is the wrinkle index: the texture inside the outline "
+        "compared with the same patch of the 0 kV baseline. 1.0 means no "
+        "texture change at all. At or above wrinkle_ratio (1.4 by default) "
+        "the frame counts as wrinkle-mode, and since the lab defines the "
+        "active area AS the buckled region, a wrinkled interior is "
+        "evidence that the outline is sitting on the right thing.",
+    ]),
+    ("If you need more than this", [
+        "The illustrated manual has the screenshots, the tuner and the "
+        "rest of the tool chain: docs/digital-multitool-manual.pdf in the "
+        "repo (or the copy handed out at the bench), section \"Companion "
+        "tools\".",
+    ]),
+]
+
+
+def howto_text():
+    """The whole panel as plain text, in reading order.
+
+    A paragraph is either a plain string or a ('code', text) pair (the one
+    literal example of a candidate line, which is rendered in a fixed font
+    and must not be reflowed). This is the single reader for the words, so
+    the headless tests check exactly what the window renders."""
+    out = []
+    for heading, paras in HOWTO_SECTIONS:
+        out.append(heading)
+        out.extend(p[1] if isinstance(p, tuple) else p for p in paras)
+    return '\n'.join(out)
+
+
+# ---------------------------------------------------------------------------
 # the 📏 fit-a-circle calibration (#215) — pure geometry, no Tk
 #
 # The operator sits a thick-stroke circle on the resting disc edge, three
@@ -1125,6 +1289,10 @@ class EdgeReviewApp:
         # gate dialog would chain a second detect worker (review 2026-08-05)
         self._cal_probe = None  # the live calibration dialog's own state,
         # published for the tests that drive it (see _calibrate_scale)
+        self._howto_win = None  # ❓ How to use (`#238`) — singleton, and
+        # NON-modal on purpose: the whole point is to read it beside the
+        # window while working, not instead of it
+        self._howto_scroll = None      # its canvas, published for the tests
         self._build_ui()
         start = path or DEFAULT_PARENT
         self._populate_runs(start)
@@ -1248,6 +1416,18 @@ class EdgeReviewApp:
         self.status = tk.Label(self.root, text="idle", bd=1, relief=tk.SUNKEN,
                                anchor='w')
         self.status.pack(side=tk.BOTTOM, fill='x')
+        # ❓ How to use — BOTTOM-RIGHT of the window (`#238`). Packed at the
+        # BOTTOM *after* the status strip on purpose: with side=BOTTOM each
+        # slave takes the bottom of what is left, so the strip keeps the
+        # window's own bottom edge and this row sits directly above it,
+        # flush right. Nothing above is touched — the top bar is where the
+        # RUN's controls live, and a "where do I start" affordance that sat
+        # among them would be one more thing to read before starting.
+        foot = ttk.Frame(self.root, padding=(6, 3))
+        foot.pack(side=tk.BOTTOM, fill='x')
+        self.howto_btn = ttk.Button(foot, text=HOWTO_BTN_TEXT,
+                                    command=self._howto)
+        self.howto_btn.pack(side=tk.RIGHT)
 
         for key, fn in (('<Key-1>', lambda e: self._pick_k(0)),
                         ('<Key-2>', lambda e: self._pick_k(1)),
@@ -5625,6 +5805,113 @@ class EdgeReviewApp:
         }
 
     # ---------------- advanced settings ----------------
+    def _howto(self):
+        """❓ How to use — the workflow panel (`#238`).
+
+        SINGLETON like Advanced… (#176) and NON-MODAL, deliberately: this is
+        read BESIDE the window while working — an operator who has just been
+        told that a wash-out frame gets traced needs the trace controls live
+        while the sentence is still on screen. It takes no grab and blocks
+        nothing.
+
+        It also owns no key bindings of the main window. The review keys
+        (1/2/3, R, D, Enter) are bound on the review root, and Tk's bindtag
+        chain for a widget inside THIS Toplevel does not include that root —
+        so typing in the help window can never accept or reject a frame.
+
+        Fail-CLOSED construction, the lesson from the calibration singleton:
+        the handle is published only once the window is fully built, and a
+        failure mid-build destroys the half-built Toplevel rather than
+        leaving a corpse that every later click would lift and return from.
+
+        The words are HOWTO_SECTIONS; see the block comment there for why
+        they are a hand-kept copy rather than being sourced from
+        docs/manual-src/content.json."""
+        if self._howto_win is not None and self._howto_win.winfo_exists():
+            self._howto_win.lift()
+            self._howto_win.focus_set()
+            return
+        BG, FG, HEAD = '#ffffff', '#1a1a1a', '#1f3a5f'
+        win = tk.Toplevel(self.root)
+        try:
+            win.title(HOWTO_TITLE)
+            win.transient(self.root)     # stays with its window; no grab
+            # Sized for a 1080p bench screen and CLAMPED to the real one, so
+            # a smaller/rotated bench display cannot get a window taller
+            # than itself with its close button off-screen.
+            h = max(340, min(HOWTO_H, self.root.winfo_screenheight() - 180))
+            w = max(420, min(HOWTO_W, self.root.winfo_screenwidth() - 80))
+            win.geometry(f"{w}x{h}")
+            win.minsize(420, 300)
+            outer = ttk.Frame(win)
+            outer.pack(fill='both', expand=True)
+            cv = tk.Canvas(outer, bg=BG, highlightthickness=0, bd=0)
+            bar = ttk.Scrollbar(outer, orient='vertical', command=cv.yview)
+            cv.configure(yscrollcommand=bar.set)
+            bar.pack(side=tk.RIGHT, fill='y')
+            cv.pack(side=tk.LEFT, fill='both', expand=True)
+            body = tk.Frame(cv, bg=BG, padx=18, pady=14)
+            item = cv.create_window((0, 0), window=body, anchor='nw')
+
+            wrapped = []                 # labels that must reflow on resize
+            for si, (heading, paras) in enumerate(HOWTO_SECTIONS):
+                tk.Label(body, text=heading, bg=BG, fg=HEAD, anchor='w',
+                         justify='left',
+                         font=('TkDefaultFont', 11, 'bold')).pack(
+                    fill='x', pady=((14 if si else 0), 4))
+                for p in paras:
+                    if isinstance(p, tuple):     # the candidate-line example
+                        tk.Label(body, text=p[1], bg='#f2f4f7', fg=FG,
+                                 anchor='w', justify='left', padx=8, pady=4,
+                                 font='TkFixedFont').pack(
+                            fill='x', pady=(2, 6))
+                        continue
+                    lb = tk.Label(body, text=p, bg=BG, fg=FG, anchor='w',
+                                  justify='left',
+                                  font=('TkDefaultFont', 10))
+                    lb.pack(fill='x', pady=(0, 7))
+                    wrapped.append(lb)
+
+            def refit(_e=None):
+                # the body tracks the canvas width so the text reflows with
+                # the window instead of being clipped by a fixed wraplength
+                cw = max(200, cv.winfo_width())
+                cv.itemconfigure(item, width=cw)
+                for lb in wrapped:
+                    lb.config(wraplength=cw - 40)
+                cv.configure(scrollregion=cv.bbox('all'))
+
+            cv.bind('<Configure>', refit)
+            body.bind('<Configure>',
+                      lambda _e: cv.configure(scrollregion=cv.bbox('all')))
+
+            def wheel(e):
+                cv.yview_scroll(-1 if e.delta > 0 else 1, 'units')
+
+            # bound on the TOPLEVEL, never bind_all: a wheel binding on the
+            # whole app would scroll this panel from over the review canvas
+            win.bind('<MouseWheel>', wheel)                      # Win/macOS
+            win.bind('<Button-4>', lambda e: cv.yview_scroll(-1, 'units'))
+            win.bind('<Button-5>', lambda e: cv.yview_scroll(1, 'units'))
+            win.bind('<Up>', lambda e: cv.yview_scroll(-1, 'units'))
+            win.bind('<Down>', lambda e: cv.yview_scroll(1, 'units'))
+            win.bind('<Prior>', lambda e: cv.yview_scroll(-1, 'pages'))
+            win.bind('<Next>', lambda e: cv.yview_scroll(1, 'pages'))
+            win.bind('<Escape>', lambda e: win.destroy())
+
+            foot = ttk.Frame(win, padding=(8, 6))
+            foot.pack(side=tk.BOTTOM, fill='x')
+            ttk.Button(foot, text="Close",
+                       command=win.destroy).pack(side=tk.RIGHT)
+            self._howto_scroll = cv     # published for the tests
+            refit()
+            win.update_idletasks()
+            refit()                     # once more with real geometry
+        except Exception:
+            win.destroy()               # never publish a half-built window
+            raise
+        self._howto_win = win
+
     def _advanced(self):
         # SINGLETON (#176): stacked settings dialogs each hold the
         # values from their open time, so Apply on a stale one silently

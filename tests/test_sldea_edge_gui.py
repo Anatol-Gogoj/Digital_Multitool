@@ -3858,6 +3858,166 @@ def test_the_second_click_banks_the_round_and_Back_undoes_it():
     assert 'Finish' in saw['live'], saw['live']
 
 
+# ---------------------------------------------------------------------------
+# `#238` -- the How-to-use workflow panel
+#
+# NOTE for anyone extending these: never interpolate the panel's text into an
+# assertion message. The words carry emoji and en dashes, and a failure whose
+# message cannot be encoded to cp1252 replaces the real failure with a
+# UnicodeEncodeError on this repo's console.
+# ---------------------------------------------------------------------------
+
+def test_howto_text_is_one_copy_and_carries_the_three_traps():
+    """`#238`: the panel's words live in ONE module constant, they contain
+    the campaign loop and the three things that cost real time, and the two
+    thresholds they quote are read back against the code's own defaults --
+    so a settings change cannot leave the help quoting a stale number.
+
+    Headless: the words are data, and the point of keeping them as data is
+    that they are testable without a display."""
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    assert gui.HOWTO_SECTIONS, "no help text at all"
+    for heading, paras in gui.HOWTO_SECTIONS:
+        assert isinstance(heading, str) and heading
+        assert paras, "a heading with nothing under it"
+        for p in paras:
+            assert isinstance(p, str) or (
+                isinstance(p, tuple) and len(p) == 2 and p[0] == 'code'), p
+    t = gui.howto_text()
+
+    # THE LOOP, all four steps, in order
+    for n in ('1.', '2.', '3.', '4.'):
+        assert n in t, f"step {n} missing from the loop"
+    assert t.index('1.') < t.index('2.') < t.index('3.') < t.index('4.')
+
+    # TRAP 1 -- wash-out frames are traced, not rejected. This is the single
+    # instruction a new operator gets wrong, and the reason is that the
+    # missing boundary is the frame, not a fault.
+    assert 'TRACED, not rejected' in t
+    assert '5.5 kV' in t
+    assert 'Reject means' in t
+
+    # TRAP 2 -- Accept stages, Save writes (a live run's correction was lost
+    # to this on 2026-08-06)
+    assert 'STAGES the anchor' in t
+    assert '2026-08-06' in t
+    assert 'Save before you close' in t
+
+    # TRAP 3 -- the scale-only re-anchor skips detection
+    assert 'no detection' in t and 're-derives every mm' in t
+
+    # THE BLANKET CLAIM MUST CARRY ITS EXCEPTION. "Nothing is written until
+    # Save" is false for a re-anchor on a saved run, which commits data.csv
+    # the moment it is confirmed (_reanchor_scale). If the sentence is ever
+    # tightened into the simple, wrong version, this fails.
+    assert 'until' in t and 'exception' in t, "the Save claim lost its caveat"
+
+    # THE TWO NUMBERS, checked against the code rather than retyped
+    assert f"accept_conf ({se.DEFAULT_SETTINGS['accept_conf']:g}" in t
+    assert f"wrinkle_ratio ({se.DEFAULT_SETTINGS['wrinkle_ratio']:g}" in t
+    assert '1.0 means no' in t, "the w baseline value is not stated"
+    assert 'not a probability' in t
+
+    # SHORT, on purpose: it has to read as help, not as documentation, and
+    # it points at the manual for the rest
+    assert 'digital-multitool-manual.pdf' in t
+    assert len(t) < 5000, f"the panel has grown into documentation: {len(t)}"
+
+    # EVERY on-screen control the text names is listed for the drift check
+    for label in gui.HOWTO_QUOTED_CONTROLS:
+        assert label in t, "a quoted control is not actually quoted"
+
+
+def test_howto_panel_is_a_singleton_scrolls_and_names_live_controls():
+    """`#238`: the button sits at the bottom (the status strip keeps the
+    window's own bottom edge), re-clicking fronts the live panel instead of
+    stacking a second one, the panel takes NO grab, it really does scroll,
+    and every control it names by label is a control that still exists.
+
+    That last one is the drift latch: `annotate.py` merely PRINTS 'no match'
+    when a button is renamed, and the manual silently loses a callout. Help
+    that sends an operator hunting for a button that no longer exists is
+    worse than no help, so it fails here instead."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_gui_howto_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None, "synthetic run failed to load"
+
+        # ---- the button: bottom, right, and not in the top bar ----------
+        assert app.howto_btn.cget('text') == gui.HOWTO_BTN_TEXT
+        assert app.howto_btn.pack_info()['side'] == 'right'
+        foot = app.howto_btn.master
+        assert foot.pack_info()['side'] == 'bottom'
+        # The status strip must still own the window's own bottom edge, and
+        # with side=bottom that is decided by PACK ORDER (each slave takes
+        # the bottom of what is left), so the order is what is asserted --
+        # a withdrawn root has no computed geometry to measure.
+        slaves = root.pack_slaves()
+        assert slaves.index(app.status) < slaves.index(foot), "status moved"
+        assert app.status.pack_info()['side'] == 'bottom'
+
+        # ---- singleton, and non-modal ----------------------------------
+        assert app._howto_win is None
+        app._howto()
+        w1 = app._howto_win
+        assert w1 is not None and w1.winfo_exists()
+        assert root.grab_current() is None, "the help panel took a grab"
+        app._howto()
+        assert app._howto_win is w1, "a second panel was stacked"
+        tops = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)]
+        assert len(tops) == 1, f"stacked dialogs: {len(tops)}"
+
+        # ---- it scrolls: the content is taller than the viewport --------
+        cv = app._howto_scroll
+        root.update_idletasks()
+        w1.update_idletasks()
+        region = [float(v) for v in str(cv.cget('scrollregion')).split()]
+        assert len(region) == 4, "no scrollregion: nothing would scroll"
+        assert region[3] > 300, "the scrollregion is empty"
+        assert w1.bind('<Escape>'), "Escape does not close the panel"
+        assert w1.bind('<MouseWheel>'), "the wheel does not scroll the panel"
+        # sized for a 1080p bench screen, and never taller than the screen
+        assert w1.winfo_reqheight() <= root.winfo_screenheight()
+
+        # ---- opening help changed nothing about the review -------------
+        assert not app.results and app.manual_ref is None
+
+        # ---- a closed panel is not a live singleton --------------------
+        w1.destroy()
+        app._howto()
+        assert app._howto_win is not w1 and app._howto_win.winfo_exists()
+        app._howto_win.destroy()
+
+        # ---- every control the text names is a real widget label -------
+        texts = []
+
+        def walk(w):
+            for ch in w.winfo_children():
+                try:
+                    texts.append(str(ch.cget('text')))
+                except tk.TclError:
+                    pass
+                walk(ch)
+
+        walk(root)
+        for label in gui.HOWTO_QUOTED_CONTROLS:
+            assert label in texts, ("the help names a control that no "
+                                    "longer exists on screen")
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     for fn in fns:

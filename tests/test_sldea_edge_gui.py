@@ -3858,6 +3858,178 @@ def test_the_second_click_banks_the_round_and_Back_undoes_it():
     assert 'Finish' in saw['live'], saw['live']
 
 
+def test_detect_edges_is_the_primary_action_and_gates_on_a_run():
+    """`#216`: ▶ Detect Edges must READ as the one thing to press, and
+    its affordance must double as its state.
+
+    - it carries an accent style the plain buttons do not, and that style
+      really resolves to a bold face (a style name nothing configures
+      would silently render identically);
+    - it is DISABLED with no run loaded — including the cockpit case, a
+      parent folder holding no runs — and live once a run is picked;
+    - the detect-in-flight lock and the no-run gate are ANDed, so
+      _detect_ui(busy=False) on a runless app may not re-arm it (the
+      regression that made the old single-writer line wrong);
+    - the empty canvas carries the hint, and the hint goes away as soon
+      as a review card occupies the canvas."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    from tkinter import ttk, font as tkfont
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_gui_primary_')
+    try:
+        # ---- COCKPIT MODE on an EMPTY parent: no run, no live Detect ---
+        empty = os.path.join(d, 'empty_parent')
+        os.makedirs(empty)
+        app = gui.EdgeReviewApp(root, path=empty)
+        assert app.run is None, "an empty parent must load no run"
+        assert str(app.detect_btn['state']) == 'disabled', \
+            "Detect was live with nothing to detect"
+        assert app._tips['detect_btn'].text == gui.TIPS['detect_btn_disabled']
+        assert app._hint == gui.HINT_PICK_RUN, app._hint
+        # the busy lock releasing must NOT re-arm a runless button
+        app._detect_ui(busy=False)
+        assert str(app.detect_btn['state']) == 'disabled', \
+            "_detect_ui re-armed Detect on a run-less cockpit"
+        # ---- the accent is real, not just a style name ------------------
+        assert str(app.detect_btn['style']) == 'Primary.TButton'
+        assert str(app.browse_btn['style']) == ''      # plain, by contrast
+        assert str(app.adv_btn['style']) == 'Secondary.TButton'
+        assert str(app.scale_btn['style']) == 'Secondary.TButton'
+        st = ttk.Style()
+        fname = st.lookup('Primary.TButton', 'font')
+        assert fname, "Primary.TButton configures no font"
+        assert tkfont.nametofont(fname).cget('weight') == 'bold', \
+            "the accent style is not bold, so it renders as a plain button"
+        assert st.lookup('Primary.TButton', 'foreground') == gui.PRIMARY_FG
+        # ...and it makes the button visibly bigger than a plain one
+        probe = ttk.Button(root, text=str(app.detect_btn['text']))
+        probe.update_idletasks()
+        app.detect_btn.update_idletasks()
+        assert (app.detect_btn.winfo_reqwidth() > probe.winfo_reqwidth()
+                and app.detect_btn.winfo_reqheight()
+                > probe.winfo_reqheight()), (
+            app.detect_btn.winfo_reqwidth(), probe.winfo_reqwidth())
+        probe.destroy()
+        # ---- pick a run: Detect arms, and the hint changes with it ------
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app._populate_runs(d)
+        assert app.run is not None, "the run did not load"
+        assert str(app.detect_btn['state']) == 'normal'
+        assert app._tips['detect_btn'].text == gui.TIPS['detect_btn']
+        assert app._hint == gui.HINT_DETECT, app._hint
+        assert app.canvas.find_withtag('hint'), "the hint was never drawn"
+        # ONE STORY: neither the hint nor the status line may tell the
+        # operator to calibrate BEFORE pressing Detect (the gate chains)
+        for line in (app._hint, str(app.status['text'])):
+            assert 'Detect Edges' in line, line
+            assert 'then Detect' not in line, line
+        # ---- mid-detect: same button, a tip that says why ---------------
+        app._detect_busy = True
+        app._detect_ui(busy=True)
+        assert str(app.detect_btn['state']) == 'disabled'
+        assert app._tips['detect_btn'].text == gui.TIPS['detect_btn_busy']
+        app._detect_busy = False
+        app._detect_ui(busy=False)
+        assert str(app.detect_btn['state']) == 'normal'
+        # ---- a card on the canvas retires the hint ----------------------
+        app.detect_all_sync()
+        assert app._hint is None, app._hint
+        assert not app.canvas.find_withtag('hint')
+        # ---- and a failed run switch puts it back -----------------------
+        real_mb = gui.messagebox
+        gui.messagebox = _StubMB()
+        try:
+            os.remove(os.path.join(run, 'data.csv'))
+            app._pick_run()
+        finally:
+            gui.messagebox = real_mb
+        assert app.run is None
+        assert str(app.detect_btn['state']) == 'disabled'
+        assert app._hint == gui.HINT_PICK_RUN, app._hint
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_every_reviewed_control_explains_itself_on_hover():
+    """`#216`: hover help on the whole top bar and the whole review card
+    -- and the two claims that are easy to get wrong.
+
+    The 💾 Save tip must say WHY the button is grey (it blocks on the
+    detection pass AND on the scale gate), and the D slot's tip must
+    quote the keys that are really bound. Coverage is asserted against
+    the app's live control list, so a control added without a tooltip
+    fails here rather than shipping mute."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_gui_tips_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None, "synthetic run failed to load"
+        # EVERY control the issue names carries a live tooltip
+        want = ['run_box', 'browse_btn', 'detect_btn', 'adv_btn',
+                'scale_btn', 'save_btn', 'accept_btn', 'reject_btn',
+                'prev_btn', 'next_btn', 'unrev_btn',
+                'cand0', 'cand1', 'cand2', 'trace']
+        missing = [k for k in want if k not in app._tips]
+        assert not missing, f"no tooltip on: {missing}"
+        for k in want:
+            assert app._tips[k].text.strip(), f"empty tooltip on {k}"
+        # ...on the widget itself, not merely in a dict
+        for widget in (app.run_lbl, app.run_box, app.browse_btn,
+                       app.detect_btn, app.adv_btn, app.scale_btn,
+                       app.save_btn, app.accept_btn, app.reject_btn,
+                       app.prev_btn, app.next_btn, app.unrev_btn,
+                       *app.cand_radios):
+            assert str(widget.bind('<Enter>')).strip(), \
+                f"{widget} has no hover binding"
+        # the D slot quotes the keys that are ACTUALLY bound to _trace
+        bound = {k for k in ('4', 'd', 'D', 't', 'T')
+                 if str(root.bind(f'<Key-{k}>')).strip()}
+        assert bound == {'4', 'd', 'D', 't', 'T'}, bound
+        for key in ('4', 'D', 'T'):
+            assert key in app._tips['trace'].text, app._tips['trace'].text
+        # ...and says Done only STAGES: Accept is what commits (#172)
+        assert 'Accept' in app._tips['trace'].text
+        # A/B/C name their own key and refuse to oversell conf
+        for k, letter in enumerate('ABC'):
+            txt = app._tips[f'cand{k}'].text
+            assert txt.startswith(f"Machine candidate {letter}"), txt
+            assert str(k + 1) in txt, txt
+        assert 'not a probability' in app._tips['cand0'].text
+        # 💾 Save explains its OWN grey: the pass and the scale gate
+        save_tip = app._tips['save_btn'].text
+        assert str(app.save_btn['state']) == 'disabled'
+        assert '▶ Detect Edges' in save_tip and '📏' in save_tip, save_tip
+        assert '.bak' in save_tip, save_tip
+        # the popup really renders, with that text in it
+        tip = app._tips['save_btn']
+        tip._show()
+        try:
+            assert tip._tip is not None, "no tooltip window appeared"
+            labels = _widgets(tip._tip, 'label')
+            assert labels and str(labels[0]['text']) == save_tip
+        finally:
+            tip._hide()
+        assert tip._tip is None, "the tooltip did not go away"
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     for fn in fns:

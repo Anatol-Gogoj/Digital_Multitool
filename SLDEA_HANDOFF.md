@@ -13,6 +13,79 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## Calibration dialog: the measuring modes lose their wall of text, and the disagreement gate becomes a glance (2026-08-07)
+
+**TL;DR:** The operator drove the two hand-measurement modes on real data and
+said what they had already said about the verify mode: too much text. The
+verify mode was showing 2 lines and the circle and two-point modes were
+showing 9 each, so the same trim was applied to them — they now show two short
+lines plus the live readout, and the gate block appears only when it has a
+warning to give. The "Rounds disagree" prompt went from 7 lines to 3: the
+round σ, what it implies as area error against the budget, and the choice.
+Nothing about what is measured, gated or recorded changed — `setup.txt`, the
+calibration log and the status line come out byte-identical.
+
+Observation → decision:
+
+- **The measuring modes were never decluttered, only the verify mode was.**
+  Measured through the real dialog at a simulated 1080p: verify 2 lines / 124
+  chars, circle **9 lines / 1112 chars**, two-point **9 lines / 1349 chars**.
+  → the line budget is no longer the verify block's private rule. It is the
+  SCREEN's rule (`CAL_SCREEN_MAX_LINES` = 4 in every mode), and what survives
+  in a measuring mode is only what a person needs *while placing points or
+  sizing a circle*: **which round they are on** (the round header, which now
+  also carries the nominal disc size and the folded action's tag) and **the
+  immediate instruction** (one line: the gesture plus the aim rule), above the
+  live readout. Result: **3 lines / 321 and 369 chars**, 4 in the worst
+  ordinary case. Window height 907 → 862 (circle) and 955 → 862 (two-point).
+- **What came off was reference material, and it is named rather than
+  forgotten:** what the method is for, why the rounds are blind, why the view
+  rotates, and the key-binding catalogue. The two keys that change a
+  *measurement* are still named where they are needed — Z by the live line's
+  own sub-1:1 warning, Backspace on the ◀ Back button — and the full
+  catalogue is in `_calibrate_scale`'s docstring. The round header's third
+  copy of "use the ✔ Finish button" went too; the button says it.
+- **The gate block is warnings-only now**, so on an ordinary run it is not
+  packed at all and the picture keeps the height. Its two standing lines
+  moved rather than died: the folded action's tag (`scale_intent_banner`,
+  shortened from a 127-character paragraph to a one-line tag) and the nominal
+  disc size are both on the round header, so the CALIBRATE/RE-ANCHOR
+  asymmetry is still stated three times over — header, window title, primary
+  button — plus in the re-anchor confirmation. Its conditional warnings were
+  compressed to one line each, and the prior-anchor and px-rows warnings now
+  share one line exactly as the verify mode's consequence line does.
+- **The recorded anchor's DIAMETER came off that line, and that is a small
+  win rather than a loss.** It is in `setup.txt`, which is where P reads it
+  from; standing on screen through every round of a *blind* measurement it
+  was a printed target to steer onto. What the operator needs there is that
+  an anchor exists and that P reuses it.
+- **"Rounds disagree" was a wall at the worst moment.** 7 non-blank lines /
+  862 chars, met on real data. → three lines: `σ = x % of diameter → ±y % in
+  area (budget ±0.8 %)`, the round count that would clear the gate (kept
+  because it is a number and it decides *which* of the three answers is
+  right), and `Yes = refit all n rounds · No = accept as measured · Cancel`.
+  Rendered: 426×400 → 418×192. The derivation went to §2.1a, where a reader
+  who wants it will be. **Two properties are unchanged and load-bearing:** it
+  still quotes PERCENTAGES ONLY, because a refit is one of its answers and a
+  disclosed diameter would defeat the blind rounds; and it still has
+  `default='cancel'`, because `<Return>` reaching an accept on this exact
+  prompt is a demonstrated failure, not a hypothetical.
+- **Nothing numeric left the record — diffed, not assumed.** A full accepted
+  round-set was driven through the real dialog in all three modes on both
+  sides of the change, dumping the calibration log in full, the `setup.txt`
+  anchor block written through the real Save builder, the `load_scale_anchor`
+  round trip and the status line: **10217 bytes, sha256
+  `28090802889def40…`, identical**. The mean's SE in diameter and the raw
+  range that came off the disagreement prompt are `se=` and `range=` in
+  `scale_calibration_log.txt` and `se_pct`/`spread_pct` in `setup.txt`; d₂ is
+  fixed by the `n=` both of them carry.
+- **Rendered and looked at**, one `ImageGrab` per dialog. Two notes for
+  whoever renders this next: a grab straight after a mode switch returns the
+  wrong mode's pixels (so open one dialog per mode with `mode=`), and on a box
+  running translucent always-on-top overlays a screen-rect grab comes back
+  with those composited over the dialog however hard it is lifted — use
+  `PrintWindow` on the Toplevel's own HWND instead.
+
 ## Scale UI: one button, self-describing method names, a leaner verify screen (2026-08-06, late)
 
 **TL;DR:** The two 📏 buttons became one, because they opened the same

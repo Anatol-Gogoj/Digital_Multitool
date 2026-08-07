@@ -1033,17 +1033,26 @@ def test_mid_round_display_never_reveals_a_previous_fit():
         for s in snaps:
             assert 'accepted so far' not in s, s
             assert 'mean' not in s.lower(), s
-            assert 'HIDDEN until the last fit' in s, s
+            # WHICH ROUND, and nothing about the ones before it. The header
+            # used to carry a sentence explaining the blinding as well; that
+            # went in the 2026-08-07 trim (`#215`) and the property it
+            # described is what the assertions above and below measure.
+            assert 'Round' in s, s
+            assert 'HIDDEN until the last fit' not in s, s
         # each round DOES show the circle currently under the cursor —
         # that is the fit being made, not a target to match
         assert 'circle: 130.0 px across' in snaps[0], snaps[0]
         assert 'circle: 140.0 px across' in snaps[1], snaps[1]
         # the spread gate is one of the questions a REFIT can answer, so
         # it too quotes only the percentage — a refit fitted against a
-        # disclosed target would be no more independent than round 2 was
+        # disclosed target would be no more independent than round 2 was.
+        # It quotes SIGMA and the AREA error since the 2026-08-07 trim; the
+        # raw range came off the prompt and is still in the log's `range=`
+        # and setup.txt's `spread_pct` (and on the reveal line below).
         assert spy.asked[0][0] == 'Rounds disagree', spy.asked
         prompt = spy.msgs[0]
-        assert '14.29%' in prompt, prompt
+        assert '8.44 %' in prompt and '% of diameter' in prompt, prompt
+        assert '9.74 %' in prompt and '% in area' in prompt, prompt
         for v in ('130.0', '140.0', '150.0'):
             assert v not in prompt, (v, prompt)
         # nor on the dialog behind it — where the only diameter on screen
@@ -1358,13 +1367,17 @@ def test_mode_b_is_blind_mid_round_and_shows_no_length_at_all():
                 assert f"{v:.0f} px" not in s, (i, v, s)
             assert 'accepted so far' not in s, s
             assert 'mean' not in s.lower(), s
-            assert 'HIDDEN until the last fit' in s, s
-            assert 'px across' not in s, s          # mode A's readout
+            # the sentence explaining the blinding came off the header in the
+            # 2026-08-07 trim (`#215`); the blinding is what the loop above
+            # measures, round by round, which is the stronger claim anyway
+            assert 'HIDDEN until the last fit' not in s, s
+            assert 'px across' not in s, s          # the circle's readout
             # what it DOES show: progress, the rotation, and the count
             # the two-point mode's LABEL is C since the 2026-08-06
             # swap (A = verify, B = circle, C = twopoint)
             assert re.search(r'Method C · Round \d of 5', s), s
-            assert 'of 2 points placed' in s, s
+            assert re.search(r'\d of 2 points', s), s            # the header
+            assert 'of 2 edge points placed' in s, s             # the readout
         # THE REVEAL, after the fitting, with sigma leading
         txt = app.status.cget('text')
         assert 'mean of 5:' in txt, txt
@@ -1530,13 +1543,42 @@ def test_mode_b_keeps_every_safety_fix_of_the_review_round():
         # the gate quotes PERCENTAGES only — a refit is one of its answers,
         # so no diameter and no average may appear in it
         prompt = spy.msgs[0]
-        assert 'σ = ' in prompt and 'standard error' in prompt, prompt
-        assert 'd₂(5) = 2.326' in prompt, prompt
+        # AT A GLANCE (`#215`, operator 2026-08-07): the round σ, what it
+        # implies as AREA error, the budget, and the three-way choice. Twelve
+        # lines of prose became three, so what is pinned is those four things
+        # and nothing else.
+        assert 'σ = ' in prompt and '% of diameter' in prompt, prompt
+        assert '% in area' in prompt and 'budget ±' in prompt, prompt
+        assert 'Yes = refit' in prompt and 'No = accept as measured' in prompt
+        assert 'Cancel' in prompt, prompt
+        # AND IT STAYS SHORT. This prompt was 7 non-blank lines / 862 chars
+        # and the operator met it on real data; three lines is what was asked
+        # for, so three is what is pinned. The per-line cap is what keeps the
+        # choice list on ONE display line -- the native message box wraps at
+        # about 70 characters, and a list that breaks mid-choice is not
+        # readable at a glance, which was the whole request.
+        body = [ln for ln in prompt.split('\n') if ln.strip()]
+        assert len(body) <= 3, (f"{len(body)} lines in the disagreement "
+                                f"prompt:\n" + prompt)
+        assert len(prompt) <= 300, (len(prompt), prompt)
+        for ln in body:
+            assert len(ln) <= 130, (len(ln), ln)
+        # ... and the DERIVATION is gone from the screen, which is where it
+        # was reference material. It is in SLDEA_MEASUREMENT §2.1a, and every
+        # number it produced is still in the record: `se=` and `range=` in
+        # scale_calibration_log.txt, `se_pct`/`spread_pct` in setup.txt, and
+        # d₂ fixed by the `n=` both of them carry.
+        for gone in ('standard error', 'd₂(5) = 2.326', 'range/d₂',
+                     'Raw range', 'SLDEA_MEASUREMENT',
+                     'stay hidden until you accept'):
+            assert gone not in prompt, (gone, prompt)
         for v in (160.0, 148.0, 136.0, 124.0, 112.0):
             assert f"{v:.1f}" not in prompt, (v, prompt)
-        # ... and it names the round count that WOULD clear it, which is
-        # the remedy only an SE gate can offer
-        assert re.search(r'\d+ rounds would meet the gate|it would take '
+        # ... and it still names the round count that WOULD clear it, which is
+        # the remedy only an SE gate can offer — and the one thing on this
+        # prompt beyond the operator's three, kept because it is a NUMBER and
+        # it decides WHICH of the three answers is right
+        assert re.search(r'\d+ rounds would meet the gate|would take '
                          r'\d+ rounds', prompt), prompt
 
         # (b) <Return> may advance a round; it must never finish
@@ -2563,6 +2605,7 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
             p = app._cal_probe
             saw['mode'] = (p['mode_var'].get(), p['st']['mode'])
             saw['text'] = _cal_display(win)
+            saw['title'] = win.title()
             saw['stretch'] = p['st']['stretch']
             btns = _cal_buttons(win)
             saw['btns'] = sorted(btns)
@@ -2631,10 +2674,21 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
                         'Nothing cross-checks it',
                         'your eye is the check'):
             assert dropped not in t, (dropped, t[:400])
-        # WHICH OF THE TWO FOLDED ACTIONS this is, said in words: the plain
-        # 📏 entry point holds the anchor for Save here and writes nothing
-        assert 'CALIBRATE' in t and 'NOTHING is written' in t, t[:300]
-        assert 'RE-ANCHOR' not in t, t[:300]
+        # WHICH OF THE TWO FOLDED ACTIONS this is: the plain 📏 entry point
+        # holds the anchor for Save here and writes nothing.
+        #
+        # ON THE BUTTON AND THE TITLE, not in the label text -- and that is a
+        # correction, not a relaxation. The verify mode has always hidden the
+        # gate block, so before the 2026-08-07 trim this assertion was
+        # reading the banner out of a label the operator could not see: it
+        # passed on text that was never on screen. The two surfaces that
+        # really carry it here are the ones checked now (and
+        # test_the_dialog_says_which_of_the_two_folded_actions_it_serves
+        # covers both intents in both kinds of mode).
+        assert 'at Save' in saw['step_text'], saw['step_text']
+        assert 'RE-ANCHOR' not in saw['step_text'], saw['step_text']
+        assert 'applied at Save' in saw['title'], saw['title']
+        assert 'RE-ANCHOR' not in saw['title'], saw['title']
         # NO VACUOUS CROSS-CHECK IS CLAIMED anywhere the operator can read
         for lie in ('apart in diam', 'mask area +0.0', 'cross-check passed',
                     '✓'):
@@ -2698,29 +2752,39 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_mode_C_screen_holds_its_four_line_budget_and_opens_zoomed():
-    """THE LINE BUDGET, through the real dialog (`#215` declutter,
-    2026-08-06 late).
+def test_every_mode_holds_the_on_screen_line_budget():
+    """THE LINE BUDGET, through the real dialog, IN ALL THREE MODES
+    (`#215`: verify decluttered 2026-08-06 late, extended to the two
+    measuring modes 2026-08-07).
 
-    Mode C was driven on a real disc and the fit was accepted as correct, so
-    the premise held -- but the operator's verdict on the screen it was
-    accepted on was "wayyyyy too busy with text and unnecessary garbage": 13
-    lines of prose wrapping to 19, above a canvas showing the 577 px disc at
-    282 px because the view opened fit-to-frame with a "below 1:1 -- press Z"
-    nag under it.
+    The verify mode was driven on a real disc and the fit was accepted as
+    correct, so the premise held -- but the operator's verdict on the screen
+    it was accepted on was "wayyyyy too busy with text and unnecessary
+    garbage": 13 lines of prose wrapping to 19, above a canvas showing the
+    577 px disc at 282 px because the view opened fit-to-frame with a "below
+    1:1 -- press Z" nag under it. That got cut to two lines.
 
-    This case exists because re-inflation is the likely regression: every
-    number cut from this screen is still in the record, so a future reader
-    of `verify_note` or the log line will see them and be tempted to put
-    them back. Four lines. The picture gets the rest.
+    Then the operator drove the two MEASURING modes on real data and said the
+    same thing about them -- "trim the wall of text". Measured at a simulated
+    1080p they were showing NINE lines each (1155 and 1393 chars) against the
+    verify mode's two, because the declutter had only ever been applied to
+    one mode's block. So the budget stops being the verify block's private
+    rule: it is the SCREEN's rule, and this case is the thing that keeps it
+    that way in every mode.
+
+    Re-inflation is the likely regression, and it is likelier in the
+    measuring modes than it was in the verify mode: every number cut is still
+    in the record, and every sentence cut was TRUE -- why the rounds are
+    blind, why the view rotates, what the keys do. A true sentence is the
+    easiest kind to put back.
 
     Pinned here rather than only on verify_evidence() because the budget is
-    a property of the SCREEN: the gate block, the round header and the live
-    readout are separate widgets, and re-inflating any of them would leave a
-    pure-function test green."""
+    a property of the SCREEN: the gate block, the instruction, the round
+    header and the live readout are four separate widgets, and re-inflating
+    any of them would leave a pure-function test green."""
     import sldea_edge_gui as gui
     import tkinter as tk
-    root = _tk_root_or_skip('mode C line budget')
+    root = _tk_root_or_skip('on-screen line budget')
     if root is None:
         return
     d = tempfile.mkdtemp(prefix='edge_cal_budget_')
@@ -2791,21 +2855,92 @@ def test_mode_C_screen_holds_its_four_line_budget_and_opens_zoomed():
 
         app.root.wait_window = poke
         app._calibrate_scale()
+        # ---- and each MEASURING mode, opened in its own dialog ------------
+        # One dialog per mode rather than a switch, so what is measured is
+        # what the operator gets when the gate opens there. (The switch path
+        # keeps its own coverage at the end of this case.)
+        for m in (CIRCLE, TWOPOINT):
+            def look(win, m=m):
+                p = app._cal_probe
+                assert p['st']['mode'] == m, (m, p['st']['mode'])
+                saw['open_' + m] = _cal_visible_lines(win)
+                saw['reqh_' + m] = win.winfo_reqheight()
+                win.destroy()
+            app.root.wait_window = look
+            app.manual_ref = None
+            app._calibrate_scale(mode=m)
+
+        # ---- THE BUDGET, every mode --------------------------------------
+        assert gui.CAL_SCREEN_MAX_LINES == 4, gui.CAL_SCREEN_MAX_LINES
+        assert gui.CAL_VERIFY_MAX_LINES == gui.CAL_SCREEN_MAX_LINES
+        for m, got in ((VERIFY, saw['lines']),
+                       (CIRCLE, saw['open_' + CIRCLE]),
+                       (TWOPOINT, saw['open_' + TWOPOINT])):
+            assert got, f"mode {m} put NOTHING on screen"
+            assert len(got) <= gui.CAL_SCREEN_MAX_LINES, (
+                f"mode {m}: {len(got)} lines on screen, budget is "
+                f"{gui.CAL_SCREEN_MAX_LINES}:\n" + '\n'.join(got))
+            # SHORT lines, not four paragraphs. The longest legitimate line
+            # is the compressed consequence line (~180 chars); 200 leaves
+            # room for wording without room for a re-inflated paragraph.
+            for ln in got:
+                assert len(ln) <= gui.CAL_SCREEN_MAX_LINE_CHARS, (
+                    m, len(ln), ln)
+            # TIGHT, because a budget with slack in it is a budget that gets
+            # spent. Two numbers, not one: a measuring mode carries a live
+            # per-click readout and a gesture instruction that the verify
+            # mode has no equivalent of.
+            cap = (gui.CAL_SCREEN_MAX_CHARS if m == VERIFY
+                   else gui.CAL_SCREEN_MAX_CHARS_MEASURING)
+            assert sum(len(ln) for ln in got) <= cap, (
+                f"mode {m}: {sum(len(ln) for ln in got)} chars on screen "
+                f"(cap {cap}):\n" + '\n'.join(got))
+
+        # ---- THE MEASURING MODES: what has to survive, and what went -----
+        for m, gesture in ((CIRCLE, 'a handle to resize'),
+                           (TWOPOINT, 'the point OPPOSITE it')):
+            j = '\n'.join(saw['open_' + m])
+            # WHICH ROUND THEY ARE ON, and THE IMMEDIATE INSTRUCTION -- the
+            # two things the operator asked to keep.
+            assert f"Method {'B' if m == CIRCLE else 'C'} · Round 1 of" in j, j
+            assert gesture in j, j
+            assert 'HALF-HEIGHT' in j, ("the aim rule went: it is the one "
+                                        "instruction here with a measured "
+                                        "cost behind it\n" + j)
+            # the disc it is being called, and its one warning's home
+            assert 'disc 16 mm' in j, j
+            # the folded action, still stated where the operator is looking
+            assert 'NOTHING is written' in j, (
+                "the measuring modes lost the folded action's tag\n" + j)
+            # the consequence, ONE line, both halves of it
+            assert 'RE-SCALES every recorded mm²' in j, j
+            assert 'press P to REUSE it' in j, j
+            # ... and the REFERENCE MATERIAL that came off (`#215`,
+            # 2026-08-07). Every one of these is still true; that is exactly
+            # why it is worth pinning that it is not on screen.
+            for gone in (
+                    # why the rounds are blind / randomised
+                    'HIDDEN until the last fit', 'scatter is a fiction',
+                    'independent',
+                    # why the view rotates
+                    'random one', 'fixed error',
+                    # the key catalogue
+                    'Ctrl+wheel', 'right-drag', 'F fits', 'Z = 1:1',
+                    'Esc cancels', 'Shift = coarse', 'Shift+arrows',
+                    # the standing prose the gate block used to open with
+                    'SCALE GATE', 'nominal disc', 'held for this session',
+                    'METHOD B (circle)', 'METHOD C (two points)',
+                    # the round header's third copy of the Finish button
+                    'this is the LAST round',
+                    # the recorded anchor's DIAMETER: a printed target
+                    # standing on screen through a blind measurement
+                    '163.5 px', 'mm/px, saved'):
+                assert gone not in j, (m, gone, j)
+            # the window still fits a 1080p bench screen
+            assert saw['reqh_' + m] <= root.winfo_screenheight(), (
+                m, saw['reqh_' + m], root.winfo_screenheight())
+
         lines = saw['lines']
-        assert lines, "mode C put NOTHING on screen"
-        assert len(lines) <= gui.CAL_VERIFY_MAX_LINES == 4, (
-            f"{len(lines)} lines on screen, budget is "
-            f"{gui.CAL_VERIFY_MAX_LINES}:\n" + '\n'.join(lines))
-        # SHORT lines, not four paragraphs. The longest legitimate line is
-        # the compressed honesty sentence (~140 chars); 200 leaves room for
-        # wording without room for a re-inflated paragraph.
-        for ln in lines:
-            assert len(ln) <= 200, (len(ln), ln)
-        # TIGHTENED as text came off (operator 2026-08-06 late): a budget
-        # with slack left in it is a budget that gets spent.
-        assert sum(len(ln) for ln in lines) <= 400, (
-            f"{sum(len(ln) for ln in lines)} chars on screen:\n"
-            + '\n'.join(lines))
         joined = '\n'.join(lines)
         # what stayed
         assert 'Automatic fit' in joined and 'px across' in joined, joined
@@ -2854,23 +2989,30 @@ def test_mode_C_screen_holds_its_four_line_budget_and_opens_zoomed():
         else:
             print("   (skipped the <Return>-refusal visibility claim: no "
                   "synthetic key press reached the dialog)")
-        # mode A brings its own text back, and returning to C sheds it again
-        assert len(saw['lines_' + CIRCLE]) > gui.CAL_VERIFY_MAX_LINES, \
-            saw['lines_' + CIRCLE]
-        assert any('SCALE GATE' in ln for ln in saw['lines_' + CIRCLE]), \
-            saw['lines_' + CIRCLE]
+        # THE SWITCH: the circle mode brings its own text back, and returning
+        # to the verify mode sheds it again -- and neither may exceed the
+        # budget on the way through, which is what the counts used to prove
+        # and no longer can now that both sides are short.
         assert any('Round 1 of 3' in ln
                    for ln in saw['lines_' + CIRCLE]), saw['lines_' + CIRCLE]
+        assert any('HALF-HEIGHT' in ln
+                   for ln in saw['lines_' + CIRCLE]), saw['lines_' + CIRCLE]
+        assert not any('Automatic fit' in ln
+                       for ln in saw['lines_' + CIRCLE]), (
+            "the verify mode's evidence block survived the switch, so the "
+            "fit's diameter is a printed target for a blind round: "
+            + str(saw['lines_' + CIRCLE]))
         # ... INCLUDING the live readout, which the first cut of this left
-        # forgotten: text set, label unpacked, so a mode-A round ran with
+        # forgotten: text set, label unpacked, so a circle-mode round ran with
         # its diameter readout -- the one number it needs -- invisible.
         # Found by rendering the dialog after a C->A switch, not by a test.
         assert any('px across' in ln and 'mm/px' in ln
                    for ln in saw['lines_' + CIRCLE]), (
             "the circle mode came back from the verify mode without its "
             "diameter readout on screen: " + str(saw['lines_' + CIRCLE]))
-        assert len(saw['lines_' + VERIFY]) <= gui.CAL_VERIFY_MAX_LINES, \
-            saw['lines_' + VERIFY]
+        for val in (CIRCLE, VERIFY):
+            got = saw['lines_' + val]
+            assert len(got) <= gui.CAL_SCREEN_MAX_LINES, (val, got)
     finally:
         gui.messagebox, gui.spawn_circle = real_mb, real_spawn
         root.destroy()
@@ -2936,17 +3078,22 @@ def test_a_refused_fit_falls_through_to_the_hand_measurement_and_says_why():
         assert any(t.startswith('B ·') for t in rt), rt
         assert any(t.startswith('C ·') for t in rt), rt
         assert not any(t.startswith('A ·') for t in rt), rt
-        # and it SAID so, with the fitter's own reason
+        # and it SAID so, with the fitter's own reason. ONE LINE since the
+        # 2026-08-07 trim (`#215`) -- the refusal and its reason were two
+        # lines and are now one; what has to survive is that the operator is
+        # told there is nothing to verify, that the job is now BY HAND, and
+        # WHY the fitter said no in the fitter's own words.
         t = saw['text']
-        assert 'AUTOMATIC FIT IS NOT AVAILABLE' in t, t[:400]
+        assert 'NO automatic fit on this run' in t, t[:400]
+        assert 'nothing to verify' in t, t[:400]
         assert 'BY HAND' in t, t[:400]
-        assert 'Reason the fit refused' in t and 'seed' in t, t[:600]
+        assert 'Reason:' in t and 'seed' in t, t[:600]
         # asking for mode C explicitly on such a run is refused the same way
         app.manual_ref = None
         saw.clear()
         app._calibrate_scale(mode=gui.se.CAL_MODE_VERIFY)
         assert saw['mode'] == (gui.se.CAL_DEFAULT_MODE, CIRCLE), saw['mode']
-        assert 'AUTOMATIC FIT IS NOT AVAILABLE' in saw['text']
+        assert 'NO automatic fit on this run' in saw['text']
     finally:
         gui.messagebox, gui.spawn_circle = real_mb, real_spawn
         root.destroy()
@@ -3185,14 +3332,23 @@ def test_measure_by_hand_leaves_mode_C_for_a_BLIND_mode_A_round_set():
         assert saw['back'] == 'normal', saw
         t = saw['text']
         # the hand measurement's own instructions are back, under the
-        # circle's NEW label (B; it was A before the 2026-08-06 swap)
-        assert 'METHOD B (circle)' in t and 'HALF-HEIGHT' in t, t[:400]
+        # circle's NEW label (B; it was A before the 2026-08-06 swap). The
+        # "METHOD B (circle):" prefix on the instruction line went in the
+        # 2026-08-07 trim -- the round header beside it says Method B, so the
+        # letter is what is checked here now, not the deleted prefix.
+        assert 'Method B · Round 1 of' in t and 'HALF-HEIGHT' in t, t[:400]
         # ... the evidence block is gone, and with it the fit's diameter:
         # no target to wheel a circle onto
         assert 'Automatic fit' not in t, t[:400]
         assert 'your eye is the check' not in t, t[:400]
         assert f"{fit['diam_px']:.1f} px" not in t, t
-        assert 'HIDDEN until the last fit' in t, t[:400]
+        # THE BLINDNESS ITSELF, not the paragraph that used to explain it
+        # (`#215` trim, 2026-08-07 -- "the earlier rounds are HIDDEN until the
+        # last fit is in" came off the header). What must hold is that no
+        # earlier round and no fitted diameter is anywhere on this screen,
+        # which the two assertions above are, so this one only pins that the
+        # sentence did not quietly come back as the whole evidence for it.
+        assert 'HIDDEN until the last fit' not in t, t[:400]
         assert app.manual_ref is None
     finally:
         gui.messagebox, gui.spawn_circle = real_mb, real_spawn
@@ -3329,6 +3485,11 @@ def test_the_dialog_says_which_of_the_two_folded_actions_it_serves():
                 saw[tag] = {'title': win.title(),
                             'step': p['step_btn'].cget('text'),
                             'text': _cal_display(win),
+                            # ON SCREEN, not merely set: a pack_forget()-ed
+                            # label still has text, and an assertion that
+                            # read one used to pass on a banner the operator
+                            # could not see (found in the 2026-08-07 trim)
+                            'shown': '\n'.join(_cal_visible_lines(win)),
                             'intent': p['intent'],
                             'mode': p['st']['mode']}
                 win.destroy()
@@ -3367,11 +3528,27 @@ def test_the_dialog_says_which_of_the_two_folded_actions_it_serves():
         assert needle in saw[k]['title'], (k, saw[k]['title'])
     assert 'RE-ANCHOR' in saw['re']['title']
     assert 'RE-ANCHOR' not in saw['cal']['title']
-    # A MEASURING MODE says it in FULL, on the gate block's first line
-    assert 'NOTHING is written' in saw['cal_circle']['text']
-    assert 'WRITTEN TO data.csv IMMEDIATELY' in saw['re_circle']['text']
-    assert 'WRITTEN TO data.csv IMMEDIATELY' not in saw['cal_circle']['text']
-    assert 'NOTHING is written' not in saw['re_circle']['text']
+    # A MEASURING MODE says it in words too, and ON SCREEN -- on the ROUND
+    # HEADER since the 2026-08-07 trim (`#215`), which is the line the
+    # operator is already watching for the round number. It used to open the
+    # gate block above the picture as a 127-character paragraph; the paragraph
+    # was part of the wall of text the operator asked to have cut, so
+    # scale_intent_banner is a tag now. What may NOT change is that neither
+    # branch can borrow the other's promise.
+    for k, needle, absent in (
+            ('cal_circle', 'NOTHING is written',
+             'WRITTEN TO data.csv IMMEDIATELY'),
+            ('re_circle', 'WRITTEN TO data.csv IMMEDIATELY',
+             'NOTHING is written')):
+        assert needle in saw[k]['shown'], (k, saw[k]['shown'])
+        assert absent not in saw[k]['text'], (k, absent, saw[k]['text'])
+    # ... and the verify mode does NOT put it on screen: there it is the
+    # button and the title, checked above, because the four-line budget owns
+    # that screen and the button is the thing that commits.
+    for k in ('cal', 're'):
+        for phrase in ('NOTHING is written',
+                       'WRITTEN TO data.csv IMMEDIATELY'):
+            assert phrase not in saw[k]['shown'], (k, phrase, saw[k]['shown'])
     # the Finish button carries it as well -- that is the one that commits
     for k in ('cal_circle', 're_circle'):
         assert 'Continue' in saw[k]['step'], saw[k]

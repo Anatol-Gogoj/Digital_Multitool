@@ -1,6 +1,6 @@
 # SLDEA active-area measurement — error budget and how the algorithm works
 
-Status: 2026-08-06 (§2.1a; the rest 2026-08-01). Every number in this
+Status: 2026-08-07 (§2.1a; the rest 2026-08-01). Every number in this
 document is **measured**, not estimated — sources are the four
 calibration rounds (47 operator labels across both campaigns), the
 per-run scale calibration (two hand methods A/B compared against the
@@ -156,6 +156,20 @@ always landed on "accept anyway". SE falls as 1/√n, so the gate now names
 the round count that *would* clear it, computed from the σ just measured
 (`se.rounds_for_se`).
 
+**What the operator sees when it trips (2026-08-07).** The prompt quotes
+three things and nothing else: the round **σ as a % of diameter**, what that
+implies as **area error** (2·σ/√n) against the **±0.8 % area budget**, and the
+round count that would clear the gate — then the three-way choice (refit /
+accept as measured / cancel). **This section is where the derivation lives**;
+the prompt does not repeat it, because it is read in the middle of a
+measurement. The mean's SE in diameter and the raw range are not on that
+prompt either and do not need to be: they are `se=` and `range=` in
+`scale_calibration_log.txt` and `se_pct` / `spread_pct` in `setup.txt`, and d₂
+is fixed by the `n=` both of them carry. The prompt quotes **percentages only,
+never a diameter** — a refit is one of its answers, and a printed diameter
+would make that refit a fitted-to-target one rather than an independent
+round — and its default is **Cancel**, the answer that changes nothing.
+
 #### First real data: the circle mode's per-fit σ ≈ 1.05% (2026-08-06)
 
 Six circle-mode calibration attempts on a scratch copy of
@@ -223,6 +237,14 @@ Four caveats, all load-bearing:
   being placed, so it is measured under stricter blinding than the circle mode —
   which can only handicap B in the comparison. If any of that changes,
   this whole section stops meaning anything.
+  **The 2026-08-07 on-screen trim did not change it.** All three modes now
+  hold one on-screen budget (`gui.CAL_SCREEN_MAX_LINES` = 4; the measuring
+  modes show two short lines plus the live readout, where they had been
+  showing nine lines). What came off was prose — including the sentence that
+  *explained* the blinding, and the prior anchor's recorded diameter, whose
+  standing presence on screen through a blind round-set was itself a printed
+  target. Every number involved is still in `setup.txt` and
+  `scale_calibration_log.txt`, verified by diffing both across the change.
 
 #### The measured human per-fit σ is ~1.0–1.1 %, and it does not depend on the method (2026-08-06, evening)
 

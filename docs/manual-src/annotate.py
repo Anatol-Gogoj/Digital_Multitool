@@ -11,6 +11,14 @@ import sys
 
 from PIL import Image, ImageDraw, ImageFont
 
+# Spec strings carry the buttons' emoji (📏, 💾). On a real Windows console
+# they print fine, but with stdout REDIRECTED (a pipe, a CI log) Python falls
+# back to the ANSI codepage with a strict encoder — and the miss report below
+# would then crash before reaching its sys.exit(1). Escape what the stream
+# cannot carry instead of dying on it.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(errors="backslashreplace")
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(_HERE)))
 from version import __version__  # noqa: E402  (repo root version.py)
@@ -26,6 +34,12 @@ FONT = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 17)
 
 manifest = json.load(open(os.path.join(SHOTS, "widgets.json"), encoding="utf-8"))
 images = {img["name"]: img for img in manifest["images"]}
+
+# Every (image, spec text) that matched no widget. The build FAILS on these
+# at the end instead of shipping without them: a miss means the on-screen
+# text= drifted from the spec (or the shots are stale), and the cost of
+# ignoring it is a manual quietly missing a capsule and its legend row.
+MISSES = []
 
 
 def find(img, text):
@@ -54,6 +68,7 @@ def resolve(img, spec):
         w = find(img, t)
         if w is None:
             print(f"  !! no match for {t!r} in {img['name']}")
+            MISSES.append((img["name"], t))
             continue
         boxes.append((w["x"], w["y"], w["x"] + w["w"], w["y"] + w["h"]))
     if not boxes:
@@ -380,6 +395,27 @@ legends = {}
 for name, spec in S.items():
     legends[name] = annotate(name, spec)
 
-with open(os.path.join(OUT, "legends.json"), "w", encoding="utf-8") as f:
+LEGENDS_PATH = os.path.join(OUT, "legends.json")
+if MISSES:
+    # FAIL CLOSED (2026-08-07). An unmatched callout used to cost only the
+    # "!! no match" line above: the capsule and its legend row vanished from
+    # the shipped manual and the build still said DONE — the 📏 Calibrate…
+    # callout was lost exactly that way when the button grew " / re-anchor"
+    # (`#215`). And a legends.json from a PREVIOUS run must not survive the
+    # failure either, or a chained build_manual.py would assemble the manual
+    # from stale legends as if nothing were wrong — so it is removed, which
+    # stops build_manual.py at its own front door.
+    if os.path.exists(LEGENDS_PATH):
+        os.remove(LEGENDS_PATH)
+    print(f"\nFAILED — {len(MISSES)} callout string(s) matched no widget; "
+          f"legends.json removed so build_manual.py cannot run:")
+    for img_name, t in MISSES:
+        print(f"  - {img_name}: {t!r}")
+    print("Renamed control → give its spec in the S[...] tables the literal "
+          "on-screen text=. Stale screenshots → re-run the capture stage "
+          "first (README.md).")
+    sys.exit(1)
+
+with open(LEGENDS_PATH, "w", encoding="utf-8") as f:
     json.dump(legends, f, indent=1, ensure_ascii=False)
 print("DONE")

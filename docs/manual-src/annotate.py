@@ -238,6 +238,8 @@ S["40_edge_review"] = {
          "label": "Set the mm-per-px scale — click two opposite disc edges"},
         {"match": "💾 Save to data.csv…",
          "label": "Writes accepted areas back (keeps a .bak) — confirms first"},
+        {"match": "❓ How to use…", "badge_side": "left",
+         "label": "The review loop in one short read — start here"},
     ],
 }
 

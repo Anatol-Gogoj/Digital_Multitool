@@ -56,6 +56,17 @@ in their footers until the pipeline is re-run, so a release without a manual
 regeneration ships docs that contradict the app. Attach the fresh PDF to the
 GitHub release so labmates always download the matching copy.
 
+**Edge Review's ❓ How to use panel is a HAND-KEPT COPY of workflow prose**
+(`#238`). Its words live in `HOWTO_SECTIONS` in `sldea_edge_gui.py`, not in
+`content.json` — deliberately, so the panel ships in the same commit as the
+code it describes instead of lagging by a release (this file's own Edge
+Review copy still described the pre-`#215` two-click calibration long after
+the app had stopped doing it). Nothing enforces the two staying in step, so
+**when the review workflow changes, change both**: `HOWTO_SECTIONS` and the
+`Companion tools` entries here. The panel names on-screen controls by their
+exact labels; those are listed in `HOWTO_QUOTED_CONTROLS` beside it and the
+GUI tests fail if one stops being a real widget label.
+
 Notes:
 
 - `capture.py` needs a **headed** desktop session (it screenshots the actual

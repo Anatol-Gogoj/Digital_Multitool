@@ -908,7 +908,7 @@
     "what": "Watches Trek current during live runs; current above Trip (µA) sustained for Confirm (s) snapshots the breakdown, ramps to 0 and aborts. Transient spikes never trip it."
    },
    {
-    "label": "📈 Telemetry log (telemetry.csv)",
+    "label": "📈 Scope kV/µA log (telemetry.csv)",
     "what": "Writes the scope’s kV/µA continuously to telemetry.csv beside data.csv, so the current BETWEEN photos is recorded and a breakdown can be dated electrically. Rate (Hz) is capped at 2 — at that setting the current rows are free, because they are the breakdown watchdog’s own readings, which used to be thrown away. Voltage is read less often (at most once a second) because it costs a second scope query; the commanded voltage is on every row regardless. Needs the scope; works on dry runs too. Nothing reads the file — data.csv is still the run, and Edge Review, the tuner and the diagnostic are unaffected."
    },
    {
@@ -964,7 +964,7 @@
     "note": "Aborts on sustained overcurrent"
    },
    {
-    "widget_text": "📈 Telemetry log",
+    "widget_text": "📈 Scope kV/µA log",
     "note": "Continuous kV/µA log beside data.csv"
    },
    {

@@ -2541,7 +2541,35 @@ LOGGING:
         # current at 2 Hz on every run and used to discard every sample,
         # so nothing electrical was recorded between snapshots and a
         # breakdown could not even be dated afterwards.
-        telf = ttk.LabelFrame(f, text="📈 Telemetry log (telemetry.csv)",
+        # The label names the instrument and the quantities on purpose:
+        # "telemetry" alone could mean run progress or link health. The
+        # FILE keeps its name (#224) -- telemetry.csv is already written by
+        # shipped code and referenced in README/BENCH_TEST/the manual, and
+        # renaming it would strand every run captured with v1.1.0.
+        #
+        # THIS LABEL IS DUPLICATED BY HAND and nothing enforces the
+        # copies, so changing the text here means changing all of these
+        # in the same commit:
+        #   docs/manual-src/content.json -- the control entry ("label")
+        #   docs/manual-src/content.json -- the inert callout entry
+        #        ("widget_text"), a second, separate copy
+        #   docs/manual-src/annotate.py  -- the callout matcher; it
+        #        matches this literal on-screen string and merely PRINTS
+        #        "no match" when it drifts, so the manual silently loses
+        #        the callout instead of failing the build
+        #   BENCH_TEST.md, section M step 2 -- tells a bench operator to
+        #        find this box by name; if it drifts they hunt for a box
+        #        title that no longer exists
+        # Do NOT trust that list to be complete -- re-derive it, because
+        # every previous attempt at this undercounted by one:
+        #     git grep -n "Scope kV"
+        # Keep such a search ASCII-only. git grep matches BYTES, so the
+        # micro sign is two bytes and a pattern like "kV/.A log" matches
+        # NOTHING while still looking like it worked.
+        # docs/digital-multitool-manual.{html,pdf} carry the label too,
+        # but they are GENERATED: the manual pipeline rewrites them at the
+        # next version bump. Never hand-edit those.
+        telf = ttk.LabelFrame(f, text="📈 Scope kV/µA log (telemetry.csv)",
                               padding=8)
         telf.pack(fill='x', padx=10, pady=(0, 8))
         self.sldea_tel_on = tk.BooleanVar(value=True)

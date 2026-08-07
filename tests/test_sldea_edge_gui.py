@@ -93,6 +93,43 @@ def test_side_text_elide_drops_the_tail_first():
     assert gui.elide("abc", 0, m) == '…'
 
 
+def test_clock_readouts_separate_detection_time_from_session_time():
+    """`#237`: the one toolbar clock ran from Detect until Save, so the
+    moment detection finished it started counting the human's review time
+    instead — destroying the only number a run can be planned with. Two
+    readouts now, and both strings are pure so their wording is pinned
+    without a display."""
+    import sldea_edge_gui as gui
+    # fmt_dur: seconds below a minute, m+s below an hour, and it ROLLS
+    # OVER (the old M:SS printed a 90-minute pass as '90:00')
+    assert gui.fmt_dur(0) == '0s' and gui.fmt_dur(43) == '43s'
+    assert gui.fmt_dur(59) == '59s' and gui.fmt_dur(60) == '1m00s'
+    assert gui.fmt_dur(134) == '2m14s'          # the issue's own example
+    assert gui.fmt_dur(3599) == '59m59s' and gui.fmt_dur(3600) == '1h00m'
+    assert gui.fmt_dur(7500) == '2h05m'
+    assert gui.fmt_dur(-5) == '0s'              # never a negative duration
+    assert gui.fmt_dur(134.9) == '2m14s'        # truncates, never rounds up
+    # the detection line, three states
+    assert gui.detect_readout() == 'detect: not run'
+    assert gui.detect_readout(3, None) == 'detect: not run'
+    # ...frozen: the frame COUNT travels with the time, so it reads as a
+    # rate an operator can extrapolate to the next run
+    done = gui.detect_readout(81, 134.2)
+    assert done == 'detect: 81 frames in 2m14s', done
+    # ...in flight: progress, and never confusable with the frozen form
+    live = gui.detect_readout(12, 35.0, 81)
+    assert '12/81' in live and '35s' in live and ' in ' not in live, live
+    # the in-flight form must not be the WIDEST of the three, or it grows
+    # the toolbar's fixed clock box on the one screen it has to hold
+    # still: the progress bar beside it is the toolbar's only give
+    assert len(gui.detect_readout(999, 3599.0, 999)) <= \
+        len(gui.detect_readout(999, 3599.0)), 'the live form is the widest'
+    # the session line is a separate string, so neither can be mistaken
+    # for the other on screen
+    assert gui.session_readout(312) == 'session 5m12s'
+    assert 'detect' not in gui.session_readout(312)
+
+
 def _fake_run(dirpath):
     """Minimal synthetic SLDEA run (baseline + two activated frames) --
     the same scene test_app_launch boots the real GUI on."""
@@ -1876,6 +1913,119 @@ def test_scale_gate_rearms_on_every_run_switch():
         app._calibrate_scale = lambda then_detect=False: opened.append(1)
         app.detect()
         assert opened, "detect() did not divert after the run switch"
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_detection_clock_freezes_while_the_session_clock_runs_on():
+    """`#237`: ONE clock ran from ▶ Detect Edges until 💾 Save, so the
+    detection time was overwritten a second after it was produced and the
+    readout became a session stopwatch. Now: the detection line freezes
+    when the pass ends and is repainted by nothing else; the session line
+    keeps counting through Save and across a run switch; and the
+    detection line resets per run, because a saved run re-opened for a
+    scale-only re-anchor (`#215`) runs NO detection and the absence of a
+    fresh detection time is the signal that says so."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('two clocks')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_clocks_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    try:
+        _fake_run(os.path.join(d, 'SLDEA_A'))
+        run_b = _fake_run(os.path.join(d, 'SLDEA_B'))
+        app = gui.EdgeReviewApp(root, path=run_b)
+        assert app.run is not None
+
+        def detect_txt():
+            return app.detect_lbl.cget('text')
+
+        def session_txt():
+            return app.clock_lbl.cget('text')
+
+        # BEFORE any pass: the absence is stated, not left blank, and the
+        # session clock is already running (the window is open)
+        assert detect_txt() == 'detect: not run', detect_txt()
+        assert session_txt().startswith('session '), session_txt()
+
+        # THE BOX HOLDS BOTH LINES AND THE WIDEST TEXT. Found by measuring
+        # the real window: the toolbar row is one button tall, so the
+        # fixed box inherited 25 px and clipped the session line to 4 of
+        # its 21. Asked of the geometry REQUESTS, so this holds on a
+        # withdrawn root -- and a box too small is exactly what a font or
+        # scaling change would do to a hard-coded pair of numbers.
+        box = app.detect_lbl.master
+        need_h = (app.detect_lbl.winfo_reqheight()
+                  + app.clock_lbl.winfo_reqheight())
+        assert int(box.cget('height')) >= need_h, \
+            f"clock box {box.cget('height')} px cannot show both lines"
+        for txt in (gui.detect_readout(999, 3600.0),
+                    gui.detect_readout(999, 3599.0, 999),
+                    gui.detect_readout()):
+            app.detect_lbl.config(text=txt)
+            assert app.detect_lbl.winfo_reqwidth() <= int(box.cget('width')), \
+                f"clock box is narrower than {txt!r}"
+        app.detect_lbl.config(text=gui.detect_readout())
+
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app._t0 = None
+        app.detect_all_sync()
+        frozen = detect_txt()
+        n = len(app.frame_rows)
+        assert frozen.startswith(f'detect: {n} frames in '), frozen
+        first_t0 = app._t0
+        assert first_t0 is not None
+
+        # THE BUG'S OWN SHAPE: let the clock tick as if five minutes of
+        # review had passed. The session line must move; the detection
+        # line must be byte-identical -- it is an answer, not a stopwatch.
+        app._t_session -= 300
+        app._tick_clock()
+        moved = session_txt()
+        assert moved == 'session 5m00s', moved
+        assert detect_txt() == frozen, "detection time kept counting"
+
+        # SAVE does not stop the session clock any more: a session
+        # outlives a Save (the batch cockpit saves one run and moves on)
+        app.save()
+        assert app._clock_on, "Save stopped the session clock"
+        app._t_session -= 60
+        app._tick_clock()
+        assert session_txt() == 'session 6m00s', session_txt()
+        assert detect_txt() == frozen, "Save rewrote the detection time"
+
+        # A RUN SWITCH re-arms the detection line (it belonged to run B's
+        # pass) and leaves the session line alone (one session, many runs)
+        other = [i for i, v in enumerate(app.run_box['values'])
+                 if 'SLDEA_A' in v][0]
+        app.run_box.current(other)
+        app._pick_run()
+        assert detect_txt() == 'detect: not run', detect_txt()
+        assert app._t0 is None
+        app._tick_clock()
+        assert session_txt() == 'session 6m00s', session_txt()
+
+        # THE SCALE-ONLY RE-ANCHOR PATH: run B is saved and carries px, so
+        # re-opening it routes to re-anchor rather than calibrate -- and
+        # that path never detects, so the readout must still say so.
+        back = [i for i, v in enumerate(app.run_box['values'])
+                if 'SLDEA_B' in v][0]
+        app.run_box.current(back)
+        app._pick_run()
+        assert app._scale_intent()['intent'] == gui.SCALE_INTENT_REANCHOR
+        assert detect_txt() == 'detect: not run', detect_txt()
+
+        # A SECOND PASS IS TIMED ON ITS OWN: `_t0 = _t0 or now` made every
+        # later pass report the time since the FIRST one of the session
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        time.sleep(0.01)
+        app.detect_all_sync()
+        assert app._t0 > first_t0, "the second pass reused the first's t0"
     finally:
         gui.messagebox = real_mb
         root.destroy()
@@ -3856,6 +4006,338 @@ def test_the_second_click_banks_the_round_and_Back_undoes_it():
     assert saw['alive'], "the last round's second click finished the set"
     # ... and it SAYS so where the operator is looking
     assert 'Finish' in saw['live'], saw['live']
+
+
+# ---------------------------------------------------------------------------
+# `#238` -- the How-to-use workflow panel
+#
+# NOTE for anyone extending these: never interpolate the panel's text into an
+# assertion message. The words carry emoji and en dashes, and a failure whose
+# message cannot be encoded to cp1252 replaces the real failure with a
+# UnicodeEncodeError on this repo's console.
+# ---------------------------------------------------------------------------
+
+def test_howto_text_is_one_copy_and_carries_the_three_traps():
+    """`#238`: the panel's words live in ONE module constant, they contain
+    the campaign loop and the three things that cost real time, and the two
+    thresholds they quote are read back against the code's own defaults --
+    so a settings change cannot leave the help quoting a stale number.
+
+    Headless: the words are data, and the point of keeping them as data is
+    that they are testable without a display."""
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    assert gui.HOWTO_SECTIONS, "no help text at all"
+    for heading, paras in gui.HOWTO_SECTIONS:
+        assert isinstance(heading, str) and heading
+        assert paras, "a heading with nothing under it"
+        for p in paras:
+            assert isinstance(p, str) or (
+                isinstance(p, tuple) and len(p) == 2 and p[0] == 'code'), p
+    t = gui.howto_text()
+
+    # THE LOOP, all four steps, in order
+    for n in ('1.', '2.', '3.', '4.'):
+        assert n in t, f"step {n} missing from the loop"
+    assert t.index('1.') < t.index('2.') < t.index('3.') < t.index('4.')
+
+    # TRAP 1 -- wash-out frames are traced, not rejected. This is the single
+    # instruction a new operator gets wrong, and the reason is that the
+    # missing boundary is the frame, not a fault.
+    assert 'TRACED, not rejected' in t
+    assert '5.5 kV' in t
+    assert 'Reject means' in t
+
+    # TRAP 2 -- Accept stages, Save writes (a live run's correction was lost
+    # to this on 2026-08-06)
+    assert 'STAGES the anchor' in t
+    assert '2026-08-06' in t
+    assert 'Save before you close' in t
+
+    # TRAP 3 -- the scale-only re-anchor skips detection
+    assert 'no detection' in t and 're-derives every mm' in t
+
+    # THE BLANKET CLAIM MUST CARRY ITS EXCEPTION. "Nothing is written until
+    # Save" is false for a re-anchor on a saved run, which commits data.csv
+    # the moment it is confirmed (_reanchor_scale). If the sentence is ever
+    # tightened into the simple, wrong version, this fails.
+    assert 'until' in t and 'exception' in t, "the Save claim lost its caveat"
+
+    # THE TWO NUMBERS, checked against the code rather than retyped
+    assert f"accept_conf ({se.DEFAULT_SETTINGS['accept_conf']:g}" in t
+    assert f"wrinkle_ratio ({se.DEFAULT_SETTINGS['wrinkle_ratio']:g}" in t
+    assert '1.0 means no' in t, "the w baseline value is not stated"
+    assert 'not a probability' in t
+
+    # SHORT, on purpose: it has to read as help, not as documentation, and
+    # it points at the manual for the rest
+    assert 'digital-multitool-manual.pdf' in t
+    assert len(t) < 5000, f"the panel has grown into documentation: {len(t)}"
+
+    # EVERY on-screen control the text names is listed for the drift check
+    for label in gui.HOWTO_QUOTED_CONTROLS:
+        assert label in t, "a quoted control is not actually quoted"
+
+
+def test_howto_panel_is_a_singleton_scrolls_and_names_live_controls():
+    """`#238`: the button sits at the bottom (the status strip keeps the
+    window's own bottom edge), re-clicking fronts the live panel instead of
+    stacking a second one, the panel takes NO grab, it really does scroll,
+    and every control it names by label is a control that still exists.
+
+    That last one is the drift latch: `annotate.py` merely PRINTS 'no match'
+    when a button is renamed, and the manual silently loses a callout. Help
+    that sends an operator hunting for a button that no longer exists is
+    worse than no help, so it fails here instead."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_gui_howto_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None, "synthetic run failed to load"
+
+        # ---- the button: bottom, right, and not in the top bar ----------
+        assert app.howto_btn.cget('text') == gui.HOWTO_BTN_TEXT
+        assert app.howto_btn.pack_info()['side'] == 'right'
+        foot = app.howto_btn.master
+        assert foot.pack_info()['side'] == 'bottom'
+        # The status strip must still own the window's own bottom edge, and
+        # with side=bottom that is decided by PACK ORDER (each slave takes
+        # the bottom of what is left), so the order is what is asserted --
+        # a withdrawn root has no computed geometry to measure.
+        slaves = root.pack_slaves()
+        assert slaves.index(app.status) < slaves.index(foot), "status moved"
+        assert app.status.pack_info()['side'] == 'bottom'
+
+        # ---- singleton, and non-modal ----------------------------------
+        assert app._howto_win is None
+        app._howto()
+        w1 = app._howto_win
+        assert w1 is not None and w1.winfo_exists()
+        assert root.grab_current() is None, "the help panel took a grab"
+        app._howto()
+        assert app._howto_win is w1, "a second panel was stacked"
+        tops = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)]
+        assert len(tops) == 1, f"stacked dialogs: {len(tops)}"
+
+        # ---- it scrolls: the content is taller than the viewport --------
+        cv = app._howto_scroll
+        root.update_idletasks()
+        w1.update_idletasks()
+        region = [float(v) for v in str(cv.cget('scrollregion')).split()]
+        assert len(region) == 4, "no scrollregion: nothing would scroll"
+        assert region[3] > 300, "the scrollregion is empty"
+        assert w1.bind('<Escape>'), "Escape does not close the panel"
+        assert w1.bind('<MouseWheel>'), "the wheel does not scroll the panel"
+        # sized for a 1080p bench screen, and never taller than the screen
+        assert w1.winfo_reqheight() <= root.winfo_screenheight()
+
+        # ---- opening help changed nothing about the review -------------
+        assert not app.results and app.manual_ref is None
+
+        # ---- a closed panel is not a live singleton --------------------
+        w1.destroy()
+        app._howto()
+        assert app._howto_win is not w1 and app._howto_win.winfo_exists()
+        app._howto_win.destroy()
+
+        # ---- every control the text names is a real widget label -------
+        texts = []
+
+        def walk(w):
+            for ch in w.winfo_children():
+                try:
+                    texts.append(str(ch.cget('text')))
+                except tk.TclError:
+                    pass
+                walk(ch)
+
+        walk(root)
+        for label in gui.HOWTO_QUOTED_CONTROLS:
+            assert label in texts, ("the help names a control that no "
+                                    "longer exists on screen")
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_detect_edges_is_the_primary_action_and_gates_on_a_run():
+    """`#216`: ▶ Detect Edges must READ as the one thing to press, and
+    its affordance must double as its state.
+
+    - it carries an accent style the plain buttons do not, and that style
+      really resolves to a bold face (a style name nothing configures
+      would silently render identically);
+    - it is DISABLED with no run loaded — including the cockpit case, a
+      parent folder holding no runs — and live once a run is picked;
+    - the detect-in-flight lock and the no-run gate are ANDed, so
+      _detect_ui(busy=False) on a runless app may not re-arm it (the
+      regression that made the old single-writer line wrong);
+    - the empty canvas carries the hint, and the hint goes away as soon
+      as a review card occupies the canvas."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    from tkinter import ttk, font as tkfont
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_gui_primary_')
+    try:
+        # ---- COCKPIT MODE on an EMPTY parent: no run, no live Detect ---
+        empty = os.path.join(d, 'empty_parent')
+        os.makedirs(empty)
+        app = gui.EdgeReviewApp(root, path=empty)
+        assert app.run is None, "an empty parent must load no run"
+        assert str(app.detect_btn['state']) == 'disabled', \
+            "Detect was live with nothing to detect"
+        assert app._tips['detect_btn'].text == gui.TIPS['detect_btn_disabled']
+        assert app._hint == gui.HINT_PICK_RUN, app._hint
+        # the busy lock releasing must NOT re-arm a runless button
+        app._detect_ui(busy=False)
+        assert str(app.detect_btn['state']) == 'disabled', \
+            "_detect_ui re-armed Detect on a run-less cockpit"
+        # ---- the accent is real, not just a style name ------------------
+        assert str(app.detect_btn['style']) == 'Primary.TButton'
+        assert str(app.browse_btn['style']) == ''      # plain, by contrast
+        assert str(app.adv_btn['style']) == 'Secondary.TButton'
+        assert str(app.scale_btn['style']) == 'Secondary.TButton'
+        st = ttk.Style()
+        fname = st.lookup('Primary.TButton', 'font')
+        assert fname, "Primary.TButton configures no font"
+        assert tkfont.nametofont(fname).cget('weight') == 'bold', \
+            "the accent style is not bold, so it renders as a plain button"
+        assert st.lookup('Primary.TButton', 'foreground') == gui.PRIMARY_FG
+        # ...and it makes the button visibly bigger than a plain one
+        probe = ttk.Button(root, text=str(app.detect_btn['text']))
+        probe.update_idletasks()
+        app.detect_btn.update_idletasks()
+        assert (app.detect_btn.winfo_reqwidth() > probe.winfo_reqwidth()
+                and app.detect_btn.winfo_reqheight()
+                > probe.winfo_reqheight()), (
+            app.detect_btn.winfo_reqwidth(), probe.winfo_reqwidth())
+        probe.destroy()
+        # ---- pick a run: Detect arms, and the hint changes with it ------
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app._populate_runs(d)
+        assert app.run is not None, "the run did not load"
+        assert str(app.detect_btn['state']) == 'normal'
+        assert app._tips['detect_btn'].text == gui.TIPS['detect_btn']
+        assert app._hint == gui.HINT_DETECT, app._hint
+        assert app.canvas.find_withtag('hint'), "the hint was never drawn"
+        # ONE STORY: neither the hint nor the status line may tell the
+        # operator to calibrate BEFORE pressing Detect (the gate chains)
+        for line in (app._hint, str(app.status['text'])):
+            assert 'Detect Edges' in line, line
+            assert 'then Detect' not in line, line
+        # ---- mid-detect: same button, a tip that says why ---------------
+        app._detect_busy = True
+        app._detect_ui(busy=True)
+        assert str(app.detect_btn['state']) == 'disabled'
+        assert app._tips['detect_btn'].text == gui.TIPS['detect_btn_busy']
+        app._detect_busy = False
+        app._detect_ui(busy=False)
+        assert str(app.detect_btn['state']) == 'normal'
+        # ---- a card on the canvas retires the hint ----------------------
+        app.detect_all_sync()
+        assert app._hint is None, app._hint
+        assert not app.canvas.find_withtag('hint')
+        # ---- and a failed run switch puts it back -----------------------
+        real_mb = gui.messagebox
+        gui.messagebox = _StubMB()
+        try:
+            os.remove(os.path.join(run, 'data.csv'))
+            app._pick_run()
+        finally:
+            gui.messagebox = real_mb
+        assert app.run is None
+        assert str(app.detect_btn['state']) == 'disabled'
+        assert app._hint == gui.HINT_PICK_RUN, app._hint
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_every_reviewed_control_explains_itself_on_hover():
+    """`#216`: hover help on the whole top bar and the whole review card
+    -- and the two claims that are easy to get wrong.
+
+    The 💾 Save tip must say WHY the button is grey (it blocks on the
+    detection pass AND on the scale gate), and the D slot's tip must
+    quote the keys that are really bound. Coverage is asserted against
+    the app's live control list, so a control added without a tooltip
+    fails here rather than shipping mute."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    d = tempfile.mkdtemp(prefix='edge_gui_tips_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None, "synthetic run failed to load"
+        # EVERY control the issue names carries a live tooltip
+        want = ['run_box', 'browse_btn', 'detect_btn', 'adv_btn',
+                'scale_btn', 'save_btn', 'accept_btn', 'reject_btn',
+                'prev_btn', 'next_btn', 'unrev_btn',
+                'cand0', 'cand1', 'cand2', 'trace']
+        missing = [k for k in want if k not in app._tips]
+        assert not missing, f"no tooltip on: {missing}"
+        for k in want:
+            assert app._tips[k].text.strip(), f"empty tooltip on {k}"
+        # ...on the widget itself, not merely in a dict
+        for widget in (app.run_lbl, app.run_box, app.browse_btn,
+                       app.detect_btn, app.adv_btn, app.scale_btn,
+                       app.save_btn, app.accept_btn, app.reject_btn,
+                       app.prev_btn, app.next_btn, app.unrev_btn,
+                       *app.cand_radios):
+            assert str(widget.bind('<Enter>')).strip(), \
+                f"{widget} has no hover binding"
+        # the D slot quotes the keys that are ACTUALLY bound to _trace
+        bound = {k for k in ('4', 'd', 'D', 't', 'T')
+                 if str(root.bind(f'<Key-{k}>')).strip()}
+        assert bound == {'4', 'd', 'D', 't', 'T'}, bound
+        for key in ('4', 'D', 'T'):
+            assert key in app._tips['trace'].text, app._tips['trace'].text
+        # ...and says Done only STAGES: Accept is what commits (#172)
+        assert 'Accept' in app._tips['trace'].text
+        # A/B/C name their own key and refuse to oversell conf
+        for k, letter in enumerate('ABC'):
+            txt = app._tips[f'cand{k}'].text
+            assert txt.startswith(f"Machine candidate {letter}"), txt
+            assert str(k + 1) in txt, txt
+        assert 'not a probability' in app._tips['cand0'].text
+        # 💾 Save explains its OWN grey: the pass and the scale gate
+        save_tip = app._tips['save_btn'].text
+        assert str(app.save_btn['state']) == 'disabled'
+        assert '▶ Detect Edges' in save_tip and '📏' in save_tip, save_tip
+        assert '.bak' in save_tip, save_tip
+        # the popup really renders, with that text in it
+        tip = app._tips['save_btn']
+        tip._show()
+        try:
+            assert tip._tip is not None, "no tooltip window appeared"
+            labels = _widgets(tip._tip, 'label')
+            assert labels and str(labels[0]['text']) == save_tip
+        finally:
+            tip._hide()
+        assert tip._tip is None, "the tooltip did not go away"
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def _run():

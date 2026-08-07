@@ -1404,7 +1404,7 @@
    },
    {
     "label": "Run: + Browse… + ▶ Detect Edges (Edge Review)",
-    "what": "Pick a run (✓ processed marks finished ones) and trace every frame; a progress bar and elapsed clock run until Save."
+    "what": "Pick a run (✓ processed marks finished ones) and trace every frame. Beside the progress bar sit two clocks: detect: freezes when the detection pass ends and keeps its frame count (81 frames in 2m14s), so runs stay comparable, while session counts how long the window has been open. A run you only re-anchor the scale on never detects, so its detect: line stays at not run."
    },
    {
     "label": "Candidates A/B/C + D: trace by hand (Edge Review)",
@@ -1421,6 +1421,10 @@
    {
     "label": "💾 Save to data.csv… (Edge Review)",
     "what": "Writes accepted areas into the run's data.csv after a confirm prompt; keeps data.csv.bak and saves an area-vs-voltage plot plus outline overlays."
+   },
+   {
+    "label": "❓ How to use… (Edge Review)",
+    "what": "Bottom-right of the window: the review loop in one short read — pick a run, Detect (calibration comes first, and the automatic disc fit is there to be verified, not repeated), work the queue, Save — plus the three things that cost people time: wash-out frames above ~5.5 kV are traced rather than rejected, an accepted scale is only staged until Save writes it, and a wrong scale can be re-anchored on a saved run without re-reviewing anything. It also says what conf and the w wrinkle index mean. Non-modal, so it can stay open beside the work."
    },
    {
     "label": "sldea_diag.py (headless)",
@@ -1504,6 +1508,10 @@
    {
     "name": "Save results confirm prompt (Edge Review)",
     "how_opened": "💾 Save to data.csv…"
+   },
+   {
+    "name": "Edge Review — how to use (workflow panel)",
+    "how_opened": "❓ How to use…"
    },
    {
     "name": "Run folder picker (launcher)",

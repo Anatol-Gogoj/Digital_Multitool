@@ -201,6 +201,10 @@ SIDE_W = 330            # right panel width -- FIXED, propagation off (#179)
 RADIO_TEXT_PX = SIDE_W - 100   # text budget in a candidate radio row: the
                                # panel + LabelFrame padding, colour swatch
                                # and radio indicator eat ~100 px of the row
+PRIMARY_FG = '#1f3a5f'  # the app's existing accent blue (splash, clock) —
+                        # reused for ▶ Detect Edges rather than introducing
+                        # a colour, because #32 owns any real restyle
+SECONDARY_FG = '#555555'   # Advanced… / 📏: muted label, stock geometry
 INFO_LINES = 5          # info label height (text lines): 3 fixed lines +
                         # room for a flag line and its wrap -- a flag must
                         # change content, not layout (#179)
@@ -253,6 +257,379 @@ def elide(text, width_px, measure):
         if measure(s) <= width_px:
             return s
     return '…'
+
+
+# ---------------------------------------------------------------------------
+# ❓ HOW TO USE — the workflow panel (`#238`)
+#
+# Edge Review had no in-app answer to "what am I supposed to do here". Every
+# control could be identified and none of them said where to START, so the
+# window's own loop — pick a run, calibrate, work the queue, Save — was
+# folklore. This is that loop, written for the operator who has just opened
+# the window, not a feature tour.
+#
+# WHERE THE WORDS LIVE, and why this is a HAND-KEPT COPY (`#238` decision).
+# The repo already has a manual pipeline whose written copy is
+# docs/manual-src/content.json, so a second copy of workflow prose can drift
+# from it — this project has been bitten by one label living in five
+# hand-kept places (gui.py, the telemetry LabelFrame). Three options were on
+# the table; the panel is a hand-kept copy, deliberately, because:
+#
+#   * content.json is MANUAL copy, not app copy. Its Edge Review material
+#     sits inside one "Companion tools" area shared with the tuner, the
+#     diagnostic and the plot tool, and its `workflow` list is that whole
+#     tool-chain in the manual's voice. There is no per-window workflow node
+#     to source, and inventing one would be inventing an app-facing schema
+#     inside a docs-build input.
+#   * Sourcing the panel from content.json at runtime would make a
+#     docs/ build input a RUNTIME dependency of the review program, with a
+#     new failure mode (missing/renamed file -> an empty help window) for a
+#     surface whose whole job is to be there when someone is lost.
+#   * content.json is a RELEASE-CADENCE artifact and is already behind the
+#     code: it still describes the scale entry point as "📏 Calibrate…" and
+#     tells the operator to "click the resting disc's two opposite edges",
+#     which is the pre-#215 flow. Text that ships in the same commit as the
+#     code it describes cannot lag it by a release; text pulled from
+#     content.json would have put that stale instruction on screen.
+#
+# So: the panel is SHORT and points at the manual for depth, the words live
+# in ONE place (HOWTO_SECTIONS, right here, next to the code they describe),
+# and docs/manual-src/README.md names this constant in the release checklist
+# so the manual and the panel move together. HOWTO_QUOTED_CONTROLS is the
+# anti-drift latch: every on-screen control the text names is listed there
+# and the tests assert those strings are still real widget labels.
+#
+# Every factual claim below is load-bearing and was checked against the code
+# before it was written; wrong help is worse than none. In particular the
+# "nothing is written until Save" line carries its own exception, because
+# a re-anchor on a saved run DOES write data.csv immediately
+# (_reanchor_scale).
+# ---------------------------------------------------------------------------
+
+HOWTO_BTN_TEXT = "❓ How to use…"
+HOWTO_TITLE = "Edge Review — how to use"
+HOWTO_W = 860                       # sized for a 1080p bench screen; the
+HOWTO_H = 700                       # height is clamped to the real screen
+
+# The on-screen controls the panel names by their exact label. A renamed
+# button must rename them here too, or the help sends the operator hunting
+# for a control that no longer exists (the failure mode that made the
+# telemetry LabelFrame's five copies worth a comment). Tested both ways:
+# each string appears in the text AND is a live widget label.
+HOWTO_QUOTED_CONTROLS = (
+    "▶ Detect Edges",
+    "📏 Calibrate / re-anchor…",
+    "💾 Save to data.csv…",
+    "Next unreviewed",
+)
+
+HOWTO_SECTIONS = [
+    ("Edge Review turns a run's photos into measured areas", [
+        "The machine measures; your job is to check its work and fix what "
+        "it got wrong. Nothing from a review pass reaches data.csv until "
+        "you press 💾 Save to data.csv… — the one exception is a re-anchor "
+        "on an already-saved run, which says so on its own button before "
+        "it writes.",
+    ]),
+    ("The loop", [
+        "1.   Pick the run in the Run box at the top. Runs that already "
+        "carry measured areas are marked ✓ processed.",
+
+        "2.   Press ▶ Detect Edges. Calibration comes first: the camera "
+        "zoom moves between runs, so Detect diverts to the scale dialog "
+        "until this run has its own px→mm anchor. The dialog opens on the "
+        "machine's own fit of the resting disc, and the job it asks of you "
+        "is to JUDGE that circle, not to measure the disc again. Measuring "
+        "by hand is the fallback for when the fit refuses, and it is "
+        "measurably worse — roughly 1 % of diameter per attempt against "
+        "the fit's 0.03–0.80 % residual, because the disc edge is a ~60 px "
+        "gradient with no line to click. ✔ Accept, and detection starts on "
+        "its own.",
+
+        "3.   Work the review queue. Confident frames are accepted "
+        "automatically; the rest wait for you. Keys 1 / 2 / 3 pick "
+        "candidate A / B / C, Enter accepts and moves on, D (or 4) opens "
+        "the hand tracer, R rejects. Next unreviewed jumps to the next "
+        "frame that still needs a human.",
+
+        "4.   💾 Save to data.csv… when the queue is empty. A .bak is kept, "
+        "and the confirm prompt says what is about to be written and how "
+        "many frames will be renamed before you answer.",
+    ]),
+    ("Three things that cost people real time", [
+        "•   Wash-out frames are TRACED, not rejected. Above about 5.5 kV "
+        "the ink boundary washes out and no boundary-shaped candidate can "
+        "exist — that is the frame being what it is, not the detector "
+        "failing, and your trace IS the measurement there. Reject means "
+        "something narrower: no honest boundary can be drawn even by hand "
+        "(occlusion, breakdown debris, a corrupt frame). Rejecting a "
+        "wash-out frame silently discards a real data point, and it is the "
+        "one instruction a new operator gets wrong.",
+
+        "•   ✔ Accept in the scale dialog only STAGES the anchor — the "
+        "Save is what writes it. Nothing on screen implies that, so it is "
+        "worth over-learning: on a live run on 2026-08-06 an operator "
+        "accepted a corrected fit, closed the window before saving, and "
+        "the correction was lost. If you accepted a scale, Save before you "
+        "close. (The dialog's own primary button says which one you are "
+        "in: \"applied at Save\" versus \"RE-ANCHOR NOW\".)",
+
+        "•   A wrong scale does not mean re-reviewing the run. On a run "
+        "that is already saved, carries pixel measurements and has no "
+        "review pass open, 📏 Calibrate / re-anchor… re-derives every mm² "
+        "straight from the pixels already in data.csv — no detection, no "
+        "second pass over the queue. Which of the two the button is about "
+        "to do follows the run's state and is named in the dialog's title, "
+        "on its primary button and in its confirmation.",
+    ]),
+    ("The two numbers on every candidate line", [
+        ('code', "A: disc-fit   12345 px²   conf 0.87   w1.2"),
+
+        "•   conf is the detector's own 0–1 opinion of that outline, built "
+        "from how solid the shape is, how hard the edge steps, whether the "
+        "other candidates agree with it and whether its interior is "
+        "wrinkled. At or above accept_conf (0.75 by default) a frame is "
+        "auto-accepted; below it, the frame comes to you. It is a score, "
+        "not a probability — a confident wrong answer is possible, which "
+        "is exactly why the queue exists.",
+
+        "•   w is the wrinkle index: the texture inside the outline "
+        "compared with the same patch of the 0 kV baseline. 1.0 means no "
+        "texture change at all. At or above wrinkle_ratio (1.4 by default) "
+        "the frame counts as wrinkle-mode, and since the lab defines the "
+        "active area AS the buckled region, a wrinkled interior is "
+        "evidence that the outline is sitting on the right thing.",
+    ]),
+    ("If you need more than this", [
+        "The illustrated manual has the screenshots, the tuner and the "
+        "rest of the tool chain: docs/digital-multitool-manual.pdf in the "
+        "repo (or the copy handed out at the bench), section \"Companion "
+        "tools\".",
+    ]),
+]
+
+
+def howto_text():
+    """The whole panel as plain text, in reading order.
+
+    A paragraph is either a plain string or a ('code', text) pair (the one
+    literal example of a candidate line, which is rendered in a fixed font
+    and must not be reflowed). This is the single reader for the words, so
+    the headless tests check exactly what the window renders."""
+    out = []
+    for heading, paras in HOWTO_SECTIONS:
+        out.append(heading)
+        out.extend(p[1] if isinstance(p, tuple) else p for p in paras)
+    return '\n'.join(out)
+# ---------------------------------------------------------------------------
+# the two clocks (`#237`) — pure, so both readouts are testable without Tk
+#
+# ONE toolbar clock used to run from ▶ Detect Edges until 💾 Save, which
+# made it a session stopwatch: the moment detection finished it kept
+# counting through however long the human then spent reviewing, and the
+# only number an operator can plan with — how long the PASS took — was
+# destroyed as soon as it was produced. Two readouts instead, because
+# both are wanted: the detection pass's own time, FROZEN when the pass
+# ends and carrying its frame count so it reads as a rate, above a
+# session total that never stops.
+# ---------------------------------------------------------------------------
+
+
+def fmt_dur(sec):
+    """Compact absolute duration — `43s`, `2m14s`, `1h04m` (`#237`).
+
+    Deliberately not M:SS. These readouts are read as an ANSWER ("81
+    frames in 2m14s"), and a bare `2:14` sitting beside a running session
+    clock reads as a time of day; M:SS also never rolls over, so a
+    90-minute pass prints `90:00`. Not `sldea_profile.fmt_duration`
+    either — its `0:02:14` spends three characters on an hour that a
+    detection pass almost never has."""
+    sec = max(0, int(sec))
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec // 60}m{sec % 60:02d}s"
+    return f"{sec // 3600}h{(sec % 3600) // 60:02d}m"
+
+
+def detect_readout(n_frames=None, secs=None, total=None):
+    """The DETECTION line of the toolbar clock (`#237`).
+
+    Three states, one function so a test can pin all of them:
+
+    - `secs is None` — **no detection pass has run on this run**, said out
+      loud rather than left blank. A scale-only re-anchor never detects
+      (`#215`), so the ABSENCE of a fresh detection time is exactly the
+      signal that tells an operator which of the two paths they are on —
+      and a blank readout beside a running session clock is indis-
+      tinguishable from a readout that has not repainted yet.
+    - `total` given — a pass is in flight; the line reads as progress.
+    - otherwise — the pass finished and this is the frozen answer.
+    """
+    if secs is None:
+        return "detect: not run"
+    if total is not None:
+        # no "frames" while running: the `/` already says what the pair
+        # is, the banner and the status line both spell it out, and this
+        # form has to stay inside the same fixed box as the frozen one
+        return f"detect: {n_frames}/{total}  {fmt_dur(secs)}"
+    return f"detect: {n_frames} frames in {fmt_dur(secs)}"
+
+
+def session_readout(secs):
+    """The SESSION line of the toolbar clock (`#237`) — how long this
+    window has been open. Runs from the moment Edge Review opens to the
+    moment it closes: it is not reset by a run switch (the batch cockpit
+    is one session across many runs) and not stopped by Save (reviewing
+    continues after one)."""
+    return f"session {fmt_dur(secs)}"
+# ---------------------------------------------------------------------------
+# hover tooltips (`#216`)
+#
+# COPIED, NOT IMPORTED, from ui_widgets.py — deliberately (PROJECT_HANDOFF
+# open decision 2). That decision moves sldea_edge / sldea_edge_gui /
+# sldea_tuner / sldea_diag / sldea_trace into their own repo as an
+# instrument-free suite; `ui_widgets` is NOT in that seam, so importing it
+# here would plant a cross-seam dependency on the split's own boundary for
+# the sake of ~35 lines with no state and no invariants. The repo's
+# duplication scar (the `#224` label in five hand-kept places) is about a
+# STRING an operator reads and a doc quotes; this is a behaviourless Tk
+# idiom. If the two ever drift, nothing measurable is wrong — one popup
+# waits 650 ms and the other 700.
+#
+# If the split is ever abandoned, delete this and
+# `from ui_widgets import add_tooltip` instead: the signature is the same
+# on purpose.
+# ---------------------------------------------------------------------------
+
+
+class Tooltip:
+    """Show `text` in a small popup after hovering `widget` for `delay` ms.
+
+    Tk has no built-in tooltip; this is the standard Toplevel +
+    overrideredirect pattern. Hides on leave/click/destroy.
+    """
+
+    def __init__(self, widget, text, delay=650, wraplength=340):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self.wraplength = wraplength
+        self._after_id = None
+        self._tip = None
+        widget.bind('<Enter>', self._schedule, add='+')
+        widget.bind('<Leave>', self._hide, add='+')
+        widget.bind('<ButtonPress>', self._hide, add='+')
+        widget.bind('<Destroy>', self._hide, add='+')
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after_id = self.widget.after(self.delay, self._show)
+
+    def _cancel(self):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _show(self):
+        if self._tip is not None or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 14
+            y = (self.widget.winfo_rooty()
+                 + self.widget.winfo_height() + 6)
+        except tk.TclError:      # widget died while the timer was pending
+            return
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f'+{x}+{y}')
+        tk.Label(tip, text=self.text, justify='left',
+                 wraplength=self.wraplength, bg='#ffffe0', fg='black',
+                 relief='solid', borderwidth=1, padx=7, pady=5).pack()
+        self._tip = tip
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except tk.TclError:
+                pass
+            self._tip = None
+
+
+def add_tooltip(widget, text):
+    """Attach a hover tooltip; returns the Tooltip.
+
+    THE ONE DELIBERATE DIFFERENCE from ui_widgets.add_tooltip, which
+    returns the widget so a caller can chain `add_tooltip(ttk.Button(…),
+    …)`. Nothing here chains, and one caller — ▶ Detect Edges, whose
+    hover text follows its enabled state — needs the object back."""
+    return Tooltip(widget, text)
+
+
+# TIPS is the whole hover-help inventory in one place, keyed by the
+# attribute/slot it hangs on, so a reviewer can read every string the
+# operator can summon without walking _build_ui — and so the tests can
+# assert that every control the issue names actually carries one.
+# One short sentence each: what THIS control does, in the words the code
+# uses. Workflow prose ("what do I do here") is #238's panel, not this.
+TIPS = {
+    'run_box': "Pick which run folder to review — '✓ processed' means its "
+               "data.csv already carries pixel areas from an earlier pass.",
+    'browse_btn': "Point Edge Review at a different run folder, or at a "
+                  "parent folder full of them.",
+    'detect_btn': "START HERE: traces the disc in every frame of this run — "
+                  "if the run has no px→mm anchor yet, the 📏 calibration "
+                  "opens first and detection continues by itself.",
+    'detect_btn_disabled': "Pick a run in the Run box first — there is "
+                           "nothing to detect until then.",
+    'detect_btn_busy': "Detection is running — the Run box and Browse… are "
+                       "locked until it finishes, so a stale pass cannot "
+                       "land on the next run.",
+    'adv_btn': "Edit this run's detection thresholds; changing one that "
+               "affects detection clears the current pass and asks first.",
+    'scale_btn': "Set this run's px→mm anchor from the resting disc; on an "
+                 "already-saved run with no review pass open it re-derives "
+                 "every mm² in data.csv instead.",
+    'save_btn': "Writes the accepted areas into data.csv (a .bak is kept) "
+                "and saves the plot and outline overlays — greyed out until "
+                "▶ Detect Edges has run, and it still refuses without the "
+                "📏 scale anchor.",
+    # the digit leads because <Key-1..3> is bound unconditionally, while
+    # the letter binding is <Key-a/b/c> — lowercase, so it is the letter
+    # an unshifted keypress sends (unlike R/D/T, bound in both cases)
+    'cand': "Machine candidate {k} — the outline drawn on the frame in the "
+            "matching colour; press {n} or {k} to pick it. conf is a "
+            "review-ordering score, not a probability that the edge is "
+            "right.",
+    'trace': "Draw the outline yourself when no candidate is right — keys "
+             "4, D or T open the tracer. Done only STAGES it as D; "
+             "✔ Accept commits it.",
+    'accept_btn': "Commit the selected candidate for this frame (Enter), "
+                  "then jump to the next frame still needing a decision.",
+    'reject_btn': "Record that this frame has no reliable edge (R) — its "
+                  "area columns are blanked, and it is not left unreviewed.",
+    'prev_btn': "Back one frame (Left arrow); browsing never changes a "
+                "decision.",
+    'next_btn': "Forward one frame (Right arrow); browsing never changes a "
+                "decision.",
+    'unrev_btn': "Jump to the first frame still waiting for a decision.",
+}
+
+# The empty canvas says what to press. The scale gate turns Detect into
+# the ONE entry point — it diverts to 📏 and chains back — so the hint
+# names Detect, not calibration (`#216`). Every other place that tells an
+# operator how to start a run says the same thing in the same order; if
+# you change this, grep for "Detect Edges" and change them together.
+HINT_PICK_RUN = ("Pick a run in the Run box above,\n"
+                 "then press  ▶ Detect Edges")
+HINT_DETECT = ("Press  ▶ Detect Edges  to start.\n"
+               "📏 Calibration will guide you first when this run "
+               "needs an anchor.")
 
 
 # ---------------------------------------------------------------------------
@@ -1125,6 +1502,13 @@ class EdgeReviewApp:
         # gate dialog would chain a second detect worker (review 2026-08-05)
         self._cal_probe = None  # the live calibration dialog's own state,
         # published for the tests that drive it (see _calibrate_scale)
+        self._howto_win = None  # ❓ How to use (`#238`) — singleton, and
+        # NON-modal on purpose: the whole point is to read it beside the
+        # window while working, not instead of it
+        self._howto_scroll = None      # its canvas, published for the tests
+        self._tips = {}          # control name -> live Tooltip (`#216`)
+        self._hint = None        # the empty-canvas "press this" line (`#216`)
+        self._primary_font = None   # kept alive by _install_styles (`#216`)
         self._build_ui()
         start = path or DEFAULT_PARENT
         self._populate_runs(start)
@@ -1132,25 +1516,81 @@ class EdgeReviewApp:
             root.after(300, self.detect)
 
     # ---------------- UI scaffolding ----------------
+    def _install_styles(self):
+        """The ONE accent in Edge Review: ▶ Detect Edges (`#216`).
+
+        Deliberately NOT a restyle of the app — #32 owns that, and this is
+        stock ttk on the vista theme. Measured on the Windows analysis PC
+        (Tk 8.6.12, theme `vista`, Segoe UI 9): a named style's `font`,
+        `padding` and `foreground` are all honoured by the native button
+        element, so the accented button renders 105x31 against a plain
+        88x25 and its label is drawn in the house blue. On a theme that
+        ignores foreground the bold face and the extra padding still carry
+        the emphasis, so it degrades to "bigger and bolder" rather than to
+        nothing. No `default='active'`: <Return> is bound to ✔ Accept, and
+        calling Detect the default button would be a lie.
+
+        Secondary (Advanced…, 📏) keeps the stock geometry — a button that
+        is smaller AND muted starts to read as disabled — and is muted by
+        label colour only, so the row's heights stay even.
+
+        THE BOLD FONT IS HELD ON THE APP, not on the stack. A tkfont.Font
+        deletes its named font from the interpreter when it is collected,
+        and a style pointing at a deleted name falls back to the default
+        face without a word — a bold accent that is silently not bold.
+        It is per-app rather than a module cache because the name lives in
+        the Tk interpreter, and the tests build and destroy roots.
+        """
+        st = ttk.Style()
+        try:
+            self._primary_font = tkfont.nametofont('TkDefaultFont').copy()
+            self._primary_font.configure(weight='bold')
+            st.configure('Primary.TButton', font=self._primary_font,
+                         padding=(12, 4), foreground=PRIMARY_FG)
+            st.configure('Secondary.TButton', foreground=SECONDARY_FG)
+        except tk.TclError as e:
+            # a theme that refuses one of these must cost the ACCENT, not
+            # the window: the button still works unstyled
+            print(f"edge review: accent style unavailable ({e})")
+
     def _build_ui(self):
+        self._install_styles()
         top = ttk.Frame(self.root, padding=6)
         top.pack(fill='x')
-        ttk.Label(top, text="Run:").pack(side=tk.LEFT)
+        # THE TOP BAR READS LEFT TO RIGHT AS THE JOB (`#216`): pick the run,
+        # press the one accented button, review, save on the far right. The
+        # separators are the grouping — [run] | [the action] | [tools] — so
+        # the two tool buttons stop competing with Detect for the eye.
+        self.run_lbl = ttk.Label(top, text="Run:")
+        self.run_lbl.pack(side=tk.LEFT)
         self.run_box = ttk.Combobox(top, width=44, state='readonly')
         self.run_box.pack(side=tk.LEFT, padx=6)
         self.run_box.bind('<<ComboboxSelected>>', lambda _e: self._pick_run())
         self.browse_btn = ttk.Button(top, text="Browse…",
                                      command=self._browse)
         self.browse_btn.pack(side=tk.LEFT)
+        ttk.Separator(top, orient='vertical').pack(side=tk.LEFT, fill='y',
+                                                   padx=10, pady=2)
+        # THE primary action, and disabled until a run is picked — the
+        # affordance doubles as the state, so a first-time operator is
+        # never invited to press the button that would only say "Pick a
+        # run first" in a modal (`#216`). _sync_detect_btn owns it from
+        # here on; the detect-in-flight lock goes through the same place.
         self.detect_btn = ttk.Button(top, text="▶ Detect Edges",
-                                     command=self.detect)
+                                     command=self.detect,
+                                     style='Primary.TButton',
+                                     state='disabled')
         self.detect_btn.pack(side=tk.LEFT, padx=10)
+        ttk.Separator(top, orient='vertical').pack(side=tk.LEFT, fill='y',
+                                                   padx=10, pady=2)
         # ONE settings-editing path in Edge Review: Advanced… covers every
         # knob with Apply+Save. The Tune button was removed (operator
         # decision 2026-07-31) — the tuner is a development instrument,
         # launched directly (deploy/Tune_SLDEA_Windows.bat unchanged).
-        ttk.Button(top, text="Advanced…",
-                   command=self._advanced).pack(side=tk.LEFT)
+        self.adv_btn = ttk.Button(top, text="Advanced…",
+                                  command=self._advanced,
+                                  style='Secondary.TButton')
+        self.adv_btn.pack(side=tk.LEFT)
         # ONE scale entry point (operator decision 2026-08-06 late, `#215`).
         # It used to be two buttons — 📏 Calibrate… and 📏 Re-anchor scale… —
         # and the operator's objection was that they open THE SAME DIALOG, so
@@ -1166,19 +1606,53 @@ class EdgeReviewApp:
         # two is about to happen is computed at click time and said in the
         # dialog's title, on its primary button and in its confirmation.
         self.scale_btn = ttk.Button(top, text="📏 Calibrate / re-anchor…",
-                                    command=self._scale_action)
+                                    command=self._scale_action,
+                                    style='Secondary.TButton')
         self.scale_btn.pack(side=tk.LEFT, padx=(6, 0))
+        # Save stays on the far RIGHT — the end of the job, and out of the
+        # left-to-right flow (`#216`). It is NOT accented: two accents is
+        # no accent, and its own affordance is the disabled state, which
+        # the tooltip explains rather than leaving as a dead grey button.
         self.save_btn = ttk.Button(top, text="💾 Save to data.csv…",
                                    command=self.save, state='disabled')
         self.save_btn.pack(side=tk.RIGHT)
-        # progress + session clock (from Detect until Save)
-        self.clock_lbl = tk.Label(top, text="", fg='#1f3a5f',
-                                  font=('TkDefaultFont', 10, 'bold'))
-        self.clock_lbl.pack(side=tk.RIGHT, padx=10)
+        # progress + TWO clocks (`#237`), stacked rather than side by side
+        # so the toolbar keeps its width: the detection pass's own time
+        # (the number an operator plans a run with, so it is the bold one)
+        # over the session total.
+        #
+        # A FIXED BOX, right-aligned, for #179's reason one row up: with
+        # geometry propagation on, this frame tracks its widest child --
+        # text that changes every poll -- and the only widget with any
+        # give left in the toolbar is the progress bar beside it, which
+        # would then resize under its own moving fill.
+        clock_font = ('TkDefaultFont', 9)
+        clocks = ttk.Frame(top)
+        clocks.pack(side=tk.RIGHT, padx=(8, 6))
+        self.detect_lbl = tk.Label(clocks, text=detect_readout(), fg='#1f3a5f',
+                                   anchor='e',
+                                   font=clock_font + ('bold',))
+        self.detect_lbl.pack(fill='x')
+        self.clock_lbl = tk.Label(clocks, text="", fg='#5a6b7d', anchor='e',
+                                  font=clock_font)
+        self.clock_lbl.pack(fill='x')
+        # Both dimensions measured from the widgets and the font rather
+        # than typed in: the toolbar row is one button tall, so a height
+        # left to the parent clipped the session line to 4 of its 21 px,
+        # and a hard-coded pair would do it again on the next display
+        # scaling or theme font.
+        clocks.configure(
+            width=tkfont.Font(font=clock_font + ('bold',)).measure(
+                detect_readout(999, 3600.0)) + 8,
+            height=(self.detect_lbl.winfo_reqheight()
+                    + self.clock_lbl.winfo_reqheight()))
+        clocks.pack_propagate(False)
         self.prog = ttk.Progressbar(top, length=180, mode='determinate')
         self.prog.pack(side=tk.RIGHT, padx=6)
-        self._t0 = None
-        self._clock_on = False
+        self._t0 = None             # start of the CURRENT detection pass
+        self._t_session = time.time()   # window open — never reset
+        self._clock_on = True
+        self._tick_clock()
 
         mid = ttk.Frame(self.root)
         mid.pack(fill='both', expand=True)
@@ -1230,24 +1704,42 @@ class EdgeReviewApp:
             self.cand_radios.append(rb)
         bt = ttk.Frame(side)
         bt.pack(fill='x', pady=6)
-        ttk.Button(bt, text="✔ Accept (Enter)",
-                   command=self._accept_next).pack(side=tk.LEFT)
-        ttk.Button(bt, text="✘ Reject (R)",
-                   command=self._reject).pack(side=tk.LEFT, padx=6)
+        self.accept_btn = ttk.Button(bt, text="✔ Accept (Enter)",
+                                     command=self._accept_next)
+        self.accept_btn.pack(side=tk.LEFT)
+        self.reject_btn = ttk.Button(bt, text="✘ Reject (R)",
+                                     command=self._reject)
+        self.reject_btn.pack(side=tk.LEFT, padx=6)
         nav = ttk.Frame(side)
         nav.pack(fill='x')
-        ttk.Button(nav, text="◀ Prev",
-                   command=lambda: self._step(-1)).pack(side=tk.LEFT)
-        ttk.Button(nav, text="Next ▶",
-                   command=lambda: self._step(+1)).pack(side=tk.LEFT, padx=6)
-        ttk.Button(nav, text="Next unreviewed",
-                   command=self._next_unreviewed).pack(side=tk.LEFT)
+        self.prev_btn = ttk.Button(nav, text="◀ Prev",
+                                   command=lambda: self._step(-1))
+        self.prev_btn.pack(side=tk.LEFT)
+        self.next_btn = ttk.Button(nav, text="Next ▶",
+                                   command=lambda: self._step(+1))
+        self.next_btn.pack(side=tk.LEFT, padx=6)
+        self.unrev_btn = ttk.Button(nav, text="Next unreviewed",
+                                    command=self._next_unreviewed)
+        self.unrev_btn.pack(side=tk.LEFT)
         self.queue_lbl = tk.Label(side, text="", fg='#8a5a00', anchor='w',
                                   justify='left')
         self.queue_lbl.pack(fill='x', pady=(8, 0))
         self.status = tk.Label(self.root, text="idle", bd=1, relief=tk.SUNKEN,
                                anchor='w')
         self.status.pack(side=tk.BOTTOM, fill='x')
+        # ❓ How to use — BOTTOM-RIGHT of the window (`#238`). Packed at the
+        # BOTTOM *after* the status strip on purpose: with side=BOTTOM each
+        # slave takes the bottom of what is left, so the strip keeps the
+        # window's own bottom edge and this row sits directly above it,
+        # flush right. Nothing above is touched — the top bar is where the
+        # RUN's controls live, and a "where do I start" affordance that sat
+        # among them would be one more thing to read before starting.
+        foot = ttk.Frame(self.root, padding=(6, 3))
+        foot.pack(side=tk.BOTTOM, fill='x')
+        self.howto_btn = ttk.Button(foot, text=HOWTO_BTN_TEXT,
+                                    command=self._howto)
+        self.howto_btn.pack(side=tk.RIGHT)
+        self._attach_tooltips()
 
         for key, fn in (('<Key-1>', lambda e: self._pick_k(0)),
                         ('<Key-2>', lambda e: self._pick_k(1)),
@@ -1266,6 +1758,85 @@ class EdgeReviewApp:
                         ('<Left>', lambda e: self._step(-1)),
                         ('<Right>', lambda e: self._step(+1))):
             self.root.bind(key, fn)
+
+    # ---------------- hover help + the primary action's state ----------
+    def _attach_tooltips(self):
+        """Hover help on every control in the top bar and the review card
+        (`#216`, and the operator asked for it again unprompted after a
+        long session). Every string lives in TIPS; the key bindings quoted
+        in them are the ones bound at the end of _build_ui.
+
+        `self._tips` is the live inventory, keyed the same as TIPS, so the
+        tests can assert coverage against the controls rather than against
+        a list that would rot the first time one is added."""
+        self._tips = {}
+        for name, widget in (('run_box', self.run_box),
+                             ('browse_btn', self.browse_btn),
+                             ('detect_btn', self.detect_btn),
+                             ('adv_btn', self.adv_btn),
+                             ('scale_btn', self.scale_btn),
+                             ('save_btn', self.save_btn),
+                             ('accept_btn', self.accept_btn),
+                             ('reject_btn', self.reject_btn),
+                             ('prev_btn', self.prev_btn),
+                             ('next_btn', self.next_btn),
+                             ('unrev_btn', self.unrev_btn)):
+            self._tips[name] = add_tooltip(widget, TIPS[name])
+        # the "Run:" caption is part of the same control to a pointer
+        add_tooltip(self.run_lbl, TIPS['run_box'])
+        # A/B/C say which key picks them; D is the tracer, not a candidate
+        for k in range(3):
+            self._tips[f'cand{k}'] = add_tooltip(
+                self.cand_radios[k],
+                TIPS['cand'].format(k=CAND_KEYS[k], n=k + 1))
+        self._tips['trace'] = add_tooltip(self.cand_radios[TRACE_SLOT],
+                                          TIPS['trace'])
+        # ▶ Detect Edges is the one tip that MOVES: a greyed-out button
+        # whose tooltip describes what it would do, without saying why it
+        # is grey, leaves the state the affordance was meant to explain
+        # unexplained.
+        self._sync_detect_btn()
+
+    def _sync_detect_btn(self):
+        """▶ Detect Edges is live exactly when there is a run to detect
+        and no worker in flight (`#216`).
+
+        Disabled-until-a-run-is-picked makes the affordance carry the
+        state: the button used to be live from launch and answer a click
+        with a modal 'Pick a run first'. It matters in COCKPIT MODE, where
+        Edge Review is opened on a parent folder — an empty parent, or one
+        whose named target is missing, leaves no run loaded at all.
+
+        The detect-in-flight lock (audit 2026-08-05) routes through here
+        too, so there is ONE writer of this button's state."""
+        busy = self._detect_busy
+        ready = self.run is not None and not busy
+        self.detect_btn.config(state='normal' if ready else 'disabled')
+        tip = self._tips.get('detect_btn')
+        if tip is not None:
+            tip.text = (TIPS['detect_btn_busy'] if busy else
+                        TIPS['detect_btn'] if self.run is not None else
+                        TIPS['detect_btn_disabled'])
+
+    def _canvas_hint(self, text=None):
+        """The empty card area SAYS what to press (`#216`).
+
+        Passing None clears it, which every path that paints the canvas
+        does — the hint belongs to the empty state only. It is re-drawn on
+        resize (_redraw_card) because a <Configure> would otherwise leave
+        the operator staring at the blank canvas the hint exists for."""
+        self._hint = text or None
+        try:
+            self.canvas.delete('hint')
+        except tk.TclError:                # canvas already gone
+            return
+        if not self._hint:
+            return
+        w, h = self._view_size()
+        self.canvas.create_text(w // 2, h // 2, text=self._hint,
+                                fill='#d7dde5', justify='center',
+                                width=max(220, w - 80), tags='hint',
+                                font=('TkDefaultFont', 13))
 
     # ---------------- run selection ----------------
     def _list_runs(self, parent):
@@ -1324,12 +1895,18 @@ class EdgeReviewApp:
                     self.status.config(
                         text=f"target run '{preselect}' not found in "
                              f"{self.parent} — pick one manually")
+                    self._sync_detect_btn()
+                    self._canvas_hint(HINT_PICK_RUN)
                     return
             self.run_box.current(want)
             self._pick_run()
         else:
             self.status.config(text=f"no runs (dirs holding a data CSV) "
                                     f"in {self.parent}")
+            # COCKPIT MODE, empty parent: no run is loaded, so ▶ Detect
+            # Edges stays grey and the canvas says which box to use first
+            self._sync_detect_btn()
+            self._canvas_hint(HINT_PICK_RUN)
 
     def _browse(self):
         d = filedialog.askdirectory(initialdir=self.parent or DEFAULT_PARENT)
@@ -1341,7 +1918,10 @@ class EdgeReviewApp:
         combobox and Browse… used to stay live and cross-contaminate the
         freshly picked run with the old worker's output (audit
         2026-08-05)."""
-        self.detect_btn.config(state='disabled' if busy else 'normal')
+        # ▶ Detect Edges goes through _sync_detect_btn, which ANDs this
+        # lock with "is a run even loaded" (`#216`) — re-enabling it here
+        # unconditionally would hand a runless cockpit a live button again
+        self._sync_detect_btn()
         self.run_box.config(state='disabled' if busy else 'readonly')
         self.browse_btn.config(state='disabled' if busy else 'normal')
 
@@ -1374,13 +1954,22 @@ class EdgeReviewApp:
         self.base_ref = None
         self.manual_ref = None
         self.pos = 0
+        # the detection readout belongs to a PASS, so it dies with the run
+        # it measured (`#237`). The batch cockpit switches runs inside one
+        # session, and the old single clock kept the previous run's number
+        # on screen through the switch — where it reads as this run's.
+        self._t0 = None
+        self._set_detect_clock()
         self.save_btn.config(state='disabled')
+        self._sync_detect_btn()          # self.run is None again (`#216`)
         try:
             self.run = se.load_run(self.rundir)
             self.settings = se.load_settings(self.rundir)
         except Exception as e:
             messagebox.showerror("Run", f"Cannot read {name}: {e}")
             self.run = None
+            self._sync_detect_btn()
+            self._canvas_hint(HINT_PICK_RUN)
             return
         self.frame_rows = [i for i, r in enumerate(self.run['rows'])
                            if (r.get('frame_file') or '').strip()]
@@ -1394,26 +1983,45 @@ class EdgeReviewApp:
                                                 self.run['rows'][i]) or ''))
         miss_txt = (f" ({missing} MISSING on disk — kept unreadable, "
                     f"never re-measured)" if missing else "")
+        # ONE STORY ABOUT HOW TO START (`#216`). This line used to read
+        # "📏 Calibrate / re-anchor, then Detect", which is the pre-gate
+        # order: since the scale gate (2026-08-05) Detect DIVERTS to the
+        # calibration itself and chains back, so telling the operator to
+        # press 📏 first contradicts the button that is now accented and
+        # the hint on the empty canvas. The gate is still named, because
+        # it is why the first Detect opens a dialog instead of detecting.
         self.status.config(
             text=f"{name}: {len(self.run['rows'])} snapshots, {n} frames "
-                 f"listed{miss_txt} — 📏 Calibrate / re-anchor, "
-                 f"then Detect "
-                 f"(diam {self.settings['diam_mm']:g} mm; scale gate "
-                 f"re-arms per run)")
+                 f"listed{miss_txt} — press ▶ Detect Edges "
+                 f"(it opens 📏 Calibrate / re-anchor first when this run "
+                 f"has no anchor; diam {self.settings['diam_mm']:g} mm; "
+                 f"scale gate re-arms per run)")
         self.canvas.delete('all')
+        self._canvas_hint(HINT_DETECT)
+        self._sync_detect_btn()
         self.info.config(text=f"{name}\n{n} frames ready")
 
     # ---------------- detection ----------------
-    @staticmethod
-    def _fmt_t(sec):
-        sec = int(sec)
-        return f"{sec // 60}:{sec % 60:02d}"
-
     def _tick_clock(self):
-        if not self._clock_on or self._t0 is None:
+        """The SESSION clock, once a second for the life of the window
+        (`#237`). It is not stopped by Save and not reset by a run switch;
+        the detection readout beside it is the one that belongs to a pass
+        and is repainted by `_set_detect_clock`."""
+        if not self._clock_on:
             return
-        self.clock_lbl.config(text=f"elapsed {self._fmt_t(time.time() - self._t0)}")
+        try:
+            self.clock_lbl.config(
+                text=session_readout(time.time() - self._t_session))
+        except tk.TclError:
+            self._clock_on = False      # the window closed under the tick
+            return
         self.root.after(1000, self._tick_clock)
+
+    def _set_detect_clock(self, n_frames=None, secs=None, total=None):
+        """Repaint the DETECTION readout — see `detect_readout` for the
+        three states. Called with no arguments it says 'not run', which is
+        what a freshly picked run and a scale-only re-anchor both are."""
+        self.detect_lbl.config(text=detect_readout(n_frames, secs, total))
 
     def _banner(self, text):
         """Big unmissable state banner drawn over the image area."""
@@ -1495,10 +2103,13 @@ class EdgeReviewApp:
         # a re-detect must not leave the PREVIOUS pass's Save live while
         # the new results stream in (audit 2026-08-05)
         self.save_btn.config(state='disabled')
+        # a re-detect discards the previous pass's frozen time with the
+        # previous pass's results — this readout is about the pass that is
+        # running now (`#237`)
         self._t0 = time.time()
-        self._clock_on = True
-        self._tick_clock()
+        self._set_detect_clock(0, 0.0, len(self.frame_rows))
         self.prog.config(maximum=len(self.frame_rows), value=0)
+        self._canvas_hint(None)        # the hint's job is done (`#216`)
         self.canvas.delete('all')
         self._banner(f"DETECTING…  0/{len(self.frame_rows)}")
         self.status.config(text="detecting…")
@@ -1597,9 +2208,10 @@ class EdgeReviewApp:
         self.prog.config(value=n)
         el = time.time() - self._t0
         eta = (el / n * (total - n)) if n else 0
+        self._set_detect_clock(n, el, total)
         self.status.config(
-            text=f"detecting… {n}/{total}  —  elapsed {self._fmt_t(el)}"
-                 + (f", ~{self._fmt_t(eta)} left" if n else ""))
+            text=f"detecting… {n}/{total}  —  elapsed {fmt_dur(el)}"
+                 + (f", ~{fmt_dur(eta)} left" if n else ""))
         self._banner(f"DETECTING…  {n}/{total}")
         if done:
             self._finish_detect()
@@ -1608,7 +2220,9 @@ class EdgeReviewApp:
 
     def detect_all_sync(self):
         """Synchronous detection (used by --auto tests and headless runs)."""
-        self._t0 = self._t0 or time.time()
+        # this pass, not the first one of the session: `_t0 or time.time()`
+        # made a second sync pass report the time since the FIRST (`#237`)
+        self._t0 = time.time()
         self.cands_all, self.results, self.flags = {}, {}, {}
         self.pair_cands = {}
         self.advisories = {}
@@ -1678,7 +2292,12 @@ class EdgeReviewApp:
         self.prog.config(value=len(self.frame_rows))
         self._banner(None)
         q = self._queue_list()
-        took = self._fmt_t(time.time() - self._t0) if self._t0 else '?'
+        # THE DETECTION READOUT FREEZES HERE (`#237`) — the pass is over,
+        # and everything after this point is the human's time, not the
+        # machine's. The session clock beside it carries on.
+        dt = (time.time() - self._t0) if self._t0 else None
+        took = fmt_dur(dt) if dt is not None else '?'
+        self._set_detect_clock(len(self.frame_rows), dt)
         if self.manual_ref:
             # the auto disc fit is a CROSS-CHECK of the operator's fit,
             # not the anchor (scale gate, 2026-08-05). Since #215 the
@@ -1943,6 +2562,10 @@ class EdgeReviewApp:
         self._resize_job = None
         i = self._current()
         if self.run is None or i is None or i not in self.cands_all:
+            # nothing to render: re-centre the empty-canvas hint on the new
+            # size instead of leaving it stranded off-centre (`#216`)
+            if self._hint:
+                self._canvas_hint(self._hint)
             return
         self._draw(i, self.cands_all.get(i, []), self.results.get(i))
 
@@ -2011,6 +2634,7 @@ class EdgeReviewApp:
     def _draw(self, i, cands, chosen):
         from PIL import ImageTk
         vw, vh = self._view_size()
+        self._hint = None          # a card is about to occupy the canvas
         try:
             img = self._render_card(i, cands, chosen, view=(vw, vh))
         except OSError:
@@ -2584,9 +3208,14 @@ class EdgeReviewApp:
             self.status.config(
                 text=f"saved, but recording the scale anchor in "
                      f"setup.txt failed: {e}")
-        self._clock_on = False
-        took = self._fmt_t(time.time() - self._t0) if self._t0 else '?'
-        self.clock_lbl.config(text=f"done in {took}")
+        # detect→Save, the whole round trip, said in the status line where
+        # it always was. Save no longer STOPS the toolbar clock (`#237`):
+        # that clock is now the session, a session outlives a Save (the
+        # batch cockpit saves one run and moves to the next), and the
+        # frozen `detect:` readout above it is the number that used to be
+        # destroyed. The old `done in …` said detect→Save in a widget that
+        # then sat stale through every following run.
+        took = fmt_dur(time.time() - self._t0) if self._t0 else '?'
         try:
             self._save_plot(scale)
             self._save_overlays()
@@ -5231,10 +5860,9 @@ class EdgeReviewApp:
                 f"active_area_px measurement, so there are no pixel areas "
                 f"to convert at a corrected scale.\n\n"
                 f"Re-anchor only fixes the px→mm factor of a run that has "
-                f"already been measured. This run has not been: use "
-                f"▶ Detect Edges (📏 Calibrate / re-anchor first — "
-                f"Detect is gated on "
-                f"it) and 💾 Save.\n\n"
+                f"already been measured. This run has not been: press "
+                f"▶ Detect Edges (it opens 📏 Calibrate / re-anchor "
+                f"first — Detect is gated on it) and then 💾 Save.\n\n"
                 f"({probe['n_rows']} row(s) scanned"
                 + (f"; {probe['n_blank']} carry an mm² with no px, which a "
                    f"re-anchor could only blank" if probe['n_blank'] else '')
@@ -5625,6 +6253,113 @@ class EdgeReviewApp:
         }
 
     # ---------------- advanced settings ----------------
+    def _howto(self):
+        """❓ How to use — the workflow panel (`#238`).
+
+        SINGLETON like Advanced… (#176) and NON-MODAL, deliberately: this is
+        read BESIDE the window while working — an operator who has just been
+        told that a wash-out frame gets traced needs the trace controls live
+        while the sentence is still on screen. It takes no grab and blocks
+        nothing.
+
+        It also owns no key bindings of the main window. The review keys
+        (1/2/3, R, D, Enter) are bound on the review root, and Tk's bindtag
+        chain for a widget inside THIS Toplevel does not include that root —
+        so typing in the help window can never accept or reject a frame.
+
+        Fail-CLOSED construction, the lesson from the calibration singleton:
+        the handle is published only once the window is fully built, and a
+        failure mid-build destroys the half-built Toplevel rather than
+        leaving a corpse that every later click would lift and return from.
+
+        The words are HOWTO_SECTIONS; see the block comment there for why
+        they are a hand-kept copy rather than being sourced from
+        docs/manual-src/content.json."""
+        if self._howto_win is not None and self._howto_win.winfo_exists():
+            self._howto_win.lift()
+            self._howto_win.focus_set()
+            return
+        BG, FG, HEAD = '#ffffff', '#1a1a1a', '#1f3a5f'
+        win = tk.Toplevel(self.root)
+        try:
+            win.title(HOWTO_TITLE)
+            win.transient(self.root)     # stays with its window; no grab
+            # Sized for a 1080p bench screen and CLAMPED to the real one, so
+            # a smaller/rotated bench display cannot get a window taller
+            # than itself with its close button off-screen.
+            h = max(340, min(HOWTO_H, self.root.winfo_screenheight() - 180))
+            w = max(420, min(HOWTO_W, self.root.winfo_screenwidth() - 80))
+            win.geometry(f"{w}x{h}")
+            win.minsize(420, 300)
+            outer = ttk.Frame(win)
+            outer.pack(fill='both', expand=True)
+            cv = tk.Canvas(outer, bg=BG, highlightthickness=0, bd=0)
+            bar = ttk.Scrollbar(outer, orient='vertical', command=cv.yview)
+            cv.configure(yscrollcommand=bar.set)
+            bar.pack(side=tk.RIGHT, fill='y')
+            cv.pack(side=tk.LEFT, fill='both', expand=True)
+            body = tk.Frame(cv, bg=BG, padx=18, pady=14)
+            item = cv.create_window((0, 0), window=body, anchor='nw')
+
+            wrapped = []                 # labels that must reflow on resize
+            for si, (heading, paras) in enumerate(HOWTO_SECTIONS):
+                tk.Label(body, text=heading, bg=BG, fg=HEAD, anchor='w',
+                         justify='left',
+                         font=('TkDefaultFont', 11, 'bold')).pack(
+                    fill='x', pady=((14 if si else 0), 4))
+                for p in paras:
+                    if isinstance(p, tuple):     # the candidate-line example
+                        tk.Label(body, text=p[1], bg='#f2f4f7', fg=FG,
+                                 anchor='w', justify='left', padx=8, pady=4,
+                                 font='TkFixedFont').pack(
+                            fill='x', pady=(2, 6))
+                        continue
+                    lb = tk.Label(body, text=p, bg=BG, fg=FG, anchor='w',
+                                  justify='left',
+                                  font=('TkDefaultFont', 10))
+                    lb.pack(fill='x', pady=(0, 7))
+                    wrapped.append(lb)
+
+            def refit(_e=None):
+                # the body tracks the canvas width so the text reflows with
+                # the window instead of being clipped by a fixed wraplength
+                cw = max(200, cv.winfo_width())
+                cv.itemconfigure(item, width=cw)
+                for lb in wrapped:
+                    lb.config(wraplength=cw - 40)
+                cv.configure(scrollregion=cv.bbox('all'))
+
+            cv.bind('<Configure>', refit)
+            body.bind('<Configure>',
+                      lambda _e: cv.configure(scrollregion=cv.bbox('all')))
+
+            def wheel(e):
+                cv.yview_scroll(-1 if e.delta > 0 else 1, 'units')
+
+            # bound on the TOPLEVEL, never bind_all: a wheel binding on the
+            # whole app would scroll this panel from over the review canvas
+            win.bind('<MouseWheel>', wheel)                      # Win/macOS
+            win.bind('<Button-4>', lambda e: cv.yview_scroll(-1, 'units'))
+            win.bind('<Button-5>', lambda e: cv.yview_scroll(1, 'units'))
+            win.bind('<Up>', lambda e: cv.yview_scroll(-1, 'units'))
+            win.bind('<Down>', lambda e: cv.yview_scroll(1, 'units'))
+            win.bind('<Prior>', lambda e: cv.yview_scroll(-1, 'pages'))
+            win.bind('<Next>', lambda e: cv.yview_scroll(1, 'pages'))
+            win.bind('<Escape>', lambda e: win.destroy())
+
+            foot = ttk.Frame(win, padding=(8, 6))
+            foot.pack(side=tk.BOTTOM, fill='x')
+            ttk.Button(foot, text="Close",
+                       command=win.destroy).pack(side=tk.RIGHT)
+            self._howto_scroll = cv     # published for the tests
+            refit()
+            win.update_idletasks()
+            refit()                     # once more with real geometry
+        except Exception:
+            win.destroy()               # never publish a half-built window
+            raise
+        self._howto_win = win
+
     def _advanced(self):
         # SINGLETON (#176): stacked settings dialogs each hold the
         # values from their open time, so Apply on a stale one silently

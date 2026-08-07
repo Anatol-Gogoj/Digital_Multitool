@@ -256,6 +256,70 @@ def elide(text, width_px, measure):
 
 
 # ---------------------------------------------------------------------------
+# the two clocks (`#237`) — pure, so both readouts are testable without Tk
+#
+# ONE toolbar clock used to run from ▶ Detect Edges until 💾 Save, which
+# made it a session stopwatch: the moment detection finished it kept
+# counting through however long the human then spent reviewing, and the
+# only number an operator can plan with — how long the PASS took — was
+# destroyed as soon as it was produced. Two readouts instead, because
+# both are wanted: the detection pass's own time, FROZEN when the pass
+# ends and carrying its frame count so it reads as a rate, above a
+# session total that never stops.
+# ---------------------------------------------------------------------------
+
+
+def fmt_dur(sec):
+    """Compact absolute duration — `43s`, `2m14s`, `1h04m` (`#237`).
+
+    Deliberately not M:SS. These readouts are read as an ANSWER ("81
+    frames in 2m14s"), and a bare `2:14` sitting beside a running session
+    clock reads as a time of day; M:SS also never rolls over, so a
+    90-minute pass prints `90:00`. Not `sldea_profile.fmt_duration`
+    either — its `0:02:14` spends three characters on an hour that a
+    detection pass almost never has."""
+    sec = max(0, int(sec))
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec // 60}m{sec % 60:02d}s"
+    return f"{sec // 3600}h{(sec % 3600) // 60:02d}m"
+
+
+def detect_readout(n_frames=None, secs=None, total=None):
+    """The DETECTION line of the toolbar clock (`#237`).
+
+    Three states, one function so a test can pin all of them:
+
+    - `secs is None` — **no detection pass has run on this run**, said out
+      loud rather than left blank. A scale-only re-anchor never detects
+      (`#215`), so the ABSENCE of a fresh detection time is exactly the
+      signal that tells an operator which of the two paths they are on —
+      and a blank readout beside a running session clock is indis-
+      tinguishable from a readout that has not repainted yet.
+    - `total` given — a pass is in flight; the line reads as progress.
+    - otherwise — the pass finished and this is the frozen answer.
+    """
+    if secs is None:
+        return "detect: not run"
+    if total is not None:
+        # no "frames" while running: the `/` already says what the pair
+        # is, the banner and the status line both spell it out, and this
+        # form has to stay inside the same fixed box as the frozen one
+        return f"detect: {n_frames}/{total}  {fmt_dur(secs)}"
+    return f"detect: {n_frames} frames in {fmt_dur(secs)}"
+
+
+def session_readout(secs):
+    """The SESSION line of the toolbar clock (`#237`) — how long this
+    window has been open. Runs from the moment Edge Review opens to the
+    moment it closes: it is not reset by a run switch (the batch cockpit
+    is one session across many runs) and not stopped by Save (reviewing
+    continues after one)."""
+    return f"session {fmt_dur(secs)}"
+
+
+# ---------------------------------------------------------------------------
 # the 📏 fit-a-circle calibration (#215) — pure geometry, no Tk
 #
 # The operator sits a thick-stroke circle on the resting disc edge, three
@@ -1171,14 +1235,43 @@ class EdgeReviewApp:
         self.save_btn = ttk.Button(top, text="💾 Save to data.csv…",
                                    command=self.save, state='disabled')
         self.save_btn.pack(side=tk.RIGHT)
-        # progress + session clock (from Detect until Save)
-        self.clock_lbl = tk.Label(top, text="", fg='#1f3a5f',
-                                  font=('TkDefaultFont', 10, 'bold'))
-        self.clock_lbl.pack(side=tk.RIGHT, padx=10)
+        # progress + TWO clocks (`#237`), stacked rather than side by side
+        # so the toolbar keeps its width: the detection pass's own time
+        # (the number an operator plans a run with, so it is the bold one)
+        # over the session total.
+        #
+        # A FIXED BOX, right-aligned, for #179's reason one row up: with
+        # geometry propagation on, this frame tracks its widest child --
+        # text that changes every poll -- and the only widget with any
+        # give left in the toolbar is the progress bar beside it, which
+        # would then resize under its own moving fill.
+        clock_font = ('TkDefaultFont', 9)
+        clocks = ttk.Frame(top)
+        clocks.pack(side=tk.RIGHT, padx=(8, 6))
+        self.detect_lbl = tk.Label(clocks, text=detect_readout(), fg='#1f3a5f',
+                                   anchor='e',
+                                   font=clock_font + ('bold',))
+        self.detect_lbl.pack(fill='x')
+        self.clock_lbl = tk.Label(clocks, text="", fg='#5a6b7d', anchor='e',
+                                  font=clock_font)
+        self.clock_lbl.pack(fill='x')
+        # Both dimensions measured from the widgets and the font rather
+        # than typed in: the toolbar row is one button tall, so a height
+        # left to the parent clipped the session line to 4 of its 21 px,
+        # and a hard-coded pair would do it again on the next display
+        # scaling or theme font.
+        clocks.configure(
+            width=tkfont.Font(font=clock_font + ('bold',)).measure(
+                detect_readout(999, 3600.0)) + 8,
+            height=(self.detect_lbl.winfo_reqheight()
+                    + self.clock_lbl.winfo_reqheight()))
+        clocks.pack_propagate(False)
         self.prog = ttk.Progressbar(top, length=180, mode='determinate')
         self.prog.pack(side=tk.RIGHT, padx=6)
-        self._t0 = None
-        self._clock_on = False
+        self._t0 = None             # start of the CURRENT detection pass
+        self._t_session = time.time()   # window open — never reset
+        self._clock_on = True
+        self._tick_clock()
 
         mid = ttk.Frame(self.root)
         mid.pack(fill='both', expand=True)
@@ -1374,6 +1467,12 @@ class EdgeReviewApp:
         self.base_ref = None
         self.manual_ref = None
         self.pos = 0
+        # the detection readout belongs to a PASS, so it dies with the run
+        # it measured (`#237`). The batch cockpit switches runs inside one
+        # session, and the old single clock kept the previous run's number
+        # on screen through the switch — where it reads as this run's.
+        self._t0 = None
+        self._set_detect_clock()
         self.save_btn.config(state='disabled')
         try:
             self.run = se.load_run(self.rundir)
@@ -1404,16 +1503,26 @@ class EdgeReviewApp:
         self.info.config(text=f"{name}\n{n} frames ready")
 
     # ---------------- detection ----------------
-    @staticmethod
-    def _fmt_t(sec):
-        sec = int(sec)
-        return f"{sec // 60}:{sec % 60:02d}"
-
     def _tick_clock(self):
-        if not self._clock_on or self._t0 is None:
+        """The SESSION clock, once a second for the life of the window
+        (`#237`). It is not stopped by Save and not reset by a run switch;
+        the detection readout beside it is the one that belongs to a pass
+        and is repainted by `_set_detect_clock`."""
+        if not self._clock_on:
             return
-        self.clock_lbl.config(text=f"elapsed {self._fmt_t(time.time() - self._t0)}")
+        try:
+            self.clock_lbl.config(
+                text=session_readout(time.time() - self._t_session))
+        except tk.TclError:
+            self._clock_on = False      # the window closed under the tick
+            return
         self.root.after(1000, self._tick_clock)
+
+    def _set_detect_clock(self, n_frames=None, secs=None, total=None):
+        """Repaint the DETECTION readout — see `detect_readout` for the
+        three states. Called with no arguments it says 'not run', which is
+        what a freshly picked run and a scale-only re-anchor both are."""
+        self.detect_lbl.config(text=detect_readout(n_frames, secs, total))
 
     def _banner(self, text):
         """Big unmissable state banner drawn over the image area."""
@@ -1495,9 +1604,11 @@ class EdgeReviewApp:
         # a re-detect must not leave the PREVIOUS pass's Save live while
         # the new results stream in (audit 2026-08-05)
         self.save_btn.config(state='disabled')
+        # a re-detect discards the previous pass's frozen time with the
+        # previous pass's results — this readout is about the pass that is
+        # running now (`#237`)
         self._t0 = time.time()
-        self._clock_on = True
-        self._tick_clock()
+        self._set_detect_clock(0, 0.0, len(self.frame_rows))
         self.prog.config(maximum=len(self.frame_rows), value=0)
         self.canvas.delete('all')
         self._banner(f"DETECTING…  0/{len(self.frame_rows)}")
@@ -1597,9 +1708,10 @@ class EdgeReviewApp:
         self.prog.config(value=n)
         el = time.time() - self._t0
         eta = (el / n * (total - n)) if n else 0
+        self._set_detect_clock(n, el, total)
         self.status.config(
-            text=f"detecting… {n}/{total}  —  elapsed {self._fmt_t(el)}"
-                 + (f", ~{self._fmt_t(eta)} left" if n else ""))
+            text=f"detecting… {n}/{total}  —  elapsed {fmt_dur(el)}"
+                 + (f", ~{fmt_dur(eta)} left" if n else ""))
         self._banner(f"DETECTING…  {n}/{total}")
         if done:
             self._finish_detect()
@@ -1608,7 +1720,9 @@ class EdgeReviewApp:
 
     def detect_all_sync(self):
         """Synchronous detection (used by --auto tests and headless runs)."""
-        self._t0 = self._t0 or time.time()
+        # this pass, not the first one of the session: `_t0 or time.time()`
+        # made a second sync pass report the time since the FIRST (`#237`)
+        self._t0 = time.time()
         self.cands_all, self.results, self.flags = {}, {}, {}
         self.pair_cands = {}
         self.advisories = {}
@@ -1678,7 +1792,12 @@ class EdgeReviewApp:
         self.prog.config(value=len(self.frame_rows))
         self._banner(None)
         q = self._queue_list()
-        took = self._fmt_t(time.time() - self._t0) if self._t0 else '?'
+        # THE DETECTION READOUT FREEZES HERE (`#237`) — the pass is over,
+        # and everything after this point is the human's time, not the
+        # machine's. The session clock beside it carries on.
+        dt = (time.time() - self._t0) if self._t0 else None
+        took = fmt_dur(dt) if dt is not None else '?'
+        self._set_detect_clock(len(self.frame_rows), dt)
         if self.manual_ref:
             # the auto disc fit is a CROSS-CHECK of the operator's fit,
             # not the anchor (scale gate, 2026-08-05). Since #215 the
@@ -2584,9 +2703,14 @@ class EdgeReviewApp:
             self.status.config(
                 text=f"saved, but recording the scale anchor in "
                      f"setup.txt failed: {e}")
-        self._clock_on = False
-        took = self._fmt_t(time.time() - self._t0) if self._t0 else '?'
-        self.clock_lbl.config(text=f"done in {took}")
+        # detect→Save, the whole round trip, said in the status line where
+        # it always was. Save no longer STOPS the toolbar clock (`#237`):
+        # that clock is now the session, a session outlives a Save (the
+        # batch cockpit saves one run and moves to the next), and the
+        # frozen `detect:` readout above it is the number that used to be
+        # destroyed. The old `done in …` said detect→Save in a widget that
+        # then sat stale through every following run.
+        took = fmt_dur(time.time() - self._t0) if self._t0 else '?'
         try:
             self._save_plot(scale)
             self._save_overlays()

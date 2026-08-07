@@ -620,11 +620,39 @@ def _cal_step_button(win):
 def _cal_display(win):
     """Everything the operator can READ in the dialog right now — the
     instruction block, the round header and the live readout. Used to
-    prove that a previous round's diameter is nowhere in it."""
+    prove that a previous round's diameter is nowhere in it.
+
+    Reads every Label the dialog OWNS, mapped or not, which is what a
+    "this string is nowhere" assertion wants. For "how much text is on
+    screen" use _cal_visible_lines: a pack_forget()-ed label still has
+    text, it just is not shown."""
     try:
         return ' | '.join(w.cget('text') for w in _widgets(win, 'label'))
     except Exception:
         return ''
+
+
+def _cal_visible_lines(win, skip=('METHOD:', 'rounds:', 'A stroke:')):
+    """The text lines actually ON SCREEN, as a list.
+
+    Only labels the geometry manager is showing (`winfo_manager()`), split
+    on newlines, blanks dropped — so a hidden or emptied label costs
+    nothing, which is the whole mechanism mode C's line budget uses. The
+    chooser row's field captions are skipped: they label the radio buttons
+    and the two option menus, i.e. they are part of the CONTROLS, not the
+    prose the budget is about."""
+    out = []
+    for w in _widgets(win, 'label'):
+        try:
+            if w.winfo_manager() != 'pack':
+                continue
+            txt = w.cget('text')
+        except Exception:
+            continue
+        if txt in skip:
+            continue
+        out.extend(ln for ln in txt.split('\n') if ln.strip())
+    return out
 
 
 class _ModalSpy:
@@ -2234,10 +2262,10 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
                               "not: " + str(spy.asked))
         # --- the evidence was on screen BEFORE the button was pressed
         t = saw['text']
-        assert 'VERIFY THE AUTOMATIC FIT' in t
-        for needle in ('THE FIT', 'EVIDENCE', 'UNCERTAINTY', 'NOT CHECKED',
-                       'HOW TO JUDGE', 'BY CONSTRUCTION', 'YOUR EYE',
-                       'display only'):
+        for needle in ('Automatic fit', 'px across', 'Quality',
+                       'of diameter', 'circularity', 'contrast-stretched',
+                       'raw frame', 'Nothing cross-checks it',
+                       'your eye is the check'):
             assert needle in t, (needle, t[:400])
         assert f"{fit['diam_px']:.1f} px" in t, t[:400]
         # NO VACUOUS CROSS-CHECK IS CLAIMED anywhere the operator can read
@@ -2298,6 +2326,175 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
                                            "override every automatic ref"
     finally:
         gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_mode_C_screen_holds_its_four_line_budget_and_opens_zoomed():
+    """THE LINE BUDGET, through the real dialog (`#215` declutter,
+    2026-08-06 late).
+
+    Mode C was driven on a real disc and the fit was accepted as correct, so
+    the premise held -- but the operator's verdict on the screen it was
+    accepted on was "wayyyyy too busy with text and unnecessary garbage": 13
+    lines of prose wrapping to 19, above a canvas showing the 577 px disc at
+    282 px because the view opened fit-to-frame with a "below 1:1 -- press Z"
+    nag under it.
+
+    This case exists because re-inflation is the likely regression: every
+    number cut from this screen is still in the record, so a future reader
+    of `verify_note` or the log line will see them and be tempted to put
+    them back. Four lines. The picture gets the rest.
+
+    Pinned here rather than only on verify_evidence() because the budget is
+    a property of the SCREEN: the gate block, the round header and the live
+    readout are separate widgets, and re-inflating any of them would leave a
+    pure-function test green."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    root = _tk_root_or_skip('mode C line budget')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_cal_budget_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    saw = {}
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        # THE WORST CASE, because a budget that only holds when a line
+        # happens to be absent is not a budget: a PRIOR ANCHOR that differs
+        # (so the conditional consequence line is present) plus already-
+        # measured px rows (so it carries its longest wording).
+        gui.se.save_scale_anchor(run, {
+            'method': 'manual-calibration', 'cal_mode': 'A',
+            'diam_px': 163.5, 'diam_mm': 16.0, 'mm_per_px': 16.0 / 163.5,
+            'n_rounds': 3, 'spread_pct': 0.5, 'spread_px': 0.8})
+        csvp = os.path.join(run, 'data.csv')
+        with open(csvp, encoding='utf-8') as f:
+            rd = list(csv.DictReader(f))
+        for r in rd[1:]:
+            r['active_area_px'] = '12345.0'
+            r['active_area_mm2'] = '123.45'
+        with open(csvp, 'w', newline='', encoding='utf-8') as f:
+            w = csv.DictWriter(f, fieldnames=list(rd[0]))
+            w.writeheader()
+            w.writerows(rd)
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app._px_rows() == 2, app._px_rows()
+        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
+        fit = app._auto_disc()
+        assert fit and fit.get('diam_px'), "fixture has no automatic fit"
+
+        def poke(win):
+            _cal_onscreen(root, win)
+            win.update_idletasks()
+            p = app._cal_probe
+            assert p['st']['mode'] == 'C', p['st']['mode']
+            saw['lines'] = _cal_visible_lines(win)
+            saw['zoom'] = p['vt'].zoom
+            saw['canvas'] = (int(p['canvas'].cget('width')),
+                             int(p['canvas'].cget('height')))
+            saw['reqh'] = win.winfo_reqheight()
+            # the <Return> refusal must still be SEEN, even though the line
+            # it lands on is hidden in the steady state
+            win.focus_force()
+            win.update()
+            for _ in range(4):
+                if not win.winfo_exists():
+                    break
+                win.event_generate('<Return>', when='now')
+                win.update()
+            saw['after_enter'] = _cal_visible_lines(win)
+            # SELF-CHECK, because a synthetic key press is silently dropped
+            # by an unviewable widget (see _cal_onscreen) and a dropped one
+            # must SKIP the visibility claim, not launder a real failure of
+            # it: `delivered` reads the label's text whether it is mapped or
+            # not, so it is true exactly when continue_key ran.
+            saw['enter_delivered'] = ('Enter cannot approve'
+                                      in _cal_display(win))
+            # ... and switching away and back must not leave it behind
+            for val in ('A', 'C'):
+                for rb in _widgets_of(win, tk.Radiobutton):
+                    if rb.cget('value') == val:
+                        rb.invoke()
+                win.update_idletasks()
+                saw['lines_' + val] = _cal_visible_lines(win)
+            win.destroy()
+
+        app.root.wait_window = poke
+        app._calibrate_scale()
+        lines = saw['lines']
+        assert lines, "mode C put NOTHING on screen"
+        assert len(lines) <= gui.CAL_VERIFY_MAX_LINES == 4, (
+            f"{len(lines)} lines on screen, budget is "
+            f"{gui.CAL_VERIFY_MAX_LINES}:\n" + '\n'.join(lines))
+        # SHORT lines, not four paragraphs. The longest legitimate line is
+        # the compressed honesty sentence (~140 chars); 200 leaves room for
+        # wording without room for a re-inflated paragraph.
+        for ln in lines:
+            assert len(ln) <= 200, (len(ln), ln)
+        assert sum(len(ln) for ln in lines) <= 600, (
+            f"{sum(len(ln) for ln in lines)} chars on screen:\n"
+            + '\n'.join(lines))
+        joined = '\n'.join(lines)
+        # the four things that stayed
+        assert 'Automatic fit' in joined and 'px across' in joined, joined
+        assert 'of diameter' in joined and 'circularity' in joined, joined
+        assert 'raw frame' in joined and 'your eye is the check' in joined
+        assert '% from the' in joined and 'next Save' in joined, joined
+        # ... and the garbage that went. Each of these is still in the
+        # RECORD (test_mode_C_is_where_the_gate_opens covers that end); what
+        # is asserted here is only that it is not on the SCREEN.
+        for gone in ('conf ', 'confidence', 'edge point', 'edge pts',
+                     'arc coverage', 'interior fill', 'resting area',
+                     'press Z', 'below 1:1', 'BY CONSTRUCTION',
+                     'no rounds and no spread', 'SCALE GATE',
+                     'ALL ELEVEN', '+0.00'):
+            assert gone not in joined, (gone, joined)
+        # OPENS ZOOMED ON THE FIT -- which is what removes the nag rather
+        # than hiding it. Fit-to-frame on this 320x240 fixture would be
+        # ~2.4x for a 1000-wide canvas; verify_zoom frames the CIRCLE, so
+        # the disc spans ~82% of the canvas's shorter side either way.
+        span = fit['diam_px'] * saw['zoom']
+        assert span <= min(saw['canvas']) + 1, (span, saw['canvas'])
+        assert span >= 0.70 * min(saw['canvas']), (
+            f"the fitted disc spans {span:.0f} px of a "
+            f"{saw['canvas']} canvas -- mode C opened surveying the frame "
+            f"instead of framing the circle")
+        # the whole window still fits a 1080p bench screen
+        assert saw['reqh'] <= root.winfo_screenheight(), (
+            saw['reqh'], root.winfo_screenheight())
+        # the <Return> refusal was VISIBLE (a 5th line, transiently, in
+        # answer to a key press -- not standing clutter). Mode C hides the
+        # live line to hold the budget, so a refusal written to it with the
+        # line still hidden would be a SILENT refusal, and an operator who
+        # gets no answer taps again harder.
+        if saw['enter_delivered']:
+            assert any('Enter cannot approve' in ln
+                       for ln in saw['after_enter']), (
+                "the <Return> refusal was written but never shown: mode C "
+                "hides the live line and this message has to bring it back")
+        else:
+            print("   (skipped the <Return>-refusal visibility claim: no "
+                  "synthetic key press reached the dialog)")
+        # mode A brings its own text back, and returning to C sheds it again
+        assert len(saw['lines_A']) > gui.CAL_VERIFY_MAX_LINES, saw['lines_A']
+        assert any('SCALE GATE' in ln for ln in saw['lines_A']), \
+            saw['lines_A']
+        assert any('Round 1 of 3' in ln for ln in saw['lines_A']), \
+            saw['lines_A']
+        # ... INCLUDING the live readout, which the first cut of this left
+        # forgotten: text set, label unpacked, so a mode-A round ran with
+        # its diameter readout -- the one number it needs -- invisible.
+        # Found by rendering the dialog after a C->A switch, not by a test.
+        assert any('px across' in ln and 'mm/px' in ln
+                   for ln in saw['lines_A']), (
+            "mode A came back from mode C without its diameter readout on "
+            "screen: " + str(saw['lines_A']))
+        assert len(saw['lines_C']) <= gui.CAL_VERIFY_MAX_LINES, \
+            saw['lines_C']
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)
 
@@ -2367,14 +2564,21 @@ def test_a_refused_fit_falls_through_to_the_hand_measurement_and_says_why():
 
 
 def test_switching_into_mode_C_gives_it_the_same_room_as_opening_in_it():
-    """Mode C's evidence block is ~180 px taller than mode A/B's gesture
-    help, so the canvas gives that height up in C and takes it back in A/B.
-    A canvas sized once for A and then filled with mode C's text overflowed
-    a 1080p bench screen by ~80 px -- so the height must follow the MODE,
-    not the mode the dialog happened to open in.
+    """The canvas height must follow the MODE, not the mode the dialog
+    happened to open in -- a canvas sized once and then re-used across a
+    switch overflowed a 1080p bench screen by ~80 px.
 
-    Screen-independent: it compares switching into C against opening in C,
-    rather than asserting a pixel count."""
+    The DIRECTION of the split flipped with the declutter (`#215`,
+    2026-08-06 late): mode C used to need ~180 px more text room than A/B
+    and gave the canvas up for it; it now shows four lines against A/B's
+    gate block plus gesture help plus round header, so C is the mode with
+    height to SPARE and the picture gets it. Either way the invariant under
+    test is the same one -- switching in gives C exactly what opening in it
+    does, and A gets its own height back -- and it is asserted
+    screen-independently rather than as a pixel count.
+
+    The window fitting the screen is checked in both modes, because that is
+    what a wrong height actually breaks."""
     import sldea_edge_gui as gui
     import tkinter as tk
     root = _tk_root_or_skip('mode C canvas height')
@@ -2424,13 +2628,18 @@ def test_switching_into_mode_C_gives_it_the_same_room_as_opening_in_it():
         # switching in gives mode C exactly the room opening in it does
         assert saw['switchC'][1] == saw['openC'][1], saw
         assert saw['switchC'][2] == saw['openC'][2], saw
-        # ... and A gets its taller canvas back
+        # ... and A gets its own canvas back, which since the declutter is
+        # the SHORTER one: mode C's four lines free the height up and the
+        # picture is what mode C spends it on
         assert saw['backA'][1] == saw['openA'][1], saw
-        assert saw['backA'][1] >= saw['openC'][1], saw
-        # the view was RE-FITTED to the new canvas, not left cropping
+        assert saw['openC'][1] >= saw['backA'][1], saw
+        # the view was RE-FRAMED for the new canvas, not left cropping
         # against a stale height
         if saw['openC'][1] != saw['openA'][1]:
             assert saw['switchC'][3] == saw['openC'][3], saw
+        # and neither mode's window overflows the screen it is sized against
+        for k in ('openC', 'openA', 'switchC', 'backA'):
+            assert saw[k][2] <= root.winfo_screenheight(), (k, saw[k])
     finally:
         gui.messagebox, gui.spawn_circle = real_mb, real_spawn
         root.destroy()
@@ -2586,7 +2795,8 @@ def test_measure_by_hand_leaves_mode_C_for_a_BLIND_mode_A_round_set():
         assert 'METHOD A (circle)' in t and 'HALF-HEIGHT' in t, t[:400]
         # ... the evidence block is gone, and with it the fit's diameter:
         # no target to wheel a circle onto
-        assert 'VERIFY THE AUTOMATIC FIT' not in t, t[:400]
+        assert 'Automatic fit' not in t, t[:400]
+        assert 'your eye is the check' not in t, t[:400]
         assert f"{fit['diam_px']:.1f} px" not in t, t
         assert 'HIDDEN until the last fit' in t, t[:400]
         assert app.manual_ref is None

@@ -20,6 +20,10 @@ frames/
 overlays/
 run.log
 edge_labels.json
+# Edge Review's scale-calibration log (one line per completed round-set,
+# accepted or declined -- se.append_calibration_log, 2026-08-06). Run
+# data: it records what an operator measured on one run's disc.
+scale_calibration_log.txt
 data*.csv.bak
 telemetry*.csv
 area_vs_voltage.png

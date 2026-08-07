@@ -13,6 +13,1049 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## Calibration dialog: six operator cuts, and the commit warning moves to the button that commits (2026-08-07, second pass)
+
+**TL;DR:** The operator drove all three calibration modes on real runs the
+same evening and asked for six more cuts. All six are presentation plus one
+relocation: the commit warning is off every mode's header and lives on the
+primary button and in its confirmation; the "this run already has px" row is
+off the top of the window and the re-anchor confirmation now *opens* by asking
+whether to overwrite the calibration on record; the round header is down to
+the round; the aim rule is an instruction instead of a metrology definition;
+the verify mode's post-accept footer is gone; and controls that do not apply
+to a mode are absent rather than greyed out. Every mode is now **3 on-screen
+lines in the ordinary worst case**. The run record is byte-identical —
+same SHA-256 across the change for all three modes.
+
+Observation → decision:
+
+- **The commit warning was on the round header of every measuring mode** as
+  `📏 CALIBRATE — NOTHING is written until the next 💾 Save` /
+  `📏 RE-ANCHOR — WRITTEN TO data.csv IMMEDIATELY`. Operator: *"the commit
+  warning belongs in one place — on the primary button and in its
+  confirmation."* → `scale_intent_banner` came off `head_text`. It is still
+  stated in **three** places, and all three are places where it decides
+  something: the window **title**, the **primary button** on exactly the press
+  that commits (`✔ Finish & RE-ANCHOR NOW`), and the re-anchor
+  **confirmation**. The function itself is unchanged and still pinned so
+  neither branch can borrow the other's promise.
+- **The "already calibrated" row stood above the picture on every saved run**
+  (`⚠ 81 row(s) already carry px — accepting RE-SCALES every recorded mm² at
+  the next 💾 Save…   ·   an anchor is on record — press P to REUSE it.`), and
+  it stood there through every round of a blind measurement it could not
+  affect. → deleted, and the **re-anchor confirmation now leads with the
+  question**: *"This run ALREADY HAS A CALIBRATION on record (…). OVERWRITE it
+  with the anchor you just measured?"* The operator's reasoning is the one
+  adopted: once you have said *overwrite the existing calibration*, that every
+  area is re-derived follows from what overwriting a scale means. The prose
+  went; the **evidence stayed** — before → after resting area, the multiplier,
+  the row counts on both sides of the `[critical]` blank-vs-re-derive rule.
+  The lead **branches on the truth**: a pre-gate run with no anchor block is
+  asked to *write* one, not to overwrite one that does not exist. `P` keeps its
+  own button, which carries its own key.
+- **The round header was still a run-on.** → `· view rotated 299.3°` and
+  `· disc 16 mm` are off it; what is left is `Method B · Round 1 of 3` (plus
+  the two-point mode's `· 0 of 2 points`, which is progress and is what the
+  line is for). The angle is a fact the operator can *see* — the frame is
+  visibly rotated — and it stays in `rot=` on the log line, which is what the
+  A/B comparison reads. `disc 16 mm` was named for the circle mode and applied
+  to both, because the two measuring screens have to read the same; its one
+  **warning** (`diam_mm` is the settings default, never measured at capture) is
+  conditionally true, so it moved to the gate block, which is the label that
+  exists for conditionally-true warnings.
+- **The aim rule was a definition, not an instruction.** It read *"aim at the
+  ink edge's HALF-HEIGHT (mid-gray), never its outer toe"* — the metrology
+  convention, correctly named, and not something a hand can do. → the screen
+  now says where to put the mark: **`straddle the edge: half the stroke on the
+  disc, half on the paper`** (circle) and **`half the ring on the disc, half on
+  the paper`** (two-point, where the marker ring is centred on the click and
+  therefore straddles it by construction). The half-height convention it
+  achieves is unchanged and stays in `SLDEA_MEASUREMENT.md` §1.3 with its
+  +5.2–5.7 % area / +2.6 % diameter band.
+- **The verify mode's post-accept footer arrived after the decision.** The
+  status line ended with 160 characters — *"σ/SE undefined (one fit, no
+  rounds); NOT cross-checked, and no independent check of an automatic anchor
+  exists — overrides every automatic reference at Save"* — on the one surface a
+  person reads next while doing something else. → dropped. Every honesty clause
+  is still in the record and it was **verified, not assumed**: `se.verify_note`
+  in `setup.txt`'s `guard:` field, `sigma=undefined se=undefined
+  range=undefined verdict=NOT-GATED` on the log line, and `sldea_diag` in two
+  verdicts *and* its text report. **One clause is flagged rather than quietly
+  dropped:** "overrides every automatic reference at Save" is a statement about
+  how the app ranks references (`se._is_manual_cal` matches the method *set*),
+  not a measurement of this run, and what the record carries is the fact it
+  follows from — `method: auto-verified`. The hand-measurement and reuse status
+  lines still say it in words.
+- **A disabled control still costs a line of visual scanning and invites a
+  click; an absent one does not.** → `◀ Back`, `⟲ Restart all rounds`, the
+  round-count selector and the stroke selector are **de-rendered** where they
+  do not apply, not greyed: none of the four in the verify mode, no stroke
+  selector in the two-point mode (its markers are specified by
+  `marker_shapes` and have no width to choose). They are boxed so a mode round
+  trip cannot bring the row back in a different order, and their `state` stays
+  `normal` so nothing is ever *shown* greyed. `back_round`/`restart_all` still
+  sit the verify mode out on their own — a Backspace keybinding is not a button
+  and cannot be unpacked.
+
+**Measured, at a simulated 1080p, ordinary worst case** (a prior anchor that
+differs plus already-measured px rows):
+
+| mode | window | canvas | zoom | on screen | chars | controls rendered |
+|---|---|---|---|---|---|---|
+| **A** verify | 1020 × 892 | 1000 × 760 | 1.18× | **3 lines** | **293** | none |
+| **B** circle | 1020 × 833 | 1000 × 680 | 0.52× | **3 lines** | **247** | Back/Restart, rounds, stroke |
+| **C** twopoint | 1020 × 833 | 1000 × 680 | 0.31× | **3 lines** | **271** | Back/Restart, rounds |
+
+The measuring modes lost a further ~29 px of window height (862 → 833) with
+the gate row. The two character caps **converged** — 400/560 → 300/300 — which
+is itself the result: the three screens finally cost the same.
+`CAL_SCREEN_MAX_LINES` stays 4 as the *pathological* ceiling (it is what
+`verify_evidence` shares) and `CAL_SCREEN_MAX_LINES_ORDINARY` = 3 is the new
+number the budget test drives. The per-line cap came down 200 → 180.
+
+**A test-helper hole this pass had to fix, because the de-rendering created
+it:** `_cal_visible_lines` decided "on screen" from the label's own
+`winfo_manager()`, and a Label inside an *unpacked Frame* still reports
+`pack` for itself — so once the chooser's controls moved into boxes, the
+budget test would have counted text nobody can see. It walks the parent chain
+now (`_cal_rendered`). `winfo_ismapped()` is not usable instead: most of these
+cases never put the window on screen.
+
+**Rendered:** `PrintWindow` on each Toplevel's own HWND at a simulated 1080p.
+Two capture notes for whoever does this next. (1) `GetDIBits` **requires** the
+bitmap not to be selected into a DC — skipping that returns a uniformly black
+image and no error, which is how the first three grabs came back blank.
+(2) A screen-rect `ImageGrab` on this box came back showing an unrelated
+full-screen application instead of the dialog, which is the same trap the
+2026-08-07 morning note recorded, only worse. `PrintWindow` renders the text
+and the canvas *vectors* but not the theme background or the canvas
+PhotoImage, so what the grabs prove is layout, line placement and which
+controls exist — not colour and not the frame bitmap.
+
+## Calibration dialog: the measuring modes lose their wall of text, and the disagreement gate becomes a glance (2026-08-07)
+
+**TL;DR:** The operator drove the two hand-measurement modes on real data and
+said what they had already said about the verify mode: too much text. The
+verify mode was showing 2 lines and the circle and two-point modes were
+showing 9 each, so the same trim was applied to them — they now show two short
+lines plus the live readout, and the gate block appears only when it has a
+warning to give. The "Rounds disagree" prompt went from 7 lines to 3: the
+round σ, what it implies as area error against the budget, and the choice.
+Nothing about what is measured, gated or recorded changed — `setup.txt`, the
+calibration log and the status line come out byte-identical.
+
+Observation → decision:
+
+- **The measuring modes were never decluttered, only the verify mode was.**
+  Measured through the real dialog at a simulated 1080p: verify 2 lines / 124
+  chars, circle **9 lines / 1112 chars**, two-point **9 lines / 1349 chars**.
+  → the line budget is no longer the verify block's private rule. It is the
+  SCREEN's rule (`CAL_SCREEN_MAX_LINES` = 4 in every mode), and what survives
+  in a measuring mode is only what a person needs *while placing points or
+  sizing a circle*: **which round they are on** (the round header, which now
+  also carries the nominal disc size and the folded action's tag) and **the
+  immediate instruction** (one line: the gesture plus the aim rule), above the
+  live readout. Result: **3 lines / 321 and 369 chars**, 4 in the worst
+  ordinary case. Window height 907 → 862 (circle) and 955 → 862 (two-point).
+- **What came off was reference material, and it is named rather than
+  forgotten:** what the method is for, why the rounds are blind, why the view
+  rotates, and the key-binding catalogue. The two keys that change a
+  *measurement* are still named where they are needed — Z by the live line's
+  own sub-1:1 warning, Backspace on the ◀ Back button — and the full
+  catalogue is in `_calibrate_scale`'s docstring. The round header's third
+  copy of "use the ✔ Finish button" went too; the button says it.
+- **The gate block is warnings-only now**, so on an ordinary run it is not
+  packed at all and the picture keeps the height. Its two standing lines
+  moved rather than died: the folded action's tag (`scale_intent_banner`,
+  shortened from a 127-character paragraph to a one-line tag) and the nominal
+  disc size are both on the round header, so the CALIBRATE/RE-ANCHOR
+  asymmetry is still stated three times over — header, window title, primary
+  button — plus in the re-anchor confirmation. Its conditional warnings were
+  compressed to one line each, and the prior-anchor and px-rows warnings now
+  share one line exactly as the verify mode's consequence line does.
+- **The recorded anchor's DIAMETER came off that line, and that is a small
+  win rather than a loss.** It is in `setup.txt`, which is where P reads it
+  from; standing on screen through every round of a *blind* measurement it
+  was a printed target to steer onto. What the operator needs there is that
+  an anchor exists and that P reuses it.
+- **"Rounds disagree" was a wall at the worst moment.** 7 non-blank lines /
+  862 chars, met on real data. → three lines: `σ = x % of diameter → ±y % in
+  area (budget ±0.8 %)`, the round count that would clear the gate (kept
+  because it is a number and it decides *which* of the three answers is
+  right), and `Yes = refit all n rounds · No = accept as measured · Cancel`.
+  Rendered: 426×400 → 418×192. The derivation went to §2.1a, where a reader
+  who wants it will be. **Two properties are unchanged and load-bearing:** it
+  still quotes PERCENTAGES ONLY, because a refit is one of its answers and a
+  disclosed diameter would defeat the blind rounds; and it still has
+  `default='cancel'`, because `<Return>` reaching an accept on this exact
+  prompt is a demonstrated failure, not a hypothetical.
+- **Nothing numeric left the record — diffed, not assumed.** A full accepted
+  round-set was driven through the real dialog in all three modes on both
+  sides of the change, dumping the calibration log in full, the `setup.txt`
+  anchor block written through the real Save builder, the `load_scale_anchor`
+  round trip and the status line: **10217 bytes, sha256
+  `28090802889def40…`, identical**. The mean's SE in diameter and the raw
+  range that came off the disagreement prompt are `se=` and `range=` in
+  `scale_calibration_log.txt` and `se_pct`/`spread_pct` in `setup.txt`; d₂ is
+  fixed by the `n=` both of them carry.
+- **Rendered and looked at**, one `ImageGrab` per dialog. Two notes for
+  whoever renders this next: a grab straight after a mode switch returns the
+  wrong mode's pixels (so open one dialog per mode with `mode=`), and on a box
+  running translucent always-on-top overlays a screen-rect grab comes back
+  with those composited over the dialog however hard it is lifted — use
+  `PrintWindow` on the Toplevel's own HWND instead.
+
+## Scale UI: one button, self-describing method names, a leaner verify screen (2026-08-06, late)
+
+**TL;DR:** The two 📏 buttons became one, because they opened the same
+dialog; which of the two things happens now follows the run's state and is
+spelled out on screen. The method letters were swapped so A is the verify
+mode, and — because the old letters are already written into live run
+records — what gets recorded is now the method's NAME. In the two-point
+mode the second click banks the round and moves on, with ◀ Back to undo it.
+Five operator-requested changes; nothing about what is measured changed.
+
+Observation → decision:
+
+- **Two 📏 buttons for one dialog confused the operator.** 📏 Calibrate…
+  and 📏 Re-anchor scale… open the same window with the same gates; what
+  differs is whether the accepted number is held for the next Save or
+  written into `data.csv` immediately. → **ONE** 📏 entry point
+  (`_scale_action`), whose behaviour follows the run
+  (`_scale_intent`): an open review pass, a detect worker in flight, or a
+  run with nothing measured yet → CALIBRATE, applied at Save; a saved run
+  with px measurements and no pass open → RE-ANCHOR, committed. The old
+  re-anchor's refusal on an open review pass **survives as that routing
+  rule and as an independent check inside `_reanchor_scale`** — re-anchoring
+  over a partial pass is the `[critical]` mixed-scale bug's own shape, and
+  folding two buttons must not be able to turn a refusal into a silent
+  commit.
+- **One of the two writes immediately and the other does not, so the
+  dialog says which.** Computed at click time, never cached on the
+  toolbar button (a stale label would be lying about exactly the thing that
+  differs), and stated in the window title, on the primary button, and in
+  the confirmation. The button label names both outcomes and never changes.
+- **The re-anchor's confirmation became THREE-WAY.** As a dedicated button,
+  declining it correctly threw the measurement away. As the only 📏 route on
+  a saved run that would dead-end an operator who wants an anchor in order
+  to re-Detect a frame, so: YES commits, **NO keeps the anchor for the next
+  Save without writing anything**, CANCEL discards it. `default='cancel'`,
+  the option that changes nothing.
+- **The method letters were renumbered — and the old ones are on disk.**
+  The operator asked for A = verify (where the gate opens), B = circle,
+  C = two-point; before the swap A was circle, B two-point, C verify. Live
+  `P3_2_2.5mL_20260728` holds `cal_mode: C` and `prev_cal_mode: C`, both
+  meaning verify, and eight `mode=C` lines in its
+  `scale_calibration_log.txt`. Renumbering silently reinterprets every one
+  of them. → **The record holds a self-describing NAME**
+  (`verify` / `circle` / `twopoint`), immune to any future relabelling; the
+  letters are UI labels only (`se.CAL_MODE_LABELS`); and the read rule for
+  a stored letter is its **pre-swap** meaning (`se.cal_mode_read`:
+  A = circle, B = twopoint, C = verify), applied in `load_scale_anchor`, in
+  the log formatter, in `sldea_diag` and in the re-anchor's provenance
+  builder. A log file written before the change gets one note marking where
+  its vocabulary changes rather than silently mixing both. Covered by
+  `test_a_stored_mode_LETTER_keeps_its_pre_swap_meaning`, which uses P3_2's
+  actual `cal_mode: C`.
+- **The verify screen's standing disclaimer came off.** *"View is
+  contrast-stretched so the edge is visible… your eye is the check."* was
+  true on every run, which is why nobody read it. → Off the screen, and
+  **unchanged in the record**: the whole statement — the display-only
+  stretch, the absent cross-check and the algebra that makes an independent
+  one impossible — is still in `setup.txt`'s `guard:` field
+  (`se.verify_note`) and still repeated by `sldea_diag` in both its
+  verdicts and its text report. What survives on screen is the case that is
+  *not* a standing disclaimer: a frame whose disc/paper step could not be
+  measured has no stretch, and the operator judging a nearly flat grey field
+  has to be told. The screen is normally **two lines** now; the four-line
+  budget stays because the pathological case can still reach it.
+- **The ✎ Measure by hand instead button was a second control for one
+  job.** The radio row already switches methods. → Dropped. The radios are
+  the only route now, so they read as one: the caption is bold and each
+  manual entry says *measure BY HAND* rather than just naming its gesture.
+- **In the two-point mode the Continue press was ceremony.** Nothing
+  happens between placing the second point and pressing it. → The second
+  click **banks the round and advances**. Two deliberate limits: the
+  **last** round still needs ✔ Finish, because what follows it is the
+  acceptance gate, the anchor guard and an anchor — auto-advancing into that
+  would let a stray click accept a scale and then meet warnings it never
+  read, the hazard `<Return>` is refused for; and auto-advance removes the
+  only moment a bad second click could be noticed, so **◀ Back / Backspace**
+  steps one round back and re-randomises it. The label names the round it
+  lands on. A redone round comes back with a **fresh** rotation: restoring
+  the old view with the old clicks would be a correlated second look at one
+  fit, which is what the blind independent rounds exist to prevent. Well
+  defined at any point, because the mean is not computed until the last
+  round is in, and a discarded round is never logged (only completed
+  round-sets reach `scale_calibration_log.txt`).
+
+Unchanged, deliberately: the four-line on-screen budget in the verify mode,
+blind rounds in the measuring modes, `<Return>` unable to reach an accept,
+declining `default=` on every warning gate, the n-aware statistics and the
+SE gate, `auto-verified` vs `manual-calibration` provenance, and every
+re-anchor guarantee (reuse of `apply_results`, the px column untouched,
+notes untouched, A/A₀ bit-identical from px, idempotence).
+
+## Re-anchor: a run's scale can be corrected without re-reviewing it (2026-08-06)
+
+**TL;DR:** A new 📏 Re-anchor scale… button fixes a run's px→mm factor and
+re-derives every recorded area from the pixel measurements already in
+data.csv. No detection runs and nothing is re-reviewed, because nothing
+needs to be — only the scale was ever wrong. It takes one calibration
+instead of minutes of detection over 81 frames, and the run's record says
+plainly that the scale was corrected rather than the run re-reviewed.
+
+Observation → decision:
+
+- **Three runs are wrong in absolute mm² for one reason only: a human
+  mis-calibrated the scale.** The corpus-wide sweep
+  (`_analysis/auto_calibration_sweep_20260806.md`) explains every one of the
+  eleven recorded resting areas, to two decimal places, by its anchor's
+  deviation from the automatic disc fit — and the eight runs that never had
+  a manual anchor are exactly the eight that land on π·8² perfectly.
+  `P3_2_2.5mL_20260728` is −4.42 % in area, `SLDEA_20260723_152205` −3.38 %,
+  `SLDEA_20260723_233451` +2.44 %. Their PIXEL measurements are correct.
+- **Correcting one cost a full detect-and-save cycle, and that cost lost a
+  correction.** An operator accepted the corrected fit on live P3_2 on
+  2026-08-06 and closed before Save rather than wait for detection over 81
+  frames. Eight further runs carry no anchor at all and are one re-save away
+  from acquiring a fresh error, so the friction would have recurred. →
+  📏 Re-anchor scale… opens the EXISTING calibration dialog (mode C / A / B,
+  unchanged), then re-derives and commits.
+- **The re-derivation is not new code, and that is the point.** The commit is
+  `apply_results(rows, {}, new_scale, {}, None)`: with an empty results dict
+  every row takes the unreviewed branch, which is the rule the [critical]
+  partial-re-save entry (2026-08-05) already put in force — keep the px,
+  RE-DERIVE mm²/diam at this scale, and blank a bug-era mm² that has NO px
+  rather than keep it on an unknowable anchor. That branch reads each row's
+  own `notes` back unchanged, touches no other column, and — because
+  `plan_breakdown_marks`/`apply_rename_plan` are never reached — can neither
+  re-apply nor revert a `*_BREAKDOWN` rename. `se.mm_per_px` derives the
+  scale exactly as Save does. Save and the re-anchor now write their
+  setup.txt anchor through ONE builder (`_anchor_record`) so a field added
+  for one path cannot go missing from the other.
+- **Verified on scratch copies of all three runs, against the real frames.**
+  `baseline_disc` reproduced 577.08 / 370.65 / 362.18 px, and re-anchoring
+  each run to its own fit moved its resting area to **201.06 mm² = π·8²** —
+  192.181 → 201.062 (×1.046211), 194.259 → 201.062 (×1.035021), 205.977 →
+  201.063 (×0.976141). That landing is an arithmetic identity: declaring the
+  fitted disc to be 16 mm forces it, which is why a resting area that does
+  NOT land there means the anchor is not the fit, and why the confirmation
+  warns when it misses by more than 1 %.
+- **A/A₀ is unaffected, and the precise claim matters.** Ratios recomputed
+  from `active_area_px` are BIT-IDENTICAL — the re-anchor never writes that
+  column, and `breakdown_flags` and `sldea_plot` both read px. Ratios
+  recomputed from the stored `active_area_mm2` agree only to ~1e-5 relative
+  (measured worst 1.2e-5 over the three runs), because mm² is quantised to
+  3 decimals and rounding does not commute with multiplication. "Bit
+  identical" is true of the px ratios and not of the rounded mm² ones; the
+  test pins each claim at its own strength.
+- **One button rewrites every area in the run, so the confirmation carries
+  numbers.** Rows to re-derive, rows that would BLANK (before the commit,
+  not after — it is a deletion), both anchor diameters, the multiplier, and
+  the before → after resting area with its deviation from π·8² on both
+  sides. It also detects and reports a column that ALREADY holds more than
+  one scale (the [critical] state itself), a setup.txt anchor that disagrees
+  with the scale the column was really derived at, and the absence of any
+  recorded anchor. The old scale is recovered from the run's own mm²/px
+  (`implied_scale`) rather than trusted from setup.txt, which is what lets
+  the eight pre-gate runs be re-anchored at all.
+- **Refuses rather than guessing.** No row carrying `active_area_px` (nothing
+  to re-derive — refused BEFORE the dialog opens, so no disc is measured for
+  nothing); a detect worker in flight; and an UNSAVED review in memory —
+  that last one is the mixed-scale bug's own shape, two writers on either
+  side of one column. `apply_results` mutates in place and `write_back` can
+  fail after it (data.csv open in Excel), so the rows are snapshotted and
+  restored: a failed re-anchor leaves the run byte-identical in memory AND
+  on disk, where otherwise the next attempt would report a ×1.000
+  multiplier against numbers nobody agreed to.
+- **The run must not end up looking re-reviewed.** The anchor block gains
+  `reanchor: scale-only`, the previous anchor's diameter and method
+  (`prev_diam_px`/`prev_method`/`prev_cal_mode`), the diameter the data
+  itself implied (`prev_implied_px` — the only one that exists on a pre-gate
+  run), and the row counts. A normal Save writes NONE of them, which is how
+  the two are told apart. `sldea_diag` surfaces it as its own verdict,
+  outside the `baseline_disc` branches so it is not lost on the runs where
+  the fit refuses, and warns not to read the anchor's timestamp as a review
+  date. A line goes into `scale_calibration_log.txt` through the same
+  formatter the three modes use (`outcome=reanchor-committed`); the mode
+  A/B/C round-set lines are byte-identical, since the group renders only
+  when `reanchor` is present.
+- **One artifact goes stale and is named rather than deleted.**
+  `area_vs_voltage.png` is drawn from a review pass's accepted results and a
+  re-anchor has none, so it cannot be regenerated and keeps showing the old
+  absolute mm² until the next Save. The confirmation says so. The outlines
+  in `overlays/` are px contours and carry no scale, so they stay correct.
+
+## Scale gate v2: fit a circle, three rounds averaged, plus an anchor sanity guard (2026-08-06)
+
+**TL;DR:** The px→mm calibration is no longer two clicks on opposite
+edges. The operator now drags and resizes a thick circle onto the resting
+disc, three times, and the mean of the three fitted diameters is the
+run's anchor. The spread between the three is written down — it is the
+first operator-repeatability number this project has ever had. And a new
+guard warns, before Save, when the accepted anchor disagrees with the
+automatic disc fit or with the 16 mm mask's π·8² resting area by more
+than ~1 %, because a run shipped 4.4 % low last week and nothing said a
+word.
+
+Observation → decision:
+
+- **The two-click calibration failed in the field, exactly as `#215`
+  predicted.** Run `P3_2_2.5mL_20260728`, reviewed 2026-08-06: the
+  operator's two clicks landed at **590.26 px** where the automatic
+  resting-disc fit sits at **577.1 px** (circ 0.999, conf 0.871). That is
+  **+2.28 % in diameter → −4.42 % in every absolute mm²** in the run: its
+  resting area recorded 192.18 mm² / 15.643 mm where the 16 mm laser-cut
+  mask requires π·8² = 201.06 mm² / 16.000 mm. Every other run in the
+  corpus lands on that anchor. **Nothing warned**, because 2.28 % sits
+  comfortably inside the dialog's own 3 % cross-check tolerance. Anatol's
+  call was to keep it as a recorded offset rather than recalibrate, so
+  the run carries a "quote ratios, not absolute mm²" caveat.
+  → **Judging "exactly opposite" is the weak link, so it is gone.** The
+  calibration is a circle fitted against the *whole* visible boundary:
+  drag the interior to move, drag any of 8 handles to resize about the
+  centre, wheel for fine resize, arrows to nudge, Shift+arrows to resize
+  1 px, Ctrl+wheel to zoom, right-drag to pan, F to fit, **Z for 1:1**.
+  Geometry is always full-res image px at any zoom, which also closes the
+  audit's 0.41×-preview finding.
+
+- **One fit is a number; three fits are a measurement.** Each round
+  respawns at a **randomized position and size inside the central ROI**
+  (the same ROI `baseline_disc` searches), because three nudges of one
+  circle are three correlated fits and their spread would flatter the
+  operator. → `diam_px` = plain mean of every round performed, no outlier
+  rejection (dropping the odd one out would edit the very number the
+  spread reports). If (max−min)/mean exceeds **`CAL_SPREAD_PCT` = 1 %**,
+  the dialog offers a **refit** of all rounds before accepting (see the
+  review sub-entry below: an extra round cannot clear a range gate, so
+  the original "add another round, up to 6" offer was withdrawn).
+
+- **The spread is persisted, and it is the number `SLDEA_MEASUREMENT`
+  §2.5 has been asking for.** The batch control round's operator-repeat
+  leg has never had data — `sldea_trace.py` finds 140 labels across 8
+  runs and **zero repeat pairs**, and tracing them by hand was abandoned
+  as too tedious on 2026-08-06. Three averaged fits generate that number
+  automatically, forever, as a side effect of calibrating. → `setup.txt`'s
+  scale-anchor block gains `n_rounds`, `rounds_px`, `spread_px`,
+  `spread_pct` and `guard`; `sldea_diag` reports them as an explicit
+  repeatability verdict.
+
+- **[new, additional to `#215`] The app knew two independent references
+  and checked the operator against neither.** → **Anchor guard**
+  (`se.anchor_guard`): at calibration time, before Save, the accepted
+  mean is compared against (1) the automatic `baseline_disc` fit and (2)
+  the 16 mm mask anchor of §2.4 via the resting area
+  `auto_area_px · (diam_mm/mean)²` vs π·(diam_mm/2)². Over
+  **`ANCHOR_GUARD_DIAM_PCT` = 1 %** or **`ANCHOR_GUARD_AREA_PCT` = 1 %**
+  the operator must **override deliberately** — and the override is
+  recorded in the run (`guard: OVERRIDDEN by operator: auto +2.28% diam,
+  mask -4.41% area`), so a deviation becomes a decision instead of
+  silence. P3_2 trips both, and its numbers are the regression test.
+  **Honest about the algebra:** `baseline_disc` returns a *circle* fit,
+  so its `area_px` is πr² and the area test is the diameter test squared
+  — one measurement in two units, not two independent votes. The area
+  gate is therefore the binding one (1 % area ≈ 0.5 % diameter) and is
+  quoted in the units the downstream numbers are quoted in. The guard
+  measures **accuracy**; the three-round spread measures **precision**. A
+  consistently mis-placed circle scores a tight spread and is caught only
+  by the guard.
+
+- **The detect-time modal stays at 3 %, on purpose.** Firing the 1 %
+  guard as a modal after every detection would nag every honestly
+  calibrated run — `baseline_disc` agrees with the by-eye measurement
+  only to ~1 % itself (§2.1) — and an operator trained to click through
+  warnings will click through the one that matters. The status line
+  carries the 1 % tier as a ⚠ with both numbers; the modal fires past
+  `ANCHOR_MODAL_DIAM_PCT` = 3 %, **or** whenever the guard trips on a
+  **reused** anchor, which is the one path that never met the
+  calibration-time guard.
+
+- **The partial-re-save consequence is now stated where the damage is
+  done.** The [critical] 2026-08-05 entry below: unreviewed rows keep
+  their px and their mm²/diam are RE-DERIVED at the current save's
+  scale, so re-reviewing one frame under a new anchor rewrites the whole
+  run's absolute column — which happened to a user. → The calibration
+  dialog counts the rows that already carry px and says so up front, and
+  the Save dialog now states the actual number: *"this anchor differs
+  from the recorded one (577.1 → 590.3 px): EVERY re-derived mm² moves
+  −4.42 %, including rows you did not re-review."* `se.rescale_pct` is
+  that arithmetic, tested against P3_2.
+
+- **Backwards compatibility is not optional and is tested.** 15 runs
+  carry the 2026-08-05 two-click anchor with none of the new fields, and
+  `P3_6_2.5mL_20260729` / `DOT_P3_1_20260729` predate the gate with no
+  anchor block at all. Every new field is optional on read; a missing
+  spread is reported as **missing**, never as a zero that would read as
+  perfect repeatability. A hand-garbled `rounds_px` costs that field, not
+  the anchor.
+
+**How tight is the 1 % spread gate, really?** Simulated against a
+converged operator whose residual *radius* error is Gaussian, on the
+580 px disc these runs actually have (2000 trials per row):
+
+| per-fit radius σ | as % of diameter | median 3-round spread | how often the 1 % gate trips |
+|---|---|---|---|
+| 0.5 px | 0.09 % | 0.27 % | 0 % of runs |
+| 1.0 px | 0.17 % | 0.55 % | 10 % |
+| 1.5 px | 0.26 % | 0.82 % | 35 % |
+| 2.0 px | 0.34 % | 1.09 % | 56 % |
+
+So 1 % assumes the operator repeats the radius to about **1 px** on a
+580 px disc. That is plausible at ≥1:1 zoom against a whole boundary but
+it is **not measured yet** — the first few real calibrations decide it.
+`CAL_SPREAD_PCT` is a named constant precisely so loosening it is one
+edit, not a redesign. If it proves noisy, raise it and say so here.
+
+**Verification, and its limits.** `tests/test_sldea_calibration.py` (25
+tests) pins the geometry (spawn stays in the ROI and never repeats,
+handles, hit-test — including that a press which grabs nothing does
+*not* teleport the circle, clamping, key/wheel deltas), the averaging and
+the spread gate, the guard against P3_2's real numbers, `rescale_pct`,
+and the backwards-compatible read path for all three eras of anchor. One
+new case in `tests/test_sldea_edge_gui.py` drives the **real dialog** on
+a synthetic run through three rounds and both gates, and asserts the
+override lands in the record. **That case needs a display and skips
+headlessly**, and `tests/test_app_launch.py` self-skips on Windows — so a
+green suite is *not* evidence that the window looks right. The stroke
+weight, the handle size and the drag feel have not been judged by a human
+eye on real bench frames. **First bench use should check exactly that.**
+
+### Adversarial review of the above, applied the same day (2026-08-06)
+
+**TL;DR:** Three reviewers took the calibration apart before it shipped
+and found four ways it could hand you a calibration that *looks*
+validated and is not. All four are fixed. The short version: Enter used to
+answer every warning with "yes"; the three rounds could see each other's
+answers, so the repeatability number was fabricable; the guard was dead on
+runs whose baseline frame will not load; and the repeatability verdict was
+missing from the diagnostic on exactly those runs.
+
+- **`<Return>` answered every warning with its dangerous option.** The
+  Toplevel bound Enter to Continue/Finish while the gates used
+  `askyesno`, which defaults to **YES** and was passed no `default=`.
+  Driven with a stub returning each prompt's default: six Enter presses
+  produced four "Rounds disagree" prompts and then the "Anchor sanity
+  check", and the out-of-tolerance anchor was **accepted** — the guard
+  that exists to catch a P3_2-style error could be dismissed without
+  being read. → Every yes/no gate now passes an **explicit `default=`**,
+  and it is the *declining* button on every accept-anyway prompt; `ask()`
+  **unbinds `<Return>`** for the duration of each modal; and the LAST
+  round requires the button, so Enter can no longer reach `finish()` at
+  all. Pinned by `test_calibration_warnings_default_to_declining_them`
+  (the reviewer's own harness — every question answered with its default,
+  and the anchor must not be accepted) and
+  `test_return_key_cannot_finish_a_calibration`.
+
+- **The three rounds were not independent, which corrupted an
+  error-budget term.** The header rendered `accepted so far: N px` beside
+  a live `circle: N px across` readout, so an operator could wheel round 2
+  until the numbers matched. Randomizing the spawn is worthless against a
+  printed target: the spread is then biased toward zero *by
+  construction*, the spread gate can never fire, and the figure §2.1a
+  converts into an error term (R/2.93, R/1.47) becomes fabricated
+  precision entering the budget. → **Nothing about a previous round is
+  shown while rounds are being fitted** — progress is `Round n of 3` plus
+  a plain statement that the earlier rounds are hidden and why. All three
+  values, the mean and the spread appear the moment the last fit is in
+  (and in the status line afterwards). The live readout of the *current*
+  circle stays: that is the fit being made, not a target to match. The
+  mid-round "add a round" prompt was also stripped of the min/max, so no
+  fitting ever proceeds against a disclosed number. Pinned by
+  `test_mid_round_display_never_reveals_a_previous_fit`.
+
+- **The guard was structurally dead on the fallback-frame path.**
+  `_anchor_frame()` falls back to a later, activated frame when the
+  baseline PNG is unreadable (the disk-full failure mode), but
+  `_auto_disc()` goes through `_base_gray()`, which needs the baseline row
+  itself. So on that path `anchor_guard` returned `available=False` with
+  an **empty** warn list and `finish()` accepted in silence — one line
+  after the dialog announced *"cross-checking the mean against the
+  automatic disc fit…"*, which reads as a check that passed. → An absent
+  cross-check is now its own **modal, defaulting to No** ("Anchor NOT
+  cross-checked"), the status line says `⚠ NOT cross-checked`, the run's
+  record says `NOT CROSS-CHECKED: no automatic disc fit was available`,
+  and `sldea_diag` reports it at **MED** ("Scale anchor has never been
+  cross-checked") instead of an OK line reading "cross-check
+  unavailable". Note what this path means: with no automatic fit, the
+  mask-area test cannot run either, so *neither* reference exists.
+
+- **The repeatability verdict was blind where it matters most.** Both new
+  verdicts sat inside `if ref and anchor and anchor.get('mm_per_px')` in
+  `sldea_diag.verdicts`, so when `baseline_disc` refused, control fell to
+  the pre-existing `elif` and **no repeatability verdict was emitted at
+  any severity** — on exactly the runs with no automatic reference, where
+  the operator's own repeatability is the only evidence there is. → The
+  spread verdict is **hoisted out**: it needs no automatic fit, being a
+  property of the three fits alone, and now fires whenever an anchor
+  exists.
+
+- **[minor, applied] The spread gate's remedy could not clear it.**
+  `spread_pct = 100·(max−min)/mean` has a floor of `100·(max−min)/max`, so
+  once tripped, adding rounds essentially never brings it back under the
+  threshold — yet the dialog offered *"Add another round?"* and then always
+  landed on *"Accept the mean anyway?"*. → The offer is withdrawn. One
+  yes/no/**cancel** question: **refit all rounds** (the only remedy that
+  can clear a range gate), **accept the mean as measured**, or **leave the
+  gate closed** — which is the default. `CAL_MAX_ROUNDS` is gone with it.
+  The gate **statistic** stays the range on purpose: §2.1a consumes a
+  range, and a statistic that shrinks with *n* (SD, SEM) would need a
+  threshold of its own, which would be a second invented number on a
+  feature whose first one is still unvalidated. Revisit when real spreads
+  exist. Pinned by `test_adding_a_round_can_never_clear_the_spread_gate`
+  — the old test built a *fresh* tight 4-value list, which is how the
+  flaw stayed invisible.
+
+- **[minor, applied] The pre-gate runs got no number.**
+  `P3_6_2.5mL_20260729` and `DOT_P3_1_20260729` carry px rows and **no
+  anchor block**, so the re-scale percentage was `None` in the dialog and
+  at Save — no number on exactly the runs whose whole mm² column is about
+  to hang on a hand-fitted anchor for the first time. → The percentage is
+  quoted against the **automatic disc fit** instead, which is the scale a
+  pre-gate Save derived those mm² at, in the calibration dialog and at
+  Save; with no automatic fit either, both say plainly that there is no
+  percentage and the whole column is derived fresh.
+
+**What is still NOT verified after this round** (unchanged unless noted):
+the drag/press/release gesture, the view-px hit test at non-unit zoom,
+wheel resize, Ctrl+wheel zoom, right-drag pan and the F/Z bindings have
+never been exercised as **events** — only the math they call, so a swapped
+argument or a wrong `event.state` mask would pass every test written
+(`<Return>` and the arrow-key path are now the exception). No operator has
+fitted a circle to a real disc, so **there is still no measured
+three-round spread anywhere**: the 1 % gate, the 0.5/5.0 px wheel steps
+and the 0.30–0.40 spawn band are chosen, not validated. The two guard
+references are not independent (πr² makes the area test the diameter test
+squared, binding at ~0.5 % diameter). Nothing has been run against a real
+run directory — every backwards-compatibility claim rests on synthetic
+`setup.txt` files. **The dialog has now been rendered and looked at**
+(2026-08-06, synthetic 320×240 frame, this workstation): the header, the
+live readout, the buttons, the bright-green stroke, the 8 handles and the
+centre cross all draw as intended at 3.12× fit zoom, and with *every*
+warning showing the window measures 1020×1006 px — which fits a 1440p
+screen comfortably and a 1080p bench screen with ~35 px to spare. That is
+a rendering check, not a usability one.
+
+**Consequence for the error budget, restated because it is the point:**
+the per-run operator-repeatability figure must **not** be fed into
+`SLDEA_MEASUREMENT.md` until a real spread has been measured on a real
+disc. Until then it is a number the tool produces, not a number the tool
+has measured.
+
+### Measured: the circle misses the budget. A second method to A/B against it (2026-08-06, evening)
+
+**TL;DR:** An operator finally drove the circle dialog on a real disc, six
+times, and it is not precise enough — per fit it scatters about 1.05 % of
+the diameter, which puts the 3-round average 1.5× outside the error
+budget. So there is now a **second calibration method** you pick from a
+chooser in the same dialog: click two opposite edge points, five times,
+with the picture **rotated a random amount between rounds**. Both methods
+are in the same build so the same disc can be measured with each and the
+numbers compared. The acceptance gate stopped judging the raw spread and
+now judges the average's standard error, which is the thing the error
+budget is actually written in — and every round-set, accepted **or
+declined**, is now written to a log file in the run folder, because last
+time the numbers only survived by being typed into a chat.
+
+Observation → decision:
+
+- **The circle method misses the error budget, measured.** Anatol drove
+  mode A six times on a scratch copy of `P3_2_2.5mL_20260728` (its real
+  anchor is +2.28 % off, so it is the sharpest available test). Recorded
+  3-round spreads: **1.94, 2.09, 1.62, 1.81, 1.44 %**, plus a sixth that
+  passed the 1 % gate. Via §2.1a at *n* = 3 that is **per-fit σ ≈ 1.05 %
+  of diameter** → 3-round mean SE **0.61 % diameter / 1.21 % area**
+  against §2.1's standing **~0.4 % / ~0.8 %**. Mode A would need **~7
+  rounds** to reach budget. The 1 % spread gate also nagged on 5 of the 6
+  attempts, which is exactly the "if real spreads land at 1.5 % the gate
+  will nag on every run" outcome the PR predicted.
+  → **The prediction that the fit-a-circle gate would tighten this term is
+  withdrawn until mode B is measured.** §2.1's numbers stay the ones to
+  quote, and §2.1a now records σ ≈ 1.05 % as the first real data point
+  with a blockquote saying it is a data point and not a distribution.
+
+- **Operator diagnosis: the stroke hides the edge.** *"the bright green
+  circle occludes the edges."* Persuasive: a circle fit uses the *whole*
+  boundary and should beat a single chord, so its failing to points at the
+  3 px stroke covering the very feature being aligned to.
+  → **Mode B — two-point diameter, N rounds, randomly rotated.** Click two
+  roughly-opposite edge points, N times (default **5**), the mean of the N
+  diameters is the anchor. Markers are a **1 px hollow ring plus a
+  crosshair with a hole in it**, and nothing is drawn within 3 px of the
+  judged point (`marker_shapes`, asserted by
+  `marker_clear_radius`) — never a filled dot, never a stroke laid along
+  the boundary. Mode A is **unchanged** and stays the dialog's default;
+  `se.CAL_DEFAULT_MODE` is one edit if B wins.
+
+- **Rotation is the load-bearing idea, not decoration.** Mis-judging
+  "exactly opposite" is *systematic* while the disc always sits the same
+  way up — one biased chord, forever. Rotate the display randomly each
+  round and the same misjudgement lands in a different direction every
+  time, so it becomes *random* and averaging suppresses it as √n. It also
+  averages out the human preference for horizontal and vertical chords
+  over diagonal ones. → Angles are **stratified**: one uniform draw per
+  equal sector of the **full** circle (the H/V bias is 90°-periodic), then
+  shuffled. Independent uniform draws can cluster, and a round-set whose
+  rotations clustered is a round-set whose rotation did nothing.
+
+- **Measured in ORIGINAL image coordinates.** The display is rotated; the
+  two clicks are mapped back through the inverse rotation
+  (`unrotate_point`) and the diameter is computed in original px. A length
+  is rotation-invariant so a correct implementation gets the same number
+  either way — doing it in original space is what keeps the *recorded*
+  click positions meaningful. Pinned against PIL's real `Image.rotate` at
+  ten angles: recovered points sit within ~1.5 px (PIL's expand ceil/floor
+  is a pure translation) and the **diameter within 0.35 px**, because a
+  translation cancels in a difference. Rotation also resamples, which
+  softens the ink edge slightly — identically in every round, so it can
+  inflate σ and cannot bias the mean.
+
+- **The statistics are n-aware, and refuse rather than guess.** §2.1a hard-
+  wired the *n* = 3 constants (σ ≈ R/1.693, SE ≈ R/2.93, area ≈ R/1.47).
+  With the round count configurable those are wrong. → **d₂(n) is a
+  documented lookup** (`se.D2_RANGE_FACTORS`, ASTM E2587 / Duncan, n =
+  2–8): σ ≈ R/d₂(n), mean SE = σ/√n, area SE = 2·SE. For an *n* with no
+  factor, `se.d2()` returns None, `calibration_stats` leaves σ/SE None
+  *together*, `se.se_ok()` returns **None — not True**, and the dialog and
+  `sldea_diag` both report the gap. Silently reusing 1.693 would have put a
+  wrong error term into the budget with nobody seeing it happen.
+
+- **The acceptance gate moved from the raw range to the mean SE.** Minor 5
+  of the review above was right and was only half-applied. Two reasons: a
+  range is **not comparable across n** (the range of 5 fits is 1.37× the
+  range of 3 at identical precision), so it cannot survive a configurable
+  round count; and **a range cannot shrink when a round is added**, so a
+  range gate's own remedy can never clear it. → **`CAL_SE_PCT` = SE ≤
+  0.4 % of diameter (≡ 0.8 % area), derived from §2.1's standing budget —
+  not measured, and not a second invented number**: the budget already
+  existed and SE is the quantity it is expressed in. Because SE falls as
+  1/√n, the gate now *names* the round count that would clear it, computed
+  from the σ just measured (`se.rounds_for_se`) — and says plainly when
+  that count is past the factor table, i.e. when the method is the problem
+  and more rounds are not the answer. The range is still recorded and
+  still reported; `spread_ok` survives with its monotonicity test intact.
+  **This changes mode A's gate too, deliberately**: two modes judged by
+  different statistics could not be compared.
+
+- **Report the comparison on σ, not on the spread.** σ is the *method's*
+  per-fit precision and the only figure that survives a different round
+  count, so it leads every readout: the dialog's reveal, the log line,
+  `sldea_diag`'s verdict and the detect-time status line.
+
+- **Every completed round-set is captured, accepted or declined.** The six
+  spreads above exist only because they were read off a screen and typed
+  into a chat: `setup.txt` was never written, because every one of those
+  calibrations was **declined** at a gate and `setup.txt` is written at
+  Save. → `se.append_calibration_log` writes one line per round-set to
+  **`<run>/scale_calibration_log.txt`** — method, n, every diameter in px,
+  the range, σ, mean SE in diameter and area, the rotation angles, the
+  automatic disc fit for reference, the outcome and a timestamp — and the
+  **same line is printed to stdout**, so a read-only or full run folder
+  (the 2026-08-04 disk-full incident) costs the file and not the
+  measurement. `.gitignore` blocks the file: it is run data.
+
+- **The third arm, because it was cheap.** If occlusion really is mode A's
+  problem, a thinner stroke may rescue it. → A stroke chooser offers **3 px
+  solid (the default, unchanged) / 1 px solid / 1 px dashed**, and the
+  choice is recorded in the log line so the A/B data distinguishes them.
+
+**Verification, and its limits.** Suite **28/32**, only the four known
+environmental failures (`test_arb_bin`, `test_camera_controls`,
+`test_presets_path`, `test_tk_fontfix`). `tests/test_sldea_calibration.py`
+27 → **45** cases (the d₂ lookup and its refusal outside the table, σ/SE
+arithmetic at every *n* in the table, the measured mode-A numbers
+reproducing the issue's conversion, the SE gate including its boundary and
+its monotonicity, `rounds_for_se`, the rotation mapping against real PIL,
+marker clearance, the stroke spec, the log line and file, and the
+`cal_mode`/σ/SE round trip through `setup.txt`).
+`tests/test_sldea_edge_gui.py` 22 → **27**, the five new cases all driving
+the **real dialog** in mode B: the click→original mapping under five
+rotations, mid-round blindness, the log for a declined *and* an accepted
+set, the mode chooser's restart, and mode B inheriting all four fixes of
+the review round.
+
+**What is still unverified**, and it is the same list as before plus mode
+B's own: **no operator has used mode B**, so its σ is entirely unmeasured
+and the 5-round default, the marker sizes and the stratified rotation are
+chosen, not validated. Whether a rotated frame is comfortable to work in
+has not been judged by a human eye. The mode-B tests put the dialog **on
+screen** to deliver synthetic mouse clicks (an unviewable widget drops
+them silently) and each self-checks that its clicks landed — but that is a
+click-delivery check, not a usability one. The dialog's "precision cannot
+be judged" modal is **unreachable through the chooser** (which only offers
+round counts in the d₂ table) and so is untested in the dialog; its
+arithmetic is pinned headlessly. Nothing has been run against a real run
+directory. **The bench session that matters is: calibrate the same disc
+with A then B, five rounds each, and compare the two σ figures the tool
+prints.**
+
+### Mode C: the machine measures, the operator verifies (2026-08-06, evening)
+
+**TL;DR:** Eleven hand calibrations on one disc say the automatic disc fit
+is better at this than a person — it beat **all eleven** on accuracy and
+**nine of eleven** on precision. So the scale gate now **opens on the
+machine's own measurement and asks the operator to approve it**, with hand
+measurement kept for the runs where the fit refuses. And there is one thing
+this mode cannot do, which is the important part: **there is no independent
+cross-check for an automatic anchor.** Calling the fitted disc 16 mm makes
+the resting area π·8² by construction, so the anchor guard would read
++0.00 % on any frame however wrong the fit is. It is not run, and — the
+part that matters — it is not claimed anywhere. The verification is the
+operator's eye, supported by the fit's own quality numbers.
+
+Observation → decision:
+
+- **The measurement that inverts the premise.** Anatol's A/B/A′ session on
+  a scratch copy of `P3_2_2.5mL_20260728`, against an automatic fit of
+  **577.08 px** (circ 0.999, conf 0.871, residual 2.3 px, 204 edge points):
+  eleven hand calibrations, and the fit beat **all eleven on accuracy** and
+  **nine of eleven on precision**. Per-fit human precision is
+  **σ ≈ 1.0–1.1 % of diameter regardless of method or stroke width** — mode
+  A at 3 px 1.03 %, mode A′ at 1 px dashed 1.11 %, mode B 2.09 % — so ~7
+  rounds would be needed to average down to the 0.4 % SE gate.
+  → **The scale gate now opens in MODE C, "verify the automatic fit",
+  whenever `se.baseline_disc` returns one.** The operator judges; they do
+  not re-measure.
+
+- **Why no gesture was ever going to fix the human side.** A radial
+  intensity profile of that baseline: the disc reads **166 gray**, the paper
+  **186**, and that **20-level step is spread over ~60 px of radius**. There
+  is no line to click. Asking an operator to pick "the edge" is asking them
+  to pick a point inside a gradient *wider than the stroke they draw with*,
+  and the point a human picks is the outer toe (§1.3, **+2.6 % in
+  diameter**) — which is mode A's measured bias, to within the noise of four
+  samples. `baseline_disc` instead takes the strongest dark→light step on
+  each of 204 surviving radial rays and fits a circle robustly.
+  → Three things follow, and all three are implemented:
+  **(1)** the fit is drawn with a **1 px dashed** stroke, never 3 px — the
+  measured cost of a stroke laid on the boundary is **+2.07 % vs +0.77 %**,
+  so a dialog whose whole job is to present a boundary *for judgement* may
+  not use one; **(2)** the displayed crop gets a **contrast stretch**
+  (~157–195 gray → black–white, measured from the frame's own disc and
+  paper levels, using the fit's foil-rejected `paper_lum` where it has one)
+  because a 20-level step on a 186 background is nearly invisible and an
+  operator squinting at a flat grey field is verifying nothing — it is
+  **display only** and the dialog says so on two lines; **(3)** the numbers
+  are on screen *before* the button: `diam_px`, the implied `mm_per_px`, the
+  resting area, `circ`, `conf`, `fit_resid_px` (also as a % of diameter),
+  `n_edge`, arc coverage, fill, and the deviation from any recorded anchor
+  with the re-save consequence spelled out.
+
+- **[the honest constraint] There is no independent cross-check available
+  for an automatic anchor, and none is invented.** Declaring the fitted disc
+  to be `diam_mm` makes the resting area π·(diam_mm/2)² **by
+  construction**, so `se.anchor_guard` returns **exactly +0.00 % on both of
+  its tests** for a mode-C anchor — on any frame, at any diameter, however
+  wrong the fit is (pinned over a 12→900 px sweep in
+  `test_the_anchor_guard_is_VACUOUS_on_an_autofit_derived_anchor`). A green
+  tick from a test that cannot fail is worse than no test: it reads as
+  verification the code never performed. This is the same algebra an earlier
+  reviewer found in the guard itself — its two tests are one measurement in
+  two units — taken to its limit.
+  → **The guard is not run on a mode-C anchor and not claimed anywhere**:
+  not in the dialog, not on the accept status line, not on the detect-time
+  status line, not in the run's record, not in `sldea_diag`
+  (`se.guard_is_vacuous` is the single predicate every reader consults). All
+  five surfaces instead say, in words, that no cross-check was performed and
+  that no independent one exists. **The verification is the operator's eye**,
+  supported by circ / conf / residual / n_edge.
+
+- **Provenance: "a human measured this" must be distinguishable from "a
+  human approved the machine's measurement."** Two different claims with
+  different failure modes — a hand measurement can carry the +2.6 %
+  outer-toe convention bias; an approved fit carries whatever the
+  step-finder locks onto.
+  → A verified anchor is recorded with **`method: auto-verified`**, against
+  the existing `manual-calibration`. Both are in `se.ANCHOR_METHODS` and
+  both still override every automatic reference at Save (`_is_manual_cal`
+  matches the set, not the one string — a mode-C anchor falling through to
+  the automatic branch would let a baseline-row detection silently outrank
+  the number the operator signed off, which is the 2026-08-05 audit's bug
+  all over again). `setup.txt` gains `fit_circ`, `fit_conf`,
+  `fit_resid_px`, `fit_arc_cov`, `fit_n_edge`, `verified_by`,
+  `verified_at`; `sldea_diag` reports the distinction in both its verdicts
+  and its text report. **Older runs keep loading**: the 15 two-click
+  anchors and the two with no block at all (`P3_6_2.5mL_20260729`,
+  `DOT_P3_1_20260729`) are untouched, every new key being optional on read.
+
+- **σ and SE do not exist for one fit, and must not be written as 0.** A
+  mode-C anchor has no rounds, so `spread_pct = 0.00 %` — which is what
+  `calibration_stats([d])` honestly returns for one value — would read as
+  **perfect precision** in the log, on the status line and in `sldea_diag`.
+  → `se.verify_stats` returns them all as **None**, the log writes
+  **`sigma=undefined se=undefined area_se=undefined range=undefined`**
+  (distinct from mode A/B's `unconvertible`, which means a number exists
+  that d₂ cannot convert), the verdict column is **`NOT-GATED`** rather than
+  `UNJUDGEABLE`, and the deviation column reads **`auto=577.1px(IS-the-anchor)`**
+  instead of a vacuous `(+0.00%)`. **Mode A and B log lines are
+  byte-identical to before** — pinned by an exact-string assertion.
+  What *does* quantify a mode-C anchor is the fit's own residual:
+  `se.fit_resid_pct` = 2.3 px / 577.08 px = **0.40 % of diameter**, which
+  lands on §2.1's budget. It is deliberately **conservative** — the
+  per-point scatter, not the fitted radius's standard error, which is
+  ~√n ≈ 14× smaller at n = 204.
+
+- **A refusal is a fall-through, not a dead end, and it says why.**
+  `baseline_disc` refuses on `P3_7_2.3mL_20260729`, and it used to refuse
+  with a bare `None` — right for every automatic caller, useless to an
+  operator being sent to do the slower, measurably worse job instead.
+  → Mode C is **withdrawn** (its radio is not even offered) when the fit
+  refuses, or when the frame being calibrated on is not the baseline the fit
+  ran on (the fallback-frame path — drawing the baseline's circle over a
+  later activated frame would be an outright lie). The gate opens on mode A
+  and states the fitter's **own reason**, from a new
+  `se.baseline_disc_refusal`: all eleven refusal sites in
+  `_baseline_disc_uncached` now name their gate, and the four documented
+  ones (arc coverage, residual, fill, plausibility) are named individually
+  rather than as one combined test — "the arc covers only 87°" sends the
+  operator to move whatever is lying across the frame, "the diameter is
+  outside the plausible range" sends them to the camera zoom and `diam_mm`.
+
+- **Accept is the primary button — and `<Return>` still cannot reach it.**
+  Unlike every warning gate on this branch, whose safe default is to
+  decline, the measured evidence says accepting the machine is the **good**
+  outcome, so ✔ Accept is first in the row and is Tk's `default='active'`
+  button. But Enter is refused in mode C with a message naming the button,
+  because an operator who taps Enter out of habit would approve a scale they
+  had not read, and "Accept is a judgement rather than a reflex" is the only
+  thing between mode C and a rubber stamp. Nothing else about the branch's
+  `<Return>` discipline changed. Mode C's other actions are **✎ Measure by
+  hand instead** (→ mode A, round 1, and the fit's diameter is *gone from
+  the screen* so there is no printed target to wheel a circle onto) and
+  **Cancel**. Nothing the mouse or the arrow keys do can move the displayed
+  circle: it is the machine's measurement, not the operator's.
+
+**Tests.** `tests/test_sldea_calibration.py` 46 → **57**;
+`tests/test_sldea_edge_gui.py` 27 → **33** (six new cases driving the real
+dialog: mode C is where the gate opens and Enter cannot approve; a refused
+fit falls through to the hand measurement and quotes the reason; ✎ Measure
+by hand lands in a blind mode-A round set with no fit diameter on screen;
+switching *into* mode C gives it the same room as opening in it; reusing a
+verified anchor keeps it verified; and a verified anchor still reports when
+the fit has *moved* underneath it). The last three are holes found while
+writing the first three — `reuse()` hardcoded
+`method='manual-calibration'`, which would have relabelled every reused
+mode-C anchor as a hand measurement and then given it a vacuous tick; and a
+canvas sized once for mode A and then filled with mode C's evidence
+overflowed a 1080p screen by ~80 px, so the canvas height now follows the
+MODE (measured: every switch path stays inside 1040 px at 1080p).
+Suite **28/32** with only the four known-environmental failures
+(`test_arb_bin`, `test_camera_controls`, `test_presets_path`,
+`test_tk_fontfix`). Eight existing dialog cases now pass `mode='A'`
+explicitly, because `mode=None` no longer means mode A.
+
+**What is still unverified.** **No operator has used mode C** — whether the
+stretched display makes the edge judgeable by eye is the entire premise and
+it has been tested only against synthetic frames. The window geometry was
+measured (1084×977 at a simulated 1080p, canvas 1004×544, fits with the
+taskbar) but **nobody has looked at the dialog**. **It has never been run
+against a real run directory**: no P3_2, no P3_7, no carbon-black baseline —
+so the contrast window's behaviour on a *saturated* baseline (the CB run
+medians 255) is only covered by a synthetic case that correctly declines to
+stretch. The refusal strings are pinned for three of eleven sites; the other
+eight are unreached by any test. And the **fit's systematic term is not
+measured by anything** — which feature the step-finder locks onto versus the
+true mechanical boundary — so an auto-verified anchor's accuracy rests on
+`baseline_disc` agreeing with the by-eye measurement to ~1 % on three P3
+baselines and on this experiment's eleven-attempt comparison, on one disc,
+in one session. **The bench session that matters is: open a real P3 run,
+look at the stretched frame at 1:1, and say whether the dashed circle is
+visibly on the middle of the ramp.**
+
+### That bench session happened, and mode C's screen was stripped to four lines (2026-08-06, late)
+
+**TL;DR:** An operator drove mode C on a real disc (P3_2's baseline,
+automatic fit 577.08 px) and said two things: the fit looks right, accept
+it — and the calibration screen is *way* too busy with text and unnecessary
+garbage. So the premise is now confirmed by a human on real ink, and the
+screen is cut from 13 lines of prose to **four short lines**. Nothing was
+removed from the *record*: `setup.txt`, the calibration log and
+`sldea_diag` carry exactly the same bytes as before, verified by diff.
+
+Observation → decision:
+
+- **The premise held. The presentation did not.** The item still open
+  above — "open a real P3 run and say whether the dashed circle is visibly
+  on the middle of the ramp" — was answered yes. The 1 px dashed stroke on
+  the contrast-stretched view *is* judgeable by eye, and the judgement
+  agreed with the fit.
+  → Mode C stays exactly as it is behaviourally. Nothing about what it
+  measures, records, refuses or provenances changed.
+
+- **The evidence block was 13 lines wrapping to 19, and 2326 characters of
+  8-point prose above a canvas showing the 577 px disc at 282 px.** The
+  original brief asked for every quality number the fitter reports, and
+  that is what it got: circ, conf, arc coverage, interior fill, residual in
+  px and in %, n_edge, the implied resting area, a paragraph of
+  A/B-experiment justification, a paragraph on uncertainty, a paragraph of
+  cross-check algebra, and a "how to judge" paragraph — plus a round header
+  saying there were no rounds, plus a live line re-announcing the contrast
+  stretch a second time and nagging "below 1:1 — press Z".
+  → **Four lines, hard budget** (`CAL_VERIFY_MAX_LINES`): the value being
+  adopted (`Automatic fit — 577.1 px across = 16.00 mm (0.027726 mm/px)`),
+  two quality numbers (residual as % of diameter, circularity), one
+  compressed honest sentence (*"View is contrast-stretched so the edge is
+  visible; the fit is measured on the raw frame. Nothing cross-checks it —
+  your eye is the check."*), and a consequence line **only when a prior
+  anchor exists and differs**. Measured: **13 → 3 lines** on a run with no
+  prior anchor, **4** with one; 2326 → 263 chars.
+
+- **`conf` is off the screen on purpose.** It is *derived from* the same
+  residual/circularity/coverage quantities the line above it already
+  shows, so it is not independent evidence and there is nothing a human
+  can do with it. `n_edge`, arc coverage and interior fill went for the
+  same reason — they qualify the residual rather than challenging it. The
+  two numbers that would make a reader *doubt* the fit are the residual as
+  a fraction of diameter and circularity, and those stayed.
+
+- **The "below 1:1 — press Z" nag was noise generated by a bad default.**
+  Mode C opened fit-to-*frame*, so on a 1080p frame the operator arrived at
+  0.50× and was told off for it.
+  → Mode C now opens framed on the **circle** (`verify_zoom`, 82 % of the
+  canvas's shorter side): 1.10× on the real geometry, the disc spanning 623
+  of 760 canvas px. The nag is not suppressed — it has nothing to warn
+  about, and it stays in modes A/B where a fit-to-window view genuinely is
+  sub-1:1 and the operator is about to measure on it.
+
+- **The canvas/text split now runs the other way.** Mode C used to need
+  ~180 px more text room than A/B and gave the canvas up for it; it now
+  needs far less, and the picture — which in mode C *is* the
+  verification — gets the difference. Measured at a simulated 1080p:
+  window **1302×902 → 1053×898**, canvas **1000×540 → 1000×760**.
+
+- **Auditability was the constraint, not a hope.** Everything cut from the
+  screen still reaches `setup.txt`'s anchor block, the
+  `scale_calibration_log.txt` line and `sldea_diag`'s verdicts. Verified
+  by capturing a full mode-C accept — the fit dict, `manual_ref`, the log
+  line, the anchor block, the `load_scale_anchor` round trip, the status
+  line and the diag verdicts — before and after: **byte-identical, same
+  SHA-256** (9240 bytes, `64eff329…`).
+
+**Tests.** `tests/test_sldea_calibration.py` 57 → **59**;
+`tests/test_sldea_edge_gui.py` 33 → **34**. The budget is pinned at both
+ends: purely on `verify_evidence` (line count, per-line length, the exact
+value line, and that each dropped number is absent) and **through the real
+dialog** on the pack-managed labels, because the gate block, the round
+header and the live readout are separate widgets and re-inflating any of
+them would leave a pure-function test green. A companion case asserts the
+cut numbers are still in `se.verify_note` and the log line, so a future
+declutter cannot reach into the record. `verify_zoom` is pinned headlessly.
+Suite **28/32**, the four known-environmental failures only.
+
+**One real bug, found by rendering rather than by a test.** The first cut
+hid the live line in mode C by unpacking it — and never packed it back on
+the way to A/B, so mode A returned from a C→A switch with its diameter
+readout's *text set and its label invisible*. Every write to that line now
+goes through one `say_live` helper that guarantees non-empty text is
+visible text, and the dialog-level case asserts mode A's readout is on
+screen after the switch.
+
+**What is still unverified.** The dialog was rendered and looked at (an
+`ImageGrab` of the Toplevel's own rect at a simulated 1080p, both the
+3-line and 4-line cases) and it reads as uncluttered — but **the four-line
+screen has not been driven by the operator on the bench**, which is the
+same class of claim the 13-line one failed. Mode A/B's own text is
+unchanged, verified character-for-character against `e6702dd`.
 ## A trace can no longer be labelled without a machine candidate (2026-08-06)
 
 **TL;DR:** Tracing a frame in a run that had never been detected wrote

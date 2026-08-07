@@ -807,12 +807,26 @@ def test_calibration_dialog_drives_three_rounds_and_both_gates():
     opens — the geometry and the arithmetic are pinned separately in
     tests/test_sldea_calibration.py).
 
-    Drives the operator's actual path: accept each randomized spawn as
-    the fit, three times. Because the spawns are randomized and nothing
-    is dragged onto the disc, this deliberately trips BOTH gates — the
-    spread gate first, then the anchor guard — and the test answers them,
-    which is the point: every gate is a decision, and the decision is
-    recorded in the anchor."""
+    Drives the operator's actual path: accept each spawned circle as the
+    fit, three times, so BOTH gates fire — the spread gate first, then
+    the anchor guard — and the test answers them, which is the point:
+    every gate is a decision, and the decision is recorded in the anchor.
+
+    The spawns are SCRIPTED, not randomized (2026-08-07, de-flaked at a
+    measured 6 failures in 300 harness runs, 5/200 standalone): a
+    randomized 3-round set can silence EITHER gate by luck — agree to
+    within the 0.4 % SE gate (range/mean under ~1.17 % = 0.4 % x d2(3)
+    x sqrt(3); 4 of the 6), or average to within the guard's 1 % of the
+    fixture's ~159.9 px auto fit, which the spawn range (~122-163 px
+    diameter) straddles (2 of the 6). A silent gate is CORRECT dialog
+    behavior — nothing to warn about — but the hard-coded answer script
+    then falls one slot out of register and the run cascades through
+    restarts to a wrong assert. So the cure is not a wider script but
+    spawns that cannot agree and cannot land near the reference; the
+    question titles are asserted exactly below, so a spawn script that
+    stopped tripping a gate fails loudly instead of skipping it.
+    spawn_circle's own randomization stays pinned in
+    tests/test_sldea_calibration.py."""
     import sldea_edge_gui as gui
     import tkinter as tk
     try:
@@ -826,6 +840,17 @@ def test_calibration_dialog_drives_three_rounds_and_both_gates():
     spy = _ModalSpy(real_mb)
     answers, asked = spy.answers, spy.asked
     gui.messagebox = spy
+    # Nine circles, one per round: half 1's set, then half 2's set and
+    # its post-restart set. Every triple has range/mean >= 14 % (the SE
+    # gate only goes silent under ~1.17 %) so the spread gate always
+    # asks, and every mean is ~140 px against the fixture's ~160 px auto
+    # fit — ~12 % out, guard tolerance 1 % — so the anchor guard always
+    # asks. All nine radii differ, so equal recorded rounds would expose
+    # a dialog that stopped respawning per round.
+    real_spawn = _fixed_spawn(gui, [
+        (160.0, 120.0, 65.0), (160.0, 120.0, 70.0), (160.0, 120.0, 75.0),
+        (160.0, 120.0, 64.0), (160.0, 120.0, 71.0), (160.0, 120.0, 76.0),
+        (160.0, 120.0, 63.0), (160.0, 120.0, 69.0), (160.0, 120.0, 77.0)])
 
     def advance(win, taken):
         """Stand in for root.wait_window: press the Continue/Finish
@@ -848,16 +873,22 @@ def test_calibration_dialog_drives_three_rounds_and_both_gates():
         taken = []
         app.root.wait_window = lambda win: advance(win, taken)
         app._calibrate_scale(mode=CIRCLE)
-        assert len(asked) == 2, asked
+        # BOTH gates fired, in order — not merely two questions. This is
+        # the assertion that keeps the scripted spawns honest: circles
+        # that stopped tripping a gate turn up here as a missing title,
+        # not as a silently skipped gate.
+        assert [t for t, _kw in asked] == \
+            ['Rounds disagree', 'Anchor sanity check'], asked
         assert taken[:2] == ['Continue →', 'Continue →'], taken
         assert '✔ Finish calibration' in taken[2]
         ref = app.manual_ref
         assert ref is not None, "three rounds produced no anchor"
         assert ref['n_rounds'] == gui.CAL_ROUNDS == 3
         assert len(ref['rounds_px']) == 3
-        # the rounds RESPAWN randomized, so three untouched fits must
-        # differ — if they were ever equal the decorrelation is gone and
-        # the spread would be a fiction
+        # the dialog takes a FRESH spawn each round — the scripted
+        # circles are all different, so three equal fits would mean the
+        # per-round respawn (the decorrelation the dialog promises)
+        # stopped happening and the spread would be a fiction
         assert len(set(ref['rounds_px'])) == 3, ref['rounds_px']
         assert abs(ref['diam_px'] - sum(ref['rounds_px']) / 3.0) < 1e-9
         assert ref['spread_px'] > 0 and ref['spread_pct'] > 0
@@ -888,8 +919,13 @@ def test_calibration_dialog_drives_three_rounds_and_both_gates():
         assert app.manual_ref is not None
         assert app.manual_ref['n_rounds'] == 3, app.manual_ref
         # 3 rounds, restart, 3 rounds again = 6 presses, and 4 questions
+        # — both gates, both cycles, in order. The desync this test used
+        # to be flaky through showed up as exactly this list losing a
+        # 'Rounds disagree' or an 'Anchor sanity check'.
         assert len(taken) == 6, taken
-        assert len(asked) == 4, asked
+        assert [t for t, _kw in asked] == \
+            ['Rounds disagree', 'Anchor sanity check',
+             'Rounds disagree', 'Anchor sanity check'], asked
         # EVERY question carried an explicit default (finding 1)
         assert all(kw.get('default') for _t, kw in asked), asked
         # the guard's modal had to print the mean and the reference for
@@ -899,7 +935,7 @@ def test_calibration_dialog_drives_three_rounds_and_both_gates():
             in app.manual_ref['guard'], app.manual_ref['guard']
         app.manual_ref['guard'].encode('ascii')
     finally:
-        gui.messagebox = real_mb
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)
 

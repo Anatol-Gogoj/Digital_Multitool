@@ -2588,13 +2588,18 @@ class EdgeReviewApp:
             # 400, not 360: the chooser row plus the taller header cost
             # ~40 px, and the pre-existing budget already left only ~35 px
             # of slack on a 1080p bench screen with every warning showing.
-            # Mode C's evidence block is ~140 px taller than mode A/B's
+            # Mode C's evidence block is ~180 px taller than mode A/B's
             # gesture help, and it is the part that must be READABLE, so
-            # the canvas gives that height up when the dialog opens in C.
-            # Fixed at build time, not per switch: a canvas that resized
-            # under the operator would move the picture they are judging.
-            ch = max(300, min(760, self.root.winfo_screenheight()
-                              - (540 if opens_c else 400)))
+            # the canvas gives that height up in mode C and takes it back
+            # in A/B. PER MODE, not fixed at build time: a switch already
+            # restarts the round-set and re-fits the view, whereas a canvas
+            # sized once for A and then filled with mode C's text overflows
+            # a 1080p screen by ~80 px (measured).
+            def canvas_h(for_verify):
+                return max(300, min(760, self.root.winfo_screenheight()
+                                    - (540 if for_verify else 400)))
+
+            ch = canvas_h(opens_c)
             cv = tk.Canvas(win, width=cw, height=ch, bg='#111',
                            cursor='crosshair')
             cv.pack(padx=8, pady=6)
@@ -2605,6 +2610,16 @@ class EdgeReviewApp:
             vt = strc.ViewTransform()
             vt.fit(img.width, img.height, cw, ch)
             rnd = random.Random()
+
+            def view_h():
+                """The canvas's CURRENT height — the one number the view
+                math must agree with. Read live rather than closed over,
+                because sync_buttons resizes the canvas per mode and a
+                stale height would crop the picture wrong."""
+                try:
+                    return int(cv.cget('height'))
+                except (tk.TclError, TypeError, ValueError):
+                    return ch
             # box the drag CAN reach vs the box a spawn must sit in
             full_box = (0.0, 0.0, float(img.width), float(img.height))
             roi_box = cal_roi(img.width, img.height,
@@ -2667,9 +2682,9 @@ class EdgeReviewApp:
                     # their zoom every round would push them to work there
                     z = vt.zoom
                     vt.ox = w / 2.0 - cw / (2.0 * z)
-                    vt.oy = h / 2.0 - ch / (2.0 * z)
+                    vt.oy = h / 2.0 - view_h() / (2.0 * z)
                 else:
-                    vt.fit(w, h, cw, ch)
+                    vt.fit(w, h, cw, view_h())
 
             def respawn():
                 st['circle'] = spawn_circle(
@@ -2780,7 +2795,7 @@ class EdgeReviewApp:
             def repaint():
                 src, sw, sh = disp()
                 ix0, iy0 = vt.to_image(0, 0)
-                ix1, iy1 = vt.to_image(cw, ch)
+                ix1, iy1 = vt.to_image(cw, view_h())
                 cx0, cy0 = max(0, int(ix0)), max(0, int(iy0))
                 cx1 = min(sw, int(ix1) + 2)
                 cy1 = min(sh, int(iy1) + 2)
@@ -3710,6 +3725,14 @@ class EdgeReviewApp:
 
             def sync_buttons():
                 vfy = verify()
+                # give the canvas's height to mode C's evidence block and
+                # take it back for A/B (canvas_h). Before fit_view runs —
+                # restart_all calls sync_buttons then repaint, and repaint
+                # crops against view_h()
+                want_h = canvas_h(vfy)
+                if view_h() != want_h:
+                    cv.config(height=want_h)
+                    fit_view(keep_zoom=False)
                 cont.config(
                     text=("✔ Accept the automatic fit" if vfy else
                           "✔ Finish calibration" if is_last_round()
@@ -3887,7 +3910,7 @@ class EdgeReviewApp:
                     ccx, ccy = st['circle'][0], st['circle'][1]
                 vt.zoom = max(1.0, vt.zoom)
                 vt.ox = ccx - cw / (2.0 * vt.zoom)
-                vt.oy = ccy - ch / (2.0 * vt.zoom)
+                vt.oy = ccy - view_h() / (2.0 * vt.zoom)
                 repaint()
 
             def pan_start(ev):

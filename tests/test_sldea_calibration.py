@@ -1989,6 +1989,40 @@ def test_verify_note_and_the_log_keep_every_number_the_screen_dropped():
                  'verdict=NOT-GATED', '(IS-the-anchor)'):
         assert kept in line, (kept, line)
     assert '0.00%' not in line, line
+    # ---- AND THE POST-ACCEPT FOOTER, which the STATUS LINE dropped on
+    # 2026-08-07 (`#215`, operator second pass). It read: "σ/SE undefined (one
+    # fit, no rounds); NOT cross-checked, and no independent check of an
+    # automatic anchor exists — overrides every automatic reference at Save",
+    # arriving after a decision the operator had already made. It is only
+    # droppable because all of it is HERE, so all of it is asserted here.
+    anchor = {'method': se.ANCHOR_METHOD_VERIFIED,
+              'cal_mode': se.CAL_MODE_VERIFY, 'diam_px': 577.1,
+              'diam_mm': 16.0, 'mm_per_px': 16.0 / 577.1,
+              'fit_circ': 0.999, 'fit_conf': 0.871, 'fit_resid_px': 2.3,
+              'fit_arc_cov': 1.0, 'fit_n_edge': 204,
+              'verified_by': 'anatol',
+              'verified_at': '2026-08-06T18:30:00', 'guard': note}
+    import sldea_diag as sd
+    dt = ' | '.join(h + ' ' + (dd or '')
+                    for _s, h, dd in sd.verdicts(_diag_d(scale_anchor=anchor)))
+    rpt = sd.report(_diag_d(scale_anchor=anchor))
+    # "σ/SE undefined (one fit, no rounds)" -> the log fields above, plus
+    # sldea_diag saying it in words and saying UNDEFINED rather than zero
+    assert 'UNDEFINED for this anchor rather than zero' in dt, dt
+    assert 'sigma/SE/range are UNDEFINED' in rpt, rpt
+    # "NOT cross-checked, and no independent check ... exists" -> the guard
+    # string (above) and BOTH diag surfaces
+    assert 'NOT CROSS-CHECKED' in dt, dt
+    assert 'no independent check of an automatic anchor exists' in dt, dt
+    assert 'NOT cross-checked' in rpt or 'NOT CROSS-CHECKED' in rpt, rpt
+    # "overrides every automatic reference at Save" -> NOT verbatim anywhere
+    # in the record, and that is FLAGGED rather than pretended about: it is a
+    # statement about how the app ranks references, not a measurement of this
+    # run, and what the record carries is the fact it follows from.
+    assert se._is_manual_cal(anchor), (
+        "the precedence the dropped clause described must still hold, since "
+        "the record states it only as method=auto-verified")
+    assert anchor['method'] == se.ANCHOR_METHOD_VERIFIED
 
 
 def test_verify_zoom_frames_the_circle_not_the_frame():
@@ -2077,24 +2111,33 @@ def test_the_folded_scale_action_states_which_one_it_will_do():
 
     Calibrate... and Re-anchor scale... were folded because they open
     the same dialog. The hazard in folding them is that one WRITES data.csv
-    the moment it is confirmed and the other does not, so the banner that
+    the moment it is confirmed and the other does not, so the wording that
     names the intent is pinned as text: neither branch may borrow the
-    other's promise."""
+    other's promise.
+
+    WHERE it appears moved on 2026-08-07 and this case did not: it opened the
+    measuring modes' gate block as a paragraph, became a tag on the round
+    header, and then came off the screen entirely at the operator's request
+    ("the commit warning belongs in one place -- on the primary button and in
+    its confirmation"). It is now the WINDOW TITLE's prefix, which is why the
+    three title call sites route through this one function; the invariant
+    pinned here is unchanged, and it is the whole reason the function exists
+    rather than the string being retyped."""
     import sldea_edge_gui as gui
     cal = gui.scale_intent_banner(gui.SCALE_INTENT_CALIBRATE)
     rea = gui.scale_intent_banner(gui.SCALE_INTENT_REANCHOR)
     assert cal != rea
     # the non-writing branch promises exactly that, and never the other
-    assert 'CALIBRATE' in cal and 'next' in cal and 'Save' in cal
-    assert 'NOTHING is written' in cal
-    assert 'IMMEDIATELY' not in cal and 'RE-ANCHOR' not in cal
-    # the writing branch says WRITES, up front, and does not offer Save as
-    # a later moment when nothing is written -- there is no later moment
-    assert 'RE-ANCHOR' in rea
-    assert 'WRITTEN TO data.csv IMMEDIATELY' in rea
-    assert 'NOTHING is written' not in rea
-    # ... and it promises the numbers first, which is the confirmation
-    assert 'before it commits' in rea
+    assert 'Calibrate' in cal and 'applied at Save' in cal
+    assert 'writes' not in cal and 'RE-ANCHOR' not in cal
+    assert 'data.csv' not in cal
+    # the writing branch says WRITES data.csv, up front, and does not offer
+    # Save as a later moment when nothing is written -- there is no later one
+    assert 'RE-ANCHOR' in rea and 'writes data.csv' in rea
+    assert 'applied at Save' not in rea
+    # SHORT, both of them: this is a title prefix now and the rest of the
+    # title still has to name the mode and the round
+    assert len(cal) <= 40 and len(rea) <= 40, (len(cal), len(rea))
     # an unknown/absent intent falls back to the NON-writing wording: a
     # dialog that guessed the other way would announce a rewrite that is
     # not about to happen

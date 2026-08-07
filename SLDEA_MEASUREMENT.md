@@ -237,14 +237,30 @@ Four caveats, all load-bearing:
   being placed, so it is measured under stricter blinding than the circle mode —
   which can only handicap B in the comparison. If any of that changes,
   this whole section stops meaning anything.
-  **The 2026-08-07 on-screen trim did not change it.** All three modes now
-  hold one on-screen budget (`gui.CAL_SCREEN_MAX_LINES` = 4; the measuring
-  modes show two short lines plus the live readout, where they had been
-  showing nine lines). What came off was prose — including the sentence that
-  *explained* the blinding, and the prior anchor's recorded diameter, whose
-  standing presence on screen through a blind round-set was itself a printed
-  target. Every number involved is still in `setup.txt` and
-  `scale_calibration_log.txt`, verified by diffing both across the change.
+  **Neither 2026-08-07 on-screen pass changed it.** All three modes now hold
+  one on-screen budget — `gui.CAL_SCREEN_MAX_LINES_ORDINARY` = 3 in every
+  mode, with `CAL_SCREEN_MAX_LINES` = 4 as the ceiling the pathological cases
+  may not pass — where the measuring modes had been showing nine lines. What
+  came off was prose, and three of the removals *strengthen* the blinding
+  rather than weakening it: the sentence that *explained* it, the prior
+  anchor's recorded diameter (whose standing presence through a blind
+  round-set was itself a printed target), and — in the second pass — the
+  measuring modes' `⚠ N row(s) already carry px …` row, which stood above the
+  picture for the whole set and has moved to the confirmation of the button
+  that actually commits. Every number involved is still in `setup.txt` and
+  `scale_calibration_log.txt`, verified by diffing a full accepted round-set's
+  record in all three modes across each change: byte-identical, same SHA-256.
+
+  **The aim instruction's wording is presentation; this document owns the
+  convention.** The screen says *"straddle the edge: half the stroke on the
+  disc, half on the paper"* (and *"half the ring …"* in the two-point mode,
+  where the marker ring is centred on the click). That is an instruction about
+  where to put the mark, which is what a hand can act on; what it *achieves*
+  is §1.3's **half-height of the ink step**, and the +5.2–5.7 % area /
+  +2.6 % diameter band against the visual outer toe is unchanged and stays
+  there. The screen deliberately no longer names the convention — a definition
+  is not an instruction — so **§1.3 is the only place it is written down**, and
+  a reader quoting absolute mm² must go there for it.
 
 #### The measured human per-fit σ is ~1.0–1.1 %, and it does not depend on the method (2026-08-06, evening)
 

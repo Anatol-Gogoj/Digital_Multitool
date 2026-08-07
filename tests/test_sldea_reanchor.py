@@ -847,20 +847,51 @@ def test_confirmation_carries_every_number_an_operator_needs():
     this dialog, because accepting it rewrites every absolute area in the
     run. Required contents: rows to re-derive, rows that would blank, both
     anchor diameters, the multiplier, and the before → after resting area
-    with its deviation from pi*8^2 on BOTH sides."""
+    with its deviation from pi*8^2 on BOTH sides.
+
+    AND IT OPENS BY ASKING WHETHER TO OVERWRITE (`#215`, operator 2026-08-07).
+    The calibration dialog used to carry that question as a standing top row
+    ("N row(s) already carry px -- accepting RE-SCALES every recorded mm2 at
+    the next Save"), above the picture, through every round of a measurement
+    it could not affect. It belongs at the moment it is incurred, which is
+    this button. What went with it is the PROSE: once the question is
+    "overwrite the existing calibration", that every area is re-derived
+    follows from what overwriting a scale means. What stayed is the EVIDENCE,
+    below, and the SCOPE -- scale only, no detection, no re-review -- which is
+    the premise of the action rather than its consequence."""
     d = REAL['P3_2_2.5mL_20260728']
     rows, _ = _rows_for('P3_2_2.5mL_20260728')
     rows.append(_row(90, 'post-ramp', None, None, active_area_mm2='188.4'))
     scale = MASK_MM / d['auto_px']
     plan = se.reanchor_plan(rows, scale, MASK_MM,
                             recorded={'diam_px': d['anchor_px']})
-    prev = {'method': se.ANCHOR_METHOD_MANUAL, 'diam_px': d['anchor_px']}
+    prev = {'method': se.ANCHOR_METHOD_MANUAL, 'diam_px': d['anchor_px'],
+            'cal_mode': se.CAL_MODE_CIRCLE, 'saved': '2026-08-06T18:30:00'}
     new_ref = {'method': se.ANCHOR_METHOD_VERIFIED, 'diam_px': d['auto_px']}
     m = _Stub(_settings()).msg(plan, prev, new_ref)
     assert 'SCALE ONLY' in m
-    # it says what it does NOT do -- the whole premise of the action
-    assert 'Detection does NOT re-run' in m and 'nothing is re-reviewed' in m
-    assert 'frame names are not touched' in m
+    # THE LEAD: the calibration on record, and the question
+    head = m.split('\n')[0]
+    assert 'ALREADY HAS A CALIBRATION on record' in head, head
+    assert 'OVERWRITE it' in m.split('\n\n')[1], m[:400]
+    # ... naming the anchor it would replace, so the question is checkable
+    assert se.ANCHOR_METHOD_MANUAL in head, head
+    assert 'B (circle)' in head, head
+    assert '2026-08-06T18:30:00' in head, head
+    # THE PROSE THAT WENT. Every sentence of it was true; what makes it
+    # droppable is that "overwrite the calibration" already says it.
+    for gone in ('Every recorded area is RE-DERIVED',
+                 'from the active_area_px already in data.csv',
+                 'tags / snapshots / current / voltage'):
+        assert gone not in m, gone
+    # ... and the SCOPE that stayed, because an operator who assumed a
+    # re-anchor re-detects would decline it for the wrong reason
+    assert 'no detection runs' in m and 'nothing is re-reviewed' in m
+    assert 'frame names' in m and 'not touched' in m
+    # the three-way choice is untouched: two of the three do not write
+    assert 'YES WRITES data.csv NOW' in m
+    assert 'NO = keep this anchor for the session' in m
+    assert 'CANCEL = discard the measurement' in m
     # both anchors and the multiplier
     assert '590.26 px' in m and '577.08 px' in m
     assert '× 1.046202' in m and '+4.62%' in m
@@ -906,7 +937,17 @@ def test_confirmation_states_the_awkward_cases_rather_than_omitting_them():
     rows, _ = _rows_for('P3_2_2.5mL_20260728')
     m = stub.msg(se.reanchor_plan(rows, MASK_MM / d['auto_px'], MASK_MM,
                                   recorded=None), None, new_ref)
-    assert 'NO anchor was on record' in m and 'pre-gate save' in m
+    # THE LEAD BRANCHES ON THE TRUTH (`#215`, operator 2026-08-07): with no
+    # anchor on record there is nothing to OVERWRITE, and asking whether to
+    # overwrite would be a question about a record that does not exist. The
+    # two pre-gate runs (P3_6_2.5mL_20260729, DOT_P3_1_20260729) are exactly
+    # this case.
+    assert 'NO calibration on record' in m.split('\n')[0], m[:200]
+    assert 'pre-gate save' in m
+    assert 'OVERWRITE' not in m, m[:400]
+    # ... and the "before" numbers say where they came from, since they are
+    # implied by the column rather than read off a block
+    assert "implied by the run's own mm" in m
     # (b) setup.txt disagreeing with the column
     m = stub.msg(se.reanchor_plan(rows, MASK_MM / d['auto_px'], MASK_MM,
                                   recorded={'diam_px': 601.0}),

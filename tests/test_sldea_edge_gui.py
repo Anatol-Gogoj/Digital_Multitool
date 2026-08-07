@@ -645,20 +645,42 @@ def _cal_display(win):
         return ''
 
 
+def _cal_rendered(w, top):
+    """True when `w` is actually rendered inside `top` — i.e. it AND every
+    frame between it and the Toplevel has a geometry manager.
+
+    The parent walk is not decoration. Since `#215`'s de-rendering pass
+    (2026-08-07) the chooser's per-mode controls live in sub-frames that get
+    pack_forget()-ed as a unit, and a Label inside an unpacked Frame still
+    reports `winfo_manager() == 'pack'` for ITSELF — so the naive check would
+    count text nobody can see, which is precisely the failure mode the line
+    budget exists to catch. `winfo_ismapped()` is not usable instead: most of
+    these cases never put the window on screen."""
+    while w is not None and w is not top:
+        try:
+            if not w.winfo_manager():
+                return False
+            w = w.master
+        except Exception:
+            return False
+    return True
+
+
 def _cal_visible_lines(win, skip=('METHOD:', 'rounds:', 'A stroke:',
                                   'B stroke:', 'C stroke:')):
     """The text lines actually ON SCREEN, as a list.
 
-    Only labels the geometry manager is showing (`winfo_manager()`), split
-    on newlines, blanks dropped — so a hidden or emptied label costs
-    nothing, which is the whole mechanism mode C's line budget uses. The
-    chooser row's field captions are skipped: they label the radio buttons
-    and the two option menus, i.e. they are part of the CONTROLS, not the
-    prose the budget is about."""
+    Only labels the geometry manager is showing — the label's own manager AND
+    every frame above it (see _cal_rendered) — split on newlines, blanks
+    dropped, so a hidden or emptied label costs nothing. That is the whole
+    mechanism the verify mode's line budget uses. The chooser row's field
+    captions are skipped: they label the radio buttons and the two option
+    menus, i.e. they are part of the CONTROLS, not the prose the budget is
+    about."""
     out = []
     for w in _widgets(win, 'label'):
         try:
-            if w.winfo_manager() != 'pack':
+            if not _cal_rendered(w, win):
                 continue
             txt = w.cget('text')
         except Exception:
@@ -666,6 +688,35 @@ def _cal_visible_lines(win, skip=('METHOD:', 'rounds:', 'A stroke:',
         if txt in skip:
             continue
         out.extend(ln for ln in txt.split('\n') if ln.strip())
+    return out
+
+
+def _cal_shown_controls(probe):
+    """Which of the four per-mode control groups the dialog is RENDERING —
+    as a set of names, with '(disabled)' appended to any that is on screen
+    but greyed out.
+
+    `#215`, operator 2026-08-07: the controls that do not apply to the active
+    mode are DE-RENDERED rather than disabled, because *"a disabled control
+    still costs a line of visual scanning and invites a click; an absent one
+    does not."* So what a test has to be able to say is "absent", which is a
+    claim about `winfo_manager()` and not about `state` — and the
+    '(disabled)' tag is here so that quietly going back to greying them out
+    fails the same assertion rather than passing it."""
+    out = set()
+    for name, inner in (('round_box', 'back_btn'),
+                        ('rounds_box', 'n_menu'),
+                        ('stroke_box', 'stroke_menu')):
+        box = probe.get(name)
+        if box is None or not box.winfo_manager():
+            continue
+        tag = name
+        try:
+            if str(probe[inner].cget('state')) == 'disabled':
+                tag += '(disabled)'
+        except Exception:
+            pass
+        out.add(tag)
     return out
 
 
@@ -1270,9 +1321,13 @@ def test_mode_b_measures_in_original_coordinates_under_rotation():
                     return
                 head = _cal_display(win)
                 seen['heads'].append(head)
-                m = re.search(r'rotated ([0-9.]+)', head)
-                assert m, head
-                seen['rots'].append(float(m.group(1)))
+                # THE ANGLE COMES FROM THE DIALOG'S OWN STATE, not off the
+                # screen (`#215`, operator 2026-08-07: the header stopped
+                # printing "view rotated N deg" because the picture is
+                # visibly rotated). Reading st['rot'] is the stronger check
+                # anyway -- it is the angle actually MEASURED at, where the
+                # header was only the angle displayed.
+                seen['rots'].append(float(app._cal_probe['st']['rot']))
                 _click_at_original(app, (80.0, 120.0))
                 _click_at_original(app, (240.0, 120.0))
                 _finish_if_last(win)
@@ -1740,7 +1795,13 @@ def test_mode_chooser_restarts_the_set_and_carries_the_modes_default_n():
         assert rotated, "the two-point mode did not rotate the display"
         # the LETTER on screen is the two-point mode's NEW label, C
         assert 'Method C · Round 1 of 5' in saw['header'], saw['header']
-        assert 'view rotated' in saw['header'], saw['header']
+        # ... and the ANGLE is no longer printed anywhere on the screen
+        # (`#215`, operator 2026-08-07): the rotation still happens (asserted
+        # on st['rimg'] and st['rot'] above, which is the stronger claim), but
+        # the picture is visibly rotated so the header was quoting a fact the
+        # operator can see. The number stays in the record -- `rot=` on the log
+        # line, which is what the A/B comparison reads.
+        assert 'view rotated' not in saw['header'], saw['header']
         for v in saw['n_choices']:
             assert gui.se.d2(int(v)) is not None, v
         assert set(saw['n_choices']) == {str(k) for k
@@ -2570,8 +2631,14 @@ def strc_area(poly):
 # MODE C -- the machine measures, the operator VERIFIES (2026-08-06 evening)
 # ---------------------------------------------------------------------------
 
-def _cal_buttons(win):
-    return {b.cget('text'): b for b in _widgets(win, 'button')}
+def _cal_buttons(win, rendered_only=False):
+    """The dialog's buttons by label. `rendered_only` restricts it to the ones
+    the geometry manager is actually showing — needed since `#215`'s
+    de-rendering pass (2026-08-07), because the round controls now go away by
+    being unpacked rather than by being disabled, and an unpacked Button still
+    answers cget('text') perfectly happily."""
+    return {b.cget('text'): b for b in _widgets(win, 'button')
+            if not rendered_only or _cal_rendered(b, win)}
 
 
 def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
@@ -2609,10 +2676,12 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
             saw['stretch'] = p['st']['stretch']
             btns = _cal_buttons(win)
             saw['btns'] = sorted(btns)
+            saw['btns_shown'] = sorted(_cal_buttons(win, rendered_only=True))
             step = p['step_btn']
             saw['step_text'] = step.cget('text')
             saw['step_default'] = str(step.cget('default'))
             saw['back_state'] = str(p['back_btn'].cget('state'))
+            saw['shown'] = _cal_shown_controls(p)
             # (1) ENTER MUST NOT APPROVE. Put the dialog on screen first --
             # a synthetic key press is silently dropped by an unviewable
             # widget, so without this the case would pass vacuously.
@@ -2642,14 +2711,27 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
         assert saw['step_text'] == ('✔ Accept the automatic fit '
                                    '(at Save)'), saw
         assert saw['step_default'] == 'active', saw   # primary, as intended
-        assert saw['back_state'] == 'disabled', saw   # no rounds here
+        # THE ROUND CONTROLS ARE ABSENT, NOT GREYED (`#215`, operator
+        # 2026-08-07): *"a disabled control still costs a line of visual
+        # scanning and invites a click; an absent one does not."* So this is an
+        # existence claim about what the geometry manager is showing -- and
+        # `state` staying 'normal' is part of it, because the mode is what
+        # decides whether they exist and nothing is ever shown greyed.
+        assert saw['shown'] == set(), saw['shown']
+        assert saw['back_state'] == 'normal', saw
+        assert not any('Back' in b for b in saw['btns_shown']), \
+            saw['btns_shown']
+        assert not any('Restart' in b for b in saw['btns_shown']), \
+            saw['btns_shown']
+        # ... and they still EXIST as widgets, so a switch to a measuring mode
+        # brings them back rather than having to rebuild the row
+        assert any('Back' in b for b in saw['btns']), saw['btns']
         # ✎ Measure by hand instead is GONE (operator 2026-08-06 late):
         # the radio row already switches methods, so it was a second
         # control for one job. The radios are the route now.
         assert not any('Measure by hand' in b for b in saw['btns']), \
             saw['btns']
         assert 'hand_btn' not in (app._cal_probe or {})
-        # the round-based controls are meaningless here
         assert saw['stretch'] is not None, "no contrast stretch was applied"
         # --- Enter was refused, and said why
         assert saw['alive_after_enter'], "Enter closed the dialog"
@@ -2712,11 +2794,32 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
         assert 'NOT cross-checked' in ref['guard']
         assert 'vacuous' in ref['guard']
         ref['guard'].encode('ascii')
-        # the status line says VERIFIED, not calibrated, and claims no tick
+        # THE STATUS LINE says VERIFIED, not calibrated -- and its FOOTER is
+        # gone (`#215`, operator 2026-08-07). It used to end with 160
+        # characters of honesty ("σ/SE undefined (one fit, no rounds); NOT
+        # cross-checked, and no independent check of an automatic anchor
+        # exists — overrides every automatic reference at Save") arriving
+        # AFTER the decision had been made, on the surface a person reads
+        # next while doing something else.
+        #
+        # It claims no tick either way: what is asserted here is that it
+        # states the VALUE, the APPROVER and the fit's own quality, and
+        # nothing that reads as a check having been performed.
         stat = app.status.cget('text')
-        assert 'VERIFIED' in stat and 'NOT cross-checked' in stat, stat
-        assert 'σ/SE undefined' in stat, stat
+        assert 'VERIFIED' in stat, stat
         assert ref['verified_by'] in stat, stat
+        assert 'circ 1.000' in stat and 'resid' in stat, stat
+        assert f"{ref['diam_px']:.0f} px" in stat, stat
+        for gone in ('σ/SE undefined', 'NOT cross-checked',
+                     'no independent check', 'overrides every automatic'):
+            assert gone not in stat, (gone, stat)
+        # ... and every word of that footer is still in the RECORD, which is
+        # the whole trade. Two of the three surfaces are asserted right here
+        # (ref['guard'] above and the log line below); sldea_diag's two
+        # verdicts and its text report are pinned by
+        # test_verify_note_and_the_log_keep_every_number_the_screen_dropped.
+        assert 'NOT cross-checked' in ref['guard'], ref['guard']
+        assert 'vacuous' in ref['guard'], ref['guard']
         # --- the log line: mode=verify, undefined precision, never 0.00%
         with open(os.path.join(app.rundir, gui.se.CAL_LOG_NAME),
                   encoding='utf-8') as f:
@@ -2772,11 +2875,28 @@ def test_every_mode_holds_the_on_screen_line_budget():
     rule: it is the SCREEN's rule, and this case is the thing that keeps it
     that way in every mode.
 
+    Then the operator drove all three on real runs that evening and cut six
+    more things (`#215`, 2026-08-07 second pass), so the ORDINARY worst case
+    is now THREE lines in every mode and the caps here came down with it:
+
+    * the folded action's tag left the round header (it is on the title, the
+      primary button and the re-anchor confirmation, which are the three
+      places where it decides something);
+    * the "N row(s) already carry px" row left the top of the window for the
+      button's own confirmation, which now opens by asking whether to
+      OVERWRITE the calibration on record;
+    * `disc 16 mm` and `view rotated N deg` left the round header;
+    * the aim rule became an INSTRUCTION ("straddle the edge") instead of the
+      metrology convention it achieves, which stays in §1.3;
+    * and the controls that do not apply to a mode are DE-RENDERED rather
+      than greyed out, which is a screen claim too and is asserted here.
+
     Re-inflation is the likely regression, and it is likelier in the
     measuring modes than it was in the verify mode: every number cut is still
     in the record, and every sentence cut was TRUE -- why the rounds are
     blind, why the view rotates, what the keys do. A true sentence is the
-    easiest kind to put back.
+    easiest kind to put back. THE CAPS ARE THEREFORE TIGHT ON PURPOSE: slack
+    left in a budget is slack that gets spent.
 
     Pinned here rather than only on verify_evidence() because the budget is
     a property of the SCREEN: the gate block, the instruction, the round
@@ -2827,6 +2947,7 @@ def test_every_mode_holds_the_on_screen_line_budget():
             saw['canvas'] = (int(p['canvas'].cget('width')),
                              int(p['canvas'].cget('height')))
             saw['reqh'] = win.winfo_reqheight()
+            saw['shown_' + VERIFY] = _cal_shown_controls(p)
             # the <Return> refusal must still be SEEN, even though the line
             # it lands on is hidden in the steady state
             win.focus_force()
@@ -2845,12 +2966,20 @@ def test_every_mode_holds_the_on_screen_line_budget():
             saw['enter_delivered'] = ('Enter cannot approve'
                                       in _cal_display(win))
             # ... and switching away and back must not leave it behind
-            for val in (CIRCLE, VERIFY):
+            saw['chooser_order'] = []
+            for val in (CIRCLE, VERIFY, CIRCLE):
                 for rb in _widgets_of(win, tk.Radiobutton):
                     if rb.cget('value') == val:
                         rb.invoke()
                 win.update_idletasks()
                 saw['lines_' + val] = _cal_visible_lines(win)
+                saw['shown_after_switch_' + val] = _cal_shown_controls(p)
+                if val == CIRCLE:
+                    # the chooser's left-to-right order, so a round trip that
+                    # re-packed the two per-mode boxes the WRONG WAY ROUND is
+                    # caught. pack_slaves() IS the packing order.
+                    saw['chooser_order'].append(
+                        [str(w) for w in p['rounds_box'].master.pack_slaves()])
             win.destroy()
 
         app.root.wait_window = poke
@@ -2865,24 +2994,34 @@ def test_every_mode_holds_the_on_screen_line_budget():
                 assert p['st']['mode'] == m, (m, p['st']['mode'])
                 saw['open_' + m] = _cal_visible_lines(win)
                 saw['reqh_' + m] = win.winfo_reqheight()
+                saw['shown_' + m] = _cal_shown_controls(p)
                 win.destroy()
             app.root.wait_window = look
             app.manual_ref = None
             app._calibrate_scale(mode=m)
 
         # ---- THE BUDGET, every mode --------------------------------------
+        # FOUR is the pathological ceiling and it is what verify_evidence
+        # shares (value + quality + a stretch that could not be computed + a
+        # prior anchor that differs). THREE is the ORDINARY worst case, which
+        # is what this fixture drives and what the 2026-08-07 cuts brought it
+        # down to in every mode -- so both are pinned, and the ordinary one is
+        # the one that catches a re-inflation.
         assert gui.CAL_SCREEN_MAX_LINES == 4, gui.CAL_SCREEN_MAX_LINES
         assert gui.CAL_VERIFY_MAX_LINES == gui.CAL_SCREEN_MAX_LINES
+        assert gui.CAL_SCREEN_MAX_LINES_ORDINARY == 3, \
+            gui.CAL_SCREEN_MAX_LINES_ORDINARY
         for m, got in ((VERIFY, saw['lines']),
                        (CIRCLE, saw['open_' + CIRCLE]),
                        (TWOPOINT, saw['open_' + TWOPOINT])):
             assert got, f"mode {m} put NOTHING on screen"
-            assert len(got) <= gui.CAL_SCREEN_MAX_LINES, (
-                f"mode {m}: {len(got)} lines on screen, budget is "
-                f"{gui.CAL_SCREEN_MAX_LINES}:\n" + '\n'.join(got))
-            # SHORT lines, not four paragraphs. The longest legitimate line
-            # is the compressed consequence line (~180 chars); 200 leaves
-            # room for wording without room for a re-inflated paragraph.
+            assert len(got) <= gui.CAL_SCREEN_MAX_LINES_ORDINARY, (
+                f"mode {m}: {len(got)} lines on screen in the ORDINARY worst "
+                f"case, budget is {gui.CAL_SCREEN_MAX_LINES_ORDINARY}:\n"
+                + '\n'.join(got))
+            # SHORT lines, not three paragraphs. The longest legitimate line
+            # is the verify mode's consequence line (~170 chars); the cap
+            # leaves room for wording, not for a re-inflated paragraph.
             for ln in got:
                 assert len(ln) <= gui.CAL_SCREEN_MAX_LINE_CHARS, (
                     m, len(ln), ln)
@@ -2901,29 +3040,32 @@ def test_every_mode_holds_the_on_screen_line_budget():
                            (TWOPOINT, 'the point OPPOSITE it')):
             j = '\n'.join(saw['open_' + m])
             # WHICH ROUND THEY ARE ON, and THE IMMEDIATE INSTRUCTION -- the
-            # two things the operator asked to keep.
+            # two things the operator asked to keep, and now the ONLY two.
             assert f"Method {'B' if m == CIRCLE else 'C'} · Round 1 of" in j, j
             assert gesture in j, j
-            assert 'HALF-HEIGHT' in j, ("the aim rule went: it is the one "
-                                        "instruction here with a measured "
-                                        "cost behind it\n" + j)
-            # the disc it is being called, and its one warning's home
-            assert 'disc 16 mm' in j, j
-            # the folded action, still stated where the operator is looking
-            assert 'NOTHING is written' in j, (
-                "the measuring modes lost the folded action's tag\n" + j)
-            # the consequence, ONE line, both halves of it
-            assert 'RE-SCALES every recorded mm²' in j, j
-            assert 'press P to REUSE it' in j, j
+            # THE AIM RULE, as an instruction about where to put the mark
+            # (`#215`, operator 2026-08-07). It is the one instruction on this
+            # screen with a measured cost behind it (§1.3: the point a human
+            # picks by eye is the outer toe, +2.6 % in diameter), so its
+            # PRESENCE is pinned -- and its old wording, which named the
+            # metrology convention instead of the gesture, is pinned ABSENT
+            # below.
+            assert 'straddle the edge' in j.lower(), (
+                "the aim rule went: it is the one instruction here with a "
+                "measured cost behind it\n" + j)
+            assert 'half on the paper' in j, j
+            assert ('half the stroke' if m == CIRCLE else 'half the ring') \
+                in j, j
             # ... and the REFERENCE MATERIAL that came off (`#215`,
-            # 2026-08-07). Every one of these is still true; that is exactly
-            # why it is worth pinning that it is not on screen.
+            # 2026-08-07, both passes). Every one of these is still true; that
+            # is exactly why it is worth pinning that it is not on screen.
             for gone in (
                     # why the rounds are blind / randomised
                     'HIDDEN until the last fit', 'scatter is a fiction',
                     'independent',
-                    # why the view rotates
-                    'random one', 'fixed error',
+                    # why the view rotates -- and, since the second pass, the
+                    # ANGLE itself: the picture is visibly rotated
+                    'random one', 'fixed error', 'view rotated',
                     # the key catalogue
                     'Ctrl+wheel', 'right-drag', 'F fits', 'Z = 1:1',
                     'Esc cancels', 'Shift = coarse', 'Shift+arrows',
@@ -2934,11 +3076,41 @@ def test_every_mode_holds_the_on_screen_line_budget():
                     'this is the LAST round',
                     # the recorded anchor's DIAMETER: a printed target
                     # standing on screen through a blind measurement
-                    '163.5 px', 'mm/px, saved'):
+                    '163.5 px', 'mm/px, saved',
+                    # SECOND PASS (operator 2026-08-07 evening) ------------
+                    # the aim rule's old wording: a definition, not an
+                    # instruction. The convention it achieves is §1.3's.
+                    'HALF-HEIGHT', 'mid-gray', 'outer toe',
+                    # the folded action's tag: on the title, the primary
+                    # button and the re-anchor confirmation instead
+                    'NOTHING is written', 'RE-ANCHOR — WRITTEN',
+                    'WRITTEN TO data.csv',
+                    # the "already calibrated" row: in the button's own
+                    # confirmation now, which asks whether to OVERWRITE
+                    'already carry px', 'RE-SCALES every recorded',
+                    'press P to REUSE it', 'never re-review',
+                    # the nominal disc size off the round header
+                    'disc 16 mm'):
                 assert gone not in j, (m, gone, j)
             # the window still fits a 1080p bench screen
             assert saw['reqh_' + m] <= root.winfo_screenheight(), (
                 m, saw['reqh_' + m], root.winfo_screenheight())
+
+        # ---- DE-RENDERED, NOT GREYED OUT (`#215`, operator 2026-08-07) ----
+        # "A disabled control still costs a line of visual scanning and
+        # invites a click; an absent one does not." So this is an EXISTENCE
+        # claim, and it is checked on winfo_manager(): a state='disabled'
+        # widget would satisfy any weaker check while still being on screen.
+        assert saw['shown_' + VERIFY] == set(), (
+            "the verify mode still renders round-based controls: "
+            + str(saw['shown_' + VERIFY]))
+        assert saw['shown_' + CIRCLE] == {'round_box', 'rounds_box',
+                                          'stroke_box'}, \
+            saw['shown_' + CIRCLE]
+        # the stroke belongs to the CIRCLE alone -- the two-point mode's
+        # markers are specified by marker_shapes and have no width to choose
+        assert saw['shown_' + TWOPOINT] == {'round_box', 'rounds_box'}, \
+            saw['shown_' + TWOPOINT]
 
         lines = saw['lines']
         joined = '\n'.join(lines)
@@ -2995,7 +3167,7 @@ def test_every_mode_holds_the_on_screen_line_budget():
         # and no longer can now that both sides are short.
         assert any('Round 1 of 3' in ln
                    for ln in saw['lines_' + CIRCLE]), saw['lines_' + CIRCLE]
-        assert any('HALF-HEIGHT' in ln
+        assert any('straddle the edge' in ln
                    for ln in saw['lines_' + CIRCLE]), saw['lines_' + CIRCLE]
         assert not any('Automatic fit' in ln
                        for ln in saw['lines_' + CIRCLE]), (
@@ -3013,6 +3185,18 @@ def test_every_mode_holds_the_on_screen_line_budget():
         for val in (CIRCLE, VERIFY):
             got = saw['lines_' + val]
             assert len(got) <= gui.CAL_SCREEN_MAX_LINES, (val, got)
+        # ... and the CONTROLS come back with the mode, not just the text: the
+        # circle mode is the only one with a stroke to choose, and a switch
+        # that re-rendered them in the wrong ORDER (or not at all) is the
+        # failure mode of doing this with pack_forget rather than `state`.
+        assert saw['shown_after_switch_' + CIRCLE] == {
+            'round_box', 'rounds_box', 'stroke_box'}, \
+            saw['shown_after_switch_' + CIRCLE]
+        assert saw['shown_after_switch_' + VERIFY] == set(), \
+            saw['shown_after_switch_' + VERIFY]
+        assert saw['chooser_order'][0] == saw['chooser_order'][1], (
+            "the chooser row's controls came back in a different order after "
+            "a mode round trip: " + str(saw['chooser_order']))
     finally:
         gui.messagebox, gui.spawn_circle = real_mb, real_spawn
         root.destroy()
@@ -3320,6 +3504,7 @@ def test_measure_by_hand_leaves_mode_C_for_a_BLIND_mode_A_round_set():
             saw['stretch'] = p['st']['stretch']
             saw['step'] = p['step_btn'].cget('text')
             saw['back'] = str(p['back_btn'].cget('state'))
+            saw['shown'] = _cal_shown_controls(p)
             saw['text'] = _cal_display(win)
             win.destroy()
 
@@ -3330,13 +3515,20 @@ def test_measure_by_hand_leaves_mode_C_for_a_BLIND_mode_A_round_set():
         assert saw['round'] == (1, 0), saw['round']
         assert saw['step'].startswith('Continue'), saw['step']
         assert saw['back'] == 'normal', saw
+        # ... and the round controls the verify mode DE-RENDERS are back with
+        # the mode (`#215`, operator 2026-08-07): the radio row is the only
+        # route into a hand measurement, so a switch that left ◀ Back and the
+        # round count absent would leave the hand measurement unusable.
+        assert saw['shown'] == {'round_box', 'rounds_box', 'stroke_box'}, \
+            saw['shown']
         t = saw['text']
         # the hand measurement's own instructions are back, under the
         # circle's NEW label (B; it was A before the 2026-08-06 swap). The
         # "METHOD B (circle):" prefix on the instruction line went in the
         # 2026-08-07 trim -- the round header beside it says Method B, so the
         # letter is what is checked here now, not the deleted prefix.
-        assert 'Method B · Round 1 of' in t and 'HALF-HEIGHT' in t, t[:400]
+        assert 'Method B · Round 1 of' in t, t[:400]
+        assert 'straddle the edge' in t, t[:400]
         # ... the evidence block is gone, and with it the fit's diameter:
         # no target to wheel a circle onto
         assert 'Automatic fit' not in t, t[:400]
@@ -3528,30 +3720,31 @@ def test_the_dialog_says_which_of_the_two_folded_actions_it_serves():
         assert needle in saw[k]['title'], (k, saw[k]['title'])
     assert 'RE-ANCHOR' in saw['re']['title']
     assert 'RE-ANCHOR' not in saw['cal']['title']
-    # A MEASURING MODE says it in words too, and ON SCREEN -- on the ROUND
-    # HEADER since the 2026-08-07 trim (`#215`), which is the line the
-    # operator is already watching for the round number. It used to open the
-    # gate block above the picture as a 127-character paragraph; the paragraph
-    # was part of the wall of text the operator asked to have cut, so
-    # scale_intent_banner is a tag now. What may NOT change is that neither
-    # branch can borrow the other's promise.
-    for k, needle, absent in (
-            ('cal_circle', 'NOTHING is written',
-             'WRITTEN TO data.csv IMMEDIATELY'),
-            ('re_circle', 'WRITTEN TO data.csv IMMEDIATELY',
-             'NOTHING is written')):
-        assert needle in saw[k]['shown'], (k, saw[k]['shown'])
-        assert absent not in saw[k]['text'], (k, absent, saw[k]['text'])
-    # ... and the verify mode does NOT put it on screen: there it is the
-    # button and the title, checked above, because the four-line budget owns
-    # that screen and the button is the thing that commits.
-    for k in ('cal', 're'):
+    # NO MODE PUTS IT ON THE SCREEN ANY MORE (`#215`, operator 2026-08-07,
+    # second pass). It was a 127-character paragraph opening the measuring
+    # modes' gate block; the morning's trim shortened it to a tag on the round
+    # header; the operator then drove all three modes and cut the tag too --
+    # *"the commit warning belongs in one place, on the primary button and in
+    # its confirmation, not repeated in every mode's header."*
+    #
+    # So the surfaces are the TITLE (asserted above, both branches, in both
+    # kinds of mode), the PRIMARY BUTTON on the press that commits (below),
+    # and the re-anchor CONFIRMATION (tests/test_sldea_reanchor.py). Still
+    # three, and all three are places where it decides something.
+    for k in ('cal', 're', 'cal_circle', 're_circle'):
         for phrase in ('NOTHING is written',
-                       'WRITTEN TO data.csv IMMEDIATELY'):
+                       'WRITTEN TO data.csv IMMEDIATELY',
+                       'RE-ANCHOR — WRITTEN'):
             assert phrase not in saw[k]['shown'], (k, phrase, saw[k]['shown'])
-    # the Finish button carries it as well -- that is the one that commits
+    # ... and neither branch may borrow the other's promise on the surfaces it
+    # DOES have. In a measuring mode round 1's button is "Continue →" -- the
+    # press that commits is the LAST round's, and it says so there
+    # (test_the_second_click_banks_the_round_and_Back_undoes_it drives that).
     for k in ('cal_circle', 're_circle'):
         assert 'Continue' in saw[k]['step'], saw[k]
+        assert 'RE-ANCHOR' not in saw[k]['step'], saw[k]
+    assert 'writes data.csv' not in saw['cal_circle']['title'], saw
+    assert 'applied at Save' not in saw['re_circle']['title'], saw
 
 
 def test_the_second_click_banks_the_round_and_Back_undoes_it():

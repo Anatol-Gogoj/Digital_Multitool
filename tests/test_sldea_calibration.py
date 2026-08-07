@@ -1641,51 +1641,184 @@ def test_contrast_stretch_is_measured_from_the_frame_and_refuses_a_flat_one():
     assert gui.disc_paper_lum(np.zeros((4, 4)), 2, 2, 1) == (None, None)
 
 
-def test_verify_evidence_shows_the_numbers_and_claims_no_cross_check():
-    """The text the operator judges on, pinned as text so its honesty is a
-    test rather than a screenshot. It must carry the fit, its quality, the
-    correctly-named uncertainty, the re-save consequence -- and a plain
-    statement that no cross-check is run, because the only one available
-    cannot fail."""
+def test_verify_evidence_is_four_lines_and_still_says_the_honest_part():
+    """The text the operator judges on, pinned as text so both its BUDGET
+    and its honesty are tests rather than a screenshot.
+
+    Four lines (`#215` declutter, 2026-08-06 late). Mode C was driven on a
+    real disc and the fit was accepted as correct -- the premise held -- but
+    the screen carried 13 lines of prose wrapping to 19, and the operator's
+    verdict was "wayyyyy too busy with text and unnecessary garbage". So:
+    the value adopted, two quality numbers, one honest sentence, and a
+    consequence line only when there IS a consequence. What was cut is
+    tested for at the other end -- test_verify_note_and_the_log_keep_every
+    number_the_screen_dropped -- because the cut must not have cost the
+    record anything."""
     import sldea_edge_gui as gui
     t = gui.verify_evidence(P3_2_FIT, 16.0, recorded=None, n_px_rows=0,
                             stretch=(157.0, 195.0))
-    # the fit and what the run's whole mm2 column hangs on
-    assert '577.1 px' in t and '16 mm' in t and '0.02773 mm/px' in t
-    assert '201.06' in t
-    # the evidence
-    for needle in ('0.999', '0.871', '2.3 px', '0.40 % of diameter',
-                   '204 edge points', 'arc coverage 1.00'):
-        assert needle in t, needle
-    # the uncertainty, correctly named: the FIT's, not the operator's
-    assert 'NO standard error' in t and 'UNDEFINED' in t.upper()
-    assert 'never as zero' in t
-    assert 'repeatab' not in t.lower(), "a mode-C anchor has no such term"
-    # THE VACUITY, in the operator's face
-    assert 'NOT CHECKED' in t and 'BY CONSTRUCTION' in t
-    assert '+0.00 %' in t and 'YOUR EYE' in t
+    lines = t.split('\n')
+    assert gui.CAL_VERIFY_MAX_LINES == 4
+    assert len(lines) == 3, lines      # no prior anchor -> no 4th line
+    for ln in lines:
+        assert ln.strip() and len(ln) <= 200, (len(ln), ln)
+    # 1. THE VALUE: exactly the number the run's whole mm2 column hangs on
+    assert lines[0] == ("Automatic fit — 577.1 px across = 16.00 mm "
+                        "(0.027726 mm/px)"), lines[0]
+    # 2. THE QUALITY: two numbers, the two that would make a reader doubt
+    #    the fit -- residual as a PERCENTAGE of diameter, and circularity
+    assert '0.40 % of diameter' in lines[1] and '0.999' in lines[1]
+    assert lines[1].count('·') == 1, lines[1]
+    # 3. THE HONEST SENTENCE: display-only stretch AND no cross-check, both
+    #    kept, compressed into one line
+    assert 'contrast-stretched' in lines[2] and 'raw frame' in lines[2]
+    assert 'Nothing cross-checks it' in lines[2]
+    assert 'your eye is the check' in lines[2]
     # ... and no claim that anything passed
     for lie in ('cross-check passed', 'verified against', 'agrees with the '
-                'mask', '✓'):
+                'mask', '✓', '+0.00'):
         assert lie not in t, lie
-    # the stretch is announced as display-only
-    assert 'display only' in t and 'RAW' in t
-    # the consequence, against a recorded anchor: P3_2's own +2.28 % case,
-    # seen from the other side (the fit is 2.23 % BELOW the two-click
-    # anchor, so accepting moves every mm2 up 4.62 %)
+    # WHAT IS NO LONGER ON SCREEN. conf goes because it is DERIVED from the
+    # same residual/circularity/coverage quantities -- it is not an
+    # independent number and there is nothing a human can do with it.
+    for gone in ('conf', '0.871', 'edge point', '204', 'arc coverage',
+                 'interior fill', 'resting area', '201.06', 'ALL ELEVEN',
+                 'BY CONSTRUCTION', 'press Z', 'below 1:1', 'UNCERTAINTY',
+                 'HOW TO JUDGE', 'repeatab'):
+        assert gone not in t, gone
+    # a frame with no measurable step says so, still in one line
+    t_raw = gui.verify_evidence(P3_2_FIT, 16.0, stretch=None)
+    assert len(t_raw.split('\n')) == 3, t_raw
+    assert 'NOT contrast-stretched' in t_raw and 'raw frame' in t_raw
+    assert 'your eye is the check' in t_raw
+    # 4. THE CONSEQUENCE, and only when there is one. P3_2's own case seen
+    #    from the other side: the fit is 2.23 % BELOW the two-click anchor,
+    #    so accepting moves every mm2 up 4.62 %.
     t2 = gui.verify_evidence(P3_2_FIT, 16.0,
                              recorded={'diam_px': 590.26,
                                        'saved': '2026-08-06'},
-                             n_px_rows=12, stretch=None)
-    assert '-2.23 %' in t2 and '+4.62 %' in t2, t2
-    assert '12 row(s)' in t2 and 'next Save' in t2
-    assert 'NOT stretched' in t2
-    # a pre-gate run (px rows, no anchor block) still gets told
-    t3 = gui.verify_evidence(P3_2_FIT, 16.0, n_px_rows=9)
-    assert '9 row(s)' in t3 and 'NO anchor is on record' in t3
+                             n_px_rows=12, stretch=(157.0, 195.0))
+    l2 = t2.split('\n')
+    assert len(l2) == 4, l2
+    assert '-2.23 %' in l2[3] and '+4.62 %' in l2[3], l2[3]
+    assert 'next Save' in l2[3] and '590.3 px on record' in l2[3]
+    # SILENCE where silence is correct. No prior anchor: nothing to compare
+    # against, so nothing is said -- not a paragraph explaining the absence.
+    assert len(gui.verify_evidence(P3_2_FIT, 16.0, n_px_rows=9)
+               .split('\n')) == 3
+    # A prior anchor that does NOT differ: "+0.00 %" is a claim dressed as a
+    # measurement, so the line is absent rather than zero.
+    same = gui.verify_evidence(P3_2_FIT, 16.0,
+                               recorded={'diam_px': 577.08, 'saved': 'x'},
+                               n_px_rows=12)
+    assert len(same.split('\n')) == 3, same
+    assert 'Accepting moves' not in same, same
+    # ... and one just past the epsilon IS reported
+    eps = 577.08 * (1.0 + 2.0 * gui.CAL_VERIFY_DEV_EPS_PCT / 100.0)
+    near = gui.verify_evidence(P3_2_FIT, 16.0,
+                               recorded={'diam_px': eps, 'saved': 'x'},
+                               n_px_rows=12)
+    assert len(near.split('\n')) == 4, near
+    # the gate label is hidden in mode C, so its "diameter was NOT recorded
+    # at capture" warning rides on the value line -- not on a fifth line
+    nd = gui.verify_evidence(P3_2_FIT, 16.0, stretch=(157.0, 195.0),
+                             diam_recorded=False)
+    assert len(nd.split('\n')) == 3, nd
+    assert 'settings default' in nd.split('\n')[0]
+    assert 'NOT measured at capture' in nd.split('\n')[0]
+    # a fitter that reported no quality numbers must not print zeros
+    bare = gui.verify_evidence({'diam_px': 100.0}, 16.0)
+    assert len(bare.split('\n')) == 3, bare
+    assert '0.000' not in bare and '0.00 %' not in bare, bare
+    assert 'nothing here to judge the fit by but the picture' in bare
     # and a fit that does not exist produces nothing to approve
     for junk in (None, {}, {'diam_px': 0}):
         assert gui.verify_evidence(junk, 16.0) == '', junk
+
+
+def test_verify_note_and_the_log_keep_every_number_the_screen_dropped():
+    """THE OTHER HALF OF THE DECLUTTER. Four lines on screen is only
+    acceptable because the record still carries everything -- a reader
+    coming to this run months later has to be able to reconstruct why the
+    anchor was trusted, and the dialog is not where they will look.
+
+    So every number cut from the screen (`conf`, `n_edge`, arc coverage,
+    interior fill, the implied resting area, the full cross-check algebra)
+    is asserted present in the anchor record's `guard` line and in the
+    calibration log line. If a future declutter reaches into
+    se.verify_note or se.append_calibration_log, this fails."""
+    import sldea_edge_gui as gui
+    note = se.verify_note(P3_2_FIT, 'anatol', '2026-08-06T18:30:00')
+    screen = gui.verify_evidence(P3_2_FIT, 16.0, stretch=(157.0, 195.0))
+    # the quality numbers the screen no longer shows
+    for kept in ('conf 0.871', 'circ 0.999', 'resid 2.3px', 'arc 1.00',
+                 '204 edge pts', '577.1 px'):
+        assert kept in note, kept
+    assert 'conf' not in screen and 'edge pts' not in screen
+    # the cross-check algebra, in full, where an auditor reads it
+    for kept in ('NOT cross-checked', 'vacuous',
+                 'pi*(d/2)^2 = pi*(d/2)^2', 'human eye'):
+        assert kept in note, kept
+    assert 'anatol' in note and '2026-08-06T18:30:00' in note
+    note.encode('ascii')          # the record stays ASCII
+    # and the LOG line carries the same, plus the residual as a percentage
+    rec = {'when': '2026-08-06T18:30:00', 'mode': se.CAL_MODE_VERIFY,
+           'stats': se.verify_stats(P3_2_FIT), 'gate': se.CAL_SE_PCT,
+           'verdict': 'NOT-GATED', 'rot_deg': None, 'stroke': None,
+           'auto_diam_px': P3_2_FIT['diam_px'], 'auto_pct': None,
+           'outcome': 'accepted-verified', 'frame': 'base.png',
+           'fit_circ': P3_2_FIT['circ'], 'fit_conf': P3_2_FIT['conf'],
+           'fit_resid_px': P3_2_FIT['fit_resid_px'],
+           'fit_arc_cov': P3_2_FIT['arc_cov'],
+           'fit_n_edge': P3_2_FIT['n_edge'],
+           'fit_resid_pct': se.fit_resid_pct(P3_2_FIT)}
+    line = se.format_calibration_log(rec) if hasattr(
+        se, 'format_calibration_log') else None
+    if line is None:
+        d = tempfile.mkdtemp(prefix='cal_log_')
+        try:
+            _p, line = se.append_calibration_log(d, rec)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+    for kept in ('mode=C', 'conf=0.871', 'circ=0.999', 'n_edge=204',
+                 'arc=1.00', 'resid=2.3px', 'resid_pct=0.40%',
+                 'sigma=undefined', 'se=undefined', 'range=undefined',
+                 'verdict=NOT-GATED', '(IS-the-anchor)'):
+        assert kept in line, (kept, line)
+    assert '0.00%' not in line, line
+
+
+def test_verify_zoom_frames_the_circle_not_the_frame():
+    """Mode C opens ALREADY ZOOMED, which is what removed the "below 1:1 --
+    press Z before accepting" nag rather than hiding it.
+
+    The nag was noise generated by a bad default: the view opened
+    fit-to-FRAME, so on a 1080p frame the 577 px disc arrived 282 canvas px
+    across and the operator was told off for it. The operator is judging ONE
+    BOUNDARY, so the CIRCLE is what the view has to frame."""
+    import sldea_edge_gui as gui
+    # the real geometry: a 577 px disc, a 1000x760 canvas on a 1080p bench
+    z = gui.verify_zoom(577.08, 1000, 760)
+    span = 577.08 * z
+    assert 0.75 * 760 <= span <= 760, span     # fills it, is not cropped
+    assert z > 1.0, z                          # ... and above 1:1, so the
+    #                                            nag it replaced could not
+    #                                            fire even if it still existed
+    # the SHORTER side governs, so the whole circle is on screen whichever
+    # way the canvas is shaped
+    assert gui.verify_zoom(577.08, 1000, 760) == \
+        gui.verify_zoom(577.08, 760, 1000)
+    # a disc WIDER than the canvas is shown whole rather than cropped to
+    # 1:1: half a boundary cannot be verified at all
+    z_big = gui.verify_zoom(2000.0, 1000, 760)
+    assert z_big < 1.0 and 2000.0 * z_big <= 760, z_big
+    # ... and a tiny one is not interpolated into fake detail
+    assert gui.verify_zoom(4.0, 1000, 760) == gui.CAL_VERIFY_MAX_OPEN_ZOOM
+    # no fit, no framing: the caller falls back to fitting the frame
+    for junk in ((None, 1000, 760), (0, 1000, 760), (-5, 1000, 760),
+                 (577.08, 0, 760), (577.08, 1000, 0),
+                 (577.08, None, None)):
+        assert gui.verify_zoom(*junk) is None, junk
 
 
 def test_diag_tells_a_verified_anchor_from_a_measured_one():

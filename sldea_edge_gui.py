@@ -39,12 +39,24 @@ Mode C therefore shows the fit with a 1 px dashed stroke (a 3 px stroke on
 the boundary measurably biases a human by +2 %, so it may not be what
 presents a boundary for judgement), over a CONTRAST-STRETCHED display copy
 (display only, stated as such — at native contrast the step is nearly
-invisible), with the fit's own numbers and a plain statement of what is
-NOT checked. Its actions are ✔ Accept (primary, and Tk's default button —
+invisible), framed on the CIRCLE so it fills the canvas the moment the
+dialog opens. Its actions are ✔ Accept (primary, and Tk's default button —
 but <Return> still cannot reach it), ✎ Measure by hand instead (drops into
 mode A), and Cancel. When the fit REFUSES, the gate falls straight through
 to the hand measurement and says so, quoting the fitter's own reason
 (`se.baseline_disc_refusal`).
+
+Mode C's SCREEN IS FOUR SHORT LINES and no more (CAL_VERIFY_MAX_LINES): the
+value being adopted, two quality numbers, one sentence covering both the
+display-only stretch and the absence of any cross-check, and a consequence
+line only when a prior anchor exists and differs. That budget is a
+requirement, not a style: an operator drove the 13-line version on a real
+disc, agreed with the fit, and reported the screen as "wayyyyy too busy
+with text and unnecessary garbage" (`#215`, 2026-08-06 late). Every number
+taken off the screen — `conf`, `n_edge`, arc coverage, interior fill, the
+implied resting area, the full cross-check algebra — still reaches
+setup.txt, the calibration log and `sldea_diag` unchanged; see
+`verify_evidence`.
 
 There is NO independent cross-check for an automatic anchor, and mode C
 does not pretend otherwise: declaring the fitted disc to be diam_mm makes
@@ -414,13 +426,34 @@ def cal_stroke_spec(style):
 #      background is nearly invisible at native contrast — the operator
 #      would be judging a flat grey field. The stretch is DISPLAY ONLY and
 #      the dialog says so; the measurement used the raw frame.
-#   3. THE NUMBERS, legibly. circ / conf / residual / n_edge, plus what is
-#      NOT being checked — see verify_evidence, which is where the honest
-#      part lives.
+#   3. FOUR LINES OF TEXT, and the canvas gets everything else.
+#
+# That third point is the DECLUTTER (`#215`, 2026-08-06 late). Mode C was
+# driven on P3_2's baseline and the fit was accepted as correct — so the
+# premise held — but the screen it was accepted on carried 13 lines of prose
+# wrapping to 19, and the operator's verdict was that the dialog was "wayyyyy
+# too busy with text and unnecessary garbage". The evidence block asked for
+# every quality number the fitter reports; the result was a wall that stole
+# the canvas height from the only thing that IS the verification, which is
+# the dashed circle on the stretched frame. So the budget is now four short
+# lines (CAL_VERIFY_MAX_LINES): the value adopted, two quality numbers, one
+# honest sentence, and a consequence line only when there is a consequence.
+# Nothing was DELETED from the record — see verify_evidence for the full
+# accounting of where each cut number still lands.
+#
+# Mode C also opens ALREADY ZOOMED (verify_zoom): the operator is judging one
+# boundary, not surveying the frame, and a fit-to-window view put the disc at
+# half size behind a "below 1:1 — press Z" nag. Fix the zoom and the nag has
+# nothing to warn about.
 # ---------------------------------------------------------------------------
 
 CAL_VERIFY_STROKE_PX = 1        # never thicker: the stroke must not sit ON
 CAL_VERIFY_DASH = (5, 7)        # the feature being judged (see above)
+CAL_VERIFY_FILL_FRAC = 0.82     # of the canvas's shorter side, on open: the
+                                # fitted circle plus a margin of paper, so
+                                # the whole boundary is judgeable at once
+CAL_VERIFY_MAX_OPEN_ZOOM = 6.0  # past this the display is interpolating, not
+                                # revealing (a tiny disc is a refused fit)
 CAL_STRETCH_PAD_FRAC = 0.45     # display window padding, as a fraction of
                                 # the measured disc→paper step
 CAL_STRETCH_MIN_SPAN = 6.0      # never stretch a narrower window than this:
@@ -517,120 +550,153 @@ def cal_stretch_lut(lo, hi):
     return out
 
 
+def verify_zoom(diam_px, canvas_w, canvas_h,
+                fill=CAL_VERIFY_FILL_FRAC,
+                max_zoom=CAL_VERIFY_MAX_OPEN_ZOOM):
+    """The zoom mode C should OPEN at, so the fitted circle fills the canvas
+    the moment the dialog appears.
+
+    Mode C used to open at fit-to-window, which on a 1080p frame is ~0.5x —
+    the 577 px disc arrived 282 canvas px across, and the live line had to
+    nag "below 1:1 — press Z before accepting". That nag was noise generated
+    by a bad default: the operator is judging ONE BOUNDARY, not surveying
+    the frame, so the frame is the wrong thing to fit. Fit the CIRCLE
+    instead and the nag has nothing to warn about.
+
+    `fill` of the canvas's SHORTER side, so the whole circle is on screen
+    whichever way the canvas is shaped, with a margin of paper round it —
+    the operator has to see the ramp on both sides of the stroke to judge
+    whether it sits in the middle of it.
+
+    Clamped ABOVE by `max_zoom` only. Deliberately not clamped below at
+    1.0: a disc wider than the canvas would then be cropped, and half a
+    boundary cannot be verified at all, whereas a slightly-under-1:1 view
+    of a whole boundary can. Returns None when there is no fit to frame,
+    and the caller then fits the frame as before.
+
+    Pure, so the arithmetic is a headless test."""
+    d = float(diam_px or 0.0)
+    w, h = float(canvas_w or 0.0), float(canvas_h or 0.0)
+    if d <= 0 or w <= 0 or h <= 0:
+        return None
+    z = float(fill) * min(w, h) / d
+    if not (z > 0):
+        return None
+    return min(float(max_zoom), z)
+
+
+CAL_VERIFY_MAX_LINES = 4        # the HARD on-screen budget (see below)
+CAL_VERIFY_DEV_EPS_PCT = 0.005  # below this a prior anchor does not "differ"
+                                # at the 2-dp the line would print, so the
+                                # line is silence rather than "+0.00 %"
+
+
 def verify_evidence(ref, diam_mm, recorded=None, n_px_rows=0,
-                    stretch=None):
-    """Everything mode C puts in front of the operator, as one text block.
+                    stretch=None, diam_recorded=True):
+    """Everything mode C puts in front of the operator — **at most
+    CAL_VERIFY_MAX_LINES lines**, and that budget is the point.
 
-    Pure, so the honesty of this text is a headless test rather than a
-    screenshot. What it must contain, and why each part is load-bearing:
+    Mode C was driven on a real disc (P3_2's baseline, automatic fit 577.08
+    px) and the operator's verdict was two-part: *"the fit looks right,
+    accept it. But the calibration screen is wayyyyyy too busy with text and
+    unnecessary garbage."* So the premise is validated — a human CAN judge
+    the fit by eye, and did, correctly. What failed was this block, which
+    asked for every quality number the fitter reports and got 13 lines of
+    them. Nineteen wrapped lines of 8-point prose is not evidence an
+    operator reads; it is a wall they scroll past to reach the button, and
+    it was stealing the canvas height from the ONE thing that is actually
+    the verification: the dashed circle on the stretched frame.
 
-    - **the fit, as numbers**: diameter, the mm/px it implies, and the
-      resting area that follows — the quantities the run's whole absolute
-      mm² column hangs on;
-    - **the fit's quality**: `circ`, `conf`, `fit_resid_px` (also as a % of
-      diameter), `n_edge`, arc coverage, interior fill. These ARE the
-      verification's supporting evidence, because there is nothing else;
-    - **the uncertainty, correctly named**: the fit's own residual, NOT an
-      operator-repeatability term. σ and SE do not exist for one fit and are
-      written as undefined rather than as 0, which would read as perfect;
-    - **what is NOT checked, in plain words**: declaring the fitted disc to
-      be `diam_mm` makes the resting area π·(diam_mm/2)² *by construction*,
-      so a mask-area check on an autofit-derived anchor can only ever pass.
-      It is not run and it is not claimed. No cross-check that cannot fail
-      appears anywhere in this dialog;
-    - **the consequence**: the deviation from any recorded anchor, and the
-      fact that accepting re-derives every mm² already in the run at the
-      next Save (the `[critical]` partial-re-save entry in SLDEA_HANDOFF).
+    So, four lines, each earning its place:
 
-    An empty string is never returned for a usable fit: if this block is
-    blank the operator is being asked to approve a number they cannot see.
-    """
+    1. **the value being adopted** — diameter in px, the mm it is being
+       called, and the mm/px that follows. This is the number the run's
+       whole absolute mm² column hangs on, so it is stated, once.
+    2. **the quality, two numbers only** — the fit residual as a PERCENTAGE
+       of diameter, and circularity. Those are the two that would make a
+       reader doubt the fit. `conf` is gone from the screen deliberately:
+       it is *derived from* the same residual/circularity/coverage
+       quantities, so it adds no independent information and nothing a
+       human can act on. `n_edge`, arc coverage and interior fill are gone
+       for the same reason — they qualify the residual rather than
+       challenging it.
+    3. **the honesty, compressed to one sentence** — that the view is
+       stretched for display while the measurement used the raw frame, and
+       that nothing cross-checks the result. Both statements are kept in
+       full; only their length is cut.
+    4. **the consequence, and ONLY when there is one** — the signed scale
+       change against a prior anchor that actually differs, and that
+       accepting re-derives the run's areas at the next Save (the
+       `[critical]` partial-re-save entry in SLDEA_HANDOFF). With no prior
+       anchor there is nothing to compare against and the line is absent:
+       silence is the correct output, not a paragraph explaining the
+       silence.
+
+    EVERYTHING CUT IS STILL RECORDED. `n_edge`, arc coverage, interior
+    fill, `conf`, the implied resting area and the full cross-check
+    algebra all still reach the anchor block in setup.txt, the
+    scale_calibration_log line and `sldea_diag`'s verdicts, unchanged —
+    see `se.verify_note`, `se.append_calibration_log` and
+    `sldea_diag.verdicts`. Decluttering the dialog cost no auditability: a
+    reader coming to the run months later can still reconstruct why the
+    anchor was trusted. What changed is that the OPERATOR, who is judging
+    one boundary in one moment, is no longer handed the audit trail to read
+    first.
+
+    Pure, so the budget and the honesty are both headless tests rather than
+    a screenshot. An empty string is never returned for a usable fit: if
+    this block is blank the operator is being asked to approve a number
+    they cannot see."""
     d = float((ref or {}).get('diam_px') or 0.0)
     if d <= 0:
         return ''
     dmm = float(diam_mm or 0.0)
     mmpp = (dmm / d) if d else 0.0
-    area = math.pi * (dmm / 2.0) ** 2 if dmm > 0 else 0.0
     rp = se.fit_resid_pct(ref)
     L = []
-    L.append("VERIFY THE AUTOMATIC FIT — the machine measured this run's "
-             "scale; your job is to judge whether it is right, not to "
-             "measure it again.")
-    L.append("Why it measures and you verify: on the one disc anyone has "
-             "measured (P3_2's baseline, eleven hand calibrations, `#215`) "
-             "the automatic fit beat ALL ELEVEN on accuracy and nine of "
-             "eleven on precision. The ink step is a ~20-gray ramp spread "
-             "over ~60 px of radius — there is no line to click, and the "
-             "point a human picks is the outer toe (+2.6 % in diameter).")
-    L.append(f"THE FIT   {d:.1f} px = {dmm:g} mm  →  {mmpp:.5f} mm/px"
-             + (f"   ·   implied resting area {area:.2f} mm²"
-                if area else ''))
+    # 1. THE VALUE. `diam_recorded` rides here rather than on a fifth line:
+    # the gate's "the diameter was not recorded at capture" warning is a
+    # qualifier ON this number, and the number is right there.
+    L.append(f"Automatic fit — {d:.1f} px across = {dmm:.2f} mm "
+             f"({mmpp:.6f} mm/px)"
+             + ('' if diam_recorded else
+                f"   ⚠ {dmm:.2f} mm is the settings default — the mask was "
+                f"NOT measured at capture"))
+    # 2. THE QUALITY, two numbers. Built from what the fitter actually
+    # reported: a missing number is never printed as 0.
     q = []
-    for key, label, fmt in (('circ', 'circularity', '{:.3f}'),
-                            ('conf', 'confidence', '{:.3f}'),
-                            ('arc_cov', 'arc coverage', '{:.2f}'),
-                            ('solidity', 'interior fill', '{:.2f}')):
-        v = (ref or {}).get(key)
-        if v is not None:
-            q.append(f"{label} " + fmt.format(float(v)))
-    resid = (ref or {}).get('fit_resid_px')
-    n_edge = (ref or {}).get('n_edge')
-    if resid is not None:
-        q.append(f"fit residual {float(resid):.1f} px"
-                 + (f" = {rp:.2f} % of diameter" if rp is not None else ''))
-    if n_edge:
-        q.append(f"{int(n_edge)} edge points")
-    L.append("EVIDENCE   " + '   ·   '.join(q))
-    L.append("UNCERTAINTY   this anchor's uncertainty is the FIT's own"
-             + (f" — the {rp:.2f} % above" if rp is not None else '')
-             + ", conservatively the per-point residual (the fitted "
-               "radius's own standard error is ~√n smaller). There is NO σ "
-               "and NO standard error: nobody fitted anything n times, so "
-               "the round-to-round spread does not exist. It is recorded as "
-               "undefined, never as zero.")
-    L.append("NOT CHECKED — and it cannot be. Nothing independent "
-             "cross-checks an automatic anchor. Calling this fitted disc "
-             f"{dmm:g} mm makes the resting area π·({dmm:g}/2)²"
-             + (f" = {area:.2f} mm²" if area else '')
-             + " BY CONSTRUCTION, so the anchor guard's disc-fit test and "
-               "its mask-area test would both read +0.00 % on any frame, "
-               "however wrong the fit is. No cross-check is run here and "
-               "none is claimed: THE VERIFICATION IS YOUR EYE, supported "
-               "by the numbers above.")
-    L.append("HOW TO JUDGE   the thin dashed circle must follow the "
-             "MIDDLE of the grey ramp all the way round — not its outer "
-             "toe, and not visibly off-centre or off-size on any sector. "
-             "Zoom in (Ctrl+wheel, Z for 1:1, right-drag to pan) before "
-             "you decide."
-             + ("   Contrast is STRETCHED for display only (gray "
-                f"{stretch[0]:.0f}–{stretch[1]:.0f} → black–white) so the "
-                "step is visible at all; the measurement used the RAW "
-                "frame and is unaffected." if stretch else
-                "   Contrast is NOT stretched (this frame's disc/paper "
-                "step could not be measured), so the edge may be very "
-                "faint."))
+    if rp is not None:
+        q.append(f"fit residual {rp:.2f} % of diameter")
+    circ = (ref or {}).get('circ')
+    if circ is not None:
+        q.append(f"circularity {float(circ):.3f}")
+    L.append("Quality — " + ('   ·   '.join(q) if q else
+                             "the fitter reported neither a residual nor a "
+                             "circularity, so there is nothing here to "
+                             "judge the fit by but the picture."))
+    # 3. THE HONESTY, one sentence. Both halves survive: the stretch is
+    # display-only, and no cross-check exists. See se.verify_note for the
+    # full algebra, which is what the RECORD carries.
+    L.append(("View is contrast-stretched so the edge is visible"
+              if stretch else
+              "View is NOT contrast-stretched (this frame's disc/paper step "
+              "could not be measured), so the edge may be very faint")
+             + "; the fit is measured on the raw frame. Nothing "
+               "cross-checks it — your eye is the check.")
+    # 4. THE CONSEQUENCE, only when a prior anchor exists AND differs.
     if recorded and recorded.get('diam_px'):
-        pct = se.rescale_pct(float(recorded['diam_px']), d)
-        dev = 100.0 * (d - float(recorded['diam_px'])) \
-            / float(recorded['diam_px'])
-        L.append(f"⚠ AGAINST THE RECORDED ANCHOR   this run already has "
-                 f"{float(recorded['diam_px']):.1f} px on record (saved "
-                 f"{recorded.get('saved', '?')}); the fit is {dev:+.2f} % "
-                 f"from it"
-                 + (f", so accepting moves every absolute mm² in the run "
-                    f"by {pct:+.2f} % at the next Save"
-                    if pct is not None else '')
-                 + (f" — including the {n_px_rows} row(s) already "
-                    f"measured, and frames you never re-review."
-                    if n_px_rows else '.'))
-    elif n_px_rows:
-        L.append(f"⚠ {n_px_rows} row(s) in this run already carry a px "
-                 f"measurement and NO anchor is on record, so all of them "
-                 f"are re-derived from px at this scale at the next Save — "
-                 f"which is the scale a pre-gate Save already used, so the "
-                 f"move should be nil. Verify it anyway: nothing else "
-                 f"will.")
-    return '\n'.join(L)
+        rec = float(recorded['diam_px'])
+        dev = 100.0 * (d - rec) / rec
+        pct = se.rescale_pct(rec, d)
+        if abs(dev) >= CAL_VERIFY_DEV_EPS_PCT:
+            L.append(f"⚠ Accepting moves this run's scale {dev:+.2f} % from "
+                     f"the {rec:.1f} px on record"
+                     + ((f", re-deriving every mm² in the run "
+                         f"{pct:+.2f} % at the next Save — including rows "
+                         f"you never re-review." if n_px_rows else
+                         ", and every mm² measured from here on.")
+                        if pct is not None else '.'))
+    return '\n'.join(L[:CAL_VERIFY_MAX_LINES])
 
 
 # ---------------------------------------------------------------------------
@@ -2309,12 +2375,17 @@ class EdgeReviewApp:
         **MODE C — verify the automatic fit** (where the gate opens, and the
         one that is not a hand measurement). `se.baseline_disc` measured the
         disc; the operator judges whether it is right. Drawn with a 1 px
-        dashed stroke over a contrast-stretched DISPLAY copy, with the fit's
-        own quality numbers and a plain statement that no independent
-        cross-check of an automatic anchor exists. Actions: ✔ Accept
-        (primary and Tk's default button, but <Return> cannot reach it),
-        ✎ Measure by hand instead (→ mode A), Cancel. Recorded with method
-        `auto-verified` so an audit can tell it from a hand measurement.
+        dashed stroke over a contrast-stretched DISPLAY copy, framed on the
+        circle, under FOUR SHORT LINES and nothing else — the value, two
+        quality numbers, one sentence covering the display-only stretch and
+        the absence of any cross-check, and a consequence line only when
+        there is a consequence (verify_evidence; the operator's verdict on
+        the 13-line version was that it was "wayyyyy too busy with text and
+        unnecessary garbage"). Actions: ✔ Accept (primary and Tk's default
+        button, but <Return> cannot reach it), ✎ Measure by hand instead
+        (→ mode A), Cancel. Recorded with method `auto-verified` so an audit
+        can tell it from a hand measurement — with every number the screen
+        no longer shows.
 
         Why it exists, measured (`#215` comment, 2026-08-06 evening): on
         P3_2's baseline the automatic fit (577.08 px, circ 0.999, conf
@@ -2524,8 +2595,20 @@ class EdgeReviewApp:
                              f"those mm² were derived at the AUTOMATIC "
                              f"fit's scale, so the move is quoted against "
                              f"THAT, here and at Save.")
-            tk.Label(win, text=gate, justify='left',
-                     wraplength=980).pack(pady=(6, 2), padx=8, anchor='w')
+            # NAMED, because mode C hides it (`#215` declutter,
+            # 2026-08-06 late). Every warning this block can carry is either
+            # impossible in mode C or already said in the four lines below:
+            # the fit-refused and baseline-missing warnings cannot occur
+            # (mode C requires both a fit and the baseline frame), the
+            # recorded-anchor and px-rows warnings ARE the evidence block's
+            # consequence line, and the diameter-not-recorded warning rides
+            # on the value line where the diameter itself is printed. So in
+            # mode C it is redundant text, and redundant text is the thing
+            # being removed. Modes A/B keep every word of it.
+            GATE_PACK = dict(pady=(6, 2), padx=8, anchor='w')
+            gate_lbl = tk.Label(win, text=gate, justify='left',
+                                wraplength=980)
+            gate_lbl.pack(**GATE_PACK)
             # ---- the mode chooser (`#215`, 2026-08-06) ----------------
             # Per calibration, not per session, so both methods can be
             # driven on the SAME disc minutes apart — which is the only
@@ -2575,41 +2658,84 @@ class EdgeReviewApp:
             stroke_menu.pack(side=tk.LEFT, padx=2)
             # The METHOD-SPECIFIC block: the gestures in mode A/B, and in
             # mode C the fit's own evidence. Split out of `gate` (which is
-            # the static warnings) because mode C has to show ~8 lines of
-            # numbers where A/B show 4 lines of gesture help, and because
-            # showing mode B's rotation explanation while mode C is up is
-            # noise the operator has to read past.
+            # the static warnings) because the two say different things at
+            # different lengths, and because showing mode B's rotation
+            # explanation while mode C is up is noise the operator has to
+            # read past.
             how = tk.Label(win, text='', justify='left', wraplength=980)
             how.pack(anchor='w', padx=8, pady=(0, 2))
+            # The ROUND HEADER — progress, which mode C has none of. Named
+            # and hidden there (see sync_buttons): "there are no rounds and
+            # no spread" was a line spent saying that a thing is absent,
+            # which the window title already covers.
+            HDR_PACK = dict(anchor='w', padx=8)
             hdr = tk.Label(win, text='', justify='left',
                            font=('TkDefaultFont', 11, 'bold'))
-            hdr.pack(anchor='w', padx=8)
+            hdr.pack(**HDR_PACK)
             cw = max(400, min(1000, self.root.winfo_screenwidth() - 220))
             # 400, not 360: the chooser row plus the taller header cost
             # ~40 px, and the pre-existing budget already left only ~35 px
             # of slack on a 1080p bench screen with every warning showing.
-            # Mode C's evidence block is ~180 px taller than mode A/B's
-            # gesture help, and it is the part that must be READABLE, so
-            # the canvas gives that height up in mode C and takes it back
-            # in A/B. PER MODE, not fixed at build time: a switch already
-            # restarts the round-set and re-fits the view, whereas a canvas
-            # sized once for A and then filled with mode C's text overflows
-            # a 1080p screen by ~80 px (measured).
+            #
+            # PER MODE, not fixed at build time, and since the declutter the
+            # split runs the OTHER WAY (`#215`, 2026-08-06 late). Mode C now
+            # shows four lines where A/B show a gate block plus three lines
+            # of gesture help and a round header, so mode C is the mode with
+            # height to spare — and the picture is what it must be spent on,
+            # because in mode C the picture IS the verification. Mode A/B's
+            # figure is unchanged, so their layout is untouched.
             def canvas_h(for_verify):
                 return max(300, min(760, self.root.winfo_screenheight()
-                                    - (540 if for_verify else 400)))
+                                    - (300 if for_verify else 400)))
 
             ch = canvas_h(opens_c)
             cv = tk.Canvas(win, width=cw, height=ch, bg='#111',
                            cursor='crosshair')
             cv.pack(padx=8, pady=6)
+            LIVE_PACK = dict(anchor='w', padx=8)
             live = tk.Label(win, text='', justify='left')
-            live.pack(anchor='w', padx=8)
+            live.pack(**LIVE_PACK)
             btns = tk.Frame(win)
             btns.pack(fill='x', padx=8, pady=(2, 8))
             vt = strc.ViewTransform()
             vt.fit(img.width, img.height, cw, ch)
             rnd = random.Random()
+
+            def show_line(w, on, opts, before):
+                """Show or hide one text line, keeping its place in the
+                column. pack_forget/pack rather than text='' because an
+                empty Label still reserves a line's height, and in mode C
+                that height belongs to the picture — three blank lines is
+                ~65 px of the canvas gone to say nothing."""
+                try:
+                    if on:
+                        if not w.winfo_manager():
+                            w.pack(before=before, **opts)
+                    elif w.winfo_manager():
+                        w.pack_forget()
+                except tk.TclError:
+                    pass          # a half-torn-down dialog is not a failure
+
+            def say_live(text):
+                """THE ONLY writer of the live line. Sets the text and
+                guarantees the invariant that non-empty text is VISIBLE
+                text.
+
+                Mode C's four-line budget hides `live`, but a refused
+                <Return> has to be SEEN or the refusal is silent and the
+                operator taps again harder. So the line reappears for the
+                message and goes away at the next mode change: it is an
+                answer to something the operator just did, not standing
+                clutter.
+
+                Every write goes through here rather than live.config
+                because the first version did not, and mode A's diameter
+                readout — the one number a mode-A round needs — came back
+                from a C→A switch with its text set and its label still
+                forgotten. A message nobody can read is worse than no
+                message: the caller believes it spoke."""
+                live.config(text=text)
+                show_line(live, bool(text), LIVE_PACK, btns)
 
             def view_h():
                 """The canvas's CURRENT height — the one number the view
@@ -2686,6 +2812,31 @@ class EdgeReviewApp:
                 else:
                     vt.fit(w, h, cw, view_h())
 
+            def verify_view():
+                """Frame mode C on the CIRCLE, not on the frame — the
+                operator is judging one boundary, not surveying the picture
+                (verify_zoom). Falls back to fitting the frame when there is
+                no fit to centre on, which cannot happen through the chooser
+                but keeps this fail-closed."""
+                ref = auto_ref() or {}
+                h = view_h()
+                z = verify_zoom(ref.get('diam_px'), cw, h)
+                if z is None:
+                    fit_view(keep_zoom=False)
+                    return
+                vt.zoom = z
+                vt.ox = float(ref.get('cx', img.width / 2.0)) - cw / (2.0 * z)
+                vt.oy = float(ref.get('cy', img.height / 2.0)) - h / (2.0 * z)
+
+            def refit():
+                """Re-frame the view for the CURRENT mode, after anything
+                that changes the canvas size. One place, so mode C's opening
+                zoom cannot be clobbered by a later fit_view."""
+                if verify():
+                    verify_view()
+                else:
+                    fit_view(keep_zoom=False)
+
             def respawn():
                 st['circle'] = spawn_circle(
                     img.width, img.height,
@@ -2739,14 +2890,17 @@ class EdgeReviewApp:
                 shows no length at all, because two clicks on an edge need
                 no numeric feedback to place."""
                 if verify():
-                    # No rounds, so no progress and nothing hidden: mode C's
-                    # whole content is the evidence block plus the picture,
-                    # and the blindness rules that govern A/B have nothing
-                    # to protect here (the operator is not producing a
-                    # number, so there is no number to steer).
-                    return ("Method C · verifying ONE automatic fit — "
-                            "nothing is being measured by hand, so there "
-                            "are no rounds and no spread")
+                    # NOTHING. No rounds, so no progress to report — and a
+                    # line whose whole content is "there are no rounds and
+                    # no spread" is a line spent announcing an absence
+                    # (`#215` declutter). The window title already says
+                    # which mode this is; sync_buttons hides the label
+                    # entirely so it does not even cost a blank line.
+                    #
+                    # The blindness rules that govern A/B have nothing to
+                    # protect here either: the operator is not producing a
+                    # number, so there is no number to steer.
+                    return ''
                 where = (f"Method {st['mode']} · Round {st['round']} of "
                          f"{max(rounds_wanted(), st['round'])}")
                 if two_point():
@@ -2833,30 +2987,34 @@ class EdgeReviewApp:
                              + ('' if vt.zoom >= 1.0 else
                                 "  ⚠ below 1:1 — press Z before accepting"))
                 if verify():
-                    live.config(
-                        text="the AUTOMATIC fit is drawn as a 1 px dashed "
-                             "circle — thin on purpose, because a 3 px "
-                             "stroke laid on the edge biases a human "
-                             "judgement by +2 %"
-                             + ("   ·   contrast STRETCHED for display only"
-                                if st['lut'] else
-                                "   ·   contrast NOT stretched")
-                             + f"   ·   {zoom_note}")
+                    # NOTHING, in the steady state (`#215` declutter). This
+                    # line used to re-announce the stretch a second time
+                    # (the evidence block already said it), explain the 1 px
+                    # stroke, and carry the "below 1:1 — press Z" nag. The
+                    # stretch is now stated once; the 1 px stroke is a
+                    # design decision recorded in paint_verify, not
+                    # something the operator acts on; and the nag is gone
+                    # because verify_zoom opens ABOVE 1:1, so it never had
+                    # anything to warn about (it stays in A/B, where a
+                    # fit-to-window view genuinely is sub-1:1 and the
+                    # operator is about to measure on it).
+                    #
+                    # Not cleared, so a transient say_live() message — the
+                    # <Return> refusal — survives a repaint.
+                    pass
                 elif two_point():
                     # NO LENGTH, deliberately (see head_text): mode B needs
                     # no numeric feedback to put two clicks on an edge, so
                     # it does not offer one — nothing on screen is a number
                     # a later round could be steered onto.
-                    live.config(
-                        text=f"{len(st['pts'])} of 2 edge points placed"
+                    say_live(f"{len(st['pts'])} of 2 edge points placed"
                              + ("   ·   Continue to record this round"
                                 if len(st['pts']) == 2 else
                                 "   ·   click the point OPPOSITE the first")
                              + f"   ·   {zoom_note}")
                 else:
                     dpx = 2.0 * st['circle'][2]
-                    live.config(
-                        text=f"circle: {dpx:.1f} px across  →  "
+                    say_live(f"circle: {dpx:.1f} px across  →  "
                              f"{self.settings['diam_mm'] / max(dpx, 1e-9):.5f}"
                              f" mm/px   ·   centre "
                              f"({st['circle'][0]:.0f}, "
@@ -3267,7 +3425,7 @@ class EdgeReviewApp:
                     return
 
                 def say(text):
-                    live.config(text=text)
+                    say_live(text)
                     try:
                         win.update_idletasks()
                     except tk.TclError:
@@ -3470,15 +3628,17 @@ class EdgeReviewApp:
                     # would otherwise approve a scale they had not read, and
                     # "Accept is a judgement rather than a reflex" is the
                     # only thing standing between mode C and a rubber stamp.
-                    live.config(
-                        text="⚠ Enter cannot approve an anchor — read the "
+                    #
+                    # say_live, not live.config: mode C hides the live line
+                    # to keep its four-line budget, so the refusal has to
+                    # bring the line back with it or it is refused silently.
+                    say_live("⚠ Enter cannot approve an anchor — read the "
                              "numbers above, look at the circle, then click "
                              "✔ Accept the automatic fit (or ✎ Measure by "
                              "hand instead)")
                     return 'break'
                 if is_last_round():
-                    live.config(
-                        text="⚠ the LAST round must be confirmed with the "
+                    say_live("⚠ the LAST round must be confirmed with the "
                              "✔ Finish calibration BUTTON — Enter cannot "
                              "accept an anchor, or answer the checks that "
                              "follow it")
@@ -3515,9 +3675,9 @@ class EdgeReviewApp:
             def continue_round(_ev=None):
                 dpx = round_diameter()
                 if dpx is None:
-                    live.config(text="⚠ place BOTH edge points before "
-                                     "continuing — click one edge, then "
-                                     "the point opposite it")
+                    say_live("⚠ place BOTH edge points before "
+                             "continuing — click one edge, then "
+                             "the point opposite it")
                     return
                 if not cal_diam_plausible(dpx, img.width, img.height,
                                           self.settings.get('roi_frac',
@@ -3582,39 +3742,44 @@ class EdgeReviewApp:
 
             def prepare_verify():
                 """Mode C's setup: measure the display contrast window from
-                the frame's OWN disc and paper levels, once.
+                the frame's OWN disc and paper levels, once — then frame the
+                view on the fitted circle.
 
-                Nothing else — there is no circle to spawn and no rotation to
-                pick, because nothing is being fitted. `st['circle']` is left
-                as whatever mode A last had (or None); every interaction that
-                would touch it sits mode C out."""
+                No circle to spawn and no rotation to pick, because nothing
+                is being fitted. `st['circle']` is left as whatever mode A
+                last had (or None); every interaction that would touch it
+                sits mode C out."""
                 st['rimg'] = None
                 st['pts'], st['ptsv'] = [], []
                 st['stretch'], st['lut'] = None, None
                 ref = auto_ref() or {}
-                if not ref.get('diam_px'):
-                    return
-                try:
-                    arr = np.asarray(img.convert('L'), float)
-                    dl, pl = disc_paper_lum(arr, float(ref['cx']),
-                                            float(ref['cy']),
-                                            0.5 * float(ref['diam_px']))
-                    # the fit measured the paper level with foil and glint
-                    # already rejected; no annulus here can do that, so its
-                    # number wins whenever the fit reported one
-                    if ref.get('paper_lum') is not None:
-                        pl = float(ref['paper_lum'])
-                    win_lohi = cal_stretch_window(dl, pl)
-                except Exception as e:
-                    # a stretch is a convenience; losing it must not cost the
-                    # verification, and a silently RAW display is announced
-                    # on the live line rather than pretended about
-                    print(f"calibrate: contrast stretch unavailable: {e}")
-                    return
-                if win_lohi:
-                    st['stretch'] = win_lohi
-                    st['lut'] = cal_stretch_lut(*win_lohi)
-                fit_view(keep_zoom=False)
+                if ref.get('diam_px'):
+                    try:
+                        arr = np.asarray(img.convert('L'), float)
+                        dl, pl = disc_paper_lum(arr, float(ref['cx']),
+                                                float(ref['cy']),
+                                                0.5 * float(ref['diam_px']))
+                        # the fit measured the paper level with foil and
+                        # glint already rejected; no annulus here can do
+                        # that, so its number wins whenever the fit
+                        # reported one
+                        if ref.get('paper_lum') is not None:
+                            pl = float(ref['paper_lum'])
+                        win_lohi = cal_stretch_window(dl, pl)
+                    except Exception as e:
+                        # a stretch is a convenience; losing it must not cost
+                        # the verification, and a silently RAW display is
+                        # stated in the evidence block rather than pretended
+                        # about
+                        print(f"calibrate: contrast stretch unavailable: {e}")
+                        win_lohi = None
+                    if win_lohi:
+                        st['stretch'] = win_lohi
+                        st['lut'] = cal_stretch_lut(*win_lohi)
+                # ALWAYS, and after the stretch rather than before: losing
+                # the stretch must not also lose the framing, which is the
+                # half of this the operator cannot work around by zooming.
+                verify_view()
 
             def restart_all(_ev=None):
                 """Start the round-set over. Also what a mode or round-count
@@ -3725,14 +3890,33 @@ class EdgeReviewApp:
 
             def sync_buttons():
                 vfy = verify()
-                # give the canvas's height to mode C's evidence block and
-                # take it back for A/B (canvas_h). Before fit_view runs —
+                # THE FOUR-LINE BUDGET, enforced here because this is the one
+                # function every mode change goes through (`#215` declutter,
+                # 2026-08-06 late). In mode C the only text on screen is the
+                # evidence block's four lines: the gate's warnings are either
+                # impossible here or folded into those lines, the round
+                # header has no rounds to report, and the live readout is
+                # empty until it has something transient to say. In A/B all
+                # three come straight back, unchanged.
+                show_line(gate_lbl, not vfy, GATE_PACK, chooser)
+                show_line(hdr, not vfy, HDR_PACK, cv)
+                # `live` BOTH WAYS, not just hidden in C: leaving it
+                # forgotten on the way back to A/B hid mode A's diameter
+                # readout, which is the one number a mode-A round needs
+                # (caught by rendering the dialog after a C→A switch). Every
+                # write to it goes through say_live for the same reason.
+                if vfy:
+                    say_live('')
+                else:
+                    show_line(live, True, LIVE_PACK, btns)
+                # give the canvas the height mode C's shorter text frees up,
+                # and take it back for A/B (canvas_h). Before refit runs —
                 # restart_all calls sync_buttons then repaint, and repaint
                 # crops against view_h()
                 want_h = canvas_h(vfy)
                 if view_h() != want_h:
                     cv.config(height=want_h)
-                    fit_view(keep_zoom=False)
+                    refit()
                 cont.config(
                     text=("✔ Accept the automatic fit" if vfy else
                           "✔ Finish calibration" if is_last_round()
@@ -3754,7 +3938,11 @@ class EdgeReviewApp:
                     how.config(text=verify_evidence(
                         auto_ref(), self.settings['diam_mm'],
                         recorded=recorded, n_px_rows=n_px_rows,
-                        stretch=st['stretch']))
+                        stretch=st['stretch'],
+                        # the gate label is hidden in mode C, so its
+                        # "the diameter was NOT recorded at capture"
+                        # warning rides on the value line instead
+                        diam_recorded=self._diam_recorded()))
                     stroke_menu.config(state='disabled')
                     n_menu.config(state='disabled')
                     return
@@ -3801,9 +3989,9 @@ class EdgeReviewApp:
                 ox, oy = unrotate_point(rx, ry, rw, rh,
                                         img.width, img.height, st['rot'])
                 if not (0.0 <= ox <= img.width and 0.0 <= oy <= img.height):
-                    live.config(text="⚠ that click is off the frame (the "
-                                     "rotated view has empty corners) — "
-                                     "click on the disc edge itself")
+                    say_live("⚠ that click is off the frame (the "
+                             "rotated view has empty corners) — "
+                             "click on the disc edge itself")
                     return
                 if len(st['pts']) >= 2:
                     st['pts'], st['ptsv'] = [], []   # a 3rd click restarts

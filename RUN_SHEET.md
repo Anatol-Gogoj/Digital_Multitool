@@ -1,184 +1,146 @@
-# Run sheet — 2026-08-05 (v1.1.0)
+# Run sheet — 2026-08-07 (v1.1.0, main at the #236 merge)
 
 **What this is:** an ordered, tick-off view of the open work, split by
 where you have to be to do it. **`PROJECT_HANDOFF.md` is the source of
 truth** — this is a snapshot of its docket, not a second copy of it.
 When they disagree, the handoff is right. Regenerate this file rather
-than maintaining it in parallel, and delete it once the list is empty.
+than editing it alongside the handoff.
 
-Three buckets: **A** you, anywhere · **B** at the bench but **no high
-voltage** — safe to hand to a colleague · **C** at the bench **with HV**.
-
-Bucket B is the one worth pushing: **§M alone is the whole gate on
-trusting `telemetry.csv`**, it needs no HV training, and it is about
-twenty minutes of somebody's time.
+**State:** main green, **no open PRs**, suite **29/33** (four documented
+environmental failures: `test_arb_bin`, `test_camera_controls`,
+`test_presets_path`, `test_tk_fontfix` — a fifth is yours).
 
 ---
 
 ## A. Remote — nothing here is blocked
 
-Roughly in the order that unblocks the most.
+Everything in this section can be done at a desk with no hardware.
 
-- [ ] **Two 07-23 breakdown-run reviews** — `152205` and `233451`.
-      First real exercise of the confirmed-breakdown review path on the
-      audit-fixed save chain. `sldea_plot --mode current` previews both
-      events. *Agent runs `compare_errorbars.py` after each save.*
-- [ ] **Control round traces** (~15 min) — **gates every remaining
-      absolute-mm² verdict**, because the optics moved between sessions.
-      Do this before the P3_2 review.
-- [ ] **P3_2 review** — eyeball the mid-ramp overlays first; +0.7 px flag.
-- [ ] **P3_6 holdout frame** (`SLDEA_s31_07.75kV_pre-ramp`) — accept or
-      hand-trace. Upgrades P3_6 from a conditional pass. Safe now that
-      the #213 partial-re-save fix has landed.
-- [ ] **Empty the Recycle Bin** — ~3.26 GB, and C: is tight.
-- [ ] **Confirm the OneDrive `Recordings\SLDEA_data` deletion was
-      sanctioned.** ⏳ *This one has a clock:* the web recycle bin keeps
-      ~30 days from 2026-08-05. If it was not sanctioned, that is the
-      recovery path and it expires.
-- [ ] **Decide #219's direction** — needs §N's numbers first, so this
-      sits behind bucket B.
-- [x] ~~Decide the CB run's fate~~ — **DONE 2026-08-05**: reviewed and
-      accepted, all 11 frames at conf 0.95–0.99, resting 16.059 mm vs a
-      16 mm nominal, A/A₀ 1.156 at 5 kV. The areas stand; only the
-      provenance is imperfect (its baseline was exposed differently from
-      its own ramp frames). Re-shoot for a clean-provenance CB curve when
-      convenient — 11 frames, 0–5 kV — but do not discard this one.
-- [ ] **Fold the new CNT run into `SCORECARD.md`** — `P3 1.5mL Triazole
-      Bake1-1`, 81 frames, already reviewed, healthy baseline.
-- [ ] **#224's rename word choice** — *30 seconds, taste only.* The
-      rename is IMPLEMENTED as `📈 Scope kV/µA log (telemetry.csv)`; all
-      you do is accept it or pick different words. If you pick different
-      words, do not work from a list of copies — every list so far has
-      undercounted (the issue said three, the first fix said four, it is
-      five).
-      Run `git grep -n "Scope kV"` and change every hit (ASCII-only —
-      `git grep` matches bytes, so a pattern with `µ` in it finds
-      nothing). The comment above the string in `gui.py` says the same.
-- [ ] **Pull v1.1.0 onto the bench and analysis PCs** — `Tools → Update
-      Software…` / `update_software.sh`, then check the footer reads
-      `v1.1.0+…`. The fleet is one release behind. (The updater clones
-      main HEAD, so the pre-release flag does not block it.)
-- [ ] **Promote the v1.1.0 pre-release to Latest** — *after §M passes.*
-      Until then GitHub serves v1.0.0 as "Latest", so anyone told to
-      "grab the manual from the latest release" gets the old PDF.
-      The bump itself is DONE (shipped 2026-08-05 with both manuals).
+- [ ] **`#237` split the elapsed timer.** It keeps counting after detection
+      finishes, so detection time — the number that tells an operator
+      whether a run takes 1 minute or 15 — is destroyed as soon as it is
+      produced. Freeze it at the end of detection, or add a second readout.
+- [ ] **`#238` the Edge Review "How to use" panel.** Bottom-right button,
+      short read on the actual loop. Must carry the three things that cost
+      time on 2026-08-06: wash-out frames get **traced, not rejected**;
+      `Accept` in the calibration dialog **stages** the anchor and **Save**
+      writes it; a scale-only **re-anchor** skips detection entirely.
+      **Decide first** where the text lives — the repo already regenerates a
+      manual from `docs/manual-src/content.json`, so in-app prose is a
+      second copy that will drift.
+- [ ] **`#216` hover tooltips + button flow.** Re-requested unprompted by
+      the operator after a long real session, so item 2 is confirmed rather
+      than speculative. Note the `add_tooltip` helper lives in
+      `ui_widgets.py`, which the planned repo split would put across the
+      seam (open decision 2).
+- [ ] **`#225` tabs have no horizontal scrollbar.** `ScrollableTab` pins
+      inner width to the canvas, so adding a bar alone does nothing. One fix
+      root-causes `#27` and is the same family as `#26` — three issues for
+      one change.
+- [ ] **`#197` tuner run picker.** `#226` fixed the Tune button's resolver;
+      this is the remaining UI half. Real risk it removes: tuning the wrong
+      run silently rewrites that run's `setup.txt`.
+- [ ] **`#223` a GUI (or a button) for `sldea_plot.py`** — the only tool in
+      the chain with no way in from the app.
+- [ ] **`#215` stays open deliberately.** #236 delivered it and superseded
+      it: measured σ ≈ 1.05 % means the circle mode misses the ±0.4 % SE
+      budget at three rounds, so it shipped as a fallback behind
+      verify-the-fit. What keeps it open is that its own numbers are chosen
+      rather than measured — the 1 % spread gate, round count, wheel steps,
+      spawn band — and the dialog has never been judged on **low-contrast
+      ink**. Close it when a second device's calibrations exist.
+- [ ] **`#229` liquid metal inverts the dark-disc assumption.** Designable
+      now, but do not build it before there is a device to test against.
+- [ ] **`#198` ML edge channel** — after `#194`'s verdict, which is bench-side.
 
-**Open decisions with no deadline** (all in `PROJECT_HANDOFF.md`):
-split the SLDEA analysis suite into its own repo · manual binaries in
-git vs LFS vs release-assets-only · `demos/` fate once #32 is decided.
+**Campaign (data) side, also desk work:**
+
+- [ ] **Decide what the control round is now for.** Its stated premise —
+      "the optics moved between sessions" — was disproved on 2026-08-06:
+      per-run anchoring absorbs optics movement entirely, and every
+      absolute-area error in the corpus came from a manual calibration. Its
+      remaining unique value is the machine-vs-operator boundary offset on
+      ramp frames. Its operator-repeat leg has never had data, and `#215`'s
+      three-round spread now produces that number for free.
+- [ ] **Optional and cosmetic:** re-anchor `SLDEA_20260723_152205`
+      (−3.38 % in area) and `SLDEA_20260723_233451` (+2.44 %). Both are
+      retired from measurement and gate nothing; correcting them rewrites
+      the breakdown fixture for no measurement gain. Offsets are recorded.
 
 ---
 
 ## B. Bench, **no HV** — hand this to a colleague
 
-> A dry run never commands the signal generator, so the app puts no
-> control voltage into the Trek. Nothing in this bucket energizes
-> anything. It does need the **Linux** bench PC — instrument control
-> does not work on Windows.
+~25 minutes together, no HV training, and between them they unblock
+trusting `telemetry.csv`, promoting v1.1.0 out of pre-release, and `#189`
+increment (1). Full steps in `BENCH_TEST.md`.
 
-- [ ] **§M — telemetry dry-run smoke.** Full numbered steps in
-      `BENCH_TEST.md`. ~20 min.
-      **Unblocks:** trusting `telemetry.csv` at all, and promoting the
-      v1.1.0 pre-release to Latest.
-      **Send back:** `run.log`, `data.csv`, `telemetry.csv`, `setup.txt`
-      from the run folder (a few kB — skip `frames/`).
-      **The answer I most want:** whether the run log says `SLOW DISK`.
-      The bench output directory is a network share and that is the one
-      behaviour desk testing cannot reproduce.
-- [ ] **Smoke the two #231 changes on any short run** — `setup.txt`
-      carries `Compliant electrode:`; the folder has a `warmup` frame at
-      t=0 AND a `baseline` at t=2; a blank Electrode box prompts before
-      starting; and **the SG stays at 0 V for the whole warm-up window**
-      (pinned by a test, but it is an HV path).
-- [ ] **§N — watchdog probe.** One command, ~1 min:
-      ```
-      .venv/bin/python bench/test_sldea_watchdog_probe.py --ich 3 --vch 2
-      ```
-      **Unblocks:** #189 increment (1) — the peak-token trip level cannot
-      be guessed at a desk — and settles whether #157's 2 Hz cap has
-      headroom, and whether increment (3) needs new driver work.
-      **Send back:** `sldea_watchdog_probe.txt` and `.json`.
-- [ ] **#206 — installer idempotence.** Run
-      `deploy/install_lab_launchers.sh` twice; the second run should
-      change nothing. Note any duplicate launchers.
-- [ ] **#193 — camera manual exposure.** Testing whether the firmware
-      honours manual UVC controls needs no HV. Try Stabilize first.
+- [ ] **§M telemetry dry-run smoke.** A dry run never commands the SG.
+      **The single answer most wanted: does `run.log` say `SLOW DISK`** —
+      the bench output dir is a network share and that is the one behaviour
+      desk testing cannot reproduce.
+- [ ] **§N watchdog probe.** `bench/test_sldea_watchdog_probe.py --ich 3
+      --vch 2`, about a minute, changes nothing on the scope. Section A sets
+      the peak-based trip level; section C decides how much driver work
+      `#189` increment (3) needs.
+- [ ] **Send back** `run.log`, `data.csv`, `telemetry.csv`, `setup.txt` and
+      the probe's two files.
+- [ ] **Smoke the two `#231` changes** on any short run: `setup.txt` carries
+      `Compliant electrode:`; the folder has a `warmup` frame at t=0 **and**
+      a `baseline` at t=2; a blank Electrode box prompts before starting;
+      and — the one that matters — **the SG stays at 0 V through the
+      warm-up window**.
+- [ ] **Judge the new calibration dialog on real ink.** It has been driven
+      hard by the operator, but only on P3_2's comparatively clean disc, and
+      nobody has seen it rendered in colour on the bench screen. Two things
+      to watch: whether *"straddle the edge — half the stroke on the disc,
+      half on the paper"* reads unambiguously on a low-contrast disc, and
+      whether the contrast-stretched view helps or misleads.
+- [ ] **`#193` camera exposure** — try Stabilize first; C920 / ELP /
+      machine-vision if the firmware wins. Unblocks P3_7 and a
+      clean-provenance CB re-shoot.
+- [ ] **`#194` fiducial contrast ring** (may shrink `#198`'s niche).
+- [ ] **`#206` deploy-script dedup / installer idempotence re-run.**
+- [ ] **Physically test the 104531 device** — dead device, or HV not
+      reaching the sample.
+- [ ] **Pull v1.1.0 onto the bench and analysis PCs** and check the footer
+      reads `v1.1.0+…`. The fleet is still on v1.0.0+4f5f213.
 
 ---
 
 ## C. Bench, **with HV** — trained and authorized operator only
 
-> Energizes the Trek to real kV. Two rules for whoever does it:
-> instrument control is **Linux-bench-only**, and a live run must be
-> ended with **■ Abort** — closing the app only attempts a best-effort
-> ramp.
-
-- [ ] **§O — live-run verification.** Verifies **#159** (which was
-      auto-closed by mistake and reopened — it closes when this RUNS). Full steps in
-      `BENCH_TEST.md`. **There is no manual scope work in this.** The
-      pre-run check reads the vertical setup back and, on a window that
-      cannot show the run's range, offers **"Fix it automatically"**,
-      which programs scale, position, offset, attenuation and coupling
-      on both monitor channels itself; the −16 µA I_Out offset is
-      cancelled by the watchdog's learned 0 kV baseline. Both shipped in
-      #195. The job is to *confirm the app does the right thing* — watch
-      the dialog fire, note what it said it fixed, and check
-      `measured_kV` tracks `nominal_kV` for the whole ramp.
-- [ ] **#189 increment (1)** — MEAN → MAXIMUM/PK2PK, streak semantics
-      re-tuned for peak noise. **Do §N first**; its section A is the
-      input this needs.
-- [ ] **#189 increments (3)+(4)** — trigger-armed single-shot capture of
-      I_Out plus post-trip `get_waveform()` forensics. The actual fix for
-      the ms-arc blind spot. Finishes **#189**.
-- [ ] **104531 device** — physically test it: dead device, or HV not
-      reaching the sample?
-- [ ] **#194 — fiducial contrast ring** for low-CNT devices. Needs a real
-      run to evaluate. **Unblocks:** P3_7, and its verdict may shrink
-      #198's niche — so do #194 before starting #198.
+- [ ] **§O live-run verification → closes `#159`.** One live ramp: the
+      pre-run monitor dialog fires, and `measured_kV` tracks `nominal_kV`
+      for the **whole** ramp with no blank tail. Nobody recentres the scope
+      by hand — `_sldea_check_monitors` offers "Fix it automatically" and
+      programs both monitor channels itself.
+- [ ] **`#189` increments (1) then (3)+(4)**: switch the watchdog read
+      MEAN → MAXIMUM/PK2PK (new SCPI token, bench-first per convention),
+      then trigger-armed single-shot capture of I_Out plus post-trip
+      `get_waveform()` forensics. Run §N **first** — it measures the three
+      numbers these are blocked on.
+- [ ] **P3_7 capture** once `#193`/`#194` give it usable contrast. Its
+      automatic disc fit **refuses**, so it is also the only run that
+      exercises the calibration dialog's refuse→measure-by-hand fallback —
+      the one path in that flow nobody has driven.
 
 ---
 
-## Electrode types — why this campaign has more than one device class
+## What just landed (2026-08-06/07) — main green, no open PRs
 
-The study compares **compliant electrode materials**. Everything measured
-so far is **CNT** (`P3 *-mL`). **Carbon black** is now in. **Liquid
-metal** is expected later and will be the hard one: `baseline_disc` seeds
-on a region DARKER than the membrane, and the `electrode_lum` mask keys
-on brightness — a mirror-bright electrode inverts both assumptions.
-**#229**, filed so it is designed for before the first run, not after.
-
-## What just landed (2026-08-05) — main green, no open PRs
-
-- **#218** — the telemetry sidecar. The watchdog's ~2 Hz samples now go
-  to `telemetry.csv` beside `data.csv` instead of being discarded.
-  Implements #157; #189 increment (2). **Desk-tested only** — §M is the
-  gate.
-- **#220** — this run sheet's bench half: `BENCH_TEST.md` §M/§N/§O and
-  `bench/test_sldea_watchdog_probe.py`.
-- **#231** — the compliant-electrode field (`setup.txt` now records the
-  material and a canonical family; blank allowed but Run asks first) and
-  a **camera warm-up frame**: throw-away at t=0, real baseline at t=2,
-  staircase starts at t=2. Forced an HV fix — `kv_at()` returned the
-  FINAL level for any t before the first segment.
-- **#230** — the exposure-gate wording, corrected after measuring that a
-  clipped background does not break detection.
-- **#226** — tuner fixes: electrode mask default 220→255 (measured: a
-  no-op on CNT/foil runs, decisive on the CB run) and the Tune button's
-  resolver, which reported "no finished runs (data.csv)" about folders
-  containing exactly that.
-- **#227** — camera: a blown-out baseline now GATES a run instead of
-  whispering a hint, and the cv2 camera path stopped ignoring the tab's
-  exposure/gain fields.
-- **#222 / v1.1.0** — tagged and published as a GitHub **pre-release**
-  (because telemetry is desk-only), with both manuals regenerated at
-  40 pages and a real crash fix: `sldea_diag.py` was dying on cp1252
-  consoles, so on the bench PC a run that reached the new scale gate
-  would finish its analysis and then die before writing any of it.
-- **Filed:** **#219** the watchdog is invisible on screen until it trips,
-  and its trip level is typed by hand while every confirmed breakdown in
-  the 08-04 ground truth was a deviation of 11–192 µA — so the smallest
-  real events sit *below* the 100 µA default and were only ever caught
-  post-hoc · **#223** the plot tool needs a GUI · **#224** telemetry
-  control wording · **#225** tabs have no horizontal scrollbar.
-- **Reopened:** **#159**, which #220 auto-closed by accident — its
-  verification (§O) has never run.
+- **#233** campaign docket · **#234** telemetry wording (`#224`) ·
+  **#235** trace labels always carry a machine candidate (`#162`'s unmet
+  criterion) · **#236** the scale-calibration rework.
+- **#236 in one line:** the machine measures the px→mm scale and the
+  operator verifies it, because thirteen logged hand calibrations put
+  operator precision at σ ≈ 1.0–1.1 % against an automatic fit's 0.40 %
+  residual. Adds a scale-only **re-anchor** that corrects a run's scale
+  without re-reviewing it.
+- **Every desk-side review is complete.** Both 07-23 breakdown runs, P3_2,
+  the P3_6 holdout frame, and both 08-05 runs folded into `SCORECARD.md`.
+- **P3_2's scale is corrected and verified** — resting 192.18 → 201.062 mm²,
+  with its px column, `notes` column and A/A₀-from-px byte-identical.
+- **Two of my own earlier claims were corrected**: the resting-area misses
+  were manual calibrations, not moved optics; and the audit p95 is
+  `np.percentile`-linear, not nearest-rank.

@@ -1,6 +1,42 @@
-# Project handoff — state as of 2026-08-05
+# Project handoff — state as of 2026-08-07
 
-**TL;DR:** Big day 2026-08-05. Merged, in order: the plot tool (#199),
+**TL;DR (2026-08-07, desk session, no bench access — read this first).**
+Main is green, **no open PRs**, suite **29/33** (the four failures are the
+documented environmental ones). Four PRs merged: **#233** the campaign
+docket, **#234** the telemetry wording (`#224`), **#235** trace/machine
+pairing (`#162`), and **#236** the scale-calibration rework — which grew
+well past its issue and is the headline of the session.
+
+**The scale chain is now understood, measured, and one run of it is fixed.**
+A corpus-wide auto-calibration sweep fitted every baseline frame and showed
+that **every recorded resting area in the corpus is explained, to two
+decimals, by its anchor's deviation from the automatic fit** — and that the
+eight runs which never had a manual anchor are exactly the eight that land
+on π·8² perfectly. Manual calibration is the only source of absolute-area
+error in this dataset. Thirteen logged hand calibrations put operator
+precision at **σ ≈ 1.05–1.07 % of diameter**, invariant across three
+different methods, against an automatic fit whose residual is **0.40 %**.
+So the app now defaults to *the machine measures, the operator verifies*.
+
+**Two of my own earlier claims were wrong and are corrected in place** —
+worth knowing because both are the kind that get quoted onward. The
+resting-area misses were **not** "the optics moved" (per-run anchoring
+absorbs optics entirely; they were manual calibrations), and the audit p95
+figures were computed nearest-rank where `sldea_diag` uses
+`np.percentile`-linear. Details in `SCORECARD.md`'s footnotes and the
+sweep report.
+
+**What a fresh agent should know before touching anything:** the bench debt
+is unchanged and still gates the priority thread (`BENCH_TEST.md` §M/§N,
+~25 min, no HV); the desk-side measurement work is **done** except the
+control round, whose premise has itself shifted (see Batch-QA); and
+`#236`'s new calibration UI has been driven hard by the operator on real
+data but **only on one comparatively clean disc** — P3_7 and low-contrast
+ink are unexercised.
+
+---
+
+**TL;DR (2026-08-05, the prior session):** Big day 2026-08-05. Merged, in order: the plot tool (#199),
 the scale gate, the 28-finding audit round, the **live telemetry
 sidecar** (#218), its **bench hand-over** (#220), **v1.1.0** as a GitHub
 **pre-release** (#222), the **tuner fixes** (#226) and the **camera
@@ -112,12 +148,71 @@ at milestones.
   report is now ASCII-clamped at one choke point (`sldea_diag._ascii`)
   with a regression test — policing individual f-strings is what failed
   last time.
+- **Suite baseline is now 29/33** (2026-08-07, after #235's and #236's new
+  suites: `test_sldea_reanchor.py` and the calibration suites). The four
+  failures are the same documented environmental ones. The 27/31 figure
+  below is the 2026-08-05 state, kept because the entries around it are
+  dated.
 - Suite baseline: `run_tests.py` → **27/31** on the Windows lab PC (the 4
   failures — test_arb_bin, test_camera_controls, test_presets_path,
   test_tk_fontfix — are environmental and documented; all SLDEA suites
   green). Was 26/30 before the telemetry sidecar added
   `test_sldea_telemetry.py`, and 25/29 before #199 added the sldea_plot
   suite.
+
+## The scale chain, settled 2026-08-07 (read before any absolute-mm² work)
+
+This is the session's substantive result and it changes how the campaign's
+absolute areas should be treated.
+
+**The sweep.** `baseline_disc` was run on every run's baseline frame
+(script and report: `_analysis\auto_calibration_sweep_20260806.*` beside the
+campaign data). It fits 13 of 15 runs — P3_7 refuses honestly, 145259 has no
+baseline frame — with uniform quality: circularity 0.971–0.999, residual
+**0.03–0.80 % of diameter**, 151–300 edge points.
+
+**The finding.** Every one of the eleven recorded resting areas in the
+corpus is predicted, to two decimal places, by its anchor's deviation from
+that automatic fit. The **eight runs with no manual anchor land on
+π·8² exactly**; the five with one miss it, by −0.02 % to +2.28 % in diameter.
+**Manual calibration is the only source of absolute-area error in this
+dataset.** Three runs were ≥1 %: P3_2 (−4.42 % in area), 152205 (−3.38 %),
+233451 (+2.44 %).
+
+**Why, measured not assumed.** Thirteen logged hand calibrations give
+operator precision **σ ≈ 1.05–1.07 % of diameter**, and it did not move
+across three quite different methods (circle-fit, thin-stroke circle,
+two-point-with-rotation) nor after a diameter leak that had been correlating
+the rounds was closed. A radial intensity profile of P3_2's baseline shows
+why: the disc/paper step is **20 gray levels spread over ~60 px of radius**,
+so there is no line to click — the operator is choosing a point inside a
+gradient wider than the stroke they draw with. The machine takes the
+steepest gradient on each of 204 rays and fits robustly.
+
+**Consequences already applied.** The app defaults to verify-the-fit
+(#236); a scale-only **re-anchor** path corrects a run's scale without
+re-reviewing it; **P3_2 has been corrected** (resting 192.18 → 201.062 mm²,
+`method: auto-verified`, px/notes/A-A₀-from-px all byte-identical). 152205
+and 233451 still carry their offsets — deliberately, since both are retired
+from measurement and correcting them would rewrite the breakdown fixture for
+no measurement gain. Their offsets are recorded to two decimals.
+
+**The control round's premise has shifted.** It was justified by "the optics
+moved between sessions". Per-run anchoring absorbs optics movement entirely —
+which is why the eight autofit runs hit π·8² while spanning 527–606 px. The
+residual absolute-mm² risk is calibration *precision*, and auto-calibration
+addresses it directly. Its remaining unique value is the machine-vs-operator
+boundary offset on ramp frames, which is a different quantity from anything
+the sweep measured. **Decide what it is for before spending an operator on
+it** — and note its operator-repeat leg has never had data, while `#215`'s
+three-round spread now generates that number for free on every manual
+calibration.
+
+**What is still unmeasured, and cannot be measured by more of the same:**
+the automatic fit's own **systematic** error. Agreement with by-eye readings
+on three P3 baselines within ~1 % (the `baseline_disc` docstring) is the only
+external check that exists, and sweeping the fitter against itself cannot
+supply another. A 0.03 % residual is precision, not accuracy.
 
 ## Batch-QA campaign (data side, lives OUTSIDE the repo)
 
@@ -459,6 +554,24 @@ open decisions below.
 **In order. The first item is the whole bottleneck; everything else is
 genuinely independent of it.**
 
+**Status 2026-08-07:** items 1/1b/2 below are unchanged and still owed.
+Items 3 and 4 are **DONE** — every desk-side review is complete and both
+08-05 runs are folded in. Item 5's list has been worked: `#224` merged in
+#234, and `#215` merged in #236 having grown into the whole calibration
+rework. What is genuinely left at a desk, in order:
+
+- **`#237`** split the elapsed timer (detection time vs session time) ·
+  **`#238`** the Edge Review "How to use" panel · **`#216`** hover
+  tooltips and button flow. All three are small, hardware-free, and were
+  asked for by the operator after a long real session — they are the
+  highest-value desk work now that the measurement side is quiet.
+- **`#225`** the horizontal-scrollbar family (root-causes `#27`, related
+  to `#26`) · **`#197`** tuner run picker · **`#200`** connection takeover
+  (touches instrument connection — cannot be bench-verified here) ·
+  **`#223`** a GUI for the plot tool.
+- **The control round's premise changed** — see Batch-QA. Do not simply
+  "do the control round" without reading that first.
+
 1. **§M + §N at the bench — ~25 min, NO high voltage, delegable.** A dry
    run never commands the SG, so neither needs HV training. Between them
    they unblock trusting `telemetry.csv`, promoting v1.1.0 out of
@@ -539,6 +652,35 @@ genuinely independent of it.**
    to Git LFS / release-assets-only.
 4. **`demos/` fate** — decision material for open issue #32 (GUI
    framework); archive the trio when #32 is decided.
+
+## Roster changes 2026-08-07
+
+**Merged and delivered:** `#224` (telemetry wording, #234) · `#162`'s unmet
+criterion (trace labels always carry a machine candidate, #235) · `#215`
+(#236 — see below).
+
+**`#215` is delivered but deliberately left OPEN.** #236 implemented its
+fit-a-circle-three-rounds ask *and* superseded it: the measured σ ≈ 1.05 %
+means the circle method misses the ±0.4 % SE budget at three rounds, so it
+shipped as a **fallback** with verify-the-automatic-fit as the default. What
+keeps the issue open is that its own numbers remain unvalidated — the 1 %
+spread gate, the round count, the wheel steps and the spawn band are all
+chosen rather than measured, and nobody has judged the dialog on
+**low-contrast ink** (P3_2's disc is comparatively clean). Close it when a
+second device's worth of calibrations exists.
+
+**New:** **`#237`** the elapsed timer keeps running after detection, so
+detection time is destroyed as soon as it is produced — split it or freeze
+it · **`#238`** an Edge Review "How to use" panel (distinct from `#216`'s
+tooltips: what do I do here, versus what does this button do), carrying the
+three things that cost time today — wash-out frames get traced not
+rejected, Accept stages but Save commits, and a re-anchor skips detection.
+`#238` also flags a real design question: the repo already regenerates a
+manual from `docs/manual-src/content.json`, so in-app workflow prose is a
+second copy that will drift.
+
+**`#216`** now also carries the operator's unprompted re-request for
+tooltips after a long real session, so treat that item as confirmed.
 
 ## Active issues roster (curated subset — full list on GitHub)
 
@@ -638,6 +780,34 @@ alone does nothing; likely the root cause of #27, same family as #26).
 Verified by re-running it, not recalled. If a fact here disagrees with
 prose elsewhere in this file, trust this and fix the other one.
 
+**Five more traps, all from 2026-08-06/07 and all of which cost real time:**
+
+6. **`Accept` in the calibration dialog only STAGES the anchor — Save
+   writes it.** The operator accepted a corrected fit on live P3_2, closed
+   before Save, and the correction was lost. Nothing on screen implies it.
+   The `scale_calibration_log.txt` line is written either way, which is how
+   we know the accept happened.
+7. **Calibration methods are recorded as NAMES on disk, not letters.**
+   `verify` / `circle` / `twopoint` in `cal_mode:` and `mode=`. The UI
+   letters were swapped on 2026-08-06 (A=verify, B=circle, C=twopoint), so
+   any *legacy* stored letter means the pre-swap thing: `A`=circle,
+   `B`=twopoint, `C`=verify. `se.cal_mode_read` is the single rule — use it,
+   do not compare letters by hand. Live data contains both vocabularies.
+8. **A low residual is precision, not accuracy.** The CB run's fit has a
+   0.03 % residual, which says its 284 edge points lie on a circle — not
+   that it is the right circle. The automatic fit's systematic error is
+   measured by nothing, and no amount of re-fitting can supply it.
+9. **Per-frame `audit_nostep` / `audit_bias` are EXCEPTION FLAGS, not
+   measurements** (`sldea_edge.py:1190-1196` sets them only when a frame
+   exceeds its gate). Null means the frame PASSED. The real numbers are in
+   `frames[].audit`. Reading the flags as measurements turns a pass into
+   "unevaluated" — done once, corrected in `SCORECARD.md` footnote 3.
+10. **The audit p95 is `np.percentile`-linear**, matching `sldea_diag.py:730`
+   and every run's `sldea_diag.txt`. Nearest-rank differs on six of twelve
+   runs (P3_6 5.60 vs 5.90, 152205 3.60 vs 3.74). One cell in the Pass-0
+   scorecard column — P3_1's `2.8` — is a transcription slip; its own
+   diag.txt says 2.7. Do not "correct" the method toward that cell.
+
 **Five traps that have already caught someone:**
 
 1. **Your local `main` is probably stale.** `git fetch` updates
@@ -680,7 +850,7 @@ prose elsewhere in this file, trust this and fix the other one.
 **What you can do at a desk, no hardware** — all verified to run:
 
 ```
-.venv\Scripts\python run_tests.py                       # 27/31; the 4 failures are environmental
+.venv\Scripts\python run_tests.py                       # 29/33 as of 2026-08-07; the 4 failures are environmental
 .venv\Scripts\python tests\test_sldea_telemetry.py      # or any suite directly
 .venv\Scripts\python sldea_plot.py --selftest OUT.png
 .venv\Scripts\python sldea_diag.py --selftest OUT.png

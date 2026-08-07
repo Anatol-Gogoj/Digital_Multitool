@@ -93,6 +93,43 @@ def test_side_text_elide_drops_the_tail_first():
     assert gui.elide("abc", 0, m) == '…'
 
 
+def test_clock_readouts_separate_detection_time_from_session_time():
+    """`#237`: the one toolbar clock ran from Detect until Save, so the
+    moment detection finished it started counting the human's review time
+    instead — destroying the only number a run can be planned with. Two
+    readouts now, and both strings are pure so their wording is pinned
+    without a display."""
+    import sldea_edge_gui as gui
+    # fmt_dur: seconds below a minute, m+s below an hour, and it ROLLS
+    # OVER (the old M:SS printed a 90-minute pass as '90:00')
+    assert gui.fmt_dur(0) == '0s' and gui.fmt_dur(43) == '43s'
+    assert gui.fmt_dur(59) == '59s' and gui.fmt_dur(60) == '1m00s'
+    assert gui.fmt_dur(134) == '2m14s'          # the issue's own example
+    assert gui.fmt_dur(3599) == '59m59s' and gui.fmt_dur(3600) == '1h00m'
+    assert gui.fmt_dur(7500) == '2h05m'
+    assert gui.fmt_dur(-5) == '0s'              # never a negative duration
+    assert gui.fmt_dur(134.9) == '2m14s'        # truncates, never rounds up
+    # the detection line, three states
+    assert gui.detect_readout() == 'detect: not run'
+    assert gui.detect_readout(3, None) == 'detect: not run'
+    # ...frozen: the frame COUNT travels with the time, so it reads as a
+    # rate an operator can extrapolate to the next run
+    done = gui.detect_readout(81, 134.2)
+    assert done == 'detect: 81 frames in 2m14s', done
+    # ...in flight: progress, and never confusable with the frozen form
+    live = gui.detect_readout(12, 35.0, 81)
+    assert '12/81' in live and '35s' in live and ' in ' not in live, live
+    # the in-flight form must not be the WIDEST of the three, or it grows
+    # the toolbar's fixed clock box on the one screen it has to hold
+    # still: the progress bar beside it is the toolbar's only give
+    assert len(gui.detect_readout(999, 3599.0, 999)) <= \
+        len(gui.detect_readout(999, 3599.0)), 'the live form is the widest'
+    # the session line is a separate string, so neither can be mistaken
+    # for the other on screen
+    assert gui.session_readout(312) == 'session 5m12s'
+    assert 'detect' not in gui.session_readout(312)
+
+
 def _fake_run(dirpath):
     """Minimal synthetic SLDEA run (baseline + two activated frames) --
     the same scene test_app_launch boots the real GUI on."""
@@ -1876,6 +1913,119 @@ def test_scale_gate_rearms_on_every_run_switch():
         app._calibrate_scale = lambda then_detect=False: opened.append(1)
         app.detect()
         assert opened, "detect() did not divert after the run switch"
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_detection_clock_freezes_while_the_session_clock_runs_on():
+    """`#237`: ONE clock ran from ▶ Detect Edges until 💾 Save, so the
+    detection time was overwritten a second after it was produced and the
+    readout became a session stopwatch. Now: the detection line freezes
+    when the pass ends and is repainted by nothing else; the session line
+    keeps counting through Save and across a run switch; and the
+    detection line resets per run, because a saved run re-opened for a
+    scale-only re-anchor (`#215`) runs NO detection and the absence of a
+    fresh detection time is the signal that says so."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('two clocks')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_clocks_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    try:
+        _fake_run(os.path.join(d, 'SLDEA_A'))
+        run_b = _fake_run(os.path.join(d, 'SLDEA_B'))
+        app = gui.EdgeReviewApp(root, path=run_b)
+        assert app.run is not None
+
+        def detect_txt():
+            return app.detect_lbl.cget('text')
+
+        def session_txt():
+            return app.clock_lbl.cget('text')
+
+        # BEFORE any pass: the absence is stated, not left blank, and the
+        # session clock is already running (the window is open)
+        assert detect_txt() == 'detect: not run', detect_txt()
+        assert session_txt().startswith('session '), session_txt()
+
+        # THE BOX HOLDS BOTH LINES AND THE WIDEST TEXT. Found by measuring
+        # the real window: the toolbar row is one button tall, so the
+        # fixed box inherited 25 px and clipped the session line to 4 of
+        # its 21. Asked of the geometry REQUESTS, so this holds on a
+        # withdrawn root -- and a box too small is exactly what a font or
+        # scaling change would do to a hard-coded pair of numbers.
+        box = app.detect_lbl.master
+        need_h = (app.detect_lbl.winfo_reqheight()
+                  + app.clock_lbl.winfo_reqheight())
+        assert int(box.cget('height')) >= need_h, \
+            f"clock box {box.cget('height')} px cannot show both lines"
+        for txt in (gui.detect_readout(999, 3600.0),
+                    gui.detect_readout(999, 3599.0, 999),
+                    gui.detect_readout()):
+            app.detect_lbl.config(text=txt)
+            assert app.detect_lbl.winfo_reqwidth() <= int(box.cget('width')), \
+                f"clock box is narrower than {txt!r}"
+        app.detect_lbl.config(text=gui.detect_readout())
+
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app._t0 = None
+        app.detect_all_sync()
+        frozen = detect_txt()
+        n = len(app.frame_rows)
+        assert frozen.startswith(f'detect: {n} frames in '), frozen
+        first_t0 = app._t0
+        assert first_t0 is not None
+
+        # THE BUG'S OWN SHAPE: let the clock tick as if five minutes of
+        # review had passed. The session line must move; the detection
+        # line must be byte-identical -- it is an answer, not a stopwatch.
+        app._t_session -= 300
+        app._tick_clock()
+        moved = session_txt()
+        assert moved == 'session 5m00s', moved
+        assert detect_txt() == frozen, "detection time kept counting"
+
+        # SAVE does not stop the session clock any more: a session
+        # outlives a Save (the batch cockpit saves one run and moves on)
+        app.save()
+        assert app._clock_on, "Save stopped the session clock"
+        app._t_session -= 60
+        app._tick_clock()
+        assert session_txt() == 'session 6m00s', session_txt()
+        assert detect_txt() == frozen, "Save rewrote the detection time"
+
+        # A RUN SWITCH re-arms the detection line (it belonged to run B's
+        # pass) and leaves the session line alone (one session, many runs)
+        other = [i for i, v in enumerate(app.run_box['values'])
+                 if 'SLDEA_A' in v][0]
+        app.run_box.current(other)
+        app._pick_run()
+        assert detect_txt() == 'detect: not run', detect_txt()
+        assert app._t0 is None
+        app._tick_clock()
+        assert session_txt() == 'session 6m00s', session_txt()
+
+        # THE SCALE-ONLY RE-ANCHOR PATH: run B is saved and carries px, so
+        # re-opening it routes to re-anchor rather than calibrate -- and
+        # that path never detects, so the readout must still say so.
+        back = [i for i, v in enumerate(app.run_box['values'])
+                if 'SLDEA_B' in v][0]
+        app.run_box.current(back)
+        app._pick_run()
+        assert app._scale_intent()['intent'] == gui.SCALE_INTENT_REANCHOR
+        assert detect_txt() == 'detect: not run', detect_txt()
+
+        # A SECOND PASS IS TIMED ON ITS OWN: `_t0 = _t0 or now` made every
+        # later pass report the time since the FIRST one of the session
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        time.sleep(0.01)
+        app.detect_all_sync()
+        assert app._t0 > first_t0, "the second pass reused the first's t0"
     finally:
         gui.messagebox = real_mb
         root.destroy()

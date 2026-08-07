@@ -64,3 +64,18 @@ milestones, not this one.
   fully functional there. Instrument control is Linux-bench-only.
 - Old `active_area_mm2` values written before 2026-07-28 carry a 2.3–2.7×
   scale bug — reprocess, never mix.
+- **The px→mm scale is the machine's job, not the operator's** (measured
+  2026-08-06). Hand calibration has σ ≈ 1.0–1.1 % of diameter whatever the
+  method, because the disc edge is a ~60 px gradient rather than a line;
+  `baseline_disc` fits it to a 0.03–0.80 % residual. Every absolute-area
+  error in the corpus came from a manual anchor, and every run that used the
+  automatic fit lands on π·8² exactly. Edge Review therefore defaults to
+  verify-the-fit; hand measurement is the fallback for when the fit refuses.
+- **Calibration methods are stored as NAMES (`verify`/`circle`/`twopoint`),
+  never letters.** The UI letters were swapped 2026-08-06, so a legacy stored
+  letter means the pre-swap method (`A`=circle, `B`=twopoint, `C`=verify).
+  Read them through `se.cal_mode_read`; live data contains both vocabularies.
+- **An auto-verified anchor has no independent cross-check, and the code says
+  so rather than faking one.** Declaring the fitted disc to be 16 mm makes
+  the resting area π·8² by construction, so a mask-area test on it can only
+  pass. Do not add a cross-check that cannot fail.

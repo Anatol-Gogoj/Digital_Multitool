@@ -181,14 +181,14 @@ ANCHOR_HDR = '--- Edge Review scale anchor (SLDEA) ---'
 # read: 15 runs carry the 2026-08-05 two-click anchor with none of them,
 # and two runs (P3_6_2.5mL_20260729, DOT_P3_1_20260729) predate the gate
 # and carry no block at all. load_scale_anchor must keep serving both.
-# cal_mode/sigma_pct/se_pct arrived with the two-point mode B
+# cal_mode/sigma_pct/se_pct arrived with the two-point `twopoint` mode
 # (2026-08-06 evening): with the round count configurable, a bare range is
 # not comparable between anchors, so the n-aware conversion is recorded
 # alongside it. `method` is NOT where the mode goes — mm_per_px matches it
 # exactly against 'manual-calibration' to give a hand calibration priority
 # over every automatic reference, so a mode suffix there would silently
-# demote every mode-B anchor back below the disc fit.
-# fit_*/verified_* arrived with mode C (2026-08-06 evening): an
+# demote every twopoint anchor back below the disc fit.
+# fit_*/verified_* arrived with the `verify` mode (2026-08-06 evening): an
 # 'auto-verified' anchor carries NO rounds and NO spread — there is one
 # automatic fit and a human who approved it — so what quantifies it is the
 # fit's own quality, and what makes it auditable is who approved it when.
@@ -200,7 +200,7 @@ ANCHOR_HDR = '--- Edge Review scale anchor (SLDEA) ---'
 # "the run was reviewed again" — which nothing else in this block records,
 # because every other field describes the anchor and not what was done
 # with it. Absent on every anchor written by a normal Save, exactly like
-# rounds_px is absent on a mode-C anchor.
+# rounds_px is absent on a verify anchor.
 _ANCHOR_KEYS = ('method', 'cal_mode', 'diam_px', 'diam_mm', 'mm_per_px',
                 'anchor_frame', 'anchor_is_baseline', 'auto_diam_px',
                 'n_rounds', 'rounds_px', 'spread_px', 'spread_pct',
@@ -340,6 +340,20 @@ def load_scale_anchor(rundir):
                 out[k] = vals
         elif k == 'anchor_is_baseline':
             out[k] = v not in ('0', '', 'False')
+        elif k in ('cal_mode', 'prev_cal_mode'):
+            # THE LEGACY LETTER RULE, applied at the boundary so no caller
+            # can forget it (cal_mode_read). A block written before
+            # 2026-08-06 late holds a pre-swap letter — live P3_2 holds
+            # `cal_mode: C` AND `prev_cal_mode: C`, both meaning verify —
+            # and under the new labels C is twopoint. Normalising here turns
+            # every reader (sldea_diag, the reuse path, the status line)
+            # honest at once, and the value that goes back out on a re-save
+            # is the NAME, i.e. a correct translation of what the letter
+            # meant rather than a letter that has changed meaning.
+            #
+            # `default=v` keeps an unrecognised token verbatim: a reader
+            # must see what is actually on disk, not a guess.
+            out[k] = cal_mode_read(v, default=v)
         else:
             out[k] = v
     return out if out.get('diam_px') else None
@@ -365,20 +379,47 @@ CAL_ROUNDS = 3
 # round is added, so a range gate's own remedy could never clear it.
 CAL_SPREAD_PCT = 1.0
 
-# ---- mode A / mode B: two calibration methods, comparable statistics ----
-# The operator drove mode A (circle fit) six times on a scratch copy of
+# ===========================================================================
+# THE THREE CALIBRATION METHODS — recorded as NAMES, labelled with letters
+# ===========================================================================
+# The value that goes on disk is a self-describing NAME ('verify' /
+# 'circle' / 'twopoint'); the letters A / B / C are UI labels only
+# (CAL_MODE_LABELS). That split exists because the letters have already
+# been RENUMBERED once, on 2026-08-06 late, at the operator's request:
+#
+#     before the swap        after the swap
+#     A = circle             A = verify     (where the gate opens)
+#     B = twopoint           B = circle
+#     C = verify             C = twopoint
+#
+# and the old letters are ON DISK. `scale_calibration_log.txt` carries
+# `mode=A|B|C` and setup.txt's anchor block carries `cal_mode:` — live
+# campaign data included (P3_2_2.5mL_20260728's block reads `cal_mode: C`
+# and its log holds 8 mode=C lines, all meaning VERIFY). Renumbering a
+# stored letter reinterprets every one of them: a logged `mode=C` would
+# flip from "verified the automatic fit" to "clicked two points", silently.
+#
+# So: nothing writes a letter ever again, and every read of a stored value
+# goes through `cal_mode_read`, whose rule for a legacy letter is the
+# PRE-SWAP meaning above. A name is immune to the next relabelling too,
+# which is the actual fix — the letters are presentation and presentation
+# is what operators change their minds about.
+#
+# ---- circle: fit a circle to the boundary (label B; was label A) --------
+# The operator drove the circle mode six times on a scratch copy of
 # P3_2_2.5mL_20260728 (`#215` comment, 2026-08-06). Recorded 3-round
 # ranges: 1.94, 2.09, 1.62, 1.81, 1.44 % plus one under 1 %. Via d2(3)
 # that is per-fit sigma ~ 1.05 % of diameter, so the 3-round mean SE is
 # 0.61 % diameter / 1.21 % area against §2.1's ~0.4 % / ~0.8 % budget.
 # The operator's diagnosis: "the bright green circle occludes the edges" —
 # a 3 px stroke laid on the boundary hides the feature being aligned to.
-# Mode B is the alternative to A/B against it: two clicks on roughly
-# opposite edge points, N rounds, the image RANDOMLY ROTATED between
-# rounds, and markers that do not cover the boundary.
-CAL_MODE_CIRCLE = 'A'
-CAL_MODE_TWOPOINT = 'B'
-# ---- mode C: the machine measures, the operator VERIFIES ----------------
+# ---- twopoint: two opposite edge points (label C; was label B) ----------
+# The alternative measured against it: two clicks on roughly opposite edge
+# points, N rounds, the image RANDOMLY ROTATED between rounds, and markers
+# that do not cover the boundary.
+CAL_MODE_CIRCLE = 'circle'
+CAL_MODE_TWOPOINT = 'twopoint'
+# ---- verify: the machine measures, the operator VERIFIES (label A) ------
 # The A/B/A' experiment settled it (`#215` comment, 2026-08-06 evening):
 # eleven hand calibrations on P3_2's baseline against an automatic fit of
 # 577.08 px (circ 0.999, conf 0.871, residual 2.3 px, 204 edge points).
@@ -399,20 +440,88 @@ CAL_MODE_TWOPOINT = 'B'
 # So the machine MEASURES and the operator VERIFIES, with hand measurement
 # kept for the runs where the fit refuses -- as it does on
 # P3_7_2.3mL_20260729.
-CAL_MODE_VERIFY = 'C'
-CAL_MODES = (CAL_MODE_CIRCLE, CAL_MODE_TWOPOINT, CAL_MODE_VERIFY)
+CAL_MODE_VERIFY = 'verify'
+# Ordered as the chooser shows them: verify first, because that is where
+# the gate opens and the label row reads A, B, C down the row.
+CAL_MODES = (CAL_MODE_VERIFY, CAL_MODE_CIRCLE, CAL_MODE_TWOPOINT)
 CAL_MANUAL_MODES = (CAL_MODE_CIRCLE, CAL_MODE_TWOPOINT)
-# Default rounds per mode. A keeps 3 so mode A's behaviour is unchanged;
-# B defaults to 5 because at the target per-fit sigma < 0.9 %, 5 rounds
-# gives SE = 0.40 % and lands on §2.1's budget. C has NO rounds: there is
-# one automatic fit and it is either approved or it is not, so it is
-# deliberately absent from this table rather than given a 1.
+# THE UI LABELS — presentation only, never written to a record. Swapped
+# 2026-08-06 late at the operator's request so the letter an operator reads
+# first is the method the gate actually opens in.
+CAL_MODE_LABELS = {CAL_MODE_VERIFY: 'A',
+                   CAL_MODE_CIRCLE: 'B',
+                   CAL_MODE_TWOPOINT: 'C'}
+# THE READ RULE for a letter found in an existing record — the PRE-SWAP
+# meanings, which are the only meanings any letter on disk can have,
+# because the swap and the letters-stop-being-written change landed
+# together. Never extend this with post-swap letters: that would make a
+# stored letter ambiguous, which is precisely what the names avoid.
+CAL_MODE_LEGACY = {'A': CAL_MODE_CIRCLE,
+                   'B': CAL_MODE_TWOPOINT,
+                   'C': CAL_MODE_VERIFY}
+# Default rounds per mode. `circle` keeps 3 so its behaviour is unchanged;
+# `twopoint` defaults to 5 because at the target per-fit sigma < 0.9 %, 5
+# rounds gives SE = 0.40 % and lands on §2.1's budget. `verify` has NO
+# rounds: there is one automatic fit and it is either approved or it is
+# not, so it is deliberately absent from this table rather than given a 1.
 CAL_ROUNDS_TWOPOINT = 5
 CAL_MODE_ROUNDS = {CAL_MODE_CIRCLE: CAL_ROUNDS,
                    CAL_MODE_TWOPOINT: CAL_ROUNDS_TWOPOINT}
-# Which MANUAL mode the dialog falls back to. Mode A, the incumbent:
+# Which MANUAL mode the dialog falls back to. The circle, the incumbent:
 # switching it would change every existing hand-calibration path silently.
 CAL_DEFAULT_MODE = CAL_MODE_CIRCLE
+
+
+def cal_mode_read(value, default=None):
+    """The canonical mode NAME for a value read back from any record —
+    setup.txt's `cal_mode:` / `prev_cal_mode:`, a `mode=` field in
+    scale_calibration_log.txt, or anything else that stored one.
+
+    THE LEGACY RULE, in one place so every reader shares it: a bare letter
+    is a PRE-SWAP letter and means what it meant before 2026-08-06 late —
+    **A = circle, B = twopoint, C = verify** (CAL_MODE_LEGACY). Live
+    campaign data depends on this: `P3_2_2.5mL_20260728/setup.txt` records
+    `cal_mode: C`, written when C meant verify, and its
+    scale_calibration_log.txt holds eight `mode=C` lines with the same
+    meaning. Under the new labels C is twopoint, so without this rule every
+    one of those records would silently claim the operator clicked two
+    points on a run where they approved an automatic fit.
+
+    An unrecognised token comes back as `default` rather than being guessed
+    at — a hand-edited setup.txt is a fact of bench life, and inventing a
+    method for a typo is worse than reporting that there is none."""
+    if value is None:
+        return default
+    s = str(value).strip()
+    if not s:
+        return default
+    if s in CAL_MODES:
+        return s
+    if s.lower() in CAL_MODES:
+        return s.lower()
+    return CAL_MODE_LEGACY.get(s.upper(), default)
+
+
+def cal_mode_label(value):
+    """The UI letter for a mode value — legacy letters included, via
+    cal_mode_read. '?' when the value names no method this build knows."""
+    return CAL_MODE_LABELS.get(cal_mode_read(value), '?')
+
+
+def cal_mode_text(value):
+    """How a mode is NAMED to a human: `A (verify)`.
+
+    Both halves on purpose. The letter is what the operator sees on the
+    dialog's radio row today; the name is what the record holds and what
+    survives the next relabelling. A report that quoted only the letter
+    would be unreadable after the next swap, and one that quoted only the
+    name would not match the screen."""
+    name = cal_mode_read(value)
+    if not name:
+        # not a method this build knows: quote it verbatim, flagged, rather
+        # than dropping it or laundering it into a label
+        return f"{str(value).strip()} (unrecognised method)" if value else ''
+    return f"{CAL_MODE_LABELS[name]} ({name})"
 
 # The two methods that produce an anchor a human is answerable for, and
 # which therefore override every automatic reference at Save (_is_manual_cal).
@@ -429,13 +538,15 @@ ANCHOR_METHODS = (ANCHOR_METHOD_MANUAL, ANCHOR_METHOD_VERIFIED)
 def cal_open_mode(auto_ref):
     """Which method the calibration gate OPENS in.
 
-    Mode C whenever there is an automatic fit to verify, because on the one
-    disc anyone has measured the machine beat every human attempt; the
-    incumbent manual mode when there is not, because a fit that refused
-    cannot be verified and the operator has to measure after all.
+    `verify` (label A) whenever there is an automatic fit to verify, because
+    on the one disc anyone has measured the machine beat every human
+    attempt; the incumbent manual mode when there is not, because a fit that
+    refused cannot be verified and the operator has to measure after all.
+    The label row is ordered so that this mode is also the FIRST letter —
+    the default and the letter an operator reads first are the same thing.
 
     Takes the fit itself rather than a flag so the caller cannot claim mode
-    C is available without holding the thing mode C displays."""
+    `verify` is available without holding the thing it displays."""
     return (CAL_MODE_VERIFY if (auto_ref or {}).get('diam_px')
             else CAL_DEFAULT_MODE)
 
@@ -536,7 +647,8 @@ def calibration_stats(diams):
 
 
 def verify_stats(ref):
-    """A `calibration_stats`-shaped record for ONE automatic fit — mode C's
+    """A `calibration_stats`-shaped record for ONE automatic fit — the
+    `verify` mode's
     anchor — or None without a usable fit.
 
     Every precision field is **None, never 0**. That is the whole point of
@@ -549,7 +661,7 @@ def verify_stats(ref):
     zero, and this code has already been bitten once by conflating them
     (`se_ok` returns None rather than True for an unjudgeable set).
 
-    What DOES quantify a mode-C anchor is the fit's own quality — its
+    What DOES quantify a verify anchor is the fit's own quality — its
     residual over 200-odd edge points, its circularity, its arc coverage —
     which travels in the record's `fit_*` fields, not here."""
     d = float((ref or {}).get('diam_px') or 0.0)
@@ -570,7 +682,7 @@ def fit_resid_pct(ref):
     On P3_2's baseline that is 2.3 px on 577.08 px = **0.40 %**, which lands
     on SLDEA_MEASUREMENT §2.1's ~0.4 % diameter budget. It is NOT an
     operator-repeatability term: nobody fitted anything, so there is no
-    scatter across rounds to convert, and quoting σ/SE for a mode-C anchor
+    scatter across rounds to convert, and quoting σ/SE for a verify anchor
     would be quoting a statistic of a sample of one.
 
     Deliberately CONSERVATIVE. This is the per-point scatter of the edge
@@ -593,7 +705,7 @@ def fit_resid_pct(ref):
 
 def verify_note(ref, who=None, when=None):
     """One ASCII line for the anchor record's `guard` field when the
-    operator APPROVED the automatic fit (mode C).
+    operator APPROVED the automatic fit (the `verify` mode).
 
     It says what was and was not checked, because for this anchor those are
     different from every other anchor's and the difference is not intuitive:
@@ -601,7 +713,7 @@ def verify_note(ref, who=None, when=None):
     **There is no independent cross-check available for an automatic
     anchor.** Declaring the fitted disc to be `diam_mm` makes the resting
     area π·(diam_mm/2)² *by construction*, so running `anchor_guard` on a
-    mode-C anchor returns +0.00 % on both of its tests, always, on any
+    verify anchor returns +0.00 % on both of its tests, always, on any
     frame, however wrong the fit is. It is not a check that passed; it is a
     check that cannot fail, and printing it would manufacture confidence out
     of an identity. (The same algebra is why `anchor_guard`'s two tests were
@@ -789,7 +901,7 @@ def guard_is_vacuous(anchor):
     """True when running `anchor_guard` on this anchor could only ever
     PASS, so its result must not be shown as a cross-check anywhere.
 
-    The case is an 'auto-verified' anchor (mode C): the anchor's diameter IS
+    The case is an 'auto-verified' anchor (the `verify` mode): its diameter IS
     the automatic fit's diameter, so `diam_pct` is exactly 0, and declaring
     that fitted disc to be `diam_mm` makes the implied resting area
     π·(diam_mm/2)² by construction, so `area_pct` is exactly 0 too. Both of
@@ -1004,8 +1116,9 @@ def reanchor_anchor_fields(prev, plan):
     re-anchor rather than by a review pass.
 
     Merged into the dict `save_scale_anchor` is given, so a re-anchored run
-    keeps the FULL provenance of its new anchor (mode C's fit quality and
-    who approved it, or a hand measurement's rounds and spread) and gains
+    keeps the FULL provenance of its new anchor (the verify mode's fit
+    quality and who approved it, or a hand measurement's rounds and
+    spread) and gains
     the record that no review happened and what the scale was before.
 
     `prev_diam_px` comes only from a recorded anchor block; `prev_implied_px`
@@ -1020,7 +1133,12 @@ def reanchor_anchor_fields(prev, plan):
     if p.get('method'):
         out['prev_method'] = p['method']
     if p.get('cal_mode'):
-        out['prev_cal_mode'] = p['cal_mode']
+        # the NAME, never a letter — `prev` may be a block written before
+        # 2026-08-06 late (live P3_2's is: `prev_cal_mode: C`, meaning
+        # verify), and copying the letter forward would carry a value whose
+        # meaning has since changed into a brand-new record
+        out['prev_cal_mode'] = cal_mode_read(p['cal_mode'],
+                                             default=p['cal_mode'])
     pl = plan or {}
     if pl.get('old_diam_px'):
         out['prev_implied_px'] = float(pl['old_diam_px'])
@@ -1047,8 +1165,9 @@ def reanchor_log_record(anchor, plan, when=None, frame=None):
     vfy = guard_is_vacuous(a)
     se_pct = _num(a.get('se_pct'))
     if vfy:
-        # THE SAME record mode C's own round-set line is built from, so the
-        # two lines describing one anchor use one vocabulary: n=1, and every
+        # THE SAME record the verify mode's own round-set line is built
+        # from, so the two lines describing one anchor use one vocabulary:
+        # n=1, and every
         # precision field 'undefined' rather than 0.00% or a bare n=0.
         stats = verify_stats(a) or {'n': 1, 'values': [], 'mean': 0.0,
                                     'single_fit': True}
@@ -1068,7 +1187,8 @@ def reanchor_log_record(anchor, plan, when=None, frame=None):
                  'single_fit': False}
     auto_px = _num(a.get('auto_diam_px'))
     rec = {'when': when or time.strftime('%Y-%m-%dT%H:%M:%S'),
-           'mode': a.get('cal_mode') or (CAL_MODE_VERIFY if vfy else '?'),
+           'mode': (cal_mode_read(a.get('cal_mode'))
+                    or (CAL_MODE_VERIFY if vfy else '?')),
            'stats': stats, 'gate': CAL_SE_PCT,
            # se_ok is already three-valued and refuses n < 2 and a missing
            # SE, so an unjudgeable set renders 'UNJUDGEABLE' rather than
@@ -1102,7 +1222,7 @@ def reanchor_log_record(anchor, plan, when=None, frame=None):
 # ---------------------------------------------------------------------------
 # the calibration log — every completed round-set, accepted or declined
 #
-# Why this file exists: the six mode-A spreads that drove the whole
+# Why this file exists: the six circle-mode spreads that drove the whole
 # two-point redesign (`#215` comment, 2026-08-06 — 1.94, 2.09, 1.62, 1.81,
 # 1.44 % and one under 1 %) survive ONLY because they were read off the
 # screen and typed into a chat. The run's setup.txt was never written,
@@ -1118,6 +1238,43 @@ def reanchor_log_record(anchor, plan, when=None, frame=None):
 # ---------------------------------------------------------------------------
 
 CAL_LOG_NAME = 'scale_calibration_log.txt'
+# The marker that says a log file's `mode=` column holds NAMES. Its absence
+# in an existing file is what triggers the one-off migration note below —
+# matched as a substring of the file, so it is written once and never again.
+CAL_LOG_VOCAB_MARK = 'mode= holds a NAME'
+CAL_LOG_HEADER = (
+    '# SLDEA Edge Review scale calibrations, one line per completed '
+    'round-set, accepted or declined.\n'
+    '# ' + CAL_LOG_VOCAB_MARK + ': verify | circle | twopoint.\n'
+    '#   verify   = the operator VERIFIED the automatic disc fit (no '
+    'rounds: sigma/se/range are\n'
+    '#              undefined, NOT zero -- what quantifies it is the fit '
+    'resid/circ/conf/n_edge)\n'
+    '#   circle   = the operator fitted a circle to the boundary, n rounds\n'
+    '#   twopoint = the operator clicked two opposite edge points, n '
+    'rounds, view rotated per round\n'
+    '# LEGACY: a line whose mode= is a bare LETTER predates 2026-08-06 late '
+    'and uses the\n'
+    '#   PRE-SWAP letters -- A = circle, B = twopoint, C = verify. Read '
+    'them through\n'
+    '#   sldea_edge.cal_mode_read; do NOT read them against the dialog\'s '
+    'current A/B/C labels.\n'
+    '# sigma = per-fit precision (range/d2(n)); se = sigma/sqrt(n) on the '
+    'mean; area_se = 2*se.\n'
+    '# Compare methods on SIGMA -- it is the only figure that survives a '
+    'different n.\n')
+# Written ONCE into a log file that predates the letters->names change, so
+# the file says where its own vocabulary changes instead of leaving a reader
+# to notice that `mode=C` and `mode=verify` are both in it.
+CAL_LOG_MIGRATION_NOTE = (
+    '# --- 2026-08-06: ' + CAL_LOG_VOCAB_MARK + ' from here down: '
+    'verify | circle | twopoint.\n'
+    '#     Lines ABOVE use the PRE-SWAP LETTERS: A = circle, B = twopoint, '
+    'C = verify.\n'
+    '#     The dialog\'s labels were renumbered (A = verify, B = circle, '
+    'C = twopoint), so a\n'
+    '#     letter in this file must NOT be read against them. '
+    'sldea_edge.cal_mode_read is the rule.\n')
 
 
 def _fmt_list(vals, fmt='{:.2f}'):
@@ -1129,6 +1286,16 @@ def calibration_log_line(rec):
     prints to stdout and appends to the run's log, so a bench operator can
     report an A/B result by copying either one.
 
+    **`mode=` records a NAME** — `verify` / `circle` / `twopoint` — not a
+    letter (2026-08-06 late). The letters were renumbered once at the
+    operator's request and would have reinterpreted every `mode=` line
+    already on disk; a name cannot be renumbered. FIELD ORDER IS UNCHANGED,
+    so an existing splitter still finds `mode=` in the same column; only
+    that field's value space moved. Lines written before the change hold a
+    PRE-SWAP letter and are read through `cal_mode_read` (A = circle,
+    B = twopoint, C = verify), which `append_calibration_log` also records
+    as a note in any log file it has to migrate.
+
     Field order is the reporting order: mode and n first (what was done),
     then **sigma** (the method's per-fit precision — the only figure
     comparable between two modes at different round counts, which is why
@@ -1136,21 +1303,27 @@ def calibration_log_line(rec):
     Deliberately one flat line of key=value: greppable out of a terminal
     scrollback with no tooling, and stable enough to parse later.
 
-    MODE C keeps every field, and writes the precision group as
-    **`undefined`** rather than `0.00%` (2026-08-06 evening). A mode-C
+    THE `verify` MODE keeps every field, and writes the precision group as
+    **`undefined`** rather than `0.00%` (2026-08-06 evening). A verify
     round-set is one automatic fit approved by a human: there is no range,
     no σ and no mean SE, and `0.00%` in those columns would read as perfect
     precision to anyone grepping this file — the opposite of the truth.
-    'undefined' is used rather than mode A/B's 'unconvertible' because the
+    'undefined' is used rather than the measuring modes' 'unconvertible'
+    because the
     two gaps are different: 'unconvertible' means a number exists but the d₂
     table cannot convert it, while 'undefined' means the quantity does not
-    exist for a sample of one. Mode A and B lines are byte-identical to
+    exist for a sample of one. The measuring modes' lines are unchanged apart
+    from the `mode=` value itself, which is now a name (see above), and are
+    otherwise byte-identical to
     before.
 
     Pure — takes a dict, returns a str, touches no disk."""
     st = rec.get('stats') or {}
     n = st.get('n') or rec.get('n') or 0
-    verify = (rec.get('mode') == CAL_MODE_VERIFY) or st.get('single_fit')
+    # normalised, so a caller (or a re-read record) holding a legacy letter
+    # is still recognised as the method it was, and still WRITES the name
+    mode = cal_mode_read(rec.get('mode'), default=rec.get('mode'))
+    verify = (mode == CAL_MODE_VERIFY) or st.get('single_fit')
     absent = 'undefined' if verify else 'unconvertible'
 
     def pct(key):
@@ -1161,7 +1334,7 @@ def calibration_log_line(rec):
     bits = [
         'SLDEA-CAL',
         str(rec.get('when') or ''),
-        f"mode={rec.get('mode', '?')}",
+        f"mode={mode or '?'}",
         f"n={n}",
         f"sigma={pct('sigma_pct')}",
         f"se={pct('se_pct')}",
@@ -1172,7 +1345,7 @@ def calibration_log_line(rec):
         f"mean={st.get('mean', 0.0):.2f}px",
         f"diams={_fmt_list(st.get('values'))}px",
     ]
-    # mode B only; '-' rather than an empty field so the line's shape is
+    # twopoint only; '-' rather than an empty field so the line's shape is
     # the same for both modes and a column-splitter cannot slip
     bits.append('rot=' + (_fmt_list(rec.get('rot_deg'), '{:.1f}')
                           or '-') + 'deg')
@@ -1180,16 +1353,16 @@ def calibration_log_line(rec):
     auto = rec.get('auto_diam_px')
     if auto:
         pctd = rec.get('auto_pct')
-        # In mode C the anchor IS the automatic fit, so a deviation column
-        # would print +0.00% by construction — an identity dressed as
-        # agreement. Say what it is instead.
+        # In the verify mode the anchor IS the automatic fit, so a
+        # deviation column would print +0.00% by construction — an
+        # identity dressed as agreement. Say what it is instead.
         bits.append(f"auto={float(auto):.1f}px"
                     + ('(IS-the-anchor)' if verify else
                        f"({pctd:+.2f}%)" if pctd is not None else ''))
     else:
         bits.append('auto=none')
-    # mode C's real quality figures, in place of a precision it does not
-    # have. Omitted entirely for A/B so their lines do not change.
+    # the verify mode's real quality figures, in place of a precision it
+    # does not have. Omitted entirely for A/B so their lines do not change.
     if verify:
         for key, label, fmt in (('fit_circ', 'circ', '{:.3f}'),
                                 ('fit_conf', 'conf', '{:.3f}'),
@@ -1204,7 +1377,8 @@ def calibration_log_line(rec):
             bits.append(f"resid_pct={float(rp):.2f}%")
     # A COMMITTED RE-ANCHOR (`#215`, 2026-08-06): a scale-only correction of
     # a run that was NOT re-reviewed. Emitted only when the key is present,
-    # so every mode A/B/C round-set line stays byte-identical to before —
+    # so every round-set line of every mode keeps its field order and
+    # spelling apart from the mode= value itself —
     # those formats are pinned by exact-string tests.
     rn = rec.get('reanchor')
     if rn:
@@ -1252,20 +1426,23 @@ def append_calibration_log(rundir, rec):
     path = os.path.join(rundir, CAL_LOG_NAME)
     try:
         new = not os.path.exists(path)
+        # A log written before the letters->names change (live P3_2 holds
+        # eight `mode=C` lines) gets ONE note saying where its vocabulary
+        # changes. Read rather than assumed, because appending the note
+        # twice would be its own small lie about when the change happened;
+        # the file is a handful of lines, so the read is free.
+        migrate = False
+        if not new:
+            try:
+                with open(path, encoding='utf-8', errors='replace') as f:
+                    migrate = CAL_LOG_VOCAB_MARK not in f.read()
+            except OSError:
+                migrate = False      # unreadable: still append the record
         with open(path, 'a', encoding='utf-8') as f:
             if new:
-                f.write('# SLDEA Edge Review scale calibrations, one line '
-                        'per completed round-set, accepted or declined.\n'
-                        '# mode=A circle fit, mode=B two-point diameter '
-                        'with the display randomly rotated per round,\n'
-                        '# mode=C the operator VERIFIED the automatic disc '
-                        'fit (no rounds: sigma/se/range are undefined,\n'
-                        '#        NOT zero -- what quantifies a mode-C '
-                        'anchor is the fit resid/circ/conf/n_edge).\n'
-                        '# sigma = per-fit precision (range/d2(n)); se = '
-                        'sigma/sqrt(n) on the mean; area_se = 2*se.\n'
-                        '# Compare methods on SIGMA -- it is the only '
-                        'figure that survives a different n.\n')
+                f.write(CAL_LOG_HEADER)
+            elif migrate:
+                f.write(CAL_LOG_MIGRATION_NOTE)
             f.write(line + '\n')
         return path, line
     except OSError as e:
@@ -2913,7 +3090,7 @@ def baseline_disc(base_gray, settings):
 
     Returns a candidate-like dict (method 'baseline-disc') or None. When
     it refuses, WHICH gate refused is recorded and readable through
-    `baseline_disc_refusal` — the calibration dialog's mode C falls back
+    `baseline_disc_refusal` — the calibration dialog's verify mode falls back
     to a hand measurement on a refusal and has to be able to say why
     (`#215`, 2026-08-06 evening)."""
     key = _disc_key(base_gray, settings)
@@ -3092,7 +3269,7 @@ def _baseline_disc_uncached(base_gray, settings):
     dmin = float(min(hs, ws))
     # The four documented gates, named individually: 'refused' sends the
     # operator to guess, while 'the arc is only 22% covered' sends them to
-    # look at what is lying across the frame (`#215` mode C, 2026-08-06).
+    # look at what is lying across the frame (`#215` verify mode, 2026-08-06).
     if cov < 0.34:
         return None, (f"the accepted edge covers only {360 * cov:.0f}° of "
                       f"arc (needs ≥ 120°) — something is lying across the "
@@ -3143,7 +3320,7 @@ def _is_manual_cal(baseline_ref):
     """Is this anchor one a HUMAN put their name to — and therefore the
     one that overrides every automatic reference at Save?
 
-    Two methods qualify (`#215` mode C, 2026-08-06 evening):
+    Two methods qualify (`#215` verify mode, 2026-08-06 evening):
     'manual-calibration' (the operator measured the disc themselves) and
     'auto-verified' (the operator was shown the automatic fit and its
     quality numbers and approved it). Both are decisions; the difference
@@ -3168,7 +3345,7 @@ def mm_per_px(results, rows, settings, baseline_ref=None):
     2026-08-06): an anchor a HUMAN signed off — `baseline_ref` whose method
     is in `ANCHOR_METHODS`, i.e. 'manual-calibration' (they measured it) or
     'auto-verified' (they were shown the automatic fit with its quality
-    numbers and approved it, mode C) — beats everything. The operator
+    numbers and approved it, the verify mode) — beats everything. The operator
     decided; the old order silently ignored those clicks whenever the
     baseline row had an accepted result (the status line claimed otherwise;
     flagged major).

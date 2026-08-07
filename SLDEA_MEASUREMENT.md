@@ -75,15 +75,35 @@ in the same PR.
 
 Since the fit-a-circle calibration (`#215`), Edge Review takes **several
 independent fits** of the resting disc per run and anchors on their
-**mean**. Two methods exist, chosen per calibration so they can be A/B
-compared on the same disc:
+**mean**. Two hand methods exist, chosen per calibration so they can be
+compared on the same disc — plus the `verify` method, which is not a hand
+measurement at all (see below):
 
-| | Mode A | Mode B |
+| | `circle` (label **B**) | `twopoint` (label **C**) |
 |---|---|---|
-| gesture | drag/resize a circle onto the boundary | click two roughly-opposite edge points |
+| gesture | drag/resize a circle onto the boundary | click two roughly-opposite edge points; **the second click banks the round and advances** |
 | decorrelation | each round respawns at a random position and size | the **display is rotated by a random angle** each round |
 | default rounds | 3 | 5 |
 | shipped | 2026-08-06 | 2026-08-06 (evening) |
+
+**Methods are recorded by NAME, not by their dialog letter.** The letters
+were renumbered on 2026-08-06 (late) at the operator's request so that
+**A = `verify`**, the method the gate opens in, with B = `circle` and
+C = `twopoint`. Before that swap A was the circle, B the two-point and C
+the verify — and those letters are on disk, in `setup.txt`'s `cal_mode:`
+and in `scale_calibration_log.txt`'s `mode=` field, on live campaign runs
+(`P3_2_2.5mL_20260728` records `cal_mode: C`, meaning *verify*). So:
+
+- nothing writes a letter any more. `cal_mode:` and `mode=` hold
+  `verify` / `circle` / `twopoint`, which no future relabelling can
+  reinterpret. The field ORDER of the log line is unchanged; only that one
+  field's value space moved.
+- **the read rule for a legacy letter is its PRE-SWAP meaning** —
+  A = circle, B = twopoint, C = verify — applied in one place
+  (`se.cal_mode_read`) and used by every reader, including `sldea_diag`,
+  the anchor loader and the reuse path. A log file that predates the
+  change gets one note marking where its own vocabulary changes.
+- the letters remain only as UI labels (`se.CAL_MODE_LABELS`).
 
 The **range** of the rounds is recorded in `setup.txt`
 (`rounds_px` / `spread_px` / `spread_pct`), together with which method
@@ -136,9 +156,9 @@ always landed on "accept anyway". SE falls as 1/√n, so the gate now names
 the round count that *would* clear it, computed from the σ just measured
 (`se.rounds_for_se`).
 
-#### First real data: mode A's per-fit σ ≈ 1.05% (2026-08-06)
+#### First real data: the circle mode's per-fit σ ≈ 1.05% (2026-08-06)
 
-Six mode-A calibration attempts on a scratch copy of
+Six circle-mode calibration attempts on a scratch copy of
 `P3_2_2.5mL_20260728` (Anatol, 2026-08-06 — recorded in the
 [`#215` comment](https://github.com/Anatol-Gogoj/Digital_Multitool/issues/215)).
 Recorded 3-round ranges **1.94, 2.09, 1.62, 1.81, 1.44%** plus a sixth
@@ -151,9 +171,9 @@ that passed the 1% gate (exact value not captured):
 **Per-fit σ ≈ 1.05%** (mean; median 1.07%). Therefore the 3-round mean SE
 is **0.61% diameter → 1.21% area**, against §2.1's ~0.4% / ~0.8% — the
 mechanism intended to *tighten* this term currently sits ~1.5× outside it,
-and mode A would need **~7 rounds** to reach budget at this precision. The
+and the circle mode would need **~7 rounds** to reach budget at this precision. The
 operator's diagnosis is that the bright green 3 px stroke **occludes the
-edge it is being aligned to**; mode B (non-occluding markers, rotated
+edge it is being aligned to**; the two-point mode (non-occluding markers, rotated
 display) targets **σ < 0.9%**, at which 5 rounds lands on budget. A mild
 practice effect is visible across the six attempts (1.94 → 2.09 → 1.62 →
 1.81 → 1.44 → <1.0), so the asymptote may be better than 1.05% — but not
@@ -161,13 +181,13 @@ by the ~2.6× needed.
 
 > **NOT YET QUOTABLE — do not put a per-run spread in the budget.** One
 > operator, one disc, one method: that is a first data point, not a
-> distribution. σ ≈ 1.05% above is what mode A measured *on this disc, by
+> distribution. σ ≈ 1.05% above is what the circle mode measured *on this disc, by
 > this operator, on that afternoon* — it is quotable as **that**, and it is
-> what justifies building mode B, but the per-run figure the tool prints
+> what justifies building the two-point mode, but the per-run figure the tool prints
 > must **not** be fed into this budget (or into a methods section, or into
 > `sldea_diag`'s numbers as if it were an established term) until several
 > runs and both methods have been measured. Until then §2.1's ~0.4%
-> diameter / ~0.8% area **remain the numbers to quote**, and mode B's own σ
+> diameter / ~0.8% area **remain the numbers to quote**, and the two-point mode's own σ
 > is **entirely unmeasured**.
 
 Worked at the new gate: a run accepted right at SE = 0.4% carries
@@ -192,15 +212,15 @@ Four caveats, all load-bearing:
   opposite", and the human preference for horizontal/vertical chords over
   diagonal — into a random one that averaging does suppress. It does
   nothing for the edge convention.
-- **Mode B's display rotation resamples the frame**, which softens the ink
+- **The two-point mode's display rotation resamples the frame**, which softens the ink
   edge slightly. Every round is rotated, so the softening is identical in
   all *n* rounds: it can inflate σ, and it does not bias the mean.
 - **Precision is only measurable if the rounds are blind.** The dialog
   hides every previously accepted diameter and the running average until
   the last fit is in, because a visible target makes the spread a number
   the operator can hit rather than a number they produce (review
-  2026-08-06). Mode B additionally shows *no length at all* for the pair
-  being placed, so it is measured under stricter blinding than mode A —
+  2026-08-06). The two-point mode additionally shows *no length at all* for the pair
+  being placed, so it is measured under stricter blinding than the circle mode —
   which can only handicap B in the comparison. If any of that changes,
   this whole section stops meaning anything.
 
@@ -224,18 +244,18 @@ Three readings of that table, all load-bearing:
   σ by 0.08 points (inside the noise of four samples) while it shifts the
   **mean by 1.3 points**. The stroke's cost is **accuracy, not precision** —
   and averaging suppresses noise as √n while doing *nothing* to a bias, so
-  no round count would ever have fixed mode A. Its +2.07…+2.59 % is the
+  no round count would ever have fixed the circle mode. Its +2.07…+2.59 % is the
   documented **outer-toe convention** of §2.3/§1.3 (+2.6 % in diameter),
   locked in by a stroke that hides the step.
 - **At σ ≈ 1.05 % the 3-round mean SE is 0.61 % diameter / 1.21 % area**
   against this document's standing ~0.4 % / ~0.8 %, so a hand-measured
-  anchor needs **~7 rounds** to reach budget. Mode B is *worse*, not better
+  anchor needs **~7 rounds** to reach budget. The two-point mode is *worse*, not better
   (a single chord uses far less of the boundary than a circle fit, and the
   stratified rotation did not compensate), so it is dominated by A′ on both
   axes.
 - **The automatic fit beat all eleven attempts on accuracy and nine of
   eleven on precision.** That is why the scale gate now opens on
-  `baseline_disc`'s measurement and asks the operator to *verify* it (mode C
+  `baseline_disc`'s measurement and asks the operator to *verify* it (the verify mode
   — see the 2026-08-06 evening `SLDEA_HANDOFF.md` entry).
 
 **The mechanism, measured on the frame:** the disc reads **166 gray**, the
@@ -246,7 +266,7 @@ with*, and the point they pick is the outer toe.
 
 #### An auto-verified anchor's uncertainty is the FIT's, not an operator term
 
-A mode-C anchor (`method: auto-verified`) has **no rounds**, so σ, the mean
+A verify-mode anchor (`method: auto-verified`) has **no rounds**, so σ, the mean
 SE and the range are **undefined for it — not zero**. The code writes them
 as undefined everywhere (`se.verify_stats`, the calibration log's
 `sigma=undefined`, `sldea_diag`), because `0.00 %` in those columns would
@@ -269,17 +289,17 @@ standing budget. Two honest qualifications:
   above. And unlike a hand-measured anchor, **there is no cross-check that
   can test it**: declaring the fitted disc to be `diam_mm` makes the resting
   area π·(diam_mm/2)² by construction, so §2.4's mask anchor reads +0.00 % on
-  a mode-C anchor at any diameter. That check is not run on one and not
+  a verify-mode anchor at any diameter. That check is not run on one and not
   claimed.
 
 An auto-verified anchor therefore contributes **nothing** to §2.5's
 operator-repeat leg. That number still comes only from runs calibrated by
-hand in mode A or B.
+hand in the circle or two-point mode.
 
 > **STILL NOT QUOTABLE — one operator, one disc, one session.** σ ≈ 1.0–1.1 %
 > above is a first data point, not a distribution: it is quotable as *what
 > this operator measured on that disc on that afternoon*, and it is what
-> justifies mode C, and that is all. **§2.1's ~0.4 % diameter / ~0.8 % area
+> justifies the verify mode, and that is all. **§2.1's ~0.4 % diameter / ~0.8 % area
 > remain the numbers to quote.** The blockquote above this sub-section
 > applies unchanged.
 
@@ -470,7 +490,7 @@ architecture**, held together by three invariants:
 | Fit CI 0.2–0.7% | disc-fit 85% CI, P3 (0.2–0.5%) and 07-23 (0.5–0.7%) runs |
 | Scale 0.4% / repeat 0.3% | Baseline-disc overlays vs by-eye, both campaigns |
 | Scale anchor per run (§2.1a): σ ≈ R/d₂(n), mean SE = σ/√n, area SE = 2·SE | d₂ factors from ASTM E2587 / Duncan (`se.D2_RANGE_FACTORS`, n = 2–8; the code refuses any other n). Range of the n fits recorded in each run's `setup.txt`, plus every round-set in `scale_calibration_log.txt` (Edge Review, 2026-08-06 onward) |
-| Mode A per-fit σ ≈ 1.05% of diameter (3-round mean SE 0.61% diam / 1.21% area) | Six mode-A attempts on a scratch copy of `P3_2_2.5mL_20260728`, one operator, 2026-08-06 (`#215` comment). **A first data point, not a distribution — quotable only as that; §2.1's 0.4%/0.8% still apply.** |
+| The circle mode per-fit σ ≈ 1.05% of diameter (3-round mean SE 0.61% diam / 1.21% area) | Six circle-mode attempts on a scratch copy of `P3_2_2.5mL_20260728`, one operator, 2026-08-06 (`#215` comment). **A first data point, not a distribution — quotable only as that; §2.1's 0.4%/0.8% still apply.** |
 | Human per-fit σ ≈ 1.0–1.1% of diameter **regardless of method or stroke** (A 1.03%, A′ 1.11%, B 2.09%); stroke cost is BIAS not precision (A +2.07% vs A′ +0.77% in diameter, the §1.3 outer toe) | A/B/A′ session, eleven interleaved calibrations on one disc against a 577.08 px automatic fit, one operator, 2026-08-06 evening (`#215` comment). **One operator, one disc, one session — §2.1's 0.4%/0.8% remain the numbers to quote** |
 | Auto-verified anchor uncertainty = the fit's own residual, 0.40% of diameter (2.3 px / 577.08 px over 204 edge points) | `se.fit_resid_pct` on `baseline_disc`'s output. **Conservative** (per-point scatter, not the fitted radius's SE, which is ~√n smaller). σ/SE/range are **undefined** for such an anchor, not zero, and it contributes nothing to §2.5's operator-repeat leg. **The fit's systematic term is unmeasured, and no cross-check of it exists** (declaring the fitted disc 16 mm makes §2.4's mask test pass by construction) |
 | Audit bias bound ±0.4 px per run | Boundary self-audit medians, all six runs |

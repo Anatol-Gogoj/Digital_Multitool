@@ -303,10 +303,10 @@ body.append(f"""
   {legend_grid('40_edge_review')}
   <div class="use"><h4>Reviewing a run</h4><ol>
     <li>Open it from the SLDEA tab (🔍 Edge Review…) — or run <code>python sldea_edge_gui.py &lt;run folder&gt; --auto</code>.</li>
-    <li>Pick the run and click ▶ Detect Edges. Most frames auto-accept; the review queue holds the uncertain ones.</li>
+    <li>Pick the run and click ▶ Detect Edges — a run with no scale anchor diverts to the 📏 dialog first: ✔ Accept the machine's disc fit (or measure by hand if it refuses) and detection continues. Most frames auto-accept; the review queue holds the uncertain ones.</li>
     <li>On each queued frame, pick the outline that hugs the electrode: keys 1/2/3 (A/B/C), R rejects, 4/D opens the hand tracer.</li>
     <li>Enter accepts and moves on; Next unreviewed jumps ahead.</li>
-    <li>If areas look wrong by a constant factor, 📏 Calibrate… — click two opposite edges of the resting disc on the baseline frame.</li>
+    <li>If areas look wrong by a constant factor, 📏 Calibrate / re-anchor… — mid-review the corrected anchor is applied at Save; on a saved run it rewrites data.csv immediately, with no re-detection.</li>
     <li>Queue empty → 💾 Save to data.csv… — read the counts in the confirm prompt before answering Yes.</li>
   </ol></div>
   <h3 class="subh">When outlines look wrong — tuning and diagnosis</h3>

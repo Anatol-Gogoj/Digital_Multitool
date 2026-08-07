@@ -1411,8 +1411,8 @@
     "what": "Pick the correct outline per queued frame — keys 1/2/3 pick, R rejects, 4/D opens the hand tracer, Enter accepts and moves on."
    },
    {
-    "label": "📏 Calibrate… (Edge Review)",
-    "what": "Click the resting disc's two opposite edges on the baseline frame to set the mm-per-pixel scale. Required per run (the scale gate): Detect and Save are blocked until it is done, and it overrides every automatic scale reference."
+    "label": "📏 Calibrate / re-anchor… (Edge Review)",
+    "what": "Sets the run's mm-per-pixel anchor. Required per run (the scale gate): Detect and Save are blocked until it is done, and it overrides every automatic scale reference. The dialog opens on the machine's automatic disc fit for you to verify — measuring by hand (circle or two-point) is the fallback, offered with the fitter's own reason when the fit refuses. One button, two outcomes, and the run's state at click time decides — the dialog's title and primary button name the active one: with a review pass open (or nothing measured yet) it calibrates, holding the anchor and applying it at the next Save with nothing written now; on a saved run whose rows already carry px it re-anchors, re-deriving every mm² in data.csv from the stored px immediately."
    },
    {
     "label": "Advanced… (Edge Review)",
@@ -1441,7 +1441,7 @@
    "Check the panel labelled baseline really shows the 0 kV image.",
    "Drag sliders until the outlines hug the active area in all three panels.",
    "Click 💾 Save to setup.txt.",
-   "Open Edge Review on the same folder (--auto opens the scale-calibration dialog first — click the resting disc's two opposite edges and detection starts automatically) and work the review queue.",
+   "Open Edge Review on the same folder (--auto opens the scale dialog first — ✔ Accept the machine's disc fit, measure by hand only if it refuses, and detection starts automatically) and work the review queue.",
    "💾 Save to data.csv… when the queue is empty; if it still will not tune, run the /diag diagnostic instead of another slider session.",
    "Once two or more runs are reviewed, put them on one figure: sldea_plot.py RUN1 RUN2 --mode area (or --mode current on raw runs, before any review)."
   ],
@@ -1494,8 +1494,8 @@
     "how_opened": "Advanced…"
    },
    {
-    "name": "Calibrate scale — click the disc's two opposite edges (Edge Review)",
-    "how_opened": "📏 Calibrate…"
+    "name": "Scale dialog, titled 'Calibrate — applied at Save' or 'RE-ANCHOR — writes data.csv' by the run's state (Edge Review)",
+    "how_opened": "📏 Calibrate / re-anchor… (▶ Detect Edges and --auto divert here while the run has no anchor)"
    },
    {
     "name": "Trace boundary (manual tracer, Edge Review)",

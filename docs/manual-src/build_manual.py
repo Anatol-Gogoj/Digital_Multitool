@@ -306,7 +306,7 @@ body.append(f"""
     <li>Pick the run and click ▶ Detect Edges. Most frames auto-accept; the review queue holds the uncertain ones.</li>
     <li>On each queued frame, pick the outline that hugs the electrode: keys 1/2/3 (A/B/C), R rejects, 4/D opens the hand tracer.</li>
     <li>Enter accepts and moves on; Next unreviewed jumps ahead.</li>
-    <li>If areas look wrong by a constant factor, 📏 Calibrate… — click two opposite edges of the resting disc on the baseline frame.</li>
+    <li>If areas look wrong by a constant factor, 📏 Calibrate / re-anchor… — accept the machine's disc fit (measure by hand only if it refuses). Mid-review the corrected anchor is applied at the next Save; on a saved run it re-anchors — every mm² in data.csv is re-derived from the stored px immediately.</li>
     <li>Queue empty → 💾 Save to data.csv… — read the counts in the confirm prompt before answering Yes.</li>
   </ol></div>
   <h3 class="subh">When outlines look wrong — tuning and diagnosis</h3>

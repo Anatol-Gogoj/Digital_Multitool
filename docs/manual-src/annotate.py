@@ -235,7 +235,7 @@ S["40_edge_review"] = {
         {"match": "Next unreviewed", "label": "Jump to the next frame needing a human"},
         {"match": "review queue", "label": "Frames still waiting for a decision"},
         {"match": "📏 Calibrate…",
-         "label": "Set the mm-per-px scale — click two opposite disc edges"},
+         "label": "Set or re-anchor the mm-per-px scale — verify the automatic disc fit"},
         {"match": "💾 Save to data.csv…",
          "label": "Writes accepted areas back (keeps a .bak) — confirms first"},
     ],

@@ -3,7 +3,8 @@
 Status: 2026-08-06 (§2.1a; the rest 2026-08-01). Every number in this
 document is **measured**, not estimated — sources are the four
 calibration rounds (47 operator labels across both campaigns), the
-per-run scale calibration (two methods, A/B compared — §2.1a), the
+per-run scale calibration (two hand methods A/B compared against the
+automatic fit the operator now verifies instead — §2.1a), the
 operator repeatability round, the per-frame boundary self-audit, and the
 baseline-scale overlays. The
 provenance table at the end maps each number to its origin. When
@@ -62,7 +63,7 @@ in the same PR.
 | Error term | Type | Measured size | Source |
 |---|---|---|---|
 | Edge definition (visual outer toe vs half-height ink step) | systematic | **+5.2–5.7% area** between conventions; spread across controls only 0.5% | round 4, four audit-clean controls |
-| Scale anchor (baseline disc trace vs by-eye) | systematic, per run | ~0.4% diameter → **~0.8% area**; 0.3% repeat on one device 32 min apart. From 2026-08-06 **measured per run** — see §2.1a, which also records the first real per-fit σ (mode A, ~1.05%, which MISSES this budget) | baseline overlays, both campaigns; per-run scatter from the calibration's n rounds |
+| Scale anchor (baseline disc trace vs by-eye) | systematic, per run | ~0.4% diameter → **~0.8% area**; 0.3% repeat on one device 32 min apart. From 2026-08-06 **measured per run** — see §2.1a: measured human per-fit **σ ≈ 1.0–1.1% whatever the method**, so a *hand* anchor MISSES this budget below ~7 rounds, while an **auto-verified** anchor carries the fit's own residual (0.40% of diameter here) and no operator term at all | baseline overlays, both campaigns; per-run scatter from the calibration's n rounds (hand modes only) |
 | Nominal diameter (the value the mm scale hangs on) | systematic | **closed** — anchored by the laser-cut application mask | lab confirmation 2026-08-01 (see §2.4) |
 | `disc-fit` statistical CI (edge-point scatter) | random, per frame | **0.2–0.7%** (85% CI) | fit CI, both campaigns |
 | Operator trace precision (the validation floor) | random | **~1%** area (0.2–2.5%); IoU ceiling 0.973 | repeatability round, 9 repeat pairs |
@@ -202,6 +203,85 @@ Four caveats, all load-bearing:
   being placed, so it is measured under stricter blinding than mode A —
   which can only handicap B in the comparison. If any of that changes,
   this whole section stops meaning anything.
+
+#### The measured human per-fit σ is ~1.0–1.1 %, and it does not depend on the method (2026-08-06, evening)
+
+This is the section's **first real data on human precision**, and it is the
+same number three ways. Anatol's A/B/A′ session on a scratch copy of
+`P3_2_2.5mL_20260728`, eleven calibrations interleaved to cancel the
+practice effect, against an automatic fit of **577.08 px** (circ 0.999,
+conf 0.871, residual 2.3 px, 204 edge points):
+
+| arm | *n* | per-fit **σ** (median) | mean diameter vs the automatic fit |
+|---|---|---|---|
+| **A** — circle, 3 px solid + 5 px halo | 3 | **1.03 %** | **+2.07 %** |
+| **A′** — circle, 1 px dashed | 3 | **1.11 %** | **+0.77 %** |
+| **B** — two-point diameter, rotated | 5 | **2.09 %** | +0.95 % |
+
+Three readings of that table, all load-bearing:
+
+- **σ ≈ 1.0–1.1 % per fit, and the stroke does not move it.** A → A′ shifts
+  σ by 0.08 points (inside the noise of four samples) while it shifts the
+  **mean by 1.3 points**. The stroke's cost is **accuracy, not precision** —
+  and averaging suppresses noise as √n while doing *nothing* to a bias, so
+  no round count would ever have fixed mode A. Its +2.07…+2.59 % is the
+  documented **outer-toe convention** of §2.3/§1.3 (+2.6 % in diameter),
+  locked in by a stroke that hides the step.
+- **At σ ≈ 1.05 % the 3-round mean SE is 0.61 % diameter / 1.21 % area**
+  against this document's standing ~0.4 % / ~0.8 %, so a hand-measured
+  anchor needs **~7 rounds** to reach budget. Mode B is *worse*, not better
+  (a single chord uses far less of the boundary than a circle fit, and the
+  stratified rotation did not compensate), so it is dominated by A′ on both
+  axes.
+- **The automatic fit beat all eleven attempts on accuracy and nine of
+  eleven on precision.** That is why the scale gate now opens on
+  `baseline_disc`'s measurement and asks the operator to *verify* it (mode C
+  — see the 2026-08-06 evening `SLDEA_HANDOFF.md` entry).
+
+**The mechanism, measured on the frame:** the disc reads **166 gray**, the
+paper **186**, and that 20-level step is spread over **~60 px of radius**.
+There is no line to click. Asking an operator to pick "the edge" is asking
+them to pick a point inside a gradient *wider than the stroke they draw
+with*, and the point they pick is the outer toe.
+
+#### An auto-verified anchor's uncertainty is the FIT's, not an operator term
+
+A mode-C anchor (`method: auto-verified`) has **no rounds**, so σ, the mean
+SE and the range are **undefined for it — not zero**. The code writes them
+as undefined everywhere (`se.verify_stats`, the calibration log's
+`sigma=undefined`, `sldea_diag`), because `0.00 %` in those columns would
+read as perfect precision.
+
+What quantifies it is the fit's own **median edge-point residual as a
+fraction of diameter** (`se.fit_resid_pct`): on this baseline
+**2.3 px / 577.08 px = 0.40 % of diameter**, i.e. it lands on §2.1's
+standing budget. Two honest qualifications:
+
+- it is **conservative** — the per-point scatter, not the standard error of
+  the *fitted radius*, which with n_edge = 204 points is roughly √n ≈ 14×
+  smaller (~0.03 %). The per-point figure is quoted because it is what the
+  fitter measured, and because over-stating this term is the safe direction;
+- it is a **precision** figure, and the fit's **systematic** term — which
+  feature the step-finder locks onto versus the true mechanical boundary —
+  **is not measured by anything in this project.** The evidence for the fit's
+  accuracy is `baseline_disc` agreeing with the by-eye measurement to ~1 % on
+  the three P3 baselines (579/578/586 px) plus the eleven-attempt comparison
+  above. And unlike a hand-measured anchor, **there is no cross-check that
+  can test it**: declaring the fitted disc to be `diam_mm` makes the resting
+  area π·(diam_mm/2)² by construction, so §2.4's mask anchor reads +0.00 % on
+  a mode-C anchor at any diameter. That check is not run on one and not
+  claimed.
+
+An auto-verified anchor therefore contributes **nothing** to §2.5's
+operator-repeat leg. That number still comes only from runs calibrated by
+hand in mode A or B.
+
+> **STILL NOT QUOTABLE — one operator, one disc, one session.** σ ≈ 1.0–1.1 %
+> above is a first data point, not a distribution: it is quotable as *what
+> this operator measured on that disc on that afternoon*, and it is what
+> justifies mode C, and that is all. **§2.1's ~0.4 % diameter / ~0.8 % area
+> remain the numbers to quote.** The blockquote above this sub-section
+> applies unchanged.
 
 ### 2.2 Why ratios are tight: the annulus cancellation
 
@@ -390,7 +470,9 @@ architecture**, held together by three invariants:
 | Fit CI 0.2–0.7% | disc-fit 85% CI, P3 (0.2–0.5%) and 07-23 (0.5–0.7%) runs |
 | Scale 0.4% / repeat 0.3% | Baseline-disc overlays vs by-eye, both campaigns |
 | Scale anchor per run (§2.1a): σ ≈ R/d₂(n), mean SE = σ/√n, area SE = 2·SE | d₂ factors from ASTM E2587 / Duncan (`se.D2_RANGE_FACTORS`, n = 2–8; the code refuses any other n). Range of the n fits recorded in each run's `setup.txt`, plus every round-set in `scale_calibration_log.txt` (Edge Review, 2026-08-06 onward) |
-| Mode A per-fit σ ≈ 1.05% of diameter (3-round mean SE 0.61% diam / 1.21% area) | Six mode-A attempts on a scratch copy of `P3_2_2.5mL_20260728`, one operator, 2026-08-06 (`#215` comment). **A first data point, not a distribution — quotable only as that; §2.1's 0.4%/0.8% still apply.** Mode B's σ is entirely unmeasured |
+| Mode A per-fit σ ≈ 1.05% of diameter (3-round mean SE 0.61% diam / 1.21% area) | Six mode-A attempts on a scratch copy of `P3_2_2.5mL_20260728`, one operator, 2026-08-06 (`#215` comment). **A first data point, not a distribution — quotable only as that; §2.1's 0.4%/0.8% still apply.** |
+| Human per-fit σ ≈ 1.0–1.1% of diameter **regardless of method or stroke** (A 1.03%, A′ 1.11%, B 2.09%); stroke cost is BIAS not precision (A +2.07% vs A′ +0.77% in diameter, the §1.3 outer toe) | A/B/A′ session, eleven interleaved calibrations on one disc against a 577.08 px automatic fit, one operator, 2026-08-06 evening (`#215` comment). **One operator, one disc, one session — §2.1's 0.4%/0.8% remain the numbers to quote** |
+| Auto-verified anchor uncertainty = the fit's own residual, 0.40% of diameter (2.3 px / 577.08 px over 204 edge points) | `se.fit_resid_pct` on `baseline_disc`'s output. **Conservative** (per-point scatter, not the fitted radius's SE, which is ~√n smaller). σ/SE/range are **undefined** for such an anchor, not zero, and it contributes nothing to §2.5's operator-repeat leg. **The fit's systematic term is unmeasured, and no cross-check of it exists** (declaring the fitted disc 16 mm makes §2.4's mask test pass by construction) |
 | Audit bias bound ±0.4 px per run | Boundary self-audit medians, all six runs |
 | Refit accuracy (+4.1/+4.6% vs predicted +3.8/+4.2%) | Resting-refit validation vs stored labels (2026-07-30) |
 | Onset excess ~1–2% | Round 3 (−6.9%) decomposed by round 4's controls |

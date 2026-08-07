@@ -23,12 +23,49 @@ reference at Save (it used to be silently ignored when the baseline row
 had an accepted result); the automatic disc fit is demoted to a
 cross-check.
 
+CALIBRATION v3 — MODE C, "verify the automatic fit" (`#215`, 2026-08-06
+evening). The gate now OPENS on the machine's own measurement whenever
+`se.baseline_disc` returns a fit, and asks the operator to JUDGE it rather
+than repeat it. The A/B/A′ experiment forced that: eleven hand
+calibrations on P3_2's baseline against an automatic fit of 577.08 px
+(circ 0.999, conf 0.871, residual 2.3 px, 204 edge points) — the fit beat
+ALL ELEVEN on accuracy and NINE OF ELEVEN on precision, and per-fit human
+precision sat at σ ≈ 1.0–1.1 % of diameter whatever the method or stroke,
+needing ~7 rounds to average down to the 0.4 % SE gate. The reason is in
+the frame: the disc reads 166 gray, the paper 186, and that 20-level step
+is spread over ~60 px of RADIUS. There is no line to click.
+
+Mode C therefore shows the fit with a 1 px dashed stroke (a 3 px stroke on
+the boundary measurably biases a human by +2 %, so it may not be what
+presents a boundary for judgement), over a CONTRAST-STRETCHED display copy
+(display only, stated as such — at native contrast the step is nearly
+invisible), with the fit's own numbers and a plain statement of what is
+NOT checked. Its actions are ✔ Accept (primary, and Tk's default button —
+but <Return> still cannot reach it), ✎ Measure by hand instead (drops into
+mode A), and Cancel. When the fit REFUSES, the gate falls straight through
+to the hand measurement and says so, quoting the fitter's own reason
+(`se.baseline_disc_refusal`).
+
+There is NO independent cross-check for an automatic anchor, and mode C
+does not pretend otherwise: declaring the fitted disc to be diam_mm makes
+the resting area π·(diam_mm/2)² BY CONSTRUCTION, so `se.anchor_guard`'s
+two tests both read +0.00 % on any frame however wrong the fit is. It is
+not run and not claimed anywhere — the dialog, the status line, the record
+and `sldea_diag` all say the verification was the operator's eye plus the
+fit quality (`se.guard_is_vacuous`, `se.verify_note`).
+
+An accepted mode-C anchor is recorded with method **`auto-verified`**, not
+`manual-calibration`: anyone auditing a run has to be able to tell "a
+human measured this" from "a human approved the machine's measurement".
+Both override every automatic reference at Save.
+
 CALIBRATION v2 (#215, 2026-08-06): the anchor is measured by hand over
 several INDEPENDENT rounds and averaged, by one of TWO methods the
 operator picks from a chooser in the dialog — so both can be driven on the
-same disc in one session and compared:
+same disc in one session and compared. These are still how a run gets a
+HAND measurement, and mode C's fallback:
 
-  MODE A (se.CAL_MODE_CIRCLE, 3 rounds, the default): fit a CIRCLE onto
+  MODE A (se.CAL_MODE_CIRCLE, 3 rounds, the manual default): fit a CIRCLE onto
   the resting disc — drag to move, 8 handles to resize — each round
   respawning at a randomized position/size in the central ROI.
   MODE B (se.CAL_MODE_TWOPOINT, 5 rounds): click two roughly-opposite
@@ -348,6 +385,252 @@ def cal_stroke_spec(style):
     width is not worth losing a calibration over."""
     return {'1 px solid': (1, None),
             '1 px dashed': (1, (4, 4))}.get(style, (3, None))
+
+
+# ---------------------------------------------------------------------------
+# MODE C — the machine measures, the operator VERIFIES
+#
+# The A/B/A′ experiment (`#215`, 2026-08-06 evening) inverted the premise
+# this dialog was built on. Eleven hand calibrations on P3_2's baseline
+# against an automatic fit of 577.08 px (circ 0.999, conf 0.871, residual
+# 2.3 px, 204 edge points): the fit beat ALL ELEVEN on accuracy and NINE OF
+# ELEVEN on precision, and per-fit human precision sat at σ ≈ 1.0–1.1 % of
+# diameter whatever the method or the stroke width.
+#
+# The radial intensity profile says why there is no gesture that fixes it:
+# the disc reads 166 gray, the paper 186, and that 20-level step is spread
+# over ~60 px of RADIUS. Asking an operator to pick "the edge" is asking
+# them to pick a point inside a gradient WIDER than the stroke they draw
+# with — and the point a human picks is the outer toe (§1.3, +2.6 %
+# diameter), which is the measured bias of mode A.
+#
+# So mode C shows the fit and asks for a judgement. Three things make that
+# a real judgement rather than a rubber stamp:
+#
+#   1. A NON-OCCLUDING stroke. A 3 px stroke laid on the boundary
+#      measurably biases a human by +2 % (mode A vs A′), so it must not be
+#      what presents a boundary FOR JUDGEMENT. One px, dashed, dark-haloed.
+#   2. A CONTRAST STRETCH of the displayed crop. A 20-level step on a 186
+#      background is nearly invisible at native contrast — the operator
+#      would be judging a flat grey field. The stretch is DISPLAY ONLY and
+#      the dialog says so; the measurement used the raw frame.
+#   3. THE NUMBERS, legibly. circ / conf / residual / n_edge, plus what is
+#      NOT being checked — see verify_evidence, which is where the honest
+#      part lives.
+# ---------------------------------------------------------------------------
+
+CAL_VERIFY_STROKE_PX = 1        # never thicker: the stroke must not sit ON
+CAL_VERIFY_DASH = (5, 7)        # the feature being judged (see above)
+CAL_STRETCH_PAD_FRAC = 0.45     # display window padding, as a fraction of
+                                # the measured disc→paper step
+CAL_STRETCH_MIN_SPAN = 6.0      # never stretch a narrower window than this:
+                                # past it the display is amplifying sensor
+                                # noise, not revealing an edge
+
+
+def disc_paper_lum(arr, cx, cy, r, inner=0.60, ring=(1.25, 1.55)):
+    """(disc median, paper median) gray levels, measured off the frame
+    itself well INSIDE and well OUTSIDE the fitted circle — never across
+    the ramp, which is the thing being displayed.
+
+    The ~20-gray step spans ~60 px of radius on a ~290 px radius, i.e. about
+    0.90 r to 1.10 r, so `inner` = 0.60 r and a ring starting at 1.25 r both
+    sit clear of it. The ring STOPS at 1.55 r rather than reaching further:
+    past that it starts collecting the electrode foil and the frame edge on
+    a 1080-tall frame, and a paper level pulled up by foil would under-
+    stretch the very step this exists to reveal. MEDIANS, not means, for the
+    same reason — the electrode strips cross both samples.
+
+    Prefer `baseline_disc`'s own `paper_lum` for the paper level where it is
+    available (the caller does): the fitter measured it with foil and glint
+    already rejected, which no annulus here can do.
+
+    Returns (None, None) when either sample is too small or the frame is
+    unusable, and every caller must then simply not stretch: a stretch
+    computed from nothing is worse than no stretch.
+
+    Pure numpy so the window arithmetic is testable without a display."""
+    a = np.asarray(arr, float)
+    if a.ndim == 3:
+        a = a.mean(axis=2)
+    if a.ndim != 2 or a.size == 0 or not r or r <= 0:
+        return (None, None)
+    h, w = a.shape
+    yy, xx = np.ogrid[0:h, 0:w]
+    d2 = (xx - float(cx)) ** 2 + (yy - float(cy)) ** 2
+    din = a[d2 <= (inner * r) ** 2]
+    lo, hi = ring
+    dout = a[(d2 >= (lo * r) ** 2) & (d2 <= (hi * r) ** 2)]
+    if din.size < 16 or dout.size < 16:
+        return (None, None)
+    return (float(np.median(din)), float(np.median(dout)))
+
+
+def cal_stretch_window(disc_lum, paper_lum, pad_frac=CAL_STRETCH_PAD_FRAC,
+                       min_span=CAL_STRETCH_MIN_SPAN):
+    """(lo, hi) gray levels to map across full black→white for the mode-C
+    display, or **None** when there is nothing worth stretching.
+
+    Derived from the frame's OWN measured disc and paper levels rather than
+    from a fixed pair, because the exposure moves between runs (the carbon-
+    black baseline medians 255). On a P3 baseline — disc 166, paper 186 —
+    this returns about (157, 195), i.e. the ~160–192 window that makes the
+    step visible.
+
+    None when the disc is not darker than the paper, or when the step is
+    narrower than `min_span`: at that point the display would be amplifying
+    noise and inventing an edge, which is the one failure this feature must
+    not have. A caller that gets None shows the raw crop."""
+    if disc_lum is None or paper_lum is None:
+        return None
+    d, p = float(disc_lum), float(paper_lum)
+    span = p - d
+    if span < float(min_span):
+        return None
+    pad = float(pad_frac) * span
+    lo = max(0.0, d - pad)
+    hi = min(255.0, p + pad)
+    if hi - lo < float(min_span):
+        return None
+    return (lo, hi)
+
+
+def cal_stretch_lut(lo, hi):
+    """256-entry lookup table mapping [lo, hi] linearly onto [0, 255], for
+    PIL's `Image.point`. Clipping outside, so the disc reads black and the
+    paper white and the ramp between them uses the whole display range.
+
+    A LUT rather than arithmetic on the array: it is exact, it is what PIL
+    wants for an RGB crop (lut * 3), and it cannot accidentally be applied
+    to anything but the DISPLAY copy."""
+    lo = max(0.0, min(254.0, float(lo)))
+    hi = max(lo + 1.0, min(255.0, float(hi)))
+    span = hi - lo
+    out = []
+    for i in range(256):
+        if i <= lo:
+            out.append(0)
+        elif i >= hi:
+            out.append(255)
+        else:
+            out.append(int(round(255.0 * (i - lo) / span)))
+    return out
+
+
+def verify_evidence(ref, diam_mm, recorded=None, n_px_rows=0,
+                    stretch=None):
+    """Everything mode C puts in front of the operator, as one text block.
+
+    Pure, so the honesty of this text is a headless test rather than a
+    screenshot. What it must contain, and why each part is load-bearing:
+
+    - **the fit, as numbers**: diameter, the mm/px it implies, and the
+      resting area that follows — the quantities the run's whole absolute
+      mm² column hangs on;
+    - **the fit's quality**: `circ`, `conf`, `fit_resid_px` (also as a % of
+      diameter), `n_edge`, arc coverage, interior fill. These ARE the
+      verification's supporting evidence, because there is nothing else;
+    - **the uncertainty, correctly named**: the fit's own residual, NOT an
+      operator-repeatability term. σ and SE do not exist for one fit and are
+      written as undefined rather than as 0, which would read as perfect;
+    - **what is NOT checked, in plain words**: declaring the fitted disc to
+      be `diam_mm` makes the resting area π·(diam_mm/2)² *by construction*,
+      so a mask-area check on an autofit-derived anchor can only ever pass.
+      It is not run and it is not claimed. No cross-check that cannot fail
+      appears anywhere in this dialog;
+    - **the consequence**: the deviation from any recorded anchor, and the
+      fact that accepting re-derives every mm² already in the run at the
+      next Save (the `[critical]` partial-re-save entry in SLDEA_HANDOFF).
+
+    An empty string is never returned for a usable fit: if this block is
+    blank the operator is being asked to approve a number they cannot see.
+    """
+    d = float((ref or {}).get('diam_px') or 0.0)
+    if d <= 0:
+        return ''
+    dmm = float(diam_mm or 0.0)
+    mmpp = (dmm / d) if d else 0.0
+    area = math.pi * (dmm / 2.0) ** 2 if dmm > 0 else 0.0
+    rp = se.fit_resid_pct(ref)
+    L = []
+    L.append("VERIFY THE AUTOMATIC FIT — the machine measured this run's "
+             "scale; your job is to judge whether it is right, not to "
+             "measure it again.")
+    L.append("Why it measures and you verify: on the one disc anyone has "
+             "measured (P3_2's baseline, eleven hand calibrations, `#215`) "
+             "the automatic fit beat ALL ELEVEN on accuracy and nine of "
+             "eleven on precision. The ink step is a ~20-gray ramp spread "
+             "over ~60 px of radius — there is no line to click, and the "
+             "point a human picks is the outer toe (+2.6 % in diameter).")
+    L.append(f"THE FIT   {d:.1f} px = {dmm:g} mm  →  {mmpp:.5f} mm/px"
+             + (f"   ·   implied resting area {area:.2f} mm²"
+                if area else ''))
+    q = []
+    for key, label, fmt in (('circ', 'circularity', '{:.3f}'),
+                            ('conf', 'confidence', '{:.3f}'),
+                            ('arc_cov', 'arc coverage', '{:.2f}'),
+                            ('solidity', 'interior fill', '{:.2f}')):
+        v = (ref or {}).get(key)
+        if v is not None:
+            q.append(f"{label} " + fmt.format(float(v)))
+    resid = (ref or {}).get('fit_resid_px')
+    n_edge = (ref or {}).get('n_edge')
+    if resid is not None:
+        q.append(f"fit residual {float(resid):.1f} px"
+                 + (f" = {rp:.2f} % of diameter" if rp is not None else ''))
+    if n_edge:
+        q.append(f"{int(n_edge)} edge points")
+    L.append("EVIDENCE   " + '   ·   '.join(q))
+    L.append("UNCERTAINTY   this anchor's uncertainty is the FIT's own"
+             + (f" — the {rp:.2f} % above" if rp is not None else '')
+             + ", conservatively the per-point residual (the fitted "
+               "radius's own standard error is ~√n smaller). There is NO σ "
+               "and NO standard error: nobody fitted anything n times, so "
+               "the round-to-round spread does not exist. It is recorded as "
+               "undefined, never as zero.")
+    L.append("NOT CHECKED — and it cannot be. Nothing independent "
+             "cross-checks an automatic anchor. Calling this fitted disc "
+             f"{dmm:g} mm makes the resting area π·({dmm:g}/2)²"
+             + (f" = {area:.2f} mm²" if area else '')
+             + " BY CONSTRUCTION, so the anchor guard's disc-fit test and "
+               "its mask-area test would both read +0.00 % on any frame, "
+               "however wrong the fit is. No cross-check is run here and "
+               "none is claimed: THE VERIFICATION IS YOUR EYE, supported "
+               "by the numbers above.")
+    L.append("HOW TO JUDGE   the thin dashed circle must follow the "
+             "MIDDLE of the grey ramp all the way round — not its outer "
+             "toe, and not visibly off-centre or off-size on any sector. "
+             "Zoom in (Ctrl+wheel, Z for 1:1, right-drag to pan) before "
+             "you decide."
+             + ("   Contrast is STRETCHED for display only (gray "
+                f"{stretch[0]:.0f}–{stretch[1]:.0f} → black–white) so the "
+                "step is visible at all; the measurement used the RAW "
+                "frame and is unaffected." if stretch else
+                "   Contrast is NOT stretched (this frame's disc/paper "
+                "step could not be measured), so the edge may be very "
+                "faint."))
+    if recorded and recorded.get('diam_px'):
+        pct = se.rescale_pct(float(recorded['diam_px']), d)
+        dev = 100.0 * (d - float(recorded['diam_px'])) \
+            / float(recorded['diam_px'])
+        L.append(f"⚠ AGAINST THE RECORDED ANCHOR   this run already has "
+                 f"{float(recorded['diam_px']):.1f} px on record (saved "
+                 f"{recorded.get('saved', '?')}); the fit is {dev:+.2f} % "
+                 f"from it"
+                 + (f", so accepting moves every absolute mm² in the run "
+                    f"by {pct:+.2f} % at the next Save"
+                    if pct is not None else '')
+                 + (f" — including the {n_px_rows} row(s) already "
+                    f"measured, and frames you never re-review."
+                    if n_px_rows else '.'))
+    elif n_px_rows:
+        L.append(f"⚠ {n_px_rows} row(s) in this run already carry a px "
+                 f"measurement and NO anchor is on record, so all of them "
+                 f"are re-derived from px at this scale at the next Save — "
+                 f"which is the scale a pre-gate Save already used, so the "
+                 f"move should be nil. Verify it anyway: nothing else "
+                 f"will.")
+    return '\n'.join(L)
 
 
 # ---------------------------------------------------------------------------
@@ -938,6 +1221,21 @@ class EdgeReviewApp:
                                                   self.run['rows'][i]))
         return None
 
+    def _base_frame_name(self):
+        """Basename of the frame `_base_gray` (and so the automatic fit)
+        reads — or '' when there is no baseline-tagged row.
+
+        Mode C draws the automatic fit's circle over the frame the operator
+        is looking at, so it has to know that the two are the SAME FILE.
+        `_anchor_frame` can legitimately serve a later activated frame while
+        `_base_gray` only ever serves the baseline row, and the fallback
+        path (an unreadable baseline PNG) is exactly when they diverge."""
+        for i in self.frame_rows:
+            if self.run['rows'][i].get('tag') == 'baseline':
+                p = se.frame_path(self.run, self.run['rows'][i])
+                return os.path.basename(p) if p else ''
+        return ''
+
     def _detect_worker(self, gen, run, frame_rows, settings, base):
         # Per-frame try + sentinel in finally: one bad frame (shape
         # mismatch, decode error) used to kill the thread silently and
@@ -1094,7 +1392,10 @@ class EdgeReviewApp:
             # settings change (diam_mm) made after calibrating. The old
             # tiering fired a modal only past 3%, which is how P3_2's
             # 2.28% shipped in silence.
-            sc = f"; scale: manual {self.manual_ref['diam_px']:.0f} px"
+            verified = se.guard_is_vacuous(self.manual_ref)
+            sc = (f"; scale: "
+                  + ("AUTO-VERIFIED " if verified else "manual ")
+                  + f"{self.manual_ref['diam_px']:.0f} px")
             spr = self.manual_ref.get('spread_pct')
             if spr is not None:
                 # quote the MEAN SE, which is what the gate judges and what
@@ -1114,7 +1415,43 @@ class EdgeReviewApp:
                           else ', SE not convertible ⚠') + ')')
             guard = se.anchor_guard(self.manual_ref['diam_px'],
                                     self.base_ref, self.settings['diam_mm'])
-            if guard['available']:
+            if verified:
+                # THE VACUOUS CROSS-CHECK, NOT SHOWN (`#215` mode C).
+                # This anchor IS the automatic fit, so `guard` reads
+                # +0.00 % on both of its tests by construction — printing
+                # "vs auto disc: +0.0% apart ✓" here would be a green tick
+                # from a test that cannot fail, on any frame, however wrong
+                # the fit is. What the operator gets instead is the fit's
+                # own quality, which is the evidence they actually judged.
+                rp = se.fit_resid_pct(self.manual_ref)
+                sc += (" (operator-approved automatic fit: circ "
+                       f"{float(self.manual_ref.get('fit_circ') or 0):.3f}, "
+                       f"conf "
+                       f"{float(self.manual_ref.get('fit_conf') or 0):.3f}"
+                       + (f", resid {rp:.2f}% of diam" if rp is not None
+                          else '')
+                       + ") ⚠ NOT cross-checked — no independent check of "
+                         "an automatic anchor exists: declaring the fitted "
+                         "disc "
+                       f"{self.settings['diam_mm']:g} mm makes the mask "
+                       "area test pass by construction")
+                # THE ONE THING that is NOT vacuous on a verified anchor:
+                # whether the fit THIS detection pass just made is still the
+                # fit that was approved. It normally is, to the bit (both
+                # come from se.baseline_disc's cache on the same frame), so
+                # any daylight here means the baseline changed underneath a
+                # reused or stale anchor — which is real information, not an
+                # identity. Reported as a deviation, and never as a tick.
+                if (guard['available']
+                        and abs(guard['diam_pct']) > 0.01):
+                    sc += (f" ⚠⚠ AND the automatic fit on this run is NOW "
+                           f"{guard['auto_diam_px']:.0f} px, "
+                           f"{-guard['diam_pct']:+.2f}% from the "
+                           f"{self.manual_ref['diam_px']:.0f} px that was "
+                           f"approved — the baseline or the settings have "
+                           f"changed since, so this anchor was verified "
+                           f"against a DIFFERENT fit. Re-verify it.")
+            elif guard['available']:
                 sc += (f" vs auto disc {guard['auto_diam_px']:.0f} px: "
                        f"{guard['diam_pct']:+.1f}% apart in diam, mask "
                        f"area {guard['area_pct']:+.1f}% "
@@ -1771,6 +2108,19 @@ class EdgeReviewApp:
                 'cal_mode': self.manual_ref.get('cal_mode'),
                 'sigma_pct': self.manual_ref.get('sigma_pct'),
                 'se_pct': self.manual_ref.get('se_pct'),
+                # mode C (`#215`, 2026-08-06 evening): an 'auto-verified'
+                # anchor has no rounds and no spread, so what quantifies it
+                # is the FIT's own quality, and what makes it auditable is
+                # the named human who approved it and when. save_scale_anchor
+                # omits every one of these when they are absent, which is
+                # every hand-measured and every pre-#215 anchor.
+                'fit_circ': self.manual_ref.get('fit_circ'),
+                'fit_conf': self.manual_ref.get('fit_conf'),
+                'fit_resid_px': self.manual_ref.get('fit_resid_px'),
+                'fit_arc_cov': self.manual_ref.get('fit_arc_cov'),
+                'fit_n_edge': self.manual_ref.get('fit_n_edge'),
+                'verified_by': self.manual_ref.get('verified_by'),
+                'verified_at': self.manual_ref.get('verified_at'),
                 'guard': self.manual_ref.get('guard'),
             })
         except OSError as e:
@@ -1925,15 +2275,62 @@ class EdgeReviewApp:
             print(f"calibrate: automatic disc cross-check failed: {e}")
             return None
 
+    def _auto_disc_refusal(self):
+        """WHY the automatic fit refused this baseline, in the fitter's own
+        words — or None.
+
+        Mode C falls through to a hand measurement whenever the fit is
+        unavailable, and an operator being told to do the slower, measurably
+        worse job deserves to know which gate said no: 'the arc covers only
+        87°' sends them to move whatever is lying across the frame, while
+        'the diameter is outside the plausible range' sends them to the
+        camera zoom and diam_mm. Never raises, for the same reason
+        `_auto_disc` does not."""
+        try:
+            base = self._base_gray()
+            if base is None:
+                return ('the baseline frame will not load, so the fit was '
+                        'never attempted')
+            return se.baseline_disc_refusal(base, self.settings)
+        except Exception as e:
+            print(f"calibrate: could not read the fit's refusal: {e}")
+            return None
+
     def _calibrate_scale(self, then_detect=False, mode=None):
-        """Manual px→mm calibration — TWO METHODS, chosen per calibration
-        so they can be A/B compared on the same disc in one session
-        (`#215`, 2026-08-06). This is the SCALE GATE (operator decision
-        2026-08-05): Detect and Save both require it per run, and it
-        overrides EVERY automatic reference at Save. With then_detect,
-        detection chains automatically once calibration finishes
-        (Detect's gate path and --auto). `mode` pre-selects a method;
-        None opens on se.CAL_DEFAULT_MODE and the operator picks.
+        """The px→mm SCALE GATE — THREE METHODS (operator decision
+        2026-08-05, `#215` 2026-08-06). Detect and Save both require it per
+        run, and whatever it produces overrides EVERY automatic reference at
+        Save. With then_detect, detection chains automatically once
+        calibration finishes (Detect's gate path and --auto). `mode`
+        pre-selects a method; **None opens on `se.cal_open_mode(the fit)`** —
+        mode C when there is an automatic fit to verify, mode A when there
+        is not.
+
+        **MODE C — verify the automatic fit** (where the gate opens, and the
+        one that is not a hand measurement). `se.baseline_disc` measured the
+        disc; the operator judges whether it is right. Drawn with a 1 px
+        dashed stroke over a contrast-stretched DISPLAY copy, with the fit's
+        own quality numbers and a plain statement that no independent
+        cross-check of an automatic anchor exists. Actions: ✔ Accept
+        (primary and Tk's default button, but <Return> cannot reach it),
+        ✎ Measure by hand instead (→ mode A), Cancel. Recorded with method
+        `auto-verified` so an audit can tell it from a hand measurement.
+
+        Why it exists, measured (`#215` comment, 2026-08-06 evening): on
+        P3_2's baseline the automatic fit (577.08 px, circ 0.999, conf
+        0.871, residual 2.3 px, 204 edge points) beat ALL ELEVEN hand
+        calibrations on accuracy and nine of eleven on precision. The ink
+        step is a ~20-gray ramp over ~60 px of radius — a gradient wider
+        than the stroke an operator draws with — so there is no gesture that
+        fixes the human side, and the point a human picks is the outer toe
+        (§1.3, +2.6 % diameter). Mode C is withdrawn when the fit refuses
+        (as on P3_7_2.3mL_20260729) or when the frame being calibrated on is
+        not the baseline the fit ran on; the gate then falls through to the
+        hand measurement and states the fitter's own reason.
+
+        The two HAND methods below are unchanged, and are what mode C falls
+        back to. They are also still the only source of the
+        operator-repeatability figure: a verified anchor contributes none.
 
         **MODE A — fit a circle** (the incumbent, behaviour unchanged):
         drag to move, 8 handles to resize about the centre, CAL_ROUNDS
@@ -2039,26 +2436,49 @@ class EdgeReviewApp:
             return
         recorded = se.load_scale_anchor(self.rundir)
         n_px_rows = self._px_rows()
+        # ---- MODE C availability, decided BEFORE the window is built -----
+        # (`#215`, 2026-08-06 evening.) Mode C shows the automatic fit
+        # drawn on the frame the operator is looking at, so it needs BOTH a
+        # fit AND the certainty that the fit belongs to THIS frame: on the
+        # fallback-frame path _anchor_frame() serves a later activated frame
+        # while _base_gray() (and so the fit) can only ever come from the
+        # baseline row. Drawing the baseline's circle over an activated
+        # frame would be an outright lie, so mode C is withdrawn unless the
+        # two are the same file.
+        auto0 = self._auto_disc()
+        same_frame = bool(anchor_is_baseline
+                          and frame_name
+                          and frame_name == self._base_frame_name())
+        verify_ok = bool(same_frame and (auto0 or {}).get('diam_px'))
+        refusal = (None if verify_ok else self._auto_disc_refusal())
+        opens_c = (verify_ok and mode is None) or (mode == se.CAL_MODE_VERIFY
+                                                  and verify_ok)
         win = tk.Toplevel(self.root)
         try:
             win.title("Calibrate scale — pick a method")
             win.transient(self.root)
-            gate = (f"SCALE GATE — this run's px→mm anchor, several rounds "
-                    f"averaged. The nominal disc is "
-                    f"{self.settings['diam_mm']:g} mm across.\n"
-                    f"Aim at the ink edge's HALF-HEIGHT (mid-gray), the "
-                    f"machine convention — not the outer toe.\n"
-                    f"METHOD A (circle): drag inside = move · drag a "
-                    f"handle = resize · wheel = fine resize (Shift = "
-                    f"coarse) · arrows nudge, Shift+arrows resize.\n"
-                    f"METHOD B (two points): click the two OPPOSITE edge "
-                    f"points · arrows nudge the last point (Shift = "
-                    f"coarse) · a 3rd click starts the pair over · the "
-                    f"view is ROTATED a random amount every round, which "
-                    f"is the point — it turns misjudging \"opposite\" from "
-                    f"a fixed error into a random one.\n"
-                    f"Both: Ctrl+wheel zooms, right-drag pans, F fits, "
-                    f"Z = 1:1. Esc cancels.")
+            gate = (f"SCALE GATE — this run's px→mm anchor. The nominal "
+                    f"disc is {self.settings['diam_mm']:g} mm across.")
+            if not verify_ok:
+                # THE REFUSAL, STATED. When baseline_disc will not fit this
+                # baseline there is nothing to verify and the operator has
+                # to measure by hand after all — which is a different job
+                # from the one the gate normally opens with, so it is said
+                # plainly and with the fitter's own reason rather than left
+                # to be inferred from a missing radio button.
+                gate += ("\n⚠ THE AUTOMATIC FIT IS NOT AVAILABLE on this "
+                         "run, so there is nothing to verify: measure the "
+                         "disc BY HAND below.")
+                if refusal:
+                    gate += f"\n   Reason the fit refused: {refusal}"
+                elif not same_frame:
+                    gate += ("\n   Reason: the frame being calibrated on is "
+                             "NOT the baseline the automatic fit runs on, "
+                             "so its circle would not belong to this "
+                             "picture.")
+                else:
+                    gate += ("\n   Reason: not reported (the fit was never "
+                             "attempted, or cv2 failed) — see the console.")
             if not anchor_is_baseline:
                 gate += ("\n⚠ The baseline frame is missing/unreadable — "
                          "this is a LATER frame. Only calibrate here if "
@@ -2114,17 +2534,28 @@ class EdgeReviewApp:
             # a measurement of either method.
             chooser = tk.Frame(win)
             chooser.pack(anchor='w', padx=8, pady=(0, 2))
-            mode_var = tk.StringVar(value=(mode if mode in se.CAL_MODES
-                                           else se.CAL_DEFAULT_MODE))
+            want = mode if mode in se.CAL_MODES else None
+            if want == se.CAL_MODE_VERIFY and not verify_ok:
+                want = None            # asked for C, there is nothing to
+                #                        verify: fall through to the manual
+                #                        mode with the refusal stated above
+            mode_var = tk.StringVar(
+                value=(want if want else se.cal_open_mode(auto0)
+                       if verify_ok else se.CAL_DEFAULT_MODE))
             n_var = tk.StringVar()
             stroke_var = tk.StringVar(value=CAL_STROKE_STYLES[0])
             tk.Label(chooser, text="METHOD:").pack(side=tk.LEFT)
             n_choices = sorted(se.D2_RANGE_FACTORS)
-            for val, txt in (
-                    (se.CAL_MODE_CIRCLE,
-                     "A · fit a circle (3 px stroke on the edge)"),
-                    (se.CAL_MODE_TWOPOINT,
-                     "B · two opposite points, view rotated each round")):
+            choices = [
+                (se.CAL_MODE_CIRCLE,
+                 "A · fit a circle (3 px stroke on the edge)"),
+                (se.CAL_MODE_TWOPOINT,
+                 "B · two opposite points, view rotated each round")]
+            if verify_ok:
+                # first in the row because it is where the gate opens
+                choices.insert(0, (se.CAL_MODE_VERIFY,
+                                   "C · VERIFY the automatic fit"))
+            for val, txt in choices:
                 tk.Radiobutton(chooser, text=txt, value=val,
                                variable=mode_var,
                                command=lambda: switch_mode()).pack(
@@ -2142,14 +2573,28 @@ class EdgeReviewApp:
                                         *CAL_STROKE_STYLES,
                                         command=lambda _v: repaint())
             stroke_menu.pack(side=tk.LEFT, padx=2)
+            # The METHOD-SPECIFIC block: the gestures in mode A/B, and in
+            # mode C the fit's own evidence. Split out of `gate` (which is
+            # the static warnings) because mode C has to show ~8 lines of
+            # numbers where A/B show 4 lines of gesture help, and because
+            # showing mode B's rotation explanation while mode C is up is
+            # noise the operator has to read past.
+            how = tk.Label(win, text='', justify='left', wraplength=980)
+            how.pack(anchor='w', padx=8, pady=(0, 2))
             hdr = tk.Label(win, text='', justify='left',
                            font=('TkDefaultFont', 11, 'bold'))
             hdr.pack(anchor='w', padx=8)
             cw = max(400, min(1000, self.root.winfo_screenwidth() - 220))
             # 400, not 360: the chooser row plus the taller header cost
             # ~40 px, and the pre-existing budget already left only ~35 px
-            # of slack on a 1080p bench screen with every warning showing
-            ch = max(300, min(760, self.root.winfo_screenheight() - 400))
+            # of slack on a 1080p bench screen with every warning showing.
+            # Mode C's evidence block is ~140 px taller than mode A/B's
+            # gesture help, and it is the part that must be READABLE, so
+            # the canvas gives that height up when the dialog opens in C.
+            # Fixed at build time, not per switch: a canvas that resized
+            # under the operator would move the picture they are judging.
+            ch = max(300, min(760, self.root.winfo_screenheight()
+                              - (540 if opens_c else 400)))
             cv = tk.Canvas(win, width=cw, height=ch, bg='#111',
                            cursor='crosshair')
             cv.pack(padx=8, pady=6)
@@ -2174,10 +2619,19 @@ class EdgeReviewApp:
                   # never for measuring)
                   'mode': mode_var.get(), 'n': 0, 'rimg': None,
                   'rot': 0.0, 'pending_rots': [], 'rots': [],
-                  'pts': [], 'ptsv': [], 'auto': '?',
+                  # seeded with the fit mode-C availability was decided on,
+                  # so the dialog and the chooser can never disagree about
+                  # whether there is something to verify
+                  'pts': [], 'ptsv': [], 'auto': auto0,
                   # a modal warning is up: <Return> must not reach the
                   # dialog underneath while one is (review 2026-08-06)
                   'modal': False,
+                  # mode C: the display-only contrast window (lo, hi) gray
+                  # levels, computed ONCE from the frame's measured disc and
+                  # paper levels. Once, not per repaint: a window that moved
+                  # as the operator panned would change the picture they are
+                  # judging while they judge it.
+                  'stretch': None, 'lut': None,
                   # the anchor guard's modal has to print the mean and the
                   # reference diameter for its warning to be actionable at
                   # all, so declining it and refitting means the next
@@ -2187,6 +2641,11 @@ class EdgeReviewApp:
 
             def two_point():
                 return st['mode'] == se.CAL_MODE_TWOPOINT
+
+            def verify():
+                """Mode C — nothing is fitted here, so every round-based
+                path has to sit this one out."""
+                return st['mode'] == se.CAL_MODE_VERIFY
 
             def disp():
                 """(image, w, h) currently DISPLAYED. Mode A shows the
@@ -2264,6 +2723,15 @@ class EdgeReviewApp:
                 readout of the CURRENT circle is fine on its own; mode B
                 shows no length at all, because two clicks on an edge need
                 no numeric feedback to place."""
+                if verify():
+                    # No rounds, so no progress and nothing hidden: mode C's
+                    # whole content is the evidence block plus the picture,
+                    # and the blindness rules that govern A/B have nothing
+                    # to protect here (the operator is not producing a
+                    # number, so there is no number to steer).
+                    return ("Method C · verifying ONE automatic fit — "
+                            "nothing is being measured by hand, so there "
+                            "are no rounds and no spread")
                 where = (f"Method {st['mode']} · Round {st['round']} of "
                          f"{max(rounds_wanted(), st['round'])}")
                 if two_point():
@@ -2319,6 +2787,17 @@ class EdgeReviewApp:
                 cv.delete('all')
                 if cx1 > cx0 and cy1 > cy0:
                     crop = src.crop((cx0, cy0, cx1, cy1))
+                    # MODE C ONLY, and only on the DISPLAY copy: the ink
+                    # step is ~20 gray levels on a ~186 background, which is
+                    # nearly invisible, and an operator squinting at a flat
+                    # grey field is not verifying anything. The measurement
+                    # is already finished and used the raw frame — this LUT
+                    # touches `crop`, a throwaway, and nothing else.
+                    if verify() and st['lut']:
+                        try:
+                            crop = crop.point(st['lut'] * len(crop.getbands()))
+                        except (ValueError, TypeError):
+                            pass          # never lose the picture to a LUT
                     dw = max(1, int(round((cx1 - cx0) * vt.zoom)))
                     dh = max(1, int(round((cy1 - cy0) * vt.zoom)))
                     res = (Image.NEAREST if vt.zoom >= 2.0
@@ -2328,7 +2807,9 @@ class EdgeReviewApp:
                     vx, vy = vt.to_view(cx0, cy0)
                     cv.create_image(int(vx), int(vy), anchor='nw',
                                     image=st['photo'])
-                if two_point():
+                if verify():
+                    paint_verify()
+                elif two_point():
                     paint_points()
                 else:
                     paint_circle()
@@ -2336,7 +2817,17 @@ class EdgeReviewApp:
                 zoom_note = (f"zoom {vt.zoom:.2f}x"
                              + ('' if vt.zoom >= 1.0 else
                                 "  ⚠ below 1:1 — press Z before accepting"))
-                if two_point():
+                if verify():
+                    live.config(
+                        text="the AUTOMATIC fit is drawn as a 1 px dashed "
+                             "circle — thin on purpose, because a 3 px "
+                             "stroke laid on the edge biases a human "
+                             "judgement by +2 %"
+                             + ("   ·   contrast STRETCHED for display only"
+                                if st['lut'] else
+                                "   ·   contrast NOT stretched")
+                             + f"   ·   {zoom_note}")
+                elif two_point():
                     # NO LENGTH, deliberately (see head_text): mode B needs
                     # no numeric feedback to put two clicks on an edge, so
                     # it does not offer one — nothing on screen is a number
@@ -2379,6 +2870,44 @@ class EdgeReviewApp:
                     cv.create_rectangle(hvx - 4, hvy - 4, hvx + 4, hvy + 4,
                                         fill='#00e676', outline='#000000')
 
+            def paint_verify():
+                """Mode C: the AUTOMATIC fit, drawn thin enough to judge
+                against.
+
+                One px, dashed, with a 1 px dark companion ring OUTSIDE it
+                so it reads on pale paper and on dark ink without the ink
+                that crosses the boundary getting any thicker. That is not a
+                style preference: the measured cost of mode A's 3 px stroke
+                was +2.07 % in diameter against A′'s +0.77 % at 1 px dashed
+                (`#215`, 2026-08-06), i.e. laying a stroke along a soft edge
+                moves where a human thinks the edge is. A dialog whose whole
+                job is to present a boundary FOR JUDGEMENT may not use it.
+
+                A centre cross with a hole in it, for concentricity — the
+                same non-occluding rule as mode B's markers, applied to a
+                point nobody is judging but which the eye uses to check the
+                circle is not offset."""
+                ref = auto_ref() or {}
+                if not ref.get('diam_px'):
+                    return
+                r = 0.5 * float(ref['diam_px'])
+                vx, vy = vt.to_view(float(ref['cx']), float(ref['cy']))
+                vr = r * vt.zoom
+                # the dark companion sits OUTSIDE, never on the boundary
+                cv.create_oval(vx - vr - 1, vy - vr - 1,
+                               vx + vr + 1, vy + vr + 1, outline='#000000',
+                               width=CAL_VERIFY_STROKE_PX,
+                               dash=CAL_VERIFY_DASH)
+                cv.create_oval(vx - vr, vy - vr, vx + vr, vy + vr,
+                               outline='#00e676', width=CAL_VERIFY_STROKE_PX,
+                               dash=CAL_VERIFY_DASH)
+                g = CAL_MARK_GAP_VIEW
+                for x0, y0, x1, y1 in ((vx + g, vy, vx + 12, vy),
+                                       (vx - g, vy, vx - 12, vy),
+                                       (vx, vy + g, vx, vy + 12),
+                                       (vx, vy - g, vx, vy - 12)):
+                    cv.create_line(x0, y0, x1, y1, fill='#00e676', width=1)
+
             def paint_points():
                 """Mode B's markers: a 1 px hollow ring and a crosshair
                 with a HOLE in it, at every placed point, plus the chord
@@ -2408,15 +2937,43 @@ class EdgeReviewApp:
                         cv.create_line(*arm, fill='#00e676', width=1)
 
             def accept(dpx_full, source_frame, src_is_baseline=None,
-                       stats=None, guard=None, overridden=False):
-                self.manual_ref = {'method': 'manual-calibration',
+                       stats=None, guard=None, overridden=False,
+                       verified=None, who=None, when=None):
+                # PROVENANCE (`#215` mode C, 2026-08-06 evening). The method
+                # string is how an audit tells "a human MEASURED this" from
+                # "a human APPROVED the machine's measurement" — two
+                # different claims about where the number came from, with
+                # different failure modes (a hand measurement can carry the
+                # +2.6 % outer-toe bias; an approved fit carries whatever
+                # the step-finder locks onto). Both override every automatic
+                # reference at Save, because both are decisions a person is
+                # answerable for; only the provenance differs.
+                self.manual_ref = {'method': (se.ANCHOR_METHOD_VERIFIED
+                                              if verified
+                                              else se.ANCHOR_METHOD_MANUAL),
                                    'diam_px': float(dpx_full),
                                    'frame': source_frame,
                                    'is_baseline': (anchor_is_baseline
                                                    if src_is_baseline
                                                    is None
                                                    else src_is_baseline)}
-                if stats:
+                if verified:
+                    # what quantifies an approved fit is the FIT's quality,
+                    # not a spread across rounds there were none of
+                    self.manual_ref.update({
+                        'cal_mode': se.CAL_MODE_VERIFY,
+                        'fit_circ': verified.get('circ'),
+                        'fit_conf': verified.get('conf'),
+                        'fit_resid_px': verified.get('fit_resid_px'),
+                        'fit_arc_cov': verified.get('arc_cov'),
+                        'fit_n_edge': verified.get('n_edge'),
+                        'verified_by': who, 'verified_at': when})
+                # `not verified`: a mode-C anchor has NO rounds, so it must
+                # not carry rounds_px/n_rounds/spread at all — recording a
+                # one-element round list and a 0 spread would make an
+                # approved automatic fit look like a hand measurement of
+                # perfect precision, in setup.txt, forever
+                if stats and not verified:
                     self.manual_ref.update({
                         'cal_mode': st['mode'],
                         'rounds_px': list(stats['values']),
@@ -2428,6 +2985,9 @@ class EdgeReviewApp:
                         # by anyone who does not also know n
                         'sigma_pct': stats.get('sigma_pct'),
                         'se_pct': stats.get('se_pct')})
+                if verified:
+                    self.manual_ref['guard'] = se.verify_note(verified, who,
+                                                              when)
                 if guard is not None:
                     note = se.anchor_guard_note(guard, overridden)
                     if st['disclosed']:
@@ -2446,6 +3006,36 @@ class EdgeReviewApp:
                 # d₂ factor, so the SE was never computed. That must not
                 # render as "over gate" (which implies a number was
                 # judged) and must not render as clean either.
+                if verified:
+                    # A mode-C status line must not borrow the vocabulary of
+                    # a hand measurement: no σ, no SE, no spread (there is
+                    # no sample), and NO cross-check tick (it would be an
+                    # identity). What it says instead is the fit's own
+                    # quality and who approved it.
+                    rp = se.fit_resid_pct(verified)
+                    bits = [f"circ {float(verified.get('circ', 0)):.3f}",
+                            f"conf {float(verified.get('conf', 0)):.3f}"]
+                    if verified.get('fit_resid_px') is not None:
+                        bits.append(
+                            f"resid "
+                            f"{float(verified['fit_resid_px']):.1f} px"
+                            + (f" = {rp:.2f}% of diam" if rp is not None
+                               else ''))
+                    if verified.get('n_edge'):
+                        bits.append(f"{int(verified['n_edge'])} edge pts")
+                    self.status.config(
+                        text=f"scale VERIFIED (automatic fit approved by "
+                             f"{who or '?'}): "
+                             f"{self.settings['diam_mm']:g} mm = "
+                             f"{dpx_full:.0f} px (" + ', '.join(bits) + ") "
+                             f"({self.settings['diam_mm'] / dpx_full:.5f} "
+                             f"mm/px) — σ/SE undefined (one fit, no "
+                             f"rounds); NOT cross-checked, and no "
+                             f"independent check of an automatic anchor "
+                             f"exists — overrides every automatic "
+                             f"reference at Save")
+                    win.destroy()
+                    return
                 ok = se.se_ok(stats) if stats else None
                 verdict_tag = ('' if ok else ' ⚠ OVER GATE' if ok is False
                                else ' ⚠ NOT JUDGED (no d₂ factor)')
@@ -2553,24 +3143,101 @@ class EdgeReviewApp:
                 auto = auto_ref() or {}
                 auto_px = auto.get('diam_px')
                 ok = se.se_ok(stats)
+                vfy = verify()
+                rec = {
+                    'when': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                    'mode': st['mode'], 'stats': stats,
+                    'gate': se.CAL_SE_PCT,
+                    # mode C is NOT GATED rather than UNJUDGEABLE: the SE
+                    # gate does not apply to a single automatic fit at all,
+                    # which is different from a round-set whose n has no d₂
+                    # factor. Writing 'UNJUDGEABLE' would imply the gate was
+                    # reached for and missed.
+                    'verdict': ('NOT-GATED' if vfy
+                                else {True: 'PASS',
+                                      False: 'OVER-GATE'}.get(ok)),
+                    'rot_deg': (list(st['rots']) if two_point()
+                                else None),
+                    'stroke': (stroke_var.get()
+                               if st['mode'] == se.CAL_MODE_CIRCLE
+                               else None),
+                    'auto_diam_px': auto_px,
+                    'auto_pct': (None if vfy else
+                                 (100.0 * (stats['mean'] - auto_px) / auto_px)
+                                 if auto_px else None),
+                    'outcome': outcome, 'frame': frame_name}
+                if vfy:
+                    rec.update({'fit_circ': auto.get('circ'),
+                                'fit_conf': auto.get('conf'),
+                                'fit_resid_px': auto.get('fit_resid_px'),
+                                'fit_arc_cov': auto.get('arc_cov'),
+                                'fit_n_edge': auto.get('n_edge'),
+                                'fit_resid_pct': se.fit_resid_pct(auto)})
                 try:
-                    _p, line = se.append_calibration_log(self.rundir, {
-                        'when': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                        'mode': st['mode'], 'stats': stats,
-                        'gate': se.CAL_SE_PCT,
-                        'verdict': {True: 'PASS',
-                                    False: 'OVER-GATE'}.get(ok),
-                        'rot_deg': (list(st['rots']) if two_point()
-                                    else None),
-                        'stroke': (stroke_var.get() if not two_point()
-                                   else None),
-                        'auto_diam_px': auto_px,
-                        'auto_pct': (100.0 * (stats['mean'] - auto_px)
-                                     / auto_px) if auto_px else None,
-                        'outcome': outcome, 'frame': frame_name})
+                    _p, line = se.append_calibration_log(self.rundir, rec)
                     print(line)
                 except Exception as e:            # never lose a round-set
                     print(f"calibrate: logging the round-set failed: {e}")
+
+            def verify_accept(_ev=None):
+                """MODE C's only outcome that produces an anchor: the
+                operator has read the fit's numbers, looked at the circle on
+                the stretched frame, and approved it.
+
+                NO GATE RUNS HERE, and that is deliberate rather than an
+                omission:
+
+                - the SE gate judges the scatter of n hand fits; there are
+                  none, and `verify_stats` writes σ/SE/range as undefined
+                  rather than 0 so nothing downstream reads a sample of one
+                  as perfect precision;
+                - the ANCHOR GUARD is **vacuous** on this anchor. Its two
+                  references are the automatic fit (which IS this anchor, so
+                  0.00 %) and the mask's π·(diam_mm/2)² resting area (which
+                  this anchor makes exact by construction, so 0.00 %). It
+                  could only ever pass, on any frame, however wrong the fit
+                  is, so it is not run and — the part that matters — it is
+                  not CLAIMED, here, on the status line, in the record, or
+                  in `sldea_diag` (`se.guard_is_vacuous`).
+
+                What IS recorded is that a named human approved it at a
+                named time, with the fit's own quality numbers beside their
+                name, and a `guard` note saying in words what was not
+                checked (`se.verify_note`)."""
+                ref = auto_ref()
+                if not (ref or {}).get('diam_px'):
+                    # cannot happen through the chooser (mode C is only
+                    # offered with a fit in hand) but a fail-closed dialog
+                    # does not rely on that
+                    messagebox.showwarning(
+                        "Calibrate",
+                        "The automatic fit is no longer available, so there "
+                        "is nothing to verify. Measure the disc by hand "
+                        "instead.")
+                    mode_var.set(se.CAL_DEFAULT_MODE)
+                    switch_mode()
+                    return
+                stats = se.verify_stats(ref)
+                try:
+                    import getpass
+                    who = getpass.getuser()
+                except Exception:
+                    who = '?'
+                when = time.strftime('%Y-%m-%dT%H:%M:%S')
+                log_set(stats, 'accepted-verified')
+                accept(float(ref['diam_px']), frame_name, stats=stats,
+                       verified=ref, who=who, when=when)
+
+            def hand_instead(_ev=None):
+                """Mode C's second action: drop into the existing hand
+                measurement. Nothing is carried over — the manual modes
+                measure from scratch, blind, exactly as they did before mode
+                C existed, and the fit's diameter is NOT pre-filled anywhere
+                (a printed target is what review 2026-08-06 removed)."""
+                if not verify():
+                    return
+                mode_var.set(se.CAL_DEFAULT_MODE)
+                switch_mode()
 
             def finish():
                 """Average the rounds, run the SE gate, then the anchor
@@ -2779,6 +3446,21 @@ class EdgeReviewApp:
                 round needs the button; the modals default to declining."""
                 if st['modal']:
                     return 'break'
+                if verify():
+                    # MODE C. The measured evidence says accepting the
+                    # machine is the GOOD outcome, so ✔ Accept is the
+                    # primary button and Tk draws it as the default one —
+                    # but Enter still cannot reach it. An operator who
+                    # arrives at this dialog and taps Enter out of habit
+                    # would otherwise approve a scale they had not read, and
+                    # "Accept is a judgement rather than a reflex" is the
+                    # only thing standing between mode C and a rubber stamp.
+                    live.config(
+                        text="⚠ Enter cannot approve an anchor — read the "
+                             "numbers above, look at the circle, then click "
+                             "✔ Accept the automatic fit (or ✎ Measure by "
+                             "hand instead)")
+                    return 'break'
                 if is_last_round():
                     live.config(
                         text="⚠ the LAST round must be confirmed with the "
@@ -2805,6 +3487,15 @@ class EdgeReviewApp:
                         return None
                     return two_point_diameter(st['pts'][0], st['pts'][1])
                 return 2.0 * st['circle'][2]
+
+            def step(_ev=None):
+                """What the PRIMARY button does — one command, dispatched on
+                the mode, so the button cannot be wired to the wrong action
+                after a mode switch."""
+                if verify():
+                    verify_accept()
+                else:
+                    continue_round()
 
             def continue_round(_ev=None):
                 dpx = round_diameter()
@@ -2874,6 +3565,42 @@ class EdgeReviewApp:
                 next_round()
                 repaint()
 
+            def prepare_verify():
+                """Mode C's setup: measure the display contrast window from
+                the frame's OWN disc and paper levels, once.
+
+                Nothing else — there is no circle to spawn and no rotation to
+                pick, because nothing is being fitted. `st['circle']` is left
+                as whatever mode A last had (or None); every interaction that
+                would touch it sits mode C out."""
+                st['rimg'] = None
+                st['pts'], st['ptsv'] = [], []
+                st['stretch'], st['lut'] = None, None
+                ref = auto_ref() or {}
+                if not ref.get('diam_px'):
+                    return
+                try:
+                    arr = np.asarray(img.convert('L'), float)
+                    dl, pl = disc_paper_lum(arr, float(ref['cx']),
+                                            float(ref['cy']),
+                                            0.5 * float(ref['diam_px']))
+                    # the fit measured the paper level with foil and glint
+                    # already rejected; no annulus here can do that, so its
+                    # number wins whenever the fit reported one
+                    if ref.get('paper_lum') is not None:
+                        pl = float(ref['paper_lum'])
+                    win_lohi = cal_stretch_window(dl, pl)
+                except Exception as e:
+                    # a stretch is a convenience; losing it must not cost the
+                    # verification, and a silently RAW display is announced
+                    # on the live line rather than pretended about
+                    print(f"calibrate: contrast stretch unavailable: {e}")
+                    return
+                if win_lohi:
+                    st['stretch'] = win_lohi
+                    st['lut'] = cal_stretch_lut(*win_lohi)
+                fit_view(keep_zoom=False)
+
             def restart_all(_ev=None):
                 """Start the round-set over. Also what a mode or round-count
                 change does: half a circle set plus half a two-point set is
@@ -2882,7 +3609,9 @@ class EdgeReviewApp:
                 st['n'] = rounds_wanted()
                 st['round'], st['diams'] = 1, []
                 st['rots'] = []
-                if two_point():
+                if verify():
+                    prepare_verify()
+                elif two_point():
                     st['pending_rots'] = rotation_angles(st['n'], rnd)
                     # keep_zoom=False on the FIRST round only: the operator
                     # has not chosen a zoom yet, and a rotated frame is a
@@ -2904,9 +3633,13 @@ class EdgeReviewApp:
                 keeping whatever was showing means the operator who just
                 wants "the other method" gets the round count that method
                 was designed around (3 for A, 5 for B) without having to
-                know it."""
-                n_var.set(str(se.CAL_MODE_ROUNDS.get(mode_var.get(),
-                                                     se.CAL_ROUNDS)))
+                know it. Mode C has no rounds, so the menu keeps whatever
+                manual count was showing and is disabled instead — a '1'
+                there would read as "one round", which is not what mode C
+                does."""
+                if mode_var.get() != se.CAL_MODE_VERIFY:
+                    n_var.set(str(se.CAL_MODE_ROUNDS.get(mode_var.get(),
+                                                         se.CAL_ROUNDS)))
                 restart_all()
 
             def reuse(_ev=None):
@@ -2916,8 +3649,18 @@ class EdgeReviewApp:
                     # baseline, not this session's (review 2026-08-05).
                     # Its rounds/spread stay ITS record too: this session
                     # fitted nothing, so it must not claim a spread.
+                    #
+                    # Including its METHOD (`#215` mode C, 2026-08-06
+                    # evening): hardcoding 'manual-calibration' here would
+                    # silently relabel a reused auto-verified anchor as a
+                    # HAND measurement, which is the one distinction the
+                    # provenance field exists to keep — and it would then
+                    # collect a vacuous cross-check tick at detect time.
+                    meth = recorded.get('method')
+                    if meth not in se.ANCHOR_METHODS:
+                        meth = se.ANCHOR_METHOD_MANUAL
                     self.manual_ref = {
-                        'method': 'manual-calibration',
+                        'method': meth,
                         'diam_px': float(recorded['diam_px']),
                         'frame': (recorded.get('anchor_frame', '')
                                   or frame_name),
@@ -2926,12 +3669,15 @@ class EdgeReviewApp:
                         'reused': True}
                     for k in ('cal_mode', 'rounds_px', 'n_rounds',
                               'spread_px', 'spread_pct', 'sigma_pct',
-                              'se_pct', 'guard'):
+                              'se_pct', 'fit_circ', 'fit_conf',
+                              'fit_resid_px', 'fit_arc_cov', 'fit_n_edge',
+                              'verified_by', 'verified_at', 'guard'):
                         if recorded.get(k) is not None:
                             self.manual_ref[k] = recorded[k]
                     dpx = float(recorded['diam_px'])
                     self.status.config(
-                        text=f"scale REUSED from the recorded anchor: "
+                        text=f"scale REUSED from the recorded "
+                             f"{meth} anchor: "
                              f"{self.settings['diam_mm']:g} mm = "
                              f"{dpx:.0f} px "
                              f"({self.settings['diam_mm'] / dpx:.5f} "
@@ -2939,12 +3685,23 @@ class EdgeReviewApp:
                              f"reference at Save")
                     win.destroy()
 
-            cont = tk.Button(btns, text='', command=continue_round)
+            cont = tk.Button(btns, text='', command=step)
             cont.pack(side=tk.LEFT)
-            tk.Button(btns, text="↻ Redo this round",
-                      command=redo_round).pack(side=tk.LEFT, padx=6)
-            tk.Button(btns, text="⟲ Restart all rounds",
-                      command=restart_all).pack(side=tk.LEFT)
+            # MODE C's second action, and the reason mode C is not a
+            # dead end: the hand measurement is still there, one click away,
+            # for the run where the fit is visibly wrong. It is created
+            # always and disabled outside mode C rather than created
+            # conditionally, so the button row does not reflow when the
+            # operator switches methods.
+            hand_btn = tk.Button(btns, text="✎ Measure by hand instead",
+                                 command=hand_instead)
+            hand_btn.pack(side=tk.LEFT, padx=6)
+            redo_btn = tk.Button(btns, text="↻ Redo this round",
+                                 command=redo_round)
+            redo_btn.pack(side=tk.LEFT, padx=6)
+            restart_btn = tk.Button(btns, text="⟲ Restart all rounds",
+                                    command=restart_all)
+            restart_btn.pack(side=tk.LEFT)
             if recorded:
                 tk.Button(btns, text="📏 Reuse recorded anchor (P)",
                           command=reuse).pack(side=tk.LEFT, padx=6)
@@ -2952,17 +3709,61 @@ class EdgeReviewApp:
                       command=win.destroy).pack(side=tk.RIGHT)
 
             def sync_buttons():
-                cont.config(text=("✔ Finish calibration" if is_last_round()
-                                  else "Continue →"))
+                vfy = verify()
+                cont.config(
+                    text=("✔ Accept the automatic fit" if vfy else
+                          "✔ Finish calibration" if is_last_round()
+                          else "Continue →"),
+                    # PRIMARY in mode C, because the measured evidence says
+                    # accepting the machine is the good outcome — unlike the
+                    # warning gates on this branch, whose safe default is to
+                    # decline. Tk's `default='active'` draws the ring; it
+                    # does NOT bind <Return>, which continue_key still
+                    # refuses in mode C so that Accept stays a judgement.
+                    default=('active' if vfy else 'normal'))
+                hand_btn.config(state=('normal' if vfy else 'disabled'))
+                # neither means anything without rounds
+                for b in (redo_btn, restart_btn):
+                    b.config(state=('disabled' if vfy else 'normal'))
+                if vfy:
+                    win.title("Calibrate scale (C) — verify the automatic "
+                              "fit on the resting disc")
+                    how.config(text=verify_evidence(
+                        auto_ref(), self.settings['diam_mm'],
+                        recorded=recorded, n_px_rows=n_px_rows,
+                        stretch=st['stretch']))
+                    stroke_menu.config(state='disabled')
+                    n_menu.config(state='disabled')
+                    return
                 what = ("fit the circle to the resting disc" if not
                         two_point() else
                         "click the two opposite edges of the resting disc")
                 win.title(f"Calibrate scale ({st['mode']}) — {what} "
                           f"({st['round']} of "
                           f"{max(rounds_wanted(), st['round'])})")
+                how.config(text=(
+                    "METHOD B (two points): click the two OPPOSITE edge "
+                    "points · arrows nudge the last point (Shift = coarse) "
+                    "· a 3rd click starts the pair over · the view is "
+                    "ROTATED a random amount every round, which is the "
+                    "point — it turns misjudging \"opposite\" from a fixed "
+                    "error into a random one.\n"
+                    "Aim at the ink edge's HALF-HEIGHT (mid-gray), the "
+                    "machine convention — not the outer toe.\n"
+                    "Ctrl+wheel zooms, right-drag pans, F fits, Z = 1:1. "
+                    "Esc cancels."
+                    if two_point() else
+                    "METHOD A (circle): drag inside = move · drag a handle "
+                    "= resize · wheel = fine resize (Shift = coarse) · "
+                    "arrows nudge, Shift+arrows resize.\n"
+                    "Aim at the ink edge's HALF-HEIGHT (mid-gray), the "
+                    "machine convention — not the outer toe.\n"
+                    "Ctrl+wheel zooms, right-drag pans, F fits, Z = 1:1. "
+                    "Esc cancels."))
                 # the stroke option only means anything for mode A's stroke
                 stroke_menu.config(state=('disabled' if two_point()
                                           else 'normal'))
+                n_menu.config(state='normal')
 
             def place_point(rx, ry):
                 """Record one mode-B click. `rx, ry` are ROTATED display
@@ -2988,6 +3789,13 @@ class EdgeReviewApp:
                 repaint()
 
             def press(ev):
+                # MODE C: the displayed circle is the MACHINE's measurement.
+                # Nothing the operator does with the mouse may move it — the
+                # whole point is that they judge a fixed number, and a
+                # draggable circle would turn mode C back into mode A with a
+                # head start.
+                if verify():
+                    return
                 if two_point():
                     place_point(*vt.to_image(ev.x, ev.y))
                     return
@@ -3023,9 +3831,11 @@ class EdgeReviewApp:
             def wheel(vx, vy, steps, ctrl=False, shift=False):
                 # In mode A the plain wheel is the FINE RESIZE and zoom is
                 # on Ctrl, so the wheel cannot fight the sizing gesture. In
-                # mode B there is nothing to resize, so the plain wheel
-                # does the obvious thing and zooms.
-                if ctrl or two_point():
+                # modes B and C there is nothing to resize, so the plain
+                # wheel does the obvious thing and zooms — and in mode C
+                # zooming is the ONLY gesture, because inspecting the edge
+                # closely is the whole job.
+                if ctrl or two_point() or verify():
                     vt.zoom_at(vx, vy, 1.15 ** steps)
                 else:
                     ccx, ccy, r = st['circle']
@@ -3034,6 +3844,9 @@ class EdgeReviewApp:
 
             def key_nudge(ev):
                 shift = bool(ev.state & 0x0001)
+                if verify():
+                    return 'break'      # nothing here is the operator's to
+                    #                     nudge (see press)
                 if two_point():
                     # arrows nudge the LAST placed point, in the rotated
                     # display frame the operator is looking at — one screen
@@ -3060,9 +3873,14 @@ class EdgeReviewApp:
                 """Zoom to at least 1:1 centred on the fit — the fixed
                 0.41x preview was itself an audit finding. Mode B centres
                 on the last placed point, or on the frame centre before any
-                point is placed."""
+                point is placed; mode C centres on the automatic fit, which
+                is the thing being inspected."""
                 _im, w, h = disp()
-                if two_point():
+                if verify():
+                    ref = auto_ref() or {}
+                    ccx, ccy = (float(ref.get('cx', w / 2.0)),
+                                float(ref.get('cy', h / 2.0)))
+                elif two_point():
                     ccx, ccy = (st['ptsv'][-1] if st['ptsv']
                                 else (w / 2.0, h / 2.0))
                 else:
@@ -3131,7 +3949,11 @@ class EdgeReviewApp:
             # instead of the dialog. Nothing in the app reads this.
             self._cal_probe = {'st': st, 'vt': vt, 'canvas': cv,
                                'disp': disp, 'mode_var': mode_var,
-                               'n_var': n_var, 'stroke_var': stroke_var}
+                               'n_var': n_var, 'stroke_var': stroke_var,
+                               # mode C: the evidence block and the two
+                               # buttons whose enablement IS the mode
+                               'how': how, 'step_btn': cont,
+                               'hand_btn': hand_btn}
             win.grab_set()
             self.root.wait_window(win)
         finally:

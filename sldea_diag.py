@@ -682,7 +682,50 @@ def verdicts(d):
         # otherwise sent operators to distrust properly hand-calibrated
         # runs (audit 2026-08-05).
         ref = d.get('baseline_disc')
-        if ref and anchor and anchor.get('mm_per_px'):
+        # PROVENANCE (`#215` mode C, 2026-08-06 evening): 'auto-verified'
+        # means a human APPROVED the automatic fit; 'manual-calibration'
+        # means a human MEASURED the disc. Different claims, different
+        # failure modes, and the cross-check line below is meaningless for
+        # the first -- so the distinction is made once, here, and every
+        # branch honours it.
+        vfy = se.guard_is_vacuous(anchor)
+        if ref and anchor and anchor.get('mm_per_px') and vfy:
+            # THE VACUOUS CROSS-CHECK, NOT RUN AND NOT CLAIMED. This
+            # anchor's diameter IS this fit's diameter, so a "% apart"
+            # figure is 0.00 by construction and the mask-area test reduces
+            # to pi*(d/2)^2 = pi*(d/2)^2. A green line here would be a
+            # check that cannot fail, which is worse than no check: it
+            # reads as verification the code never performed.
+            rp = se.fit_resid_pct(anchor)
+            out.append((
+                'OK', 'px->mm: anchor is the AUTOMATIC fit, VERIFIED by an '
+                      'operator',
+                f"saved scale {anchor['mm_per_px']:.5f} mm/px "
+                f"({anchor['diam_px']:.0f} px, saved "
+                f"{anchor.get('saved', '?')}) is the baseline_disc fit "
+                f"itself, approved by "
+                f"{anchor.get('verified_by') or '(unrecorded)'}"
+                + (f" at {anchor['verified_at']}"
+                   if anchor.get('verified_at') else '')
+                + ". Fit quality: circ "
+                + f"{float(anchor.get('fit_circ') or 0):.3f}, conf "
+                + f"{float(anchor.get('fit_conf') or 0):.3f}"
+                + (f", residual {float(anchor['fit_resid_px']):.1f} px"
+                   if anchor.get('fit_resid_px') is not None else '')
+                + (f" = {rp:.2f}% of diameter" if rp is not None else '')
+                + (f" over {int(anchor['fit_n_edge'])} edge points"
+                   if anchor.get('fit_n_edge') else '')
+                + ". NOT CROSS-CHECKED, and no independent check of an "
+                  "automatic anchor exists: declaring the fitted disc "
+                + f"{(d.get('settings') or {}).get('diam_mm', 16.0):g} mm "
+                + "makes the mask's pi*(d/2)^2 resting area exact BY "
+                  "CONSTRUCTION, so both of anchor_guard's tests would "
+                  "read +0.00% however wrong the fit is. The verification "
+                  "was the operator's eye plus the numbers above. What "
+                  "remains unbounded is the fit's SYSTEMATIC term -- which "
+                  "feature the step-finder locks onto -- and nothing in "
+                  "this project measures it."))
+        elif ref and anchor and anchor.get('mm_per_px'):
             mism = (100 * abs(ref['diam_px'] - anchor['diam_px'])
                     / anchor['diam_px'])
             sev = 'OK' if mism <= 3.0 else 'MED'
@@ -776,7 +819,35 @@ def verdicts(d):
     if anchor and anchor.get('diam_px'):
         spr = anchor.get('spread_pct')
         rounds = anchor.get('rounds_px') or []
-        if spr is None:
+        if se.guard_is_vacuous(anchor):
+            # AN AUTO-VERIFIED ANCHOR HAS NO OPERATOR REPEATABILITY, and it
+            # must not be reported as though the record were merely missing:
+            # nobody fitted anything, so there is nothing to be repeatable
+            # ABOUT. Saying "two-click era" here (the branch below) would
+            # misdescribe the provenance of the newest anchors in the corpus.
+            rp = se.fit_resid_pct(anchor)
+            out.append((
+                'OK', 'No operator-repeatability term: the anchor is a '
+                      'VERIFIED automatic fit, not a hand measurement',
+                "sigma, the mean standard error and the range are all "
+                "UNDEFINED for this anchor rather than zero -- there is one "
+                "automatic fit and a human who approved it, so there is no "
+                "sample to take a spread of. Its uncertainty is the FIT's "
+                "own"
+                + (f": residual {rp:.2f}% of diameter" if rp is not None
+                   else '')
+                + (f" over {int(anchor['fit_n_edge'])} edge points"
+                   if anchor.get('fit_n_edge') else '')
+                + ", conservatively the per-point scatter (the fitted "
+                  "radius's own standard error is ~sqrt(n) smaller). This "
+                  "anchor therefore contributes NOTHING to "
+                  "SLDEA_MEASUREMENT 2.5's operator-repeat leg -- that "
+                  "number only comes from runs calibrated by hand in mode A "
+                  "or B. Approved by "
+                + (anchor.get('verified_by') or '(unrecorded)')
+                + (f" at {anchor['verified_at']}"
+                   if anchor.get('verified_at') else '') + '.'))
+        elif spr is None:
             out.append((
                 'OK', 'Anchor has no repeatability record (two-click era)',
                 f"this anchor was recorded before the {se.CAL_ROUNDS}-round "
@@ -1056,7 +1127,32 @@ def report(d):
           f"{anchor.get('mm_per_px', 0):.5f} mm/px  "
           f"[{anchor.get('method', '?')}, saved "
           f"{anchor.get('saved', '?')}]")
-        if rounds or anchor.get('spread_pct') is not None:
+        if se.guard_is_vacuous(anchor):
+            # the newest provenance in the corpus, printed as what it is:
+            # an approved automatic fit, whose numbers are the FIT's and
+            # whose sigma/SE/range do not exist
+            rp = se.fit_resid_pct(anchor)
+            A("  provenance    : AUTO-VERIFIED -- a human approved the "
+              "automatic fit; nothing was measured by hand")
+            A("  fit quality   : "
+              + f"circ {float(anchor.get('fit_circ') or 0):.3f}  "
+              + f"conf {float(anchor.get('fit_conf') or 0):.3f}"
+              + (f"  arc {float(anchor['fit_arc_cov']):.2f}"
+                 if anchor.get('fit_arc_cov') is not None else '')
+              + (f"  resid {float(anchor['fit_resid_px']):.1f} px"
+                 if anchor.get('fit_resid_px') is not None else '')
+              + (f" ({rp:.2f}% of diam)" if rp is not None else '')
+              + (f"  over {int(anchor['fit_n_edge'])} edge pts"
+                 if anchor.get('fit_n_edge') else ''))
+            A("  rounds        : none -- sigma/SE/range are UNDEFINED for a "
+              "single automatic fit, not zero")
+            A("  verified      : "
+              + (anchor.get('verified_by') or '(unrecorded)')
+              + (f" at {anchor['verified_at']}"
+                 if anchor.get('verified_at') else ''))
+            if anchor.get('guard'):
+                A(f"  note          : {anchor['guard']}")
+        elif rounds or anchor.get('spread_pct') is not None:
             nr = anchor.get('n_rounds') or len(rounds) or 0
             sig = anchor.get('sigma_pct')
             if sig is None:

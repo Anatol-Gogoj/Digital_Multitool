@@ -2366,6 +2366,77 @@ def test_a_refused_fit_falls_through_to_the_hand_measurement_and_says_why():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_switching_into_mode_C_gives_it_the_same_room_as_opening_in_it():
+    """Mode C's evidence block is ~180 px taller than mode A/B's gesture
+    help, so the canvas gives that height up in C and takes it back in A/B.
+    A canvas sized once for A and then filled with mode C's text overflowed
+    a 1080p bench screen by ~80 px -- so the height must follow the MODE,
+    not the mode the dialog happened to open in.
+
+    Screen-independent: it compares switching into C against opening in C,
+    rather than asserting a pixel count."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    root = _tk_root_or_skip('mode C canvas height')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_cal_room_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    saw = {}
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
+
+        def grab(win, key):
+            win.update_idletasks()
+            p = app._cal_probe
+            saw[key] = (p['st']['mode'],
+                        int(p['canvas'].cget('height')),
+                        win.winfo_reqheight(),
+                        round(p['vt'].zoom, 4))
+
+        def opened_in_C(win):
+            grab(win, 'openC')
+            win.destroy()
+
+        def opened_in_A_then_C(win):
+            grab(win, 'openA')
+            for rb in _widgets_of(win, tk.Radiobutton):
+                if rb.cget('value') == 'C':
+                    rb.invoke()
+            grab(win, 'switchC')
+            # and back to A: the height must be RETURNED, not kept
+            for rb in _widgets_of(win, tk.Radiobutton):
+                if rb.cget('value') == 'A':
+                    rb.invoke()
+            grab(win, 'backA')
+            win.destroy()
+
+        app.root.wait_window = opened_in_C
+        app._calibrate_scale()
+        app.manual_ref = None
+        app.root.wait_window = opened_in_A_then_C
+        app._calibrate_scale(mode='A')
+        assert saw['openC'][0] == 'C' and saw['openA'][0] == 'A', saw
+        assert saw['switchC'][0] == 'C' and saw['backA'][0] == 'A', saw
+        # switching in gives mode C exactly the room opening in it does
+        assert saw['switchC'][1] == saw['openC'][1], saw
+        assert saw['switchC'][2] == saw['openC'][2], saw
+        # ... and A gets its taller canvas back
+        assert saw['backA'][1] == saw['openA'][1], saw
+        assert saw['backA'][1] >= saw['openC'][1], saw
+        # the view was RE-FITTED to the new canvas, not left cropping
+        # against a stale height
+        if saw['openC'][1] != saw['openA'][1]:
+            assert saw['switchC'][3] == saw['openC'][3], saw
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_reusing_a_verified_anchor_keeps_it_verified_not_hand_measured():
     """Found while writing mode C: `reuse` hardcoded
     method='manual-calibration', so pressing P on a run whose anchor was

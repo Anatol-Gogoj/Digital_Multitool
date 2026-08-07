@@ -552,15 +552,19 @@ Observation → decision:
   circle: it is the machine's measurement, not the operator's.
 
 **Tests.** `tests/test_sldea_calibration.py` 46 → **57**;
-`tests/test_sldea_edge_gui.py` 27 → **32** (five new cases driving the real
+`tests/test_sldea_edge_gui.py` 27 → **33** (six new cases driving the real
 dialog: mode C is where the gate opens and Enter cannot approve; a refused
 fit falls through to the hand measurement and quotes the reason; ✎ Measure
 by hand lands in a blind mode-A round set with no fit diameter on screen;
-reusing a verified anchor keeps it verified; and a verified anchor still
-reports when the fit has *moved* underneath it). The last two are holes
-found while writing the first three — `reuse()` hardcoded
+switching *into* mode C gives it the same room as opening in it; reusing a
+verified anchor keeps it verified; and a verified anchor still reports when
+the fit has *moved* underneath it). The last three are holes found while
+writing the first three — `reuse()` hardcoded
 `method='manual-calibration'`, which would have relabelled every reused
-mode-C anchor as a hand measurement and then given it a vacuous tick.
+mode-C anchor as a hand measurement and then given it a vacuous tick; and a
+canvas sized once for mode A and then filled with mode C's evidence
+overflowed a 1080p screen by ~80 px, so the canvas height now follows the
+MODE (measured: every switch path stays inside 1040 px at 1080p).
 Suite **28/32** with only the four known-environmental failures
 (`test_arb_bin`, `test_camera_controls`, `test_presets_path`,
 `test_tk_fontfix`). Eight existing dialog cases now pass `mode='A'`

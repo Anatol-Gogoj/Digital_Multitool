@@ -62,8 +62,15 @@ Notes:
   window; a locked screen or RDP-disconnected session gives black images).
   It is DPI-aware and forces the window topmost. On Windows the app runs in
   view/edit mode, so no instrument is ever touched.
-- Watch `annotate.py`'s output for `!! no match` lines — a renamed button
-  means its spec in the `S[...]` tables needs the new `text=` string.
+- `annotate.py` **fails (exit 1) when any callout string matches no widget**:
+  it lists every miss and deletes `annotated/legends.json`, so a chained
+  `build_manual.py` stops instead of assembling the manual from the previous
+  run's legends. A renamed control means its spec in the `S[...]` tables
+  needs the new literal `text=` string; stale screenshots mean the capture
+  stage needs re-running first. (Until 2026-08-07 a miss only printed
+  `!! no match` and the callout silently vanished from the shipped manual —
+  the 📏 Calibrate… callout was lost that way when the button grew
+  " / re-anchor".)
 - `content.json` is the manual's written copy (per-tab purpose, controls,
   steps, cautions). Edit it directly for wording changes — several entries
   were **corrected after a code audit** (notably: closing the app does NOT

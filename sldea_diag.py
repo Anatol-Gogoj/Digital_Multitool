@@ -82,6 +82,7 @@ What it measures, and the failure each one pins down:
 Nothing is modified: the run's setup.txt is read, never written.
 """
 import json
+import math
 import os
 import sys
 
@@ -673,6 +674,7 @@ def verdicts(d):
                         f"median {100 * med_ff:.0f}% of detected area on "
                         f"foil across {len(ffs)} frames with a detection."))
 
+    anchor = d.get('scale_anchor')
     if 'baseline_disc' in d:
         # Since the 2026-08-05 scale gate, Edge Review's saved mm² comes
         # from the operator's mandatory manual 📏 anchor — the automatic
@@ -680,8 +682,50 @@ def verdicts(d):
         # otherwise sent operators to distrust properly hand-calibrated
         # runs (audit 2026-08-05).
         ref = d.get('baseline_disc')
-        anchor = d.get('scale_anchor')
-        if ref and anchor and anchor.get('mm_per_px'):
+        # PROVENANCE (`#215` verify mode, 2026-08-06 evening): 'auto-verified'
+        # means a human APPROVED the automatic fit; 'manual-calibration'
+        # means a human MEASURED the disc. Different claims, different
+        # failure modes, and the cross-check line below is meaningless for
+        # the first -- so the distinction is made once, here, and every
+        # branch honours it.
+        vfy = se.guard_is_vacuous(anchor)
+        if ref and anchor and anchor.get('mm_per_px') and vfy:
+            # THE VACUOUS CROSS-CHECK, NOT RUN AND NOT CLAIMED. This
+            # anchor's diameter IS this fit's diameter, so a "% apart"
+            # figure is 0.00 by construction and the mask-area test reduces
+            # to pi*(d/2)^2 = pi*(d/2)^2. A green line here would be a
+            # check that cannot fail, which is worse than no check: it
+            # reads as verification the code never performed.
+            rp = se.fit_resid_pct(anchor)
+            out.append((
+                'OK', 'px->mm: anchor is the AUTOMATIC fit, VERIFIED by an '
+                      'operator',
+                f"saved scale {anchor['mm_per_px']:.5f} mm/px "
+                f"({anchor['diam_px']:.0f} px, saved "
+                f"{anchor.get('saved', '?')}) is the baseline_disc fit "
+                f"itself, approved by "
+                f"{anchor.get('verified_by') or '(unrecorded)'}"
+                + (f" at {anchor['verified_at']}"
+                   if anchor.get('verified_at') else '')
+                + ". Fit quality: circ "
+                + f"{float(anchor.get('fit_circ') or 0):.3f}, conf "
+                + f"{float(anchor.get('fit_conf') or 0):.3f}"
+                + (f", residual {float(anchor['fit_resid_px']):.1f} px"
+                   if anchor.get('fit_resid_px') is not None else '')
+                + (f" = {rp:.2f}% of diameter" if rp is not None else '')
+                + (f" over {int(anchor['fit_n_edge'])} edge points"
+                   if anchor.get('fit_n_edge') else '')
+                + ". NOT CROSS-CHECKED, and no independent check of an "
+                  "automatic anchor exists: declaring the fitted disc "
+                + f"{(d.get('settings') or {}).get('diam_mm', 16.0):g} mm "
+                + "makes the mask's pi*(d/2)^2 resting area exact BY "
+                  "CONSTRUCTION, so both of anchor_guard's tests would "
+                  "read +0.00% however wrong the fit is. The verification "
+                  "was the operator's eye plus the numbers above. What "
+                  "remains unbounded is the fit's SYSTEMATIC term -- which "
+                  "feature the step-finder locks onto -- and nothing in "
+                  "this project measures it."))
+        elif ref and anchor and anchor.get('mm_per_px'):
             mism = (100 * abs(ref['diam_px'] - anchor['diam_px'])
                     / anchor['diam_px'])
             sev = 'OK' if mism <= 3.0 else 'MED'
@@ -695,6 +739,30 @@ def verdicts(d):
                         f"cross-check fit {ref['diam_px']:.0f} px "
                         f"({ref.get('mm_per_px', 0):.5f} mm/px) — "
                         f"{mism:.1f}% apart in diameter."))
+            # The ANCHOR GUARD, offline (2026-08-06). The 3% tier above
+            # passed run P3_2_2.5mL_20260728 at 2.28%, and that run's
+            # every absolute mm2 is 4.42% low against the 16 mm mask's
+            # pi*8^2 resting area. Run the same ~1% guard the calibration
+            # dialog now runs, so the 15 pre-#215 two-click anchors get
+            # audited too -- retroactively, with no re-review needed.
+            g = se.anchor_guard(anchor['diam_px'], ref,
+                                (d.get('settings') or {}).get('diam_mm',
+                                                              16.0))
+            if g['warn']:
+                out.append((
+                    'MED', 'Scale anchor is outside the ~1% sanity guard',
+                    f"the recorded anchor implies a resting area of "
+                    f"{g['rest_area_mm2']:.2f} mm2 against the mask "
+                    f"anchor's {g['nominal_mm2']:.2f} mm2 "
+                    f"({g['area_pct']:+.2f}%), and sits "
+                    f"{g['diam_pct']:+.2f}% from the automatic disc fit. "
+                    f"The scale-anchor budget is ~0.4% diameter / ~0.8% "
+                    f"area (SLDEA_MEASUREMENT 2.1), so ABSOLUTE mm2 in "
+                    f"this run are outside it -- quote expansion ratios "
+                    f"A/A0 (the scale cancels exactly) or recalibrate. "
+                    f"Guard note on record: "
+                    f"{anchor.get('guard', '(none -- pre-2026-08-06 anchor)')}"
+                ))
         elif ref:
             out.append(('OK', 'Automatic cross-check anchor available '
                         '(Edge Review saves use the manual 📏 anchor)',
@@ -707,14 +775,29 @@ def verdicts(d):
                         f"anchor is recorded in setup.txt yet (pre-gate "
                         f"save, or not yet saved)."))
         elif anchor and anchor.get('mm_per_px'):
-            out.append(('OK', 'px->mm from the recorded manual anchor; '
-                        'automatic cross-check unavailable',
+            # NOT 'OK' (review 2026-08-06). This run's anchor has never
+            # been checked against anything: baseline_disc refused, so
+            # neither the independent disc fit NOR the mask's pi*(d/2)^2
+            # area test could run, and a P3_2-style systematic miss would
+            # sit here unreported. An OK line reading 'cross-check
+            # unavailable' is exactly the shape of finding that gets
+            # skimmed past -- the same silence the calibration dialog used
+            # to produce on this path.
+            gnote = anchor.get('guard') or '(none -- pre-2026-08-06 anchor)'
+            dmm = (d.get('settings') or {}).get('diam_mm', 16.0)
+            out.append(('MED', 'Scale anchor has never been cross-checked',
                         f"saved scale {anchor['mm_per_px']:.5f} mm/px "
                         f"({anchor['diam_px']:.0f} px, saved "
                         f"{anchor.get('saved', '?')}); baseline_disc "
-                        f"refused this baseline, so there is no "
-                        f"independent fit to check it against — verify "
-                        f"the anchor by eye on the contact sheet."))
+                        f"refused this baseline, so NEITHER reference "
+                        f"could be applied -- not the independent disc "
+                        f"fit and not the {dmm:g} mm mask's pi*(d/2)^2 "
+                        f"resting area. A repeatable operator can be a "
+                        f"consistently wrong one, so treat ABSOLUTE mm2 "
+                        f"in this run as unverified: quote ratios A/A0, "
+                        f"or restore/re-export the baseline frame and "
+                        f"recalibrate so the guard can run. Guard note on "
+                        f"record: {gnote}"))
         else:
             out.append(('MED', 'No scale reference at all',
                         f"baseline_disc refused this baseline AND no "
@@ -722,6 +805,177 @@ def verdicts(d):
                         f"Edge Review's gate will demand the 📏 clicks; "
                         f"until a save records them, treat any existing "
                         f"active_area_mm2 as unverifiable."))
+
+    # A SCALE-ONLY RE-ANCHOR (`#215`, 2026-08-06). The run's absolute column
+    # was re-derived from its stored px at a corrected scale, with NO
+    # detection and NO re-review -- so its mm2 are NEWER than its review, and
+    # a reader comparing timestamps would otherwise conclude the run had been
+    # reviewed again. Reported at OK because it is a CORRECTION, not a
+    # defect; what would be a defect is the correction being invisible.
+    #
+    # OUTSIDE the baseline_disc branches, like the repeatability verdict
+    # below and for the same reason: whether a run was re-anchored is a fact
+    # about its own record and needs no automatic reference to state. Nested,
+    # it would go unreported on exactly the runs where baseline_disc refuses.
+    if anchor and anchor.get('reanchor'):
+        prev_px = anchor.get('prev_diam_px')
+        impl_px = anchor.get('prev_implied_px')
+        was = anchor.get('prev_method') or 'none on record (pre-gate save)'
+        mult = None
+        for old in (prev_px, impl_px):
+            if old and anchor.get('diam_px'):
+                mult = (float(old) / float(anchor['diam_px'])) ** 2
+                break
+        out.append((
+            'OK', 'Scale was RE-ANCHORED (scale-only) -- the run was NOT '
+                  're-reviewed',
+            f"this run's absolute areas were re-derived from the "
+            f"active_area_px already in data.csv at a corrected scale "
+            f"({anchor.get('reanchor')}), saved "
+            f"{anchor.get('saved', '?')}"
+            + (f" by {anchor['user']}" if anchor.get('user') else '')
+            + ". Detection did not re-run and no frame was re-reviewed, so "
+              "the pixel measurements and every review verdict predate this "
+              "write -- do NOT read the anchor's timestamp as a review date. "
+              "Previous scale: "
+            + (f"{float(prev_px):.2f} px recorded" if prev_px
+               else 'no anchor was on record')
+            + (f" ({float(impl_px):.2f} px implied by the data)"
+               if impl_px is not None
+               and (prev_px is None
+                    or abs(float(impl_px) - float(prev_px)) > 0.05) else '')
+            + f", method {was}"
+            + (f", now {float(anchor['diam_px']):.2f} px"
+               if anchor.get('diam_px') else '')
+            + (f" -- every area moved x{mult:.6f}" if mult else '')
+            + (f". {int(anchor['reanchor_rows'])} row(s) re-derived"
+               if anchor.get('reanchor_rows') is not None else '')
+            + (f", {int(anchor['reanchor_blanked'])} row(s) BLANKED (an mm2 "
+               f"with no px cannot be re-derived and is not kept on an "
+               f"unknowable anchor)"
+               if anchor.get('reanchor_blanked') else '')
+            + ". Expansion ratios A/A0 are unaffected by this: a uniform "
+              "scale factor cancels exactly in a ratio, so any A/A0 quoted "
+              "before the re-anchor still stands."))
+
+    # #215: three averaged circle fits carry their own spread -- the run's
+    # operator-repeatability number. Absent on every pre-2026-08-06
+    # anchor, and its absence is reported as absence, never as agreement.
+    #
+    # OUTSIDE the baseline_disc branches ON PURPOSE (review 2026-08-06):
+    # the spread is a property of the operator's own fits and needs no
+    # automatic reference to judge. Nested under `if ref and anchor` it
+    # was emitted at NO severity on exactly the runs where baseline_disc
+    # refuses -- the runs with no automatic reference, where the
+    # operator's own repeatability is the only evidence there is.
+    if anchor and anchor.get('diam_px'):
+        spr = anchor.get('spread_pct')
+        rounds = anchor.get('rounds_px') or []
+        if se.guard_is_vacuous(anchor):
+            # AN AUTO-VERIFIED ANCHOR HAS NO OPERATOR REPEATABILITY, and it
+            # must not be reported as though the record were merely missing:
+            # nobody fitted anything, so there is nothing to be repeatable
+            # ABOUT. Saying "two-click era" here (the branch below) would
+            # misdescribe the provenance of the newest anchors in the corpus.
+            rp = se.fit_resid_pct(anchor)
+            out.append((
+                'OK', 'No operator-repeatability term: the anchor is a '
+                      'VERIFIED automatic fit, not a hand measurement',
+                "sigma, the mean standard error and the range are all "
+                "UNDEFINED for this anchor rather than zero -- there is one "
+                "automatic fit and a human who approved it, so there is no "
+                "sample to take a spread of. Its uncertainty is the FIT's "
+                "own"
+                + (f": residual {rp:.2f}% of diameter" if rp is not None
+                   else '')
+                + (f" over {int(anchor['fit_n_edge'])} edge points"
+                   if anchor.get('fit_n_edge') else '')
+                + ", conservatively the per-point scatter (the fitted "
+                  "radius's own standard error is ~sqrt(n) smaller). This "
+                  "anchor therefore contributes NOTHING to "
+                  "SLDEA_MEASUREMENT 2.5's operator-repeat leg -- that "
+                  "number only comes from runs calibrated BY HAND (the "
+                  "circle or two-point methods). Approved by "
+                + (anchor.get('verified_by') or '(unrecorded)')
+                + (f" at {anchor['verified_at']}"
+                   if anchor.get('verified_at') else '') + '.'))
+        elif spr is None:
+            out.append((
+                'OK', 'Anchor has no repeatability record (two-click era)',
+                f"this anchor was recorded before the {se.CAL_ROUNDS}-round "
+                f"fit-a-circle calibration (2026-08-06), so it carries a "
+                f"single diameter and no spread. Nothing is wrong with it "
+                f"-- there is simply no measurement of how repeatable it "
+                f"was. Recalibrating in Edge Review would produce one."))
+        else:
+            # n-AWARE since 2026-08-06 evening: the round count is
+            # configurable and the two calibration modes default to
+            # different counts, so a bare range says nothing on its own --
+            # the range of 5 fits is 1.37x the range of 3 at the SAME
+            # precision (d2(5)/d2(3)). Judge the MEAN SE, which is what
+            # SLDEA_MEASUREMENT 2.1 budgets, and derive it from the
+            # RECORDED range and n rather than recomputing from rounds_px:
+            # the persisted range is the statistic the anchor carries, and
+            # rounds_px is optional.
+            nr = anchor.get('n_rounds') or len(rounds) or 0
+            sig = anchor.get('sigma_pct')
+            if sig is None:
+                sig = se.sigma_from_range(spr, nr)
+            sep = anchor.get('se_pct')
+            if sep is None and sig is not None and nr:
+                sep = sig / math.sqrt(nr)
+            # THE LEGACY LETTER RULE (se.cal_mode_read, via cal_mode_text).
+            # A block written before 2026-08-06 late holds a PRE-SWAP letter
+            # -- live P3_2's reads `cal_mode: C`, meaning verify -- and the
+            # dialog's labels have since been renumbered, so a letter printed
+            # raw here would name the wrong method to every reader of this
+            # report. Quoted as `letter (name)` so it matches both the screen
+            # and the record.
+            mode = se.cal_mode_text(anchor.get('cal_mode'))
+            how = f"method {mode}, " if mode else ''
+            if sep is None:
+                # no d2 factor for this n, so the conversion the budget
+                # needs does not exist. Reported as a gap, above OK: an
+                # unconvertible number is not a passing one.
+                out.append((
+                    'MED', 'Operator repeatability cannot be converted: '
+                           f"no d2 factor for n={nr}",
+                    f"{how}range {spr:.2f}% across {nr} fit(s), but "
+                    f"SLDEA_MEASUREMENT 2.1a's range-to-sigma table covers "
+                    f"n = {min(se.D2_RANGE_FACTORS)}-"
+                    f"{max(se.D2_RANGE_FACTORS)} only, so neither the "
+                    f"per-fit sigma nor the mean's standard error could be "
+                    f"computed. Nothing here has been compared with 2.1's "
+                    f"~0.4% diameter budget. Recalibrate with a round "
+                    f"count in the table if this anchor's precision "
+                    f"matters."))
+            else:
+                sev2 = 'OK' if sep <= se.CAL_SE_PCT else 'MED'
+                out.append((
+                    sev2, 'Operator repeatability: '
+                          f"sigma {sig:.2f}%/fit, mean SE {sep:.2f}% "
+                          f"diameter across {nr} fits"
+                          + ('' if sep <= se.CAL_SE_PCT
+                             else f" -- over the {se.CAL_SE_PCT:g}% gate"),
+                    f"{how}fitted diameters "
+                    + (', '.join(f"{v:.1f}" for v in rounds) + ' px'
+                       if rounds else '(values not recorded)')
+                    + f"; mean {anchor['diam_px']:.1f} px, range "
+                      f"{anchor.get('spread_px', 0):.1f} px = {spr:.2f}%. "
+                      f"sigma = range/d2({nr}); mean SE = sigma/sqrt(n); "
+                      f"area SE = {2 * sep:.2f}%. Compare CALIBRATION "
+                      f"METHODS on sigma -- it is the per-fit precision "
+                      f"and the only figure that survives a different "
+                      f"round count. This is a measurement of the "
+                      f"OPERATOR, not of the device -- the one number "
+                      f"SLDEA_MEASUREMENT 2.5 asks for and has never had. "
+                      f"Tight is precision, not accuracy: a consistently "
+                      f"mis-placed mark scores well here and is caught by "
+                      f"the mask-area guard instead -- and where there is "
+                      f"no automatic fit, nothing catches it at all. "
+                      f"DO NOT feed this into the error budget until a "
+                      f"real spread has been measured on a real disc "
+                      f"(SLDEA_MEASUREMENT 2.1a)."))
 
     auds = [p.get('audit') for p in per]
     auds = [a for a in auds if a and a.get('bias_px') is not None]
@@ -921,6 +1175,90 @@ def report(d):
         else:
             A("resting disc    : NOT FOUND (baseline_disc refused -- mm "
               "figures fall back to an activated frame)")
+    anchor = d.get('scale_anchor')
+    if anchor:
+        # #215 fields are all optional: a pre-2026-08-06 anchor prints
+        # the same line minus the rounds, and a pre-gate run prints
+        # nothing here at all (anchor is None)
+        rounds = anchor.get('rounds_px') or []
+        A(f"saved anchor    : {anchor['diam_px']:.1f} px = "
+          f"{anchor.get('diam_mm', 0):g} mm  ->  "
+          f"{anchor.get('mm_per_px', 0):.5f} mm/px  "
+          f"[{anchor.get('method', '?')}, saved "
+          f"{anchor.get('saved', '?')}]")
+        if se.guard_is_vacuous(anchor):
+            # the newest provenance in the corpus, printed as what it is:
+            # an approved automatic fit, whose numbers are the FIT's and
+            # whose sigma/SE/range do not exist
+            rp = se.fit_resid_pct(anchor)
+            A("  provenance    : AUTO-VERIFIED -- a human approved the "
+              "automatic fit; nothing was measured by hand")
+            A("  fit quality   : "
+              + f"circ {float(anchor.get('fit_circ') or 0):.3f}  "
+              + f"conf {float(anchor.get('fit_conf') or 0):.3f}"
+              + (f"  arc {float(anchor['fit_arc_cov']):.2f}"
+                 if anchor.get('fit_arc_cov') is not None else '')
+              + (f"  resid {float(anchor['fit_resid_px']):.1f} px"
+                 if anchor.get('fit_resid_px') is not None else '')
+              + (f" ({rp:.2f}% of diam)" if rp is not None else '')
+              + (f"  over {int(anchor['fit_n_edge'])} edge pts"
+                 if anchor.get('fit_n_edge') else ''))
+            A("  rounds        : none -- sigma/SE/range are UNDEFINED for a "
+              "single automatic fit, not zero")
+            A("  verified      : "
+              + (anchor.get('verified_by') or '(unrecorded)')
+              + (f" at {anchor['verified_at']}"
+                 if anchor.get('verified_at') else ''))
+            if anchor.get('guard'):
+                A(f"  note          : {anchor['guard']}")
+        elif rounds or anchor.get('spread_pct') is not None:
+            nr = anchor.get('n_rounds') or len(rounds) or 0
+            sig = anchor.get('sigma_pct')
+            if sig is None:
+                sig = se.sigma_from_range(anchor.get('spread_pct'), nr)
+            sep = anchor.get('se_pct')
+            if sep is None and sig is not None and nr:
+                sep = sig / math.sqrt(nr)
+            A(f"  rounds        : "
+              + (f"method {se.cal_mode_text(anchor['cal_mode'])}, "
+                 if anchor.get('cal_mode') else '')
+              + (', '.join(f"{v:.1f}" for v in rounds) + ' px  '
+                 if rounds else '')
+              + f"spread {anchor.get('spread_px', 0):.1f} px "
+                f"({anchor.get('spread_pct', 0):.2f}%)"
+              # the n-aware conversion, or a plain statement that there is
+              # none: a range on its own is not comparable across n
+              + (f"  sigma {sig:.2f}%/fit, SE {sep:.2f}%"
+                 if sep is not None else
+                 f"  (no d2 factor for n={nr}: sigma/SE not computed)")
+              + (f"  guard: {anchor['guard']}" if anchor.get('guard')
+                 else ''))
+        else:
+            A("  rounds        : none recorded (pre-2026-08-06 two-click "
+              "anchor -- no repeatability number)")
+        if anchor.get('reanchor'):
+            # printed for EVERY provenance, not only a verified fit: a
+            # re-anchor can
+            # be committed from any of the three calibration modes, and the
+            # thing a reader needs is that the mm2 are newer than the review
+            A(f"  re-anchored   : {anchor['reanchor']} -- areas re-derived "
+              f"from stored px; NO detection, NO re-review")
+            prev_px = anchor.get('prev_diam_px')
+            impl_px = anchor.get('prev_implied_px')
+            A("  previous scale: "
+              + (f"{float(prev_px):.2f} px" if prev_px
+                 else 'no anchor on record')
+              + (f"  (data implied {float(impl_px):.2f} px)"
+                 if impl_px is not None else '')
+              + f"  [{anchor.get('prev_method') or 'none on record'}"
+              + (f", method {se.cal_mode_text(anchor['prev_cal_mode'])}"
+                 if anchor.get('prev_cal_mode') else '') + ']')
+            if anchor.get('reanchor_rows') is not None:
+                A(f"  rows          : "
+                  f"{int(anchor['reanchor_rows'])} re-derived"
+                  + (f", {int(anchor['reanchor_blanked'])} blanked "
+                     f"(mm2 with no px)"
+                     if anchor.get('reanchor_blanked') else ''))
     A("")
     A("VERDICTS")
     A("-" * 74)

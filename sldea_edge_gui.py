@@ -201,6 +201,10 @@ SIDE_W = 330            # right panel width -- FIXED, propagation off (#179)
 RADIO_TEXT_PX = SIDE_W - 100   # text budget in a candidate radio row: the
                                # panel + LabelFrame padding, colour swatch
                                # and radio indicator eat ~100 px of the row
+PRIMARY_FG = '#1f3a5f'  # the app's existing accent blue (splash, clock) —
+                        # reused for ▶ Detect Edges rather than introducing
+                        # a colour, because #32 owns any real restyle
+SECONDARY_FG = '#555555'   # Advanced… / 📏: muted label, stock geometry
 INFO_LINES = 5          # info label height (text lines): 3 fixed lines +
                         # room for a flag line and its wrap -- a flag must
                         # change content, not layout (#179)
@@ -479,6 +483,153 @@ def session_readout(secs):
     is one session across many runs) and not stopped by Save (reviewing
     continues after one)."""
     return f"session {fmt_dur(secs)}"
+# ---------------------------------------------------------------------------
+# hover tooltips (`#216`)
+#
+# COPIED, NOT IMPORTED, from ui_widgets.py — deliberately (PROJECT_HANDOFF
+# open decision 2). That decision moves sldea_edge / sldea_edge_gui /
+# sldea_tuner / sldea_diag / sldea_trace into their own repo as an
+# instrument-free suite; `ui_widgets` is NOT in that seam, so importing it
+# here would plant a cross-seam dependency on the split's own boundary for
+# the sake of ~35 lines with no state and no invariants. The repo's
+# duplication scar (the `#224` label in five hand-kept places) is about a
+# STRING an operator reads and a doc quotes; this is a behaviourless Tk
+# idiom. If the two ever drift, nothing measurable is wrong — one popup
+# waits 650 ms and the other 700.
+#
+# If the split is ever abandoned, delete this and
+# `from ui_widgets import add_tooltip` instead: the signature is the same
+# on purpose.
+# ---------------------------------------------------------------------------
+
+
+class Tooltip:
+    """Show `text` in a small popup after hovering `widget` for `delay` ms.
+
+    Tk has no built-in tooltip; this is the standard Toplevel +
+    overrideredirect pattern. Hides on leave/click/destroy.
+    """
+
+    def __init__(self, widget, text, delay=650, wraplength=340):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self.wraplength = wraplength
+        self._after_id = None
+        self._tip = None
+        widget.bind('<Enter>', self._schedule, add='+')
+        widget.bind('<Leave>', self._hide, add='+')
+        widget.bind('<ButtonPress>', self._hide, add='+')
+        widget.bind('<Destroy>', self._hide, add='+')
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after_id = self.widget.after(self.delay, self._show)
+
+    def _cancel(self):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _show(self):
+        if self._tip is not None or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 14
+            y = (self.widget.winfo_rooty()
+                 + self.widget.winfo_height() + 6)
+        except tk.TclError:      # widget died while the timer was pending
+            return
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f'+{x}+{y}')
+        tk.Label(tip, text=self.text, justify='left',
+                 wraplength=self.wraplength, bg='#ffffe0', fg='black',
+                 relief='solid', borderwidth=1, padx=7, pady=5).pack()
+        self._tip = tip
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except tk.TclError:
+                pass
+            self._tip = None
+
+
+def add_tooltip(widget, text):
+    """Attach a hover tooltip; returns the Tooltip.
+
+    THE ONE DELIBERATE DIFFERENCE from ui_widgets.add_tooltip, which
+    returns the widget so a caller can chain `add_tooltip(ttk.Button(…),
+    …)`. Nothing here chains, and one caller — ▶ Detect Edges, whose
+    hover text follows its enabled state — needs the object back."""
+    return Tooltip(widget, text)
+
+
+# TIPS is the whole hover-help inventory in one place, keyed by the
+# attribute/slot it hangs on, so a reviewer can read every string the
+# operator can summon without walking _build_ui — and so the tests can
+# assert that every control the issue names actually carries one.
+# One short sentence each: what THIS control does, in the words the code
+# uses. Workflow prose ("what do I do here") is #238's panel, not this.
+TIPS = {
+    'run_box': "Pick which run folder to review — '✓ processed' means its "
+               "data.csv already carries pixel areas from an earlier pass.",
+    'browse_btn': "Point Edge Review at a different run folder, or at a "
+                  "parent folder full of them.",
+    'detect_btn': "START HERE: traces the disc in every frame of this run — "
+                  "if the run has no px→mm anchor yet, the 📏 calibration "
+                  "opens first and detection continues by itself.",
+    'detect_btn_disabled': "Pick a run in the Run box first — there is "
+                           "nothing to detect until then.",
+    'detect_btn_busy': "Detection is running — the Run box and Browse… are "
+                       "locked until it finishes, so a stale pass cannot "
+                       "land on the next run.",
+    'adv_btn': "Edit this run's detection thresholds; changing one that "
+               "affects detection clears the current pass and asks first.",
+    'scale_btn': "Set this run's px→mm anchor from the resting disc; on an "
+                 "already-saved run with no review pass open it re-derives "
+                 "every mm² in data.csv instead.",
+    'save_btn': "Writes the accepted areas into data.csv (a .bak is kept) "
+                "and saves the plot and outline overlays — greyed out until "
+                "▶ Detect Edges has run, and it still refuses without the "
+                "📏 scale anchor.",
+    # the digit leads because <Key-1..3> is bound unconditionally, while
+    # the letter binding is <Key-a/b/c> — lowercase, so it is the letter
+    # an unshifted keypress sends (unlike R/D/T, bound in both cases)
+    'cand': "Machine candidate {k} — the outline drawn on the frame in the "
+            "matching colour; press {n} or {k} to pick it. conf is a "
+            "review-ordering score, not a probability that the edge is "
+            "right.",
+    'trace': "Draw the outline yourself when no candidate is right — keys "
+             "4, D or T open the tracer. Done only STAGES it as D; "
+             "✔ Accept commits it.",
+    'accept_btn': "Commit the selected candidate for this frame (Enter), "
+                  "then jump to the next frame still needing a decision.",
+    'reject_btn': "Record that this frame has no reliable edge (R) — its "
+                  "area columns are blanked, and it is not left unreviewed.",
+    'prev_btn': "Back one frame (Left arrow); browsing never changes a "
+                "decision.",
+    'next_btn': "Forward one frame (Right arrow); browsing never changes a "
+                "decision.",
+    'unrev_btn': "Jump to the first frame still waiting for a decision.",
+}
+
+# The empty canvas says what to press. The scale gate turns Detect into
+# the ONE entry point — it diverts to 📏 and chains back — so the hint
+# names Detect, not calibration (`#216`). Every other place that tells an
+# operator how to start a run says the same thing in the same order; if
+# you change this, grep for "Detect Edges" and change them together.
+HINT_PICK_RUN = ("Pick a run in the Run box above,\n"
+                 "then press  ▶ Detect Edges")
+HINT_DETECT = ("Press  ▶ Detect Edges  to start.\n"
+               "📏 Calibration will guide you first when this run "
+               "needs an anchor.")
 
 
 # ---------------------------------------------------------------------------
@@ -1355,6 +1506,9 @@ class EdgeReviewApp:
         # NON-modal on purpose: the whole point is to read it beside the
         # window while working, not instead of it
         self._howto_scroll = None      # its canvas, published for the tests
+        self._tips = {}          # control name -> live Tooltip (`#216`)
+        self._hint = None        # the empty-canvas "press this" line (`#216`)
+        self._primary_font = None   # kept alive by _install_styles (`#216`)
         self._build_ui()
         start = path or DEFAULT_PARENT
         self._populate_runs(start)
@@ -1362,25 +1516,81 @@ class EdgeReviewApp:
             root.after(300, self.detect)
 
     # ---------------- UI scaffolding ----------------
+    def _install_styles(self):
+        """The ONE accent in Edge Review: ▶ Detect Edges (`#216`).
+
+        Deliberately NOT a restyle of the app — #32 owns that, and this is
+        stock ttk on the vista theme. Measured on the Windows analysis PC
+        (Tk 8.6.12, theme `vista`, Segoe UI 9): a named style's `font`,
+        `padding` and `foreground` are all honoured by the native button
+        element, so the accented button renders 105x31 against a plain
+        88x25 and its label is drawn in the house blue. On a theme that
+        ignores foreground the bold face and the extra padding still carry
+        the emphasis, so it degrades to "bigger and bolder" rather than to
+        nothing. No `default='active'`: <Return> is bound to ✔ Accept, and
+        calling Detect the default button would be a lie.
+
+        Secondary (Advanced…, 📏) keeps the stock geometry — a button that
+        is smaller AND muted starts to read as disabled — and is muted by
+        label colour only, so the row's heights stay even.
+
+        THE BOLD FONT IS HELD ON THE APP, not on the stack. A tkfont.Font
+        deletes its named font from the interpreter when it is collected,
+        and a style pointing at a deleted name falls back to the default
+        face without a word — a bold accent that is silently not bold.
+        It is per-app rather than a module cache because the name lives in
+        the Tk interpreter, and the tests build and destroy roots.
+        """
+        st = ttk.Style()
+        try:
+            self._primary_font = tkfont.nametofont('TkDefaultFont').copy()
+            self._primary_font.configure(weight='bold')
+            st.configure('Primary.TButton', font=self._primary_font,
+                         padding=(12, 4), foreground=PRIMARY_FG)
+            st.configure('Secondary.TButton', foreground=SECONDARY_FG)
+        except tk.TclError as e:
+            # a theme that refuses one of these must cost the ACCENT, not
+            # the window: the button still works unstyled
+            print(f"edge review: accent style unavailable ({e})")
+
     def _build_ui(self):
+        self._install_styles()
         top = ttk.Frame(self.root, padding=6)
         top.pack(fill='x')
-        ttk.Label(top, text="Run:").pack(side=tk.LEFT)
+        # THE TOP BAR READS LEFT TO RIGHT AS THE JOB (`#216`): pick the run,
+        # press the one accented button, review, save on the far right. The
+        # separators are the grouping — [run] | [the action] | [tools] — so
+        # the two tool buttons stop competing with Detect for the eye.
+        self.run_lbl = ttk.Label(top, text="Run:")
+        self.run_lbl.pack(side=tk.LEFT)
         self.run_box = ttk.Combobox(top, width=44, state='readonly')
         self.run_box.pack(side=tk.LEFT, padx=6)
         self.run_box.bind('<<ComboboxSelected>>', lambda _e: self._pick_run())
         self.browse_btn = ttk.Button(top, text="Browse…",
                                      command=self._browse)
         self.browse_btn.pack(side=tk.LEFT)
+        ttk.Separator(top, orient='vertical').pack(side=tk.LEFT, fill='y',
+                                                   padx=10, pady=2)
+        # THE primary action, and disabled until a run is picked — the
+        # affordance doubles as the state, so a first-time operator is
+        # never invited to press the button that would only say "Pick a
+        # run first" in a modal (`#216`). _sync_detect_btn owns it from
+        # here on; the detect-in-flight lock goes through the same place.
         self.detect_btn = ttk.Button(top, text="▶ Detect Edges",
-                                     command=self.detect)
+                                     command=self.detect,
+                                     style='Primary.TButton',
+                                     state='disabled')
         self.detect_btn.pack(side=tk.LEFT, padx=10)
+        ttk.Separator(top, orient='vertical').pack(side=tk.LEFT, fill='y',
+                                                   padx=10, pady=2)
         # ONE settings-editing path in Edge Review: Advanced… covers every
         # knob with Apply+Save. The Tune button was removed (operator
         # decision 2026-07-31) — the tuner is a development instrument,
         # launched directly (deploy/Tune_SLDEA_Windows.bat unchanged).
-        ttk.Button(top, text="Advanced…",
-                   command=self._advanced).pack(side=tk.LEFT)
+        self.adv_btn = ttk.Button(top, text="Advanced…",
+                                  command=self._advanced,
+                                  style='Secondary.TButton')
+        self.adv_btn.pack(side=tk.LEFT)
         # ONE scale entry point (operator decision 2026-08-06 late, `#215`).
         # It used to be two buttons — 📏 Calibrate… and 📏 Re-anchor scale… —
         # and the operator's objection was that they open THE SAME DIALOG, so
@@ -1396,8 +1606,13 @@ class EdgeReviewApp:
         # two is about to happen is computed at click time and said in the
         # dialog's title, on its primary button and in its confirmation.
         self.scale_btn = ttk.Button(top, text="📏 Calibrate / re-anchor…",
-                                    command=self._scale_action)
+                                    command=self._scale_action,
+                                    style='Secondary.TButton')
         self.scale_btn.pack(side=tk.LEFT, padx=(6, 0))
+        # Save stays on the far RIGHT — the end of the job, and out of the
+        # left-to-right flow (`#216`). It is NOT accented: two accents is
+        # no accent, and its own affordance is the disabled state, which
+        # the tooltip explains rather than leaving as a dead grey button.
         self.save_btn = ttk.Button(top, text="💾 Save to data.csv…",
                                    command=self.save, state='disabled')
         self.save_btn.pack(side=tk.RIGHT)
@@ -1489,18 +1704,23 @@ class EdgeReviewApp:
             self.cand_radios.append(rb)
         bt = ttk.Frame(side)
         bt.pack(fill='x', pady=6)
-        ttk.Button(bt, text="✔ Accept (Enter)",
-                   command=self._accept_next).pack(side=tk.LEFT)
-        ttk.Button(bt, text="✘ Reject (R)",
-                   command=self._reject).pack(side=tk.LEFT, padx=6)
+        self.accept_btn = ttk.Button(bt, text="✔ Accept (Enter)",
+                                     command=self._accept_next)
+        self.accept_btn.pack(side=tk.LEFT)
+        self.reject_btn = ttk.Button(bt, text="✘ Reject (R)",
+                                     command=self._reject)
+        self.reject_btn.pack(side=tk.LEFT, padx=6)
         nav = ttk.Frame(side)
         nav.pack(fill='x')
-        ttk.Button(nav, text="◀ Prev",
-                   command=lambda: self._step(-1)).pack(side=tk.LEFT)
-        ttk.Button(nav, text="Next ▶",
-                   command=lambda: self._step(+1)).pack(side=tk.LEFT, padx=6)
-        ttk.Button(nav, text="Next unreviewed",
-                   command=self._next_unreviewed).pack(side=tk.LEFT)
+        self.prev_btn = ttk.Button(nav, text="◀ Prev",
+                                   command=lambda: self._step(-1))
+        self.prev_btn.pack(side=tk.LEFT)
+        self.next_btn = ttk.Button(nav, text="Next ▶",
+                                   command=lambda: self._step(+1))
+        self.next_btn.pack(side=tk.LEFT, padx=6)
+        self.unrev_btn = ttk.Button(nav, text="Next unreviewed",
+                                    command=self._next_unreviewed)
+        self.unrev_btn.pack(side=tk.LEFT)
         self.queue_lbl = tk.Label(side, text="", fg='#8a5a00', anchor='w',
                                   justify='left')
         self.queue_lbl.pack(fill='x', pady=(8, 0))
@@ -1519,6 +1739,7 @@ class EdgeReviewApp:
         self.howto_btn = ttk.Button(foot, text=HOWTO_BTN_TEXT,
                                     command=self._howto)
         self.howto_btn.pack(side=tk.RIGHT)
+        self._attach_tooltips()
 
         for key, fn in (('<Key-1>', lambda e: self._pick_k(0)),
                         ('<Key-2>', lambda e: self._pick_k(1)),
@@ -1537,6 +1758,85 @@ class EdgeReviewApp:
                         ('<Left>', lambda e: self._step(-1)),
                         ('<Right>', lambda e: self._step(+1))):
             self.root.bind(key, fn)
+
+    # ---------------- hover help + the primary action's state ----------
+    def _attach_tooltips(self):
+        """Hover help on every control in the top bar and the review card
+        (`#216`, and the operator asked for it again unprompted after a
+        long session). Every string lives in TIPS; the key bindings quoted
+        in them are the ones bound at the end of _build_ui.
+
+        `self._tips` is the live inventory, keyed the same as TIPS, so the
+        tests can assert coverage against the controls rather than against
+        a list that would rot the first time one is added."""
+        self._tips = {}
+        for name, widget in (('run_box', self.run_box),
+                             ('browse_btn', self.browse_btn),
+                             ('detect_btn', self.detect_btn),
+                             ('adv_btn', self.adv_btn),
+                             ('scale_btn', self.scale_btn),
+                             ('save_btn', self.save_btn),
+                             ('accept_btn', self.accept_btn),
+                             ('reject_btn', self.reject_btn),
+                             ('prev_btn', self.prev_btn),
+                             ('next_btn', self.next_btn),
+                             ('unrev_btn', self.unrev_btn)):
+            self._tips[name] = add_tooltip(widget, TIPS[name])
+        # the "Run:" caption is part of the same control to a pointer
+        add_tooltip(self.run_lbl, TIPS['run_box'])
+        # A/B/C say which key picks them; D is the tracer, not a candidate
+        for k in range(3):
+            self._tips[f'cand{k}'] = add_tooltip(
+                self.cand_radios[k],
+                TIPS['cand'].format(k=CAND_KEYS[k], n=k + 1))
+        self._tips['trace'] = add_tooltip(self.cand_radios[TRACE_SLOT],
+                                          TIPS['trace'])
+        # ▶ Detect Edges is the one tip that MOVES: a greyed-out button
+        # whose tooltip describes what it would do, without saying why it
+        # is grey, leaves the state the affordance was meant to explain
+        # unexplained.
+        self._sync_detect_btn()
+
+    def _sync_detect_btn(self):
+        """▶ Detect Edges is live exactly when there is a run to detect
+        and no worker in flight (`#216`).
+
+        Disabled-until-a-run-is-picked makes the affordance carry the
+        state: the button used to be live from launch and answer a click
+        with a modal 'Pick a run first'. It matters in COCKPIT MODE, where
+        Edge Review is opened on a parent folder — an empty parent, or one
+        whose named target is missing, leaves no run loaded at all.
+
+        The detect-in-flight lock (audit 2026-08-05) routes through here
+        too, so there is ONE writer of this button's state."""
+        busy = self._detect_busy
+        ready = self.run is not None and not busy
+        self.detect_btn.config(state='normal' if ready else 'disabled')
+        tip = self._tips.get('detect_btn')
+        if tip is not None:
+            tip.text = (TIPS['detect_btn_busy'] if busy else
+                        TIPS['detect_btn'] if self.run is not None else
+                        TIPS['detect_btn_disabled'])
+
+    def _canvas_hint(self, text=None):
+        """The empty card area SAYS what to press (`#216`).
+
+        Passing None clears it, which every path that paints the canvas
+        does — the hint belongs to the empty state only. It is re-drawn on
+        resize (_redraw_card) because a <Configure> would otherwise leave
+        the operator staring at the blank canvas the hint exists for."""
+        self._hint = text or None
+        try:
+            self.canvas.delete('hint')
+        except tk.TclError:                # canvas already gone
+            return
+        if not self._hint:
+            return
+        w, h = self._view_size()
+        self.canvas.create_text(w // 2, h // 2, text=self._hint,
+                                fill='#d7dde5', justify='center',
+                                width=max(220, w - 80), tags='hint',
+                                font=('TkDefaultFont', 13))
 
     # ---------------- run selection ----------------
     def _list_runs(self, parent):
@@ -1595,12 +1895,18 @@ class EdgeReviewApp:
                     self.status.config(
                         text=f"target run '{preselect}' not found in "
                              f"{self.parent} — pick one manually")
+                    self._sync_detect_btn()
+                    self._canvas_hint(HINT_PICK_RUN)
                     return
             self.run_box.current(want)
             self._pick_run()
         else:
             self.status.config(text=f"no runs (dirs holding a data CSV) "
                                     f"in {self.parent}")
+            # COCKPIT MODE, empty parent: no run is loaded, so ▶ Detect
+            # Edges stays grey and the canvas says which box to use first
+            self._sync_detect_btn()
+            self._canvas_hint(HINT_PICK_RUN)
 
     def _browse(self):
         d = filedialog.askdirectory(initialdir=self.parent or DEFAULT_PARENT)
@@ -1612,7 +1918,10 @@ class EdgeReviewApp:
         combobox and Browse… used to stay live and cross-contaminate the
         freshly picked run with the old worker's output (audit
         2026-08-05)."""
-        self.detect_btn.config(state='disabled' if busy else 'normal')
+        # ▶ Detect Edges goes through _sync_detect_btn, which ANDs this
+        # lock with "is a run even loaded" (`#216`) — re-enabling it here
+        # unconditionally would hand a runless cockpit a live button again
+        self._sync_detect_btn()
         self.run_box.config(state='disabled' if busy else 'readonly')
         self.browse_btn.config(state='disabled' if busy else 'normal')
 
@@ -1652,12 +1961,15 @@ class EdgeReviewApp:
         self._t0 = None
         self._set_detect_clock()
         self.save_btn.config(state='disabled')
+        self._sync_detect_btn()          # self.run is None again (`#216`)
         try:
             self.run = se.load_run(self.rundir)
             self.settings = se.load_settings(self.rundir)
         except Exception as e:
             messagebox.showerror("Run", f"Cannot read {name}: {e}")
             self.run = None
+            self._sync_detect_btn()
+            self._canvas_hint(HINT_PICK_RUN)
             return
         self.frame_rows = [i for i, r in enumerate(self.run['rows'])
                            if (r.get('frame_file') or '').strip()]
@@ -1671,13 +1983,22 @@ class EdgeReviewApp:
                                                 self.run['rows'][i]) or ''))
         miss_txt = (f" ({missing} MISSING on disk — kept unreadable, "
                     f"never re-measured)" if missing else "")
+        # ONE STORY ABOUT HOW TO START (`#216`). This line used to read
+        # "📏 Calibrate / re-anchor, then Detect", which is the pre-gate
+        # order: since the scale gate (2026-08-05) Detect DIVERTS to the
+        # calibration itself and chains back, so telling the operator to
+        # press 📏 first contradicts the button that is now accented and
+        # the hint on the empty canvas. The gate is still named, because
+        # it is why the first Detect opens a dialog instead of detecting.
         self.status.config(
             text=f"{name}: {len(self.run['rows'])} snapshots, {n} frames "
-                 f"listed{miss_txt} — 📏 Calibrate / re-anchor, "
-                 f"then Detect "
-                 f"(diam {self.settings['diam_mm']:g} mm; scale gate "
-                 f"re-arms per run)")
+                 f"listed{miss_txt} — press ▶ Detect Edges "
+                 f"(it opens 📏 Calibrate / re-anchor first when this run "
+                 f"has no anchor; diam {self.settings['diam_mm']:g} mm; "
+                 f"scale gate re-arms per run)")
         self.canvas.delete('all')
+        self._canvas_hint(HINT_DETECT)
+        self._sync_detect_btn()
         self.info.config(text=f"{name}\n{n} frames ready")
 
     # ---------------- detection ----------------
@@ -1788,6 +2109,7 @@ class EdgeReviewApp:
         self._t0 = time.time()
         self._set_detect_clock(0, 0.0, len(self.frame_rows))
         self.prog.config(maximum=len(self.frame_rows), value=0)
+        self._canvas_hint(None)        # the hint's job is done (`#216`)
         self.canvas.delete('all')
         self._banner(f"DETECTING…  0/{len(self.frame_rows)}")
         self.status.config(text="detecting…")
@@ -2240,6 +2562,10 @@ class EdgeReviewApp:
         self._resize_job = None
         i = self._current()
         if self.run is None or i is None or i not in self.cands_all:
+            # nothing to render: re-centre the empty-canvas hint on the new
+            # size instead of leaving it stranded off-centre (`#216`)
+            if self._hint:
+                self._canvas_hint(self._hint)
             return
         self._draw(i, self.cands_all.get(i, []), self.results.get(i))
 
@@ -2308,6 +2634,7 @@ class EdgeReviewApp:
     def _draw(self, i, cands, chosen):
         from PIL import ImageTk
         vw, vh = self._view_size()
+        self._hint = None          # a card is about to occupy the canvas
         try:
             img = self._render_card(i, cands, chosen, view=(vw, vh))
         except OSError:
@@ -5533,10 +5860,9 @@ class EdgeReviewApp:
                 f"active_area_px measurement, so there are no pixel areas "
                 f"to convert at a corrected scale.\n\n"
                 f"Re-anchor only fixes the px→mm factor of a run that has "
-                f"already been measured. This run has not been: use "
-                f"▶ Detect Edges (📏 Calibrate / re-anchor first — "
-                f"Detect is gated on "
-                f"it) and 💾 Save.\n\n"
+                f"already been measured. This run has not been: press "
+                f"▶ Detect Edges (it opens 📏 Calibrate / re-anchor "
+                f"first — Detect is gated on it) and then 💾 Save.\n\n"
                 f"({probe['n_rows']} row(s) scanned"
                 + (f"; {probe['n_blank']} carry an mm² with no px, which a "
                    f"re-anchor could only blank" if probe['n_blank'] else '')

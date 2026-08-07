@@ -62,8 +62,10 @@ Notes:
   window; a locked screen or RDP-disconnected session gives black images).
   It is DPI-aware and forces the window topmost. On Windows the app runs in
   view/edit mode, so no instrument is ever touched.
-- Watch `annotate.py`'s output for `!! no match` lines — a renamed button
-  means its spec in the `S[...]` tables needs the new `text=` string.
+- A renamed button means its spec in the `S[...]` tables needs the new
+  `text=` string — `annotate.py` collects every `!! no match` across the
+  run and exits nonzero at the end, so a stale matcher fails the build
+  instead of silently dropping its callout and renumbering the rest.
 - `content.json` is the manual's written copy (per-tab purpose, controls,
   steps, cautions). Edit it directly for wording changes — several entries
   were **corrected after a code audit** (notably: closing the app does NOT

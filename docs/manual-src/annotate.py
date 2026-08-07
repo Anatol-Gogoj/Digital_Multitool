@@ -3,6 +3,10 @@
 Reads manual/shots/widgets.json for exact widget bboxes, draws capsule
 outlines + numbered badges + arrows with PIL, writes manual/annotated/*.png
 and manual/annotated/legends.json for the HTML builder.
+
+A callout matcher that finds no widget is a build failure: misses are
+collected across the whole run (so one run reports every stale matcher)
+and the script exits nonzero at the end.
 """
 import json
 import math
@@ -26,6 +30,8 @@ FONT = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 17)
 
 manifest = json.load(open(os.path.join(SHOTS, "widgets.json"), encoding="utf-8"))
 images = {img["name"]: img for img in manifest["images"]}
+
+MISSES = []  # (image name, matcher text) per miss; any -> nonzero exit
 
 
 def find(img, text):
@@ -53,7 +59,9 @@ def resolve(img, spec):
     for t in texts:
         w = find(img, t)
         if w is None:
-            print(f"  !! no match for {t!r} in {img['name']}")
+            # ascii() not !r: matchers carry emoji; consoles are cp1252
+            print(f"  !! no match for {ascii(t)} in {img['name']}")
+            MISSES.append((img["name"], t))
             continue
         boxes.append((w["x"], w["y"], w["x"] + w["w"], w["y"] + w["h"]))
     if not boxes:
@@ -234,7 +242,7 @@ S["40_edge_review"] = {
          "label": "Keys: 1/2/3 pick a candidate, Enter accepts, R rejects, D traces by hand"},
         {"match": "Next unreviewed", "label": "Jump to the next frame needing a human"},
         {"match": "review queue", "label": "Frames still waiting for a decision"},
-        {"match": "📏 Calibrate…",
+        {"match": "📏 Calibrate / re-anchor…",
          "label": "Set the mm-per-px scale — click two opposite disc edges"},
         {"match": "💾 Save to data.csv…",
          "label": "Writes accepted areas back (keeps a .bak) — confirms first"},
@@ -380,4 +388,11 @@ for name, spec in S.items():
 
 with open(os.path.join(OUT, "legends.json"), "w", encoding="utf-8") as f:
     json.dump(legends, f, indent=1, ensure_ascii=False)
+
+if MISSES:
+    print(f"FAILED: {len(MISSES)} callout matcher(s) found no widget -- "
+          "stale text in the S[...] specs:")
+    for img_name, t in MISSES:
+        print(f"  !! no match for {ascii(t)} in {img_name}")
+    sys.exit(1)
 print("DONE")

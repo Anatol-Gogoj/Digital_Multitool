@@ -1,7 +1,21 @@
 # Project handoff — state as of 2026-08-07
 
-**TL;DR (2026-08-07, desk session, no bench access — read this first).**
-Main is green, **no open PRs**, suite **29/33** (the four failures are the
+**TL;DR (2026-08-07, later desk sessions — read this first; the block
+below it is the same day, earlier).** Main is unchanged and green, but
+**eight PRs are now open**, from parallel desk sessions working the
+roster: #240 (`#238` how-to panel), #241 (`#237` detect timer), #242
+(`#216` tooltips), #247 (`#215` dialog-test deflake), and two pairs of
+**duplicates** — #245/#246 (manual sources caught up to the verify-first
+calibration flow) and #248/#249 (annotate.py fails the manual build on
+unmatched callouts). Parallel sessions picked up the same two follow-ups
+independently; the pairs conflict on the same lines, so **one of each
+pair merges and the other closes** — the differences that matter for the
+pick are recorded in "Roster changes 2026-08-07" below. This session
+authored #245 and #248 and verified only those four diffs; the other
+four PRs are known here by title only.
+
+**TL;DR (2026-08-07, earlier desk session, no bench access).**
+Main is green, **no open PRs at its close**, suite **29/33** (the four failures are the
 documented environmental ones). Four PRs merged: **#233** the campaign
 docket, **#234** the telemetry wording (`#224`), **#235** trace/machine
 pairing (`#162`), and **#236** the scale-calibration rework — which grew
@@ -681,6 +695,60 @@ second copy that will drift.
 
 **`#216`** now also carries the operator's unprompted re-request for
 tooltips after a long real session, so treat that item as confirmed.
+
+**Manual-copy follow-up (2026-08-07, later desk session — PRs #245 and
+#248).** The task: `#238`'s implementation found `docs/manual-src/` still
+describing the pre-`#215` calibration flow — a button named 📏 Calibrate…
+and click-the-disc's-two-opposite-edges as THE method — and deliberately
+left the fix out of that PR's scope. Done as two PRs, every claim verified
+against `sldea_edge_gui.py` (module docstring, `_scale_intent`, `detect()`)
+before rewriting:
+
+- **#245** fixes **five** stale spots, not the three flagged — a repo-wide
+  grep found two more, per `#224`'s re-derive-the-set-with-grep rule:
+  `content.json`'s control entry, workflow step and subwindow entry,
+  `annotate.py`'s 40_edge_review matcher, and `build_manual.py`'s
+  "Reviewing a run" steps 2+5. New copy is verify-first (✔ Accept the
+  automatic fit; hand circle/two-point as the fallback, offered with the
+  fitter's reason on refusal) and states the folded re-anchor outcome
+  (saved run + px rows + no open pass → data.csv rewritten immediately, no
+  re-detection). Shipped manual binaries intentionally untouched —
+  release-cadence, same treatment as the `#224` label move.
+- **#248** makes `annotate.py` **fail (exit 1) on any unmatched callout**,
+  after completing the sweep so one run lists every drifted string, and
+  **deletes `annotated/legends.json` on failure** — `build_manual.py` loads
+  it at import, so a chained build stops instead of assembling from the
+  previous run's legends. stdout goes `errors=backslashreplace` so the
+  emoji-bearing miss report cannot crash a redirected console. Exercised
+  against the real v1.1.0 `build/shots`: stale state fails and removes even
+  a just-written legends.json; a simulated fresh capture passes and
+  restores the dropped callout. Its first real run flagged the KNOWN stale
+  pair — the `#224` spec (`📈 Scope kV/µA log`, a startswith-prefix of the
+  current Tk label) vs shots that still hold pre-rename
+  `📈 Telemetry log (telemetry.csv)`. That is the documented
+  old-label-until-rebuild state, now loud instead of silent. The
+  handoff-continuation worktree's `build/` is left fail-closed on purpose:
+  **no legends.json until the next capture run** — not breakage.
+
+**The duplicate pairs, and what matters for the pick** (this session
+authored #245/#248 — weigh the recommendation accordingly):
+
+- **#245 vs #246** is wording emphasis; both are correct against the code.
+  #245 leads verify-first, also fixes build_manual step 2 (Detect diverts
+  to the dialog on an unanchored run) and names both divert routes
+  (Detect and `--auto`) in the subwindow entry; #246 leads with the
+  one-button-two-outcomes fold and carries the anchor-resets-per-run-switch
+  detail. Merge either; grafting the other's emphasis is a two-line edit.
+- **#248 vs #249 differ in behavior, not wording.** #249 writes
+  legends.json FIRST and exits 1 after — a chained build that ignores the
+  exit code still assembles the degraded manual; #248 deletes legends.json
+  so it cannot (the repo's fail-closed idiom). #249 prints misses as
+  `ascii()` escapes even on a console that could show them; #248 escapes
+  only what the stream cannot carry. And #249 also flips the 📏 MATCH
+  string while keeping its stale pre-`#215` LABEL ("click two opposite
+  disc edges") — so if #249 is the pick, a copy PR (#245 or #246) is still
+  needed for the label either way. Whichever merges: run `annotate.py`
+  once afterwards and confirm the exit behavior does what its PR says.
 
 ## Active issues roster (curated subset — full list on GitHub)
 

@@ -670,7 +670,7 @@ def test_reanchor_log_line_records_the_correction():
               'anchor_frame': 'SLDEA_s00_00.00kV_baseline.png'}
     rec = se.reanchor_log_record(anchor, plan, when='2026-08-06T18:41:00')
     line = se.calibration_log_line(rec)
-    assert line.startswith('SLDEA-CAL 2026-08-06T18:41:00 mode=C n=1 ')
+    assert line.startswith('SLDEA-CAL 2026-08-06T18:41:00 mode=verify n=1 ')
     assert 'outcome=reanchor-committed' in line
     assert 'reanchor=scale-only' in line
     assert 'rows=4' in line and 'blanked=0' in line
@@ -679,10 +679,11 @@ def test_reanchor_log_line_records_the_correction():
     assert 'area_mult=x1.035038' in line
     assert 'resting=194.259->201.06' in line
     assert 'resting_dev=+0.00%' in line
-    # mode C's vocabulary is kept: no sigma/SE/range for a single fit
+    # the verify mode's vocabulary is kept: no sigma/SE/range for one fit
     assert 'sigma=undefined se=undefined' in line
     assert 'verdict=NOT-GATED' in line
-    # mode C's honest 'auto=' column: the anchor IS the fit, so a deviation
+    # the verify mode's honest 'auto=' column: the anchor IS the fit, so a
+    # deviation
     # percentage would be an identity dressed as agreement
     assert '(IS-the-anchor)' in line and 'auto=370.6' in line
     assert f"diams={d['auto_px']:.2f}px" in line
@@ -699,10 +700,10 @@ def test_reanchor_log_line_records_the_correction():
 
 
 def test_a_hand_measured_reanchor_keeps_its_own_statistics():
-    """A re-anchor can be committed from any mode, so a mode A/B anchor's
-    rounds, sigma and SE have to survive into the line — otherwise the only
-    per-run operator-repeatability measurement this project has would be
-    dropped on exactly the runs being corrected."""
+    """A re-anchor can be committed from any mode, so a HAND-measured
+    anchor's rounds, sigma and SE have to survive into the line — otherwise
+    the only per-run operator-repeatability measurement this project has
+    would be dropped on exactly the runs being corrected."""
     d = REAL['P3_2_2.5mL_20260728']
     rows, _ = _rows_for('P3_2_2.5mL_20260728')
     plan = se.reanchor_plan(rows, MASK_MM / d['auto_px'], MASK_MM)
@@ -715,13 +716,13 @@ def test_a_hand_measured_reanchor_keeps_its_own_statistics():
               'prev_method': se.ANCHOR_METHOD_MANUAL}
     line = se.calibration_log_line(
         se.reanchor_log_record(anchor, plan, when='2026-08-06T18:42:00'))
-    assert 'mode=A n=3' in line
+    assert 'mode=circle n=3' in line
     assert 'sigma=0.06% se=0.04% area_se=0.07%' in line
     assert 'range=0.10%' in line
     assert 'diams=576.80,577.40,577.10px' in line
     assert 'verdict=PASS' in line          # SE 0.035% is inside the 0.4% gate
     assert 'reanchor=scale-only' in line
-    assert 'circ=' not in line             # mode C's fit fields stay absent
+    assert 'circ=' not in line       # the verify fit fields stay absent
     # a pre-#215 two-click anchor has no rounds: its own diameter is the one
     # value there is, and the precision fields are 'unconvertible', not 0
     two = {'method': se.ANCHOR_METHOD_MANUAL, 'diam_px': 590.26,

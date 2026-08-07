@@ -955,22 +955,36 @@ def test_rounds_for_se_names_the_remedy_and_admits_when_there_is_none():
 
 def test_mode_constants_are_shared_and_the_defaults_are_per_mode():
     import sldea_edge_gui as gui
-    assert se.CAL_MODES == ('A', 'B', 'C')
-    assert se.CAL_MANUAL_MODES == ('A', 'B')
+    # NAMES, not letters (2026-08-06 late). The recorded value has to be
+    # self-describing because the LABELS have already been renumbered once
+    # and the old letters are on disk -- see the legacy-mapping test below.
+    assert se.CAL_MODES == ('verify', 'circle', 'twopoint')
+    assert se.CAL_MANUAL_MODES == ('circle', 'twopoint')
     assert se.CAL_MODE_ROUNDS[se.CAL_MODE_CIRCLE] == se.CAL_ROUNDS == 3
     assert se.CAL_MODE_ROUNDS[se.CAL_MODE_TWOPOINT] == 5
-    # mode C has NO round count, deliberately: a 1 in this table would read
-    # as "one round" and invite sigma/SE to be computed for a sample of one
+    # the verify mode has NO round count, deliberately: a 1 in this table
+    # would read as "one round" and invite sigma/SE to be computed for a
+    # sample of one
     assert se.CAL_MODE_VERIFY not in se.CAL_MODE_ROUNDS
-    # mode A stays the MANUAL default (what mode C falls back to): switching
-    # it would change every existing hand-calibration path silently.
+    # the circle stays the MANUAL default (what the verify mode falls back
+    # to): switching it would change every existing hand-calibration path
+    # silently.
     assert se.CAL_DEFAULT_MODE == se.CAL_MODE_CIRCLE
     # every per-mode default has a d2 factor, or its own gate could never
     # be applied to it
     for n in se.CAL_MODE_ROUNDS.values():
         assert se.d2(n) is not None, n
     assert gui.CAL_ROUNDS_TWOPOINT is se.CAL_ROUNDS_TWOPOINT
-    assert gui.CAL_STROKE_STYLES[0] == '3 px solid'   # A unchanged
+    assert gui.CAL_STROKE_STYLES[0] == '3 px solid'   # circle unchanged
+    # THE LABELS, and the swap that made them (operator 2026-08-06 late):
+    # A is the mode the gate OPENS in, so the first letter and the default
+    # are the same thing. Presentation only -- nothing writes these.
+    assert se.CAL_MODE_LABELS == {'verify': 'A', 'circle': 'B',
+                                  'twopoint': 'C'}
+    assert se.CAL_MODE_LABELS[se.cal_open_mode(_auto_ref())] == 'A'
+    # every mode has exactly one label and no two share one
+    assert sorted(se.CAL_MODE_LABELS) == sorted(se.CAL_MODES)
+    assert len(set(se.CAL_MODE_LABELS.values())) == len(se.CAL_MODES)
 
 
 def test_the_gate_opens_on_mode_C_only_when_there_is_a_fit_to_verify():
@@ -1150,12 +1164,21 @@ def test_log_line_leads_with_sigma_and_states_the_mode():
     at different round counts."""
     s = _stats_b()
     line = se.calibration_log_line({
-        'when': '2026-08-06T14:22:31', 'mode': 'B', 'stats': s,
-        'gate': se.CAL_SE_PCT, 'verdict': 'PASS',
+        'when': '2026-08-06T14:22:31', 'mode': se.CAL_MODE_TWOPOINT,
+        'stats': s, 'gate': se.CAL_SE_PCT, 'verdict': 'PASS',
         'rot_deg': [37.4, 201.8, 95.2, 318.6, 144.0],
         'auto_diam_px': 577.1, 'auto_pct': 2.12,
         'outcome': 'accepted', 'frame': 'base.png'})
-    assert line.startswith('SLDEA-CAL 2026-08-06T14:22:31 mode=B n=5 ')
+    # mode= is a NAME (2026-08-06 late), in the same position as before:
+    # the field ORDER is unchanged, only that field's value space moved,
+    # because a stored letter changed meaning when the labels were swapped.
+    assert line.startswith('SLDEA-CAL 2026-08-06T14:22:31 mode=twopoint '
+                           'n=5 ')
+    # a LEGACY letter handed to the formatter is read with its PRE-SWAP
+    # meaning and written out as the name, so one file never mixes both
+    legacy = se.calibration_log_line({
+        'when': 'T', 'mode': 'B', 'stats': s, 'outcome': 'accepted'})
+    assert ' mode=twopoint ' in legacy and 'mode=B' not in legacy
     assert 'sigma=0.23%' in line
     assert 'se=0.10%' in line and 'area_se=0.20%' in line
     assert 'gate=0.40%' in line and 'verdict=PASS' in line
@@ -1166,15 +1189,15 @@ def test_log_line_leads_with_sigma_and_states_the_mode():
     assert 'outcome=accepted' in line and 'frame=base.png' in line
     # ONE line, always -- a stray newline would split one record in two
     assert '\n' not in line and '\r' not in line
-    # mode A carries the stroke style instead of rotations, and the line
-    # keeps the same SHAPE either way so a column splitter cannot slip
-    a = se.calibration_log_line({'when': 'T', 'mode': 'A',
+    # the circle carries the stroke style instead of rotations, and the
+    # line keeps the same SHAPE either way so a column splitter cannot slip
+    a = se.calibration_log_line({'when': 'T', 'mode': se.CAL_MODE_CIRCLE,
                                  'stats': se.calibration_stats(
                                      [580.0, 584.0, 582.0]),
                                  'verdict': 'OVER-GATE',
                                  'stroke': '1 px dashed',
                                  'outcome': 'declined-refit'})
-    assert 'mode=A n=3' in a and 'stroke=1 px dashed' in a
+    assert 'mode=circle n=3' in a and 'stroke=1 px dashed' in a
     assert 'rot=-deg' in a and 'auto=none' in a
     assert 'verdict=OVER-GATE' in a
 
@@ -1200,14 +1223,15 @@ def test_log_appends_every_round_set_accepted_or_declined():
     so the run recorded nothing at all."""
     d = tempfile.mkdtemp(prefix='cal_log_')
     try:
-        recs = [('A', 'declined-cancel'), ('A', 'declined-refit'),
-                ('B', 'accepted'), ('B', 'accepted-override')]
+        C, T = se.CAL_MODE_CIRCLE, se.CAL_MODE_TWOPOINT
+        recs = [(C, 'declined-cancel'), (C, 'declined-refit'),
+                (T, 'accepted'), (T, 'accepted-override')]
         for mode, outcome in recs:
             path, line = se.append_calibration_log(d, {
                 'when': '2026-08-06T00:00:00', 'mode': mode,
-                'stats': _stats_b(3 if mode == 'A' else 5),
+                'stats': _stats_b(3 if mode == C else 5),
                 'gate': se.CAL_SE_PCT, 'verdict': 'PASS',
-                'rot_deg': [1.0, 2.0] if mode == 'B' else None,
+                'rot_deg': [1.0, 2.0] if mode == T else None,
                 'outcome': outcome})
             assert path and os.path.basename(path) == se.CAL_LOG_NAME
             assert outcome in line
@@ -1217,11 +1241,18 @@ def test_log_appends_every_round_set_accepted_or_declined():
         assert len(lines) == 4, lines
         # DECLINED sets are in there -- that is the whole point
         assert sum('outcome=declined' in ln for ln in lines) == 2
-        assert sum('mode=A n=3' in ln for ln in lines) == 2
-        assert sum('mode=B n=5' in ln for ln in lines) == 2
-        # a header explains the columns exactly once, on creation
+        assert sum('mode=circle n=3' in ln for ln in lines) == 2
+        assert sum('mode=twopoint n=5' in ln for ln in lines) == 2
+        # a header explains the columns exactly once, on creation -- and it
+        # documents the LEGACY LETTERS, because a reader grepping a mixed
+        # file has to know that a bare letter is a pre-swap one
         assert body.count('# SLDEA Edge Review scale calibrations') == 1
         assert 'Compare methods on SIGMA' in body
+        assert se.CAL_LOG_VOCAB_MARK in body
+        assert 'A = circle, B = twopoint, C = verify' in body
+        # no migration note in a file this build created: that note exists
+        # only to mark where an EXISTING file changes vocabulary
+        assert body.count(se.CAL_LOG_VOCAB_MARK) == 1
         # ASCII-safe: this file gets grepped and pasted into issues
         body.encode('ascii')
     finally:
@@ -1235,15 +1266,15 @@ def test_log_write_failure_costs_the_file_not_the_measurement():
     gone = os.path.join(tempfile.gettempdir(),
                         'no_such_dir_' + os.urandom(4).hex())
     path, line = se.append_calibration_log(
-        gone, {'when': 'T', 'mode': 'B', 'stats': _stats_b(),
-               'outcome': 'accepted'})
+        gone, {'when': 'T', 'mode': se.CAL_MODE_TWOPOINT,
+               'stats': _stats_b(), 'outcome': 'accepted'})
     assert path is None
-    assert line.startswith('SLDEA-CAL') and 'mode=B' in line
+    assert line.startswith('SLDEA-CAL') and 'mode=twopoint' in line
     # no rundir at all (a run that was never opened) is the same story
-    path, line = se.append_calibration_log(None, {'when': 'T', 'mode': 'A',
-                                                  'stats': _stats_b(3),
-                                                  'outcome': 'accepted'})
-    assert path is None and 'mode=A' in line
+    path, line = se.append_calibration_log(
+        None, {'when': 'T', 'mode': se.CAL_MODE_CIRCLE,
+               'stats': _stats_b(3), 'outcome': 'accepted'})
+    assert path is None and 'mode=circle' in line
 
 
 def test_mode_and_conversion_round_trip_into_setup_txt():
@@ -1260,7 +1291,8 @@ def test_mode_and_conversion_round_trip_into_setup_txt():
         _setup(d)
         s = _stats_b()
         se.save_scale_anchor(d, {
-            'method': 'manual-calibration', 'cal_mode': 'B',
+            'method': 'manual-calibration',
+            'cal_mode': se.CAL_MODE_TWOPOINT,
             'diam_px': s['mean'], 'diam_mm': 16.0,
             'mm_per_px': 16.0 / s['mean'], 'n_rounds': s['n'],
             'rounds_px': s['values'], 'spread_px': s['spread_px'],
@@ -1270,7 +1302,7 @@ def test_mode_and_conversion_round_trip_into_setup_txt():
         # the exact string mm_per_px matches on, so a mode-B anchor still
         # beats every automatic reference at Save
         assert back['method'] == 'manual-calibration'
-        assert back['cal_mode'] == 'B'
+        assert back['cal_mode'] == se.CAL_MODE_TWOPOINT == 'twopoint'
         assert back['n_rounds'] == 5 and len(back['rounds_px']) == 5
         assert abs(back['sigma_pct'] - s['sigma_pct']) < 0.005
         assert abs(back['se_pct'] - s['se_pct']) < 0.005
@@ -1302,31 +1334,34 @@ def test_diag_judges_the_SE_and_names_the_method():
             'diam_mm': 16.0, 'mm_per_px': 16.0 / 577.1,
             'guard': 'clear (auto +0.00% diam)'}
     # a mode-B anchor at n=5 whose range is 1.0 %: sigma 0.43 %, SE 0.19 %
-    good = dict(base, cal_mode='B', n_rounds=5, spread_pct=1.0,
-                spread_px=5.8, rounds_px=[575, 576, 577, 578, 580])
+    good = dict(base, cal_mode=se.CAL_MODE_TWOPOINT, n_rounds=5,
+                spread_pct=1.0, spread_px=5.8,
+                rounds_px=[575, 576, 577, 578, 580])
     hit = one(good, 'Operator repeatability')
     assert len(hit) == 1 and hit[0][0] == 'OK', hit
     assert 'sigma 0.43%/fit' in hit[0][1], hit[0][1]
     assert 'mean SE 0.19%' in hit[0][1], hit[0][1]
-    assert 'method B' in hit[0][2]
+    # NAMED with letter AND name: the letter matches the dialog the
+    # operator used, the name matches the record and survives a relabelling
+    assert 'method C (twopoint)' in hit[0][2], hit[0][2]
     assert 'DO NOT feed this into the error budget' in hit[0][2]
     # the SAME 1.0 % range at n=3 is WORSE precision, and that shows
-    at3 = dict(base, cal_mode='A', n_rounds=3, spread_pct=1.0,
-               spread_px=5.8)
+    at3 = dict(base, cal_mode=se.CAL_MODE_CIRCLE, n_rounds=3,
+               spread_pct=1.0, spread_px=5.8)
     hit3 = one(at3, 'Operator repeatability')
     assert 'sigma 0.59%/fit' in hit3[0][1], hit3[0][1]
     assert 'mean SE 0.34%' in hit3[0][1], hit3[0][1]
     assert hit3[0][0] == 'OK'
     # the measured mode-A reality: a 1.94 % range at n=3 misses the budget
-    real = dict(base, cal_mode='A', n_rounds=3, spread_pct=1.94,
-                spread_px=11.2)
+    real = dict(base, cal_mode=se.CAL_MODE_CIRCLE, n_rounds=3,
+                spread_pct=1.94, spread_px=11.2)
     hitr = one(real, 'Operator repeatability')
     assert hitr[0][0] == 'MED', hitr
     assert f"over the {se.CAL_SE_PCT:g}% gate" in hitr[0][1]
     # an n with NO d2 factor is reported as a GAP, above OK -- never as a
     # pass, and never with an invented sigma
-    bad = dict(base, cal_mode='B', n_rounds=9, spread_pct=1.0,
-               spread_px=5.8)
+    bad = dict(base, cal_mode=se.CAL_MODE_TWOPOINT, n_rounds=9,
+               spread_pct=1.0, spread_px=5.8)
     hitb = one(bad, 'cannot be converted')
     assert len(hitb) == 1 and hitb[0][0] == 'MED', hitb
     assert 'no d2 factor for n=9' in hitb[0][1]
@@ -1338,7 +1373,7 @@ def test_diag_judges_the_SE_and_names_the_method():
                    if 'repeatability' in h)
     # ... and the text report prints the conversion, or says there is none
     txt = sd.report(_diag_d(scale_anchor=good))
-    assert 'method B' in txt and 'sigma 0.43%/fit' in txt
+    assert 'method C (twopoint)' in txt and 'sigma 0.43%/fit' in txt
     txt = sd.report(_diag_d(scale_anchor=bad))
     assert 'no d2 factor for n=9' in txt
 
@@ -1466,11 +1501,16 @@ def test_verify_note_records_who_approved_what_and_what_was_not_checked():
 
 
 def test_mode_C_log_line_says_undefined_and_leaves_A_and_B_untouched():
-    """The log's existing format is load-bearing, so mode C extends it
-    rather than changing it: A/B lines are byte-identical, and mode C's
-    precision columns read `undefined` -- not `0.00%` (perfect precision)
-    and not `unconvertible` (which means a number exists that the d2 table
-    cannot convert; here the quantity itself does not exist)."""
+    """The log's existing format is load-bearing, so the verify mode extends
+    it rather than changing it: the measuring modes' lines keep every field
+    in every position, and the verify mode's precision columns read
+    `undefined` -- not `0.00%` (perfect precision) and not `unconvertible`
+    (which means a number exists that the d2 table cannot convert; here the
+    quantity itself does not exist).
+
+    The ONE field whose value space moved is `mode=`, which now holds a name
+    (2026-08-06 late) because a stored letter changed meaning when the
+    labels were swapped. Its position is unchanged."""
     stats = se.verify_stats(P3_2_FIT)
     rec = {'when': '2026-08-06T18:30:00', 'mode': se.CAL_MODE_VERIFY,
            'stats': stats, 'gate': se.CAL_SE_PCT, 'verdict': 'NOT-GATED',
@@ -1480,7 +1520,7 @@ def test_mode_C_log_line_says_undefined_and_leaves_A_and_B_untouched():
            'fit_resid_pct': se.fit_resid_pct(P3_2_FIT),
            'outcome': 'accepted-verified', 'frame': 'base.png'}
     line = se.calibration_log_line(rec)
-    assert 'mode=C' in line and 'n=1' in line
+    assert 'mode=verify' in line and 'n=1' in line
     for f in ('sigma=undefined', 'se=undefined', 'area_se=undefined',
               'range=undefined'):
         assert f in line, (f, line)
@@ -1497,15 +1537,25 @@ def test_mode_C_log_line_says_undefined_and_leaves_A_and_B_untouched():
         assert f in line, (f, line)
     # and an A line is exactly what it was before mode C existed
     a = se.calibration_log_line({
-        'when': 'W', 'mode': 'A', 'stats': se.calibration_stats(
-            [570.0, 575.0, 580.0]), 'gate': 0.4, 'verdict': 'PASS',
-        'auto_diam_px': 577.1, 'auto_pct': -0.35, 'stroke': '3 px solid',
-        'outcome': 'accepted', 'frame': 'b.png'})
-    assert ('SLDEA-CAL W mode=A n=3 sigma=1.03% se=0.59% area_se=1.19% '
-            'gate=0.40% verdict=PASS range=1.74% mean=575.00px '
-            'diams=570.00,575.00,580.00px rot=-deg stroke=3 px solid '
-            'auto=577.1px(-0.35%) outcome=accepted frame=b.png') == a, a
+        'when': 'W', 'mode': se.CAL_MODE_CIRCLE, 'stats':
+            se.calibration_stats([570.0, 575.0, 580.0]), 'gate': 0.4,
+        'verdict': 'PASS', 'auto_diam_px': 577.1, 'auto_pct': -0.35,
+        'stroke': '3 px solid', 'outcome': 'accepted', 'frame': 'b.png'})
+    assert ('SLDEA-CAL W mode=circle n=3 sigma=1.03% se=0.59% '
+            'area_se=1.19% gate=0.40% verdict=PASS range=1.74% '
+            'mean=575.00px diams=570.00,575.00,580.00px rot=-deg '
+            'stroke=3 px solid auto=577.1px(-0.35%) outcome=accepted '
+            'frame=b.png') == a, a
     assert 'circ=' not in a and 'resid_pct=' not in a
+    # ... and every field is in the position it was in before the mode=
+    # value changed, so an existing splitter still finds each one
+    old = ('SLDEA-CAL W mode=A n=3 sigma=1.03% se=0.59% area_se=1.19% '
+           'gate=0.40% verdict=PASS range=1.74% mean=575.00px '
+           'diams=570.00,575.00,580.00px rot=-deg stroke=3 px solid '
+           'auto=577.1px(-0.35%) outcome=accepted frame=b.png')
+    got_keys = [b.split('=')[0] for b in a.split(' ') if '=' in b]
+    old_keys = [b.split('=')[0] for b in old.split(' ') if '=' in b]
+    assert got_keys == old_keys, (got_keys, old_keys)
 
 
 def test_auto_verified_anchor_round_trips_through_setup_txt():
@@ -1529,7 +1579,7 @@ def test_auto_verified_anchor_round_trips_through_setup_txt():
                                     '2026-08-06T18:30:00')})
         back = se.load_scale_anchor(d)
         assert back['method'] == se.ANCHOR_METHOD_VERIFIED
-        assert back['cal_mode'] == 'C'
+        assert back['cal_mode'] == se.CAL_MODE_VERIFY == 'verify'
         assert abs(back['diam_px'] - 577.08) < 0.01
         assert abs(back['fit_circ'] - 0.999) < 1e-9
         assert abs(back['fit_resid_px'] - 2.3) < 1e-9
@@ -1645,38 +1695,50 @@ def test_verify_evidence_is_four_lines_and_still_says_the_honest_part():
     """The text the operator judges on, pinned as text so both its BUDGET
     and its honesty are tests rather than a screenshot.
 
-    Four lines (`#215` declutter, 2026-08-06 late). Mode C was driven on a
+    Four lines was the budget after the first declutter (`#215`, 2026-08-06
+    late); the screen is now normally TWO. The verify mode was driven on a
     real disc and the fit was accepted as correct -- the premise held -- but
-    the screen carried 13 lines of prose wrapping to 19, and the operator's
-    verdict was "wayyyyy too busy with text and unnecessary garbage". So:
-    the value adopted, two quality numbers, one honest sentence, and a
-    consequence line only when there IS a consequence. What was cut is
-    tested for at the other end -- test_verify_note_and_the_log_keep_every
-    number_the_screen_dropped -- because the cut must not have cost the
-    record anything."""
+    the screen carried 13 lines of prose wrapping to 19 and the operator's
+    verdict was "wayyyyy too busy with text and unnecessary garbage", and
+    then that the surviving standing sentence ("View is contrast-stretched
+    so the edge is visible... your eye is the check.") was unnecessary too.
+    It was: on every normal run it said the same two things, and a
+    disclaimer that is always true is one nobody reads.
+
+    So what is left is the value adopted and two quality numbers, plus two
+    CONDITIONAL lines: a warning when the contrast stretch could not be
+    computed (a fault in the picture, false on a normal run) and the
+    consequence line when a prior anchor actually differs. The budget stays
+    at four because the pathological case can still reach it.
+
+    THE HONESTY DID NOT GO ANYWHERE -- it moved to the record, which is
+    pinned at the other end by
+    test_verify_note_and_the_log_keep_every_number_the_screen_dropped."""
     import sldea_edge_gui as gui
     t = gui.verify_evidence(P3_2_FIT, 16.0, recorded=None, n_px_rows=0,
                             stretch=(157.0, 195.0))
     lines = t.split('\n')
     assert gui.CAL_VERIFY_MAX_LINES == 4
-    assert len(lines) == 3, lines      # no prior anchor -> no 4th line
+    # TWO lines in the normal case: no prior anchor and a working stretch
+    assert len(lines) == 2, lines
     for ln in lines:
         assert ln.strip() and len(ln) <= 200, (len(ln), ln)
     # 1. THE VALUE: exactly the number the run's whole mm2 column hangs on
-    assert lines[0] == ("Automatic fit — 577.1 px across = 16.00 mm "
+    assert lines[0] == ("Automatic fit \u2014 577.1 px across = 16.00 mm "
                         "(0.027726 mm/px)"), lines[0]
     # 2. THE QUALITY: two numbers, the two that would make a reader doubt
     #    the fit -- residual as a PERCENTAGE of diameter, and circularity
     assert '0.40 % of diameter' in lines[1] and '0.999' in lines[1]
-    assert lines[1].count('·') == 1, lines[1]
-    # 3. THE HONEST SENTENCE: display-only stretch AND no cross-check, both
-    #    kept, compressed into one line
-    assert 'contrast-stretched' in lines[2] and 'raw frame' in lines[2]
-    assert 'Nothing cross-checks it' in lines[2]
-    assert 'your eye is the check' in lines[2]
+    assert lines[1].count('\u00b7') == 1, lines[1]
+    # 3. THE STANDING DISCLAIMER IS GONE FROM THE SCREEN (operator
+    #    2026-08-06 late). Not softened, not shortened -- absent.
+    for dropped in ('contrast-stretched so the edge is visible',
+                    'Nothing cross-checks it', 'your eye is the check',
+                    'measured on the raw frame'):
+        assert dropped not in t, dropped
     # ... and no claim that anything passed
     for lie in ('cross-check passed', 'verified against', 'agrees with the '
-                'mask', '✓', '+0.00'):
+                'mask', '\u2713', '+0.00'):
         assert lie not in t, lie
     # WHAT IS NO LONGER ON SCREEN. conf goes because it is DERIVED from the
     # same residual/circularity/coverage quantities -- it is not an
@@ -1686,11 +1748,15 @@ def test_verify_evidence_is_four_lines_and_still_says_the_honest_part():
                  'BY CONSTRUCTION', 'press Z', 'below 1:1', 'UNCERTAINTY',
                  'HOW TO JUDGE', 'repeatab'):
         assert gone not in t, gone
-    # a frame with no measurable step says so, still in one line
+    # A FRAME WITH NO MEASURABLE STEP still says so, and this is the one
+    # thing the dropped sentence used to carry that had to stay: it is not a
+    # standing disclaimer but a fault in the picture the whole verification
+    # rests on, and it is false on a normal run.
     t_raw = gui.verify_evidence(P3_2_FIT, 16.0, stretch=None)
-    assert len(t_raw.split('\n')) == 3, t_raw
-    assert 'NOT contrast-stretched' in t_raw and 'raw frame' in t_raw
-    assert 'your eye is the check' in t_raw
+    raw_lines = t_raw.split('\n')
+    assert len(raw_lines) == 3, t_raw
+    assert 'NOT contrast-stretched' in raw_lines[2]
+    assert 'too faint to judge' in raw_lines[2]
     # 4. THE CONSEQUENCE, and only when there is one. P3_2's own case seen
     #    from the other side: the fit is 2.23 % BELOW the two-click anchor,
     #    so accepting moves every mm2 up 4.62 %.
@@ -1699,41 +1765,178 @@ def test_verify_evidence_is_four_lines_and_still_says_the_honest_part():
                                        'saved': '2026-08-06'},
                              n_px_rows=12, stretch=(157.0, 195.0))
     l2 = t2.split('\n')
-    assert len(l2) == 4, l2
-    assert '-2.23 %' in l2[3] and '+4.62 %' in l2[3], l2[3]
-    assert 'next Save' in l2[3] and '590.3 px on record' in l2[3]
+    assert len(l2) == 3, l2
+    assert '-2.23 %' in l2[-1] and '+4.62 %' in l2[-1], l2[-1]
+    assert 'next Save' in l2[-1] and '590.3 px on record' in l2[-1]
+    # THE WORST CASE -- both conditional lines at once -- still fits the
+    # budget, which is why the budget stays at four rather than dropping
+    worst = gui.verify_evidence(P3_2_FIT, 16.0,
+                                recorded={'diam_px': 590.26, 'saved': 'x'},
+                                n_px_rows=12, stretch=None,
+                                diam_recorded=False)
+    assert len(worst.split('\n')) == gui.CAL_VERIFY_MAX_LINES, worst
     # SILENCE where silence is correct. No prior anchor: nothing to compare
     # against, so nothing is said -- not a paragraph explaining the absence.
-    assert len(gui.verify_evidence(P3_2_FIT, 16.0, n_px_rows=9)
-               .split('\n')) == 3
+    assert len(gui.verify_evidence(P3_2_FIT, 16.0, n_px_rows=9,
+                                   stretch=(157.0, 195.0))
+               .split('\n')) == 2
     # A prior anchor that does NOT differ: "+0.00 %" is a claim dressed as a
     # measurement, so the line is absent rather than zero.
     same = gui.verify_evidence(P3_2_FIT, 16.0,
                                recorded={'diam_px': 577.08, 'saved': 'x'},
-                               n_px_rows=12)
-    assert len(same.split('\n')) == 3, same
+                               n_px_rows=12, stretch=(157.0, 195.0))
+    assert len(same.split('\n')) == 2, same
     assert 'Accepting moves' not in same, same
     # ... and one just past the epsilon IS reported
     eps = 577.08 * (1.0 + 2.0 * gui.CAL_VERIFY_DEV_EPS_PCT / 100.0)
     near = gui.verify_evidence(P3_2_FIT, 16.0,
                                recorded={'diam_px': eps, 'saved': 'x'},
-                               n_px_rows=12)
-    assert len(near.split('\n')) == 4, near
-    # the gate label is hidden in mode C, so its "diameter was NOT recorded
-    # at capture" warning rides on the value line -- not on a fifth line
+                               n_px_rows=12, stretch=(157.0, 195.0))
+    assert len(near.split('\n')) == 3, near
+    # the gate label is hidden in the verify mode, so its "diameter was NOT
+    # recorded at capture" warning rides on the value line -- not its own
     nd = gui.verify_evidence(P3_2_FIT, 16.0, stretch=(157.0, 195.0),
                              diam_recorded=False)
-    assert len(nd.split('\n')) == 3, nd
+    assert len(nd.split('\n')) == 2, nd
     assert 'settings default' in nd.split('\n')[0]
     assert 'NOT measured at capture' in nd.split('\n')[0]
     # a fitter that reported no quality numbers must not print zeros
-    bare = gui.verify_evidence({'diam_px': 100.0}, 16.0)
-    assert len(bare.split('\n')) == 3, bare
+    bare = gui.verify_evidence({'diam_px': 100.0}, 16.0,
+                               stretch=(157.0, 195.0))
+    assert len(bare.split('\n')) == 2, bare
     assert '0.000' not in bare and '0.00 %' not in bare, bare
     assert 'nothing here to judge the fit by but the picture' in bare
     # and a fit that does not exist produces nothing to approve
     for junk in (None, {}, {'diam_px': 0}):
         assert gui.verify_evidence(junk, 16.0) == '', junk
+
+
+def test_a_stored_mode_LETTER_keeps_its_pre_swap_meaning():
+    """THE MIGRATION, and the trap it exists for (`#215`, 2026-08-06 late).
+
+    The dialog's mode letters were renumbered at the operator's request --
+    A = verify, B = circle, C = twopoint, where before the swap A was the
+    circle, B the two-point and C the verify. THE OLD LETTERS ARE ON DISK:
+    `P3_2_2.5mL_20260728/setup.txt` records `cal_mode: C` AND
+    `prev_cal_mode: C`, both written when C meant verify, and that run's
+    scale_calibration_log.txt holds eight `mode=C` lines with the same
+    meaning. Reinterpreting a stored letter against the NEW labels would
+    turn every one of them into a claim that the operator clicked two points
+    on a run where they approved an automatic fit.
+
+    Two things stop that, and both are asserted here: the record now holds a
+    self-describing NAME so no future relabelling can reach it, and every
+    read of a legacy letter goes through cal_mode_read with the PRE-SWAP
+    mapping."""
+    # THE RULE
+    assert se.CAL_MODE_LEGACY == {'A': 'circle', 'B': 'twopoint',
+                                  'C': 'verify'}
+    assert se.cal_mode_read('A') == se.CAL_MODE_CIRCLE
+    assert se.cal_mode_read('B') == se.CAL_MODE_TWOPOINT
+    assert se.cal_mode_read('C') == se.CAL_MODE_VERIFY
+    # P3_2's ACTUAL stored value, which is the whole point of this test
+    assert se.cal_mode_read('C') == 'verify'
+    assert se.cal_mode_label('C') == 'A'          # verify's label today
+    assert se.cal_mode_text('C') == 'A (verify)'
+    # the legacy letter must NOT be read against the CURRENT labels
+    assert se.cal_mode_read('C') != se.CAL_MODE_TWOPOINT
+    assert se.cal_mode_read('A') != se.CAL_MODE_VERIFY
+    # a NAME reads as itself, and is idempotent under a second read
+    for name in se.CAL_MODES:
+        assert se.cal_mode_read(name) == name
+        assert se.cal_mode_read(se.cal_mode_read(name)) == name
+        assert se.cal_mode_label(name) == se.CAL_MODE_LABELS[name]
+    # nothing is INVENTED for a token that names no method -- a hand-edited
+    # setup.txt is a fact of bench life
+    for junk in (None, '', '  ', 'D', 'Z', 'circle-ish', 42):
+        assert se.cal_mode_read(junk) is None, junk
+        assert se.cal_mode_label(junk) == '?', junk
+    assert se.cal_mode_read('nonsense', default='kept') == 'kept'
+    assert 'unrecognised' in se.cal_mode_text('nonsense')
+
+    # ---- and END TO END, through P3_2's real anchor block ----------------
+    d = tempfile.mkdtemp(prefix='cal_legacy_')
+    try:
+        _setup(d)
+        # written by hand exactly as the live run holds it: the LETTER, in
+        # both the anchor's own field and the re-anchor's previous-mode field
+        path = os.path.join(d, 'setup.txt')
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write('\n' + se.ANCHOR_HDR + '\n'
+                    'method: auto-verified\n'
+                    'cal_mode: C\n'
+                    'diam_px: 577.078\n'
+                    'diam_mm: 16\n'
+                    'mm_per_px: 0.0277259\n'
+                    'reanchor: scale-only\n'
+                    'prev_method: auto-verified\n'
+                    'prev_cal_mode: C\n')
+        back = se.load_scale_anchor(d)
+        # NORMALISED AT THE BOUNDARY, so no reader downstream can forget
+        assert back['cal_mode'] == se.CAL_MODE_VERIFY, back['cal_mode']
+        assert back['prev_cal_mode'] == se.CAL_MODE_VERIFY
+        assert back['diam_px'] == 577.078
+        # sldea_diag names it correctly rather than calling it two-point
+        import sldea_diag as sd
+        rep = '\n'.join(sd.verdicts(_diag_d(scale_anchor=back))[i][2]
+                         for i in range(len(sd.verdicts(
+                             _diag_d(scale_anchor=back)))))
+        assert 'twopoint' not in rep, rep
+        # and a re-save writes the NAME -- a correct translation of what the
+        # letter meant, not a letter whose meaning has since changed
+        se.save_scale_anchor(d, dict(back))
+        text = open(path, encoding='utf-8').read()
+        assert 'cal_mode: verify' in text, text
+        assert 'prev_cal_mode: verify' in text
+        assert 'cal_mode: C' not in text
+        # the re-anchor's provenance builder carries the name too, from a
+        # block that still holds the letter
+        fields = se.reanchor_anchor_fields({'method': 'auto-verified',
+                                           'cal_mode': 'C',
+                                           'diam_px': 577.078}, {})
+        assert fields['prev_cal_mode'] == se.CAL_MODE_VERIFY
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_an_existing_log_file_is_told_where_its_vocabulary_changes():
+    """A run that was calibrated before the letters became names already has
+    a scale_calibration_log.txt full of `mode=C` lines (live P3_2 has
+    eight). Appending `mode=verify` under a header that says "mode=C the
+    operator VERIFIED" would leave the file self-contradicting, so the file
+    gets ONE note marking where its vocabulary changes -- written once, and
+    never for a file this build created."""
+    d = tempfile.mkdtemp(prefix='cal_log_migrate_')
+    try:
+        legacy = os.path.join(d, se.CAL_LOG_NAME)
+        # P3_2's real first line, letter and all
+        with open(legacy, 'w', encoding='utf-8') as f:
+            f.write('# SLDEA Edge Review scale calibrations, one line per '
+                    'completed round-set, accepted or declined.\n'
+                    '# mode=A circle fit, mode=B two-point diameter with '
+                    'the display randomly rotated per round,\n'
+                    'SLDEA-CAL 2026-08-06T22:41:10 mode=C n=1 '
+                    'sigma=undefined outcome=accepted-verified\n')
+        rec = {'when': 'T', 'mode': se.CAL_MODE_VERIFY,
+               'stats': se.verify_stats(P3_2_FIT), 'verdict': 'NOT-GATED',
+               'outcome': 'accepted-verified'}
+        se.append_calibration_log(d, rec)
+        body = open(legacy, encoding='utf-8').read()
+        assert body.count(se.CAL_LOG_VOCAB_MARK) == 1, body
+        assert 'A = circle, B = twopoint, C = verify' in body
+        # the note sits BETWEEN the old lines and the new one
+        note_at = body.index(se.CAL_LOG_VOCAB_MARK)
+        assert body.index('mode=C n=1') < note_at < body.index('mode=verify')
+        # the old line is untouched -- this is a log, not a rewrite
+        assert 'SLDEA-CAL 2026-08-06T22:41:10 mode=C n=1' in body
+        # a SECOND append does not repeat the note
+        se.append_calibration_log(d, rec)
+        body2 = open(legacy, encoding='utf-8').read()
+        assert body2.count(se.CAL_LOG_VOCAB_MARK) == 1, body2
+        assert body2.count('mode=verify') == 2
+        body2.encode('ascii')
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_verify_note_and_the_log_keep_every_number_the_screen_dropped():
@@ -1780,7 +1983,7 @@ def test_verify_note_and_the_log_keep_every_number_the_screen_dropped():
             _p, line = se.append_calibration_log(d, rec)
         finally:
             shutil.rmtree(d, ignore_errors=True)
-    for kept in ('mode=C', 'conf=0.871', 'circ=0.999', 'n_edge=204',
+    for kept in ('mode=verify', 'conf=0.871', 'circ=0.999', 'n_edge=204',
                  'arc=1.00', 'resid=2.3px', 'resid_pct=0.40%',
                  'sigma=undefined', 'se=undefined', 'range=undefined',
                  'verdict=NOT-GATED', '(IS-the-anchor)'):
@@ -1867,6 +2070,36 @@ def test_diag_tells_a_verified_anchor_from_a_measured_one():
     assert 'sigma/SE/range are UNDEFINED' in txt
     assert 'anatol' in txt and 'circ 0.999' in txt
     assert 'two-click' not in txt.split('VERDICTS')[0]
+
+
+def test_the_folded_scale_action_states_which_one_it_will_do():
+    """ONE SCALE BUTTON, TWO blast radii (operator 2026-08-06 late, `#215`).
+
+    Calibrate... and Re-anchor scale... were folded because they open
+    the same dialog. The hazard in folding them is that one WRITES data.csv
+    the moment it is confirmed and the other does not, so the banner that
+    names the intent is pinned as text: neither branch may borrow the
+    other's promise."""
+    import sldea_edge_gui as gui
+    cal = gui.scale_intent_banner(gui.SCALE_INTENT_CALIBRATE)
+    rea = gui.scale_intent_banner(gui.SCALE_INTENT_REANCHOR)
+    assert cal != rea
+    # the non-writing branch promises exactly that, and never the other
+    assert 'CALIBRATE' in cal and 'next' in cal and 'Save' in cal
+    assert 'NOTHING is written' in cal
+    assert 'IMMEDIATELY' not in cal and 'RE-ANCHOR' not in cal
+    # the writing branch says WRITES, up front, and does not offer Save as
+    # a later moment when nothing is written -- there is no later moment
+    assert 'RE-ANCHOR' in rea
+    assert 'WRITTEN TO data.csv IMMEDIATELY' in rea
+    assert 'NOTHING is written' not in rea
+    # ... and it promises the numbers first, which is the confirmation
+    assert 'before it commits' in rea
+    # an unknown/absent intent falls back to the NON-writing wording: a
+    # dialog that guessed the other way would announce a rewrite that is
+    # not about to happen
+    for junk in (None, '', 'something-else', 0):
+        assert gui.scale_intent_banner(junk) == cal, junk
 
 
 def _run():

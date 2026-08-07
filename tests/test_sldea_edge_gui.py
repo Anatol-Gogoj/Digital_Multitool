@@ -602,6 +602,15 @@ def _set_ua(rundir, uas):
         w.writerows(rows)
 
 
+# The three calibration modes by NAME (2026-08-06 late). The
+# dialog's A/B/C are LABELS only -- se.CAL_MODE_LABELS -- and the
+# letters were renumbered once, so a test that spelled a letter
+# would be asserting the presentation and not the behaviour.
+VERIFY = 'verify'
+CIRCLE = 'circle'
+TWOPOINT = 'twopoint'
+
+
 def _widgets(w, kind):
     import tkinter as tk
     cls = tk.Button if kind == 'button' else tk.Label
@@ -636,7 +645,8 @@ def _cal_display(win):
         return ''
 
 
-def _cal_visible_lines(win, skip=('METHOD:', 'rounds:', 'A stroke:')):
+def _cal_visible_lines(win, skip=('METHOD:', 'rounds:', 'A stroke:',
+                                  'B stroke:', 'C stroke:')):
     """The text lines actually ON SCREEN, as a list.
 
     Only labels the geometry manager is showing (`winfo_manager()`), split
@@ -749,7 +759,7 @@ def test_calibration_dialog_drives_three_rounds_and_both_gates():
         answers[:] = [False, True]
         taken = []
         app.root.wait_window = lambda win: advance(win, taken)
-        app._calibrate_scale(mode='A')
+        app._calibrate_scale(mode=CIRCLE)
         assert len(asked) == 2, asked
         assert taken[:2] == ['Continue →', 'Continue →'], taken
         assert '✔ Finish calibration' in taken[2]
@@ -786,7 +796,7 @@ def test_calibration_dialog_drives_three_rounds_and_both_gates():
         # spread No, guard No (restart), then spread No, guard Yes
         answers[:] = [False, False, False, True]
         taken = []
-        app._calibrate_scale(mode='A')
+        app._calibrate_scale(mode=CIRCLE)
         assert app.manual_ref is not None
         assert app.manual_ref['n_rounds'] == 3, app.manual_ref
         # 3 rounds, restart, 3 rounds again = 6 presses, and 4 questions
@@ -860,7 +870,7 @@ def test_calibration_warnings_default_to_declining_them():
         # than randomized so the question order is deterministic.
         _fixed_spawn(gui, [(160.0, 120.0, 65.0), (160.0, 120.0, 70.0),
                            (160.0, 120.0, 75.0)])
-        app._calibrate_scale(mode='A')
+        app._calibrate_scale(mode=CIRCLE)
         assert app.manual_ref is None, ("an anchor nobody read was "
                                         "accepted: " + str(app.manual_ref))
         assert spy.asked and spy.asked[0][0] == 'Rounds disagree'
@@ -871,7 +881,7 @@ def test_calibration_warnings_default_to_declining_them():
         # fixture's ~160 px disc is a P3_2-shaped miss, 18% out
         spy.asked.clear()
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 65.0)
-        app._calibrate_scale(mode='A')
+        app._calibrate_scale(mode=CIRCLE)
         assert app.manual_ref is None, app.manual_ref
         titles = [t for t, _kw in spy.asked]
         assert titles and set(titles) == {'Anchor sanity check'}, titles
@@ -883,7 +893,7 @@ def test_calibration_warnings_default_to_declining_them():
         # defaults to declining too (finding 3)
         spy.asked.clear()
         app._auto_disc = lambda: None
-        app._calibrate_scale(mode='A')
+        app._calibrate_scale(mode=CIRCLE)
         assert app.manual_ref is None, app.manual_ref
         assert [t for t, _kw in spy.asked][0] == 'Anchor NOT cross-checked'
         assert set(spy.defaults()) == {'no'}, spy.asked
@@ -949,7 +959,7 @@ def test_return_key_cannot_finish_a_calibration():
             seen['text'] = _cal_display(win) if seen['alive'] else ''
 
         app.root.wait_window = hammer
-        app._calibrate_scale(mode='A')
+        app._calibrate_scale(mode=CIRCLE)
         assert seen.get('alive'), "Enter closed the calibration dialog"
         # self-check FIRST: if this environment refuses to deliver a
         # synthetic key press, the rest of the case proves nothing
@@ -1011,7 +1021,7 @@ def test_mid_round_display_never_reveals_a_previous_fit():
                 _cal_step_button(win).invoke()
 
         app.root.wait_window = advance
-        app._calibrate_scale(mode='A')
+        app._calibrate_scale(mode=CIRCLE)
         assert len(snaps) == 3, snaps
         assert app.manual_ref['rounds_px'] == [130.0, 140.0, 150.0]
         # round 1 shows only its own circle; rounds 2 and 3 must contain
@@ -1135,6 +1145,27 @@ def _cal_onscreen(root, win):
     win.update()
 
 
+def _finish_if_last(win):
+    """Press the primary button ONLY when it is the Finish button.
+
+    Since AUTO-ADVANCE (operator 2026-08-06 late) the two-point mode banks a
+    round on its second click and moves to the next one by itself, so there
+    is no Continue to press mid-set — and pressing one would only produce
+    the "place BOTH edge points" refusal. The LAST round still needs the
+    button, because what follows it is the acceptance gate, the anchor guard
+    and an anchor.
+
+    Every mode-B driver below goes through here rather than pressing
+    unconditionally, which also makes auto-advance load-bearing in these
+    cases: if the second click stopped banking the round, the round count
+    would never reach the last one and the loop would run out."""
+    btn = _cal_step_button(win)
+    if 'Finish' in btn.cget('text'):
+        btn.invoke()
+        return True
+    return False
+
+
 def _click_at_original(app, orig_xy, img_w=320, img_h=240):
     """Click the point that currently DISPLAYS the original-image
     coordinate `orig_xy`, as a real <Button-1> on the dialog's canvas.
@@ -1162,19 +1193,32 @@ def _click_at_original(app, orig_xy, img_w=320, img_h=240):
     assert abs(back[0] - orig_xy[0]) < 1e-6, (back, orig_xy)
     assert abs(back[1] - orig_xy[1]) < 1e-6, (back, orig_xy)
     before = len(p['st']['pts'])
+    banked_before = len(p['st']['diams'])
     vx, vy = vt.to_view(rx, ry)
     cv.event_generate('<Button-1>', x=int(round(vx)), y=int(round(vy)),
                       when='now')
     cv.update()
     # SELF-CHECK: a <Button-1> on an unviewable widget is silently dropped,
     # so without this the whole case would pass while testing nothing.
-    # A third click starts the pair over, hence 2 -> 1.
+    #
+    # THREE possible outcomes since AUTO-ADVANCE (operator 2026-08-06 late):
+    # a first point lands (0 -> 1); a SECOND point lands and BANKS the round,
+    # which clears the pair for the next one (1 -> 0 with diams up by one);
+    # or, on the last round, the second point stays put (1 -> 2) because
+    # finishing still needs the button. A third click restarts the pair
+    # (2 -> 1).
     now = len(p['st']['pts'])
-    want = before + 1 if before < 2 else 1
-    assert now == want, (
-        f"the click never reached the dialog (points {before} -> {now}, "
-        f"expected {want}) — nothing here was tested; is the window on "
-        f"screen?")
+    banked = len(p['st']['diams'])
+    if before == 1 and banked == banked_before + 1:
+        assert now == 0, (
+            f"a round was banked but its clicks were not cleared "
+            f"(points {before} -> {now})")
+    else:
+        want = before + 1 if before < 2 else 1
+        assert now == want and banked == banked_before, (
+            f"the click never reached the dialog (points {before} -> {now}, "
+            f"expected {want}; banked {banked_before} -> {banked}) — "
+            f"nothing here was tested; is the window on screen?")
     return orig_xy
 
 
@@ -1222,13 +1266,13 @@ def test_mode_b_measures_in_original_coordinates_under_rotation():
                 seen['rots'].append(float(m.group(1)))
                 _click_at_original(app, (80.0, 120.0))
                 _click_at_original(app, (240.0, 120.0))
-                _cal_step_button(win).invoke()
+                _finish_if_last(win)
 
         app.root.wait_window = advance
-        app._calibrate_scale(mode='B')
+        app._calibrate_scale(mode=TWOPOINT)
         ref = app.manual_ref
         assert ref is not None, "mode B produced no anchor"
-        assert ref['cal_mode'] == 'B'
+        assert ref['cal_mode'] == TWOPOINT
         assert ref['n_rounds'] == gui.CAL_ROUNDS_TWOPOINT == 5
         assert len(ref['rounds_px']) == 5
         # THE POINT: same two physical points, five display rotations, the
@@ -1294,13 +1338,13 @@ def test_mode_b_is_blind_mid_round_and_shows_no_length_at_all():
                 # round's value would be a distinguishable string
                 half = 80.0 - 5.0 * k
                 _click_at_original(app, (160.0 - half, 120.0))
+                snaps.append(_cal_display(win))    # mid-round: one point in
                 _click_at_original(app, (160.0 + half, 120.0))
                 diams.append(2.0 * half)
-                snaps.append(_cal_display(win))
-                _cal_step_button(win).invoke()
+                _finish_if_last(win)
 
         app.root.wait_window = advance
-        app._calibrate_scale(mode='B')
+        app._calibrate_scale(mode=TWOPOINT)
         assert len(snaps) == 5, len(snaps)
         ref = app.manual_ref
         assert ref is not None and ref['n_rounds'] == 5
@@ -1317,7 +1361,9 @@ def test_mode_b_is_blind_mid_round_and_shows_no_length_at_all():
             assert 'HIDDEN until the last fit' in s, s
             assert 'px across' not in s, s          # mode A's readout
             # what it DOES show: progress, the rotation, and the count
-            assert re.search(r'Method B · Round \d of 5', s), s
+            # the two-point mode's LABEL is C since the 2026-08-06
+            # swap (A = verify, B = circle, C = twopoint)
+            assert re.search(r'Method C · Round \d of 5', s), s
             assert 'of 2 points placed' in s, s
         # THE REVEAL, after the fitting, with sigma leading
         txt = app.status.cget('text')
@@ -1370,13 +1416,13 @@ def test_every_round_set_is_logged_accepted_or_declined():
                            (160.0, 120.0, 75.0)])
         spy = _ModalSpy(real_mb, app, answers=[None])
         gui.messagebox = spy
-        app._calibrate_scale(mode='A')
+        app._calibrate_scale(mode=CIRCLE)
         assert app.manual_ref is None, "cancel accepted an anchor"
         assert os.path.exists(log), "a declined round-set was not logged"
         lines = _log_lines(log)
         assert len(lines) == 1, lines
         one = lines[0]
-        assert 'mode=A n=3' in one, one
+        assert 'mode=circle n=3' in one, one
         assert 'outcome=declined-cancel' in one, one
         assert 'verdict=OVER-GATE' in one, one
         assert 'diams=130.00,140.00,150.00px' in one, one
@@ -1400,15 +1446,15 @@ def test_every_round_set_is_logged_accepted_or_declined():
                     return
                 _click_at_original(app, (80.0, 120.0))
                 _click_at_original(app, (240.0, 120.0))
-                _cal_step_button(win).invoke()
+                _finish_if_last(win)
 
         app.root.wait_window = advance_b
-        app._calibrate_scale(mode='B')
+        app._calibrate_scale(mode=TWOPOINT)
         assert app.manual_ref is not None
         lines = _log_lines(log)
         assert len(lines) == 2, lines
         two = lines[1]
-        assert 'mode=B n=5' in two, two
+        assert 'mode=twopoint n=5' in two, two
         assert two.startswith('SLDEA-CAL 20')
         assert 'outcome=accepted' in two, two
         assert 'stroke=-' in two, two
@@ -1472,10 +1518,10 @@ def test_mode_b_keeps_every_safety_fix_of_the_review_round():
                 half = 80.0 - 6.0 * k
                 _click_at_original(app, (160.0 - half, 120.0))
                 _click_at_original(app, (160.0 + half, 120.0))
-                _cal_step_button(win).invoke()
+                _finish_if_last(win)
 
         app.root.wait_window = advance
-        app._calibrate_scale(mode='B')
+        app._calibrate_scale(mode=TWOPOINT)
         assert app.manual_ref is None, ("an anchor nobody read was "
                                         "accepted: " + str(app.manual_ref))
         assert spy.asked and spy.asked[0][0] == 'Rounds disagree', spy.asked
@@ -1498,25 +1544,34 @@ def test_mode_b_keeps_every_safety_fix_of_the_review_round():
         app.manual_ref = None
 
         def hammer(win, _n=16):
+            """Enter, hammered, on the round where it could do damage.
+
+            REWRITTEN FOR AUTO-ADVANCE (operator 2026-08-06 late). Enter used
+            to be what advanced an intermediate round, so seeing rounds
+            2..5 go by proved the key had been delivered. The CLICKS advance
+            the rounds now, so that evidence is gone and the old self-check
+            would pass without a single key press arriving. What proves
+            delivery instead is the refusal MESSAGE, which only
+            continue_key can write.
+
+            So: click through to the LAST round, where Enter is one press
+            away from an anchor and the gates behind it, and hammer there."""
             _cal_onscreen(root, win)
             win.focus_force()
             win.update()
             rounds = set()
+            st = app._cal_probe['st']
             for _ in range(_n):
                 if not win.winfo_exists():
                     break
-                # place a valid pair each time so Enter has a fittable
-                # round in front of it — the refusal must come from the
-                # BINDING, not from an incomplete round
-                if len(app._cal_probe['st']['pts']) < 2:
+                m = re.search(r'Round (\d+) of', _cal_display(win))
+                if m:
+                    rounds.add(int(m.group(1)))
+                if len(st['pts']) < 2:
                     _click_at_original(app, (80.0, 120.0))
                     _click_at_original(app, (240.0, 120.0))
                 win.event_generate('<Return>', when='now')
                 win.update()
-                if win.winfo_exists():
-                    m = re.search(r'Round (\d+) of', _cal_display(win))
-                    if m:
-                        rounds.add(int(m.group(1)))
             seen['rounds'] = rounds
             seen['alive'] = win.winfo_exists()
             seen['btn'] = (_cal_step_button(win).cget('text')
@@ -1524,21 +1579,24 @@ def test_mode_b_keeps_every_safety_fix_of_the_review_round():
             seen['text'] = _cal_display(win) if seen['alive'] else ''
 
         app.root.wait_window = hammer
-        app._calibrate_scale(mode='B')
+        app._calibrate_scale(mode=TWOPOINT)
         assert seen.get('alive'), "Enter closed the calibration dialog"
-        # self-check FIRST: without a delivered key press this proves
-        # nothing. The header is read AFTER each press, so four presses
-        # advancing rounds 1->2->3->4->5 are seen as {2,3,4,5}; every press
-        # after that was refused, which is why 5 appears and 6 never does.
-        assert seen['rounds'] == {2, 3, 4, 5}, (
-            "no <Return> reached the dialog, so nothing here was tested "
-            f"(rounds seen: {seen['rounds']})")
+        # the clicks walked the set to its last round and stopped there --
+        # auto-advance never carries a set past the round that needs the
+        # button
+        assert seen['rounds'] == {1, 2, 3, 4, 5}, seen['rounds']
         assert 'Finish' in seen['btn'], seen['btn']
+        # SELF-CHECK: the refusal message is the only thing continue_key
+        # writes, so it is what proves a key press actually arrived. Without
+        # it this case would pass while testing nothing (a synthetic key on
+        # an unviewable widget is silently dropped).
+        assert 'Enter cannot accept an anchor' in seen['text'], (
+            "no <Return> reached the dialog, so nothing here was tested: "
+            + seen['text'][:300])
         assert app.manual_ref is None, ("Enter accepted an anchor: "
                                         + str(app.manual_ref))
         assert not spy.asked, ("Enter reached a modal warning: "
                                + str(spy.asked))
-        assert 'Enter cannot accept an anchor' in seen['text'], seen['text']
 
         # (c) FINDING 3 in mode B: no automatic disc fit -> its own modal,
         # declining by default, and the gap on the record when overridden
@@ -1554,21 +1612,21 @@ def test_mode_b_keeps_every_safety_fix_of_the_review_round():
                     return
                 _click_at_original(app, (80.0, 120.0))
                 _click_at_original(app, (240.0, 120.0))
-                _cal_step_button(win).invoke()
+                _finish_if_last(win)
 
         app.root.wait_window = advance_ok
-        app._calibrate_scale(mode='B')
+        app._calibrate_scale(mode=TWOPOINT)
         titles = [t for t, _kw in spy.asked]
         assert titles == ['Anchor NOT cross-checked'], titles
         assert spy.defaults() == ['no'], spy.asked
         ref = app.manual_ref
-        assert ref is not None and ref['cal_mode'] == 'B'
+        assert ref is not None and ref['cal_mode'] == TWOPOINT
         assert ref['guard'].startswith('NOT CROSS-CHECKED'), ref['guard']
         ref['guard'].encode('ascii')
         assert 'NOT cross-checked' in app.status.cget('text')
         # and the log records the gap too, with no automatic reference
         line = _log_lines(os.path.join(run, gui.se.CAL_LOG_NAME))[-1]
-        assert 'mode=B n=5' in line and 'auto=none' in line, line
+        assert 'mode=twopoint n=5' in line and 'auto=none' in line, line
         assert 'outcome=accepted-override' in line, line
     finally:
         gui.messagebox = real_mb
@@ -1609,14 +1667,14 @@ def test_mode_chooser_restarts_the_set_and_carries_the_modes_default_n():
             _cal_step_button(win).invoke()
             saw['mid'] = (p['st']['round'], len(p['st']['diams']))
             # ... then switch to B: restarted, 5 rounds, rotated display
-            p['mode_var'].set('B')
+            p['mode_var'].set(TWOPOINT)
             p['mode_var'].get()
             win.tk.call('after', 'idle', '')          # let Tk settle
             app._cal_probe['st']  # (the switch runs on the radio command)
             saw['switched_before_cmd'] = p['st']['mode']
             # the radio's command is what the operator's click invokes
             for rb in _widgets_of(win, tk.Radiobutton):
-                if rb.cget('value') == 'B':
+                if rb.cget('value') == TWOPOINT:
                     rb.invoke()
             saw['after'] = (p['st']['mode'], p['st']['n'],
                             p['n_var'].get(), p['st']['round'],
@@ -1629,16 +1687,17 @@ def test_mode_chooser_restarts_the_set_and_carries_the_modes_default_n():
             win.destroy()
 
         app.root.wait_window = poke
-        app._calibrate_scale(mode='A')
-        assert saw['open'] == (gui.se.CAL_DEFAULT_MODE, '3', 'A', 3), saw
+        app._calibrate_scale(mode=CIRCLE)
+        assert saw['open'] == (gui.se.CAL_DEFAULT_MODE, '3', CIRCLE, 3), saw
         assert saw['mid'] == (2, 1), saw
         mode, n, nv, rnd_i, ndiams, npend, rotated = saw['after']
-        assert mode == 'B' and n == 5 and nv == '5', saw
+        assert mode == TWOPOINT and n == 5 and nv == '5', saw
         assert rnd_i == 1 and ndiams == 0, ("switching mode kept fits from "
                                             "the other method: " + str(saw))
         assert npend == 4, saw            # 5 angles, round 1's already used
-        assert rotated, "mode B did not rotate the display"
-        assert 'Method B · Round 1 of 5' in saw['header'], saw['header']
+        assert rotated, "the two-point mode did not rotate the display"
+        # the LETTER on screen is the two-point mode's NEW label, C
+        assert 'Method C · Round 1 of 5' in saw['header'], saw['header']
         assert 'view rotated' in saw['header'], saw['header']
         for v in saw['n_choices']:
             assert gui.se.d2(int(v)) is not None, v
@@ -2510,7 +2569,7 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
             step = p['step_btn']
             saw['step_text'] = step.cget('text')
             saw['step_default'] = str(step.cget('default'))
-            saw['hand_state'] = str(p['hand_btn'].cget('state'))
+            saw['back_state'] = str(p['back_btn'].cget('state'))
             # (1) ENTER MUST NOT APPROVE. Put the dialog on screen first --
             # a synthetic key press is silently dropped by an unviewable
             # widget, so without this the case would pass vacuously.
@@ -2531,11 +2590,22 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
         app.root.wait_window = poke
         app._calibrate_scale()
         # --- opened in C, on the strength of a real fit
-        assert saw['mode'] == ('C', 'C'), saw['mode']
-        assert saw['step_text'] == '✔ Accept the automatic fit', saw
+        assert saw['mode'] == (VERIFY, VERIFY), saw['mode']
+        # THE INTENT IS ON THE BUTTON (`#215` fold, 2026-08-06 late): the
+        # one 📏 entry point can either hold the anchor for Save or
+        # rewrite data.csv now, and the verify mode hides the block that
+        # says which in words, so the button the operator presses carries
+        # it. A plain '✔ Accept' would be ambiguous between the two.
+        assert saw['step_text'] == ('✔ Accept the automatic fit '
+                                   '(at Save)'), saw
         assert saw['step_default'] == 'active', saw   # primary, as intended
-        assert saw['hand_state'] == 'normal', saw
-        assert any('Measure by hand' in b for b in saw['btns']), saw['btns']
+        assert saw['back_state'] == 'disabled', saw   # no rounds here
+        # ✎ Measure by hand instead is GONE (operator 2026-08-06 late):
+        # the radio row already switches methods, so it was a second
+        # control for one job. The radios are the route now.
+        assert not any('Measure by hand' in b for b in saw['btns']), \
+            saw['btns']
+        assert 'hand_btn' not in (app._cal_probe or {})
         # the round-based controls are meaningless here
         assert saw['stretch'] is not None, "no contrast stretch was applied"
         # --- Enter was refused, and said why
@@ -2549,11 +2619,22 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
         # --- the evidence was on screen BEFORE the button was pressed
         t = saw['text']
         for needle in ('Automatic fit', 'px across', 'Quality',
-                       'of diameter', 'circularity', 'contrast-stretched',
-                       'raw frame', 'Nothing cross-checks it',
-                       'your eye is the check'):
+                       'of diameter', 'circularity'):
             assert needle in t, (needle, t[:400])
         assert f"{fit['diam_px']:.1f} px" in t, t[:400]
+        # THE STANDING DISCLAIMER IS OFF THE SCREEN (operator 2026-08-06
+        # late) -- and still in the RECORD, which is asserted below on
+        # ref['guard'] and on the log line. That split is the whole point:
+        # the honesty belongs where a later reader needs it, not in front of
+        # the person judging one boundary in one moment.
+        for dropped in ('contrast-stretched', 'raw frame',
+                        'Nothing cross-checks it',
+                        'your eye is the check'):
+            assert dropped not in t, (dropped, t[:400])
+        # WHICH OF THE TWO FOLDED ACTIONS this is, said in words: the plain
+        # 📏 entry point holds the anchor for Save here and writes nothing
+        assert 'CALIBRATE' in t and 'NOTHING is written' in t, t[:300]
+        assert 'RE-ANCHOR' not in t, t[:300]
         # NO VACUOUS CROSS-CHECK IS CLAIMED anywhere the operator can read
         for lie in ('apart in diam', 'mask area +0.0', 'cross-check passed',
                     '✓'):
@@ -2564,7 +2645,7 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
         assert ref['method'] == gui.se.ANCHOR_METHOD_VERIFIED == \
             'auto-verified'
         assert ref['method'] != gui.se.ANCHOR_METHOD_MANUAL
-        assert ref['cal_mode'] == 'C'
+        assert ref['cal_mode'] == VERIFY
         assert abs(ref['diam_px'] - fit['diam_px']) < 1e-9
         assert ref['fit_n_edge'] == fit['n_edge']
         assert abs(ref['fit_resid_px'] - fit['fit_resid_px']) < 1e-9
@@ -2582,13 +2663,13 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
         assert 'VERIFIED' in stat and 'NOT cross-checked' in stat, stat
         assert 'σ/SE undefined' in stat, stat
         assert ref['verified_by'] in stat, stat
-        # --- the log line: mode=C, undefined precision, never 0.00%
+        # --- the log line: mode=verify, undefined precision, never 0.00%
         with open(os.path.join(app.rundir, gui.se.CAL_LOG_NAME),
                   encoding='utf-8') as f:
             log = f.read()
         line = [L for L in log.splitlines()
                 if L.startswith('SLDEA-CAL')][-1]
-        assert 'mode=C' in line and 'n=1' in line, line
+        assert 'mode=verify' in line and 'n=1' in line, line
         for f_ in ('sigma=undefined', 'se=undefined', 'range=undefined',
                    'verdict=NOT-GATED', 'outcome=accepted-verified',
                    '(IS-the-anchor)'):
@@ -2606,7 +2687,8 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
             'verified_by': ref['verified_by'],
             'verified_at': ref['verified_at'], 'guard': ref['guard']})
         back = gui.se.load_scale_anchor(app.rundir)
-        assert back['method'] == 'auto-verified' and back['cal_mode'] == 'C'
+        assert back['method'] == 'auto-verified'
+        assert back['cal_mode'] == VERIFY
         assert back['verified_by'] == ref['verified_by']
         assert gui.se._is_manual_cal(back), "a verified anchor must still " \
                                            "override every automatic ref"
@@ -2651,7 +2733,7 @@ def test_mode_C_screen_holds_its_four_line_budget_and_opens_zoomed():
         # (so the conditional consequence line is present) plus already-
         # measured px rows (so it carries its longest wording).
         gui.se.save_scale_anchor(run, {
-            'method': 'manual-calibration', 'cal_mode': 'A',
+            'method': 'manual-calibration', 'cal_mode': CIRCLE,
             'diam_px': 163.5, 'diam_mm': 16.0, 'mm_per_px': 16.0 / 163.5,
             'n_rounds': 3, 'spread_pct': 0.5, 'spread_px': 0.8})
         csvp = os.path.join(run, 'data.csv')
@@ -2675,7 +2757,7 @@ def test_mode_C_screen_holds_its_four_line_budget_and_opens_zoomed():
             _cal_onscreen(root, win)
             win.update_idletasks()
             p = app._cal_probe
-            assert p['st']['mode'] == 'C', p['st']['mode']
+            assert p['st']['mode'] == VERIFY, p['st']['mode']
             saw['lines'] = _cal_visible_lines(win)
             saw['zoom'] = p['vt'].zoom
             saw['canvas'] = (int(p['canvas'].cget('width')),
@@ -2699,7 +2781,7 @@ def test_mode_C_screen_holds_its_four_line_budget_and_opens_zoomed():
             saw['enter_delivered'] = ('Enter cannot approve'
                                       in _cal_display(win))
             # ... and switching away and back must not leave it behind
-            for val in ('A', 'C'):
+            for val in (CIRCLE, VERIFY):
                 for rb in _widgets_of(win, tk.Radiobutton):
                     if rb.cget('value') == val:
                         rb.invoke()
@@ -2719,15 +2801,24 @@ def test_mode_C_screen_holds_its_four_line_budget_and_opens_zoomed():
         # wording without room for a re-inflated paragraph.
         for ln in lines:
             assert len(ln) <= 200, (len(ln), ln)
-        assert sum(len(ln) for ln in lines) <= 600, (
+        # TIGHTENED as text came off (operator 2026-08-06 late): a budget
+        # with slack left in it is a budget that gets spent.
+        assert sum(len(ln) for ln in lines) <= 400, (
             f"{sum(len(ln) for ln in lines)} chars on screen:\n"
             + '\n'.join(lines))
         joined = '\n'.join(lines)
-        # the four things that stayed
+        # what stayed
         assert 'Automatic fit' in joined and 'px across' in joined, joined
         assert 'of diameter' in joined and 'circularity' in joined, joined
-        assert 'raw frame' in joined and 'your eye is the check' in joined
         assert '% from the' in joined and 'next Save' in joined, joined
+        # ... and the standing stretch / no-cross-check sentence that came
+        # OFF it (operator 2026-08-06 late). It is still in the run's
+        # `guard:` field, the log line and sldea_diag -- pinned by
+        # test_verify_note_and_the_log_keep_every_number_the_screen_dropped.
+        for dropped in ('contrast-stretched', 'raw frame',
+                        'Nothing cross-checks it',
+                        'your eye is the check'):
+            assert dropped not in joined, (dropped, joined)
         # ... and the garbage that went. Each of these is still in the
         # RECORD (test_mode_C_is_where_the_gate_opens covers that end); what
         # is asserted here is only that it is not on the SCREEN.
@@ -2764,21 +2855,22 @@ def test_mode_C_screen_holds_its_four_line_budget_and_opens_zoomed():
             print("   (skipped the <Return>-refusal visibility claim: no "
                   "synthetic key press reached the dialog)")
         # mode A brings its own text back, and returning to C sheds it again
-        assert len(saw['lines_A']) > gui.CAL_VERIFY_MAX_LINES, saw['lines_A']
-        assert any('SCALE GATE' in ln for ln in saw['lines_A']), \
-            saw['lines_A']
-        assert any('Round 1 of 3' in ln for ln in saw['lines_A']), \
-            saw['lines_A']
+        assert len(saw['lines_' + CIRCLE]) > gui.CAL_VERIFY_MAX_LINES, \
+            saw['lines_' + CIRCLE]
+        assert any('SCALE GATE' in ln for ln in saw['lines_' + CIRCLE]), \
+            saw['lines_' + CIRCLE]
+        assert any('Round 1 of 3' in ln
+                   for ln in saw['lines_' + CIRCLE]), saw['lines_' + CIRCLE]
         # ... INCLUDING the live readout, which the first cut of this left
         # forgotten: text set, label unpacked, so a mode-A round ran with
         # its diameter readout -- the one number it needs -- invisible.
         # Found by rendering the dialog after a C->A switch, not by a test.
         assert any('px across' in ln and 'mm/px' in ln
-                   for ln in saw['lines_A']), (
-            "mode A came back from mode C without its diameter readout on "
-            "screen: " + str(saw['lines_A']))
-        assert len(saw['lines_C']) <= gui.CAL_VERIFY_MAX_LINES, \
-            saw['lines_C']
+                   for ln in saw['lines_' + CIRCLE]), (
+            "the circle mode came back from the verify mode without its "
+            "diameter readout on screen: " + str(saw['lines_' + CIRCLE]))
+        assert len(saw['lines_' + VERIFY]) <= gui.CAL_VERIFY_MAX_LINES, \
+            saw['lines_' + VERIFY]
     finally:
         gui.messagebox, gui.spawn_circle = real_mb, real_spawn
         root.destroy()
@@ -2822,16 +2914,28 @@ def test_a_refused_fit_falls_through_to_the_hand_measurement_and_says_why():
             saw['radios'] = [rb.cget('value')
                              for rb in _widgets_of(win, tk.Radiobutton)]
             saw['step'] = p['step_btn'].cget('text')
-            saw['hand'] = str(p['hand_btn'].cget('state'))
+            saw['back'] = str(p['back_btn'].cget('state'))
+            saw['radio_text'] = [rb.cget('text')
+                                 for rb in _widgets_of(win,
+                                                       tk.Radiobutton)]
             win.destroy()
 
         app.root.wait_window = poke
         app._calibrate_scale()
         # opened on the HAND measurement, mode C not on offer at all
-        assert saw['mode'] == (gui.se.CAL_DEFAULT_MODE, 'A'), saw['mode']
-        assert 'C' not in saw['radios'], saw['radios']
+        assert saw['mode'] == (gui.se.CAL_DEFAULT_MODE, CIRCLE), saw['mode']
+        assert VERIFY not in saw['radios'], saw['radios']
         assert saw['step'].startswith('Continue'), saw['step']
-        assert saw['hand'] == 'disabled', saw
+        assert saw['back'] == 'normal', saw
+        # THE RADIOS ARE THE ONLY ROUTE to a hand measurement now, so they
+        # have to READ as one -- each manual entry says so in words, and
+        # the letters keep their positions when A is withdrawn (B is the
+        # circle whether or not the verify mode is on offer).
+        rt = saw['radio_text']
+        assert all('BY HAND' in t for t in rt), rt
+        assert any(t.startswith('B ·') for t in rt), rt
+        assert any(t.startswith('C ·') for t in rt), rt
+        assert not any(t.startswith('A ·') for t in rt), rt
         # and it SAID so, with the fitter's own reason
         t = saw['text']
         assert 'AUTOMATIC FIT IS NOT AVAILABLE' in t, t[:400]
@@ -2841,7 +2945,7 @@ def test_a_refused_fit_falls_through_to_the_hand_measurement_and_says_why():
         app.manual_ref = None
         saw.clear()
         app._calibrate_scale(mode=gui.se.CAL_MODE_VERIFY)
-        assert saw['mode'] == (gui.se.CAL_DEFAULT_MODE, 'A'), saw['mode']
+        assert saw['mode'] == (gui.se.CAL_DEFAULT_MODE, CIRCLE), saw['mode']
         assert 'AUTOMATIC FIT IS NOT AVAILABLE' in saw['text']
     finally:
         gui.messagebox, gui.spawn_circle = real_mb, real_spawn
@@ -2894,12 +2998,12 @@ def test_switching_into_mode_C_gives_it_the_same_room_as_opening_in_it():
         def opened_in_A_then_C(win):
             grab(win, 'openA')
             for rb in _widgets_of(win, tk.Radiobutton):
-                if rb.cget('value') == 'C':
+                if rb.cget('value') == VERIFY:
                     rb.invoke()
             grab(win, 'switchC')
             # and back to A: the height must be RETURNED, not kept
             for rb in _widgets_of(win, tk.Radiobutton):
-                if rb.cget('value') == 'A':
+                if rb.cget('value') == CIRCLE:
                     rb.invoke()
             grab(win, 'backA')
             win.destroy()
@@ -2908,9 +3012,9 @@ def test_switching_into_mode_C_gives_it_the_same_room_as_opening_in_it():
         app._calibrate_scale()
         app.manual_ref = None
         app.root.wait_window = opened_in_A_then_C
-        app._calibrate_scale(mode='A')
-        assert saw['openC'][0] == 'C' and saw['openA'][0] == 'A', saw
-        assert saw['switchC'][0] == 'C' and saw['backA'][0] == 'A', saw
+        app._calibrate_scale(mode=CIRCLE)
+        assert saw['openC'][0] == VERIFY and saw['openA'][0] == CIRCLE, saw
+        assert saw['switchC'][0] == VERIFY and saw['backA'][0] == CIRCLE, saw
         # switching in gives mode C exactly the room opening in it does
         assert saw['switchC'][1] == saw['openC'][1], saw
         assert saw['switchC'][2] == saw['openC'][2], saw
@@ -2947,7 +3051,7 @@ def test_reusing_a_verified_anchor_keeps_it_verified_not_hand_measured():
     try:
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         gui.se.save_scale_anchor(run, {
-            'method': gui.se.ANCHOR_METHOD_VERIFIED, 'cal_mode': 'C',
+            'method': gui.se.ANCHOR_METHOD_VERIFIED, 'cal_mode': VERIFY,
             'diam_px': 159.9, 'diam_mm': 16.0, 'mm_per_px': 16.0 / 159.9,
             'fit_circ': 0.999, 'fit_conf': 0.871, 'fit_resid_px': 0.5,
             'fit_n_edge': 360, 'verified_by': 'anatol',
@@ -2967,7 +3071,7 @@ def test_reusing_a_verified_anchor_keeps_it_verified_not_hand_measured():
         ref = app.manual_ref
         assert ref is not None and ref['reused'] is True
         assert ref['method'] == gui.se.ANCHOR_METHOD_VERIFIED, ref['method']
-        assert ref['cal_mode'] == 'C'
+        assert ref['cal_mode'] == VERIFY
         assert ref['verified_by'] == 'anatol', ref
         assert ref['fit_n_edge'] == 360
         assert gui.se.guard_is_vacuous(ref)
@@ -2984,7 +3088,7 @@ def test_reusing_a_verified_anchor_keeps_it_verified_not_hand_measured():
             'method': gui.se.ANCHOR_METHOD_MANUAL, 'diam_px': 170.0,
             'diam_mm': 16.0, 'mm_per_px': 16.0 / 170.0})
         app.manual_ref = None
-        app._calibrate_scale(mode='A')
+        app._calibrate_scale(mode=CIRCLE)
         assert app.manual_ref['method'] == gui.se.ANCHOR_METHOD_MANUAL
         for k in ('fit_n_edge', 'verified_by', 'cal_mode'):
             assert k not in app.manual_ref, k
@@ -3012,7 +3116,7 @@ def test_a_verified_anchor_still_reports_when_the_fit_has_MOVED():
         assert fit and fit.get('diam_px')
         # (a) approved against THIS fit -> no drift warning, no tick either
         app.manual_ref = {'method': gui.se.ANCHOR_METHOD_VERIFIED,
-                          'cal_mode': 'C', 'diam_px': fit['diam_px'],
+                          'cal_mode': VERIFY, 'diam_px': fit['diam_px'],
                           'fit_circ': fit['circ'], 'fit_conf': fit['conf'],
                           'fit_resid_px': fit['fit_resid_px'],
                           'fit_n_edge': fit['n_edge'],
@@ -3058,27 +3162,31 @@ def test_measure_by_hand_leaves_mode_C_for_a_BLIND_mode_A_round_set():
 
         def poke(win):
             p = app._cal_probe
-            assert p['st']['mode'] == 'C'
-            p['hand_btn'].invoke()
+            assert p['st']['mode'] == VERIFY
+            # THE RADIO is the route now -- the ✎ button is gone
+            for rb in _widgets_of(win, __import__('tkinter').Radiobutton):
+                if rb.cget('value') == CIRCLE:
+                    rb.invoke()
             saw['mode'] = (p['mode_var'].get(), p['st']['mode'])
             saw['n'] = (p['n_var'].get(), p['st']['n'])
             saw['round'] = (p['st']['round'], len(p['st']['diams']))
             saw['stretch'] = p['st']['stretch']
             saw['step'] = p['step_btn'].cget('text')
-            saw['hand'] = str(p['hand_btn'].cget('state'))
+            saw['back'] = str(p['back_btn'].cget('state'))
             saw['text'] = _cal_display(win)
             win.destroy()
 
         app.root.wait_window = poke
         app._calibrate_scale()
-        assert saw['mode'] == ('A', 'A'), saw['mode']
+        assert saw['mode'] == (CIRCLE, CIRCLE), saw['mode']
         assert saw['n'] == ('3', 3), saw['n']
         assert saw['round'] == (1, 0), saw['round']
         assert saw['step'].startswith('Continue'), saw['step']
-        assert saw['hand'] == 'disabled', saw
+        assert saw['back'] == 'normal', saw
         t = saw['text']
-        # the hand measurement's own instructions are back...
-        assert 'METHOD A (circle)' in t and 'HALF-HEIGHT' in t, t[:400]
+        # the hand measurement's own instructions are back, under the
+        # circle's NEW label (B; it was A before the 2026-08-06 swap)
+        assert 'METHOD B (circle)' in t and 'HALF-HEIGHT' in t, t[:400]
         # ... the evidence block is gone, and with it the fit's diameter:
         # no target to wheel a circle onto
         assert 'Automatic fit' not in t, t[:400]
@@ -3090,6 +3198,294 @@ def test_measure_by_hand_leaves_mode_C_for_a_BLIND_mode_A_round_set():
         gui.messagebox, gui.spawn_circle = real_mb, real_spawn
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_one_scale_button_routes_by_the_runs_state():
+    """THE FOLD (operator 2026-08-06 late, `#215`). One 📏 button replaces
+    📏 Calibrate… and 📏 Re-anchor scale…, because they open the same dialog
+    and having two was confusing. What differs is what happens to the number
+    AFTERWARDS, and that follows the run:
+
+    - an open review pass -> CALIBRATE, applied at Save. This is the
+      `[critical]` mixed-scale bug's own shape (SLDEA_HANDOFF 2026-08-05):
+      committing a scale while a half-finished pass sits in self.results puts
+      two writers on one mm² column. The old button REFUSED here, and the
+      fold must not turn that refusal into a silent commit.
+    - a detect worker in flight -> CALIBRATE, same reason: nothing may
+      rewrite data.csv under a running pass.
+    - nothing measured yet -> CALIBRATE; there are no px to re-derive.
+    - a saved run with px and no pass -> RE-ANCHOR, committed immediately.
+
+    And the intent is computed at CLICK TIME, never cached on the button,
+    because a stale label would be lying about the one thing that differs:
+    whether pressing this writes data.csv now."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('folded scale button')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_scale_fold_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+
+        # ONE button, and it names BOTH outcomes so it can never be stale
+        labels = [b.cget('text') for b in _widgets_of(root, __import__(
+            'tkinter').ttk.Button) if '📏' in b.cget('text')]
+        assert len(labels) == 1, labels
+        assert 'Calibrate' in labels[0] and 're-anchor' in labels[0].lower()
+
+        # (1) nothing measured yet -> calibrate
+        assert app._px_rows() == 0
+        i = app._scale_intent()
+        assert i['intent'] == gui.SCALE_INTENT_CALIBRATE, i
+        assert 'nothing to re-derive' in i['why'], i
+
+        # (2) px on record, no pass open -> RE-ANCHOR
+        for r in app.run['rows'][1:]:
+            r['active_area_px'] = '12345.0'
+            r['active_area_mm2'] = '123.45'
+        assert app._px_rows() == 2
+        i = app._scale_intent()
+        assert i['intent'] == gui.SCALE_INTENT_REANCHOR, i
+        assert i['n_px_rows'] == 2 and 'commits immediately' in i['why']
+
+        # (3) an UNSAVED review pass -> back to calibrate, every kind of it
+        for attr, val in (('results', {1: 0}), ('traces', {1: [(0, 0)]}),
+                          ('flags', {1: True}), ('advisories', {1: 'x'})):
+            setattr(app, attr, val)
+            i = app._scale_intent()
+            assert i['intent'] == gui.SCALE_INTENT_CALIBRATE, (attr, i)
+            assert i['dirty'], (attr, i)
+            assert 'two writers' in i['why'], (attr, i)
+            setattr(app, attr, {})
+        assert app._scale_intent()['intent'] == gui.SCALE_INTENT_REANCHOR
+
+        # (4) a detect worker in flight -> calibrate; nothing may write
+        app._detect_busy = True
+        i = app._scale_intent()
+        assert i['intent'] == gui.SCALE_INTENT_CALIBRATE, i
+        assert 'detection pass is running' in i['why'], i
+        app._detect_busy = False
+
+        # (5) THE DISPATCH itself, both ways
+        went = []
+        app._calibrate_scale = lambda **kw: went.append(('cal', kw))
+        app._reanchor_scale = lambda: went.append(('reanchor', {}))
+        app._scale_action()
+        assert went == [('reanchor', {})], went
+        app.results = {1: 0}
+        app._scale_action()
+        assert went[-1][0] == 'cal', went
+        # ... and with no run at all it asks for one rather than guessing.
+        # showinfo is stubbed explicitly: _ModalSpy delegates anything it
+        # does not implement to the REAL messagebox, which would put a live
+        # modal on screen and block the suite for ever.
+        went.clear()
+        app.run = None
+        told = []
+
+        class _Info:
+            def showinfo(self, title, msg='', **_kw):
+                told.append((title, msg))
+
+            def __getattr__(self, name):
+                raise AssertionError('unexpected messagebox.' + name)
+
+        real_mb = gui.messagebox
+        try:
+            gui.messagebox = _Info()
+            app._scale_action()
+        finally:
+            gui.messagebox = real_mb
+        assert went == [], went
+        assert told and 'Pick a run' in told[0][1], told
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_dialog_says_which_of_the_two_folded_actions_it_serves():
+    """One 📏 button, two blast radii — so the dialog itself has to say which
+    one it is, in every mode. The verify mode hides the gate block that says
+    it in words, so the PRIMARY BUTTON carries it there, and the window title
+    carries it everywhere. Never a bare "Accept": accepting means two
+    different things now."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('folded scale intent on screen')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_scale_intent_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    saw = {}
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
+
+        def look(tag):
+            def poke(win):
+                p = app._cal_probe
+                saw[tag] = {'title': win.title(),
+                            'step': p['step_btn'].cget('text'),
+                            'text': _cal_display(win),
+                            'intent': p['intent'],
+                            'mode': p['st']['mode']}
+                win.destroy()
+            return poke
+
+        # the plain calibration: applied at Save, nothing written
+        app.root.wait_window = look('cal')
+        app._calibrate_scale()
+        # the re-anchor's dialog: the SAME dialog, told what it serves
+        app.root.wait_window = look('re')
+        app._calibrate_scale(intent=gui.SCALE_INTENT_REANCHOR)
+        # ... and the same pair in a MEASURING mode, where the gate block is
+        # on screen and states it in full
+        app.root.wait_window = look('cal_circle')
+        app._calibrate_scale(mode=CIRCLE)
+        app.root.wait_window = look('re_circle')
+        app._calibrate_scale(mode=CIRCLE,
+                             intent=gui.SCALE_INTENT_REANCHOR)
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+    # THE VERIFY MODE: the button is where the asymmetry has to live, since
+    # the block that would say it in words is hidden for the line budget
+    assert saw['cal']['mode'] == VERIFY and saw['re']['mode'] == VERIFY
+    assert 'at Save' in saw['cal']['step'], saw['cal']
+    assert 'RE-ANCHOR' not in saw['cal']['step'], saw['cal']
+    assert 'RE-ANCHOR NOW' in saw['re']['step'], saw['re']
+    assert 'at Save' not in saw['re']['step'], saw['re']
+    # the TITLE too, in both modes, so the bar and the button agree
+    for k, needle in (('cal', 'applied at Save'),
+                      ('re', 'writes data.csv'),
+                      ('cal_circle', 'applied at Save'),
+                      ('re_circle', 'writes data.csv')):
+        assert needle in saw[k]['title'], (k, saw[k]['title'])
+    assert 'RE-ANCHOR' in saw['re']['title']
+    assert 'RE-ANCHOR' not in saw['cal']['title']
+    # A MEASURING MODE says it in FULL, on the gate block's first line
+    assert 'NOTHING is written' in saw['cal_circle']['text']
+    assert 'WRITTEN TO data.csv IMMEDIATELY' in saw['re_circle']['text']
+    assert 'WRITTEN TO data.csv IMMEDIATELY' not in saw['cal_circle']['text']
+    assert 'NOTHING is written' not in saw['re_circle']['text']
+    # the Finish button carries it as well -- that is the one that commits
+    for k in ('cal_circle', 're_circle'):
+        assert 'Continue' in saw[k]['step'], saw[k]
+
+
+def test_the_second_click_banks_the_round_and_Back_undoes_it():
+    """AUTO-ADVANCE AND ITS UNDO (operator 2026-08-06 late, `#215`).
+
+    The operator asked for the second click to advance to the next round with
+    no Continue press. That removes the only moment a bad second click could
+    have been noticed before it counted, so the round just banked has to be
+    recoverable: ◀ Back (and Backspace) step one round back and re-randomise
+    it. Well defined at any point, because the mean is not computed until the
+    last round is in.
+
+    TWO deliberate limits are pinned here as well:
+
+    - the LAST round does NOT auto-advance. There is no next round to advance
+      to; what follows is finish(), i.e. the acceptance gate, the anchor guard
+      and an anchor. Auto-advancing into that would let a stray click accept a
+      scale and then meet warnings it never read -- the hazard <Return> is
+      refused for.
+    - a round that comes back is RE-RANDOMISED. Restoring the old rotation
+      with the old clicks on it would be a correlated second look at one fit,
+      which is what the blind independent rounds exist to prevent."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('two-point auto-advance and undo')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_autoadv_')
+    real_mb = gui.messagebox
+    saw = {}
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        gui.messagebox = _ModalSpy(real_mb, app)
+
+        def poke(win):
+            _cal_onscreen(root, win)
+            p = app._cal_probe
+            st = p['st']
+            saw['back_label_r1'] = p['back_btn'].cget('text')
+            # ---- round 1: two clicks, and the round BANKS itself ---------
+            rot1 = st['rot']
+            _click_at_original(app, (80.0, 120.0))
+            assert len(st['pts']) == 1, st['pts']
+            _click_at_original(app, (240.0, 120.0))
+            saw['after_two'] = (st['round'], len(st['diams']),
+                                len(st['pts']))
+            saw['banked'] = list(st['diams'])
+            saw['rot_changed'] = (st['rot'] != rot1)
+            saw['back_label_r2'] = p['back_btn'].cget('text')
+            # ---- ◀ Back: the round comes off again ----------------------
+            rot2 = st['rot']
+            p['back_btn'].invoke()
+            saw['after_back'] = (st['round'], len(st['diams']),
+                                 len(st['pts']))
+            saw['rerandomised'] = (st['rot'] != rot2)
+            # ---- BACKSPACE does the same thing --------------------------
+            _click_at_original(app, (80.0, 120.0))
+            _click_at_original(app, (240.0, 120.0))
+            assert len(st['diams']) == 1, st['diams']
+            win.focus_force()
+            win.update()
+            win.event_generate('<BackSpace>', when='now')
+            win.update()
+            saw['after_key'] = (st['round'], len(st['diams']))
+            # ---- walk to the LAST round, which must NOT auto-advance ----
+            for _ in range(4):
+                if len(st['diams']) >= 4:
+                    break
+                _click_at_original(app, (80.0, 120.0))
+                _click_at_original(app, (240.0, 120.0))
+            saw['at_last'] = (st['round'], len(st['diams']))
+            saw['step_last'] = p['step_btn'].cget('text')
+            _click_at_original(app, (80.0, 120.0))
+            _click_at_original(app, (240.0, 120.0))
+            saw['last_pts'] = len(st['pts'])
+            saw['last_banked'] = len(st['diams'])
+            saw['alive'] = win.winfo_exists()
+            saw['live'] = _cal_display(win)
+            win.destroy()
+
+        app.root.wait_window = poke
+        app._calibrate_scale(mode=TWOPOINT)
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+    # THE SECOND CLICK BANKED THE ROUND AND MOVED ON -- no button press
+    assert saw['after_two'] == (2, 1, 0), saw['after_two']
+    assert len(saw['banked']) == 1 and saw['banked'][0] > 0, saw['banked']
+    assert saw['rot_changed'], "the next round reused the same rotation"
+    # ◀ BACK took it off again and put the operator back in that round
+    assert saw['after_back'] == (1, 0, 0), saw['after_back']
+    assert saw['rerandomised'], ("a redone round came back with the same "
+                                 "rotation, so the refit would not be "
+                                 "independent")
+    assert saw['after_key'] == (1, 0), saw['after_key']
+    # THE LABEL NAMES THE ROUND IT LANDS ON, and its key -- an undo nobody
+    # can find is not an undo, and there is no room for a paragraph
+    assert 'Backspace' in saw['back_label_r1'], saw['back_label_r1']
+    assert 'round 1' in saw['back_label_r1'], saw['back_label_r1']
+    assert 'round 1' in saw['back_label_r2'], saw['back_label_r2']
+    # THE LAST ROUND KEEPS ITS BUTTON: two points placed, nothing banked,
+    # the dialog still open and no anchor taken by a click
+    assert saw['at_last'] == (5, 4), saw['at_last']
+    assert 'Finish' in saw['step_last'], saw['step_last']
+    assert saw['last_pts'] == 2, saw['last_pts']
+    assert saw['last_banked'] == 4, saw['last_banked']
+    assert saw['alive'], "the last round's second click finished the set"
+    # ... and it SAYS so where the operator is looking
+    assert 'Finish' in saw['live'], saw['live']
 
 
 def _run():

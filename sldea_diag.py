@@ -682,7 +682,7 @@ def verdicts(d):
         # otherwise sent operators to distrust properly hand-calibrated
         # runs (audit 2026-08-05).
         ref = d.get('baseline_disc')
-        # PROVENANCE (`#215` mode C, 2026-08-06 evening): 'auto-verified'
+        # PROVENANCE (`#215` verify mode, 2026-08-06 evening): 'auto-verified'
         # means a human APPROVED the automatic fit; 'manual-calibration'
         # means a human MEASURED the disc. Different claims, different
         # failure modes, and the cross-check line below is meaningless for
@@ -894,8 +894,8 @@ def verdicts(d):
                   "radius's own standard error is ~sqrt(n) smaller). This "
                   "anchor therefore contributes NOTHING to "
                   "SLDEA_MEASUREMENT 2.5's operator-repeat leg -- that "
-                  "number only comes from runs calibrated by hand in mode A "
-                  "or B. Approved by "
+                  "number only comes from runs calibrated BY HAND (the "
+                  "circle or two-point methods). Approved by "
                 + (anchor.get('verified_by') or '(unrecorded)')
                 + (f" at {anchor['verified_at']}"
                    if anchor.get('verified_at') else '') + '.'))
@@ -924,7 +924,14 @@ def verdicts(d):
             sep = anchor.get('se_pct')
             if sep is None and sig is not None and nr:
                 sep = sig / math.sqrt(nr)
-            mode = anchor.get('cal_mode')
+            # THE LEGACY LETTER RULE (se.cal_mode_read, via cal_mode_text).
+            # A block written before 2026-08-06 late holds a PRE-SWAP letter
+            # -- live P3_2's reads `cal_mode: C`, meaning verify -- and the
+            # dialog's labels have since been renumbered, so a letter printed
+            # raw here would name the wrong method to every reader of this
+            # report. Quoted as `letter (name)` so it matches both the screen
+            # and the record.
+            mode = se.cal_mode_text(anchor.get('cal_mode'))
             how = f"method {mode}, " if mode else ''
             if sep is None:
                 # no d2 factor for this n, so the conversion the budget
@@ -1213,7 +1220,7 @@ def report(d):
             if sep is None and sig is not None and nr:
                 sep = sig / math.sqrt(nr)
             A(f"  rounds        : "
-              + (f"method {anchor['cal_mode']}, "
+              + (f"method {se.cal_mode_text(anchor['cal_mode'])}, "
                  if anchor.get('cal_mode') else '')
               + (', '.join(f"{v:.1f}" for v in rounds) + ' px  '
                  if rounds else '')
@@ -1230,7 +1237,8 @@ def report(d):
             A("  rounds        : none recorded (pre-2026-08-06 two-click "
               "anchor -- no repeatability number)")
         if anchor.get('reanchor'):
-            # printed for EVERY provenance, not only mode C: a re-anchor can
+            # printed for EVERY provenance, not only a verified fit: a
+            # re-anchor can
             # be committed from any of the three calibration modes, and the
             # thing a reader needs is that the mm2 are newer than the review
             A(f"  re-anchored   : {anchor['reanchor']} -- areas re-derived "
@@ -1243,7 +1251,7 @@ def report(d):
               + (f"  (data implied {float(impl_px):.2f} px)"
                  if impl_px is not None else '')
               + f"  [{anchor.get('prev_method') or 'none on record'}"
-              + (f", method {anchor['prev_cal_mode']}"
+              + (f", method {se.cal_mode_text(anchor['prev_cal_mode'])}"
                  if anchor.get('prev_cal_mode') else '') + ']')
             if anchor.get('reanchor_rows') is not None:
                 A(f"  rows          : "

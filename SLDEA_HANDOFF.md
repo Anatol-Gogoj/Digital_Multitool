@@ -13,6 +13,97 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## Scale UI: one button, self-describing method names, a leaner verify screen (2026-08-06, late)
+
+**TL;DR:** The two 📏 buttons became one, because they opened the same
+dialog; which of the two things happens now follows the run's state and is
+spelled out on screen. The method letters were swapped so A is the verify
+mode, and — because the old letters are already written into live run
+records — what gets recorded is now the method's NAME. In the two-point
+mode the second click banks the round and moves on, with ◀ Back to undo it.
+Five operator-requested changes; nothing about what is measured changed.
+
+Observation → decision:
+
+- **Two 📏 buttons for one dialog confused the operator.** 📏 Calibrate…
+  and 📏 Re-anchor scale… open the same window with the same gates; what
+  differs is whether the accepted number is held for the next Save or
+  written into `data.csv` immediately. → **ONE** 📏 entry point
+  (`_scale_action`), whose behaviour follows the run
+  (`_scale_intent`): an open review pass, a detect worker in flight, or a
+  run with nothing measured yet → CALIBRATE, applied at Save; a saved run
+  with px measurements and no pass open → RE-ANCHOR, committed. The old
+  re-anchor's refusal on an open review pass **survives as that routing
+  rule and as an independent check inside `_reanchor_scale`** — re-anchoring
+  over a partial pass is the `[critical]` mixed-scale bug's own shape, and
+  folding two buttons must not be able to turn a refusal into a silent
+  commit.
+- **One of the two writes immediately and the other does not, so the
+  dialog says which.** Computed at click time, never cached on the
+  toolbar button (a stale label would be lying about exactly the thing that
+  differs), and stated in the window title, on the primary button, and in
+  the confirmation. The button label names both outcomes and never changes.
+- **The re-anchor's confirmation became THREE-WAY.** As a dedicated button,
+  declining it correctly threw the measurement away. As the only 📏 route on
+  a saved run that would dead-end an operator who wants an anchor in order
+  to re-Detect a frame, so: YES commits, **NO keeps the anchor for the next
+  Save without writing anything**, CANCEL discards it. `default='cancel'`,
+  the option that changes nothing.
+- **The method letters were renumbered — and the old ones are on disk.**
+  The operator asked for A = verify (where the gate opens), B = circle,
+  C = two-point; before the swap A was circle, B two-point, C verify. Live
+  `P3_2_2.5mL_20260728` holds `cal_mode: C` and `prev_cal_mode: C`, both
+  meaning verify, and eight `mode=C` lines in its
+  `scale_calibration_log.txt`. Renumbering silently reinterprets every one
+  of them. → **The record holds a self-describing NAME**
+  (`verify` / `circle` / `twopoint`), immune to any future relabelling; the
+  letters are UI labels only (`se.CAL_MODE_LABELS`); and the read rule for
+  a stored letter is its **pre-swap** meaning (`se.cal_mode_read`:
+  A = circle, B = twopoint, C = verify), applied in `load_scale_anchor`, in
+  the log formatter, in `sldea_diag` and in the re-anchor's provenance
+  builder. A log file written before the change gets one note marking where
+  its vocabulary changes rather than silently mixing both. Covered by
+  `test_a_stored_mode_LETTER_keeps_its_pre_swap_meaning`, which uses P3_2's
+  actual `cal_mode: C`.
+- **The verify screen's standing disclaimer came off.** *"View is
+  contrast-stretched so the edge is visible… your eye is the check."* was
+  true on every run, which is why nobody read it. → Off the screen, and
+  **unchanged in the record**: the whole statement — the display-only
+  stretch, the absent cross-check and the algebra that makes an independent
+  one impossible — is still in `setup.txt`'s `guard:` field
+  (`se.verify_note`) and still repeated by `sldea_diag` in both its
+  verdicts and its text report. What survives on screen is the case that is
+  *not* a standing disclaimer: a frame whose disc/paper step could not be
+  measured has no stretch, and the operator judging a nearly flat grey field
+  has to be told. The screen is normally **two lines** now; the four-line
+  budget stays because the pathological case can still reach it.
+- **The ✎ Measure by hand instead button was a second control for one
+  job.** The radio row already switches methods. → Dropped. The radios are
+  the only route now, so they read as one: the caption is bold and each
+  manual entry says *measure BY HAND* rather than just naming its gesture.
+- **In the two-point mode the Continue press was ceremony.** Nothing
+  happens between placing the second point and pressing it. → The second
+  click **banks the round and advances**. Two deliberate limits: the
+  **last** round still needs ✔ Finish, because what follows it is the
+  acceptance gate, the anchor guard and an anchor — auto-advancing into that
+  would let a stray click accept a scale and then meet warnings it never
+  read, the hazard `<Return>` is refused for; and auto-advance removes the
+  only moment a bad second click could be noticed, so **◀ Back / Backspace**
+  steps one round back and re-randomises it. The label names the round it
+  lands on. A redone round comes back with a **fresh** rotation: restoring
+  the old view with the old clicks would be a correlated second look at one
+  fit, which is what the blind independent rounds exist to prevent. Well
+  defined at any point, because the mean is not computed until the last
+  round is in, and a discarded round is never logged (only completed
+  round-sets reach `scale_calibration_log.txt`).
+
+Unchanged, deliberately: the four-line on-screen budget in the verify mode,
+blind rounds in the measuring modes, `<Return>` unable to reach an accept,
+declining `default=` on every warning gate, the n-aware statistics and the
+SE gate, `auto-verified` vs `manual-calibration` provenance, and every
+re-anchor guarantee (reuse of `apply_results`, the px column untouched,
+notes untouched, A/A₀ bit-identical from px, idempotence).
+
 ## Re-anchor: a run's scale can be corrected without re-reviewing it (2026-08-06)
 
 **TL;DR:** A new 📏 Re-anchor scale… button fixes a run's px→mm factor and

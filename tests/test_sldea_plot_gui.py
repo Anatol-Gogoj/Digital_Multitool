@@ -878,6 +878,81 @@ def test_the_window_applies_the_precedence_it_documents():
         shutil.rmtree(p, ignore_errors=True)
 
 
+def test_closing_cancels_the_pending_redraw_before_it_destroys_the_root():
+    """`#283`: _closing destroyed the root with the debounced redraw still
+    queued, so a close landing inside REDRAW_MS -- pick a run, reach
+    straight for the X -- left a callback pointing at a command Tk had
+    just deleted and printed `invalid command name ...redraw`.
+
+    Measured AT THE MOMENT OF DESTROY, because that is the last instant
+    the interpreter can be asked what it still has queued; a pending id
+    naming a deleted command IS the Tcl error, one step earlier. The
+    `#275` order is pinned with it: the options are on disk by then, so
+    remember_now ran while the widgets it reads were still alive.
+
+    The module's only other after() is Tooltip's hover timer, which
+    cancels itself on <Destroy> -- asserted here rather than assumed,
+    since _closing's docstring leans on it."""
+    import tkinter as tk
+    p = _mktmp()
+    root = None
+    try:
+        _fake_run(p, 'R1')
+        cfg = os.path.join(p, 'opts.json')
+        real = g.OPTIONS_PATH
+        g.OPTIONS_PATH = cfg
+        try:
+            try:
+                root = tk.Tk()
+            except tk.TclError as e:
+                print(f"   (skipped: no display for Tk: {e})")
+                return
+            root.withdraw()
+            win = g.PlotWindow(root, p, preselect=['R1'])     # remember=True
+            win.schedule()                     # THE BUG'S STATE: one pending
+            pending = win._redraw_after
+            queued = set(root.tk.splitlist(root.tk.call('after', 'info')))
+            assert pending is not None and pending in queued, \
+                'the fixture never armed a redraw to be orphaned'
+            win.tip_bands._schedule()
+            tip_id = win.tip_bands._after_id
+            assert tip_id in set(root.tk.splitlist(
+                root.tk.call('after', 'info')))
+
+            seen = {}
+            real_destroy = root.destroy
+
+            def spy():
+                seen['queued'] = set(root.tk.splitlist(
+                    root.tk.call('after', 'info')))
+                seen['remembered'] = os.path.exists(cfg)
+                real_destroy()
+
+            root.destroy = spy
+            try:
+                win._closing()
+            finally:
+                del root.destroy
+            assert seen, '_closing never reached destroy'
+            assert pending not in seen['queued'], \
+                'the debounced redraw was still queued when the root died'
+            assert win._redraw_after is None, 'the id was left behind'
+            assert seen['remembered'], \
+                'the options were not remembered before the destroy'
+            assert g.load_options(p, path=cfg), 'remember_now wrote nothing'
+            # the tooltip timer goes with the widget it hangs off, during
+            # the destroy rather than before it -- which is why _closing
+            # does not repeat the cancellation
+            assert win.tip_bands._after_id is None, \
+                'a hover timer outlived the window'
+        finally:
+            g.OPTIONS_PATH = real
+    finally:
+        if root is not None:
+            _shut(root)
+        shutil.rmtree(p, ignore_errors=True)
+
+
 # ---------------------------------------------------------------------------
 # the engine options in the Draw column (`#263` log scales, `#267` marker
 # key, `#269` panel headings, `#270` panel selection, `#264` cadence guard)

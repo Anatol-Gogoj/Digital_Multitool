@@ -1501,29 +1501,90 @@ BENCH_RUNS = {
 }
 
 
-def newest_run(root):
-    """Newest run directory under `root`, or None.
+def _run_dirs(root):
+    """Run directories DIRECTLY under `root`, sorted by name ([] on error).
 
     A run is ANY sub-directory holding a run CSV -- not only SLDEA_*. Bench
     folders are named things like P3_1_2.5mL_20260728, and requiring the
     prefix made them invisible to the Tune buttons while Edge Review opened
     them happily (bench 2026-07-28)."""
     try:
-        subs = [os.path.join(root, n) for n in os.listdir(root)
+        subs = [os.path.join(root, n) for n in sorted(os.listdir(root))
                 if os.path.isdir(os.path.join(root, n))]
     except OSError:
-        return None
-    subs = [s for s in subs if run_csv(s)]
+        return []
+    return [s for s in subs if run_csv(s)]
+
+
+def runs_parent(root):
+    """The directory to LOOK IN for runs when a caller says `root`.
+
+    THE DESCENT RULE, stated once here because every SLDEA front end has
+    to answer it the same way:
+
+      1. a folder that IS a run wins -- settled before this by the
+         caller (resolve_run's run_csv test, the pickers' own);
+      2. `root` itself whenever runs sit directly in it;
+      3. otherwise EXACTLY ONE level down, into the child directory
+         holding the most runs (ties go to the first by name);
+      4. otherwise `root` back -- never None, because the caller's own
+         path is what an error message has to name.
+
+    Never deeper than one level, so this can never turn into a walk of a
+    share, and only when the level above holds nothing. It picks where to
+    LOOK; it never picks the run -- that stays with newest_run and the
+    pickers.
+
+    Why it exists: a campaign upload arrives as a WRAPPER folder -- the
+    2026-08-04 batch is 13 runs inside 'Upload 20260804\\SLDEA_data (1)' --
+    and SCPI_SLDEA_DIR points at the wrapper, where a direct listing
+    correctly finds nothing. That is what made the Windows tuner
+    launcher's --resolve step exit 2, "no run found", on a machine holding
+    13 of them (`#261`), and the no-argument tuner say the same (`#197`).
+
+    Lifted from sldea_tuner, where `#197` first solved it for the run
+    picker alone; newest_run and resolve_run now go through it, so the
+    tuner CLI and its launcher, the app's Tune button, Edge Review, the
+    plot window and the diagnostic share one answer."""
+    if _run_dirs(root):
+        return root
+    try:
+        subs = [os.path.join(root, n) for n in sorted(os.listdir(root))
+                if os.path.isdir(os.path.join(root, n))]
+    except OSError:
+        return root
+    best, best_n = None, 0
+    for s in subs:
+        found = len(_run_dirs(s))
+        if found > best_n:
+            best, best_n = s, found
+    return best or root
+
+
+def newest_run(root):
+    """Newest run directory under `root`, or None.
+
+    `root` is read through runs_parent, so a campaign wrapper whose runs
+    are nested one level down answers with the newest nested run instead
+    of None (`#261`). `root` itself is never a candidate however it is
+    spelled -- only sub-directories are -- which is why resolve_run tests
+    run_csv(path) first and this is the fallback."""
+    subs = _run_dirs(runs_parent(root))
     return max(subs, key=os.path.getmtime) if subs else None
 
 
 def resolve_run(path):
     """The run to work on -> path, or None.
 
-    Accepts a bench shortcut ('1'), a run directory, or a parent full of
-    runs (giving the newest). One resolver for the CLI, the app's Tune
-    buttons and the Windows launcher, so the three cannot disagree about
-    what a given argument means."""
+    Accepts a bench shortcut ('1'), a run directory, a parent full of runs
+    (giving the newest), or a campaign wrapper one level above such a
+    parent (`#261`, see runs_parent). One resolver for the CLI, the app's
+    Tune buttons and the Windows launcher, so the three cannot disagree
+    about what a given argument means.
+
+    A folder that IS a run always wins: run_csv is tested before any
+    descent, so a run holding a nested copy of itself still resolves to
+    the run that was named."""
     if not path:
         return None
     shortcut = BENCH_RUNS.get(str(path).strip())

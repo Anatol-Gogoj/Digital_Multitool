@@ -27,7 +27,9 @@ Two deliberate shapes:
     back to its numbers -- so there is no "just the picture" option here
     (sldea_plot.export enforces it for both front ends).
 """
+import math
 import os
+import subprocess
 import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -173,6 +175,86 @@ def initial_state(args):
 def default_out_dir(parent):
     """Figures land beside the runs, never inside one."""
     return os.path.join(parent or os.getcwd(), OUT_SUBDIR)
+
+
+# ---------------------------------------------------------------------------
+# click-through to Edge Review (`#274`)
+#
+# A figure that shows an odd point and cannot say WHICH FRAME it is makes
+# the operator go and find it by hand -- open Edge Review, guess the run,
+# count frames. These two functions are the whole resolver, and they are
+# pure so they can be tested without a window.
+# ---------------------------------------------------------------------------
+
+PICK_PX = 30       # how near a double-click must land, in SCREEN pixels
+
+CLICK_HINT = ("Double-click a point on the figure to open that frame in "
+              "Edge Review.")
+
+
+def plot_points(runs, opts, panel=0):
+    """-> [(x, y, run, row)] for every ROW the current mode draws on axes
+    `panel` (0 = the only axes, or area mode's mm²-vs-kV panel; 1 = area
+    mode's A/A₀ panel).
+
+    ROWS, NOT MARKERS, on purpose. What a double-click asks is "which
+    snapshot is that", and a snapshot IS a row -- the frame Edge Review
+    would open. With --prepost the drawn markers are exactly these rows;
+    with the mean line drawn instead, a level's mean sits between its
+    pre/post pair and the nearer row wins, which is the honest answer.
+
+    The value rules are sldea_plot's, not this module's: the same "has a
+    kV and a value" test levels() applies, the same vs-area x axis, and
+    power through power_mw -- so a row can only appear here if the figure
+    drew something for it.
+    """
+    out = []
+    for run in runs:
+        if opts['mode'] == 'area':
+            a0 = run['a0']
+            for r in run['rows']:
+                if r['kv'] is None or r['area_mm2'] is None:
+                    continue
+                if panel == 1:
+                    if not a0:
+                        continue
+                    out.append((r['kv'], r['area_mm2'] / a0, run, r))
+                else:
+                    out.append((r['kv'], r['area_mm2'], run, r))
+            continue
+        med = sp.run_ua_median(run)
+        for r in run['rows']:
+            x = r['area_mm2'] if opts['vs_area'] else r['kv']
+            y = sp.power_mw(r, med) if opts['mode'] == 'power' else r['ua']
+            if x is None or y is None:
+                continue
+            out.append((x, y, run, r))
+    return out
+
+
+def nearest_point(ax, points, px, py, tol=PICK_PX):
+    """-> (run, row, distance_px) nearest the DISPLAY position (px, py),
+    or None when nothing is within `tol` pixels.
+
+    DISPLAY pixels, never data units. kV runs 0-10 while mm² runs
+    150-250, so a distance in data space is dominated by whichever axis
+    carries the bigger numbers -- "nearest" would quietly mean "nearest
+    in y". Going through the axes' own transform also makes the
+    tolerance mean the same thing at every window size and every zoom,
+    because it is the transform the figure was drawn with.
+    """
+    best = None
+    for x, y, run, row in points:
+        try:
+            tx, ty = ax.transData.transform((x, y))
+        except (ValueError, TypeError):        # non-finite after a log axis
+            continue
+        if not (math.isfinite(tx) and math.isfinite(ty)):
+            continue
+        d = math.hypot(tx - px, ty - py)
+        if d <= tol and (best is None or d < best[2]):
+            best = (run, row, d)
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +680,14 @@ class PlotWindow:
         self.msg = tk.Text(right, height=6, wrap='word', state='disabled')
         self.msg.pack(side=tk.BOTTOM, fill=tk.X)
 
+        # --- the click-through line (`#274`). It doubles as the report of
+        # what the last double-click resolved to: the feature is invisible
+        # otherwise, and a click that silently opened a window somewhere
+        # would be worse than one that did nothing.
+        self.lbl_click = ttk.Label(right, foreground='#666', anchor=tk.W,
+                                   text=CLICK_HINT)
+        self.lbl_click.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(2, 2))
+
         # --- canvas
         self.fig = Figure(figsize=sp.FIGSIZE['area'], dpi=100)
         self.canvas = FigureCanvasTkAgg(self.fig, master=right)
@@ -618,6 +708,10 @@ class PlotWindow:
         # default. Our own handler then re-runs tight_layout against the
         # new size; the coalescing keeps a drag from redrawing per pixel.
         widget.bind('<Configure>', self._canvas_configured, add='+')
+        # DOUBLE-click, not single: single-click belongs to the toolbar's
+        # pan and zoom rectangles, and launching a program on a stray
+        # click while someone is dragging a zoom box would be hostile.
+        self.canvas.mpl_connect('button_press_event', self.on_click)
 
     # -- run list ----------------------------------------------------------
 
@@ -747,6 +841,10 @@ class PlotWindow:
 
     def redraw(self):
         self._redraw_after = None
+        # the click line goes back to being a hint: what it says otherwise
+        # is which frame the LAST double-click opened, and that answer
+        # belongs to the figure that was on screen when it was clicked
+        self.lbl_click.config(text=CLICK_HINT)
         opts, err = self.current_opts()
         self.fig.clear()
         if err:
@@ -781,6 +879,60 @@ class PlotWindow:
         self._set_messages(warns)
         self._show_targets()
         self.canvas.draw()
+
+    # -- click-through (`#274`) --------------------------------------------
+
+    def on_click(self, event):
+        """matplotlib button_press_event -> the frame under the pointer.
+
+        Returns what it resolved (run, row) so the live smoke and the
+        tests can see the whole chain without watching for a process."""
+        if not getattr(event, 'dblclick', False) or event.inaxes is None:
+            return None
+        if not self._prepared:
+            return None
+        opts, err = self.current_opts()
+        if err:
+            return None
+        try:
+            panel = list(self.fig.axes).index(event.inaxes)
+        except ValueError:                 # the axes was cleared under us
+            return None
+        hit = nearest_point(event.inaxes,
+                            plot_points(self._prepared, opts, panel),
+                            event.x, event.y)
+        if hit is None:
+            self.lbl_click.config(
+                text=f"no data point within {PICK_PX} px of that "
+                     f"double-click — aim at a marker")
+            return None
+        run, row, _dist = hit
+        self.open_in_edge_review(run, row)
+        return run, row
+
+    def open_in_edge_review(self, run, row):
+        """Its own process, exactly like the app's 🔍 Edge Review… button
+        (gui.py `_sldea_open_edge_review`) and the two other sibling
+        launches: this window keeps its figure, and the review outlives
+        it. -> the argv used, or None if it could not start."""
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              'sldea_edge_gui.py')
+        # row['index'] is the 0-BASED CSV row. Edge Review shows 1-based
+        # FRAMES and does the translation itself (see its goto_row) —
+        # `#255` is on record for what doing it at the wrong end costs.
+        cmd = [sys.executable, script, run['dir'],
+               '--goto', str(row['index'])]
+        try:
+            subprocess.Popen(cmd, start_new_session=True)
+        except Exception as e:
+            messagebox.showerror("Edge Review",
+                                 f"Could not launch Edge Review:\n{e}")
+            return None
+        snap = str(row.get('snapshot') or '?')
+        self.lbl_click.config(
+            text=f"→ Edge Review opening on {run['name']}, snapshot "
+                 f"{snap} (data row {row['index']})")
+        return cmd
 
     def _hint(self, text):
         ax = self.fig.add_subplot(111)

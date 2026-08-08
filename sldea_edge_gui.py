@@ -1455,7 +1455,7 @@ def hot_slot(entries, chosen, sel):
 
 
 class EdgeReviewApp:
-    def __init__(self, root, path=None, auto=False):
+    def __init__(self, root, path=None, auto=False, goto=None):
         self.root = root
         root.title("SLDEA Edge Review — Digital Multitool")
         root.geometry("1150x760")
@@ -1517,6 +1517,12 @@ class EdgeReviewApp:
         self._build_ui()
         start = path or DEFAULT_PARENT
         self._populate_runs(start)
+        # `--goto ROW` lands on a frame BEFORE anything else happens
+        # (`#274`). With --auto as well the detect pass repositions to the
+        # first unreviewed frame when it finishes, which is what --auto
+        # means; the plot window never sends both.
+        if goto is not None:
+            self.goto_row(goto)
         if auto and self.rundir:
             root.after(300, self.detect)
 
@@ -3025,6 +3031,45 @@ class EdgeReviewApp:
             return
         self.pos = max(0, min(len(self.frame_rows) - 1, self.pos + d))
         self._show()
+
+    def goto_row(self, row):
+        """Show the frame for DATA ROW `row` (`#274`).
+
+        -> the row actually landed on, or None when there is nothing to
+        land on.
+
+        THE MAPPING IS `frame_rows` — the rows that HAVE a frame file, in
+        CSV order — which is the same rule `#255` documented when the
+        trace report's 0-based rows met this window's 1-based frames and
+        mis-targeted a trace by one. `frame_rows.index(row) + 1` is the
+        frame number on screen; nothing else is.
+
+        A row with NO frame of its own resolves to the nearest one and
+        the status bar says which. The plot window can legitimately point
+        at a snapshot that was never photographed — currents and powers
+        are drawn per snapshot, and a run captured with fewer frames than
+        snapshots has plenty of them — and both alternatives are worse:
+        refusing throws away a click that meant something, and silently
+        landing on frame 1 is a wrong answer that looks like a right one.
+        """
+        if not self.run or not self.frame_rows:
+            self.status.config(
+                text=f"--goto {row}: no frames in this run to show")
+            return None
+        if row in self.frame_rows:
+            landed, note = row, ''
+        else:
+            # ties go to the LOWER row: deterministic, and the earlier
+            # frame is the one before the event rather than after it
+            landed = min(self.frame_rows, key=lambda i: (abs(i - row), i))
+            note = (f" — data row {row} has no frame of its own, "
+                    f"nearest is row {landed}")
+        self.pos = self.frame_rows.index(landed)
+        self._show()
+        self.status.config(
+            text=f"opened at frame {self.pos + 1}/{len(self.frame_rows)} "
+                 f"for data row {row}{note}")
+        return landed
 
     def _next_unreviewed(self):
         q = self._queue_list()
@@ -6906,12 +6951,46 @@ class TraceWindow(tk.Toplevel):
         self.app._show()
 
 
+def parse_args(argv):
+    """-> (path, auto, goto) for the command line.
+
+    `--goto ROW` (also `--goto=ROW`) opens the run at the frame showing
+    that DATA ROW — the plot window's click-through target (`#274`). ROW
+    is a 0-BASED index into the run CSV, which is what every other tool
+    in the suite means by a row; this window shows 1-based FRAMES, and
+    `#255` is on record for what confusing the two costs (a trace
+    mis-targeted by one frame). Translating between them is `goto_row`'s
+    job, not the caller's.
+
+    NEVER RAISES AND NEVER REFUSES TO OPEN. A junk or missing ROW is
+    dropped with a console note and the window opens exactly as it would
+    have: this is a shortcut, and a broken shortcut must not cost the
+    operator their program. The value is consumed either way, so
+    `--goto nonsense` cannot be mistaken for the run path.
+    """
+    path, auto, goto = None, False, None
+    rest = []
+    it = iter(argv)
+    for a in it:
+        if a == '--auto':
+            auto = True
+        elif a == '--goto' or a.startswith('--goto='):
+            val = a.split('=', 1)[1] if '=' in a else next(it, None)
+            try:
+                goto = int(val)
+            except (TypeError, ValueError):
+                # ASCII: a Windows cp1252 console cannot carry a path
+                print(f"edge review: ignoring --goto {ascii(val)} "
+                      f"(want a 0-based CSV row number)")
+        elif not a.startswith('--'):
+            rest.append(a)
+    return (rest[0] if rest else None), auto, goto
+
+
 def main():
-    args = [a for a in sys.argv[1:]]
-    auto = '--auto' in args
-    path = next((a for a in args if not a.startswith('--')), None)
+    path, auto, goto = parse_args(sys.argv[1:])
     root = tk.Tk()
-    EdgeReviewApp(root, path=path, auto=auto)
+    EdgeReviewApp(root, path=path, auto=auto, goto=goto)
     root.mainloop()
 
 

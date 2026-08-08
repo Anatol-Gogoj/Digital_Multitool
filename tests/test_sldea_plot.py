@@ -73,6 +73,22 @@ def _has_mpl():
         return False
 
 
+def _drawn(runs, opts, warn=lambda m: None):
+    """-> the Figure sp.draw() produced, WITHOUT pyplot (the same path
+    save_figure uses), so a test can interrogate the real axes."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    fig = Figure(figsize=sp.FIGSIZE[opts['mode']])
+    FigureCanvasAgg(fig)
+    sp.draw(fig, runs, opts, warn)
+    return fig
+
+
+def _caption(fig):
+    """The figure-level caption text every figure carries."""
+    return '\n'.join(t.get_text() for t in fig.texts)
+
+
 def test_load_rows_parses_notes_phases_and_eras():
     d = _mktmp()
     try:
@@ -499,6 +515,938 @@ def test_tidy_names_each_areas_edge_convention():
             assert by_traced.get('False') == 'half-height'
         finally:
             shutil.rmtree(out, ignore_errors=True)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# the shared front-end surface (`#223`): the window is a front end to these,
+# so anything that lets the two drift apart is the bug these tests hunt
+# --------------------------------------------------------------------------
+
+def test_make_opts_maps_choices_and_refuses_bad_combinations():
+    o, err = sp.make_opts()
+    assert err is None
+    # the defaults are the CLI's: bands and breakdown marks ON, the rest
+    # off. Strict equality on purpose -- a key added without a default
+    # that reproduces the pre-change figure has to fail here.
+    assert o == {'mode': 'area', 'vs_area': False, 'prepost': False,
+                 'mean': False, 'bands': True, 'breakdown': True,
+                 'title': None, 'logx': False, 'logy': False,
+                 'marker_key': True, 'title_first': None,
+                 'title_second': None, 'subplots': 'both',
+                 'cadence_guard': False}
+    o, err = sp.make_opts(mode='current', vs_area=True, prepost=True,
+                          mean=True, bands=False, breakdown=False,
+                          title='x')
+    assert err is None and o['vs_area'] and not o['bands']
+    assert o['title'] == 'x'
+    # an empty title is no title, not an empty heading
+    assert sp.make_opts(title='')[0]['title'] is None
+    # the two illegal states, refused with the CLI's own wording
+    assert sp.make_opts(mode='bogus')[0] is None
+    assert '--mode' in sp.make_opts(mode='bogus')[1]
+    assert sp.make_opts(mode='area', vs_area=True)[0] is None
+    assert '--vs-area' in sp.make_opts(mode='area', vs_area=True)[1]
+
+
+def test_cli_flags_land_on_the_shared_options_dict():
+    # The mapping the window has to match. Captured off the REAL CLI path
+    # rather than re-derived, so a flag that stops reaching the renderer
+    # fails here.
+    seen = {}
+    real = sp.export
+    sp.export = lambda runs, opts, out, stem, warn=None: (
+        seen.update(opts=opts, out=out, stem=stem), ('p.png', 'p.csv'))[1]
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(6))
+        assert sp.main([d, '--out', d]) == 0
+        assert seen['opts'] == sp.make_opts()[0]
+        assert seen['stem'] == 'sldea_plot_area'
+        assert sp.main([d, '--mode', 'current', '--vs-area', '--prepost',
+                        '--mean', '--no-bands', '--no-breakdown',
+                        '--title', 'T', '--stem', 's', '--out', d]) == 0
+        assert seen['opts'] == sp.make_opts(
+            mode='current', vs_area=True, prepost=True, mean=True,
+            bands=False, breakdown=False, title='T')[0]
+        assert seen['stem'] == 's'
+    finally:
+        sp.export = real
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_output_paths_keep_the_csv_beside_the_png():
+    png, tidy = sp.output_paths('/tmp/o', 'fig', 'area')
+    assert os.path.basename(png) == 'fig.png'
+    assert os.path.basename(tidy) == 'fig.csv'
+    assert os.path.dirname(png) == os.path.dirname(tidy)
+    # no stem -> the mode's default, so the two modes cannot overwrite
+    # each other's figure by accident
+    assert sp.output_paths('o', '', 'current')[0].endswith(
+        'sldea_plot_current.png')
+    assert sp.output_paths('o', None, 'power')[1].endswith(
+        'sldea_plot_power.csv')
+    assert sp.output_paths('o', '  ', 'area')[0].endswith(
+        'sldea_plot_area.png')
+
+
+def test_export_never_writes_a_png_without_its_csv():
+    """`#223`: the tidy CSV is the figure's evidence. A front end that
+    could draw to disk without it would break the provenance that makes a
+    figure citable -- so export() is the only write path and it writes
+    both."""
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        runs = sp.prepare_runs([d], sp.make_opts()[0])
+        assert runs
+        sub = os.path.join(out, 'made', 'up')      # created on demand
+        png, tidy = sp.export(runs, sp.make_opts()[0], sub, 'fig')
+        assert os.path.exists(png) and os.path.exists(tidy)
+        with open(tidy, encoding='utf-8') as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) == 17 and rows[0].keys() == \
+            dict.fromkeys(sp.TIDY_COLS).keys()
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_window_export_is_byte_identical_to_the_cli():
+    """The window must not be a fork. save_figure() skips pyplot (it runs
+    in a process that owns a live Tk canvas, and matplotlib.use('Agg')
+    would switch the backend underneath it) -- but it has to land on the
+    same bytes as the command line, or 'the same figure' is a story."""
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        for mode in sp.MODES:
+            opts = sp.make_opts(mode=mode)[0]
+            runs = sp.prepare_runs([d], opts)
+            cli = os.path.join(out, mode + '_cli.png')
+            if mode == 'area':
+                sp.figure_area(runs, opts, cli)
+            else:
+                sp.figure_signal(runs, opts, cli)
+            gui = sp.save_figure(runs, opts, os.path.join(out, mode + '_g.png'))
+            with open(cli, 'rb') as a, open(gui, 'rb') as b:
+                assert a.read() == b.read(), mode
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_prepare_runs_is_the_gate_both_front_ends_pass_through():
+    # A raw run: area mode drops it with a reason, current keeps it. The
+    # window shows exactly these warnings, so the wording is the contract.
+    d = _mktmp()
+    try:
+        rows = _healthy_rows(6)
+        for r in rows:
+            r['active_area_mm2'] = ''
+            r['active_area_px'] = ''
+            r['notes'] = ''
+        _fake_run(d, rows)
+        warns = []
+        assert sp.prepare_runs([d], sp.make_opts()[0], warns.append) == []
+        assert any('no reviewed areas' in w for w in warns), warns
+        warns = []
+        runs = sp.prepare_runs([d], sp.make_opts(mode='current')[0],
+                               warns.append)
+        assert len(runs) == 1 and runs[0]['color'] == sp.TOL_BRIGHT[0]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_prepare_runs_clears_a_previous_modes_area_blanking():
+    """The window reuses loaded run dicts across redraws. 'suspect_kept'
+    is set per mode, so leaving a stale True behind would blank the area
+    columns of a perfectly good area-mode CSV."""
+    d = _mktmp()
+    try:
+        rows = _healthy_rows(6, ts='2026-07-20T10:00:00')
+        for r in rows:
+            if r.get('active_area_mm2'):
+                r['active_area_mm2'] = round(r['active_area_mm2'] * 2.5, 3)
+        _fake_run(d, rows)
+        cache = {}
+
+        def load(a, warn):
+            if a not in cache:
+                cache[a] = sp.load_run(a, warn)
+            return cache[a]
+
+        runs = sp.prepare_runs([d], sp.make_opts(mode='current')[0],
+                               load=load)
+        assert runs and runs[0]['suspect_kept'] is True
+        # same dict, now with the era override on: areas are legitimate
+        runs = sp.prepare_runs([d], sp.make_opts(mode='current')[0],
+                               allow_suspect=True, load=load)
+        assert runs and runs[0]['suspect_kept'] is False
+        assert runs[0] is cache[d], 'the cached dict was not reused'
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_gui_flag_opens_the_window_without_run_arguments():
+    """`--gui` is the one path that does not need runs on the command
+    line -- the window has its own picker. Flags given alongside it
+    preselect."""
+    import sldea_plot_gui
+    seen = {}
+    real = sldea_plot_gui.launch
+    sldea_plot_gui.launch = lambda args, **kw: (
+        seen.update(args=list(args), **kw), 0)[1]
+    try:
+        assert sp.main(['--gui']) == 0
+        assert seen['args'] == [] and seen['opts']['mode'] == 'area'
+        assert seen['out_dir'] is None and seen['stem'] is None
+        assert sp.main(['--gui', 'RUNA', 'RUNB', '--mode', 'power',
+                        '--no-bands', '--out', 'O', '--stem', 'S']) == 0
+        assert seen['args'] == ['RUNA', 'RUNB']
+        assert seen['opts']['mode'] == 'power'
+        assert seen['opts']['bands'] is False
+        assert seen['out_dir'] == 'O' and seen['stem'] == 'S'
+        # a bad combination is still refused before any window opens
+        assert sp.main(['--gui', '--mode', 'nope']) == 2
+    finally:
+        sldea_plot_gui.launch = real
+
+
+# --------------------------------------------------------------------------
+# the compatibility invariant: adding options must not move a pixel of the
+# figure nobody asked to change. The `#223` refactor proved 'the window is
+# not a fork' by comparing bytes; this proves 'the new options are not a
+# rewrite' the same way -- against the REAL pre-change engine, read out of
+# git, so both halves run on the same matplotlib and the comparison means
+# something on any machine.
+# --------------------------------------------------------------------------
+
+# the commit this branch was cut from (the `#223` plot-window merge). Kept
+# as a SHA rather than a stored PNG because PNG bytes carry the matplotlib
+# version -- a golden file would rot on the next upgrade, this cannot.
+_BASE_SHA = 'd11b01ad0b9e3e28786d482fabb4fe6027a4438e'
+
+
+def _pre_change_module():
+    """sldea_plot as of _BASE_SHA, as an importable module, or None.
+
+    None when the object is not reachable (no git, a shallow clone, an
+    exported tarball) -- the caller then SKIPS and says so, because a
+    compatibility test that quietly passes when it cannot compare is
+    worse than no test."""
+    import importlib.util
+    import subprocess
+    root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    try:
+        got = subprocess.run(['git', 'show', _BASE_SHA + ':sldea_plot.py'],
+                             cwd=root, capture_output=True, timeout=30)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if got.returncode != 0 or not got.stdout:
+        return None
+    spec = importlib.util.spec_from_loader('sldea_plot_pre_change',
+                                           loader=None)
+    mod = importlib.util.module_from_spec(spec)
+    mod.__file__ = os.path.join(root, 'sldea_plot.py')
+    exec(compile(got.stdout.decode('utf-8'), '<sldea_plot@base>', 'exec'),
+         mod.__dict__)
+    return mod
+
+
+def _default_opts_pair(old, mode):
+    """(new opts, old opts) for `mode` with every new option at the value
+    that reproduces the pre-change figure. Extended once per new option,
+    which is the point: an option that CANNOT be turned back off shows up
+    here as a test that no longer compiles."""
+    return (sp.make_opts(mode=mode, marker_key=False)[0],
+            old.make_opts(mode=mode)[0])
+
+
+def test_default_output_is_byte_identical_to_the_pre_change_engine():
+    if not _has_mpl():
+        return
+    old = _pre_change_module()
+    if old is None:
+        print('  (skipped: pre-change sldea_plot not reachable via git)')
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        rows = _healthy_rows(8)
+        for snap, ua in ((14, -80.0), (15, -140.0), (16, -205.0)):
+            rows[snap - 1]['measured_uA'] = ua      # exercise the X marks
+        _fake_run(d, rows)
+        for mode in sp.MODES:
+            new_opts, old_opts = _default_opts_pair(old, mode)
+            new_png = sp.save_figure(
+                sp.prepare_runs([d], new_opts), new_opts,
+                os.path.join(out, mode + '_new.png'))
+            old_png = old.save_figure(
+                old.prepare_runs([d], old_opts), old_opts,
+                os.path.join(out, mode + '_old.png'))
+            with open(new_png, 'rb') as a, open(old_png, 'rb') as b:
+                assert a.read() == b.read(), f"{mode} PNG moved"
+            new_csv = sp.write_tidy(sp.prepare_runs([d], new_opts),
+                                    os.path.join(out, mode + '_new.csv'))
+            old_csv = old.write_tidy(old.prepare_runs([d], old_opts),
+                                     os.path.join(out, mode + '_old.csv'))
+            with open(new_csv, 'rb') as a, open(old_csv, 'rb') as b:
+                assert a.read() == b.read(), f"{mode} CSV moved"
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# log scales (`#263`)
+# --------------------------------------------------------------------------
+
+def test_log_scale_kind_is_chosen_from_the_data():
+    """The `#263` policy: positive data -> log10; anything <= 0 -> symlog
+    with a decade-floored linthresh, so no point is clipped away."""
+    assert sp.log_scale_for([1.0, 2.0, 300.0]) == ('log', None)
+    kind, lin = sp.log_scale_for([-16.0, -15.9, -10.5])
+    assert kind == 'symlog' and lin == 10.0, lin      # min |v| 10.5 -> 10
+    kind, lin = sp.log_scale_for([0.0, 0.5, 8.0])     # the 0 kV baseline
+    assert kind == 'symlog' and lin == 0.1, lin
+    # nothing a log scale can show -> leave the axis linear, never raise
+    assert sp.log_scale_for([]) is None
+    assert sp.log_scale_for([0.0, 0.0]) is None
+    assert sp.log_scale_for([None, float('nan'), float('inf')]) is None
+
+
+def test_log_flags_reach_the_axes_on_the_happy_and_nonpositive_paths():
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        # areas are strictly positive -> plain log10 on both panels
+        opts = sp.make_opts(logy=True)[0]
+        runs = sp.prepare_runs([d], opts)
+        fig = _drawn(runs, opts)
+        assert [a.get_yscale() for a in fig.axes] == ['log', 'log']
+        assert [a.get_xscale() for a in fig.axes] == ['linear', 'linear']
+        assert 'Y axis: log10.' in _caption(fig)
+        # the x axis starts at the 0 kV baseline row -> symlog, and the
+        # baseline level is still drawn (nothing clipped)
+        opts = sp.make_opts(logx=True)[0]
+        fig = _drawn(sp.prepare_runs([d], opts), opts)
+        assert [a.get_xscale() for a in fig.axes] == ['symlog', 'symlog']
+        assert 'symlog' in _caption(fig) and '≤ 0' in _caption(fig)
+        assert min(min(l.get_xdata()) for l in fig.axes[0].get_lines()) == 0
+        # currents are NEGATIVE on the -16 uA era: symlog keeps the whole
+        # trace where a plain log would have dropped every point
+        opts = sp.make_opts(mode='current', logy=True)[0]
+        fig = _drawn(sp.prepare_runs([d], opts), opts)
+        assert fig.axes[0].get_yscale() == 'symlog'
+        ys = [y for l in fig.axes[0].get_lines() for y in l.get_ydata()]
+        assert any(y < 0 for y in ys), 'negative currents were dropped'
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_log_axis_with_nothing_to_scale_stays_linear_and_says_so():
+    """A power figure whose every point is exactly 0 (a run sitting on its
+    own median) has no log axis to draw. It must caption that, not raise
+    and not silently pretend the axis is logarithmic."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        rows = [{'snapshot': 1, 'tag': 'baseline', 'nominal_kV': 0,
+                 'measured_uA': -16.0, 'timestamp': '2026-08-05T10:00:00'}]
+        for n in range(2, 8):        # flat current -> power is 0 everywhere
+            rows.append({'snapshot': n, 'tag': 'pre-ramp', 'nominal_kV': n,
+                         'measured_uA': -16.0,
+                         'timestamp': '2026-08-05T10:00:00'})
+        _fake_run(d, rows)
+        opts = sp.make_opts(mode='power', logy=True)[0]
+        fig = _drawn(sp.prepare_runs([d], opts), opts)
+        assert fig.axes[0].get_yscale() == 'linear'
+        assert 'left linear' in _caption(fig)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_log_flags_survive_the_cli_and_land_on_the_options_dict():
+    seen = {}
+    real = sp.export
+    sp.export = lambda runs, opts, out, stem, warn=None: (
+        seen.update(opts=opts), ('p.png', 'p.csv'))[1]
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(6))
+        assert sp.main([d, '--out', d, '--logx', '--logy']) == 0
+        assert seen['opts']['logx'] and seen['opts']['logy']
+        assert sp.main([d, '--out', d]) == 0
+        assert not seen['opts']['logx'] and not seen['opts']['logy']
+    finally:
+        sp.export = real
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# the marker key (`#267`)
+# --------------------------------------------------------------------------
+
+def _legend_texts(ax):
+    """Every legend on `ax` -> {title: [row labels]}. A second legend only
+    survives when the first was re-added as an artist, so reading them all
+    back is also the collision test."""
+    from matplotlib.legend import Legend
+    out = {}
+    for art in ax.get_children():
+        if isinstance(art, Legend):
+            title = art.get_title().get_text()
+            out[title] = [t.get_text() for t in art.get_texts()]
+    return out
+
+
+def test_marker_key_is_on_by_default_and_does_not_eat_the_run_legend():
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        opts = sp.make_opts()[0]
+        fig = _drawn(sp.prepare_runs([d], opts), opts)
+        legends = _legend_texts(fig.axes[0])
+        assert len(legends) == 2, legends           # both survived
+        key = legends.get('marker fill')
+        assert key == ['hand-traced (outer toe)',
+                       'machine (half-height)'], legends
+        # the run legend still carries the run, in its own corner
+        runs_leg = [v for k, v in legends.items() if k != 'marker fill'][0]
+        assert any('sldea_plot_test' in t for t in runs_leg), runs_leg
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_no_marker_key_hides_it_and_current_power_never_show_one():
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        opts = sp.make_opts(marker_key=False)[0]
+        fig = _drawn(sp.prepare_runs([d], opts), opts)
+        assert 'marker fill' not in _legend_texts(fig.axes[0])
+        assert len(_legend_texts(fig.axes[0])) == 1
+        # current/power draw one plain dot per snapshot -- there is no
+        # open/closed meaning there, so the key must not appear even ON
+        for mode in ('current', 'power'):
+            opts = sp.make_opts(mode=mode)[0]
+            assert opts['marker_key'] is True
+            fig = _drawn(sp.prepare_runs([d], opts), opts)
+            assert 'marker fill' not in _legend_texts(fig.axes[0]), mode
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_no_marker_key_flag_reaches_the_options_dict():
+    seen = {}
+    real = sp.export
+    sp.export = lambda runs, opts, out, stem, warn=None: (
+        seen.update(opts=opts), ('p.png', 'p.csv'))[1]
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(6))
+        assert sp.main([d, '--out', d]) == 0
+        assert seen['opts']['marker_key'] is True
+        assert sp.main([d, '--out', d, '--no-marker-key']) == 0
+        assert seen['opts']['marker_key'] is False
+    finally:
+        sp.export = real
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# per-panel titles (`#269`)
+# --------------------------------------------------------------------------
+
+def _titles(fig):
+    """Panel headings, in axes order. loc='left' on purpose -- that is
+    where the figures put them, and the default get_title() reads the
+    (always empty) centre slot."""
+    return [a.get_title(loc='left') for a in fig.axes]
+
+
+def test_panel_titles_default_then_take_the_per_panel_override():
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        opts = sp.make_opts()[0]
+        assert _titles(_drawn(sp.prepare_runs([d], opts), opts)) == [
+            'Active area vs voltage',
+            'Normalized to baseline area (A₀ = 201.1 mm²)']
+        opts = sp.make_opts(title_first='Absolute', title_second='Norm')[0]
+        assert _titles(_drawn(sp.prepare_runs([d], opts), opts)) == \
+            ['Absolute', 'Norm']
+        # one override leaves the other panel's default alone
+        opts = sp.make_opts(title_second='Only the right one')[0]
+        got = _titles(_drawn(sp.prepare_runs([d], opts), opts))
+        assert got == ['Active area vs voltage', 'Only the right one'], got
+        # single-panel modes: 'first' is the panel, 'second' does nothing
+        for mode, default in (('current', 'Current -- per snapshot'),
+                              ('power', 'Power -- per snapshot')):
+            opts = sp.make_opts(mode=mode, title_second='ignored')[0]
+            assert _titles(_drawn(sp.prepare_runs([d], opts), opts)) == \
+                [default], mode
+            opts = sp.make_opts(mode=mode, title_first='Mine')[0]
+            assert _titles(_drawn(sp.prepare_runs([d], opts), opts)) == \
+                ['Mine'], mode
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_legacy_title_still_means_the_first_panel_and_loses_to_it():
+    """--title shipped before per-panel titles and has always set the
+    first panel's heading. A script that says --title must keep its
+    figure; --title-first is the precise name for the same slot."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        opts = sp.make_opts(title='Legacy')[0]
+        got = _titles(_drawn(sp.prepare_runs([d], opts), opts))
+        assert got[0] == 'Legacy'
+        assert got[1] == 'Normalized to baseline area (A₀ = 201.1 mm²)'
+        opts = sp.make_opts(title='Legacy', title_first='Precise')[0]
+        assert _titles(_drawn(sp.prepare_runs([d], opts), opts))[0] == \
+            'Precise'
+        # blank is 'no override', not an empty heading, on every route in
+        assert sp.make_opts(title_first='', title_second='  ')[0][
+            'title_first'] is None
+        opts = sp.make_opts(title_first='   ')[0]
+        assert _titles(_drawn(sp.prepare_runs([d], opts), opts))[0] == \
+            'Active area vs voltage'
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_title_flags_reach_the_options_dict():
+    seen = {}
+    real = sp.export
+    sp.export = lambda runs, opts, out, stem, warn=None: (
+        seen.update(opts=opts), ('p.png', 'p.csv'))[1]
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(6))
+        assert sp.main([d, '--out', d, '--title-first', 'A',
+                        '--title-second', 'B']) == 0
+        assert seen['opts']['title_first'] == 'A'
+        assert seen['opts']['title_second'] == 'B'
+        assert seen['opts']['title'] is None
+        # still a valued flag: a missing value is refused, not swallowed
+        assert sp.main([d, '--title-first']) == 2
+    finally:
+        sp.export = real
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# panel selection (`#270`)
+# --------------------------------------------------------------------------
+
+def test_a_single_chosen_panel_is_the_only_axes_on_the_figure():
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        opts = sp.make_opts()[0]
+        assert len(_drawn(sp.prepare_runs([d], opts), opts).axes) == 2
+        # first: the absolute-area panel, alone, filling the canvas
+        opts = sp.make_opts(subplots='first')[0]
+        fig = _drawn(sp.prepare_runs([d], opts), opts)
+        assert len(fig.axes) == 1, 'an empty axes was left behind'
+        assert _titles(fig) == ['Active area vs voltage']
+        assert fig.axes[0].get_ylabel() == 'Active area (mm²)'
+        box = fig.axes[0].get_position()
+        assert box.width > 0.7, box          # the whole canvas, not half
+        # second: the normalized panel, alone, and it inherits the legend
+        # and the marker key that used to live on the left one
+        opts = sp.make_opts(subplots='second')[0]
+        fig = _drawn(sp.prepare_runs([d], opts), opts)
+        assert len(fig.axes) == 1
+        assert fig.axes[0].get_ylabel() == 'Expansion  A / A₀'
+        assert 'Normalized' in _titles(fig)[0]
+        assert 'marker fill' in _legend_texts(fig.axes[0])
+        assert len(_legend_texts(fig.axes[0])) == 2
+        assert fig.axes[0].get_position().width > 0.7
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_panel_selection_refuses_only_the_panel_that_does_not_exist():
+    assert sp.make_opts(subplots='bogus')[0] is None
+    assert '--subplots' in sp.make_opts(subplots='bogus')[1]
+    # single-panel modes: 'first' names the only panel (no-op), 'second'
+    # asks for one that is not drawn
+    for mode in ('current', 'power'):
+        assert sp.make_opts(mode=mode, subplots='first')[0]['subplots'] \
+            == 'first'
+        o, err = sp.make_opts(mode=mode, subplots='second')
+        assert o is None and '--subplots second' in err, err
+    assert sp.make_opts(mode='area', subplots='second')[1] is None
+
+
+def test_panel_selection_reaches_export_and_the_csv_stays_whole():
+    """`#270`: the PNG follows the selection, the tidy CSV does not. The
+    CSV is the evidence for the numbers, and both panels are two views of
+    the same areas -- dropping rows to match a layout choice would make
+    the figure's own evidence depend on how it was framed."""
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        assert sp.main([d, '--out', out, '--stem', 'both']) == 0
+        assert sp.main([d, '--out', out, '--stem', 'one',
+                        '--subplots', 'second']) == 0
+        with open(os.path.join(out, 'both.csv'), 'rb') as a, \
+                open(os.path.join(out, 'one.csv'), 'rb') as b:
+            assert a.read() == b.read(), 'the tidy CSV followed the layout'
+        with open(os.path.join(out, 'both.png'), 'rb') as a, \
+                open(os.path.join(out, 'one.png'), 'rb') as b:
+            assert a.read() != b.read(), 'the PNG ignored --subplots'
+        # a bad value is refused before anything is written
+        assert sp.main([d, '--out', out, '--subplots', 'sideways']) == 2
+        assert sp.main([d, '--out', out, '--mode', 'current',
+                        '--subplots', 'second']) == 2
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# the figspec sidecar (`#273`)
+# --------------------------------------------------------------------------
+
+def _read_json(path):
+    import json
+    with open(path, encoding='utf-8') as f:
+        return json.load(f)
+
+
+def test_export_writes_the_figspec_beside_the_png_and_csv():
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        opts = sp.make_opts(prepost=True, logy=True, title_first='T')[0]
+        runs = sp.prepare_runs([d], opts)
+        png, tidy = sp.export(runs, opts, out, 'fig')
+        spec_path = sp.figspec_path(png)
+        assert os.path.exists(spec_path)
+        assert os.path.dirname(spec_path) == os.path.dirname(png)
+        spec = _read_json(spec_path)
+        assert spec['spec_version'] == sp.SPEC_VERSION
+        assert spec['opts'] == opts, spec['opts']
+        assert spec['stem'] == 'fig'
+        assert spec['app_version'] and isinstance(spec['app_version'], str)
+        # runs are stored RESOLVED and absolute -- a bench shortcut or a
+        # parent-of-runs argument means a different run tomorrow
+        assert spec['runs'] == [os.path.abspath(d)], spec['runs']
+        # a blank stem records the EFFECTIVE one, so a re-render lands on
+        # the same filenames instead of on 'None.png'
+        png2, _ = sp.export(runs, opts, out, '')
+        assert _read_json(sp.figspec_path(png2))['stem'] == \
+            'sldea_plot_area'
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_figspec_round_trip_re_renders_a_byte_identical_png():
+    """The whole promise of `#273`: the sidecar is enough to make the
+    figure again. Non-default options on purpose -- a round trip that
+    only exercises the defaults proves nothing."""
+    if not _has_mpl():
+        return
+    d, out, again = _mktmp(), _mktmp(), _mktmp()
+    try:
+        rows = _healthy_rows(8)
+        for snap, ua in ((14, -80.0), (15, -140.0), (16, -205.0)):
+            rows[snap - 1]['measured_uA'] = ua
+        _fake_run(d, rows)
+        assert sp.main([d, '--out', out, '--stem', 'rt', '--prepost',
+                        '--mean', '--no-bands', '--logy',
+                        '--title-first', 'One', '--title-second', 'Two',
+                        '--subplots', 'second']) == 0
+        spec = os.path.join(out, 'rt.figspec.json')
+        assert os.path.exists(spec)
+        assert sp.main(['--from-spec', spec, '--out', again]) == 0
+        with open(os.path.join(out, 'rt.png'), 'rb') as a, \
+                open(os.path.join(again, 'rt.png'), 'rb') as b:
+            assert a.read() == b.read(), 're-render is not the same figure'
+        with open(os.path.join(out, 'rt.csv'), 'rb') as a, \
+                open(os.path.join(again, 'rt.csv'), 'rb') as b:
+            assert a.read() == b.read()
+        # and the spec the re-render wrote says the same thing
+        assert _read_json(os.path.join(again, 'rt.figspec.json'))['opts'] \
+            == _read_json(spec)['opts']
+    finally:
+        for p in (d, out, again):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_explicit_flags_override_the_spec_and_runs_replace_it():
+    if not _has_mpl():
+        return
+    d, d2, out = _mktmp(), _mktmp(), _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        _fake_run(d2, _healthy_rows(6))
+        assert sp.main([d, '--out', out, '--stem', 'base', '--logy',
+                        '--subplots', 'first', '--title', 'Spec title',
+                        '--no-marker-key']) == 0
+        spec = os.path.join(out, 'base.figspec.json')
+        seen = {}
+        real = sp.export
+        sp.export = lambda runs, opts, o, stem, warn=None: (
+            seen.update(opts=opts, out=o, stem=stem,
+                        runs=[r['dir'] for r in runs]),
+            ('p.png', 'p.csv'))[1]
+        try:
+            # nothing explicit -> everything comes from the spec
+            assert sp.main(['--from-spec', spec, '--out', out]) == 0
+            assert seen['opts'] == _read_json(spec)['opts']
+            assert seen['stem'] == 'base'
+            assert seen['runs'] == [os.path.abspath(d)]
+            # explicit flags win, per option, and a RUN replaces the list
+            assert sp.main([d2, '--from-spec', spec, '--out', out,
+                            '--mode', 'current', '--stem', 'over']) == 0
+            assert seen['opts']['mode'] == 'current'
+            assert seen['opts']['logy'] is True        # kept from the spec
+            assert seen['opts']['title'] == 'Spec title'
+            assert seen['opts']['marker_key'] is False
+            assert seen['stem'] == 'over'
+            assert seen['runs'] == [d2], seen['runs']
+            # a --no-... flag can still switch a spec's true off
+            assert sp.main(['--from-spec', spec, '--out', out,
+                            '--no-breakdown']) == 0
+            assert seen['opts']['breakdown'] is False
+        finally:
+            sp.export = real
+    finally:
+        for p in (d, d2, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_a_bad_spec_is_refused_rather_than_half_understood():
+    import json
+    out = _mktmp()
+    try:
+        def spec_file(name, payload):
+            p = os.path.join(out, name)
+            with open(p, 'w', encoding='utf-8') as f:
+                if isinstance(payload, str):
+                    f.write(payload)
+                else:
+                    json.dump(payload, f)
+            return p
+        good = {'spec_version': sp.SPEC_VERSION, 'opts':
+                sp.make_opts()[0], 'runs': ['x'], 'stem': 's'}
+        assert sp.load_figspec(spec_file('ok.json', good))[0] is not None
+        assert sp.main(['--from-spec',
+                        os.path.join(out, 'nope.json')]) == 2
+        assert sp.main(['--from-spec',
+                        spec_file('bad.json', '{not json')]) == 2
+        assert sp.main(['--from-spec', spec_file('list.json', [1, 2])]) == 2
+        newer = dict(good, spec_version=sp.SPEC_VERSION + 1)
+        _, err = sp.load_figspec(spec_file('new.json', newer))
+        assert 'newer build' in err, err
+        for broken, needle in (
+                (dict(good, spec_version='1'), 'positive integer'),
+                (dict(good, opts=None), "no 'opts'"),
+                (dict(good, runs='not-a-list'), 'list of'),
+                (dict(good, runs=[1, 2]), 'list of')):
+            spec, err = sp.load_figspec(spec_file('b.json', broken))
+            assert spec is None and needle in err, (err, needle)
+        # an ILLEGAL combination inside an otherwise valid spec is refused
+        # with the CLI's own wording, not silently rendered
+        bad_combo = dict(good, opts=dict(sp.make_opts()[0], vs_area=True))
+        assert sp.main(['--from-spec',
+                        spec_file('combo.json', bad_combo)]) == 2
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_from_spec_preselects_the_window_too():
+    import json
+    import sldea_plot_gui
+    out = _mktmp()
+    seen = {}
+    real = sldea_plot_gui.launch
+    sldea_plot_gui.launch = lambda args, **kw: (
+        seen.update(args=list(args), **kw), 0)[1]
+    try:
+        p = os.path.join(out, 'w.figspec.json')
+        with open(p, 'w', encoding='utf-8') as f:
+            json.dump({'spec_version': sp.SPEC_VERSION, 'stem': 'st',
+                       'runs': ['RUNA', 'RUNB'],
+                       'opts': sp.make_opts(mode='power')[0]}, f)
+        assert sp.main(['--gui', '--from-spec', p]) == 0
+        assert seen['args'] == ['RUNA', 'RUNB']
+        assert seen['opts']['mode'] == 'power'
+        assert seen['stem'] == 'st'
+    finally:
+        sldea_plot_gui.launch = real
+        shutil.rmtree(out, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# the cadence guard (`#264`)
+# --------------------------------------------------------------------------
+
+def _spaced_rows(seconds, n_levels=8):
+    """_healthy_rows with the snapshots `seconds` apart instead of all
+    sharing one timestamp."""
+    import datetime
+    rows = _healthy_rows(n_levels)
+    t0 = datetime.datetime(2026, 8, 5, 10, 0, 0)
+    for i, r in enumerate(rows):
+        r['timestamp'] = (t0 + datetime.timedelta(
+            seconds=i * seconds)).isoformat()
+    for snap, ua in ((14, -80.0), (15, -140.0), (16, -205.0)):
+        rows[snap - 1]['measured_uA'] = ua
+    return rows
+
+
+def test_cadence_comes_from_telemetry_then_from_snapshot_spacing():
+    d = _mktmp()
+    try:
+        _fake_run(d, _spaced_rows(30))
+        secs, src = sp.run_cadence(d, sp.load_rows(d))
+        assert abs(secs - 30.0) < 1e-6 and src == 'snapshot spacing'
+        # telemetry.csv beside data.csv answers on PRESENCE -- a truncated
+        # or aborted log still means the run was monitored
+        with open(os.path.join(d, 'telemetry.csv'), 'w',
+                  encoding='utf-8') as f:
+            f.write('t_s,timestamp\n')
+        secs, src = sp.run_cadence(d, sp.load_rows(d))
+        assert secs <= sp.CADENCE_COARSE_S and src == 'telemetry.csv'
+        assert sp.load_run(d, lambda m: None)['cadence_src'] == \
+            'telemetry.csv'
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    # no parseable timestamps -> no answer, and 'unknown' is never 'fine'
+    d2 = _mktmp()
+    try:
+        _fake_run(d2, _healthy_rows(4, ts=''))
+        assert sp.run_cadence(d2, sp.load_rows(d2)) == (None, 'unknown')
+        run = sp.load_run(d2, lambda m: None)
+        assert not sp.coarse_cadence(run, sp.make_opts(
+            cadence_guard=True)[0])
+    finally:
+        shutil.rmtree(d2, ignore_errors=True)
+
+
+def test_coarse_cadence_marks_stay_on_the_figure_and_say_the_spacing():
+    """The guard annotates, it does not hide: a current-confirmed event
+    drawn hollow is still drawn. Suppressing it because the camera was
+    slow would be the P3_5 mistake pointing the other way."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _fake_run(d, _spaced_rows(32.5))
+        for mode in ('area', 'current'):
+            plain = sp.make_opts(mode=mode)[0]
+            guard = sp.make_opts(mode=mode, cadence_guard=True)[0]
+            warns = []
+            fig = _drawn(sp.prepare_runs([d], plain, warns.append), plain)
+            assert not any('sampled every' in w for w in warns), warns
+            marks = _cross_faces(fig)
+            assert marks and all(f != (1.0, 1.0, 1.0, 1.0)
+                                 for f in marks), mode
+            warns = []
+            runs = sp.prepare_runs([d], guard, warns.append)
+            fig = _drawn(runs, guard, warns.append)
+            guarded = _cross_faces(fig)
+            # same number of X marks, now hollow
+            assert len(guarded) == len(marks), mode
+            assert all(f == (1.0, 1.0, 1.0, 1.0) for f in guarded), mode
+            cap = _caption(fig)
+            assert 'Hollow X' in cap and '32.5 s' in cap, cap
+            assert 'snapshot spacing' in cap, cap
+            assert any('sampled every 32.5 s' in w for w in warns), warns
+            # ONE line, and short enough to stay on the narrowest canvas
+            # (9 in fits ~170 characters at 7 pt) -- a caption that runs
+            # off the figure says nothing
+            hollow = [l for l in cap.split('\n') if l.startswith('Hollow')]
+            assert len(hollow) == 1, cap
+            assert len(hollow[0]) < 170, (len(hollow[0]), hollow[0])
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _cross_faces(fig):
+    """The face colour of every 'X' breakdown marker on the first axes,
+    as RGBA. White = hollow = the cadence guard annotated it."""
+    from matplotlib.colors import to_rgba
+    return [to_rgba(l.get_markerfacecolor())
+            for l in fig.axes[0].get_lines() if l.get_marker() == 'X']
+
+
+def test_a_fast_run_is_not_annotated_even_with_the_guard_on():
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _fake_run(d, _spaced_rows(0.5))       # telemetry-grade cadence
+        opts = sp.make_opts(cadence_guard=True)[0]
+        warns = []
+        runs = sp.prepare_runs([d], opts, warns.append)
+        assert runs[0]['cadence_s'] <= sp.CADENCE_COARSE_S
+        fig = _drawn(runs, opts)
+        assert 'Hollow X' not in _caption(fig)
+        assert all(f != (1.0, 1.0, 1.0, 1.0) for f in _cross_faces(fig))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_cadence_guard_is_opt_in_and_no_breakdown_is_unchanged():
+    """OFF by default on purpose: no run in the corpus carries
+    telemetry.csv and every one samples current far slower than 1 s, so
+    an automatic guard would restyle every figure the suite has made.
+    That is a measurement-chain decision, not a rendering default."""
+    if not _has_mpl():
+        return
+    assert sp.make_opts()[0]['cadence_guard'] is False
+    seen = {}
+    real = sp.export
+    sp.export = lambda runs, opts, out, stem, warn=None: (
+        seen.update(opts=opts), ('p.png', 'p.csv'))[1]
+    d = _mktmp()
+    try:
+        _fake_run(d, _spaced_rows(32.5))
+        assert sp.main([d, '--out', d]) == 0
+        assert seen['opts']['cadence_guard'] is False
+        assert sp.main([d, '--out', d, '--cadence-guard']) == 0
+        assert seen['opts']['cadence_guard'] is True
+    finally:
+        sp.export = real
+        shutil.rmtree(d, ignore_errors=True)
+    # --no-breakdown still means no marks at all, guard or no guard
+    d = _mktmp()
+    try:
+        _fake_run(d, _spaced_rows(32.5))
+        opts = sp.make_opts(breakdown=False, cadence_guard=True)[0]
+        fig = _drawn(sp.prepare_runs([d], opts), opts)
+        assert _cross_faces(fig) == []
+        assert 'Hollow X' not in _caption(fig)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

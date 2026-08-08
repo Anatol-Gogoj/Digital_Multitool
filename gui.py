@@ -298,21 +298,40 @@ class InstrumentControlGUI:
                               f"Help → Update Software, or report this."
                          ).pack(padx=20, pady=20, anchor='w')
         
-        # Footer: status bar (left, stretches) + version readout (right)
-        footer = tk.Frame(root)
-        footer.pack(side=tk.BOTTOM, fill=tk.X)
-        self.status_bar = tk.Label(footer, text="Ready", bd=1, relief=tk.SUNKEN, anchor=tk.W)
-        self.status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        version_label = tk.Label(footer, text=version_string(), bd=1,
-                                 relief=tk.SUNKEN, anchor=tk.E, padx=8)
-        version_label.pack(side=tk.RIGHT)
-        
+        self.build_footer(root)
+
         # Clean up the camera (and any capture loop) on window close.
         self.root.protocol('WM_DELETE_WINDOW', self._on_app_close)
 
         # Auto-connect on startup (in the background -- issue #40)
         self._progress("Looking for instruments...")
         self.root.after(100, self.auto_connect)
+
+    def build_footer(self, parent):
+        """Footer: version readout (right) + status bar (left, stretches).
+
+        The version label is packed FIRST on purpose (`#27`). The packer
+        serves slaves in PACKING order, each taking its requested size out
+        of what is left of the cavity -- so whoever is packed first is the
+        one guaranteed to get its width. With the status bar first, any
+        status message wider than the window swallowed the whole footer and
+        the version readout vanished: measured at a 500 px window with a
+        497 px status line, the readout collapsed from 96 px to 3 px.
+        Reversed, the version keeps its width at every window width and the
+        (re-settable, non-critical) status text is what truncates instead.
+
+        A method rather than inline so the rule can be tested on its own,
+        without building all nine tabs first.
+        """
+        footer = tk.Frame(parent)
+        footer.pack(side=tk.BOTTOM, fill=tk.X)
+        self.version_label = tk.Label(footer, text=version_string(), bd=1,
+                                      relief=tk.SUNKEN, anchor=tk.E, padx=8)
+        self.version_label.pack(side=tk.RIGHT)
+        self.status_bar = tk.Label(footer, text="Ready", bd=1,
+                                   relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        return footer
 
     def _on_app_close(self):
         """Safety shutdown on window close (user request 2026-07-20: the

@@ -218,6 +218,16 @@ S["09_SLDEA_Test"] = {
          "label": "Open Edge Review on a finished run — see the Edge Review section"},
         {"match": "🎚 Tune params…", "badge_side": "bottom",
          "label": "Advanced — confirmation-gated; Save rewrites the run's detection settings"},
+        # `#223`. Added WITH the button rather than at the next release:
+        # the shots on disk predate it, so until a fresh capture this is a
+        # miss and the manual build fails on it (`#248`). That is the
+        # intended state -- the build is ALREADY red on three legitimate
+        # misses (the renamed 📏 button, the `#224` telemetry label, the
+        # new ❓ button) waiting for the same capture, and the release
+        # checklist is capture-then-annotate. A matcher deferred to
+        # "later" is the failure mode `#248` exists to stop.
+        {"match": "📊 Plot runs…", "badge_side": "bottom",
+         "label": "Several finished runs on one figure — Export writes the PNG and its tidy CSV together"},
     ],
 }
 

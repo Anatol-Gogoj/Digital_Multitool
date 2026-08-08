@@ -32,6 +32,7 @@ sldea_diag*.json
 sldea_diag*.txt
 sldea_plot*.png
 sldea_plot*.csv
+*.figspec.json
 sldea_watchdog_probe*.txt
 sldea_watchdog_probe*.json
 *_selftest.png

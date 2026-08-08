@@ -198,7 +198,6 @@ class PlotWindow:
         self.v_bands = tk.BooleanVar(value=o['bands'])
         self.v_breakdown = tk.BooleanVar(value=o['breakdown'])
         self.v_vs_area = tk.BooleanVar(value=o['vs_area'])
-        self.v_suspect = tk.BooleanVar(value=False)
         self.v_title = tk.StringVar(value=o['title'] or '')
         self.v_out = tk.StringVar(value=out_dir or default_out_dir(parent_dir))
         self.v_stem = tk.StringVar(value=stem or '')
@@ -261,10 +260,21 @@ class PlotWindow:
         # --- draw options
         df = ttk.LabelFrame(left, text="Draw", padding=6)
         df.pack(fill=tk.X, pady=(8, 0))
-        for var, text in ((self.v_prepost, "pre/post separately "
-                                           "(post solid, pre dashed)"),
-                          (self.v_mean, "…and the mean line on top"),
-                          (self.v_bands, "uncertainty bands (±2% / ±1%)"),
+        ttk.Checkbutton(df, text="pre/post separately "
+                                 "(post solid, pre dashed)",
+                        variable=self.v_prepost,
+                        command=self._prepost_changed).pack(anchor=tk.W)
+        # "…and the mean line" is a CHILD option: without separated
+        # pre/post lines the single drawn line already IS the level mean
+        # (draw_area: `if opts['mean'] or not opts['prepost']`), so the
+        # toggle only means something on top of them — indented and
+        # disabled to say so (operator review 2026-08-07).
+        self.cb_mean = ttk.Checkbutton(df, text="…and the mean line on top",
+                                       variable=self.v_mean,
+                                       command=self.schedule)
+        self.cb_mean.pack(anchor=tk.W, padx=(18, 0))
+        self._sync_mean_enabled()
+        for var, text in ((self.v_bands, "uncertainty bands (±2% / ±1%)"),
                           (self.v_breakdown, "breakdown marks (recomputed)")):
             ttk.Checkbutton(df, text=text, variable=var,
                             command=self.schedule).pack(anchor=tk.W)
@@ -272,10 +282,6 @@ class PlotWindow:
             df, text="x axis = active area (needs reviewed runs)",
             variable=self.v_vs_area, command=self.schedule)
         self.cb_vs_area.pack(anchor=tk.W)
-        self.cb_suspect = ttk.Checkbutton(
-            df, text="allow pre-2026-07-28 areas (scale bug)",
-            variable=self.v_suspect, command=self.schedule)
-        self.cb_suspect.pack(anchor=tk.W)
         trow = ttk.Frame(df)
         trow.pack(fill=tk.X, pady=(4, 0))
         ttk.Label(trow, text="Title:").pack(side=tk.LEFT)
@@ -370,6 +376,16 @@ class PlotWindow:
 
     # -- options -----------------------------------------------------------
 
+    def _sync_mean_enabled(self):
+        """The mean checkbox is live exactly when pre/post lines are drawn
+        separately — see the comment where it is built."""
+        self.cb_mean.config(state='normal' if self.v_prepost.get()
+                            else 'disabled')
+
+    def _prepost_changed(self):
+        self._sync_mean_enabled()
+        self.schedule()
+
     def _mode_changed(self):
         mode = self.v_mode.get()
         self.lbl_mode.config(text=MODE_HINT.get(mode, ''))
@@ -431,8 +447,12 @@ class PlotWindow:
         # prepare_runs re-resolves and re-guards on every redraw (the mode
         # changes what counts as plottable), but loading goes through the
         # cache
+        # pre-2026-07-28 areas (the 2.3-2.7x scale-bug era) are refused
+        # outright in the window: the campaign dataset is reprocessed, so
+        # the override checkbox was dropped (operator call 2026-08-07).
+        # The CLI keeps --allow-suspect-scale for archaeology.
         runs = sp.prepare_runs(dirs, opts, warns.append,
-                               allow_suspect=self.v_suspect.get(),
+                               allow_suspect=False,
                                load=self._load)
         self._prepared = runs
         if not runs:

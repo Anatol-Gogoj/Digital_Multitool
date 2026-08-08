@@ -45,9 +45,35 @@ def measured_ua(imon_scope_v):
 # (#229). Free text is allowed -- the list is a convenience, not a
 # constraint; an unrecognised entry is kept verbatim and families out to
 # 'other'.
-ELECTRODE_CHOICES = ('', 'CNT', 'carbon black', 'eGaIn', 'other')
+#
+# The CNT inks are listed by BRAND (`#272`), not by the in-lab shorthand
+# ("P2 ink", "P3 ink"): the brand is what can be re-ordered, cited, and
+# matched against a datasheet, and the shorthand already lives in the run
+# folder names. Generic 'CNT' stays because it is the vocabulary every
+# run recorded before this list existed, and dropping it would strand
+# that value.
+#
+# There is deliberately NO literal 'other' entry (`#272`). It is a
+# non-answer that looks like an answer: a run recorded as "other" says
+# only that the material is not on a list that has since changed. Typing
+# the real material is now advertised on the box and costs the same
+# click, and a genuinely unknown sample is BLANK -- which the run-start
+# prompt already treats as a deliberate choice. 'other' remains a FAMILY
+# below, so runs that recorded the literal string still canonicalise
+# exactly as they always did.
+ELECTRODE_CHOICES = ('', 'CNT',
+                     'Carbon Solutions P3-SWNT', 'Carbon Solutions P2-SWNT',
+                     'nano-c Invisicon 3900', 'nano-c Invisicon 3500',
+                     'carbon black', 'eGaIn')
+# Substring needles, matched against the lowercased value padded with
+# spaces. None of the four brand names contains "cnt", so the CNT family
+# also keys on what the products ARE: 'swnt'/'mwnt' (Carbon Solutions
+# sells single-wall nanotube ink) and the 'invisicon' brand (nano-c's
+# transparent CNT ink). Order matters -- the first family that matches
+# wins.
 _ELECTRODE_FAMILIES = (
-    ('cnt', ('cnt', 'carbon nanotube', 'nanotube')),
+    ('cnt', ('cnt', 'carbon nanotube', 'nanotube', 'swnt', 'mwnt',
+             'invisicon', 'nano-c')),
     ('carbon_black', ('carbon black', 'carbonblack', 'cb ', ' cb', 'c-black')),
     ('liquid_metal', ('egain', 'e-gain', 'galinstan', 'liquid metal',
                       'liquidmetal')),
@@ -57,12 +83,19 @@ _ELECTRODE_FAMILIES = (
 def electrode_family(text):
     """Free-text electrode -> a canonical family, or None when blank.
 
-    'CNT' / 'carbon black' / 'eGaIn' and their obvious spellings map to
-    'cnt' / 'carbon_black' / 'liquid_metal'; anything else non-blank is
-    'other'. Nothing keys off this yet -- it exists so that when the
-    detector needs per-family behaviour (#229: a mirror-bright electrode
-    inverts the dark-disc assumption) there is one place that decides
-    what family a run belongs to."""
+    'CNT' / 'carbon black' / 'eGaIn', the branded CNT inks in
+    ELECTRODE_CHOICES, and their obvious spellings map to 'cnt' /
+    'carbon_black' / 'liquid_metal'; anything else non-blank is 'other'.
+    Nothing keys off this yet -- it exists so that when the detector needs
+    per-family behaviour (#229: a mirror-bright electrode inverts the
+    dark-disc assumption) there is one place that decides what family a
+    run belongs to.
+
+    Matching is case-insensitive, ignores surrounding whitespace, and is
+    on substrings, so a hand-typed 'p3-swnt', 'SWNT ink' or
+    'Invisicon 3900' still lands in 'cnt'. It does NOT guess from the
+    campaign's device tokens alone: a bare 'P2' or 'P3' names a device,
+    not a material, and is 'other'."""
     t = (text or '').strip().lower()
     if not t:
         return None
@@ -71,6 +104,45 @@ def electrode_family(text):
         if any(nd in padded for nd in needles):
             return family
     return 'other'
+
+
+def concentration_applies(electrode):
+    """Is an ink concentration a meaningful thing to record here? (`#276`)
+
+    The Concentration (mL) field records the CNT INK VOLUME -- the '2.5mL'
+    in a folder name like P3_2.5mL_Triazole, which is how the campaign has
+    been carrying it. Carbon black and liquid metal are not inks dispensed
+    by volume, so for those it is meaningless: the field is greyed, the run
+    never asks about it, and setup.txt does not carry the key at all. A CB
+    run should not look like a CNT run that forgot to fill something in.
+
+    Everything else may have one and is offered it: the CNT family, and any
+    custom material the operator typed (we do not know that a material we
+    have never heard of is not an ink).
+
+    BLANK counts as applicable. "No electrode chosen yet" is not the same
+    fact as "this electrode has no concentration", and greying the box
+    before the operator has said what the device is would just look broken.
+    """
+    return electrode_family(electrode) not in ('carbon_black', 'liquid_metal')
+
+
+def parse_concentration_ml(text):
+    """Concentration text -> a positive float, or ValueError (`#276`).
+
+    Junk, zero, negatives, nan and inf are all refused: this number goes
+    into setup.txt as a fact about the device, and "0 mL of ink" is not a
+    measurement anyone meant to record. A BLANK string is refused here
+    too -- "nothing entered" is a question to put to the operator, not a
+    parse result, and the run asks it separately.
+    """
+    import math
+    s = str(text or '').strip()
+    value = float(s)                       # ValueError on blank or junk
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(
+            f"concentration must be a positive number of mL, got {s!r}")
+    return value
 
 
 def compute_levels(start_kv, end_kv, step_kv=None, n_steps=None):
@@ -814,7 +886,8 @@ class SldeaProfile:
                 f"total {fmt_duration(self.total_duration_s)}")
 
     def setup_text(self, run_name, started_iso, sg_ch, vmon_ch, imon_ch,
-                   dry_run, cam_info='', dea_diam_mm=None, electrode=None):
+                   dry_run, cam_info='', dea_diam_mm=None, electrode=None,
+                   concentration_ml=None):
         step_desc = (f"{self.step_kv:g} kV/step" if self.step_kv
                      else f"{self.n_steps_req} steps")
         return "\n".join([
@@ -846,9 +919,20 @@ class SldeaProfile:
             ""] + ([f"DEA nominal diameter: {dea_diam_mm:g} mm", ""]
                    if dea_diam_mm else []) + (
             [f"Compliant electrode: {str(electrode).strip()}",
-             f"Electrode family: {electrode_family(electrode)}", ""]
+             f"Electrode family: {electrode_family(electrode)}"]
             if str(electrode or '').strip()
-            else ["Compliant electrode: (not specified)", ""]) + [
+            else ["Compliant electrode: (not specified)"]) + (
+            # Ink concentration (`#276`), beside the electrode it belongs
+            # to. OMITTED ENTIRELY when the electrode is not an ink: a
+            # carbon-black run must not carry a CNT-ink key at all, empty
+            # or otherwise. When it DOES apply, a blank answer is written
+            # as "(not specified)" rather than dropped -- the same rule the
+            # electrode line follows, so a run that declined to answer and
+            # a run that predates the field stay distinguishable.
+            [f"Ink concentration: {str(concentration_ml).strip()} mL"
+             if str(concentration_ml or '').strip()
+             else "Ink concentration: (not specified)"]
+            if concentration_applies(electrode) else []) + ["",
             "--- Snapshots ---",
             ("baseline @ 0 kV"
              + (f" (after a {self.baseline_warmup_s:g}s camera warm-up "

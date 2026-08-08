@@ -904,12 +904,24 @@
     "what": "Tick when the Trek is configured inverting; the run then drives negative control so the HV output stays positive."
    },
    {
+    "label": "Electrode",
+    "what": "Which compliant electrode material this device uses. Pick one of the listed inks — Carbon Solutions P2/P3-SWNT, nano-c Invisicon 3500/3900, plain CNT, carbon black, eGaIn — or type any material straight into the box; whatever you type is recorded word for word in setup.txt, alongside a canonical family so runs can be grouped later. Optional, but the run asks before starting without it. Leave it blank if the sample is genuinely unknown, rather than naming something you are not sure of."
+   },
+   {
+    "label": "Concentration (mL)",
+    "what": "How much CNT ink went on this device — the '2.5mL' in a folder name like P3_2.5mL_Triazole, now recorded in the run itself. It is greyed out for carbon black and eGaIn, which are not inks dispensed by volume: when it is greyed the run neither asks for it nor writes it to setup.txt, so a carbon-black run carries no ink key at all. Where it does apply, the run asks before starting without it, and only a positive number is accepted."
+   },
+   {
     "label": "⚡ Breakdown watchdog (LIVE runs)",
     "what": "Watches Trek current during live runs; current above Trip (µA) sustained for Confirm (s) snapshots the breakdown, ramps to 0 and aborts. Transient spikes never trip it."
    },
    {
     "label": "📈 Scope kV/µA log (telemetry.csv)",
     "what": "Writes the scope’s kV/µA continuously to telemetry.csv beside data.csv, so the current BETWEEN photos is recorded and a breakdown can be dated electrically. Rate (Hz) is capped at 2 — at that setting the current rows are free, because they are the breakdown watchdog’s own readings, which used to be thrown away. Voltage is read less often (at most once a second) because it costs a second scope query; the commanded voltage is on every row regardless. Needs the scope; works on dry runs too. Nothing reads the file — data.csv is still the run, and Edge Review, the tuner and the diagnostic are unaffected."
+   },
+   {
+    "label": "Run configuration presets",
+    "what": "Saves everything above under a name and recalls it later, so a campaign's staircase is not retyped each session. A preset covers the staircase, Output dir, scope/SG channels, DEA diameter, electrode, Trek inverts, and the watchdog and telemetry settings. It deliberately does NOT carry your run name, and never the DRY/LIVE state — loading one always leaves the tab in DRY, so arming the HV stays a separate deliberate click. Presets live in the same shared presets/ library as the signal-generator presets. If a preset was written by an older or newer version and something in it no longer fits, the load says what it could not apply instead of skipping it quietly."
    },
    {
     "label": "DRY RUN — HV OFF / ▶ Run / ■ Abort",

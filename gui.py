@@ -274,6 +274,13 @@ class InstrumentControlGUI:
         self.cam_seq_thread = None
         self.cam_seq_queue = queue.Queue()
 
+        # Footer BEFORE the notebook: same packing rule as `#27`, one level
+        # up. The packer serves slaves in packing order, so the footer must
+        # claim its strip of the cavity before the notebook packs with
+        # expand=True -- packed after, it sat pinned at its full-height y
+        # and was pushed clean off the bottom at window heights < ~400 px.
+        self.build_footer(root)
+
         # Create notebook (tabbed interface)
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill='both', expand=True, padx=10, pady=10)
@@ -302,8 +309,6 @@ class InstrumentControlGUI:
                               f"The rest of the app keeps working. Try "
                               f"Help → Update Software, or report this."
                          ).pack(padx=20, pady=20, anchor='w')
-        
-        self.build_footer(root)
 
         # Clean up the camera (and any capture loop) on window close.
         self.root.protocol('WM_DELETE_WINDOW', self._on_app_close)
@@ -5615,7 +5620,8 @@ LOGGING:
         if vals and not self.cam_index_var.get():
             self.cam_index_var.set(vals[0])
         self.cam_sync_controls()
-        # status_bar may not exist yet during initial tab construction.
+        # The footer now packs before the tabs build, so status_bar exists
+        # here in the app; the hasattr tolerates footer-less harnesses.
         if hasattr(self, 'status_bar'):
             self.status_bar.config(
                 text=f"Found {len(vals)} camera(s)" if vals else "No cameras found")

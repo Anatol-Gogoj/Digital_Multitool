@@ -38,6 +38,8 @@ import lcr_format
 import scope_trace
 import siggen_presets
 from siggen_presets import SignalGenPresetStore
+import sldea_presets
+from sldea_presets import SldeaPresetStore
 import sldea_profile
 from sldea_profile import (SldeaProfile, control_v_for_kv, measured_kv,
                            measured_ua, fmt_duration)
@@ -183,8 +185,13 @@ class InstrumentControlGUI:
         self._progress = progress or (lambda _text: None)
         self.root = root
         self.root.title(f"Lab Instrument Control  —  {version_string()}")
-        # Wide enough for the LCR tab's right-hand column (bias/speed/
-        # correction) and the footer version readout (issues #26/#27).
+        # A comfortable default, no longer load-bearing. This size used to
+        # be the only thing keeping the LCR tab's right-hand column
+        # (bias/speed/correction) and the footer version readout on screen
+        # (`#26`/`#27`) -- both were clipped at the previous 1000 px and the
+        # window was widened rather than the clipping fixed. Both now hold
+        # at ANY size: the column scrolls (`#225`) and the version readout
+        # is packed first, so shrinking the window costs nothing but room.
         self.root.geometry("1320x800")
 
         # Menu bar: Tools -> bench profiles + Update Software
@@ -225,6 +232,7 @@ class InstrumentControlGUI:
         self.psu_live_job = None
         # SLDEA test state (host-sequenced staircase runner in a daemon thread)
         self.sldea_vars = {}
+        self.sldea_presets = SldeaPresetStore()   # named run configs (`#265`)
         self._sldea_profile = None
         self._sldea_running = False
         self._sldea_stop = False
@@ -269,6 +277,13 @@ class InstrumentControlGUI:
         self.cam_seq_thread = None
         self.cam_seq_queue = queue.Queue()
 
+        # Footer BEFORE the notebook: same packing rule as `#27`, one level
+        # up. The packer serves slaves in packing order, so the footer must
+        # claim its strip of the cavity before the notebook packs with
+        # expand=True -- packed after, it sat pinned at its full-height y
+        # and was pushed clean off the bottom at window heights < ~400 px.
+        self.build_footer(root)
+
         # Create notebook (tabbed interface)
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill='both', expand=True, padx=10, pady=10)
@@ -297,22 +312,39 @@ class InstrumentControlGUI:
                               f"The rest of the app keeps working. Try "
                               f"Help → Update Software, or report this."
                          ).pack(padx=20, pady=20, anchor='w')
-        
-        # Footer: status bar (left, stretches) + version readout (right)
-        footer = tk.Frame(root)
-        footer.pack(side=tk.BOTTOM, fill=tk.X)
-        self.status_bar = tk.Label(footer, text="Ready", bd=1, relief=tk.SUNKEN, anchor=tk.W)
-        self.status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        version_label = tk.Label(footer, text=version_string(), bd=1,
-                                 relief=tk.SUNKEN, anchor=tk.E, padx=8)
-        version_label.pack(side=tk.RIGHT)
-        
+
         # Clean up the camera (and any capture loop) on window close.
         self.root.protocol('WM_DELETE_WINDOW', self._on_app_close)
 
         # Auto-connect on startup (in the background -- issue #40)
         self._progress("Looking for instruments...")
         self.root.after(100, self.auto_connect)
+
+    def build_footer(self, parent):
+        """Footer: version readout (right) + status bar (left, stretches).
+
+        The version label is packed FIRST on purpose (`#27`). The packer
+        serves slaves in PACKING order, each taking its requested size out
+        of what is left of the cavity -- so whoever is packed first is the
+        one guaranteed to get its width. With the status bar first, any
+        status message wider than the window swallowed the whole footer and
+        the version readout vanished: measured at a 500 px window with a
+        497 px status line, the readout collapsed from 96 px to 3 px.
+        Reversed, the version keeps its width at every window width and the
+        (re-settable, non-critical) status text is what truncates instead.
+
+        A method rather than inline so the rule can be tested on its own,
+        without building all nine tabs first.
+        """
+        footer = tk.Frame(parent)
+        footer.pack(side=tk.BOTTOM, fill=tk.X)
+        self.version_label = tk.Label(footer, text=version_string(), bd=1,
+                                      relief=tk.SUNKEN, anchor=tk.E, padx=8)
+        self.version_label.pack(side=tk.RIGHT)
+        self.status_bar = tk.Label(footer, text="Ready", bd=1,
+                                   relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        return footer
 
     def _on_app_close(self):
         """Safety shutdown on window close (user request 2026-07-20: the
@@ -2459,8 +2491,8 @@ LOGGING:
             cb.set(default)
             cb.grid(row=r, column=4, sticky='w')
             self.sldea_vars[key] = cb
-        ttk.Label(outf, text="DEA diam (mm):").grid(row=2, column=0,
-                                                    sticky='e')
+        ttk.Label(outf, text="DEA active area diam (mm):").grid(
+            row=2, column=0, sticky='e')
         diam = ttk.Entry(outf, width=8)
         diam.insert(0, '16')
         diam.grid(row=2, column=1, sticky='w', padx=6)
@@ -2475,19 +2507,58 @@ LOGGING:
         # confirmation if it is left empty rather than silently recording
         # an unknown device class.
         ttk.Label(outf, text="Electrode:").grid(row=3, column=0, sticky='e')
+        # width 24 fits the longest brand ('Carbon Solutions P3-SWNT',
+        # `#272`) without truncating it in the box. It costs no layout:
+        # this column is already sized by the width-34 Output dir entry
+        # above it.
         electrode = ttk.Combobox(
-            outf, width=14,
+            outf, width=24,
             values=[c for c in sldea_profile.ELECTRODE_CHOICES if c])
         electrode.set('')
         electrode.grid(row=3, column=1, sticky='w', padx=6)
         add_tooltip(electrode,
-                    "Compliant electrode material for this device — CNT, "
-                    "carbon black, eGaIn, or type your own. Written to "
-                    "setup.txt so the campaign's device class lives in the "
-                    "data rather than in folder names. Optional, but the "
-                    "run will ask before starting without it. Nothing in "
-                    "detection keys off it yet (see issue #229).")
+                    "Compliant electrode material for this device. Pick one "
+                    "of the listed inks — or TYPE ANY MATERIAL straight into "
+                    "the box: the list is a convenience, not a constraint, "
+                    "and whatever you type is recorded word for word. "
+                    "Written to setup.txt so the campaign's device class "
+                    "lives in the data rather than in folder names. "
+                    "Optional, but the run will ask before starting without "
+                    "it — leave it BLANK if the sample is genuinely unknown, "
+                    "rather than naming something you are not sure of. "
+                    "Nothing in detection keys off it yet (see issue #229).")
         self.sldea_vars['electrode'] = electrode
+        # Concentration (mL) -- the CNT ink volume (`#276`). This formalises
+        # the campaign's folder-name convention (P3_2.5mL_Triazole) into the
+        # data, where it can be grouped on.
+        #
+        # Row 5 deliberately: rows 3-4 of this frame are contested (`#262`
+        # moves the Trek checkbutton off the electrode's row onto row 4), and
+        # a fresh row cannot collide with that. Once #262 has landed this
+        # could be tucked closer to the Electrode row it follows.
+        ttk.Label(outf, text="Concentration (mL):").grid(row=5, column=0,
+                                                         sticky='e')
+        conc = ttk.Entry(outf, width=8)
+        conc.grid(row=5, column=1, sticky='w', padx=6)
+        add_tooltip(conc,
+                    "How much CNT ink went on this device — the '2.5mL' in a "
+                    "folder name like P3_2.5mL_Triazole, recorded in the run "
+                    "instead of in the folder name.\n"
+                    "Greyed out for carbon black and eGaIn: those are not "
+                    "inks dispensed by volume, so the figure is only "
+                    "meaningful for CNT-family inks. When it is greyed the "
+                    "run neither asks for it nor writes it to setup.txt.")
+        self.sldea_vars['conc_ml'] = conc
+        # Says WHY the box is greyed, right beside it -- a disabled field
+        # with no explanation is a support question.
+        self.sldea_conc_note = tk.Label(outf, text='', fg='#777', anchor='w')
+        self.sldea_conc_note.grid(row=5, column=2, columnspan=3, sticky='w')
+        # Follow the electrode as it is SELECTED and as it is TYPED: the box
+        # is free text, so a custom material never fires ComboboxSelected.
+        electrode.bind('<<ComboboxSelected>>',
+                       lambda _ev: self._sldea_conc_sync())
+        electrode.bind('<KeyRelease>', lambda _ev: self._sldea_conc_sync())
+        self._sldea_conc_sync()
         self.sldea_trek_inv = tk.BooleanVar(value=False)
         add_tooltip(ttk.Checkbutton(outf, text="Trek inverts (negate "
                                                 "control)",
@@ -2496,9 +2567,13 @@ LOGGING:
                     "control voltage (inverting amp config/input). The run "
                     "then drives a negative control so the HV output is "
                     "positive, and the V_Out monitor reading is sign-"
-                    "corrected in the log.").grid(row=3, column=0,
+                    "corrected in the log.").grid(row=4, column=0,
                                                   columnspan=3, sticky='w',
                                                   pady=(4, 0))
+        # row=4, NOT row=3: the Electrode label+box moved into row 3 with
+        # the `#231` field, and this checkbutton stayed gridded over the
+        # same cells — the two overlapped on screen until the operator
+        # caught it on 2026-08-07.
 
         # Breakdown watchdog (LIVE runs): deliberately slow-to-trip monitor
         # of the Trek I_Out on the scope; sustained overcurrent -> snapshot
@@ -2600,6 +2675,57 @@ LOGGING:
                     f"rate ACHIEVED is reported in the run log at the end.")
         self.sldea_vars['tel_hz'] = tel_hz
 
+        # Named run-configuration presets (`#265`) -- everything above this
+        # frame, saved under a name in the shared presets/ library so a
+        # campaign's staircase is recalled instead of retyped.
+        #
+        # It gets its OWN frame directly above the run row, deliberately:
+        #   * "Output & Measurement" rows 2-4 are being rearranged in
+        #     parallel (`#262`), and squeezing preset controls in among them
+        #     would collide for no benefit;
+        #   * sitting here, the DRY/LIVE checkbox is the next thing under
+        #     the Load button -- and a load always leaves the tab in DRY,
+        #     so the operator sees that state exactly where they clicked.
+        # What a preset does NOT carry (run name, DRY/LIVE) and why is in
+        # sldea_presets.py.
+        presf = ttk.LabelFrame(f, text="Run configuration presets", padding=8)
+        presf.pack(fill='x', padx=10, pady=(0, 8))
+        ttk.Label(presf, text="Preset:").pack(side=tk.LEFT)
+        self.sldea_preset_select = ttk.Combobox(presf, width=22,
+                                                state='readonly')
+        self.sldea_preset_select.pack(side=tk.LEFT, padx=(4, 6))
+        add_tooltip(self.sldea_preset_select,
+                    "Saved run configurations. They live in the same shared "
+                    "presets/ library as the signal-generator presets, so "
+                    "the other bench user sees yours.")
+        add_tooltip(ttk.Button(presf, text="Load",
+                               command=self.sldea_load_preset),
+                    "Fill this tab from the selected preset: the staircase, "
+                    "Output dir, scope/SG channels, DEA diameter, electrode, "
+                    "Trek inverts, and the watchdog and telemetry settings.\n"
+                    "Your RUN NAME is left alone, and the tab always comes "
+                    "back in DRY — a preset never re-arms the HV. Anything "
+                    "the preset could not supply is listed rather than "
+                    "quietly skipped.").pack(side=tk.LEFT)
+        add_tooltip(ttk.Button(presf, text="Delete",
+                               command=self.sldea_delete_preset),
+                    "Remove the selected preset from the shared library. "
+                    "Asks first.").pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(presf, text="Save current as:").pack(side=tk.LEFT,
+                                                       padx=(16, 2))
+        self.sldea_preset_name = ttk.Entry(presf, width=20)
+        self.sldea_preset_name.pack(side=tk.LEFT)
+        add_tooltip(self.sldea_preset_name,
+                    "Name for the settings currently on this tab. Reusing a "
+                    "name overwrites that preset, after asking.")
+        add_tooltip(ttk.Button(presf, text="Save",
+                               command=self.sldea_save_preset),
+                    "Store this tab's settings under that name. Fields are "
+                    "saved exactly as typed, so a half-finished number is "
+                    "never the reason a save fails.").pack(side=tk.LEFT,
+                                                           padx=(4, 0))
+        self.sldea_refresh_presets()
+
         runf = ttk.Frame(f)
         runf.pack(fill='x', padx=10, pady=8)
         self.sldea_dryrun = tk.BooleanVar(value=True)
@@ -2635,6 +2761,14 @@ LOGGING:
                     "with the current outlines, redrawn as you drag the "
                     "thresholds. Save writes them into the run's setup.txt "
                     "for Edge Review.").pack(side=tk.LEFT, padx=(8, 0))
+        add_tooltip(ttk.Button(runf, text="📊 Plot runs…",
+                               command=lambda: self._sldea_open_plot(None)),
+                    "Put several finished runs on one figure: pick the runs, "
+                    "tick what to draw, watch it redraw. Export writes the "
+                    "300 dpi PNG and the tidy per-snapshot CSV behind it, so "
+                    "the figure can be traced back to its numbers. Area "
+                    "needs reviewed runs; current and power work on raw "
+                    "ones.").pack(side=tk.LEFT, padx=(8, 0))
         self.sldea_status = tk.Label(runf, text="idle", anchor='w', fg='#555')
         self.sldea_status.pack(side=tk.LEFT, padx=12)
 
@@ -2765,6 +2899,174 @@ LOGGING:
         if d:
             self.sldea_outdir.set(d)
 
+    def _sldea_conc_applicable(self, electrode=None):
+        """Does Concentration (mL) mean anything for the chosen electrode?
+
+        The rule itself lives in sldea_profile.concentration_applies so the
+        widget state, the run-start question and what setup.txt records all
+        read the SAME decision (`#276`).
+        """
+        if electrode is None:
+            electrode = self.sldea_vars['electrode'].get()
+        return sldea_profile.concentration_applies(electrode)
+
+    def _sldea_conc_sync(self):
+        """Grey/ungrey Concentration (mL) to follow the electrode.
+
+        The typed value is deliberately NOT cleared when the box greys: an
+        operator flipping between materials would lose it, and a greyed
+        value is never asked about nor written to setup.txt anyway.
+        """
+        ok = self._sldea_conc_applicable()
+        self.sldea_vars['conc_ml'].config(state='normal' if ok else 'disabled')
+        self.sldea_conc_note.config(
+            text='' if ok else "— not an ink; nothing recorded for this "
+                               "electrode")
+
+    # ---- Named run-configuration presets (`#265`) ------------------------
+    # A widget-level snapshot of this tab, stored in the shared presets/
+    # library by sldea_presets.py -- the same storage conventions as the
+    # sig-gen presets and the bench profiles. Values are collected as the
+    # raw strings in the boxes (bench_profiles' rule) so Save never fails
+    # on a half-typed field.
+    #
+    # NOT in a preset: the run name (it identifies one run) and the
+    # DRY/LIVE state (a preset must never re-arm the HV). A load therefore
+    # forces the tab back to DRY -- see _sldea_apply_preset.
+
+    def _sldea_preset_targets(self):
+        """{preset field key -> widget or Tk variable} for every field.
+
+        sldea_presets owns the field LIST; this owns where each one lives on
+        screen. Both directions of drift are caught by the collector below
+        raising KeyError, and by the source-scan test in
+        tests/test_sldea_presets.py.
+        """
+        targets = dict(self.sldea_vars)          # entries + comboboxes
+        targets.update({
+            'outdir': self.sldea_outdir,
+            'updown': self.sldea_updown,
+            'trek_inv': self.sldea_trek_inv,
+            'wd_on': self.sldea_wd_on,
+            'tel_on': self.sldea_tel_on,
+            'autoproc': self.sldea_autoproc,
+        })
+        return targets
+
+    def _sldea_collect_preset(self):
+        """The tab's current settings as a complete preset snapshot."""
+        targets = self._sldea_preset_targets()
+        return {key: targets[key].get() for key in sldea_presets.ALL_FIELDS}
+
+    def _sldea_apply_preset(self, fields):
+        """Push a loaded preset's fields into the widgets.
+
+        Only the keys the preset actually carried are touched; anything
+        absent keeps whatever is on screen (the caller reports that). The
+        DRY/LIVE toggle is then forced back to DRY regardless of what it
+        was: reconfiguring a run and re-arming the high voltage stay two
+        separate, deliberate acts.
+        """
+        targets = self._sldea_preset_targets()
+        # Concentration (mL) may currently be greyed (`#276`), and a
+        # disabled ttk.Entry refuses a programmatic write. Enable it for the
+        # duration; the sync at the end sets its real state from whatever
+        # electrode this preset just loaded.
+        self.sldea_vars['conc_ml'].config(state='normal')
+        for key, value in fields.items():
+            w = targets.get(key)
+            if w is None:
+                continue
+            if key in sldea_presets.BOOL_FIELDS:
+                w.set(bool(value))
+            elif isinstance(w, ttk.Entry) and not isinstance(w, ttk.Combobox):
+                self._set_entry(w, value)
+            else:                                # Combobox or StringVar
+                w.set(value)
+        self._sldea_conc_sync()
+        self.sldea_dryrun.set(True)
+        self._sldea_dry_toggle()
+        self._sldea_refresh()
+
+    def sldea_refresh_presets(self):
+        """Reload the preset list into the combobox."""
+        try:
+            names = self.sldea_presets.names()
+        except Exception:                        # unreadable share, say so
+            names = []                           # rather than fail the tab
+        self.sldea_preset_select['values'] = names
+        if names and self.sldea_preset_select.get() not in names:
+            self.sldea_preset_select.set(names[0])
+        elif not names:
+            self.sldea_preset_select.set('')
+
+    def sldea_save_preset(self):
+        name = self.sldea_preset_name.get().strip()
+        if not name:
+            messagebox.showerror("SLDEA preset", "Enter a preset name first")
+            return
+        if name in self.sldea_presets.names() and not messagebox.askyesno(
+                "SLDEA preset", f"Overwrite preset '{name}'?"):
+            return
+        try:
+            self.sldea_presets.save(name, self._sldea_collect_preset())
+        except Exception as e:
+            messagebox.showerror("SLDEA preset", str(e))
+            return
+        self.sldea_refresh_presets()
+        self.sldea_preset_select.set(name)
+        self.status_bar.config(
+            text=self._preset_note(f"SLDEA preset saved: {name}"))
+
+    def sldea_load_preset(self):
+        name = self.sldea_preset_select.get()
+        if not name:
+            messagebox.showerror("SLDEA preset", "Select a preset to load")
+            return
+        # Mid-run the worker already holds its own copy of every setting, so
+        # a load would change nothing except what the operator is looking
+        # at -- which is worse than refusing.
+        if self._sldea_running:
+            messagebox.showinfo("SLDEA preset",
+                                "A run is in progress. Loading a preset now "
+                                "would not change it — wait for it to "
+                                "finish, or ■ Abort first.")
+            return
+        try:
+            fields, warnings = self.sldea_presets.load(name)
+        except Exception as e:
+            messagebox.showerror("SLDEA preset", str(e))
+            return
+        self._sldea_apply_preset(fields)
+        # Never half-apply in silence: fields have been moving (`#231`), so
+        # say exactly what did not come across.
+        if warnings:
+            messagebox.showwarning(
+                "SLDEA preset",
+                f"Preset '{name}' loaded, but not everything in it was "
+                f"applied:\n\n- " + "\n- ".join(warnings))
+        self.status_bar.config(
+            text=f"SLDEA preset loaded: {name} — run name untouched, tab "
+                 f"left in DRY")
+        self._sldea_log(f"preset loaded: {name}" + (
+            f" — {len(warnings)} setting(s) NOT applied" if warnings else ""))
+
+    def sldea_delete_preset(self):
+        name = self.sldea_preset_select.get()
+        if not name:
+            messagebox.showerror("SLDEA preset", "Select a preset to delete")
+            return
+        if not messagebox.askyesno("SLDEA preset",
+                                   f"Delete preset '{name}'?"):
+            return
+        try:
+            self.sldea_presets.delete(name)
+        except Exception as e:
+            messagebox.showerror("SLDEA preset", str(e))
+            return
+        self.sldea_refresh_presets()
+        self.status_bar.config(text=f"SLDEA preset deleted: {name}")
+
     def sldea_run(self):
         if self._sldea_running:
             return
@@ -2846,6 +3148,34 @@ LOGGING:
                     "lives.\n\nStart the run without it?", default='no'):
                 self._sldea_log("run cancelled — electrode not specified")
                 return
+            # Ink concentration (`#276`). Only ever raised when it means
+            # something: for carbon black / eGaIn there is no ink volume, so
+            # the box is greyed, no question is asked, and nothing is
+            # recorded. `None` (not '') is what tells setup.txt to omit the
+            # key entirely rather than write it empty.
+            concentration_ml = None
+            if self._sldea_conc_applicable(electrode):
+                concentration_ml = self.sldea_vars['conc_ml'].get().strip()
+                if concentration_ml:
+                    try:
+                        sldea_profile.parse_concentration_ml(concentration_ml)
+                    except ValueError:
+                        messagebox.showerror(
+                            "SLDEA",
+                            f"Concentration (mL) must be a positive number — "
+                            f"'{concentration_ml}' is not one.\n\nFix it, or "
+                            f"clear the box if you do not want to record a "
+                            f"concentration for this run.")
+                        return
+                elif not messagebox.askyesno(
+                        "No concentration specified",
+                        "This run will not record how much CNT ink went on "
+                        "the device — the '2.5mL' in a folder name like "
+                        "P3_2.5mL_Triazole.\n\nStart the run without it?",
+                        default='no'):
+                    self._sldea_log(
+                        "run cancelled — concentration not specified")
+                    return
             autoproc = self.sldea_autoproc.get()
             trek_sign = -1.0 if self.sldea_trek_inv.get() else 1.0
             # Breakdown watchdog (live only). Only claim it is armed when it
@@ -2913,7 +3243,7 @@ LOGGING:
                       self.sldea_runname.get().strip(),
                       sgch, vch, ich, dry, cam_exp, cam_gain, diam_mm,
                       autoproc, wd_on, wd_ua, wd_s, trek_sign, scope_setup,
-                      tel_on, tel_hz, electrode),
+                      tel_on, tel_hz, electrode, concentration_ml),
                 daemon=True).start()
             self.root.after(100, self._sldea_animate_cursor)  # playhead
         finally:
@@ -3253,6 +3583,27 @@ LOGGING:
         except Exception as e:
             messagebox.showerror("Edge tuner", f"Could not launch: {e}")
 
+    def _sldea_open_plot(self, rundir):
+        """Launch the cross-run plot window (its own process, like the two
+        buttons above) — issue `#223`.
+
+        It is passed the output dir, NOT a resolved run: unlike Edge Review
+        and the tuner this tool works on SEVERAL runs at once, so what it
+        needs is the folder to list, and it does its own multi-select.
+        Passing a single run still works — it lists that run's siblings and
+        preselects it — which is what makes this safe to call with a
+        rundir from anywhere later."""
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              'sldea_plot_gui.py')
+        target = rundir or self.sldea_outdir.get()
+        try:
+            subprocess.Popen([sys.executable, script, target],
+                             start_new_session=True)
+            self.status_bar.config(
+                text=f"Plot window opened on {os.path.basename(target)}")
+        except Exception as e:
+            messagebox.showerror("SLDEA plot", f"Could not launch: {e}")
+
     def sldea_abort(self):
         self._sldea_stop = True
         self._sldea_log("abort requested — ramping to 0 and stopping…")
@@ -3314,7 +3665,8 @@ LOGGING:
                       cam_exp=6, cam_gain=60, diam_mm=16.0, autoproc=False,
                       wd_on=False, wd_ua=100.0, wd_s=3.0, trek_sign=1.0,
                       scope_setup=None, tel_on=False,
-                      tel_hz=sldea_profile.TELEMETRY_MAX_HZ, electrode=''):
+                      tel_hz=sldea_profile.TELEMETRY_MAX_HZ, electrode='',
+                      concentration_ml=None):
         """Host-sequenced staircase runner (daemon thread; no Tk calls except
         via _sldea_log/_sldea_set_status/after). Drives the SG DC offset along
         p.kv_at(t), fires webcam+scope snapshots on schedule, writes the run
@@ -3343,7 +3695,8 @@ LOGGING:
                     started.isoformat(timespec='seconds'),
                     sgch, vch, ich, dry,
                     f"exposure {cam_exp}, gain {cam_gain}, WB off (manual)",
-                    dea_diam_mm=diam_mm, electrode=electrode))
+                    dea_diam_mm=diam_mm, electrode=electrode,
+                    concentration_ml=concentration_ml))
                 if trek_sign < 0:
                     sf.write("Trek control polarity: INVERTED (control = "
                              "-kV/gain; monitor readings sign-corrected "
@@ -5591,7 +5944,8 @@ LOGGING:
         if vals and not self.cam_index_var.get():
             self.cam_index_var.set(vals[0])
         self.cam_sync_controls()
-        # status_bar may not exist yet during initial tab construction.
+        # The footer now packs before the tabs build, so status_bar exists
+        # here in the app; the hasattr tolerates footer-less harnesses.
         if hasattr(self, 'status_bar'):
             self.status_bar.config(
                 text=f"Found {len(vals)} camera(s)" if vals else "No cameras found")

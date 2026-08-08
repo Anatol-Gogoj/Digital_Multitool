@@ -2478,18 +2478,26 @@ LOGGING:
         # confirmation if it is left empty rather than silently recording
         # an unknown device class.
         ttk.Label(outf, text="Electrode:").grid(row=3, column=0, sticky='e')
+        # width 24 fits the longest brand ('Carbon Solutions P3-SWNT',
+        # `#272`) without truncating it in the box. It costs no layout:
+        # this column is already sized by the width-34 Output dir entry
+        # above it.
         electrode = ttk.Combobox(
-            outf, width=14,
+            outf, width=24,
             values=[c for c in sldea_profile.ELECTRODE_CHOICES if c])
         electrode.set('')
         electrode.grid(row=3, column=1, sticky='w', padx=6)
         add_tooltip(electrode,
-                    "Compliant electrode material for this device — CNT, "
-                    "carbon black, eGaIn, or type your own. Written to "
-                    "setup.txt so the campaign's device class lives in the "
-                    "data rather than in folder names. Optional, but the "
-                    "run will ask before starting without it. Nothing in "
-                    "detection keys off it yet (see issue #229).")
+                    "Compliant electrode material for this device. Pick one "
+                    "of the listed inks — or TYPE ANY MATERIAL straight into "
+                    "the box: the list is a convenience, not a constraint, "
+                    "and whatever you type is recorded word for word. "
+                    "Written to setup.txt so the campaign's device class "
+                    "lives in the data rather than in folder names. "
+                    "Optional, but the run will ask before starting without "
+                    "it — leave it BLANK if the sample is genuinely unknown, "
+                    "rather than naming something you are not sure of. "
+                    "Nothing in detection keys off it yet (see issue #229).")
         self.sldea_vars['electrode'] = electrode
         self.sldea_trek_inv = tk.BooleanVar(value=False)
         add_tooltip(ttk.Checkbutton(outf, text="Trek inverts (negate "

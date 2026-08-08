@@ -1,5 +1,30 @@
 # Project handoff — state as of 2026-08-08
 
+**RELEASE (2026-08-08, later): v1.2.0 is TAGGED and PUBLISHED as a
+PRE-RELEASE** (#288 + tag; PDF attached to the GitHub release). Before it,
+the release-prep pair merged: **#287** (`#261` the wrapper-descent rule
+lifted into `se.runs_parent` — the Windows tuner launcher works on this
+box's `SCPI_SLDEA_DIR` again; `#283` quiet plot-window close) and **#286**
+(`#280` step 1: run_tests keeps failing suites' output in
+`test_failures/`; `#49` docs half: README caught up, BENCH_TEST verified
+clean). The footer-height fix turned out to be ALREADY on main — it rode
+into #284 inside the wave-2 integration. Both manuals regenerated from
+the live app at v1.2.0+0f65953, **42 pages, every callout matcher green
+on the first fail-closed pass** — including all six that were waiting on
+a fresh capture. Two pipeline fixes forced by an Edge browser update
+(first seen today): a file:/// URL with raw spaces silently prints
+nothing (as_uri now), and headless Edge hands off to a relaunched
+process, so make_pdf waits for the artifact, not the process. One badge
+nudged off the `#237` session clock.
+
+**Why still a pre-release:** same gate as v1.1.0 — the telemetry sidecar
+is desk-tested only; **§M promotes v1.2.0 to Latest** (v1.1.0's own
+promotion is moot, superseded). The updater deploys main HEAD regardless.
+**The fleet is now TWO releases behind (v1.0.0+4f5f213 on the bench):
+pull v1.2.0 onto the bench and analysis PCs and check the footers.**
+Remaining desk item: `#200` only. Everything else on the docket is bench
+(§M/§N/§O first), plus the open decisions listed under wave 2 below.
+
 **TL;DR (2026-08-08, wave 2 — read this first).** Nine PRs merged in one
 operator-tested integration (**#284** — Anatol drove the full runcard on
 the exact tree first): the **plotter round 2** stack (#258 window ·

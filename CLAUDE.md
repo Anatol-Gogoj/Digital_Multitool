@@ -39,6 +39,11 @@ milestones, not this one.
 - **Run data never enters the repo.** `.gitignore` blocks run folders and
   their outputs; a PR that introduces a new capture artifact type extends
   `.gitignore` in the same PR.
+- **`setup.txt` is a lab-notebook document, not a config file — it stays
+  plain text** (decision 2026-08-08, dated entry in `SLDEA_HANDOFF.md`).
+  New machine-read fields keep the `Key: value` convention through
+  `se.load_settings`/`save_settings`; if typed or nested structure is
+  ever needed, add a sidecar file beside the txt — never convert it.
 - **SLDEA measurement-chain behavior changes** land with a dated
   observation → decision entry in `SLDEA_HANDOFF.md`.
 - **Breakdown semantics (since 2026-08-05):** only current-confirmed

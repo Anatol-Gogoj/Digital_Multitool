@@ -73,6 +73,22 @@ def _has_mpl():
         return False
 
 
+def _drawn(runs, opts):
+    """-> the Figure sp.draw() produced, WITHOUT pyplot (the same path
+    save_figure uses), so a test can interrogate the real axes."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    fig = Figure(figsize=sp.FIGSIZE[opts['mode']])
+    FigureCanvasAgg(fig)
+    sp.draw(fig, runs, opts)
+    return fig
+
+
+def _caption(fig):
+    """The figure-level caption text every figure carries."""
+    return '\n'.join(t.get_text() for t in fig.texts)
+
+
 def test_load_rows_parses_notes_phases_and_eras():
     d = _mktmp()
     try:
@@ -511,10 +527,12 @@ def test_tidy_names_each_areas_edge_convention():
 def test_make_opts_maps_choices_and_refuses_bad_combinations():
     o, err = sp.make_opts()
     assert err is None
-    # the defaults are the CLI's: bands and breakdown marks ON, the rest off
+    # the defaults are the CLI's: bands and breakdown marks ON, the rest
+    # off. Strict equality on purpose -- a key added without a default
+    # that reproduces the pre-change figure has to fail here.
     assert o == {'mode': 'area', 'vs_area': False, 'prepost': False,
                  'mean': False, 'bands': True, 'breakdown': True,
-                 'title': None}
+                 'title': None, 'logx': False, 'logy': False}
     o, err = sp.make_opts(mode='current', vs_area=True, prepost=True,
                           mean=True, bands=False, breakdown=False,
                           title='x')
@@ -695,6 +713,178 @@ def test_gui_flag_opens_the_window_without_run_arguments():
         assert sp.main(['--gui', '--mode', 'nope']) == 2
     finally:
         sldea_plot_gui.launch = real
+
+
+# --------------------------------------------------------------------------
+# the compatibility invariant: adding options must not move a pixel of the
+# figure nobody asked to change. The `#223` refactor proved 'the window is
+# not a fork' by comparing bytes; this proves 'the new options are not a
+# rewrite' the same way -- against the REAL pre-change engine, read out of
+# git, so both halves run on the same matplotlib and the comparison means
+# something on any machine.
+# --------------------------------------------------------------------------
+
+# the commit this branch was cut from (the `#223` plot-window merge). Kept
+# as a SHA rather than a stored PNG because PNG bytes carry the matplotlib
+# version -- a golden file would rot on the next upgrade, this cannot.
+_BASE_SHA = 'd11b01ad0b9e3e28786d482fabb4fe6027a4438e'
+
+
+def _pre_change_module():
+    """sldea_plot as of _BASE_SHA, as an importable module, or None.
+
+    None when the object is not reachable (no git, a shallow clone, an
+    exported tarball) -- the caller then SKIPS and says so, because a
+    compatibility test that quietly passes when it cannot compare is
+    worse than no test."""
+    import importlib.util
+    import subprocess
+    root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    try:
+        got = subprocess.run(['git', 'show', _BASE_SHA + ':sldea_plot.py'],
+                             cwd=root, capture_output=True, timeout=30)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if got.returncode != 0 or not got.stdout:
+        return None
+    spec = importlib.util.spec_from_loader('sldea_plot_pre_change',
+                                           loader=None)
+    mod = importlib.util.module_from_spec(spec)
+    mod.__file__ = os.path.join(root, 'sldea_plot.py')
+    exec(compile(got.stdout.decode('utf-8'), '<sldea_plot@base>', 'exec'),
+         mod.__dict__)
+    return mod
+
+
+def _default_opts_pair(old, mode):
+    """(new opts, old opts) for `mode` with every new option at the value
+    that reproduces the pre-change figure. Extended once per new option,
+    which is the point: an option that CANNOT be turned back off shows up
+    here as a test that no longer compiles."""
+    return sp.make_opts(mode=mode)[0], old.make_opts(mode=mode)[0]
+
+
+def test_default_output_is_byte_identical_to_the_pre_change_engine():
+    if not _has_mpl():
+        return
+    old = _pre_change_module()
+    if old is None:
+        print('  (skipped: pre-change sldea_plot not reachable via git)')
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        rows = _healthy_rows(8)
+        for snap, ua in ((14, -80.0), (15, -140.0), (16, -205.0)):
+            rows[snap - 1]['measured_uA'] = ua      # exercise the X marks
+        _fake_run(d, rows)
+        for mode in sp.MODES:
+            new_opts, old_opts = _default_opts_pair(old, mode)
+            new_png = sp.save_figure(
+                sp.prepare_runs([d], new_opts), new_opts,
+                os.path.join(out, mode + '_new.png'))
+            old_png = old.save_figure(
+                old.prepare_runs([d], old_opts), old_opts,
+                os.path.join(out, mode + '_old.png'))
+            with open(new_png, 'rb') as a, open(old_png, 'rb') as b:
+                assert a.read() == b.read(), f"{mode} PNG moved"
+            new_csv = sp.write_tidy(sp.prepare_runs([d], new_opts),
+                                    os.path.join(out, mode + '_new.csv'))
+            old_csv = old.write_tidy(old.prepare_runs([d], old_opts),
+                                     os.path.join(out, mode + '_old.csv'))
+            with open(new_csv, 'rb') as a, open(old_csv, 'rb') as b:
+                assert a.read() == b.read(), f"{mode} CSV moved"
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# log scales (`#263`)
+# --------------------------------------------------------------------------
+
+def test_log_scale_kind_is_chosen_from_the_data():
+    """The `#263` policy: positive data -> log10; anything <= 0 -> symlog
+    with a decade-floored linthresh, so no point is clipped away."""
+    assert sp.log_scale_for([1.0, 2.0, 300.0]) == ('log', None)
+    kind, lin = sp.log_scale_for([-16.0, -15.9, -10.5])
+    assert kind == 'symlog' and lin == 10.0, lin      # min |v| 10.5 -> 10
+    kind, lin = sp.log_scale_for([0.0, 0.5, 8.0])     # the 0 kV baseline
+    assert kind == 'symlog' and lin == 0.1, lin
+    # nothing a log scale can show -> leave the axis linear, never raise
+    assert sp.log_scale_for([]) is None
+    assert sp.log_scale_for([0.0, 0.0]) is None
+    assert sp.log_scale_for([None, float('nan'), float('inf')]) is None
+
+
+def test_log_flags_reach_the_axes_on_the_happy_and_nonpositive_paths():
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        # areas are strictly positive -> plain log10 on both panels
+        opts = sp.make_opts(logy=True)[0]
+        runs = sp.prepare_runs([d], opts)
+        fig = _drawn(runs, opts)
+        assert [a.get_yscale() for a in fig.axes] == ['log', 'log']
+        assert [a.get_xscale() for a in fig.axes] == ['linear', 'linear']
+        assert 'Y axis: log10.' in _caption(fig)
+        # the x axis starts at the 0 kV baseline row -> symlog, and the
+        # baseline level is still drawn (nothing clipped)
+        opts = sp.make_opts(logx=True)[0]
+        fig = _drawn(sp.prepare_runs([d], opts), opts)
+        assert [a.get_xscale() for a in fig.axes] == ['symlog', 'symlog']
+        assert 'symlog' in _caption(fig) and '≤ 0' in _caption(fig)
+        assert min(min(l.get_xdata()) for l in fig.axes[0].get_lines()) == 0
+        # currents are NEGATIVE on the -16 uA era: symlog keeps the whole
+        # trace where a plain log would have dropped every point
+        opts = sp.make_opts(mode='current', logy=True)[0]
+        fig = _drawn(sp.prepare_runs([d], opts), opts)
+        assert fig.axes[0].get_yscale() == 'symlog'
+        ys = [y for l in fig.axes[0].get_lines() for y in l.get_ydata()]
+        assert any(y < 0 for y in ys), 'negative currents were dropped'
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_log_axis_with_nothing_to_scale_stays_linear_and_says_so():
+    """A power figure whose every point is exactly 0 (a run sitting on its
+    own median) has no log axis to draw. It must caption that, not raise
+    and not silently pretend the axis is logarithmic."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        rows = [{'snapshot': 1, 'tag': 'baseline', 'nominal_kV': 0,
+                 'measured_uA': -16.0, 'timestamp': '2026-08-05T10:00:00'}]
+        for n in range(2, 8):        # flat current -> power is 0 everywhere
+            rows.append({'snapshot': n, 'tag': 'pre-ramp', 'nominal_kV': n,
+                         'measured_uA': -16.0,
+                         'timestamp': '2026-08-05T10:00:00'})
+        _fake_run(d, rows)
+        opts = sp.make_opts(mode='power', logy=True)[0]
+        fig = _drawn(sp.prepare_runs([d], opts), opts)
+        assert fig.axes[0].get_yscale() == 'linear'
+        assert 'left linear' in _caption(fig)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_log_flags_survive_the_cli_and_land_on_the_options_dict():
+    seen = {}
+    real = sp.export
+    sp.export = lambda runs, opts, out, stem, warn=None: (
+        seen.update(opts=opts), ('p.png', 'p.csv'))[1]
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(6))
+        assert sp.main([d, '--out', d, '--logx', '--logy']) == 0
+        assert seen['opts']['logx'] and seen['opts']['logy']
+        assert sp.main([d, '--out', d]) == 0
+        assert not seen['opts']['logx'] and not seen['opts']['logy']
+    finally:
+        sp.export = real
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def _run():

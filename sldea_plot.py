@@ -6,6 +6,7 @@ Usage:
                          [--vs-area] [--prepost] [--mean] [--no-bands]
                          [--no-breakdown] [--out DIR] [--stem NAME]
                          [--title TEXT] [--allow-suspect-scale]
+                         [--logx] [--logy]
     python sldea_plot.py --gui [RUN ...]        # window (see below)
     python sldea_plot.py --selftest [OUT.png]
 
@@ -48,6 +49,28 @@ Rendering:
       nominal disc; --allow-suspect-scale overrides. In current/power
       modes such runs still plot (currents are unaffected) but their area
       columns are blanked in the tidy CSV so eras cannot be mixed.
+
+Log scales (`#263`):
+    --logx / --logy put the x / y axis on a logarithmic scale. The axis
+    kind is chosen from the DATA, per axis and per panel:
+
+      all plotted values > 0      -> plain log10
+      any value <= 0              -> symlog, linear inside +-linthresh
+                                     and log outside, where linthresh is
+                                     the smallest nonzero |value| rounded
+                                     DOWN to a power of ten
+
+    Symlog rather than clipping is deliberate. This suite's currents are
+    NEGATIVE on the whole 07-29 era (the I_Out offset idles at ~-16 uA)
+    and every run's x axis starts at the 0 kV baseline row, so a plain log
+    scale would drop the entire current trace and the resting tier -- and
+    dropping rows to make an axis work is the one thing this tool does not
+    do (see the P3_5 lesson below). Symlog keeps every point, keeps the
+    sign, and the caption names the scale and the linthresh so a reader
+    cannot mistake the linear-near-zero region for log.
+
+    An axis with no finite values, or one whose values are all exactly
+    zero, is left LINEAR and says so in the caption rather than raising.
 
 Breakdown marks (the P3_5 lesson, 2026-08-05 semantics):
     X marks come from RECOMPUTING the current-based detector
@@ -298,6 +321,78 @@ def _style_axes(ax, xlabel, ylabel):
     ax.set_ylabel(ylabel)
 
 
+def log_scale_for(values):
+    """-> ('log', None) | ('symlog', linthresh) | None, from the DATA.
+
+    The `#263` policy in one function so both figures decide identically.
+    None means 'leave this axis linear' -- nothing finite to scale, or an
+    all-zero axis, neither of which a log scale can represent. See the
+    module docstring for why nonpositive data becomes symlog rather than
+    being clipped away."""
+    vals = [v for v in values
+            if v is not None and isinstance(v, (int, float))
+            and math.isfinite(v)]
+    if not vals:
+        return None
+    if all(v > 0 for v in vals):
+        return ('log', None)
+    nz = [abs(v) for v in vals if v != 0]
+    if not nz:
+        return None
+    # floor to a decade so the linear window is a readable round number
+    # and two runs of the same shape get the same axis
+    return ('symlog', max(10.0 ** math.floor(math.log10(min(nz))), 1e-12))
+
+
+def _apply_scales(ax, opts, xs, ys, notes):
+    """Apply --logx/--logy to one axis, appending caption lines to `notes`.
+
+    Values come from the CALLER's record of what it plotted, not from
+    ax.get_lines(): axhline/axvline store one of their coordinate pairs in
+    axes fractions (0..1), and letting those vote would pick a linthresh
+    from a gridline rather than from the data."""
+    for axis, on, vals, name in (('x', opts.get('logx'), xs, 'X'),
+                                 ('y', opts.get('logy'), ys, 'Y')):
+        if not on:
+            continue
+        pick = log_scale_for(vals)
+        if pick is None:
+            notes.append(f"{name} axis: log requested but the data has "
+                         f"nothing a log scale can show -- left linear.")
+            continue
+        kind, lin = pick
+        if kind == 'log':
+            ax.set_xscale('log') if axis == 'x' else ax.set_yscale('log')
+            notes.append(f"{name} axis: log10.")
+        else:
+            if axis == 'x':
+                ax.set_xscale('symlog', linthresh=lin)
+            else:
+                ax.set_yscale('symlog', linthresh=lin)
+            notes.append(f"{name} axis: symlog -- linear within ±{lin:g}, "
+                         f"log outside (the data carries values ≤ 0; a "
+                         f"plain log scale would drop them).")
+
+
+def _dedupe(items):
+    """Order-preserving unique -- the two area panels share an x axis, so
+    the same caption line is generated twice."""
+    out = []
+    for i in items:
+        if i not in out:
+            out.append(i)
+    return out
+
+
+def _scale_caption(notes):
+    """The log-scale caption line, or '' when both axes stayed linear.
+
+    A figure whose axis is not what a reader assumes has to SAY so on the
+    figure -- the PNG travels without the command line that made it."""
+    notes = _dedupe(notes)
+    return ('\n' + '  '.join(notes)) if notes else ''
+
+
 def _series(ax, xs, ys, traced, color, ls, bands, band_traced=None):
     """One curve: line + per-point open/closed markers + traced-aware band.
     `traced` drives the marker fill; `band_traced` (default: same) drives
@@ -346,6 +441,9 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
 
     run_handles = []
     had_x = had_fallback = False
+    # what actually got plotted, per axis -- the log-scale policy reads
+    # the DATA and axes-fraction gridlines must not vote (`#263`)
+    xs_all, ysl_all, ysr_all = [], [], []
     for run in runs:
         color = run['color']
         lvs = levels(run)
@@ -361,6 +459,9 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                     _series(axl, px, py, pt, color, ls, opts['bands'])
                     _series(axr, px, [y / run['a0'] for y in py], pt,
                             color, ls, opts['bands'])
+                    xs_all += list(px)
+                    ysl_all += list(py)
+                    ysr_all += [y / run['a0'] for y in py]
         if opts['mean'] or not opts['prepost']:
             # marker fill follows the CONVENTION of the plotted value:
             # a mixed level's mean uses the machine member(s) only, so
@@ -373,6 +474,9 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
             _series(axl, xs, ys, tr, color, '-', show_bands, band_tr)
             _series(axr, xs, [y / run['a0'] for y in ys], tr, color, '-',
                     show_bands, band_tr)
+            xs_all += list(xs)
+            ysl_all += list(ys)
+            ysr_all += [y / run['a0'] for y in ys]
             mixed = [l['kv'] for l in lvs if l['mixed']]
             if mixed:
                 warn(f"{run['name']}: {len(mixed)} level(s) mix a "
@@ -397,10 +501,14 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                     for ax in (axl, axr):
                         ax.axvline(r['kv'], color=color, linestyle='--',
                                    linewidth=0.9, alpha=0.55, zorder=1)
+                    xs_all.append(r['kv'])
                     unanchored.append(r['index'])
             _cross_marks(axl, drawn, color)
             _cross_marks(axr, [(x, y / run['a0']) for x, y in drawn],
                          color)
+            xs_all += [x for x, _ in drawn]
+            ysl_all += [y for _, y in drawn]
+            ysr_all += [y / run['a0'] for _, y in drawn]
             had_x = had_x or bool(drawn)
             had_fallback = had_fallback or bool(unanchored)
             if unanchored:
@@ -411,6 +519,9 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
 
     _style_axes(axl, 'Nominal voltage (kV)', 'Active area (mm²)')
     _style_axes(axr, 'Nominal voltage (kV)', 'Expansion  A / A₀')
+    scale_notes = []
+    _apply_scales(axl, opts, xs_all, ysl_all, scale_notes)
+    _apply_scales(axr, opts, xs_all, ysr_all, scale_notes)
     axl.set_title(opts['title'] or 'Active area vs voltage', loc='left',
                   fontweight='bold', fontsize=11)
     a0s = sorted({round(r['a0'], 1) for r in runs})
@@ -441,7 +552,8 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
               else "") + ".\n"
            "X = current-confirmed breakdown (recomputed, 2026-08-05 "
            "semantics).  X axis: nominal kV (measured_kV telemetry "
-           "incomplete on all runs).")
+           "incomplete on all runs)."
+           + _scale_caption(scale_notes))
     fig.text(0.01, 0.005, cap, fontsize=7, color='#555555')
     fig.tight_layout(rect=(0, 0.05, 1, 1))
     return fig
@@ -505,6 +617,7 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
     run_handles = []
     had_x = had_adv = False
     raw_power = []
+    xs_all, ys_all = [], []          # what got plotted (`#263`)
     for run in runs:
         color = run['color']
         med = run_ua_median(run)
@@ -524,11 +637,15 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
         ax.plot(xs, ys, '-', color=color, linewidth=1.4, alpha=0.85,
                 zorder=3)
         ax.plot(xs, ys, 'o', color=color, markersize=3, zorder=4)
+        xs_all += xs
+        ys_all += ys
         if not power and not opts['vs_area']:
             uas = [r['ua'] for r in run['rows'] if r['ua'] is not None]
             if len(uas) >= 5:
-                ax.axhline(_median(uas), color=color, linestyle=':',
+                med_line = _median(uas)
+                ax.axhline(med_line, color=color, linestyle=':',
                            linewidth=0.9, alpha=0.6, zorder=2)
+                ys_all.append(med_line)
         if opts['breakdown']:
             xpts = [(x, y) for x, y, r in pts if r['index'] in run['flags']]
             _cross_marks(ax, xpts, color)
@@ -552,6 +669,8 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
     ylabel = ('|kV × (µA − run median)|  (mW)' if power
               else 'Measured current (µA)')
     _style_axes(ax, xlabel, ylabel)
+    scale_notes = []
+    _apply_scales(ax, opts, xs_all, ys_all, scale_notes)
     ax.set_title(opts['title'] or ('Power' if power else 'Current')
                  + ' -- per snapshot', loc='left', fontweight='bold',
                  fontsize=11)
@@ -575,7 +694,8 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
                  f"{', '.join(raw_power)}." if raw_power else "")
               if power else
               "Currents carry each era's instrument offset "
-              "(07-29 ≈ −16 µA idle)."))
+              "(07-29 ≈ −16 µA idle).")
+           + _scale_caption(scale_notes))
     fig.text(0.01, 0.005, cap, fontsize=7, color='#555555')
     fig.tight_layout(rect=(0, 0.05, 1, 1))
     return fig
@@ -696,12 +816,17 @@ def default_stem(mode):
 
 
 def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
-              bands=True, breakdown=True, title=None):
+              bands=True, breakdown=True, title=None,
+              logx=False, logy=False):
     """-> (opts dict, error message or None).
 
     The CLI builds this from its flags and the window from its tick boxes,
     so an illegal combination is refused identically in both. Error strings
-    are the CLI's own wording -- main() prints them verbatim."""
+    are the CLI's own wording -- main() prints them verbatim.
+
+    Every key added after `#223` defaults to the behaviour that existed
+    before it, so an options dict built with no arguments still describes
+    the original figure."""
     if mode not in MODES:
         return None, f"unknown --mode {mode} (area | current | power)"
     if vs_area and mode == 'area':
@@ -709,7 +834,8 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
     return {'mode': mode, 'vs_area': bool(vs_area),
             'prepost': bool(prepost), 'mean': bool(mean),
             'bands': bool(bands), 'breakdown': bool(breakdown),
-            'title': title or None}, None
+            'title': title or None,
+            'logx': bool(logx), 'logy': bool(logy)}, None
 
 
 def needs_areas(opts):
@@ -897,7 +1023,7 @@ def _selftest(out_png):
 
 _BOOL_FLAGS = ('--vs-area', '--prepost', '--mean', '--no-bands',
                '--no-breakdown', '--allow-suspect-scale', '--selftest',
-               '--gui')
+               '--gui', '--logx', '--logy')
 _VALUED_FLAGS = ('--mode', '--out', '--stem', '--title')
 
 _orig_stdout = None     # keeps the replaced wrapper alive: a GC'd
@@ -966,7 +1092,9 @@ def main(argv):
                           mean='--mean' in flags,
                           bands='--no-bands' not in flags,
                           breakdown='--no-breakdown' not in flags,
-                          title=vals.get('--title'))
+                          title=vals.get('--title'),
+                          logx='--logx' in flags,
+                          logy='--logy' in flags)
     if '--gui' in flags:
         # the window is a front end to everything below, and it does its own
         # run picking -- so unlike the headless paths it does NOT require

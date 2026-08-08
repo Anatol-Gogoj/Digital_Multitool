@@ -14,6 +14,10 @@ tab has a Reconnect button):
   - DC Supply (BK 9174B): dual-output V / current-limit with protection,
     live V/A/W readout, and an explicit output toggle. Serial (CP2102).
   - Data Logging (CSV)
+  - Webcam (live preview + capture; fully functional on Windows)
+  - Battery Data (CSV post-processing and plots)
+  - SLDEA Test (HV staircase runs -> run folders; launches the Edge
+    Review / tuner / plot companion tools)
 
 A version readout is shown in the footer. Instrument drivers live in
 instruments.py; signal-gen presets in siggen_presets.py.
@@ -927,7 +931,7 @@ APPLIED READOUTS & PREVIEW:
 FREQUENCY RANGE:
 - Depends on waveform and model; check the front panel for the unit's
   rated maxima (sine reaches the highest; square/pulse/ramp are lower)
-- Enter frequency in Hz (e.g. 1000 for 1 kHz, 1e6 for 1 MHz)
+- Enter frequency in Hz (e.g. 1000 for 1 kHz, 5e5 for 500 kHz — the meter's cap)
 
 AMPLITUDE, OFFSET & LOAD:
 - Amplitude is peak-to-peak (Vpp); Offset is the DC level (V)

@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
-"""Headless tests for the sldea_plot window's non-widget logic (`#223`).
+"""Tests for the sldea_plot window (`#223`, `#271`).
 
-No Tk root is created here: everything tested lives in the module's run
-discovery and its initial state, which is deliberately separate from the
-widgets so it CAN be tested without a display. The drawing and export
-paths belong to sldea_plot and are covered by test_sldea_plot.py -- that
-split is the point, the window owns no plotting rules of its own.
+Most of it is headless: run discovery and initial state are deliberately
+separate from the widgets so they CAN be tested without a display. The
+drawing and export paths belong to sldea_plot and are covered by
+test_sldea_plot.py -- that split is the point, the window owns no
+plotting rules of its own.
+
+The `#271` LAYOUT cases are the exception and cannot be faked. A
+withdrawn root computes no geometry at all (measured: every winfo_height
+comes back 1), so the window has to be on screen for "is the figure the
+size of its widget", "is the warnings pane still there" and "did the
+scrollbar appear" to mean anything -- the same reason
+test_sldea_edge_gui deiconifies for its synthetic-event cases. They skip
+cleanly with no display.
 
 Run: .venv/bin/python tests/test_sldea_plot_gui.py
 """
@@ -17,6 +25,7 @@ import csv
 import os
 import shutil
 import tempfile
+import time
 
 import sldea_plot as sp
 import sldea_plot_gui as g
@@ -198,6 +207,175 @@ def test_mode_hints_say_which_modes_need_reviewed_runs():
     assert 'REVIEWED' in g.MODE_HINT['area']
     for m in ('current', 'power'):
         assert 'RAW' in g.MODE_HINT[m], m
+
+
+# ---------------------------------------------------------------------------
+# `#271` -- resize, scrollbars, minimum size
+#
+# NOTE ON ORDERING: _run() calls the tests in sorted order and
+# test_importing_the_module_opens_no_window asserts tk._default_root is
+# None. Every window below is destroyed in a finally, which resets it
+# (verified), so the two cannot collide either way round.
+# ---------------------------------------------------------------------------
+
+class _Win:
+    """A real, on-screen plot window over a two-run fixture, or None-ish.
+
+    Context manager: builds the fixture, opens the window, destroys both.
+    `ok` is False when there is no display, and the caller returns.
+    """
+
+    def __init__(self, size='1400x900'):
+        self.size = size
+        self.ok = False
+
+    def __enter__(self):
+        import tkinter as tk
+        self.tmp = _mktmp()
+        _fake_run(self.tmp, 'P3_1_20260805')
+        _fake_run(self.tmp, 'P3_2_20260805')
+        try:
+            self.root = tk.Tk()
+        except tk.TclError as e:
+            print(f"   (skipped: no display for Tk: {e})")
+            shutil.rmtree(self.tmp, ignore_errors=True)
+            self.root = None
+            return self
+        self.root.geometry(self.size)
+        self.win = g.PlotWindow(self.root, self.tmp,
+                                preselect=['P3_1_20260805'])
+        self.root.update()
+        self.settle()
+        self.ok = True
+        return self
+
+    def settle(self, secs=0.6):
+        """Pump the loop until the coalesced redraw has fired and Tk has
+        finished re-laying the window out."""
+        t0 = time.time()
+        while time.time() - t0 < secs:
+            self.root.update()
+            time.sleep(0.02)
+
+    def resize(self, size):
+        self.root.geometry(size)
+        self.settle()
+
+    def __exit__(self, *_exc):
+        if self.root is not None:
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        return False
+
+
+def test_resize_the_figure_follows_the_window():
+    """THE `#271` bug. The window bound <Configure> on the matplotlib
+    widget WITHOUT add='+', which REPLACES FigureCanvasTkAgg's own
+    `resize` -- the only thing that tells the Figure how many inches it
+    has. So the figure stayed 12.6x5.4 in forever and tight_layout laid
+    every redraw out against a size the window had not had since it
+    opened: clipped on the right, blank below, at every size including
+    the default."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        for size in ('1400x900', '1000x640', '820x520', '1200x780'):
+            w.resize(size)
+            widget = w.win.canvas.get_tk_widget()
+            px = w.win.fig.get_size_inches() * w.win.fig.dpi
+            assert abs(px[0] - widget.winfo_width()) <= 2, (size, px)
+            assert abs(px[1] - widget.winfo_height()) <= 2, (size, px)
+        # ...and the binding that carries it is still BOTH handlers: a
+        # future plain bind() here would silently restore the bug, so the
+        # tag itself is pinned, not just today's symptom
+        script = w.win.canvas.get_tk_widget().bind('<Configure>')
+        assert 'resize' in script, "matplotlib's resize was unbound again"
+        assert script.count('\n\nif ') >= 1, "our handler replaced it"
+
+
+def test_short_window_keeps_the_toolbar_and_the_warnings_pane():
+    """`#271`: pack fills each slave's request from the cavity IN ORDER,
+    so with the figure packed first it took its full requested height and
+    pushed the toolbar and the message pane off the bottom -- measured at
+    900x560, both unmapped, the warnings simply gone with nothing saying
+    so. They claim their space first now."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        for size in ('1400x900', '900x560', '760x500'):
+            w.resize(size)
+            assert w.win.msg.winfo_ismapped(), f"warnings pane gone at {size}"
+            assert w.win.toolbar.winfo_ismapped(), f"toolbar gone at {size}"
+            assert w.win.canvas.get_tk_widget().winfo_height() > 40, size
+
+
+def test_the_controls_column_scrolls_only_when_it_overflows():
+    """`#271` + the `#225` decision: the bar is a REPORT of overflow, not
+    furniture. It appears when the controls do not fit, goes away when
+    they do -- and rewinds on the way out, or a column scrolled halfway
+    down and then given room would keep an offset nobody can undo."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        col = w.win.column
+        tall = col.body.winfo_reqheight()
+        assert tall > 200, 'fixture built no controls to overflow'
+        w.resize(f'1000x{tall + 120}')
+        assert not col.bar_shown, 'bar shown with room to spare'
+        assert not col.bar.winfo_ismapped()
+        w.resize(f'1000x{max(g.MIN_H, tall - 200)}')
+        assert col.bar_shown, 'no bar with the controls cut off'
+        assert col.bar.winfo_ismapped()
+        col._cv.yview_moveto(0.5)
+        w.resize(f'1000x{tall + 120}')
+        assert not col.bar_shown and not col.bar.winfo_ismapped()
+        assert col._cv.yview()[0] == 0.0, 'hidden bar left the column scrolled'
+
+
+def test_the_window_has_a_floor_it_cannot_collapse_below():
+    """`#271`: minsize was (120, 1) -- the layout could be squeezed to
+    nothing. The width is MEASURED from the controls column, because a
+    number that is right on the analysis PC is wrong at another DPI."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        mw, mh = w.win.root.minsize()
+        assert (mw, mh) == w.win.min_size, (mw, mh, w.win.min_size)
+        assert mh == g.MIN_H, (mw, mh)
+        # the width is the MEASURED column plus a figure worth drawing,
+        # and it is the same number before and after the window is laid
+        # out -- the canvas does not know its own width until then, so a
+        # floor read off IT came out 34 px
+        assert mw == w.win.apply_minsize()[0], 'not re-measurable'
+        assert mw == w.win.column.natural_width() + g.MIN_FIG_W, (mw, mh)
+        assert mw > g.MIN_FIG_W + 150 and mh > 100
+        # the floor is a floor: the figure still has room to be a figure
+        w.resize(f'{mw}x{mh}')
+        assert w.win.canvas.get_tk_widget().winfo_width() >= 100
+        assert w.win.msg.winfo_ismapped() and w.win.toolbar.winfo_ismapped()
+
+
+def test_moving_the_window_does_not_cost_a_redraw():
+    """`#271`: <Configure> also fires when the canvas merely MOVES -- and
+    it does move, by the scrollbar's width, every time the bar appears. A
+    full prepare_runs + matplotlib pass for that is work nobody asked
+    for, so the handler compares the SIZE."""
+    with _Win('1200x800') as w:
+        if not w.ok:
+            return
+        class _E:
+            def __init__(self, wd, ht):
+                self.width, self.height = wd, ht
+        n = []
+        w.win.schedule = lambda *_a: n.append(1)
+        cur = w.win._canvas_size
+        w.win._canvas_configured(_E(*cur))          # same size: a move
+        assert n == [], 'a move scheduled a redraw'
+        w.win._canvas_configured(_E(cur[0] - 60, cur[1]))
+        assert n == [1], 'a real resize did not schedule a redraw'
 
 
 def _run():

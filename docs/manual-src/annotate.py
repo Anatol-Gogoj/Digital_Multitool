@@ -228,6 +228,14 @@ S["09_SLDEA_Test"] = {
         # "later" is the failure mode `#248` exists to stop.
         {"match": "📊 Plot runs…", "badge_side": "bottom",
          "label": "Several finished runs on one figure — Export writes the PNG and its tidy CSV together"},
+        # Listed last rather than in screen order (it sits above the DRY RUN
+        # row) so this entry stays clear of the DEA-diam callout that `#262`
+        # is rewriting three lines up. Badge numbering follows list order, so
+        # the presets capsule is numbered last on the shot — cosmetic only.
+        {"match": "Run configuration presets",
+         "label": "Save the whole tab under a name and recall it — never the run name, and never the LIVE state"},
+        {"match": "Concentration (mL):", "extend_right": 95,
+         "label": "How much CNT ink went on — greyed out for carbon black and eGaIn, which are not inks"},
     ],
 }
 

@@ -218,6 +218,12 @@ S["09_SLDEA_Test"] = {
          "label": "Open Edge Review on a finished run — see the Edge Review section"},
         {"match": "🎚 Tune params…", "badge_side": "bottom",
          "label": "Advanced — confirmation-gated; Save rewrites the run's detection settings"},
+        # Listed last rather than in screen order (it sits above the DRY RUN
+        # row) so this entry stays clear of the DEA-diam callout that `#262`
+        # is rewriting three lines up. Badge numbering follows list order, so
+        # the presets capsule is numbered last on the shot — cosmetic only.
+        {"match": "Run configuration presets",
+         "label": "Save the whole tab under a name and recall it — never the run name, and never the LIVE state"},
     ],
 }
 

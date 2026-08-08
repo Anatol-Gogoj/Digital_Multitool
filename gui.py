@@ -38,6 +38,8 @@ import lcr_format
 import scope_trace
 import siggen_presets
 from siggen_presets import SignalGenPresetStore
+import sldea_presets
+from sldea_presets import SldeaPresetStore
 import sldea_profile
 from sldea_profile import (SldeaProfile, control_v_for_kv, measured_kv,
                            measured_ua, fmt_duration)
@@ -225,6 +227,7 @@ class InstrumentControlGUI:
         self.psu_live_job = None
         # SLDEA test state (host-sequenced staircase runner in a daemon thread)
         self.sldea_vars = {}
+        self.sldea_presets = SldeaPresetStore()   # named run configs (`#265`)
         self._sldea_profile = None
         self._sldea_running = False
         self._sldea_stop = False
@@ -2600,6 +2603,57 @@ LOGGING:
                     f"rate ACHIEVED is reported in the run log at the end.")
         self.sldea_vars['tel_hz'] = tel_hz
 
+        # Named run-configuration presets (`#265`) -- everything above this
+        # frame, saved under a name in the shared presets/ library so a
+        # campaign's staircase is recalled instead of retyped.
+        #
+        # It gets its OWN frame directly above the run row, deliberately:
+        #   * "Output & Measurement" rows 2-4 are being rearranged in
+        #     parallel (`#262`), and squeezing preset controls in among them
+        #     would collide for no benefit;
+        #   * sitting here, the DRY/LIVE checkbox is the next thing under
+        #     the Load button -- and a load always leaves the tab in DRY,
+        #     so the operator sees that state exactly where they clicked.
+        # What a preset does NOT carry (run name, DRY/LIVE) and why is in
+        # sldea_presets.py.
+        presf = ttk.LabelFrame(f, text="Run configuration presets", padding=8)
+        presf.pack(fill='x', padx=10, pady=(0, 8))
+        ttk.Label(presf, text="Preset:").pack(side=tk.LEFT)
+        self.sldea_preset_select = ttk.Combobox(presf, width=22,
+                                                state='readonly')
+        self.sldea_preset_select.pack(side=tk.LEFT, padx=(4, 6))
+        add_tooltip(self.sldea_preset_select,
+                    "Saved run configurations. They live in the same shared "
+                    "presets/ library as the signal-generator presets, so "
+                    "the other bench user sees yours.")
+        add_tooltip(ttk.Button(presf, text="Load",
+                               command=self.sldea_load_preset),
+                    "Fill this tab from the selected preset: the staircase, "
+                    "Output dir, scope/SG channels, DEA diameter, electrode, "
+                    "Trek inverts, and the watchdog and telemetry settings.\n"
+                    "Your RUN NAME is left alone, and the tab always comes "
+                    "back in DRY — a preset never re-arms the HV. Anything "
+                    "the preset could not supply is listed rather than "
+                    "quietly skipped.").pack(side=tk.LEFT)
+        add_tooltip(ttk.Button(presf, text="Delete",
+                               command=self.sldea_delete_preset),
+                    "Remove the selected preset from the shared library. "
+                    "Asks first.").pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(presf, text="Save current as:").pack(side=tk.LEFT,
+                                                       padx=(16, 2))
+        self.sldea_preset_name = ttk.Entry(presf, width=20)
+        self.sldea_preset_name.pack(side=tk.LEFT)
+        add_tooltip(self.sldea_preset_name,
+                    "Name for the settings currently on this tab. Reusing a "
+                    "name overwrites that preset, after asking.")
+        add_tooltip(ttk.Button(presf, text="Save",
+                               command=self.sldea_save_preset),
+                    "Store this tab's settings under that name. Fields are "
+                    "saved exactly as typed, so a half-finished number is "
+                    "never the reason a save fails.").pack(side=tk.LEFT,
+                                                           padx=(4, 0))
+        self.sldea_refresh_presets()
+
         runf = ttk.Frame(f)
         runf.pack(fill='x', padx=10, pady=8)
         self.sldea_dryrun = tk.BooleanVar(value=True)
@@ -2764,6 +2818,144 @@ LOGGING:
         d = filedialog.askdirectory()
         if d:
             self.sldea_outdir.set(d)
+
+    # ---- Named run-configuration presets (`#265`) ------------------------
+    # A widget-level snapshot of this tab, stored in the shared presets/
+    # library by sldea_presets.py -- the same storage conventions as the
+    # sig-gen presets and the bench profiles. Values are collected as the
+    # raw strings in the boxes (bench_profiles' rule) so Save never fails
+    # on a half-typed field.
+    #
+    # NOT in a preset: the run name (it identifies one run) and the
+    # DRY/LIVE state (a preset must never re-arm the HV). A load therefore
+    # forces the tab back to DRY -- see _sldea_apply_preset.
+
+    def _sldea_preset_targets(self):
+        """{preset field key -> widget or Tk variable} for every field.
+
+        sldea_presets owns the field LIST; this owns where each one lives on
+        screen. Both directions of drift are caught by the collector below
+        raising KeyError, and by the source-scan test in
+        tests/test_sldea_presets.py.
+        """
+        targets = dict(self.sldea_vars)          # entries + comboboxes
+        targets.update({
+            'outdir': self.sldea_outdir,
+            'updown': self.sldea_updown,
+            'trek_inv': self.sldea_trek_inv,
+            'wd_on': self.sldea_wd_on,
+            'tel_on': self.sldea_tel_on,
+            'autoproc': self.sldea_autoproc,
+        })
+        return targets
+
+    def _sldea_collect_preset(self):
+        """The tab's current settings as a complete preset snapshot."""
+        targets = self._sldea_preset_targets()
+        return {key: targets[key].get() for key in sldea_presets.ALL_FIELDS}
+
+    def _sldea_apply_preset(self, fields):
+        """Push a loaded preset's fields into the widgets.
+
+        Only the keys the preset actually carried are touched; anything
+        absent keeps whatever is on screen (the caller reports that). The
+        DRY/LIVE toggle is then forced back to DRY regardless of what it
+        was: reconfiguring a run and re-arming the high voltage stay two
+        separate, deliberate acts.
+        """
+        targets = self._sldea_preset_targets()
+        for key, value in fields.items():
+            w = targets.get(key)
+            if w is None:
+                continue
+            if key in sldea_presets.BOOL_FIELDS:
+                w.set(bool(value))
+            elif isinstance(w, ttk.Entry) and not isinstance(w, ttk.Combobox):
+                self._set_entry(w, value)
+            else:                                # Combobox or StringVar
+                w.set(value)
+        self.sldea_dryrun.set(True)
+        self._sldea_dry_toggle()
+        self._sldea_refresh()
+
+    def sldea_refresh_presets(self):
+        """Reload the preset list into the combobox."""
+        try:
+            names = self.sldea_presets.names()
+        except Exception:                        # unreadable share, say so
+            names = []                           # rather than fail the tab
+        self.sldea_preset_select['values'] = names
+        if names and self.sldea_preset_select.get() not in names:
+            self.sldea_preset_select.set(names[0])
+        elif not names:
+            self.sldea_preset_select.set('')
+
+    def sldea_save_preset(self):
+        name = self.sldea_preset_name.get().strip()
+        if not name:
+            messagebox.showerror("SLDEA preset", "Enter a preset name first")
+            return
+        if name in self.sldea_presets.names() and not messagebox.askyesno(
+                "SLDEA preset", f"Overwrite preset '{name}'?"):
+            return
+        try:
+            self.sldea_presets.save(name, self._sldea_collect_preset())
+        except Exception as e:
+            messagebox.showerror("SLDEA preset", str(e))
+            return
+        self.sldea_refresh_presets()
+        self.sldea_preset_select.set(name)
+        self.status_bar.config(
+            text=self._preset_note(f"SLDEA preset saved: {name}"))
+
+    def sldea_load_preset(self):
+        name = self.sldea_preset_select.get()
+        if not name:
+            messagebox.showerror("SLDEA preset", "Select a preset to load")
+            return
+        # Mid-run the worker already holds its own copy of every setting, so
+        # a load would change nothing except what the operator is looking
+        # at -- which is worse than refusing.
+        if self._sldea_running:
+            messagebox.showinfo("SLDEA preset",
+                                "A run is in progress. Loading a preset now "
+                                "would not change it — wait for it to "
+                                "finish, or ■ Abort first.")
+            return
+        try:
+            fields, warnings = self.sldea_presets.load(name)
+        except Exception as e:
+            messagebox.showerror("SLDEA preset", str(e))
+            return
+        self._sldea_apply_preset(fields)
+        # Never half-apply in silence: fields have been moving (`#231`), so
+        # say exactly what did not come across.
+        if warnings:
+            messagebox.showwarning(
+                "SLDEA preset",
+                f"Preset '{name}' loaded, but not everything in it was "
+                f"applied:\n\n- " + "\n- ".join(warnings))
+        self.status_bar.config(
+            text=f"SLDEA preset loaded: {name} — run name untouched, tab "
+                 f"left in DRY")
+        self._sldea_log(f"preset loaded: {name}" + (
+            f" — {len(warnings)} setting(s) NOT applied" if warnings else ""))
+
+    def sldea_delete_preset(self):
+        name = self.sldea_preset_select.get()
+        if not name:
+            messagebox.showerror("SLDEA preset", "Select a preset to delete")
+            return
+        if not messagebox.askyesno("SLDEA preset",
+                                   f"Delete preset '{name}'?"):
+            return
+        try:
+            self.sldea_presets.delete(name)
+        except Exception as e:
+            messagebox.showerror("SLDEA preset", str(e))
+            return
+        self.sldea_refresh_presets()
+        self.status_bar.config(text=f"SLDEA preset deleted: {name}")
 
     def sldea_run(self):
         if self._sldea_running:

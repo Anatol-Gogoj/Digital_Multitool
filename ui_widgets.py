@@ -133,12 +133,41 @@ class SplashScreen(tk.Toplevel):
             pass
 
 
+def content_width(canvas_width, content_reqwidth):
+    """Width to give a ScrollableTab's content inside a canvas that wide.
+
+    Stretching the content to the canvas width is load-bearing: it is what
+    makes every tab frame fill the window at comfortable widths. Doing it
+    UNCONDITIONALLY was the `#225` bug -- content wider than the window got
+    squeezed and clipped instead of becoming scrollable, with no way to
+    reach it. Taking the max keeps the stretch and lets genuinely wide
+    content overflow into scrollable territory.
+    """
+    return max(int(canvas_width), int(content_reqwidth))
+
+
+def needs_hscroll(canvas_width, content_reqwidth):
+    """Should the horizontal scrollbar be on screen?
+
+    Only when something is actually off to the right -- a permanent h-bar
+    under every tab would be its own annoyance. Strict `>`: showing the bar
+    costs VERTICAL space and never horizontal, so the decision cannot
+    oscillate the way a conditional v-bar would.
+    """
+    return int(content_reqwidth) > int(canvas_width)
+
+
 class ScrollableTab(ttk.Frame):
-    """Notebook tab with a vertical scrollbar when content doesn't fit.
+    """Notebook tab with scrollbars when content doesn't fit the window.
 
     Build the tab's content into `.body` instead of the tab itself.
-    The scrollbar only matters when the window is shorter than the
-    content -- exactly the cut-off case it fixes.
+
+    Vertical: the bar is always there and scrolls when content is taller
+    than the window -- the original cut-off case.
+    Horizontal (`#225`): the bar appears ONLY when content is genuinely
+    wider than the canvas. Wide content used to be pinned to the canvas
+    width and clipped, unreachable by any means; Shift+wheel and
+    Left/Right now reach it.
     """
 
     def __init__(self, notebook):
@@ -148,9 +177,22 @@ class ScrollableTab(ttk.Frame):
                                  **({'bg': bg} if bg else {}))
         vbar = ttk.Scrollbar(self, orient='vertical',
                              command=self._canvas.yview)
-        self._canvas.configure(yscrollcommand=vbar.set)
-        vbar.pack(side=tk.RIGHT, fill='y')
-        self._canvas.pack(side=tk.LEFT, fill='both', expand=True)
+        self._hbar = ttk.Scrollbar(self, orient='horizontal',
+                                   command=self._canvas.xview)
+        self._canvas.configure(yscrollcommand=vbar.set,
+                               xscrollcommand=self._hbar.set)
+        # grid rather than pack: the h-bar has to come and go underneath the
+        # canvas without disturbing the v-bar, and grid_remove()/grid()
+        # restores its slot exactly. Nothing outside this class is placed in
+        # the tab frame itself -- callers only ever touch `.body`.
+        self._canvas.grid(row=0, column=0, sticky='nsew')
+        vbar.grid(row=0, column=1, sticky='ns')
+        self._hbar.grid(row=1, column=0, sticky='ew')
+        self._hbar.grid_remove()             # on demand only
+        self._hbar_shown = False
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+
         self.body = ttk.Frame(self._canvas)
         self._win = self._canvas.create_window((0, 0), window=self.body,
                                                anchor='nw')
@@ -163,16 +205,44 @@ class ScrollableTab(ttk.Frame):
             self._canvas.bind(key,
                               lambda e, n=n: self._canvas.yview_scroll(
                                   n, 'units'))
+        for key, n in (('<Left>', -1), ('<Right>', 1)):
+            self._canvas.bind(key,
+                              lambda e, n=n: self._canvas.xview_scroll(
+                                  n, 'units'))
         # Mouse wheel scrolls whichever tab the pointer is over. bind_all
         # is grabbed on Enter and released on Leave so tabs don't fight.
         self.bind('<Enter>', self._bind_wheel)
         self.bind('<Leave>', self._unbind_wheel)
 
+    # ---- layout ---------------------------------------------------------
+
+    def _refit(self, canvas_w=None):
+        """Re-apply the content width and the h-bar show/hide decision."""
+        if canvas_w is None:
+            canvas_w = self._canvas.winfo_width()
+        if canvas_w <= 1:
+            return              # not laid out yet -- nothing to decide on
+        need = self.body.winfo_reqwidth()
+        self._canvas.itemconfigure(self._win,
+                                   width=content_width(canvas_w, need))
+        show = needs_hscroll(canvas_w, need)
+        if show != self._hbar_shown:
+            (self._hbar.grid if show else self._hbar.grid_remove)()
+            self._hbar_shown = show
+
     def _on_body_configure(self, _event):
+        # Content changed size: the scrollregion AND the width / h-bar
+        # decision both follow it, so a tab that grows at runtime does not
+        # keep the width it was born with.
         self._canvas.configure(scrollregion=self._canvas.bbox('all'))
+        self._refit()
 
     def _on_canvas_configure(self, event):
-        self._canvas.itemconfigure(self._win, width=event.width)
+        # event.width, not winfo_width(): during <Configure> the widget may
+        # still report its previous size.
+        self._refit(event.width)
+
+    # ---- pointer --------------------------------------------------------
 
     def _wheel(self, event):
         if event.num == 4 or event.delta > 0:
@@ -180,11 +250,39 @@ class ScrollableTab(ttk.Frame):
         elif event.num == 5 or event.delta < 0:
             self._canvas.yview_scroll(2, 'units')
 
+    def _wheel_x(self, event):
+        """Shift+wheel (and an X11 tilt wheel) scrolls sideways -- the
+        platform convention, and the pointer route to off-screen content."""
+        if event.num in (4, 6) or event.delta > 0:
+            self._canvas.xview_scroll(-2, 'units')
+        elif event.num in (5, 7) or event.delta < 0:
+            self._canvas.xview_scroll(2, 'units')
+
+    _WHEEL_SEQS = (
+        ('<Button-4>', '_wheel'),            # X11 up
+        ('<Button-5>', '_wheel'),            # X11 down
+        ('<MouseWheel>', '_wheel'),          # other OSes
+        # Horizontal. The Shift- patterns are more specific than the plain
+        # ones above, so Tk prefers them while Shift is held.
+        ('<Shift-Button-4>', '_wheel_x'),
+        ('<Shift-Button-5>', '_wheel_x'),
+        ('<Shift-MouseWheel>', '_wheel_x'),
+        ('<Button-6>', '_wheel_x'),          # X11 tilt wheel left
+        ('<Button-7>', '_wheel_x'),          # X11 tilt wheel right
+    )
+
     def _bind_wheel(self, _event=None):
-        self._canvas.bind_all('<Button-4>', self._wheel)     # X11 up
-        self._canvas.bind_all('<Button-5>', self._wheel)     # X11 down
-        self._canvas.bind_all('<MouseWheel>', self._wheel)   # other OSes
+        for seq, handler in self._WHEEL_SEQS:
+            try:
+                self._canvas.bind_all(seq, getattr(self, handler))
+            except tk.TclError:
+                # Windows Tk knows buttons 1-5 only and rejects the X11
+                # tilt wheel outright. Bind what the platform accepts.
+                pass
 
     def _unbind_wheel(self, _event=None):
-        for seq in ('<Button-4>', '<Button-5>', '<MouseWheel>'):
-            self._canvas.unbind_all(seq)
+        for seq, _handler in self._WHEEL_SEQS:
+            try:
+                self._canvas.unbind_all(seq)
+            except tk.TclError:
+                pass

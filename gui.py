@@ -2635,6 +2635,14 @@ LOGGING:
                     "with the current outlines, redrawn as you drag the "
                     "thresholds. Save writes them into the run's setup.txt "
                     "for Edge Review.").pack(side=tk.LEFT, padx=(8, 0))
+        add_tooltip(ttk.Button(runf, text="📊 Plot runs…",
+                               command=lambda: self._sldea_open_plot(None)),
+                    "Put several finished runs on one figure: pick the runs, "
+                    "tick what to draw, watch it redraw. Export writes the "
+                    "300 dpi PNG and the tidy per-snapshot CSV behind it, so "
+                    "the figure can be traced back to its numbers. Area "
+                    "needs reviewed runs; current and power work on raw "
+                    "ones.").pack(side=tk.LEFT, padx=(8, 0))
         self.sldea_status = tk.Label(runf, text="idle", anchor='w', fg='#555')
         self.sldea_status.pack(side=tk.LEFT, padx=12)
 
@@ -3252,6 +3260,27 @@ LOGGING:
                 text=f"Edge tuner opened on {os.path.basename(target)}")
         except Exception as e:
             messagebox.showerror("Edge tuner", f"Could not launch: {e}")
+
+    def _sldea_open_plot(self, rundir):
+        """Launch the cross-run plot window (its own process, like the two
+        buttons above) — issue `#223`.
+
+        It is passed the output dir, NOT a resolved run: unlike Edge Review
+        and the tuner this tool works on SEVERAL runs at once, so what it
+        needs is the folder to list, and it does its own multi-select.
+        Passing a single run still works — it lists that run's siblings and
+        preselects it — which is what makes this safe to call with a
+        rundir from anywhere later."""
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              'sldea_plot_gui.py')
+        target = rundir or self.sldea_outdir.get()
+        try:
+            subprocess.Popen([sys.executable, script, target],
+                             start_new_session=True)
+            self.status_bar.config(
+                text=f"Plot window opened on {os.path.basename(target)}")
+        except Exception as e:
+            messagebox.showerror("SLDEA plot", f"Could not launch: {e}")
 
     def sldea_abort(self):
         self._sldea_stop = True

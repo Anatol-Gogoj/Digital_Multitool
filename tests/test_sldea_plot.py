@@ -503,6 +503,200 @@ def test_tidy_names_each_areas_edge_convention():
         shutil.rmtree(d, ignore_errors=True)
 
 
+# --------------------------------------------------------------------------
+# the shared front-end surface (`#223`): the window is a front end to these,
+# so anything that lets the two drift apart is the bug these tests hunt
+# --------------------------------------------------------------------------
+
+def test_make_opts_maps_choices_and_refuses_bad_combinations():
+    o, err = sp.make_opts()
+    assert err is None
+    # the defaults are the CLI's: bands and breakdown marks ON, the rest off
+    assert o == {'mode': 'area', 'vs_area': False, 'prepost': False,
+                 'mean': False, 'bands': True, 'breakdown': True,
+                 'title': None}
+    o, err = sp.make_opts(mode='current', vs_area=True, prepost=True,
+                          mean=True, bands=False, breakdown=False,
+                          title='x')
+    assert err is None and o['vs_area'] and not o['bands']
+    assert o['title'] == 'x'
+    # an empty title is no title, not an empty heading
+    assert sp.make_opts(title='')[0]['title'] is None
+    # the two illegal states, refused with the CLI's own wording
+    assert sp.make_opts(mode='bogus')[0] is None
+    assert '--mode' in sp.make_opts(mode='bogus')[1]
+    assert sp.make_opts(mode='area', vs_area=True)[0] is None
+    assert '--vs-area' in sp.make_opts(mode='area', vs_area=True)[1]
+
+
+def test_cli_flags_land_on_the_shared_options_dict():
+    # The mapping the window has to match. Captured off the REAL CLI path
+    # rather than re-derived, so a flag that stops reaching the renderer
+    # fails here.
+    seen = {}
+    real = sp.export
+    sp.export = lambda runs, opts, out, stem, warn=None: (
+        seen.update(opts=opts, out=out, stem=stem), ('p.png', 'p.csv'))[1]
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(6))
+        assert sp.main([d, '--out', d]) == 0
+        assert seen['opts'] == sp.make_opts()[0]
+        assert seen['stem'] == 'sldea_plot_area'
+        assert sp.main([d, '--mode', 'current', '--vs-area', '--prepost',
+                        '--mean', '--no-bands', '--no-breakdown',
+                        '--title', 'T', '--stem', 's', '--out', d]) == 0
+        assert seen['opts'] == sp.make_opts(
+            mode='current', vs_area=True, prepost=True, mean=True,
+            bands=False, breakdown=False, title='T')[0]
+        assert seen['stem'] == 's'
+    finally:
+        sp.export = real
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_output_paths_keep_the_csv_beside_the_png():
+    png, tidy = sp.output_paths('/tmp/o', 'fig', 'area')
+    assert os.path.basename(png) == 'fig.png'
+    assert os.path.basename(tidy) == 'fig.csv'
+    assert os.path.dirname(png) == os.path.dirname(tidy)
+    # no stem -> the mode's default, so the two modes cannot overwrite
+    # each other's figure by accident
+    assert sp.output_paths('o', '', 'current')[0].endswith(
+        'sldea_plot_current.png')
+    assert sp.output_paths('o', None, 'power')[1].endswith(
+        'sldea_plot_power.csv')
+    assert sp.output_paths('o', '  ', 'area')[0].endswith(
+        'sldea_plot_area.png')
+
+
+def test_export_never_writes_a_png_without_its_csv():
+    """`#223`: the tidy CSV is the figure's evidence. A front end that
+    could draw to disk without it would break the provenance that makes a
+    figure citable -- so export() is the only write path and it writes
+    both."""
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        runs = sp.prepare_runs([d], sp.make_opts()[0])
+        assert runs
+        sub = os.path.join(out, 'made', 'up')      # created on demand
+        png, tidy = sp.export(runs, sp.make_opts()[0], sub, 'fig')
+        assert os.path.exists(png) and os.path.exists(tidy)
+        with open(tidy, encoding='utf-8') as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) == 17 and rows[0].keys() == \
+            dict.fromkeys(sp.TIDY_COLS).keys()
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_window_export_is_byte_identical_to_the_cli():
+    """The window must not be a fork. save_figure() skips pyplot (it runs
+    in a process that owns a live Tk canvas, and matplotlib.use('Agg')
+    would switch the backend underneath it) -- but it has to land on the
+    same bytes as the command line, or 'the same figure' is a story."""
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        for mode in sp.MODES:
+            opts = sp.make_opts(mode=mode)[0]
+            runs = sp.prepare_runs([d], opts)
+            cli = os.path.join(out, mode + '_cli.png')
+            if mode == 'area':
+                sp.figure_area(runs, opts, cli)
+            else:
+                sp.figure_signal(runs, opts, cli)
+            gui = sp.save_figure(runs, opts, os.path.join(out, mode + '_g.png'))
+            with open(cli, 'rb') as a, open(gui, 'rb') as b:
+                assert a.read() == b.read(), mode
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_prepare_runs_is_the_gate_both_front_ends_pass_through():
+    # A raw run: area mode drops it with a reason, current keeps it. The
+    # window shows exactly these warnings, so the wording is the contract.
+    d = _mktmp()
+    try:
+        rows = _healthy_rows(6)
+        for r in rows:
+            r['active_area_mm2'] = ''
+            r['active_area_px'] = ''
+            r['notes'] = ''
+        _fake_run(d, rows)
+        warns = []
+        assert sp.prepare_runs([d], sp.make_opts()[0], warns.append) == []
+        assert any('no reviewed areas' in w for w in warns), warns
+        warns = []
+        runs = sp.prepare_runs([d], sp.make_opts(mode='current')[0],
+                               warns.append)
+        assert len(runs) == 1 and runs[0]['color'] == sp.TOL_BRIGHT[0]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_prepare_runs_clears_a_previous_modes_area_blanking():
+    """The window reuses loaded run dicts across redraws. 'suspect_kept'
+    is set per mode, so leaving a stale True behind would blank the area
+    columns of a perfectly good area-mode CSV."""
+    d = _mktmp()
+    try:
+        rows = _healthy_rows(6, ts='2026-07-20T10:00:00')
+        for r in rows:
+            if r.get('active_area_mm2'):
+                r['active_area_mm2'] = round(r['active_area_mm2'] * 2.5, 3)
+        _fake_run(d, rows)
+        cache = {}
+
+        def load(a, warn):
+            if a not in cache:
+                cache[a] = sp.load_run(a, warn)
+            return cache[a]
+
+        runs = sp.prepare_runs([d], sp.make_opts(mode='current')[0],
+                               load=load)
+        assert runs and runs[0]['suspect_kept'] is True
+        # same dict, now with the era override on: areas are legitimate
+        runs = sp.prepare_runs([d], sp.make_opts(mode='current')[0],
+                               allow_suspect=True, load=load)
+        assert runs and runs[0]['suspect_kept'] is False
+        assert runs[0] is cache[d], 'the cached dict was not reused'
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_gui_flag_opens_the_window_without_run_arguments():
+    """`--gui` is the one path that does not need runs on the command
+    line -- the window has its own picker. Flags given alongside it
+    preselect."""
+    import sldea_plot_gui
+    seen = {}
+    real = sldea_plot_gui.launch
+    sldea_plot_gui.launch = lambda args, **kw: (
+        seen.update(args=list(args), **kw), 0)[1]
+    try:
+        assert sp.main(['--gui']) == 0
+        assert seen['args'] == [] and seen['opts']['mode'] == 'area'
+        assert seen['out_dir'] is None and seen['stem'] is None
+        assert sp.main(['--gui', 'RUNA', 'RUNB', '--mode', 'power',
+                        '--no-bands', '--out', 'O', '--stem', 'S']) == 0
+        assert seen['args'] == ['RUNA', 'RUNB']
+        assert seen['opts']['mode'] == 'power'
+        assert seen['opts']['bands'] is False
+        assert seen['out_dir'] == 'O' and seen['stem'] == 'S'
+        # a bad combination is still refused before any window opens
+        assert sp.main(['--gui', '--mode', 'nope']) == 2
+    finally:
+        sldea_plot_gui.launch = real
+
+
 def _run():
     names = [n for n in sorted(globals()) if n.startswith('test_')]
     for n in names:

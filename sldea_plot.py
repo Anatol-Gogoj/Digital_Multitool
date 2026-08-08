@@ -6,6 +6,7 @@ Usage:
                          [--vs-area] [--prepost] [--mean] [--no-bands]
                          [--no-breakdown] [--out DIR] [--stem NAME]
                          [--title TEXT] [--allow-suspect-scale]
+    python sldea_plot.py --gui [RUN ...]        # window (see below)
     python sldea_plot.py --selftest [OUT.png]
 
 Each RUN is a run directory, a parent full of runs (newest wins) or a bench
@@ -60,6 +61,16 @@ Breakdown marks (the P3_5 lesson, 2026-08-05 semantics):
     vertical instead of being silently dropped. Rows are NEVER dropped or
     restyled because of breakdown annotations -- 'post-breakdown' rows plot
     exactly like any other row.
+
+Window (`#223`):
+    --gui opens the point-and-click front end (sldea_plot_gui.py, also
+    launchable on its own and from the app's SLDEA tab). It is a FRONT END
+    to the functions below, not a second implementation: it picks runs with
+    prepare_runs, draws with draw() and writes with export(), so a figure
+    made in the window and the same figure made here are the same figure.
+    Any RUN arguments and flags given alongside --gui preselect the window.
+    The headless paths are unchanged -- batch scripting and --selftest are
+    real usage and stay first-class.
 """
 import csv
 import io
@@ -76,6 +87,14 @@ import sldea_edge as se
 # figure ships with its tidy CSV as the readable fallback.
 TOL_BRIGHT = ['#4477AA', '#66CCEE', '#228833', '#CCBB44',
               '#EE6677', '#AA3377', '#BBBBBB']
+
+MODES = ('area', 'current', 'power')
+
+# Figure geometry lives here rather than at each call site: the CLI's PNG,
+# the window's Export and the window's on-screen canvas all size from this
+# one table, so an exported figure cannot silently differ in shape from the
+# command-line one (`#223`).
+FIGSIZE = {'area': (12.6, 5.4), 'current': (9, 5.4), 'power': (9, 5.4)}
 
 MACHINE_BAND_PCT = 2.0   # auto-accepted (half-height) stretches
 TRACED_BAND_PCT = 1.0    # hand-traced (outer-toe) stretches
@@ -315,13 +334,16 @@ def _legend(ax, run_handles, style_rows):
     ax.legend(handles=handles, fontsize=8, loc='upper left', framealpha=0.9)
 
 
-def figure_area(runs, opts, path, warn=lambda m: None):
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
+def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
+    """Draw the two-panel area figure into ALREADY-CREATED axes.
+
+    Split out of figure_area for `#223`: the window needs to draw into its
+    live Tk canvas without saving a file, and a second drawing routine
+    would be a second set of plotting rules to keep in step. Everything
+    that decides what a figure LOOKS like lives here; the callers only
+    decide where the pixels go."""
     from matplotlib.lines import Line2D
 
-    fig, (axl, axr) = plt.subplots(1, 2, figsize=(12.6, 5.4))
     run_handles = []
     had_x = had_fallback = False
     for run in runs:
@@ -422,6 +444,18 @@ def figure_area(runs, opts, path, warn=lambda m: None):
            "incomplete on all runs).")
     fig.text(0.01, 0.005, cap, fontsize=7, color='#555555')
     fig.tight_layout(rect=(0, 0.05, 1, 1))
+    return fig
+
+
+def figure_area(runs, opts, path, warn=lambda m: None):
+    """The area figure as a 300 dpi PNG (kept for direct callers/tests).
+    Same drawing as the window -- see draw_area."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    fig, (axl, axr) = plt.subplots(1, 2, figsize=FIGSIZE['area'])
+    draw_area(fig, axl, axr, runs, opts, warn)
     fig.savefig(path, dpi=300)
     plt.close(fig)
     return path
@@ -450,12 +484,10 @@ def power_mw(r, med):
     return abs(r['kv'] * ua)
 
 
-def figure_signal(runs, opts, path, warn=lambda m: None):
-    """current / power vs kV (or vs area with --vs-area), per snapshot.
-    Power is offset-corrected per run (see power_mw)."""
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
+def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
+    """current / power vs kV (or vs area with --vs-area), per snapshot,
+    into an ALREADY-CREATED axis. Power is offset-corrected per run (see
+    power_mw). The window and the CLI both draw through here (`#223`)."""
     from matplotlib.lines import Line2D
 
     power = opts['mode'] == 'power'
@@ -470,7 +502,6 @@ def figure_signal(runs, opts, path, warn=lambda m: None):
     def xval(r):
         return r['area_mm2'] if opts['vs_area'] else r['kv']
 
-    fig, ax = plt.subplots(figsize=(9, 5.4))
     run_handles = []
     had_x = had_adv = False
     raw_power = []
@@ -547,8 +578,50 @@ def figure_signal(runs, opts, path, warn=lambda m: None):
               "(07-29 ≈ −16 µA idle)."))
     fig.text(0.01, 0.005, cap, fontsize=7, color='#555555')
     fig.tight_layout(rect=(0, 0.05, 1, 1))
+    return fig
+
+
+def figure_signal(runs, opts, path, warn=lambda m: None):
+    """The current/power figure as a 300 dpi PNG (kept for direct
+    callers/tests). Same drawing as the window -- see draw_signal."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=FIGSIZE[opts['mode']])
+    draw_signal(fig, ax, runs, opts, warn)
     fig.savefig(path, dpi=300)
     plt.close(fig)
+    return path
+
+
+def draw(fig, runs, opts, warn=lambda m: None):
+    """Draw the whole figure for opts['mode'] into a bare Figure, creating
+    the axes it needs. THE entry point for anything that renders: the
+    window's live canvas calls it on every toggle, and save_figure() calls
+    it for the PNG, so what you see on screen is what lands in the file."""
+    if opts['mode'] == 'area':
+        axl, axr = fig.subplots(1, 2)
+        return draw_area(fig, axl, axr, runs, opts, warn)
+    return draw_signal(fig, fig.subplots(), runs, opts, warn)
+
+
+def save_figure(runs, opts, path, warn=lambda m: None):
+    """Write the 300 dpi PNG at the canonical geometry, WITHOUT pyplot.
+
+    figure_area/figure_signal force the Agg backend, which in a process
+    that already owns a live Tk canvas means switching backends underneath
+    it. This path never imports pyplot at all, so the window can export
+    while its preview stays alive -- and headless callers get the same
+    bytes, because it is the same Figure, the same draw() and the same
+    dpi."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    fig = Figure(figsize=FIGSIZE[opts['mode']])
+    FigureCanvasAgg(fig)
+    draw(fig, runs, opts, warn)
+    fig.savefig(path, dpi=300)
     return path
 
 
@@ -608,6 +681,154 @@ def write_tidy(runs, path):
 
 
 # ---------------------------------------------------------------------------
+# the shared front-end surface: options, output paths, run preparation
+#
+# Everything below is what the CLI's main() and the window (`#223`) BOTH go
+# through. Keeping it here rather than in the window is the whole point:
+# a run the command line excludes is excluded in the window too, for the
+# same reason and with the same warning text, and neither front end can
+# grow its own idea of what a figure's options or filenames are.
+# ---------------------------------------------------------------------------
+
+def default_stem(mode):
+    """The output stem when nobody chose one."""
+    return f"sldea_plot_{mode}"
+
+
+def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
+              bands=True, breakdown=True, title=None):
+    """-> (opts dict, error message or None).
+
+    The CLI builds this from its flags and the window from its tick boxes,
+    so an illegal combination is refused identically in both. Error strings
+    are the CLI's own wording -- main() prints them verbatim."""
+    if mode not in MODES:
+        return None, f"unknown --mode {mode} (area | current | power)"
+    if vs_area and mode == 'area':
+        return None, '--vs-area applies to current/power modes only'
+    return {'mode': mode, 'vs_area': bool(vs_area),
+            'prepost': bool(prepost), 'mean': bool(mean),
+            'bands': bool(bands), 'breakdown': bool(breakdown),
+            'title': title or None}, None
+
+
+def needs_areas(opts):
+    """True when this figure reads reviewed areas -- area mode, or an area
+    x axis. Current/power vs kV work on RAW runs, which is the distinction
+    the window has to surface (`#223`: it was buried in --help)."""
+    return opts['mode'] == 'area' or opts['vs_area']
+
+
+def output_paths(out_dir, stem, mode):
+    """-> (png_path, csv_path).
+
+    The tidy CSV is derived from the PNG's stem and written beside it, and
+    that is not a convenience: the per-snapshot CSV is the figure's
+    evidence, and a figure that cannot be traced back to its numbers is not
+    citable (`#223`). Derived in ONE place so no caller can drift."""
+    stem = (stem or '').strip() or default_stem(mode)
+    return (os.path.join(out_dir, stem + '.png'),
+            os.path.join(out_dir, stem + '.csv'))
+
+
+def export(runs, opts, out_dir, stem, warn=lambda m: None):
+    """Render the figure AND write its tidy CSV -> (png, csv).
+
+    The single write path for both front ends. There is deliberately no
+    way to ask for the PNG alone: on-screen preview is free, but anything
+    that lands on disk lands with its numbers."""
+    os.makedirs(out_dir, exist_ok=True)
+    png, tidy = output_paths(out_dir, stem, opts['mode'])
+    save_figure(runs, opts, png, warn)
+    write_tidy(runs, tidy)
+    return png, tidy
+
+
+def prepare_runs(args, opts, warn=lambda m: None, allow_suspect=False,
+                 load=None):
+    """Resolve, load, era-guard, filter and colour the runs -> list.
+
+    Returns [] when nothing is plottable (the caller reports the collected
+    warnings). Every guard the CLI grew lives here, so the window inherits
+    them instead of reimplementing them: the pre-2026-07-28 scale-bug era,
+    the reviewed-areas requirement, the missing-baseline case, the palette
+    wrap and the cross-run anchor-provenance advisory.
+
+    `load` overrides load_run. The window redraws on every tick box and
+    re-reading each run's CSV (and recomputing its breakdown flags) that
+    often made it feel broken, so it passes a cache -- the guards below
+    still run every time, because which runs are plottable depends on the
+    mode."""
+    load = load or load_run
+    uses_areas = needs_areas(opts)
+    runs = []
+    for a in args:
+        run = load(a, warn)
+        if run is None:
+            continue
+        # explicit rather than defaulted: a run dict reused across two
+        # renders (the window redraws on every toggle) must not carry a
+        # previous mode's blanking decision into this one
+        run['suspect_kept'] = False
+        if suspect_old_scale(run):
+            if allow_suspect:
+                warn(f"{run['name']}: pre-{SCALE_FIX_DATE} areas "
+                     f"KEPT on --allow-suspect-scale")
+            elif uses_areas:
+                warn(f"{run['name']}: EXCLUDED -- areas predate the "
+                     f"{SCALE_FIX_DATE} scale fix and cannot be verified "
+                     f"against the nominal disc (2.3-2.7x bug era). "
+                     f"Reprocess, or override with --allow-suspect-scale")
+                continue
+            else:
+                # currents are unaffected by the blob-scale bug -- keep
+                # the run, but keep its bug-era areas out of the export
+                run['suspect_kept'] = True
+                warn(f"{run['name']}: areas predate the "
+                     f"{SCALE_FIX_DATE} scale fix -- run kept for "
+                     f"{opts['mode']} mode (currents unaffected); area "
+                     f"columns blanked in the tidy CSV")
+        runs.append(run)
+    if uses_areas:
+        kept = []
+        for run in runs:
+            has_areas = any(r['area_mm2'] is not None for r in run['rows'])
+            if has_areas and (opts['mode'] != 'area' or run['a0']):
+                kept.append(run)
+            elif not has_areas:
+                warn(f"{run['name']}: no reviewed areas -- skipped "
+                     f"({'area mode' if opts['mode'] == 'area' else '--vs-area'} "
+                     f"needs them; current/power vs kV work on raw "
+                     f"runs)")
+            else:
+                warn(f"{run['name']}: areas present but no "
+                     f"baseline A0 -- cannot normalize, skipped in "
+                     f"area mode")
+        runs = kept
+    if not runs:
+        return runs
+    if len(runs) > len(TOL_BRIGHT):
+        warn(f"{len(runs)} runs > {len(TOL_BRIGHT)} palette "
+             f"colors -- colors repeat; consider fewer runs per "
+             f"figure")
+    if uses_areas and len(runs) > 1:
+        # cross-run absolute mm² inherits each run's anchor provenance
+        # (audit 2026-08-05): a recorded manual 📏 anchor and a pre-gate
+        # automatic one are different instruments
+        with_anchor = [r['name'] for r in runs if r.get('anchor')]
+        without = [r['name'] for r in runs if not r.get('anchor')]
+        if with_anchor and without:
+            warn(f"absolute-scale provenance differs across runs: "
+                 f"{len(with_anchor)} carry a recorded manual anchor "
+                 f"({', '.join(with_anchor)}), {len(without)} predate it "
+                 f"({', '.join(without)}) — cross-run absolute mm² "
+                 f"comparisons inherit that difference (A/A0 is safe)")
+    for i, run in enumerate(runs):
+        run['color'] = TOL_BRIGHT[i % len(TOL_BRIGHT)]
+    return runs
+
+
+# ---------------------------------------------------------------------------
 # selftest (synthetic runs, no bench data -- run data never enters the repo)
 # ---------------------------------------------------------------------------
 
@@ -663,8 +884,7 @@ def _selftest(out_png):
         run['color'] = TOL_BRIGHT[i]
     assert runs[0]['flags'] == {}, runs[0]['flags']
     assert runs[1]['flags'], 'synthetic breakdown not confirmed'
-    opts = {'mode': 'area', 'prepost': False, 'mean': True, 'bands': True,
-            'breakdown': True, 'vs_area': False, 'title': 'selftest'}
+    opts, _ = make_opts(mode='area', mean=True, title='selftest')
     figure_area(runs, opts, out_png, warns.append)
     write_tidy(runs, os.path.splitext(out_png)[0] + '.csv')
     print(f"selftest ok -- wrote {out_png}")
@@ -676,7 +896,8 @@ def _selftest(out_png):
 # ---------------------------------------------------------------------------
 
 _BOOL_FLAGS = ('--vs-area', '--prepost', '--mean', '--no-bands',
-               '--no-breakdown', '--allow-suspect-scale', '--selftest')
+               '--no-breakdown', '--allow-suspect-scale', '--selftest',
+               '--gui')
 _VALUED_FLAGS = ('--mode', '--out', '--stem', '--title')
 
 _orig_stdout = None     # keeps the replaced wrapper alive: a GC'd
@@ -737,104 +958,50 @@ def main(argv):
     args, flags, vals = parsed
     if '--selftest' in flags:
         return _selftest(args[0] if args else 'sldea_plot_selftest.png')
+
+    mode = vals.get('--mode', 'area')
+    opts, err = make_opts(mode=mode,
+                          vs_area='--vs-area' in flags,
+                          prepost='--prepost' in flags,
+                          mean='--mean' in flags,
+                          bands='--no-bands' not in flags,
+                          breakdown='--no-breakdown' not in flags,
+                          title=vals.get('--title'))
+    if '--gui' in flags:
+        # the window is a front end to everything below, and it does its own
+        # run picking -- so unlike the headless paths it does NOT require
+        # run arguments; any given preselect it (`#223`)
+        if err:
+            print(err)
+            return 2
+        import sldea_plot_gui
+        return sldea_plot_gui.launch(args, opts=opts,
+                                     out_dir=vals.get('--out'),
+                                     stem=vals.get('--stem'))
+    # order preserved from before the `#223` refactor: a bare invocation
+    # prints usage, and only an invocation that HAS runs gets told its mode
+    # or --vs-area is wrong
     if not args:
         _usage()
         return 2
+    if err:
+        print(err)
+        return 2
 
-    mode = vals.get('--mode', 'area')
-    if mode not in ('area', 'current', 'power'):
-        print(f"unknown --mode {mode} (area | current | power)")
-        return 2
-    opts = {
-        'mode': mode,
-        'vs_area': '--vs-area' in flags,
-        'prepost': '--prepost' in flags,
-        'mean': '--mean' in flags,
-        'bands': '--no-bands' not in flags,
-        'breakdown': '--no-breakdown' not in flags,
-        'title': vals.get('--title'),
-    }
-    if opts['vs_area'] and mode == 'area':
-        print('--vs-area applies to current/power modes only')
-        return 2
     out_dir = vals.get('--out', '.')
     os.makedirs(out_dir, exist_ok=True)
-    stem = vals.get('--stem', f'sldea_plot_{mode}')
-    uses_areas = mode == 'area' or opts['vs_area']
+    stem = vals.get('--stem', default_stem(mode))
 
     warns = []
-    runs = []
-    for a in args:
-        run = load_run(a, warns.append)
-        if run is None:
-            continue
-        if suspect_old_scale(run):
-            if '--allow-suspect-scale' in flags:
-                warns.append(f"{run['name']}: pre-{SCALE_FIX_DATE} areas "
-                             f"KEPT on --allow-suspect-scale")
-            elif uses_areas:
-                warns.append(
-                    f"{run['name']}: EXCLUDED -- areas predate the "
-                    f"{SCALE_FIX_DATE} scale fix and cannot be verified "
-                    f"against the nominal disc (2.3-2.7x bug era). "
-                    f"Reprocess, or override with --allow-suspect-scale")
-                continue
-            else:
-                # currents are unaffected by the blob-scale bug -- keep
-                # the run, but keep its bug-era areas out of the export
-                run['suspect_kept'] = True
-                warns.append(f"{run['name']}: areas predate the "
-                             f"{SCALE_FIX_DATE} scale fix -- run kept for "
-                             f"{mode} mode (currents unaffected); area "
-                             f"columns blanked in the tidy CSV")
-        runs.append(run)
-    if uses_areas:
-        kept = []
-        for run in runs:
-            has_areas = any(r['area_mm2'] is not None for r in run['rows'])
-            if has_areas and (mode != 'area' or run['a0']):
-                kept.append(run)
-            elif not has_areas:
-                warns.append(f"{run['name']}: no reviewed areas -- skipped "
-                             f"({'area mode' if mode == 'area' else '--vs-area'} "
-                             f"needs them; current/power vs kV work on raw "
-                             f"runs)")
-            else:
-                warns.append(f"{run['name']}: areas present but no "
-                             f"baseline A0 -- cannot normalize, skipped in "
-                             f"area mode")
-        runs = kept
+    runs = prepare_runs(args, opts, warns.append,
+                        allow_suspect='--allow-suspect-scale' in flags)
     if not runs:
         for w in warns:
             print('warning:', w)
         print('nothing to plot')
         return 2
-    if len(runs) > len(TOL_BRIGHT):
-        warns.append(f"{len(runs)} runs > {len(TOL_BRIGHT)} palette "
-                     f"colors -- colors repeat; consider fewer runs per "
-                     f"figure")
-    if uses_areas and len(runs) > 1:
-        # cross-run absolute mm² inherits each run's anchor provenance
-        # (audit 2026-08-05): a recorded manual 📏 anchor and a pre-gate
-        # automatic one are different instruments
-        with_anchor = [r['name'] for r in runs if r.get('anchor')]
-        without = [r['name'] for r in runs if not r.get('anchor')]
-        if with_anchor and without:
-            warns.append(
-                f"absolute-scale provenance differs across runs: "
-                f"{len(with_anchor)} carry a recorded manual anchor "
-                f"({', '.join(with_anchor)}), {len(without)} predate it "
-                f"({', '.join(without)}) — cross-run absolute mm² "
-                f"comparisons inherit that difference (A/A0 is safe)")
-    for i, run in enumerate(runs):
-        run['color'] = TOL_BRIGHT[i % len(TOL_BRIGHT)]
 
-    png = os.path.join(out_dir, stem + '.png')
-    if mode == 'area':
-        figure_area(runs, opts, png, warns.append)
-    else:
-        figure_signal(runs, opts, png, warns.append)
-    tidy = write_tidy(runs, os.path.join(out_dir, stem + '.csv'))
+    png, tidy = export(runs, opts, out_dir, stem, warns.append)
 
     for run in runs:
         n_traced = sum(1 for r in run['rows'] if r['traced'])

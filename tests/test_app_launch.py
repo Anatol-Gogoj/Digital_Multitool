@@ -14,9 +14,9 @@ not have.
 
 So these tests launch the real programs the way a user does, with any
 external font workaround REMOVED, and assert a mapped window appears.
-All three Tk entry points are covered -- Edge Review and the tuner are
-separate processes carrying the same emoji, and would have died the same
-way, but nothing was checking them.
+Every Tk entry point is covered -- Edge Review, the tuner and the plot
+window are separate processes carrying the same emoji, and would have died
+the same way, but nothing was checking them.
 
 Run: .venv/bin/python tests/test_app_launch.py
 """
@@ -159,6 +159,23 @@ def test_tuner_starts_and_maps_a_window():
         _launch_expecting_window(
             [_sys.executable, os.path.join(REPO, 'sldea_tuner.py'), run],
             'SLDEA edge tuner', timeout=60)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_plot_window_starts_and_maps_a_window():
+    # `#223`: a fourth Tk entry point, launched by 📊 Plot runs… and
+    # carrying emoji of its own (📊, 💾, ✓) -- the exact shape of the
+    # 2026-07-27 colour-bitmap-font abort this suite exists to catch.
+    if not _have('Xvfb', 'xwininfo'):
+        print("   (skipped: Xvfb/xwininfo not installed)")
+        return
+    d = tempfile.mkdtemp(prefix='launch_plot_')
+    try:
+        _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        _launch_expecting_window(
+            [_sys.executable, os.path.join(REPO, 'sldea_plot_gui.py'), d],
+            'SLDEA plot', timeout=60)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

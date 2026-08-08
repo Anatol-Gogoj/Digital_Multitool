@@ -183,8 +183,13 @@ class InstrumentControlGUI:
         self._progress = progress or (lambda _text: None)
         self.root = root
         self.root.title(f"Lab Instrument Control  —  {version_string()}")
-        # Wide enough for the LCR tab's right-hand column (bias/speed/
-        # correction) and the footer version readout (issues #26/#27).
+        # A comfortable default, no longer load-bearing. This size used to
+        # be the only thing keeping the LCR tab's right-hand column
+        # (bias/speed/correction) and the footer version readout on screen
+        # (`#26`/`#27`) -- both were clipped at the previous 1000 px and the
+        # window was widened rather than the clipping fixed. Both now hold
+        # at ANY size: the column scrolls (`#225`) and the version readout
+        # is packed first, so shrinking the window costs nothing but room.
         self.root.geometry("1320x800")
 
         # Menu bar: Tools -> bench profiles + Update Software
@@ -269,6 +274,13 @@ class InstrumentControlGUI:
         self.cam_seq_thread = None
         self.cam_seq_queue = queue.Queue()
 
+        # Footer BEFORE the notebook: same packing rule as `#27`, one level
+        # up. The packer serves slaves in packing order, so the footer must
+        # claim its strip of the cavity before the notebook packs with
+        # expand=True -- packed after, it sat pinned at its full-height y
+        # and was pushed clean off the bottom at window heights < ~400 px.
+        self.build_footer(root)
+
         # Create notebook (tabbed interface)
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill='both', expand=True, padx=10, pady=10)
@@ -297,22 +309,39 @@ class InstrumentControlGUI:
                               f"The rest of the app keeps working. Try "
                               f"Help → Update Software, or report this."
                          ).pack(padx=20, pady=20, anchor='w')
-        
-        # Footer: status bar (left, stretches) + version readout (right)
-        footer = tk.Frame(root)
-        footer.pack(side=tk.BOTTOM, fill=tk.X)
-        self.status_bar = tk.Label(footer, text="Ready", bd=1, relief=tk.SUNKEN, anchor=tk.W)
-        self.status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        version_label = tk.Label(footer, text=version_string(), bd=1,
-                                 relief=tk.SUNKEN, anchor=tk.E, padx=8)
-        version_label.pack(side=tk.RIGHT)
-        
+
         # Clean up the camera (and any capture loop) on window close.
         self.root.protocol('WM_DELETE_WINDOW', self._on_app_close)
 
         # Auto-connect on startup (in the background -- issue #40)
         self._progress("Looking for instruments...")
         self.root.after(100, self.auto_connect)
+
+    def build_footer(self, parent):
+        """Footer: version readout (right) + status bar (left, stretches).
+
+        The version label is packed FIRST on purpose (`#27`). The packer
+        serves slaves in PACKING order, each taking its requested size out
+        of what is left of the cavity -- so whoever is packed first is the
+        one guaranteed to get its width. With the status bar first, any
+        status message wider than the window swallowed the whole footer and
+        the version readout vanished: measured at a 500 px window with a
+        497 px status line, the readout collapsed from 96 px to 3 px.
+        Reversed, the version keeps its width at every window width and the
+        (re-settable, non-critical) status text is what truncates instead.
+
+        A method rather than inline so the rule can be tested on its own,
+        without building all nine tabs first.
+        """
+        footer = tk.Frame(parent)
+        footer.pack(side=tk.BOTTOM, fill=tk.X)
+        self.version_label = tk.Label(footer, text=version_string(), bd=1,
+                                      relief=tk.SUNKEN, anchor=tk.E, padx=8)
+        self.version_label.pack(side=tk.RIGHT)
+        self.status_bar = tk.Label(footer, text="Ready", bd=1,
+                                   relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        return footer
 
     def _on_app_close(self):
         """Safety shutdown on window close (user request 2026-07-20: the
@@ -5620,7 +5649,8 @@ LOGGING:
         if vals and not self.cam_index_var.get():
             self.cam_index_var.set(vals[0])
         self.cam_sync_controls()
-        # status_bar may not exist yet during initial tab construction.
+        # The footer now packs before the tabs build, so status_bar exists
+        # here in the app; the hasattr tolerates footer-less harnesses.
         if hasattr(self, 'status_bar'):
             self.status_bar.config(
                 text=f"Found {len(vals)} camera(s)" if vals else "No cameras found")

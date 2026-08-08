@@ -2540,10 +2540,10 @@ LOGGING:
         # moves the Trek checkbutton off the electrode's row onto row 4), and
         # a fresh row cannot collide with that. Once #262 has landed this
         # could be tucked closer to the Electrode row it follows.
-        ttk.Label(outf, text="Concentration (mL):").grid(row=5, column=0,
+        ttk.Label(outf, text="Concentration (mL):").grid(row=4, column=0,
                                                          sticky='e')
         conc = ttk.Entry(outf, width=8)
-        conc.grid(row=5, column=1, sticky='w', padx=6)
+        conc.grid(row=4, column=1, sticky='w', padx=6)
         add_tooltip(conc,
                     "How much CNT ink went on this device — the '2.5mL' in a "
                     "folder name like P3_2.5mL_Triazole, recorded in the run "
@@ -2556,7 +2556,7 @@ LOGGING:
         # Says WHY the box is greyed, right beside it -- a disabled field
         # with no explanation is a support question.
         self.sldea_conc_note = tk.Label(outf, text='', fg='#777', anchor='w')
-        self.sldea_conc_note.grid(row=5, column=2, columnspan=3, sticky='w')
+        self.sldea_conc_note.grid(row=4, column=2, columnspan=3, sticky='w')
         # Follow the electrode as it is SELECTED and as it is TYPED: the box
         # is free text, so a custom material never fires ComboboxSelected.
         electrode.bind('<<ComboboxSelected>>',
@@ -2571,13 +2571,14 @@ LOGGING:
                     "control voltage (inverting amp config/input). The run "
                     "then drives a negative control so the HV output is "
                     "positive, and the V_Out monitor reading is sign-"
-                    "corrected in the log.").grid(row=4, column=0,
+                    "corrected in the log.").grid(row=5, column=0,
                                                   columnspan=3, sticky='w',
                                                   pady=(4, 0))
-        # row=4, NOT row=3: the Electrode label+box moved into row 3 with
-        # the `#231` field, and this checkbutton stayed gridded over the
-        # same cells — the two overlapped on screen until the operator
-        # caught it on 2026-08-07.
+        # row=5, BELOW the electrode+concentration pair: those two define
+        # the DEVICE and read as one flow (operator note 2026-08-08 — the
+        # checkbutton between them broke it); this is a DRIVE setting and
+        # comes after. History: it once overlapped the electrode row
+        # outright (`#231` moved the field in, `#262` un-stacked it).
 
         # Breakdown watchdog (LIVE runs): deliberately slow-to-trip monitor
         # of the Trek I_Out on the scope; sustained overcurrent -> snapshot

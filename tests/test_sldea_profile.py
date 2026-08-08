@@ -334,6 +334,140 @@ def test_electrode_family_maps_the_campaign_materials():
     assert electrode_family(None) is None
 
 
+def test_every_branded_cnt_ink_in_the_dropdown_families_to_cnt():
+    """`#272`. The family is the future group-by key (#229), so a device
+    built with a named CNT ink must land in the same bucket as one recorded
+    as plain 'CNT' -- and NONE of the four brand names contains the
+    substring 'cnt', so this cannot work by accident."""
+    from sldea_profile import ELECTRODE_CHOICES, electrode_family
+    branded = ('Carbon Solutions P3-SWNT', 'Carbon Solutions P2-SWNT',
+               'nano-c Invisicon 3900', 'nano-c Invisicon 3500')
+    for name in branded:
+        assert name in ELECTRODE_CHOICES, f"{name} missing from the dropdown"
+        assert 'cnt' not in name.lower(), "test premise: no literal 'cnt'"
+        assert electrode_family(name) == 'cnt', name
+    # plain CNT is kept: it is what every run recorded before the brands
+    assert 'CNT' in ELECTRODE_CHOICES
+    assert electrode_family('CNT') == 'cnt'
+
+
+def test_electrode_family_tolerates_the_obvious_typed_variants():
+    """What the matcher is documented to accept for the branded inks:
+    any case, surrounding whitespace, and a substring of the name."""
+    from sldea_profile import electrode_family
+    for text in ('carbon solutions p3-swnt', 'CARBON SOLUTIONS P2-SWNT',
+                 '  Carbon Solutions P3-SWNT  ', 'P3-SWNT', 'p2 swnt',
+                 'SWNT', 'swnt ink', 'MWNT'):
+        assert electrode_family(text) == 'cnt', text
+    for text in ('nano-c invisicon 3900', 'NANO-C INVISICON 3500',
+                 'Invisicon 3900', 'invisicon', ' nano-c  '):
+        assert electrode_family(text) == 'cnt', text
+    # and what it deliberately does NOT guess from: the campaign's device
+    # tokens name a DEVICE, not a material
+    assert electrode_family('P3') == 'other'
+    assert electrode_family('P2') == 'other'
+    assert electrode_family('P3_2.5mL_Triazole') == 'other'
+    # the new needles must not steal the other families
+    assert electrode_family('carbon black') == 'carbon_black'
+    assert electrode_family('eGaIn') == 'liquid_metal'
+
+
+def test_the_dropdown_no_longer_offers_a_literal_other():
+    """`#272`. 'other' as a stored VALUE is a non-answer that looks like an
+    answer; blank is how "unknown" is recorded and the run asks about it.
+    The FAMILY bucket is untouched, so runs that stored the old literal
+    still canonicalise the same way."""
+    from sldea_profile import ELECTRODE_CHOICES, electrode_family
+    assert 'other' not in ELECTRODE_CHOICES
+    assert electrode_family('other') == 'other'
+    assert electrode_family('PEDOT:PSS') == 'other'
+    assert electrode_family('') is None
+
+
+def test_a_branded_ink_reaches_setup_txt_verbatim():
+    """The brand string is what gets cited and re-ordered, so setup.txt
+    must carry it exactly as chosen -- not normalised to its family."""
+    p = SldeaProfile(start_kv=0, end_kv=4, step_kv=2, ramp_s=5, landing_s=60)
+    for brand in ('Carbon Solutions P3-SWNT', 'nano-c Invisicon 3900'):
+        txt = p.setup_text('r', 'ts', 1, 2, 3, True, electrode=brand)
+        assert f'Compliant electrode: {brand}' in txt, brand
+        assert 'Electrode family: cnt' in txt, brand
+
+
+def test_concentration_applies_only_where_an_ink_volume_means_something():
+    """`#276`. CNT-family and unrecognised materials may have an ink
+    volume; carbon black and liquid metal do not."""
+    from sldea_profile import concentration_applies
+    for yes in ('CNT', 'Carbon Solutions P3-SWNT', 'Carbon Solutions P2-SWNT',
+                'nano-c Invisicon 3900', 'nano-c Invisicon 3500',
+                'p3-swnt', 'some bespoke ink', 'PEDOT:PSS'):
+        assert concentration_applies(yes) is True, yes
+    for no in ('carbon black', 'Carbon Black', 'CB', 'eGaIn', 'egain',
+               'Galinstan', 'liquid metal'):
+        assert concentration_applies(no) is False, no
+    # blank is applicable: "no electrode chosen yet" is not "this electrode
+    # has no concentration", and grey-before-you-choose looks broken
+    for blank in ('', '   ', None):
+        assert concentration_applies(blank) is True, repr(blank)
+
+
+def test_parse_concentration_ml_accepts_only_a_positive_number():
+    """`#276`. The value lands in setup.txt as fact, so junk is refused at
+    Run rather than written down."""
+    from sldea_profile import parse_concentration_ml
+    assert parse_concentration_ml('2.5') == 2.5
+    assert parse_concentration_ml(' 1 ') == 1.0
+    assert parse_concentration_ml('0.75') == 0.75
+    assert parse_concentration_ml(2.5) == 2.5
+    for junk in ('', '   ', None, 'abc', '2.5mL', '2,5', '0', '-1', '-0.5',
+                 'nan', 'inf', '-inf'):
+        try:
+            parse_concentration_ml(junk)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{junk!r} was accepted")
+
+
+def test_setup_text_records_the_concentration_beside_the_electrode():
+    p = SldeaProfile(start_kv=0, end_kv=4, step_kv=2, ramp_s=5, landing_s=60)
+    txt = p.setup_text('r', 'ts', 1, 2, 3, True,
+                       electrode='Carbon Solutions P3-SWNT',
+                       concentration_ml='2.5')
+    assert 'Ink concentration: 2.5 mL' in txt
+    # beside the electrode, not adrift somewhere else in the file
+    lines = [ln for ln in txt.splitlines() if ln.strip()]
+    i = lines.index('Compliant electrode: Carbon Solutions P3-SWNT')
+    assert lines[i + 1] == 'Electrode family: cnt'
+    assert lines[i + 2] == 'Ink concentration: 2.5 mL'
+
+
+def test_setup_text_omits_the_concentration_key_for_a_non_ink_electrode():
+    """A carbon-black run must not carry a CNT-ink key AT ALL -- not even
+    an empty one. An empty key reads as "an ink run that forgot to fill
+    something in"; an absent key reads as "not an ink"."""
+    p = SldeaProfile(start_kv=0, end_kv=4, step_kv=2, ramp_s=5, landing_s=60)
+    for material in ('carbon black', 'eGaIn'):
+        txt = p.setup_text('r', 'ts', 1, 2, 3, True, electrode=material)
+        assert 'concentration' not in txt.lower(), material
+        # and a stale value in the greyed box cannot leak in either
+        stale = p.setup_text('r', 'ts', 1, 2, 3, True, electrode=material,
+                             concentration_ml='2.5')
+        assert 'concentration' not in stale.lower(), material
+        assert '2.5' not in stale, material
+
+
+def test_setup_text_says_not_specified_when_an_ink_run_declines():
+    """Where it DOES apply, blank is written rather than dropped -- the
+    same rule the electrode line follows, so "declined to answer" and
+    "predates the field" stay different facts."""
+    p = SldeaProfile(start_kv=0, end_kv=4, step_kv=2, ramp_s=5, landing_s=60)
+    txt = p.setup_text('r', 'ts', 1, 2, 3, True, electrode='CNT')
+    assert 'Ink concentration: (not specified)' in txt
+    blank_electrode = p.setup_text('r', 'ts', 1, 2, 3, True)
+    assert 'Ink concentration: (not specified)' in blank_electrode
+
+
 def test_setup_text_records_the_electrode_and_the_warm_up():
     p = SldeaProfile(start_kv=0, end_kv=4, step_kv=2, ramp_s=5, landing_s=60)
     txt = p.setup_text('r', 'ts', 1, 2, 3, True, electrode='carbon black')

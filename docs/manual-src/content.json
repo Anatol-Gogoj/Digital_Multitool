@@ -896,12 +896,20 @@
     "what": "Which scope channels carry the Trek monitor outputs and which SG channel drives the Trek."
    },
    {
-    "label": "DEA diam (mm)",
+    "label": "DEA active area diam (mm)",
     "what": "Nominal resting diameter of the active area — written to setup.txt and used as the px-to-mm scale in Edge Review."
    },
    {
     "label": "Trek inverts (negate control)",
     "what": "Tick when the Trek is configured inverting; the run then drives negative control so the HV output stays positive."
+   },
+   {
+    "label": "Electrode",
+    "what": "Which compliant electrode material this device uses. Pick one of the listed inks — Carbon Solutions P2/P3-SWNT, nano-c Invisicon 3500/3900, plain CNT, carbon black, eGaIn — or type any material straight into the box; whatever you type is recorded word for word in setup.txt, alongside a canonical family so runs can be grouped later. Optional, but the run asks before starting without it. Leave it blank if the sample is genuinely unknown, rather than naming something you are not sure of."
+   },
+   {
+    "label": "Concentration (mL)",
+    "what": "How much CNT ink went on this device — the '2.5mL' in a folder name like P3_2.5mL_Triazole, now recorded in the run itself. It is greyed out for carbon black and eGaIn, which are not inks dispensed by volume: when it is greyed the run neither asks for it nor writes it to setup.txt, so a carbon-black run carries no ink key at all. Where it does apply, the run asks before starting without it, and only a positive number is accepted."
    },
    {
     "label": "⚡ Breakdown watchdog (LIVE runs)",
@@ -910,6 +918,10 @@
    {
     "label": "📈 Scope kV/µA log (telemetry.csv)",
     "what": "Writes the scope’s kV/µA continuously to telemetry.csv beside data.csv, so the current BETWEEN photos is recorded and a breakdown can be dated electrically. Rate (Hz) is capped at 2 — at that setting the current rows are free, because they are the breakdown watchdog’s own readings, which used to be thrown away. Voltage is read less often (at most once a second) because it costs a second scope query; the commanded voltage is on every row regardless. Needs the scope; works on dry runs too. Nothing reads the file — data.csv is still the run, and Edge Review, the tuner and the diagnostic are unaffected."
+   },
+   {
+    "label": "Run configuration presets",
+    "what": "Saves everything above under a name and recalls it later, so a campaign's staircase is not retyped each session. A preset covers the staircase, Output dir, scope/SG channels, DEA diameter, electrode, Trek inverts, and the watchdog and telemetry settings. It deliberately does NOT carry your run name, and never the DRY/LIVE state — loading one always leaves the tab in DRY, so arming the HV stays a separate deliberate click. Presets live in the same shared presets/ library as the signal-generator presets. If a preset was written by an older or newer version and something in it no longer fits, the load says what it could not apply instead of skipping it quietly."
    },
    {
     "label": "DRY RUN — HV OFF / ▶ Run / ■ Abort",
@@ -924,6 +936,10 @@
     "what": "Open the analysis program, or the live slider tuner. Tune params is advanced and confirmation-gated — its Save rewrites the run's setup.txt."
    },
    {
+    "label": "📊 Plot runs…",
+    "what": "Opens the plot window on several finished runs at once: tick the runs, choose area / current / power, toggle what is drawn (pre/post separately, mean line, uncertainty bands, breakdown marks) and the figure redraws as you go. Nothing is written until Export, which saves the 300 dpi PNG together with the tidy per-snapshot CSV behind it — the CSV is the figure's evidence, so the two always travel as a pair. Area mode needs runs Edge Review has saved areas for (✓ processed in the list); current and power work on raw runs, so a run can be looked at electrically before anyone has reviewed a frame. Hover the uncertainty-bands box to see where those numbers come from: they are the calibrated error budget in SLDEA_MEASUREMENT.md — ±2% for machine-measured levels, ±1% for hand-traced ones, a level mixing the two keeping the machine band — and Edge Review's conf score is a review-ordering number, never an uncertainty."
+   },
+   {
     "label": "Run log",
     "what": "Timestamped record of the run: directory path, each landing, watchdog status, warnings."
    }
@@ -931,7 +947,7 @@
   "workflow": [
    "1. Enter the staircase: Start/End/Step kV, Ramp and Landing times.",
    "2. Check the preview and summary line — dots are photos, total time shown.",
-   "3. Set Output dir, DEA diam (mm), and the scope/SG channels.",
+   "3. Set Output dir, DEA active area diam (mm), and the scope/SG channels.",
    "4. Do a dry run first to rehearse timing and camera captures.",
    "5. Untick DRY RUN; answer the scope-monitor and Energize HV prompts.",
    "6. In camera pre-flight, center the DEA in the circle, check focus, start.",
@@ -976,7 +992,11 @@
     "note": "Analyze a finished run"
    },
    {
-    "widget_text": "DEA diam (mm):",
+    "widget_text": "📊 Plot runs…",
+    "note": "Several runs on one figure; Export writes PNG + CSV"
+   },
+   {
+    "widget_text": "DEA active area diam (mm):",
     "note": "Sets the px-to-mm scale"
    },
    {
@@ -1004,6 +1024,10 @@
    {
     "name": "Edge parameter tuner (separate program)",
     "how_opened": "🎚 Tune params…"
+   },
+   {
+    "name": "SLDEA plot — cross-run figures (separate program)",
+    "how_opened": "📊 Plot runs…"
    }
   ]
  },
@@ -1431,8 +1455,8 @@
     "what": "Run it on a run folder (or via /diag) when tuning fails; writes sldea_diag.txt/.json/.png into the run, changes nothing — the .json is small enough to send on."
    },
    {
-    "label": "sldea_plot.py (headless)",
-    "what": "Puts one or more finished runs on a single figure. Takes the same run arguments as the tuner and the diagnostic (a run folder, a parent full of runs, or a bench shortcut) and writes a 300 dpi PNG plus the tidy per-snapshot CSV behind it, so a figure can always be traced back to its numbers. Colours are the house colourblind-safe set, assigned in the order runs are listed."
+    "label": "sldea_plot.py (headless or windowed)",
+    "what": "Puts one or more finished runs on a single figure. Takes the same run arguments as the tuner and the diagnostic (a run folder, a parent full of runs, or a bench shortcut) and writes a 300 dpi PNG plus the tidy per-snapshot CSV behind it, so a figure can always be traced back to its numbers. Colours are the house colourblind-safe set, assigned in the order runs are listed. Add --gui (or use 📊 Plot runs… on the SLDEA tab) for the window: the same figure, with the runs and the toggles as tick boxes and a live preview. The command line stays the way to script a batch of figures."
    },
    {
     "label": "--mode area | current | power",
@@ -1447,7 +1471,7 @@
    "Click 💾 Save to setup.txt.",
    "Open Edge Review on the same folder (--auto opens the scale-calibration dialog first — verify the machine's disc fit with ✔ Accept, or measure by hand if the fit refuses — and detection starts automatically once the anchor is in) and work the review queue.",
    "💾 Save to data.csv… when the queue is empty; if it still will not tune, run the /diag diagnostic instead of another slider session.",
-   "Once two or more runs are reviewed, put them on one figure: sldea_plot.py RUN1 RUN2 --mode area (or --mode current on raw runs, before any review)."
+   "Once two or more runs are reviewed, put them on one figure: 📊 Plot runs… on the SLDEA tab (tick the runs, pick the mode, Export), or sldea_plot.py RUN1 RUN2 --mode area for the same figure from a script (--mode current works on raw runs, before any review)."
   ],
   "cautions": [
    "Tuner Save writes into that run folder's setup.txt. If you tuned a local copy, copy setup.txt back to the master run or the review pass will not use your tuning.",
@@ -1456,7 +1480,7 @@
    "Edge Review's Save rewrites data.csv (a .bak is kept) and renames frame files from the first breakdown onward with a _BREAKDOWN suffix — read the counts in the confirm prompt before answering Yes.",
    "The tuner and Edge Review need Python installed with the \"tcl/tk and IDLE\" option ticked; the diagnostic opens no window and runs fine without it — use /diag on such machines.",
    "Bench shortcuts 1/2/3 only resolve on the PCs with the OneDrive run folder synced; anywhere else pass the real folder path.",
-   "The plot tool writes its PNG and CSV into the current directory unless --out says otherwise, and a custom --stem inside the repo checkout is not gitignored — keep the default sldea_plot prefix there, or point --out somewhere else."
+   "The plot tool writes its PNG and CSV into the current directory unless --out says otherwise, and a custom --stem inside the repo checkout is not gitignored — keep the default sldea_plot prefix there, or point --out somewhere else. The window does not use the current directory: it offers a plots folder beside the runs, and names both files it is about to write before you click Export."
   ],
   "callouts": [
    {

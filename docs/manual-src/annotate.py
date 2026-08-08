@@ -208,7 +208,7 @@ S["09_SLDEA_Test"] = {
     "callouts": [
         {"match": "Test Profile (voltages in kV",
          "label": "The voltage staircase — start/end/step, ramp and landing times (the 0 kV reference photo is always taken)"},
-        {"match": "DEA diam (mm):", "extend_right": 95, "label": "Sets the px→mm scale — a wrong value corrupts all areas"},
+        {"match": "DEA active area diam (mm):", "extend_right": 95, "label": "Sets the px→mm scale — a wrong value corrupts all areas"},
         {"match": "⚡ Breakdown watchdog (LIVE runs)", "label": "Aborts on sustained overcurrent — leave Enabled"},
         {"match": "📈 Scope kV/µA log", "label": "Logs kV/µA continuously to telemetry.csv — the current between photos"},
         {"match": "DRY RUN — HV OFF", "label": "Safety toggle — untick only for a live HV run"},
@@ -218,6 +218,24 @@ S["09_SLDEA_Test"] = {
          "label": "Open Edge Review on a finished run — see the Edge Review section"},
         {"match": "🎚 Tune params…", "badge_side": "bottom",
          "label": "Advanced — confirmation-gated; Save rewrites the run's detection settings"},
+        # `#223`. Added WITH the button rather than at the next release:
+        # the shots on disk predate it, so until a fresh capture this is a
+        # miss and the manual build fails on it (`#248`). That is the
+        # intended state -- the build is ALREADY red on three legitimate
+        # misses (the renamed 📏 button, the `#224` telemetry label, the
+        # new ❓ button) waiting for the same capture, and the release
+        # checklist is capture-then-annotate. A matcher deferred to
+        # "later" is the failure mode `#248` exists to stop.
+        {"match": "📊 Plot runs…", "badge_side": "bottom",
+         "label": "Several finished runs on one figure — Export writes the PNG and its tidy CSV together"},
+        # Listed last rather than in screen order (it sits above the DRY RUN
+        # row) so this entry stays clear of the DEA-diam callout that `#262`
+        # is rewriting three lines up. Badge numbering follows list order, so
+        # the presets capsule is numbered last on the shot — cosmetic only.
+        {"match": "Run configuration presets",
+         "label": "Save the whole tab under a name and recall it — never the run name, and never the LIVE state"},
+        {"match": "Concentration (mL):", "extend_right": 95,
+         "label": "How much CNT ink went on — greyed out for carbon black and eGaIn, which are not inks"},
     ],
 }
 

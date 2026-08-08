@@ -225,10 +225,19 @@ OPTIONS_FALLBACK = os.path.join(os.path.expanduser('~'), '.cache',
 #
 # Not the title and not the file stem: both name one particular figure,
 # and resurrecting last week's caption over this week's runs would be a
-# wrong label that looks like a right one. Not the run selection either --
-# a campaign gains runs, and reopening on a stale set would quietly plot
-# the wrong batch.
-REMEMBERED = ('mode', 'prepost', 'mean', 'bands', 'breakdown', 'vs_area')
+# wrong label that looks like a right one. THE PANEL TITLES ARE THE SAME
+# ANSWER for the same reason -- 'title_first'/'title_second' caption two
+# panels of one figure rather than describing a house style, so they are
+# deliberately absent below while every other drawing option joins.
+# Not the run selection either -- a campaign gains runs, and reopening on
+# a stale set would quietly plot the wrong batch.
+REMEMBERED = ('mode', 'prepost', 'mean', 'bands', 'breakdown', 'vs_area',
+              'logx', 'logy', 'marker_key', 'subplots', 'cadence_guard')
+
+# The remembered options that are NAMES rather than flags, each with the
+# vocabulary sldea_plot validates it against -- read from sldea_plot so a
+# value the engine has retired can never survive a round trip here.
+ENUM_OPTIONS = {'mode': sp.MODES, 'subplots': sp.SUBPLOTS}
 
 
 def options_key(parent):
@@ -250,10 +259,11 @@ def _clean_options(d):
     if not isinstance(d, dict):
         return {}
     out = {}
-    if d.get('mode') in sp.MODES:
-        out['mode'] = d['mode']
+    for k, allowed in ENUM_OPTIONS.items():
+        if d.get(k) in allowed:
+            out[k] = d[k]
     for k in REMEMBERED:
-        if k != 'mode' and isinstance(d.get(k), bool):
+        if k not in ENUM_OPTIONS and isinstance(d.get(k), bool):
             out[k] = d[k]
     if isinstance(d.get('out_dir'), str) and d['out_dir'].strip():
         out['out_dir'] = d['out_dir']
@@ -529,6 +539,46 @@ BANDS_TIP = (
     f"is not a small error bar. Never quote it as an uncertainty.")
 
 
+# Hover text for the engine options the Draw column exposes. Module
+# constants rather than literals at the widgets, for the reason BANDS_TIP
+# is one: a test can read them, and the sentence that HAS to stay true --
+# the cadence guard's, which is the difference between annotating an
+# event and hiding one -- sits somewhere findable.
+DRAW_TIPS = {
+    'logx': (
+        "Log x axis — log10 when every plotted x is positive, otherwise "
+        "symlog (linear near zero, log outside) so no point is dropped, "
+        "and the caption names the scale it chose."),
+    'logy': (
+        "Log y axis — the same rule as log x, and the reason symlog "
+        "exists here: this suite's currents idle NEGATIVE, so a plain log "
+        "scale would drop the whole trace rather than show it."),
+    'marker_key': (
+        "Adds a second compact legend, lower right, naming what the open "
+        "and filled markers mean — area mode only, because current and "
+        "power draw one plain dot per snapshot with no open/closed "
+        "distinction to explain."),
+    'cadence_guard': (
+        "Asks how often each run measured current and, where that is "
+        "slower than 1 s, draws its breakdown X hollow with the spacing "
+        "in the caption — it ANNOTATES the mark rather than SUPPRESSING "
+        "it, and whether it belongs on by default is an open decision for "
+        "the bench (`#264`), not a rendering preference."),
+    'subplots': (
+        "Which of the mode's panels render — a single chosen panel "
+        "becomes the figure's ONLY axes and fills the canvas instead of "
+        "sitting in half a grid, and 'second' needs area mode because "
+        "current and power have no second panel."),
+    'title_first': (
+        "Replaces the first panel's built-in heading; blank keeps the "
+        "default, and this wins over Title above, which is the older name "
+        "for the same panel."),
+    'title_second': (
+        "Replaces the second panel's built-in heading; area mode only, "
+        "because current and power draw a single panel."),
+}
+
+
 # ---------------------------------------------------------------------------
 # the controls column (`#271`)
 #
@@ -704,10 +754,12 @@ class PlotWindow:
         if opts:
             named = explicit_opts(opts) if explicit is None else set(explicit)
             o.update({k: opts[k] for k in named if k in opts})
-            # a title is never remembered, so an explicit one is simply the
-            # only one there can be
-            if opts.get('title'):
-                o['title'] = opts['title']
+            # no title is ever remembered, so an explicit one is simply the
+            # only one there can be -- and that holds for the two panel
+            # headings exactly as it holds for the legacy --title
+            for k in ('title', 'title_first', 'title_second'):
+                if opts.get(k):
+                    o[k] = opts[k]
         self.v_mode = tk.StringVar(value=o['mode'])
         self.v_prepost = tk.BooleanVar(value=o['prepost'])
         self.v_mean = tk.BooleanVar(value=o['mean'])
@@ -715,6 +767,18 @@ class PlotWindow:
         self.v_breakdown = tk.BooleanVar(value=o['breakdown'])
         self.v_vs_area = tk.BooleanVar(value=o['vs_area'])
         self.v_title = tk.StringVar(value=o['title'] or '')
+        # the `#263`/`#267`/`#269`/`#270`/`#264` engine options. Every one
+        # of them reaches current_opts below: a variable that the window
+        # showed but did not pass would put the tick box and the figure in
+        # disagreement, which is how a CLI `--logy --gui` preselection used
+        # to be thrown away by the window's own first redraw.
+        self.v_logx = tk.BooleanVar(value=o['logx'])
+        self.v_logy = tk.BooleanVar(value=o['logy'])
+        self.v_marker_key = tk.BooleanVar(value=o['marker_key'])
+        self.v_cadence = tk.BooleanVar(value=o['cadence_guard'])
+        self.v_subplots = tk.StringVar(value=o['subplots'])
+        self.v_title_first = tk.StringVar(value=o['title_first'] or '')
+        self.v_title_second = tk.StringVar(value=o['title_second'] or '')
         chosen_out = out_dir or mem.get('out_dir')
         self.v_out = tk.StringVar(
             value=chosen_out or default_out_dir(parent_dir))
@@ -796,7 +860,7 @@ class PlotWindow:
         ttk.Checkbutton(df, text="pre/post separately "
                                  "(post solid, pre dashed)",
                         variable=self.v_prepost,
-                        command=self._prepost_changed).pack(anchor=tk.W)
+                        command=self._toggled).pack(anchor=tk.W)
         # "…and the mean line" is a CHILD option: without separated
         # pre/post lines the single drawn line already IS the level mean
         # (draw_area: `if opts['mean'] or not opts['prepost']`), so the
@@ -806,7 +870,6 @@ class PlotWindow:
                                        variable=self.v_mean,
                                        command=self.schedule)
         self.cb_mean.pack(anchor=tk.W, padx=(18, 0))
-        self._sync_mean_enabled()
         # the two percentages come from sldea_plot's constants, here and
         # in BANDS_TIP, so the label cannot outlive the band it names
         self.cb_bands = ttk.Checkbutton(
@@ -817,19 +880,70 @@ class PlotWindow:
         # hover says WHERE THE NUMBERS COME FROM, and that conf is not one
         # of them (`#266`)
         self.tip_bands = add_tooltip(self.cb_bands, BANDS_TIP)
+        # the open/closed marker key (`#267`). Area mode only -- draw_area
+        # is the only drawer that calls _marker_key, because current and
+        # power draw one plain dot per snapshot and a key there would
+        # claim a distinction the figure does not make. GREYED rather than
+        # hidden in those modes: a control that vanishes says nothing
+        # about why it went.
+        self.cb_marker_key = ttk.Checkbutton(
+            df, text="marker key (open = hand-traced)",
+            variable=self.v_marker_key, command=self.schedule)
+        self.cb_marker_key.pack(anchor=tk.W)
+        add_tooltip(self.cb_marker_key, DRAW_TIPS['marker_key'])
         ttk.Checkbutton(df, text="breakdown marks (recomputed)",
                         variable=self.v_breakdown,
-                        command=self.schedule).pack(anchor=tk.W)
+                        command=self._toggled).pack(anchor=tk.W)
+        # the cadence guard (`#264`) is a CHILD of the breakdown marks for
+        # exactly the reason the mean line is a child of pre/post:
+        # sldea_plot consults coarse_cadence only inside
+        # `if opts['breakdown']`, so with the X marks off there is nothing
+        # left for it to annotate. Indented and disabled to say so.
+        self.cb_cadence = ttk.Checkbutton(
+            df, text="…and flag coarse current sampling",
+            variable=self.v_cadence, command=self.schedule)
+        self.cb_cadence.pack(anchor=tk.W, padx=(18, 0))
+        add_tooltip(self.cb_cadence, DRAW_TIPS['cadence_guard'])
         self.cb_vs_area = ttk.Checkbutton(
             df, text="x axis = active area (needs reviewed runs)",
             variable=self.v_vs_area, command=self.schedule)
         self.cb_vs_area.pack(anchor=tk.W)
-        trow = ttk.Frame(df)
-        trow.pack(fill=tk.X, pady=(4, 0))
-        ttk.Label(trow, text="Title:").pack(side=tk.LEFT)
-        e_title = ttk.Entry(trow, textvariable=self.v_title)
-        e_title.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
-        e_title.bind('<KeyRelease>', lambda _e: self.schedule())
+        # the log scales (`#263`) share ONE row: two independent flags
+        # with three-character labels, and the column is tall already.
+        lrow = ttk.Frame(df)
+        lrow.pack(fill=tk.X)
+        for text, var, key in (("log x", self.v_logx, 'logx'),
+                               ("log y", self.v_logy, 'logy')):
+            cb = ttk.Checkbutton(lrow, text=text, variable=var,
+                                 command=self.schedule)
+            cb.pack(side=tk.LEFT, padx=(0, 12))
+            add_tooltip(cb, DRAW_TIPS[key])
+        # which panel(s) render (`#270`). Radios rather than a combobox:
+        # three fixed choices, all three worth reading at once, and it
+        # costs the same single row either way.
+        prow = ttk.Frame(df)
+        prow.pack(fill=tk.X, pady=(2, 0))
+        lbl_panels = ttk.Label(prow, text="Panels:")
+        lbl_panels.pack(side=tk.LEFT)
+        add_tooltip(lbl_panels, DRAW_TIPS['subplots'])
+        self.rb_subplots = {}
+        for name in sp.SUBPLOTS:
+            rb = ttk.Radiobutton(prow, text=name, value=name,
+                                 variable=self.v_subplots,
+                                 command=self._toggled)
+            rb.pack(side=tk.LEFT, padx=(6, 0))
+            add_tooltip(rb, DRAW_TIPS['subplots'])
+            self.rb_subplots[name] = rb
+        # the headings (`#269`). --title predates the per-panel pair and
+        # has always meant the FIRST panel, so it keeps its row and its
+        # name; the two below are its precise successors and beat it.
+        # sldea_plot._panel_title owns that rule -- this only exposes it.
+        self.e_title = self._title_row(df, "Title:", self.v_title)
+        self.e_title_first = self._title_row(
+            df, "Panel 1:", self.v_title_first, DRAW_TIPS['title_first'])
+        self.e_title_second = self._title_row(
+            df, "Panel 2:", self.v_title_second, DRAW_TIPS['title_second'])
+        self._sync_enabled()
 
         # --- export
         xf = ttk.LabelFrame(left, text="Export (PNG + tidy CSV)", padding=6)
@@ -903,6 +1017,27 @@ class PlotWindow:
         # click while someone is dragging a zoom box would be hostile.
         self.canvas.mpl_connect('button_press_event', self.on_click)
 
+    def _title_row(self, master, label, var, tip=None):
+        """One 'Label: [entry]' heading row in the Draw column. -> the
+        Entry.
+
+        There are three of them now (the legacy --title and the two
+        per-panel headings, `#269`), so the row pattern is written once
+        and the label width is fixed in characters -- the three entries
+        line up at whatever the theme's font is, which a hand-repeated
+        row does not."""
+        row = ttk.Frame(master)
+        row.pack(fill=tk.X, pady=(4, 0))
+        lbl = ttk.Label(row, text=label, width=8)
+        lbl.pack(side=tk.LEFT)
+        entry = ttk.Entry(row, textvariable=var)
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
+        entry.bind('<KeyRelease>', lambda _e: self.schedule())
+        if tip:
+            add_tooltip(lbl, tip)
+            add_tooltip(entry, tip)
+        return entry
+
     # -- run list ----------------------------------------------------------
 
     def populate(self, preselect=()):
@@ -962,34 +1097,90 @@ class PlotWindow:
         self.remember_now()
         self.root.destroy()
 
-    def _sync_mean_enabled(self):
-        """The mean checkbox is live exactly when pre/post lines are drawn
-        separately — see the comment where it is built."""
-        self.cb_mean.config(state='normal' if self.v_prepost.get()
-                            else 'disabled')
+    def _sync_enabled(self):
+        """Grey every control the current mode and panel selection make
+        INERT, and un-grey it the moment it means something again.
 
-    def _prepost_changed(self):
-        self._sync_mean_enabled()
+        Greyed rather than hidden, throughout: a control that vanishes
+        tells an operator nothing about why it went, while a greyed one
+        with a tooltip says what would bring it back. Every rule below is
+        sldea_plot's — each names the engine code that makes the option a
+        no-op — so the column cannot drift from what the figure does."""
+        area = self.v_mode.get() == 'area'
+        which = self.v_subplots.get()
+
+        def live(widget, on):
+            widget.config(state='normal' if on else 'disabled')
+
+        # without separated pre/post lines the single drawn line already IS
+        # the level mean (draw_area: `if opts['mean'] or not opts['prepost']`)
+        live(self.cb_mean, self.v_prepost.get())
+        # coarse_cadence is consulted only inside `if opts['breakdown']`
+        live(self.cb_cadence, self.v_breakdown.get())
+        # _marker_key is called by draw_area alone
+        live(self.cb_marker_key, area)
+        # --vs-area is meaningless in area mode (the x axis IS area there);
+        # the CLI refuses the combination, so the window does not offer it
+        live(self.cb_vs_area, not area)
+        # 'second' names a panel only area mode has
+        live(self.rb_subplots['second'], area)
+        # a heading only lands on a panel that RENDERS: --title and
+        # --title-first reach the first panel, --title-second the second,
+        # and area_axes creates neither when `#270` switched it off
+        first_drawn = not (area and which == 'second')
+        live(self.e_title, first_drawn)
+        live(self.e_title_first, first_drawn)
+        live(self.e_title_second, area and which != 'first')
+
+    def _toggled(self):
+        """A control whose own state changes what ELSE is live: re-sync
+        the column, then redraw like any other change."""
+        self._sync_enabled()
         self.schedule()
 
     def _mode_changed(self):
         mode = self.v_mode.get()
         self.lbl_mode.config(text=MODE_HINT.get(mode, ''))
-        # --vs-area is meaningless in area mode (the x axis IS area there);
-        # the CLI refuses the combination, so the window does not offer it
-        self.cb_vs_area.config(
-            state='disabled' if mode == 'area' else 'normal')
-        self.schedule()
+        # 'second' asks for a panel current/power do not have, and
+        # make_opts refuses that pair. The radio is SNAPPED back rather
+        # than only greyed, because a greyed-but-still-filled 'second'
+        # beside a two-panel figure would be a control contradicting the
+        # picture — a radio group always shows one choice as taken, so an
+        # inert one cannot just sit there the way an inert checkbox can.
+        # (current_opts neutralises it too: that is what keeps the pair
+        # from ever reaching make_opts, whatever set the variable.)
+        if mode != 'area' and self.v_subplots.get() == 'second':
+            self.v_subplots.set('both')
+        self._toggled()
 
     def current_opts(self):
         """-> (opts, error). Same builder the CLI uses, so the window
-        cannot invent an options combination the CLI would refuse."""
+        cannot invent an options combination the CLI would refuse.
+
+        EVERY option the column shows is passed through. One that had a
+        widget but no argument here would redraw on the DEFAULT while the
+        widget went on showing something else — which is precisely what
+        used to happen to `python sldea_plot.py --logy --gui`: the flag
+        reached the window, and the window's own first redraw threw it
+        away."""
+        area = self.v_mode.get() == 'area'
+        which = self.v_subplots.get()
         return sp.make_opts(
             mode=self.v_mode.get(),
-            vs_area=self.v_vs_area.get() and self.v_mode.get() != 'area',
+            vs_area=self.v_vs_area.get() and not area,
             prepost=self.v_prepost.get(), mean=self.v_mean.get(),
             bands=self.v_bands.get(), breakdown=self.v_breakdown.get(),
-            title=self.v_title.get().strip() or None)
+            title=self.v_title.get().strip() or None,
+            logx=self.v_logx.get(), logy=self.v_logy.get(),
+            marker_key=self.v_marker_key.get(),
+            cadence_guard=self.v_cadence.get(),
+            # 'second' outside area mode is the one combination make_opts
+            # refuses. Neutralised to the default exactly as vs_area is
+            # above: an error message where the figure goes is not what a
+            # mode switch should produce.
+            subplots='both' if which == 'second' and not area else which,
+            title_first=self.v_title_first.get().strip() or None,
+            title_second=self.v_title_second.get().strip() or None)
 
     # -- drawing -----------------------------------------------------------
 

@@ -40,6 +40,31 @@ def _mktmp():
     return tempfile.mkdtemp(prefix='sldea_plot_gui_test_')
 
 
+def _shut(root):
+    """Destroy a test root WITHOUT the orphaned-callback noise.
+
+    PlotWindow debounces every redraw through root.after, so a window
+    built and torn down before the loop ever runs leaves one pending and
+    Tk's background error handler prints `invalid command name
+    ...redraw`. Harmless -- but noise on a test console is where a real
+    failure goes to hide, and these cases are read by counting.
+
+    Cancelled by Tcl id rather than per window, because the precedence
+    case builds several on one root and keeps only the last."""
+    try:
+        for after_id in root.tk.splitlist(root.tk.call('after', 'info')):
+            try:
+                root.after_cancel(after_id)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        root.destroy()
+    except Exception:
+        pass
+
+
 def _fake_run(parent, name, processed=True, csv_name='data.csv'):
     d = os.path.join(parent, name)
     os.makedirs(os.path.join(d, 'frames'), exist_ok=True)
@@ -327,10 +352,7 @@ class _Win:
 
     def __exit__(self, *_exc):
         if self.root is not None:
-            try:
-                self.root.destroy()
-            except Exception:
-                pass
+            _shut(self.root)
         shutil.rmtree(self.tmp, ignore_errors=True)
         return False
 
@@ -656,7 +678,12 @@ def test_remembered_options_round_trip_per_parent_folder():
         got = g.load_options(a, path=cfg)
         assert got == {'mode': 'power', 'prepost': True, 'mean': False,
                        'bands': False, 'breakdown': True,
-                       'vs_area': False}, got
+                       'vs_area': False, 'logx': False, 'logy': False,
+                       'marker_key': True, 'subplots': 'both',
+                       'cadence_guard': False}, got
+        # spelled out rather than derived, so a key that quietly joins
+        # REMEMBERED has to be argued for here too
+        assert set(got) == set(g.REMEMBERED), set(got) ^ set(g.REMEMBERED)
         # a different parent is a different memory, and saving one does
         # not disturb the other
         assert g.load_options(b, path=cfg) == {}
@@ -669,13 +696,23 @@ def test_remembered_options_round_trip_per_parent_folder():
         # case without differing
         assert g.options_key(a) == g.options_key(a.upper()) or \
             os.path.normcase('A') == 'A'
-        # the title and the stem are NEVER remembered: they name one
-        # figure, and last week's caption over this week's runs is a
-        # wrong label that looks like a right one
-        opts3, _e = sp.make_opts(title='P3 batch, first pass')
+        # NO title and no stem is ever remembered: they name one figure,
+        # and last week's caption over this week's runs is a wrong label
+        # that looks like a right one. The two PANEL headings are the same
+        # answer for the same reason -- they caption two panels of one
+        # figure, so they stay out while every other drawing option went in
+        opts3, _e = sp.make_opts(title='P3 batch, first pass',
+                                 title_first='mm² vs kV',
+                                 title_second='normalized')
         g.save_options(a, opts3, path=cfg)
-        assert 'title' not in g.load_options(a, path=cfg)
-        assert 'stem' not in g.load_options(a, path=cfg)
+        back = g.load_options(a, path=cfg)
+        for k in ('title', 'title_first', 'title_second', 'stem'):
+            assert k not in back, k
+        # and the on-disk file cannot carry one back in either, however it
+        # got there -- _clean_options drops what it does not recognize
+        assert 'title_first' not in g._clean_options(
+            {'title_first': 'from a hand edit', 'logy': True})
+        assert g._clean_options({'logy': True})['logy'] is True
     finally:
         shutil.rmtree(p, ignore_errors=True)
 
@@ -698,9 +735,12 @@ def test_a_corrupt_or_stale_options_file_can_only_cost_the_memory():
         with open(cfg, 'w', encoding='utf-8') as f:
             f.write('{"version": 1, "parents": {"%s": {"mode": "spectrum",'
                     ' "bands": "yes", "prepost": true, "junk": 1,'
-                    ' "out_dir": ""}}}'
+                    ' "subplots": "third", "logy": "on", "out_dir": ""}}}'
                     % g.options_key(p).replace('\\', '\\\\'))
         got = g.load_options(p, path=cfg)
+        # 'third' is dropped like 'spectrum' and for the same reason: both
+        # are NAMES, checked against sldea_plot's own vocabulary rather
+        # than against a list retyped here
         assert got == {'prepost': True}, got
         # and saving over junk starts clean instead of failing
         opts, _e = sp.make_opts(mode='current')
@@ -729,6 +769,23 @@ def test_explicit_arguments_beat_remembered_which_beat_defaults():
     # hidden, in explicit_opts' docstring
     same, _e = sp.make_opts(mode='area')
     assert 'mode' not in g.explicit_opts(same)
+    # It diffs against make_opts' OWN defaults, so an option added to the
+    # engine is picked up with no edit here -- pinned, because the wiring
+    # that carries a `--logy --gui` preselection into the window rests on
+    # it. Each of the seven, including the two whose default is not False.
+    for kw, want in ((dict(logx=True), 'logx'), (dict(logy=True), 'logy'),
+                     (dict(marker_key=False), 'marker_key'),
+                     (dict(cadence_guard=True), 'cadence_guard'),
+                     (dict(subplots='first'), 'subplots'),
+                     (dict(title_first='mm² vs kV'), 'title_first'),
+                     (dict(title_second='A/A₀'), 'title_second')):
+        said, _e = sp.make_opts(**kw)
+        assert g.explicit_opts(said) == {want}, (kw, g.explicit_opts(said))
+    # ...and the defaults of those same seven are still not statements
+    assert g.explicit_opts(base) == set()
+    for k in ('logx', 'logy', 'marker_key', 'cadence_guard', 'subplots',
+              'title_first', 'title_second'):
+        assert k in base, f"{k} is not in make_opts' defaults to diff against"
 
 
 def test_the_window_applies_the_precedence_it_documents():
@@ -778,12 +835,357 @@ def test_the_window_applies_the_precedence_it_documents():
                 assert w.remember_now() == cfg
                 assert g.load_options(p, path=cfg)['mode'] == 'current'
                 assert g.load_options(p, path=cfg)['breakdown'] is False
+                # the new drawing options round-trip with the rest, and
+                # the panel headings deliberately do not come back
+                w = g.PlotWindow(root, p)
+                w.v_mode.set('area')
+                w.v_logy.set(True)
+                w.v_marker_key.set(False)
+                w.v_cadence.set(True)
+                w.v_subplots.set('first')
+                w.v_title_first.set('one figure, one caption')
+                assert w.remember_now() == cfg
+                back = g.load_options(p, path=cfg)
+                assert back['logy'] is True and back['marker_key'] is False
+                assert back['cadence_guard'] is True
+                assert back['subplots'] == 'first'
+                assert 'title_first' not in back and 'title' not in back
+                w = g.PlotWindow(root, p)
+                assert w.v_logy.get() is True
+                assert w.v_subplots.get() == 'first'
+                assert w.v_cadence.get() is True
+                assert w.v_title_first.get() == '', 'a caption came back'
+                # a HAND-EDITED file is the only route to the one pair
+                # make_opts refuses (the window can never save it), and
+                # populate() -> _mode_changed corrects it BEFORE the first
+                # redraw rather than showing an error where the figure goes
+                import json
+                with open(cfg, encoding='utf-8') as f:
+                    blob = json.load(f)
+                blob['parents'][g.options_key(p)].update(
+                    {'mode': 'current', 'subplots': 'second'})
+                with open(cfg, 'w', encoding='utf-8') as f:
+                    json.dump(blob, f)
+                w = g.PlotWindow(root, p)
+                assert w.v_mode.get() == 'current'
+                assert w.v_subplots.get() == 'both', w.v_subplots.get()
+                assert not w.current_opts()[1], 'opened on an error'
             finally:
-                root.destroy()
+                _shut(root)
         finally:
             g.OPTIONS_PATH = real
     finally:
         shutil.rmtree(p, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# the engine options in the Draw column (`#263` log scales, `#267` marker
+# key, `#269` panel headings, `#270` panel selection, `#264` cadence guard)
+#
+# These ask what reached make_opts and what reached the FIGURE -- axis
+# scale, axes count, headings, which legend the key made -- rather than how
+# any of it looks, so they run on a withdrawn root. The layout case at the
+# end is the one that needs a real window, for the `#271` reason.
+# ---------------------------------------------------------------------------
+
+class _Bare:
+    """A WITHDRAWN plot window over a one-run fixture, or None-ish.
+
+    Context manager: builds the fixture, opens the window, destroys both.
+    `ok` is False when there is no display, and the caller returns.
+
+    remember=False throughout: the wiring cases must not read -- or
+    write -- the real user's `#275` options file.
+    """
+
+    def __init__(self, **kw):
+        self.kw = kw
+        self.ok = False
+
+    def __enter__(self):
+        import tkinter as tk
+        self.tmp = _mktmp()
+        _fake_run(self.tmp, 'R1')
+        try:
+            self.root = tk.Tk()
+        except tk.TclError as e:
+            print(f"   (skipped: no display for Tk: {e})")
+            shutil.rmtree(self.tmp, ignore_errors=True)
+            self.root = None
+            return self
+        self.root.withdraw()
+        self.win = g.PlotWindow(self.root, self.tmp, preselect=['R1'],
+                                remember=False, **self.kw)
+        self.ok = True
+        return self
+
+    def __exit__(self, *_exc):
+        if self.root is not None:
+            _shut(self.root)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        return False
+
+
+def _state(widget):
+    """ttk hands `state` back as a Tcl object; compare it as text."""
+    return str(widget.cget('state'))
+
+
+def test_every_draw_option_reaches_the_opts_the_figure_is_drawn_from():
+    """THE wiring gap. current_opts() built its dict from seven variables
+    and let the other seven fall back to make_opts' defaults, so a tick
+    box could sit on screen saying one thing while every redraw drew
+    another."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        base, _e = win.current_opts()
+        assert base['logx'] is False and base['marker_key'] is True
+        assert base['subplots'] == 'both' and base['cadence_guard'] is False
+        win.v_logx.set(True)
+        win.v_logy.set(True)
+        win.v_marker_key.set(False)
+        win.v_cadence.set(True)
+        win.v_subplots.set('first')
+        win.v_title_first.set('  mm² vs kV  ')
+        win.v_title_second.set('A/A₀')
+        opts, err = win.current_opts()
+        assert not err, err
+        assert opts['logx'] is True and opts['logy'] is True
+        assert opts['marker_key'] is False
+        assert opts['cadence_guard'] is True
+        assert opts['subplots'] == 'first'
+        # stripped, and None rather than '' when blank -- the same rule the
+        # legacy title row has always followed, because _panel_title reads
+        # blank as 'no override' and not as an empty heading
+        assert opts['title_first'] == 'mm² vs kV'
+        assert opts['title_second'] == 'A/A₀'
+        win.v_title_first.set('   ')
+        assert win.current_opts()[0]['title_first'] is None
+
+
+def test_the_draw_options_reach_the_figure_not_just_the_dict():
+    """Measured off the drawn Figure, because a dict that says 'logy' and
+    a figure that is linear is exactly the bug this wiring is for."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        win.redraw()
+        assert len(win.fig.axes) == 2, 'area mode draws two panels'
+        assert win.fig.axes[0].get_yscale() == 'linear'
+        # `#270`: a single chosen panel is the figure's ONLY axes, so it
+        # gets the whole canvas instead of half a two-column grid
+        win.v_subplots.set('second')
+        win.redraw()
+        assert len(win.fig.axes) == 1
+        win.v_subplots.set('both')
+        # `#263`: every plotted area is positive here, so this is log10
+        win.v_logy.set(True)
+        win.redraw()
+        assert win.fig.axes[0].get_yscale() == 'log'
+        win.v_logy.set(False)
+        # `#269`: each heading lands on its own panel, and only there
+        win.v_title_first.set('first heading')
+        win.v_title_second.set('second heading')
+        win.redraw()
+        assert win.fig.axes[0].get_title(loc='left') == 'first heading'
+        assert win.fig.axes[1].get_title(loc='left') == 'second heading'
+        win.v_title_first.set('')
+        win.v_title_second.set('')
+        win.redraw()
+        assert win.fig.axes[0].get_title(loc='left') != 'first heading'
+        # `#267`: the key is its own second legend, the one carrying the
+        # 'marker fill' title -- the run legend has no title at all
+        assert win.fig.axes[0].get_legend().get_title().get_text() == \
+            'marker fill'
+        win.v_marker_key.set(False)
+        win.redraw()
+        assert win.fig.axes[0].get_legend().get_title().get_text() != \
+            'marker fill'
+
+
+def test_a_cli_preselection_survives_the_first_redraw():
+    """`python sldea_plot.py --logy --gui` used to lose its flag to the
+    window's OWN first redraw: launch() handed the opts over, __init__ had
+    no variable to put logy in, and current_opts() rebuilt the dict
+    without it. The flag has to still be on the figure AFTER it is drawn,
+    which is a different claim from 'it arrived'."""
+    cli, err = sp.make_opts(logy=True, marker_key=False, subplots='first')
+    assert not err, err
+    assert g.explicit_opts(cli) == {'logy', 'marker_key', 'subplots'}
+    with _Bare(opts=cli) as b:
+        if not b.ok:
+            return
+        win = b.win
+        assert win.v_logy.get() is True, 'the flag never reached a widget'
+        assert win.v_marker_key.get() is False
+        assert win.v_subplots.get() == 'first'
+        win.redraw()
+        opts, e2 = win.current_opts()
+        assert not e2 and opts['logy'] is True, 'the redraw threw it away'
+        assert len(win.fig.axes) == 1, '--subplots first drew both panels'
+        assert win.fig.axes[0].get_yscale() == 'log'
+        assert win.fig.axes[0].get_legend().get_title().get_text() != \
+            'marker fill'
+
+
+def test_a_control_is_greyed_exactly_when_it_is_inert():
+    """Live conditionality, the pattern the mean child already set: a
+    control that cannot change the figure is GREYED, never hidden -- one
+    that vanishes says nothing about why -- and it is live again the
+    moment it can. Every rule here is sldea_plot's, named in place."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        # the mean line is a child of pre/post: without separated lines
+        # the single drawn line already IS the level mean
+        assert _state(win.cb_mean) == 'disabled'
+        win.v_prepost.set(True)
+        win._toggled()
+        assert _state(win.cb_mean) == 'normal'
+        # the cadence guard is a child of the breakdown marks: sldea_plot
+        # consults coarse_cadence only inside `if opts['breakdown']`, so
+        # with the X marks off it has nothing left to annotate
+        assert _state(win.cb_cadence) == 'normal'
+        win.v_breakdown.set(False)
+        win._toggled()
+        assert _state(win.cb_cadence) == 'disabled'
+        win.v_breakdown.set(True)
+        win._toggled()
+        assert _state(win.cb_cadence) == 'normal'
+        # the marker key is drawn by draw_area alone
+        assert win.v_mode.get() == 'area'
+        assert _state(win.cb_marker_key) == 'normal'
+        assert _state(win.cb_vs_area) == 'disabled'
+        assert _state(win.rb_subplots['second']) == 'normal'
+        win.v_mode.set('current')
+        win._mode_changed()
+        assert _state(win.cb_marker_key) == 'disabled', \
+            'a key in current mode claims a distinction the figure does ' \
+            'not make'
+        assert _state(win.cb_vs_area) == 'normal'
+        # ...and 'second' names a panel current and power do not have
+        assert _state(win.rb_subplots['second']) == 'disabled'
+        assert _state(win.e_title_second) == 'disabled'
+        assert _state(win.e_title_first) == 'normal'
+        win.v_mode.set('area')
+        win._mode_changed()
+        assert _state(win.cb_marker_key) == 'normal'
+        assert _state(win.e_title_second) == 'normal'
+        # a heading only lands on a panel that RENDERS (`#270`): area_axes
+        # creates neither axes when the selection switched it off
+        win.v_subplots.set('first')
+        win._toggled()
+        assert _state(win.e_title_second) == 'disabled'
+        assert _state(win.e_title_first) == 'normal'
+        win.v_subplots.set('second')
+        win._toggled()
+        assert _state(win.e_title_second) == 'normal'
+        assert _state(win.e_title_first) == 'disabled'
+        # ...and the legacy Title, which has ALWAYS meant the first panel,
+        # greys with its precise successor rather than pretending to work
+        assert _state(win.e_title) == 'disabled'
+
+
+def test_switching_away_from_area_cannot_leave_second_selected():
+    """make_opts REFUSES `--subplots second` outside area mode, so the
+    combination would have put an error message where the figure goes.
+    Two guards, and both earn their place: the radio snaps back so the
+    row cannot sit there contradicting the picture, and current_opts
+    neutralises the pair so it cannot reach make_opts at all, however the
+    variable came to be set."""
+    assert sp.make_opts(mode='current', subplots='second')[0] is None
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        win.v_subplots.set('second')
+        win.v_mode.set('current')
+        win._mode_changed()
+        assert win.v_subplots.get() == 'both', 'a greyed radio left filled'
+        opts, err = win.current_opts()
+        assert not err and opts['subplots'] == 'both'
+        # the belt and the braces: set behind the widgets' back, it is
+        # still neutralised rather than raised
+        win.v_subplots.set('second')
+        opts, err = win.current_opts()
+        assert not err, 'an invalid pair reached make_opts'
+        assert opts['subplots'] == 'both'
+        win.redraw()
+        assert len(win.fig.axes) == 1
+        assert win.fig.axes[0].get_title(loc='left').startswith('Current')
+        # 'first' outside area mode stays a no-op naming the only panel,
+        # which is sldea_plot's rule, not a second one invented here
+        win.v_subplots.set('first')
+        assert win.current_opts()[0]['subplots'] == 'first'
+
+
+def test_the_cadence_guard_tooltip_says_it_annotates_not_suppresses():
+    """`#264`'s two load-bearing facts. The guard RESTYLES a breakdown
+    mark and never removes one -- hiding a real event because the camera
+    was slow would be the P3_5 mistake pointing the other way -- and
+    whether it belongs on by default is a bench decision that does not
+    exist yet, not a rendering preference."""
+    tip = g.DRAW_TIPS['cadence_guard']
+    low = tip.lower()
+    assert 'annotates' in low and 'suppressing' in low, tip
+    assert 'open decision' in low, tip
+    assert '`#264`' in tip, 'the tooltip does not cite the open decision'
+    # every new control has one, and none of them is a stub
+    for key in ('logx', 'logy', 'marker_key', 'cadence_guard', 'subplots',
+                'title_first', 'title_second'):
+        assert len(g.DRAW_TIPS[key]) > 60, key
+    # the marker key's says which mode it belongs to, since that is what
+    # the greyed box in current/power leaves an operator asking
+    assert 'area mode only' in g.DRAW_TIPS['marker_key'].lower()
+    # ...and they are ATTACHED, not merely declared up here
+    with _Bare() as b:
+        if not b.ok:
+            return
+        for w in (b.win.cb_marker_key, b.win.cb_cadence,
+                  b.win.e_title_first, b.win.e_title_second,
+                  b.win.rb_subplots['both']):
+            assert w.bind('<Enter>'), f"no tooltip attached to {w}"
+
+
+def test_the_taller_draw_column_still_measures_and_still_scrolls():
+    """The Draw column grew by seven controls and `#271`'s floor is
+    MEASURED off it, so the two have to still agree. The bar stays a
+    report of overflow (`#225`) -- it just trips at a taller window than
+    it used to."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        win, col = w.win, w.win.column
+        # the new rows are inside the MEASURED body, not floating beside it
+        body = str(col.body) + '.'
+        for widget in (win.cb_marker_key, win.cb_cadence, win.e_title_first,
+                       win.e_title_second, win.rb_subplots['both'],
+                       win.e_title):
+            assert str(widget).startswith(body), \
+                f"{widget} is outside the scrolled body"
+        tall = col.body.winfo_reqheight()
+        assert tall > 200, 'fixture built no controls to overflow'
+        # the floor still tracks the column it is measured from, and it is
+        # still the BODY's width plus the bar -- never the canvas's, which
+        # does not know its own until the window is laid out
+        assert win.apply_minsize()[0] == col.natural_width() + g.MIN_FIG_W
+        assert win.root.minsize()[0] == win.min_size[0]
+        assert col.natural_width() >= col.body.winfo_reqwidth()
+        # appears on genuine overflow, goes away with room -- and rewinds
+        w.resize(f'1000x{tall + 120}')
+        assert not col.bar_shown, 'bar shown with room to spare'
+        assert not col.bar.winfo_ismapped()
+        w.resize(f'1000x{max(g.MIN_H, tall - 150)}')
+        assert col.bar_shown, 'no bar with the taller column cut off'
+        assert col.bar.winfo_ismapped()
+        col._cv.yview_moveto(0.5)
+        w.resize(f'1000x{tall + 120}')
+        assert not col.bar_shown and not col.bar.winfo_ismapped()
+        assert col._cv.yview()[0] == 0.0, 'hidden bar left the column scrolled'
 
 
 def _run():

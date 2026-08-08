@@ -925,7 +925,7 @@
    },
    {
     "label": "📊 Plot runs…",
-    "what": "Opens the plot window on several finished runs at once: tick the runs, choose area / current / power, toggle what is drawn (pre/post separately, mean line, uncertainty bands, breakdown marks) and the figure redraws as you go. Nothing is written until Export, which saves the 300 dpi PNG together with the tidy per-snapshot CSV behind it — the CSV is the figure's evidence, so the two always travel as a pair. Area mode needs runs Edge Review has saved areas for (✓ processed in the list); current and power work on raw runs, so a run can be looked at electrically before anyone has reviewed a frame."
+    "what": "Opens the plot window on several finished runs at once: tick the runs, choose area / current / power, toggle what is drawn (pre/post separately, mean line, uncertainty bands, breakdown marks) and the figure redraws as you go. Nothing is written until Export, which saves the 300 dpi PNG together with the tidy per-snapshot CSV behind it — the CSV is the figure's evidence, so the two always travel as a pair. Area mode needs runs Edge Review has saved areas for (✓ processed in the list); current and power work on raw runs, so a run can be looked at electrically before anyone has reviewed a frame. Hover the uncertainty-bands box to see where those numbers come from: they are the calibrated error budget in SLDEA_MEASUREMENT.md — ±2% for machine-measured levels, ±1% for hand-traced ones, a level mixing the two keeping the machine band — and Edge Review's conf score is a review-ordering number, never an uncertainty."
    },
    {
     "label": "Run log",

@@ -209,6 +209,67 @@ def test_mode_hints_say_which_modes_need_reviewed_runs():
         assert 'RAW' in g.MODE_HINT[m], m
 
 
+def test_uncertainty_band_tooltip_says_where_the_numbers_come_from():
+    """`#266`: the bands are a CALIBRATED ERROR BUDGET
+    (SLDEA_MEASUREMENT.md), not a fit residual and not anything this
+    window computed -- and nothing on screen said so."""
+    tip = g.BANDS_TIP
+    assert 'SLDEA_MEASUREMENT.md' in tip, 'the budget is not cited'
+    for phrase in ('scale anchor', 'repeatability', 'half-height',
+                   'outer toe'):
+        assert phrase in tip, phrase
+    # the two levels, and the rule for a level that mixes them
+    assert f"±{sp.MACHINE_BAND_PCT:g}%" in tip
+    assert f"±{sp.TRACED_BAND_PCT:g}%" in tip
+    assert 'MIXES' in tip and 'machine member(s) only' in tip
+    assert '5.2–5.7%' in tip, 'the definitional offset is not named'
+
+
+def test_uncertainty_band_tooltip_refuses_conf_as_an_uncertainty():
+    """`#266`'s sharp end. `conf` is the one number an operator sees
+    beside every area, it looks exactly like an error bar, and it is a
+    review-ORDERING score -- measured ANTI-calibrated across methods
+    (SLDEA_MEASUREMENT.md §3.3). The tooltip has to say so, not merely
+    omit it."""
+    tip = g.BANDS_TIP
+    assert 'conf' in tip
+    assert 'ordering' in tip.lower() and 'ANTI-calibrated' in tip
+    assert 'Never quote it as an uncertainty.' in tip
+
+
+def test_the_band_percentages_are_never_typed_twice():
+    """The `#224` scar: a number hand-kept in several places drifts. Both
+    the checkbox label and the tooltip interpolate sldea_plot's
+    constants, so the window cannot name a band it does not draw."""
+    assert f"±{sp.MACHINE_BAND_PCT:g}%" in g.BANDS_TIP
+    with _Win('1200x800') as w:
+        if not w.ok:
+            return
+        label = w.win.cb_bands.cget('text')
+        assert f"±{sp.MACHINE_BAND_PCT:g}%" in label, label
+        assert f"±{sp.TRACED_BAND_PCT:g}%" in label, label
+        assert w.win.tip_bands.text == g.BANDS_TIP
+        # ...and it is really hung on the checkbox, not just stored
+        assert '<Enter>' in w.win.cb_bands.bind()
+
+
+def test_the_tooltip_is_a_copy_not_a_cross_seam_import():
+    """The module keeps its own ~35-line Tooltip, exactly as
+    sldea_edge_gui does, because ui_widgets is on the other side of the
+    open-decision-2 repo split. Importing it here would plant a
+    dependency on the split's own boundary."""
+    import re
+    import sldea_plot_gui
+    src = open(sldea_plot_gui.__file__, encoding='utf-8').read()
+    # a real import STATEMENT, not the comment that names the one to
+    # write if the split is ever abandoned
+    assert not re.search(r'(?m)^\s*(from|import)\s+ui_widgets\b', src)
+    # nothing this file imports drags it in transitively either
+    assert 'ui_widgets' not in _sys.modules, 'pulled in through the seam'
+    assert hasattr(g, 'Tooltip') and hasattr(g, 'add_tooltip')
+    assert 'COPIED, NOT IMPORTED' in src, 'the copy does not say it is one'
+
+
 # ---------------------------------------------------------------------------
 # `#271` -- resize, scrollbars, minimum size
 #

@@ -176,6 +176,111 @@ def default_out_dir(parent):
 
 
 # ---------------------------------------------------------------------------
+# hover tooltip (`#266`)
+#
+# COPIED, NOT IMPORTED, from ui_widgets.py — and the reason is the one
+# sldea_edge_gui.py already writes out above its own copy: PROJECT_HANDOFF
+# open decision 2 moves the SLDEA suite into its own instrument-free repo,
+# this module is on that side of the seam (it imports sldea_edge and
+# sldea_plot), and `ui_widgets` is not. Importing it would plant a
+# cross-seam dependency on the split's own boundary for ~35 lines with no
+# state and no invariants. If the split is ever abandoned, delete this
+# and `from ui_widgets import add_tooltip` — the signature matches on
+# purpose, in all three places.
+# ---------------------------------------------------------------------------
+
+class Tooltip:
+    """Show `text` in a small popup after hovering `widget` for `delay` ms.
+
+    Tk has no built-in tooltip; this is the standard Toplevel +
+    overrideredirect pattern. Hides on leave/click/destroy.
+    """
+
+    def __init__(self, widget, text, delay=650, wraplength=380):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self.wraplength = wraplength
+        self._after_id = None
+        self._tip = None
+        widget.bind('<Enter>', self._schedule, add='+')
+        widget.bind('<Leave>', self._hide, add='+')
+        widget.bind('<ButtonPress>', self._hide, add='+')
+        widget.bind('<Destroy>', self._hide, add='+')
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after_id = self.widget.after(self.delay, self._show)
+
+    def _cancel(self):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _show(self):
+        if self._tip is not None or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 14
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        except tk.TclError:          # widget died while the timer was pending
+            return
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f'+{x}+{y}')
+        tk.Label(tip, text=self.text, justify='left',
+                 wraplength=self.wraplength, bg='#ffffe0', fg='black',
+                 relief='solid', borderwidth=1, padx=7, pady=5).pack()
+        self._tip = tip
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except tk.TclError:
+                pass
+            self._tip = None
+
+
+def add_tooltip(widget, text):
+    """Attach a hover tooltip; returns the Tooltip."""
+    return Tooltip(widget, text)
+
+
+# The bands are a CALIBRATED ERROR BUDGET, not a fit residual and not
+# anything this window computed (`#266`). Nothing on screen said so, and
+# the one number an operator sees next to every area — Edge Review's
+# `conf` — looks exactly like the uncertainty it is not.
+#
+# Both percentages are interpolated from sldea_plot's constants rather
+# than typed again: this string and the drawn band must not be able to
+# disagree (the `#224` lesson, a label hand-kept in five places).
+BANDS_TIP = (
+    f"Where the bands come from: the CALIBRATED ERROR BUDGET in "
+    f"SLDEA_MEASUREMENT.md. They are quoted, not computed — nothing "
+    f"here fits them to your data.\n\n"
+    f"±{sp.MACHINE_BAND_PCT:g}%  machine-measured levels (the "
+    f"half-height ink step): the per-run scale anchor (~0.8% area) over "
+    f"the disc-fit's own CI (0.2–0.7%).\n"
+    f"±{sp.TRACED_BAND_PCT:g}%  hand-traced levels (the outer toe): "
+    f"operator repeatability, measured over 9 repeat pairs.\n\n"
+    f"A level that MIXES the two keeps the machine "
+    f"±{sp.MACHINE_BAND_PCT:g}% band, because what it plots is its "
+    f"machine member(s) only — the two conventions differ +5.2–5.7% in "
+    f"area and are never averaged.\n\n"
+    f"'conf' IS NOT IN THIS. The confidence score beside each candidate "
+    f"in Edge Review is a review-ORDERING score — it decides what a "
+    f"human looks at first, nothing more. It measured "
+    f"ANTI-calibrated across methods (patch winners at 0.97–0.99 scored "
+    f"IoU ~0.43 while boundary fits at 0.74 scored 0.89), so a high conf "
+    f"is not a small error bar. Never quote it as an uncertainty.")
+
+
+# ---------------------------------------------------------------------------
 # the controls column (`#271`)
 #
 # COPIED IN SPIRIT, NOT IMPORTED, from ui_widgets.ScrollableTab —
@@ -430,10 +535,19 @@ class PlotWindow:
                                        command=self.schedule)
         self.cb_mean.pack(anchor=tk.W, padx=(18, 0))
         self._sync_mean_enabled()
-        for var, text in ((self.v_bands, "uncertainty bands (±2% / ±1%)"),
-                          (self.v_breakdown, "breakdown marks (recomputed)")):
-            ttk.Checkbutton(df, text=text, variable=var,
-                            command=self.schedule).pack(anchor=tk.W)
+        # the two percentages come from sldea_plot's constants, here and
+        # in BANDS_TIP, so the label cannot outlive the band it names
+        self.cb_bands = ttk.Checkbutton(
+            df, text=f"uncertainty bands (±{sp.MACHINE_BAND_PCT:g}% / "
+                     f"±{sp.TRACED_BAND_PCT:g}%)",
+            variable=self.v_bands, command=self.schedule)
+        self.cb_bands.pack(anchor=tk.W)
+        # hover says WHERE THE NUMBERS COME FROM, and that conf is not one
+        # of them (`#266`)
+        self.tip_bands = add_tooltip(self.cb_bands, BANDS_TIP)
+        ttk.Checkbutton(df, text="breakdown marks (recomputed)",
+                        variable=self.v_breakdown,
+                        command=self.schedule).pack(anchor=tk.W)
         self.cb_vs_area = ttk.Checkbutton(
             df, text="x axis = active area (needs reviewed runs)",
             variable=self.v_vs_area, command=self.schedule)

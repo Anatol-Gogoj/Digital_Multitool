@@ -13,6 +13,36 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## setup.txt stays a text document; structure, if ever needed, arrives as a sidecar (2026-08-08)
+
+**TL;DR:** Anatol asked whether `setup.txt` should become JSON or CSV.
+Decision: it stays plain text. It is a lab-notebook document first —
+prose sections, units inline, readable at a bench in ten seconds — with
+the machine-read lines already behind structured accessors
+(`se.load_settings` / `se.save_settings`, `electrode_family`). If typed
+or nested structure is ever genuinely needed, it lands as a machine
+SIDECAR beside the txt (single writer, txt stays the canonical human
+record) — never by converting the document.
+
+**Observation → decision.** A real header (`P3_1_2.5mL_20260728`) reads:
+staircase prose, "HV gain: 1 V(control) = 1 kV(Trek)", camera settings,
+snapshot timing — a run description a human at the bench actually reads,
+and one the manual tells them to hand-edit in a named failure case (a
+wrong DEA diameter). CSV is the wrong shape outright: heterogeneous
+keys, sections, one file per run. JSON would trade the notebook
+readability and hand-editability for structure the code does not
+currently need — and format is not where this chain has been bitten:
+the calibration-letter vocabulary swap and the `pre/post` vs
+`pre-ramp/post-ramp` tag drift were VALUE-vocabulary incidents that a
+JSON container would not have prevented. Conversion cost would be every
+reader and writer in the chain, 18 existing runs, both manuals, and
+bench habit. So: new fields keep the `Key: value` convention
+(`Compliant electrode:`, `Electrode family:`, the incoming
+`Concentration (mL):` — `#276`), vocabularies stay canonicalized in
+code (`electrode_family`, `se.cal_mode_read`), and any future
+structured need gets a sidecar file. (Decision Anatol, analysis in the
+2026-08-08 session log.)
+
 ## Calibration dialog: six operator cuts, and the commit warning moves to the button that commits (2026-08-07, second pass)
 
 **TL;DR:** The operator drove all three calibration modes on real runs the

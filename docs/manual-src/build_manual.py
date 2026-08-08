@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """Assemble the Digital Multitool user manual HTML from captured assets."""
 import base64
+import glob
 import html
 import json
 import os
+import re
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -162,13 +164,174 @@ def section(sid, tab_label, area, img_key, extra_html="", caution_keep=None,
 </section>"""
 
 
+# ------------------------------------------------ Part II "How it works"
+# Addendum chapters live one-per-file in docs/manual-src/addendum_*.json and
+# are rendered, in filename order, after the tab chapters. The schema is
+# small and FIXED — required keys never change:
+#
+#   {"id": "addendum-stack",          # slug; becomes the <section> anchor
+#    "title": "How it works — ...",   # the <h2>; also the PDF bookmark
+#    "nav": "The instrument stack",   # optional short sticky-nav label
+#    "sections": [{"heading": "...",                          # required
+#                  "paras":   ["...", ...],                   # optional
+#                  "bullets": ["...", ...],                   # optional
+#                  "table":   {"cols": [...], "rows": [[...]]},  # optional
+#                  "code":    "verbatim block"}]}             # optional
+#
+# Missing files are simply absent: the manual builds with none, one or many.
+# A malformed one FAILS THE BUILD naming the file — including an UNKNOWN key,
+# because a chapter that silently loses a paragraph is exactly the failure
+# mode `#248` exists to stop. A chapter that needs a new key teaches this
+# renderer about it in the same PR.
+#
+# Keep chapter titles to ONE printed line. make_pdf.py finds each chapter's
+# page by matching this title in the page text; a wrapped <h2> extracts with
+# a newline through the middle and silently loses its bookmark and footer.
+PART_TITLE = "Part II — How it works"
+_CHAPTER_KEYS = {"id", "title", "sections", "nav"}
+_SECTION_KEYS = {"heading", "paras", "bullets", "table", "code"}
+
+
+def _addendum_fail(name, msg):
+    sys.exit(
+        f"build_manual.py FAILED -- addendum {name}: {msg}\n"
+        "  Expected {id, title, sections:[{heading, paras?, bullets?, "
+        "table?, code?}], nav?}.\n"
+        "  Fix the file -- or, for a genuinely new key, teach "
+        "build_manual.py to render it.")
+
+
+def _need_str(name, where, value, what):
+    if not isinstance(value, str) or not value.strip():
+        _addendum_fail(name, f"{where}: {what} must be a non-empty string")
+
+
+def _need_str_list(name, where, value, what):
+    if not isinstance(value, list) or not value:
+        _addendum_fail(name, f"{where}: {what} must be a non-empty list")
+    for k, item in enumerate(value):
+        _need_str(name, where, item, f"{what}[{k}]")
+
+
+def _check_section(name, idx, sec):
+    where = f"sections[{idx}]"
+    if not isinstance(sec, dict):
+        _addendum_fail(name, f"{where} must be an object")
+    unknown = sorted(set(sec) - _SECTION_KEYS)
+    if unknown:
+        _addendum_fail(name, f"{where}: unknown key(s) {unknown}")
+    _need_str(name, where, sec.get("heading"), "heading")
+    if not _SECTION_KEYS.intersection(sec) - {"heading"}:
+        _addendum_fail(name, f"{where}: heading with no content under it")
+    if "paras" in sec:
+        _need_str_list(name, where, sec["paras"], "paras")
+    if "bullets" in sec:
+        _need_str_list(name, where, sec["bullets"], "bullets")
+    if "code" in sec:
+        _need_str(name, where, sec["code"], "code")
+    if "table" in sec:
+        tbl = sec["table"]
+        if not isinstance(tbl, dict) or set(tbl) != {"cols", "rows"}:
+            _addendum_fail(name, f"{where}: table needs exactly cols + rows")
+        _need_str_list(name, where, tbl["cols"], "table.cols")
+        if not isinstance(tbl["rows"], list) or not tbl["rows"]:
+            _addendum_fail(name, f"{where}: table.rows must be a non-empty "
+                                 "list")
+        for r, row in enumerate(tbl["rows"]):
+            if not isinstance(row, list) or len(row) != len(tbl["cols"]):
+                _addendum_fail(
+                    name, f"{where}: table.rows[{r}] has "
+                          f"{len(row) if isinstance(row, list) else '?'} "
+                          f"cell(s), cols has {len(tbl['cols'])}")
+            for c, cell in enumerate(row):
+                _need_str(name, where, cell, f"table.rows[{r}][{c}]")
+
+
+def load_addenda(taken_ids):
+    """Read and validate addendum_*.json in filename order (a_ before b_)."""
+    chapters = []
+    seen = dict.fromkeys(taken_ids, "the tab chapters")
+    for path in sorted(glob.glob(os.path.join(_HERE, "addendum_*.json"))):
+        name = os.path.basename(path)
+        try:
+            with open(path, encoding="utf-8") as f:
+                ch = json.load(f)
+        except ValueError as exc:
+            _addendum_fail(name, f"not valid JSON ({exc})")
+        if not isinstance(ch, dict):
+            _addendum_fail(name, "top level must be an object")
+        unknown = sorted(set(ch) - _CHAPTER_KEYS)
+        if unknown:
+            _addendum_fail(name, f"unknown top-level key(s) {unknown}")
+        for key in ("id", "title"):
+            _need_str(name, "top level", ch.get(key), key)
+        if not re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", ch["id"]):
+            _addendum_fail(name, f"id {ch['id']!r} must be a lowercase slug "
+                                 "(it becomes an HTML anchor)")
+        if ch["id"] in seen:
+            _addendum_fail(name, f"id {ch['id']!r} is already used by "
+                                 f"{seen[ch['id']]}")
+        seen[ch["id"]] = name
+        if "nav" in ch:
+            _need_str(name, "top level", ch["nav"], "nav")
+        if not isinstance(ch["sections"], list) or not ch["sections"]:
+            _addendum_fail(name, "sections must be a non-empty list")
+        for idx, sec in enumerate(ch["sections"]):
+            _check_section(name, idx, sec)
+        ch["_file"] = name
+        chapters.append(ch)
+    return chapters
+
+
+def nav_label(ch):
+    """Short sticky-nav label: the clause after the title's dash."""
+    if ch.get("nav"):
+        return ch["nav"]
+    text = ch["title"]
+    for dash in (" — ", " – ", " - ", ": "):
+        if dash in text:
+            text = text.split(dash, 1)[1]
+            break
+    text = text.split(",")[0].strip()
+    return (text[:1].upper() + text[1:]) if text else ch["title"]
+
+
+def render_addendum(ch):
+    blocks = []
+    for sec in ch["sections"]:
+        blocks.append(f'<h3 class="subh">{esc(sec["heading"])}</h3>')
+        for para in sec.get("paras", []):
+            blocks.append(f"<p>{esc(para)}</p>")
+        if "bullets" in sec:
+            lis = "".join(f"<li>{esc(b)}</li>" for b in sec["bullets"])
+            blocks.append(f"<ul>{lis}</ul>")
+        if "table" in sec:
+            tbl = sec["table"]
+            head = "".join(f'<td class="cl">{esc(c)}</td>'
+                           for c in tbl["cols"])
+            rows = "".join(
+                "<tr>" + "".join(f"<td>{esc(v)}</td>" for v in row) + "</tr>"
+                for row in tbl["rows"])
+            blocks.append('<div class="tblwrap"><table>'
+                          f"<tr>{head}</tr>{rows}</table></div>")
+        if "code" in sec:
+            blocks.append(f"<pre>{esc(sec['code'])}</pre>")
+    return f"""
+<section id="{esc(ch["id"])}" class="addendum">
+  <header class="band">
+    <p class="part">{esc(PART_TITLE)}</p>
+    <h2>{esc(ch["title"])}</h2>
+  </header>
+  {"".join(blocks)}
+</section>"""
+
+
 NAV = [
     ("start", "Getting started"), ("lcr", "LCR Meter"), ("scope", "Scope"),
     ("siggen", "Signal Gen"), ("arb", "Arb Editor"), ("psu", "DC Supply"),
     ("dmm", "DMM"), ("logging", "Logging"), ("battery", "Battery"),
     ("webcam", "Webcam"), ("sldea", "SLDEA Test"), ("tools", "SLDEA Tools"),
 ]
-nav_html = "".join(f'<a href="#{i}">{esc(t)}</a>' for i, t in NAV)
 
 # Full section titles, in document order. Must match the <h2> band titles
 # exactly — make_pdf.py locates each section's page by this text and the
@@ -187,8 +350,25 @@ SECTIONS = [
     ("sldea", "SLDEA Test"),
     ("tools", "SLDEA companion tools"),
 ]
-print_toc_html = "".join(
-    f'<li><a href="#{i}">{esc(t)}</a></li>' for i, t in SECTIONS)
+
+# Addendum chapters join NAV and SECTIONS here, before either is rendered:
+# that is the whole of the make_pdf.py integration. sections.json is written
+# from SECTIONS at the bottom of this file, and make_pdf.py reads it for the
+# bookmark sidebar and the running footers — so a new addendum file gets both
+# with no change to make_pdf.py.
+_N_TAB_CHAPTERS = len(SECTIONS)
+ADDENDA = load_addenda([i for i, _ in SECTIONS])
+for _ch in ADDENDA:
+    NAV.append((_ch["id"], nav_label(_ch)))
+    SECTIONS.append((_ch["id"], _ch["title"]))
+
+nav_html = "".join(f'<a href="#{i}">{esc(t)}</a>' for i, t in NAV)
+
+_toc_items = [f'<li><a href="#{i}">{esc(t)}</a></li>' for i, t in SECTIONS]
+if ADDENDA:
+    _toc_items.insert(_N_TAB_CHAPTERS,
+                      f'<li class="partline">{esc(PART_TITLE)}</li>')
+print_toc_html = "".join(_toc_items)
 
 shell = content["app-shell"]
 shell_steps = steps("app-shell")
@@ -350,6 +530,9 @@ body.append(f"""
   </table></div></details>
 </section>""")
 
+for _ch in ADDENDA:
+    body.append(render_addendum(_ch))
+
 body.append(f"""
 <footer class="foot">
   <p>Built from the live app ({esc(version_string())}) — every screenshot is a real capture, every
@@ -408,11 +591,12 @@ section { max-width:1060px; margin:46px auto 0; }
   padding:16px 22px; }
 .band h2 { margin:0 0 4px; font-size:23px; letter-spacing:-.01em; }
 .band .purpose { margin:0; font-size:14.5px; opacity:.85; max-width:90ch; }
-:root[data-theme="dark"] .band h2, :root[data-theme="dark"] .band .purpose
- { color:var(--ink); }
-@media (prefers-color-scheme: dark) { .band h2, .band .purpose { color:var(--ink); } }
-:root[data-theme="light"] .band h2, :root[data-theme="light"] .band .purpose
- { color:var(--navy-ink); }
+:root[data-theme="dark"] .band h2, :root[data-theme="dark"] .band .purpose,
+:root[data-theme="dark"] .band .part { color:var(--ink); }
+@media (prefers-color-scheme: dark) { .band h2, .band .purpose,
+  .band .part { color:var(--ink); } }
+:root[data-theme="light"] .band h2, :root[data-theme="light"] .band .purpose,
+:root[data-theme="light"] .band .part { color:var(--navy-ink); }
 .shot { margin:18px 0 0; border:1px solid var(--line); border-radius:10px;
   overflow:hidden; background:var(--card); }
 .shot img { display:block; width:100%; height:auto; }
@@ -467,6 +651,25 @@ td.cl { white-space:nowrap; font-weight:600; color:var(--navy); }
 @media (prefers-reduced-motion: no-preference) {
   html { scroll-behavior:smooth; } }
 
+/* ---- Part II "How it works" addendum chapters ----------------------- */
+.band .part { font-family:Consolas, monospace; text-transform:uppercase;
+  letter-spacing:.14em; font-size:11px; opacity:.72; margin:0 0 6px;
+  color:var(--navy-ink); }
+.addendum p { margin:11px 0 0; max-width:88ch; }
+.addendum ul { margin:10px 0 0; padding-left:22px; max-width:88ch; }
+.addendum li { margin:4px 0; }
+.addendum .subh { margin-top:30px; }
+.addendum .tblwrap { margin-top:14px; padding:0 10px 10px;
+  border:1px solid var(--line); border-radius:10px; background:var(--card); }
+.addendum pre { margin:14px 0 0; padding:11px 14px; overflow-x:auto;
+  background:var(--code-bg); border:1px solid var(--line);
+  border-radius:8px; white-space:pre-wrap;
+  font:12.5px/1.5 Consolas, "Cascadia Mono", monospace; }
+.print-toc li.partline { list-style:none; margin-left:-22px;
+  font-family:Consolas, monospace; text-transform:uppercase;
+  letter-spacing:.1em; font-size:11.5px; color:var(--steel);
+  padding-top:10px; }
+
 /* ---- print / PDF (Edge headless via make_pdf.py, or Ctrl+P) ---------- */
 .print-toc { display:none; }
 @page { size:A4; margin:12mm 11mm 16mm; }
@@ -488,6 +691,13 @@ td.cl { white-space:nowrap; font-weight:600; color:var(--navy); }
   .shot, .chip, .cautions .c, .tool, .use, details tr { break-inside:avoid; }
   .dialogpair > div, .advbox { break-inside:avoid; }
   .subh { break-after:avoid; }
+  .addendum pre, .addendum tr { break-inside:avoid; }
+  .addendum .tblwrap { break-inside:auto; }
+  /* A Part II chapter is heading-dense prose, not two .subh in a page of
+     screenshots: on screen the 30px rhythm reads well, on paper it spends
+     a page per chapter on white space. */
+  .addendum .subh { margin-top:18px; }
+  .addendum p { margin-top:8px; }
   details { border:none; }
   summary { color:var(--steel); }
   .foot { break-inside:avoid; }

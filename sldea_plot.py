@@ -6,7 +6,7 @@ Usage:
                          [--vs-area] [--prepost] [--mean] [--no-bands]
                          [--no-breakdown] [--out DIR] [--stem NAME]
                          [--title TEXT] [--allow-suspect-scale]
-                         [--logx] [--logy]
+                         [--logx] [--logy] [--no-marker-key]
     python sldea_plot.py --gui [RUN ...]        # window (see below)
     python sldea_plot.py --selftest [OUT.png]
 
@@ -42,6 +42,13 @@ Rendering:
       hand-traced ones (--no-bands hides them). A level mixing traced and
       machine snapshots keeps the machine +-2% band. Open markers = the
       level (with --prepost: the snapshot) includes a hand-traced boundary.
+    - The open/closed marker meaning is a KEY on the figure (`#267`): two
+      proxy handles in their own compact legend, lower right of the area
+      panel, so the run legend upper left keeps its corner and does not
+      grow by two fixed rows on every plot. On by default;
+      --no-marker-key hides it. Area mode only -- current/power draw one
+      plain dot per snapshot with no open/closed meaning, and a key there
+      would claim a distinction the figure does not make.
     - Colors are the Paul Tol bright family (colorblind-safe, house
       convention), assigned to runs in argument order.
     - Areas predating the 2026-07-28 scale fix (2.3-2.7x blob bug) are
@@ -422,11 +429,46 @@ def _cross_marks(ax, pts, color):
 
 
 def _legend(ax, run_handles, style_rows):
+    """The run legend (+ the style rows this figure earned) -> the Legend.
+
+    Returned rather than dropped: matplotlib keeps ONE ax.legend_, so the
+    marker key has to re-add this one as a standalone artist before it
+    creates its own or the run legend silently disappears (`#267`)."""
     from matplotlib.lines import Line2D
     handles = list(run_handles)
     for label, kw in style_rows:
         handles.append(Line2D([], [], color='#666666', label=label, **kw))
-    ax.legend(handles=handles, fontsize=8, loc='upper left', framealpha=0.9)
+    return ax.legend(handles=handles, fontsize=8, loc='upper left',
+                     framealpha=0.9)
+
+
+# the two marker fills `_series` draws, as the figure's own key (`#267`).
+# Area mode only: current/power draw one plain filled dot per snapshot with
+# no open/closed meaning, and a key there would claim a distinction the
+# figure does not make.
+MARKER_KEY_ROWS = (('hand-traced (outer toe)', 'white'),
+                   ('machine (half-height)', '#666666'))
+
+
+def _marker_key(ax, main_legend):
+    """Draw the open/closed marker key as a SECOND compact legend.
+
+    Its own legend in the opposite corner rather than two more rows in the
+    run legend: the run list is what a reader scans to tell the curves
+    apart, and a fixed key that grows it pushes the runs down the figure
+    on every plot. Placed lower right because area curves rise to the
+    right of the panel the run legend sits in."""
+    from matplotlib.lines import Line2D
+    if main_legend is not None:
+        ax.add_artist(main_legend)
+    proxies = [Line2D([], [], linestyle='', marker='o', markersize=4.5,
+                      color='#666666', markerfacecolor=fill,
+                      markeredgecolor='#666666', markeredgewidth=1.2,
+                      label=label)
+               for label, fill in MARKER_KEY_ROWS]
+    return ax.legend(handles=proxies, fontsize=7, loc='lower right',
+                     framealpha=0.9, title='marker fill',
+                     title_fontsize=7)
 
 
 def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
@@ -539,7 +581,9 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     if had_fallback:
         style_rows.append(('breakdown, no reviewed area',
                            {'linestyle': '--'}))
-    _legend(axl, run_handles, style_rows)
+    main_legend = _legend(axl, run_handles, style_rows)
+    if opts.get('marker_key', True):
+        _marker_key(axl, main_legend)
 
     cap = ("Points = per-level pre/post snapshot pair"
            + (" (post solid, pre dashed)" if opts['prepost']
@@ -817,7 +861,7 @@ def default_stem(mode):
 
 def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
               bands=True, breakdown=True, title=None,
-              logx=False, logy=False):
+              logx=False, logy=False, marker_key=True):
     """-> (opts dict, error message or None).
 
     The CLI builds this from its flags and the window from its tick boxes,
@@ -826,7 +870,9 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
 
     Every key added after `#223` defaults to the behaviour that existed
     before it, so an options dict built with no arguments still describes
-    the original figure."""
+    the original figure -- with ONE deliberate exception, `marker_key`,
+    which `#267` asked for on by default (--no-marker-key restores the
+    older figure exactly, and the test suite proves that byte for byte)."""
     if mode not in MODES:
         return None, f"unknown --mode {mode} (area | current | power)"
     if vs_area and mode == 'area':
@@ -835,7 +881,8 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
             'prepost': bool(prepost), 'mean': bool(mean),
             'bands': bool(bands), 'breakdown': bool(breakdown),
             'title': title or None,
-            'logx': bool(logx), 'logy': bool(logy)}, None
+            'logx': bool(logx), 'logy': bool(logy),
+            'marker_key': bool(marker_key)}, None
 
 
 def needs_areas(opts):
@@ -1023,7 +1070,7 @@ def _selftest(out_png):
 
 _BOOL_FLAGS = ('--vs-area', '--prepost', '--mean', '--no-bands',
                '--no-breakdown', '--allow-suspect-scale', '--selftest',
-               '--gui', '--logx', '--logy')
+               '--gui', '--logx', '--logy', '--no-marker-key')
 _VALUED_FLAGS = ('--mode', '--out', '--stem', '--title')
 
 _orig_stdout = None     # keeps the replaced wrapper alive: a GC'd
@@ -1094,7 +1141,8 @@ def main(argv):
                           breakdown='--no-breakdown' not in flags,
                           title=vals.get('--title'),
                           logx='--logx' in flags,
-                          logy='--logy' in flags)
+                          logy='--logy' in flags,
+                          marker_key='--no-marker-key' not in flags)
     if '--gui' in flags:
         # the window is a front end to everything below, and it does its own
         # run picking -- so unlike the headless paths it does NOT require

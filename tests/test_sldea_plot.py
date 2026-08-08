@@ -532,7 +532,8 @@ def test_make_opts_maps_choices_and_refuses_bad_combinations():
     # that reproduces the pre-change figure has to fail here.
     assert o == {'mode': 'area', 'vs_area': False, 'prepost': False,
                  'mean': False, 'bands': True, 'breakdown': True,
-                 'title': None, 'logx': False, 'logy': False}
+                 'title': None, 'logx': False, 'logy': False,
+                 'marker_key': True}
     o, err = sp.make_opts(mode='current', vs_area=True, prepost=True,
                           mean=True, bands=False, breakdown=False,
                           title='x')
@@ -761,7 +762,8 @@ def _default_opts_pair(old, mode):
     that reproduces the pre-change figure. Extended once per new option,
     which is the point: an option that CANNOT be turned back off shows up
     here as a test that no longer compiles."""
-    return sp.make_opts(mode=mode)[0], old.make_opts(mode=mode)[0]
+    return (sp.make_opts(mode=mode, marker_key=False)[0],
+            old.make_opts(mode=mode)[0])
 
 
 def test_default_output_is_byte_identical_to_the_pre_change_engine():
@@ -882,6 +884,81 @@ def test_log_flags_survive_the_cli_and_land_on_the_options_dict():
         assert seen['opts']['logx'] and seen['opts']['logy']
         assert sp.main([d, '--out', d]) == 0
         assert not seen['opts']['logx'] and not seen['opts']['logy']
+    finally:
+        sp.export = real
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# the marker key (`#267`)
+# --------------------------------------------------------------------------
+
+def _legend_texts(ax):
+    """Every legend on `ax` -> {title: [row labels]}. A second legend only
+    survives when the first was re-added as an artist, so reading them all
+    back is also the collision test."""
+    from matplotlib.legend import Legend
+    out = {}
+    for art in ax.get_children():
+        if isinstance(art, Legend):
+            title = art.get_title().get_text()
+            out[title] = [t.get_text() for t in art.get_texts()]
+    return out
+
+
+def test_marker_key_is_on_by_default_and_does_not_eat_the_run_legend():
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        opts = sp.make_opts()[0]
+        fig = _drawn(sp.prepare_runs([d], opts), opts)
+        legends = _legend_texts(fig.axes[0])
+        assert len(legends) == 2, legends           # both survived
+        key = legends.get('marker fill')
+        assert key == ['hand-traced (outer toe)',
+                       'machine (half-height)'], legends
+        # the run legend still carries the run, in its own corner
+        runs_leg = [v for k, v in legends.items() if k != 'marker fill'][0]
+        assert any('sldea_plot_test' in t for t in runs_leg), runs_leg
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_no_marker_key_hides_it_and_current_power_never_show_one():
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        opts = sp.make_opts(marker_key=False)[0]
+        fig = _drawn(sp.prepare_runs([d], opts), opts)
+        assert 'marker fill' not in _legend_texts(fig.axes[0])
+        assert len(_legend_texts(fig.axes[0])) == 1
+        # current/power draw one plain dot per snapshot -- there is no
+        # open/closed meaning there, so the key must not appear even ON
+        for mode in ('current', 'power'):
+            opts = sp.make_opts(mode=mode)[0]
+            assert opts['marker_key'] is True
+            fig = _drawn(sp.prepare_runs([d], opts), opts)
+            assert 'marker fill' not in _legend_texts(fig.axes[0]), mode
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_no_marker_key_flag_reaches_the_options_dict():
+    seen = {}
+    real = sp.export
+    sp.export = lambda runs, opts, out, stem, warn=None: (
+        seen.update(opts=opts), ('p.png', 'p.csv'))[1]
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(6))
+        assert sp.main([d, '--out', d]) == 0
+        assert seen['opts']['marker_key'] is True
+        assert sp.main([d, '--out', d, '--no-marker-key']) == 0
+        assert seen['opts']['marker_key'] is False
     finally:
         sp.export = real
         shutil.rmtree(d, ignore_errors=True)

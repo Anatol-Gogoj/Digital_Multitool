@@ -45,7 +45,7 @@ SAMPLE = {
     'repeat': '2', 'updown': True,
     'outdir': '/mnt/shareDrive/robot_incubator/SLDEA_data',
     'vch': '2', 'ich': '3', 'sgch': '1',
-    'diam_mm': '16', 'electrode': 'carbon black',
+    'diam_mm': '16', 'electrode': 'carbon black', 'conc_ml': '2.5',
     'trek_inv': True,
     'wd_on': True, 'wd_ua': '100', 'wd_s': '3',
     'tel_on': False, 'tel_hz': '2',
@@ -443,6 +443,36 @@ def test_every_sldea_var_on_the_tab_is_covered_by_a_preset_field():
     assert not uncovered, (
         f"SLDEA tab fields not covered by a preset: {uncovered} -- add them "
         f"to sldea_presets.TEXT_FIELDS/BOOL_FIELDS and FIELD_LABELS")
+
+
+def test_the_concentration_is_stored_and_round_trips():
+    """`#276`. A preset is a snapshot of the BOXES, so the concentration is
+    stored whatever the electrode -- including one that greys it. Whether
+    the box ends up greyed is decided from the electrode the preset loads,
+    not from anything stored alongside it."""
+    import sldea_profile
+    store, _root, restore = _sandbox()
+    try:
+        assert 'conc_ml' in sldea_presets.ALL_FIELDS
+        # an ink preset: applicable, and the value comes back
+        store.save('ink', dict(SAMPLE, electrode='Carbon Solutions P3-SWNT',
+                               conc_ml='1.5'))
+        fields, warnings = store.load('ink')
+        assert warnings == [], warnings
+        assert fields['conc_ml'] == '1.5'
+        assert sldea_profile.concentration_applies(
+            fields['electrode']) is True
+
+        # a carbon-black preset: the value is still stored (the operator
+        # typed it), but loading it greys the box
+        store.save('cb', dict(SAMPLE, electrode='carbon black',
+                              conc_ml='2.5'))
+        fields, _w = store.load('cb')
+        assert fields['conc_ml'] == '2.5'
+        assert sldea_profile.concentration_applies(
+            fields['electrode']) is False
+    finally:
+        restore()
 
 
 def test_every_preset_field_has_a_readable_label():

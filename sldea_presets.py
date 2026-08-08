@@ -61,8 +61,10 @@ TEXT_FIELDS = (
     'outdir',
     # instrument channel map
     'vch', 'ich', 'sgch',
-    # device under test
-    'diam_mm', 'electrode',
+    # device under test. conc_ml is stored even when the electrode makes it
+    # inapplicable: a preset is a snapshot of the BOXES, and whether the
+    # box is greyed follows the electrode the preset loads (`#276`).
+    'diam_mm', 'electrode', 'conc_ml',
     # breakdown watchdog
     'wd_ua', 'wd_s',
     # telemetry
@@ -88,6 +90,7 @@ FIELD_LABELS = {
     'outdir': 'Output dir',
     'vch': 'V_Out scope CH', 'ich': 'I_Out scope CH', 'sgch': 'SG CH',
     'diam_mm': 'DEA diam (mm)', 'electrode': 'Electrode',
+    'conc_ml': 'Concentration (mL)',
     'trek_inv': 'Trek inverts',
     'wd_on': 'Watchdog enabled', 'wd_ua': 'Watchdog trip (uA)',
     'wd_s': 'Watchdog confirm (s)',

@@ -269,7 +269,9 @@ S["40_edge_review"] = {
         {"match": "review queue", "label": "Frames still waiting for a decision"},
         {"match": "📏 Calibrate / re-anchor…",
          "label": "Set or re-anchor the mm-per-px scale — verify the automatic disc fit"},
-        {"match": "💾 Save to data.csv…",
+        {"match": "💾 Save to data.csv…", "badge_side": "bottom",
+         # bottom, not the automatic left: the `#237` detect/session clock
+         # now sits left of Save, and the auto badge landed on its text
          "label": "Writes accepted areas back (keeps a .bak) — confirms first"},
         {"match": "❓ How to use…", "badge_side": "left",
          "label": "The review loop in one short read — start here"},

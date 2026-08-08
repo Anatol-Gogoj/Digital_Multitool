@@ -204,7 +204,12 @@ RADIO_TEXT_PX = SIDE_W - 100   # text budget in a candidate radio row: the
 PRIMARY_FG = '#1f3a5f'  # the app's existing accent blue (splash, clock) —
                         # reused for ▶ Detect Edges rather than introducing
                         # a colour, because #32 owns any real restyle
-SECONDARY_FG = '#555555'   # Advanced… / 📏: muted label, stock geometry
+# There is deliberately NO secondary foreground. The first `#216` version
+# muted Advanced… / 📏 grey, and on the first real drive the operator read
+# exactly that as disabled — and was surprised the buttons worked
+# (2026-08-07: "greyed out, but I can click them"). A muted-but-live
+# control is the colour-alone lie about state the 2026-08-05 audit warns
+# about; the primary accent plus the separators carry the hierarchy alone.
 INFO_LINES = 5          # info label height (text lines): 3 fixed lines +
                         # room for a flag line and its wrap -- a flag must
                         # change content, not layout (#179)
@@ -1530,9 +1535,12 @@ class EdgeReviewApp:
         nothing. No `default='active'`: <Return> is bound to ✔ Accept, and
         calling Detect the default button would be a lie.
 
-        Secondary (Advanced…, 📏) keeps the stock geometry — a button that
-        is smaller AND muted starts to read as disabled — and is muted by
-        label colour only, so the row's heights stay even.
+        Secondary (Advanced…, 📏) is STOCK — geometry AND colour. The
+        first version muted their label grey, guarding only against
+        "smaller AND muted reads as disabled"; on the first real drive
+        (2026-08-07) the mute ALONE read as disabled, and the operator
+        was surprised the buttons worked. The style name stays applied as
+        a hook, deliberately unconfigured.
 
         THE BOLD FONT IS HELD ON THE APP, not on the stack. A tkfont.Font
         deletes its named font from the interpreter when it is collected,
@@ -1547,7 +1555,9 @@ class EdgeReviewApp:
             self._primary_font.configure(weight='bold')
             st.configure('Primary.TButton', font=self._primary_font,
                          padding=(12, 4), foreground=PRIMARY_FG)
-            st.configure('Secondary.TButton', foreground=SECONDARY_FG)
+            # 'Secondary.TButton' stays on Advanced…/📏 as a hook but is
+            # NOT configured: unstyled it inherits stock TButton, i.e. it
+            # looks exactly as enabled as it is. See the PRIMARY_FG note.
         except tk.TclError as e:
             # a theme that refuses one of these must cost the ACCENT, not
             # the window: the button still works unstyled

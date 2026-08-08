@@ -6965,17 +6965,27 @@ def parse_args(argv):
     NEVER RAISES AND NEVER REFUSES TO OPEN. A junk or missing ROW is
     dropped with a console note and the window opens exactly as it would
     have: this is a shortcut, and a broken shortcut must not cost the
-    operator their program. The value is consumed either way, so
-    `--goto nonsense` cannot be mistaken for the run path.
+    operator their program. A junk value is still CONSUMED, so
+    `--goto nonsense` cannot be mistaken for the run path -- but a value
+    that looks like a flag is left alone, which is sldea_plot's rule for
+    its own valued flags: `--goto --auto` is a --goto with no value AND
+    an --auto, not a swallowed --auto.
     """
     path, auto, goto = None, False, None
     rest = []
-    it = iter(argv)
-    for a in it:
+    i = 0
+    while i < len(argv):
+        a = argv[i]
         if a == '--auto':
             auto = True
         elif a == '--goto' or a.startswith('--goto='):
-            val = a.split('=', 1)[1] if '=' in a else next(it, None)
+            if '=' in a:
+                val = a.split('=', 1)[1]
+            elif i + 1 < len(argv) and not argv[i + 1].startswith('--'):
+                val = argv[i + 1]
+                i += 1
+            else:
+                val = None
             try:
                 goto = int(val)
             except (TypeError, ValueError):
@@ -6984,6 +6994,7 @@ def parse_args(argv):
                       f"(want a 0-based CSV row number)")
         elif not a.startswith('--'):
             rest.append(a)
+        i += 1
     return (rest[0] if rest else None), auto, goto
 
 

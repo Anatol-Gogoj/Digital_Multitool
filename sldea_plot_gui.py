@@ -26,6 +26,16 @@ Two deliberate shapes:
     CSV is the figure's evidence -- it is what makes a figure traceable
     back to its numbers -- so there is no "just the picture" option here
     (sldea_plot.export enforces it for both front ends).
+
+Two things the window remembers or reaches for, both additive:
+
+  * a double-click on a data point opens THAT FRAME in Edge Review
+    (`#274`), through the same sibling-process launch the SLDEA tab's
+    buttons use, with `--goto ROW`;
+  * the draw options are remembered PER PARENT FOLDER in a per-user file
+    (`#275`), never in a run folder and never in the repo. Precedence is
+    explicit CLI/init args > remembered > defaults, and a corrupt or
+    stale file can only cost the memory, never the window.
 """
 import math
 import os
@@ -48,8 +58,14 @@ Usage:
     python sldea_plot.py --gui [RUN ...]       # the same window, via the CLI
 
 Pick several runs, choose area / current / power, tick what to draw.
+Double-click a point on the figure to open that frame in Edge Review.
 Export writes the 300 dpi PNG and its tidy per-snapshot CSV together.
-For headless and batch use, see sldea_plot.py --help."""
+
+The draw options are remembered PER PARENT FOLDER in a per-user file --
+~/.local/share/scpi_control/sldea_plot_gui.json, or the same name under
+~/.cache/scpi_control -- never in the repo and never in a run folder.
+Precedence: an option given on the command line beats a remembered one,
+which beats the default. Delete that file to forget everything."""
 
 DEFAULT_PARENT = os.environ.get(
     'SCPI_SLDEA_DIR', '/mnt/shareDrive/robot_incubator/SLDEA_data')
@@ -175,6 +191,157 @@ def initial_state(args):
 def default_out_dir(parent):
     """Figures land beside the runs, never inside one."""
     return os.path.join(parent or os.getcwd(), OUT_SUBDIR)
+
+
+# ---------------------------------------------------------------------------
+# remembered options, per parent folder (`#275`)
+#
+# USER SCOPE, and deliberately so. Not in the run folders -- run data
+# never carries a UI preference, and the campaign corpus is read-only.
+# Not in the repo either, so there is nothing to add to .gitignore: the
+# file cannot land in the tree because it is not in it.
+#
+# The location and the format are the house convention for per-user state
+# (webcam.py's camera_controls.json, presets_path.py's fallback): a JSON
+# file under ~/.local/share/scpi_control, falling back to
+# ~/.cache/scpi_control, which the launcher creates at every start and is
+# therefore always writable -- the primary was left root-owned in one
+# user's home by the root-run desktop installer (bench 2026-07-24) and an
+# unguarded write there is a known Errno 13. The filename carries the
+# module so the open-decision-2 repo split moves exactly one file.
+#
+# This is NOT `setup.txt`'s territory (house rule 2026-08-08: that stays
+# plain text, and machine-read fields there keep Key: value). This file
+# is neither in a run folder nor read by any measurement path.
+# ---------------------------------------------------------------------------
+
+OPTIONS_PATH = os.path.join(os.path.expanduser('~'), '.local', 'share',
+                            'scpi_control', 'sldea_plot_gui.json')
+OPTIONS_FALLBACK = os.path.join(os.path.expanduser('~'), '.cache',
+                                'scpi_control', 'sldea_plot_gui.json')
+
+# What is worth remembering: how the figure is DRAWN, plus an output
+# folder someone deliberately chose.
+#
+# Not the title and not the file stem: both name one particular figure,
+# and resurrecting last week's caption over this week's runs would be a
+# wrong label that looks like a right one. Not the run selection either --
+# a campaign gains runs, and reopening on a stale set would quietly plot
+# the wrong batch.
+REMEMBERED = ('mode', 'prepost', 'mean', 'bands', 'breakdown', 'vs_area')
+
+
+def options_key(parent):
+    """The config key for a parent folder: absolute, and normcase'd
+    because Windows paths differ in case without differing."""
+    try:
+        return os.path.normcase(os.path.abspath(parent or ''))
+    except (OSError, ValueError):
+        return str(parent or '')
+
+
+def _clean_options(d):
+    """-> only the entries that are RECOGNIZABLE and VALID.
+
+    Everything else is dropped rather than repaired. A stale file written
+    by an older build, a mode that no longer exists, a hand-edit that put
+    a string where a flag goes: none of them may reach make_opts, and
+    none of them may stop the window opening."""
+    if not isinstance(d, dict):
+        return {}
+    out = {}
+    if d.get('mode') in sp.MODES:
+        out['mode'] = d['mode']
+    for k in REMEMBERED:
+        if k != 'mode' and isinstance(d.get(k), bool):
+            out[k] = d[k]
+    if isinstance(d.get('out_dir'), str) and d['out_dir'].strip():
+        out['out_dir'] = d['out_dir']
+    return out
+
+
+def load_options(parent, path=None):
+    """-> the remembered options for `parent`, or {}.
+
+    NEVER RAISES. A missing, unreadable, truncated, non-JSON or
+    hand-mangled file yields {} and the window opens on the defaults --
+    silently to the operator, with one line on stderr for whoever is
+    reading a console. A convenience must not be able to cost someone
+    their program."""
+    import json
+    paths = [path] if path is not None else [OPTIONS_PATH, OPTIONS_FALLBACK]
+    for p in paths:
+        try:
+            with open(p, encoding='utf-8') as f:
+                blob = json.load(f)
+        except (OSError, ValueError, UnicodeDecodeError) as e:
+            if isinstance(e, OSError) and e.errno == 2:
+                continue                       # simply not there yet
+            print(f"sldea plot: ignoring unreadable options file "
+                  f"{ascii(p)} ({type(e).__name__})")
+            continue
+        try:
+            return _clean_options(blob.get('parents', {}).get(
+                options_key(parent), {}))
+        except AttributeError:                 # not the shape we write
+            print(f"sldea plot: ignoring options file {ascii(p)} "
+                  f"(unexpected structure)")
+    return {}
+
+
+def save_options(parent, opts, out_dir=None, path=None):
+    """Remember `opts` for `parent`. -> the file written, or None.
+
+    NEVER RAISES either, for the same reason: this runs when the window
+    is closing, and a failure to remember a checkbox must not turn a
+    close into a traceback. Other parents' entries are preserved --
+    the file is read, one key is replaced, and it is written atomically
+    through a .tmp so a crash mid-write cannot leave a half file."""
+    import json
+    entry = {k: opts[k] for k in REMEMBERED if k in opts}
+    if out_dir:
+        entry['out_dir'] = out_dir
+    for cand in ([path] if path is not None
+                 else [OPTIONS_PATH, OPTIONS_FALLBACK]):
+        try:
+            blob = {}
+            try:
+                with open(cand, encoding='utf-8') as f:
+                    blob = json.load(f)
+            except (OSError, ValueError, UnicodeDecodeError):
+                blob = {}                      # start clean over junk
+            if not isinstance(blob.get('parents'), dict):
+                blob = {'version': 1, 'parents': {}}
+            blob['version'] = 1
+            blob['parents'][options_key(parent)] = entry
+            os.makedirs(os.path.dirname(cand) or '.', exist_ok=True)
+            tmp = cand + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(blob, f, indent=2, sort_keys=True)
+            os.replace(tmp, cand)
+            return cand
+        except OSError:
+            continue
+    print("sldea plot: could not save the remembered options")
+    return None
+
+
+def explicit_opts(opts):
+    """-> the option names `opts` states EXPLICITLY, for the precedence
+    rule (CLI/init args > remembered > defaults).
+
+    Derived by DIFFING AGAINST sldea_plot's defaults, because that is all
+    the command line leaves behind: sldea_plot.main builds a complete
+    opts dict whether or not a single flag was given, so a field sitting
+    on its default cannot be told apart from one nobody mentioned.
+
+    The consequence is stated rather than hidden. `--mode area` reads as
+    "unset" and a remembered mode wins; `--mode power` beats anything
+    remembered. Any caller that knows better can hand `launch` the set
+    instead of making it guess."""
+    base, _err = sp.make_opts()
+    return {k for k, v in (opts or {}).items()
+            if k in base and v != base[k]}
 
 
 # ---------------------------------------------------------------------------
@@ -514,7 +681,7 @@ class PlotWindow:
     no singleton to leak and closing it takes everything with it."""
 
     def __init__(self, root, parent_dir, preselect=(), opts=None,
-                 out_dir=None, stem=None):
+                 out_dir=None, stem=None, explicit=None, remember=True):
         self.root = root
         self.parent = parent_dir
         self.runs = []                 # [(name, label)] currently listed
@@ -526,7 +693,21 @@ class PlotWindow:
         self._warns = []
         root.title("SLDEA plot — cross-run figures")
 
-        o = opts or sp.make_opts()[0]
+        # PRECEDENCE (`#275`): explicit CLI/init args > remembered >
+        # defaults. `remember=False` opts a caller out of the file
+        # entirely (the tests, and anything that must be reproducible).
+        self.remember = remember
+        o = sp.make_opts()[0]
+        mem = load_options(parent_dir) if remember else {}
+        self.remembered = mem
+        o.update({k: v for k, v in mem.items() if k in REMEMBERED})
+        if opts:
+            named = explicit_opts(opts) if explicit is None else set(explicit)
+            o.update({k: opts[k] for k in named if k in opts})
+            # a title is never remembered, so an explicit one is simply the
+            # only one there can be
+            if opts.get('title'):
+                o['title'] = opts['title']
         self.v_mode = tk.StringVar(value=o['mode'])
         self.v_prepost = tk.BooleanVar(value=o['prepost'])
         self.v_mean = tk.BooleanVar(value=o['mean'])
@@ -534,15 +715,24 @@ class PlotWindow:
         self.v_breakdown = tk.BooleanVar(value=o['breakdown'])
         self.v_vs_area = tk.BooleanVar(value=o['vs_area'])
         self.v_title = tk.StringVar(value=o['title'] or '')
-        self.v_out = tk.StringVar(value=out_dir or default_out_dir(parent_dir))
+        chosen_out = out_dir or mem.get('out_dir')
+        self.v_out = tk.StringVar(
+            value=chosen_out or default_out_dir(parent_dir))
         self.v_stem = tk.StringVar(value=stem or '')
-        self._out_chosen = bool(out_dir)   # did someone pick it themselves?
+        self._out_chosen = bool(chosen_out)  # did someone pick it themselves?
 
         self._build(root)
         self.populate(preselect)
         # AFTER populate: the floor is measured off the finished column,
         # and the run list and the parent-path label are part of it.
         self.apply_minsize()
+        # remember on the way out (`#275`). Closing is where a set of
+        # options is finished with; Export saves too, because that is the
+        # moment someone committed to them.
+        try:
+            root.protocol('WM_DELETE_WINDOW', self._closing)
+        except tk.TclError:                # not a toplevel to ask
+            pass
 
     # -- construction ------------------------------------------------------
 
@@ -755,6 +945,22 @@ class PlotWindow:
                 for i in self.run_box.curselection()]
 
     # -- options -----------------------------------------------------------
+
+    def remember_now(self):
+        """Write the current options under the current parent (`#275`).
+        -> the file written, or None. Never raises."""
+        if not self.remember:
+            return None
+        opts, err = self.current_opts()
+        if err:                       # an invalid combination is not a
+            return None               # preference worth restoring
+        return save_options(self.parent, opts,
+                            self.v_out.get().strip()
+                            if self._out_chosen else None)
+
+    def _closing(self):
+        self.remember_now()
+        self.root.destroy()
 
     def _sync_mean_enabled(self):
         """The mean checkbox is live exactly when pre/post lines are drawn
@@ -991,6 +1197,7 @@ class PlotWindow:
             messagebox.showerror("Plot", f"Could not write the figure:\n{e}")
             return
         self._set_messages(warns)
+        self.remember_now()          # they committed to these options
         messagebox.showinfo(
             "Exported",
             f"Figure (300 dpi) and its tidy per-snapshot CSV:\n\n"
@@ -1002,12 +1209,18 @@ class PlotWindow:
 # entry points
 # ---------------------------------------------------------------------------
 
-def launch(args=(), opts=None, out_dir=None, stem=None):
-    """Open the window. Returns an exit code (0)."""
+def launch(args=(), opts=None, out_dir=None, stem=None, explicit=None,
+           remember=True):
+    """Open the window. Returns an exit code (0).
+
+    `explicit` names the options the CALLER actually set, for the `#275`
+    precedence rule (explicit > remembered > defaults). Left None it is
+    inferred by diffing `opts` against sldea_plot's defaults -- see
+    explicit_opts for what that can and cannot tell apart."""
     parent, preselect = initial_state(args)
     root = tk.Tk()
     PlotWindow(root, parent, preselect, opts=opts, out_dir=out_dir,
-               stem=stem)
+               stem=stem, explicit=explicit, remember=remember)
     root.mainloop()
     return 0
 

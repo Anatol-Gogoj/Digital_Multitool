@@ -5,6 +5,9 @@ __pycache__/
 logs/
 presets/
 *.code-workspace
+# run_tests.py drops each failing suite's full output here, overwritten
+# every run, so a flake's traceback outlives the console (`#280`).
+test_failures/
 # Bench run data. One set of three runs is ~half a gigabyte of 1080p
 # frames; runs get extracted into the working directory for analysis and
 # must never be committed. The diagnostic writes its outputs beside the

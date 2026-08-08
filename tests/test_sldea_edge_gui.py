@@ -4253,6 +4253,15 @@ def test_detect_edges_is_the_primary_action_and_gates_on_a_run():
         assert tkfont.nametofont(fname).cget('weight') == 'bold', \
             "the accent style is not bold, so it renders as a plain button"
         assert st.lookup('Primary.TButton', 'foreground') == gui.PRIMARY_FG
+        # Secondary is a HOOK, not a look: the first #216 version muted it
+        # grey and the operator read that as DISABLED on the first real
+        # drive (2026-08-07). Stock appearance is the fix — keep it.
+        # (lookup falls back through the style tree, so an unconfigured
+        # style reports TButton's own value: assert equality, not empty.)
+        assert (st.lookup('Secondary.TButton', 'foreground')
+                == st.lookup('TButton', 'foreground')), \
+            "Secondary.TButton foreground diverges from stock TButton - " \
+            "the grey mute read as disabled once; keep secondary stock"
         # ...and it makes the button visibly bigger than a plain one
         probe = ttk.Button(root, text=str(app.detect_btn['text']))
         probe.update_idletasks()

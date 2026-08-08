@@ -1094,8 +1094,38 @@ class PlotWindow:
                             if self._out_chosen else None)
 
     def _closing(self):
+        """Remember, cancel, destroy -- in that order.
+
+        remember_now FIRST (`#275`): it reads the live widgets, and a
+        destroyed root has none.
+
+        Then the pending debounced redraw, BEFORE destroy. A close landing
+        inside REDRAW_MS of a click -- picking a run and reaching straight
+        for the X -- left one queued at a command Tk had just deleted, and
+        its background error handler printed `invalid command name
+        ...redraw` on the console (`#283`). Harmless, but it is exactly
+        the kind of line a real failure hides behind, which is why the
+        test suite's own _shut() helper has been sweeping it up by hand.
+
+        The only other after() in this module is Tooltip's hover timer,
+        and it cancels itself: Tooltip binds <Destroy> to _hide. Nothing
+        else here queues a callback, so this is the whole sweep -- and it
+        stays a list of THIS window's ids rather than 'after info', which
+        on a shared root would cancel someone else's."""
         self.remember_now()
+        self._cancel_redraw()
         self.root.destroy()
+
+    def _cancel_redraw(self):
+        """Drop the pending debounced redraw, if any. Never raises -- an
+        id Tk has already fired or forgotten is not an error to a caller
+        on its way out."""
+        if self._redraw_after is not None:
+            try:
+                self.root.after_cancel(self._redraw_after)
+            except Exception:
+                pass
+            self._redraw_after = None
 
     def _sync_enabled(self):
         """Grey every control the current mode and panel selection make
@@ -1187,8 +1217,7 @@ class PlotWindow:
     def schedule(self, _event=None):
         """Coalesce redraws: dragging through the run list fires a select
         event per row, and each redraw is a full matplotlib pass."""
-        if self._redraw_after is not None:
-            self.root.after_cancel(self._redraw_after)
+        self._cancel_redraw()          # one canceller, shared with _closing
         self._redraw_after = self.root.after(REDRAW_MS, self.redraw)
 
     def _canvas_configured(self, event):

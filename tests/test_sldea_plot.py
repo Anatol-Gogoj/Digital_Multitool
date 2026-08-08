@@ -533,7 +533,8 @@ def test_make_opts_maps_choices_and_refuses_bad_combinations():
     assert o == {'mode': 'area', 'vs_area': False, 'prepost': False,
                  'mean': False, 'bands': True, 'breakdown': True,
                  'title': None, 'logx': False, 'logy': False,
-                 'marker_key': True}
+                 'marker_key': True, 'title_first': None,
+                 'title_second': None}
     o, err = sp.make_opts(mode='current', vs_area=True, prepost=True,
                           mean=True, bands=False, breakdown=False,
                           title='x')
@@ -959,6 +960,93 @@ def test_no_marker_key_flag_reaches_the_options_dict():
         assert seen['opts']['marker_key'] is True
         assert sp.main([d, '--out', d, '--no-marker-key']) == 0
         assert seen['opts']['marker_key'] is False
+    finally:
+        sp.export = real
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# per-panel titles (`#269`)
+# --------------------------------------------------------------------------
+
+def _titles(fig):
+    """Panel headings, in axes order. loc='left' on purpose -- that is
+    where the figures put them, and the default get_title() reads the
+    (always empty) centre slot."""
+    return [a.get_title(loc='left') for a in fig.axes]
+
+
+def test_panel_titles_default_then_take_the_per_panel_override():
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        opts = sp.make_opts()[0]
+        assert _titles(_drawn(sp.prepare_runs([d], opts), opts)) == [
+            'Active area vs voltage',
+            'Normalized to baseline area (A₀ = 201.1 mm²)']
+        opts = sp.make_opts(title_first='Absolute', title_second='Norm')[0]
+        assert _titles(_drawn(sp.prepare_runs([d], opts), opts)) == \
+            ['Absolute', 'Norm']
+        # one override leaves the other panel's default alone
+        opts = sp.make_opts(title_second='Only the right one')[0]
+        got = _titles(_drawn(sp.prepare_runs([d], opts), opts))
+        assert got == ['Active area vs voltage', 'Only the right one'], got
+        # single-panel modes: 'first' is the panel, 'second' does nothing
+        for mode, default in (('current', 'Current -- per snapshot'),
+                              ('power', 'Power -- per snapshot')):
+            opts = sp.make_opts(mode=mode, title_second='ignored')[0]
+            assert _titles(_drawn(sp.prepare_runs([d], opts), opts)) == \
+                [default], mode
+            opts = sp.make_opts(mode=mode, title_first='Mine')[0]
+            assert _titles(_drawn(sp.prepare_runs([d], opts), opts)) == \
+                ['Mine'], mode
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_legacy_title_still_means_the_first_panel_and_loses_to_it():
+    """--title shipped before per-panel titles and has always set the
+    first panel's heading. A script that says --title must keep its
+    figure; --title-first is the precise name for the same slot."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        opts = sp.make_opts(title='Legacy')[0]
+        got = _titles(_drawn(sp.prepare_runs([d], opts), opts))
+        assert got[0] == 'Legacy'
+        assert got[1] == 'Normalized to baseline area (A₀ = 201.1 mm²)'
+        opts = sp.make_opts(title='Legacy', title_first='Precise')[0]
+        assert _titles(_drawn(sp.prepare_runs([d], opts), opts))[0] == \
+            'Precise'
+        # blank is 'no override', not an empty heading, on every route in
+        assert sp.make_opts(title_first='', title_second='  ')[0][
+            'title_first'] is None
+        opts = sp.make_opts(title_first='   ')[0]
+        assert _titles(_drawn(sp.prepare_runs([d], opts), opts))[0] == \
+            'Active area vs voltage'
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_title_flags_reach_the_options_dict():
+    seen = {}
+    real = sp.export
+    sp.export = lambda runs, opts, out, stem, warn=None: (
+        seen.update(opts=opts), ('p.png', 'p.csv'))[1]
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(6))
+        assert sp.main([d, '--out', d, '--title-first', 'A',
+                        '--title-second', 'B']) == 0
+        assert seen['opts']['title_first'] == 'A'
+        assert seen['opts']['title_second'] == 'B'
+        assert seen['opts']['title'] is None
+        # still a valued flag: a missing value is refused, not swallowed
+        assert sp.main([d, '--title-first']) == 2
     finally:
         sp.export = real
         shutil.rmtree(d, ignore_errors=True)

@@ -7,6 +7,7 @@ Usage:
                          [--no-breakdown] [--out DIR] [--stem NAME]
                          [--title TEXT] [--allow-suspect-scale]
                          [--logx] [--logy] [--no-marker-key]
+                         [--title-first TEXT] [--title-second TEXT]
     python sldea_plot.py --gui [RUN ...]        # window (see below)
     python sldea_plot.py --selftest [OUT.png]
 
@@ -56,6 +57,22 @@ Rendering:
       nominal disc; --allow-suspect-scale overrides. In current/power
       modes such runs still plot (currents are unaffected) but their area
       columns are blanked in the tidy CSV so eras cannot be mixed.
+
+Panel titles (`#269`):
+    The panels a mode actually draws, in the order the flags name them:
+
+        area            first  = active area vs nominal kV
+                        second = the same curves as A/A0
+        current, power  first  = the single per-snapshot panel
+                        (there is no second panel in these modes)
+
+    --title-first / --title-second replace that panel's heading; blank or
+    absent keeps the built-in default, so a figure only carries a hand
+    written title where somebody wrote one. --title predates these and
+    has always meant the FIRST panel, so it still does: --title-first
+    wins over it, and both lose to nothing (the default). --title-second
+    in current/power mode is accepted and does nothing -- there is no
+    second panel to title.
 
 Log scales (`#263`):
     --logx / --logy put the x / y axis on a logarithmic scale. The axis
@@ -381,6 +398,20 @@ def _apply_scales(ax, opts, xs, ys, notes):
                          f"plain log scale would drop them).")
 
 
+def _panel_title(opts, which, default):
+    """The heading for one panel: the panel's own option, else (first
+    panel only) the legacy --title, else the built-in default.
+
+    --title predates per-panel titles and has always meant 'the FIRST
+    panel', so it keeps meaning that and --title-first is simply its
+    precise name -- a script that says --title today keeps its figure.
+    Blank is 'no override', never an empty heading (`#269`)."""
+    text = (opts.get('title_' + which) or '').strip()
+    if not text and which == 'first':
+        text = (opts.get('title') or '').strip()
+    return text or default
+
+
 def _dedupe(items):
     """Order-preserving unique -- the two area panels share an x axis, so
     the same caption line is generated twice."""
@@ -564,13 +595,14 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     scale_notes = []
     _apply_scales(axl, opts, xs_all, ysl_all, scale_notes)
     _apply_scales(axr, opts, xs_all, ysr_all, scale_notes)
-    axl.set_title(opts['title'] or 'Active area vs voltage', loc='left',
-                  fontweight='bold', fontsize=11)
+    axl.set_title(_panel_title(opts, 'first', 'Active area vs voltage'),
+                  loc='left', fontweight='bold', fontsize=11)
     a0s = sorted({round(r['a0'], 1) for r in runs})
     a0txt = (f"A₀ = {a0s[0]:g} mm²" if len(a0s) == 1
              else "per-run A₀")
-    axr.set_title(f"Normalized to baseline area ({a0txt})", loc='left',
-                  fontweight='bold', fontsize=11)
+    axr.set_title(_panel_title(opts, 'second',
+                               f"Normalized to baseline area ({a0txt})"),
+                  loc='left', fontweight='bold', fontsize=11)
     style_rows = []
     if opts['prepost']:
         style_rows += [('post-ramp snapshot', {'linestyle': '-'}),
@@ -715,9 +747,10 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
     _style_axes(ax, xlabel, ylabel)
     scale_notes = []
     _apply_scales(ax, opts, xs_all, ys_all, scale_notes)
-    ax.set_title(opts['title'] or ('Power' if power else 'Current')
-                 + ' -- per snapshot', loc='left', fontweight='bold',
-                 fontsize=11)
+    ax.set_title(_panel_title(opts, 'first',
+                              ('Power' if power else 'Current')
+                              + ' -- per snapshot'),
+                 loc='left', fontweight='bold', fontsize=11)
     style_rows = []
     if had_x:
         style_rows.append(('breakdown (current-confirmed)',
@@ -861,7 +894,8 @@ def default_stem(mode):
 
 def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
               bands=True, breakdown=True, title=None,
-              logx=False, logy=False, marker_key=True):
+              logx=False, logy=False, marker_key=True,
+              title_first=None, title_second=None):
     """-> (opts dict, error message or None).
 
     The CLI builds this from its flags and the window from its tick boxes,
@@ -882,7 +916,9 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
             'bands': bool(bands), 'breakdown': bool(breakdown),
             'title': title or None,
             'logx': bool(logx), 'logy': bool(logy),
-            'marker_key': bool(marker_key)}, None
+            'marker_key': bool(marker_key),
+            'title_first': title_first or None,
+            'title_second': title_second or None}, None
 
 
 def needs_areas(opts):
@@ -1071,7 +1107,8 @@ def _selftest(out_png):
 _BOOL_FLAGS = ('--vs-area', '--prepost', '--mean', '--no-bands',
                '--no-breakdown', '--allow-suspect-scale', '--selftest',
                '--gui', '--logx', '--logy', '--no-marker-key')
-_VALUED_FLAGS = ('--mode', '--out', '--stem', '--title')
+_VALUED_FLAGS = ('--mode', '--out', '--stem', '--title',
+                 '--title-first', '--title-second')
 
 _orig_stdout = None     # keeps the replaced wrapper alive: a GC'd
                         # TextIOWrapper closes the buffer it shares with
@@ -1142,7 +1179,9 @@ def main(argv):
                           title=vals.get('--title'),
                           logx='--logx' in flags,
                           logy='--logy' in flags,
-                          marker_key='--no-marker-key' not in flags)
+                          marker_key='--no-marker-key' not in flags,
+                          title_first=vals.get('--title-first'),
+                          title_second=vals.get('--title-second'))
     if '--gui' in flags:
         # the window is a front end to everything below, and it does its own
         # run picking -- so unlike the headless paths it does NOT require

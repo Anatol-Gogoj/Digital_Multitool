@@ -896,7 +896,7 @@
     "what": "Which scope channels carry the Trek monitor outputs and which SG channel drives the Trek."
    },
    {
-    "label": "DEA diam (mm)",
+    "label": "DEA active area diam (mm)",
     "what": "Nominal resting diameter of the active area — written to setup.txt and used as the px-to-mm scale in Edge Review."
    },
    {
@@ -931,7 +931,7 @@
   "workflow": [
    "1. Enter the staircase: Start/End/Step kV, Ramp and Landing times.",
    "2. Check the preview and summary line — dots are photos, total time shown.",
-   "3. Set Output dir, DEA diam (mm), and the scope/SG channels.",
+   "3. Set Output dir, DEA active area diam (mm), and the scope/SG channels.",
    "4. Do a dry run first to rehearse timing and camera captures.",
    "5. Untick DRY RUN; answer the scope-monitor and Energize HV prompts.",
    "6. In camera pre-flight, center the DEA in the circle, check focus, start.",
@@ -976,7 +976,7 @@
     "note": "Analyze a finished run"
    },
    {
-    "widget_text": "DEA diam (mm):",
+    "widget_text": "DEA active area diam (mm):",
     "note": "Sets the px-to-mm scale"
    },
    {

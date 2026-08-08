@@ -9,16 +9,17 @@ Usage:
                          [--logx] [--logy] [--no-marker-key]
                          [--title-first TEXT] [--title-second TEXT]
                          [--subplots both|first|second]
+    python sldea_plot.py --from-spec FILE.figspec.json [flags to override]
     python sldea_plot.py --gui [RUN ...]        # window (see below)
     python sldea_plot.py --selftest [OUT.png]
 
 Each RUN is a run directory, a parent full of runs (newest wins) or a bench
 shortcut ('1'/'2'/'3') -- the same resolver as the tuner and diagnostic.
-Writes a 300 dpi PNG plus the underlying tidy per-snapshot CSV, both named
-after --stem (default 'sldea_plot_<mode>'), into --out (default the current
-directory). Custom --stem names written inside the repo checkout are NOT
-gitignored -- keep the default 'sldea_plot' prefix there, or point --out
-outside the checkout.
+Writes a 300 dpi PNG, the underlying tidy per-snapshot CSV and the figspec
+sidecar (below), all named after --stem (default 'sldea_plot_<mode>'), into
+--out (default the current directory). Custom --stem names written inside
+the repo checkout are NOT gitignored -- keep the default 'sldea_plot'
+prefix there, or point --out outside the checkout.
 
 Modes:
     area      (default) two panels: active area (mm^2) vs nominal kV, and
@@ -85,6 +86,33 @@ Panels (`#269` titles, `#270` selection):
     does NOT shrink with the selection: it is the per-snapshot evidence
     for the numbers, not a description of the layout, and the two panels
     are two views of the same areas.
+
+Figspec sidecar (`#273`):
+    Every export writes a THIRD file beside the PNG and the CSV:
+    <stem>.figspec.json, carrying the exact options, the run directories
+    that were plotted (resolved and absolute -- a bench shortcut means a
+    different run tomorrow) and two versions: the app's, and the spec
+    FORMAT's. A PNG travels into slide decks and papers; the command line
+    that made it does not, and six months later 'which runs is this?' has
+    to be answerable from the file itself.
+
+    --from-spec FILE re-renders from one. Precedence is one rule applied
+    to every option: an explicitly given command-line flag beats the
+    spec's value, which beats the built-in default. Positional RUN
+    arguments REPLACE the spec's run list rather than adding to it (the
+    common case is 'this figure, other runs'). --out is never taken from
+    a spec -- a spec describes the figure, not the folder somebody filed
+    it in -- and --stem comes from the spec unless you give one.
+
+    The one asymmetry: boolean flags are one-way switches. --prepost can
+    turn a spec's false ON, --no-bands can turn a spec's true OFF, but
+    there is no --bands to turn a spec's false back on. Edit the spec; it
+    is JSON, and that is half the point.
+
+    A spec is validated, not trusted: it is a file a human can edit, so
+    its options go back through make_opts and an illegal combination is
+    refused with the same wording as on the command line. A spec_version
+    from a newer build is refused rather than half-understood.
 
 Log scales (`#263`):
     --logx / --logy put the x / y axis on a logarithmic scale. The axis
@@ -1000,16 +1028,113 @@ def output_paths(out_dir, stem, mode):
             os.path.join(out_dir, stem + '.csv'))
 
 
+# ---------------------------------------------------------------------------
+# the figspec sidecar (`#273`)
+#
+# A PNG travels; the command line that made it does not. The figspec is the
+# third file every export writes: the exact options, the run directories
+# that were actually plotted, and the versions that plotted them -- enough
+# to re-render the figure, and enough to say what a figure in a slide deck
+# came from six months later. JSON beside the PNG rather than PNG metadata
+# so it is greppable, diffable and survives a crop.
+# ---------------------------------------------------------------------------
+
+SPEC_VERSION = 1        # the figspec FORMAT version, not the app's
+
+
+def figspec_path(png_path):
+    """The spec that belongs to a PNG. Derived from the PNG in ONE place
+    so no caller can invent a different neighbour."""
+    return os.path.splitext(png_path)[0] + '.figspec.json'
+
+
+def _app_version():
+    """v<semver>[+<short hash>], or 'unknown' off a checkout. Best effort
+    on purpose: provenance is worth recording, but not worth failing an
+    export over."""
+    try:
+        import version
+        return version.version_string()
+    except Exception:
+        return 'unknown'
+
+
+def build_figspec(runs, opts, stem):
+    """-> the spec dict for this figure.
+
+    Runs are stored RESOLVED and absolute, not as the arguments that were
+    typed: a bench shortcut ('1') or a parent-of-runs path means something
+    different on another machine or on another day, and a spec that
+    re-renders a different run is worse than no spec at all."""
+    return {
+        'spec_version': SPEC_VERSION,
+        'tool': 'sldea_plot',
+        'app_version': _app_version(),
+        'stem': stem,
+        'runs': [os.path.abspath(r['dir']) for r in runs],
+        'opts': dict(opts),
+    }
+
+
+def write_figspec(runs, opts, path, stem):
+    import json
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(build_figspec(runs, opts, stem), f, indent=2,
+                  sort_keys=True)
+        f.write('\n')
+    return path
+
+
+def load_figspec(path):
+    """-> (spec dict, None) or (None, error message the CLI prints).
+
+    Validated rather than trusted: a spec is a file a human can edit, and
+    the failure mode of a silently half-understood spec is a figure that
+    claims to be a re-render and is not."""
+    import json
+    try:
+        with open(path, encoding='utf-8') as f:
+            spec = json.load(f)
+    except OSError as e:
+        return None, f"cannot read --from-spec {path}: {e}"
+    except ValueError as e:
+        return None, f"--from-spec {path} is not valid JSON: {e}"
+    if not isinstance(spec, dict):
+        return None, f"--from-spec {path}: expected a JSON object"
+    ver = spec.get('spec_version')
+    if isinstance(ver, bool) or not isinstance(ver, int) or ver < 1:
+        return None, (f"--from-spec {path}: 'spec_version' must be a "
+                      f"positive integer")
+    if ver > SPEC_VERSION:
+        return None, (f"--from-spec {path}: spec_version {ver} was written "
+                      f"by a newer build (this one reads up to "
+                      f"{SPEC_VERSION})")
+    if not isinstance(spec.get('opts'), dict):
+        return None, f"--from-spec {path}: no 'opts' object"
+    runs = spec.get('runs')
+    if not isinstance(runs, list) or not all(isinstance(r, str)
+                                             for r in runs):
+        return None, (f"--from-spec {path}: 'runs' must be a list of "
+                      f"run directories")
+    return spec, None
+
+
 def export(runs, opts, out_dir, stem, warn=lambda m: None):
-    """Render the figure AND write its tidy CSV -> (png, csv).
+    """Render the figure, write its tidy CSV AND its figspec -> (png, csv).
 
     The single write path for both front ends. There is deliberately no
     way to ask for the PNG alone: on-screen preview is free, but anything
-    that lands on disk lands with its numbers."""
+    that lands on disk lands with its numbers and with the spec that says
+    where they came from. The return stays (png, csv) -- the spec's path
+    is figspec_path(png), so existing callers keep working unchanged."""
     os.makedirs(out_dir, exist_ok=True)
     png, tidy = output_paths(out_dir, stem, opts['mode'])
     save_figure(runs, opts, png, warn)
     write_tidy(runs, tidy)
+    # the EFFECTIVE stem (output_paths defaults a blank one), so a
+    # re-render from this spec lands on the same filenames
+    write_figspec(runs, opts, figspec_path(png),
+                  os.path.splitext(os.path.basename(png))[0])
     return png, tidy
 
 
@@ -1168,7 +1293,8 @@ _BOOL_FLAGS = ('--vs-area', '--prepost', '--mean', '--no-bands',
                '--no-breakdown', '--allow-suspect-scale', '--selftest',
                '--gui', '--logx', '--logy', '--no-marker-key')
 _VALUED_FLAGS = ('--mode', '--out', '--stem', '--title',
-                 '--title-first', '--title-second', '--subplots')
+                 '--title-first', '--title-second', '--subplots',
+                 '--from-spec')
 
 _orig_stdout = None     # keeps the replaced wrapper alive: a GC'd
                         # TextIOWrapper closes the buffer it shares with
@@ -1220,6 +1346,50 @@ def _parse_argv(argv):
     return args, flags, vals
 
 
+def _cli_opts(flags, vals, base=None):
+    """Build the options dict from the parsed command line, over an
+    optional `base` (a figspec's opts) -> (opts, error).
+
+    ONE precedence rule, applied to every option: an explicitly given
+    command-line flag wins, else the spec's value, else the built-in
+    default. With no base this is exactly what the CLI did before
+    --from-spec existed.
+
+    Boolean flags are one-way switches, which is the one asymmetry worth
+    knowing: --prepost can turn prepost ON over a spec that says false,
+    and --no-bands can turn bands OFF over a spec that says true, but
+    there is no --bands to turn a spec's `false` back on. To flip a spec
+    value the other way, edit the spec -- it is a JSON file, and that is
+    half the point of it being one."""
+    base = base or {}
+
+    def val(flag, key, default):
+        return vals[flag] if flag in vals else base.get(key, default)
+
+    def on(flag, key):
+        """a plain --flag: present turns it on, absent inherits"""
+        return True if flag in flags else bool(base.get(key, False))
+
+    def off(flag, key):
+        """a --no-... flag: present turns it off, absent inherits"""
+        return False if flag in flags else bool(base.get(key, True))
+
+    return make_opts(mode=val('--mode', 'mode', 'area'),
+                     vs_area=on('--vs-area', 'vs_area'),
+                     prepost=on('--prepost', 'prepost'),
+                     mean=on('--mean', 'mean'),
+                     bands=off('--no-bands', 'bands'),
+                     breakdown=off('--no-breakdown', 'breakdown'),
+                     title=val('--title', 'title', None),
+                     logx=on('--logx', 'logx'),
+                     logy=on('--logy', 'logy'),
+                     marker_key=off('--no-marker-key', 'marker_key'),
+                     title_first=val('--title-first', 'title_first', None),
+                     title_second=val('--title-second', 'title_second',
+                                      None),
+                     subplots=val('--subplots', 'subplots', 'both'))
+
+
 def main(argv):
     _utf8_stdout()
     parsed = _parse_argv(argv)
@@ -1229,20 +1399,17 @@ def main(argv):
     if '--selftest' in flags:
         return _selftest(args[0] if args else 'sldea_plot_selftest.png')
 
-    mode = vals.get('--mode', 'area')
-    opts, err = make_opts(mode=mode,
-                          vs_area='--vs-area' in flags,
-                          prepost='--prepost' in flags,
-                          mean='--mean' in flags,
-                          bands='--no-bands' not in flags,
-                          breakdown='--no-breakdown' not in flags,
-                          title=vals.get('--title'),
-                          logx='--logx' in flags,
-                          logy='--logy' in flags,
-                          marker_key='--no-marker-key' not in flags,
-                          title_first=vals.get('--title-first'),
-                          title_second=vals.get('--title-second'),
-                          subplots=vals.get('--subplots', 'both'))
+    spec = None
+    if '--from-spec' in vals:
+        spec, spec_err = load_figspec(vals['--from-spec'])
+        if spec is None:
+            print(spec_err)
+            return 2
+    # a spec's options are re-validated through make_opts rather than
+    # trusted: it is an editable file, and an illegal combination must be
+    # refused with the same wording wherever it came from
+    opts, err = _cli_opts(flags, vals, spec['opts'] if spec else None)
+    run_args = args or (list(spec['runs']) if spec else [])
     if '--gui' in flags:
         # the window is a front end to everything below, and it does its own
         # run picking -- so unlike the headless paths it does NOT require
@@ -1251,13 +1418,13 @@ def main(argv):
             print(err)
             return 2
         import sldea_plot_gui
-        return sldea_plot_gui.launch(args, opts=opts,
-                                     out_dir=vals.get('--out'),
-                                     stem=vals.get('--stem'))
+        return sldea_plot_gui.launch(
+            run_args, opts=opts, out_dir=vals.get('--out'),
+            stem=vals.get('--stem') or (spec['stem'] if spec else None))
     # order preserved from before the `#223` refactor: a bare invocation
     # prints usage, and only an invocation that HAS runs gets told its mode
     # or --vs-area is wrong
-    if not args:
+    if not run_args:
         _usage()
         return 2
     if err:
@@ -1266,10 +1433,13 @@ def main(argv):
 
     out_dir = vals.get('--out', '.')
     os.makedirs(out_dir, exist_ok=True)
-    stem = vals.get('--stem', default_stem(mode))
+    # --out is deliberately NOT carried in a spec: a spec describes the
+    # figure, not the folder somebody filed it in
+    stem = vals.get('--stem') or (spec['stem'] if spec else None) \
+        or default_stem(opts['mode'])
 
     warns = []
-    runs = prepare_runs(args, opts, warns.append,
+    runs = prepare_runs(run_args, opts, warns.append,
                         allow_suspect='--allow-suspect-scale' in flags)
     if not runs:
         for w in warns:
@@ -1285,13 +1455,13 @@ def main(argv):
               else 'no confirmed breakdown')
         print(f"{run['name']}: {len(run['rows'])} rows, "
               f"{n_traced} traced, {bd}")
-    if mode == 'area' and len(runs) > 1:
+    if opts['mode'] == 'area' and len(runs) > 1:
         print('note: cross-run ABSOLUTE mm2 comparability needs the batch '
               'control round; the A/A0 panel is the safe comparison '
               '(SLDEA_MEASUREMENT.md)')
     for w in warns:
         print('warning:', w)
-    print(f"wrote {png} + {tidy}")
+    print(f"wrote {png} + {tidy} + {figspec_path(png)}")
     return 0
 
 

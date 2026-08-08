@@ -1127,6 +1127,184 @@ def test_panel_selection_reaches_export_and_the_csv_stays_whole():
             shutil.rmtree(p, ignore_errors=True)
 
 
+# --------------------------------------------------------------------------
+# the figspec sidecar (`#273`)
+# --------------------------------------------------------------------------
+
+def _read_json(path):
+    import json
+    with open(path, encoding='utf-8') as f:
+        return json.load(f)
+
+
+def test_export_writes_the_figspec_beside_the_png_and_csv():
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        opts = sp.make_opts(prepost=True, logy=True, title_first='T')[0]
+        runs = sp.prepare_runs([d], opts)
+        png, tidy = sp.export(runs, opts, out, 'fig')
+        spec_path = sp.figspec_path(png)
+        assert os.path.exists(spec_path)
+        assert os.path.dirname(spec_path) == os.path.dirname(png)
+        spec = _read_json(spec_path)
+        assert spec['spec_version'] == sp.SPEC_VERSION
+        assert spec['opts'] == opts, spec['opts']
+        assert spec['stem'] == 'fig'
+        assert spec['app_version'] and isinstance(spec['app_version'], str)
+        # runs are stored RESOLVED and absolute -- a bench shortcut or a
+        # parent-of-runs argument means a different run tomorrow
+        assert spec['runs'] == [os.path.abspath(d)], spec['runs']
+        # a blank stem records the EFFECTIVE one, so a re-render lands on
+        # the same filenames instead of on 'None.png'
+        png2, _ = sp.export(runs, opts, out, '')
+        assert _read_json(sp.figspec_path(png2))['stem'] == \
+            'sldea_plot_area'
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_figspec_round_trip_re_renders_a_byte_identical_png():
+    """The whole promise of `#273`: the sidecar is enough to make the
+    figure again. Non-default options on purpose -- a round trip that
+    only exercises the defaults proves nothing."""
+    if not _has_mpl():
+        return
+    d, out, again = _mktmp(), _mktmp(), _mktmp()
+    try:
+        rows = _healthy_rows(8)
+        for snap, ua in ((14, -80.0), (15, -140.0), (16, -205.0)):
+            rows[snap - 1]['measured_uA'] = ua
+        _fake_run(d, rows)
+        assert sp.main([d, '--out', out, '--stem', 'rt', '--prepost',
+                        '--mean', '--no-bands', '--logy',
+                        '--title-first', 'One', '--title-second', 'Two',
+                        '--subplots', 'second']) == 0
+        spec = os.path.join(out, 'rt.figspec.json')
+        assert os.path.exists(spec)
+        assert sp.main(['--from-spec', spec, '--out', again]) == 0
+        with open(os.path.join(out, 'rt.png'), 'rb') as a, \
+                open(os.path.join(again, 'rt.png'), 'rb') as b:
+            assert a.read() == b.read(), 're-render is not the same figure'
+        with open(os.path.join(out, 'rt.csv'), 'rb') as a, \
+                open(os.path.join(again, 'rt.csv'), 'rb') as b:
+            assert a.read() == b.read()
+        # and the spec the re-render wrote says the same thing
+        assert _read_json(os.path.join(again, 'rt.figspec.json'))['opts'] \
+            == _read_json(spec)['opts']
+    finally:
+        for p in (d, out, again):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_explicit_flags_override_the_spec_and_runs_replace_it():
+    if not _has_mpl():
+        return
+    d, d2, out = _mktmp(), _mktmp(), _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        _fake_run(d2, _healthy_rows(6))
+        assert sp.main([d, '--out', out, '--stem', 'base', '--logy',
+                        '--subplots', 'first', '--title', 'Spec title',
+                        '--no-marker-key']) == 0
+        spec = os.path.join(out, 'base.figspec.json')
+        seen = {}
+        real = sp.export
+        sp.export = lambda runs, opts, o, stem, warn=None: (
+            seen.update(opts=opts, out=o, stem=stem,
+                        runs=[r['dir'] for r in runs]),
+            ('p.png', 'p.csv'))[1]
+        try:
+            # nothing explicit -> everything comes from the spec
+            assert sp.main(['--from-spec', spec, '--out', out]) == 0
+            assert seen['opts'] == _read_json(spec)['opts']
+            assert seen['stem'] == 'base'
+            assert seen['runs'] == [os.path.abspath(d)]
+            # explicit flags win, per option, and a RUN replaces the list
+            assert sp.main([d2, '--from-spec', spec, '--out', out,
+                            '--mode', 'current', '--stem', 'over']) == 0
+            assert seen['opts']['mode'] == 'current'
+            assert seen['opts']['logy'] is True        # kept from the spec
+            assert seen['opts']['title'] == 'Spec title'
+            assert seen['opts']['marker_key'] is False
+            assert seen['stem'] == 'over'
+            assert seen['runs'] == [d2], seen['runs']
+            # a --no-... flag can still switch a spec's true off
+            assert sp.main(['--from-spec', spec, '--out', out,
+                            '--no-breakdown']) == 0
+            assert seen['opts']['breakdown'] is False
+        finally:
+            sp.export = real
+    finally:
+        for p in (d, d2, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_a_bad_spec_is_refused_rather_than_half_understood():
+    import json
+    out = _mktmp()
+    try:
+        def spec_file(name, payload):
+            p = os.path.join(out, name)
+            with open(p, 'w', encoding='utf-8') as f:
+                if isinstance(payload, str):
+                    f.write(payload)
+                else:
+                    json.dump(payload, f)
+            return p
+        good = {'spec_version': sp.SPEC_VERSION, 'opts':
+                sp.make_opts()[0], 'runs': ['x'], 'stem': 's'}
+        assert sp.load_figspec(spec_file('ok.json', good))[0] is not None
+        assert sp.main(['--from-spec',
+                        os.path.join(out, 'nope.json')]) == 2
+        assert sp.main(['--from-spec',
+                        spec_file('bad.json', '{not json')]) == 2
+        assert sp.main(['--from-spec', spec_file('list.json', [1, 2])]) == 2
+        newer = dict(good, spec_version=sp.SPEC_VERSION + 1)
+        _, err = sp.load_figspec(spec_file('new.json', newer))
+        assert 'newer build' in err, err
+        for broken, needle in (
+                (dict(good, spec_version='1'), 'positive integer'),
+                (dict(good, opts=None), "no 'opts'"),
+                (dict(good, runs='not-a-list'), 'list of'),
+                (dict(good, runs=[1, 2]), 'list of')):
+            spec, err = sp.load_figspec(spec_file('b.json', broken))
+            assert spec is None and needle in err, (err, needle)
+        # an ILLEGAL combination inside an otherwise valid spec is refused
+        # with the CLI's own wording, not silently rendered
+        bad_combo = dict(good, opts=dict(sp.make_opts()[0], vs_area=True))
+        assert sp.main(['--from-spec',
+                        spec_file('combo.json', bad_combo)]) == 2
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_from_spec_preselects_the_window_too():
+    import json
+    import sldea_plot_gui
+    out = _mktmp()
+    seen = {}
+    real = sldea_plot_gui.launch
+    sldea_plot_gui.launch = lambda args, **kw: (
+        seen.update(args=list(args), **kw), 0)[1]
+    try:
+        p = os.path.join(out, 'w.figspec.json')
+        with open(p, 'w', encoding='utf-8') as f:
+            json.dump({'spec_version': sp.SPEC_VERSION, 'stem': 'st',
+                       'runs': ['RUNA', 'RUNB'],
+                       'opts': sp.make_opts(mode='power')[0]}, f)
+        assert sp.main(['--gui', '--from-spec', p]) == 0
+        assert seen['args'] == ['RUNA', 'RUNB']
+        assert seen['opts']['mode'] == 'power'
+        assert seen['stem'] == 'st'
+    finally:
+        sldea_plot_gui.launch = real
+        shutil.rmtree(out, ignore_errors=True)
+
+
 def _run():
     names = [n for n in sorted(globals()) if n.startswith('test_')]
     for n in names:

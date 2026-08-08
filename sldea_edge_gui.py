@@ -3342,7 +3342,7 @@ class EdgeReviewApp:
     def _diam_recorded(self):
         """True when this run's setup.txt carries the capture-side
         'DEA nominal diameter' line (written from the SLDEA tab's
-        'DEA diam (mm)' field) — if not, diam_mm is only the settings
+        'DEA active area diam (mm)' field) — if not, diam_mm is only the settings
         default and the gate dialog says so.
 
         utf-8 + errors='replace', like load_settings: the bare locale-

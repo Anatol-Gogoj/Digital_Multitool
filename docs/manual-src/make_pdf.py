@@ -15,9 +15,11 @@ Needs: pip install pypdf reportlab   (plus Microsoft Edge on the machine).
 import io
 import json
 import os
+import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 
 from pypdf import PdfReader, PdfWriter
 from reportlab.lib.pagesizes import A4
@@ -56,8 +58,24 @@ def render_raw_pdf():
             [edge, "--headless=new", "--disable-gpu",
              f"--user-data-dir={profile}", "--no-pdf-header-footer",
              f"--print-to-pdf={raw}",
-             "file:///" + print_html.replace("\\", "/")],
+             # as_uri() percent-encodes the spaces in this path tree; an
+             # Edge update (first seen 2026-08-08) silently prints nothing
+             # for a file:/// URL with raw spaces, where it used to work
+             pathlib.Path(print_html).as_uri()],
             check=True, timeout=300)
+        # The same Edge update made the launched process HAND OFF to a
+        # relaunched browser and return immediately, so run() no longer
+        # waits for the print. Wait for the artifact, not the process —
+        # and do it INSIDE this block, or the TemporaryDirectory deletes
+        # the profile out from under the browser mid-print.
+        last = -1
+        for _ in range(600):
+            if os.path.exists(raw):
+                size = os.path.getsize(raw)
+                if size and size == last:
+                    break
+                last = size
+            time.sleep(0.5)
     if not os.path.exists(raw):
         sys.exit("Edge did not produce a PDF.")
     return raw

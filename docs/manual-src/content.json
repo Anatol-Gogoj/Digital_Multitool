@@ -912,6 +912,10 @@
     "what": "Writes the scope’s kV/µA continuously to telemetry.csv beside data.csv, so the current BETWEEN photos is recorded and a breakdown can be dated electrically. Rate (Hz) is capped at 2 — at that setting the current rows are free, because they are the breakdown watchdog’s own readings, which used to be thrown away. Voltage is read less often (at most once a second) because it costs a second scope query; the commanded voltage is on every row regardless. Needs the scope; works on dry runs too. Nothing reads the file — data.csv is still the run, and Edge Review, the tuner and the diagnostic are unaffected."
    },
    {
+    "label": "Run configuration presets",
+    "what": "Saves everything above under a name and recalls it later, so a campaign's staircase is not retyped each session. A preset covers the staircase, Output dir, scope/SG channels, DEA diameter, electrode, Trek inverts, and the watchdog and telemetry settings. It deliberately does NOT carry your run name, and never the DRY/LIVE state — loading one always leaves the tab in DRY, so arming the HV stays a separate deliberate click. Presets live in the same shared presets/ library as the signal-generator presets. If a preset was written by an older or newer version and something in it no longer fits, the load says what it could not apply instead of skipping it quietly."
+   },
+   {
     "label": "DRY RUN — HV OFF / ▶ Run / ■ Abort",
     "what": "Dry run rehearses timing and photos with HV off; unticking turns the row red for a live run. Abort ramps to 0 kV before stopping."
    },

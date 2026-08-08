@@ -121,7 +121,7 @@ A run directory is what the SLDEA tab writes: `data.csv` (needs the `frame_file`
 
 The three bench runs under `Recordings\SLDEA_data` are hardcoded as shortcuts `1`, `2` and `3` (`sldea_edge.BENCH_RUNS`) — `sldea_diag.py 1`, `sldea_tuner.py 2`, or `.\deploy\Tune_SLDEA_Windows.bat /diag 3` — so the long OneDrive path never has to be typed. The shortcut root is picked from the machines the OneDrive folder is synced to (bench PC and analysis PC); entries whose path does not exist are ignored, so the shortcuts are inert anywhere else. Detection itself, its decision history, and what the confidence number does and does not certify are documented in `SLDEA_HANDOFF.md`.
 
-Pass the run folder explicitly. With no argument the tuner falls back to `%SCPI_SLDEA_DIR%` and then to the Linux share path, which on Windows only prints "no run found" and exits 2. Setting it once — `setx SCPI_SLDEA_DIR "C:\SLDEA"`, new shell required — makes the no-argument form, the SLDEA tab's **🎚 Tune params…** button and Edge Review's **Tune** button all resolve the newest run under it. Autodiscovery treats any sub-folder holding a run CSV as a run, whatever it is called — bench names like `P3_1_2.5mL_20260728` included.
+Pass the run folder explicitly and the tuner opens on exactly that run; a path that does not resolve stays a hard error (exit 2) rather than quietly opening something else, so the SLDEA tab's button and the launchers can never land on the wrong run. With **no** argument it opens on the newest run under `%SCPI_SLDEA_DIR%` (the Linux share path when that is unset) and the window's **Run:** box lists the others with **Browse…** for anywhere else — so an empty or wrongly-pointed `SCPI_SLDEA_DIR` now opens the picker instead of exiting. Setting it once — `setx SCPI_SLDEA_DIR "C:\SLDEA"`, new shell required — makes the no-argument form and the SLDEA tab's **🎚 Tune params…** button resolve the newest run under it. Autodiscovery treats any sub-folder holding a run CSV as a run, whatever it is called — bench names like `P3_1_2.5mL_20260728` included. When the directory itself holds no runs, the run list looks exactly one level down, into the sub-folder holding the most — a campaign that arrives as one wrapper folder is the normal case, not a special one.
 
 One data trap worth knowing: the first loadable panel is used as the difference baseline, so if the run's baseline frame is missing or unreadable the mid-run frame silently becomes the reference and every outline is wrong. Check that the panel labelled `baseline` really shows the 0 kV image.
 
@@ -151,9 +151,15 @@ or `deploy\Tune_SLDEA_Windows.bat /diag`, which uses the same environment (from 
 
 `python sldea_diag.py --selftest out.png` runs it against synthetic runs — one that expands, one that only wrinkles, one that drifts — without needing any data.
 
+### Plotting runs against each other
+
+`sldea_plot.py` puts one or several runs on one figure — active area vs kV (`--mode area`, the default), or current or power, which work on raw unreviewed runs too. Every export writes three files off one stem: the 300 dpi PNG, the tidy per-snapshot CSV that is the figure's evidence, and a `.figspec.json` sidecar that re-renders it later (`--from-spec`).
+
+It is no longer command-line-only: **📊 Plot runs…** on the SLDEA tab opens the same tool as a window (`sldea_plot_gui.py`, or `sldea_plot.py --gui`) — pick the runs, tick what to draw, watch it redraw, then Export. The preview draws only; nothing reaches disk until Export, which names both files it wrote. Exporting inside a checkout, keep the default `sldea_plot` stem: a custom `--stem` is not covered by `.gitignore`.
+
 ## Repository layout & tests
 
-- Repo root: the application modules only (`gui.py`, `instruments.py`, the arb/export/format/profile libraries, `version.py`).
+- Repo root: the application modules — the Tk app and its tabs (`gui.py`, `battery_tab.py`, `webcam.py`, `ui_widgets.py`, `tk_fontfix.py`), the instrument drivers (`instruments.py`), the arb/export/format/profile libraries, and the SLDEA measurement chain (`sldea_*.py` — capture profile, edge detection, Edge Review, tuner, diagnostic, plotter, trace), plus `version.py`.
 - `tests/` — **headless** test suites plus their fixture files; no instrument needed. Run them all with:
 
   ```
@@ -162,7 +168,7 @@ or `deploy\Tune_SLDEA_Windows.bat /diag`, which uses the same environment (from 
 
   or any single suite directly (`.venv/bin/python tests/test_arb_bin.py`).
 - `bench/` — hardware-in-the-loop and manual scripts (scope/sig-gen loop tests, the arb editor demo). These need instruments connected and are run deliberately, one at a time; see `BENCH_TEST.md`. Historical bring-up and wedge-isolation probes live in `bench/archive/` — **`bench/archive/test_arb_usb_probe.py` intentionally wedges the 4055B** (front-panel power cycle to recover).
-- `presets/` — shared instrument presets, arb library, and bench profiles.
+- `presets/` — shared instrument presets, arb library, bench profiles and SLDEA run presets. **Not part of the repo**: it is `.gitignore`d and created at runtime under the working directory, which the launchers set to the ShareDrive so bench users share one copy. When the share is unreachable a write lands in a per-user local copy instead and the status bar says so (`presets_path.py`) — so a checkout never has a `presets/` to commit.
 
 ## Webcam tab
 

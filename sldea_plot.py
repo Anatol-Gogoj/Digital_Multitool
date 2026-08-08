@@ -8,7 +8,7 @@ Usage:
                          [--title TEXT] [--allow-suspect-scale]
                          [--logx] [--logy] [--no-marker-key]
                          [--title-first TEXT] [--title-second TEXT]
-                         [--subplots both|first|second]
+                         [--subplots both|first|second] [--cadence-guard]
     python sldea_plot.py --from-spec FILE.figspec.json [flags to override]
     python sldea_plot.py --gui [RUN ...]        # window (see below)
     python sldea_plot.py --selftest [OUT.png]
@@ -87,6 +87,30 @@ Panels (`#269` titles, `#270` selection):
     for the numbers, not a description of the layout, and the two panels
     are two views of the same areas.
 
+Cadence guard (`#264`, OPT-IN):
+    --cadence-guard asks how often a run measured CURRENT and, where that
+    is slower than 1 s, draws its breakdown X hollow and states the
+    spacing in the caption. The mark stays on the figure: the event is
+    just as current-confirmed, it is its ONSET that is an interval rather
+    than a point, and suppressing a real event because the camera was
+    slow would be the P3_5 mistake pointing the other way.
+
+    Cadence comes from telemetry.csv beside data.csv (present = the ~2 Hz
+    monitor log ran, so current was sampled continuously), else from the
+    MEDIAN gap between snapshot timestamps. Threshold 1 s, because that is
+    the telemetry logger's slowest guaranteed kV/uA period; an unmeasurable
+    cadence is never treated as coarse.
+
+    OFF by default, deliberately, and this is a decision for the bench to
+    make rather than a plotting preference. No run in the 2026-08-04
+    corpus carries telemetry.csv and every one of the thirteen samples
+    current between 4.6 s and 32.5 s (median), so an automatic guard would
+    restyle the breakdown marks on every figure the suite has ever made.
+    That is a change to how a current-confirmed event is PRESENTED, which
+    under CLAUDE.md is measurement-chain behaviour and belongs in a dated
+    SLDEA_HANDOFF.md decision -- not in a rendering default. Turn it on
+    per figure until that decision exists.
+
 Figspec sidecar (`#273`):
     Every export writes a THIRD file beside the PNG and the CSV:
     <stem>.figspec.json, carrying the exact options, the run directories
@@ -160,6 +184,7 @@ Window (`#223`):
     real usage and stay first-class.
 """
 import csv
+import datetime
 import io
 import math
 import os
@@ -167,6 +192,7 @@ import re
 import sys
 
 import sldea_edge as se
+import sldea_profile as sprof
 
 # Paul Tol bright (house palette for plots -- CLAUDE.md). Canonical order:
 # adjacent pairs keep CVD deltaE >= 12 (validated 2026-08-05). Cyan/yellow/
@@ -300,12 +326,76 @@ def load_run(arg, warn):
     base_areas = [r['area_mm2'] for r in rows
                   if r['phase'] == 'baseline' and r['area_mm2']]
     a0 = _median(base_areas) if base_areas else None
+    cadence_s, cadence_src = run_cadence(rundir, rows)
     return {'dir': rundir, 'name': name, 'rows': rows, 'a0': a0,
+            # how often this run measured current (`#264`) -- what the
+            # breakdown mark's position is actually resolved to
+            'cadence_s': cadence_s, 'cadence_src': cadence_src,
             'settings': settings, 'flags': flags, 'advis': advis,
             # the px→mm anchor Edge Review recorded at Save (2026-08-05)
             # — cross-run absolute mm² inherits its provenance
             'anchor': se.load_scale_anchor(rundir),
             'saved_brand': saved_brand}
+
+
+# How often the run measured CURRENT, above which a breakdown mark's
+# position in voltage/time is an interval rather than a point (`#264`).
+# 1 s because that is the telemetry logger's slowest guaranteed kV/uA
+# period (sldea_profile.TELEMETRY_KV_MIN_PERIOD_S): at or under it the
+# detector saw the event as it happened, above it the onset can be
+# anywhere in the gap before the flagged snapshot.
+CADENCE_COARSE_S = 1.0
+
+
+def run_cadence(rundir, rows):
+    """-> (seconds between current samples, where that came from).
+
+    telemetry.csv beside data.csv means the ~2 Hz monitor log ran, so the
+    current was sampled continuously; its presence is the answer and the
+    file is not parsed (a truncated or aborted log still means the run was
+    monitored). Otherwise the only current the run has is one reading per
+    snapshot, and the cadence is the MEDIAN gap between snapshot
+    timestamps -- median, not mean, because ramp settling makes the
+    distribution lumpy (the P3 corpus runs 7 s to 57 s with a 32.5 s
+    median).
+
+    (None, 'unknown') when fewer than two timestamps parse: that is 'no
+    answer', and no caller may read it as 'fine'."""
+    tel = os.path.join(rundir, sprof.TELEMETRY_FILENAME)
+    if os.path.exists(tel):
+        return (1.0 / sprof.TELEMETRY_MAX_HZ, sprof.TELEMETRY_FILENAME)
+    stamps = []
+    for r in rows:
+        text = r.get('timestamp') or ''
+        try:
+            stamps.append(datetime.datetime.fromisoformat(text))
+        except (TypeError, ValueError):
+            continue
+    gaps = [(b - a).total_seconds()
+            for a, b in zip(stamps, stamps[1:])
+            if (b - a).total_seconds() > 0]
+    if not gaps:
+        return (None, 'unknown')
+    return (_median(gaps), 'snapshot spacing')
+
+
+def coarse_cadence(run, opts):
+    """True when the guard is on AND this run sampled current more slowly
+    than CADENCE_COARSE_S. An unknown cadence is NOT coarse: the guard
+    annotates what it can measure and stays quiet about what it cannot."""
+    if not opts.get('cadence_guard'):
+        return False
+    secs = run.get('cadence_s')
+    return secs is not None and secs > CADENCE_COARSE_S
+
+
+def _cadence_note(run):
+    """'<run> every 6.1 s (snapshot spacing)' -- deliberately compact: it
+    goes on ONE caption line, and the caption has a figure's width, not a
+    console's. The console/window warning wraps this in the full
+    sentence."""
+    return (f"{run['name']} every {run['cadence_s']:.1f} s "
+            f"({run.get('cadence_src', '?')})")
 
 
 def suspect_old_scale(run):
@@ -466,6 +556,20 @@ def _dedupe(items):
     return out
 
 
+def _cadence_caption(notes):
+    """The cadence-guard caption line, or '' when no run earned one.
+
+    States the SPACING, not just 'coarse': a reader deciding whether an
+    X at 6.4 kV means 'at 6.4 kV' needs the number to judge it, and 32 s
+    of ramp is a very different claim from 5 s."""
+    notes = _dedupe(notes)
+    if not notes:
+        return ''
+    return (f"\nHollow X = confirmed, sampled slower than "
+            f"{CADENCE_COARSE_S:g} s (onset lies before the mark).  "
+            f"Sampling: " + '; '.join(notes) + '.')
+
+
 def _scale_caption(notes):
     """The log-scale caption line, or '' when both axes stayed linear.
 
@@ -496,11 +600,20 @@ def _series(ax, xs, ys, traced, color, ls, bands, band_traced=None):
                         zorder=2)
 
 
-def _cross_marks(ax, pts, color):
-    """X at each current-confirmed breakdown point. `pts` = [(x, y)]."""
+def _cross_marks(ax, pts, color, coarse=False):
+    """X at each current-confirmed breakdown point. `pts` = [(x, y)].
+
+    `coarse` draws the X hollow (`#264`): the event is just as confirmed,
+    but the run sampled current slowly enough that its onset could be
+    anywhere in the interval before this snapshot, so the mark is a
+    neighbourhood rather than a point. It is still DRAWN -- suppressing a
+    real current-confirmed event because the camera was slow would hide
+    evidence, which is the P3_5 mistake pointing the other way."""
     for x, y in pts:
         ax.plot([x], [y], 'X', markersize=9, color=color, zorder=6,
-                markeredgecolor='black', markeredgewidth=0.6)
+                markerfacecolor='white' if coarse else color,
+                markeredgecolor=color if coarse else 'black',
+                markeredgewidth=1.4 if coarse else 0.6)
 
 
 def _legend(ax, run_handles, style_rows):
@@ -562,7 +675,8 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     panels = [ax for ax in (axl, axr) if ax is not None]
     legend_ax = axl if axl is not None else axr
     run_handles = []
-    had_x = had_fallback = False
+    had_x = had_fallback = had_coarse = False
+    cadence_notes = []
     # what actually got plotted, per axis -- the log-scale policy reads
     # the DATA and axes-fraction gridlines must not vote (`#263`)
     xs_all, ysl_all, ysr_all = [], [], []
@@ -614,6 +728,7 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                      f"(see --prepost for both, and the tidy "
                      f"'convention' column)")
         if opts['breakdown']:
+            coarse = coarse_cadence(run, opts)
             drawn, unanchored = [], []
             for r in run['rows']:
                 if r['index'] not in run['flags'] or r['kv'] is None:
@@ -630,15 +745,24 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                     xs_all.append(r['kv'])
                     unanchored.append(r['index'])
             if axl is not None:
-                _cross_marks(axl, drawn, color)
+                _cross_marks(axl, drawn, color, coarse)
             if axr is not None:
                 _cross_marks(axr, [(x, y / run['a0']) for x, y in drawn],
-                             color)
+                             color, coarse)
             xs_all += [x for x, _ in drawn]
             ysl_all += [y for _, y in drawn]
             ysr_all += [y / run['a0'] for _, y in drawn]
             had_x = had_x or bool(drawn)
+            had_coarse = had_coarse or (coarse and bool(drawn))
             had_fallback = had_fallback or bool(unanchored)
+            if coarse and (drawn or unanchored):
+                cadence_notes.append(_cadence_note(run))
+                warn(f"{run['name']}: current sampled every "
+                     f"{run['cadence_s']:.1f} s "
+                     f"({run.get('cadence_src', '?')}), slower than "
+                     f"{CADENCE_COARSE_S:g} s -- a breakdown's onset can "
+                     f"be anywhere in the interval before the flagged "
+                     f"snapshot, so its X is drawn hollow")
             if unanchored:
                 warn(f"{run['name']}: confirmed breakdown row(s) "
                      f"{unanchored} have no reviewed area -- drawn as "
@@ -669,6 +793,11 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     if had_x:
         style_rows.append(('breakdown (current-confirmed)',
                            {'linestyle': '', 'marker': 'X'}))
+    if had_coarse:
+        style_rows.append(('breakdown, coarse current sampling',
+                           {'linestyle': '', 'marker': 'X',
+                            'markerfacecolor': 'white',
+                            'markeredgewidth': 1.4}))
     if had_fallback:
         style_rows.append(('breakdown, no reviewed area',
                            {'linestyle': '--'}))
@@ -688,6 +817,7 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
            "X = current-confirmed breakdown (recomputed, 2026-08-05 "
            "semantics).  X axis: nominal kV (measured_kV telemetry "
            "incomplete on all runs)."
+           + _cadence_caption(cadence_notes)
            + _scale_caption(scale_notes))
     fig.text(0.01, 0.005, cap, fontsize=7, color='#555555')
     fig.tight_layout(rect=(0, 0.05, 1, 1))
@@ -768,8 +898,9 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
         return r['area_mm2'] if opts['vs_area'] else r['kv']
 
     run_handles = []
-    had_x = had_adv = False
+    had_x = had_adv = had_coarse = False
     raw_power = []
+    cadence_notes = []
     xs_all, ys_all = [], []          # what got plotted (`#263`)
     for run in runs:
         color = run['color']
@@ -800,9 +931,19 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
                            linewidth=0.9, alpha=0.6, zorder=2)
                 ys_all.append(med_line)
         if opts['breakdown']:
+            coarse = coarse_cadence(run, opts)
             xpts = [(x, y) for x, y, r in pts if r['index'] in run['flags']]
-            _cross_marks(ax, xpts, color)
+            _cross_marks(ax, xpts, color, coarse)
             had_x = had_x or bool(xpts)
+            had_coarse = had_coarse or (coarse and bool(xpts))
+            if coarse and xpts:
+                cadence_notes.append(_cadence_note(run))
+                warn(f"{run['name']}: current sampled every "
+                     f"{run['cadence_s']:.1f} s "
+                     f"({run.get('cadence_src', '?')}), slower than "
+                     f"{CADENCE_COARSE_S:g} s -- a breakdown's onset can "
+                     f"be anywhere in the interval before the flagged "
+                     f"snapshot, so its X is drawn hollow")
             drawn_idx = {r['index'] for _, _, r in pts}
             missing = sorted(i for i in run['flags'] if i not in drawn_idx)
             if missing:
@@ -832,6 +973,11 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
     if had_x:
         style_rows.append(('breakdown (current-confirmed)',
                            {'linestyle': '', 'marker': 'X'}))
+    if had_coarse:
+        style_rows.append(('breakdown, coarse current sampling',
+                           {'linestyle': '', 'marker': 'X',
+                            'markerfacecolor': 'white',
+                            'markeredgewidth': 1.4}))
     if had_adv:
         style_rows.append(('transient / advisory',
                            {'linestyle': '', 'marker': 'D',
@@ -849,6 +995,7 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
               if power else
               "Currents carry each era's instrument offset "
               "(07-29 ≈ −16 µA idle).")
+           + _cadence_caption(cadence_notes)
            + _scale_caption(scale_notes))
     fig.text(0.01, 0.005, cap, fontsize=7, color='#555555')
     fig.tight_layout(rect=(0, 0.05, 1, 1))
@@ -972,7 +1119,8 @@ def default_stem(mode):
 def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
               bands=True, breakdown=True, title=None,
               logx=False, logy=False, marker_key=True,
-              title_first=None, title_second=None, subplots='both'):
+              title_first=None, title_second=None, subplots='both',
+              cadence_guard=False):
     """-> (opts dict, error message or None).
 
     The CLI builds this from its flags and the window from its tick boxes,
@@ -1006,7 +1154,8 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
             'marker_key': bool(marker_key),
             'title_first': title_first or None,
             'title_second': title_second or None,
-            'subplots': subplots}, None
+            'subplots': subplots,
+            'cadence_guard': bool(cadence_guard)}, None
 
 
 def needs_areas(opts):
@@ -1291,7 +1440,8 @@ def _selftest(out_png):
 
 _BOOL_FLAGS = ('--vs-area', '--prepost', '--mean', '--no-bands',
                '--no-breakdown', '--allow-suspect-scale', '--selftest',
-               '--gui', '--logx', '--logy', '--no-marker-key')
+               '--gui', '--logx', '--logy', '--no-marker-key',
+               '--cadence-guard')
 _VALUED_FLAGS = ('--mode', '--out', '--stem', '--title',
                  '--title-first', '--title-second', '--subplots',
                  '--from-spec')
@@ -1387,7 +1537,8 @@ def _cli_opts(flags, vals, base=None):
                      title_first=val('--title-first', 'title_first', None),
                      title_second=val('--title-second', 'title_second',
                                       None),
-                     subplots=val('--subplots', 'subplots', 'both'))
+                     subplots=val('--subplots', 'subplots', 'both'),
+                     cadence_guard=on('--cadence-guard', 'cadence_guard'))
 
 
 def main(argv):

@@ -73,14 +73,14 @@ def _has_mpl():
         return False
 
 
-def _drawn(runs, opts):
+def _drawn(runs, opts, warn=lambda m: None):
     """-> the Figure sp.draw() produced, WITHOUT pyplot (the same path
     save_figure uses), so a test can interrogate the real axes."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
     fig = Figure(figsize=sp.FIGSIZE[opts['mode']])
     FigureCanvasAgg(fig)
-    sp.draw(fig, runs, opts)
+    sp.draw(fig, runs, opts, warn)
     return fig
 
 
@@ -534,7 +534,8 @@ def test_make_opts_maps_choices_and_refuses_bad_combinations():
                  'mean': False, 'bands': True, 'breakdown': True,
                  'title': None, 'logx': False, 'logy': False,
                  'marker_key': True, 'title_first': None,
-                 'title_second': None, 'subplots': 'both'}
+                 'title_second': None, 'subplots': 'both',
+                 'cadence_guard': False}
     o, err = sp.make_opts(mode='current', vs_area=True, prepost=True,
                           mean=True, bands=False, breakdown=False,
                           title='x')
@@ -1303,6 +1304,151 @@ def test_from_spec_preselects_the_window_too():
     finally:
         sldea_plot_gui.launch = real
         shutil.rmtree(out, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# the cadence guard (`#264`)
+# --------------------------------------------------------------------------
+
+def _spaced_rows(seconds, n_levels=8):
+    """_healthy_rows with the snapshots `seconds` apart instead of all
+    sharing one timestamp."""
+    import datetime
+    rows = _healthy_rows(n_levels)
+    t0 = datetime.datetime(2026, 8, 5, 10, 0, 0)
+    for i, r in enumerate(rows):
+        r['timestamp'] = (t0 + datetime.timedelta(
+            seconds=i * seconds)).isoformat()
+    for snap, ua in ((14, -80.0), (15, -140.0), (16, -205.0)):
+        rows[snap - 1]['measured_uA'] = ua
+    return rows
+
+
+def test_cadence_comes_from_telemetry_then_from_snapshot_spacing():
+    d = _mktmp()
+    try:
+        _fake_run(d, _spaced_rows(30))
+        secs, src = sp.run_cadence(d, sp.load_rows(d))
+        assert abs(secs - 30.0) < 1e-6 and src == 'snapshot spacing'
+        # telemetry.csv beside data.csv answers on PRESENCE -- a truncated
+        # or aborted log still means the run was monitored
+        with open(os.path.join(d, 'telemetry.csv'), 'w',
+                  encoding='utf-8') as f:
+            f.write('t_s,timestamp\n')
+        secs, src = sp.run_cadence(d, sp.load_rows(d))
+        assert secs <= sp.CADENCE_COARSE_S and src == 'telemetry.csv'
+        assert sp.load_run(d, lambda m: None)['cadence_src'] == \
+            'telemetry.csv'
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    # no parseable timestamps -> no answer, and 'unknown' is never 'fine'
+    d2 = _mktmp()
+    try:
+        _fake_run(d2, _healthy_rows(4, ts=''))
+        assert sp.run_cadence(d2, sp.load_rows(d2)) == (None, 'unknown')
+        run = sp.load_run(d2, lambda m: None)
+        assert not sp.coarse_cadence(run, sp.make_opts(
+            cadence_guard=True)[0])
+    finally:
+        shutil.rmtree(d2, ignore_errors=True)
+
+
+def test_coarse_cadence_marks_stay_on_the_figure_and_say_the_spacing():
+    """The guard annotates, it does not hide: a current-confirmed event
+    drawn hollow is still drawn. Suppressing it because the camera was
+    slow would be the P3_5 mistake pointing the other way."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _fake_run(d, _spaced_rows(32.5))
+        for mode in ('area', 'current'):
+            plain = sp.make_opts(mode=mode)[0]
+            guard = sp.make_opts(mode=mode, cadence_guard=True)[0]
+            warns = []
+            fig = _drawn(sp.prepare_runs([d], plain, warns.append), plain)
+            assert not any('sampled every' in w for w in warns), warns
+            marks = _cross_faces(fig)
+            assert marks and all(f != (1.0, 1.0, 1.0, 1.0)
+                                 for f in marks), mode
+            warns = []
+            runs = sp.prepare_runs([d], guard, warns.append)
+            fig = _drawn(runs, guard, warns.append)
+            guarded = _cross_faces(fig)
+            # same number of X marks, now hollow
+            assert len(guarded) == len(marks), mode
+            assert all(f == (1.0, 1.0, 1.0, 1.0) for f in guarded), mode
+            cap = _caption(fig)
+            assert 'Hollow X' in cap and '32.5 s' in cap, cap
+            assert 'snapshot spacing' in cap, cap
+            assert any('sampled every 32.5 s' in w for w in warns), warns
+            # ONE line, and short enough to stay on the narrowest canvas
+            # (9 in fits ~170 characters at 7 pt) -- a caption that runs
+            # off the figure says nothing
+            hollow = [l for l in cap.split('\n') if l.startswith('Hollow')]
+            assert len(hollow) == 1, cap
+            assert len(hollow[0]) < 170, (len(hollow[0]), hollow[0])
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _cross_faces(fig):
+    """The face colour of every 'X' breakdown marker on the first axes,
+    as RGBA. White = hollow = the cadence guard annotated it."""
+    from matplotlib.colors import to_rgba
+    return [to_rgba(l.get_markerfacecolor())
+            for l in fig.axes[0].get_lines() if l.get_marker() == 'X']
+
+
+def test_a_fast_run_is_not_annotated_even_with_the_guard_on():
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _fake_run(d, _spaced_rows(0.5))       # telemetry-grade cadence
+        opts = sp.make_opts(cadence_guard=True)[0]
+        warns = []
+        runs = sp.prepare_runs([d], opts, warns.append)
+        assert runs[0]['cadence_s'] <= sp.CADENCE_COARSE_S
+        fig = _drawn(runs, opts)
+        assert 'Hollow X' not in _caption(fig)
+        assert all(f != (1.0, 1.0, 1.0, 1.0) for f in _cross_faces(fig))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_cadence_guard_is_opt_in_and_no_breakdown_is_unchanged():
+    """OFF by default on purpose: no run in the corpus carries
+    telemetry.csv and every one samples current far slower than 1 s, so
+    an automatic guard would restyle every figure the suite has made.
+    That is a measurement-chain decision, not a rendering default."""
+    if not _has_mpl():
+        return
+    assert sp.make_opts()[0]['cadence_guard'] is False
+    seen = {}
+    real = sp.export
+    sp.export = lambda runs, opts, out, stem, warn=None: (
+        seen.update(opts=opts), ('p.png', 'p.csv'))[1]
+    d = _mktmp()
+    try:
+        _fake_run(d, _spaced_rows(32.5))
+        assert sp.main([d, '--out', d]) == 0
+        assert seen['opts']['cadence_guard'] is False
+        assert sp.main([d, '--out', d, '--cadence-guard']) == 0
+        assert seen['opts']['cadence_guard'] is True
+    finally:
+        sp.export = real
+        shutil.rmtree(d, ignore_errors=True)
+    # --no-breakdown still means no marks at all, guard or no guard
+    d = _mktmp()
+    try:
+        _fake_run(d, _spaced_rows(32.5))
+        opts = sp.make_opts(breakdown=False, cadence_guard=True)[0]
+        fig = _drawn(sp.prepare_runs([d], opts), opts)
+        assert _cross_faces(fig) == []
+        assert 'Hollow X' not in _caption(fig)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def _run():

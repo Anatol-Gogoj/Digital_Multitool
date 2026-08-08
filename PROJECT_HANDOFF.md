@@ -1,4 +1,58 @@
-# Project handoff — state as of 2026-08-07
+# Project handoff — state as of 2026-08-08
+
+**TL;DR (2026-08-08, wave 2 — read this first).** Nine PRs merged in one
+operator-tested integration (**#284** — Anatol drove the full runcard on
+the exact tree first): the **plotter round 2** stack (#258 window ·
+#279 engine: `--logx/--logy` with symlog for negative currents, marker
+key, per-panel titles, panel selection, figspec sidecar + `--from-spec`,
+cadence guard · #281 shell: the resize ROOT CAUSE — a `<Configure>` bind
+without `add='+'` had been *replacing* matplotlib's own resize handler
+since birth — plus scrollable controls, band-provenance tooltip,
+**double-click a point → Edge Review opens that frame** via the new
+additive `--goto ROW`, per-folder remembered options · #282 wiring, all
+seven options in the Draw column); **#259** the scrollbar family (`#27`
+fixed as its own mechanism, `#26` closed by diagnosis); **#260** the
+tuner run picker (the no-argument tuner had been broken on this machine
+all along — wrapper-dir `SCPI_SLDEA_DIR`, see `#261`); **#262** SLDEA-tab
+fixes (Trek row un-stacked, "DEA active area diam"); **#278** named run
+presets (never the run name, never DRY/LIVE — loads come back DRY) +
+the four **branded CNT inks** (Carbon Solutions P2/P3-SWNT, nano-c
+Invisicon 3500/3900, all family-mapped to cnt) + **Concentration (mL)**
+conditional on electrode family; **#257** the trace report speaking both
+row/frame vocabularies.
+
+**Suite baseline is now 34/38** (five new suites since 29/33 this
+morning; same four documented-environmental failures). 18 issues closed:
+26/27/197/223/225/255/263/265/266/267/269/270/271/272/273/274/275/276.
+**Open decisions:** `#264` cadence-guard default (mechanism shipped
+opt-in; flipping it restyles every historical figure — needs a dated
+SLDEA_HANDOFF entry, sensibly after the first telemetry-era captures) ·
+`#268` cross-run mean ± Nσ + electrode-family averaging (deferred: real
+stats policy) · two `#278` soft calls accepted-by-merge (`Ink
+concentration:` as the setup.txt key; the literal `'other'` entry
+removed) — revisit if either reads wrong on the first real run. New bugs
+en route: **#280** (edge-gui runner-context flake, corroborated by two
+independent observers) · **#283** (plot window close-mid-redraw Tcl
+noise). **#261** (resolve_run wrapper descent) still open. The
+setup.txt-stays-txt decision is on the record (#277 + CLAUDE.md rule).
+
+**A release bump is now the natural next milestone:** main is far past
+the v1.1.0 tag, and the manual has SIX callout matchers waiting on one
+fresh capture (📏 rename, the `#224` label, ❓ How to use, 📊 Plot runs,
+the presets frame, Concentration + the DEA rename) — since #248 the
+build is loudly red until that capture runs. The bump itself is desk
+work per the release checklist; only v1.1.0's *promotion* out of
+pre-release stays §M-gated. Bench debt otherwise unchanged.
+
+**Hygiene:** all wave branches and agent worktrees swept.
+Deliberately left: `claude/225-h-scroll-family` + its worktree (Anatol's
+footer-height session holds uncommitted work there — its fix arrives as
+a follow-up PR now that #259 is merged) · `claude/wave2-integration` +
+the scratchpad view worktree (hosting the running operator GUI instance;
+delete both once the window closes) · `claude/run-sheet` (sole copy of
+parked PR #221's draft).
+
+---
 
 **TL;DR (2026-08-07 evening, remote parallel-agent session — read this
 first).** Main is green, **no open PRs**, GUI suite **47 tests**, full
@@ -633,10 +687,10 @@ rework. What is genuinely left at a desk, in order:
   closed; `#216`/`#238` stay open pending operator acceptance in one real
   session. The highest-value desk work is now that acceptance drive, then
   the row below.
-- **`#225`** the horizontal-scrollbar family (root-causes `#27`, related
-  to `#26`) · **`#197`** tuner run picker · **`#200`** connection takeover
-  (touches instrument connection — cannot be bench-verified here) ·
-  **`#223`** a GUI for the plot tool.
+- ~~`#225` · `#197` · `#223`~~ **DONE 2026-08-08** (wave 2, merged via
+  #284 — see the top TL;DR). What survives of this row: **`#200`**
+  connection takeover (touches instrument connection — cannot be
+  bench-verified here).
 - **The control round's premise changed** — see Batch-QA. Do not simply
   "do the control round" without reading that first.
 

@@ -1887,13 +1887,20 @@ class EdgeReviewApp:
         return out
 
     def _populate_runs(self, path):
-        """Accept a run dir (holds a run CSV) or a parent full of runs."""
+        """Accept a run dir (holds a run CSV), a parent full of runs, or a
+        campaign wrapper one level above such a parent.
+
+        The wrapper case goes through se.runs_parent -- the same one-level
+        descent the tuner and the Windows launcher resolve with (`#261`),
+        so opening the cockpit on SCPI_SLDEA_DIR lists the same runs the
+        Tune button would open. A folder that IS a run still wins: the
+        run_csv test comes first."""
         path = os.path.abspath(path)
         if se.run_csv(path):
             self.parent = os.path.dirname(path)
             preselect = os.path.basename(path)
         else:
-            self.parent = path
+            self.parent = se.runs_parent(path)
             preselect = None
         runs = self._list_runs(self.parent)
         self.run_box['values'] = runs

@@ -296,8 +296,16 @@ def _selftest(out_png):
 # already imports, so the diagnostic gets the same rules without dragging
 # the font workaround in. Kept under the old names: gui.py calls
 # _newest_run, and the Windows launcher calls resolve_run.
+#
+# runs_parent -- the one-level descent into a campaign wrapper -- was
+# written here for `#197`'s picker and moved to sldea_edge for `#261`, so
+# se.newest_run and se.resolve_run descend too and the launcher's
+# --resolve step stops reporting "no run found" about a wrapper holding
+# 13 runs. The rule itself is documented at se.runs_parent; this name
+# stays because the picker and the tests below call it.
 _newest_run = se.newest_run
 resolve_run = se.resolve_run
+runs_parent = se.runs_parent
 
 
 def list_runs(parent):
@@ -335,34 +343,6 @@ def run_label(rundir):
             return '  ✓ tuned' if se.EDGE_HDR in f.read() else ''
     except OSError:
         return ''
-
-
-def runs_parent(root):
-    """The directory to LIST runs from when the tuner opens on `root`.
-
-    `root` itself when runs sit directly in it. Otherwise one level down,
-    into the sub-directory holding the most runs: a campaign upload
-    arrives as a wrapper folder -- the 2026-08-04 batch is 13 runs inside
-    'Upload 20260804\\SLDEA_data (1)' -- and SCPI_SLDEA_DIR points at the
-    wrapper, where se.newest_run correctly finds nothing, which is why the
-    no-argument tuner said 'no run found' on a machine holding 13 of them.
-
-    Exactly one level, and only when the root itself holds no runs, so
-    this can never become a walk of a share. It picks where to LOOK; it
-    never picks the run -- that stays with se.newest_run and the box."""
-    if list_runs(root):
-        return root
-    try:
-        subs = sorted(n for n in os.listdir(root)
-                      if os.path.isdir(os.path.join(root, n)))
-    except OSError:
-        return root
-    best, best_n = None, 0
-    for n in subs:
-        found = len(list_runs(os.path.join(root, n)))
-        if found > best_n:
-            best, best_n = os.path.join(root, n), found
-    return best or root
 
 
 def pick_index(names, target):

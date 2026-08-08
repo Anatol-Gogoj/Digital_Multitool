@@ -123,6 +123,51 @@ def test_resolve_flag_prints_the_run_and_signals_failure():
     assert out.getvalue().strip() == ''
 
 
+def test_resolve_flag_descends_into_a_campaign_wrapper():
+    """`#261`, at the launcher's own front door. SCPI_SLDEA_DIR points at
+    the campaign wrapper and the runs are nested in 'SLDEA_data (1)', so
+    Tune_SLDEA_Windows.bat's --resolve step exited 2 -- "no run found" --
+    on a machine holding 13 runs.
+
+    The CONTRACT is unchanged and byte-compatible: the resolved directory
+    on stdout with rc 0, and rc 0 with no stdout is impossible; anything
+    unresolvable is still rc 2 with nothing printed, because the batch
+    file reads that line as a path."""
+    import io
+    import contextlib
+    import shutil
+    import tempfile
+    wrapper = tempfile.mkdtemp(prefix='resolve_wrap_')
+    try:
+        inner = _os.path.join(wrapper, 'SLDEA_data (1)')
+        _os.makedirs(inner)
+        older = _run_dir(inner, 'P3_1_2.5mL_20260728', csv_name='data1.csv')
+        newer = _run_dir(inner, 'P3_2_2.5mL_20260728')
+        t = _os.path.getmtime(newer)
+        _os.utime(older, (t - 60, t - 60))
+        _os.makedirs(_os.path.join(wrapper, '_analysis'), exist_ok=True)
+
+        # THE FIX: the wrapper now resolves to the newest nested run
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = st.main(['--resolve', wrapper])
+        assert rc == 0, rc
+        assert out.getvalue().strip() == newer, out.getvalue()
+        # ...and it is the same answer the picker's parent gives
+        assert st.runs_parent(wrapper) == inner
+
+        # UNCHANGED: a genuine non-run is still rc 2 with an empty stdout
+        for path in (_os.path.join(wrapper, '_analysis'),
+                     _os.path.join(wrapper, 'missing'), ''):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = st.main(['--resolve', path] if path else ['--resolve'])
+            assert rc == 2, (path, rc)
+            assert out.getvalue().strip() == '', (path, out.getvalue())
+    finally:
+        shutil.rmtree(wrapper, ignore_errors=True)
+
+
 def test_windows_launcher_contract():
     """The Windows tuner launcher calls into this module by name. Batch
     files are not importable, so nothing else would notice a rename until a

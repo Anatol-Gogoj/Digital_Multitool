@@ -439,6 +439,189 @@ def test_moving_the_window_does_not_cost_a_redraw():
         assert n == [1], 'a real resize did not schedule a redraw'
 
 
+# ---------------------------------------------------------------------------
+# `#274` -- double-click through to Edge Review
+# ---------------------------------------------------------------------------
+
+def _prepared(parent, names, **opt_kw):
+    """(runs, opts) as the window holds them -- through sldea_plot's own
+    prepare_runs, so the tests see exactly what the figure was drawn
+    from."""
+    opts, err = sp.make_opts(**opt_kw)
+    assert not err, err
+    runs = sp.prepare_runs([os.path.join(parent, n) for n in names], opts,
+                           lambda _m: None, allow_suspect=False)
+    return runs, opts
+
+
+class _Popen:
+    """Records the argv instead of starting a program."""
+
+    def __init__(self):
+        self.calls = []
+
+    def Popen(self, cmd, **kw):
+        self.calls.append((list(cmd), kw))
+        return self
+
+
+def test_plot_points_indexes_the_rows_the_mode_actually_draws():
+    """`#274`: what a double-click asks is 'which snapshot is that', and
+    a snapshot IS a row -- the frame Edge Review would open. The index
+    must therefore hold rows, and only the ones the mode plots."""
+    p = _mktmp()
+    try:
+        _fake_run(p, 'A_run', processed=True)
+        _fake_run(p, 'B_run', processed=False)      # raw: no areas
+        runs, opts = _prepared(p, ['A_run'], mode='area')
+        pts = g.plot_points(runs, opts, panel=0)
+        assert [r['index'] for _x, _y, _run, r in pts] == [0, 1]
+        assert [(x, y) for x, y, _r, _w in pts] == [
+            (0.0, 201.062), (1.0, 201.062)]
+        # the A/A0 panel plots the SAME rows against the normalized value
+        norm = g.plot_points(runs, opts, panel=1)
+        a0 = runs[0]['a0']
+        assert [r['index'] for _x, _y, _run, r in norm] == [0, 1]
+        assert all(abs(y - 201.062 / a0) < 1e-9 for _x, y, _r, _w in norm)
+        # current mode works on a RAW run, and indexes it
+        runs, opts = _prepared(p, ['B_run'], mode='current')
+        pts = g.plot_points(runs, opts)
+        assert [r['index'] for _x, _y, _run, r in pts] == [0, 1]
+        assert [y for _x, y, _r, _w in pts] == [-16.0, -15.9]
+        # power is the offset-corrected product, through sldea_plot's own
+        # power_mw -- this module owns no measurement rule of its own
+        runs, opts = _prepared(p, ['B_run'], mode='power')
+        med = sp.run_ua_median(runs[0])
+        assert [y for _x, y, _r, _w in g.plot_points(runs, opts)] == [
+            sp.power_mw(r, med) for r in runs[0]['rows']]
+        # a row with no plottable coordinate is not a click target
+        runs, opts = _prepared(p, ['B_run'], mode='current', vs_area=True)
+        assert g.plot_points(runs, opts) == [], 'raw run has no areas'
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_nearest_point_measures_in_screen_pixels_not_data_units():
+    """The trap `#274` had to avoid: kV runs 0-10 while mm² runs 150-250,
+    so a distance in DATA space is dominated by whichever axis carries
+    the bigger numbers and 'nearest' quietly means 'nearest in y'."""
+    from matplotlib.figure import Figure
+    p = _mktmp()
+    try:
+        _fake_run(p, 'A_run', processed=True)
+        runs, opts = _prepared(p, ['A_run'], mode='area')
+        fig = Figure(figsize=(12.6, 5.4), dpi=100)
+        sp.draw(fig, runs, opts)
+        fig.canvas.draw()
+        ax = fig.axes[0]
+        pts = g.plot_points(runs, opts, panel=0)
+        (x0, y0, _r0, row0), (x1, y1, _r1, row1) = pts
+        px0, py0 = ax.transData.transform((x0, y0))
+        px1, py1 = ax.transData.transform((x1, y1))
+        # dead on a marker
+        hit = g.nearest_point(ax, pts, px0, py0)
+        assert hit is not None and hit[1]['index'] == row0['index']
+        assert hit[2] < 1e-6
+        # a few pixels away is still that marker...
+        hit = g.nearest_point(ax, pts, px0 + 8, py0 - 6)
+        assert hit is not None and hit[1]['index'] == row0['index']
+        # ...and past the tolerance nothing is returned rather than
+        # something arbitrary
+        assert g.nearest_point(ax, pts, px0, py0 - g.PICK_PX - 40) is None
+        # THE PIXEL RULE. The two rows share a y (both 201.062 mm2) and
+        # differ by 1.0 in x, which is a small number in DATA units and a
+        # long way in pixels -- so a click by the second marker resolves
+        # to the second row, which a data-space metric would fumble.
+        assert abs(px1 - px0) > 200, 'fixture is not separated on screen'
+        hit = g.nearest_point(ax, pts, px1 + 4, py1)
+        assert hit is not None and hit[1]['index'] == row1['index']
+        assert g.nearest_point(ax, [], px0, py0) is None
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_a_double_click_launches_edge_review_on_that_exact_frame():
+    """The whole `#274` chain: event -> nearest row -> a sibling process
+    on that run with `--goto` carrying the 0-BASED CSV row. The row
+    number is the hand-off `#255` is on record about, so it is pinned
+    here and translated at the Edge Review end, never here."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        win = w.win
+        assert win._prepared, 'nothing was prepared to click on'
+        opts, err = win.current_opts()
+        assert not err
+        ax = win.fig.axes[0]
+        pts = g.plot_points(win._prepared, opts, panel=0)
+        _x, _y, run, row = pts[1]
+        px, py = ax.transData.transform((_x, _y))
+
+        class _Ev:
+            def __init__(self, dbl=True):
+                self.dblclick, self.inaxes = dbl, ax
+                self.x, self.y = px, py
+        spy = _Popen()
+        real = g.subprocess
+        g.subprocess = spy
+        try:
+            got = win.on_click(_Ev())
+            assert got is not None, 'the double-click resolved nothing'
+            assert got[1]['index'] == row['index']
+            assert len(spy.calls) == 1, spy.calls
+            cmd, kw = spy.calls[0]
+            assert cmd[0] == _sys.executable
+            assert os.path.basename(cmd[1]) == 'sldea_edge_gui.py'
+            assert os.path.exists(cmd[1]), cmd[1]
+            assert os.path.abspath(cmd[2]) == os.path.abspath(run['dir'])
+            assert cmd[3] == '--goto' and cmd[4] == str(row['index'])
+            assert kw.get('start_new_session') is True   # it outlives us
+            # the window SAYS what it opened -- a click that silently
+            # started a program somewhere is worse than one that did
+            # nothing
+            said = win.lbl_click.cget('text')
+            assert run['name'] in said and str(row['index']) in said
+            # a SINGLE click is not a launch: single-click belongs to the
+            # toolbar's pan and zoom rectangles
+            spy.calls.clear()
+            assert win.on_click(_Ev(dbl=False)) is None
+            assert spy.calls == []
+            # neither is a double-click off the axes, or on empty space
+            class _Off:
+                dblclick, inaxes, x, y = True, None, 0, 0
+            assert win.on_click(_Off()) is None and spy.calls == []
+            class _Miss:
+                dblclick, inaxes = True, ax
+                x, y = px, py - g.PICK_PX - 200
+            assert win.on_click(_Miss()) is None and spy.calls == []
+            assert 'no data point within' in win.lbl_click.cget('text')
+        finally:
+            g.subprocess = real
+
+
+def test_the_click_through_is_discoverable_and_does_not_go_stale():
+    """`#274` asked for a hint, because an undocumented double-click is
+    a feature nobody finds. The same line reports what the last click
+    resolved to -- and a redraw takes that report back down, since the
+    answer belonged to the figure that was on screen when it was made."""
+    assert 'Double-click' in g.CLICK_HINT and 'Edge Review' in g.CLICK_HINT
+    with _Win('1200x800') as w:
+        if not w.ok:
+            return
+        assert w.win.lbl_click.cget('text') == g.CLICK_HINT
+        spy = _Popen()
+        real = g.subprocess
+        g.subprocess = spy
+        try:
+            run = w.win._prepared[0]
+            w.win.open_in_edge_review(run, run['rows'][1])
+            assert w.win.lbl_click.cget('text') != g.CLICK_HINT
+            w.win.redraw()
+            assert w.win.lbl_click.cget('text') == g.CLICK_HINT
+        finally:
+            g.subprocess = real
+
+
 def _run():
     names = [n for n in sorted(globals()) if n.startswith('test_')]
     for n in names:

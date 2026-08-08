@@ -4385,6 +4385,126 @@ def test_every_reviewed_control_explains_itself_on_hover():
         shutil.rmtree(d, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# `--goto ROW` -- the plot window's click-through target (`#274`)
+# ---------------------------------------------------------------------------
+
+def _fake_run_with_gaps(dirpath):
+    """A run whose CSV carries snapshots with NO frame of their own.
+
+    Real runs do: current and power are recorded per snapshot while
+    frames are not, so the plot window can legitimately point at a row
+    that was never photographed. Rows 0, 2, 4 carry frames; 1, 3, 5 do
+    not -- so frame_rows == [0, 2, 4]."""
+    d = _fake_run(dirpath)
+    path = os.path.join(d, 'data.csv')
+    with open(path, newline='') as f:
+        rows = list(csv.DictReader(f))
+    cols = list(rows[0].keys())
+    out = []
+    for r in rows:
+        out.append(r)
+        blank = {c: '' for c in cols}
+        blank['tag'] = 'telemetry'
+        blank['snapshot'] = str(len(out) + 1)
+        out.append(blank)
+    with open(path, 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        w.writerows(out)
+    return d
+
+
+def test_goto_parses_without_swallowing_the_run_path():
+    """`#274`: `--goto ROW` consumes its VALUE. The old parser took the
+    first non-`--` argument as the path, so an unconsumed '7' would have
+    become the run to open."""
+    import sldea_edge_gui as gui
+    assert gui.parse_args([]) == (None, False, None)
+    assert gui.parse_args(['C:\\runs\\P3_1']) == ('C:\\runs\\P3_1',
+                                                  False, None)
+    assert gui.parse_args(['C:\\runs\\P3_1', '--goto', '7']) == (
+        'C:\\runs\\P3_1', False, 7)
+    assert gui.parse_args(['--goto', '7', 'C:\\runs\\P3_1']) == (
+        'C:\\runs\\P3_1', False, 7)
+    assert gui.parse_args(['--goto=7', 'r']) == ('r', False, 7)
+    # existing flags are untouched, and the two compose
+    assert gui.parse_args(['r', '--auto']) == ('r', True, None)
+    assert gui.parse_args(['r', '--auto', '--goto', '3']) == ('r', True, 3)
+    assert gui.parse_args(['r', '--goto', '0'])[2] == 0     # not falsy-None
+
+
+def test_goto_junk_never_costs_the_operator_the_window():
+    """A shortcut that cannot be honoured must still open the program --
+    and must not leave its own argument lying around to be mistaken for
+    the run path."""
+    import sldea_edge_gui as gui
+    for junk in ('abc', '', '3.5', '--auto'):
+        path, auto, goto = gui.parse_args(['R', '--goto', junk])
+        assert goto is None, junk
+        assert path == 'R', (junk, path)      # the junk is consumed
+    # ...and a trailing --goto with nothing after it
+    assert gui.parse_args(['R', '--goto']) == ('R', False, None)
+
+
+def test_goto_lands_on_the_frame_that_shows_that_data_row():
+    """The mapping is `frame_rows` -- the rows that HAVE a frame file --
+    the rule `#255` documented when 0-based report rows met 1-based GUI
+    frames and mis-targeted a trace by one."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('edge review')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_goto_')
+    try:
+        run = _fake_run_with_gaps(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run, goto=2)
+        assert app.frame_rows == [0, 2, 4], app.frame_rows
+        assert app._current() == 2, 'did not land on the requested row'
+        assert app.pos == 1, 'landed on the wrong FRAME for that row'
+        assert 'frame 2/3' in app.status.cget('text'), app.status.cget('text')
+        assert 'data row 2' in app.status.cget('text')
+        # every framed row is reachable, and the frame number is
+        # frame_rows.index(row) + 1 -- nothing else
+        for want_pos, row in enumerate(app.frame_rows):
+            assert app.goto_row(row) == row
+            assert app.pos == want_pos and app._current() == row
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_goto_a_row_with_no_frame_lands_next_door_and_says_so():
+    """Refusing throws away a click that meant something; silently
+    landing on frame 1 is a wrong answer that looks like a right one."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('edge review')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_goto_gap_')
+    try:
+        run = _fake_run_with_gaps(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.frame_rows == [0, 2, 4]
+        # row 1 sits between frames 0 and 2 -- ties go to the LOWER row
+        assert app.goto_row(1) == 0
+        txt = app.status.cget('text')
+        assert 'no frame of its own' in txt and 'nearest is row 0' in txt
+        assert 'data row 1' in txt
+        # row 3 likewise, and rows off both ends clamp to the end frames
+        assert app.goto_row(3) == 2
+        assert app.goto_row(99) == 4 and app.pos == 2
+        assert app.goto_row(-5) == 0 and app.pos == 0
+        assert 'nearest is row' in app.status.cget('text')
+        # a run with no frames at all says so instead of raising
+        app.frame_rows = []
+        assert app.goto_row(0) is None
+        assert 'no frames' in app.status.cget('text')
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     for fn in fns:

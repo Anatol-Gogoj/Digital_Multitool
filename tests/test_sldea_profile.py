@@ -334,6 +334,66 @@ def test_electrode_family_maps_the_campaign_materials():
     assert electrode_family(None) is None
 
 
+def test_every_branded_cnt_ink_in_the_dropdown_families_to_cnt():
+    """`#272`. The family is the future group-by key (#229), so a device
+    built with a named CNT ink must land in the same bucket as one recorded
+    as plain 'CNT' -- and NONE of the four brand names contains the
+    substring 'cnt', so this cannot work by accident."""
+    from sldea_profile import ELECTRODE_CHOICES, electrode_family
+    branded = ('Carbon Solutions P3-SWNT', 'Carbon Solutions P2-SWNT',
+               'nano-c Invisicon 3900', 'nano-c Invisicon 3500')
+    for name in branded:
+        assert name in ELECTRODE_CHOICES, f"{name} missing from the dropdown"
+        assert 'cnt' not in name.lower(), "test premise: no literal 'cnt'"
+        assert electrode_family(name) == 'cnt', name
+    # plain CNT is kept: it is what every run recorded before the brands
+    assert 'CNT' in ELECTRODE_CHOICES
+    assert electrode_family('CNT') == 'cnt'
+
+
+def test_electrode_family_tolerates_the_obvious_typed_variants():
+    """What the matcher is documented to accept for the branded inks:
+    any case, surrounding whitespace, and a substring of the name."""
+    from sldea_profile import electrode_family
+    for text in ('carbon solutions p3-swnt', 'CARBON SOLUTIONS P2-SWNT',
+                 '  Carbon Solutions P3-SWNT  ', 'P3-SWNT', 'p2 swnt',
+                 'SWNT', 'swnt ink', 'MWNT'):
+        assert electrode_family(text) == 'cnt', text
+    for text in ('nano-c invisicon 3900', 'NANO-C INVISICON 3500',
+                 'Invisicon 3900', 'invisicon', ' nano-c  '):
+        assert electrode_family(text) == 'cnt', text
+    # and what it deliberately does NOT guess from: the campaign's device
+    # tokens name a DEVICE, not a material
+    assert electrode_family('P3') == 'other'
+    assert electrode_family('P2') == 'other'
+    assert electrode_family('P3_2.5mL_Triazole') == 'other'
+    # the new needles must not steal the other families
+    assert electrode_family('carbon black') == 'carbon_black'
+    assert electrode_family('eGaIn') == 'liquid_metal'
+
+
+def test_the_dropdown_no_longer_offers_a_literal_other():
+    """`#272`. 'other' as a stored VALUE is a non-answer that looks like an
+    answer; blank is how "unknown" is recorded and the run asks about it.
+    The FAMILY bucket is untouched, so runs that stored the old literal
+    still canonicalise the same way."""
+    from sldea_profile import ELECTRODE_CHOICES, electrode_family
+    assert 'other' not in ELECTRODE_CHOICES
+    assert electrode_family('other') == 'other'
+    assert electrode_family('PEDOT:PSS') == 'other'
+    assert electrode_family('') is None
+
+
+def test_a_branded_ink_reaches_setup_txt_verbatim():
+    """The brand string is what gets cited and re-ordered, so setup.txt
+    must carry it exactly as chosen -- not normalised to its family."""
+    p = SldeaProfile(start_kv=0, end_kv=4, step_kv=2, ramp_s=5, landing_s=60)
+    for brand in ('Carbon Solutions P3-SWNT', 'nano-c Invisicon 3900'):
+        txt = p.setup_text('r', 'ts', 1, 2, 3, True, electrode=brand)
+        assert f'Compliant electrode: {brand}' in txt, brand
+        assert 'Electrode family: cnt' in txt, brand
+
+
 def test_setup_text_records_the_electrode_and_the_warm_up():
     p = SldeaProfile(start_kv=0, end_kv=4, step_kv=2, ramp_s=5, landing_s=60)
     txt = p.setup_text('r', 'ts', 1, 2, 3, True, electrode='carbon black')

@@ -45,9 +45,35 @@ def measured_ua(imon_scope_v):
 # (#229). Free text is allowed -- the list is a convenience, not a
 # constraint; an unrecognised entry is kept verbatim and families out to
 # 'other'.
-ELECTRODE_CHOICES = ('', 'CNT', 'carbon black', 'eGaIn', 'other')
+#
+# The CNT inks are listed by BRAND (`#272`), not by the in-lab shorthand
+# ("P2 ink", "P3 ink"): the brand is what can be re-ordered, cited, and
+# matched against a datasheet, and the shorthand already lives in the run
+# folder names. Generic 'CNT' stays because it is the vocabulary every
+# run recorded before this list existed, and dropping it would strand
+# that value.
+#
+# There is deliberately NO literal 'other' entry (`#272`). It is a
+# non-answer that looks like an answer: a run recorded as "other" says
+# only that the material is not on a list that has since changed. Typing
+# the real material is now advertised on the box and costs the same
+# click, and a genuinely unknown sample is BLANK -- which the run-start
+# prompt already treats as a deliberate choice. 'other' remains a FAMILY
+# below, so runs that recorded the literal string still canonicalise
+# exactly as they always did.
+ELECTRODE_CHOICES = ('', 'CNT',
+                     'Carbon Solutions P3-SWNT', 'Carbon Solutions P2-SWNT',
+                     'nano-c Invisicon 3900', 'nano-c Invisicon 3500',
+                     'carbon black', 'eGaIn')
+# Substring needles, matched against the lowercased value padded with
+# spaces. None of the four brand names contains "cnt", so the CNT family
+# also keys on what the products ARE: 'swnt'/'mwnt' (Carbon Solutions
+# sells single-wall nanotube ink) and the 'invisicon' brand (nano-c's
+# transparent CNT ink). Order matters -- the first family that matches
+# wins.
 _ELECTRODE_FAMILIES = (
-    ('cnt', ('cnt', 'carbon nanotube', 'nanotube')),
+    ('cnt', ('cnt', 'carbon nanotube', 'nanotube', 'swnt', 'mwnt',
+             'invisicon', 'nano-c')),
     ('carbon_black', ('carbon black', 'carbonblack', 'cb ', ' cb', 'c-black')),
     ('liquid_metal', ('egain', 'e-gain', 'galinstan', 'liquid metal',
                       'liquidmetal')),
@@ -57,12 +83,19 @@ _ELECTRODE_FAMILIES = (
 def electrode_family(text):
     """Free-text electrode -> a canonical family, or None when blank.
 
-    'CNT' / 'carbon black' / 'eGaIn' and their obvious spellings map to
-    'cnt' / 'carbon_black' / 'liquid_metal'; anything else non-blank is
-    'other'. Nothing keys off this yet -- it exists so that when the
-    detector needs per-family behaviour (#229: a mirror-bright electrode
-    inverts the dark-disc assumption) there is one place that decides
-    what family a run belongs to."""
+    'CNT' / 'carbon black' / 'eGaIn', the branded CNT inks in
+    ELECTRODE_CHOICES, and their obvious spellings map to 'cnt' /
+    'carbon_black' / 'liquid_metal'; anything else non-blank is 'other'.
+    Nothing keys off this yet -- it exists so that when the detector needs
+    per-family behaviour (#229: a mirror-bright electrode inverts the
+    dark-disc assumption) there is one place that decides what family a
+    run belongs to.
+
+    Matching is case-insensitive, ignores surrounding whitespace, and is
+    on substrings, so a hand-typed 'p3-swnt', 'SWNT ink' or
+    'Invisicon 3900' still lands in 'cnt'. It does NOT guess from the
+    campaign's device tokens alone: a bare 'P2' or 'P3' names a device,
+    not a material, and is 'other'."""
     t = (text or '').strip().lower()
     if not t:
         return None

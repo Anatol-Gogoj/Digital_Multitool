@@ -183,8 +183,13 @@ class InstrumentControlGUI:
         self._progress = progress or (lambda _text: None)
         self.root = root
         self.root.title(f"Lab Instrument Control  —  {version_string()}")
-        # Wide enough for the LCR tab's right-hand column (bias/speed/
-        # correction) and the footer version readout (issues #26/#27).
+        # A comfortable default, no longer load-bearing. This size used to
+        # be the only thing keeping the LCR tab's right-hand column
+        # (bias/speed/correction) and the footer version readout on screen
+        # (`#26`/`#27`) -- both were clipped at the previous 1000 px and the
+        # window was widened rather than the clipping fixed. Both now hold
+        # at ANY size: the column scrolls (`#225`) and the version readout
+        # is packed first, so shrinking the window costs nothing but room.
         self.root.geometry("1320x800")
 
         # Menu bar: Tools -> bench profiles + Update Software

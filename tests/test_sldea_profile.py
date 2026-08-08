@@ -394,6 +394,80 @@ def test_a_branded_ink_reaches_setup_txt_verbatim():
         assert 'Electrode family: cnt' in txt, brand
 
 
+def test_concentration_applies_only_where_an_ink_volume_means_something():
+    """`#276`. CNT-family and unrecognised materials may have an ink
+    volume; carbon black and liquid metal do not."""
+    from sldea_profile import concentration_applies
+    for yes in ('CNT', 'Carbon Solutions P3-SWNT', 'Carbon Solutions P2-SWNT',
+                'nano-c Invisicon 3900', 'nano-c Invisicon 3500',
+                'p3-swnt', 'some bespoke ink', 'PEDOT:PSS'):
+        assert concentration_applies(yes) is True, yes
+    for no in ('carbon black', 'Carbon Black', 'CB', 'eGaIn', 'egain',
+               'Galinstan', 'liquid metal'):
+        assert concentration_applies(no) is False, no
+    # blank is applicable: "no electrode chosen yet" is not "this electrode
+    # has no concentration", and grey-before-you-choose looks broken
+    for blank in ('', '   ', None):
+        assert concentration_applies(blank) is True, repr(blank)
+
+
+def test_parse_concentration_ml_accepts_only_a_positive_number():
+    """`#276`. The value lands in setup.txt as fact, so junk is refused at
+    Run rather than written down."""
+    from sldea_profile import parse_concentration_ml
+    assert parse_concentration_ml('2.5') == 2.5
+    assert parse_concentration_ml(' 1 ') == 1.0
+    assert parse_concentration_ml('0.75') == 0.75
+    assert parse_concentration_ml(2.5) == 2.5
+    for junk in ('', '   ', None, 'abc', '2.5mL', '2,5', '0', '-1', '-0.5',
+                 'nan', 'inf', '-inf'):
+        try:
+            parse_concentration_ml(junk)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{junk!r} was accepted")
+
+
+def test_setup_text_records_the_concentration_beside_the_electrode():
+    p = SldeaProfile(start_kv=0, end_kv=4, step_kv=2, ramp_s=5, landing_s=60)
+    txt = p.setup_text('r', 'ts', 1, 2, 3, True,
+                       electrode='Carbon Solutions P3-SWNT',
+                       concentration_ml='2.5')
+    assert 'Ink concentration: 2.5 mL' in txt
+    # beside the electrode, not adrift somewhere else in the file
+    lines = [ln for ln in txt.splitlines() if ln.strip()]
+    i = lines.index('Compliant electrode: Carbon Solutions P3-SWNT')
+    assert lines[i + 1] == 'Electrode family: cnt'
+    assert lines[i + 2] == 'Ink concentration: 2.5 mL'
+
+
+def test_setup_text_omits_the_concentration_key_for_a_non_ink_electrode():
+    """A carbon-black run must not carry a CNT-ink key AT ALL -- not even
+    an empty one. An empty key reads as "an ink run that forgot to fill
+    something in"; an absent key reads as "not an ink"."""
+    p = SldeaProfile(start_kv=0, end_kv=4, step_kv=2, ramp_s=5, landing_s=60)
+    for material in ('carbon black', 'eGaIn'):
+        txt = p.setup_text('r', 'ts', 1, 2, 3, True, electrode=material)
+        assert 'concentration' not in txt.lower(), material
+        # and a stale value in the greyed box cannot leak in either
+        stale = p.setup_text('r', 'ts', 1, 2, 3, True, electrode=material,
+                             concentration_ml='2.5')
+        assert 'concentration' not in stale.lower(), material
+        assert '2.5' not in stale, material
+
+
+def test_setup_text_says_not_specified_when_an_ink_run_declines():
+    """Where it DOES apply, blank is written rather than dropped -- the
+    same rule the electrode line follows, so "declined to answer" and
+    "predates the field" stay different facts."""
+    p = SldeaProfile(start_kv=0, end_kv=4, step_kv=2, ramp_s=5, landing_s=60)
+    txt = p.setup_text('r', 'ts', 1, 2, 3, True, electrode='CNT')
+    assert 'Ink concentration: (not specified)' in txt
+    blank_electrode = p.setup_text('r', 'ts', 1, 2, 3, True)
+    assert 'Ink concentration: (not specified)' in blank_electrode
+
+
 def test_setup_text_records_the_electrode_and_the_warm_up():
     p = SldeaProfile(start_kv=0, end_kv=4, step_kv=2, ramp_s=5, landing_s=60)
     txt = p.setup_text('r', 'ts', 1, 2, 3, True, electrode='carbon black')

@@ -224,6 +224,8 @@ S["09_SLDEA_Test"] = {
         # the presets capsule is numbered last on the shot — cosmetic only.
         {"match": "Run configuration presets",
          "label": "Save the whole tab under a name and recall it — never the run name, and never the LIVE state"},
+        {"match": "Concentration (mL):", "extend_right": 95,
+         "label": "How much CNT ink went on — greyed out for carbon black and eGaIn, which are not inks"},
     ],
 }
 

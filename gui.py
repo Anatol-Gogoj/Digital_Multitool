@@ -2499,6 +2499,37 @@ LOGGING:
                     "rather than naming something you are not sure of. "
                     "Nothing in detection keys off it yet (see issue #229).")
         self.sldea_vars['electrode'] = electrode
+        # Concentration (mL) -- the CNT ink volume (`#276`). This formalises
+        # the campaign's folder-name convention (P3_2.5mL_Triazole) into the
+        # data, where it can be grouped on.
+        #
+        # Row 5 deliberately: rows 3-4 of this frame are contested (`#262`
+        # moves the Trek checkbutton off the electrode's row onto row 4), and
+        # a fresh row cannot collide with that. Once #262 has landed this
+        # could be tucked closer to the Electrode row it follows.
+        ttk.Label(outf, text="Concentration (mL):").grid(row=5, column=0,
+                                                         sticky='e')
+        conc = ttk.Entry(outf, width=8)
+        conc.grid(row=5, column=1, sticky='w', padx=6)
+        add_tooltip(conc,
+                    "How much CNT ink went on this device — the '2.5mL' in a "
+                    "folder name like P3_2.5mL_Triazole, recorded in the run "
+                    "instead of in the folder name.\n"
+                    "Greyed out for carbon black and eGaIn: those are not "
+                    "inks dispensed by volume, so the figure is only "
+                    "meaningful for CNT-family inks. When it is greyed the "
+                    "run neither asks for it nor writes it to setup.txt.")
+        self.sldea_vars['conc_ml'] = conc
+        # Says WHY the box is greyed, right beside it -- a disabled field
+        # with no explanation is a support question.
+        self.sldea_conc_note = tk.Label(outf, text='', fg='#777', anchor='w')
+        self.sldea_conc_note.grid(row=5, column=2, columnspan=3, sticky='w')
+        # Follow the electrode as it is SELECTED and as it is TYPED: the box
+        # is free text, so a custom material never fires ComboboxSelected.
+        electrode.bind('<<ComboboxSelected>>',
+                       lambda _ev: self._sldea_conc_sync())
+        electrode.bind('<KeyRelease>', lambda _ev: self._sldea_conc_sync())
+        self._sldea_conc_sync()
         self.sldea_trek_inv = tk.BooleanVar(value=False)
         add_tooltip(ttk.Checkbutton(outf, text="Trek inverts (negate "
                                                 "control)",
@@ -2827,6 +2858,30 @@ LOGGING:
         if d:
             self.sldea_outdir.set(d)
 
+    def _sldea_conc_applicable(self, electrode=None):
+        """Does Concentration (mL) mean anything for the chosen electrode?
+
+        The rule itself lives in sldea_profile.concentration_applies so the
+        widget state, the run-start question and what setup.txt records all
+        read the SAME decision (`#276`).
+        """
+        if electrode is None:
+            electrode = self.sldea_vars['electrode'].get()
+        return sldea_profile.concentration_applies(electrode)
+
+    def _sldea_conc_sync(self):
+        """Grey/ungrey Concentration (mL) to follow the electrode.
+
+        The typed value is deliberately NOT cleared when the box greys: an
+        operator flipping between materials would lose it, and a greyed
+        value is never asked about nor written to setup.txt anyway.
+        """
+        ok = self._sldea_conc_applicable()
+        self.sldea_vars['conc_ml'].config(state='normal' if ok else 'disabled')
+        self.sldea_conc_note.config(
+            text='' if ok else "— not an ink; nothing recorded for this "
+                               "electrode")
+
     # ---- Named run-configuration presets (`#265`) ------------------------
     # A widget-level snapshot of this tab, stored in the shared presets/
     # library by sldea_presets.py -- the same storage conventions as the
@@ -2872,6 +2927,11 @@ LOGGING:
         separate, deliberate acts.
         """
         targets = self._sldea_preset_targets()
+        # Concentration (mL) may currently be greyed (`#276`), and a
+        # disabled ttk.Entry refuses a programmatic write. Enable it for the
+        # duration; the sync at the end sets its real state from whatever
+        # electrode this preset just loaded.
+        self.sldea_vars['conc_ml'].config(state='normal')
         for key, value in fields.items():
             w = targets.get(key)
             if w is None:
@@ -2882,6 +2942,7 @@ LOGGING:
                 self._set_entry(w, value)
             else:                                # Combobox or StringVar
                 w.set(value)
+        self._sldea_conc_sync()
         self.sldea_dryrun.set(True)
         self._sldea_dry_toggle()
         self._sldea_refresh()
@@ -3046,6 +3107,34 @@ LOGGING:
                     "lives.\n\nStart the run without it?", default='no'):
                 self._sldea_log("run cancelled — electrode not specified")
                 return
+            # Ink concentration (`#276`). Only ever raised when it means
+            # something: for carbon black / eGaIn there is no ink volume, so
+            # the box is greyed, no question is asked, and nothing is
+            # recorded. `None` (not '') is what tells setup.txt to omit the
+            # key entirely rather than write it empty.
+            concentration_ml = None
+            if self._sldea_conc_applicable(electrode):
+                concentration_ml = self.sldea_vars['conc_ml'].get().strip()
+                if concentration_ml:
+                    try:
+                        sldea_profile.parse_concentration_ml(concentration_ml)
+                    except ValueError:
+                        messagebox.showerror(
+                            "SLDEA",
+                            f"Concentration (mL) must be a positive number — "
+                            f"'{concentration_ml}' is not one.\n\nFix it, or "
+                            f"clear the box if you do not want to record a "
+                            f"concentration for this run.")
+                        return
+                elif not messagebox.askyesno(
+                        "No concentration specified",
+                        "This run will not record how much CNT ink went on "
+                        "the device — the '2.5mL' in a folder name like "
+                        "P3_2.5mL_Triazole.\n\nStart the run without it?",
+                        default='no'):
+                    self._sldea_log(
+                        "run cancelled — concentration not specified")
+                    return
             autoproc = self.sldea_autoproc.get()
             trek_sign = -1.0 if self.sldea_trek_inv.get() else 1.0
             # Breakdown watchdog (live only). Only claim it is armed when it
@@ -3113,7 +3202,7 @@ LOGGING:
                       self.sldea_runname.get().strip(),
                       sgch, vch, ich, dry, cam_exp, cam_gain, diam_mm,
                       autoproc, wd_on, wd_ua, wd_s, trek_sign, scope_setup,
-                      tel_on, tel_hz, electrode),
+                      tel_on, tel_hz, electrode, concentration_ml),
                 daemon=True).start()
             self.root.after(100, self._sldea_animate_cursor)  # playhead
         finally:
@@ -3514,7 +3603,8 @@ LOGGING:
                       cam_exp=6, cam_gain=60, diam_mm=16.0, autoproc=False,
                       wd_on=False, wd_ua=100.0, wd_s=3.0, trek_sign=1.0,
                       scope_setup=None, tel_on=False,
-                      tel_hz=sldea_profile.TELEMETRY_MAX_HZ, electrode=''):
+                      tel_hz=sldea_profile.TELEMETRY_MAX_HZ, electrode='',
+                      concentration_ml=None):
         """Host-sequenced staircase runner (daemon thread; no Tk calls except
         via _sldea_log/_sldea_set_status/after). Drives the SG DC offset along
         p.kv_at(t), fires webcam+scope snapshots on schedule, writes the run
@@ -3543,7 +3633,8 @@ LOGGING:
                     started.isoformat(timespec='seconds'),
                     sgch, vch, ich, dry,
                     f"exposure {cam_exp}, gain {cam_gain}, WB off (manual)",
-                    dea_diam_mm=diam_mm, electrode=electrode))
+                    dea_diam_mm=diam_mm, electrode=electrode,
+                    concentration_ml=concentration_ml))
                 if trek_sign < 0:
                     sf.write("Trek control polarity: INVERTED (control = "
                              "-kV/gain; monitor readings sign-corrected "

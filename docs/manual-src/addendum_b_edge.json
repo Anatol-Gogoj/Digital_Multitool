@@ -1,0 +1,215 @@
+{
+  "id": "addendum-edge",
+  "title": "How it works — Edge Review, from photo to mm²",
+  "sections": [
+    {
+      "heading": "Who this chapter is for",
+      "paras": [
+        "This is for the labmate who wants to understand the measurement, or extend it — not to drive it. Driving it is the Companion tools chapter and Edge Review's ❓ How to use… panel, which lives inside the app so it ships with the code it describes.",
+        "Every number here is measured and carries its date. Where a term is genuinely unmeasured — and one important one is — this chapter says so rather than rounding it to a reassuring figure."
+      ]
+    },
+    {
+      "heading": "What a run is, on disk",
+      "paras": [
+        "A run is a folder the SLDEA tab wrote; Edge Review never invents one. A typical run is ~40 voltage steps to 10 kV with two snapshots per step — pre-ramp and post-ramp, about 57 s apart — so roughly 81 rows at 1920×1080."
+      ],
+      "code": "SLDEA_<timestamp>/\n    setup.txt                   lab-notebook document + two machine-read blocks\n    data.csv                    one row per snapshot\n    frames/SLDEA_s01_00.25kV_pre-ramp.png …\n    telemetry.csv               live runs since 2026-08-05 (watchdog log, ~2 Hz)\n\n    edge_labels.json            hand traces, append-only ground truth\n    scale_calibration_log.txt   one line per completed calibration round-set\n    overlays/                   accepted outline drawn on each frame   } written\n    area_vs_voltage.png         the session's accepted areas           } at Save\n    data.csv.bak                pre-save backup",
+      "bullets": [
+        "setup.txt is a lab-notebook document, not a config file, and it stays plain text (decision 2026-08-08). Machine-read lines keep the Key: value convention through se.load_settings / se.save_settings; if typed or nested structure is ever needed it arrives as a sidecar beside the txt, never by converting the document.",
+        "Two machine-read blocks sit inside it: the edge-settings section, and the scale-anchor block. The anchor block comes FIRST so replacing the settings cannot delete it, and every key in it is optional on read — 15 runs carry the 2026-08-05 two-click anchor without the newer fields and two predate the block entirely. Both files are read UTF-8 with errors='replace': one hand-annotated non-ASCII byte used to raise mid-dialog and silently brick Detect for the session.",
+        "telemetry.csv is a sidecar nothing in the analysis chain reads: run_csv matches ^data(\\d*)\\.csv$, so it can never be mistaken for the run CSV."
+      ]
+    },
+    {
+      "heading": "data.csv, and which column is primary",
+      "table": {
+        "cols": ["Column", "Written by", "Meaning"],
+        "rows": [
+          ["snapshot, step, tag", "capture", "Index, staircase step, and which of the pair: baseline, pre-ramp, post-ramp, or warmup (the throw-away frame at t=0, runs since 2026-08-05)."],
+          ["nominal_kV, control_V", "capture", "Commanded voltage and the control level behind it. The X axis of every figure — measured_kV is incomplete on every run in the 2026-07/08 batch."],
+          ["measured_kV, measured_uA", "capture", "Scope readings at the snapshot, Trek-polarity corrected. Blank when unusable."],
+          ["frame_file", "capture; rewritten at Save", "The PNG this row measures. Rewritten only for breakdown branding, and only to a name that exists or is about to."],
+          ["active_area_px", "Save", "The accepted outline's area in full-resolution pixels. The PRIMITIVE measurement — every mm² and every A/A₀ derives from it."],
+          ["active_area_mm2, active_diam_mm", "Save", "The same measurement through this save's px→mm anchor. Derived, never primary."],
+          ["wrinkle_idx", "Save", "The wrinkle index w of the accepted outline, measured on the normalized frame."],
+          ["notes", "Save", "Method and confidence (edge:disc-fit conf 0.94), plus flags, advisories and consistency annotations."]
+        ]
+      },
+      "bullets": [
+        "Because px is primary and mm² derived, a wrong scale is recoverable and a wrong outline is not. That asymmetry is why the re-anchor path exists.",
+        "Never use an active_area_mm2 written before 2026-07-28: the old blob detector's scale bug understated them by 2.3–2.7× in area. Reprocess; do not mix the two eras."
+      ]
+    },
+    {
+      "heading": "What Save commits, and what a trace banks immediately",
+      "bullets": [
+        "Nothing from a review pass reaches data.csv until 💾 Save. The one exception is a re-anchor on an already-saved run, which says so on its own button before it writes. Save is also gated on the scale anchor: with none recorded it refuses, because no entry point may write mm² off an unverified scale.",
+        "Save's destructive phase is ORDERED — columns filled, rename plan computed, data.csv committed (backup, then atomic tmp+replace), and only then are frames renamed. A failure before the commit leaves the run byte-identical with zero renames; the old order renamed first, so a full disk left renamed frames, a stale CSV, and a dialog promising a .bak that was never written.",
+        "ONE SCALE PER SAVE. A row still in the review queue keeps its previous pass's active_area_px, but its mm² and diameter are RE-DERIVED at this save's scale. A partial re-save used to write two absolute scales into one column — a 56.1 % artificial step on the real-data repro, invisible to the breakdown rule and the plot tool because both read px. A stale mm² with no px is blanked rather than kept on an unknowable anchor.",
+        "Tracing banks separately and immediately: the polygon is STAGED as candidate D and Accept commits it, but the label is appended to edge_labels.json at DONE, not at Accept — a completed trace is ground truth whether or not it is committed, and a re-trace appends another record, which is how operator repeatability was measured. Tracing never touches data.csv or setup.txt, and the sidecar is append-only, written tmp+replace, refusing rather than clobbering a corrupt file."
+      ]
+    },
+    {
+      "heading": "How a frame becomes candidates",
+      "paras": [
+        "Detection is a competition between channels refereed by an acceptance system; up to three candidates survive per frame, best first. First the frame is mapped into the baseline's photometric space by a gain+offset fit computed on PAPER ONLY — ROI minus disc minus electrode footprint — so a changed device cannot drag its own correction. The footprint is defined by Laplacian-energy texture rather than brightness, because most of the copper is dimmer than the paper (median foil pixel 173 against paper 176–190).",
+        "The scene sets the channel order. The resting disc sits only 10–25 gray levels below the paper (162–167 against 176–190) while the strips span 120–255 across 12.7–13.3 % of the frame: the device is the lowest-contrast object in its own photograph. And it activates by WRINKLING with almost no intensity displacement — separability of the plain intensity difference measured 0.000 on all 72 frames of the P3 campaign, against ~0.3 for the texture map. Thresholding a difference image is therefore not the primary signal here, which is why the diagnostic's [HIGH] verdicts about it ('The difference is dominated by photometry, not by the device'; 'No map here separates at all'; 'One threshold cannot serve this run') fire on healthy, reviewed, PASSING P3 runs. They are true statements about a channel the area does not come from; on the same run the verdict about the measurement reads OK — 'Accepted boundaries sit on a real ink step'."
+      ],
+      "table": {
+        "cols": ["Channel", "What it actually measures", "Standing"],
+        "rows": [
+          ["disc-fit", "The ink edge of the known disc, ray-tracked and fitted with a robust trimmed ellipse — the full responding disc, leads and passive wrinkle ring excluded.", "Primary. Median IoU 0.89 vs operator traces (n=26, min 0.82)."],
+          ["resting", "A statement, not a detection: on a frame with no change against the baseline, the area EQUALS the resting area.", "The low ramp. Confidence grows with the margin below the gate, capped 0.95."],
+          ["tex-ratio", "The wrinkled REGION — local Laplacian energy of frame over baseline, cut at wrinkle_ratio (1.4).", "Where the fit refuses. Region, not boundary: IoU ~0.43, area −40..−69 %."],
+          ["diff-lo / diff-otsu / diff-hi", "The changed region at 0.6×Otsu, Otsu and 1.5×Otsu of the ROI difference.", "Secondaries. Same region-not-boundary caveat."],
+          ["manual-trace (candidate D)", "The operator's polygon.", "Ground truth by definition; the only measurement above ~5.5 kV."]
+        ]
+      },
+      "bullets": [
+        "The honest no-change gate: below min_diff (default 6.0) on the ROI difference's 99th percentile, the intensity tiers return nothing — inventing an outline there was the old failure mode. Texture and boundary are consulted either way, because a fine wrinkle can be invisible to the downscaled difference and still be real. With no readable baseline at all, candidates() returns nothing: the old base-less fallback thresholded the raw photograph and auto-accepted the ROI background at conf 0.85–0.90, 2.74× the true area.",
+        "disc-fit: 360 rays from the resting centre; per ray the strongest sustained dark→light ink step, searched between 0.80 and 1.38 r₀, with a cut adapting to the scene's own median ink contrast (max(3.0, 0.35 × median)) because P3 ink steps 10–25 gray levels while the 07-23 devices step 40+; sub-pixel parabolic refinement; strips and their leads excluded by azimuth (±10°); robust trimmed ellipse; area from the FITTED shape. It refuses unless the fit lands between 0.9 and 1.3 r₀, holds its centre within 0.15 r₀, reaches circularity ≥ 0.55 and a median residual ≤ 6 % of the equivalent radius, on ≥ 40 edge points from ≥ 90 open sectors.",
+        "The ink edge is the only feature that IS the boundary, and the two alternatives were built and falsified on the frames: a change-map boundary rides out to the passive membrane ring that hoop-wrinkles around the disc (1.6–2× areas), and a valley tracker follows the taut rim, which migrates INWARD with kV so the area shrinks as voltage rises. At 4.25 kV the ink step visibly moved ~80 px and the fit sits on it.",
+        "The wrinkle index w is a texture ratio: blur frame and baseline (σ 2.5), take mean |Laplacian| inside the outline in each, divide frame by baseline. 1.0 = no change, clipped at 9.99. The pre-blur is load-bearing — raw Laplacian is dominated by sensor grain and read ~0.9 on obviously wrinkled frames. wrinkle_ratio does two jobs: the tex-ratio segmentation cut, and the threshold at which a row is annotated wrinkle-mode (informational only — it never triggers breakdown renaming). Hand traces compute w on the NORMALIZED frame exactly as the detector does; |Laplacian| is linear in gain, so the old raw-frame path put values 20–30 % off into the same column as machine ones."
+      ]
+    },
+    {
+      "heading": "From candidates to an accepted row",
+      "paras": [
+        "Ranking and acceptance are separate machines, and keeping them separate is load-bearing. Ranking decides which outline is the best measurement on offer; acceptance decides whether a human must look at it. A candidate can keep first place and its area while losing the right to be accepted unseen."
+      ],
+      "bullets": [
+        "Containment cap: a tex-ratio or diff patch whose centroid is inside a valid disc-fit and whose area is ≤ 1.2× the fit's is supporting evidence, not a better answer — capped just below the fit. A region LARGER than 1.2× is a disagreement and still competes. Extended from tex-only to the diff tiers on 2026-07-29 after an operator spot-read: on 155425 at 5.25 kV a diff-hi patch at half the fit's area had outranked the correct boundary.",
+        "Ramp hysteresis: the previous frame's winning channel gets +0.05, so a challenger must win by a margin rather than a coin flip — near-tied channels flipping on single frames caused most same-kV pair mismatches. The bonus is applied BEFORE the sort, so it can change which candidate ranks first, not merely its score.",
+        "Same-kV pair reconciliation: the two snapshots of one step are independent detections of one physical state. Agreement within a tolerance derived from their own fit CIs gives both +0.05; disagreement past twice that tolerance caps both just below accept_conf, so a confident tier flip cannot auto-accept on both sides of a contradiction.",
+        "Auto-accept then takes any frame whose best candidate has conf ≥ accept_conf (0.75), spread within spread_pct (12 %), and no fallback tag. A frame with no candidates is auto-rejected as an honest no-change/no-edge; an UNREADABLE frame is neither, staying in the queue labelled with its true cause with its saved values intact — before that distinction existed, an undecodable file was laundered into 'no change vs baseline (auto)' and Save blanked a hand-traced terminal-breakdown measurement.",
+        "accept_conf = 0.75 is FINAL for the current label set (2026-07-29 at 34 labels, unchanged at 47). Raising it buys nothing — wrong high-confidence patches are already held by the spread and pair rules — and lowering it was rejected on area evidence: the audit-capped onset fits it would recover run a median −6.9 % area against the operator."
+      ]
+    },
+    {
+      "heading": "conf is a review-ordering score, not an uncertainty",
+      "paras": [
+        "conf measures the strength of internally consistent evidence. It is valid for ORDERING frames for review. It is not a calibrated probability that the boundary is correct, and it is not an error bar: read conf ≥ 0.85 as 'no internal contradiction found', never as 'validated correct'.",
+        "That is measured, not cautious. The first calibration round (13 operator traces on 155425, 2026-07-29) found conf ANTI-calibrated: the 0.50–0.75 bin scored P(IoU ≥ 0.8) = 0.40 while both bins above it scored 0.00 — every high-confidence label was a diff-hi winner at 5.5–6 kV outlining the interior wrinkle patch, pair-confirmed to 0.97–0.99 because both snapshots were fooled identically. Pooled at 47 labels, method identity predicts correctness and conf does not: disc-fit median IoU 0.89 (n=26), patch tiers 0.43 (n=15) with recorded areas −40..−69 %. The real uncertainties live in the error budget instead."
+      ],
+      "table": {
+        "cols": ["Quantity reported", "Quote", "Dominated by"],
+        "rows": [
+          ["Expansion ratio A/A₀", "±1–2 %", "Fit CI plus the second-order residual of the edge-definition offset — the scale cancels exactly."],
+          ["Absolute mm², convention stated", "±1–2 %", "Scale anchor plus fit CI."],
+          ["Absolute mm², convention NOT stated", "±3 % (or a one-sided +5.5 % band)", "The edge-definition offset. Avoid this — state the convention."],
+          ["Hand-traced areas (wash-out ≥ 5.5 kV)", "±1 % precision, outer-toe convention", "Operator repeatability. The machine has no boundary there; the traces ARE the measurement."]
+        ]
+      },
+      "bullets": [
+        "The per-frame random term is on the candidate itself: disc-fit's spread_pct is its own 85 % confidence interval on area from the edge-point scatter — 0.2–0.5 % on the P3 runs, 0.5–0.7 % on the 07-23 runs. It replaced a cross-tier spread that measured threshold sensitivity, a different quantity.",
+        "The largest single term is definitional, not statistical. On audit-clean control frames the operator's trace sits +5.2–5.7 % in area above the machine's, with a spread across four independent controls of only 0.5 %: the machine takes the HALF-HEIGHT of the ink step, a human tracing by eye lands on the OUTER TOE. Pick a convention, state it, and absolute areas inherit only the scale terms and the per-frame CI.",
+        "Ratios are tighter for a geometric reason: the offset behaves as a near-constant annulus of ~7 px on a ~289 px resting radius, and a fixed annulus cancels to second order — at 1.44× area the residual between conventions is ~0.8 %. Honest caveat: it was measured at rest and low kV, and the onset-frame excess of ~1–2 % bounds how much it could grow under large strain.",
+        "No machine boundary should be judged against a bar above IoU ~0.97: intra-operator repeatability measured median IoU 0.973 over 9 repeat pairs, area deltas 0.2–2.5 %."
+      ]
+    },
+    {
+      "heading": "The scale chain: one anchor per run",
+      "paras": [
+        "Everything absolute hangs on one number — how many millimetres a pixel is worth. Three links: a nominal diameter, a measurement of the resting disc in pixels, and a decision to adopt it. The nominal diameter is CLOSED: the CNT electrodes are applied through a laser-cut mask, so the resting discs sit at 16 mm by manufacture for this whole series (lab confirmation, 2026-08-01) — a machined constraint, common-mode across every device cut by it.",
+        "The pixel measurement is the machine's job, and that is a measured conclusion rather than a preference. On 2026-08-06 an operator ran eleven interleaved hand calibrations on one disc against an automatic fit of 577.08 px: per-fit precision came out at σ ≈ 1.0–1.1 % of diameter and did NOT move with method or stroke (circle at 3 px 1.03 %, the same circle at 1 px dashed 1.11 %, two-point-with-rotation 2.09 %), and the fit beat all eleven on accuracy and nine of eleven on precision. The mechanism, measured on the frame: the disc reads 166 gray, the paper 186, and that 20-level step is spread over ~60 px of radius. There is no line to click, and the point a human picks is the outer toe — the 3 px stroke's measured +2.07 % diameter bias. Averaging suppresses noise as √n and does nothing to a bias, so no round count would have fixed it.",
+        "The corpus agrees. A sweep of every baseline (2026-08-06) fitted 13 of 15 runs at residuals of 0.03–0.80 % of diameter, and each of the eleven recorded resting areas is predicted to two decimal places by its anchor's deviation from that fit; the eight runs with no manual anchor land on π·8² exactly. Manual calibration is the only source of absolute-area error in this dataset. So the scale gate opens on the machine's measurement and asks the operator to VERIFY it; hand measurement is the fallback for when the fit refuses."
+      ],
+      "table": {
+        "cols": ["Recorded method", "σ / SE", "Independent cross-check?"],
+        "rows": [
+          ["auto-verified — the operator was shown the automatic fit with its quality numbers and approved it", "UNDEFINED: one fit, no rounds. Never written as 0.", "None exists — see the next section."],
+          ["manual-calibration — the operator measured the disc themselves, n blind rounds, averaged", "σ ≈ range/d₂(n); mean SE = σ/√n; area SE = 2×SE.", "Yes: the automatic fit, and the 16 mm mask's π·8² resting area, both gated at ~1 %."],
+          ["(no anchor block) — a pre-gate run", "—", "—"]
+        ]
+      },
+      "bullets": [
+        "baseline_disc refuses rather than fabricating: 360 radial rays from a central dark seed, the strongest dark→light step per ray where the neighborhood is clear of foil and glint, a robust circle fit run twice (an off-centre seed truncates the far side) — and nothing at all unless the accepted edge covers ≥ 120° of arc, the residual is under 6 % of the radius, the circle is filled with the dark class, the diameter is a plausible fraction of the search window, and circularity is ≥ 0.85. Its predecessor returned an 85 %-of-frame blob at circ 0.32 and conf 0.93, and every recorded mm² inherited a 2.3–2.7× area error from it. On a refusal the dialog quotes the fitter's own reason from eleven individually named gates, because 'the arc covers only 87°' and 'the diameter is outside the plausible range' send the operator to different places.",
+        "Both signed-off methods outrank every automatic reference at Save: an approved fit must keep beating an accepted result on the baseline row exactly as a hand measurement does, or a baseline-row detection would silently outrank the number the operator signed.",
+        "Verify-then-Accept STAGES the anchor for the next Save. The one path that writes immediately is the RE-ANCHOR on an already-saved run — every recorded mm² re-derived from the pixel measurements already in data.csv, with no detection and nothing re-reviewed, because only the scale was ever wrong. It is not new code: the commit re-runs the normal fill with an EMPTY results dict, so every row takes the unreviewed branch. It refuses when no row carries px, when a detect worker is in flight, and when an UNSAVED review is in memory — the last being the mixed-scale bug's own shape.",
+        "Verified on scratch copies of three runs against the real frames: fits reproduced at 577.08 / 370.65 / 362.18 px and each resting area moved to 201.06 mm² = π·8². That landing is an arithmetic identity — declaring the fitted disc to be 16 mm forces it — so a resting area that does NOT land there means the anchor is not the fit. A/A₀ recomputed from active_area_px is BIT-IDENTICAL across a re-anchor; from the stored 3-decimal mm² it agrees only to ~1e-5 relative (worst 1.2e-5). area_vs_voltage.png goes stale — it is drawn from a review pass's accepted results and a re-anchor has none — and is named rather than deleted; the overlays are px contours and stay correct.",
+        "Calibration methods are recorded as NAMES — verify, circle, twopoint — never dialog letters. The letters were renumbered on 2026-08-06 and the old ones are on disk, so a stored LETTER means its pre-swap meaning (A = circle, B = twopoint, C = verify), applied in one place, se.cal_mode_read. Live data contains both vocabularies."
+      ]
+    },
+    {
+      "heading": "The honest gap in the scale chain",
+      "paras": [
+        "An auto-verified anchor has no independent cross-check, and the code says so rather than faking one. Declaring the fitted disc to be diam_mm makes the resting area π·(diam_mm/2)² BY CONSTRUCTION, so the anchor guard's two tests both return exactly +0.00 % on such an anchor — on any frame, at any diameter, however wrong the fit is (pinned over a 12→900 px sweep). A green tick from a check that cannot fail is worse than no check: it reads as verification the code never performed. So the guard is not run on a verify-mode anchor and is not claimed anywhere — not in the dialog, not on either status line, not in the run's record, not in the diagnostic. All five surfaces say in words that no cross-check was performed and that no independent one exists. The verification is the operator's eye, supported by the fit's own quality numbers.",
+        "What DOES quantify such an anchor is the fit's median edge-point residual as a fraction of diameter: on P3_2's baseline, 2.3 px on 577.08 px = 0.40 %, which lands on the standing budget. It is deliberately conservative — per-point scatter, not the standard error of the fitted radius, which with 204 edge points is roughly √n ≈ 14× smaller (~0.03 %). And it is a PRECISION figure. The fit's SYSTEMATIC term — which feature the step-finder locks onto versus the true mechanical boundary — is measured by NOTHING in this project, and cannot be measured by re-fitting: a 0.03 % residual says the edge points lie on a circle, not that it is the right circle. The only external evidence is baseline_disc agreeing with by-eye readings to ~1 % on three P3 baselines, plus the eleven-attempt comparison above."
+      ],
+      "bullets": [
+        "The hand-calibration σ figures are likewise not a distribution: one operator, one disc, one session. They are quotable as exactly that, and they justify the verify mode. Until several runs and both hand methods have been measured, SLDEA_MEASUREMENT.md §2.1's ~0.4 % diameter / ~0.8 % area remain the numbers to quote, and the two-point mode's own σ is entirely unmeasured.",
+        "For a hand anchor the gate is the MEAN's standard error, not the raw range: SE ≤ 0.4 % of diameter (≡ 0.8 % area), derived from the standing budget rather than invented. A range cannot shrink when a round is added, so a range gate's remedy could never clear it; SE falls as 1/√n, so the gate can name the round count that would. The range→σ conversion is n-aware (control-chart d₂ factors, n = 2–8) and REFUSES an n it has no factor for, returning σ and SE undefined together rather than reusing the n = 3 constant. Even here the two guard references are not fully independent: baseline_disc returns a circle, so its area is πr² and the area test is the diameter test squared."
+      ]
+    },
+    {
+      "heading": "The two audits",
+      "paras": [
+        "Confidence certifies consistency; the boundary self-audit is the correctness check, and it costs the operator nothing. For every winning disc-fit or resting candidate, 180 rays are cast along the candidate's own contour (per-angle radius, so an ellipse is not penalized). Each open ray reports the SIGNED offset between the fitted boundary and the measured half-height of the ink step under it (+ = the fit sits outside the step), and whether there is a measurable step there at all; rays through the foil are skipped, not repaired. 'Circled the noise' reads as a large no-step arc, a systematically wrong FEATURE as a nonzero bias with a small MAD.",
+        "The audit gates ACCEPTANCE, not ranking: a tripped winner keeps its rank and its area — still the best measurement on offer — and loses only the right to auto-accept, tagged so the queue says why. Pair agreement can never lift it back, because two snapshots interpolated over the same washed-out arc agree beautifully, and that is exactly the correlated error pair agreement cannot certify against."
+      ],
+      "table": {
+        "cols": ["Gate", "Setting", "Trips when", "What it usually means"],
+        "rows": [
+          ["audit_nostep", "audit_nostep_pct, default 15 %", "More than 15 % of the fitted arc has no measurable ink step under it.", "Wrinkle onset: the ink locally washes out and the ellipse INTERPOLATES those sectors."],
+          ["audit_bias", "audit_bias_px, default 3 px", "The median signed offset between fitted boundary and measured step exceeds 3 px.", "A stale 'resting' claim — the disc crept out below the no-change gate — or a fit sitting off the ink."]
+        ]
+      },
+      "bullets": [
+        "The bias gate found something nobody was looking for. On all six bench runs, in the 1.5–3 kV band, frames were winning as resting at conf 0.84–0.99 and auto-accepting while the audit measured the ink step OUTSIDE the claimed circle — bias −4 px at 1.5–2.2 kV growing monotonically to −11 px (P3_2 at 2.0 kV), understating the area by up to ~7 %. The audit had seen it all along; nothing was listening.",
+        "The resting-refit measures rather than asserts: when the bias gate trips on a resting winner, the fitter runs on that frame with the change-map 'is it responding' gates WAIVED — the audit has just proved a measurable step exists off the circle — while every ink-profile quality gate still applies. The refit is audited like any winner and takes the frame only on its own merits; the capped resting claim stays as runner-up. Validated against stored labels: P3_1's 2.0 kV pair refit +4.6/+4.1 % where the audit predicted +3.8/+4.2 %.",
+        "Read the per-frame audit_nostep and audit_bias fields as EXCEPTION FLAGS, not measurements. They are set only when a frame EXCEEDS its gate, so null means the frame PASSED — not that the check was skipped. The real per-frame numbers live in frames[].audit in the diagnostic's JSON. Reading the flags as measurements turns a pass into 'unevaluated', which has been done once and corrected.",
+        "Percentiles follow np.percentile's LINEAR convention, matching the diagnostic's own report and every run's sldea_diag.txt. Nearest-rank differs on six of twelve runs in the corpus, so do not 'correct' one method toward the other.",
+        "At run level the verdict stands: median audit bias stays within −0.4..+0.4 px on all six runs, bounding wrong-feature tracking below ~0.3 % of area — the caps are per-frame exceptions, not a systematic. One run needed its own knob: 155425 has a stable ~15.5–16 % faint-arc sector on every low-kV frame (a benign floor, bias clean there) sitting just above the 15 % default, so audit_nostep_pct: 20 is saved in that run's setup.txt. Do NOT raise the default — P3's floor is 0–2.8 % and the default catches real onset interpolation there."
+      ]
+    },
+    {
+      "heading": "Breakdown: what renames a frame",
+      "paras": [
+        "Since 2026-08-05 only CURRENT-CONFIRMED events rename frames with a _BREAKDOWN suffix; area collapse alone is an advisory note and nothing else.",
+        "The rule is deviation-based. The baseline is the per-run MEDIAN of every parseable measured_uA — robust even at the worst observed 31 % event contamination — and an event row deviates from it by at least breakdown_dev_ua (20 µA). CONFIRMED needs two event rows on ADJACENT CSV rows, or the run's last parseable-current row being an event (terminal, no recovery evidence). A single event followed by recovery is a self-clearing transient: advisory only. A blank-current row between two event rows BREAKS adjacency, deliberately — at ~30 s between snapshots there is no evidence the excursion spanned the gap. Absolute thresholds cannot do this job: the whole 07-29 campaign sits on a stiff −16 µA instrument offset present at the 0 kV baseline row, so abs(µA) > 50 was really 34 µA of headroom one way and 66 the other. The absolute rule survives only as the fallback when a run has fewer than five parseable current rows."
+      ],
+      "bullets": [
+        "The 2026-08-04 ground-truth table set the threshold: true events sustain 26.5–208 µA of deviation, false ones stay at or below 14.6, recovered transients reach 48–137 before returning. Every value between 14.6 and 26.5 separates the corpus; 20 splits the margin.",
+        "The incident behind the rule: P3_5 recorded 'breakdown? area collapsed 36 %' at 5.75 kV and renamed 35 HEALTHY frames while the measured current never left ±11 µA of its baseline. The 'collapse' was the manual-trace → disc-fit method switch at the wrinkle transition — a change of measurement convention, not physics. All three observed collapses in the corpus carry a pair-mismatch note, and collapse corroborated exactly zero real breakdowns. Do not 'simplify' this back to an area- or absolute-µA-triggered rename. Collapse now confirms only alongside a current event at the same nominal-kV level; uncorroborated it becomes a note, 'collapse? area −N % (no current signature)'.",
+        "Branding is symmetric and self-healing: rows at or after the first confirmed flag are branded (file renamed, frame_file updated, post-breakdown note); rows OUTSIDE that zone — including every row when the flags are empty, and rows never re-reviewed — are UN-branded. Files are renamed, never deleted, and a mismatch in either direction repairs itself on the next Save.",
+        "Saved brands are not ground truth: the cross-run plot tool RECOMPUTES its marks from the saved current trace at plot time, a saved brand the recompute does not confirm gets a stale-brand warning and no mark, and no row is ever dropped for carrying a breakdown note."
+      ]
+    },
+    {
+      "heading": "The watchdog is a different instrument",
+      "paras": [
+        "The live watchdog runs during the run, samples the Trek current at ~2 Hz, and exists to STOP it. It is deliberately slow to trip: breakdown is declared only after the current has stayed at or above the trip level for confirm_s seconds of CONSECUTIVE samples. Any single reading below the threshold resets the streak; unreadable samples are ignored without resetting; the scope's 9.9E37 off-screen sentinel counts as an over-trip sample rather than an unreadable one, because a clipping current is a huge current, not a missing one. With a baseline learned at 0 kV before the ramp, the trip is on deviation, for the same −16 µA reason as above.",
+        "The post-hoc rule runs at Save, over the whole run at once, and exists to LABEL. It can see recovery, adjacency and the run's own median — none of which the watchdog has when it must decide. That is why a run can end without the watchdog firing and still carry a confirmed breakdown: 233451's −207 µA staircase was exactly that."
+      ],
+      "bullets": [
+        "Since 2026-08-05 the watchdog's samples go to telemetry.csv rather than being discarded, and every blank cell carries a status saying WHY it is blank (ok / offscreen / invalid / error / skipped) — an empty cell recording no reason is what made an earlier dropout investigation unresolvable. Telemetry is a record, not a safety device, and the code enforces that order: in a tick the watchdog decides FIRST and the row is written after.",
+        "Stated rather than glossed: the sidecar was tested against a fake scope and is NOT bench-verified. Nothing in the analysis chain reads it, so no area, scale, verdict or breakdown flag can move because of it. Sampling is a 2 Hz MEAN, so a millisecond-scale arc still falls between samples — and no run in the 2026-07/08 batch has telemetry at all, so those runs cannot be dated electrically."
+      ]
+    },
+    {
+      "heading": "Labels, pairing and IoU",
+      "paras": [
+        "Hand traces are the ground truth this chain is validated against, and a trace is only useful as ground truth if it is PAIRED — stored alongside the machine candidate it should be compared with. A label with no machine candidate yields no IoU, ever.",
+        "That used to fail silently: opening an already-reviewed run without --auto means detection never ran in that session, so the candidate list is empty and the label went out with machine: null and no complaint. Four labels from the batch control round were lost that way. The fix CREATES the pairing rather than reporting its absence — when nothing has detected the current frame, the tracer detects that one frame before it opens — and a label can no longer be written with an unexplained missing pairing at all, because the record builder refuses unless the reason is named."
+      ],
+      "bullets": [
+        "A run-pass pairing comes from a full ▶ Detect Edges pass: ramp hysteresis applied, same-kV pairs reconciled. That is the convention the calibration curve is read in. A frame-on-demand pairing is one frame detected in isolation: no previous frame, so no hysteresis bonus, and pair reconciliation never runs.",
+        "The on-demand caveats are quantified, not hand-waved. The missing 0.05 bonus is applied BEFORE candidates are sorted, so its absence can change WHICH candidate ranks first — measured 2026-08-06 on synthetic diff-tier scenes, the best area moved 3–9 % where the disc fit refuses, which is precisely the event and breakdown frames an operator hand-traces. So the conf can read up to 0.05 low AND a different candidate can rank first: honest as a pairing (stored conf and stored contour come from the same candidate), not a review result. Such candidates live in a separate store and never enter the review pass, and the trace report marks their points per conf bin and per method with a footnote naming the run and row.",
+        "A REJECTED candidate still pairs: recovery — tracing when every automated candidate has been thrown out — is the tracer's first job, and the rejected candidate is exactly the machine answer the polygon is ground truth against. Two causes of an unpaired label survive on purpose: an unreadable baseline, and an honest no-change frame. Both get a dialog before the tracing effort, and the label carries the reason so the report names it. A trace whose pairing is impossible is still SAVED — recovery outranks calibration.",
+        "What the calibration table means: P(IoU ≥ 0.8) per confidence bin plus per-method medians, over every label with a comparable machine candidate. It is the curve that decides what accept_conf may rise to, and its 0.8 target is validated against the measured human ceiling of 0.973.",
+        "Vocabulary, and it has bitten. 'Row' means the data.csv row counted from 0, which is what the trace report means by it. Edge Review's status bar numbers FRAMES 1..N over the rows that HAVE a frame file, not over every CSV row, so one row without a frame shifts every later frame number by one — and an aborted run leaves exactly that. On 2026-08-07 an operator sent to 'row 28' navigated to frame 28 and landed the label on row 27, a valid but unintended frame. The report now prints both, 'row 28 (GUI frame 29)'."
+      ]
+    },
+    {
+      "heading": "Where to read next",
+      "bullets": [
+        "SLDEA_MEASUREMENT.md — the full error budget: §1.1 what uncertainty to quote for which quantity, §1.2 how much to trust each method, §2 every term with its measured size, §4 a provenance row for every number. Read it before quoting any figure in a methods section.",
+        "SLDEA_HANDOFF.md — the dated, append-only decision log for the measurement chain. Every behaviour in this chapter has an observation → decision entry there with the evidence that settled it.",
+        "CLAUDE.md — the timeless traps, including the two that cost the most time: the pre-2026-07-28 scale bug, and the calibration-method vocabulary.",
+        "python sldea_trace.py <run-or-parent> — pools every edge_labels.json it finds and prints the conf-vs-IoU calibration table, plus a warning naming any label that can never yield an IoU. Any ranking change is re-scored against the stored polygons offline, at no operator cost.",
+        "python sldea_diag.py <run> --out DIR — the per-run diagnostic, read-only. ALWAYS pass --out: run folders already hold outputs from earlier sessions and the default path overwrites them. And read sldea_diag_contact.png, not only the numbers — the statistics said nothing while every outline sat on the electrode strips."
+      ]
+    }
+  ]
+}

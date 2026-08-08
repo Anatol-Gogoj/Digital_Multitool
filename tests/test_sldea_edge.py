@@ -669,6 +669,113 @@ def test_resolve_run_accepts_the_run_folder_itself():
     assert se.resolve_run(empty) is None
 
 
+def _wrapper_fixture():
+    """(wrapper, inner, [older, newer]) -- the campaign layout: runs one
+    level down inside 'SLDEA_data (1)', with sibling folders that are not
+    runs, exactly as SCPI_SLDEA_DIR sees it on the analysis PC."""
+    wrapper = tempfile.mkdtemp(prefix='wrapper_')
+    inner = os.path.join(wrapper, 'SLDEA_data (1)')
+    older = os.path.join(inner, 'P3_1_2.5mL_20260728')
+    newer = os.path.join(inner, 'P3_2_2.5mL_20260728')
+    for d in (older, newer):
+        os.makedirs(d)
+        _fake_run(d, [{'step': 0, 'tag': 'baseline', 'nominal_kV': '0'}])
+    # the newest is decided by mtime, so push the other one back rather
+    # than trusting two writes inside one clock tick to differ
+    t = os.path.getmtime(newer)
+    os.utime(older, (t - 60, t - 60))
+    for junk in ('_analysis', '_baselines', os.path.join(inner, 'plots')):
+        os.makedirs(os.path.join(wrapper, junk), exist_ok=True)
+    return wrapper, inner, older, newer
+
+
+def test_runs_parent_descends_one_level_into_a_campaign_wrapper():
+    """`#261`: SCPI_SLDEA_DIR points at the campaign WRAPPER and the runs
+    are nested one level down, where a direct listing correctly finds
+    nothing -- so the Windows tuner launcher's --resolve step exited 2,
+    "no run found", on a machine holding 13 runs.
+
+    The rule is one level, only when the level above holds nothing."""
+    wrapper, inner, older, newer = _wrapper_fixture()
+    try:
+        assert se.runs_parent(wrapper) == inner
+        # a directory that holds runs itself is never rewritten
+        assert se.runs_parent(inner) == inner
+        # ...and both resolvers now answer for the wrapper, which is the fix
+        assert se.newest_run(wrapper) == newer
+        assert se.resolve_run(wrapper) == newer
+        assert se.newest_run(inner) == newer     # unchanged, and it agrees
+
+        # EXACTLY ONE LEVEL: a run two levels down does not move the parent
+        deep = tempfile.mkdtemp(prefix='wrapper_deep_')
+        d = os.path.join(deep, 'a', 'b', 'R1')
+        os.makedirs(d)
+        _fake_run(d, [{'step': 0, 'tag': 'baseline', 'nominal_kV': '0'}])
+        assert se.runs_parent(deep) == deep
+        assert se.newest_run(deep) is None
+        assert se.resolve_run(deep) is None
+        shutil.rmtree(deep, ignore_errors=True)
+
+        # nothing anywhere: the caller's own path back, never None -- the
+        # error message has to be able to name it
+        barren = tempfile.mkdtemp(prefix='wrapper_barren_')
+        assert se.runs_parent(barren) == barren
+        assert se.resolve_run(barren) is None
+        os.makedirs(os.path.join(barren, 'notes'))
+        assert se.runs_parent(barren) == barren
+        shutil.rmtree(barren, ignore_errors=True)
+
+        # unreadable / missing: the path back, and no exception
+        assert se.runs_parent(os.path.join(barren, 'gone')) == \
+            os.path.join(barren, 'gone')
+    finally:
+        shutil.rmtree(wrapper, ignore_errors=True)
+
+
+def test_a_folder_that_is_a_run_wins_over_anything_nested_in_it():
+    """The descent may never take the run out of the operator's hands: a
+    named run resolves to ITSELF even when a copy sits inside it, because
+    resolve_run tests run_csv before it looks down (`#261`)."""
+    parent = tempfile.mkdtemp(prefix='wrapper_selfwins_')
+    try:
+        d = os.path.join(parent, 'SLDEA_20260805_101500')
+        nested = os.path.join(d, 'copy_of_me')
+        os.makedirs(nested)
+        _fake_run(d, [{'step': 0, 'tag': 'baseline', 'nominal_kV': '0'}])
+        _fake_run(nested, [{'step': 0, 'tag': 'baseline', 'nominal_kV': '0'}])
+        assert se.resolve_run(d) == d
+        # runs_parent is where to LOOK, so on a run it stays on the run
+        # itself -- it holds one, so there is nothing to descend for
+        assert se.runs_parent(d) == d
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+
+
+def test_the_descent_picks_the_child_holding_the_most_runs():
+    """Ties and near-misses are decided here rather than by directory
+    order, so two machines with the same share resolve the same run."""
+    root = tempfile.mkdtemp(prefix='wrapper_pick_')
+    try:
+        for child, n in (('one_run', 1), ('three_runs', 3), ('none', 0)):
+            os.makedirs(os.path.join(root, child), exist_ok=True)
+            for i in range(n):
+                d = os.path.join(root, child, f'R{i}')
+                os.makedirs(d)
+                _fake_run(d, [{'step': 0, 'tag': 'baseline',
+                               'nominal_kV': '0'}])
+        assert se.runs_parent(root) == os.path.join(root, 'three_runs')
+        # a tie goes to the first by NAME, not to whatever listdir says
+        tie = tempfile.mkdtemp(prefix='wrapper_tie_')
+        for child in ('bbb', 'aaa'):
+            d = os.path.join(tie, child, 'R0')
+            os.makedirs(d)
+            _fake_run(d, [{'step': 0, 'tag': 'baseline', 'nominal_kV': '0'}])
+        assert se.runs_parent(tie) == os.path.join(tie, 'aaa')
+        shutil.rmtree(tie, ignore_errors=True)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_electrode_mask_defaults_to_off_for_dark_electrodes():
     """255 = effectively off. The mask keys on BRIGHTNESS (copper/foil),
     but a carbon-black electrode is the darkest thing in frame, so the

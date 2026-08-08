@@ -4204,6 +4204,52 @@ def test_howto_panel_is_a_singleton_scrolls_and_names_live_controls():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_the_cockpit_descends_into_a_campaign_wrapper_like_the_tuner():
+    """`#261`: with no argument Edge Review opens on SCPI_SLDEA_DIR, which
+    on the analysis PC is the campaign WRAPPER with the runs nested one
+    level down. It listed nothing there while the tuner's picker listed
+    thirteen, so the two tools disagreed about the same folder. Both now
+    go through se.runs_parent, and an EMPTY parent is still the cockpit."""
+    import sldea_edge_gui as gui
+    import sldea_edge as se
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    root.withdraw()
+    wrapper = tempfile.mkdtemp(prefix='edge_gui_wrapper_')
+    try:
+        inner = os.path.join(wrapper, 'SLDEA_data (1)')
+        os.makedirs(inner)
+        run = _fake_run(os.path.join(inner, 'P3_1_2.5mL_20260728'))
+        os.makedirs(os.path.join(wrapper, '_analysis'), exist_ok=True)
+        app = gui.EdgeReviewApp(root, path=wrapper)
+        assert app.parent == inner, app.parent
+        assert app.rundir == run, app.rundir
+        assert [str(v).split('  ')[0] for v in app.run_box['values']] == \
+            ['P3_1_2.5mL_20260728']
+        # the same run the tuner's launcher resolves the wrapper to: one
+        # rule, so the Tune button cannot open a different run than the
+        # cockpit is showing
+        assert se.resolve_run(wrapper) == run
+        # a wrapper with nothing under it anywhere is still the cockpit --
+        # the descent may not invent a run
+        barren = tempfile.mkdtemp(prefix='edge_gui_barren_')
+        try:
+            os.makedirs(os.path.join(barren, 'notes'))
+            app2 = gui.EdgeReviewApp(root, path=barren)
+            assert app2.parent == barren, app2.parent
+            assert app2.run is None
+            assert app2._hint == gui.HINT_PICK_RUN
+        finally:
+            shutil.rmtree(barren, ignore_errors=True)
+    finally:
+        root.destroy()
+        shutil.rmtree(wrapper, ignore_errors=True)
+
+
 def test_detect_edges_is_the_primary_action_and_gates_on_a_run():
     """`#216`: ▶ Detect Edges must READ as the one thing to press, and
     its affordance must double as its state.

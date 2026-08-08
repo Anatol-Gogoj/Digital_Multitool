@@ -462,15 +462,69 @@ def label_scope(rec):
     return (rec.get('machine') or {}).get('detect_scope') or SCOPE_RUN
 
 
+def gui_frame_map(rundir):
+    """{row_index: Edge Review frame number} for one run directory.
+
+    Edge Review numbers frames 1..N over the rows that HAVE a frame
+    file, not over every CSV row: sldea_edge_gui builds
+    `frame_rows = [i for i, r in enumerate(rows) if r['frame_file']]`
+    and its status bar prints `frame {pos+1}/{len(frame_rows)}`. So the
+    frame number is NOT row_index+1 in general -- one CSV row without a
+    frame shifts every later row by one, and an aborted run leaves
+    exactly that (SLDEA_20260723_233426 in the 2026-07 corpus). Read
+    from the same CSV the GUI reads rather than assumed: guessing an
+    operator's frame number wrong is the whole of `#255`, and a fix that
+    guesses it wrong a different way is not a fix.
+
+    -> {} when the run cannot be read (a malformed CSV); label_where
+    then falls back to the contiguous-run identity, which is what 17 of
+    the corpus's 18 runs are."""
+    try:
+        import sldea_edge as se
+        rows = se.load_run(rundir)['rows']
+    except Exception:
+        return {}
+    frame_rows = [i for i, r in enumerate(rows)
+                  if (r.get('frame_file') or '').strip()]
+    return {i: n for n, i in enumerate(frame_rows, start=1)}
+
+
+def gui_frame(rec):
+    """The frame number Edge Review shows this label's row as, or None
+    when row_index is not a number at all (a hand-edited sidecar can
+    hold anything).
+
+    Uses the exact mapping main() attached from the run CSV when there
+    is one; otherwise row_index+1, the identity for a run where every
+    row has a frame."""
+    n = rec.get('_gui_frame')
+    if isinstance(n, int):
+        return n
+    i = rec.get('row_index')
+    return i + 1 if isinstance(i, int) else None
+
+
 def label_where(rec):
-    """'row 28', or 'DOT_P3_1_20260729 row 28' once main() has attached
-    the run name (in memory only, never written back). A pooled report of
-    several runs printed two bare 'row 28's from different runs, and an
-    operator cannot tell which run to re-detect from that (review
-    2026-08-06)."""
+    """Where to send an operator to re-trace this label, in BOTH
+    vocabularies: 'row 28 (GUI frame 29)', or 'DOT_P3_1_20260729 row 28
+    (GUI frame 29)' once main() has attached the run name (in memory
+    only, never written back).
+
+    Two separate mis-targetings paid for this one line. A pooled report
+    of several runs printed two bare 'row 28's from different runs, and
+    an operator cannot tell which run to re-detect from that (review
+    2026-08-06). Then the bare row number itself sent one to the wrong
+    frame: this report counts data.csv rows from 0, Edge Review's status
+    bar counts frames from 1, and on 2026-08-07 an operator sent to
+    'row 28' navigated to frame 28 and landed the label on row 27 -- a
+    valid but unintended frame (`#255`). 'row' still means the data.csv
+    row everywhere else in this file, so it keeps its meaning and the
+    GUI's number is printed BESIDE it, never instead of it."""
     run = (rec.get('_run') or '').strip()
-    return f"{run} row {rec.get('row_index')}" if run \
+    where = f"{run} row {rec.get('row_index')}" if run \
         else f"row {rec.get('row_index')}"
+    n = gui_frame(rec)
+    return where if n is None else f"{where} (GUI frame {n})"
 
 
 def label_record(row_index, row, polygon, frame_shape, *, machine=None,
@@ -621,7 +675,10 @@ def unpaired_summary(labels):
         rows = ', '.join(label_where(r) for r in recs[:6])
         if len(recs) > 6:
             rows += f", +{len(recs) - 6} more"
-        lines.append(f"  {reason:<20} {len(recs):>3}  ({rows})")
+        # no parens around the list: label_where now ends each entry with
+        # its own '(GUI frame N)', and the old wrapper turned every line
+        # into a '))' pile-up that is exactly what an operator skims
+        lines.append(f"  {reason:<20} {len(recs):>3}  {rows}")
         lines.append(f"      {unpaired_message(reason)}")
     return lines
 
@@ -717,11 +774,17 @@ def main(argv):
     for rundir, labels in _iter_label_files(argv):
         n_runs += 1
         # display-only provenance: the pooled report names the run each
-        # row came from (label_where), never written back to the sidecar
+        # row came from and the frame number Edge Review shows it as
+        # (label_where), neither written back to the sidecar -- the
+        # stored records stay exactly as they are on disk (`#255`).
         # (isinstance because a hand-edited sidecar can hold anything)
+        frames = gui_frame_map(rundir)
         for rec in labels:
             if isinstance(rec, dict):
                 rec['_run'] = os.path.basename(rundir.rstrip('\\/'))
+                i = rec.get('row_index')
+                if isinstance(i, int) and i in frames:
+                    rec['_gui_frame'] = frames[i]
         all_labels.extend(labels)
         pairs.extend(conf_vs_iou(labels))
         gaps = sum(len(v) for v in unpaired_labels(labels).values())

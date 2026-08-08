@@ -208,7 +208,7 @@ S["09_SLDEA_Test"] = {
     "callouts": [
         {"match": "Test Profile (voltages in kV",
          "label": "The voltage staircase — start/end/step, ramp and landing times (the 0 kV reference photo is always taken)"},
-        {"match": "DEA diam (mm):", "extend_right": 95, "label": "Sets the px→mm scale — a wrong value corrupts all areas"},
+        {"match": "DEA active area diam (mm):", "extend_right": 95, "label": "Sets the px→mm scale — a wrong value corrupts all areas"},
         {"match": "⚡ Breakdown watchdog (LIVE runs)", "label": "Aborts on sustained overcurrent — leave Enabled"},
         {"match": "📈 Scope kV/µA log", "label": "Logs kV/µA continuously to telemetry.csv — the current between photos"},
         {"match": "DRY RUN — HV OFF", "label": "Safety toggle — untick only for a live HV run"},

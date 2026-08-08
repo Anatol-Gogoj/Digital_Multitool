@@ -534,7 +534,7 @@ def test_make_opts_maps_choices_and_refuses_bad_combinations():
                  'mean': False, 'bands': True, 'breakdown': True,
                  'title': None, 'logx': False, 'logy': False,
                  'marker_key': True, 'title_first': None,
-                 'title_second': None}
+                 'title_second': None, 'subplots': 'both'}
     o, err = sp.make_opts(mode='current', vs_area=True, prepost=True,
                           mean=True, bands=False, breakdown=False,
                           title='x')
@@ -1050,6 +1050,81 @@ def test_title_flags_reach_the_options_dict():
     finally:
         sp.export = real
         shutil.rmtree(d, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# panel selection (`#270`)
+# --------------------------------------------------------------------------
+
+def test_a_single_chosen_panel_is_the_only_axes_on_the_figure():
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        opts = sp.make_opts()[0]
+        assert len(_drawn(sp.prepare_runs([d], opts), opts).axes) == 2
+        # first: the absolute-area panel, alone, filling the canvas
+        opts = sp.make_opts(subplots='first')[0]
+        fig = _drawn(sp.prepare_runs([d], opts), opts)
+        assert len(fig.axes) == 1, 'an empty axes was left behind'
+        assert _titles(fig) == ['Active area vs voltage']
+        assert fig.axes[0].get_ylabel() == 'Active area (mm²)'
+        box = fig.axes[0].get_position()
+        assert box.width > 0.7, box          # the whole canvas, not half
+        # second: the normalized panel, alone, and it inherits the legend
+        # and the marker key that used to live on the left one
+        opts = sp.make_opts(subplots='second')[0]
+        fig = _drawn(sp.prepare_runs([d], opts), opts)
+        assert len(fig.axes) == 1
+        assert fig.axes[0].get_ylabel() == 'Expansion  A / A₀'
+        assert 'Normalized' in _titles(fig)[0]
+        assert 'marker fill' in _legend_texts(fig.axes[0])
+        assert len(_legend_texts(fig.axes[0])) == 2
+        assert fig.axes[0].get_position().width > 0.7
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_panel_selection_refuses_only_the_panel_that_does_not_exist():
+    assert sp.make_opts(subplots='bogus')[0] is None
+    assert '--subplots' in sp.make_opts(subplots='bogus')[1]
+    # single-panel modes: 'first' names the only panel (no-op), 'second'
+    # asks for one that is not drawn
+    for mode in ('current', 'power'):
+        assert sp.make_opts(mode=mode, subplots='first')[0]['subplots'] \
+            == 'first'
+        o, err = sp.make_opts(mode=mode, subplots='second')
+        assert o is None and '--subplots second' in err, err
+    assert sp.make_opts(mode='area', subplots='second')[1] is None
+
+
+def test_panel_selection_reaches_export_and_the_csv_stays_whole():
+    """`#270`: the PNG follows the selection, the tidy CSV does not. The
+    CSV is the evidence for the numbers, and both panels are two views of
+    the same areas -- dropping rows to match a layout choice would make
+    the figure's own evidence depend on how it was framed."""
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        assert sp.main([d, '--out', out, '--stem', 'both']) == 0
+        assert sp.main([d, '--out', out, '--stem', 'one',
+                        '--subplots', 'second']) == 0
+        with open(os.path.join(out, 'both.csv'), 'rb') as a, \
+                open(os.path.join(out, 'one.csv'), 'rb') as b:
+            assert a.read() == b.read(), 'the tidy CSV followed the layout'
+        with open(os.path.join(out, 'both.png'), 'rb') as a, \
+                open(os.path.join(out, 'one.png'), 'rb') as b:
+            assert a.read() != b.read(), 'the PNG ignored --subplots'
+        # a bad value is refused before anything is written
+        assert sp.main([d, '--out', out, '--subplots', 'sideways']) == 2
+        assert sp.main([d, '--out', out, '--mode', 'current',
+                        '--subplots', 'second']) == 2
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
 
 
 def _run():

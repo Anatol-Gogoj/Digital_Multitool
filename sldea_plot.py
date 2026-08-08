@@ -8,6 +8,7 @@ Usage:
                          [--title TEXT] [--allow-suspect-scale]
                          [--logx] [--logy] [--no-marker-key]
                          [--title-first TEXT] [--title-second TEXT]
+                         [--subplots both|first|second]
     python sldea_plot.py --gui [RUN ...]        # window (see below)
     python sldea_plot.py --selftest [OUT.png]
 
@@ -58,7 +59,7 @@ Rendering:
       modes such runs still plot (currents are unaffected) but their area
       columns are blanked in the tidy CSV so eras cannot be mixed.
 
-Panel titles (`#269`):
+Panels (`#269` titles, `#270` selection):
     The panels a mode actually draws, in the order the flags name them:
 
         area            first  = active area vs nominal kV
@@ -73,6 +74,17 @@ Panel titles (`#269`):
     wins over it, and both lose to nothing (the default). --title-second
     in current/power mode is accepted and does nothing -- there is no
     second panel to title.
+
+    --subplots picks which of them render: 'both' (default), 'first' or
+    'second'. A single chosen panel is created as the figure's ONLY axes
+    so it fills the canvas -- not a two-column grid with one column
+    blanked, which would squeeze the survivor into half a figure beside
+    white space -- and it keeps the run legend and the marker key.
+    'second' outside area mode is refused (there is no second panel to
+    draw); 'first' there is a no-op naming the only panel. The tidy CSV
+    does NOT shrink with the selection: it is the per-snapshot evidence
+    for the numbers, not a description of the layout, and the two panels
+    are two views of the same areas.
 
 Log scales (`#263`):
     --logx / --logy put the x / y axis on a logarithmic scale. The axis
@@ -136,6 +148,10 @@ TOL_BRIGHT = ['#4477AA', '#66CCEE', '#228833', '#CCBB44',
               '#EE6677', '#AA3377', '#BBBBBB']
 
 MODES = ('area', 'current', 'power')
+
+# which panel(s) a figure renders (`#270`). 'first'/'second' name the same
+# panels --title-first/--title-second do, so one vocabulary covers both.
+SUBPLOTS = ('both', 'first', 'second')
 
 # Figure geometry lives here rather than at each call site: the CLI's PNG,
 # the window's Export and the window's on-screen canvas all size from this
@@ -509,9 +525,14 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     live Tk canvas without saving a file, and a second drawing routine
     would be a second set of plotting rules to keep in step. Everything
     that decides what a figure LOOKS like lives here; the callers only
-    decide where the pixels go."""
+    decide where the pixels go.
+
+    EITHER axis may be None (`#270`): the caller creates only the panels
+    opts['subplots'] asked for, and the survivor gets the whole canvas."""
     from matplotlib.lines import Line2D
 
+    panels = [ax for ax in (axl, axr) if ax is not None]
+    legend_ax = axl if axl is not None else axr
     run_handles = []
     had_x = had_fallback = False
     # what actually got plotted, per axis -- the log-scale policy reads
@@ -529,9 +550,11 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                        for l in lvs if l[key] is not None]
                 if pts:
                     px, py, pt = zip(*pts)
-                    _series(axl, px, py, pt, color, ls, opts['bands'])
-                    _series(axr, px, [y / run['a0'] for y in py], pt,
-                            color, ls, opts['bands'])
+                    if axl is not None:
+                        _series(axl, px, py, pt, color, ls, opts['bands'])
+                    if axr is not None:
+                        _series(axr, px, [y / run['a0'] for y in py], pt,
+                                color, ls, opts['bands'])
                     xs_all += list(px)
                     ysl_all += list(py)
                     ysr_all += [y / run['a0'] for y in py]
@@ -544,9 +567,11 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
             band_tr = [l['all_traced'] for l in lvs]
             ys = [l['mean'] for l in lvs]
             show_bands = opts['bands'] and not opts['prepost']
-            _series(axl, xs, ys, tr, color, '-', show_bands, band_tr)
-            _series(axr, xs, [y / run['a0'] for y in ys], tr, color, '-',
-                    show_bands, band_tr)
+            if axl is not None:
+                _series(axl, xs, ys, tr, color, '-', show_bands, band_tr)
+            if axr is not None:
+                _series(axr, xs, [y / run['a0'] for y in ys], tr, color,
+                        '-', show_bands, band_tr)
             xs_all += list(xs)
             ysl_all += list(ys)
             ysr_all += [y / run['a0'] for y in ys]
@@ -571,14 +596,16 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                     # confirmed but no reviewed area (e.g. frame rejected
                     # in review): anchor the event to its kV rather than
                     # silently dropping it
-                    for ax in (axl, axr):
+                    for ax in panels:
                         ax.axvline(r['kv'], color=color, linestyle='--',
                                    linewidth=0.9, alpha=0.55, zorder=1)
                     xs_all.append(r['kv'])
                     unanchored.append(r['index'])
-            _cross_marks(axl, drawn, color)
-            _cross_marks(axr, [(x, y / run['a0']) for x, y in drawn],
-                         color)
+            if axl is not None:
+                _cross_marks(axl, drawn, color)
+            if axr is not None:
+                _cross_marks(axr, [(x, y / run['a0']) for x, y in drawn],
+                             color)
             xs_all += [x for x, _ in drawn]
             ysl_all += [y for _, y in drawn]
             ysr_all += [y / run['a0'] for _, y in drawn]
@@ -590,19 +617,23 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                      f"dashed verticals at their kV (see current mode)")
         run_handles.append(Line2D([], [], color=color, label=run['name']))
 
-    _style_axes(axl, 'Nominal voltage (kV)', 'Active area (mm²)')
-    _style_axes(axr, 'Nominal voltage (kV)', 'Expansion  A / A₀')
     scale_notes = []
-    _apply_scales(axl, opts, xs_all, ysl_all, scale_notes)
-    _apply_scales(axr, opts, xs_all, ysr_all, scale_notes)
-    axl.set_title(_panel_title(opts, 'first', 'Active area vs voltage'),
-                  loc='left', fontweight='bold', fontsize=11)
-    a0s = sorted({round(r['a0'], 1) for r in runs})
-    a0txt = (f"A₀ = {a0s[0]:g} mm²" if len(a0s) == 1
-             else "per-run A₀")
-    axr.set_title(_panel_title(opts, 'second',
-                               f"Normalized to baseline area ({a0txt})"),
-                  loc='left', fontweight='bold', fontsize=11)
+    if axl is not None:
+        _style_axes(axl, 'Nominal voltage (kV)', 'Active area (mm²)')
+        _apply_scales(axl, opts, xs_all, ysl_all, scale_notes)
+        axl.set_title(_panel_title(opts, 'first',
+                                   'Active area vs voltage'),
+                      loc='left', fontweight='bold', fontsize=11)
+    if axr is not None:
+        _style_axes(axr, 'Nominal voltage (kV)', 'Expansion  A / A₀')
+        _apply_scales(axr, opts, xs_all, ysr_all, scale_notes)
+        a0s = sorted({round(r['a0'], 1) for r in runs})
+        a0txt = (f"A₀ = {a0s[0]:g} mm²" if len(a0s) == 1
+                 else "per-run A₀")
+        axr.set_title(_panel_title(opts, 'second',
+                                   f"Normalized to baseline area "
+                                   f"({a0txt})"),
+                      loc='left', fontweight='bold', fontsize=11)
     style_rows = []
     if opts['prepost']:
         style_rows += [('post-ramp snapshot', {'linestyle': '-'}),
@@ -613,9 +644,9 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     if had_fallback:
         style_rows.append(('breakdown, no reviewed area',
                            {'linestyle': '--'}))
-    main_legend = _legend(axl, run_handles, style_rows)
+    main_legend = _legend(legend_ax, run_handles, style_rows)
     if opts.get('marker_key', True):
-        _marker_key(axl, main_legend)
+        _marker_key(legend_ax, main_legend)
 
     cap = ("Points = per-level pre/post snapshot pair"
            + (" (post solid, pre dashed)" if opts['prepost']
@@ -635,6 +666,23 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     return fig
 
 
+def area_axes(fig, opts):
+    """-> (left, right) axes for the area figure; either is None when
+    `#270` switched that panel off.
+
+    A single chosen panel is created as the figure's ONLY axes, so it
+    fills the canvas -- not a two-column grid with one column blanked,
+    which would leave the survivor squeezed into half a figure next to
+    white space. Every caller that makes area axes goes through here so
+    the window, the CLI and the PNG cannot disagree about the layout."""
+    which = opts.get('subplots', 'both')
+    if which == 'first':
+        return fig.subplots(), None
+    if which == 'second':
+        return None, fig.subplots()
+    return tuple(fig.subplots(1, 2))
+
+
 def figure_area(runs, opts, path, warn=lambda m: None):
     """The area figure as a 300 dpi PNG (kept for direct callers/tests).
     Same drawing as the window -- see draw_area."""
@@ -642,7 +690,8 @@ def figure_area(runs, opts, path, warn=lambda m: None):
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-    fig, (axl, axr) = plt.subplots(1, 2, figsize=FIGSIZE['area'])
+    fig = plt.figure(figsize=FIGSIZE['area'])
+    axl, axr = area_axes(fig, opts)
     draw_area(fig, axl, axr, runs, opts, warn)
     fig.savefig(path, dpi=300)
     plt.close(fig)
@@ -798,7 +847,7 @@ def draw(fig, runs, opts, warn=lambda m: None):
     window's live canvas calls it on every toggle, and save_figure() calls
     it for the PNG, so what you see on screen is what lands in the file."""
     if opts['mode'] == 'area':
-        axl, axr = fig.subplots(1, 2)
+        axl, axr = area_axes(fig, opts)
         return draw_area(fig, axl, axr, runs, opts, warn)
     return draw_signal(fig, fig.subplots(), runs, opts, warn)
 
@@ -895,7 +944,7 @@ def default_stem(mode):
 def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
               bands=True, breakdown=True, title=None,
               logx=False, logy=False, marker_key=True,
-              title_first=None, title_second=None):
+              title_first=None, title_second=None, subplots='both'):
     """-> (opts dict, error message or None).
 
     The CLI builds this from its flags and the window from its tick boxes,
@@ -911,6 +960,16 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
         return None, f"unknown --mode {mode} (area | current | power)"
     if vs_area and mode == 'area':
         return None, '--vs-area applies to current/power modes only'
+    subplots = subplots or 'both'
+    if subplots not in SUBPLOTS:
+        return None, (f"unknown --subplots {subplots} "
+                      f"(both | first | second)")
+    if subplots == 'second' and mode != 'area':
+        # 'first' in a single-panel mode is a harmless no-op (it names the
+        # only panel), but 'second' would ask for a panel that does not
+        # exist -- that is a mistake, not a preference
+        return None, ('--subplots second applies to area mode only '
+                      '(current/power draw a single panel)')
     return {'mode': mode, 'vs_area': bool(vs_area),
             'prepost': bool(prepost), 'mean': bool(mean),
             'bands': bool(bands), 'breakdown': bool(breakdown),
@@ -918,7 +977,8 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
             'logx': bool(logx), 'logy': bool(logy),
             'marker_key': bool(marker_key),
             'title_first': title_first or None,
-            'title_second': title_second or None}, None
+            'title_second': title_second or None,
+            'subplots': subplots}, None
 
 
 def needs_areas(opts):
@@ -1108,7 +1168,7 @@ _BOOL_FLAGS = ('--vs-area', '--prepost', '--mean', '--no-bands',
                '--no-breakdown', '--allow-suspect-scale', '--selftest',
                '--gui', '--logx', '--logy', '--no-marker-key')
 _VALUED_FLAGS = ('--mode', '--out', '--stem', '--title',
-                 '--title-first', '--title-second')
+                 '--title-first', '--title-second', '--subplots')
 
 _orig_stdout = None     # keeps the replaced wrapper alive: a GC'd
                         # TextIOWrapper closes the buffer it shares with
@@ -1181,7 +1241,8 @@ def main(argv):
                           logy='--logy' in flags,
                           marker_key='--no-marker-key' not in flags,
                           title_first=vals.get('--title-first'),
-                          title_second=vals.get('--title-second'))
+                          title_second=vals.get('--title-second'),
+                          subplots=vals.get('--subplots', 'both'))
     if '--gui' in flags:
         # the window is a front end to everything below, and it does its own
         # run picking -- so unlike the headless paths it does NOT require

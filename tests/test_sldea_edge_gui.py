@@ -4439,12 +4439,16 @@ def test_goto_junk_never_costs_the_operator_the_window():
     and must not leave its own argument lying around to be mistaken for
     the run path."""
     import sldea_edge_gui as gui
-    for junk in ('abc', '', '3.5', '--auto'):
+    for junk in ('abc', '', '3.5', '12x'):
         path, auto, goto = gui.parse_args(['R', '--goto', junk])
         assert goto is None, junk
         assert path == 'R', (junk, path)      # the junk is consumed
     # ...and a trailing --goto with nothing after it
     assert gui.parse_args(['R', '--goto']) == ('R', False, None)
+    # a value that LOOKS LIKE A FLAG is left alone -- sldea_plot's rule
+    # for its own valued flags. `--goto --auto` is a --goto with no value
+    # and an --auto, not a swallowed --auto.
+    assert gui.parse_args(['R', '--goto', '--auto']) == ('R', True, None)
 
 
 def test_goto_lands_on_the_frame_that_shows_that_data_row():

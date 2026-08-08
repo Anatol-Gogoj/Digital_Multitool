@@ -2488,8 +2488,8 @@ LOGGING:
             cb.set(default)
             cb.grid(row=r, column=4, sticky='w')
             self.sldea_vars[key] = cb
-        ttk.Label(outf, text="DEA diam (mm):").grid(row=2, column=0,
-                                                    sticky='e')
+        ttk.Label(outf, text="DEA active area diam (mm):").grid(
+            row=2, column=0, sticky='e')
         diam = ttk.Entry(outf, width=8)
         diam.insert(0, '16')
         diam.grid(row=2, column=1, sticky='w', padx=6)
@@ -2525,9 +2525,13 @@ LOGGING:
                     "control voltage (inverting amp config/input). The run "
                     "then drives a negative control so the HV output is "
                     "positive, and the V_Out monitor reading is sign-"
-                    "corrected in the log.").grid(row=3, column=0,
+                    "corrected in the log.").grid(row=4, column=0,
                                                   columnspan=3, sticky='w',
                                                   pady=(4, 0))
+        # row=4, NOT row=3: the Electrode label+box moved into row 3 with
+        # the `#231` field, and this checkbutton stayed gridded over the
+        # same cells — the two overlapped on screen until the operator
+        # caught it on 2026-08-07.
 
         # Breakdown watchdog (LIVE runs): deliberately slow-to-trip monitor
         # of the Trek I_Out on the scope; sustained overcurrent -> snapshot

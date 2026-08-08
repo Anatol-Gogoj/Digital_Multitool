@@ -47,6 +47,25 @@ it, "later" — the premise note in Batch-QA still applies), and the `#162`
 live-verify (a 10-minute GUI walkthrough is in the 2026-08-07 session
 log; close `#162` after it).
 
+**Late-evening addendum, same day — the acceptance drive happened.**
+`#216`, `#238` and `#162` are all CLOSED: Anatol drove the new UI on a
+scratch CB run and accepted the trio, with one finding fixed the same
+hour — the secondary grey mute on Advanced…/📏 read as *disabled* to the
+operator (the colour-alone trap, live within hours of shipping); stock
+look restored and pinned by a test in **#254**. The `#162` recovery path
+was live-verified on real data: a trace in a never-detected session came
+back paired `frame-on-demand` with a computed IoU, visible in the
+`sldea_trace.py` calibration table. New **`#255`**: the trace report
+prints 0-based rows while the GUI shows 1-based frames, which
+mis-targeted a trace by one frame — until fixed, translate as GUI frame
+= report row + 1. **The control round is now the only campaign item
+needing an operator at a desk.** Its targets in GUI-frame language:
+DOT_P3_1_20260729 frame 29 · P3_3_2.5mL_20260728 frames 29 and 66 ·
+P3_5_2.5mL_0729 frame 26 · plus a second trace on two of them for the
+repeat pairs. Rules: no ▶ Detect, no 💾 Save on campaign runs — trace,
+Done, ✔ Accept, close. Then the agent computes the §3b-5 gates and
+writes the SCORECARD/HANDOFF verdicts.
+
 ---
 
 **TL;DR (2026-08-07 morning, desk session, no bench access).**

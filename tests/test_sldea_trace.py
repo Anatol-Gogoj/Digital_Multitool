@@ -403,7 +403,11 @@ def test_unpaired_summary_names_the_dead_labels_including_legacy():
     # the curve itself still only counts comparable labels
     assert len(st.conf_vs_iou([good, named, legacy])) == 1
     text = '\n'.join(st.unpaired_summary([good, named, legacy]))
-    assert '2 of 3' in text and 'row 28' in text and 'row 65' in text
+    assert '2 of 3' in text
+    # both vocabularies, every time (`#255`) -- the bare row number sent
+    # an operator to the wrong frame on 2026-08-07
+    assert 'row 28 (GUI frame 29)' in text, text
+    assert 'row 65 (GUI frame 66)' in text, text
     assert '--auto' in text, "the actual cause must be named"
     assert st.unpaired_summary([good])[0].startswith('all 1 label')
     assert 'no labels yet' in st.unpaired_summary([])[0]
@@ -413,8 +417,8 @@ def test_unpaired_summary_names_the_dead_labels_including_legacy():
     two_runs = [dict(legacy, _run='DOT_P3_1_20260729'),
                 dict(legacy, _run='P3_3_2.5mL_20260728')]
     both = '\n'.join(st.unpaired_summary(two_runs))
-    assert 'DOT_P3_1_20260729 row 28' in both, both
-    assert 'P3_3_2.5mL_20260728 row 28' in both, both
+    assert 'DOT_P3_1_20260729 row 28 (GUI frame 29)' in both, both
+    assert 'P3_3_2.5mL_20260728 row 28 (GUI frame 29)' in both, both
     # measured 2026-08-06: the bench PC's console is cp1252, and one '⚠'
     # in this report aborted the whole CLI with a UnicodeEncodeError.
     # Every line the CLI can print stays ASCII (Tk dialogs may not) --
@@ -462,7 +466,9 @@ def test_calibration_report_marks_on_demand_points():
         st.conf_vs_iou([run_pass, on_demand, legacy])))
     assert st.SCOPE_FRAME in text, text
     assert '1 of 3' in text, text
-    assert 'P3_5_2.5mL_0729 row 25' in text, text
+    # the re-trace list is an instruction to an operator, so it speaks
+    # the GUI's frame numbers too (`#255`)
+    assert 'P3_5_2.5mL_0729 row 25 (GUI frame 26)' in text, text
     # the marker lands on the affected bin and method line, not only in
     # the footnote -- the bin is what sets accept_conf
     marked = [ln for ln in text.split('\n') if 'on-demand' in ln]
@@ -473,6 +479,107 @@ def test_calibration_report_marks_on_demand_points():
     clean = '\n'.join(st.calibration_summary(
         st.conf_vs_iou([run_pass, legacy])))
     assert 'on-demand' not in clean and st.SCOPE_FRAME not in clean
+
+
+def test_report_names_rows_in_the_gui_frame_vocabulary():
+    """`#255`: every row this report names to an operator carries the
+    number Edge Review's status bar shows for that row.
+
+    The report counts data.csv rows from 0; the GUI prints
+    `frame {pos+1}/{len(frame_rows)}`. On 2026-08-07 an operator sent to
+    'row 28' navigated to GUI frame 28 and landed the label on row 27 --
+    a valid but unintended frame. 'row' still means the data.csv row (it
+    is the sidecar's own key, read by everything else), so the GUI's
+    number is printed BESIDE it, never instead of it.
+
+    And the frame number is MAPPED from the run CSV, never assumed to be
+    row+1: the GUI numbers only the rows that HAVE a frame file, so one
+    frameless row shifts every later one -- the 2026-07 corpus already
+    holds such a run (SLDEA_20260723_233426, an aborted capture)."""
+    import io
+    import re
+    from contextlib import redirect_stdout
+
+    # the formatting helper, in every state it can be called in
+    assert st.label_where({'row_index': 28}) == 'row 28 (GUI frame 29)'
+    assert st.label_where({'row_index': 28, '_run': 'DOT_P3_1_20260729'}) \
+        == 'DOT_P3_1_20260729 row 28 (GUI frame 29)'
+    # a mapping attached by main() WINS over the row+1 fallback
+    assert st.label_where({'row_index': 28, '_gui_frame': 25}) == \
+        'row 28 (GUI frame 25)'
+    # a hand-edited sidecar can hold anything; still no crash, and no
+    # invented frame number
+    assert st.label_where({'row_index': None}) == 'row None'
+    assert st.gui_frame({'row_index': 'x'}) is None
+
+    d = tempfile.mkdtemp(prefix='trace_frames_')
+    try:
+        # a run whose row 2 lost its frame: from there on the GUI's frame
+        # number is NOT row+1
+        with open(os.path.join(d, 'data.csv'), 'w', newline='') as f:
+            f.write('frame_file,nominal_kV,tag\n')
+            for i in range(5):
+                name = '' if i == 2 else f'f{i}.png'
+                f.write(f'{name},{i},pre-ramp\n')
+        assert st.gui_frame_map(d) == {0: 1, 1: 2, 3: 3, 4: 4}
+        # an unreadable run degrades to the row+1 fallback, never raises
+        assert st.gui_frame_map(os.path.join(d, 'nope')) == {}
+
+        sq = [[10, 10], [110, 10], [110, 90], [10, 90]]
+        legacy = {'row_index': 3, 'polygon': sq, 'frame_shape': [200, 400],
+                  'machine': None}              # pre-gate -> 'unrecorded'
+        on_demand = {'row_index': 4, 'polygon': sq,
+                     'frame_shape': [200, 400],
+                     'machine': {'method': 'disc-fit', 'conf': 0.9,
+                                 'contour': sq,
+                                 'detect_scope': st.SCOPE_FRAME}}
+        sidecar = os.path.join(d, st.LABELS_NAME)
+        with open(sidecar, 'w') as f:
+            json.dump({'version': st.LABELS_VERSION,
+                       'labels': [legacy, on_demand]}, f, indent=1)
+        before = open(sidecar, 'rb').read()
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            assert st.main([d]) == 0
+        out = buf.getvalue()
+        # the payoff. Row 3 is the GUI's frame 3 because row 2 carries no
+        # frame -- a row+1 guess would have said 4 and sent the operator
+        # one frame PAST the one that needs re-tracing, which is `#255`
+        # committed a second time.
+        assert 'row 3 (GUI frame 3)' in out, out
+        assert 'row 3 (GUI frame 4)' not in out, out
+        assert 'row 4 (GUI frame 4)' in out, out
+        # no row is named bare anywhere in the report -- a hand-built
+        # f-string left behind must fail HERE, not in an operator's hands
+        bare = re.findall(r'row \d+\b(?! \(GUI frame \d)', out)
+        assert not bare, (bare, out)
+
+        # the report is read-only: the display-only _run / _gui_frame keys
+        # annotate records in memory and never reach the sidecar. This is
+        # a REPORT-vocabulary fix; the machine-readable records do not
+        # move (`#255`).
+        assert open(sidecar, 'rb').read() == before
+        assert '_gui_frame' not in before.decode()
+        rec = st.label_record(3, {'frame_file': 'f3.png', 'nominal_kV': '1',
+                                  'tag': 'pre'}, sq, (200, 400),
+                              unpaired=st.UNPAIRED_NOT_DETECTED)
+        assert '_gui_frame' not in rec and '_run' not in rec
+
+        # measured 2026-08-06, four times over: the bench PC's console is
+        # cp1252/cp437/cp850 and one non-ASCII glyph aborts the whole
+        # report with a UnicodeEncodeError. The new wording is ASCII...
+        out.encode('ascii')
+        for enc in ('cp437', 'cp850', 'cp1252'):
+            out.encode(enc)
+        # ...and survives an actual redirect onto a legacy code page,
+        # which is how the bench reads it: `sldea_trace.py ... > out.txt`
+        p = os.path.join(d, 'report.txt')
+        with open(p, 'w', encoding='cp437') as f, redirect_stdout(f):
+            st.main([d])
+        assert 'row 3 (GUI frame 3)' in open(p, encoding='cp437').read()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def _run():

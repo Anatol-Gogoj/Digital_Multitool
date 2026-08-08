@@ -1,0 +1,132 @@
+{
+  "id": "addendum-stack",
+  "title": "How it works — the instrument stack, PC to bench",
+  "nav": "The instrument stack",
+  "sections": [
+    {
+      "heading": "Who this chapter is for",
+      "paras": [
+        "Part I tells you which button to press; this chapter tells you what is behind it — which cable each instrument really talks over, why the app is deliberately less capable on Windows, what an SLDEA run does minute by minute, and how code reaches the bench. Claims that came from an instrument rather than from reading source carry their date; anything only desk-tested says so."
+      ]
+    },
+    {
+      "heading": "Transports: which box speaks what",
+      "paras": [
+        "There is no single bus. The five instruments arrived over three transports, and every driver lives in instruments.py, one class per instrument. Three share a small base class that owns the PyVISA session, terminators and timeout; the DC supply and the DMM are stand-alone, because they are not USB-TMC devices at all."
+      ],
+      "table": {
+        "cols": ["Instrument", "Transport", "How it is addressed"],
+        "rows": [
+          ["LCR meter — BK 894", "USB-TMC via PyVISA (pyvisa-py + libusb)", "Auto-discovered by USB VID/PID. Its own USB serial descriptor is garbage, so the real serial only comes from *IDN?"],
+          ["Oscilloscope — MSO24", "USB-TMC via PyVISA", "Auto-discovered by VID/PID; the session is put into binary waveform transfer on open"],
+          ["Signal generator — BK 4055B", "LAN first, USB-TMC as fallback", "A fixed bench IP is probed first, USB discovery only if that fails. LAN is preferred because arb upload cannot work over USB at all"],
+          ["DC supply — BK 9174B", "Plain serial over the built-in CP2102 USB-UART bridge", "A fixed device node at 57600 baud, 8N1, CR+LF, from B&K's own example code. A virtual COM port, so it never shows up in a USB-TMC scan"],
+          ["DMM — BK 5493C", "Raw TCP socket over LAN, opened through PyVISA as a SOCKET resource", "A configured IP and a non-standard port. This unit's USB never enumerated and it is not VXI-11 either"]
+        ]
+      }
+    },
+    {
+      "heading": "Apply, then output — and read back what you can",
+      "paras": [
+        "The same convention runs through every tab that can energize something: Apply sends configuration, a separate button switches the output, and Apply never turns an output on. The drivers are built for it — the signal generator has a method whose only purpose is to set load and polarity without touching the on/off state, and the supply's apply() takes the output state as an optional argument defaulting to \"leave it alone\", because a supply may be powering something you care about. The output buttons confirm first, defaulting to No. The exception is the LCR meter's DC bias, which is part of the measurement configuration and so follows Apply like everything else on that tab — which is why loading a bench profile mid-measurement is called out as dangerous.",
+        "The GUI holds no authoritative model of instrument state: what it shows after a connect or a Reconnect was read out of the box, and the supply is read-only on connect so plugging in never changes an output. After Apply the app waits 200 ms and queries the channel back, deliberately best-effort — the configuration has already landed, so a slow query reports \"read-back failed, use Read Instrument to refresh\" rather than a configuration error. Where a value cannot be read the code says so instead of substituting a plausible number: a trace that has left the scope's visible window comes back as offscreen, not as the instrument's 9.9E37 sentinel dressed up as a reading."
+      ]
+    },
+    {
+      "heading": "Connect, Reconnect, and what closing the window does",
+      "paras": [
+        "There is no connect() method anywhere: constructing a driver opens the link, and a failed identify closes the session before re-raising — a leaked open claims the USB interface for the life of the process, and every later reconnect then fails until restart (audit 2026-07-25). At start-up the five are connected one at a time in a single worker, because the drivers share one process-wide PyVISA resource manager and it is not re-entrant. Reconnect runs the same code for one box — null the handle, close the old session, construct a fresh one — and is refused for the signal generator while an SLDEA run is live, since nulling that handle used to skip the run's safety ramp-down entirely."
+      ],
+      "bullets": [
+        "Closing the window stops a running SLDEA test first and waits up to about 3 s for its worker to zero the drive, then switches both generator channels off and turns LCR DC bias off.",
+        "It hands every instrument back to LOCAL and closes the link, so the front panels work again without a power cycle — pyvisa-py asserts remote on connect and never releases it by itself.",
+        "Closing the app does NOT switch off the BK 9174B DC supply output. Nothing on the close path touches it: it may be powering something, so it is left exactly as it was.",
+        "Scope acquisition is not stopped either, and the generator keeps its configured waveform — only the output gate drops."
+      ]
+    },
+    {
+      "heading": "The 4055B's 52-byte USB ceiling",
+      "paras": [
+        "The generator's USB firmware (1.01.01.33R3) hard-wedges on any USB-TMC Bulk-OUT transfer spanning more than one 64-byte USB packet — even a whitespace-padded, pure-ASCII *IDN?. Once wedged, writes vanish, every read times out, and only a front-panel power cycle recovers it: INITIATE_CLEAR, *RST, a USB reset and a hub-port power cycle all fail, because the instrument is self-powered. Bench-verified 2026-07-02, three ways; it is also why EasyWaveX freezes the box, and the probe that demonstrates it lives in bench/archive/, labelled as intentionally destructive. Splitting a long command across several single-packet messages does not wedge the box but does not reassemble either — the first message is processed as the whole command and the rest dropped, so a 2 KB waveform upload stored as its first 24 data bytes, with the name registering, which is what makes that failure easy to miss.",
+        "So every USB command must fit 52 bytes including the newline: one 64-byte packet minus the 12-byte USB-TMC header. The driver enforces it rather than letting you find out — an oversized write raises with the byte count and the offending command, the basic-waveform setter auto-splits long parameter chains, and arb upload refuses over USB and points at LAN. Reads are unaffected. That is why arbs reach the instrument by LAN or by flash drive, and why the Arb Editor has two export buttons; the full story is in README §quirks."
+      ]
+    },
+    {
+      "heading": "The scope-monitor check, and the supply's dual range",
+      "paras": [
+        "The Trek's V_Out and I_Out monitors are ordinary BNC outputs into two scope channels (CH2 and CH3 by default), and nothing in that path is self-describing: with the scope set up wrongly a run still completes and simply records wrong numbers. Three real batches were lost that way — CH3 carrying a 10× probe factor on a plain BNC, inflating every logged current tenfold; CH2 at 2.6 mV/div for a 0–10 V monitor, so five runs recorded no usable measured kV (bench 2026-07-25); and a correct volts-per-division with the wrong window, clipping the 2026-07-29 batch from 4.25 kV up. So before a live run the app reads back each monitor's scale, external attenuation, position and offset, and checks three things: that the attenuation is 1× as a direct BNC requires, that the span covers the run's top voltage and trip current, and that the visible window actually contains that range. The check is polarity-aware, and the current window must contain ±the trip current, because every real breakdown in the 2026-08-04 ground-truth batch swung negative. A problem gives one dialog with three answers — fix and continue, run anyway, or stop — and fixing writes attenuation, scale, offset, position, coupling and channel-on for both monitors, then logs what it did. It is never silent, and a query that failed is reported as skipped, not as passed.",
+        "The DC supply has a smaller version of the same idea. Each of its two outputs is 105 W and dual-range: up to 3 A at or below 35 V, up to 1.5 A between 35 V and 70 V. The joint check lives in the driver's apply(), the only place that sees a voltage and a current together, and the GUI runs the same check on the main thread first, so an impossible combination is a readable dialog rather than a background traceback. One oddity when reading that driver: the 9174B has no channel-select command — channel 1 uses the bare SCPI token and channel 2 a 2-suffixed one (verified read-only against the unit 2026-07-22)."
+      ]
+    },
+    {
+      "heading": "Windows edits, Linux drives",
+      "paras": [
+        "Instrument I/O works only on the Linux bench box. One module-level flag decides it, checked once at import; the reason sits underneath PyVISA, which drives the USB-TMC boxes through libusb with a udev and module-blacklist setup that exists only on that machine. On Windows the app still runs and the instrument tabs stay fully editable — what is locked out is connecting. The connection lines go amber with \"Linux bench only -- view/edit (presets OK)\" and Update Software… is greyed out. Those are normal on Windows, not faults: settings can still be typed, saved as presets and profiles, and loaded on the bench.",
+        "What works fully on Windows is most of the analysis work, not a token subset. Battery Data is not an instrument tab at all, just file processing; the Webcam tab takes snapshots and timelapses normally; and the whole SLDEA analysis chain — Edge Review, the tuner, the diagnostic and the plot tool — is stand-alone, touches no instrument and runs anywhere a copy of the run data does. The one Webcam feature that does not work off the bench is the sig-gen-driven stepped sweep, and it is worth knowing how it fails: the button is not greyed out but gated by a runtime check on the generator handle, which on Windows is permanently absent, so clicking it reports \"Signal generator not connected\". The effect matches the documentation; the mechanism is a null check, not a platform check."
+      ]
+    },
+    {
+      "heading": "An SLDEA run: the staircase and the two 0 kV frames",
+      "paras": [
+        "A run is one worker thread ticking at 10 Hz against a plan computed up front — voltage levels, ramp and hold segments, and the exact time of every photograph — which is why the tab shows the frame count and total duration before anything is energized. Start, End and Step become a list of levels; Up/down appends the descending half and Repeat multiplies the sequence. A leading 0 kV level is dropped from the landings rather than held, because 0 kV is captured as the baseline, not sat at. Each level contributes one ramp segment, one hold segment and two photographs, and the profile refuses to build if those timings collide with the landing time.",
+        "A run therefore takes two photographs at 0 kV. The first, tagged warmup, is thrown at the camera to make it settle and is used as a reference by nothing; the second, two seconds later and tagged baseline, is the frame every area in the run is measured against. It exists because of a measured failure: on the 2026-08-05 carbon-black run the baseline came out 73.7 % saturated while that same run's ramp frames were 0.27 %, because the camera firmware walks written control values back within about half a second. The tag matters more than it looks — warmup and not baseline-warmup on purpose, since the plot tool groups rows whose tag starts with \"baseline\" and a baseline-prefixed name would have averaged the throw-away frame into A₀, the exact number the warm-up protects. Every other consumer tests for the tag being exactly baseline. Both rows appear in data.csv; only one is the reference."
+      ],
+      "code": "t = 0.0 s      frame  SLDEA_s00_00.00kV_warmup.png     tag warmup    (thrown away)\nt = 2.0 s      frame  SLDEA_s00_00.00kV_baseline.png   tag baseline  <-- the reference\n               ramp   0.00 -> 0.25 kV  over Ramp (s)\n  + Settle     frame  SLDEA_s01_00.25kV_post-ramp.png  tag post-ramp\n               hold   0.25 kV           for Landing (s)\n  - Snap lead  frame  SLDEA_s01_00.25kV_pre-ramp.png   tag pre-ramp\n               ...    one ramp + one hold + two frames per level ..."
+    },
+    {
+      "heading": "Control voltage, the Trek, and the monitors",
+      "paras": [
+        "The high voltage is not generated by anything in this rack. The signal generator is configured as a DC source and its offset is the Trek amplifier's control input, at 1 V per kV with a 10 kV ceiling; each tick computes the voltage the plan calls for and, only if it has changed, writes a new offset. That is the whole drive path. Coming back, V_Out reads 1 kV of Trek output per scope volt and I_Out reads 200 µA per scope volt, so 10 V on the scope is 2000 µA. Those constants, the gain and the ceiling live together at the top of sldea_profile.py — the only place the physical calibration is written down.",
+        "Trek inverts (negate control) is for the amplifier wired inverting, where a positive control gives a negative kV. Ticking it flips the sign of the commanded control voltage so the HV output stays positive, and sign-corrects the readings coming back — both monitors, not just V_Out, because the Trek inverts current and voltage alike (decided 2026-08-04). The pre-run window check is told about it too. The watchdog is the deliberate exception: it decides on the raw magnitude, before any sign correction. It is a drive setting rather than a description of the device, which is why it sits below the electrode and concentration fields rather than between them."
+      ]
+    },
+    {
+      "heading": "Snapshots, and the 2 Hz sidecar beside them",
+      "paras": [
+        "The photographs are the measurement: each writes a PNG into frames/ and appends one row to data.csv, flushed immediately so an interrupted run still leaves everything up to that point. telemetry.csv is a different thing — a continuous log of what the monitors did between photographs, at up to 2 Hz, with columns for elapsed time, timestamp, nominal and measured kV, measured µA, the two read statuses and an event field. The cap is 2 Hz because the watchdog already samples the current at exactly that rate, so the sidecar costs no extra instrument traffic; anything faster is a new duty cycle on the scope that nobody has timed. V_Out is sub-sampled to at most once a second, since the commanded voltage is already on every row, and the file is closed only after the HV is down.",
+        "Its honest status: the sidecar is desk-tested against a simulated scope and is NOT bench-verified. BENCH_TEST.md §M is its gate — a dry-run smoke test needing no HV — and until that passes nothing depends on the file. data.csv is still the run, and any rate figure quoted for the sidecar is an acceptance target, not a bench measurement."
+      ]
+    },
+    {
+      "heading": "The breakdown watchdog, and what \"breakdown\" means afterwards",
+      "paras": [
+        "The watchdog is armed only on live runs and only with a scope connected; ask for it without one and the run log says so rather than pretending. Before the staircase it learns the device's own quiet current at 0 kV — a settling pause, ten reads with the first two discarded, median taken — and refuses an implausibly large baseline, because a big \"rest level\" at 0 kV is a standing fault current and anchoring the trip to it would normalise the very signal the watchdog exists for; it falls back to the absolute rule, which then trips on the fault. From then on it reads I_Out every half second and trips only on sustained deviation from that baseline — by default 100 µA held for 3 s. A sample back below resets the clock, an unreadable sample is ignored without resetting it, and an off-screen reading counts as over-trip rather than as missing. If the current is unreadable for ten seconds the run raises a loud monitoring-lost warning and keeps going — the honest choice when the alternative is aborting on a flaky query.",
+        "On a confirmed trip the order is: log it, write the telemetry event, capture a frame tagged breakdown, stop the loop. The HV comes down through the same shutdown path every ended run uses, the run is marked BREAKDOWN-ABORT, and Edge Review is not auto-opened because that only happens for a completed run.",
+        "What counts as a breakdown afterwards is a separate and, since 2026-08-05, strict decision: only current-confirmed events rename frames with a _BREAKDOWN suffix. Confirmation means two adjacent rows deviating from the run's median current, or a terminal event. A collapse in measured area with no current signature is an advisory note and renames nothing. This is not fussiness — the old area-jump heuristic branded 35 healthy frames on run P3_5 while the measured current never left ±11 µA of its baseline. Renaming happens in Edge Review, never during the run, and it is reversible: un-branding is symmetric, and files are renamed, never deleted."
+      ]
+    },
+    {
+      "heading": "What lands in the run folder, and when",
+      "paras": [
+        "setup.txt is written first, before the camera is even configured, so an interrupted run still leaves a readable record of what was attempted. It is a lab-notebook document, not a config file, and it stays plain text — decided 2026-08-08; if typed or nested structure is ever genuinely needed it arrives as a sidecar beside the txt rather than by converting it."
+      ],
+      "table": {
+        "cols": ["File", "Written when", "What it is"],
+        "rows": [
+          ["setup.txt", "At run start, before camera setup; appended by Edge Review later", "The lab notebook: drive settings, monitor scaling read back off the scope, camera, device (diameter, electrode, concentration), the snapshot plan"],
+          ["run.log", "From the moment Run is pressed", "Everything the Run log panel shows, including the pre-run checks"],
+          ["data.csv", "Header at start; one row per photograph, flushed immediately", "The run. The area columns are left blank at capture time and filled by the edge-detection pass later"],
+          ["frames/*.png", "One per snapshot", "SLDEA_sNN_XX.XXkV_tag.png — step, nominal kV and tag. Renamed with a _BREAKDOWN suffix only later, and only by Edge Review"],
+          ["telemetry.csv", "Continuously at up to 2 Hz; closed after the HV is down", "The sidecar. Nothing reads it to measure anything"],
+          ["data.csv.bak", "Not by the run — only when Edge Review saves", "One backup copy, overwritten on each save"]
+        ]
+      }
+    },
+    {
+      "heading": "Stopping a run: ■ Abort, and the window-close path",
+      "paras": [
+        "■ Abort sets a stop flag. The loop checks it at the top of every 10 Hz tick, so it exits within about a tenth of a second, and the shutdown runs in the worker's finally block: the control voltage is commanded to 0 V and only then is the output opened. The safety property is that ORDER, not a slew rate — what the code does is one write of the offset followed by the output switch. It tries the generator handle the run captured at the start and, if that is no longer the attached one, the current handle too, so a mid-run Reconnect cannot orphan the instrument that was actually driving. If neither can be zeroed the run does not end quietly: a loud line goes into the run log and a modal HV NOT ZEROED dialog tells you to switch off the generator and Trek at the front panel. An earlier version swallowed that failure and ended the run green with the Trek still energized.",
+        "Closing the window during a live run is a weaker path. It sets the same flag and waits up to about 3 seconds for the worker to finish — but it is best-effort. If the worker has not reached its finally block by then, close falls through and cuts both generator outputs bluntly while the offset may still be at full scale; and because the window is then destroyed, the HV NOT ZEROED dialog can never be shown. That is the whole reason the documentation insists on it: a live SLDEA run gets only a best-effort ramp on window close — ■ Abort is the real stop."
+      ]
+    },
+    {
+      "heading": "From main HEAD to the bench: the deploy chain",
+      "paras": [
+        "Nobody runs this from a git checkout on the bench. The Linux desktop icon calls a wrapper that tries, in order: the ShareDrive copy, a GitHub fallback clone on local disk, this user's local cache, then a developer clone — and if all four fail it shows a visible error rather than nothing. The share is probed by reading a byte from it, not by testing readability: on 2026-07-20 a readability test succeeded against a dead NAS and the launch died with \"Host is down\". The fallback clones to local disk deliberately, because git on the CIFS share corrupts packfiles. On Windows the launcher does the same job in five printed phases — check the share, find a Python 3.10+ with tkinter, mirror the app locally, build or update a virtual environment, launch — with the working directory left on the share so presets stay shared.",
+        "The updater that refreshes the share does a shallow clone of main and rsyncs it across. It passes no branch and no tag and never touches the GitHub releases API, so what the fleet gets is main HEAD, whatever that is. The consequence is worth internalising: publishing a release as a pre-release does not hold it back — a pre-release reaches every bench the moment its commit is on main. Tags govern which PDF the releases page serves; they do not govern the code anyone runs.",
+        "The version stamp is what makes redeploying safe to repeat. version.py holds the semantic version and version_string() appends the short git hash at runtime when it can find a checkout; the share copy has no .git, so the deploy script bakes the hash into the version string instead — last, after everything else has synced, because stamping first once let a launch mid-deploy cache half-copied libraries under the new stamp permanently (audit 2026-07-25). Both launchers read exactly that one file to decide whether their cache is stale. The stamp is a deploy-complete marker, not a release identifier — which is precisely why a pre-release propagates.",
+        "If you are extending any of this: new SCPI paths do not ship without a bench session, and anything touching an HV-safety path — the runner, the watchdog, instrument output switching — gets an adversarial review pass before the pull request opens."
+      ]
+    }
+  ]
+}

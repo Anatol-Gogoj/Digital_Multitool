@@ -137,9 +137,14 @@ def test_initial_state_preselects_several_runs():
         # cannot be listed alongside it, so it does not preselect
         parent, pre = g.initial_state([a, elsewhere])
         assert parent == os.path.abspath(p) and pre == ['A_run']
-        # a bare parent still preselects its newest run
+        # a bare parent still preselects its newest run. se.newest_run
+        # orders by MTIME, and two directories created back to back can
+        # land on the same tick -- so the fixture states which is newer
+        # instead of racing the clock.
+        os.utime(a, (1_700_000_000, 1_700_000_000))
+        os.utime(b, (1_800_000_000, 1_800_000_000))
         parent, pre = g.initial_state([p])
-        assert parent == os.path.abspath(p) and pre == ['B_run']
+        assert parent == os.path.abspath(p) and pre == ['B_run'], pre
     finally:
         for d in (p, other):
             shutil.rmtree(d, ignore_errors=True)
@@ -174,6 +179,16 @@ def test_default_out_dir_is_never_the_working_directory():
         assert os.path.dirname(out) == p
     finally:
         shutil.rmtree(p, ignore_errors=True)
+
+
+def test_help_text_is_ascii_and_opens_no_window():
+    # The one thing this module prints to a console. A Windows cp1252
+    # console cannot carry the docstring's prose, and --help must not
+    # start a mainloop.
+    g.USAGE.encode('ascii')
+    assert 'sldea_plot_gui.py' in g.USAGE
+    for flag in ('-h', '--help'):
+        assert g.main([flag]) == 0
 
 
 def test_mode_hints_say_which_modes_need_reviewed_runs():

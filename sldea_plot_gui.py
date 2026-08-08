@@ -37,6 +37,18 @@ import sldea_plot as sp
 import tk_fontfix                      # must run before tkinter connects:
 tk_fontfix.apply()                     # colour-emoji glyphs hard-crash Tk
 
+# ASCII only: this is the one thing the module prints to a console, and a
+# Windows cp1252 console cannot carry the docstring's prose.
+USAGE = """\
+Usage:
+    python sldea_plot_gui.py [RUN_OR_PARENT]   # a run, a folder of runs,
+                                               # or a bench shortcut (1/2/3)
+    python sldea_plot.py --gui [RUN ...]       # the same window, via the CLI
+
+Pick several runs, choose area / current / power, tick what to draw.
+Export writes the 300 dpi PNG and its tidy per-snapshot CSV together.
+For headless and batch use, see sldea_plot.py --help."""
+
 DEFAULT_PARENT = os.environ.get(
     'SCPI_SLDEA_DIR', '/mnt/shareDrive/robot_incubator/SLDEA_data')
 
@@ -512,7 +524,7 @@ def launch(args=(), opts=None, out_dir=None, stem=None):
 
 def main(argv):
     if argv and argv[0] in ('-h', '--help'):
-        print(__doc__.strip().split('\n\n')[1])
+        print(USAGE)
         return 0
     return launch(argv)
 

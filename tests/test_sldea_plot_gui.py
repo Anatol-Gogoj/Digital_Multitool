@@ -303,8 +303,11 @@ class _Win:
             self.root = None
             return self
         self.root.geometry(self.size)
+        # remember=False: these cases are about layout and clicking, and
+        # they must not read (or write) the real user's `#275` options
         self.win = g.PlotWindow(self.root, self.tmp,
-                                preselect=['P3_1_20260805'])
+                                preselect=['P3_1_20260805'],
+                                remember=False)
         self.root.update()
         self.settle()
         self.ok = True
@@ -620,6 +623,167 @@ def test_the_click_through_is_discoverable_and_does_not_go_stale():
             assert w.win.lbl_click.cget('text') == g.CLICK_HINT
         finally:
             g.subprocess = real
+
+
+# ---------------------------------------------------------------------------
+# `#275` -- remembered options, per parent folder
+# ---------------------------------------------------------------------------
+
+def test_remembered_options_live_outside_the_repo_and_the_run_folders():
+    """`#275`: user scope. Run data never carries a UI preference, the
+    campaign corpus is read-only, and nothing may need a .gitignore entry
+    because nothing can land in the tree."""
+    here = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    home = os.path.expanduser('~')
+    for p in (g.OPTIONS_PATH, g.OPTIONS_FALLBACK):
+        assert os.path.isabs(p), p
+        assert p.startswith(home), p
+        rel = os.path.relpath(p, here)
+        assert rel.startswith(os.pardir), f"{p} is inside the checkout"
+    assert g.OPTIONS_PATH != g.OPTIONS_FALLBACK
+    # the fallback is the launcher's own cache dir -- the primary was left
+    # root-owned in one user's home by the desktop installer
+    assert '.cache' in g.OPTIONS_FALLBACK
+
+
+def test_remembered_options_round_trip_per_parent_folder():
+    p = _mktmp()
+    try:
+        cfg = os.path.join(p, 'opts.json')
+        a, b = os.path.join(p, 'campaignA'), os.path.join(p, 'campaignB')
+        opts, _e = sp.make_opts(mode='power', prepost=True, bands=False)
+        assert g.save_options(a, opts, out_dir=None, path=cfg) == cfg
+        got = g.load_options(a, path=cfg)
+        assert got == {'mode': 'power', 'prepost': True, 'mean': False,
+                       'bands': False, 'breakdown': True,
+                       'vs_area': False}, got
+        # a different parent is a different memory, and saving one does
+        # not disturb the other
+        assert g.load_options(b, path=cfg) == {}
+        opts2, _e = sp.make_opts(mode='current')
+        g.save_options(b, opts2, out_dir=os.path.join(p, 'figs'), path=cfg)
+        assert g.load_options(a, path=cfg)['mode'] == 'power'
+        assert g.load_options(b, path=cfg)['out_dir'] == os.path.join(p,
+                                                                     'figs')
+        # the key is case-insensitive on Windows, where a path differs in
+        # case without differing
+        assert g.options_key(a) == g.options_key(a.upper()) or \
+            os.path.normcase('A') == 'A'
+        # the title and the stem are NEVER remembered: they name one
+        # figure, and last week's caption over this week's runs is a
+        # wrong label that looks like a right one
+        opts3, _e = sp.make_opts(title='P3 batch, first pass')
+        g.save_options(a, opts3, path=cfg)
+        assert 'title' not in g.load_options(a, path=cfg)
+        assert 'stem' not in g.load_options(a, path=cfg)
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_a_corrupt_or_stale_options_file_can_only_cost_the_memory():
+    """`#275`'s hard requirement: it must never prevent launch. Every one
+    of these yields {} and the window opens on the defaults."""
+    p = _mktmp()
+    try:
+        cfg = os.path.join(p, 'opts.json')
+        assert g.load_options(p, path=os.path.join(p, 'nope.json')) == {}
+        for junk in ('', '{', 'null', '[]', '"a string"',
+                     '{"parents": 7}', '{"parents": {"x": 7}}',
+                     '\x00\xff binary'):
+            with open(cfg, 'w', encoding='utf-8', errors='replace') as f:
+                f.write(junk)
+            assert g.load_options(p, path=cfg) == {}, junk
+        # a file of the right shape carrying values that are no longer
+        # valid: each bad field is dropped, the good ones survive
+        with open(cfg, 'w', encoding='utf-8') as f:
+            f.write('{"version": 1, "parents": {"%s": {"mode": "spectrum",'
+                    ' "bands": "yes", "prepost": true, "junk": 1,'
+                    ' "out_dir": ""}}}'
+                    % g.options_key(p).replace('\\', '\\\\'))
+        got = g.load_options(p, path=cfg)
+        assert got == {'prepost': True}, got
+        # and saving over junk starts clean instead of failing
+        opts, _e = sp.make_opts(mode='current')
+        with open(cfg, 'w', encoding='utf-8') as f:
+            f.write('not json at all')
+        assert g.save_options(p, opts, path=cfg) == cfg
+        assert g.load_options(p, path=cfg)['mode'] == 'current'
+        # an unwritable target is reported, not raised
+        assert g.save_options(p, opts,
+                              path=os.path.join(p, 'no', 'such', 'x', '')) \
+            is None
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_explicit_arguments_beat_remembered_which_beat_defaults():
+    """The `#275` precedence rule, and the one thing it cannot see: the
+    CLI hands over a COMPLETE opts dict whether or not a flag was given,
+    so a field on its default is indistinguishable from an unset one."""
+    base, _e = sp.make_opts()
+    assert g.explicit_opts(None) == set()
+    assert g.explicit_opts(base) == set(), 'defaults are not statements'
+    said, _e = sp.make_opts(mode='power', bands=False)
+    assert g.explicit_opts(said) == {'mode', 'bands'}
+    # `--mode area` IS the default, so it reads as unset -- stated, not
+    # hidden, in explicit_opts' docstring
+    same, _e = sp.make_opts(mode='area')
+    assert 'mode' not in g.explicit_opts(same)
+
+
+def test_the_window_applies_the_precedence_it_documents():
+    p = _mktmp()
+    try:
+        _fake_run(p, 'R1')
+        cfg = os.path.join(p, 'opts.json')
+        remembered, _e = sp.make_opts(mode='power', prepost=True,
+                                      bands=False)
+        g.save_options(p, remembered, out_dir=os.path.join(p, 'figs'),
+                       path=cfg)
+        real = g.OPTIONS_PATH
+        g.OPTIONS_PATH = cfg
+        import tkinter as tk
+        try:
+            try:
+                root = tk.Tk()
+            except tk.TclError as e:
+                print(f"   (skipped: no display for Tk: {e})")
+                return
+            root.withdraw()
+            try:
+                # no args at all: remembered beats the defaults
+                w = g.PlotWindow(root, p)
+                assert w.v_mode.get() == 'power'
+                assert w.v_prepost.get() is True
+                assert w.v_bands.get() is False
+                assert w.v_out.get() == os.path.join(p, 'figs')
+                assert w._out_chosen is True
+                # an explicit option beats the remembered one, and the
+                # ones it does not mention stay remembered
+                cli, _e = sp.make_opts(mode='current', bands=False)
+                w = g.PlotWindow(root, p, opts=cli)
+                assert w.v_mode.get() == 'current'
+                assert w.v_prepost.get() is True, 'lost the remembered one'
+                # an explicit out_dir beats the remembered one
+                w = g.PlotWindow(root, p, out_dir=os.path.join(p, 'other'))
+                assert w.v_out.get() == os.path.join(p, 'other')
+                # remember=False is the defaults, whatever is on disk
+                w = g.PlotWindow(root, p, remember=False)
+                assert w.v_mode.get() == 'area' and w.v_bands.get() is True
+                assert w.remember_now() is None, 'wrote anyway'
+                # ...and the round trip: change something, remember it
+                w = g.PlotWindow(root, p)
+                w.v_mode.set('current')
+                w.v_breakdown.set(False)
+                assert w.remember_now() == cfg
+                assert g.load_options(p, path=cfg)['mode'] == 'current'
+                assert g.load_options(p, path=cfg)['breakdown'] is False
+            finally:
+                root.destroy()
+        finally:
+            g.OPTIONS_PATH = real
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
 
 
 def _run():

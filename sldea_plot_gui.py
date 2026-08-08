@@ -61,6 +61,20 @@ OUT_SUBDIR = 'plots'
 
 PROCESSED_MARK = '  ✓ processed'       # Edge Review's labelling convention
 
+# The smallest window the layout still WORKS in (`#271`). Width is
+# measured, not guessed: the controls column asks for whatever the theme
+# and DPI make it (295 px on the Windows analysis PC, wider on a
+# high-DPI bench PC), and MIN_FIG_W is the narrowest figure worth
+# drawing beside it. Height is the message pane plus the matplotlib
+# toolbar plus a figure that is still a figure.
+MIN_FIG_W = 360
+MIN_H = 420
+
+# Redraw coalescing. 120 ms was already the run-list debounce; a resize
+# drag fires <Configure> per pixel and each redraw is a full matplotlib
+# pass, so it is the same number for the same reason.
+REDRAW_MS = 120
+
 
 # ---------------------------------------------------------------------------
 # run discovery -- kept apart from the widgets on purpose
@@ -162,6 +176,138 @@ def default_out_dir(parent):
 
 
 # ---------------------------------------------------------------------------
+# the controls column (`#271`)
+#
+# COPIED IN SPIRIT, NOT IMPORTED, from ui_widgets.ScrollableTab —
+# deliberately, and for the same reason sldea_edge_gui keeps its own
+# Tooltip (see the block above its class): PROJECT_HANDOFF open decision
+# 2 moves the SLDEA suite into its own instrument-free repo, and this
+# module is on that side of the seam (it imports sldea_edge and
+# sldea_plot). `ui_widgets` is NOT, so importing it here would plant a
+# cross-seam dependency for the sake of a stateless Tk idiom.
+#
+# It is not the same widget anyway: ScrollableTab scrolls a NOTEBOOK TAB
+# and shows its bar unconditionally, while this is a fixed-width column
+# beside a figure whose bar must appear only on genuine overflow — the
+# `#225` decision (a bar that is always there is one more thing on
+# screen that says nothing).
+# ---------------------------------------------------------------------------
+
+class ScrollColumn(ttk.Frame):
+    """Fixed-width column with a vertical scrollbar ONLY when it overflows.
+
+    Build the controls into `.body`, not into the column itself.
+
+    Two properties make it stable, and both are the reason the naive
+    version oscillates:
+
+      * the canvas is exactly as wide as `.body` ASKS to be, and the bar's
+        width is added to the COLUMN. Taking it out of the content instead
+        would narrow the controls, re-wrap their labels, make them taller,
+        and the bar could then never go away again.
+      * the body is stretched to the canvas height when there is room to
+        spare, so `expand=True` inside it still works — a scroll canvas
+        otherwise pins every child to its requested height and the run
+        list stops growing with the window.
+    """
+
+    SLACK = 4          # px of overflow to tolerate before showing the bar
+
+    def __init__(self, master, padding=0):
+        super().__init__(master)
+        bg = ttk.Style().lookup('TFrame', 'background') or None
+        self._cv = tk.Canvas(self, highlightthickness=0, borderwidth=0,
+                             **({'bg': bg} if bg else {}))
+        self.bar = ttk.Scrollbar(self, orient=tk.VERTICAL,
+                                 command=self._cv.yview)
+        self._cv.configure(yscrollcommand=self.bar.set)
+        self._cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.body = ttk.Frame(self._cv, padding=padding)
+        self._win = self._cv.create_window((0, 0), window=self.body,
+                                           anchor='nw')
+        self.bar_shown = False
+        self._geom = None
+        self.body.bind('<Configure>', self._refit)
+        self._cv.bind('<Configure>', self._refit)
+        # The wheel is grabbed only while the pointer is over the column
+        # and released on the way out, so it never steals scrolling from
+        # the figure beside it (matplotlib binds its own scroll_event on
+        # the canvas). bind_all is what makes the grab reach the deeply
+        # nested children; the Leave release is what keeps it honest.
+        self.bind('<Enter>', self._bind_wheel)
+        self.bind('<Leave>', self._unbind_wheel)
+        self._cv.configure(takefocus=1)
+        for key, n in (('<Up>', -1), ('<Down>', 1),
+                       ('<Prior>', -5), ('<Next>', 5)):
+            self._cv.bind(key, lambda _e, n=n: self._scroll(n))
+
+    # -- fit ---------------------------------------------------------------
+
+    def _refit(self, _event=None):
+        """Re-measure and show or hide the bar. Idempotent: it is bound to
+        both <Configure>s and they trip each other."""
+        want = self.body.winfo_reqwidth()
+        need = self.body.winfo_reqheight()
+        have = self._cv.winfo_height()
+        geom = (want, need, have)
+        if geom == self._geom:
+            return
+        self._geom = geom
+        self._cv.config(width=want)
+        self._cv.itemconfigure(self._win, width=want, height=max(need, have))
+        self._cv.configure(scrollregion=(0, 0, want, max(need, have)))
+        self.show_bar(need > have + self.SLACK)
+
+    def natural_width(self):
+        """The width the column needs: what the controls ask for PLUS the
+        bar, whether or not it is showing right now.
+
+        Measured off `.body`, never off the canvas: the canvas does not
+        learn its width until the first <Configure>, which needs the
+        window on screen, so a floor computed at construction time from
+        the canvas comes out 34 px (measured) instead of 302."""
+        self.update_idletasks()
+        return self.body.winfo_reqwidth() + self.bar.winfo_reqwidth()
+
+    def show_bar(self, on):
+        """The `#225` rule: the bar is a REPORT of overflow, not furniture.
+        Hiding it also rewinds — a column scrolled halfway down and then
+        given room would otherwise keep its offset with no way to undo it."""
+        if on == self.bar_shown:
+            return
+        self.bar_shown = on
+        if on:
+            self.bar.pack(side=tk.RIGHT, fill=tk.Y)
+        else:
+            self.bar.pack_forget()
+            self._cv.yview_moveto(0)
+
+    # -- scrolling ---------------------------------------------------------
+
+    def _scroll(self, units):
+        if self.bar_shown:                 # nothing to scroll when it fits
+            self._cv.yview_scroll(units, 'units')
+
+    def _wheel(self, event):
+        if getattr(event, 'num', 0) == 4 or getattr(event, 'delta', 0) > 0:
+            self._scroll(-2)
+        elif getattr(event, 'num', 0) == 5 or getattr(event, 'delta', 0) < 0:
+            self._scroll(2)
+
+    def _bind_wheel(self, _event=None):
+        self._cv.bind_all('<Button-4>', self._wheel)      # X11 up
+        self._cv.bind_all('<Button-5>', self._wheel)      # X11 down
+        self._cv.bind_all('<MouseWheel>', self._wheel)    # Windows / macOS
+
+    def _unbind_wheel(self, _event=None):
+        for seq in ('<Button-4>', '<Button-5>', '<MouseWheel>'):
+            try:
+                self._cv.unbind_all(seq)
+            except tk.TclError:            # the window went away under us
+                pass
+
+
+# ---------------------------------------------------------------------------
 # the window
 # ---------------------------------------------------------------------------
 
@@ -188,6 +334,8 @@ class PlotWindow:
         self._loaded = {}              # rundir -> loaded run dict (cache)
         self._prepared = []            # what the canvas is currently showing
         self._redraw_after = None
+        self._canvas_size = None       # last figure-canvas size (`#271`)
+        self.min_size = (MIN_FIG_W, MIN_H)   # replaced by apply_minsize
         self._warns = []
         root.title("SLDEA plot — cross-run figures")
 
@@ -205,6 +353,9 @@ class PlotWindow:
 
         self._build(root)
         self.populate(preselect)
+        # AFTER populate: the floor is measured off the finished column,
+        # and the run list and the parent-path label are part of it.
+        self.apply_minsize()
 
     # -- construction ------------------------------------------------------
 
@@ -213,8 +364,13 @@ class PlotWindow:
                                                        NavigationToolbar2Tk)
         from matplotlib.figure import Figure
 
-        left = ttk.Frame(root, padding=8)
-        left.pack(side=tk.LEFT, fill=tk.Y)
+        # The controls scroll when the window is too short for them
+        # (`#271`): every control below the run list — including 💾 Export,
+        # the whole point of the tool — used to be cut off with no bar and
+        # no way to reach it.
+        self.column = ScrollColumn(root, padding=8)
+        self.column.pack(side=tk.LEFT, fill=tk.Y)
+        left = self.column.body
         right = ttk.Frame(root)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
@@ -313,25 +469,41 @@ class PlotWindow:
                                     font=('TkDefaultFont', 9, 'bold'))
         self.btn_export.pack(fill=tk.X, pady=(6, 0))
 
-        # --- canvas
-        self.fig = Figure(figsize=sp.FIGSIZE['area'], dpi=100)
-        self.canvas = FigureCanvasTkAgg(self.fig, master=right)
-        widget = self.canvas.get_tk_widget()
-        widget.pack(fill=tk.BOTH, expand=True)
-        # the captions and legends are laid out by tight_layout against the
-        # size at draw time, so a resized window needs one more pass (the
-        # 120 ms coalescing keeps a drag from redrawing per pixel)
-        widget.bind('<Configure>', lambda _e: self.schedule())
-        toolbar = NavigationToolbar2Tk(self.canvas, right)
-        toolbar.update()
-        toolbar.pack(fill=tk.X)
-
         # --- messages: the CLI's warnings, which are the tool's whole
         # safety story (scale eras, stale brands, mixed conventions). A
         # window that swallowed them would be strictly less safe than the
         # command line it replaces.
+        #
+        # PACKED BEFORE THE FIGURE, side=BOTTOM (`#271`). pack fills each
+        # slave's request from the cavity IN ORDER, so with the figure
+        # first it took its full requested height and the toolbar and this
+        # pane were pushed off the bottom of a short window — measured: at
+        # 900x560 both were unmapped, i.e. the warnings were gone and
+        # nothing said so. Claiming their space first makes the FIGURE the
+        # thing that shrinks, which is what expand=True already promised.
         self.msg = tk.Text(right, height=6, wrap='word', state='disabled')
-        self.msg.pack(fill=tk.X)
+        self.msg.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # --- canvas
+        self.fig = Figure(figsize=sp.FIGSIZE['area'], dpi=100)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=right)
+        widget = self.canvas.get_tk_widget()
+        self.toolbar = NavigationToolbar2Tk(self.canvas, right,
+                                            pack_toolbar=False)
+        self.toolbar.update()
+        self.toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+        widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        # add='+' IS THE `#271` FIX, not a style choice. FigureCanvasTkAgg
+        # binds <Configure> on this same widget to its own `resize`, which
+        # is the ONLY thing that tells the Figure how many inches it now
+        # has. A plain bind() REPLACES that binding (verified on
+        # matplotlib 3.10.9: the tag holds one script, not a list), so the
+        # figure stayed 12.6x5.4 in forever — laid out by tight_layout
+        # against a size the window had not had since it opened, clipped
+        # on the right and blank below at EVERY size including the
+        # default. Our own handler then re-runs tight_layout against the
+        # new size; the coalescing keeps a drag from redrawing per pixel.
+        widget.bind('<Configure>', self._canvas_configured, add='+')
 
     # -- run list ----------------------------------------------------------
 
@@ -412,7 +584,39 @@ class PlotWindow:
         event per row, and each redraw is a full matplotlib pass."""
         if self._redraw_after is not None:
             self.root.after_cancel(self._redraw_after)
-        self._redraw_after = self.root.after(120, self.redraw)
+        self._redraw_after = self.root.after(REDRAW_MS, self.redraw)
+
+    def _canvas_configured(self, event):
+        """The figure canvas changed size — relayout, coalesced (`#271`).
+
+        SIZE, not every <Configure>: the event also fires when the widget
+        merely MOVES (the scrollbar appearing beside it shifts it by its
+        own width), and a full prepare_runs + draw for a move is work
+        nobody asked for."""
+        size = (event.width, event.height)
+        if size == self._canvas_size:
+            return
+        self._canvas_size = size
+        self.schedule()
+
+    def apply_minsize(self):
+        """Floor the window so the layout cannot collapse (`#271`).
+
+        The width is MEASURED — the controls column asks for whatever the
+        theme and DPI make it, and a hardcoded number that is right on the
+        analysis PC is wrong on a high-DPI bench PC. A window this size is
+        cramped but every control is reachable (the column scrolls) and the
+        figure is still a figure.
+
+        -> the (width, height) it set, also kept on `self.min_size`."""
+        try:
+            self.root.update_idletasks()
+            self.min_size = (self.column.natural_width() + MIN_FIG_W,
+                             MIN_H)
+            self.root.minsize(*self.min_size)
+        except tk.TclError:                # no window manager to ask
+            pass
+        return self.min_size
 
     def _load(self, rundir, warn):
         """load_run, cached -- the toggles redraw constantly and re-reading

@@ -270,6 +270,405 @@ def test_detect_panels_prefers_the_recorded_manual_anchor():
         "anchor preference is indistinguishable from the auto fit"
 
 
+# ---------------------------------------------------------------------------
+# `#197` — the run picker
+# ---------------------------------------------------------------------------
+
+_COLS = ['snapshot', 'step', 'tag', 'nominal_kV', 'frame_file',
+         'active_area_px', 'active_area_mm2', 'notes']
+
+
+def _frames_run(parent, name, csv_name='data.csv'):
+    """A run the tuner can actually LOAD: baseline + two activated frames.
+
+    Same shapes as the module's own --selftest, so detection finds a
+    region in the late frame and the window reaches its loaded state."""
+    import csv
+    import cv2
+    import numpy as np
+    d = _os.path.join(parent, name)
+    frames = _os.path.join(d, 'frames')
+    _os.makedirs(frames, exist_ok=True)
+
+    def disc(r, level):
+        img = np.full((240, 320), 90.0, np.float32)
+        yy, xx = np.mgrid[0:240, 0:320]
+        m = (xx - 160) ** 2 + (yy - 120) ** 2 <= r * r
+        img[m] += level
+        return np.clip(img, 0, 255).astype(np.uint8)
+
+    rows = []
+    for k, (tag, kv, im) in enumerate([('baseline', 0.0, disc(0, 0)),
+                                       ('post-ramp', 3.0, disc(45, 30)),
+                                       ('post-ramp', 6.0, disc(70, 40))]):
+        fn = f'SLDEA_s{k:02d}_{kv:05.2f}kV_{tag}.png'
+        cv2.imwrite(_os.path.join(frames, fn), im)
+        rows.append({**{c: '' for c in _COLS}, 'tag': tag, 'nominal_kV': kv,
+                     'frame_file': fn, 'step': k, 'snapshot': k + 1})
+    with open(_os.path.join(d, csv_name), 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=_COLS)
+        w.writeheader()
+        w.writerows(rows)
+    return d
+
+
+def test_list_runs_is_names_only_and_newest_name_first():
+    """Discovery goes through se.run_csv, the same test Edge Review's
+    listing uses — so a custom-named run and a renamed data1.csv are runs
+    here exactly as they are there, and a plain directory is not."""
+    import shutil
+    import tempfile
+    parent = tempfile.mkdtemp(prefix='tuner_list_')
+    try:
+        _run_dir(parent, 'SLDEA_20260801_101010')
+        _run_dir(parent, 'P3_9_2.5mL_20260802', csv_name='data2.csv')
+        _os.makedirs(_os.path.join(parent, '_analysis'), exist_ok=True)
+        names = st.list_runs(parent)
+        assert names == ['SLDEA_20260801_101010', 'P3_9_2.5mL_20260802'], names
+        # NAMES, never the labelled strings: the picker pairs index i with
+        # its own label, so a run name containing the separator cannot be
+        # read back as a different directory
+        assert all('✓' not in n for n in names), names
+        assert st.list_runs(_os.path.join(parent, 'nope')) == []
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+
+
+def test_run_label_flags_a_run_that_already_carries_tuned_settings():
+    """The tuner's Save OVERWRITES a run's tuned block, so what its picker
+    flags is 'already tuned' — not Edge Review's 'processed'."""
+    import shutil
+    import tempfile
+    import sldea_edge as se
+    parent = tempfile.mkdtemp(prefix='tuner_label_')
+    try:
+        d = _run_dir(parent, 'SLDEA_20260801_101010')
+        assert st.run_label(d) == ''
+        se.save_settings(d, dict(se.DEFAULT_SETTINGS))
+        assert st.run_label(d).strip() == '✓ tuned', st.run_label(d)
+        assert st.run_label(_os.path.join(parent, 'nope')) == ''
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+
+
+def test_runs_parent_descends_into_an_upload_wrapper():
+    """The campaign layout: SCPI_SLDEA_DIR points at 'Upload 20260804' and
+    the runs live in 'SLDEA_data (1)' inside it, where se.newest_run
+    correctly finds nothing — which is why the no-argument tuner reported
+    'no run found' on a machine holding 13 runs."""
+    import shutil
+    import tempfile
+    root = tempfile.mkdtemp(prefix='tuner_wrap_')
+    try:
+        inner = _os.path.join(root, 'SLDEA_data (1)')
+        _os.makedirs(inner)
+        _run_dir(inner, 'P3_1_2.5mL_20260728', csv_name='data1.csv')
+        _run_dir(inner, 'P3_2_2.5mL_20260728')
+        _os.makedirs(_os.path.join(root, '_analysis'), exist_ok=True)
+        assert st.runs_parent(root) == inner
+        # a root that holds runs itself is never rewritten
+        assert st.runs_parent(inner) == inner
+        # exactly one level: a run two levels down does not move the parent
+        deep = tempfile.mkdtemp(prefix='tuner_deep_')
+        _run_dir(_os.path.join(deep, 'a', 'b'), 'R1')
+        assert st.runs_parent(deep) == deep
+        shutil.rmtree(deep, ignore_errors=True)
+        # nothing anywhere: the caller's own path back, not None
+        barren = tempfile.mkdtemp(prefix='tuner_barren_')
+        assert st.runs_parent(barren) == barren
+        shutil.rmtree(barren, ignore_errors=True)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_pick_index_never_substitutes_another_run():
+    """Edge Review's audit-2026-07-25 ruling, which the tuner needs more:
+    a missing target is a message asking for a pick, never a silent 0."""
+    names = ['B', 'A']
+    assert st.pick_index(names, 'A') == 1
+    assert st.pick_index(names, 'C') is None
+    assert st.pick_index([], 'A') is None
+
+
+def test_dirty_keys_is_exactly_what_save_would_change():
+    import sldea_edge as se
+    a = dict(se.DEFAULT_SETTINGS)
+    assert st.dirty_keys(a, dict(a)) == []
+    b = dict(a, blur_px=9)
+    assert st.dirty_keys(a, b) == ['blur_px']
+    # compared through save_settings' own '%g', so a nudge too small to
+    # reach the file is not reported as unsaved work
+    assert st.dirty_keys(a, dict(a, min_solidity=a['min_solidity'] + 1e-12)) \
+        == []
+    assert st.dirty_keys(a, dict(a, norm_bg=0)) == ['norm_bg']
+    # an empty side (nothing loaded) never claims a difference it cannot
+    # describe -- _confirm_discard leans on this
+    assert st.dirty_keys({}, {}) == []
+
+
+def _tk_or_skip(what):
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped {what}: no display for Tk: {e})")
+        return None
+    root.withdraw()
+    return root
+
+
+class _StubMB:
+    """messagebox stub: records what was shown, answers askyesno with
+    `yes`. The discard prompt is a decision, so the tests take both."""
+
+    def __init__(self, yes=True):
+        self.infos, self.asked = [], []
+        self.yes = yes
+
+    def showinfo(self, *a, **k):
+        self.infos.append(a)
+
+    def showwarning(self, *a, **k):
+        pass
+
+    def showerror(self, *a, **k):
+        pass
+
+    def askyesno(self, *a, **k):
+        self.asked.append(a)
+        return self.yes
+
+
+def _close(root, win=None):
+    if win is not None:
+        win._cancel_job()
+        try:
+            win.plt.close(win.fig)
+        except Exception:
+            pass
+    root.update_idletasks()
+    root.destroy()
+
+
+def _age(older, newer):
+    """Make `newer` unambiguously the newest run by mtime.
+
+    Pushing the other one BACK, not this one forward: writing anything
+    into a run re-dates its directory, and two writes inside one clock
+    tick tie — which se.newest_run breaks by directory order, so the
+    fixture would silently test the opposite of what it says."""
+    t = _os.path.getmtime(newer)
+    _os.utime(older, (t - 60, t - 60))
+
+
+def _two_runs():
+    """(parent, older, newer) — two loadable runs, `newer` the newest."""
+    import tempfile
+    parent = tempfile.mkdtemp(prefix='tuner_pick_')
+    old = _frames_run(parent, 'AAA_run_20260801')
+    new = _frames_run(parent, 'ZZZ_run_20260802', csv_name='data1.csv')
+    _age(old, new)
+    return parent, old, new
+
+
+def test_picker_lists_the_runs_and_names_the_loaded_one():
+    """`#197`: with no argument the tuner still opens the newest run — but
+    now it lists the others and says, in the title bar AND the identity
+    bar, which one Save would rewrite."""
+    import shutil
+    root = _tk_or_skip('picker listing')
+    if root is None:
+        return
+    parent, old, new = _two_runs()
+    try:
+        win = st.TunerWindow(root, parent=parent, messagebox=_StubMB())
+        assert list(win.run_names) == ['ZZZ_run_20260802', 'AAA_run_20260801']
+        assert win.rundir == new, win.rundir      # newest by mtime, as before
+        assert _os.path.basename(new) in root.title()
+        assert _os.path.basename(new) in win.banner_run.cget('text')
+        # the identity bar names the FILE Save rewrites, not just the run
+        assert win.banner_path.cget('text').endswith(
+            _os.path.join(new, 'setup.txt'))
+        assert str(win.save_btn.cget('state')) == 'normal'
+        _close(root, win)
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+
+
+def test_switching_runs_loads_that_runs_own_settings():
+    """Tuned values NEVER travel between runs: the new run's setup.txt is
+    what lands on the sliders, and the title/banner follow the switch."""
+    import shutil
+    import sldea_edge as se
+    root = _tk_or_skip('run switching')
+    if root is None:
+        return
+    parent, old, new = _two_runs()
+    try:
+        se.save_settings(old, dict(se.DEFAULT_SETTINGS, blur_px=11))
+        _age(old, new)                # that write re-dated `old`
+        win = st.TunerWindow(root, parent=parent, messagebox=_StubMB())
+        assert win.rundir == new
+        assert win.settings['blur_px'] == se.DEFAULT_SETTINGS['blur_px']
+        win.run_box.current(win.run_names.index(_os.path.basename(old)))
+        win._pick_run()
+        assert win.rundir == old, win.rundir
+        assert win.settings['blur_px'] == 11, win.settings['blur_px']
+        assert int(float(win.scales['blur_px'].get())) == 11
+        assert _os.path.basename(old) in root.title()
+        assert _os.path.basename(old) in win.banner_run.cget('text')
+        # and it is not 'dirty' merely for having loaded a tuned run
+        assert st.dirty_keys(win.loaded, win.settings) == []
+        _close(root, win)
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+
+
+def test_switch_with_unsaved_tuning_asks_and_a_no_keeps_the_run():
+    """The tuner had no dirty state at all, so adding a picker adds a way
+    to bin a tuning session with one mis-click. A declined discard keeps
+    the run AND puts the box back on it — a box disagreeing with the
+    banner is the confusion `#197` is about."""
+    import shutil
+    root = _tk_or_skip('discard prompt')
+    if root is None:
+        return
+    parent, old, new = _two_runs()
+    try:
+        mb = _StubMB(yes=False)
+        win = st.TunerWindow(root, parent=parent, messagebox=mb)
+        win.set_slider('blur_px', 9)
+        assert st.dirty_keys(win.loaded, win.settings) == ['blur_px']
+        win.run_box.current(win.run_names.index(_os.path.basename(old)))
+        win._pick_run()
+        assert mb.asked, "an unsaved switch must ask"
+        assert win.rundir == new, "a declined discard must keep the run"
+        assert win.run_box.get().split('  ')[0] == _os.path.basename(new)
+        assert win.settings['blur_px'] == 9, "the tuning is still there"
+        # ... and a yes goes through, dropping the unsaved value
+        mb.yes = True
+        win.run_box.current(win.run_names.index(_os.path.basename(old)))
+        win._pick_run()
+        assert win.rundir == old
+        assert win.settings['blur_px'] != 9
+        # re-picking the loaded run is a no-op, not a discard prompt
+        n_asked = len(mb.asked)
+        win.set_slider('blur_px', 7)
+        win.run_box.current(win.run_names.index(_os.path.basename(old)))
+        win._pick_run()
+        assert len(mb.asked) == n_asked and win.settings['blur_px'] == 7
+        _close(root, win)
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+
+
+def test_save_writes_only_the_loaded_runs_setup():
+    """THE `#197` regression. Tune, switch, tune, Save: the values land in
+    the run the banner names and the other run's setup.txt is untouched."""
+    import shutil
+    import sldea_edge as se
+    root = _tk_or_skip('save targeting')
+    if root is None:
+        return
+    parent, old, new = _two_runs()
+    try:
+        win = st.TunerWindow(root, parent=parent, messagebox=_StubMB())
+        win.set_slider('diff_thresh', 21)          # tuning the newest run
+        win.run_box.current(win.run_names.index(_os.path.basename(old)))
+        win._pick_run()                            # ... then switching away
+        assert win.rundir == old
+        win.set_slider('diff_thresh', 33)
+        win.do_save()
+        assert se.load_settings(old)['diff_thresh'] == 33
+        assert se.load_settings(new)['diff_thresh'] == \
+            se.DEFAULT_SETTINGS['diff_thresh'], "wrote the wrong run"
+        assert not _os.path.exists(_os.path.join(new, 'setup.txt'))
+        # saved == no longer unsaved, and the row now says so
+        assert st.dirty_keys(win.loaded, win.settings) == []
+        assert '✓ tuned' in win.run_box['values'][
+            win.run_names.index(_os.path.basename(old))]
+        _close(root, win)
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+
+
+def test_a_cli_target_is_loaded_and_a_missing_one_refuses():
+    """Scriptability: gui.py's Tune button and the Windows launcher pass a
+    resolved path and must get THAT run with no picking — even when it is
+    not the newest. A target that is not in the parent loads nothing at
+    all rather than the newest (audit 2026-07-25's ruling, and here it
+    would rewrite the setup.txt of a run nobody named)."""
+    import shutil
+    root = _tk_or_skip('cli target')
+    if root is None:
+        return
+    parent, old, new = _two_runs()
+    try:
+        win = st.TunerWindow(root, target=old, messagebox=_StubMB())
+        assert win.rundir == old, win.rundir       # NOT the newest
+        assert win.parent == _os.path.abspath(parent)
+        assert len(win.run_names) == 2, "the neighbours are still listed"
+        win._populate(parent, preselect='not_a_run_20260101')
+        assert win.rundir is None, "loaded a run that was not asked for"
+        assert 'not_a_run_20260101' in win.status.cget('text')
+        assert str(win.save_btn.cget('state')) == 'disabled'
+        _close(root, win)
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+
+
+def test_an_unloadable_run_unloads_rather_than_keeping_the_old_one():
+    """Fail CLOSED on a bad switch: Save must never stay pointed at run A
+    while the operator believes they moved to run B."""
+    import shutil
+    root = _tk_or_skip('failed switch')
+    if root is None:
+        return
+    parent, old, new = _two_runs()
+    try:
+        win = st.TunerWindow(root, target=new, messagebox=_StubMB())
+        assert win.rundir == new
+        # truncate the older run's baseline: unreadable, so untunable
+        base = _os.path.join(old, 'frames', 'SLDEA_s00_00.00kV_baseline.png')
+        open(base, 'wb').close()
+        win.run_box.current(win.run_names.index(_os.path.basename(old)))
+        win._pick_run()
+        assert win.rundir is None, "a failed load must not keep run A live"
+        assert str(win.save_btn.cget('state')) == 'disabled'
+        assert 'baseline' in win.status.cget('text')
+        _close(root, win)
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+
+
+def test_an_empty_parent_opens_the_picker_with_nothing_loaded():
+    """A machine whose SCPI_SLDEA_DIR holds no runs used to get 'no run
+    found' and exit code 2 — no window, nothing to click. Now the window
+    opens with the picker live and Save closed until something loads."""
+    import shutil
+    import tempfile
+    root = _tk_or_skip('empty parent')
+    if root is None:
+        return
+    empty = tempfile.mkdtemp(prefix='tuner_empty_')
+    try:
+        win = st.TunerWindow(root, parent=empty, messagebox=_StubMB())
+        assert win.rundir is None
+        assert win.run_names == []
+        assert str(win.save_btn.cget('state')) == 'disabled'
+        assert str(win.reset_btn.cget('state')) == 'disabled'
+        assert str(win.browse_btn.cget('state')) == 'normal'
+        assert 'no run loaded' in win.banner_run.cget('text')
+        assert 'no run loaded' in root.title()
+        # and the actions are inert rather than raising on a runless window
+        win.do_save()
+        win.do_reset()
+        assert win.rundir is None
+        _close(root, win)
+    finally:
+        shutil.rmtree(empty, ignore_errors=True)
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items())
            if k.startswith('test_') and callable(v)]

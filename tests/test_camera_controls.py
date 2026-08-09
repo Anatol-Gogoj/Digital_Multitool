@@ -109,10 +109,17 @@ def test_settings_persist_roundtrip():
 def test_save_falls_back_when_primary_unwritable():
     # A root-owned ~/.local/share/scpi_control (installer artefact) must not
     # break persistence: save lands in the fallback, load finds it there.
+    #
+    # The unwritable parent is faked by NOT BEING A DIRECTORY rather than by
+    # chmod, which Windows ignores on directories -- that is why this case
+    # was long filed as an environmental failure (2026-08-09). webcam.py:388
+    # catches plain OSError, so the FileExistsError/NotADirectoryError this
+    # raises lands in the same branch a permission denial would.
+    # The root-owned cause itself stays POSIX-only; the FALLBACK CHAIN is
+    # what this exercises, and it is exercised identically.
     d = tempfile.mkdtemp(prefix='camctl_fb_')
     ro = os.path.join(d, 'ro')
-    os.makedirs(ro)
-    os.chmod(ro, 0o555)                       # unwritable "primary" parent
+    open(ro, 'wb').close()                    # unwritable "primary" parent
     prim_bak = webcam.CAMERA_SETTINGS_PATH
     fall_bak = webcam.CAMERA_SETTINGS_FALLBACK
     webcam.CAMERA_SETTINGS_PATH = os.path.join(ro, 'sub', 'cam.json')
@@ -124,8 +131,7 @@ def test_save_falls_back_when_primary_unwritable():
     finally:
         webcam.CAMERA_SETTINGS_PATH = prim_bak
         webcam.CAMERA_SETTINGS_FALLBACK = fall_bak
-        os.chmod(ro, 0o755)
-        shutil.rmtree(d)
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def _run():

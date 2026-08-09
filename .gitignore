@@ -27,6 +27,19 @@ edge_labels.json
 # accepted or declined -- se.append_calibration_log, 2026-08-06). Run
 # data: it records what an operator measured on one run's disc.
 scale_calibration_log.txt
+# The rules above match run folders by NAME, but the code detects a run by
+# CONTENT -- sldea_edge treats ANY sub-folder holding a run CSV as a run,
+# whatever it is called, and the corpus already contains one that matches no
+# name rule here (`_scratch_playground`). These four cover a run dropped in
+# under any name at all (audited with `git check-ignore -v`, 2026-08-09).
+data*.csv
+setup.txt
+plots/
+# Holdout/pre-edit backups: `data*.csv.bak` below only catches the plain
+# suffix, and the real corpus carries `data.csv.pre-holdout-20260806.bak`,
+# `edge_labels.json.pre-holdout-...bak` and two sldea_diag ones, none of
+# which end in a matched extension.
+*.bak
 data*.csv.bak
 telemetry*.csv
 area_vs_voltage.png

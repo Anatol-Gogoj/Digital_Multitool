@@ -148,9 +148,31 @@ echo.
 
 REM ---- 4/5 the run -----------------------------------------------------
 echo [4/5] Finding the run to work on...
-if not defined TARGET if defined SCPI_SLDEA_DIR set "TARGET=%SCPI_SLDEA_DIR%"
+REM A SET-BUT-DANGLING SCPI_SLDEA_DIR used to dead-end the launcher: the
+REM value was taken unconditionally, the picker below only fires when TARGET
+REM is undefined, and the run then died at :fail with a confusing message.
+REM Live example (analysis VM, 2026-08-09): the variable pointed at a
+REM VirtualBox share that was no longer attached. Both Python front ends
+REM already degrade -- sldea_edge.py swallows the OSError, sldea_tuner.py
+REM opens its picker with a printed reason -- so this was the last place
+REM that did not.
+REM
+REM The trailing-backslash test is deliberate and was MEASURED, not guessed:
+REM `if exist "<path>\."` returns TRUE for a plain FILE, which would let a
+REM file through as though it were a run folder. `"<path>\"` is false for a
+REM dangling path AND for a file, and true only for a real directory.
+if not defined TARGET if defined SCPI_SLDEA_DIR (
+    if exist "%SCPI_SLDEA_DIR%\" (
+        set "TARGET=%SCPI_SLDEA_DIR%"
+    ) else (
+        echo       SCPI_SLDEA_DIR is set, but is not a folder that exists:
+        echo         %SCPI_SLDEA_DIR%
+        echo       Ignoring it and opening a picker. Point it somewhere real with:
+        echo         setx SCPI_SLDEA_DIR "C:\path\to\the\runs"
+    )
+)
 if not defined TARGET (
-    echo       No folder given and SCPI_SLDEA_DIR is not set - opening a picker.
+    echo       No usable folder from SCPI_SLDEA_DIR - opening a picker.
     for /f "usebackq delims=" %%p in (`powershell -NoProfile -STA -Command "Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description='Pick an SLDEA run folder (or the parent folder holding the runs)'; if($d.ShowDialog() -eq 'OK'){$d.SelectedPath}" 2^>nul`) do set "TARGET=%%p"
 )
 if not defined TARGET (

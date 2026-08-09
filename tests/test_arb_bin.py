@@ -12,13 +12,46 @@ import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
     _os.path.abspath(__file__))))
 import os
+import shutil
 import struct
+import tempfile
 
+import arb_bin
 from arb_bin import (BIN_POINTS, FULL_SCALE, build_arb_bin, find_flash_drives,
                      parse_arb_bin, write_arb_bin)
 
 _REFERENCE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           'arb_bin_reference_9step.bin')
+
+
+class _OsWithUnwritable:
+    """The `os` module with exactly one directory reported unwritable.
+
+    `os.chmod(dir, 0o555)` was the old way to fake a read-only stick, and
+    Windows ignores chmod on DIRECTORIES entirely -- the "read-only" stick
+    stayed writable and `find_flash_drives` correctly returned both, which
+    is one of the four failures long filed as environmental (2026-08-09).
+
+    Swapping the directory for a file would turn the suite green for the
+    wrong reason: `arb_bin.py:84` is `if not os.path.isdir(path) or not
+    os.access(path, os.W_OK)`, so a file trips the isdir half and the
+    writability half -- the thing under test -- never runs. Faking the
+    probe itself keeps the real branch exercised on every platform.
+
+    `arb_bin` does a plain module-level `import os`, so `arb_bin.os` is a
+    rebindable name. The real `os` module is never mutated.
+    """
+
+    def __init__(self, blocked):
+        self._blocked = os.path.abspath(blocked)
+
+    def __getattr__(self, name):        # everything else is the real thing
+        return getattr(os, name)
+
+    def access(self, path, mode):
+        if mode & os.W_OK and os.path.abspath(path) == self._blocked:
+            return False
+        return os.access(path, mode)
 
 
 def test_build_size_and_encoding():
@@ -77,9 +110,13 @@ def test_reference_roundtrip_byte_identical():
     assert rebuilt == original, "rebuild must be byte-identical"
 
 
-def test_write_arb_bin(tmp='/tmp/_arb_bin_test.bin'):
-    n = write_arb_bin(tmp, [0.0, 1.0, 0.0, -1.0])
+def test_write_arb_bin():
+    # tempfile, not a '/tmp/...' literal: on Windows that abspaths to
+    # C:\tmp and the test depends on a directory nobody created.
+    fd, tmp = tempfile.mkstemp(prefix='arb_bin_', suffix='.bin')
+    os.close(fd)
     try:
+        n = write_arb_bin(tmp, [0.0, 1.0, 0.0, -1.0])
         with open(tmp, 'rb') as f:
             blob = f.read()
         assert n == len(blob) == BIN_POINTS * 2
@@ -87,19 +124,21 @@ def test_write_arb_bin(tmp='/tmp/_arb_bin_test.bin'):
         os.unlink(tmp)
 
 
-def test_find_flash_drives(root='/tmp/_arb_bin_media'):
-    import shutil
+def test_find_flash_drives():
+    root = tempfile.mkdtemp(prefix='arb_bin_media_')
+    ro = os.path.join(root, 'RO_STICK')
     os.makedirs(os.path.join(root, 'STICK'), exist_ok=True)
-    os.makedirs(os.path.join(root, 'RO_STICK'), exist_ok=True)
-    os.chmod(os.path.join(root, 'RO_STICK'), 0o555)      # not writable
+    os.makedirs(ro, exist_ok=True)
+    real_os = arb_bin.os
+    arb_bin.os = _OsWithUnwritable(ro)   # see the class docstring
     try:
         found = find_flash_drives(roots=[root], require_mount=False)
         assert found == [os.path.join(root, 'STICK')], found
         # missing roots are silently skipped
         assert find_flash_drives(roots=['/nonexistent_xyz']) == []
     finally:
-        os.chmod(os.path.join(root, 'RO_STICK'), 0o755)
-        shutil.rmtree(root)
+        arb_bin.os = real_os
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def _run():

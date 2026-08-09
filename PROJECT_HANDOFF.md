@@ -102,29 +102,70 @@ pre-release stays §M-gated. Bench debt otherwise unchanged.
 **New since wave 2 — the DM-Analysis VM (2026-08-08, provisioned).**
 GUI-heavy agent work now has a home off Anatol's desktop: a VirtualBox
 Windows 11 guest ("DM-Analysis", snapshot "provisioned") with the repo
-cloned, the venv built, gh + Claude Code installed, and
-`SCPI_SLDEA_DIR` pointed at the campaign via a **read-only** shared
-folder — corpus safety is now enforced at the share level, not merely
-promised by protocol. Route window-opening waves (Edge Review/plotter/
-tuner smokes, and notably the release's manual-capture stage) to a
-session inside the VM; host sessions keep orchestration and GitHub.
-VM suite baseline: **34/38 with the SAME four environmental failures as
-the host** — and their tracebacks (first ever captured, via the new
-run_tests evidence footer) show three share one root cause: the tests
-fake unwritable directories with chmod, which Windows ignores for
-directories. 38/38 on Windows is one small test-side fix away — offered,
-not yet ordered. Provisioning script: `vm-setup\provision-guest.ps1`
-in the umbrella folder (not in-repo); reset = restore snapshot + pull.
-Release-prep PRs #286/#287 are merged and `#261`/`#283` closed, so the
-release bump has no remaining code prerequisites.
+cloned, the venv built, gh + Claude Code installed. Route
+window-opening waves (Edge Review/plotter/tuner smokes, and notably the
+release's manual-capture stage) to a session inside the VM; host
+sessions keep orchestration and GitHub. Provisioning script:
+`vm-setup\provision-guest.ps1` in the umbrella folder (not in-repo);
+reset = restore snapshot + pull. Release-prep PRs #286/#287 are merged
+and `#261`/`#283` closed, so the release bump has no remaining code
+prerequisites.
 
-**Hygiene:** all wave branches and agent worktrees swept.
-Deliberately left: `claude/225-h-scroll-family` + its worktree (Anatol's
-footer-height session holds uncommitted work there — its fix arrives as
-a follow-up PR now that #259 is merged) · `claude/wave2-integration` +
-the scratchpad view worktree (hosting the running operator GUI instance;
-delete both once the window closes) · `claude/run-sheet` (sole copy of
-parked PR #221's draft).
+> **CORRECTION 2026-08-09 — the corpus is NOT protected by the share
+> layout, whatever this paragraph said before.** It claimed
+> `SCPI_SLDEA_DIR` pointed at a **read-only** share and that "corpus
+> safety is now enforced at the share level, not merely promised by
+> protocol." Measured on the guest: `SCPI_SLDEA_DIR` is
+> `\\VBOXSVR\SLDEA_data\Upload 20260804` and **does not resolve**
+> (`Test-Path` → False) — that share is not attached. The only share is
+> `Z: → \\VBoxSvr\Digital_Multitool`, **read-write**, and the campaign
+> corpus sits inside it at `Z:\SLDEA_data`, where a read-write handle
+> opens successfully. **P3_6's `data.csv` is still the sole copy in
+> existence and the backup item below is still un-ticked.** Protection
+> is protocol-only until the share layout changes: never write anywhere
+> under `Z:\SLDEA_data`, and copy runs out to scratch before any tool
+> that might write. Decision taken (Anatol, 2026-08-09): back the corpus
+> up first, then move `SLDEA_data` out of the read-write share's root,
+> then attach it as a genuine read-only share and repoint
+> `SCPI_SLDEA_DIR`. Two things to fix in the same pass, or that change
+> breaks them: the corpus path is hard-coded here and in `RUN_SHEET.md`,
+> and `sldea_plot_gui`'s default Export target writes a `plots` dir
+> *beside the runs*, which a read-only share refuses. Do **not** take the
+> shortcut of pointing `SCPI_SLDEA_DIR` at the `Z:` path — it resolves,
+> and hands every tool write access to the sole copy.
+
+**VM suite baseline: 38/38 since 2026-08-09** (was 34/38). The four
+failures long recorded here as environmental were **six** actual
+failures from **two** causes, hidden because 31 of 38 suite files share
+a fail-fast `_run()` loop — `test_presets_path` reported one failure and
+had five. The main cause was as described (Windows ignores `chmod` on
+directories), but "one small test-side fix away" was wrong:
+`test_arb_bin` needed the opposite fix, because `arb_bin.py:84` tests
+`isdir` **or** `W_OK` and the directory→file swap would have passed
+without exercising writability at all. Fixed in #296, which also closed
+a real coverage hole — the font-fix test checked three Tk entry points
+and there are four. A fifth failure seen once on this box was the guest
+DISPLAY SIZE, not code: two plot-window scroll cases need ~1150 px of
+screen height and Tk silently clamps the window below that.
+
+**Hygiene: the remote is now `main` alone (swept 2026-08-09, Anatol
+authorized).** All 27 `claude/*` remote branches are deleted. Verified
+before deleting: 22 were fully merged into `origin/main`, and the other
+five each carried unique commits but each mapped to a **closed**,
+superseded PR (#246, #249, #250, #251, #221), so no live work was behind
+any of them. The only branch holding unique TEXT — PR #221's parked
+run-sheet draft — is preserved as the tag **`archive/run-sheet-221`**
+(commit `c4de8c1`), pushed and verified; the run sheet itself shipped on
+main separately, and the draft's other payload had all landed. Run
+`git fetch --prune` in every checkout: a stale remote ref was already
+found in one clone, so pruning is not optional.
+
+This supersedes the previous note, which kept three branches. That note
+was stale in two directions: `claude/225-h-scroll-family` and
+`claude/wave2-integration` were already absent from `git ls-remote`
+while their PRs (#259, #284) are referenced as merged thirteen lines
+above, and `claude/run-sheet` was simultaneously described as retired
+(top block) and deliberately kept (here).
 
 ---
 

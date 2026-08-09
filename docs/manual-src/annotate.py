@@ -208,7 +208,20 @@ S["09_SLDEA_Test"] = {
     "callouts": [
         {"match": "Test Profile (voltages in kV",
          "label": "The voltage staircase — start/end/step, ramp and landing times (the 0 kV reference photo is always taken)"},
-        {"match": "DEA active area diam (mm):", "extend_right": 95, "label": "Sets the px→mm scale — a wrong value corrupts all areas"},
+        # `#292`: ONE capsule over the three rows that define the device.
+        # They were two separate callouts (diam, and concentration numbered
+        # last and eleven badges away) for a pair of fields the operator
+        # fills in as one flow — the same reading-order argument `#290` used
+        # to move the Trek checkbutton off this block (gui.py: "those two
+        # define the DEVICE and read as one flow ... this is a DRIVE setting
+        # and comes after"). Trek inverts therefore stays OUT of the union.
+        # The px→mm warning stays inline: it is the one field here that can
+        # silently corrupt every area in the run.
+        {"union": ["DEA active area diam (mm):", "Electrode:",
+                   "Concentration (mL):"], "extend_right": 175,
+         "label": "Defines the device: active-area diameter (sets the px→mm "
+                  "scale — a wrong value corrupts every area), electrode "
+                  "material, ink concentration (greyed for non-inks)"},
         {"match": "⚡ Breakdown watchdog (LIVE runs)", "label": "Aborts on sustained overcurrent — leave Enabled"},
         {"match": "📈 Scope kV/µA log", "label": "Logs kV/µA continuously to telemetry.csv — the current between photos"},
         {"match": "DRY RUN — HV OFF", "label": "Safety toggle — untick only for a live HV run"},
@@ -234,8 +247,6 @@ S["09_SLDEA_Test"] = {
         # the presets capsule is numbered last on the shot — cosmetic only.
         {"match": "Run configuration presets",
          "label": "Save the whole tab under a name and recall it — never the run name, and never the LIVE state"},
-        {"match": "Concentration (mL):", "extend_right": 95,
-         "label": "How much CNT ink went on — greyed out for carbon black and eGaIn, which are not inks"},
     ],
 }
 

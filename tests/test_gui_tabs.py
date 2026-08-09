@@ -190,6 +190,77 @@ def test_the_lcr_lower_controls_are_reachable():
         root.destroy()
 
 
+def test_the_manual_vocabulary_is_one_vocabulary():
+    """Tab slugs, content.json keys and the manual's ids are ONE set.
+
+    No display needed -- this is the half of the slug contract that can be
+    checked anywhere, and it is the half that used to be checked nowhere:
+    the manual's figures were named at capture time from each tab's DISPLAY
+    LABEL plus its POSITION ("06_Data_Logging"), and every consumer
+    hardcoded the result, so renaming or reordering a tab broke the manual
+    build with no warning until someone next regenerated it.
+    """
+    import json
+    import gui
+    slugs = [s for s, _label, _builder in gui.MANUAL_TABS]
+    assert len(set(slugs)) == len(slugs), f"duplicate tab slug: {slugs}"
+    for slug in slugs:
+        assert slug and slug.replace('-', '').isalnum() \
+            and slug.lower() == slug, (
+                f"{slug!r} is not a lowercase slug (it becomes a filename "
+                "and an HTML anchor)")
+    builders = [b for _s, _l, b in gui.MANUAL_TABS]
+    missing = [b for b in builders
+               if not hasattr(gui.InstrumentControlGUI, b)]
+    assert not missing, f"MANUAL_TABS names no such builder(s): {missing}"
+
+    here = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    with open(_os.path.join(here, 'docs', 'manual-src', 'content.json'),
+              encoding='utf-8') as fh:
+        content = json.load(fh)
+    for slug in slugs:
+        assert slug in content, (
+            f"tab {slug!r} has no docs/manual-src/content.json entry -- the "
+            "manual would build a chapter-less tab")
+    for key, sec in content.items():
+        assert sec['key'] == key, (
+            f"content.json {key!r} carries key={sec['key']!r}: the entry's "
+            "own key field must be its slug, not its on-screen label")
+    # The non-tab chapters. Spelled out so that dropping one is a failure
+    # here rather than a silently shorter manual.
+    assert set(content) == set(slugs) | {'start', 'arb', 'tools'}, sorted(
+        set(content) ^ (set(slugs) | {'start', 'arb', 'tools'}))
+
+
+def test_every_live_tab_carries_its_slug():
+    """The other half: the real notebook, tagged, in order.
+
+    docs/manual-src/capture.py names each screenshot `tab_<slug>` from this
+    attribute and refuses to photograph a tab without one.
+    """
+    import gui
+    root, app = _app()
+    if root is None:
+        return
+    try:
+        live = [getattr(root.nametowidget(tid), 'manual_slug', None)
+                for tid in app.notebook.tabs()]
+        assert live == [s for s, _l, _b in gui.MANUAL_TABS], (
+            "notebook tabs do not carry MANUAL_TABS' slugs in order: %s"
+            % (live,))
+        for name, tab in _tabs(root, app):
+            assert getattr(tab, 'manual_slug', None), (
+                f"tab {name!r} carries no manual_slug")
+        assert app.tab_widget('webcam') is not None, (
+            "tab_widget() cannot find the webcam tab by slug")
+        assert app.tab_widget('no-such-tab') is None
+        assert app.select_manual_tab('webcam'), "select_manual_tab failed"
+        assert app.notebook.select() == str(app.tab_widget('webcam'))
+        assert not app.select_manual_tab('no-such-tab')
+    finally:
+        root.destroy()
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items())
            if k.startswith('test_') and callable(v)]

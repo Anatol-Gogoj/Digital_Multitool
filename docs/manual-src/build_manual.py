@@ -21,8 +21,15 @@ from version import __version__, version_string  # noqa: E402
 content = json.load(open(os.path.join(_HERE, "content.json"), encoding="utf-8"))
 legends = json.load(open(os.path.join(ANN, "legends.json"), encoding="utf-8"))
 
+# content.json is keyed by STABLE SLUG -- the same vocabulary as NAV/SECTIONS
+# below and as gui.MANUAL_TABS, never by a tab's on-screen label. Every entry
+# has to end up in the manual: an entry nobody renders is a chapter silently
+# dropped, so the build fails on leftovers at the bottom of this file (the
+# same fail-closed rule annotate.py applies to callouts).
+USED_CONTENT = set()
+
 # ---- audit corrections (verified against gui.py / instruments.py) --------
-_sh = content["app-shell"]
+_sh = content["start"]
 _sh["workflow"][6] = ("7. Close the window when done — sig-gen outputs and "
                       "LCR bias switch off automatically; the DC supply "
                       "output is left as-is.")
@@ -40,7 +47,7 @@ _sh["cautions"][4] = (
     "On Windows the amber “Linux bench only” connection lines and "
     "the greyed-out Update Software… are normal, not faults.")
 
-_lcr = content["LCR Meter (BK 894)"]
+_lcr = content["lcr"]
 _lcr["cautions"][0] = (
     "The app enforces the meter's limits — voltage 0.01–2.0 V, frequency "
     "100 Hz–500 kHz; out-of-range entries are rejected with a Configuration "
@@ -52,7 +59,7 @@ _lcr["cautions"].append(
     "Each correction sweep takes tens of seconds and the meter is busy "
     "until it finishes.")
 
-_sl = content["SLDEA Test"]
+_sl = content["sldea"]
 _sl["purpose"] = _sl["purpose"].replace(
     "single-layer DEA",
     "single-layer dielectric elastomer actuator (SLDEA)")
@@ -62,7 +69,7 @@ _sl["cautions"][0] = (
     "best-effort — if the SG link is dead the Trek can stay energized and "
     "the app raises an HV NOT ZEROED alarm.")
 
-_arb = content["Arb Editor"]
+_arb = content["arb"]
 _arb["cautions"] = [
     "The export buttons only save a file — nothing is sent to the "
     "instrument. The .bin holds the shape only; the EasyWaveX CSV embeds "
@@ -76,12 +83,12 @@ _arb["cautions"] = [
     _arb["cautions"][4],
 ]
 
-for _c in content["Webcam"]["controls"]:
+for _c in content["webcam"]["controls"]:
     if "cap_0003" in _c["what"]:
         _c["what"] = _c["what"].replace(
             "cap_0003_1p9V_….png", "cap_0003_20260728-141230_1p9V.png")
 
-content["Companion tools"]["purpose"] = (
+content["tools"]["purpose"] = (
     "Four stand-alone programs for recorded SLDEA runs — they touch no "
     "instruments, so any PC with a copy of the run data works.")
 # --------------------------------------------------------------------------
@@ -122,12 +129,14 @@ def legend_grid(key):
 
 
 def steps(area, limit=7):
+    USED_CONTENT.add(area)
     ws = [strip_num(s) for s in content[area]["workflow"]][:limit]
     lis = "".join(f"<li>{esc(s)}</li>" for s in ws)
     return f'<div class="use"><h4>Typical use</h4><ol>{lis}</ol></div>'
 
 
 def cautions(area, keep=None):
+    USED_CONTENT.add(area)
     cs = content[area]["cautions"]
     if keep is not None:
         cs = [cs[i] for i in keep if i < len(cs)]
@@ -138,6 +147,7 @@ def cautions(area, keep=None):
 
 
 def controls_details(area, label="Every control on this tab"):
+    USED_CONTENT.add(area)
     rows = "".join(
         f'<tr><td class="cl">{esc(c["label"])}</td>'
         f'<td>{esc(c["what"])}</td></tr>'
@@ -146,20 +156,32 @@ def controls_details(area, label="Every control on this tab"):
             f'<div class="tblwrap"><table>{rows}</table></div></details>')
 
 
-def section(sid, tab_label, area, img_key, extra_html="", caution_keep=None,
-            purpose=None):
-    a = content[area]
+def section(slug, title, extra_html="", caution_keep=None, purpose=None,
+            img_key=None):
+    """One tab chapter, addressed by the tab's STABLE SLUG.
+
+    `slug` is a single identifier doing three jobs that used to take three
+    separate strings: the HTML anchor, the `content.json` key, and (as
+    `tab_<slug>`) the shot/legend key capture.py writes and annotate.py
+    annotates. The last two used to be the tab's DISPLAY LABEL and its
+    POSITION baked into a filename ("06_Data_Logging"), so renaming or
+    reordering a tab broke the build. `title` is prose and may be reworded
+    freely. Chapters whose figure is not a tab shot pass `img_key`.
+    """
+    a = content[slug]
+    USED_CONTENT.add(slug)
+    img = img_key or f"tab_{slug}"
     return f"""
-<section id="{sid}">
+<section id="{slug}">
   <header class="band">
-    <h2>{esc(tab_label)}</h2>
+    <h2>{esc(title)}</h2>
     <p class="purpose">{esc(purpose or a["purpose"])}</p>
   </header>
-  {fig(img_key, tab_label + " — annotated screenshot")}
-  {legend_grid(img_key)}
-  {steps(area)}
-  {cautions(area, caution_keep)}
-  {controls_details(area)}
+  {fig(img, title + " — annotated screenshot")}
+  {legend_grid(img)}
+  {steps(slug)}
+  {cautions(slug, caution_keep)}
+  {controls_details(slug)}
   {extra_html}
 </section>"""
 
@@ -370,9 +392,9 @@ if ADDENDA:
                       f'<li class="partline">{esc(PART_TITLE)}</li>')
 print_toc_html = "".join(_toc_items)
 
-shell = content["app-shell"]
-shell_steps = steps("app-shell")
-shell_caut = cautions("app-shell", keep=[0, 1, 4])
+shell = content["start"]
+shell_steps = steps("start")
+shell_caut = cautions("start", keep=[0, 1, 4])
 
 # --------------------------------------------------------------- sections
 body = []
@@ -412,16 +434,14 @@ body.append(f"""
   {legend_grid('overview')}
   {shell_steps}
   {shell_caut}
-  {controls_details('app-shell', 'The app shell, menu and profiles in detail')}
+  {controls_details('start', 'The app shell, menu and profiles in detail')}
 </section>""")
 
-body.append(section("lcr", "LCR Meter — BK 894", "LCR Meter (BK 894)",
-                    "01_LCR_Meter__BK_894_", caution_keep=[0, 1, 3, 4, 5]))
+body.append(section("lcr", "LCR Meter — BK 894",
+                    caution_keep=[0, 1, 3, 4, 5]))
 body.append(section("scope", "Oscilloscope — Tektronix MSO24",
-                    "Oscilloscope (MSO24)", "02_Oscilloscope__MSO24_",
                     caution_keep=[0, 1, 2]))
 body.append(section("siggen", "Signal Generator — BK 4055B",
-                    "Signal Gen (BK 4055B)", "03_Signal_Gen__BK_4055B_",
                     caution_keep=[0, 2, 3, 6]))
 
 arb_extra = f"""
@@ -429,25 +449,23 @@ arb_extra = f"""
   <div>{fig('21_arb_bin_export', 'Export .bin dialog')}{legend_grid('21_arb_bin_export')}</div>
   <div>{fig('22_arb_easywavex_export', 'EasyWaveX export dialog')}{legend_grid('22_arb_easywavex_export')}</div>
 </div>"""
-body.append(section("arb", "Arbitrary Waveform Editor", "Arb Editor",
-                    "20_arb_editor", extra_html=arb_extra,
+body.append(section("arb", "Arbitrary Waveform Editor",
+                    # not a notebook tab -- its own window, captured under a
+                    # name that was already a stable literal
+                    img_key="20_arb_editor", extra_html=arb_extra,
                     caution_keep=[0, 1, 2, 4]))
 
-body.append(section("psu", "DC Supply — BK 9174B", "DC Supply (BK 9174B)",
-                    "04_DC_Supply__BK_9174B_", caution_keep=[0, 1, 2, 3]))
-body.append(section("dmm", "Digital Multimeter — BK 5493C", "DMM (BK 5493C)",
-                    "05_DMM__BK_5493C_", caution_keep=[0, 1, 2]))
-body.append(section("logging", "Data Logging", "Data Logging",
-                    "06_Data_Logging", caution_keep=[0, 1, 2]))
-body.append(section("battery", "Battery Data", "Battery Data",
-                    "07_Battery_Data", caution_keep=[0, 2, 4]))
-body.append(section("webcam", "Webcam", "Webcam", "08_Webcam",
-                    caution_keep=[1, 2, 4]))
-body.append(section("sldea", "SLDEA Test", "SLDEA Test", "09_SLDEA_Test",
-                    caution_keep=[0, 1, 2, 4]))
+body.append(section("psu", "DC Supply — BK 9174B",
+                    caution_keep=[0, 1, 2, 3]))
+body.append(section("dmm", "Digital Multimeter — BK 5493C",
+                    caution_keep=[0, 1, 2]))
+body.append(section("logging", "Data Logging", caution_keep=[0, 1, 2]))
+body.append(section("battery", "Battery Data", caution_keep=[0, 2, 4]))
+body.append(section("webcam", "Webcam", caution_keep=[1, 2, 4]))
+body.append(section("sldea", "SLDEA Test", caution_keep=[0, 1, 2, 4]))
 
-ct = content["Companion tools"]
-ct_caut = cautions("Companion tools", keep=[0, 1, 2, 3])
+ct = content["tools"]
+ct_caut = cautions("tools", keep=[0, 1, 2, 3])
 body.append(f"""
 <section id="tools">
   <header class="band"><h2>SLDEA companion tools</h2>
@@ -703,6 +721,20 @@ td.cl { white-space:nowrap; font-weight:600; color:var(--navy); }
   .foot { break-inside:avoid; }
 }
 """
+
+# FAIL CLOSED on a content.json entry nobody rendered. The slugs above, the
+# slugs in content.json and gui.MANUAL_TABS are one vocabulary; a typo or a
+# half-finished rename that leaves an orphan entry means a whole chapter
+# quietly missing from the manual, which is the failure `#248` (annotate.py's
+# miss report) exists to stop one level down.
+_orphans = sorted(set(content) - USED_CONTENT)
+if _orphans:
+    sys.exit(
+        f"build_manual.py FAILED -- content.json entr{'y' if len(_orphans) == 1 else 'ies'} "
+        f"{_orphans} rendered into no section.\n"
+        "  content.json is keyed by tab slug (gui.py MANUAL_TABS), plus "
+        "'start', 'arb' and 'tools'.\n"
+        "  Either add a section() call for it, or fix the key to match.")
 
 page = ("<title>Digital Multitool — User Manual</title>\n"
         f"<style>{CSS}</style>\n" + "\n".join(body))

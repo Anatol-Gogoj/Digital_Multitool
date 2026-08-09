@@ -143,20 +143,40 @@ def main():
              "w": app.notebook.winfo_width(), "h": 26},
         ]
 
-    tab_names = []
-    for i, tab_id in enumerate(app.notebook.tabs()):
+    # Shot names come from each tab's STABLE SLUG (gui.MANUAL_TABS), never
+    # from its display label or its position in the notebook. They used to
+    # be f"{i+1:02d}_{label-with-non-alnum-underscored}", which made every
+    # consumer -- annotate.py's S[...] keys, build_manual.py's figure keys --
+    # break on a tab rename or a reorder. `#30` (rename Data Logging) is
+    # exactly that trap. See docs/manual-src/README.md "Tab slugs".
+    tabs = []
+    for tab_id in app.notebook.tabs():
         label = app.notebook.tab(tab_id, "text")
-        tab_names.append(label)
+        tab_w = root.nametowidget(tab_id)
+        slug = getattr(tab_w, "manual_slug", None)
+        if not slug:
+            # Fail closed. An untagged tab is either a NEW tab whose slug
+            # nobody added, or a tab that failed to BUILD (gui.py leaves
+            # the error placeholder untagged on purpose) -- photographing
+            # either one ships a wrong manual page under a right-looking
+            # name.
+            sys.exit(
+                f"capture.py FAILED -- notebook tab {label!r} carries no "
+                "manual_slug.\n"
+                "  A new tab: add it to MANUAL_TABS in gui.py (and give it "
+                "a content.json entry + a section in build_manual.py).\n"
+                "  An '(unavailable)' tab: the app did not start cleanly -- "
+                "fix that first; the manual is built from a healthy app.")
+        tabs.append({"slug": slug, "label": label})
         app.notebook.select(tab_id)
         root.update_idletasks()
         root.update()
         time.sleep(0.45)
         root.update()
-        safe = "".join(c if c.isalnum() else "_" for c in label)
-        entry = capture_window(root, f"{i + 1:02d}_{safe}", _extras())
+        entry = capture_window(root, f"tab_{slug}", _extras())
         entry["tab"] = label
+        entry["slug"] = slug
         # Tall scrollable tab? Grab a second, scrolled-to-bottom view.
-        tab_w = root.nametowidget(tab_id)
         canvas = getattr(tab_w, "_canvas", None)
         body = getattr(tab_w, "body", None)
         if canvas is not None and body is not None:
@@ -165,9 +185,9 @@ def main():
                 root.update_idletasks()
                 root.update()
                 time.sleep(0.35)
-                e2 = capture_window(root, f"{i + 1:02d}_{safe}_bottom",
-                                    _extras())
+                e2 = capture_window(root, f"tab_{slug}_bottom", _extras())
                 e2["tab"] = label + " (scrolled)"
+                e2["slug"] = slug + "_bottom"
                 canvas.yview_moveto(0.0)
                 root.update()
 
@@ -217,7 +237,9 @@ def main():
     except Exception as ex:
         print("arb editor failed:", ex)
 
-    manifest["tab_names"] = tab_names
+    # Replaces the old "tab_names" list of bare display strings: the slug is
+    # the identity, the label rides along as data.
+    manifest["tabs"] = tabs                      # [{"slug", "label"}, ...]
     with open(os.path.join(OUT, "widgets.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=1)
     print("DONE", len(manifest["images"]), "images")

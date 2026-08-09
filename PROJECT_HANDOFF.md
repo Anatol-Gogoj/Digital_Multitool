@@ -1,5 +1,35 @@
 # Project handoff — state as of 2026-08-08
 
+**FINAL 2026-08-08 — Part II shipped; the NEXT SESSION MAY RUN IN A VM
+(read this block first there).** The manual gained **Part II — "How it
+works"** (#293): the instrument stack PC-to-bench (~6 pp) and Edge
+Review internals (~11 pp), rendered by a new fail-closed addendum
+capability in `build_manual.py` (`docs/manual-src/README.md` documents
+the chapter-file format); manuals now **59 pages**, the v1.2.0 release
+PDF asset is refreshed, `#291`/`#292` closed. An optional ~1,800-word
+trim of the Edge Review chapter is prepared (cut list in PR #293) —
+Anatol's call. **`RUN_SHEET.md` was regenerated this date** — the whole
+docket, split by WHERE work can run (VM / lab PC / bench-no-HV /
+bench-HV) — and supersedes the parked PR #221 draft, whose keeper branch
+`claude/run-sheet` is retired.
+
+**VM cold start.** Clone the repo (`main`); Python 3.10+ WITH tcl/tk;
+one venv from the pip line in `docs/manual-src/README.md` §Regenerating
+(it covers the suites and every tool, pypdf/reportlab included);
+`gh auth login`. Then `run_tests.py` to establish THAT machine's
+baseline — the lab PC's four environmental failures are its facts, not
+the suite's. **What a clone does NOT bring:** the campaign data
+(`…\Desktop\Digital Multitool\SLDEA_data\Upload 20260804\` exists ONLY
+on the lab PC, and **P3_6's processed `data.csv` is the sole copy in
+existence — back the corpus up before any migration**, robocopy
+`/R:2 /W:5`); the manual capture stage (headed desktop + Edge + a
+hydrated run — lab PC); the presets/ShareDrive runtime dirs; bench
+hardware; and the agent's machine-bound file memory — **this file plus
+`CLAUDE.md` are the memory**. On the lab PC, `SCPI_SLDEA_DIR` points at
+the campaign wrapper; every resolver descends into it since PR #287.
+
+---
+
 **RELEASE (2026-08-08, later): v1.2.0 is TAGGED and PUBLISHED as a
 PRE-RELEASE** (#288 + tag; PDF attached to the GitHub release). Before it,
 the release-prep pair merged: **#287** (`#261` the wrapper-descent rule

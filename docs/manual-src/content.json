@@ -1,6 +1,6 @@
 {
- "app-shell": {
-  "key": "app-shell",
+ "start": {
+  "key": "start",
   "area": "app-shell",
   "purpose": "The frame around the instrument tabs: the launch splash, each tab's connection line with its one-click Reconnect, the Tools menu (whole-bench profiles and the software updater), and the footer status bar with the exact build version.",
   "controls": [
@@ -122,8 +122,8 @@
    }
   ]
  },
- "LCR Meter (BK 894)": {
-  "key": "LCR Meter (BK 894)",
+ "lcr": {
+  "key": "lcr",
   "area": "LCR Meter (BK 894)",
   "purpose": "Controls the B&K Precision 894 LCR meter: set the AC test signal (mode, frequency, level, DC bias), take single or live readings of a component, and run automated frequency-by-voltage sweeps that save to a CSV file.",
   "controls": [
@@ -257,8 +257,8 @@
    }
   ]
  },
- "Oscilloscope (MSO24)": {
-  "key": "Oscilloscope (MSO24)",
+ "scope": {
+  "key": "scope",
   "area": "Oscilloscope (MSO24)",
   "purpose": "Controls the Tektronix MSO24 4-channel oscilloscope: set up each channel, timebase and trigger, start/stop acquisition, read automated measurements, and pull a waveform record into a plot window for saving as CSV.",
   "controls": [
@@ -384,8 +384,8 @@
    }
   ]
  },
- "Signal Gen (BK 4055B)": {
-  "key": "Signal Gen (BK 4055B)",
+ "siggen": {
+  "key": "siggen",
   "area": "Signal Gen (BK 4055B)",
   "purpose": "Controls both output channels of the BK 4055B function generator: waveform type, frequency, amplitude, offset, burst shots, and the physical output switch. Named presets let you save and recall complete two-channel setups.",
   "controls": [
@@ -521,8 +521,8 @@
    }
   ]
  },
- "Arb Editor": {
-  "key": "Arb Editor",
+ "arb": {
+  "key": "arb",
   "area": "Arb Editor",
   "purpose": "Design a custom waveform for the BK 4055B signal generator by placing points on a plot and choosing the shape between them. Save it to the app's library, then deliver it to the instrument by flash-drive file (.bin or EasyWaveX CSV) or by LAN upload. Opened from the Signal Gen tab: set a channel's waveform to ARB and click \"Waveform Editor...\".",
   "controls": [
@@ -649,8 +649,8 @@
    }
   ]
  },
- "DC Supply (BK 9174B)": {
-  "key": "DC Supply (BK 9174B)",
+ "psu": {
+  "key": "psu",
   "area": "DC Supply (BK 9174B)",
   "purpose": "Controls the B&K 9174B dual-output bench DC supply: per channel you stage a voltage and current limit, set hardware protection trips, watch live measured volts/amps/watts, and switch the output on or off. Setting values and energizing the terminals are deliberately separate actions.",
   "controls": [
@@ -760,8 +760,8 @@
    }
   ]
  },
- "DMM (BK 5493C)": {
-  "key": "DMM (BK 5493C)",
+ "dmm": {
+  "key": "dmm",
   "area": "DMM (BK 5493C)",
   "purpose": "Reads the bench B&K 5493C 6.5-digit multimeter over the lab network (this unit is Ethernet-only). Pick a measurement function and take a single reading or watch a live, continuously updated display.",
   "controls": [
@@ -858,8 +858,8 @@
    }
   ]
  },
- "SLDEA Test": {
-  "key": "SLDEA Test",
+ "sldea": {
+  "key": "sldea",
   "area": "SLDEA Test",
   "purpose": "Runs an automated voltage-staircase test on a single-layer DEA: the signal generator drives the Trek HV amplifier (1 V control = 1 kV, max 10 kV), the scope logs the Trek's V_Out/I_Out monitors, and the webcam photographs the electrode at each voltage landing. Each run produces a self-contained folder (setup.txt, data.csv, run.log, frames/ — plus telemetry.csv when the scope is connected) ready for the Edge Review analysis program.",
   "controls": [
@@ -1031,8 +1031,8 @@
    }
   ]
  },
- "Data Logging": {
-  "key": "Data Logging",
+ "logging": {
+  "key": "logging",
   "area": "Data Logging",
   "purpose": "Records readings from the connected instruments to CSV files at a fixed interval — one timestamped file per source, so a run captures stimulus (sig gen, supply) and response (LCR, scope, DMM) side by side. Files are for offline analysis (Excel, Python); there is no live plot on this tab.",
   "controls": [
@@ -1138,8 +1138,8 @@
    }
   ]
  },
- "Battery Data": {
-  "key": "Battery Data",
+ "battery": {
+  "key": "battery",
   "area": "Battery Data",
   "purpose": "Post-processes exports from the battery cycler: load the tester's .xls/.xlsx file and the tab translates the Mandarin headers and status labels to English, merges all detail sheets into one table, and converts mV to V. From there you can export a clean CSV or make plots. Works on any PC — no instrument connection involved.",
   "controls": [
@@ -1261,8 +1261,8 @@
    }
   ]
  },
- "Webcam": {
-  "key": "Webcam",
+ "webcam": {
+  "key": "webcam",
   "area": "Webcam",
   "purpose": "Live view and photo capture from the bench USB/industrial camera. Take single snapshots, timelapse series, or automated runs where each photo is tied to a signal-generator voltage or to a delay after a start trigger — with an on-screen focus score to help you sharpen the lens first.",
   "controls": [
@@ -1385,8 +1385,8 @@
    }
   ]
  },
- "Companion tools": {
-  "key": "Companion tools",
+ "tools": {
+  "key": "tools",
   "area": "Companion tools",
   "purpose": "Four stand-alone programs ship beside the Multitool for working on recorded SLDEA runs; they touch no instruments, so any PC holding a copy of the run data works. Reach for the edge tuner when outlines look wrong (drag sliders, watch live), Edge Review to trace and human-check every frame of a run, the headless diagnostic when no amount of slider-dragging helps — it measures why the run will not tune — and the plot tool once runs are reviewed, to put several of them on one figure.",
   "controls": [

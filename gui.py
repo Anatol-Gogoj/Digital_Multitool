@@ -54,6 +54,35 @@ from version import version_string
 import webcam
 import threading
 
+# ---- The tabs, and their STABLE slugs -------------------------------------
+# (slug, progress noun, builder method name), in the order the tabs are
+# built -- which is also the order they appear in the notebook.
+#
+# The slug is the tab's IDENTITY and never changes; the on-screen label
+# (set inside each builder) and the position in this tuple are both free to
+# change without breaking anything. Everything outside the GUI that has to
+# name a tab -- the manual pipeline's screenshots, its callout specs and
+# `content.json` -- keys off the slug, so renaming "Data Logging" to
+# "Continuous Logging" (`#30`) is now the one-string change it looks like.
+# The slug vocabulary is shared with `docs/manual-src/build_manual.py`'s
+# NAV/SECTIONS ids; tests/test_gui_tabs.py pins the two together.
+#
+# Each built tab widget is tagged with `.manual_slug` below. A tab that
+# FAILED to build is deliberately left untagged, so the capture stage
+# refuses to photograph a degraded app instead of shipping a manual page
+# showing an error box.
+MANUAL_TABS = (
+    ('lcr', 'LCR meter', 'create_lcr_tab'),
+    ('scope', 'oscilloscope', 'create_scope_tab'),
+    ('siggen', 'signal generator', 'create_sg_tab'),
+    ('psu', 'DC supply', 'create_psu_tab'),
+    ('dmm', 'DMM', 'create_dmm_tab'),
+    ('logging', 'data logging', 'create_logging_tab'),
+    ('battery', 'battery data', 'create_battery_tab'),
+    ('webcam', 'webcam', 'create_webcam_tab'),
+    ('sldea', 'SLDEA test', 'create_sldea_tab'),
+)
+
 # ---- Signal generator field rules -----------------------------------------
 # Which fields exist, what they're called, which waveforms use them, and
 # whether they're hidden behind the Advanced toggle.
@@ -293,18 +322,11 @@ class InstrumentControlGUI:
         self.notebook.pack(fill='both', expand=True, padx=10, pady=10)
         
         # Create tabs (reporting each one; this is the slow part of start-up)
-        for label, build in (("LCR meter", self.create_lcr_tab),
-                             ("oscilloscope", self.create_scope_tab),
-                             ("signal generator", self.create_sg_tab),
-                             ("DC supply", self.create_psu_tab),
-                             ("DMM", self.create_dmm_tab),
-                             ("data logging", self.create_logging_tab),
-                             ("battery data", self.create_battery_tab),
-                             ("webcam", self.create_webcam_tab),
-                             ("SLDEA test", self.create_sldea_tab)):
+        for slug, label, builder in MANUAL_TABS:
             self._progress(f"Loading {label}...")
+            before = set(self.notebook.tabs())
             try:
-                build()
+                getattr(self, builder)()
             except Exception as e:
                 # One broken tab (torn pylibs, bad import) must degrade,
                 # not kill the whole app before the window even appears
@@ -316,6 +338,14 @@ class InstrumentControlGUI:
                               f"The rest of the app keeps working. Try "
                               f"Help → Update Software, or report this."
                          ).pack(padx=20, pady=20, anchor='w')
+            else:
+                # Tag the tab this builder just added with its stable slug.
+                # Done here, once, rather than in nine builders: MANUAL_TABS
+                # is then the single place the vocabulary lives. On the
+                # except path nothing is tagged, on purpose -- see above.
+                for tid in self.notebook.tabs():
+                    if tid not in before:
+                        self.root.nametowidget(tid).manual_slug = slug
 
         # Clean up the camera (and any capture loop) on window close.
         self.root.protocol('WM_DELETE_WINDOW', self._on_app_close)
@@ -323,6 +353,31 @@ class InstrumentControlGUI:
         # Auto-connect on startup (in the background -- issue #40)
         self._progress("Looking for instruments...")
         self.root.after(100, self.auto_connect)
+
+    def tab_widget(self, slug):
+        """The tab widget carrying `slug`, or None if it never built.
+
+        Look tabs up through this, never by their display label: a label is
+        prose and gets reworded (`#30`), and a label match that stops
+        matching fails as a silent no-op.
+        """
+        for tid in self.notebook.tabs():
+            w = self.root.nametowidget(tid)
+            if getattr(w, 'manual_slug', None) == slug:
+                return w
+        return None
+
+    def select_manual_tab(self, slug):
+        """Bring the tab named by `slug` to the front. True if it exists."""
+        w = self.tab_widget(slug)
+        if w is None:
+            # Only reachable if that tab failed to build, in which case it
+            # already says so on screen -- say it here too rather than
+            # doing nothing at all.
+            self.status_bar.config(text=f"The {slug} tab is not available")
+            return False
+        self.notebook.select(w)
+        return True
 
     def build_footer(self, parent):
         """Footer: version readout (right) + status bar (left, stretches).
@@ -3470,10 +3525,7 @@ LOGGING:
 
         def adjust():
             win.destroy()
-            for i in range(len(self.notebook.tabs())):
-                if self.notebook.tab(i, 'text') == 'Webcam':
-                    self.notebook.select(i)
-                    break
+            self.select_manual_tab('webcam')
 
         gob = ttk.Button(bf, text="✔ Looks good — start run" if not clipped
                          else "⚠ Start anyway (baseline blown out)",

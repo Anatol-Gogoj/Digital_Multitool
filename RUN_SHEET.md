@@ -68,8 +68,10 @@ baseline first.
       dialog, `measured_kV` tracks the whole ramp with no blank tail.
 - [ ] `#231` smoke — SG stays at 0 V through the warm-up window; blank
       electrode prompts.
-- [ ] `#193` / `#194` exposure + fiducial-ring experiments (unblocks
-      P3_7; may shrink `#198`).
+- [ ] **§P fiducial contrast ring** (`BENCH_TEST.md`) — `#193` / `#194`
+      exposure + ring experiment in one visit, ~2.5 h. Its P1/P2 steps
+      are dry and can be done from §C; everything after them is HV.
+      Unblocks `P3_7`; its verdict sizes `#198`.
 - [ ] `SLDEA_20260729_104531` device autopsy — dead device vs HV not
       reaching the sample.
 - [ ] `#215` — a second device's worth of calibrations, then close.

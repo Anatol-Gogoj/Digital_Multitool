@@ -69,6 +69,25 @@ build is loudly red until that capture runs. The bump itself is desk
 work per the release checklist; only v1.1.0's *promotion* out of
 pre-release stays §M-gated. Bench debt otherwise unchanged.
 
+**New since wave 2 — the DM-Analysis VM (2026-08-08, provisioned).**
+GUI-heavy agent work now has a home off Anatol's desktop: a VirtualBox
+Windows 11 guest ("DM-Analysis", snapshot "provisioned") with the repo
+cloned, the venv built, gh + Claude Code installed, and
+`SCPI_SLDEA_DIR` pointed at the campaign via a **read-only** shared
+folder — corpus safety is now enforced at the share level, not merely
+promised by protocol. Route window-opening waves (Edge Review/plotter/
+tuner smokes, and notably the release's manual-capture stage) to a
+session inside the VM; host sessions keep orchestration and GitHub.
+VM suite baseline: **34/38 with the SAME four environmental failures as
+the host** — and their tracebacks (first ever captured, via the new
+run_tests evidence footer) show three share one root cause: the tests
+fake unwritable directories with chmod, which Windows ignores for
+directories. 38/38 on Windows is one small test-side fix away — offered,
+not yet ordered. Provisioning script: `vm-setup\provision-guest.ps1`
+in the umbrella folder (not in-repo); reset = restore snapshot + pull.
+Release-prep PRs #286/#287 are merged and `#261`/`#283` closed, so the
+release bump has no remaining code prerequisites.
+
 **Hygiene:** all wave branches and agent worktrees swept.
 Deliberately left: `claude/225-h-scroll-family` + its worktree (Anatol's
 footer-height session holds uncommitted work there — its fix arrives as

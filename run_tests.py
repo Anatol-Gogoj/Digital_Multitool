@@ -13,6 +13,17 @@ per-suite lines, where 38 suites' worth of scrollback buried it. The
 summary block is what people quote and grep, so nothing new is ever added
 inside it; everything lands after it or in a file.
 
+Each suite in tests/ follows that same shape internally. A suite runs
+every one of its tests, recording failures instead of stopping at the
+first -- fail-fast made a suite with five broken tests report one, and
+"38/38 is one small fix away" was wrong by four. What a suite prints is
+therefore: a line per test (`ok`/`FAIL`/`skip`), then its count line,
+then -- only when something failed -- the tracebacks, in test-name order,
+between a `K of M tests failed` header and an `end K of M tests failed`
+footer. One grep for "tests failed" lands on both ends of a bounded
+block. Skips are counted separately and are not failures: suites that
+can skip print `N of M tests ran` and still exit 0.
+
 Console output is forced to ASCII (backslash-escaping anything else) --
 suite output can carry emoji, and a Windows console that cannot encode
 them would kill the runner mid-report, losing the very traceback this

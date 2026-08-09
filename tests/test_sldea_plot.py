@@ -1452,12 +1452,31 @@ def test_cadence_guard_is_opt_in_and_no_breakdown_is_unchanged():
 
 
 def _run():
+    # Failures are collected, not fatal (`#280`): failing fast reported one
+    # broken test in suites that had five. Tracebacks land after the count
+    # line, in name order, in one bounded block -- run_tests.py explains why.
+    import traceback
     names = [n for n in sorted(globals()) if n.startswith('test_')]
+    failed = []
     for n in names:
-        globals()[n]()
+        try:
+            globals()[n]()
+        except Exception:
+            failed.append((n, traceback.format_exc()))
+            print('FAIL', n)
+            continue
         print('ok ', n)
-    print(f"{len(names)} tests passed")
+    if not failed:
+        print(f"{len(names)} tests passed")
+        return 0
+    head = f"{len(failed)} of {len(names)} tests failed"
+    print(f"\n{head}")
+    for name, tb in failed:
+        print(f"===== FAIL {name} =====")
+        print(tb.rstrip('\n'))
+    print(f"===== end {head} =====")
+    return 1
 
 
 if __name__ == '__main__':
-    _run()
+    raise SystemExit(_run())

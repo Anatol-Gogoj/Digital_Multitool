@@ -2,7 +2,7 @@
 
 `../digital-multitool-manual.html` is the illustrated user manual — a single
 self-contained file (all screenshots embedded as base64). It was last built
-from the **live app** at v1.2.0+91f5bfd on 2026-08-08 (42 pages): every
+from the **live app** at v1.2.0+91f5bfd-era tree on 2026-08-08 (59 pages incl. Part II): every
 screenshot is a real capture and every red callout is anchored to the actual
 widget's on-screen coordinates. When the GUI changes visibly, regenerate
 rather than hand-edit. This line is easy to forget — check it against the
@@ -16,7 +16,7 @@ manual's own footer after every rebuild.
 | `capture_edge_review.py` | Opens Edge Review on a real run (defaults to bench run 1), runs a blocking detection pass, screenshots a frame showing all three candidates. Never clicks Save | `shots/40_edge_review.png` (+ appends to `widgets.json`) |
 | `capture_tuner_dialog.py` | Screenshots the Tune-params advanced-tool gate, then takes the Cancel path | `shots/41_tuner_warning.png` |
 | `annotate.py` | Draws the red capsules, arrows and numbered badges from curated per-image specs, matching callouts to exact widget `text=` strings | `annotated/*.png`, `annotated/legends.json` |
-| `build_manual.py` | Assembles the HTML from `content.json` (the manual copy) + legends + images | `../digital-multitool-manual.html`, `sections.json` |
+| `build_manual.py` | Assembles the HTML from `content.json` (the manual copy) + legends + images, then appends the Part II chapters from `addendum_*.json` | `../digital-multitool-manual.html`, `sections.json` |
 | `make_pdf.py` | Renders the HTML to the hand-out PDF via headless Edge, then adds chapter bookmarks, clickable contents, running footers with page numbers, and metadata. `<details>` tables are forced open so the PDF is complete | `../digital-multitool-manual.pdf` |
 
 ## Regenerating
@@ -36,6 +36,42 @@ py -3 -m venv .venv
 .venv\Scripts\python build_manual.py
 .venv\Scripts\python make_pdf.py
 ```
+
+## Part II — the "How it works" addendum
+
+The tab chapters (Part I) answer *how do I drive this?*. Part II answers *how
+does it work?*, for the labmate who has to understand or extend the stack
+rather than operate it. Those chapters are **prose, not captures**, so they
+live outside `content.json`: one file per chapter, `addendum_a_*.json`,
+`addendum_b_*.json`, … in this folder. `build_manual.py` renders them in
+filename order after the tab chapters, and — because they join `SECTIONS`
+before `sections.json` is written — they pick up the print contents entry,
+the PDF bookmark and the running footer with no change to `make_pdf.py`.
+
+```
+{"id": "addendum-stack",                    # slug; the HTML anchor
+ "title": "How it works — the ...",         # the <h2>, and the PDF bookmark
+ "nav": "The instrument stack",             # optional short sticky-nav label
+ "sections": [{"heading": "...",                             # required
+               "paras":   ["...", ...],                      # optional
+               "bullets": ["...", ...],                      # optional
+               "table":   {"cols": [...], "rows": [[...]]},  # optional
+               "code":    "verbatim block"}]}                # optional
+```
+
+- **No addendum files is a valid manual** — the build simply has no Part II.
+- **A malformed file fails the build (exit 1) naming the file**, in the same
+  fail-closed spirit as `annotate.py`. That includes an *unknown* key: a
+  chapter that needs one teaches `build_manual.py` to render it in the same
+  PR, rather than shipping a chapter with a paragraph silently missing.
+- **Keep the title to one printed line.** `make_pdf.py` locates a chapter's
+  page by matching the title in the extracted page text; a wrapped `<h2>`
+  extracts with a newline through the middle and loses its bookmark (it says
+  so — `!! section not located`, and the bookmark tally at the end drops
+  below `n/n`). Check that tally after adding a chapter.
+- Prose blocks reuse the manual's own classes (`band`, `subh`, `tblwrap`),
+  so a Part II chapter looks native next to a tab chapter. Table column
+  names render in the control-table style — keep them short.
 
 **Hand the PDF to people** (`docs/digital-multitool-manual.pdf`) — it is the
 labmate-facing copy: cover + clickable contents, one chapter per page run,

@@ -477,9 +477,9 @@ Also send, once:
 - **P4 perturbs the control** (diameter or ratios outside the gates
   above) → the ring is not a free win, and `#198` gets *more* important,
   not less, because there is then no cheap physical fix.
-- **P1, P2 or P3 fails** → `#194` is closed on physical grounds and
-  `#198` is unblocked immediately at full scope. This is why P1–P3 are
-  cheap and come first.
+- **P1, P2 or P3 fails** → `#194` is answered *no* on physical grounds
+  and `#198` is unblocked immediately at full scope. This is why P1–P3
+  are cheap and come first.
 
 ---
 

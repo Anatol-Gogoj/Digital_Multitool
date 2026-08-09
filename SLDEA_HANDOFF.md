@@ -13,6 +13,88 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## Cross-run aggregate: the band means a different thing at each n, and the common grid is interpolated by default (2026-08-09)
+
+**TL;DR:** `#268` wants a mean curve across several runs with a shaded
+band. Decision, from Anatol: the band is the **standard error of the
+mean** (σ/√n) when averaging a family of runs, and the **calibrated
+±1–2 % budget** when averaging one run's pre/post pair. Pre/post drawn
+as separate lines keeps no band, which is what already ships. Runs are
+put on a **common grid by interpolation by default**, with exact-key
+pooling behind a toggle. The aggregate stops at the first breakdown.
+None of this is implemented yet — this entry is the policy the
+implementation has to satisfy.
+
+**Observation → decision.** Measured today on the five poolable P3-family
+runs, read-only from the campaign corpus, using A/A₀ so the pre-2026-07-28
+`active_area_mm2` scale bug divides out. (P3_7 carries no row tagged
+`baseline`, so it has no A₀ and drops out of every aggregate — five runs
+pool, not six. Worth knowing before any *n* is quoted in print.)
+
+*Why the family band is SEM, not the budget.* Per-level spread across
+runs is SD median 4.94 %, max 15.63 %; the corresponding SEM is median
+2.21 %, max 6.99 %. SEM exceeds the ±2 % end of the budget at **23 of 40
+levels, every one of them above 4 kV**. Below 4 kV the two are the same
+size (SEM 0.87–2.21 %) and either would look alike; above it the
+instrument stops being the limit and a budget band would overstate
+confidence in the mean by up to ~3.5×, exactly where the physics gets
+interesting. The line drawn is the mean, so the band belongs to the
+mean.
+
+*Why the pre/post pair takes the budget instead.* Two reasons, and the
+second is the real one. First, n = 2 is one degree of freedom — a SD
+from a pair carries ~76 % relative uncertainty on itself, so a
+calibrated external term beats it. Second, and decisive: the pre/post
+difference **is not a sampling error**. Across 200 complete pairs the
+direction is consistent in 4 or 5 of 5 runs at nearly every level, and
+it flips sign at breakdown — post-ramp reads *smaller* than pre-ramp
+below (−0.36 % to −1.77 %) and *larger* above (+1.11 % to +3.01 %).
+Treating that spread as random error would report relaxation as noise.
+This also confirms the existing suppression at `sldea_plot.py:711`: with
+pre/post drawn apart, the difference between the two lines is the
+information and a band would compete with it.
+
+*Why the aggregate stops at first breakdown.* Mean A/A₀ climbs to 2.041
+at 5.25 kV and then collapses to ~1.18–1.27 for the rest of the
+staircase. Past that point the average mixes intact and collapsed
+devices, which is not a physical quantity. The SD signature confirms the
+mechanism rather than merely suggesting it: spread spikes to ~15 %
+through the transition, then falls again at 5.75 kV as the runs
+re-agree on having collapsed.
+
+*Why the grid is interpolated by default.* Eight runs step 0.25 kV; one
+steps 0.2 and shares only eight levels with them. Exact-key pooling
+drops that run at 33 of 41 levels, so *n* alternates 4/5 level to level
+and the SEM band steps discontinuously for a reason that is an artifact
+of grid choice, not of the devices. Interpolation keeps *n* uniform.
+Three guardrails make it honest, and an implementation without them
+does not satisfy this decision: **never extrapolate** past a run's own
+measured range (the 0–5 kV and 0–6 kV runs must leave the aggregate
+above their maxima, not be extended into it); **never interpolate across
+a breakdown event**, since the curve is not smooth there — which the
+first-breakdown cap already mostly enforces; and **record per level how
+many contributing values were measured versus interpolated**, and
+surface it, because a level carried by one measured run and four
+interpolated ones is not the same evidence as five measured ones.
+Exact-key pooling stays available as a toggle for anyone who wants only
+real readings.
+
+*One thing this entry does NOT do.* The SEM figures above are an
+empirical descriptor of these five runs — one electrode family, two
+dates — not a budget term. `SLDEA_MEASUREMENT.md:196-201` already sets
+the house rule for this ("do not put a per-run spread in the budget…
+one operator, one disc, one method: that is a first data point, not a
+distribution"); that warning is about calibration repeatability, so it
+does not block SEM as a *band*, but the same logic applies and nobody
+should promote these numbers into the budget later. Note also that the
+budget for A/A₀ is **±1–2 %** (`SLDEA_MEASUREMENT.md:22`), a range, not
+the flat ±2 % that shorthand elsewhere has used; a figure caption should
+quote the range. The electrode-family grouping half of `#268` is
+untouched here and stays blocked — the `Electrode family:` field it keys
+on is carried by zero of the 13 corpus runs. (Decision Anatol,
+measurements in the 2026-08-09 session; both scripts kept in that
+session's scratch.)
+
 ## setup.txt stays a text document; structure, if ever needed, arrives as a sidecar (2026-08-08)
 
 **TL;DR:** Anatol asked whether `setup.txt` should become JSON or CSV.

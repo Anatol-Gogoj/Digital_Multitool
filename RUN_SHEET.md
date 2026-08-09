@@ -119,8 +119,10 @@ item in §B is the first thing on this sheet for a reason.
 - [ ] §O live telemetry verification.
 - [ ] `#159` live verify — one ramp, watch the scope-monitor auto-fix
       dialog, `measured_kV` tracks the whole ramp with no blank tail.
-- [ ] `#193` / `#194` exposure + fiducial-ring experiments (unblocks
-      P3_7; may shrink `#198`).
+- [ ] **§P fiducial contrast ring** (`BENCH_TEST.md`) — `#193` / `#194`
+      exposure + ring experiment as one procedure, ~2.5 h. Its P1/P2 steps
+      are dry and delegable from §C; everything after them is HV. Unblocks
+      P3_7, and its verdict sizes `#198`.
 - [ ] `SLDEA_20260729_104531` device autopsy — dead device vs HV not
       reaching the sample.
 

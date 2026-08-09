@@ -41,13 +41,13 @@ import math
 import os
 import subprocess
 import sys
+import tk_fontfix                      # must run before tkinter connects:
+tk_fontfix.apply()                     # colour-emoji glyphs hard-crash Tk
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import sldea_edge as se
 import sldea_plot as sp
-import tk_fontfix                      # must run before tkinter connects:
-tk_fontfix.apply()                     # colour-emoji glyphs hard-crash Tk
 
 # ASCII only: this is the one thing the module prints to a console, and a
 # Windows cp1252 console cannot carry the docstring's prose.

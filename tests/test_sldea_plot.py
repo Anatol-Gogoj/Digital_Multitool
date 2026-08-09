@@ -1451,6 +1451,35 @@ def test_cadence_guard_is_opt_in_and_no_breakdown_is_unchanged():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_the_cli_option_table_cannot_drift_from_make_opts():
+    """A figspec must never silently re-render a DIFFERENT figure.
+
+    `build_figspec` stores `dict(opts)` wholesale, so a new option lands in
+    the spec faithfully. But `_cli_opts` rebuilds the dict from a
+    hand-written val()/on()/off() table and drops every key that table does
+    not name -- returning err=None, so nothing anywhere reports it. The
+    result is a `--from-spec` render that claims to reproduce a figure and
+    does not: exactly the failure `load_figspec`'s validation exists to
+    prevent, and cannot catch, because such a spec is well-formed.
+
+    Measured 2026-08-09 with a fake `sem_band` key -- present in the spec,
+    absent after the round trip, err None -- while `logy` round-tripped
+    fine. This is the guard so the next option through the seam (`#268`)
+    cannot repeat it.
+    """
+    base, err = sp.make_opts()
+    assert err is None, err
+    out, err = sp._cli_opts([], {}, dict(base))
+    assert err is None, err
+    dropped = sorted(set(base) - set(out))
+    assert not dropped, (
+        f"_cli_opts drops {dropped}: add them to its val()/on()/off() table, "
+        "or --from-spec will silently render a different figure")
+    invented = sorted(set(out) - set(base))
+    assert not invented, \
+        f"_cli_opts invents keys make_opts never made: {invented}"
+
+
 def _run():
     names = [n for n in sorted(globals()) if n.startswith('test_')]
     for n in names:

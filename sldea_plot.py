@@ -72,9 +72,12 @@ Rendering:
       to one run's pre/post average and is suppressed under the aggregate,
       exactly as --prepost suppresses it. The runs are put on a common
       grid by interpolation, never extrapolated past a run's own measured
-      range and never interpolated across a breakdown, and each level
-      prints how many contributing values were measured and how many were
-      interpolated ('a+b'). --aggregate-exact pools only exact levels
+      range and never interpolated across a breakdown. The caption states
+      the aggregate's n; a level whose MEASURED support falls below that n
+      prints its own count above the x axis ('a+b' = a measured + b
+      interpolated), and no other level prints anything, so a family on one
+      grid draws a clean figure and a thinly interpolated level still
+      announces itself (`#312`). --aggregate-exact pools only exact levels
       instead. The aggregate stops at the first current-confirmed
       breakdown, past which the mean would mix intact and collapsed
       devices (`#268`, policy in SLDEA_HANDOFF.md 2026-08-09).
@@ -579,7 +582,9 @@ def levels(run, value=lambda r: r['area_mm2']):
 #      carried by one measured run and four interpolated ones is not the
 #      same evidence as five measured ones, and with a uniform n nothing
 #      else on the figure would tell them apart. Hence `n_measured` /
-#      `n_interpolated`, printed as a row of counts above the x axis.
+#      `n_interpolated` -- stated as ONE n in the caption, and printed per
+#      level only on the levels that fall short of it (`#312`; see
+#      `aggregate_thin_levels`).
 #
 # Guardrail 2 is NOT made redundant by the first-breakdown cap below, which
 # is the easy thing to assume: the cap drops grid levels at or above the
@@ -716,6 +721,38 @@ def aggregate_support(lv):
     first is still readable at a glance."""
     return (str(lv['n']) if not lv['n_interpolated']
             else f"{lv['n_measured']}+{lv['n_interpolated']}")
+
+
+def aggregate_full_n(ag):
+    """The aggregate's headline n: the LARGEST per-level contribution
+    count, which is the one the caption quotes. 0 for an empty
+    aggregate."""
+    return max((l['n'] for l in ag), default=0)
+
+
+def aggregate_thin_levels(ag):
+    """The levels whose MEASURED support falls below `aggregate_full_n`
+    -> the only levels that still carry a printed count (`#312`).
+
+    Every level used to print its own count, which put a row of identical
+    numbers under the curve and straight through the marker key. The
+    counts are not noise, though: guardrail 3 exists because a level
+    carried by one measured run and four interpolated ones is not the
+    evidence five measured runs are, and under the default interpolated
+    grid `n` is uniform, so nothing else on the figure separates them.
+
+    So the caption states the one n and this picks out the exceptions.
+    The test is `n_measured < full`, on MEASURED support and not on `n`,
+    and that choice is the whole point: comparing `n` alone would leave
+    the 1-measured-of-5 level unmarked at exactly full n, which is the
+    case the guardrail was written for. Since n_measured <= n <= full, a
+    level passes the test iff it has the full complement of runs AND
+    every one of them really measured this level -- so the marked set is
+    exactly {thin support} u {interpolated support}, and on a clean
+    single-grid family it is empty and the figure carries no counts at
+    all."""
+    full = aggregate_full_n(ag)
+    return [l for l in ag if l['n_measured'] < full]
 
 
 # ---------------------------------------------------------------------------
@@ -881,9 +918,45 @@ def _scale_caption(notes):
     return ('\n' + '  '.join(notes)) if notes else ''
 
 
+# Where the support counts sit, and where the marker key has to start, both
+# as POINTS above the axes floor -- never axes fractions (`#312`).
+#
+# The row used to be placed at axes y = 0.012 / 0.045 while the marker key
+# sat at loc='lower right', i.e. one of the two in fractions and the other
+# in font-sized padding. Those two agree at exactly one window size, and the
+# window is resizable: on the campaign corpus the key landed on top of the
+# counts and neither was readable. Points are the unit both are really made
+# of -- text does not shrink with the axes -- so with the row's own height
+# in the same unit the clearance below is arithmetic rather than a hope,
+# and it holds at every window size the window permits.
+#
+# Two staggered baselines because where two grids interleave the levels can
+# sit 0.05 kV apart, and a single row rendered n = 1, 5, 1 as "151" -- a
+# support count that reads as a different support count is worse than none.
+SUPPORT_FONT_PT = 6.0
+SUPPORT_ROW_PT = (3.0, 12.0)
+# COMPUTED from the row, not typed beside it: the top of the taller row
+# plus 6 pt of daylight. Retyping it is how a clearance stops clearing
+# anything the first time somebody nudges the font size.
+MARKER_KEY_LIFT_PT = max(SUPPORT_ROW_PT) + SUPPORT_FONT_PT + 6.0
+
+
+def _pt_above_axes(ax, pt, base=None):
+    """`base` (default the axes transform) shifted UP by `pt` points.
+
+    A lazy offset, evaluated at draw time: draw_area adds its artists
+    before tight_layout and the window re-lays the figure on every
+    resize, so anything measured in pixels here would be stale by the
+    time it is drawn."""
+    from matplotlib.transforms import offset_copy
+    return offset_copy(ax.transAxes if base is None else base,
+                       fig=ax.get_figure(), x=0, y=pt, units='points')
+
+
 def _aggregate_series(ax, ag, band=True, labels=True):
-    """The aggregate mean curve + its SEM band + the per-level support
-    labels -> the (x, y) pairs it plotted, for the log-scale policy.
+    """The aggregate mean curve + its SEM band + a support count on the
+    levels that earn one -> the (x, y) pairs it plotted, for the
+    log-scale policy.
 
     SQUARE markers, not the round ones every run curve uses: the figure
     already spends open/closed circles on the hand-traced/machine
@@ -916,19 +989,25 @@ def _aggregate_series(ax, ag, band=True, labels=True):
         # each other where the mean turns over -- measured on the five
         # poolable corpus runs, where the peak is exactly where the counts
         # matter most. get_xaxis_transform is x-in-data, y-in-axes, so the
-        # row stays put whatever the y scale does (including --logy).
-        # STAGGERED over two rows. Where two grids interleave the levels
-        # can sit 0.05 kV apart, and a single row rendered n = 1, 5, 1 as
-        # "151" -- a support count that reads as a different support count
-        # is worse than none. Alternating heights doubles the room each
-        # label has without dropping any of them, and dropping some is not
-        # available: the thin levels are exactly the ones guardrail 3 is
-        # for (seen on the 0.2-vs-0.25 kV corpus pair, --aggregate-exact).
+        # row stays put whatever the y scale does (including --logy), and
+        # _pt_above_axes puts its two heights in the same unit the marker
+        # key clears them by.
+        #
+        # ONLY THE EXCEPTIONS (`#312`). A count per level printed the same
+        # number forty times over and ran the row under the marker key;
+        # the caption now states the one n and `aggregate_thin_levels`
+        # picks out the levels that fall short of it. The stagger is
+        # indexed by position in `ag`, not in the marked subset, so two
+        # marked neighbours still alternate.
+        thin = {id(l) for l in aggregate_thin_levels(ag)}
         for i, l in enumerate(ag):
-            ax.text(l['kv'], 0.012 if i % 2 == 0 else 0.045,
-                    aggregate_support(l),
-                    transform=ax.get_xaxis_transform(), ha='center',
-                    va='bottom', fontsize=6, color='#444444', zorder=7)
+            if id(l) not in thin:
+                continue
+            ax.text(l['kv'], 0.0, aggregate_support(l),
+                    transform=_pt_above_axes(
+                        ax, SUPPORT_ROW_PT[i % 2], ax.get_xaxis_transform()),
+                    ha='center', va='bottom', fontsize=SUPPORT_FONT_PT,
+                    color='#444444', zorder=7)
     return pts
 
 
@@ -958,6 +1037,17 @@ def _aggregate_caption(runs, ag, opts, cap):
             if cap is not None else
             "No current-confirmed breakdown among these runs, so the "
             "first-breakdown cap did not fire.")
+    # n IN THE CAPTION, exceptions on the figure (`#312`). The row of
+    # per-level counts printed the same number at every level and ran
+    # under the marker key; one sentence carries it, and the levels that
+    # fall short of it keep their own count where it means something.
+    full = aggregate_full_n(ag)
+    thin = aggregate_thin_levels(ag)
+    support = (f"n = {full} at every level, all measured."
+               if not thin else
+               f"n = {full} at every level except the {len(thin)} marked "
+               f"above the x axis, where 'a+b' = a measured + b "
+               f"interpolated.")
     # THREE lines, not one, and each kept under ~215 characters: at 7 pt
     # on a 12.6 in figure anything longer runs off the right edge, which
     # is how the first draft of this lost the cap sentence entirely. The
@@ -965,8 +1055,7 @@ def _aggregate_caption(runs, ag, opts, cap):
     # A caption a reader cannot finish is not a caption.
     return ('\n' + head
             + '\n' + grid
-            + '\n' + "Row of counts above the x axis = n contributing runs "
-                     "('a+b' = a measured + b interpolated).  " + stop)
+            + '\n' + support + '  ' + stop)
 
 
 def _warn_aggregate(runs, ag, opts, cap, warn):
@@ -993,9 +1082,9 @@ def _warn_aggregate(runs, ag, opts, cap, warn):
         warn(f"aggregate: {len(interp)} of {len(ag)} levels carry "
              f"interpolated contributions (thinnest measured support: "
              f"{worst['kv']:g} kV, {worst['n_measured']} measured / "
-             f"{worst['n_interpolated']} interpolated) -- the per-level "
-             f"'a+b' labels on the figure carry the same counts, and "
-             f"--aggregate-exact pools only real readings")
+             f"{worst['n_interpolated']} interpolated) -- every level "
+             f"short of the caption's n carries its own 'a+b' count on "
+             f"the figure, and --aggregate-exact pools only real readings")
     thin = [l for l in ag if l['n'] < n_runs]
     if thin:
         warn(f"aggregate: {len(thin)} of {len(ag)} levels are supported by "
@@ -1076,14 +1165,21 @@ MARKER_KEY_ROWS = (('hand-traced (outer toe)', 'white'),
                    ('machine (half-height)', '#666666'))
 
 
-def _marker_key(ax, main_legend):
+def _marker_key(ax, main_legend, lift=False):
     """Draw the open/closed marker key as a SECOND compact legend.
 
     Its own legend in the opposite corner rather than two more rows in the
     run legend: the run list is what a reader scans to tell the curves
     apart, and a fixed key that grows it pushes the runs down the figure
     on every plot. Placed lower right because area curves rise to the
-    right of the panel the run legend sits in."""
+    right of the panel the run legend sits in.
+
+    `lift` is the aggregate's support row asking for its own floor
+    (`#312`): the two share the bottom-right corner, so the key starts
+    MARKER_KEY_LIFT_PT above the axes floor rather than at it whenever
+    that row is on this axis. Lifted by shifting the whole anchor box up
+    -- the same corner, the same font padding, just a higher floor -- so
+    a figure without the row lays out to the pixel it always did."""
     from matplotlib.lines import Line2D
     if main_legend is not None:
         ax.add_artist(main_legend)
@@ -1092,9 +1188,12 @@ def _marker_key(ax, main_legend):
                       markeredgecolor='#666666', markeredgewidth=1.2,
                       label=label)
                for label, fill in MARKER_KEY_ROWS]
+    extra = ({} if not lift else
+             {'bbox_to_anchor': (0.0, 0.0, 1.0, 1.0),
+              'bbox_transform': _pt_above_axes(ax, MARKER_KEY_LIFT_PT)})
     return ax.legend(handles=proxies, fontsize=7, loc='lower right',
                      framealpha=0.9, title='marker fill',
-                     title_fontsize=7)
+                     title_fontsize=7, **extra)
 
 
 def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
@@ -1218,6 +1317,10 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
         run_handles.append(Line2D([], [], color=color, label=run['name']))
 
     agg_caption = ''
+    # did the aggregate actually PRINT a count on the legend axis? Only
+    # then does the marker key give up the bottom of its corner (`#312`) --
+    # a figure with nothing to mark keeps the layout it always had.
+    agg_support_row = False
     if opts.get('aggregate'):
         cap_kv = aggregate_cap_kv(runs)
         # n = 1 is a REFUSAL, not a fallback (`#268`, decided 2026-08-09):
@@ -1236,6 +1339,8 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
             if not ag:
                 continue
             pts = _aggregate_series(ax, ag, band=band, labels=ax is label_ax)
+            if ax is label_ax:
+                agg_support_row = bool(aggregate_thin_levels(ag))
             xs_all += [x for x, _ in pts]
             sink += [y for _, y in pts]
         if ag:
@@ -1283,7 +1388,7 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                            {'linestyle': '--'}))
     main_legend = _legend(legend_ax, run_handles, style_rows)
     if opts.get('marker_key', True):
-        _marker_key(legend_ax, main_legend)
+        _marker_key(legend_ax, main_legend, lift=agg_support_row)
 
     cap = ("Points = per-level pre/post snapshot pair"
            + (" (post solid, pre dashed)" if opts['prepost']

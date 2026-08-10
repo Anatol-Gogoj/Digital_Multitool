@@ -1575,7 +1575,25 @@ def write_tidy(runs, path):
 # grow its own idea of what a figure's options or filenames are.
 #
 # ---------------------------------------------------------------------------
-# ADDING A NEW OPTION: five landing sites, and four of them fail SILENTLY
+# ADDING A NEW OPTION: SEVEN landing sites, and five of them fail SILENTLY
+#
+# It was five until `#314`. Two more surfaced there, and neither was a
+# special case -- each is the general form of a category the original five
+# happened not to cover:
+#
+#   6. output_paths(). SILENT. Only matters for an option that changes an
+#      ARTIFACT NAME rather than the figure's content; `fmt` was the first.
+#      Miss it and the file is written with the wrong extension.
+#   7. sldea_plot_gui.NUMERIC_OPTIONS. SILENT. The remembered-options
+#      cleaner validated enums and flags only, because every remembered
+#      option had been one or the other; `dpi` was the first NUMBER. Miss
+#      it and a corrupt value in the options file survives a round trip
+#      instead of being rejected.
+#
+# The lesson generalises: the count is not the point. Before adding an
+# option, ask which CATEGORY it belongs to -- flag, name, number, artifact
+# name -- and whether that category has ever existed here before. A first
+# of its kind will find a site this list does not have yet.
 #
 # Every option currently here is plumbed correctly, so nothing is broken --
 # this is a map, written down because the next option through this seam

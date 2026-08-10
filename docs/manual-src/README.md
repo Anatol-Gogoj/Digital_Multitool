@@ -12,12 +12,48 @@ manual's own footer after every rebuild.
 
 | Script | What it does | Output (in `build/`, untracked) |
 |---|---|---|
-| `capture.py` | Launches the real `gui.py` (window pops up briefly), screenshots the splash, all 9 tabs, the Arb Editor and both export dialogs, and records the bbox of every labelled widget | `shots/*.png`, `shots/widgets.json` |
+| `capture.py` | Launches the real `gui.py` (window pops up briefly), screenshots the splash, all 9 tabs (one `tab_<slug>.png` each — see **Tab slugs**), the Arb Editor and both export dialogs, and records the bbox of every labelled widget | `shots/*.png`, `shots/widgets.json` |
 | `capture_edge_review.py` | Opens Edge Review on a real run (defaults to bench run 1), runs a blocking detection pass, screenshots a frame showing all three candidates. Never clicks Save | `shots/40_edge_review.png` (+ appends to `widgets.json`) |
 | `capture_tuner_dialog.py` | Screenshots the Tune-params advanced-tool gate, then takes the Cancel path | `shots/41_tuner_warning.png` |
 | `annotate.py` | Draws the red capsules, arrows and numbered badges from curated per-image specs, matching callouts to exact widget `text=` strings | `annotated/*.png`, `annotated/legends.json` |
 | `build_manual.py` | Assembles the HTML from `content.json` (the manual copy) + legends + images, then appends the Part II chapters from `addendum_*.json` | `../digital-multitool-manual.html`, `sections.json` |
 | `make_pdf.py` | Renders the HTML to the hand-out PDF via headless Edge, then adds chapter bookmarks, clickable contents, running footers with page numbers, and metadata. `<details>` tables are forced open so the PDF is complete | `../digital-multitool-manual.pdf` |
+
+## Tab slugs — how the pipeline names a tab
+
+Every notebook tab has a **stable slug**: `lcr`, `scope`, `siggen`, `psu`,
+`dmm`, `logging`, `battery`, `webcam`, `sldea`. They live in ONE place,
+`MANUAL_TABS` in the repo's `gui.py`, and each built tab widget is tagged
+with its slug (`.manual_slug`). The slug is the tab's identity; the
+on-screen label is prose and the position in the notebook is layout —
+**both are free to change**.
+
+Everything downstream keys off the slug:
+
+| Where | Looks like |
+|---|---|
+| `capture.py` screenshot | `shots/tab_logging.png` (+ `tab_logging_bottom.png` when the tab scrolls) |
+| `annotate.py` callout spec | `S["tab_logging"]` |
+| `annotate.py` legend | `legends["tab_logging"]` |
+| `content.json` entry | `"logging": {...}` (its `key` is the slug; its `area` records the on-screen label as *data*) |
+| `build_manual.py` chapter | `section("logging", "Data Logging", ...)` — also the `<section id>` and the NAV/SECTIONS id |
+
+Before 2026-08-09 the shot name was built at capture time as
+`f"{i+1:02d}_{label-with-non-alnum-underscored}"` — the tab's **display
+label** plus its **position** — and every consumer hardcoded the result
+(`06_Data_Logging`). Renaming a tab, or merely inserting one before it,
+renamed the files under the whole pipeline. That is why `#30` ("rename Data
+Logging to Continuous Logging") looked like a one-string change and was not.
+
+Changing a tab's on-screen label is now genuinely a one-string change: edit
+the `notebook.add(..., text=...)` in `gui.py` and the chapter title in
+`build_manual.py` if you want the manual's heading to follow. Nothing else
+moves. **Adding** a tab means adding its slug to `MANUAL_TABS`, a
+`content.json` entry under that slug, and a `section()` call — and each of
+those three is enforced: `capture.py` refuses a tab with no slug,
+`build_manual.py` refuses a `content.json` entry no section renders, and
+`tests/test_gui_tabs.py` pins the slugs and the `content.json` keys together
+so the drift is caught by the test suite, not by the next release.
 
 ## Regenerating
 
@@ -118,6 +154,12 @@ Notes:
   `!! no match` and the callout silently vanished from the shipped manual —
   the 📏 Calibrate… callout was lost that way when the button grew
   " / re-anchor".)
+- `annotate.py` also **exits naming the shot** when a spec keys on an image
+  that is not in `widgets.json` — what a half-finished tab rename looks like
+  from the annotate stage. It lists what *was* captured. Note that a spec's
+  `match`/`union` strings are on-screen `text=` literals, **not** slugs: a
+  reworded control needs its new literal, and the miss report above is what
+  makes that loud.
 - `content.json` is the manual's written copy (per-tab purpose, controls,
   steps, cautions). Edit it directly for wording changes — several entries
   were **corrected after a code audit** (notably: closing the app does NOT

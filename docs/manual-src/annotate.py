@@ -82,10 +82,24 @@ def resolve(img, spec):
 
 
 # ---------------------------------------------------------------- specs
+#
+# TWO DIFFERENT NAMESPACES live in this table, and only one of them was ever
+# tied to the running app:
+#   * the S[...] KEYS are shot names -- for tabs, "tab_<slug>", where the
+#     slug is the tab's stable id from gui.MANUAL_TABS. They used to be
+#     "06_Data_Logging"-style names built at capture time from the tab's
+#     DISPLAY LABEL and its POSITION, so a rename or a reorder silently
+#     renamed every file this table keys on.
+#   * every "match"/"union" string is the literal on-screen `text=` of a
+#     widget, matched through find() against widgets.json. Those are NOT
+#     slugs and must never be "tidied" to look like one: a control that
+#     gets reworded needs its new literal here, and until it does the build
+#     fails at the MISSES report below.
+# A key naming no captured shot is caught at the top of annotate().
 S = {}
 
 S["overview"] = {
-    "source": "01_LCR_Meter__BK_894_",
+    "source": "tab_lcr",
     "callouts": [
         {"match": "__tabstrip__", "label": "One tab per instrument or job — click to switch"},
         {"match": "Tools", "label": "Tools menu — bench profiles & software update"},
@@ -98,7 +112,7 @@ S["overview"] = {
     ],
 }
 
-S["01_LCR_Meter__BK_894_"] = {
+S["tab_lcr"] = {
     "callouts": [
         {"match": "Mode:", "extend_right": 195, "label": "Measurement pair — CPD = capacitance + dissipation"},
         {"union": ["Frequency (Hz):", "Voltage (V):"], "extend_right": 160,
@@ -114,7 +128,7 @@ S["01_LCR_Meter__BK_894_"] = {
     ],
 }
 
-S["02_Oscilloscope__MSO24_"] = {
+S["tab_scope"] = {
     "callouts": [
         {"rect": [24, 179, 244, 26], "badge_side": "right",
          "label": "Per-channel setup — one inner tab per channel (CH1–CH4)"},
@@ -129,7 +143,7 @@ S["02_Oscilloscope__MSO24_"] = {
     ],
 }
 
-S["03_Signal_Gen__BK_4055B_"] = {
+S["tab_siggen"] = {
     "callouts": [
         {"match": "Waveform:", "extend_right": 150, "badge_side": "right",
          "label": "Waveform type — the fields below adapt to it"},
@@ -143,7 +157,7 @@ S["03_Signal_Gen__BK_4055B_"] = {
     ],
 }
 
-S["04_DC_Supply__BK_9174B_"] = {
+S["tab_psu"] = {
     "callouts": [
         {"union": ["Set Voltage (V):", "Current Limit (A):"], "extend_right": 55,
          "label": "Stage voltage and current ceiling (CC — not a fuse)"},
@@ -155,7 +169,7 @@ S["04_DC_Supply__BK_9174B_"] = {
     ],
 }
 
-S["05_DMM__BK_5493C_"] = {
+S["tab_dmm"] = {
     "callouts": [
         {"match": "IP:", "extend_right": 95, "label": "The meter's LAN address — this unit is Ethernet-only"},
         {"match": "Reconnect", "label": "Connect / retry at this IP"},
@@ -167,7 +181,7 @@ S["05_DMM__BK_5493C_"] = {
     ],
 }
 
-S["06_Data_Logging"] = {
+S["tab_logging"] = {
     "callouts": [
         {"match": "Log Directory:", "extend_right": 260, "label": "All CSV files land here (default ./logs)"},
         {"match": "Sample Interval (s):", "extend_right": 60, "label": "Seconds between samples"},
@@ -179,7 +193,7 @@ S["06_Data_Logging"] = {
     ],
 }
 
-S["07_Battery_Data"] = {
+S["tab_battery"] = {
     "callouts": [
         {"match": "Load File…", "badge_at": [19, 260], "label": "Open the raw cycler .xls/.xlsx export"},
         {"match": "No file loaded", "label": "Shows filename + rows × columns when processed"},
@@ -190,7 +204,7 @@ S["07_Battery_Data"] = {
     ],
 }
 
-S["08_Webcam"] = {
+S["tab_webcam"] = {
     "callouts": [
         {"union": ["Camera:", "Refresh"], "extend_right": 40, "badge_at": [70, 258],
          "label": "Pick the camera; Refresh rescans devices"},
@@ -204,7 +218,7 @@ S["08_Webcam"] = {
     ],
 }
 
-S["09_SLDEA_Test"] = {
+S["tab_sldea"] = {
     "callouts": [
         {"match": "Test Profile (voltages in kV",
          "label": "The voltage staircase — start/end/step, ramp and landing times (the 0 kV reference photo is always taken)"},
@@ -355,7 +369,18 @@ def place_badge(rect, occupied, img_w, img_h, soft=(), r=16, side=None):
 
 
 def annotate(name, spec):
-    src = images[spec.get("source", name)]
+    want = spec.get("source", name)
+    if want not in images:
+        # Loud, with the list, rather than a bare KeyError: this is what a
+        # half-finished tab rename looks like from here -- the spec keys on
+        # a shot slug capture.py no longer writes.
+        sys.exit(
+            f"annotate.py FAILED -- spec {name!r} wants shot {want!r}, which "
+            "is not in widgets.json.\n"
+            f"  Captured: {', '.join(sorted(images))}\n"
+            "  Tab shots are named tab_<slug> from gui.py MANUAL_TABS. Fix "
+            "the S[...] key, or re-run the capture stage (README.md).")
+    src = images[want]
     im = Image.open(os.path.join(
         SHOTS, os.path.basename(src["file"]))).convert("RGB")
     d = ImageDraw.Draw(im)

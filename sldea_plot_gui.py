@@ -37,11 +37,20 @@ Two things the window remembers or reaches for, both additive:
   * the draw options are remembered PER PARENT FOLDER in a per-user file
     (`#275`), never in a run folder and never in the repo. Precedence is
     explicit CLI/init args > remembered > defaults, and a corrupt or
-    stale file can only cost the memory, never the window;
+    stale file can only cost the memory, never the window. With runs
+    from SEVERAL folders on one figure (`#323`) the memory is keyed on
+    the FIRST folder, and the window says which one above the run list;
   * each empty heading box shows, in grey, the heading that panel will
     actually carry (`#315`) -- a HINT and never a value, so blank still
     means 'no override' and no derived wording can reach the options file
-    or an exported figspec. See the block above HINT_FG.
+    or an exported figspec. See the block above HINT_FG;
+  * runs can be put in named GROUPS (`#313`), and the cross-run aggregate
+    then draws one mean per group -- carbon black against P3, two lines
+    on one panel -- with a tick box that hides the contributing runs so
+    the panel carries the comparison and not the thicket. The grouping is
+    the operator's; nothing is read from setup.txt, which is why it works
+    on every run in the corpus and the parked `Electrode family:` half of
+    `#268` does not.
 """
 import math
 import os
@@ -212,31 +221,53 @@ def split_target(path):
 
 
 def initial_state(args):
-    """-> (parent, [names to preselect]).
+    """-> ([parent folders, first one first], [run DIRECTORIES to
+    preselect]).
 
     Several run arguments preselect several runs -- the whole point of the
-    tool is more than one run on a figure. Runs from different parents
-    cannot be listed at once, so the FIRST argument picks the parent and
-    the rest preselect only if they live there (the others are still
-    reachable via Browse)."""
-    parent, preselect = None, []
+    tool is more than one run on a figure.
+
+    IT USED TO RETURN ONE PARENT (`#323`). The first argument picked it
+    and every argument living anywhere else was silently dropped: the
+    window listed one folder, so a run from a second one had nowhere to
+    appear. That is not a listing quirk, it is the reason the comparison
+    the campaign exists for could not be drawn at all -- carbon black
+    lives under `Upload 20260805\\SL Ramp Test Initial CB` and the P3
+    family under `Upload 20260804\\SLDEA_data (1)`, and no single parent
+    contains both. Now every argument's parent joins the list, in
+    argument order, and the preselection is by DIRECTORY rather than by
+    name, because two runs in different parents can share a name and a
+    name is no longer an identity here.
+
+    The FIRST parent stays special, and only for the two things that need
+    a single answer: the remembered-options key and the default output
+    folder. Both say so where they are used, rather than merging several
+    parents' state into something no operator asked for."""
+    parents, preselect = [], []
     for a in args or ():
         p, name = split_target(a)
         if p is None:
             continue
-        if parent is None:
-            parent = p
-        if name and p == parent:
-            preselect.append(name)
-    if parent is None:
-        parent, name = split_target(DEFAULT_PARENT)
+        if p not in parents:
+            parents.append(p)
         if name:
-            preselect = [name]
-    return parent or DEFAULT_PARENT, preselect
+            preselect.append(os.path.join(p, name))
+    if not parents:
+        p, name = split_target(DEFAULT_PARENT)
+        if p:
+            parents.append(p)
+            if name:
+                preselect = [os.path.join(p, name)]
+    return parents or [DEFAULT_PARENT], preselect
 
 
 def default_out_dir(parent):
-    """Figures land beside the runs, never inside one."""
+    """Figures land beside the runs, never inside one.
+
+    `parent` is the FIRST parent when several are in play (`#323`): a
+    figure drawn from two campaigns has to be filed under one of them,
+    and the one the window opened on is the only choice that does not
+    move when a folder is added or removed."""
     return os.path.join(parent or os.getcwd(), OUT_SUBDIR)
 
 
@@ -278,9 +309,22 @@ OPTIONS_FALLBACK = os.path.join(os.path.expanduser('~'), '.cache',
 # deliberately absent below while every other drawing option joins.
 # Not the run selection either -- a campaign gains runs, and reopening on
 # a stale set would quietly plot the wrong batch.
+#
+# `groups` IS REMEMBERED, and it is the one entry here that names
+# particular runs -- which is exactly what the paragraph above says is
+# never remembered. The distinction is real and worth stating (`#313`):
+# the run SELECTION is what a figure is drawn from, so a stale one plots
+# the wrong batch silently. A grouping is a LABELLING of runs the
+# operator has already told us about, keyed on absolute run directories,
+# and it changes nothing unless a run it names is both selected AND the
+# aggregate is on. So a stale group is inert rather than wrong, while
+# re-typing 'these six are P3' every session is a real cost paid every
+# session. Remembered under the FIRST parent, like everything else here
+# (`#323` made 'the parent' a list; see options_key).
 REMEMBERED = ('mode', 'prepost', 'mean', 'bands', 'breakdown', 'vs_area',
               'logx', 'logy', 'marker_key', 'subplots', 'cadence_guard',
-              'aggregate', 'aggregate_exact', 'fmt', 'dpi')
+              'aggregate', 'aggregate_exact', 'groups', 'aggregate_only',
+              'fmt', 'dpi')
 
 # The remembered options that are NAMES rather than flags, each with the
 # vocabulary sldea_plot validates it against -- read from sldea_plot so a
@@ -294,10 +338,28 @@ ENUM_OPTIONS = {'mode': sp.MODES, 'subplots': sp.SUBPLOTS,
 # config cannot smuggle a dpi past the refusal make_opts would give it.
 NUMERIC_OPTIONS = {'dpi': sp.check_dpi}
 
+# ...and the ones that are STRUCTURES (`#313` brought the first). Same
+# principle again, and the reason the seam's landing-site map now has a
+# note about it: `groups` is a list of (name, run dirs) pairs, so neither
+# the enum test nor the number test nor the isinstance(bool) test below
+# would have recognised it, and an unvalidated one out of a hand-edited
+# config -- two groups with the same name, one run in both -- would have
+# reached make_opts and been refused there, which in the window means an
+# error message where the figure goes, from a file the operator never
+# opened.
+STRUCTURED_OPTIONS = {'groups': sp.check_groups}
+
 
 def options_key(parent):
     """The config key for a parent folder: absolute, and normcase'd
-    because Windows paths differ in case without differing."""
+    because Windows paths differ in case without differing.
+
+    With several parents on one figure (`#323`) this is given the FIRST
+    of them, deliberately and visibly: the window prints which folder its
+    memory is filed under. Merging several parents' entries was the other
+    candidate and it has no defensible answer to 'which one wins' -- the
+    same two folders opened in the other order would restore different
+    options, which is a memory that cannot be reasoned about."""
     try:
         return os.path.normcase(os.path.abspath(parent or ''))
     except (OSError, ValueError):
@@ -325,8 +387,20 @@ def _clean_options(d):
             # dropped like any other unrecognizable entry
             if err is None and d[k] is not None:
                 out[k] = value
+    for k, check in STRUCTURED_OPTIONS.items():
+        # the SHAPE is tested here and the CONTENTS by the engine's own
+        # checker. A present-but-wrong-shaped entry (a string, a null) is
+        # dropped like every other unrecognizable one rather than being
+        # read as 'no groups' -- 'repair' is what this function does not
+        # do. An empty list IS a valid value and is kept, so a round trip
+        # through the file returns exactly what was written to it.
+        if isinstance(d.get(k), (list, tuple)):
+            value, err = check(d[k])
+            if err is None:
+                out[k] = value
     for k in REMEMBERED:
         if (k not in ENUM_OPTIONS and k not in NUMERIC_OPTIONS
+                and k not in STRUCTURED_OPTIONS
                 and isinstance(d.get(k), bool)):
             out[k] = d[k]
     if isinstance(d.get('out_dir'), str) and d['out_dir'].strip():
@@ -449,6 +523,14 @@ def plot_points(runs, opts, panel=0):
     power through power_mw -- so a row can only appear here if the figure
     drew something for it.
     """
+    # NOTHING is clickable when the per-run curves are hidden (`#313`):
+    # the only marks left are group means, and a mean is not a frame.
+    # Returning the rows anyway would resolve a double-click against
+    # markers that are not on the figure -- the click-through would open
+    # Edge Review on a frame nobody could see, which is worse than the
+    # silence `#311` spent a week diagnosing. on_click says so in words.
+    if opts.get('aggregate_only') and opts.get('aggregate'):
+        return []
     out = []
     for run in runs:
         if opts['mode'] == 'area':
@@ -679,6 +761,17 @@ DRAW_TIPS = {
         "Interpolation never extrapolates past a run's own range and "
         "never crosses a breakdown, and the figure prints how many "
         "values at each level were measured versus interpolated."),
+    'aggregate_only': (
+        "Draws the aggregate means ALONE — the per-run curves, their "
+        "markers and their breakdown X marks are all left off, so a "
+        "CB-against-P3 panel is two lines and not fifteen (`#313`). "
+        "Nothing is thrown away: every contributing run is still loaded, "
+        "still guarded and still written to the tidy CSV in full, with "
+        "the group it was in. Needs the aggregate above — on its own "
+        "there would be nothing left to draw, so the engine refuses the "
+        "pair rather than handing back an empty figure. Note that "
+        "double-click-to-open-a-frame goes quiet while the runs are "
+        "hidden: the points it resolves are the per-run markers."),
     'subplots': (
         "Which of the mode's panels render — a single chosen panel "
         "becomes the figure's ONLY axes and fills the canvas instead of "
@@ -692,6 +785,50 @@ DRAW_TIPS = {
         "Replaces the second panel's built-in heading; area mode only, "
         "because current and power draw a single panel."),
 }
+
+# Hover text for the run-folder buttons (`#323`) and the group editor
+# (`#313`). Module constants for the reason every other tooltip here is
+# one: a test can read them, and the sentence that has to stay true --
+# that the memory is keyed on ONE of several folders -- sits somewhere
+# findable rather than inline at a widget.
+BROWSE_TIP = (
+    "ADDS a folder of runs to the list; it does not replace the one "
+    "already there (`#323`). That is the whole point: the campaign's two "
+    "electrode families live under different Upload folders, so a "
+    "carbon-black-against-P3 figure needs runs from more than one parent "
+    "and used to be impossible to draw at all. Runs are listed with the "
+    "folder they came from, because two runs in different folders can "
+    "share a name.")
+
+DROP_FOLDERS_TIP = (
+    "Goes back to the folder this window opened on, dropping the ones "
+    "added since. The remembered options and the default output folder "
+    "are keyed on that FIRST folder and do not move when you add or drop "
+    "others — the window names it above the list, so which one is never "
+    "a guess.")
+
+GROUP_ASSIGN_TIP = (
+    "Type a name, select runs on the left, press Assign: those runs "
+    "become that group, and the cross-run aggregate then draws ONE MEAN "
+    "PER GROUP instead of one mean over everything (`#313`). Two groups "
+    "give the CB-against-P3 comparison the campaign is for.\n\n"
+    "The grouping is YOURS — nothing is read from setup.txt. The "
+    "'Electrode family:' field exists but no run in the corpus carries "
+    "it, so grouping by hand is what works on the runs that exist.\n\n"
+    "Each group's band follows the same decided rule as the ungrouped "
+    "aggregate, computed from that group's own runs: SEM for two runs or "
+    "more, and for a single run NO band plus a caption saying an "
+    "aggregate needs at least two. A run belongs to at most one group.")
+
+GROUP_UNGROUP_TIP = (
+    "Takes the selected runs out of whatever group they are in, leaving "
+    "the other groups alone. A run in no group is still drawn; it just "
+    "averages into nothing, and the console says so.")
+
+GROUP_CLEAR_TIP = (
+    "Forgets every group. The aggregate goes back to one mean over every "
+    "selected run, which is what it drew before groups existed.")
+
 
 # Hover text for the two options that describe the FILE rather than the
 # drawing (`#314`). Their own dict because they belong to the Export box
@@ -980,8 +1117,16 @@ class PlotWindow:
     def __init__(self, root, parent_dir, preselect=(), opts=None,
                  out_dir=None, stem=None, explicit=None, remember=True):
         self.root = root
-        self.parent = parent_dir
-        self.runs = []                 # [(name, label)] currently listed
+        # `#323`: SEVERAL parent folders, in the order they arrived, and
+        # `self.parent` is the first of them -- the one the options file
+        # and the default output folder are keyed on. A single string is
+        # still accepted here because every caller but launch() passes
+        # one, and a window that took a list only would break them all
+        # for no gain.
+        self.parents = ([parent_dir] if isinstance(parent_dir, str)
+                        else [p for p in (parent_dir or []) if p]
+                        or [DEFAULT_PARENT])
+        self.runs = []                 # [(rundir, label)] currently listed
         self._loaded = {}              # rundir -> loaded run dict (cache)
         self._prepared = []            # what the canvas is currently showing
         self._drawn_key = None         # ...and what it was derived from
@@ -1001,7 +1146,7 @@ class PlotWindow:
         # entirely (the tests, and anything that must be reproducible).
         self.remember = remember
         o = sp.make_opts()[0]
-        mem = load_options(parent_dir) if remember else {}
+        mem = load_options(self.parent) if remember else {}
         self.remembered = mem
         o.update({k: v for k, v in mem.items() if k in REMEMBERED})
         if opts:
@@ -1032,6 +1177,17 @@ class PlotWindow:
         self.v_cadence = tk.BooleanVar(value=o['cadence_guard'])
         self.v_aggregate = tk.BooleanVar(value=o['aggregate'])
         self.v_aggregate_exact = tk.BooleanVar(value=o['aggregate_exact'])
+        self.v_aggregate_only = tk.BooleanVar(value=o['aggregate_only'])
+        # `#313`. NOT a Tk variable: the grouping is a mapping from run
+        # directory to group name, which no Tk variable type can hold, so
+        # it lives here and current_opts renders it into opts' canonical
+        # form. `_group_order` keeps the operator's group order, because
+        # that order picks the colours (sp.group_style) and a set would
+        # repaint the figure on every reload.
+        self.groups = {}               # run key -> group name
+        self._group_order = []         # group names, creation order
+        self._set_groups(o['groups'])
+        self.v_group_name = tk.StringVar(value='')
         self.v_subplots = tk.StringVar(value=o['subplots'])
         self.v_title_first = tk.StringVar(value=o['title_first'] or '')
         self.v_title_second = tk.StringVar(value=o['title_second'] or '')
@@ -1043,7 +1199,7 @@ class PlotWindow:
         self.v_dpi = tk.StringVar(value=str(o['dpi']))
         chosen_out = out_dir or mem.get('out_dir')
         self.v_out = tk.StringVar(
-            value=chosen_out or default_out_dir(parent_dir))
+            value=chosen_out or default_out_dir(self.parent))
         self.v_stem = tk.StringVar(value=stem or '')
         self._out_chosen = bool(chosen_out)  # did someone pick it themselves?
 
@@ -1059,6 +1215,91 @@ class PlotWindow:
             root.protocol('WM_DELETE_WINDOW', self._closing)
         except tk.TclError:                # not a toplevel to ask
             pass
+
+    # -- parents and groups ------------------------------------------------
+
+    @property
+    def parent(self):
+        """The FIRST parent folder, which is the one two things are keyed
+        on and nothing else is (`#323`): the remembered-options entry and
+        the default output folder. Read-only on purpose -- `#323` made
+        the answer to "the parent" a list, and code that assigns a new
+        one is code that has not noticed."""
+        return self.parents[0]
+
+    def _set_groups(self, groups):
+        """Replace the whole grouping from opts' canonical form."""
+        self.groups = {}
+        self._group_order = []
+        for name, members in (groups or ()):
+            if name not in self._group_order:
+                self._group_order.append(name)
+            for path in members:
+                self.groups[path] = name
+
+    def group_list(self):
+        """-> the grouping in sp.check_groups' canonical form, in the
+        operator's group order.
+
+        Built from the mapping every time rather than kept alongside it,
+        so the two cannot disagree -- the bug this window has had twice
+        in other guises (a widget saying one thing while the figure drew
+        another)."""
+        out = []
+        for name in self._group_order:
+            members = [k for k, n in self.groups.items() if n == name]
+            if members:
+                out.append([name, members])
+        return out
+
+    def assign_group(self, name, rundirs):
+        """Put `rundirs` in the group `name`, taking them out of whatever
+        group they were in. Empty `name` UNGROUPS them, which is the one
+        control this box needs beyond assignment.
+
+        -> an error message, or None. The engine's own checker has the
+        last word (sp.check_groups), so the window cannot create a
+        grouping the CLI would refuse."""
+        name = (name or '').strip()
+        # STORED AS SPELLED, matched case-insensitively -- the engine's
+        # own rule (sp.group_key's docstring): a normcased store puts a
+        # lowercased run path into the figspec and into every warning,
+        # against a folder of the real name.
+        paths = [os.path.abspath(d) for d in rundirs]
+        if not paths:
+            return 'Pick the runs to group on the left first.'
+        drop = {sp.group_key(p) for p in paths}
+        self.groups = {k: v for k, v in self.groups.items()
+                       if sp.group_key(k) not in drop}
+        if name:
+            for path in paths:
+                self.groups[path] = name
+            if name not in self._group_order:
+                self._group_order.append(name)
+        # drop names nothing is in any more, so the order list cannot
+        # grow forever and a re-used name keeps its original colour slot
+        self._group_order = [n for n in self._group_order
+                             if n in set(self.groups.values())]
+        _clean, err = sp.check_groups(self.group_list())
+        if err:
+            return err
+        return None
+
+    def group_summary(self):
+        """One line naming the groups and their sizes, for the label under
+        the group box -- the window's own read-out of what it will draw."""
+        rows = self.group_list()
+        if not rows:
+            return ('No groups. The aggregate averages every selected run '
+                    'into one mean.')
+        bits = [f"{name} ({len(members)})" for name, members in rows]
+        line = 'Groups: ' + ', '.join(bits) + '.'
+        if not self.v_aggregate.get():
+            line += (' Turn on the cross-run aggregate to draw a mean per '
+                     'group.')
+        elif self.v_mode.get() != 'area':
+            line += ' Area mode only — nothing is drawn from them here.'
+        return line
 
     # -- construction ------------------------------------------------------
 
@@ -1098,13 +1339,59 @@ class PlotWindow:
         self.run_box.bind('<<ListboxSelect>>', lambda _e: self.schedule())
         brow = ttk.Frame(rf)
         brow.pack(fill=tk.X)
-        ttk.Button(brow, text="Browse…", command=self._browse).pack(
-            side=tk.LEFT)
+        # ADDS a folder, never replaces the list (`#323`). The old
+        # behaviour -- browse somewhere and the previous folder's runs
+        # vanish -- is exactly what made a CB-vs-P3 figure impossible,
+        # since the two families live under different Upload folders.
+        b_browse = ttk.Button(brow, text="Add folder…", command=self._browse)
+        b_browse.pack(side=tk.LEFT)
+        add_tooltip(b_browse, BROWSE_TIP)
         ttk.Button(brow, text="Select all", command=self._select_all).pack(
             side=tk.LEFT, padx=6)
+        self.btn_drop = ttk.Button(brow, text="Reset folders",
+                                   command=self._drop_extra_parents)
+        self.btn_drop.pack(side=tk.LEFT)
+        add_tooltip(self.btn_drop, DROP_FOLDERS_TIP)
         ttk.Label(rf, foreground='#666', wraplength=260, justify=tk.LEFT,
                   text="✓ processed = Edge Review saved areas for that "
                        "run.").pack(fill=tk.X, pady=(4, 0))
+
+        # --- groups (`#313`). Under the run list rather than in Draw,
+        # because what it edits is the RUNS -- who belongs with whom --
+        # and not how the figure is drawn. Left live in every mode for
+        # the same reason the run list is: it edits data the operator is
+        # entering, and greying it would mean 'assign your groups only
+        # after you have switched to area mode and ticked aggregate'.
+        # What the figure does with them is the aggregate's business, and
+        # the label below says so whenever nothing is being drawn.
+        gf = ttk.LabelFrame(left, text="Groups (aggregate each separately)",
+                            padding=6)
+        gf.pack(fill=tk.X, pady=(8, 0))
+        grow = ttk.Frame(gf)
+        grow.pack(fill=tk.X)
+        ttk.Label(grow, text="Name:").pack(side=tk.LEFT)
+        self.e_group = ttk.Entry(grow, textvariable=self.v_group_name,
+                                 width=10)
+        self.e_group.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 4))
+        self.e_group.bind('<Return>', lambda _e: self._assign_group())
+        self.btn_assign = ttk.Button(grow, text="Assign",
+                                     command=self._assign_group)
+        self.btn_assign.pack(side=tk.LEFT)
+        for w in (self.e_group, self.btn_assign):
+            add_tooltip(w, GROUP_ASSIGN_TIP)
+        g2 = ttk.Frame(gf)
+        g2.pack(fill=tk.X, pady=(4, 0))
+        self.btn_ungroup = ttk.Button(g2, text="Ungroup selected",
+                                      command=self._ungroup_selected)
+        self.btn_ungroup.pack(side=tk.LEFT)
+        add_tooltip(self.btn_ungroup, GROUP_UNGROUP_TIP)
+        self.btn_clear_groups = ttk.Button(g2, text="Clear all",
+                                           command=self._clear_groups)
+        self.btn_clear_groups.pack(side=tk.LEFT, padx=6)
+        add_tooltip(self.btn_clear_groups, GROUP_CLEAR_TIP)
+        self.lbl_groups = ttk.Label(gf, foreground='#666', wraplength=260,
+                                    justify=tk.LEFT)
+        self.lbl_groups.pack(fill=tk.X, pady=(4, 0))
 
         # --- mode
         mf = ttk.LabelFrame(left, text="Mode", padding=6)
@@ -1161,6 +1448,16 @@ class PlotWindow:
             variable=self.v_aggregate_exact, command=self.schedule)
         self.cb_aggregate_exact.pack(anchor=tk.W, padx=(18, 0))
         add_tooltip(self.cb_aggregate_exact, DRAW_TIPS['aggregate_exact'])
+        # the other child of the aggregate (`#313`), and the one the
+        # operator actually asked for: two lines, not fifteen. Same
+        # indentation and the same greying rule -- make_opts REFUSES it
+        # without the aggregate, because on its own it would empty the
+        # figure rather than tidy it.
+        self.cb_aggregate_only = ttk.Checkbutton(
+            df, text="…and hide the contributing runs",
+            variable=self.v_aggregate_only, command=self._toggled)
+        self.cb_aggregate_only.pack(anchor=tk.W, padx=(18, 0))
+        add_tooltip(self.cb_aggregate_only, DRAW_TIPS['aggregate_only'])
         # the open/closed marker key (`#267`). Area mode only -- draw_area
         # is the only drawer that calls _marker_key, because current and
         # power draw one plain dot per snapshot and a key there would
@@ -1444,35 +1741,101 @@ class PlotWindow:
 
     # -- run list ----------------------------------------------------------
 
-    def populate(self, preselect=()):
-        self.runs = list_runs(self.parent)
+    def populate(self, preselect=(), keep=True):
+        """List every parent's runs, preselecting the given DIRECTORIES.
+
+        Directories, not names (`#323`): two runs in different parents
+        can share a name, so a name is no longer an identity here. `keep`
+        carries the current selection across a re-listing, which is what
+        makes 'Add folder…' additive in the way that matters -- adding a
+        second campaign must not deselect the first one's runs.
+
+        A BARE NAME is still accepted, and matches that name under every
+        listed parent. Not laziness: this is the window's front door, the
+        argument arrives from a command line or another module, and the
+        forgiving reading of 'P3_1' when only one folder holds a P3_1 is
+        the one every other SLDEA entry point gives it. An entry with a
+        directory in it is matched as a path and only as a path, so the
+        ambiguous case is never resolved by guessing."""
+        names = {p for p in preselect if not os.path.dirname(p)}
+        wanted = {sp.group_key(d) for d in preselect
+                  if d not in names}
+        if keep:
+            wanted |= {sp.group_key(d) for d in self.selected_dirs()}
+        self.runs = []
+        multi = len(self.parents) > 1
+        for i, parent in enumerate(self.parents, 1):
+            for name, label in list_runs(parent):
+                # WHERE IT CAME FROM, once there is more than one answer,
+                # as a NUMBER keyed to the folder list above (`#323`).
+                # Two runs in different parents can share a name, so the
+                # list has to say which is which -- but the column is
+                # ~250 px and the folder's own basename does not fit:
+                # measured on the corpus, 'P3_6_2.5mL_20260729 ✓
+                # processed ⟨SLDEA_data (1)⟩' clipped to '⟨SLDEA_da',
+                # which distinguishes nothing. A leading tag is short,
+                # never clipped, and sits directly under the numbered
+                # list of folders it refers to.
+                self.runs.append(
+                    (os.path.join(parent, name),
+                     (f"[{i}] " if multi else '') + label))
         self.run_box.delete(0, tk.END)
-        for _name, label in self.runs:
+        for _dir, label in self.runs:
             self.run_box.insert(tk.END, label)
-        self.lbl_parent.config(text=self.parent)
-        want = [i for i, (name, _l) in enumerate(self.runs)
-                if name in set(preselect)]
-        for i in want:
-            self.run_box.selection_set(i)
+        self.lbl_parent.config(text=self._parent_label())
+        self.btn_drop.config(state='normal' if len(self.parents) > 1
+                             else 'disabled')
+        for i, (rundir, _l) in enumerate(self.runs):
+            if (sp.group_key(rundir) in wanted
+                    or os.path.basename(rundir) in names):
+                self.run_box.selection_set(i)
         if not self.runs:
             self._set_messages(
-                [f"no runs (directories holding data.csv) in {self.parent} "
-                 f"— use Browse… to point at a folder of runs"])
+                [f"no runs (directories holding data.csv) in "
+                 f"{'; '.join(self.parents)} — use Add folder… to point at "
+                 f"a folder of runs"])
         self._mode_changed()
 
+    def _parent_label(self):
+        """What the label above the run list says: the folders in play,
+        and -- once there is more than one -- which of them the memory
+        and the default output folder are keyed on (`#323`).
+
+        SAID rather than left to be discovered. The issue's own answer to
+        'which key wins' was 'remember against the FIRST parent and say
+        so'; this is the saying so."""
+        if len(self.parents) == 1:
+            return self.parents[0]
+        rows = '\n'.join(f"[{i}] {p}"
+                         for i, p in enumerate(self.parents, 1))
+        return (f"{rows}\n(options and the default output folder are "
+                f"remembered against [1])")
+
     def _browse(self):
+        """Add a folder of runs to the list (`#323`)."""
         d = filedialog.askdirectory(initialdir=self.parent or DEFAULT_PARENT)
         if not d:
             return
         parent, name = split_target(d)
-        self.parent = parent or d
-        # the output folder follows the runs UNTIL the user picks one of
-        # their own: browsing to another campaign should not quietly file
-        # its figures under the previous campaign, but neither should it
-        # override a folder someone deliberately chose
+        parent = parent or d
+        if parent not in self.parents:
+            self.parents.append(parent)
+        # the output folder follows the FIRST parent until the user picks
+        # one of their own, and adding a second folder does not move it:
+        # a figure combining two campaigns has to be filed somewhere, and
+        # somewhere that jumps as folders are added is worse than a
+        # somewhere that is merely arbitrary
         if not self._out_chosen:
             self.v_out.set(default_out_dir(self.parent))
-        self.populate([name] if name else [])
+        self.populate([os.path.join(parent, name)] if name else [])
+        self.schedule()
+
+    def _drop_extra_parents(self):
+        """Back to the folder the window opened on (`#323`)."""
+        if len(self.parents) < 2:
+            return
+        del self.parents[1:]
+        self.populate()
         self.schedule()
 
     def _select_all(self):
@@ -1480,8 +1843,39 @@ class PlotWindow:
         self.schedule()
 
     def selected_dirs(self):
-        return [os.path.join(self.parent, self.runs[i][0])
-                for i in self.run_box.curselection()]
+        """The run directories currently selected. Held as full paths in
+        `self.runs` since `#323` -- joining a name onto 'the' parent is
+        what dropped every run that did not live under it."""
+        return [self.runs[i][0] for i in self.run_box.curselection()]
+
+    # -- groups (`#313`) ---------------------------------------------------
+
+    def _assign_group(self):
+        err = self.assign_group(self.v_group_name.get(),
+                                self.selected_dirs())
+        if err:
+            messagebox.showwarning("Groups", err)
+            return
+        self._groups_changed()
+
+    def _ungroup_selected(self):
+        err = self.assign_group('', self.selected_dirs())
+        if err:
+            messagebox.showwarning("Groups", err)
+            return
+        self._groups_changed()
+
+    def _clear_groups(self):
+        self.groups = {}
+        self._group_order = []
+        self._groups_changed()
+
+    def _groups_changed(self):
+        """The grouping moved: re-read it out, then redraw like any other
+        control. _sync_enabled too, because the aggregate's own greying
+        does not change but the group label under the box reports on it."""
+        self.lbl_groups.config(text=self.group_summary())
+        self.schedule()
 
     # -- options -----------------------------------------------------------
 
@@ -1562,13 +1956,25 @@ class PlotWindow:
         agg = self.v_aggregate.get()
         live(self.cb_bands, area and not agg)
         self.tip_bands.text = bands_tip(area, agg)
-        # _marker_key is called by draw_area alone
-        live(self.cb_marker_key, area)
+        # _marker_key is called by draw_area alone -- and inside it, only
+        # when the per-run curves are actually drawn: the key explains
+        # THEIR open/closed markers, and with the runs hidden (`#313`)
+        # there are none on the figure to explain, exactly as there are
+        # none in current/power mode
+        hidden = agg and self.v_aggregate_only.get()
+        live(self.cb_marker_key, area and not hidden)
         # the aggregate pools PER-LEVEL curves, which only area mode has;
         # make_opts refuses the other pairing outright
         live(self.cb_aggregate, area)
         # nothing outside `if opts['aggregate']` reads the grid toggle
         live(self.cb_aggregate_exact, area and self.v_aggregate.get())
+        # ...and make_opts REFUSES --aggregate-only without --aggregate,
+        # so this one is not merely inert without it, it is an error
+        # message where the figure goes. Greyed for the same reason as
+        # every other child here, and the group summary below reports the
+        # same state in words.
+        live(self.cb_aggregate_only, area and self.v_aggregate.get())
+        self.lbl_groups.config(text=self.group_summary())
         # --vs-area is meaningless in area mode (the x axis IS area there);
         # the CLI refuses the combination, so the window does not offer it
         live(self.cb_vs_area, not area)
@@ -1649,6 +2055,19 @@ class PlotWindow:
             # switch produces a figure rather than an error message
             aggregate=self.v_aggregate.get() and area,
             aggregate_exact=self.v_aggregate_exact.get(),
+            # `#313`. Neutralised against the SAME condition the box is
+            # greyed by, and for the reason vs_area and subplots are:
+            # make_opts refuses --aggregate-only without --aggregate, and
+            # unticking the aggregate must produce a figure rather than
+            # an error message where the figure goes.
+            aggregate_only=(self.v_aggregate_only.get()
+                            and self.v_aggregate.get() and area),
+            # the operator's grouping, in the engine's canonical form.
+            # Passed in every mode: it draws nothing outside the
+            # aggregate, and dropping it here would mean a figspec
+            # exported from current mode forgot a grouping the window is
+            # still showing.
+            groups=self.group_list(),
             # 'second' outside area mode is the one combination make_opts
             # refuses. Neutralised to the default exactly as vs_area is
             # above: an error message where the figure goes is not what a
@@ -1908,6 +2327,19 @@ class PlotWindow:
                 text=f"cannot open a frame while the draw options are "
                      f"unusable: {err}")
             return None
+        if opts.get('aggregate_only') and opts.get('aggregate'):
+            # BEFORE the where-did-you-click questions, and deliberately:
+            # with the per-run curves hidden (`#313`) no click anywhere on
+            # the figure can resolve to a frame, so "aim inside the
+            # figure, at a marker" and "no data point within 30 px" are
+            # both true and both send an operator hunting for markers
+            # that are not there. `#311`'s rule is that every path either
+            # acts or says why; this is the why, and it outranks where.
+            self.lbl_click.config(
+                text="the contributing runs are hidden, so there are no "
+                     "snapshots on the figure to open — untick “…and hide "
+                     "the contributing runs” to click through again")
+            return None
         ax, panel = self._panel_for(event)
         if ax is None:
             self.lbl_click.config(
@@ -2064,9 +2496,9 @@ def launch(args=(), opts=None, out_dir=None, stem=None, explicit=None,
     precedence rule (explicit > remembered > defaults). Left None it is
     inferred by diffing `opts` against sldea_plot's defaults -- see
     explicit_opts for what that can and cannot tell apart."""
-    parent, preselect = initial_state(args)
+    parents, preselect = initial_state(args)
     root = tk.Tk()
-    PlotWindow(root, parent, preselect, opts=opts, out_dir=out_dir,
+    PlotWindow(root, parents, preselect, opts=opts, out_dir=out_dir,
                stem=stem, explicit=explicit, remember=remember)
     root.mainloop()
     return 0

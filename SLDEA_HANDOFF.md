@@ -13,6 +13,122 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## The aggregate averages BY GROUP, the runs it averages can be hidden, and the group palette is a shape argument rather than a colour one (2026-08-10)
+
+**TL;DR:** the cross-run aggregate produced one mean over everything
+selected. It now produces one mean per operator-named group, so carbon
+black and P3 are two lines on one panel, and a tick box hides the
+contributing runs so the panel carries two curves instead of fifteen.
+The decided band policy is unchanged and is applied **per group** — which
+matters immediately, because the CB group is a single run and gets no
+band plus a caption saying so, while the P3 group is five and gets its
+SEM. Grouping is **assigned by the operator**, not read from any field.
+
+**Observation → decision.** Everything below was measured today against
+`Upload 20260804\SLDEA_data (1)` and
+`Upload 20260805\SL Ramp Test Initial CB`, read-only, through the
+plotter's own loaders and its real window.
+
+*Why the grouping is the operator's and not a field.* `#268`'s
+electrode-family sub-item was parked because it keys on the
+`Electrode family:` field `#231` added to `setup.txt`, and **zero of the
+13 corpus runs carry it**. That blocker applies only to AUTOMATIC
+grouping. An operator selecting runs and naming a group needs no field at
+all and works on every run that exists, including the whole 2026-07/08
+campaign. The field, if it is ever populated, becomes a convenience that
+pre-fills the grouping — not a prerequisite. Confirmed with the owner
+before building.
+
+*Why several parent folders had to come first (`#323`).* The window took
+its parent from the first argument and silently dropped every preselected
+run living elsewhere. On this corpus **no single parent contains both
+families** — CB is under `Upload 20260805\SL Ramp Test Initial CB` and
+the P3 family under `Upload 20260804\SLDEA_data (1)` — so the comparison
+could not be drawn at all, whatever the aggregate did. The window now
+holds several parents; the remembered-options file and the default output
+folder stay keyed on the **first** of them, and the window prints which
+one above the run list rather than leaving it to be discovered. Merging
+several parents' remembered entries was the alternative and has no
+defensible answer to "which wins": the same two folders opened in the
+other order would restore different options.
+
+*The band policy, per group, on the real data.* Unchanged from
+2026-08-09 and applied to each group's own runs: SEM for n ≥ 2, and for
+n = 1 **no band plus a caption saying the aggregate needs ≥ 2 runs**.
+Measured on the campaign: `CB = SLCBvalidationTest` is **1 run over 6
+levels, all measured, no band**; `P3` = the five poolable runs is **5
+runs over 41 levels, all measured, SEM band**. Neither group carries a
+current-confirmed breakdown, so neither cap fires and both caption and
+console say so rather than implying the cap looked and found nothing.
+The cap, the two interpolation guardrails and the first-breakdown rule
+are all computed **per group** — a shared cap would let a breakdown in
+the CB run truncate the P3 mean, which is a claim about P3 that no P3
+device made.
+
+*Why the group palette is a SHAPE argument and not a colour one — this
+is the part worth reading.* The requirement was that group colours
+collide neither with each other nor with a run colour. The first half is
+achievable and achieved; **the second half is not achievable by hue at
+all**, and that is a measurement rather than a compromise. Worst-case
+CIEDE2000 under normal + deuteranopic + protanopic + tritanopic
+simulation (Machado 2009 severity-1.0 matrices), every candidate against
+every `TOL_BRIGHT` entry:
+
+| group colours drawn | nearest other GROUP | nearest RUN colour |
+|---|---|---|
+| 2 | 29.23 | 8.24 (`#BB5566` vs `#AA3377`, tritan) |
+| 3 | 22.05 | 3.98 (`#004488` vs `#AA3377`, protan) |
+| 4 | 18.70 | 2.22 (`#DDAA33` vs `#CCBB44`, deutan) |
+
+`TOL_BRIGHT`'s own adjacent-pair floor, measured the same way, is
+**18.00**. So group-vs-group clears the run palette's own standard at
+every size. Group-vs-run cannot be fixed by picking a better palette:
+`TOL_BRIGHT` already spans the hue wheel, and an exhaustive search over
+Paul Tol's other qualitative schemes could not get a four-colour set past
+**10.67** even allowing olive, grey and brown — a muddy palette that buys
+4 ΔE and loses the house look. **Decision:** take Paul Tol
+**high-contrast** (`#000000`, `#BB5566`, `#004488`, `#DDAA33`, ordered by
+measured distance to the run palette so the two that do collide are
+reachable only at three and four groups), and carry the separation from
+the runs on **shape** instead — square markers, a 2.2 pt line against the
+runs' 1.8, and a line style per group — plus `--aggregate-only`, which is
+the state this figure is normally read in and removes the question
+entirely. Black stays first, so one group draws exactly the black solid
+curve the ungrouped aggregate has always drawn. Stated with its limit
+rather than claimed as solved.
+
+*Per-level support counts are dropped on a grouped figure, and the
+caption says so.* `#312` moved the counts to exceptions-only because one
+row of 6 pt numbers above the x axis already collided with the marker
+key. G groups want G rows, at the same x positions, with nothing on the
+figure saying which row is whose. So a grouped caption states each
+group's n and how many of its levels fall short in words, and the console
+names each group's thinnest level. Guardrail 3 is unchanged; where it is
+said moves again, for the same reason it moved the first time.
+
+*Found while measuring the caption, and NOT fixed here.* The caption's
+"Points = per-level..." line runs to **280 characters** on a default area
+figure — the band widths (`, bands ±2% machine / ±1% traced`) are
+appended whenever the budget bands are drawn, which is every figure not
+under an aggregate. Rendered on the corpus it **clips**, ending
+"…never averaged), banc" and losing the band widths entirely. Under an
+aggregate the same line is 248 and fits, which is where
+`CAPTION_LINE_MAX` comes from. This is a pre-existing defect on the most
+ordinary figure this tool draws; it predates `#313`, and repairing it
+moves the default figure's pixels, which the byte-identity guard exists
+to make a deliberate decision rather than a side effect of a grouping
+change. The numbers are recorded here and asserted in the suite so it
+cannot get quietly worse.
+
+*What the tidy CSV gained, and why it had to.* A `group` column, second,
+beside `run`. A figure whose two lines are the CB mean and the P3 mean
+cannot be reproduced from a table that does not say which run was in
+which line, and the CSV is the figure's evidence. It is written from the
+same opts the figure was drawn from, so it cannot describe a different
+grouping than the picture. The figspec records the grouping too, keyed on
+absolute run directories, so `--from-spec` re-renders two lines rather
+than one.
+
 ## Guardrail 3 is stated once in the caption and marked only where a level falls short of it (2026-08-10)
 
 **TL;DR:** the aggregate printed every level's support count in a row

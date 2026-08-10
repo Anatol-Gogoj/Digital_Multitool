@@ -47,6 +47,7 @@ from sldea_presets import SldeaPresetStore
 import sldea_profile
 from sldea_profile import (SldeaProfile, control_v_for_kv, measured_kv,
                            measured_ua, fmt_duration)
+import sweep_plan
 from ui_widgets import ScrollableTab, SplashScreen, add_tooltip
 from arb_editor import ArbWaveformEditor
 from waveform_render import unit_waveform, scale_waveform
@@ -1344,42 +1345,20 @@ ANALYSIS:
         return os.path.join(log_dir, f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
 
     def _parse_sweep_axis(self, axis, vmin, vmax, name):
-        """Return a list[float] for the given axis, validated against [vmin, vmax]."""
-        mode = getattr(self, f'sw_{axis}_mode').get()
-        if mode == 'list':
-            raw = getattr(self, f'sw_{axis}_list_var').get()
-            try:
-                values = [float(x) for x in raw.replace(';', ',').split(',') if x.strip()]
-            except ValueError as e:
-                raise ValueError(f"{name} list could not be parsed: {e}")
-            if not values:
-                raise ValueError(f"{name} list is empty")
-        else:
-            try:
-                start = float(getattr(self, f'sw_{axis}_start_entry').get())
-                stop = float(getattr(self, f'sw_{axis}_stop_entry').get())
-                points = int(getattr(self, f'sw_{axis}_points_entry').get())
-            except ValueError as e:
-                raise ValueError(f"{name} range fields must be numeric: {e}")
-            if points < 1:
-                raise ValueError(f"{name} points must be ≥ 1")
-            scale = getattr(self, f'sw_{axis}_scale').get()
-            if points == 1:
-                values = [start]
-            elif scale == 'log':
-                if start <= 0 or stop <= 0:
-                    raise ValueError(f"{name} log sweep requires positive start and stop")
-                ratio = (stop / start) ** (1.0 / (points - 1))
-                values = [start * (ratio ** i) for i in range(points - 1)]
-                values.append(stop)  # snap endpoint to avoid 100000.00000000003
-            else:
-                step = (stop - start) / (points - 1)
-                values = [start + step * i for i in range(points - 1)]
-                values.append(stop)
-        for v in values:
-            if not (vmin <= v <= vmax):
-                raise ValueError(f"{name} value {v} is outside [{vmin}, {vmax}]")
-        return values
+        """Return a list[float] for the given axis, validated against [vmin, vmax].
+
+        Widget reader only: the planning maths lives in `sweep_plan.plan_axis`
+        so it can be tested headlessly and reused by the signal-generator
+        sweep of `#65`. Raises ValueError, which callers show in a messagebox.
+        """
+        return sweep_plan.plan_axis(
+            getattr(self, f'sw_{axis}_mode').get(),
+            list_text=getattr(self, f'sw_{axis}_list_var').get(),
+            start=getattr(self, f'sw_{axis}_start_entry').get(),
+            stop=getattr(self, f'sw_{axis}_stop_entry').get(),
+            points=getattr(self, f'sw_{axis}_points_entry').get(),
+            scale=getattr(self, f'sw_{axis}_scale').get(),
+            vmin=vmin, vmax=vmax, name=name)
 
     def _set_sweep_ui_state(self, running):
         """Enable/disable sweep controls while a sweep is in progress."""

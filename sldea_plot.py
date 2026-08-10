@@ -757,6 +757,48 @@ def _panel_title(opts, which, default):
     return text or default
 
 
+def default_panel_titles(opts, runs=()):
+    """The BUILT-IN heading each panel carries when no option overrides
+    it. -> {'first': str, 'second': str or None}; 'second' is None in the
+    single-panel modes, which have no second panel to head.
+
+    Written here rather than at the set_title calls so that the window can
+    SHOW an operator the heading a blank box will produce (`#315`) without
+    copying the wording -- a second copy of 'Active area vs voltage' would
+    drift the first time one of them was reworded, and the drift would
+    read as a correct label.
+
+    The second panel's default names the baseline it normalizes by, so it
+    depends on the RUNS and not only on the options -- which is precisely
+    why the window may not treat it as a fixed string. `a0` is skipped
+    where it is absent rather than indexed: draw_area only ever sees runs
+    that have one (prepare_runs drops the others in area mode), but the
+    window asks this question between a mode switch and the redraw that
+    follows it, when the runs it holds were prepared for the mode before.
+    """
+    if opts['mode'] != 'area':
+        return {'first': ('Power' if opts['mode'] == 'power' else 'Current')
+                         + ' -- per snapshot',
+                'second': None}
+    a0s = sorted({round(r['a0'], 1) for r in runs if r.get('a0')})
+    a0txt = f"A₀ = {a0s[0]:g} mm²" if len(a0s) == 1 else "per-run A₀"
+    return {'first': 'Active area vs voltage',
+            'second': f"Normalized to baseline area ({a0txt})"}
+
+
+def panel_titles(opts, runs=()):
+    """What each panel's heading ACTUALLY reads with these options and
+    these runs -- the override where there is one, the built-in default
+    where there is not. -> {'first': str, 'second': str or None}.
+
+    THE answer to 'what will the figure say', for anything that has to
+    agree with the figure without drawing it."""
+    defaults = default_panel_titles(opts, runs)
+    return {w: (None if defaults[w] is None
+                else _panel_title(opts, w, defaults[w]))
+            for w in ('first', 'second')}
+
+
 def _dedupe(items):
     """Order-preserving unique -- the two area panels share an x axis, so
     the same caption line is generated twice."""
@@ -1159,21 +1201,18 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                  'level below the first-breakdown cap')
 
     scale_notes = []
+    # the headings both panels will carry, resolved in ONE place so the
+    # window can show the same answer without drawing (`#315`)
+    heads = panel_titles(opts, runs)
     if axl is not None:
         _style_axes(axl, 'Nominal voltage (kV)', 'Active area (mm²)')
         _apply_scales(axl, opts, xs_all, ysl_all, scale_notes)
-        axl.set_title(_panel_title(opts, 'first',
-                                   'Active area vs voltage'),
+        axl.set_title(heads['first'],
                       loc='left', fontweight='bold', fontsize=11)
     if axr is not None:
         _style_axes(axr, 'Nominal voltage (kV)', 'Expansion  A / A₀')
         _apply_scales(axr, opts, xs_all, ysr_all, scale_notes)
-        a0s = sorted({round(r['a0'], 1) for r in runs})
-        a0txt = (f"A₀ = {a0s[0]:g} mm²" if len(a0s) == 1
-                 else "per-run A₀")
-        axr.set_title(_panel_title(opts, 'second',
-                                   f"Normalized to baseline area "
-                                   f"({a0txt})"),
+        axr.set_title(heads['second'],
                       loc='left', fontweight='bold', fontsize=11)
     style_rows = []
     if opts['prepost']:
@@ -1363,9 +1402,7 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
     _style_axes(ax, xlabel, ylabel)
     scale_notes = []
     _apply_scales(ax, opts, xs_all, ys_all, scale_notes)
-    ax.set_title(_panel_title(opts, 'first',
-                              ('Power' if power else 'Current')
-                              + ' -- per snapshot'),
+    ax.set_title(panel_titles(opts, runs)['first'],
                  loc='left', fontweight='bold', fontsize=11)
     style_rows = []
     if had_x:

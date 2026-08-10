@@ -35,7 +35,11 @@ Two things the window remembers or reaches for, both additive:
   * the draw options are remembered PER PARENT FOLDER in a per-user file
     (`#275`), never in a run folder and never in the repo. Precedence is
     explicit CLI/init args > remembered > defaults, and a corrupt or
-    stale file can only cost the memory, never the window.
+    stale file can only cost the memory, never the window;
+  * each empty heading box shows, in grey, the heading that panel will
+    actually carry (`#315`) -- a HINT and never a value, so blank still
+    means 'no override' and no derived wording can reach the options file
+    or an exported figspec. See the block above HINT_FG.
 """
 import math
 import os
@@ -600,6 +604,114 @@ DRAW_TIPS = {
 
 
 # ---------------------------------------------------------------------------
+# the heading hints (`#315`)
+#
+# THE PROBLEM: three empty boxes say nothing. An operator cannot tell that
+# Title / Panel 1 / Panel 2 are editable, because an empty box looks the
+# same as a box that does nothing.
+#
+# THE ANSWER IS A HINT, NOT A PRE-FILL. Writing the derived heading INTO
+# the boxes was the other candidate and it is the wrong one, on three
+# pieces of evidence found in the code rather than in taste:
+#
+#   1. the second panel's default heading names the baseline it divides
+#      by -- 'Normalized to baseline area (A₀ = 201.1 mm²)' -- so it moves
+#      with the RUN SELECTION, not only with the mode. A pre-fill would
+#      have to rewrite a box the operator may be typing in every time a
+#      row of the run list is clicked, and every path that forgot to would
+#      leave a WRONG heading that looks like a chosen one.
+#   2. sldea_plot._panel_title reads blank as 'no override'. A pre-fill
+#      turns all three fields into permanent explicit overrides, and the
+#      figspec sidecar (`#273`) records `dict(opts)` verbatim -- so every
+#      exported figure would carry today's derived wording as if somebody
+#      had typed it, and --from-spec would re-render it over other data.
+#      That is a worse leak than the remembered-options file, and unlike
+#      that file it is not filtered by a key list.
+#   3. --title vs --title-first precedence would invert: a pre-filled
+#      Panel 1 beats anything typed into Title, so the older box would
+#      stop working the moment the newer one was pre-filled.
+#
+# A hint is a LABEL SITTING OVER AN EMPTY ENTRY, never the entry's value.
+# Nothing downstream changes: current_opts still reads the variables, the
+# variables are still blank, make_opts still gets None, and the figure
+# still derives its own heading. Clearing a box therefore returns to the
+# derived heading for free -- there is no state to reset -- and no derived
+# string can reach the options file or a figspec, because none of them is
+# ever a value.
+#
+# The hint text is THE HEADING THAT PANEL WILL ACTUALLY CARRY
+# (sp.panel_titles, the same call draw_area makes), refreshed on every
+# redraw. So a box either holds what the figure says, or shows what the
+# figure says.
+# ---------------------------------------------------------------------------
+
+HINT_FG = '#8a8a8a'                    # grey: a hint, not a value
+
+
+def _field_bg(widget):
+    """The Entry field colour this theme paints, so a hint laid over one
+    is invisible against it. Best effort: an unknown theme gets the
+    platform's window colour and, failing that, white -- a hint in the
+    wrong shade is cosmetic, and it must not stop the window opening."""
+    for cand in (ttk.Style().lookup('TEntry', 'fieldbackground'),
+                 'SystemWindow', 'white'):
+        if not cand:
+            continue
+        try:
+            widget.winfo_rgb(cand)
+        except tk.TclError:
+            continue
+        return cand
+    return 'white'
+
+
+class TitleRow:
+    """One heading box and the hint that sits over it while it is empty.
+
+    The hint is a separate widget on purpose (see the block above): it
+    cannot be read back as the field's value, by this module or by any
+    later one, because it is not in the variable.
+    """
+
+    def __init__(self, key, panel, var, entry, hint, tip, base_tip=''):
+        self.key = key            # the opts name this box fills
+        self.panel = panel        # which panel it heads: 'first'/'second'
+        self.var = var
+        self.entry = entry
+        self.hint = hint
+        self.tip = tip            # the hint's own Tooltip
+        self.base_tip = base_tip  # the row's tooltip, which the hint covers
+
+    def typed(self):
+        """-> what the operator put in this box (stripped), or ''."""
+        return self.var.get().strip()
+
+    def show(self, text):
+        """Show `text` as this box's hint, or hide the hint if empty.
+
+        The label's text is cleared when it is hidden, so `hint['text']`
+        is the whole truth about what the box is showing -- a caller
+        never has to also ask whether it is mapped.
+
+        The hint's tooltip is rewritten with it, for two reasons. It sits
+        ON the entry, so it would otherwise SWALLOW the row's own hover
+        text; and the column is narrow, so a long heading -- the second
+        panel's names its baseline area -- is clipped by the box it is
+        shown in, and the hover is where it can be read whole."""
+        if text:
+            self.hint.config(text=text)
+            self.hint.place(in_=self.entry, x=3, y=0,
+                            relwidth=1.0, width=-6, relheight=1.0)
+            reads = f"Blank keeps this panel's heading: \"{text}\""
+            self.tip.text = (f"{self.base_tip}\n\n{reads}"
+                             if self.base_tip else reads)
+        else:
+            self.hint.config(text='')
+            self.hint.place_forget()
+            self.tip.text = self.base_tip
+
+
+# ---------------------------------------------------------------------------
 # the controls column (`#271`)
 #
 # COPIED IN SPIRIT, NOT IMPORTED, from ui_widgets.ScrollableTab —
@@ -761,6 +873,8 @@ class PlotWindow:
         self._canvas_size = None       # last figure-canvas size (`#271`)
         self.min_size = (MIN_FIG_W, MIN_H)   # replaced by apply_minsize
         self._warns = []
+        self._title_rows = []          # the heading boxes (`#315`)
+        self._title_focused = None     # the one with the caret, if any
         root.title("SLDEA plot — cross-run figures")
 
         # PRECEDENCE (`#275`): explicit CLI/init args > remembered >
@@ -980,11 +1094,17 @@ class PlotWindow:
         # has always meant the FIRST panel, so it keeps its row and its
         # name; the two below are its precise successors and beat it.
         # sldea_plot._panel_title owns that rule -- this only exposes it.
-        self.e_title = self._title_row(df, "Title:", self.v_title)
+        # Each row carries the panel it heads, which is what its hint
+        # reports (`#315`): Title and Panel 1 both head the first panel,
+        # so both hint at the first panel's heading.
+        self.e_title = self._title_row(df, "Title:", self.v_title,
+                                       'title', 'first')
         self.e_title_first = self._title_row(
-            df, "Panel 1:", self.v_title_first, DRAW_TIPS['title_first'])
+            df, "Panel 1:", self.v_title_first, 'title_first', 'first',
+            DRAW_TIPS['title_first'])
         self.e_title_second = self._title_row(
-            df, "Panel 2:", self.v_title_second, DRAW_TIPS['title_second'])
+            df, "Panel 2:", self.v_title_second, 'title_second', 'second',
+            DRAW_TIPS['title_second'])
         self._sync_enabled()
 
         # --- export
@@ -1059,26 +1179,94 @@ class PlotWindow:
         # click while someone is dragging a zoom box would be hostile.
         self.canvas.mpl_connect('button_press_event', self.on_click)
 
-    def _title_row(self, master, label, var, tip=None):
-        """One 'Label: [entry]' heading row in the Draw column. -> the
-        Entry.
+    def _title_row(self, master, label, var, key, panel, tip=None):
+        """One 'Label: [entry]' heading row in the Draw column, with the
+        `#315` hint laid over the entry. -> the Entry.
 
         There are three of them now (the legacy --title and the two
         per-panel headings, `#269`), so the row pattern is written once
         and the label width is fixed in characters -- the three entries
         line up at whatever the theme's font is, which a hand-repeated
-        row does not."""
+        row does not.
+
+        The hint is placed IN the entry rather than beside it because it
+        has to read as the box's own content: a grey line under the row
+        would be one more label in a column full of them. It hides while
+        the box has focus, so what an operator sees the moment they click
+        is an empty field and a caret -- the point of the exercise is
+        'you may type here', and a caret behind grey text says it less
+        clearly than a caret in an empty box."""
         row = ttk.Frame(master)
         row.pack(fill=tk.X, pady=(4, 0))
         lbl = ttk.Label(row, text=label, width=8)
         lbl.pack(side=tk.LEFT)
         entry = ttk.Entry(row, textvariable=var)
         entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
-        entry.bind('<KeyRelease>', lambda _e: self.schedule())
+        entry.bind('<KeyRelease>', lambda _e: self._title_typed())
+        hint = tk.Label(row, text='', anchor=tk.W, foreground=HINT_FG,
+                        background=_field_bg(entry), borderwidth=0,
+                        font='TkTextFont')
+        # a click has to land in the box the hint covers, not on the hint
+        hint.bind('<Button-1>', lambda _e: entry.focus_set())
+        trow = TitleRow(key, panel, var, entry, hint,
+                        add_tooltip(hint, tip or ''), tip or '')
+        # tracked rather than asked of Tk (focus_get answers for the whole
+        # application, and returns None at all when the window is not the
+        # one the desktop focused)
+        entry.bind('<FocusIn>', lambda _e: self._title_focus(trow))
+        entry.bind('<FocusOut>', lambda _e: self._title_focus(None, trow))
+        self._title_rows.append(trow)
         if tip:
             add_tooltip(lbl, tip)
             add_tooltip(entry, tip)
         return entry
+
+    # -- the heading hints (`#315`) ----------------------------------------
+
+    def _title_focus(self, row, leaving=None):
+        """Remember which heading box has the caret, and re-hint."""
+        if leaving is not None and self._title_focused is not leaving:
+            return                     # a stale FocusOut; someone else has it
+        self._title_focused = row
+        self._refresh_hints()
+
+    def _title_typed(self):
+        """A heading box changed. Re-hint IMMEDIATELY (the box just became
+        filled, or just became empty again) and redraw on the debounce
+        like every other control."""
+        self._refresh_hints()
+        self.schedule()
+
+    def _refresh_hints(self):
+        """Show, over every EMPTY heading box, the heading that panel will
+        actually carry -- and nothing over a box that has text, has the
+        caret, or heads a panel this figure does not draw.
+
+        Asked of sldea_plot.panel_titles with the runs currently prepared,
+        which is the same call draw_area makes, so the hint cannot say one
+        thing while the figure says another. Called from redraw(), so it
+        follows the mode, the panel choice AND the run selection -- the
+        second panel's default heading names the baseline area, which
+        moves with the runs.
+
+        An options combination the engine REFUSES draws an error message
+        instead of a figure, so it has no headings to report and every
+        hint goes: a hint is a courtesy, and one left over from the last
+        drawable combination would be a claim about a figure that does
+        not exist."""
+        opts, err = self.current_opts()
+        heads = {} if err else sp.panel_titles(opts, self._prepared)
+        for row in self._title_rows:
+            live = str(row.entry.cget('state')) == 'normal'
+            row.show('' if (row.typed() or row is self._title_focused
+                            or not live)
+                     else (heads.get(row.panel) or ''))
+
+    def title_hints(self):
+        """-> {opts name: the hint that box is showing, '' for none}.
+
+        The window's own read-out of what it is telling the operator."""
+        return {r.key: r.hint.cget('text') for r in self._title_rows}
 
     # -- run list ----------------------------------------------------------
 
@@ -1208,6 +1396,10 @@ class PlotWindow:
         live(self.e_title, first_drawn)
         live(self.e_title_first, first_drawn)
         live(self.e_title_second, area and which != 'first')
+        # a greyed box heads a panel that is not drawn, so its hint would
+        # promise a heading nothing carries -- and the greying may just
+        # have brought one back (`#315`)
+        self._refresh_hints()
 
     def _toggled(self):
         """A control whose own state changes what ELSE is live: re-sync
@@ -1318,6 +1510,20 @@ class PlotWindow:
         return run
 
     def redraw(self):
+        """Draw, then re-hint the heading boxes -- ALWAYS, including the
+        paths that return early (`#315`).
+
+        In a `finally` because the hints have to follow the figure even
+        when there is no figure: a redraw that stopped at 'pick some runs'
+        or at an error message still changed what the headings would say,
+        and a hint left over from the last good draw is exactly the stale
+        text this feature exists not to show."""
+        try:
+            self._redraw()
+        finally:
+            self._refresh_hints()
+
+    def _redraw(self):
         self._redraw_after = None
         # the click line goes back to being a hint: what it says otherwise
         # is which frame the LAST double-click opened, and that answer

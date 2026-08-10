@@ -1269,6 +1269,174 @@ def test_the_cadence_guard_tooltip_says_it_annotates_not_suppresses():
             assert w.bind('<Enter>'), f"no tooltip attached to {w}"
 
 
+def _heads(win):
+    """The headings the drawn figure is actually carrying, per panel."""
+    return [ax.get_title(loc='left') for ax in win.fig.axes]
+
+
+def test_an_empty_heading_box_hints_at_the_heading_the_figure_will_use():
+    """`#315`: three empty boxes said nothing about being editable.
+
+    The hint is what the panel WILL READ, measured off the drawn figure
+    rather than recomputed here -- a hint that agreed with a second copy
+    of the wording and not with the axes would be exactly the wrong
+    label that looks like a right one."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        win.redraw()
+        first, second = _heads(win)
+        hints = win.title_hints()
+        # Title and Panel 1 both head the FIRST panel, so both hint at it
+        assert hints['title'] == first, hints
+        assert hints['title_first'] == first, hints
+        assert hints['title_second'] == second, hints
+        assert 'Active area' in first and 'A₀' in second
+        # ...and it is a HINT, not a value: nothing reached the options,
+        # so the figure still derived every one of those headings itself
+        opts, err = win.current_opts()
+        assert not err, err
+        for k in ('title', 'title_first', 'title_second'):
+            assert opts[k] is None, (k, opts[k])
+
+
+def test_a_heading_hint_follows_the_mode_while_the_box_is_untouched():
+    """The staleness trap. Switching area -> current changes what the
+    first panel's heading says, and a hint left showing the old one would
+    be worse than an empty box."""
+    # the second panel's default names the baseline it divides by, so it
+    # moves with the RUN SELECTION and not only with the mode -- which is
+    # why the window may not treat it as a fixed string it can pre-fill
+    # once
+    area, _e = sp.make_opts(mode='area')
+    one = sp.default_panel_titles(area, [{'a0': 201.062}])['second']
+    many = sp.default_panel_titles(area, [{'a0': 201.062},
+                                          {'a0': 98.4}])['second']
+    assert '201.1' in one and 'per-run' in many, (one, many)
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        win.redraw()
+        was = win.title_hints()['title_first']
+        win.v_mode.set('current')
+        win._mode_changed()
+        win.redraw()
+        now = win.title_hints()
+        assert now['title_first'] != was, 'the hint went stale'
+        assert now['title_first'] == _heads(win)[0] == 'Current -- per '\
+            'snapshot', now
+        assert now['title'] == now['title_first']
+        # current draws ONE panel, so the second box heads nothing: greyed,
+        # and hinting at a heading nothing carries would contradict that
+        assert now['title_second'] == '', now
+        assert _state(win.e_title_second) == 'disabled'
+
+
+def test_a_typed_heading_is_never_clobbered_by_a_mode_switch():
+    """The other half of the staleness trap: the hint may follow the mode
+    only while the box is UNTOUCHED. Once there is text in it, it is the
+    operator's, and the box shows exactly what the figure shows."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        win.v_title_first.set('mm² vs kV')
+        win._title_typed()
+        win.redraw()
+        assert win.title_hints()['title_first'] == '', 'hint over the text'
+        assert _heads(win)[0] == 'mm² vs kV'
+        win.v_mode.set('current')
+        win._mode_changed()
+        win.redraw()
+        assert win.v_title_first.get() == 'mm² vs kV', 'the mode ate it'
+        assert _heads(win)[0] == 'mm² vs kV'
+        assert win.title_hints()['title_first'] == ''
+        # the legacy Title box is still empty and still truthful: it heads
+        # the same panel, which now reads the text typed above
+        assert win.current_opts()[0]['title'] is None
+        assert win.title_hints()['title'] == 'mm² vs kV'
+
+
+def test_clearing_a_heading_returns_to_the_derived_one():
+    """Emptying a box must give the DERIVED heading back, never a
+    literally empty one. It does so because the hint was never a value:
+    there is no pre-fill to undo, so `_panel_title` reads blank as 'no
+    override' exactly as it always has."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        win.redraw()
+        derived = _heads(win)[1]
+        win.v_title_second.set('normalized')
+        win._title_typed()
+        win.redraw()
+        assert _heads(win)[1] == 'normalized'
+        for blank in ('', '   '):
+            win.v_title_second.set(blank)
+            win._title_typed()
+            win.redraw()
+            assert win.current_opts()[0]['title_second'] is None, blank
+            assert _heads(win)[1] == derived, blank
+            assert win.title_hints()['title_second'] == derived, blank
+
+
+def test_no_derived_heading_reaches_the_remembered_options_file():
+    """The failure that would only show up NEXT session (`#275` + `#315`).
+
+    Closing writes the WHOLE remembered set at once, so a derived heading
+    that had leaked into a variable would be saved as if the operator had
+    chosen it, and next week's figure would open captioned with last
+    week's default. Checked against the file's BYTES rather than its
+    keys: a leak into any key at all is a leak.
+
+    The figspec (`#273`) is the same hazard with a longer reach -- it
+    records `dict(opts)` verbatim beside every exported PNG, unfiltered by
+    any key list, and --from-spec re-renders from it."""
+    import json
+    import tkinter as tk
+    p = _mktmp()
+    was = (g.OPTIONS_PATH, g.OPTIONS_FALLBACK)
+    try:
+        cfg = os.path.join(p, 'opts.json')
+        # BOTH, so a real user's file cannot be read or written even if
+        # the primary is the one this desktop would fall back from
+        g.OPTIONS_PATH = g.OPTIONS_FALLBACK = cfg
+        _fake_run(p, 'R1')
+        try:
+            root = tk.Tk()
+        except tk.TclError as e:
+            print(f"   (skipped: no display for Tk: {e})")
+            return
+        root.withdraw()
+        win = g.PlotWindow(root, p, preselect=['R1'], remember=True)
+        win.redraw()
+        hints = win.title_hints()
+        assert hints['title_first'] and hints['title_second'], hints
+        opts, err = win.current_opts()
+        assert not err, err
+        # the sidecar first, while the window is still alive
+        spec = sp.build_figspec([], opts, 'sldea_plot_area')
+        for k in ('title', 'title_first', 'title_second'):
+            assert spec['opts'][k] is None, (k, spec['opts'][k])
+        win._closing()                 # the real on-close write
+        with open(cfg, encoding='utf-8') as f:
+            blob = f.read()
+        entry = json.loads(blob)['parents'][g.options_key(p)]
+        assert set(entry) == set(g.REMEMBERED), set(entry) ^ set(
+            g.REMEMBERED)
+        for text in hints.values():
+            assert text and text not in blob, f"{text!r} was remembered"
+        back = g.load_options(p, path=cfg)
+        for k in ('title', 'title_first', 'title_second'):
+            assert k not in back, k
+    finally:
+        g.OPTIONS_PATH, g.OPTIONS_FALLBACK = was
+        shutil.rmtree(p, ignore_errors=True)
+
+
 def test_the_taller_draw_column_still_measures_and_still_scrolls():
     """The Draw column grew by seven controls and `#271`'s floor is
     MEASURED off it, so the two have to still agree. The bar stays a

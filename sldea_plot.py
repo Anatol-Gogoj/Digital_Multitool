@@ -722,6 +722,57 @@ def aggregate_support(lv):
 # figures
 # ---------------------------------------------------------------------------
 
+# The caption strip is reserved in FIGURE FRACTIONS, so a resized figure
+# keeps its proportions -- but the caption's own text does not scale, and
+# neither do the tick labels tight_layout was measuring when it chose
+# those fractions. That is the whole reason a resize needs anything from
+# us at all; matplotlib's own resize handler has already redrawn the
+# figure at the new size by then.
+#
+# So the rect is REMEMBERED rather than recomputed (`#316`). Re-deriving
+# it means rebuilding the figure -- 298 ms of artist construction over 13
+# runs, measured -- to arrive at a number that cannot have changed, since
+# nothing but the window's shape did.
+_RECT_ATTR = '_sldea_layout_rect'
+
+
+def _tight(fig, rect):
+    """fig.tight_layout(rect=...), remembering the rect for relayout."""
+    setattr(fig, _RECT_ATTR, rect)
+    fig.tight_layout(rect=rect)
+    return rect
+
+
+_SUBPLOTPARS = ('left', 'right', 'bottom', 'top', 'wspace', 'hspace')
+
+
+def relayout(fig):
+    """Re-run the last draw's tight_layout at the figure's CURRENT size.
+
+    FROM THE DEFAULT SUBPLOT PARAMS, NOT FROM THE LAST LAYOUT'S. That
+    reset looks like a spare line and is not: tight_layout derives wspace
+    from the axes width it FINDS, so run on its own output it does not
+    land where it lands on a fresh figure. Measured in the plot window
+    over the campaign corpus -- area mode's two panels came out 8-12%
+    narrower at a 496x347 canvas, and by a different amount on each visit
+    to the same size. Resetting first makes this exactly what a rebuild
+    would have laid out, which is the only thing that makes it a shortcut
+    rather than a second layout engine.
+
+    -> True when there was a layout to re-run, False when this figure was
+    never drawn by draw() (or was cleared since), which is the caller's
+    signal that it needs a real draw and not a shortcut."""
+    from matplotlib import rcParams
+
+    rect = getattr(fig, _RECT_ATTR, None)
+    if rect is None or not fig.axes:
+        return False
+    fig.subplots_adjust(**{k: rcParams['figure.subplot.' + k]
+                           for k in _SUBPLOTPARS})
+    fig.tight_layout(rect=rect)
+    return True
+
+
 def _style_axes(ax, xlabel, ylabel):
     ax.grid(alpha=0.3)
     for side in ('top', 'right'):
@@ -1258,7 +1309,7 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     bottom = 0.05
     if opts.get('aggregate'):
         bottom = min(0.025 + 0.025 * (cap.count('\n') + 1), 0.30)
-    fig.tight_layout(rect=(0, bottom, 1, 1))
+    _tight(fig, (0, bottom, 1, 1))
     return fig
 
 
@@ -1460,7 +1511,7 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
            + _cadence_caption(cadence_notes)
            + _scale_caption(scale_notes))
     fig.text(0.01, 0.005, cap, fontsize=7, color='#555555')
-    fig.tight_layout(rect=(0, 0.05, 1, 1))
+    _tight(fig, (0, 0.05, 1, 1))
     return fig
 
 

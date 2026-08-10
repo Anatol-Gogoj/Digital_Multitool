@@ -782,6 +782,149 @@ def test_the_click_through_is_discoverable_and_does_not_go_stale():
             g.subprocess = real
 
 
+class _Ev:
+    """A button_press_event as matplotlib delivers one."""
+
+    def __init__(self, ax, x, y, dbl=True):
+        self.inaxes, self.x, self.y, self.dblclick = ax, x, y, dbl
+
+
+def _marker(win, panel=0):
+    """(axes, px, py, run, row) for a marker of the CURRENT figure."""
+    opts, err = win.current_opts()
+    assert not err, err
+    ax = win.fig.axes[panel]
+    pts = g.plot_points(win._prepared, opts, panel)
+    x, y, run, row = pts[1]
+    px, py = ax.transData.transform((x, y))
+    return ax, px, py, run, row
+
+
+def test_a_double_click_survives_a_redraw_under_it():
+    """THE `#311` BUG. `on_click` resolved the panel with
+    `list(self.fig.axes).index(event.inaxes)`, which raises ValueError the
+    moment the figure is cleared and redrawn between the event being built
+    and the handler running -- and the except returned None SILENTLY. The
+    operator saw a double-click open Edge Review once and then do nothing
+    at all, with no message anywhere to say what had happened.
+
+    A redraw is forced between the two clicks here, which is the condition
+    itself rather than a stand-in for it: the second click carries an Axes
+    that is genuinely no longer in the figure."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        win = w.win
+        spy = _Popen()
+        real = g.subprocess
+        g.subprocess = spy
+        try:
+            ax_old, px, py, _run, row = _marker(win)
+            assert win.on_click(_Ev(ax_old, px, py)) is not None
+            assert len(spy.calls) == 1
+
+            # the figure is rebuilt under the pointer -- every Axes object
+            # the first click knew is gone
+            win.redraw()
+            w.settle(0.3)
+            assert ax_old not in win.fig.axes, 'redraw kept the same Axes'
+
+            # a click carrying the STALE axes still resolves, on the same
+            # row, because the panel is re-asked of the figure as it is now
+            ax_new, px2, py2, _r2, row2 = _marker(win)
+            spy.calls.clear()
+            got = win.on_click(_Ev(ax_old, px2, py2))
+            assert got is not None, 'the stale-axes double-click was dropped'
+            assert got[1]['index'] == row2['index'] == row['index']
+            assert len(spy.calls) == 1, spy.calls
+            assert spy.calls[0][1].get('start_new_session') is True
+
+            # and so does the ordinary one that carries the current axes
+            spy.calls.clear()
+            assert win.on_click(_Ev(ax_new, px2, py2)) is not None
+            assert len(spy.calls) == 1
+
+            # repeatedly: three redraws, three double-clicks, three launches
+            spy.calls.clear()
+            for _i in range(3):
+                win.redraw()
+                w.settle(0.2)
+                ax_i, pxi, pyi, _ri, _rowi = _marker(win)
+                assert win.on_click(_Ev(ax_i, pxi, pyi)) is not None
+            assert len(spy.calls) == 3, spy.calls
+        finally:
+            g.subprocess = real
+
+
+def test_no_click_leaves_the_window_without_an_answer():
+    """`#311`'s other half, and the reason it took an operator report to
+    find at all: FOUR paths out of `on_click` returned None in silence --
+    not a double-click, off the panels, nothing prepared, unusable
+    options. A swallowed interaction cannot be told apart from a broken
+    feature, so every path now either acts or says why, in the one line
+    that was already there to report what the last click resolved."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        win = w.win
+        spy = _Popen()
+        real = g.subprocess
+        g.subprocess = spy
+        try:
+            ax, px, py, run, row = _marker(win)
+
+            def said(ev):
+                """-> what the window said, having said nothing before."""
+                win.lbl_click.config(text='')
+                spy.calls.clear()
+                assert win.on_click(ev) is None
+                assert spy.calls == [], 'a refused click still launched'
+                text = win.lbl_click.cget('text')
+                assert text, 'the click was swallowed in silence'
+                return text
+
+            # 1 -- a SINGLE click on a marker. This is the reported
+            # symptom: a double-click that reaches the window as two
+            # singles used to do nothing and say nothing. It names the
+            # frame it is on and asks for the second click.
+            text = said(_Ev(ax, px, py, dbl=False))
+            assert 'single click' in text.lower()
+            assert run['name'] in text and 'DOUBLE-click' in text
+
+            # 2 -- a double-click that is not over a panel
+            text = said(_Ev(None, 2.0, 2.0))
+            assert 'not over a panel' in text
+
+            # 3 -- a double-click with nothing plotted to click through to
+            prepared, win._prepared = win._prepared, []
+            try:
+                text = said(_Ev(ax, px, py))
+                assert 'nothing is plotted' in text
+            finally:
+                win._prepared = prepared
+
+            # 4 -- a double-click while the draw options cannot be built
+            opts_real = win.current_opts
+            win.current_opts = lambda: (None, 'mode is not usable here')
+            try:
+                text = said(_Ev(ax, px, py))
+                assert 'mode is not usable here' in text
+            finally:
+                win.current_opts = opts_real
+
+            # 5 -- the miss that always did report, still reports
+            text = said(_Ev(ax, px, py - g.PICK_PX - 200))
+            assert 'no data point within' in text
+
+            # ...and after all of that the ordinary double-click still works
+            spy.calls.clear()
+            assert win.on_click(_Ev(ax, px, py)) is not None
+            assert len(spy.calls) == 1
+            assert run['name'] in win.lbl_click.cget('text')
+        finally:
+            g.subprocess = real
+
+
 # ---------------------------------------------------------------------------
 # `#275` -- remembered options, per parent folder
 # ---------------------------------------------------------------------------

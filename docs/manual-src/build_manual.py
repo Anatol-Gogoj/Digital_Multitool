@@ -488,9 +488,10 @@ body.append(f"""
       nothing. No window needed.</p></div>
     <div class="tool"><h4>📊 Plot tool</h4>
       <p>Puts several finished runs on one figure:
-      <code>python sldea_plot.py RUN1 RUN2 --mode area</code>. Writes a
-      300 dpi PNG <i>and</i> the tidy CSV behind it, so any figure can be
-      traced back to its numbers. <code>--mode current</code> works on raw
+      <code>python sldea_plot.py RUN1 RUN2 --mode area</code>. Writes the
+      figure — PNG at <code>--dpi</code> (300 by default) or
+      <code>--format svg</code> — <i>and</i> the tidy CSV behind it, so any
+      figure can be traced back to its numbers. <code>--mode current</code> works on raw
       runs, before anyone has reviewed a frame.</p></div>
   </div>
   <h3 class="subh">Edge Review — reviewing a run</h3>

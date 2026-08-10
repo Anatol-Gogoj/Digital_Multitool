@@ -549,7 +549,10 @@ def test_make_opts_maps_choices_and_refuses_bad_combinations():
                  'marker_key': True, 'title_first': None,
                  'title_second': None, 'subplots': 'both',
                  'cadence_guard': False, 'aggregate': False,
-                 'aggregate_exact': False}
+                 'aggregate_exact': False,
+                 # `#314`: the file, not the drawing -- and the defaults
+                 # are the file every export wrote before it existed
+                 'fmt': 'png', 'dpi': 300}
     o, err = sp.make_opts(mode='current', vs_area=True, prepost=True,
                           mean=True, bands=False, breakdown=False,
                           title='x')
@@ -633,23 +636,31 @@ def test_window_export_is_byte_identical_to_the_cli():
     """The window must not be a fork. save_figure() skips pyplot (it runs
     in a process that owns a live Tk canvas, and matplotlib.use('Agg')
     would switch the backend underneath it) -- but it has to land on the
-    same bytes as the command line, or 'the same figure' is a story."""
+    same bytes as the command line, or 'the same figure' is a story.
+
+    Every FORMAT and a non-default dpi (`#314`), because the two paths
+    now decide more than they used to: an SVG written through the Agg
+    canvas has to be the SVG pyplot writes, and a dpi that reached only
+    one of them would be exactly this bug wearing a new hat."""
     if not _has_mpl():
         return
     d, out = _mktmp(), _mktmp()
     try:
         _fake_run(d, _healthy_rows(8))
         for mode in sp.MODES:
-            opts = sp.make_opts(mode=mode)[0]
-            runs = sp.prepare_runs([d], opts)
-            cli = os.path.join(out, mode + '_cli.png')
-            if mode == 'area':
-                sp.figure_area(runs, opts, cli)
-            else:
-                sp.figure_signal(runs, opts, cli)
-            gui = sp.save_figure(runs, opts, os.path.join(out, mode + '_g.png'))
-            with open(cli, 'rb') as a, open(gui, 'rb') as b:
-                assert a.read() == b.read(), mode
+            for fmt, dpi in (('png', 300), ('png', 120), ('svg', 300)):
+                opts = sp.make_opts(mode=mode, fmt=fmt, dpi=dpi)[0]
+                runs = sp.prepare_runs([d], opts)
+                tag = f"{mode}_{fmt}{dpi}"
+                cli = os.path.join(out, f"{tag}_cli.{fmt}")
+                if mode == 'area':
+                    sp.figure_area(runs, opts, cli)
+                else:
+                    sp.figure_signal(runs, opts, cli)
+                gui = sp.save_figure(runs, opts,
+                                     os.path.join(out, f"{tag}_g.{fmt}"))
+                with open(cli, 'rb') as a, open(gui, 'rb') as b:
+                    assert a.read() == b.read(), tag
     finally:
         for p in (d, out):
             shutil.rmtree(p, ignore_errors=True)
@@ -1660,15 +1671,198 @@ def test_aggregate_records_measured_versus_interpolated_per_level():
         # losing a contribution somewhere
         for l in ag.values():
             assert l['n_measured'] + l['n_interpolated'] == l['n'], l
-        # and it is SURFACED, on the figure and on the console
+        # and it is SURFACED, on the figure and on the console -- on the
+        # EXCEPTIONS only since `#312`: the thin levels keep their count,
+        # the level all three runs really measured carries none, and the
+        # caption states the n it falls short of
         opts = sp.make_opts(aggregate=True)[0]
         warns = []
         fig = _drawn([fine, c1, c2], opts, warns.append)
         labels = {t.get_text() for a in fig.axes for t in a.texts}
-        assert '2+1' in labels and '1+2' in labels and '3' in labels, labels
+        assert '2+1' in labels and '1+2' in labels, labels
+        assert '3' not in labels, 'a full-support level still printed its n'
         assert any('measured' in w and 'interpolated' in w for w in warns), \
             warns
         assert 'measured + ' in _caption(fig), _caption(fig)
+        assert 'n = 3 at every level except' in _caption(fig), _caption(fig)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _marker_key_legend(ax):
+    """The 'marker fill' legend on `ax`, or None -- it is a second Legend
+    beside the run legend, so it has to be picked out by its title."""
+    for a in ax.get_children():
+        if (a.__class__.__name__ == 'Legend'
+                and a.get_title().get_text() == 'marker fill'):
+            return a
+    return None
+
+
+def test_only_the_levels_short_of_the_captions_n_still_print_a_count():
+    """`#312`. Every level used to print its own support count, which
+    under the default interpolated grid is the SAME NUMBER at every level
+    -- a row of identical digits, and it ran straight through the marker
+    key. The counts still have to survive where they mean something, so
+    the caption states the one n and only the exceptions are marked.
+
+    The exception test is on MEASURED support, not on n, and that is the
+    whole of it: a level carried by one measured run and four
+    interpolated ones sits at exactly full n, so comparing n alone would
+    leave unmarked the very case guardrail 3 exists for."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        fine = _agg_run(d, 'FINE', [0.2, 0.4, 0.6, 0.8, 1.0],
+                        lambda kv: 100.0 + 10 * kv)
+        c1 = _agg_run(d, 'C1', [0.25, 0.5, 0.75, 1.0],
+                      lambda kv: 100.0 + 11 * kv)
+        c2 = _agg_run(d, 'C2', [0.25, 0.5, 0.75, 1.0],
+                      lambda kv: 100.0 + 12 * kv)
+        ag = sp.aggregate_levels([fine, c1, c2])
+        by_kv = {l['kv']: l for l in ag}
+        assert sp.aggregate_full_n(ag) == 3
+        thin = {l['kv'] for l in sp.aggregate_thin_levels(ag)}
+        # 1.0 kV: every run measured it -> not an exception
+        assert by_kv[1.0]['n'] == 3 and by_kv[1.0]['n_interpolated'] == 0
+        assert 1.0 not in thin, 'a fully measured level was marked'
+        # 0.4 kV: full n, but ONE measured value and two interpolated --
+        # the case a plain `n < max` rule would miss
+        assert by_kv[0.4]['n'] == sp.aggregate_full_n(ag)
+        assert by_kv[0.4]['n_measured'] == 1
+        assert 0.4 in thin, 'a thinly interpolated level went unmarked'
+        assert 0.5 in thin, thin                       # 2 measured of 3
+        # and it is exactly {short of n} u {any interpolation}
+        assert thin == {l['kv'] for l in ag
+                        if l['n'] < 3 or l['n_interpolated']}, thin
+        # an empty aggregate has no maximum to fall short of
+        assert sp.aggregate_full_n([]) == 0
+        assert sp.aggregate_thin_levels([]) == []
+        # ONE run on ONE grid: nothing is interpolated, so nothing is
+        # marked and the caption carries the whole story
+        opts = sp.make_opts(aggregate=True)[0]
+        fig = _drawn([c1, c2], opts)
+        assert not [t for a in fig.axes for t in a.texts], \
+            'a single-grid family still printed per-level counts'
+        assert 'n = 2 at every level, all measured.' in _caption(fig), \
+            _caption(fig)
+        # ...and neither wording outgrew the width the aggregate caption
+        # is written to (7 pt on a 12.6 in figure runs off the right edge
+        # past ~215 characters, which is how an early draft lost the cap
+        # sentence entirely)
+        for pool in ([c1, c2], [fine, c1, c2]):
+            text = sp._aggregate_caption(pool, sp.aggregate_levels(pool),
+                                         opts, None)
+            for line in text.split('\n'):
+                assert len(line) <= 215, (len(line), line)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_support_row_clears_the_marker_key_at_every_figure_size():
+    """`#312`'s acceptance, measured rather than eyeballed.
+
+    The row of counts was placed in AXES FRACTIONS and the marker key in
+    font-sized padding from the corner. Two units, one shared corner: they
+    agree at no size at all -- on the campaign corpus the key sat on the
+    counts and neither was readable. Both are now measured in POINTS from
+    the axes floor, so the clearance is arithmetic and, being points, it
+    is the SAME at every size the window can be dragged to.
+
+    Sizes span 3.2x2.0 in (below anything the window permits) to 20x9,
+    including a wide-and-short one, because a fraction-based row would
+    fail first exactly where the axes are shortest."""
+    if not _has_mpl():
+        return
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    d = _mktmp()
+    try:
+        kv25 = [round(0.25 * i, 3) for i in range(1, 41)]     # to 10 kV
+        kv20 = [round(0.20 * i, 3) for i in range(1, 51)]     # ...and 0.2
+        runs = [_agg_run(d, 'FINE', kv20, lambda kv: 100.0 + 10 * kv),
+                _agg_run(d, 'C1', kv25, lambda kv: 100.0 + 11 * kv),
+                _agg_run(d, 'C2', kv25, lambda kv: 100.0 + 12 * kv)]
+        opts = sp.make_opts(aggregate=True)[0]
+        # the labels have to reach the key's own corner, or the test
+        # would pass on a figure that never put them near each other
+        ag = sp.aggregate_levels(runs)
+        assert max(l['kv'] for l in sp.aggregate_thin_levels(ag)) >= 9.0
+        tightest = set()
+        for size in ((12.6, 5.4), (20.0, 9.0), (6.0, 3.0), (4.0, 2.2),
+                     (14.0, 2.6), (3.2, 2.0)):
+            fig = Figure(figsize=size)
+            FigureCanvasAgg(fig)
+            sp.draw(fig, runs, opts, lambda m: None)
+            fig.canvas.draw()
+            rend = fig.canvas.get_renderer()
+            for ax in fig.axes:
+                key = _marker_key_legend(ax)
+                if key is None:
+                    continue
+                kb = key.get_window_extent(rend)
+                assert ax.texts, 'no support row on the key\'s own axis'
+                gaps = []
+                for t in ax.texts:
+                    tb = t.get_window_extent(rend)
+                    assert not tb.overlaps(kb), \
+                        (size, t.get_text(), 'under the marker key')
+                    gaps.append(kb.y0 - tb.y1)
+                # the taller of the two staggered rows is the one that
+                # decides whether the key clears anything
+                tightest.add(round(min(gaps), 1))
+        # points, not fractions: ONE clearance across every size above
+        assert len(tightest) == 1, \
+            f"clearance varies with figure size: {tightest}"
+        assert tightest.pop() > 0
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_figure_with_nothing_to_mark_leaves_the_marker_key_alone():
+    """The lift is the support row asking for a floor, so a figure
+    without one keeps the corner it always had -- the aggregate is not
+    allowed to restyle every other figure in the suite on its way past.
+
+    Read off the legend's ANCHOR BOX against the axes it sits in, which
+    is what 'lower right' is measured from: unlifted the two are the same
+    rectangle, lifted the anchor floor is MARKER_KEY_LIFT_PT above the
+    axes floor -- in points, so the same at any size."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        c1 = _agg_run(d, 'C1', [0.25, 0.5, 0.75, 1.0],
+                      lambda kv: 100.0 + 11 * kv)
+        c2 = _agg_run(d, 'C2', [0.25, 0.5, 0.75, 1.0],
+                      lambda kv: 100.0 + 12 * kv)
+        fine = _agg_run(d, 'FINE', [0.2, 0.4, 0.6, 0.8, 1.0],
+                        lambda kv: 100.0 + 10 * kv)
+
+        def floors(runs, opts):
+            fig = _drawn(runs, opts)
+            fig.canvas.draw()
+            out = []
+            for ax in fig.axes:
+                key = _marker_key_legend(ax)
+                if key is not None:
+                    out.append((key.get_bbox_to_anchor().y0, ax.bbox.y0,
+                                fig.dpi))
+            assert out, 'no marker key drawn'
+            return out
+
+        for opts in (sp.make_opts()[0], sp.make_opts(aggregate=True)[0]):
+            for anchor_y0, axes_y0, _dpi in floors([c1, c2], opts):
+                assert anchor_y0 == axes_y0, \
+                    'the key left its corner with nothing to clear'
+        # ...and the mixed grid, which DOES mark levels, lifts it by
+        # exactly the declared number of points
+        for anchor_y0, axes_y0, dpi in floors(
+                [fine, c1, c2], sp.make_opts(aggregate=True)[0]):
+            lift_px = sp.MARKER_KEY_LIFT_PT * dpi / 72.0
+            assert abs((anchor_y0 - axes_y0) - lift_px) < 0.5, \
+                (anchor_y0 - axes_y0, lift_px)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -1806,6 +2000,224 @@ def test_aggregate_is_refused_outside_area_mode_in_both_front_ends():
     # without --prepost -- it is a CHILD of --aggregate, not a mode
     o, err = sp._cli_opts({'--aggregate-exact'}, {'--mode': 'current'})
     assert err is None and o['aggregate_exact'] and not o['aggregate']
+
+
+# --------------------------------------------------------------------------
+# the export format and the dpi (`#314`) -- the first options that describe
+# the FILE rather than the drawing
+# --------------------------------------------------------------------------
+
+def _png_size(path):
+    """(width, height) in pixels, read straight out of the PNG's IHDR.
+
+    No Pillow: the suite has no image dependency, and thirteen bytes of
+    header is a smaller thing to trust than a decoder."""
+    with open(path, 'rb') as f:
+        head = f.read(24)
+    assert head[:8] == b'\x89PNG\r\n\x1a\n', path
+    return (int.from_bytes(head[16:20], 'big'),
+            int.from_bytes(head[20:24], 'big'))
+
+
+def test_svg_export_writes_a_real_svg_beside_its_csv_and_figspec():
+    """`#314`: the vector option. The three-files-or-nothing rule is
+    format-INDEPENDENT -- the tidy CSV is the figure's evidence whatever
+    the picture is written as -- so the assertion is not just 'an .svg
+    appeared' but 'the whole set did, off one stem'."""
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        opts = sp.make_opts(fmt='svg')[0]
+        runs = sp.prepare_runs([d], opts)
+        img, tidy = sp.export(runs, opts, out, 'vec')
+        assert img == os.path.join(out, 'vec.svg'), img
+        # a real SVG, not an empty file with a hopeful name
+        with open(img, encoding='utf-8') as f:
+            text = f.read()
+        assert os.path.getsize(img) > 10000, os.path.getsize(img)
+        assert text.lstrip().startswith('<?xml'), text[:80]
+        assert '<svg' in text and '</svg>' in text
+        # ...and it really is vector: the area figure's own axis label is
+        # in there as text/paths, and no raster payload is embedded
+        assert 'image/png' not in text, 'the SVG embedded a bitmap'
+        # the set, off ONE stem
+        assert tidy == os.path.join(out, 'vec.csv')
+        spec = sp.figspec_path(img)
+        assert spec == os.path.join(out, 'vec.figspec.json')
+        for p in (tidy, spec):
+            assert os.path.exists(p) and os.path.getsize(p) > 0, p
+        # the CSV is the same evidence the PNG would have been given
+        raster = sp.make_opts()[0]
+        png_img, png_tidy = sp.export(sp.prepare_runs([d], raster), raster,
+                                      out, 'ras')
+        assert png_img == os.path.join(out, 'ras.png'), png_img
+        with open(tidy, 'rb') as a, open(png_tidy, 'rb') as b:
+            assert a.read() == b.read(), 'the tidy CSV followed the format'
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_the_dpi_reaches_the_raster_and_cannot_reach_the_vector():
+    """Two claims in one, and the second is the point of greying the
+    field: a PNG really is written at the dpi that was asked for, and an
+    SVG is byte-for-byte the same file at 50 dpi as at 1200 -- so a dpi
+    under SVG is INERT, which is what the window's greyed box says, and
+    not silently applied behind it."""
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        wide, tall = sp.FIGSIZE['area']
+        for dpi in (100, 300, 600):
+            opts = sp.make_opts(dpi=dpi)[0]
+            png = sp.save_figure(sp.prepare_runs([d], opts), opts,
+                                 os.path.join(out, f"r{dpi}.png"))
+            # matplotlib rounds the inch x dpi product; 1 px of slack
+            w, h = _png_size(png)
+            assert abs(w - wide * dpi) <= 1 and abs(h - tall * dpi) <= 1, \
+                (dpi, w, h)
+        # the default is still 300, i.e. the pre-`#314` file exactly
+        assert _png_size(os.path.join(out, 'r300.png')) == _png_size(
+            sp.save_figure(sp.prepare_runs([d], sp.make_opts()[0]),
+                           sp.make_opts()[0], os.path.join(out, 'def.png')))
+        svgs = []
+        for dpi in (sp.DPI_MIN, sp.DPI_MAX):
+            opts = sp.make_opts(fmt='svg', dpi=dpi)[0]
+            assert opts['dpi'] == dpi, 'the value was not even carried'
+            path = sp.save_figure(sp.prepare_runs([d], opts), opts,
+                                  os.path.join(out, f"v{dpi}.svg"))
+            with open(path, 'rb') as f:
+                svgs.append(f.read())
+        assert svgs[0] == svgs[1], 'a dpi changed a vector file'
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_a_dpi_or_format_outside_the_sane_range_is_refused():
+    """REFUSED, not clamped and not ignored (`#314`). A typed '30000' asks
+    for a render that looks exactly like a hang, and a clamp would answer
+    it with a figure nobody asked for -- the same silent-success failure
+    the landing-site map exists to prevent."""
+    for bad in (30000, 0, -300, 49, 1201, 'abc', '', True, 12.5):
+        opts, err = sp.make_opts(dpi=bad)
+        if bad == '':                 # a blank box is the ABSENCE of a
+            assert err is None and opts['dpi'] == sp.DEFAULT_DPI   # request
+            continue
+        assert opts is None, bad
+        assert '--dpi' in err, (bad, err)
+    # the boundaries themselves are IN
+    for good in (sp.DPI_MIN, sp.DPI_MAX, '600'):
+        opts, err = sp.make_opts(dpi=good)
+        assert err is None and opts['dpi'] == int(good), (good, err)
+    # None means unset, which is how every caller that says nothing about
+    # the dpi still gets the 300 every pre-`#314` export used
+    assert sp.make_opts(dpi=None)[0]['dpi'] == sp.DEFAULT_DPI
+    # an unknown format is refused in the CLI's own vocabulary
+    for bad in ('tiff', 'PNG', 'pdf', ''):
+        opts, err = sp.make_opts(fmt=bad)
+        assert opts is None and '--format' in err, (bad, err)
+    # ...and the CLI refuses before it writes anything
+    d, out = _mktmp(), _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(6))
+        assert sp.main([d, '--out', out, '--dpi', '30000']) == 2
+        assert sp.main([d, '--out', out, '--dpi', 'lots']) == 2
+        assert sp.main([d, '--out', out, '--format', 'tiff']) == 2
+        assert os.listdir(out) == [], os.listdir(out)
+        # and a good one still writes the three files
+        assert sp.main([d, '--out', out, '--stem', 'ok', '--format', 'svg',
+                        '--dpi', '600']) == 0
+        assert sorted(os.listdir(out)) == ['ok.csv', 'ok.figspec.json',
+                                           'ok.svg']
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_the_figspec_records_the_format_and_the_dpi():
+    """Without both, `--from-spec` re-renders something other than the
+    file it names -- a 300 dpi PNG standing in for the 600 dpi SVG the
+    spec was written beside. The round trip is checked on the BYTES, and
+    then a flag is used to override the spec's format, which is the whole
+    reason the two live in opts rather than beside them."""
+    if not _has_mpl():
+        return
+    d, out, again = _mktmp(), _mktmp(), _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        assert sp.main([d, '--out', out, '--stem', 'rt', '--format', 'svg',
+                        '--dpi', '600', '--prepost']) == 0
+        spec = os.path.join(out, 'rt.figspec.json')
+        recorded = _read_json(spec)['opts']
+        assert recorded['fmt'] == 'svg' and recorded['dpi'] == 600, recorded
+        # the re-render lands on an SVG again, byte for byte
+        assert sp.main(['--from-spec', spec, '--out', again]) == 0
+        assert os.path.exists(os.path.join(again, 'rt.svg'))
+        with open(os.path.join(out, 'rt.svg'), 'rb') as a, \
+                open(os.path.join(again, 'rt.svg'), 'rb') as b:
+            assert a.read() == b.read(), 're-render is not the same file'
+        # an explicit flag still beats the spec, and the dpi the spec
+        # carried is what the PNG is then rendered at -- which is why the
+        # window keeps the typed value under SVG instead of neutralising it
+        third = _mktmp()
+        try:
+            assert sp.main(['--from-spec', spec, '--out', third,
+                            '--format', 'png']) == 0
+            png = os.path.join(third, 'rt.png')
+            assert os.path.exists(png) and not os.path.exists(
+                os.path.join(third, 'rt.svg'))
+            w, _h = _png_size(png)
+            assert abs(w - sp.FIGSIZE['area'][0] * 600) <= 1, w
+        finally:
+            shutil.rmtree(third, ignore_errors=True)
+        # a spec written before `#314` has neither key: it must still
+        # re-render, as the 300 dpi PNG it was
+        old = os.path.join(out, 'old.figspec.json')
+        blob = _read_json(spec)
+        blob['opts'].pop('fmt')
+        blob['opts'].pop('dpi')
+        blob['stem'] = 'old'
+        import json
+        with open(old, 'w', encoding='utf-8') as f:
+            json.dump(blob, f)
+        assert sp.main(['--from-spec', old, '--out', again]) == 0
+        assert os.path.exists(os.path.join(again, 'old.png'))
+        assert abs(_png_size(os.path.join(again, 'old.png'))[0]
+                   - sp.FIGSIZE['area'][0] * sp.DEFAULT_DPI) <= 1
+    finally:
+        for p in (d, out, again):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_the_written_file_is_described_with_its_size():
+    """An SVG's size follows the number of drawn elements rather than the
+    pixel count, so it is the one thing about an export that cannot be
+    read off the settings -- hence naming it in the line that says the
+    file was written. The dpi is named only where it means something."""
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        for fmt in sp.FORMATS:
+            opts = sp.make_opts(fmt=fmt, dpi=150)[0]
+            img, _csv = sp.export(sp.prepare_runs([d], opts), opts, out, fmt)
+            said = sp.describe_output(img, opts)
+            assert fmt.upper() in said, said
+            assert ('150 dpi' in said) is (fmt == 'png'), said
+            assert 'kB' in said or 'MB' in said, said
+        # never a reason to fail an export: a file that is not there yet
+        # still gets a description
+        assert 'PNG' in sp.describe_output(os.path.join(out, 'nope.png'),
+                                           sp.make_opts()[0])
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
 
 
 def test_the_cli_option_table_cannot_drift_from_make_opts():

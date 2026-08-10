@@ -416,6 +416,23 @@ def test_resize_the_figure_follows_the_window():
         script = w.win.canvas.get_tk_widget().bind('<Configure>')
         assert 'resize' in script, "matplotlib's resize was unbound again"
         assert script.count('\n\nif ') >= 1, "our handler replaced it"
+        # ...and the CHEAP resize path lays the figure out where the
+        # expensive one would (`#316`). A resize re-runs the remembered
+        # tight_layout instead of rebuilding 742 artists to rediscover
+        # it, and a shortcut that landed somewhere else would be a second
+        # layout engine rather than a shortcut. It is not automatic:
+        # tight_layout reads wspace off the axes it finds, so run on its
+        # own output it drifted the panels 8-12% narrower.
+        for size in ('900x600', '1300x850', '900x600'):
+            w.resize(size)
+            shortcut = [tuple(ax.get_position().bounds)
+                        for ax in w.win.fig.axes]
+            assert shortcut, f'nothing drawn to lay out at {size}'
+            w.win._drawn_key = None            # forces the full rebuild
+            w.win.redraw()
+            assert [tuple(ax.get_position().bounds)
+                    for ax in w.win.fig.axes] == shortcut, \
+                f'the resize shortcut is not what a rebuild lays out ({size})'
 
 
 def test_short_window_keeps_the_toolbar_and_the_warnings_pane():
@@ -499,6 +516,87 @@ def test_moving_the_window_does_not_cost_a_redraw():
         assert n == [], 'a move scheduled a redraw'
         w.win._canvas_configured(_E(cur[0] - 60, cur[1]))
         assert n == [1], 'a real resize did not schedule a redraw'
+
+
+def _settled_redraws(w, n, secs=3.0):
+    """Pump until the coalesced redraw lands. -> the redraws counted."""
+    t0 = time.time()
+    while time.time() - t0 < secs and not n:
+        w.root.update()
+        time.sleep(0.01)
+    return n
+
+
+def test_a_resize_burst_costs_one_redraw():
+    """`#316`: the 120 ms debounce coalesced NOTHING during a resize drag.
+
+    Measured against the campaign corpus -- 13 runs on one area figure, a
+    real 3.5 s mouse drag on the window edge -- 3 to 5 <Configure> events
+    reached the canvas and 3 to 5 FULL REDRAWS came back. One for one.
+    A drag does not fire <Configure> per pixel: each redraw costs 480 ms
+    there and BLOCKS THE TK LOOP for all of it, so the next event cannot
+    arrive until long after a 120 ms timer has expired and fired. The
+    debounce was not late to the drag; the drag was throttled to the
+    debounce.
+
+    Both halves of the fix are asked for separately, because either alone
+    passes one of these and fails the other:
+
+      * the resize window has to outlast the gap a drag really leaves
+        between events (280-500 ms measured, being matplotlib's own
+        resize render plus the WM's dispatch) -- so the first burst
+        spaces its events over that gap with the loop FREE;
+      * and it cannot be only a longer number, because that gap is the
+        cost of servicing one resize and grows with the series count --
+        so the second burst BLOCKS the loop past the window, and the
+        redraw has to keep deferring while its timer comes up late.
+
+    COUNTS, not durations: a duration would pin this desktop's speed,
+    which is not what went wrong.
+    """
+    with _Win('1200x800') as w:
+        if not w.ok:
+            return
+
+        class _E:
+            def __init__(self, wd, ht):
+                self.width, self.height = wd, ht
+        n = []
+        w.win.redraw = lambda: n.append(1)
+        wide, tall = w.win._canvas_size
+
+        def burst(count, gap, block, start):
+            """`count` resize events `gap` apart; `block` of that gap is
+            the loop being unavailable, as a matplotlib render makes it."""
+            for i in range(count):
+                w.win._canvas_configured(_E(wide - start - 10 * i, tall))
+                time.sleep(block)
+                t0 = time.time()
+                while time.time() - t0 < gap - block:
+                    w.root.update()
+                    time.sleep(0.01)
+                w.root.update()
+
+        # a drag the loop keeps up with: the events are simply further
+        # apart than a click's worth of quiet
+        burst(6, 0.35, 0.0, 20)
+        assert n == [], f'a live drag redrew {len(n)} times'
+        assert _settled_redraws(w, n) == [1], \
+            f'a settled drag redrew {len(n)} times, want 1'
+        # a drag the loop CANNOT keep up with: every timer comes up late
+        del n[:]
+        burst(4, 0.0, (g.RESIZE_MS + g.LATE_MS + 80) / 1000.0, 120)
+        assert n == [], f'a blocked drag redrew {len(n)} times'
+        assert _settled_redraws(w, n) == [1], \
+            f'a settled blocked drag redrew {len(n)} times, want 1'
+        # ...and the ordinary case is untouched: a toggle blocks nothing,
+        # so its timer is on time and its redraw is not held back
+        del n[:]
+        for _ in range(5):
+            w.win.schedule()
+            w.root.update()
+        assert _settled_redraws(w, n) == [1], \
+            f'a burst on an idle loop redrew {len(n)} times'
 
 
 # ---------------------------------------------------------------------------
@@ -684,6 +782,149 @@ def test_the_click_through_is_discoverable_and_does_not_go_stale():
             g.subprocess = real
 
 
+class _Ev:
+    """A button_press_event as matplotlib delivers one."""
+
+    def __init__(self, ax, x, y, dbl=True):
+        self.inaxes, self.x, self.y, self.dblclick = ax, x, y, dbl
+
+
+def _marker(win, panel=0):
+    """(axes, px, py, run, row) for a marker of the CURRENT figure."""
+    opts, err = win.current_opts()
+    assert not err, err
+    ax = win.fig.axes[panel]
+    pts = g.plot_points(win._prepared, opts, panel)
+    x, y, run, row = pts[1]
+    px, py = ax.transData.transform((x, y))
+    return ax, px, py, run, row
+
+
+def test_a_double_click_survives_a_redraw_under_it():
+    """THE `#311` BUG. `on_click` resolved the panel with
+    `list(self.fig.axes).index(event.inaxes)`, which raises ValueError the
+    moment the figure is cleared and redrawn between the event being built
+    and the handler running -- and the except returned None SILENTLY. The
+    operator saw a double-click open Edge Review once and then do nothing
+    at all, with no message anywhere to say what had happened.
+
+    A redraw is forced between the two clicks here, which is the condition
+    itself rather than a stand-in for it: the second click carries an Axes
+    that is genuinely no longer in the figure."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        win = w.win
+        spy = _Popen()
+        real = g.subprocess
+        g.subprocess = spy
+        try:
+            ax_old, px, py, _run, row = _marker(win)
+            assert win.on_click(_Ev(ax_old, px, py)) is not None
+            assert len(spy.calls) == 1
+
+            # the figure is rebuilt under the pointer -- every Axes object
+            # the first click knew is gone
+            win.redraw()
+            w.settle(0.3)
+            assert ax_old not in win.fig.axes, 'redraw kept the same Axes'
+
+            # a click carrying the STALE axes still resolves, on the same
+            # row, because the panel is re-asked of the figure as it is now
+            ax_new, px2, py2, _r2, row2 = _marker(win)
+            spy.calls.clear()
+            got = win.on_click(_Ev(ax_old, px2, py2))
+            assert got is not None, 'the stale-axes double-click was dropped'
+            assert got[1]['index'] == row2['index'] == row['index']
+            assert len(spy.calls) == 1, spy.calls
+            assert spy.calls[0][1].get('start_new_session') is True
+
+            # and so does the ordinary one that carries the current axes
+            spy.calls.clear()
+            assert win.on_click(_Ev(ax_new, px2, py2)) is not None
+            assert len(spy.calls) == 1
+
+            # repeatedly: three redraws, three double-clicks, three launches
+            spy.calls.clear()
+            for _i in range(3):
+                win.redraw()
+                w.settle(0.2)
+                ax_i, pxi, pyi, _ri, _rowi = _marker(win)
+                assert win.on_click(_Ev(ax_i, pxi, pyi)) is not None
+            assert len(spy.calls) == 3, spy.calls
+        finally:
+            g.subprocess = real
+
+
+def test_no_click_leaves_the_window_without_an_answer():
+    """`#311`'s other half, and the reason it took an operator report to
+    find at all: FOUR paths out of `on_click` returned None in silence --
+    not a double-click, off the panels, nothing prepared, unusable
+    options. A swallowed interaction cannot be told apart from a broken
+    feature, so every path now either acts or says why, in the one line
+    that was already there to report what the last click resolved."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        win = w.win
+        spy = _Popen()
+        real = g.subprocess
+        g.subprocess = spy
+        try:
+            ax, px, py, run, row = _marker(win)
+
+            def said(ev):
+                """-> what the window said, having said nothing before."""
+                win.lbl_click.config(text='')
+                spy.calls.clear()
+                assert win.on_click(ev) is None
+                assert spy.calls == [], 'a refused click still launched'
+                text = win.lbl_click.cget('text')
+                assert text, 'the click was swallowed in silence'
+                return text
+
+            # 1 -- a SINGLE click on a marker. This is the reported
+            # symptom: a double-click that reaches the window as two
+            # singles used to do nothing and say nothing. It names the
+            # frame it is on and asks for the second click.
+            text = said(_Ev(ax, px, py, dbl=False))
+            assert 'single click' in text.lower()
+            assert run['name'] in text and 'DOUBLE-click' in text
+
+            # 2 -- a double-click that is not over a panel
+            text = said(_Ev(None, 2.0, 2.0))
+            assert 'not over a panel' in text
+
+            # 3 -- a double-click with nothing plotted to click through to
+            prepared, win._prepared = win._prepared, []
+            try:
+                text = said(_Ev(ax, px, py))
+                assert 'nothing is plotted' in text
+            finally:
+                win._prepared = prepared
+
+            # 4 -- a double-click while the draw options cannot be built
+            opts_real = win.current_opts
+            win.current_opts = lambda: (None, 'mode is not usable here')
+            try:
+                text = said(_Ev(ax, px, py))
+                assert 'mode is not usable here' in text
+            finally:
+                win.current_opts = opts_real
+
+            # 5 -- the miss that always did report, still reports
+            text = said(_Ev(ax, px, py - g.PICK_PX - 200))
+            assert 'no data point within' in text
+
+            # ...and after all of that the ordinary double-click still works
+            spy.calls.clear()
+            assert win.on_click(_Ev(ax, px, py)) is not None
+            assert len(spy.calls) == 1
+            assert run['name'] in win.lbl_click.cget('text')
+        finally:
+            g.subprocess = real
+
+
 # ---------------------------------------------------------------------------
 # `#275` -- remembered options, per parent folder
 # ---------------------------------------------------------------------------
@@ -718,7 +959,16 @@ def test_remembered_options_round_trip_per_parent_folder():
                        'vs_area': False, 'logx': False, 'logy': False,
                        'marker_key': True, 'subplots': 'both',
                        'cadence_guard': False, 'aggregate': False,
-                       'aggregate_exact': False}, got
+                       'aggregate_exact': False,
+                       # `#314`'s pair joins for a different reason from
+                       # every key above it: not how the figure is drawn,
+                       # but what it is written as. A house that exports
+                       # SVG at 600 dpi does so every time, and having to
+                       # re-pick the format per session is the same
+                       # annoyance the draw options were remembered to
+                       # end. The stem and the titles still stay out --
+                       # they name ONE figure; a format does not.
+                       'fmt': 'png', 'dpi': 300}, got
         # the `#268` pair joins because both are HOW THE FIGURE IS DRAWN,
         # which is the whole membership rule: whether a reader wants the
         # cross-run mean, and whether they want it pooled on exact keys,
@@ -1174,6 +1424,23 @@ def test_a_control_is_greyed_exactly_when_it_is_inert():
         win.v_breakdown.set(True)
         win._toggled()
         assert _state(win.cb_cadence) == 'normal'
+        # the budget bands reach ONE line of the engine, draw_area's
+        # `budget_bands = opts['bands'] and not opts.get('aggregate')`, and
+        # nothing outside draw_area reads the option at all -- so the box
+        # is inert in exactly two states (`#312`). Under the aggregate
+        # first: the band there is the SEM across runs and the ±1–2%
+        # budget is deliberately suppressed, so the tick did nothing while
+        # looking every bit as operative as the ones above it.
+        assert _state(win.cb_bands) == 'normal'
+        win.v_aggregate.set(True)
+        win._toggled()
+        assert _state(win.cb_bands) == 'disabled', \
+            'the aggregate suppresses the budget band, so the box is inert'
+        assert win.tip_bands.text == g.BANDS_OFF_AGGREGATE_TIP
+        win.v_aggregate.set(False)
+        win._toggled()
+        assert _state(win.cb_bands) == 'normal'
+        assert win.tip_bands.text == g.BANDS_TIP
         # the marker key is drawn by draw_area alone
         assert win.v_mode.get() == 'area'
         assert _state(win.cb_marker_key) == 'normal'
@@ -1184,6 +1451,11 @@ def test_a_control_is_greyed_exactly_when_it_is_inert():
         assert _state(win.cb_marker_key) == 'disabled', \
             'a key in current mode claims a distinction the figure does ' \
             'not make'
+        # ...and the bands go with it: the budget is an AREA budget, and
+        # draw_current never reads the option
+        assert _state(win.cb_bands) == 'disabled', \
+            'an area budget offered over a microamp figure'
+        assert win.tip_bands.text == g.BANDS_OFF_MODE_TIP
         assert _state(win.cb_vs_area) == 'normal'
         # ...and 'second' names a panel current and power do not have
         assert _state(win.rb_subplots['second']) == 'disabled'
@@ -1192,6 +1464,8 @@ def test_a_control_is_greyed_exactly_when_it_is_inert():
         win.v_mode.set('area')
         win._mode_changed()
         assert _state(win.cb_marker_key) == 'normal'
+        assert _state(win.cb_bands) == 'normal'
+        assert win.tip_bands.text == g.BANDS_TIP
         assert _state(win.e_title_second) == 'normal'
         # a heading only lands on a panel that RENDERS (`#270`): area_axes
         # creates neither axes when the selection switched it off
@@ -1206,6 +1480,144 @@ def test_a_control_is_greyed_exactly_when_it_is_inert():
         # ...and the legacy Title, which has ALWAYS meant the first panel,
         # greys with its precise successor rather than pretending to work
         assert _state(win.e_title) == 'disabled'
+        # the dpi is dots per INCH OF RASTER and an SVG has none: the
+        # backend pins it to 72 and scales in user units, so _savefig does
+        # not pass one at all. The same invariant as every rule above --
+        # the box greys, it does not silently stop mattering (`#314`).
+        assert win.v_fmt.get() == 'png'
+        assert _state(win.sb_dpi) == 'normal'
+        assert _state(win.lbl_dpi) == 'normal'
+        win.v_fmt.set('svg')
+        win._format_changed()
+        assert _state(win.sb_dpi) == 'disabled', \
+            'a dpi box left live beside a vector format'
+        assert _state(win.lbl_dpi) == 'disabled'
+        win.v_fmt.set('png')
+        win._format_changed()
+        assert _state(win.sb_dpi) == 'normal'
+        # ...and the format itself is never inert: it is the one control
+        # here with no condition on it
+        for name in sp.FORMATS:
+            assert _state(win.rb_fmt[name]) == 'normal', name
+
+
+class _Boxes:
+    """Stands in for tkinter.messagebox for one case, recording what the
+    window would have said. A real dialog would block the suite."""
+
+    def __init__(self):
+        self.said = []
+
+    def _record(self, kind):
+        def box(title, message, **_kw):
+            self.said.append((kind, title, message))
+        return box
+
+    def __enter__(self):
+        self._real = g.messagebox
+        g.messagebox = self
+        for kind in ('showinfo', 'showwarning', 'showerror'):
+            setattr(self, kind, self._record(kind))
+        return self
+
+    def __exit__(self, *_exc):
+        g.messagebox = self._real
+        return False
+
+
+def test_the_window_exports_the_format_and_dpi_it_shows():
+    """`#314` through the window end to end: the two controls reach
+    make_opts, the file that lands is the one the targets line promised,
+    and the CSV and the figspec land with it for BOTH formats -- the
+    three-files rule is sldea_plot's and does not know about formats."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        out = os.path.join(b.tmp, 'figs')
+        win.v_out.set(out)
+        win.v_stem.set('w')
+        base, err = win.current_opts()
+        assert not err and base['fmt'] == 'png' and base['dpi'] == 300
+        # the targets line names all three files, and follows the format
+        win.v_fmt.set('svg')
+        win._format_changed()
+        shown = win.lbl_targets.cget('text')
+        assert 'w.svg' in shown and 'w.csv' in shown, shown
+        assert 'w.figspec.json' in shown, shown
+        opts, err = win.current_opts()
+        assert not err and opts['fmt'] == 'svg'
+        win.redraw()
+        with _Boxes() as boxes:
+            win._export()
+        assert [k for k, _t, _m in boxes.said] == ['showinfo'], boxes.said
+        for name in ('w.svg', 'w.csv', 'w.figspec.json'):
+            p = os.path.join(out, name)
+            assert os.path.exists(p) and os.path.getsize(p) > 0, name
+        with open(os.path.join(out, 'w.svg'), encoding='utf-8') as f:
+            assert '<svg' in f.read()
+        # the confirmation says what it wrote, size included, because an
+        # SVG can be tens of MB where the PNG was one
+        said = boxes.said[0][2]
+        assert 'SVG' in said and ('kB' in said or 'MB' in said), said
+        # ...and the PNG path honours the dpi, measured off the file
+        win.v_fmt.set('png')
+        win.v_dpi.set('120')
+        win._format_changed()
+        assert win.current_opts()[0]['dpi'] == 120
+        with _Boxes() as boxes:
+            win._export()
+        with open(os.path.join(out, 'w.png'), 'rb') as f:
+            head = f.read(24)
+        width = int.from_bytes(head[16:20], 'big')
+        assert abs(width - sp.FIGSIZE['area'][0] * 120) <= 1, width
+        assert '120 dpi' in boxes.said[0][2], boxes.said
+        # the figspec the window wrote records both, so the CLI can
+        # re-render exactly what the window made
+        import json
+        with open(os.path.join(out, 'w.figspec.json'), encoding='utf-8') as f:
+            spec = json.load(f)
+        assert spec['opts']['fmt'] == 'png' and spec['opts']['dpi'] == 120
+
+
+def test_a_typo_in_the_dpi_box_is_refused_not_rendered():
+    """The `#314` refusal, in the window. It is REPORTED where the
+    filenames are (a bad number does not spoil the preview -- the canvas
+    is at screen dpi) and it stops the export rather than falling back to
+    a resolution nobody typed."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        win.v_out.set(os.path.join(b.tmp, 'figs'))
+        win.v_stem.set('nope')
+        win.redraw()
+        for bad in ('30000', '0', 'lots'):
+            win.v_dpi.set(bad)
+            win._show_targets()
+            opts, err = win.current_opts()
+            assert opts is None and '--dpi' in err, (bad, err)
+            assert 'REFUSED' in win.lbl_targets.cget('text'), bad
+            with _Boxes() as boxes:
+                win._export()
+            assert [k for k, _t, _m in boxes.said] == ['showwarning'], bad
+            assert '--dpi' in boxes.said[0][2], boxes.said
+            assert not os.path.exists(os.path.join(b.tmp, 'figs')), \
+                f"a refused dpi ({bad}) still wrote something"
+        # a blank box is the ABSENCE of a request, not a bad one: the
+        # default stands, so mid-edit the window never blocks on an empty
+        # field it is about to be given a number for
+        win.v_dpi.set('')
+        opts, err = win.current_opts()
+        assert not err and opts['dpi'] == sp.DEFAULT_DPI, (opts, err)
+        # ...and a hand-edited options file cannot smuggle one past the
+        # range the window itself enforces
+        assert g._clean_options({'dpi': 30000}) == {}
+        assert g._clean_options({'dpi': 'lots'}) == {}
+        assert g._clean_options({'dpi': True}) == {}
+        assert g._clean_options({'dpi': 600})['dpi'] == 600
+        assert g._clean_options({'fmt': 'tiff'}) == {}
+        assert g._clean_options({'fmt': 'svg'})['fmt'] == 'svg'
 
 
 def test_switching_away_from_area_cannot_leave_second_selected():
@@ -1259,13 +1671,21 @@ def test_the_cadence_guard_tooltip_says_it_annotates_not_suppresses():
     # the marker key's says which mode it belongs to, since that is what
     # the greyed box in current/power leaves an operator asking
     assert 'area mode only' in g.DRAW_TIPS['marker_key'].lower()
+    # the `#314` pair is held to the same bar, and the dpi's has the one
+    # sentence a greyed box makes someone ask for: WHY it went
+    for key in ('fmt', 'dpi'):
+        assert len(g.EXPORT_TIPS[key]) > 60, key
+    assert 'svg' in g.EXPORT_TIPS['dpi'].lower(), g.EXPORT_TIPS['dpi']
+    assert 'refused' in g.EXPORT_TIPS['dpi'].lower()
+    assert str(sp.DPI_MAX) in g.EXPORT_TIPS['dpi']
     # ...and they are ATTACHED, not merely declared up here
     with _Bare() as b:
         if not b.ok:
             return
         for w in (b.win.cb_marker_key, b.win.cb_cadence,
                   b.win.e_title_first, b.win.e_title_second,
-                  b.win.rb_subplots['both']):
+                  b.win.rb_subplots['both'], b.win.rb_fmt['svg'],
+                  b.win.sb_dpi):
             assert w.bind('<Enter>'), f"no tooltip attached to {w}"
 
 
@@ -1435,6 +1855,32 @@ def test_no_derived_heading_reaches_the_remembered_options_file():
     finally:
         g.OPTIONS_PATH, g.OPTIONS_FALLBACK = was
         shutil.rmtree(p, ignore_errors=True)
+def test_a_greyed_bands_box_says_which_of_its_two_reasons_it_is():
+    """`#312`. Greying the box is half the fix: 'a control that vanishes
+    tells an operator nothing about why it went, while a greyed one with
+    a tooltip says what would bring it back' is this column's own rule,
+    and the bands box has TWO ways to go inert, which want different
+    sentences. Each names the state and the way out, and each keeps the
+    budget text behind it -- the `#266` warning about `conf` must not be
+    the thing that falls off when the box greys."""
+    assert g.bands_tip(True, False) == g.BANDS_TIP
+    assert g.bands_tip(True, True) == g.BANDS_OFF_AGGREGATE_TIP
+    assert g.bands_tip(False, False) == g.BANDS_OFF_MODE_TIP
+    # mode wins the wording: the aggregate cannot be on outside area mode
+    # (current_opts neutralises it), so a reader in current mode is told
+    # about the mode
+    assert g.bands_tip(False, True) == g.BANDS_OFF_MODE_TIP
+    for tip, must in ((g.BANDS_OFF_AGGREGATE_TIP,
+                       ('aggregate', 'standard error of the mean',
+                        '`#268`', 'Turn the aggregate off')),
+                      (g.BANDS_OFF_MODE_TIP,
+                       ('area', 'Switch to area mode'))):
+        assert tip.startswith('Greyed:'), tip[:40]
+        for phrase in must:
+            assert phrase in tip, (phrase, tip[:200])
+        # ...and the budget itself is still one hover away
+        assert tip.endswith(g.BANDS_TIP), 'the greyed tip dropped the budget'
+        assert 'Never quote it as an uncertainty.' in tip
 
 
 def test_the_taller_draw_column_still_measures_and_still_scrolls():
@@ -1450,7 +1896,12 @@ def test_the_taller_draw_column_still_measures_and_still_scrolls():
         body = str(col.body) + '.'
         for widget in (win.cb_marker_key, win.cb_cadence, win.e_title_first,
                        win.e_title_second, win.rb_subplots['both'],
-                       win.e_title):
+                       win.e_title,
+                       # `#314`'s row is in the Export box, which is in
+                       # the same measured body -- a control floating
+                       # beside the scrolled column is unreachable in a
+                       # short window exactly as `#271` found
+                       win.rb_fmt['png'], win.sb_dpi):
             assert str(widget).startswith(body), \
                 f"{widget} is outside the scrolled body"
         tall = col.body.winfo_reqheight()

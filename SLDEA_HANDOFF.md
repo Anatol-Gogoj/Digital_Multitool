@@ -220,14 +220,30 @@ implementation has to satisfy.
 
 **Observation → decision.** Measured today on the five poolable P3-family
 runs, read-only from the campaign corpus, using A/A₀ so the pre-2026-07-28
-`active_area_mm2` scale bug divides out. (P3_7 carries no row tagged
-`baseline`, so it has no A₀ and drops out of every aggregate — five runs
-pool, not six. Worth knowing before any *n* is quoted in print.)
+`active_area_mm2` scale bug divides out. (P3_7 drops out of every
+aggregate — five runs pool, not six. Worth knowing before any *n* is
+quoted in print.)
+
+> **CORRECTIONS, 2026-08-10, found while implementing this.** Three
+> figures above were measured with a plain mean over all rows, which is
+> NOT what the plotter does; `levels()` has applied the "never average
+> across edge conventions" rule since the 2026-08-05 audit
+> (`sldea_plot.py:445`). Recomputed through the real loaders:
+> **SD max is 16.29 % and SEM max 7.28 %, both at 5.50 kV** — not
+> 15.63 % / 6.99 % at 7.50 kV. Every median, every count, and the peak
+> mean A/A₀ reproduce exactly; only the two maxima move, because the
+> machine-only rule lifts 5.50 kV from 13.90 % to 16.29 % and that
+> becomes the new maximum. **No part of the decision changes.**
+> Also: "every one of them above 4 kV" is off by one — 22 are above and
+> one sits exactly *at* 4.00 kV, under either rule. And the reason given
+> for P3_7 was wrong: it **does** have a row tagged `baseline`. What it
+> lacks is any `active_area_mm2` value at all — 81 rows, zero areas — so
+> A₀ is None. It drops out for that reason, and five runs still pool.
 
 *Why the family band is SEM, not the budget.* Per-level spread across
-runs is SD median 4.94 %, max 15.63 %; the corresponding SEM is median
-2.21 %, max 6.99 %. SEM exceeds the ±2 % end of the budget at **23 of 40
-levels, every one of them above 4 kV**. Below 4 kV the two are the same
+runs is SD median 4.94 %, max 16.29 %; the corresponding SEM is median
+2.21 %, max 7.28 %. SEM exceeds the ±2 % end of the budget at **23 of 40
+levels, 22 of them above 4 kV and one exactly at it**. Below 4 kV the two are the same
 size (SEM 0.87–2.21 %) and either would look alike; above it the
 instrument stops being the limit and a budget band would overstate
 confidence in the mean by up to ~3.5×, exactly where the physics gets
@@ -254,6 +270,26 @@ devices, which is not a physical quantity. The SD signature confirms the
 mechanism rather than merely suggesting it: spread spikes to ~15 %
 through the transition, then falls again at 5.75 kV as the runs
 re-agree on having collapsed.
+
+> **The cap is decided policy, and on this campaign it never fires
+> (2026-08-10).** `run['flags']` is empty for **all seven** P3 runs;
+> the only current-confirmed breakdowns in the whole corpus are the
+> three July-23 runs (4, 1 and 13 flags). So the A/A₀ collapse above
+> 5.25 kV that motivates this paragraph is an **area-only signature
+> with no current corroboration**, and the aggregate runs the entire
+> staircase straight through it.
+>
+> The implementation does NOT invent an area-collapse trigger to make
+> the cap bite. `CLAUDE.md` is explicit that area collapse alone is an
+> advisory and only current-confirmed events count — the rule exists
+> because an area-triggered rename false-branded 35 healthy frames
+> once. The figure and console instead state that the cap did not fire
+> and name any advisories present (P3_5 row 46, `collapse? area -36%`).
+>
+> **If the cap was meant to bite here, that needs a new decision about
+> non-current-confirmed collapse.** It is not a bug and not an
+> oversight; it is the decided rule meeting data the rule does not
+> cover.
 
 *Why the grid is interpolated by default.* Eight runs step 0.25 kV; one
 steps 0.2 and shares only eight levels with them. Exact-key pooling

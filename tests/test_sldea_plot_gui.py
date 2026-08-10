@@ -416,6 +416,23 @@ def test_resize_the_figure_follows_the_window():
         script = w.win.canvas.get_tk_widget().bind('<Configure>')
         assert 'resize' in script, "matplotlib's resize was unbound again"
         assert script.count('\n\nif ') >= 1, "our handler replaced it"
+        # ...and the CHEAP resize path lays the figure out where the
+        # expensive one would (`#316`). A resize re-runs the remembered
+        # tight_layout instead of rebuilding 742 artists to rediscover
+        # it, and a shortcut that landed somewhere else would be a second
+        # layout engine rather than a shortcut. It is not automatic:
+        # tight_layout reads wspace off the axes it finds, so run on its
+        # own output it drifted the panels 8-12% narrower.
+        for size in ('900x600', '1300x850', '900x600'):
+            w.resize(size)
+            shortcut = [tuple(ax.get_position().bounds)
+                        for ax in w.win.fig.axes]
+            assert shortcut, f'nothing drawn to lay out at {size}'
+            w.win._drawn_key = None            # forces the full rebuild
+            w.win.redraw()
+            assert [tuple(ax.get_position().bounds)
+                    for ax in w.win.fig.axes] == shortcut, \
+                f'the resize shortcut is not what a rebuild lays out ({size})'
 
 
 def test_short_window_keeps_the_toolbar_and_the_warnings_pane():
@@ -499,6 +516,87 @@ def test_moving_the_window_does_not_cost_a_redraw():
         assert n == [], 'a move scheduled a redraw'
         w.win._canvas_configured(_E(cur[0] - 60, cur[1]))
         assert n == [1], 'a real resize did not schedule a redraw'
+
+
+def _settled_redraws(w, n, secs=3.0):
+    """Pump until the coalesced redraw lands. -> the redraws counted."""
+    t0 = time.time()
+    while time.time() - t0 < secs and not n:
+        w.root.update()
+        time.sleep(0.01)
+    return n
+
+
+def test_a_resize_burst_costs_one_redraw():
+    """`#316`: the 120 ms debounce coalesced NOTHING during a resize drag.
+
+    Measured against the campaign corpus -- 13 runs on one area figure, a
+    real 3.5 s mouse drag on the window edge -- 3 to 5 <Configure> events
+    reached the canvas and 3 to 5 FULL REDRAWS came back. One for one.
+    A drag does not fire <Configure> per pixel: each redraw costs 480 ms
+    there and BLOCKS THE TK LOOP for all of it, so the next event cannot
+    arrive until long after a 120 ms timer has expired and fired. The
+    debounce was not late to the drag; the drag was throttled to the
+    debounce.
+
+    Both halves of the fix are asked for separately, because either alone
+    passes one of these and fails the other:
+
+      * the resize window has to outlast the gap a drag really leaves
+        between events (280-500 ms measured, being matplotlib's own
+        resize render plus the WM's dispatch) -- so the first burst
+        spaces its events over that gap with the loop FREE;
+      * and it cannot be only a longer number, because that gap is the
+        cost of servicing one resize and grows with the series count --
+        so the second burst BLOCKS the loop past the window, and the
+        redraw has to keep deferring while its timer comes up late.
+
+    COUNTS, not durations: a duration would pin this desktop's speed,
+    which is not what went wrong.
+    """
+    with _Win('1200x800') as w:
+        if not w.ok:
+            return
+
+        class _E:
+            def __init__(self, wd, ht):
+                self.width, self.height = wd, ht
+        n = []
+        w.win.redraw = lambda: n.append(1)
+        wide, tall = w.win._canvas_size
+
+        def burst(count, gap, block, start):
+            """`count` resize events `gap` apart; `block` of that gap is
+            the loop being unavailable, as a matplotlib render makes it."""
+            for i in range(count):
+                w.win._canvas_configured(_E(wide - start - 10 * i, tall))
+                time.sleep(block)
+                t0 = time.time()
+                while time.time() - t0 < gap - block:
+                    w.root.update()
+                    time.sleep(0.01)
+                w.root.update()
+
+        # a drag the loop keeps up with: the events are simply further
+        # apart than a click's worth of quiet
+        burst(6, 0.35, 0.0, 20)
+        assert n == [], f'a live drag redrew {len(n)} times'
+        assert _settled_redraws(w, n) == [1], \
+            f'a settled drag redrew {len(n)} times, want 1'
+        # a drag the loop CANNOT keep up with: every timer comes up late
+        del n[:]
+        burst(4, 0.0, (g.RESIZE_MS + g.LATE_MS + 80) / 1000.0, 120)
+        assert n == [], f'a blocked drag redrew {len(n)} times'
+        assert _settled_redraws(w, n) == [1], \
+            f'a settled blocked drag redrew {len(n)} times, want 1'
+        # ...and the ordinary case is untouched: a toggle blocks nothing,
+        # so its timer is on time and its redraw is not held back
+        del n[:]
+        for _ in range(5):
+            w.win.schedule()
+            w.root.update()
+        assert _settled_redraws(w, n) == [1], \
+            f'a burst on an idle loop redrew {len(n)} times'
 
 
 # ---------------------------------------------------------------------------

@@ -41,6 +41,7 @@ import math
 import os
 import subprocess
 import sys
+import time
 import tk_fontfix                      # must run before tkinter connects:
 tk_fontfix.apply()                     # colour-emoji glyphs hard-crash Tk
 import tkinter as tk
@@ -88,10 +89,49 @@ PROCESSED_MARK = '  ✓ processed'       # Edge Review's labelling convention
 MIN_FIG_W = 360
 MIN_H = 420
 
-# Redraw coalescing. 120 ms was already the run-list debounce; a resize
-# drag fires <Configure> per pixel and each redraw is a full matplotlib
-# pass, so it is the same number for the same reason.
+# Redraw coalescing for a CONTROL change -- a tick box, a keystroke, a
+# drag through the run list. 120 ms is a click's worth of quiet.
 REDRAW_MS = 120
+
+# A resize needs its own, longer window, and the reason is the `#316`
+# defect: a restartable timer only coalesces a burst whose events arrive
+# FASTER THAN IT FIRES, and a resize drag's did not.
+#
+# Measured, 13 corpus runs on one area figure, a real 3.5 s mouse drag on
+# the window edge: 3-5 <Configure> reached the canvas and 3-5 FULL
+# REDRAWS came back. One for one, no coalescing at all. A drag does not
+# fire <Configure> per pixel the way this comment used to assume -- it
+# fires ONE PER REDRAW, because each redraw blocks the Tk loop for 480 ms
+# (298 ms building 742 artists, 178 ms rendering them) and nothing can be
+# delivered meanwhile. The debounce was not late to the drag; the drag
+# was throttled to the debounce.
+#
+# So the window is measured against the thing it has to outlast. With the
+# redundant redraws gone, consecutive <Configure> arrive 280-500 ms apart
+# on this corpus -- that gap being matplotlib's OWN resize render (262 ms,
+# measured with our handler disabled entirely) plus the WM's dispatch.
+# 500 ms clears it. A drag settling a third of a second later than a click
+# costs nothing visible: matplotlib's handler has already redrawn the
+# figure at the new size by then, and what our redraw adds on top is the
+# re-run of tight_layout against it.
+RESIZE_MS = 500
+
+# That gap IS the cost of servicing one resize, though, so it grows with
+# the series count and no fixed window can be right for every figure.
+# This covers the rest, and it needs no number for the workload: a timer
+# that comes up LATE waited on a blocked loop. The two cases separate by
+# a factor of six, measured on the real debounce path -- ~5 ms past the
+# deadline on an idle loop, 240-290 ms past it when a render ran in
+# between. A redraw that comes up late is a redraw whose burst is still
+# running, so it re-arms instead of firing.
+LATE_MS = 40
+
+# ...and deferral is BOUNDED, because "the loop is busy" is not a promise
+# that it will ever go quiet. A new event restarts the budget -- that is
+# a live burst, and waiting through it is the point -- but nothing else
+# may push the figure further out of date than this. One visibly late
+# redraw beats a figure that silently stopped tracking its window.
+MAX_DEFER_MS = 1000
 
 
 # ---------------------------------------------------------------------------
@@ -757,7 +797,11 @@ class PlotWindow:
         self.runs = []                 # [(name, label)] currently listed
         self._loaded = {}              # rundir -> loaded run dict (cache)
         self._prepared = []            # what the canvas is currently showing
+        self._drawn_key = None         # ...and what it was derived from
         self._redraw_after = None
+        self._deadline = 0.0           # when the pending redraw is DUE
+        self._window_ms = REDRAW_MS    # the quiet this burst has to make
+        self._defer_until = None       # how long this burst may push it
         self._canvas_size = None       # last figure-canvas size (`#271`)
         self.min_size = (MIN_FIG_W, MIN_H)   # replaced by apply_minsize
         self._warns = []
@@ -1266,11 +1310,50 @@ class PlotWindow:
 
     # -- drawing -----------------------------------------------------------
 
-    def schedule(self, _event=None):
+    def schedule(self, _event=None, ms=REDRAW_MS):
         """Coalesce redraws: dragging through the run list fires a select
-        event per row, and each redraw is a full matplotlib pass."""
+        event per row, a resize drag fires <Configure> per redraw, and
+        each redraw is a full matplotlib pass. `ms` is how much quiet the
+        burst has to produce before the redraw lands -- a click's worth by
+        default, a resize's when the resize handler asks for it (`#316`).
+
+        Every caller comes through here, so this is also where the
+        deferral budget restarts: a fresh event is a new burst, whatever
+        the last one was still waiting on."""
+        self._defer_until = None
+        self._arm(ms)
+
+    def _arm(self, ms):
+        """Queue the coalesced redraw and REMEMBER WHEN IT IS DUE. That
+        deadline is the whole `#316` mechanism -- without it the callback
+        cannot tell a quiet loop from a blocked one."""
         self._cancel_redraw()          # one canceller, shared with _closing
-        self._redraw_after = self.root.after(REDRAW_MS, self.redraw)
+        self._window_ms = ms
+        self._deadline = time.monotonic() + ms / 1000.0
+        if self._defer_until is None:
+            self._defer_until = self._deadline + MAX_DEFER_MS / 1000.0
+        self._redraw_after = self.root.after(ms, self._debounced)
+
+    def _debounced(self):
+        """Redraw -- or defer once more, because the burst is still
+        running (`#316`).
+
+        A timer that comes up LATE waited on a blocked event loop, and
+        during a resize drag it always does: matplotlib's own resize
+        handler renders the figure at the new size before Tk gets to
+        service anything else. Firing there redraws INTO a drag that is
+        still going, which is how 6 <Configure> used to cost 6 full
+        redraws. Re-arming instead means the redraw lands once, when the
+        drag stops -- and the ordinary case is untouched, because a
+        toggle blocks nothing and its timer is ~5 ms late, not 250."""
+        self._redraw_after = None
+        now = time.monotonic()
+        if ((now - self._deadline) * 1000.0 > LATE_MS
+                and now < self._defer_until):
+            self._arm(self._window_ms)
+            return
+        self._defer_until = None
+        self.redraw()
 
     def _canvas_configured(self, event):
         """The figure canvas changed size — relayout, coalesced (`#271`).
@@ -1278,12 +1361,17 @@ class PlotWindow:
         SIZE, not every <Configure>: the event also fires when the widget
         merely MOVES (the scrollbar appearing beside it shifts it by its
         own width), and a full prepare_runs + draw for a move is work
-        nobody asked for."""
+        nobody asked for.
+
+        RESIZE_MS, not REDRAW_MS: a drag's events are hundreds of
+        milliseconds apart because servicing one costs that much, so the
+        click-sized window let a drag redraw straight through it
+        (`#316`)."""
         size = (event.width, event.height)
         if size == self._canvas_size:
             return
         self._canvas_size = size
-        self.schedule()
+        self.schedule(None, RESIZE_MS)
 
     def apply_minsize(self):
         """Floor the window so the layout cannot collapse (`#271`).
@@ -1317,13 +1405,50 @@ class PlotWindow:
             warn(m)
         return run
 
+    def _figure_key(self):
+        """What the figure on screen was DERIVED FROM: the run set and
+        every option that reaches the drawing. Two redraws with the same
+        key can only differ in the size of the canvas they land on."""
+        opts, err = self.current_opts()
+        return (tuple(self.selected_dirs()), err,
+                None if err else tuple(sorted(opts.items())))
+
+    def relayout(self):
+        """Re-run the last draw's layout at the canvas's new size, WITHOUT
+        rebuilding the figure (`#316`).
+
+        A resize does not change a single number on the figure; it changes
+        how many inches the numbers have. Rebuilding to find that out cost
+        298 ms of artist construction over 13 runs and a second full
+        render on top of the one matplotlib's own resize handler had
+        already done -- measured, and the larger half of a drag's whole
+        bill. -> True when it could be done.
+
+        draw_idle, not draw: matplotlib has a render pending for this same
+        resize, and this merges into it instead of adding a second."""
+        if not sp.relayout(self.fig):
+            return False
+        self.canvas.draw_idle()
+        return True
+
     def redraw(self):
         self._redraw_after = None
         # the click line goes back to being a hint: what it says otherwise
         # is which frame the LAST double-click opened, and that answer
-        # belongs to the figure that was on screen when it was clicked
+        # belongs to the figure that was on screen when it was clicked --
+        # at the size it was then, which is why a relayout takes it down
+        # too: the point it named has moved
         self.lbl_click.config(text=CLICK_HINT)
+        # A resize reaches here like everything else, and is told apart
+        # like this rather than by a flag: what makes it cheap is that
+        # nothing the figure was derived from has changed, and a flag
+        # would have to be right about that. Interleave a tick box with
+        # the drag and the key moves, so the rebuild happens.
+        if self._drawn_key is not None and self._figure_key() == \
+                self._drawn_key and self.relayout():
+            return
         opts, err = self.current_opts()
+        self._drawn_key = None         # nothing survives the clear below
         self.fig.clear()
         if err:
             self._prepared = []
@@ -1354,6 +1479,9 @@ class PlotWindow:
                        "See the messages below.")
         else:
             sp.draw(self.fig, runs, opts, warns.append)
+            # only a real figure can be re-laid-out instead of rebuilt:
+            # the hint above draws no axes and sp.relayout says so
+            self._drawn_key = self._figure_key()
         self._set_messages(warns)
         self._show_targets()
         self.canvas.draw()

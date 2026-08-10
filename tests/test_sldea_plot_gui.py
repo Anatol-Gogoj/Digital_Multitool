@@ -823,8 +823,18 @@ def test_a_double_click_survives_a_redraw_under_it():
             assert win.on_click(_Ev(ax_old, px, py)) is not None
             assert len(spy.calls) == 1
 
-            # the figure is rebuilt under the pointer -- every Axes object
-            # the first click knew is gone
+            # The figure is rebuilt under the pointer -- every Axes object
+            # the first click knew is gone.
+            #
+            # `_drawn_key` is cleared FIRST because `#316` made a redraw
+            # whose inputs are unchanged re-run the layout instead of
+            # rebuilding, which keeps the Axes alive. That is the whole
+            # point of that change and it is not being worked around: this
+            # case needs a genuine rebuild, so it asks for one. Landing
+            # `#311` and `#316` in the same wave took main to 38/39 for
+            # exactly this reason -- each was green alone, and the clash is
+            # semantic, so git merged both without a murmur.
+            win._drawn_key = None
             win.redraw()
             w.settle(0.3)
             assert ax_old not in win.fig.axes, 'redraw kept the same Axes'

@@ -63,6 +63,21 @@ def _shut(root):
         root.destroy()
     except Exception:
         pass
+    # LEAVE NO ROOT BEHIND, even when Tcl teardown was untidy.
+    #
+    # Tk.destroy() clears tkinter._default_root on the way OUT, so a raise
+    # anywhere inside it -- a child whose Tcl command has already gone, a
+    # callback cancelled out from under a widget -- leaves the interpreter
+    # marked live. Nothing in THIS case fails; the next test that asserts a
+    # clean interpreter does, which is how a teardown fault gets reported
+    # as somebody else's bug. Seen 2026-08-10: the failure surfaced in
+    # test_importing_the_module_opens_no_window, four cases later.
+    #
+    # This helper's whole contract is "the root is gone afterwards", so it
+    # ends by making that true rather than hoping destroy() got there.
+    import tkinter as _tk
+    if getattr(_tk, '_default_root', None) is root:
+        _tk._default_root = None
 
 
 def _fake_run(parent, name, processed=True, csv_name='data.csv'):

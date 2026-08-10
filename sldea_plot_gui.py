@@ -1367,7 +1367,17 @@ class PlotWindow:
         entry = ttk.Entry(row, textvariable=var)
         entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
         entry.bind('<KeyRelease>', lambda _e: self._title_typed())
-        hint = tk.Label(row, text='', anchor=tk.W, foreground=HINT_FG,
+        # PARENTED TO THE ENTRY, not to the row, even though it is placed
+        # over the entry either way. A Label whose parent is the row but
+        # which is placed `in_` a sibling gets destroyed TWICE on teardown
+        # -- once when Tk tears down the entry it is placed in, then again
+        # when the row walks its own children -- and the second
+        # deletecommand raises TclError. Tk.destroy() clears
+        # tkinter._default_root only on the way OUT, so the raise left a
+        # live root behind and the next test asserting a clean interpreter
+        # failed instead of this one. Parenting it here means it is
+        # destroyed exactly once.
+        hint = tk.Label(entry, text='', anchor=tk.W, foreground=HINT_FG,
                         background=_field_bg(entry), borderwidth=0,
                         font='TkTextFont')
         # a click has to land in the box the hint covers, not on the hint

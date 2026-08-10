@@ -13,6 +13,61 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## Guardrail 3 is stated once in the caption and marked only where a level falls short of it (2026-08-10)
+
+**TL;DR:** the aggregate printed every level's support count in a row
+above the x axis. Under the default interpolated grid that is the same
+number at every level, and the row ran straight under the marker key, so
+neither could be read. Decision, from Anatol against `#312`: **drop the
+per-level row, state the one n in the caption, and keep a printed count
+only on the levels whose MEASURED support falls below it.** Guardrail 3
+is unchanged — what changes is where it is said.
+
+*What the row actually cost.* Measured through the plotter's own loaders
+on the campaign corpus, read-only. The five poolable P3 runs pool to
+**41 levels, n = 5 at every one, all measured** — 41 labels, all reading
+"5", and the last of them sat under the marker-fill legend. Adding
+`DOT_P3_1_20260729` gives 41 levels at n = 6, again all measured, again
+41 identical labels. Under the new rule both figures print **no counts at
+all** and the caption carries "n = 5 at every level, all measured."
+
+*What it was worth keeping for.* The window's own worst case is the
+eight-run selection that mixes the P3 family with the three July-23 runs:
+**45 levels, n = 8, and 39 of them thin** — the 0.2 kV stepper against
+everyone else's 0.25 puts 1 measured + 7 interpolated on half the grid
+and 7 + 1 on the other half. Those 39 keep their `a+b` counts, so the one
+figure where the counts carry information still carries them, and the
+console warning names the thinnest (0.2 kV, 1 measured of 8).
+
+*Why the test is on measured support, not on n.* `n < max(n)` would have
+been the obvious rule and it is the wrong one: interpolation is what
+keeps n uniform, so the level carried by one measured run and seven
+interpolated ones sits at **exactly full n** and would have gone unmarked
+— which is the case guardrail 3 was written for in the first place.
+Since `n_measured <= n <= full`, testing `n_measured < full` marks a
+level iff it is short of runs OR carries any interpolation, in one
+comparison.
+
+*Why the collision was certain rather than unlucky.* The counts were
+placed in axes fractions (y = 0.012 / 0.045) and the key in font-sized
+padding from the corner: two different units sharing one corner, which
+agree at no window size at all. Measured on a mixed-grid fixture across
+figure sizes from 3.2×2.0 in to 20×9 in, the old geometry overlapped by
+**20.1 px at every one of them**; both are now measured in POINTS from
+the axes floor (row baselines 3 and 12 pt, key floor 24 pt) and the
+clearance is **13.2 px at every size**, which is the point of using
+points. The lift applies only when a count is actually printed, so every
+figure that marks nothing lays out exactly as before.
+
+*One thing this does NOT do.* On the eight-run mixed selection the 39
+surviving labels still crowd each other at small window sizes — 39 marks
+in 5.6 kV is dense however it is drawn. That is a selection pooling two
+electrode families and two campaigns, which `#268`'s family grouping is
+meant to prevent and cannot yet (zero corpus runs carry the
+`Electrode family:` field); the console warning states the interpolation
+share in words either way. Not fixed here, and not a reason to drop
+labels — the thin levels are exactly the ones worth printing.
+
 ## Cadence guard: no corpus run can support a point-in-time breakdown mark, and the default flip is Anatol's call (2026-08-09)
 
 **TL;DR:** the breakdown X on a cross-run figure says "the device broke

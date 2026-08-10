@@ -1660,15 +1660,198 @@ def test_aggregate_records_measured_versus_interpolated_per_level():
         # losing a contribution somewhere
         for l in ag.values():
             assert l['n_measured'] + l['n_interpolated'] == l['n'], l
-        # and it is SURFACED, on the figure and on the console
+        # and it is SURFACED, on the figure and on the console -- on the
+        # EXCEPTIONS only since `#312`: the thin levels keep their count,
+        # the level all three runs really measured carries none, and the
+        # caption states the n it falls short of
         opts = sp.make_opts(aggregate=True)[0]
         warns = []
         fig = _drawn([fine, c1, c2], opts, warns.append)
         labels = {t.get_text() for a in fig.axes for t in a.texts}
-        assert '2+1' in labels and '1+2' in labels and '3' in labels, labels
+        assert '2+1' in labels and '1+2' in labels, labels
+        assert '3' not in labels, 'a full-support level still printed its n'
         assert any('measured' in w and 'interpolated' in w for w in warns), \
             warns
         assert 'measured + ' in _caption(fig), _caption(fig)
+        assert 'n = 3 at every level except' in _caption(fig), _caption(fig)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _marker_key_legend(ax):
+    """The 'marker fill' legend on `ax`, or None -- it is a second Legend
+    beside the run legend, so it has to be picked out by its title."""
+    for a in ax.get_children():
+        if (a.__class__.__name__ == 'Legend'
+                and a.get_title().get_text() == 'marker fill'):
+            return a
+    return None
+
+
+def test_only_the_levels_short_of_the_captions_n_still_print_a_count():
+    """`#312`. Every level used to print its own support count, which
+    under the default interpolated grid is the SAME NUMBER at every level
+    -- a row of identical digits, and it ran straight through the marker
+    key. The counts still have to survive where they mean something, so
+    the caption states the one n and only the exceptions are marked.
+
+    The exception test is on MEASURED support, not on n, and that is the
+    whole of it: a level carried by one measured run and four
+    interpolated ones sits at exactly full n, so comparing n alone would
+    leave unmarked the very case guardrail 3 exists for."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        fine = _agg_run(d, 'FINE', [0.2, 0.4, 0.6, 0.8, 1.0],
+                        lambda kv: 100.0 + 10 * kv)
+        c1 = _agg_run(d, 'C1', [0.25, 0.5, 0.75, 1.0],
+                      lambda kv: 100.0 + 11 * kv)
+        c2 = _agg_run(d, 'C2', [0.25, 0.5, 0.75, 1.0],
+                      lambda kv: 100.0 + 12 * kv)
+        ag = sp.aggregate_levels([fine, c1, c2])
+        by_kv = {l['kv']: l for l in ag}
+        assert sp.aggregate_full_n(ag) == 3
+        thin = {l['kv'] for l in sp.aggregate_thin_levels(ag)}
+        # 1.0 kV: every run measured it -> not an exception
+        assert by_kv[1.0]['n'] == 3 and by_kv[1.0]['n_interpolated'] == 0
+        assert 1.0 not in thin, 'a fully measured level was marked'
+        # 0.4 kV: full n, but ONE measured value and two interpolated --
+        # the case a plain `n < max` rule would miss
+        assert by_kv[0.4]['n'] == sp.aggregate_full_n(ag)
+        assert by_kv[0.4]['n_measured'] == 1
+        assert 0.4 in thin, 'a thinly interpolated level went unmarked'
+        assert 0.5 in thin, thin                       # 2 measured of 3
+        # and it is exactly {short of n} u {any interpolation}
+        assert thin == {l['kv'] for l in ag
+                        if l['n'] < 3 or l['n_interpolated']}, thin
+        # an empty aggregate has no maximum to fall short of
+        assert sp.aggregate_full_n([]) == 0
+        assert sp.aggregate_thin_levels([]) == []
+        # ONE run on ONE grid: nothing is interpolated, so nothing is
+        # marked and the caption carries the whole story
+        opts = sp.make_opts(aggregate=True)[0]
+        fig = _drawn([c1, c2], opts)
+        assert not [t for a in fig.axes for t in a.texts], \
+            'a single-grid family still printed per-level counts'
+        assert 'n = 2 at every level, all measured.' in _caption(fig), \
+            _caption(fig)
+        # ...and neither wording outgrew the width the aggregate caption
+        # is written to (7 pt on a 12.6 in figure runs off the right edge
+        # past ~215 characters, which is how an early draft lost the cap
+        # sentence entirely)
+        for pool in ([c1, c2], [fine, c1, c2]):
+            text = sp._aggregate_caption(pool, sp.aggregate_levels(pool),
+                                         opts, None)
+            for line in text.split('\n'):
+                assert len(line) <= 215, (len(line), line)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_support_row_clears_the_marker_key_at_every_figure_size():
+    """`#312`'s acceptance, measured rather than eyeballed.
+
+    The row of counts was placed in AXES FRACTIONS and the marker key in
+    font-sized padding from the corner. Two units, one shared corner: they
+    agree at no size at all -- on the campaign corpus the key sat on the
+    counts and neither was readable. Both are now measured in POINTS from
+    the axes floor, so the clearance is arithmetic and, being points, it
+    is the SAME at every size the window can be dragged to.
+
+    Sizes span 3.2x2.0 in (below anything the window permits) to 20x9,
+    including a wide-and-short one, because a fraction-based row would
+    fail first exactly where the axes are shortest."""
+    if not _has_mpl():
+        return
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    d = _mktmp()
+    try:
+        kv25 = [round(0.25 * i, 3) for i in range(1, 41)]     # to 10 kV
+        kv20 = [round(0.20 * i, 3) for i in range(1, 51)]     # ...and 0.2
+        runs = [_agg_run(d, 'FINE', kv20, lambda kv: 100.0 + 10 * kv),
+                _agg_run(d, 'C1', kv25, lambda kv: 100.0 + 11 * kv),
+                _agg_run(d, 'C2', kv25, lambda kv: 100.0 + 12 * kv)]
+        opts = sp.make_opts(aggregate=True)[0]
+        # the labels have to reach the key's own corner, or the test
+        # would pass on a figure that never put them near each other
+        ag = sp.aggregate_levels(runs)
+        assert max(l['kv'] for l in sp.aggregate_thin_levels(ag)) >= 9.0
+        tightest = set()
+        for size in ((12.6, 5.4), (20.0, 9.0), (6.0, 3.0), (4.0, 2.2),
+                     (14.0, 2.6), (3.2, 2.0)):
+            fig = Figure(figsize=size)
+            FigureCanvasAgg(fig)
+            sp.draw(fig, runs, opts, lambda m: None)
+            fig.canvas.draw()
+            rend = fig.canvas.get_renderer()
+            for ax in fig.axes:
+                key = _marker_key_legend(ax)
+                if key is None:
+                    continue
+                kb = key.get_window_extent(rend)
+                assert ax.texts, 'no support row on the key\'s own axis'
+                gaps = []
+                for t in ax.texts:
+                    tb = t.get_window_extent(rend)
+                    assert not tb.overlaps(kb), \
+                        (size, t.get_text(), 'under the marker key')
+                    gaps.append(kb.y0 - tb.y1)
+                # the taller of the two staggered rows is the one that
+                # decides whether the key clears anything
+                tightest.add(round(min(gaps), 1))
+        # points, not fractions: ONE clearance across every size above
+        assert len(tightest) == 1, \
+            f"clearance varies with figure size: {tightest}"
+        assert tightest.pop() > 0
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_figure_with_nothing_to_mark_leaves_the_marker_key_alone():
+    """The lift is the support row asking for a floor, so a figure
+    without one keeps the corner it always had -- the aggregate is not
+    allowed to restyle every other figure in the suite on its way past.
+
+    Read off the legend's ANCHOR BOX against the axes it sits in, which
+    is what 'lower right' is measured from: unlifted the two are the same
+    rectangle, lifted the anchor floor is MARKER_KEY_LIFT_PT above the
+    axes floor -- in points, so the same at any size."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        c1 = _agg_run(d, 'C1', [0.25, 0.5, 0.75, 1.0],
+                      lambda kv: 100.0 + 11 * kv)
+        c2 = _agg_run(d, 'C2', [0.25, 0.5, 0.75, 1.0],
+                      lambda kv: 100.0 + 12 * kv)
+        fine = _agg_run(d, 'FINE', [0.2, 0.4, 0.6, 0.8, 1.0],
+                        lambda kv: 100.0 + 10 * kv)
+
+        def floors(runs, opts):
+            fig = _drawn(runs, opts)
+            fig.canvas.draw()
+            out = []
+            for ax in fig.axes:
+                key = _marker_key_legend(ax)
+                if key is not None:
+                    out.append((key.get_bbox_to_anchor().y0, ax.bbox.y0,
+                                fig.dpi))
+            assert out, 'no marker key drawn'
+            return out
+
+        for opts in (sp.make_opts()[0], sp.make_opts(aggregate=True)[0]):
+            for anchor_y0, axes_y0, _dpi in floors([c1, c2], opts):
+                assert anchor_y0 == axes_y0, \
+                    'the key left its corner with nothing to clear'
+        # ...and the mixed grid, which DOES mark levels, lifts it by
+        # exactly the declared number of points
+        for anchor_y0, axes_y0, dpi in floors(
+                [fine, c1, c2], sp.make_opts(aggregate=True)[0]):
+            lift_px = sp.MARKER_KEY_LIFT_PT * dpi / 72.0
+            assert abs((anchor_y0 - axes_y0) - lift_px) < 0.5, \
+                (anchor_y0 - axes_y0, lift_px)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

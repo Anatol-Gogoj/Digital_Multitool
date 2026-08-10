@@ -540,6 +540,38 @@ BANDS_TIP = (
     f"is not a small error bar. Never quote it as an uncertainty.")
 
 
+# Why the box is GREY, said before the budget itself (`#312`). The bands
+# checkbox reaches exactly one line of the engine --
+# `budget_bands = opts['bands'] and not opts.get('aggregate')` in draw_area,
+# which is the only place sldea_plot reads the option at all -- so in two
+# states it is a control that cannot change the figure, and this window's
+# rule is that such a control greys with a tooltip saying what brings it
+# back. The reason leads and the unchanged budget text follows it: an
+# operator hovering a greyed box wants the WHY first.
+BANDS_OFF_AGGREGATE_TIP = (
+    "Greyed: the cross-run aggregate suppresses this band. The ±1–2% "
+    "budget is ONE run's instrument error, while the aggregate's band is "
+    "the standard error of the mean across runs (`#268`) — two different "
+    "quantities, and stacking them would invite reading one for the "
+    "other. Turn the aggregate off to draw the budget bands again.\n\n"
+    + BANDS_TIP)
+
+BANDS_OFF_MODE_TIP = (
+    "Greyed: the bands are an AREA budget and only the area figure draws "
+    "them — current and power plot microamps and milliwatts, which this "
+    "budget says nothing about. Switch to area mode to draw them "
+    "again.\n\n" + BANDS_TIP)
+
+
+def bands_tip(area, aggregate):
+    """The bands tooltip for the state the window is in: the plain budget
+    text while the box is live, that text behind a reason while it is
+    not."""
+    if not area:
+        return BANDS_OFF_MODE_TIP
+    return BANDS_OFF_AGGREGATE_TIP if aggregate else BANDS_TIP
+
+
 # Hover text for the engine options the Draw column exposes. Module
 # constants rather than literals at the widgets, for the reason BANDS_TIP
 # is one: a test can read them, and the sentence that HAS to stay true --
@@ -1189,6 +1221,17 @@ class PlotWindow:
         live(self.cb_mean, self.v_prepost.get())
         # coarse_cadence is consulted only inside `if opts['breakdown']`
         live(self.cb_cadence, self.v_breakdown.get())
+        # the budget bands reach ONE line of the engine, draw_area's
+        # `budget_bands = opts['bands'] and not opts.get('aggregate')`, and
+        # nothing outside draw_area reads the option -- so the box is inert
+        # both under the aggregate, which deliberately suppresses the
+        # ±1–2% budget in favour of the SEM, and in current/power, which
+        # never had an area budget to draw (`#312`). The tooltip says which
+        # of the two it is; the box greys rather than vanishing, as
+        # everything else in this column does.
+        agg = self.v_aggregate.get()
+        live(self.cb_bands, area and not agg)
+        self.tip_bands.text = bands_tip(area, agg)
         # _marker_key is called by draw_area alone
         live(self.cb_marker_key, area)
         # the aggregate pools PER-LEVEL curves, which only area mode has;

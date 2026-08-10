@@ -1174,6 +1174,23 @@ def test_a_control_is_greyed_exactly_when_it_is_inert():
         win.v_breakdown.set(True)
         win._toggled()
         assert _state(win.cb_cadence) == 'normal'
+        # the budget bands reach ONE line of the engine, draw_area's
+        # `budget_bands = opts['bands'] and not opts.get('aggregate')`, and
+        # nothing outside draw_area reads the option at all -- so the box
+        # is inert in exactly two states (`#312`). Under the aggregate
+        # first: the band there is the SEM across runs and the ±1–2%
+        # budget is deliberately suppressed, so the tick did nothing while
+        # looking every bit as operative as the ones above it.
+        assert _state(win.cb_bands) == 'normal'
+        win.v_aggregate.set(True)
+        win._toggled()
+        assert _state(win.cb_bands) == 'disabled', \
+            'the aggregate suppresses the budget band, so the box is inert'
+        assert win.tip_bands.text == g.BANDS_OFF_AGGREGATE_TIP
+        win.v_aggregate.set(False)
+        win._toggled()
+        assert _state(win.cb_bands) == 'normal'
+        assert win.tip_bands.text == g.BANDS_TIP
         # the marker key is drawn by draw_area alone
         assert win.v_mode.get() == 'area'
         assert _state(win.cb_marker_key) == 'normal'
@@ -1184,6 +1201,11 @@ def test_a_control_is_greyed_exactly_when_it_is_inert():
         assert _state(win.cb_marker_key) == 'disabled', \
             'a key in current mode claims a distinction the figure does ' \
             'not make'
+        # ...and the bands go with it: the budget is an AREA budget, and
+        # draw_current never reads the option
+        assert _state(win.cb_bands) == 'disabled', \
+            'an area budget offered over a microamp figure'
+        assert win.tip_bands.text == g.BANDS_OFF_MODE_TIP
         assert _state(win.cb_vs_area) == 'normal'
         # ...and 'second' names a panel current and power do not have
         assert _state(win.rb_subplots['second']) == 'disabled'
@@ -1192,6 +1214,8 @@ def test_a_control_is_greyed_exactly_when_it_is_inert():
         win.v_mode.set('area')
         win._mode_changed()
         assert _state(win.cb_marker_key) == 'normal'
+        assert _state(win.cb_bands) == 'normal'
+        assert win.tip_bands.text == g.BANDS_TIP
         assert _state(win.e_title_second) == 'normal'
         # a heading only lands on a panel that RENDERS (`#270`): area_axes
         # creates neither axes when the selection switched it off
@@ -1267,6 +1291,34 @@ def test_the_cadence_guard_tooltip_says_it_annotates_not_suppresses():
                   b.win.e_title_first, b.win.e_title_second,
                   b.win.rb_subplots['both']):
             assert w.bind('<Enter>'), f"no tooltip attached to {w}"
+
+
+def test_a_greyed_bands_box_says_which_of_its_two_reasons_it_is():
+    """`#312`. Greying the box is half the fix: 'a control that vanishes
+    tells an operator nothing about why it went, while a greyed one with
+    a tooltip says what would bring it back' is this column's own rule,
+    and the bands box has TWO ways to go inert, which want different
+    sentences. Each names the state and the way out, and each keeps the
+    budget text behind it -- the `#266` warning about `conf` must not be
+    the thing that falls off when the box greys."""
+    assert g.bands_tip(True, False) == g.BANDS_TIP
+    assert g.bands_tip(True, True) == g.BANDS_OFF_AGGREGATE_TIP
+    assert g.bands_tip(False, False) == g.BANDS_OFF_MODE_TIP
+    # mode wins the wording: the aggregate cannot be on outside area mode
+    # (current_opts neutralises it), so a reader in current mode is told
+    # about the mode
+    assert g.bands_tip(False, True) == g.BANDS_OFF_MODE_TIP
+    for tip, must in ((g.BANDS_OFF_AGGREGATE_TIP,
+                       ('aggregate', 'standard error of the mean',
+                        '`#268`', 'Turn the aggregate off')),
+                      (g.BANDS_OFF_MODE_TIP,
+                       ('area', 'Switch to area mode'))):
+        assert tip.startswith('Greyed:'), tip[:40]
+        for phrase in must:
+            assert phrase in tip, (phrase, tip[:200])
+        # ...and the budget itself is still one hover away
+        assert tip.endswith(g.BANDS_TIP), 'the greyed tip dropped the budget'
+        assert 'Never quote it as an uncertainty.' in tip
 
 
 def test_the_taller_draw_column_still_measures_and_still_scrolls():

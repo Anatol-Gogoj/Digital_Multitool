@@ -102,14 +102,23 @@ def _need_room(w, col, tall):
     failing identically. The Draw column needs roughly `tall + 120` of
     window, which wants ~1150 px of screen once the title bar and taskbar
     are taken -- note that the 1920x1080 vm-setup asks for does NOT clear
-    it.
+    it. `#268` added two more Draw rows, which is what finally pushed this
+    desktop under the line and exposed the bug below.
+
+    The screen size goes in the message through `w.win.root`: `w.win` is a
+    PlotWindow, not a Tk widget, so the original `w.win.winfo_screenwidth()`
+    raised AttributeError instead of skipping -- the guard turned every
+    too-short desktop into a hard error, which is precisely the failure it
+    was written to prevent. It had never fired on a desktop tall enough to
+    run both cases, so nothing caught it (fixed 2026-08-10).
     """
     have = col._cv.winfo_height()
     if have < tall:
         raise _Skip(
             f'desktop too short: the column needs {tall}px and the window '
             f'could only give it {have}px (screen '
-            f'{w.win.winfo_screenwidth()}x{w.win.winfo_screenheight()})')
+            f'{w.win.root.winfo_screenwidth()}x'
+            f'{w.win.root.winfo_screenheight()})')
 
 
 def test_importing_the_module_opens_no_window():
@@ -708,7 +717,13 @@ def test_remembered_options_round_trip_per_parent_folder():
                        'bands': False, 'breakdown': True,
                        'vs_area': False, 'logx': False, 'logy': False,
                        'marker_key': True, 'subplots': 'both',
-                       'cadence_guard': False}, got
+                       'cadence_guard': False, 'aggregate': False,
+                       'aggregate_exact': False}, got
+        # the `#268` pair joins because both are HOW THE FIGURE IS DRAWN,
+        # which is the whole membership rule: whether a reader wants the
+        # cross-run mean, and whether they want it pooled on exact keys,
+        # are house-style answers that outlive one figure -- unlike a
+        # title, which names one. Neither is a run selection either.
         # spelled out rather than derived, so a key that quietly joins
         # REMEMBERED has to be argued for here too
         assert set(got) == set(g.REMEMBERED), set(got) ^ set(g.REMEMBERED)

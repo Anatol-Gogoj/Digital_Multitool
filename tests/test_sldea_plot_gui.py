@@ -718,7 +718,16 @@ def test_remembered_options_round_trip_per_parent_folder():
                        'vs_area': False, 'logx': False, 'logy': False,
                        'marker_key': True, 'subplots': 'both',
                        'cadence_guard': False, 'aggregate': False,
-                       'aggregate_exact': False}, got
+                       'aggregate_exact': False,
+                       # `#314`'s pair joins for a different reason from
+                       # every key above it: not how the figure is drawn,
+                       # but what it is written as. A house that exports
+                       # SVG at 600 dpi does so every time, and having to
+                       # re-pick the format per session is the same
+                       # annoyance the draw options were remembered to
+                       # end. The stem and the titles still stay out --
+                       # they name ONE figure; a format does not.
+                       'fmt': 'png', 'dpi': 300}, got
         # the `#268` pair joins because both are HOW THE FIGURE IS DRAWN,
         # which is the whole membership rule: whether a reader wants the
         # cross-run mean, and whether they want it pooled on exact keys,
@@ -1206,6 +1215,144 @@ def test_a_control_is_greyed_exactly_when_it_is_inert():
         # ...and the legacy Title, which has ALWAYS meant the first panel,
         # greys with its precise successor rather than pretending to work
         assert _state(win.e_title) == 'disabled'
+        # the dpi is dots per INCH OF RASTER and an SVG has none: the
+        # backend pins it to 72 and scales in user units, so _savefig does
+        # not pass one at all. The same invariant as every rule above --
+        # the box greys, it does not silently stop mattering (`#314`).
+        assert win.v_fmt.get() == 'png'
+        assert _state(win.sb_dpi) == 'normal'
+        assert _state(win.lbl_dpi) == 'normal'
+        win.v_fmt.set('svg')
+        win._format_changed()
+        assert _state(win.sb_dpi) == 'disabled', \
+            'a dpi box left live beside a vector format'
+        assert _state(win.lbl_dpi) == 'disabled'
+        win.v_fmt.set('png')
+        win._format_changed()
+        assert _state(win.sb_dpi) == 'normal'
+        # ...and the format itself is never inert: it is the one control
+        # here with no condition on it
+        for name in sp.FORMATS:
+            assert _state(win.rb_fmt[name]) == 'normal', name
+
+
+class _Boxes:
+    """Stands in for tkinter.messagebox for one case, recording what the
+    window would have said. A real dialog would block the suite."""
+
+    def __init__(self):
+        self.said = []
+
+    def _record(self, kind):
+        def box(title, message, **_kw):
+            self.said.append((kind, title, message))
+        return box
+
+    def __enter__(self):
+        self._real = g.messagebox
+        g.messagebox = self
+        for kind in ('showinfo', 'showwarning', 'showerror'):
+            setattr(self, kind, self._record(kind))
+        return self
+
+    def __exit__(self, *_exc):
+        g.messagebox = self._real
+        return False
+
+
+def test_the_window_exports_the_format_and_dpi_it_shows():
+    """`#314` through the window end to end: the two controls reach
+    make_opts, the file that lands is the one the targets line promised,
+    and the CSV and the figspec land with it for BOTH formats -- the
+    three-files rule is sldea_plot's and does not know about formats."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        out = os.path.join(b.tmp, 'figs')
+        win.v_out.set(out)
+        win.v_stem.set('w')
+        base, err = win.current_opts()
+        assert not err and base['fmt'] == 'png' and base['dpi'] == 300
+        # the targets line names all three files, and follows the format
+        win.v_fmt.set('svg')
+        win._format_changed()
+        shown = win.lbl_targets.cget('text')
+        assert 'w.svg' in shown and 'w.csv' in shown, shown
+        assert 'w.figspec.json' in shown, shown
+        opts, err = win.current_opts()
+        assert not err and opts['fmt'] == 'svg'
+        win.redraw()
+        with _Boxes() as boxes:
+            win._export()
+        assert [k for k, _t, _m in boxes.said] == ['showinfo'], boxes.said
+        for name in ('w.svg', 'w.csv', 'w.figspec.json'):
+            p = os.path.join(out, name)
+            assert os.path.exists(p) and os.path.getsize(p) > 0, name
+        with open(os.path.join(out, 'w.svg'), encoding='utf-8') as f:
+            assert '<svg' in f.read()
+        # the confirmation says what it wrote, size included, because an
+        # SVG can be tens of MB where the PNG was one
+        said = boxes.said[0][2]
+        assert 'SVG' in said and ('kB' in said or 'MB' in said), said
+        # ...and the PNG path honours the dpi, measured off the file
+        win.v_fmt.set('png')
+        win.v_dpi.set('120')
+        win._format_changed()
+        assert win.current_opts()[0]['dpi'] == 120
+        with _Boxes() as boxes:
+            win._export()
+        with open(os.path.join(out, 'w.png'), 'rb') as f:
+            head = f.read(24)
+        width = int.from_bytes(head[16:20], 'big')
+        assert abs(width - sp.FIGSIZE['area'][0] * 120) <= 1, width
+        assert '120 dpi' in boxes.said[0][2], boxes.said
+        # the figspec the window wrote records both, so the CLI can
+        # re-render exactly what the window made
+        import json
+        with open(os.path.join(out, 'w.figspec.json'), encoding='utf-8') as f:
+            spec = json.load(f)
+        assert spec['opts']['fmt'] == 'png' and spec['opts']['dpi'] == 120
+
+
+def test_a_typo_in_the_dpi_box_is_refused_not_rendered():
+    """The `#314` refusal, in the window. It is REPORTED where the
+    filenames are (a bad number does not spoil the preview -- the canvas
+    is at screen dpi) and it stops the export rather than falling back to
+    a resolution nobody typed."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        win.v_out.set(os.path.join(b.tmp, 'figs'))
+        win.v_stem.set('nope')
+        win.redraw()
+        for bad in ('30000', '0', 'lots'):
+            win.v_dpi.set(bad)
+            win._show_targets()
+            opts, err = win.current_opts()
+            assert opts is None and '--dpi' in err, (bad, err)
+            assert 'REFUSED' in win.lbl_targets.cget('text'), bad
+            with _Boxes() as boxes:
+                win._export()
+            assert [k for k, _t, _m in boxes.said] == ['showwarning'], bad
+            assert '--dpi' in boxes.said[0][2], boxes.said
+            assert not os.path.exists(os.path.join(b.tmp, 'figs')), \
+                f"a refused dpi ({bad}) still wrote something"
+        # a blank box is the ABSENCE of a request, not a bad one: the
+        # default stands, so mid-edit the window never blocks on an empty
+        # field it is about to be given a number for
+        win.v_dpi.set('')
+        opts, err = win.current_opts()
+        assert not err and opts['dpi'] == sp.DEFAULT_DPI, (opts, err)
+        # ...and a hand-edited options file cannot smuggle one past the
+        # range the window itself enforces
+        assert g._clean_options({'dpi': 30000}) == {}
+        assert g._clean_options({'dpi': 'lots'}) == {}
+        assert g._clean_options({'dpi': True}) == {}
+        assert g._clean_options({'dpi': 600})['dpi'] == 600
+        assert g._clean_options({'fmt': 'tiff'}) == {}
+        assert g._clean_options({'fmt': 'svg'})['fmt'] == 'svg'
 
 
 def test_switching_away_from_area_cannot_leave_second_selected():
@@ -1259,13 +1406,21 @@ def test_the_cadence_guard_tooltip_says_it_annotates_not_suppresses():
     # the marker key's says which mode it belongs to, since that is what
     # the greyed box in current/power leaves an operator asking
     assert 'area mode only' in g.DRAW_TIPS['marker_key'].lower()
+    # the `#314` pair is held to the same bar, and the dpi's has the one
+    # sentence a greyed box makes someone ask for: WHY it went
+    for key in ('fmt', 'dpi'):
+        assert len(g.EXPORT_TIPS[key]) > 60, key
+    assert 'svg' in g.EXPORT_TIPS['dpi'].lower(), g.EXPORT_TIPS['dpi']
+    assert 'refused' in g.EXPORT_TIPS['dpi'].lower()
+    assert str(sp.DPI_MAX) in g.EXPORT_TIPS['dpi']
     # ...and they are ATTACHED, not merely declared up here
     with _Bare() as b:
         if not b.ok:
             return
         for w in (b.win.cb_marker_key, b.win.cb_cadence,
                   b.win.e_title_first, b.win.e_title_second,
-                  b.win.rb_subplots['both']):
+                  b.win.rb_subplots['both'], b.win.rb_fmt['svg'],
+                  b.win.sb_dpi):
             assert w.bind('<Enter>'), f"no tooltip attached to {w}"
 
 
@@ -1282,7 +1437,12 @@ def test_the_taller_draw_column_still_measures_and_still_scrolls():
         body = str(col.body) + '.'
         for widget in (win.cb_marker_key, win.cb_cadence, win.e_title_first,
                        win.e_title_second, win.rb_subplots['both'],
-                       win.e_title):
+                       win.e_title,
+                       # `#314`'s row is in the Export box, which is in
+                       # the same measured body -- a control floating
+                       # beside the scrolled column is unreachable in a
+                       # short window exactly as `#271` found
+                       win.rb_fmt['png'], win.sb_dpi):
             assert str(widget).startswith(body), \
                 f"{widget} is outside the scrolled body"
         tall = col.body.winfo_reqheight()

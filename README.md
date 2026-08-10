@@ -153,9 +153,9 @@ or `deploy\Tune_SLDEA_Windows.bat /diag`, which uses the same environment (from 
 
 ### Plotting runs against each other
 
-`sldea_plot.py` puts one or several runs on one figure — active area vs kV (`--mode area`, the default), or current or power, which work on raw unreviewed runs too. Every export writes three files off one stem: the 300 dpi PNG, the tidy per-snapshot CSV that is the figure's evidence, and a `.figspec.json` sidecar that re-renders it later (`--from-spec`).
+`sldea_plot.py` puts one or several runs on one figure — active area vs kV (`--mode area`, the default), or current or power, which work on raw unreviewed runs too. Every export writes three files off one stem: the figure, the tidy per-snapshot CSV that is the figure's evidence, and a `.figspec.json` sidecar that re-renders it later (`--from-spec`). The figure is a PNG at `--dpi` (300 by default; 50–1200, refused outside it rather than clamped) or an SVG with `--format svg`; the CSV and the sidecar are written for both. The window greys its dpi box under SVG — a vector file has no dots per inch to set — and the figspec records format and dpi, so a re-render is the same file and not merely the same picture.
 
-It is no longer command-line-only: **📊 Plot runs…** on the SLDEA tab opens the same tool as a window (`sldea_plot_gui.py`, or `sldea_plot.py --gui`) — pick the runs, tick what to draw, watch it redraw, then Export. The preview draws only; nothing reaches disk until Export, which names both files it wrote. Exporting inside a checkout, keep the default `sldea_plot` stem: a custom `--stem` is not covered by `.gitignore`.
+It is no longer command-line-only: **📊 Plot runs…** on the SLDEA tab opens the same tool as a window (`sldea_plot_gui.py`, or `sldea_plot.py --gui`) — pick the runs, tick what to draw, watch it redraw, then Export. The preview draws only; nothing reaches disk until Export, which names the files it wrote and the format, resolution and size it wrote them at. Exporting inside a checkout, keep the default `sldea_plot` stem: a custom `--stem` is not covered by `.gitignore`.
 
 ## Repository layout & tests
 

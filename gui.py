@@ -2804,8 +2804,9 @@ LOGGING:
                                command=lambda: self._sldea_open_plot(None)),
                     "Put several finished runs on one figure: pick the runs, "
                     "tick what to draw, watch it redraw. Export writes the "
-                    "300 dpi PNG and the tidy per-snapshot CSV behind it, so "
-                    "the figure can be traced back to its numbers. Area "
+                    "figure — PNG at a dpi you set (300 by default) or SVG — "
+                    "and the tidy per-snapshot CSV behind it, so the figure "
+                    "can be traced back to its numbers. Area "
                     "needs reviewed runs; current and power work on raw "
                     "ones.").pack(side=tk.LEFT, padx=(8, 0))
         self.sldea_status = tk.Label(runf, text="idle", anchor='w', fg='#555')

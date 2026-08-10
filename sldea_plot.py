@@ -10,17 +10,28 @@ Usage:
                          [--title-first TEXT] [--title-second TEXT]
                          [--subplots both|first|second] [--cadence-guard]
                          [--aggregate] [--aggregate-exact]
+                         [--format png|svg] [--dpi N]
     python sldea_plot.py --from-spec FILE.figspec.json [flags to override]
     python sldea_plot.py --gui [RUN ...]        # window (see below)
     python sldea_plot.py --selftest [OUT.png]
 
 Each RUN is a run directory, a parent full of runs (newest wins) or a bench
 shortcut ('1'/'2'/'3') -- the same resolver as the tuner and diagnostic.
-Writes a 300 dpi PNG, the underlying tidy per-snapshot CSV and the figspec
+Writes the figure, the underlying tidy per-snapshot CSV and the figspec
 sidecar (below), all named after --stem (default 'sldea_plot_<mode>'), into
 --out (default the current directory). Custom --stem names written inside
 the repo checkout are NOT gitignored -- keep the default 'sldea_plot'
 prefix there, or point --out outside the checkout.
+
+    --format  png (default) or svg. Only the IMAGE changes -- the tidy CSV
+              and the figspec are written for both, off the same stem.
+    --dpi     the raster resolution, 300 by default, 50-1200. Outside that
+              it is REFUSED rather than clamped (a typed '30000' asks for
+              a render that looks like a hang). Ignored for --format svg,
+              which is a vector format pinned to 72 dpi by the backend --
+              the window greys the field rather than pretending otherwise.
+              Both are recorded in the figspec, so --from-spec re-renders
+              the format and resolution it names.
 
 Modes:
     area      (default) two panels: active area (mm^2) vs nominal kV, and
@@ -227,6 +238,35 @@ SUBPLOTS = ('both', 'first', 'second')
 # one table, so an exported figure cannot silently differ in shape from the
 # command-line one (`#223`).
 FIGSIZE = {'area': (12.6, 5.4), 'current': (9, 5.4), 'power': (9, 5.4)}
+
+# What an export may LAND AS (`#314`). PNG stays the default -- every figure
+# in the handoff and the slide decks is one -- and SVG is the vector answer
+# for a figure that will be enlarged or re-lettered by a publisher.
+FORMATS = ('png', 'svg')
+DEFAULT_FORMAT = 'png'
+
+# The raster resolution, in dots per inch. 300 stays the default (it is what
+# every figure written before `#314` used, and what a journal asks for), but
+# it is now a number the operator sets rather than one hard-wired at the
+# three savefig call sites.
+DEFAULT_DPI = 300
+# The range, with a refusal outside it. The floor is where the 7-point
+# caption stops being readable. The ceiling is measured, 2026-08-10, on the
+# two-run area figure: 1200 dpi is 15120 x 6480 px -- 98 Mpx, ~390 MB of RGBA
+# buffer, 3.1 s and 1.3 MB on disk, which is already generous for a figure
+# that is 12.6 inches wide. The next order of magnitude is not slow, it is a
+# hang: a typed '30000' asks for 61 GIGApixels. Refused, never clamped -- a
+# figure quietly written at a resolution nobody asked for is the same class
+# of failure as a flag that silently does nothing.
+DPI_MIN, DPI_MAX = 50, 1200
+
+# matplotlib salts the internal element ids of an SVG with a FRESH uuid4 per
+# render when svg.hashsalt is None, and stamps the file with its creation
+# date -- so two renders of the same figure differ byte for byte. Both are
+# pinned in _savefig, because a figspec that cannot prove it re-rendered the
+# same file is the failure load_figspec exists to prevent (`#273`), and the
+# suite's window-vs-CLI byte comparison would be untestable for SVG.
+SVG_HASHSALT = 'sldea_plot'
 
 MACHINE_BAND_PCT = 2.0   # auto-accepted (half-height) stretches
 TRACED_BAND_PCT = 1.0    # hand-traced (outer-toe) stretches
@@ -1239,9 +1279,33 @@ def area_axes(fig, opts):
     return tuple(fig.subplots(1, 2))
 
 
+def _savefig(fig, path, opts):
+    """THE savefig every write path goes through (`#314`) -> path.
+
+    One call site for the format and the dpi, for the same reason FIGSIZE
+    is one table: the CLI's figure, the window's Export and the direct
+    figure_* helpers must not be able to disagree about what they wrote.
+
+    DPI IS NOT PASSED FOR SVG, and that is not an oversight -- the SVG
+    backend pins the figure to 72 dpi and scales in user units, so a dpi
+    there could only ever be a number that did nothing. The window greys
+    the field to say so; opts still CARRIES the value, so switching back
+    to PNG (or overriding a spec with --format png) renders at the dpi
+    that was chosen rather than at a silently restored default."""
+    fmt = opts.get('fmt', DEFAULT_FORMAT)
+    if fmt == 'svg':
+        import matplotlib
+        # both pins are reproducibility, not cosmetics -- see SVG_HASHSALT
+        with matplotlib.rc_context({'svg.hashsalt': SVG_HASHSALT}):
+            fig.savefig(path, format='svg', metadata={'Date': None})
+        return path
+    fig.savefig(path, format=fmt, dpi=opts.get('dpi', DEFAULT_DPI))
+    return path
+
+
 def figure_area(runs, opts, path, warn=lambda m: None):
-    """The area figure as a 300 dpi PNG (kept for direct callers/tests).
-    Same drawing as the window -- see draw_area."""
+    """The area figure at opts' format and dpi (kept for direct
+    callers/tests). Same drawing as the window -- see draw_area."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -1249,7 +1313,7 @@ def figure_area(runs, opts, path, warn=lambda m: None):
     fig = plt.figure(figsize=FIGSIZE['area'])
     axl, axr = area_axes(fig, opts)
     draw_area(fig, axl, axr, runs, opts, warn)
-    fig.savefig(path, dpi=300)
+    _savefig(fig, path, opts)
     plt.close(fig)
     return path
 
@@ -1401,7 +1465,7 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
 
 
 def figure_signal(runs, opts, path, warn=lambda m: None):
-    """The current/power figure as a 300 dpi PNG (kept for direct
+    """The current/power figure at opts' format and dpi (kept for direct
     callers/tests). Same drawing as the window -- see draw_signal."""
     import matplotlib
     matplotlib.use('Agg')
@@ -1409,7 +1473,7 @@ def figure_signal(runs, opts, path, warn=lambda m: None):
 
     fig, ax = plt.subplots(figsize=FIGSIZE[opts['mode']])
     draw_signal(fig, ax, runs, opts, warn)
-    fig.savefig(path, dpi=300)
+    _savefig(fig, path, opts)
     plt.close(fig)
     return path
 
@@ -1426,22 +1490,24 @@ def draw(fig, runs, opts, warn=lambda m: None):
 
 
 def save_figure(runs, opts, path, warn=lambda m: None):
-    """Write the 300 dpi PNG at the canonical geometry, WITHOUT pyplot.
+    """Write the figure at the canonical geometry, WITHOUT pyplot.
 
     figure_area/figure_signal force the Agg backend, which in a process
     that already owns a live Tk canvas means switching backends underneath
     it. This path never imports pyplot at all, so the window can export
     while its preview stays alive -- and headless callers get the same
     bytes, because it is the same Figure, the same draw() and the same
-    dpi."""
+    _savefig (which is where the format and the dpi are decided, for both
+    of them). An SVG path is fine on the Agg canvas: savefig swaps in the
+    backend the FORMAT names, which is a different thing from
+    matplotlib.use() replacing the process's."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
     fig = Figure(figsize=FIGSIZE[opts['mode']])
     FigureCanvasAgg(fig)
     draw(fig, runs, opts, warn)
-    fig.savefig(path, dpi=300)
-    return path
+    return _savefig(fig, path, opts)
 
 
 # ---------------------------------------------------------------------------
@@ -1509,7 +1575,25 @@ def write_tidy(runs, path):
 # grow its own idea of what a figure's options or filenames are.
 #
 # ---------------------------------------------------------------------------
-# ADDING A NEW OPTION: five landing sites, and four of them fail SILENTLY
+# ADDING A NEW OPTION: SEVEN landing sites, and five of them fail SILENTLY
+#
+# It was five until `#314`. Two more surfaced there, and neither was a
+# special case -- each is the general form of a category the original five
+# happened not to cover:
+#
+#   6. output_paths(). SILENT. Only matters for an option that changes an
+#      ARTIFACT NAME rather than the figure's content; `fmt` was the first.
+#      Miss it and the file is written with the wrong extension.
+#   7. sldea_plot_gui.NUMERIC_OPTIONS. SILENT. The remembered-options
+#      cleaner validated enums and flags only, because every remembered
+#      option had been one or the other; `dpi` was the first NUMBER. Miss
+#      it and a corrupt value in the options file survives a round trip
+#      instead of being rejected.
+#
+# The lesson generalises: the count is not the point. Before adding an
+# option, ask which CATEGORY it belongs to -- flag, name, number, artifact
+# name -- and whether that category has ever existed here before. A first
+# of its kind will find a site this list does not have yet.
 #
 # Every option currently here is plumbed correctly, so nothing is broken --
 # this is a map, written down because the next option through this seam
@@ -1522,6 +1606,16 @@ def write_tidy(runs, path):
 # `aggregate` has to reach BOTH area panels and the caption, and
 # `aggregate_exact` is read only by aggregate_levels, so a half-consumed
 # version of either draws a figure that looks perfectly finished.
+#
+# `#314` (`fmt` and `dpi`) has been through too, and it is the first
+# option pair that does NOT describe the drawing -- it describes the file.
+# That moves site 5: nothing in draw_area/draw_signal reads either one,
+# and the code that does is _savefig plus output_paths' extension. Two
+# extra sites came with that, both silent, both worth the next person's
+# attention: output_paths (an SVG written to a .png name opens in
+# nothing), and site 4's cleaner, which validated ENUM and BOOL values
+# only -- `dpi` is the first NUMBER remembered, and an unvalidated one
+# out of a hand-edited config would have reached make_opts.
 #
 #   1. make_opts() below -- the keyword, its default, any validation.
 #      MISSING THIS IS LOUD: every other site raises TypeError.
@@ -1563,12 +1657,37 @@ def default_stem(mode):
     return f"sldea_plot_{mode}"
 
 
+def check_dpi(dpi):
+    """-> (the dpi as an int, None) or (None, the CLI's own error message).
+
+    Its own function because two callers need the identical answer:
+    make_opts (so the CLI and the window refuse a typo in the same words)
+    and the window's remembered-options cleaner (so a hand-edited config
+    cannot smuggle a 30000 past the range the window itself enforces).
+
+    None means 'unset' and yields the default -- a caller that has nothing
+    to say is not the same as one asking for a bad number."""
+    if dpi is None or (isinstance(dpi, str) and not dpi.strip()):
+        return DEFAULT_DPI, None
+    if isinstance(dpi, bool):               # True is not a resolution
+        return None, f"--dpi must be a whole number ({DPI_MIN}-{DPI_MAX})"
+    try:
+        n = int(str(dpi).strip())
+    except (TypeError, ValueError):
+        return None, (f"--dpi {dpi} is not a whole number "
+                      f"({DPI_MIN}-{DPI_MAX})")
+    if not DPI_MIN <= n <= DPI_MAX:
+        return None, (f"--dpi {n} out of range ({DPI_MIN}-{DPI_MAX}); "
+                      f"the default is {DEFAULT_DPI}")
+    return n, None
+
+
 def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
               bands=True, breakdown=True, title=None,
               logx=False, logy=False, marker_key=True,
               title_first=None, title_second=None, subplots='both',
               cadence_guard=False, aggregate=False,
-              aggregate_exact=False):
+              aggregate_exact=False, fmt=DEFAULT_FORMAT, dpi=None):
     """-> (opts dict, error message or None).
 
     The CLI builds this from its flags and the window from its tick boxes,
@@ -1579,7 +1698,20 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
     before it, so an options dict built with no arguments still describes
     the original figure -- with ONE deliberate exception, `marker_key`,
     which `#267` asked for on by default (--no-marker-key restores the
-    older figure exactly, and the test suite proves that byte for byte)."""
+    older figure exactly, and the test suite proves that byte for byte).
+
+    `fmt`/`dpi` (`#314`) are the two that describe the FILE rather than
+    the drawing. They live here with the rest because the figspec records
+    what make_opts produced, and a spec that did not say png-or-svg at
+    what resolution would re-render something other than what it names.
+    The key is `fmt` rather than `format` (the flag is --format): a
+    parameter called `format` shadows the builtin in every signature it
+    passes through."""
+    if fmt not in FORMATS:
+        return None, f"unknown --format {fmt} ({' | '.join(FORMATS)})"
+    dpi, dpi_err = check_dpi(dpi)
+    if dpi_err:
+        return None, dpi_err
     if mode not in MODES:
         return None, f"unknown --mode {mode} (area | current | power)"
     if vs_area and mode == 'area':
@@ -1614,7 +1746,8 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
             'subplots': subplots,
             'cadence_guard': bool(cadence_guard),
             'aggregate': bool(aggregate),
-            'aggregate_exact': bool(aggregate_exact)}, None
+            'aggregate_exact': bool(aggregate_exact),
+            'fmt': fmt, 'dpi': dpi}, None
 
 
 def needs_areas(opts):
@@ -1624,15 +1757,20 @@ def needs_areas(opts):
     return opts['mode'] == 'area' or opts['vs_area']
 
 
-def output_paths(out_dir, stem, mode):
-    """-> (png_path, csv_path).
+def output_paths(out_dir, stem, mode, fmt=DEFAULT_FORMAT):
+    """-> (image_path, csv_path).
 
-    The tidy CSV is derived from the PNG's stem and written beside it, and
-    that is not a convenience: the per-snapshot CSV is the figure's
+    The tidy CSV is derived from the image's stem and written beside it,
+    and that is not a convenience: the per-snapshot CSV is the figure's
     evidence, and a figure that cannot be traced back to its numbers is not
-    citable (`#223`). Derived in ONE place so no caller can drift."""
+    citable (`#223`). Derived in ONE place so no caller can drift.
+
+    `fmt` only ever moves the IMAGE's extension (`#314`) -- the CSV and the
+    figspec are named off the same stem whichever format was picked, so a
+    figure's three files stay a set and an operator who exported both an
+    SVG and a PNG of one figure does not end up with two rival CSVs."""
     stem = (stem or '').strip() or default_stem(mode)
-    return (os.path.join(out_dir, stem + '.png'),
+    return (os.path.join(out_dir, f"{stem}.{fmt}"),
             os.path.join(out_dir, stem + '.csv'))
 
 
@@ -1650,10 +1788,11 @@ def output_paths(out_dir, stem, mode):
 SPEC_VERSION = 1        # the figspec FORMAT version, not the app's
 
 
-def figspec_path(png_path):
-    """The spec that belongs to a PNG. Derived from the PNG in ONE place
-    so no caller can invent a different neighbour."""
-    return os.path.splitext(png_path)[0] + '.figspec.json'
+def figspec_path(img_path):
+    """The spec that belongs to an exported figure, PNG or SVG. Derived
+    from the image in ONE place so no caller can invent a different
+    neighbour."""
+    return os.path.splitext(img_path)[0] + '.figspec.json'
 
 
 def _app_version():
@@ -1728,22 +1867,60 @@ def load_figspec(path):
 
 
 def export(runs, opts, out_dir, stem, warn=lambda m: None):
-    """Render the figure, write its tidy CSV AND its figspec -> (png, csv).
+    """Render the figure, write its tidy CSV AND its figspec -> (img, csv).
 
     The single write path for both front ends. There is deliberately no
-    way to ask for the PNG alone: on-screen preview is free, but anything
-    that lands on disk lands with its numbers and with the spec that says
-    where they came from. The return stays (png, csv) -- the spec's path
-    is figspec_path(png), so existing callers keep working unchanged."""
+    way to ask for the IMAGE alone: on-screen preview is free, but
+    anything that lands on disk lands with its numbers and with the spec
+    that says where they came from.
+
+    What that sentence used to say (and what the flags used to allow) is
+    that there was no way to ask for a DIFFERENT image either -- one 300
+    dpi PNG, no choice offered. `#314` replaced the hard-wiring with
+    opts['fmt'] (png | svg) and opts['dpi'], BOTH recorded in the figspec,
+    and left the pairing rule exactly where it was: the format is the
+    operator's, the three-files-or-nothing is not. The return stays
+    (image, csv) -- the spec's path is figspec_path(image), so existing
+    callers keep working unchanged."""
     os.makedirs(out_dir, exist_ok=True)
-    png, tidy = output_paths(out_dir, stem, opts['mode'])
-    save_figure(runs, opts, png, warn)
+    img, tidy = output_paths(out_dir, stem, opts['mode'],
+                             opts.get('fmt', DEFAULT_FORMAT))
+    save_figure(runs, opts, img, warn)
     write_tidy(runs, tidy)
     # the EFFECTIVE stem (output_paths defaults a blank one), so a
     # re-render from this spec lands on the same filenames
-    write_figspec(runs, opts, figspec_path(png),
-                  os.path.splitext(os.path.basename(png))[0])
-    return png, tidy
+    write_figspec(runs, opts, figspec_path(img),
+                  os.path.splitext(os.path.basename(img))[0])
+    return img, tidy
+
+
+def describe_output(img_path, opts):
+    """'PNG, 300 dpi, 1.2 MB' / 'SVG (vector), 4.8 MB' -> one phrase both
+    front ends report after writing (`#314`).
+
+    The SIZE is in it on purpose. An SVG's size follows the number of
+    drawn ELEMENTS, not the pixel count, so it is the one thing about an
+    export that cannot be predicted from the settings -- `#314` expected
+    a many-run SVG to dwarf its PNG, and MEASURED (2026-08-10, seven runs
+    with --prepost --mean) it is 322 kB against the PNG's 310 kB at 300
+    dpi. Comparable on this campaign's figures, then; the point of
+    printing it is that the next figure's answer may differ, and reading
+    it here beats discovering it when a slide deck will not take the
+    file. The dpi is named only where it MEANS something, for the same
+    reason the window greys the field."""
+    try:
+        size = os.path.getsize(img_path)
+    except OSError:                       # nothing worth failing over
+        size = None
+    fmt = opts.get('fmt', DEFAULT_FORMAT)
+    what = ('SVG (vector)' if fmt == 'svg'
+            else f"PNG, {opts.get('dpi', DEFAULT_DPI)} dpi")
+    if size is None:
+        return what
+    for unit, scale in (('MB', 1024 * 1024), ('kB', 1024)):
+        if size >= scale:
+            return f"{what}, {size / scale:.1f} {unit}"
+    return f"{what}, {size} bytes"
 
 
 def prepare_runs(args, opts, warn=lambda m: None, allow_suspect=False,
@@ -1903,7 +2080,7 @@ _BOOL_FLAGS = ('--vs-area', '--prepost', '--mean', '--no-bands',
                '--cadence-guard', '--aggregate', '--aggregate-exact')
 _VALUED_FLAGS = ('--mode', '--out', '--stem', '--title',
                  '--title-first', '--title-second', '--subplots',
-                 '--from-spec')
+                 '--from-spec', '--format', '--dpi')
 
 _orig_stdout = None     # keeps the replaced wrapper alive: a GC'd
                         # TextIOWrapper closes the buffer it shares with
@@ -2000,7 +2177,14 @@ def _cli_opts(flags, vals, base=None):
                      cadence_guard=on('--cadence-guard', 'cadence_guard'),
                      aggregate=on('--aggregate', 'aggregate'),
                      aggregate_exact=on('--aggregate-exact',
-                                        'aggregate_exact'))
+                                        'aggregate_exact'),
+                     # `#314`. Both go through val() like any other named
+                     # option, so `--from-spec spec.json --format png`
+                     # re-renders a spec'd SVG as a PNG at the spec's own
+                     # dpi -- and a spec that names neither still gets the
+                     # 300 dpi PNG every pre-`#314` spec was written from.
+                     fmt=val('--format', 'fmt', DEFAULT_FORMAT),
+                     dpi=val('--dpi', 'dpi', DEFAULT_DPI))
 
 
 def main(argv):
@@ -2060,7 +2244,7 @@ def main(argv):
         print('nothing to plot')
         return 2
 
-    png, tidy = export(runs, opts, out_dir, stem, warns.append)
+    img, tidy = export(runs, opts, out_dir, stem, warns.append)
 
     for run in runs:
         n_traced = sum(1 for r in run['rows'] if r['traced'])
@@ -2074,7 +2258,8 @@ def main(argv):
               '(SLDEA_MEASUREMENT.md)')
     for w in warns:
         print('warning:', w)
-    print(f"wrote {png} + {tidy} + {figspec_path(png)}")
+    print(f"wrote {img} ({describe_output(img, opts)}) + {tidy} + "
+          f"{figspec_path(img)}")
     return 0
 
 

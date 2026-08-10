@@ -232,7 +232,8 @@ OPTIONS_FALLBACK = os.path.join(os.path.expanduser('~'), '.cache',
 # Not the run selection either -- a campaign gains runs, and reopening on
 # a stale set would quietly plot the wrong batch.
 REMEMBERED = ('mode', 'prepost', 'mean', 'bands', 'breakdown', 'vs_area',
-              'logx', 'logy', 'marker_key', 'subplots', 'cadence_guard')
+              'logx', 'logy', 'marker_key', 'subplots', 'cadence_guard',
+              'aggregate', 'aggregate_exact')
 
 # The remembered options that are NAMES rather than flags, each with the
 # vocabulary sldea_plot validates it against -- read from sldea_plot so a
@@ -564,6 +565,25 @@ DRAW_TIPS = {
         "in the caption — it ANNOTATES the mark rather than SUPPRESSING "
         "it, and whether it belongs on by default is an open decision for "
         "the bench (`#264`), not a rendering preference."),
+    'aggregate': (
+        "One mean curve across every SELECTED run, in black, with a band "
+        "that is the standard error of the mean (σ/√n) per level — not "
+        "the ±1–2% instrument budget, which belongs to a single run and is "
+        "suppressed here. With one run selected there is NO band and the "
+        "caption says why: a band across a family needs at least two "
+        "members. The curve stops at the first current-confirmed "
+        "breakdown, past which the mean would mix intact and collapsed "
+        "devices. Area mode only (`#268`)."),
+    'aggregate_exact': (
+        "Pool only the levels a run really measured, instead of "
+        "interpolating every run onto the common grid. Honest but lumpy: "
+        "in the campaign corpus one run steps 0.2 kV against everyone "
+        "else's 0.25 and shares just 8 of 41 levels, so exact pooling "
+        "makes n alternate 4/5 level to level and the band step for a "
+        "reason that is an artifact of grid choice, not of the devices. "
+        "Interpolation never extrapolates past a run's own range and "
+        "never crosses a breakdown, and the figure prints how many "
+        "values at each level were measured versus interpolated."),
     'subplots': (
         "Which of the mode's panels render — a single chosen panel "
         "becomes the figure's ONLY axes and fills the canvas instead of "
@@ -767,15 +787,18 @@ class PlotWindow:
         self.v_breakdown = tk.BooleanVar(value=o['breakdown'])
         self.v_vs_area = tk.BooleanVar(value=o['vs_area'])
         self.v_title = tk.StringVar(value=o['title'] or '')
-        # the `#263`/`#267`/`#269`/`#270`/`#264` engine options. Every one
-        # of them reaches current_opts below: a variable that the window
-        # showed but did not pass would put the tick box and the figure in
-        # disagreement, which is how a CLI `--logy --gui` preselection used
-        # to be thrown away by the window's own first redraw.
+        # the `#263`/`#267`/`#269`/`#270`/`#264`/`#268` engine options.
+        # Every one of them reaches current_opts below: a variable that
+        # the window showed but did not pass would put the tick box and
+        # the figure in disagreement, which is how a CLI `--logy --gui`
+        # preselection used to be thrown away by the window's own first
+        # redraw.
         self.v_logx = tk.BooleanVar(value=o['logx'])
         self.v_logy = tk.BooleanVar(value=o['logy'])
         self.v_marker_key = tk.BooleanVar(value=o['marker_key'])
         self.v_cadence = tk.BooleanVar(value=o['cadence_guard'])
+        self.v_aggregate = tk.BooleanVar(value=o['aggregate'])
+        self.v_aggregate_exact = tk.BooleanVar(value=o['aggregate_exact'])
         self.v_subplots = tk.StringVar(value=o['subplots'])
         self.v_title_first = tk.StringVar(value=o['title_first'] or '')
         self.v_title_second = tk.StringVar(value=o['title_second'] or '')
@@ -880,6 +903,25 @@ class PlotWindow:
         # hover says WHERE THE NUMBERS COME FROM, and that conf is not one
         # of them (`#266`)
         self.tip_bands = add_tooltip(self.cb_bands, BANDS_TIP)
+        # the cross-run aggregate (`#268`). It sits directly under the
+        # bands row because it REPLACES what that band means: the ±1–2%
+        # budget is one run's instrument error, and the aggregate's band
+        # is the standard error of the mean across runs. Area mode only —
+        # make_opts refuses the pair, so current_opts neutralises it the
+        # way it does --vs-area, and the box greys rather than vanishing.
+        self.cb_aggregate = ttk.Checkbutton(
+            df, text="cross-run aggregate (mean + SEM band)",
+            variable=self.v_aggregate, command=self._toggled)
+        self.cb_aggregate.pack(anchor=tk.W)
+        add_tooltip(self.cb_aggregate, DRAW_TIPS['aggregate'])
+        # a CHILD of the aggregate, for the same reason the mean line is a
+        # child of pre/post: nothing outside `if opts['aggregate']` reads
+        # it, so on its own it is a control that does nothing.
+        self.cb_aggregate_exact = ttk.Checkbutton(
+            df, text="…pooling exact levels only (no interpolation)",
+            variable=self.v_aggregate_exact, command=self.schedule)
+        self.cb_aggregate_exact.pack(anchor=tk.W, padx=(18, 0))
+        add_tooltip(self.cb_aggregate_exact, DRAW_TIPS['aggregate_exact'])
         # the open/closed marker key (`#267`). Area mode only -- draw_area
         # is the only drawer that calls _marker_key, because current and
         # power draw one plain dot per snapshot and a key there would
@@ -1149,6 +1191,11 @@ class PlotWindow:
         live(self.cb_cadence, self.v_breakdown.get())
         # _marker_key is called by draw_area alone
         live(self.cb_marker_key, area)
+        # the aggregate pools PER-LEVEL curves, which only area mode has;
+        # make_opts refuses the other pairing outright
+        live(self.cb_aggregate, area)
+        # nothing outside `if opts['aggregate']` reads the grid toggle
+        live(self.cb_aggregate_exact, area and self.v_aggregate.get())
         # --vs-area is meaningless in area mode (the x axis IS area there);
         # the CLI refuses the combination, so the window does not offer it
         live(self.cb_vs_area, not area)
@@ -1204,6 +1251,11 @@ class PlotWindow:
             logx=self.v_logx.get(), logy=self.v_logy.get(),
             marker_key=self.v_marker_key.get(),
             cadence_guard=self.v_cadence.get(),
+            # area mode only, and make_opts REFUSES the other pairing --
+            # neutralised here exactly as vs_area is above, so a mode
+            # switch produces a figure rather than an error message
+            aggregate=self.v_aggregate.get() and area,
+            aggregate_exact=self.v_aggregate_exact.get(),
             # 'second' outside area mode is the one combination make_opts
             # refuses. Neutralised to the default exactly as vs_area is
             # above: an error message where the figure goes is not what a

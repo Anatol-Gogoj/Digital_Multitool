@@ -89,6 +89,19 @@ def _caption(fig):
     return '\n'.join(t.get_text() for t in fig.texts)
 
 
+def _band_count(fig):
+    """How many SHADED bands the figure actually drew, over all panels.
+
+    fill_between is the only thing in this module that makes a filled
+    collection, so counting them is counting bands -- and counting the
+    drawn artists rather than reading the opts dict is the point: an
+    option that is half-consumed by the drawing code produces a figure
+    that looks finished and is not."""
+    from matplotlib.collections import PolyCollection
+    return sum(1 for ax in fig.axes for c in ax.collections
+               if isinstance(c, PolyCollection))
+
+
 def test_load_rows_parses_notes_phases_and_eras():
     d = _mktmp()
     try:
@@ -535,7 +548,8 @@ def test_make_opts_maps_choices_and_refuses_bad_combinations():
                  'title': None, 'logx': False, 'logy': False,
                  'marker_key': True, 'title_first': None,
                  'title_second': None, 'subplots': 'both',
-                 'cadence_guard': False}
+                 'cadence_guard': False, 'aggregate': False,
+                 'aggregate_exact': False}
     o, err = sp.make_opts(mode='current', vs_area=True, prepost=True,
                           mean=True, bands=False, breakdown=False,
                           title='x')
@@ -1449,6 +1463,349 @@ def test_cadence_guard_is_opt_in_and_no_breakdown_is_unchanged():
         assert 'Hollow X' not in _caption(fig)
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# the cross-run aggregate (`#268`, policy SLDEA_HANDOFF.md 2026-08-09)
+# ---------------------------------------------------------------------------
+
+def _agg_run(d, name, kvs, area_at, ts='2026-08-05T10:00:00', ua=None):
+    """A run whose levels are exactly `kvs` with area `area_at(kv)`.
+
+    One snapshot per level (no pre/post pair) so a level's mean IS the
+    number written here -- the aggregate arithmetic is then hand-checkable
+    without going through the pair aggregation as well. `ua` overrides the
+    current per level, which is how a breakdown gets confirmed."""
+    rows = [{'snapshot': 1, 'tag': 'baseline', 'nominal_kV': 0,
+             'measured_uA': -16.0, 'active_area_px': 100000,
+             'active_area_mm2': 100.0, 'timestamp': ts,
+             'notes': 'edge:resting conf 0.95'}]
+    for i, kv in enumerate(kvs, start=2):
+        rows.append({'snapshot': i, 'tag': 'post-ramp', 'nominal_kV': kv,
+                     'measured_uA': (ua(kv) if ua else -16.0),
+                     'active_area_px': 100000 + 1000 * i,
+                     'active_area_mm2': area_at(kv), 'timestamp': ts,
+                     'notes': 'edge:disc-fit conf 0.93'})
+    sub = os.path.join(d, name)
+    _fake_run(sub, rows)
+    run = sp.load_run(sub, lambda m: None)
+    run['color'] = '#4477AA'
+    return run
+
+
+def test_aggregate_of_one_run_refuses_the_band_and_says_so():
+    """The n = 1 rule, decided by the owner 2026-08-09: NO BAND, plus a
+    caption saying the aggregate needs >= 2 runs.
+
+    A refusal that can actually fail, which is why it is a refusal and not
+    a silent fallback -- the tempting alternative is to quietly draw the
+    calibrated +-1-2% budget band instead, which would dress a claim about
+    the INSTRUMENT up as a claim about the family."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        one = _agg_run(d, 'R1', [1.0, 2.0, 3.0], lambda kv: 100.0 + 10 * kv)
+        ag = sp.aggregate_levels([one], norm=True)
+        assert [l['n'] for l in ag] == [1, 1, 1, 1], ag
+        assert all(l['sd'] is None and l['sem'] is None for l in ag), ag
+        opts = sp.make_opts(aggregate=True)[0]
+        warns = []
+        fig = _drawn([one], opts, warns.append)
+        cap = _caption(fig)
+        assert 'NO BAND' in cap, cap
+        assert '≥ 2 runs' in cap, cap
+        assert any('NO BAND' in w for w in warns), warns
+        # and the refusal is REAL: nothing shaded was drawn on either panel
+        assert _band_count(fig) == 0, 'a band survived the n = 1 refusal'
+        # two runs earn one
+        two = _agg_run(d, 'R2', [1.0, 2.0, 3.0], lambda kv: 102.0 + 10 * kv)
+        fig2 = _drawn([one, two], sp.make_opts(aggregate=True)[0])
+        assert 'NO BAND' not in _caption(fig2)
+        assert 'σ/√n' in _caption(fig2), _caption(fig2)
+        assert _band_count(fig2) > 0, 'n = 2 earned no band'
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_aggregate_band_is_the_standard_error_of_the_mean():
+    """SEM = sigma/sqrt(n) with the SAMPLE (n-1) deviation, hand-checked.
+
+    Four runs, one level, areas 100/110/120/130 mm2 against A0 = 100:
+    mean 115, deviations -15/-5/+5/+15, sum of squares 500, sample
+    variance 500/3 = 166.667, sigma = 12.90994, SEM = sigma/2 = 6.45497.
+    The n-1 denominator is the decision being pinned: these runs are a
+    SAMPLE of a family, not the family."""
+    d = _mktmp()
+    try:
+        runs = [_agg_run(d, f"R{i}", [1.0], lambda kv, a=a: a)
+                for i, a in enumerate((100.0, 110.0, 120.0, 130.0))]
+        lv = next(l for l in sp.aggregate_levels(runs) if l['kv'] == 1.0)
+        assert lv['n'] == 4, lv
+        assert abs(lv['mean'] - 115.0) < 1e-9, lv
+        assert abs(lv['sd'] - 12.909944487358056) < 1e-9, lv
+        assert abs(lv['sem'] - 6.454972243679028) < 1e-9, lv
+        # ddof=0 would give sigma 11.18034 / SEM 5.59017 -- pinned so a
+        # "simpler" population formula cannot slip in unnoticed
+        assert abs(lv['sd'] - 11.180339887498949) > 1e-6, 'ddof=0 crept in'
+        # and A/A0 rescales by each run's own A0 (all 100 here), so the
+        # normalized band is the same numbers over 100
+        lvn = next(l for l in sp.aggregate_levels(runs, norm=True)
+                   if l['kv'] == 1.0)
+        assert abs(lvn['mean'] - 1.15) < 1e-9, lvn
+        assert abs(lvn['sem'] - 0.06454972243679028) < 1e-9, lvn
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_aggregate_never_extrapolates_past_a_runs_own_range():
+    """Guardrail 1. A run that stops at 3 kV LEAVES the aggregate above
+    3 kV; it is not extended into it on the strength of its last point."""
+    d = _mktmp()
+    try:
+        short = _agg_run(d, 'SHORT', [1.0, 2.0, 3.0],
+                         lambda kv: 100.0 + 10 * kv)
+        long_ = _agg_run(d, 'LONG', [1.0, 2.0, 3.0, 4.0, 5.0],
+                         lambda kv: 100.0 + 12 * kv)
+        ag = {l['kv']: l for l in sp.aggregate_levels([short, long_])}
+        assert ag[3.0]['n'] == 2, ag[3.0]
+        # above the short run's last level it contributes NOTHING -- not a
+        # held-flat value, not a linear continuation
+        for kv in (4.0, 5.0):
+            assert ag[kv]['n'] == 1, (kv, ag[kv])
+            assert ag[kv]['n_interpolated'] == 0, ag[kv]
+            assert abs(ag[kv]['mean'] - (100.0 + 12 * kv)) < 1e-9, ag[kv]
+            # n = 1 -> no band at that level either; a lone run's mean must
+            # not inherit its neighbours' confidence
+            assert ag[kv]['sem'] is None, ag[kv]
+        # the guard is in _contribution, so it holds off-figure too
+        curve = sp.run_level_curve(short)
+        assert sp._contribution(curve, 4.0) is None
+        assert sp._contribution(curve, 0.5) is not None      # inside: fine
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_aggregate_never_interpolates_across_a_breakdown():
+    """Guardrail 2, and the reason it is NOT made redundant by the cap.
+
+    The cap drops levels at or above the first breakdown, but a level just
+    BELOW it can still be reached by interpolating a segment whose upper
+    end is the collapsed reading -- and a device that collapses between
+    two levels did not travel down the straight line joining them.
+
+    Reproduced on the real corpus 2026-08-09: SLDEA_20260723_233451 steps
+    0.2 kV and breaks down at 5.6 kV, so at the 0.25 kV grid's 5.5 kV
+    level it would otherwise be interpolated 5.4 -> 5.6, straight through
+    the event. It declines, and n drops 6 -> 5 at exactly that level."""
+    d = _mktmp()
+    try:
+        # a 0.2 kV stepper that collapses at 1.6 kV, against a 0.25 stepper
+        def ua(kv):
+            return -200.0 if kv >= 1.6 else -16.0
+
+        def area(kv):
+            return 40.0 if kv >= 1.6 else 100.0 + 10 * kv
+        fine = _agg_run(d, 'FINE', [0.2 * i for i in range(1, 11)],
+                        area, ua=ua)
+        assert sp.first_breakdown_kv(fine) == 1.6, sp.first_breakdown_kv(fine)
+        curve = sp.run_level_curve(fine)
+        # 1.5 sits between the run's 1.4 and its CONFIRMED 1.6 -- refused
+        assert sp._contribution(curve, 1.5) is None
+        # 1.3 sits between two clean levels -- interpolated, as normal
+        got = sp._contribution(curve, 1.3)
+        assert got is not None and got[1] is False, got
+        assert abs(got[0] - 113.0) < 1e-9, got
+        coarse = _agg_run(d, 'COARSE', [0.25 * i for i in range(1, 9)],
+                          lambda kv: 100.0 + 11 * kv)
+        ag = {l['kv']: l for l in sp.aggregate_levels([fine, coarse])}
+        assert sp.aggregate_cap_kv([fine, coarse]) == 1.6
+        assert max(ag) < 1.6, max(ag)                 # the cap
+        assert 1.5 in ag, sorted(ag)                  # below it, so kept
+        assert ag[1.5]['n'] == 1, ag[1.5]             # ...but FINE declined
+        assert ag[1.5]['n_interpolated'] == 0, ag[1.5]
+        assert ag[1.25]['n'] == 2, ag[1.25]           # a clean segment
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_aggregate_records_measured_versus_interpolated_per_level():
+    """Guardrail 3. A level carried by one measured run and two
+    interpolated ones is not the same evidence as three measured ones, and
+    with a uniform n nothing else on the figure would tell them apart."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        fine = _agg_run(d, 'FINE', [0.2, 0.4, 0.6, 0.8, 1.0],
+                        lambda kv: 100.0 + 10 * kv)
+        c1 = _agg_run(d, 'C1', [0.25, 0.5, 0.75, 1.0],
+                      lambda kv: 100.0 + 11 * kv)
+        c2 = _agg_run(d, 'C2', [0.25, 0.5, 0.75, 1.0],
+                      lambda kv: 100.0 + 12 * kv)
+        ag = {l['kv']: l for l in sp.aggregate_levels([fine, c1, c2])}
+        # a 0.25 grid level: measured by the two coarse runs, interpolated
+        # for the fine one
+        assert (ag[0.5]['n'], ag[0.5]['n_measured'],
+                ag[0.5]['n_interpolated']) == (3, 2, 1), ag[0.5]
+        assert sp.aggregate_support(ag[0.5]) == '2+1'
+        # a 0.2 grid level: the other way round
+        assert (ag[0.4]['n'], ag[0.4]['n_measured'],
+                ag[0.4]['n_interpolated']) == (3, 1, 2), ag[0.4]
+        assert sp.aggregate_support(ag[0.4]) == '1+2'
+        # a level every run really measured prints the bare n
+        assert ag[1.0]['n_interpolated'] == 0 and ag[1.0]['n'] == 3
+        assert sp.aggregate_support(ag[1.0]) == '3'
+        # measured + interpolated is ALWAYS n -- the label cannot lie by
+        # losing a contribution somewhere
+        for l in ag.values():
+            assert l['n_measured'] + l['n_interpolated'] == l['n'], l
+        # and it is SURFACED, on the figure and on the console
+        opts = sp.make_opts(aggregate=True)[0]
+        warns = []
+        fig = _drawn([fine, c1, c2], opts, warns.append)
+        labels = {t.get_text() for a in fig.axes for t in a.texts}
+        assert '2+1' in labels and '1+2' in labels and '3' in labels, labels
+        assert any('measured' in w and 'interpolated' in w for w in warns), \
+            warns
+        assert 'measured + ' in _caption(fig), _caption(fig)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_aggregate_suppresses_the_calibrated_budget_band():
+    """The +-1-2% budget is ONE run's instrument error and must not sit
+    under a cross-run mean -- the same argument that suppresses it under
+    --prepost, where the gap between the two lines is the information.
+
+    Counted off the drawn figure rather than the opts dict, because a
+    dict that says 'aggregate' and a figure with five budget bands under
+    it is exactly the half-consumed-option failure the landing-site map
+    warns about."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        r1 = _agg_run(d, 'R1', [1.0, 2.0, 3.0], lambda kv: 100.0 + 10 * kv)
+        r2 = _agg_run(d, 'R2', [1.0, 2.0, 3.0], lambda kv: 102.0 + 10 * kv)
+        plain = _drawn([r1, r2], sp.make_opts()[0])
+        n_budget = _band_count(plain)
+        assert n_budget >= 2, 'the budget band is not being drawn at all'
+        agg = _drawn([r1, r2], sp.make_opts(aggregate=True)[0])
+        # exactly the aggregate's OWN band survives, per panel
+        assert _band_count(agg) == 2, _band_count(agg)
+        assert 'bands ±2% machine' not in _caption(agg), _caption(agg)
+        assert 'suppressed under it' in _caption(agg), _caption(agg)
+        # --no-bands under the aggregate still leaves the SEM band: the
+        # tick box names the BUDGET band, and the aggregate's band is the
+        # figure's whole claim
+        both = _drawn([r1, r2], sp.make_opts(aggregate=True, bands=False)[0])
+        assert _band_count(both) == 2, _band_count(both)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_exact_key_toggle_really_changes_the_pooling():
+    """Interpolation is the DEFAULT and exact-key pooling the toggle.
+
+    Measured on the corpus 2026-08-09: eight runs step 0.25 kV and one
+    steps 0.2, sharing only 8 of 41 levels, so exact pooling drops it at
+    33 of 41 and n alternates 4/5 level to level -- a band that steps for
+    a reason that is an artifact of grid choice, not of the devices."""
+    d = _mktmp()
+    try:
+        fine = _agg_run(d, 'FINE', [0.2, 0.4, 0.6, 0.8, 1.0],
+                        lambda kv: 100.0 + 10 * kv)
+        coarse = _agg_run(d, 'COARSE', [0.25, 0.5, 0.75, 1.0],
+                          lambda kv: 100.0 + 20 * kv)
+        assert sp.make_opts()[0]['aggregate_exact'] is False, 'wrong default'
+        soft = sp.aggregate_levels([fine, coarse], exact=False)
+        hard = sp.aggregate_levels([fine, coarse], exact=True)
+        # interpolation gives a UNIFORM n; exact pooling alternates
+        assert {l['n'] for l in soft} == {2}, [(l['kv'], l['n'])
+                                               for l in soft]
+        assert {l['n'] for l in hard} == {1, 2}, [(l['kv'], l['n'])
+                                                  for l in hard]
+        # ...and where n = 1 there is no band at all under exact pooling
+        assert [l['kv'] for l in hard if l['sem'] is None] == \
+            [0.2, 0.25, 0.4, 0.5, 0.6, 0.75, 0.8], hard
+        # exact pooling never invents a value: every contribution measured
+        assert all(l['n_interpolated'] == 0 for l in hard), hard
+        assert any(l['n_interpolated'] for l in soft), soft
+        # the two agree exactly where both runs really measured
+        assert soft[-1]['mean'] == hard[-1]['mean']
+        # and the toggle reaches the figure through the CLI
+        o, err = sp._cli_opts({'--aggregate', '--aggregate-exact'}, {})
+        assert not err and o['aggregate'] and o['aggregate_exact']
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_aggregate_stops_at_the_first_breakdown_across_the_runs():
+    """The cap is the LOWEST first-breakdown kV, not each run's own: past
+    the first collapse the mean mixes intact and collapsed devices, which
+    is not a physical quantity.
+
+    It keys on CURRENT-CONFIRMED breakdown, the only kind this tool has
+    trusted since 2026-08-05 -- so it is deliberately independent of
+    --no-breakdown, which hides X marks without un-collapsing a device."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        # the event sits near the TOP of the staircase on purpose:
+        # breakdown_flags measures deviation against the run's own MEDIAN
+        # current, so a run that is mostly collapsed drags the baseline
+        # onto the collapsed value and confirms every row including the
+        # resting one (measured while writing this test)
+        def ua(kv):
+            return -300.0 if kv >= 4.5 else -16.0
+
+        def area(kv):
+            return 30.0 if kv >= 4.5 else 100.0 + 10 * kv
+        kvs = [1.0 + 0.5 * i for i in range(9)]        # 1.0 .. 5.0
+        broke = _agg_run(d, 'BROKE', kvs, area, ua=ua)
+        fine_ = _agg_run(d, 'FINE', kvs, lambda kv: 100.0 + 11 * kv)
+        assert sp.first_breakdown_kv(broke) == 4.5
+        assert sp.first_breakdown_kv(fine_) is None
+        assert sp.aggregate_cap_kv([broke, fine_]) == 4.5
+        ag = sp.aggregate_levels([broke, fine_])
+        assert max(l['kv'] for l in ag) == 4.0, [l['kv'] for l in ag]
+        # the healthy run reaches 5.0 on its own -- it is the OTHER run's
+        # collapse that ends the average, because past it the mean mixes
+        # intact and collapsed devices
+        assert max(p['key'] for p in sp.run_level_curve(fine_)) == 5.0
+        assert 'Stops at 4.5 kV' in _caption(
+            _drawn([broke, fine_], sp.make_opts(aggregate=True)[0]))
+        # --no-breakdown hides the X marks; the cap is untouched
+        no_x = sp.make_opts(aggregate=True, breakdown=False)[0]
+        assert 'Stops at 4.5 kV' in _caption(_drawn([broke, fine_], no_x))
+        # nothing broke down -> no cap, and the figure SAYS the cap did not
+        # fire rather than implying it looked and found nothing (the P3
+        # campaign's real state: zero current-confirmed breakdowns)
+        warns = []
+        fig = _drawn([fine_], sp.make_opts(aggregate=True)[0], warns.append)
+        assert 'cap did not fire' in _caption(fig), _caption(fig)
+        assert any('cap did not fire' in w for w in warns), warns
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_aggregate_is_refused_outside_area_mode_in_both_front_ends():
+    """current/power plot one point per SNAPSHOT, with no level structure
+    to pool. Refused loudly rather than ignored: a flag that quietly does
+    nothing is landing-site 2's silent failure wearing a different hat."""
+    assert sp.make_opts(aggregate=True)[1] is None
+    for mode in ('current', 'power'):
+        opts, err = sp.make_opts(mode=mode, aggregate=True)
+        assert opts is None and 'area mode only' in err, (mode, err)
+    # the CLI refuses it with the same wording, and main() prints it
+    opts, err = sp._cli_opts({'--aggregate'}, {'--mode': 'current'})
+    assert opts is None and 'area mode only' in err, err
+    # aggregate_exact alone is a harmless no-op, exactly like --mean
+    # without --prepost -- it is a CHILD of --aggregate, not a mode
+    o, err = sp._cli_opts({'--aggregate-exact'}, {'--mode': 'current'})
+    assert err is None and o['aggregate_exact'] and not o['aggregate']
 
 
 def test_the_cli_option_table_cannot_drift_from_make_opts():

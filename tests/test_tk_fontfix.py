@@ -138,9 +138,14 @@ def test_every_tk_entry_point_applies_the_fix_before_tkinter():
 
 
 def _run():
+    # Failures are collected, not fatal (`#280`): failing fast reported one
+    # broken test in suites that had five. Tracebacks land after the count
+    # line, in name order, in one bounded block -- run_tests.py explains why.
+    import traceback
     fns = [v for k, v in sorted(globals().items())
            if k.startswith('test_') and callable(v)]
     ran = skipped = 0
+    failed = []
     for fn in fns:
         try:
             fn()
@@ -148,13 +153,28 @@ def _run():
             skipped += 1
             print(f"skip {fn.__name__}  ({why})")
             continue
+        except Exception:
+            # A test that blew up still RAN -- only a skip is "did not run".
+            ran += 1
+            failed.append((fn.__name__, traceback.format_exc()))
+            print(f"FAIL {fn.__name__}")
+            continue
         ran += 1
         print(f"ok  {fn.__name__}")
     tail = f"{ran} of {len(fns)} tests ran"
     if skipped:
         tail += f" ({skipped} skipped, needs fontconfig)"
     print(f"\n{tail}")
+    if not failed:
+        return 0
+    head = f"{len(failed)} of {len(fns)} tests failed"
+    print(f"\n{head}")
+    for name, tb in failed:
+        print(f"===== FAIL {name} =====")
+        print(tb.rstrip('\n'))
+    print(f"===== end {head} =====")
+    return 1
 
 
 if __name__ == '__main__':
-    _run()
+    raise SystemExit(_run())

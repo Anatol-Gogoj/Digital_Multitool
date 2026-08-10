@@ -1360,31 +1360,89 @@ class PlotWindow:
 
     # -- click-through (`#274`) --------------------------------------------
 
+    def _panel_for(self, event):
+        """-> (axes, panel index) for the click, RESOLVED AGAINST THE FIGURE
+        AS IT IS NOW, or (None, None) if the pointer is over no panel.
+
+        `event.inaxes` is whatever matplotlib decided when it built the
+        event. Trusting it and taking `list(self.fig.axes).index(...)` is
+        what `#311` swallowed clicks on: if the figure is cleared and
+        redrawn between the event being made and this running, that Axes
+        object is not in the figure any more, the lookup raises ValueError
+        and the click is dropped. Re-asking the CURRENT figure which panel
+        holds those pixels answers the same question and cannot go stale --
+        and the Axes it returns is the one whose transData nearest_point
+        must measure with, which a stale one would get wrong too.
+        """
+        axes = list(self.fig.axes)
+        if event.inaxes in axes:
+            return event.inaxes, axes.index(event.inaxes)
+        for i, ax in enumerate(axes):
+            try:
+                # the same test matplotlib's own canvas.inaxes applies
+                if ax.get_visible() and ax.patch.contains_point(
+                        (event.x, event.y)):
+                    return ax, i
+            except (ValueError, TypeError):
+                continue
+        return None, None
+
     def on_click(self, event):
         """matplotlib button_press_event -> the frame under the pointer.
 
         Returns what it resolved (run, row) so the live smoke and the
-        tests can see the whole chain without watching for a process."""
-        if not getattr(event, 'dblclick', False) or event.inaxes is None:
-            return None
-        if not self._prepared:
-            return None
+        tests can see the whole chain without watching for a process.
+
+        EVERY path out of here either acts or says why, in `self.lbl_click`
+        (`#311`). It used to have four silent returns, and an operator who
+        double-clicked and got nothing -- no window, no message, no console
+        line -- had no way to tell a mis-aimed click from a broken feature
+        from a double-click that arrived as two singles. That silence is
+        what made the report impossible to characterise, so it is treated
+        here as part of the bug and not as tidiness.
+        """
+        dbl = bool(getattr(event, 'dblclick', False))
         opts, err = self.current_opts()
         if err:
+            self.lbl_click.config(
+                text=f"cannot open a frame while the draw options are "
+                     f"unusable: {err}")
             return None
-        try:
-            panel = list(self.fig.axes).index(event.inaxes)
-        except ValueError:                 # the axes was cleared under us
+        ax, panel = self._panel_for(event)
+        if ax is None:
+            self.lbl_click.config(
+                text="that double-click was not over a panel — aim inside "
+                     "the figure, at a marker" if dbl else CLICK_HINT)
             return None
-        hit = nearest_point(event.inaxes,
-                            plot_points(self._prepared, opts, panel),
+        if not self._prepared:
+            self.lbl_click.config(
+                text="nothing is plotted to click through to — pick runs "
+                     "that work in this mode (the messages below say which "
+                     "were skipped, and why)")
+            return None
+        hit = nearest_point(ax, plot_points(self._prepared, opts, panel),
                             event.x, event.y)
         if hit is None:
             self.lbl_click.config(
                 text=f"no data point within {PICK_PX} px of that "
-                     f"double-click — aim at a marker")
+                     f"{'double-click' if dbl else 'click'} — aim at a "
+                     f"marker")
             return None
         run, row, _dist = hit
+        if not dbl:
+            # THE `#311` SYMPTOM MADE VISIBLE. A double-click can reach the
+            # window as two separate single clicks -- the pair is split when
+            # the desktop is busy handing focus back from the Edge Review
+            # window that was just closed, and Tk then matches <Button-1>
+            # twice instead of <Double-Button-1> once. That used to be
+            # perfectly silent, which is exactly the reported "double-click
+            # does nothing, sometimes the second one works". Now the click
+            # lands ON a marker and SAYS so, and says what it wants.
+            snap = str(row.get('snapshot') or '?')
+            self.lbl_click.config(
+                text=f"single click on {run['name']}, snapshot {snap} — "
+                     f"DOUBLE-click it to open that frame in Edge Review")
+            return None
         self.open_in_edge_review(run, row)
         return run, row
 

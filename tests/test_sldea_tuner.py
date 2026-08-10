@@ -196,6 +196,19 @@ def test_windows_launcher_contract():
     for script in ('sldea_tuner.py', 'sldea_diag.py'):
         assert script in text, script
         assert _os.path.exists(_os.path.join(repo, script)), script
+    # A set-but-DANGLING SCPI_SLDEA_DIR must not skip the folder picker. The
+    # value used to be taken unconditionally, so a stale pointer -- e.g. a
+    # VirtualBox share no longer attached, live on the analysis VM
+    # 2026-08-09 -- dead-ended the launcher instead of falling back to the
+    # picker, which is what both Python front ends already do.
+    assert 'if exist "%SCPI_SLDEA_DIR%\\"' in text, \
+        'a dangling SCPI_SLDEA_DIR must not be taken as the target'
+    # The trailing form is load-bearing and was measured under cmd:
+    # `if exist "<path>\."` is TRUE for a plain FILE, so it would let a file
+    # through as though it were a run folder. Only `"<path>\"` is true for a
+    # directory and false for both a file and a dangling path.
+    assert '"%SCPI_SLDEA_DIR%\\."' not in text, \
+        'the "\\." form matches plain files too -- use "%SCPI_SLDEA_DIR%\\"'
     # `shift` moves %0 too, so %~dp0 must be banked BEFORE argument parsing
     # or the launcher cannot find the app it is sitting next to (bench
     # 2026-07-28). Batch has no unit tests; this is the guard.

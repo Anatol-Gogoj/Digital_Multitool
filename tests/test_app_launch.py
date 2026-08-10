@@ -40,6 +40,24 @@ def _have(*tools):
     return all(shutil.which(t) for t in tools)
 
 
+class _Skip(Exception):
+    """Raised by a case that cannot run here. Counted, never silent."""
+
+
+def _need_display():
+    """Skip unless a virtual X display can actually be driven.
+
+    The four display cases used to `return` quietly, so `_run` counted them
+    as passes and this suite's tail line read "4 tests passed" on a box that
+    executed NOTHING of it (audit 2026-08-09). That matters more than it
+    looks: run_tests.py echoes a suite's last stdout line verbatim, so that
+    line WAS the runner summary, and CLAUDE.md trap 5 points at this very
+    suite as the only thing that answers "does the GUI actually open".
+    """
+    if not _have('Xvfb', 'xwininfo'):
+        raise _Skip('Xvfb/xwininfo not installed')
+
+
 def _clean_env():
     """The user's environment, minus any developer font workaround: the app
     must stand on its own exactly as it does for a user."""
@@ -127,17 +145,13 @@ def _launch_expecting_window(argv, title_fragment, timeout=BOOT_TIMEOUT):
 
 
 def test_main_gui_starts_and_maps_a_window():
-    if not _have('Xvfb', 'xwininfo'):
-        print("   (skipped: Xvfb/xwininfo not installed)")
-        return
+    _need_display()
     _launch_expecting_window(
         [_sys.executable, os.path.join(REPO, 'gui.py')], 'Lab Instrument')
 
 
 def test_edge_review_starts_and_maps_a_window():
-    if not _have('Xvfb', 'xwininfo'):
-        print("   (skipped: Xvfb/xwininfo not installed)")
-        return
+    _need_display()
     d = tempfile.mkdtemp(prefix='launch_edge_')
     try:
         _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
@@ -149,9 +163,7 @@ def test_edge_review_starts_and_maps_a_window():
 
 
 def test_tuner_starts_and_maps_a_window():
-    if not _have('Xvfb', 'xwininfo'):
-        print("   (skipped: Xvfb/xwininfo not installed)")
-        return
+    _need_display()
     d = tempfile.mkdtemp(prefix='launch_tuner_')
     run = os.path.join(d, 'SLDEA_20260101_000000')
     try:
@@ -167,9 +179,7 @@ def test_plot_window_starts_and_maps_a_window():
     # `#223`: a fourth Tk entry point, launched by 📊 Plot runs… and
     # carrying emoji of its own (📊, 💾, ✓) -- the exact shape of the
     # 2026-07-27 colour-bitmap-font abort this suite exists to catch.
-    if not _have('Xvfb', 'xwininfo'):
-        print("   (skipped: Xvfb/xwininfo not installed)")
-        return
+    _need_display()
     d = tempfile.mkdtemp(prefix='launch_plot_')
     try:
         _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
@@ -183,10 +193,20 @@ def test_plot_window_starts_and_maps_a_window():
 def _run():
     fns = [v for k, v in sorted(globals().items())
            if k.startswith('test_') and callable(v)]
+    ran = skipped = 0
     for fn in fns:
-        fn()
+        try:
+            fn()
+        except _Skip as why:
+            skipped += 1
+            print(f"skip {fn.__name__}  ({why})")
+            continue
+        ran += 1
         print(f"ok  {fn.__name__}")
-    print(f"\n{len(fns)} tests passed")
+    tail = f"{ran} of {len(fns)} tests ran"
+    if skipped:
+        tail += f" ({skipped} skipped, needs Xvfb+xwininfo)"
+    print(f"\n{tail}")
 
 
 if __name__ == '__main__':

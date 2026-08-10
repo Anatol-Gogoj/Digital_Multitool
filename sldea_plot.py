@@ -1109,6 +1109,49 @@ def write_tidy(runs, path):
 # a run the command line excludes is excluded in the window too, for the
 # same reason and with the same warning text, and neither front end can
 # grow its own idea of what a figure's options or filenames are.
+#
+# ---------------------------------------------------------------------------
+# ADDING A NEW OPTION: five landing sites, and four of them fail SILENTLY
+#
+# Every option currently here is plumbed correctly, so nothing is broken --
+# this is a map, written down because the next option through this seam
+# (`#268`'s cross-run aggregate) would hit two of the silent ones on its
+# first day. Miss a site and there is no error, just a control that does
+# nothing -- or worse, a "re-render" of a different figure.
+#
+#   1. make_opts() below -- the keyword, its default, any validation.
+#      MISSING THIS IS LOUD: every other site raises TypeError.
+#
+#   2. _cli_opts()'s hand-written val()/on()/off() table. SILENT. The flag
+#      does nothing. Worse, `--from-spec` then fails in a way that looks
+#      like success: build_figspec() stores `dict(opts)` WHOLESALE, so the
+#      spec records the new option faithfully, but _cli_opts() rebuilds the
+#      dict from its own enumerated list and drops any key it does not know
+#      -- returning err=None. Measured 2026-08-09:
+#
+#          spec_opts['sem_band'] = True
+#          out, err = _cli_opts([], {}, spec_opts)
+#          # err is None and 'sem_band' is not in out,
+#          # while a known key ('logy') round-trips fine
+#
+#      That is precisely the failure load_figspec()'s docstring exists to
+#      prevent ("a figure that claims to be a re-render and is not"), and
+#      its validation cannot catch it -- the spec is perfectly well-formed.
+#
+#   3. The window: widget, Tk variable, and current_opts()
+#      (sldea_plot_gui.py). SILENT -- the option ends up CLI-only. The
+#      docstring there records the `--logy --gui` bug this already caused.
+#
+#   4. sldea_plot_gui.REMEMBERED, plus ENUM_OPTIONS if the value is a NAME
+#      rather than a flag. SILENT: the option works, but is forgotten
+#      between sessions, inconsistently with every other control.
+#
+#   5. The drawing code that reads opts[...]. Silent if the option is only
+#      half-consumed -- read by one panel and not the other.
+#
+# A cheap guard for site 2, for whoever is next in here: assert that the
+# keys make_opts() produces are exactly the keys _cli_opts() rebuilds, so
+# the table cannot drift from the signature without a test failing.
 # ---------------------------------------------------------------------------
 
 def default_stem(mode):

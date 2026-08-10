@@ -20,12 +20,14 @@ the same tidy CSV beside the same PNG. The headless paths are untouched;
 Two deliberate shapes:
 
   * Preview DRAWS ONLY. Nothing reaches the disk until Export, which names
-    both files it wrote in the window. A preview that quietly littered the
+    the files it wrote in the window. A preview that quietly littered the
     run folder with PNGs would be worse than the CLI, not better.
-  * Export always writes the tidy per-snapshot CSV beside the PNG. That
-    CSV is the figure's evidence -- it is what makes a figure traceable
-    back to its numbers -- so there is no "just the picture" option here
-    (sldea_plot.export enforces it for both front ends).
+  * Export always writes the tidy per-snapshot CSV beside the figure.
+    That CSV is the figure's evidence -- it is what makes a figure
+    traceable back to its numbers -- so there is no "just the picture"
+    option here, whichever format the picture is in (sldea_plot.export
+    enforces it for both front ends; `#314` made the format and the dpi
+    the operator's choice and left that rule untouched).
 
 Two things the window remembers or reaches for, both additive:
 
@@ -45,6 +47,7 @@ import math
 import os
 import subprocess
 import sys
+import time
 import tk_fontfix                      # must run before tkinter connects:
 tk_fontfix.apply()                     # colour-emoji glyphs hard-crash Tk
 import tkinter as tk
@@ -63,7 +66,8 @@ Usage:
 
 Pick several runs, choose area / current / power, tick what to draw.
 Double-click a point on the figure to open that frame in Edge Review.
-Export writes the 300 dpi PNG and its tidy per-snapshot CSV together.
+Export writes the figure, its tidy per-snapshot CSV and its figspec
+sidecar together -- PNG (at a dpi you set, 300 by default) or SVG.
 
 The draw options are remembered PER PARENT FOLDER in a per-user file --
 ~/.local/share/scpi_control/sldea_plot_gui.json, or the same name under
@@ -92,10 +96,49 @@ PROCESSED_MARK = '  ✓ processed'       # Edge Review's labelling convention
 MIN_FIG_W = 360
 MIN_H = 420
 
-# Redraw coalescing. 120 ms was already the run-list debounce; a resize
-# drag fires <Configure> per pixel and each redraw is a full matplotlib
-# pass, so it is the same number for the same reason.
+# Redraw coalescing for a CONTROL change -- a tick box, a keystroke, a
+# drag through the run list. 120 ms is a click's worth of quiet.
 REDRAW_MS = 120
+
+# A resize needs its own, longer window, and the reason is the `#316`
+# defect: a restartable timer only coalesces a burst whose events arrive
+# FASTER THAN IT FIRES, and a resize drag's did not.
+#
+# Measured, 13 corpus runs on one area figure, a real 3.5 s mouse drag on
+# the window edge: 3-5 <Configure> reached the canvas and 3-5 FULL
+# REDRAWS came back. One for one, no coalescing at all. A drag does not
+# fire <Configure> per pixel the way this comment used to assume -- it
+# fires ONE PER REDRAW, because each redraw blocks the Tk loop for 480 ms
+# (298 ms building 742 artists, 178 ms rendering them) and nothing can be
+# delivered meanwhile. The debounce was not late to the drag; the drag
+# was throttled to the debounce.
+#
+# So the window is measured against the thing it has to outlast. With the
+# redundant redraws gone, consecutive <Configure> arrive 280-500 ms apart
+# on this corpus -- that gap being matplotlib's OWN resize render (262 ms,
+# measured with our handler disabled entirely) plus the WM's dispatch.
+# 500 ms clears it. A drag settling a third of a second later than a click
+# costs nothing visible: matplotlib's handler has already redrawn the
+# figure at the new size by then, and what our redraw adds on top is the
+# re-run of tight_layout against it.
+RESIZE_MS = 500
+
+# That gap IS the cost of servicing one resize, though, so it grows with
+# the series count and no fixed window can be right for every figure.
+# This covers the rest, and it needs no number for the workload: a timer
+# that comes up LATE waited on a blocked loop. The two cases separate by
+# a factor of six, measured on the real debounce path -- ~5 ms past the
+# deadline on an idle loop, 240-290 ms past it when a render ran in
+# between. A redraw that comes up late is a redraw whose burst is still
+# running, so it re-arms instead of firing.
+LATE_MS = 40
+
+# ...and deferral is BOUNDED, because "the loop is busy" is not a promise
+# that it will ever go quiet. A new event restarts the budget -- that is
+# a live burst, and waiting through it is the point -- but nothing else
+# may push the figure further out of date than this. One visibly late
+# redraw beats a figure that silently stopped tracking its window.
+MAX_DEFER_MS = 1000
 
 
 # ---------------------------------------------------------------------------
@@ -237,12 +280,19 @@ OPTIONS_FALLBACK = os.path.join(os.path.expanduser('~'), '.cache',
 # a stale set would quietly plot the wrong batch.
 REMEMBERED = ('mode', 'prepost', 'mean', 'bands', 'breakdown', 'vs_area',
               'logx', 'logy', 'marker_key', 'subplots', 'cadence_guard',
-              'aggregate', 'aggregate_exact')
+              'aggregate', 'aggregate_exact', 'fmt', 'dpi')
 
 # The remembered options that are NAMES rather than flags, each with the
 # vocabulary sldea_plot validates it against -- read from sldea_plot so a
 # value the engine has retired can never survive a round trip here.
-ENUM_OPTIONS = {'mode': sp.MODES, 'subplots': sp.SUBPLOTS}
+ENUM_OPTIONS = {'mode': sp.MODES, 'subplots': sp.SUBPLOTS,
+                'fmt': sp.FORMATS}
+
+# ...and the ones that are NUMBERS (`#314` brought the first), each with
+# the engine's own checker. Same principle as ENUM_OPTIONS: the window
+# does not restate a range sldea_plot already owns, so a hand-edited
+# config cannot smuggle a dpi past the refusal make_opts would give it.
+NUMERIC_OPTIONS = {'dpi': sp.check_dpi}
 
 
 def options_key(parent):
@@ -267,8 +317,17 @@ def _clean_options(d):
     for k, allowed in ENUM_OPTIONS.items():
         if d.get(k) in allowed:
             out[k] = d[k]
+    for k, check in NUMERIC_OPTIONS.items():
+        if k in d:
+            value, err = check(d[k])
+            # `None` reads as 'unset' to the checker and would silently
+            # reinstate the default; a key that is PRESENT and unusable is
+            # dropped like any other unrecognizable entry
+            if err is None and d[k] is not None:
+                out[k] = value
     for k in REMEMBERED:
-        if k not in ENUM_OPTIONS and isinstance(d.get(k), bool):
+        if (k not in ENUM_OPTIONS and k not in NUMERIC_OPTIONS
+                and isinstance(d.get(k), bool)):
             out[k] = d[k]
     if isinstance(d.get('out_dir'), str) and d['out_dir'].strip():
         out['out_dir'] = d['out_dir']
@@ -544,6 +603,38 @@ BANDS_TIP = (
     f"is not a small error bar. Never quote it as an uncertainty.")
 
 
+# Why the box is GREY, said before the budget itself (`#312`). The bands
+# checkbox reaches exactly one line of the engine --
+# `budget_bands = opts['bands'] and not opts.get('aggregate')` in draw_area,
+# which is the only place sldea_plot reads the option at all -- so in two
+# states it is a control that cannot change the figure, and this window's
+# rule is that such a control greys with a tooltip saying what brings it
+# back. The reason leads and the unchanged budget text follows it: an
+# operator hovering a greyed box wants the WHY first.
+BANDS_OFF_AGGREGATE_TIP = (
+    "Greyed: the cross-run aggregate suppresses this band. The ±1–2% "
+    "budget is ONE run's instrument error, while the aggregate's band is "
+    "the standard error of the mean across runs (`#268`) — two different "
+    "quantities, and stacking them would invite reading one for the "
+    "other. Turn the aggregate off to draw the budget bands again.\n\n"
+    + BANDS_TIP)
+
+BANDS_OFF_MODE_TIP = (
+    "Greyed: the bands are an AREA budget and only the area figure draws "
+    "them — current and power plot microamps and milliwatts, which this "
+    "budget says nothing about. Switch to area mode to draw them "
+    "again.\n\n" + BANDS_TIP)
+
+
+def bands_tip(area, aggregate):
+    """The bands tooltip for the state the window is in: the plain budget
+    text while the box is live, that text behind a reason while it is
+    not."""
+    if not area:
+        return BANDS_OFF_MODE_TIP
+    return BANDS_OFF_AGGREGATE_TIP if aggregate else BANDS_TIP
+
+
 # Hover text for the engine options the Draw column exposes. Module
 # constants rather than literals at the widgets, for the reason BANDS_TIP
 # is one: a test can read them, and the sentence that HAS to stay true --
@@ -600,6 +691,30 @@ DRAW_TIPS = {
     'title_second': (
         "Replaces the second panel's built-in heading; area mode only, "
         "because current and power draw a single panel."),
+}
+
+# Hover text for the two options that describe the FILE rather than the
+# drawing (`#314`). Their own dict because they belong to the Export box
+# and never touch the preview -- the canvas is at screen dpi and stays
+# there whichever of these is set.
+EXPORT_TIPS = {
+    'fmt': (
+        "PNG is the default and what every figure in the handoff is. SVG "
+        "is vector — enlarge it or re-letter it without touching the "
+        "data. Its size follows the number of drawn ELEMENTS rather than "
+        "the pixel count, which is why the confirmation names it: "
+        "measured 2026-08-10, seven runs with pre/post and the mean came "
+        "to 322 kB against the same figure's 310 kB PNG, but a denser one "
+        "has no such promise. The tidy CSV and the figspec are written "
+        "for both."),
+    'dpi': (
+        f"Raster resolution, {sp.DEFAULT_DPI} by default, "
+        f"{sp.DPI_MIN}–{sp.DPI_MAX}. Outside that range it is REFUSED "
+        f"rather than quietly clamped — a typed '30000' asks for a render "
+        f"that looks exactly like a hang. Greyed under SVG because a "
+        f"vector file has no dots per inch to set: the backend pins it to "
+        f"72 and scales in user units, so a number here could only ever "
+        f"be one that did nothing."),
 }
 
 
@@ -869,7 +984,11 @@ class PlotWindow:
         self.runs = []                 # [(name, label)] currently listed
         self._loaded = {}              # rundir -> loaded run dict (cache)
         self._prepared = []            # what the canvas is currently showing
+        self._drawn_key = None         # ...and what it was derived from
         self._redraw_after = None
+        self._deadline = 0.0           # when the pending redraw is DUE
+        self._window_ms = REDRAW_MS    # the quiet this burst has to make
+        self._defer_until = None       # how long this burst may push it
         self._canvas_size = None       # last figure-canvas size (`#271`)
         self.min_size = (MIN_FIG_W, MIN_H)   # replaced by apply_minsize
         self._warns = []
@@ -916,6 +1035,12 @@ class PlotWindow:
         self.v_subplots = tk.StringVar(value=o['subplots'])
         self.v_title_first = tk.StringVar(value=o['title_first'] or '')
         self.v_title_second = tk.StringVar(value=o['title_second'] or '')
+        # the `#314` export options. Strings, both of them: the format is
+        # a name and the dpi is what an operator TYPES, so it is validated
+        # by the engine (sp.check_dpi, through current_opts) rather than
+        # by an IntVar that raises TclError on a half-typed number.
+        self.v_fmt = tk.StringVar(value=o['fmt'])
+        self.v_dpi = tk.StringVar(value=str(o['dpi']))
         chosen_out = out_dir or mem.get('out_dir')
         self.v_out = tk.StringVar(
             value=chosen_out or default_out_dir(parent_dir))
@@ -1105,11 +1230,44 @@ class PlotWindow:
         self.e_title_second = self._title_row(
             df, "Panel 2:", self.v_title_second, 'title_second', 'second',
             DRAW_TIPS['title_second'])
-        self._sync_enabled()
 
         # --- export
-        xf = ttk.LabelFrame(left, text="Export (PNG + tidy CSV)", padding=6)
+        xf = ttk.LabelFrame(left, text="Export (figure + tidy CSV)",
+                            padding=6)
         xf.pack(fill=tk.X, pady=(8, 0))
+        # format and resolution (`#314`) sit HERE and not in Draw: they
+        # change the file, never the picture, and the preview canvas is at
+        # screen dpi whatever they say. One row for both, because the Draw
+        # column is what `#271`'s measured floor is taken from.
+        frow = ttk.Frame(xf)
+        frow.pack(fill=tk.X, pady=(0, 4))
+        lbl_fmt = ttk.Label(frow, text="Format:")
+        lbl_fmt.pack(side=tk.LEFT)
+        add_tooltip(lbl_fmt, EXPORT_TIPS['fmt'])
+        self.rb_fmt = {}
+        for name in sp.FORMATS:
+            rb = ttk.Radiobutton(frow, text=name.upper(), value=name,
+                                 variable=self.v_fmt,
+                                 command=self._format_changed)
+            rb.pack(side=tk.LEFT, padx=(6, 0))
+            add_tooltip(rb, EXPORT_TIPS['fmt'])
+            self.rb_fmt[name] = rb
+        self.lbl_dpi = ttk.Label(frow, text="dpi:")
+        self.lbl_dpi.pack(side=tk.LEFT, padx=(12, 0))
+        # a Spinbox says the range is bounded before anything is typed;
+        # the refusal outside it is still the engine's, since the box can
+        # be typed into freely
+        self.sb_dpi = ttk.Spinbox(frow, from_=sp.DPI_MIN, to=sp.DPI_MAX,
+                                  increment=50, width=6,
+                                  textvariable=self.v_dpi,
+                                  command=self._show_targets)
+        self.sb_dpi.pack(side=tk.LEFT, padx=(4, 0))
+        # NO redraw binding, deliberately: the dpi cannot change the
+        # preview, and a redraw per keystroke would blank the figure on
+        # the '5' of '500' while the number is still half typed
+        self.sb_dpi.bind('<KeyRelease>', lambda _e: self._show_targets())
+        for w in (self.lbl_dpi, self.sb_dpi):
+            add_tooltip(w, EXPORT_TIPS['dpi'])
         orow = ttk.Frame(xf)
         orow.pack(fill=tk.X)
         ttk.Label(orow, text="Folder:").pack(side=tk.LEFT)
@@ -1178,6 +1336,12 @@ class PlotWindow:
         # pan and zoom rectangles, and launching a program on a stray
         # click while someone is dragging a zoom box would be hostile.
         self.canvas.mpl_connect('button_press_event', self.on_click)
+
+        # LAST: the greying rules span both boxes now (`#314` greys the dpi
+        # from the format radios in the Export frame, `#315`'s hints follow
+        # the greying), so the first sync can only run once every widget it
+        # touches exists.
+        self._sync_enabled()
 
     def _title_row(self, master, label, var, key, panel, tip=None):
         """One 'Label: [entry]' heading row in the Draw column, with the
@@ -1377,6 +1541,17 @@ class PlotWindow:
         live(self.cb_mean, self.v_prepost.get())
         # coarse_cadence is consulted only inside `if opts['breakdown']`
         live(self.cb_cadence, self.v_breakdown.get())
+        # the budget bands reach ONE line of the engine, draw_area's
+        # `budget_bands = opts['bands'] and not opts.get('aggregate')`, and
+        # nothing outside draw_area reads the option -- so the box is inert
+        # both under the aggregate, which deliberately suppresses the
+        # ±1–2% budget in favour of the SEM, and in current/power, which
+        # never had an area budget to draw (`#312`). The tooltip says which
+        # of the two it is; the box greys rather than vanishing, as
+        # everything else in this column does.
+        agg = self.v_aggregate.get()
+        live(self.cb_bands, area and not agg)
+        self.tip_bands.text = bands_tip(area, agg)
         # _marker_key is called by draw_area alone
         live(self.cb_marker_key, area)
         # the aggregate pools PER-LEVEL curves, which only area mode has;
@@ -1396,10 +1571,26 @@ class PlotWindow:
         live(self.e_title, first_drawn)
         live(self.e_title_first, first_drawn)
         live(self.e_title_second, area and which != 'first')
-        # a greyed box heads a panel that is not drawn, so its hint would
-        # promise a heading nothing carries -- and the greying may just
-        # have brought one back (`#315`)
+        # the dpi is dots per INCH of raster, and SVG has no raster: the
+        # backend pins the figure to 72 dpi and scales in user units, so
+        # _savefig does not pass one at all. Greyed rather than silently
+        # ignored, which is what `#314` asked for, and greyed rather than
+        # hidden for the reason every other rule here is (`#314`).
+        raster = self.v_fmt.get() != 'svg'
+        live(self.sb_dpi, raster)
+        live(self.lbl_dpi, raster)
+
+        # LAST in this method: a greyed box heads a panel that is not
+        # drawn, so its hint would promise a heading nothing carries -- and
+        # the greying just above may have brought one back (`#315`).
         self._refresh_hints()
+
+    def _format_changed(self):
+        """PNG <-> SVG: the dpi field goes live or grey, and the target
+        filenames change extension. No redraw -- the preview canvas is at
+        screen dpi and neither option can reach it."""
+        self._sync_enabled()
+        self._show_targets()
 
     def _toggled(self):
         """A control whose own state changes what ELSE is live: re-sync
@@ -1454,15 +1645,63 @@ class PlotWindow:
             # mode switch should produce.
             subplots='both' if which == 'second' and not area else which,
             title_first=self.v_title_first.get().strip() or None,
-            title_second=self.v_title_second.get().strip() or None)
+            title_second=self.v_title_second.get().strip() or None,
+            # `#314`. NOT neutralised under SVG the way vs_area and
+            # subplots are above: a dpi beside a vector format is inert,
+            # not illegal, and make_opts takes the pair happily. Keeping
+            # the typed value means the figspec records what was chosen
+            # and `--from-spec --format png` re-renders at it, instead of
+            # at a default nobody asked for. A blank box is the absence of
+            # a request, so check_dpi reads it as the default; a bad or
+            # out-of-range one is REFUSED here, in the CLI's own words.
+            fmt=self.v_fmt.get(), dpi=self.v_dpi.get())
 
     # -- drawing -----------------------------------------------------------
 
-    def schedule(self, _event=None):
+    def schedule(self, _event=None, ms=REDRAW_MS):
         """Coalesce redraws: dragging through the run list fires a select
-        event per row, and each redraw is a full matplotlib pass."""
+        event per row, a resize drag fires <Configure> per redraw, and
+        each redraw is a full matplotlib pass. `ms` is how much quiet the
+        burst has to produce before the redraw lands -- a click's worth by
+        default, a resize's when the resize handler asks for it (`#316`).
+
+        Every caller comes through here, so this is also where the
+        deferral budget restarts: a fresh event is a new burst, whatever
+        the last one was still waiting on."""
+        self._defer_until = None
+        self._arm(ms)
+
+    def _arm(self, ms):
+        """Queue the coalesced redraw and REMEMBER WHEN IT IS DUE. That
+        deadline is the whole `#316` mechanism -- without it the callback
+        cannot tell a quiet loop from a blocked one."""
         self._cancel_redraw()          # one canceller, shared with _closing
-        self._redraw_after = self.root.after(REDRAW_MS, self.redraw)
+        self._window_ms = ms
+        self._deadline = time.monotonic() + ms / 1000.0
+        if self._defer_until is None:
+            self._defer_until = self._deadline + MAX_DEFER_MS / 1000.0
+        self._redraw_after = self.root.after(ms, self._debounced)
+
+    def _debounced(self):
+        """Redraw -- or defer once more, because the burst is still
+        running (`#316`).
+
+        A timer that comes up LATE waited on a blocked event loop, and
+        during a resize drag it always does: matplotlib's own resize
+        handler renders the figure at the new size before Tk gets to
+        service anything else. Firing there redraws INTO a drag that is
+        still going, which is how 6 <Configure> used to cost 6 full
+        redraws. Re-arming instead means the redraw lands once, when the
+        drag stops -- and the ordinary case is untouched, because a
+        toggle blocks nothing and its timer is ~5 ms late, not 250."""
+        self._redraw_after = None
+        now = time.monotonic()
+        if ((now - self._deadline) * 1000.0 > LATE_MS
+                and now < self._defer_until):
+            self._arm(self._window_ms)
+            return
+        self._defer_until = None
+        self.redraw()
 
     def _canvas_configured(self, event):
         """The figure canvas changed size — relayout, coalesced (`#271`).
@@ -1470,12 +1709,17 @@ class PlotWindow:
         SIZE, not every <Configure>: the event also fires when the widget
         merely MOVES (the scrollbar appearing beside it shifts it by its
         own width), and a full prepare_runs + draw for a move is work
-        nobody asked for."""
+        nobody asked for.
+
+        RESIZE_MS, not REDRAW_MS: a drag's events are hundreds of
+        milliseconds apart because servicing one costs that much, so the
+        click-sized window let a drag redraw straight through it
+        (`#316`)."""
         size = (event.width, event.height)
         if size == self._canvas_size:
             return
         self._canvas_size = size
-        self.schedule()
+        self.schedule(None, RESIZE_MS)
 
     def apply_minsize(self):
         """Floor the window so the layout cannot collapse (`#271`).
@@ -1509,6 +1753,32 @@ class PlotWindow:
             warn(m)
         return run
 
+    def _figure_key(self):
+        """What the figure on screen was DERIVED FROM: the run set and
+        every option that reaches the drawing. Two redraws with the same
+        key can only differ in the size of the canvas they land on."""
+        opts, err = self.current_opts()
+        return (tuple(self.selected_dirs()), err,
+                None if err else tuple(sorted(opts.items())))
+
+    def relayout(self):
+        """Re-run the last draw's layout at the canvas's new size, WITHOUT
+        rebuilding the figure (`#316`).
+
+        A resize does not change a single number on the figure; it changes
+        how many inches the numbers have. Rebuilding to find that out cost
+        298 ms of artist construction over 13 runs and a second full
+        render on top of the one matplotlib's own resize handler had
+        already done -- measured, and the larger half of a drag's whole
+        bill. -> True when it could be done.
+
+        draw_idle, not draw: matplotlib has a render pending for this same
+        resize, and this merges into it instead of adding a second."""
+        if not sp.relayout(self.fig):
+            return False
+        self.canvas.draw_idle()
+        return True
+
     def redraw(self):
         """Draw, then re-hint the heading boxes -- ALWAYS, including the
         paths that return early (`#315`).
@@ -1527,9 +1797,20 @@ class PlotWindow:
         self._redraw_after = None
         # the click line goes back to being a hint: what it says otherwise
         # is which frame the LAST double-click opened, and that answer
-        # belongs to the figure that was on screen when it was clicked
+        # belongs to the figure that was on screen when it was clicked --
+        # at the size it was then, which is why a relayout takes it down
+        # too: the point it named has moved
         self.lbl_click.config(text=CLICK_HINT)
+        # A resize reaches here like everything else, and is told apart
+        # like this rather than by a flag: what makes it cheap is that
+        # nothing the figure was derived from has changed, and a flag
+        # would have to be right about that. Interleave a tick box with
+        # the drag and the key moves, so the rebuild happens.
+        if self._drawn_key is not None and self._figure_key() == \
+                self._drawn_key and self.relayout():
+            return
         opts, err = self.current_opts()
+        self._drawn_key = None         # nothing survives the clear below
         self.fig.clear()
         if err:
             self._prepared = []
@@ -1560,37 +1841,98 @@ class PlotWindow:
                        "See the messages below.")
         else:
             sp.draw(self.fig, runs, opts, warns.append)
+            # only a real figure can be re-laid-out instead of rebuilt:
+            # the hint above draws no axes and sp.relayout says so
+            self._drawn_key = self._figure_key()
         self._set_messages(warns)
         self._show_targets()
         self.canvas.draw()
 
     # -- click-through (`#274`) --------------------------------------------
 
+    def _panel_for(self, event):
+        """-> (axes, panel index) for the click, RESOLVED AGAINST THE FIGURE
+        AS IT IS NOW, or (None, None) if the pointer is over no panel.
+
+        `event.inaxes` is whatever matplotlib decided when it built the
+        event. Trusting it and taking `list(self.fig.axes).index(...)` is
+        what `#311` swallowed clicks on: if the figure is cleared and
+        redrawn between the event being made and this running, that Axes
+        object is not in the figure any more, the lookup raises ValueError
+        and the click is dropped. Re-asking the CURRENT figure which panel
+        holds those pixels answers the same question and cannot go stale --
+        and the Axes it returns is the one whose transData nearest_point
+        must measure with, which a stale one would get wrong too.
+        """
+        axes = list(self.fig.axes)
+        if event.inaxes in axes:
+            return event.inaxes, axes.index(event.inaxes)
+        for i, ax in enumerate(axes):
+            try:
+                # the same test matplotlib's own canvas.inaxes applies
+                if ax.get_visible() and ax.patch.contains_point(
+                        (event.x, event.y)):
+                    return ax, i
+            except (ValueError, TypeError):
+                continue
+        return None, None
+
     def on_click(self, event):
         """matplotlib button_press_event -> the frame under the pointer.
 
         Returns what it resolved (run, row) so the live smoke and the
-        tests can see the whole chain without watching for a process."""
-        if not getattr(event, 'dblclick', False) or event.inaxes is None:
-            return None
-        if not self._prepared:
-            return None
+        tests can see the whole chain without watching for a process.
+
+        EVERY path out of here either acts or says why, in `self.lbl_click`
+        (`#311`). It used to have four silent returns, and an operator who
+        double-clicked and got nothing -- no window, no message, no console
+        line -- had no way to tell a mis-aimed click from a broken feature
+        from a double-click that arrived as two singles. That silence is
+        what made the report impossible to characterise, so it is treated
+        here as part of the bug and not as tidiness.
+        """
+        dbl = bool(getattr(event, 'dblclick', False))
         opts, err = self.current_opts()
         if err:
+            self.lbl_click.config(
+                text=f"cannot open a frame while the draw options are "
+                     f"unusable: {err}")
             return None
-        try:
-            panel = list(self.fig.axes).index(event.inaxes)
-        except ValueError:                 # the axes was cleared under us
+        ax, panel = self._panel_for(event)
+        if ax is None:
+            self.lbl_click.config(
+                text="that double-click was not over a panel — aim inside "
+                     "the figure, at a marker" if dbl else CLICK_HINT)
             return None
-        hit = nearest_point(event.inaxes,
-                            plot_points(self._prepared, opts, panel),
+        if not self._prepared:
+            self.lbl_click.config(
+                text="nothing is plotted to click through to — pick runs "
+                     "that work in this mode (the messages below say which "
+                     "were skipped, and why)")
+            return None
+        hit = nearest_point(ax, plot_points(self._prepared, opts, panel),
                             event.x, event.y)
         if hit is None:
             self.lbl_click.config(
                 text=f"no data point within {PICK_PX} px of that "
-                     f"double-click — aim at a marker")
+                     f"{'double-click' if dbl else 'click'} — aim at a "
+                     f"marker")
             return None
         run, row, _dist = hit
+        if not dbl:
+            # THE `#311` SYMPTOM MADE VISIBLE. A double-click can reach the
+            # window as two separate single clicks -- the pair is split when
+            # the desktop is busy handing focus back from the Edge Review
+            # window that was just closed, and Tk then matches <Button-1>
+            # twice instead of <Double-Button-1> once. That used to be
+            # perfectly silent, which is exactly the reported "double-click
+            # does nothing, sometimes the second one works". Now the click
+            # lands ON a marker and SAYS so, and says what it wants.
+            snap = str(row.get('snapshot') or '?')
+            self.lbl_click.config(
+                text=f"single click on {run['name']}, snapshot {snap} — "
+                     f"DOUBLE-click it to open that frame in Edge Review")
+            return None
         self.open_in_edge_review(run, row)
         return run, row
 
@@ -1643,14 +1985,26 @@ class PlotWindow:
             self._show_targets()
 
     def _show_targets(self):
-        """Name both files BEFORE the click. The CLI prints what it wrote;
-        a window that only said 'Saved' would be a step backwards."""
+        """Name every file BEFORE the click. The CLI prints what it wrote;
+        a window that only said 'Saved' would be a step backwards.
+
+        It is also where a refused dpi surfaces while it is being typed
+        (`#314`): the message goes here rather than into the figure pane,
+        because the preview is not what an unusable dpi spoils."""
         opts, err = self.current_opts()
         mode = self.v_mode.get() if err else opts['mode']
-        png, csvp = sp.output_paths(self.v_out.get(), self.v_stem.get(), mode)
-        self.lbl_targets.config(
-            text=f"→ {os.path.basename(png)}\n→ {os.path.basename(csvp)}")
-        return png, csvp
+        fmt = self.v_fmt.get() if err else opts['fmt']
+        if fmt not in sp.FORMATS:                  # only via a stale config
+            fmt = sp.DEFAULT_FORMAT
+        img, csvp = sp.output_paths(self.v_out.get(), self.v_stem.get(),
+                                    mode, fmt)
+        lines = [f"→ {os.path.basename(img)}",
+                 f"→ {os.path.basename(csvp)}",
+                 f"→ {os.path.basename(sp.figspec_path(img))}"]
+        if err:
+            lines.append(f"REFUSED: {err}")
+        self.lbl_targets.config(text='\n'.join(lines))
+        return img, csvp
 
     def _export(self):
         opts, err = self.current_opts()
@@ -1669,7 +2023,7 @@ class PlotWindow:
             return
         warns = list(self._warns)
         try:
-            png, csvp = sp.export(self._prepared, opts, out_dir,
+            img, csvp = sp.export(self._prepared, opts, out_dir,
                                   self.v_stem.get(), warns.append)
         except OSError as e:
             messagebox.showerror("Plot", f"Could not write the figure:\n{e}")
@@ -1678,9 +2032,14 @@ class PlotWindow:
         self.remember_now()          # they committed to these options
         messagebox.showinfo(
             "Exported",
-            f"Figure (300 dpi) and its tidy per-snapshot CSV:\n\n"
-            f"{png}\n{csvp}\n\nThe CSV is the figure's evidence — keep the "
-            f"pair together.")
+            # the format, the dpi where it means anything, and the SIZE --
+            # an SVG's is the one thing about an export that does not
+            # follow from the settings, since it counts drawn elements
+            # rather than pixels (`#314`, and describe_output has the
+            # measurement)
+            f"Figure ({sp.describe_output(img, opts)}) and its tidy "
+            f"per-snapshot CSV:\n\n{img}\n{csvp}\n\nThe CSV is the "
+            f"figure's evidence — keep the pair together.")
 
 
 # ---------------------------------------------------------------------------

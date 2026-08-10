@@ -9,6 +9,7 @@ Usage:
                          [--logx] [--logy] [--no-marker-key]
                          [--title-first TEXT] [--title-second TEXT]
                          [--subplots both|first|second] [--cadence-guard]
+                         [--aggregate] [--aggregate-exact]
     python sldea_plot.py --from-spec FILE.figspec.json [flags to override]
     python sldea_plot.py --gui [RUN ...]        # window (see below)
     python sldea_plot.py --selftest [OUT.png]
@@ -52,6 +53,20 @@ Rendering:
       --no-marker-key hides it. Area mode only -- current/power draw one
       plain dot per snapshot with no open/closed meaning, and a key there
       would claim a distinction the figure does not make.
+    - --aggregate (area mode only) adds ONE mean curve across the selected
+      runs, in black with square markers. Its band is the STANDARD ERROR
+      OF THE MEAN, sigma/sqrt(n), per level -- and with a single run
+      selected there is NO band at all, plus a caption saying the
+      aggregate needs >= 2 runs. The calibrated +-1-2% budget band belongs
+      to one run's pre/post average and is suppressed under the aggregate,
+      exactly as --prepost suppresses it. The runs are put on a common
+      grid by interpolation, never extrapolated past a run's own measured
+      range and never interpolated across a breakdown, and each level
+      prints how many contributing values were measured and how many were
+      interpolated ('a+b'). --aggregate-exact pools only exact levels
+      instead. The aggregate stops at the first current-confirmed
+      breakdown, past which the mean would mix intact and collapsed
+      devices (`#268`, policy in SLDEA_HANDOFF.md 2026-08-09).
     - Colors are the Paul Tol bright family (colorblind-safe, house
       convention), assigned to runs in argument order.
     - Areas predating the 2026-07-28 scale fix (2.3-2.7x blob bug) are
@@ -468,6 +483,202 @@ def levels(run, value=lambda r: r['area_mm2']):
 
 
 # ---------------------------------------------------------------------------
+# the cross-run aggregate (`#268`)
+#
+# ONE mean curve across the selected runs, with a band -- and the band means
+# a different thing at each n, which is the whole point of the feature
+# (policy decided 2026-08-09, SLDEA_HANDOFF.md; measured on the five
+# poolable P3-family runs):
+#
+#   n = 1 run   NO BAND, and the figure SAYS so. A refusal rather than a
+#               silent fallback to the budget band, because "the mean of
+#               one run +-2%" is a claim about the instrument dressed up
+#               as a claim about the family.
+#   n >= 2      the STANDARD ERROR OF THE MEAN, sigma/sqrt(n), per level.
+#               The line drawn is the mean, so the band belongs to the
+#               mean. Per-level spread across those five runs is SD median
+#               4.94% / max 16.29%, SEM median 2.21% / max 7.28%; the SEM
+#               exceeds the +-2% end of the calibrated budget at 23 of 40
+#               levels, 22 above 4 kV and one exactly AT it -- above that
+#               the instrument is no longer the limit and a budget band
+#               would overstate confidence by ~3.5x.
+#
+#               Two corrections to the numbers the policy entry quotes,
+#               both re-measured through these functions on 2026-08-10 and
+#               neither changing the decision. The entry's MAXIMA (SD
+#               15.63% at 7.5 kV, SEM 6.99%) predate the 2026-08-05
+#               "never average across edge conventions" rule in levels():
+#               with a mixed level's mean taken over the machine member(s)
+#               only, 5.5 kV overtakes 7.5 kV and the maxima become the
+#               ones above. The medians and the count of 23 are identical
+#               either way. And "every one of them above 4 kV" is off by
+#               one boundary level under BOTH rules.
+#
+# The calibrated +-1-2% budget band belongs to ONE run's pre/post average
+# and is suppressed under the aggregate, exactly as --prepost suppresses it
+# (draw_area's `budget_bands`).
+#
+# THE GRID. Eight corpus runs step 0.25 kV; one steps 0.2 and shares only
+# eight levels with them. Pooling exact keys alone drops that run at 33 of
+# 41 levels, so n alternates 4/5 level to level and the band steps
+# discontinuously for a reason that is an artifact of grid choice and not
+# of the devices. So runs are put on a common grid by INTERPOLATION by
+# default, with exact-key pooling behind `aggregate_exact` for anyone who
+# wants only real readings. Three guardrails make interpolation honest, and
+# an implementation without them does not satisfy the decision:
+#
+#   1. NEVER EXTRAPOLATE past a run's own measured range. A run that stops
+#      at 6 kV leaves the aggregate above 6 kV; it is not extended into it.
+#      `_contribution` only ever interpolates STRICTLY BETWEEN two of the
+#      run's own consecutive levels, so there is no code path that can.
+#   2. NEVER INTERPOLATE ACROSS A BREAKDOWN. The curve is not smooth there
+#      -- a device that collapses between two levels did not travel down
+#      the straight line joining them. `_contribution` refuses any segment
+#      with a current-confirmed level at either end.
+#   3. RECORD MEASURED vs INTERPOLATED per level, and surface it. A level
+#      carried by one measured run and four interpolated ones is not the
+#      same evidence as five measured ones, and with a uniform n nothing
+#      else on the figure would tell them apart. Hence `n_measured` /
+#      `n_interpolated`, printed as a row of counts above the x axis.
+#
+# Guardrail 2 is NOT made redundant by the first-breakdown cap below, which
+# is the easy thing to assume: the cap drops grid levels at or above the
+# first breakdown, but a level just BELOW it can still be reached by
+# interpolating a segment whose UPPER end is the collapsed reading. That is
+# exactly the case the corpus's 0.2 kV run creates against the 0.25 kV
+# runs, and it is the case the test suite pins.
+# ---------------------------------------------------------------------------
+
+# The aggregate is not a run, so it does not take a run colour. Black sits
+# outside the Tol bright family entirely -- the one curve on the figure
+# that is a statistic rather than a measurement should not look like one
+# more run.
+AGGREGATE_COLOR = '#000000'
+
+
+def first_breakdown_kv(run):
+    """The nominal kV of this run's FIRST current-confirmed breakdown, or
+    None when it has none.
+
+    Reads run['flags'], which load_run ALWAYS recomputes from the saved
+    current trace -- so this is deliberately independent of opts:
+    where the average stops being a physical quantity is not a rendering
+    preference, and --no-breakdown hides the X marks without making the
+    device's collapse go away."""
+    kvs = [r['kv'] for r in run['rows']
+           if r['index'] in run['flags'] and r['kv'] is not None]
+    return min(kvs) if kvs else None
+
+
+def aggregate_cap_kv(runs):
+    """Where the aggregate STOPS: the lowest first-breakdown kV across the
+    runs, or None when nothing broke down.
+
+    The LOWEST, not each run's own: past the first collapse the mean mixes
+    intact and collapsed devices, which is not a physical quantity. On the
+    corpus's five poolable runs the mean A/A0 climbs to 2.041 at 5.25 kV
+    and then falls to ~1.18-1.27 for the rest of the staircase, and the
+    spread spikes to ~15% through the transition before falling again as
+    the runs re-agree on having collapsed -- the average of a mixture, not
+    an average expansion."""
+    kvs = [k for k in (first_breakdown_kv(r) for r in runs) if k is not None]
+    return min(kvs) if kvs else None
+
+
+def run_level_curve(run, norm=False):
+    """One run as [{key, kv, y, confirmed}], sorted by level.
+
+    `y` is the level's mean area in mm2, or A/A0 when `norm` -- the two
+    area panels aggregate SEPARATELY because A/A0 rescales each run by its
+    own A0, and a spread in mm2 is not the same spread in A/A0. A run with
+    no A0 contributes nothing to the normalized panel rather than being
+    silently dropped into the absolute one."""
+    if norm and not run.get('a0'):
+        return []
+    out = []
+    for lv in levels(run):
+        y = lv['mean'] / run['a0'] if norm else lv['mean']
+        out.append({'key': round(lv['kv'], 3), 'kv': lv['kv'], 'y': y,
+                    'confirmed': lv['confirmed']})
+    return out
+
+
+def _contribution(curve, key, exact=False):
+    """One run's value at grid level `key` -> (y, measured?) or None.
+
+    None means THIS RUN DOES NOT SPEAK HERE, and there are three ways to
+    earn it -- all three of them guardrails, none of them a fallback:
+    the level is outside the run's own measured range (guardrail 1, no
+    extrapolation); the segment that would carry it has a current-confirmed
+    breakdown at one end (guardrail 2, the curve is not smooth there); or
+    `exact` was asked for and the run simply never measured this level."""
+    for p in curve:
+        if p['key'] == key:
+            return (p['y'], True)
+    if exact:
+        return None
+    for a, b in zip(curve, curve[1:]):
+        if a['key'] < key < b['key']:
+            if a['confirmed'] or b['confirmed']:
+                return None                    # guardrail 2
+            span = b['key'] - a['key']
+            return (a['y'] + (key - a['key']) / span * (b['y'] - a['y']),
+                    False)
+    return None                                # guardrail 1
+
+
+def aggregate_levels(runs, norm=False, exact=False):
+    """-> sorted [{kv, n, mean, sd, sem, n_measured, n_interpolated}].
+
+    The cross-run mean and its SEM band, per level, capped at the first
+    current-confirmed breakdown. `sd` and `sem` are None wherever fewer
+    than two runs contribute -- one value has no spread, and a level
+    carried by a single run must not be handed a band borrowed from its
+    neighbours.
+
+    SD is the SAMPLE deviation (n-1): these runs are a sample of a family,
+    not the family. Note what this function deliberately does NOT do --
+    there is no minimum-n threshold beyond that. A thinly supported level
+    is SHOWN, with its n, rather than quietly dropped; the corpus might
+    argue for a floor later, and that is an argument to have in the open,
+    not a constant to slip in here."""
+    curves = [c for c in (run_level_curve(r, norm) for r in runs) if c]
+    cap = aggregate_cap_kv(runs)
+    keys = sorted({p['key'] for c in curves for p in c})
+    if cap is not None:
+        keys = [k for k in keys if k < round(cap, 3)]
+    out = []
+    for key in keys:
+        vals, n_meas = [], 0
+        for c in curves:
+            hit = _contribution(c, key, exact)
+            if hit is None:
+                continue
+            vals.append(hit[0])
+            n_meas += 1 if hit[1] else 0
+        if not vals:
+            continue
+        n = len(vals)
+        mean = sum(vals) / n
+        sd = sem = None
+        if n >= 2:
+            sd = math.sqrt(sum((v - mean) ** 2 for v in vals) / (n - 1))
+            sem = sd / math.sqrt(n)
+        out.append({'kv': key, 'n': n, 'mean': mean, 'sd': sd, 'sem': sem,
+                    'n_measured': n_meas, 'n_interpolated': n - n_meas})
+    return out
+
+
+def aggregate_support(lv):
+    """The per-level support label printed under an aggregate point: 'n',
+    or 'a+b' where a were MEASURED at this level and b interpolated onto
+    it (guardrail 3). The sum is always n, so the number a reader wants
+    first is still readable at a glance."""
+    return (str(lv['n']) if not lv['n_interpolated']
+            else f"{lv['n_measured']}+{lv['n_interpolated']}")
+
+
+# ---------------------------------------------------------------------------
 # figures
 # ---------------------------------------------------------------------------
 
@@ -579,6 +790,142 @@ def _scale_caption(notes):
     return ('\n' + '  '.join(notes)) if notes else ''
 
 
+def _aggregate_series(ax, ag, band=True, labels=True):
+    """The aggregate mean curve + its SEM band + the per-level support
+    labels -> the (x, y) pairs it plotted, for the log-scale policy.
+
+    SQUARE markers, not the round ones every run curve uses: the figure
+    already spends open/closed circles on the hand-traced/machine
+    convention (`#267`'s marker key), and a sixth round marker in a new
+    colour would read as one more run rather than as the statistic.
+
+    `band` is the n = 1 refusal arriving here as a flag; the band is also
+    dropped level by level wherever fewer than two runs contributed, which
+    is why fill_between gets a `where` mask rather than a whole-curve
+    call -- a level with no SEM leaves a GAP in the band instead of being
+    bridged by its neighbours' confidence."""
+    xs = [l['kv'] for l in ag]
+    ys = [l['mean'] for l in ag]
+    pts = list(zip(xs, ys))
+    ax.plot(xs, ys, '-', color=AGGREGATE_COLOR, linewidth=2.2, zorder=5)
+    ax.plot(xs, ys, 's', markersize=4.0, linestyle='', zorder=6,
+            color=AGGREGATE_COLOR, markerfacecolor=AGGREGATE_COLOR,
+            markeredgecolor=AGGREGATE_COLOR)
+    if band and len(ag) > 1:
+        have = [l['sem'] is not None for l in ag]
+        lo = [l['mean'] - (l['sem'] or 0.0) for l in ag]
+        hi = [l['mean'] + (l['sem'] or 0.0) for l in ag]
+        ax.fill_between(xs, lo, hi, where=have, color=AGGREGATE_COLOR,
+                        alpha=0.18, linewidth=0, zorder=1)
+        pts += list(zip(xs, lo)) + list(zip(xs, hi))
+    if labels:
+        # A FIXED ROW just above the x axis, not a tag trailing each point.
+        # Hung off the curve the counts climb the staircase with it, land
+        # on top of the run lines through the steep middle and pile up on
+        # each other where the mean turns over -- measured on the five
+        # poolable corpus runs, where the peak is exactly where the counts
+        # matter most. get_xaxis_transform is x-in-data, y-in-axes, so the
+        # row stays put whatever the y scale does (including --logy).
+        # STAGGERED over two rows. Where two grids interleave the levels
+        # can sit 0.05 kV apart, and a single row rendered n = 1, 5, 1 as
+        # "151" -- a support count that reads as a different support count
+        # is worse than none. Alternating heights doubles the room each
+        # label has without dropping any of them, and dropping some is not
+        # available: the thin levels are exactly the ones guardrail 3 is
+        # for (seen on the 0.2-vs-0.25 kV corpus pair, --aggregate-exact).
+        for i, l in enumerate(ag):
+            ax.text(l['kv'], 0.012 if i % 2 == 0 else 0.045,
+                    aggregate_support(l),
+                    transform=ax.get_xaxis_transform(), ha='center',
+                    va='bottom', fontsize=6, color='#444444', zorder=7)
+    return pts
+
+
+def _aggregate_caption(runs, ag, opts, cap):
+    """What the aggregate's band, grid and cap MEAN, as figure text.
+
+    Every clause here is load-bearing and none of it can be left to the
+    command line: the PNG travels, and a shaded band whose meaning a
+    reader has to guess will be read as the +-1-2% budget band this
+    figure spent four years teaching them to expect."""
+    n = len(runs)
+    if n < 2:
+        head = (f"AGGREGATE: {n} run — NO BAND. The aggregate band is the "
+                f"standard error of the mean and needs ≥ 2 runs; add runs "
+                f"to earn one.")
+    else:
+        head = (f"AGGREGATE (black squares): mean of {n} runs, band = SEM "
+                f"(σ/√n) per level — NOT the ±{TRACED_BAND_PCT:g}–"
+                f"{MACHINE_BAND_PCT:g}% instrument budget, which is "
+                f"suppressed under it.")
+    grid = ('Grid: exact-key pooling — only levels a run really measured.'
+            if opts.get('aggregate_exact') else
+            'Grid: runs interpolated onto the common levels, never '
+            'extrapolated past a run\'s own range and never across a '
+            'breakdown.')
+    stop = (f"Stops at {cap:g} kV, the first current-confirmed breakdown."
+            if cap is not None else
+            "No current-confirmed breakdown among these runs, so the "
+            "first-breakdown cap did not fire.")
+    # THREE lines, not one, and each kept under ~215 characters: at 7 pt
+    # on a 12.6 in figure anything longer runs off the right edge, which
+    # is how the first draft of this lost the cap sentence entirely. The
+    # existing caption's longest line is the width budget to match.
+    # A caption a reader cannot finish is not a caption.
+    return ('\n' + head
+            + '\n' + grid
+            + '\n' + "Row of counts above the x axis = n contributing runs "
+                     "('a+b' = a measured + b interpolated).  " + stop)
+
+
+def _warn_aggregate(runs, ag, opts, cap, warn):
+    """Say on the CONSOLE what the figure can only say in six-point type.
+
+    Two things, and both are the kind a reader should meet before quoting
+    a number rather than after. Guardrail 3 first: how much of the
+    aggregate is interpolation, and where the thinnest level is. Then the
+    cap -- or its absence, which is the corpus's actual state and the
+    quieter of the two failures. The cap keys on CURRENT-CONFIRMED
+    breakdown (the only kind this tool has trusted since 2026-08-05), and
+    the P3-family campaign carries none at all, so on those runs the
+    aggregate runs the whole staircase THROUGH an area collapse that no
+    current channel corroborated. Saying nothing there would let a figure
+    imply the cap had been applied and found nothing to cut."""
+    n_runs = len(runs)
+    if n_runs < 2:
+        warn(f"aggregate: {n_runs} run selected -- NO BAND drawn. The "
+             f"aggregate band is the standard error of the mean and needs "
+             f"at least 2 runs; the mean line is still the run itself")
+    interp = [l for l in ag if l['n_interpolated']]
+    if interp:
+        worst = min(interp, key=lambda l: (l['n_measured'], l['kv']))
+        warn(f"aggregate: {len(interp)} of {len(ag)} levels carry "
+             f"interpolated contributions (thinnest measured support: "
+             f"{worst['kv']:g} kV, {worst['n_measured']} measured / "
+             f"{worst['n_interpolated']} interpolated) -- the per-level "
+             f"'a+b' labels on the figure carry the same counts, and "
+             f"--aggregate-exact pools only real readings")
+    thin = [l for l in ag if l['n'] < n_runs]
+    if thin:
+        warn(f"aggregate: {len(thin)} of {len(ag)} levels are supported by "
+             f"fewer than all {n_runs} runs (a run is never extrapolated "
+             f"past its own measured range); levels with n < 2 carry no "
+             f"band at all")
+    if cap is not None:
+        warn(f"aggregate: capped at {cap:g} kV, the first current-confirmed "
+             f"breakdown -- past it the mean mixes intact and collapsed "
+             f"devices, which is not a physical quantity")
+    else:
+        advis = [r['name'] for r in runs if r.get('advis')]
+        extra = (f" {len(advis)} run(s) carry a breakdown ADVISORY "
+                 f"({', '.join(advis)}), which confirms nothing and draws "
+                 f"nothing -- read the top of the staircase by eye before "
+                 f"quoting the mean there." if advis else '')
+        warn(f"aggregate: no run carries a current-confirmed breakdown, so "
+             f"the first-breakdown cap did not fire and the mean runs to "
+             f"the end of the staircase.{extra}")
+
+
 def _series(ax, xs, ys, traced, color, ls, bands, band_traced=None):
     """One curve: line + per-point open/closed markers + traced-aware band.
     `traced` drives the marker fill; `band_traced` (default: same) drives
@@ -680,6 +1027,16 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     # what actually got plotted, per axis -- the log-scale policy reads
     # the DATA and axes-fraction gridlines must not vote (`#263`)
     xs_all, ysl_all, ysr_all = [], [], []
+    # The calibrated ±1-2% band is ONE run's instrument budget. Under the
+    # aggregate the figure's claim is the SEM of the family, and five
+    # budget bands stacked under it would compete with exactly the band a
+    # reader is meant to read -- the same argument that suppresses it under
+    # --prepost, where the gap between the two lines is the information
+    # (`#268`, policy 2026-08-09).
+    # .get, like every option added after the hand-built opts dicts in the
+    # test suite and the older callers: a missing key means "the behaviour
+    # that existed before this option", never a KeyError mid-figure.
+    budget_bands = opts['bands'] and not opts.get('aggregate')
     for run in runs:
         color = run['color']
         lvs = levels(run)
@@ -693,10 +1050,10 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                 if pts:
                     px, py, pt = zip(*pts)
                     if axl is not None:
-                        _series(axl, px, py, pt, color, ls, opts['bands'])
+                        _series(axl, px, py, pt, color, ls, budget_bands)
                     if axr is not None:
                         _series(axr, px, [y / run['a0'] for y in py], pt,
-                                color, ls, opts['bands'])
+                                color, ls, budget_bands)
                     xs_all += list(px)
                     ysl_all += list(py)
                     ysr_all += [y / run['a0'] for y in py]
@@ -708,7 +1065,7 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
             tr = [l['all_traced'] for l in lvs]
             band_tr = [l['all_traced'] for l in lvs]
             ys = [l['mean'] for l in lvs]
-            show_bands = opts['bands'] and not opts['prepost']
+            show_bands = budget_bands and not opts['prepost']
             if axl is not None:
                 _series(axl, xs, ys, tr, color, '-', show_bands, band_tr)
             if axr is not None:
@@ -769,6 +1126,38 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                      f"dashed verticals at their kV (see current mode)")
         run_handles.append(Line2D([], [], color=color, label=run['name']))
 
+    agg_caption = ''
+    if opts.get('aggregate'):
+        cap_kv = aggregate_cap_kv(runs)
+        # n = 1 is a REFUSAL, not a fallback (`#268`, decided 2026-08-09):
+        # the band drops out entirely and the caption says why. A single
+        # run's spread about itself is zero, and quietly substituting the
+        # instrument budget would dress a claim about the instrument up as
+        # a claim about the family.
+        band = len(runs) >= 2
+        label_ax = axl if axl is not None else axr
+        ag = None
+        for ax, norm, sink in ((axl, False, ysl_all), (axr, True, ysr_all)):
+            if ax is None:
+                continue
+            ag = aggregate_levels(runs, norm=norm,
+                                  exact=opts.get('aggregate_exact'))
+            if not ag:
+                continue
+            pts = _aggregate_series(ax, ag, band=band, labels=ax is label_ax)
+            xs_all += [x for x, _ in pts]
+            sink += [y for _, y in pts]
+        if ag:
+            agg_caption = _aggregate_caption(runs, ag, opts, cap_kv)
+            run_handles.append(Line2D(
+                [], [], color=AGGREGATE_COLOR, marker='s', markersize=4.0,
+                label=(f"aggregate mean of {len(runs)} runs (±SEM)"
+                       if band else 'aggregate mean (1 run — no band)')))
+            _warn_aggregate(runs, ag, opts, cap_kv, warn)
+        else:
+            warn('aggregate: nothing to average -- no run contributed a '
+                 'level below the first-breakdown cap')
+
     scale_notes = []
     if axl is not None:
         _style_axes(axl, 'Nominal voltage (kV)', 'Active area (mm²)')
@@ -812,15 +1201,24 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
            "filled = machine half-height convention; a level mixing the "
            "two plots its machine member(s) only (conventions differ "
            "+5.5% area, never averaged)"
-           + (", bands ±2% machine / ±1% traced" if opts['bands']
+           + (", bands ±2% machine / ±1% traced" if budget_bands
               else "") + ".\n"
            "X = current-confirmed breakdown (recomputed, 2026-08-05 "
            "semantics).  X axis: nominal kV (measured_kV telemetry "
            "incomplete on all runs)."
+           + agg_caption
            + _cadence_caption(cadence_notes)
            + _scale_caption(scale_notes))
     fig.text(0.01, 0.005, cap, fontsize=7, color='#555555')
-    fig.tight_layout(rect=(0, 0.05, 1, 1))
+    # The caption grew three lines under the aggregate and the fixed 5%
+    # strip clipped the last of them. Reserved space follows the LINE
+    # COUNT -- but only when the aggregate is on, so every figure that
+    # existed before `#268` still lays out to the same pixels (the
+    # window/CLI byte-identity test would catch it if it did not).
+    bottom = 0.05
+    if opts.get('aggregate'):
+        bottom = min(0.025 + 0.025 * (cap.count('\n') + 1), 0.30)
+    fig.tight_layout(rect=(0, bottom, 1, 1))
     return fig
 
 
@@ -1119,6 +1517,12 @@ def write_tidy(runs, path):
 # first day. Miss a site and there is no error, just a control that does
 # nothing -- or worse, a "re-render" of a different figure.
 #
+# `#268` has since been through: `aggregate` and `aggregate_exact` landed
+# in all five, and the map held. Site 5 was the one that nearly bit --
+# `aggregate` has to reach BOTH area panels and the caption, and
+# `aggregate_exact` is read only by aggregate_levels, so a half-consumed
+# version of either draws a figure that looks perfectly finished.
+#
 #   1. make_opts() below -- the keyword, its default, any validation.
 #      MISSING THIS IS LOUD: every other site raises TypeError.
 #
@@ -1163,7 +1567,8 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
               bands=True, breakdown=True, title=None,
               logx=False, logy=False, marker_key=True,
               title_first=None, title_second=None, subplots='both',
-              cadence_guard=False):
+              cadence_guard=False, aggregate=False,
+              aggregate_exact=False):
     """-> (opts dict, error message or None).
 
     The CLI builds this from its flags and the window from its tick boxes,
@@ -1189,6 +1594,15 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
         # exist -- that is a mistake, not a preference
         return None, ('--subplots second applies to area mode only '
                       '(current/power draw a single panel)')
+    if aggregate and mode != 'area':
+        # REFUSED rather than ignored (`#268`). The aggregate averages
+        # PER-LEVEL curves, and current/power plot one point per snapshot
+        # with no level structure to pool -- a flag that quietly did
+        # nothing here is the silent failure the landing-site map above
+        # exists to prevent.
+        return None, ('--aggregate applies to area mode only '
+                      '(current/power draw one point per snapshot, '
+                      'not one per level)')
     return {'mode': mode, 'vs_area': bool(vs_area),
             'prepost': bool(prepost), 'mean': bool(mean),
             'bands': bool(bands), 'breakdown': bool(breakdown),
@@ -1198,7 +1612,9 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
             'title_first': title_first or None,
             'title_second': title_second or None,
             'subplots': subplots,
-            'cadence_guard': bool(cadence_guard)}, None
+            'cadence_guard': bool(cadence_guard),
+            'aggregate': bool(aggregate),
+            'aggregate_exact': bool(aggregate_exact)}, None
 
 
 def needs_areas(opts):
@@ -1484,7 +1900,7 @@ def _selftest(out_png):
 _BOOL_FLAGS = ('--vs-area', '--prepost', '--mean', '--no-bands',
                '--no-breakdown', '--allow-suspect-scale', '--selftest',
                '--gui', '--logx', '--logy', '--no-marker-key',
-               '--cadence-guard')
+               '--cadence-guard', '--aggregate', '--aggregate-exact')
 _VALUED_FLAGS = ('--mode', '--out', '--stem', '--title',
                  '--title-first', '--title-second', '--subplots',
                  '--from-spec')
@@ -1581,7 +1997,10 @@ def _cli_opts(flags, vals, base=None):
                      title_second=val('--title-second', 'title_second',
                                       None),
                      subplots=val('--subplots', 'subplots', 'both'),
-                     cadence_guard=on('--cadence-guard', 'cadence_guard'))
+                     cadence_guard=on('--cadence-guard', 'cadence_guard'),
+                     aggregate=on('--aggregate', 'aggregate'),
+                     aggregate_exact=on('--aggregate-exact',
+                                        'aggregate_exact'))
 
 
 def main(argv):

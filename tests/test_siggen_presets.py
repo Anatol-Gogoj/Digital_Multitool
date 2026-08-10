@@ -254,16 +254,37 @@ def test_preset_file_rejects_junk():
 import shutil  # noqa: E402  (used by the preset-file tests above)
 
 
-if __name__ == '__main__':
+def _run():
+    # Failures are collected, not fatal (`#280`): failing fast reported one
+    # broken test in suites that had five. Tracebacks land after the count
+    # line, in name order, in one bounded block -- run_tests.py explains why.
     import inspect
+    import traceback
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
-    passed = 0
+    failed = []
     for t in tests:
-        if 'tmp_path' in inspect.signature(t).parameters:
-            with tempfile.TemporaryDirectory() as d:
-                t(os.path.join(d, 'presets.json'))
-        else:
-            t()
+        try:
+            if 'tmp_path' in inspect.signature(t).parameters:
+                with tempfile.TemporaryDirectory() as d:
+                    t(os.path.join(d, 'presets.json'))
+            else:
+                t()
+        except Exception:
+            failed.append((t.__name__, traceback.format_exc()))
+            print(f"FAIL {t.__name__}")
+            continue
         print(f"PASS {t.__name__}")
-        passed += 1
-    print(f"\nAll {passed} preset-store tests passed.")
+    if not failed:
+        print(f"\nAll {len(tests)} preset-store tests passed.")
+        return 0
+    head = f"{len(failed)} of {len(tests)} tests failed"
+    print(f"\n{head}")
+    for name, tb in failed:
+        print(f"===== FAIL {name} =====")
+        print(tb.rstrip('\n'))
+    print(f"===== end {head} =====")
+    return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(_run())

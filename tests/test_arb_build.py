@@ -193,9 +193,32 @@ def test_recipe_round_trip():
     assert ab.render_recipe(r2) == ab.render_recipe(r)   # deterministic
 
 
-if __name__ == '__main__':
+def _run():
+    # Failures are collected, not fatal (`#280`): failing fast reported one
+    # broken test in suites that had five. Tracebacks land after the count
+    # line, in name order, in one bounded block -- run_tests.py explains why.
+    import traceback
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
+    failed = []
     for t in tests:
-        t()
+        try:
+            t()
+        except Exception:
+            failed.append((t.__name__, traceback.format_exc()))
+            print(f"FAIL {t.__name__}")
+            continue
         print(f"PASS {t.__name__}")
-    print(f"\nAll {len(tests)} arb_build tests passed.")
+    if not failed:
+        print(f"\nAll {len(tests)} arb_build tests passed.")
+        return 0
+    head = f"{len(failed)} of {len(tests)} tests failed"
+    print(f"\n{head}")
+    for name, tb in failed:
+        print(f"===== FAIL {name} =====")
+        print(tb.rstrip('\n'))
+    print(f"===== end {head} =====")
+    return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(_run())

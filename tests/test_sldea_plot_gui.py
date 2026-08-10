@@ -1293,8 +1293,13 @@ def test_the_taller_draw_column_still_measures_and_still_scrolls():
 
 
 def _run():
+    # Failures are collected, not fatal (`#280`): failing fast reported one
+    # broken test in suites that had five. Tracebacks land after the count
+    # line, in name order, in one bounded block -- run_tests.py explains why.
+    import traceback
     names = [n for n in sorted(globals()) if n.startswith('test_')]
     ran = skipped = 0
+    failed = []
     for n in names:
         try:
             globals()[n]()
@@ -1302,13 +1307,28 @@ def _run():
             skipped += 1
             print('skip', n, f'({why})')
             continue
+        except Exception:
+            # A test that blew up still RAN -- only a skip is "did not run".
+            ran += 1
+            failed.append((n, traceback.format_exc()))
+            print('FAIL', n)
+            continue
         ran += 1
         print('ok ', n)
     tail = f"{ran} of {len(names)} tests ran"
     if skipped:
         tail += f" ({skipped} skipped, desktop too short)"
     print(tail)
+    if not failed:
+        return 0
+    head = f"{len(failed)} of {len(names)} tests failed"
+    print(f"\n{head}")
+    for name, tb in failed:
+        print(f"===== FAIL {name} =====")
+        print(tb.rstrip('\n'))
+    print(f"===== end {head} =====")
+    return 1
 
 
 if __name__ == '__main__':
-    _run()
+    raise SystemExit(_run())

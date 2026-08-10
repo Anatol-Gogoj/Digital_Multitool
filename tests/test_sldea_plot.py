@@ -550,6 +550,11 @@ def test_make_opts_maps_choices_and_refuses_bad_combinations():
                  'title_second': None, 'subplots': 'both',
                  'cadence_guard': False, 'aggregate': False,
                  'aggregate_exact': False,
+                 # `#313`: no groups is 'average everything selected',
+                 # which is the aggregate that already shipped, and the
+                 # contributing runs are drawn -- both defaults reproduce
+                 # the figure that existed before the option
+                 'groups': [], 'aggregate_only': False,
                  # `#314`: the file, not the drawing -- and the defaults
                  # are the file every export wrote before it existed
                  'fmt': 'png', 'dpi': 300}
@@ -820,8 +825,25 @@ def test_default_output_is_byte_identical_to_the_pre_change_engine():
                                     os.path.join(out, mode + '_new.csv'))
             old_csv = old.write_tidy(old.prepare_runs([d], old_opts),
                                      os.path.join(out, mode + '_old.csv'))
-            with open(new_csv, 'rb') as a, open(old_csv, 'rb') as b:
-                assert a.read() == b.read(), f"{mode} CSV moved"
+            # THE ONE DELIBERATE MOVE (`#313`): the tidy CSV gained a
+            # 'group' column, because a figure whose two lines are the CB
+            # mean and the P3 mean cannot be reproduced from a table that
+            # does not say which run was in which line. So the claim
+            # sharpens rather than lapses -- drop the new column and
+            # every other byte, in every row, must still be identical.
+            # Ungrouped, that column is empty at every row, which is
+            # asserted here too: adding the option must not have changed
+            # what an ungrouped export SAYS, only what it can say.
+            assert sp.TIDY_COLS[1] == 'group', sp.TIDY_COLS
+            assert 'group' not in old.TIDY_COLS, 'base already had it'
+            with open(new_csv, newline='', encoding='utf-8') as a, \
+                    open(old_csv, newline='', encoding='utf-8') as b:
+                new_rows = list(csv.reader(a))
+                old_rows = list(csv.reader(b))
+            assert {r[1] for r in new_rows[1:]} <= {''}, \
+                'an ungrouped export wrote a group'
+            assert [r[:1] + r[2:] for r in new_rows] == old_rows, \
+                f"{mode} CSV moved beyond the new column"
     finally:
         for p in (d, out):
             shutil.rmtree(p, ignore_errors=True)
@@ -2000,6 +2022,394 @@ def test_aggregate_is_refused_outside_area_mode_in_both_front_ends():
     # without --prepost -- it is a CHILD of --aggregate, not a mode
     o, err = sp._cli_opts({'--aggregate-exact'}, {'--mode': 'current'})
     assert err is None and o['aggregate_exact'] and not o['aggregate']
+
+
+# ---------------------------------------------------------------------------
+# aggregating BY GROUP (`#313`) -- CB against P3 as two mean lines
+#
+# The comparison the campaign exists for. Everything below is measured off
+# the drawn Figure or the written CSV rather than off the opts dict: an
+# option half-consumed by the drawing code produces a figure that looks
+# perfectly finished, which is landing site 5 and is how `#268` nearly
+# shipped a caption describing a band it had not drawn.
+# ---------------------------------------------------------------------------
+
+def _agg_lines(fig, panel=0):
+    """-> {label: handle} for the RUN legend of `fig`'s panel.
+
+    Not ax.get_legend(): matplotlib keeps one ax.legend_ and `#267`'s
+    marker key is created second, so get_legend() answers with the key
+    and the run legend is the artist _marker_key re-added by hand. The
+    one WITHOUT the 'marker fill' title is the one this asks about."""
+    from matplotlib.legend import Legend
+    legs = [c for c in fig.axes[panel].get_children()
+            if isinstance(c, Legend)
+            and c.get_title().get_text() != 'marker fill']
+    assert legs, 'no run legend on this panel'
+    return {t.get_text(): h
+            for t, h in zip(legs[0].get_texts(), legs[0].legend_handles)}
+
+
+def _thick(fig, panel=0):
+    """The aggregate curves actually drawn on a panel: linewidth 2.2 is
+    _aggregate_series' own, and no run curve uses it (runs are 1.8)."""
+    return [ln for ln in fig.axes[panel].get_lines()
+            if abs(ln.get_linewidth() - 2.2) < 1e-6]
+
+
+def test_two_groups_draw_two_means_and_each_gets_its_own_band_rule():
+    """THE `#313` FIGURE, and the n = 1 rule holding PER GROUP.
+
+    On the real campaign the carbon-black group is a single run and the
+    P3 group is five, so 'no band at n = 1' is not a corner case here --
+    it is one of the two curves. A single band policy applied to the
+    whole figure would be wrong about one of them whichever way it went.
+    """
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        cb = _agg_run(d, 'CB1', [1.0, 2.0, 3.0], lambda kv: 100.0 + 5 * kv)
+        p1 = _agg_run(d, 'P3_1', [1.0, 2.0, 3.0], lambda kv: 110.0 + 10 * kv)
+        p2 = _agg_run(d, 'P3_2', [1.0, 2.0, 3.0], lambda kv: 120.0 + 10 * kv)
+        groups = [['CB', [cb['dir']]], ['P3', [p1['dir'], p2['dir']]]]
+        opts, err = sp.make_opts(aggregate=True, groups=groups)
+        assert err is None, err
+        warns = []
+        fig = _drawn([cb, p1, p2], opts, warns.append)
+        # TWO aggregate curves, not one, on BOTH panels (site 5: the
+        # option has to reach the mm² panel and the A/A0 panel alike)
+        assert len(_thick(fig, 0)) == 2, _thick(fig, 0)
+        assert len(_thick(fig, 1)) == 2, _thick(fig, 1)
+        # ...distinguishable from each other, by colour AND by style
+        colors = {ln.get_color() for ln in _thick(fig, 0)}
+        styles = {ln.get_linestyle() for ln in _thick(fig, 0)}
+        assert len(colors) == 2, colors
+        assert len(styles) == 2, styles
+        assert colors <= set(sp.GROUP_COLORS), colors
+        # ...and neither wears a RUN's colour
+        assert not (colors & {r['color'] for r in (cb, p1, p2)}), colors
+        # the legend names both groups and states each one's band
+        labels = _agg_lines(fig)
+        assert 'CB — mean of 1 run (no band)' in labels, labels
+        assert 'P3 — mean of 2 runs (±SEM)' in labels, labels
+        # THE BAND RULE, per group: exactly one shaded band on each panel
+        # -- P3's. The n = 1 group's absence is the refusal, and the
+        # caption has to say so rather than leaving it to be noticed.
+        assert _band_count(fig) == 2, 'one SEM band per panel, P3 only'
+        cap = _caption(fig)
+        assert 'CB (solid, 1 run — NO BAND)' in cap, cap
+        assert '≥ 2 runs' in cap, cap
+        # the mean is the group's own, hand-checked: P3 at 3.0 kV is the
+        # mean of 140 and 150 in mm², and CB's is its single run's 115
+        p3_line = [ln for ln in _thick(fig, 0)
+                   if ln.get_color() == sp.GROUP_COLORS[1]][0]
+        cb_line = [ln for ln in _thick(fig, 0)
+                   if ln.get_color() == sp.GROUP_COLORS[0]][0]
+        assert list(p3_line.get_ydata())[-1] == 145.0, p3_line.get_ydata()
+        assert list(cb_line.get_ydata())[-1] == 115.0, cb_line.get_ydata()
+        # and the console says it PER GROUP, naming which
+        assert any("group 'CB'" in w and 'NO BAND' in w for w in warns), \
+            warns
+        assert not any("group 'P3'" in w and 'NO BAND' in w for w in warns)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_group_caps_and_pools_on_its_own_runs_only():
+    """Every `#268` rule is computed from THAT GROUP's runs. The tempting
+    shortcut -- one cap, one grid, one n for the figure -- would let a
+    breakdown in the CB run truncate the P3 mean, which is a claim about
+    P3 that no P3 device made."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        # A breaks down near the top of its staircase; B and C never do.
+        # The event sits high on purpose, for the reason the cap test
+        # above records: breakdown_flags measures deviation against the
+        # run's OWN median current, so a mostly-collapsed run drags the
+        # baseline onto the collapsed value and confirms every row.
+        kvs = [1.0 + 0.5 * i for i in range(9)]           # 1.0 .. 5.0
+        a = _agg_run(d, 'A', kvs,
+                     lambda kv: 30.0 if kv >= 4.5 else 100.0 + 5 * kv,
+                     ua=lambda kv: -300.0 if kv >= 4.5 else -16.0)
+        b = _agg_run(d, 'B', kvs, lambda kv: 110.0 + 10 * kv)
+        c = _agg_run(d, 'C', kvs, lambda kv: 120.0 + 10 * kv)
+        assert sp.first_breakdown_kv(a) == 4.5, a['flags']
+        assert sp.first_breakdown_kv(b) is None
+        groups = [['broken', [a['dir']]], ['whole', [b['dir'], c['dir']]]]
+        opts = sp.make_opts(aggregate=True, groups=groups)[0]
+        fig = _drawn([a, b, c], opts)
+        by_color = {ln.get_color(): ln for ln in _thick(fig, 0)}
+        broken = by_color[sp.GROUP_COLORS[0]]
+        whole = by_color[sp.GROUP_COLORS[1]]
+        # the capped group stops; the other runs the whole staircase, and
+        # an ungrouped aggregate over all three would have stopped both
+        assert max(broken.get_xdata()) < 4.5, broken.get_xdata()
+        assert max(whole.get_xdata()) == 5.0, whole.get_xdata()
+        assert max(l['kv'] for l in sp.aggregate_levels([a, b, c])) < 4.5, \
+            'fixture: the shared cap would not have been visible'
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_hiding_the_contributing_runs_leaves_the_means_and_says_so():
+    """'so the panel is two lines and not fifteen' -- the operator's own
+    words. Counted off the Figure, because a caption claiming the runs
+    are hidden over a panel still carrying them is the exact failure this
+    is measured to prevent."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        runs = [_agg_run(d, f"R{i}", [1.0, 2.0, 3.0],
+                         lambda kv, i=i: 100.0 + i + 10 * kv)
+                for i in range(4)]
+        groups = [['X', [r['dir'] for r in runs[:2]]],
+                  ['Y', [r['dir'] for r in runs[2:]]]]
+        shown = sp.make_opts(aggregate=True, groups=groups)[0]
+        hidden = sp.make_opts(aggregate=True, groups=groups,
+                              aggregate_only=True)[0]
+        n_shown = len(_drawn(runs, shown).axes[0].get_lines())
+        fig = _drawn(runs, hidden)
+        assert len(_thick(fig, 0)) == 2, 'the group means went too'
+        # every line left on the panel IS an aggregate -- no run curve and
+        # no per-point run marker. _aggregate_series draws two Line2D per
+        # group (the curve, then its square markers), so two groups is
+        # four and anything above that is a run that survived.
+        assert len(fig.axes[0].get_lines()) == 4, fig.axes[0].get_lines()
+        assert all(ln.get_color() in sp.GROUP_COLORS
+                   for ln in fig.axes[0].get_lines())
+        assert n_shown > 6, 'fixture drew too few run artists to matter'
+        cap = _caption(fig)
+        assert 'Per-run curves HIDDEN' in cap, cap
+        # the caption that describes per-run markers and X marks is gone
+        # with them -- it would be describing a figure that is not there
+        assert 'Open markers' not in cap, cap
+        # ...and the members are named, because the legend no longer can
+        assert 'Members: X = R0, R1; Y = R2, R3.' in cap, cap
+        # the marker key explains RUN markers and goes with them
+        assert fig.axes[0].get_legend().get_title().get_text() != \
+            'marker fill'
+        # refused without the aggregate: on its own it empties the figure
+        bad, err = sp.make_opts(aggregate_only=True)
+        assert bad is None and '--aggregate-only needs --aggregate' in err
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_tidy_csv_carries_the_grouping_the_figure_was_drawn_from():
+    """Landing site 9. `#313` asked for this in as many words: 'the tidy
+    CSV export should gain a group column, or the figure cannot be
+    reproduced from its own data'. A two-line CB-vs-P3 figure whose CSV
+    cannot say which run was in which line is not evidence for it."""
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        cb = _agg_run(d, 'CB1', [1.0, 2.0], lambda kv: 100.0 + 5 * kv)
+        p1 = _agg_run(d, 'P3_1', [1.0, 2.0], lambda kv: 110.0 + 10 * kv)
+        loose = _agg_run(d, 'LOOSE', [1.0, 2.0], lambda kv: 90.0 + kv)
+        groups = [['CB', [cb['dir']]], ['P3', [p1['dir']]]]
+        opts = sp.make_opts(aggregate=True, groups=groups)[0]
+        img, tidy = sp.export([cb, p1, loose], opts, out, 'g')
+        with open(tidy, newline='', encoding='utf-8') as f:
+            rows = list(csv.DictReader(f))
+        got = {r['run']: r['group'] for r in rows}
+        assert got == {'CB1': 'CB', 'P3_1': 'P3', 'LOOSE': ''}, got
+        # EVERY row of a grouped run carries it, not just the first
+        assert all(r['group'] == 'CB' for r in rows if r['run'] == 'CB1')
+        # ...and the figspec records the grouping too, so --from-spec
+        # re-renders the same two lines rather than one
+        spec, err = sp.load_figspec(sp.figspec_path(img))
+        assert err is None, err
+        assert spec['opts']['groups'] == groups, spec['opts']['groups']
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_a_grouping_survives_the_command_line_and_a_spec_round_trip():
+    """Landing sites 2 and 8 together. --group is REPEATABLE, which every
+    other valued flag is not ('later wins' would silently draw one curve
+    where two were asked for), and it has to survive build_figspec ->
+    load_figspec -> _cli_opts, which is the round trip that drops any key
+    the CLI's hand-written table does not name."""
+    o, err = sp._cli_opts(set(), {'--group': ['CB=r1', 'P3=r2,r3']})
+    assert err is None, err
+    assert [n for n, _m in o['groups']] == ['CB', 'P3'], o['groups']
+    assert len(o['groups'][1][1]) == 2, o['groups']
+    # ORDER IS THE OPERATOR'S, and it is what picks the colours -- so it
+    # is preserved rather than sorted
+    o2, _e = sp._cli_opts(set(), {'--group': ['P3=r2', 'CB=r1']})
+    assert [n for n, _m in o2['groups']] == ['P3', 'CB']
+    # the spec round trip: a spec's grouping is inherited when no --group
+    # is given, and REPLACED wholesale when one is
+    back, err = sp._cli_opts(set(), {}, dict(o))
+    assert err is None and back['groups'] == o['groups'], back['groups']
+    over, _e = sp._cli_opts(set(), {'--group': ['ALL=r1,r2,r3']}, dict(o))
+    assert [n for n, _m in over['groups']] == ['ALL']
+    # the parser really accumulates rather than overwriting
+    args, flags, vals = sp._parse_argv(['x', '--group', 'A=1',
+                                        '--group', 'B=2'])
+    assert vals['--group'] == ['A=1', 'B=2'], vals
+    assert args == ['x'] and not flags
+    # a malformed one is refused in the CLI's own words, never half-read
+    for bad in ('nonsense', '=r1', 'CB='):
+        assert sp._cli_opts(set(), {'--group': [bad]})[1], bad
+
+
+def test_a_grouping_that_cannot_be_read_is_refused_not_repaired():
+    """check_groups is the one gate, so the window and a hand-edited
+    config get the identical answer. Each refusal below is a grouping
+    with no defensible reading -- unlike an EMPTY group, which is simply
+    dropped because the window holds one while a name is being typed."""
+    ok, err = sp.check_groups([['CB', ['a']], ['P3', ['b', 'c']]])
+    assert err is None and len(ok) == 2, (ok, err)
+    # JSON has no tuples: the value that comes back out of a figspec or
+    # the options file is lists, and it must read as what went in
+    assert sp.check_groups(tuple(tuple(g) for g in ok))[0] == ok
+    # a run in two groups: which curve does it belong to?
+    assert 'at most one group' in sp.check_groups(
+        [['CB', ['a']], ['P3', ['a']]])[1]
+    # two groups with one name: which legend entry is which?
+    assert sp.check_groups([['CB', ['a']], ['cb', ['b']]])[1]
+    for bad in ('a string', [['CB']], [['', ['a']]], [['CB', 'a']],
+                [['CB', ['']]], [['x' * 99, ['a']]]):
+        assert sp.check_groups(bad)[1], bad
+    # an empty group is DROPPED, and the rest survive it
+    kept, err = sp.check_groups([['CB', []], ['P3', ['b']]])
+    assert err is None and kept == [['P3', [os.path.abspath('b')]]], kept
+    # STORED AS SPELLED, matched case-insensitively. The first draft
+    # stored the normcased key and every group in the figspec and in the
+    # warnings came out lowercased on Windows -- 'P3_1_2.5mL_20260728'
+    # reported as 'p3_1_2.5ml_20260728', against a run folder of the
+    # other name.
+    mixed, err = sp.check_groups([['P3', ['MiXeD_Case_Run']]])
+    assert err is None
+    assert os.path.basename(mixed[0][1][0]) == 'MiXeD_Case_Run', mixed
+    assert sp.run_group({'dir': os.path.abspath('mixed_case_run'),
+                         'name': 'mixed_case_run'}, mixed) == 'P3' or \
+        os.path.normcase('A') == 'A'
+
+
+def test_a_group_that_names_a_run_nobody_plotted_says_so():
+    """The silent failure this option was always going to have: a typo in
+    a run name makes the group average fewer runs and still draw a
+    perfectly convincing curve."""
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(6))
+        opts = sp.make_opts(aggregate=True, groups=[
+            ['P3', [d, os.path.join(os.path.dirname(d), 'NOT_A_RUN')]]])[0]
+        warns = []
+        runs = sp.prepare_runs([d], opts, warns.append)
+        assert len(runs) == 1
+        assert any('NOT_A_RUN' in w and "group 'P3'" in w for w in warns), \
+            warns
+        # ...and no warning when every named run is there
+        warns2 = []
+        sp.prepare_runs([d], sp.make_opts(
+            aggregate=True, groups=[['P3', [d]]])[0], warns2.append)
+        assert not any('not on this figure' in w for w in warns2), warns2
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_group_palette_is_separable_and_never_wears_a_run_colour():
+    """The `#313` colour question, answered as a property rather than as
+    a list of hexes: no group colour may BE a run colour, no two groups
+    may share a (colour, style) pair inside one wrap, and the first group
+    must still be the black solid curve the ungrouped aggregate draws --
+    so turning one group on does not restyle a figure that had none.
+
+    The perceptual measurement behind the CHOICE of palette lives in the
+    GROUP_COLORS comment; what a test can hold is the invariant."""
+    assert not set(sp.GROUP_COLORS) & set(sp.TOL_BRIGHT)
+    assert sp.group_style(0) == (sp.AGGREGATE_COLOR, '-')
+    n = len(sp.GROUP_COLORS) * len(sp.GROUP_STYLES)
+    pairs = [sp.group_style(i) for i in range(n)]
+    assert len(set(pairs)) == n, 'a (colour, style) pair repeats early'
+    # inside one palette-width, the COLOURS alone already differ -- the
+    # style is the second axis, not a substitute for the first
+    assert len({c for c, _s in pairs[:len(sp.GROUP_COLORS)]}) == \
+        len(sp.GROUP_COLORS)
+    assert len({s for _c, s in pairs[:len(sp.GROUP_STYLES)]}) == \
+        len(sp.GROUP_STYLES)
+
+
+def test_grouping_changes_nothing_when_nobody_asked_for_it():
+    """The compatibility half. An option that cannot be turned back off
+    is a rewrite; this proves the ungrouped aggregate is untouched, down
+    to the bytes."""
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        a = _agg_run(d, 'A', [1.0, 2.0, 3.0], lambda kv: 100.0 + 5 * kv)
+        b = _agg_run(d, 'B', [1.0, 2.0, 3.0], lambda kv: 110.0 + 10 * kv)
+        opts = sp.make_opts(aggregate=True)[0]
+        assert opts['groups'] == [] and opts['aggregate_only'] is False
+        one = sp.save_figure([a, b], opts, os.path.join(out, 'plain.png'))
+        # a grouping naming runs that are NOT on this figure is inert
+        far = sp.make_opts(aggregate=True,
+                           groups=[['ELSEWHERE', ['/nowhere/at/all']]])[0]
+        two = sp.save_figure([a, b], far, os.path.join(out, 'inert.png'))
+        with open(one, 'rb') as f1, open(two, 'rb') as f2:
+            assert f1.read() == f2.read(), \
+                'a group matching no plotted run changed the figure'
+        # ...and the single ungrouped mean is still black, solid, one line
+        fig = _drawn([a, b], opts)
+        assert len(_thick(fig, 0)) == 1
+        assert _thick(fig, 0)[0].get_color() == sp.AGGREGATE_COLOR
+        assert 'AGGREGATE BY GROUP' not in _caption(fig)
+        assert 'aggregate mean of 2 runs (±SEM)' in _agg_lines(fig)
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_no_caption_line_runs_off_the_right_edge_of_the_figure():
+    """MEASURED, 2026-08-10: the first grouped caption's support line ran
+    to ~250 characters and the figure cut it mid-word at 'the console
+    names eac|', losing the sentence that says where the per-level counts
+    went. Group names and run names are operator text, so no amount of
+    care in the wording bounds this -- only the fit does."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        runs = [_agg_run(d, 'R' + 'x' * 30 + str(i), [1.0, 2.0],
+                         lambda kv, i=i: 100.0 + i + 10 * kv)
+                for i in range(6)]
+        groups = [[f"group number {i} with a long name", [r['dir']]]
+                  for i, r in enumerate(runs)]
+        opts = sp.make_opts(aggregate=True, groups=groups)[0]
+        cap = _caption(_drawn(runs, opts))
+        for line in cap.split('\n'):
+            assert len(line) <= sp.CAPTION_LINE_MAX, (len(line), line)
+        assert '…' in cap, 'nothing was truncated; fixture too tame'
+        # THE BUDGET IS AN ANCHOR, not a guess: 248 is the "Points ="
+        # line as it renders under an aggregate, which every figure in
+        # the handoff carries and which sits inside the frame.
+        under_agg = _caption(_drawn(runs[:1], sp.make_opts(
+            aggregate=True)[0])).split('\n')
+        assert max(len(l) for l in under_agg[:2]) == sp.CAPTION_LINE_MAX
+        # ...and the same line WITHOUT the aggregate is 280, because the
+        # band widths are appended whenever the budget bands are drawn.
+        # It clips on a default figure -- measured on the corpus, it ends
+        # "never averaged), banc". Recorded rather than fixed: that is a
+        # pre-existing defect on the most ordinary figure this tool
+        # draws, it predates `#313`, and repairing it moves the default
+        # figure's pixels, which the byte-identity guard above exists to
+        # make a deliberate decision rather than a side effect. The
+        # number is asserted so the next change here cannot make it
+        # quietly worse.
+        plain = _caption(_drawn(runs[:1], sp.make_opts()[0])).split('\n')
+        assert max(len(l) for l in plain) == 280, [len(l) for l in plain]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------

@@ -10,6 +10,7 @@ Usage:
                          [--title-first TEXT] [--title-second TEXT]
                          [--subplots both|first|second] [--cadence-guard]
                          [--aggregate] [--aggregate-exact]
+                         [--group NAME=RUN[,RUN...]] [--aggregate-only]
                          [--format png|svg] [--dpi N]
     python sldea_plot.py --from-spec FILE.figspec.json [flags to override]
     python sldea_plot.py --gui [RUN ...]        # window (see below)
@@ -81,8 +82,30 @@ Rendering:
       instead. The aggregate stops at the first current-confirmed
       breakdown, past which the mean would mix intact and collapsed
       devices (`#268`, policy in SLDEA_HANDOFF.md 2026-08-09).
+    - --group NAME=RUN[,RUN...] puts the named runs in a GROUP, and the
+      aggregate then averages EACH GROUP SEPARATELY instead of averaging
+      everything selected (`#313`). Repeat the flag for a second group:
+      --group CB=SLCBvalidationTest --group P3=P3_1_2.5mL_20260728,...
+      draws two mean curves on one panel, which is the carbon-black
+      against P3 comparison the campaign is for. Every rule above still
+      holds PER GROUP -- the SEM band, the no-band-and-a-caption refusal
+      at n = 1, the no-extrapolation and no-interpolation-across-a-
+      breakdown guardrails, and the first-breakdown cap, each computed
+      from that group's own runs. A run may be in at most one group; runs
+      in no group are drawn but contribute to no mean. A RUN is named by
+      its directory (absolute is safest -- two runs in different parents
+      can share a name) or by its bare folder name when that is
+      unambiguous among the plotted runs.
+    - --aggregate-only hides the contributing per-run curves so the panel
+      carries the group means alone -- two lines and not fifteen, which
+      is the state the comparison is actually read in. The runs are still
+      loaded, still guarded and still written to the tidy CSV in full; it
+      is the DRAWING that stops, and the caption says so.
     - Colors are the Paul Tol bright family (colorblind-safe, house
-      convention), assigned to runs in argument order.
+      convention), assigned to runs in argument order. Group means take
+      the Paul Tol HIGH-CONTRAST palette instead, plus a line style each,
+      because a statistic must not look like one more measurement -- see
+      GROUP_COLORS for what that separation measures.
     - Areas predating the 2026-07-28 scale fix (2.3-2.7x blob bug) are
       excluded from area axes unless the run's baseline matches the
       nominal disc; --allow-suspect-scale overrides. In current/power
@@ -600,6 +623,220 @@ def levels(run, value=lambda r: r['area_mm2']):
 # more run.
 AGGREGATE_COLOR = '#000000'
 
+# ...and neither is a GROUP mean (`#313`), so the group palette starts at
+# the same black: one group draws the figure the ungrouped aggregate
+# already drew.
+#
+# Paul Tol HIGH-CONTRAST, not bright -- bright is the run palette, and the
+# whole point is that these curves are statistics. The order is MEASURED
+# rather than Tol's own, worst-case CIEDE2000 under normal + deuteranopic
+# + protanopic + tritanopic simulation (Machado 2009 matrices, script in
+# the `#313` session scratch), against every TOL_BRIGHT entry:
+#
+#     groups   nearest OTHER GROUP     nearest RUN colour
+#     2        29.23                    8.24  (#BB5566 vs #AA3377, tritan)
+#     3        22.05                    3.98  (#004488 vs #AA3377, protan)
+#     4        18.70                    2.22  (#DDAA33 vs #CCBB44, deutan)
+#
+# Read the two columns separately, because they are two different claims.
+# GROUP-VS-GROUP is the requirement -- two means on one panel have to be
+# told apart -- and it clears TOL_BRIGHT's own adjacent-pair floor (18.00,
+# measured the same way) at every size.
+#
+# GROUP-VS-RUN cannot be solved by hue at all, and that is a finding
+# rather than a compromise: TOL_BRIGHT already spans the wheel, so an
+# exhaustive search over Tol's other qualitative schemes could not get a
+# four-colour set past 10.67 even allowing olive/grey/brown. So the
+# separation from the runs is carried by SHAPE -- square markers, 2.2 pt
+# line, a line style per group -- and by --aggregate-only, which is the
+# state this figure is normally read in and removes the question. The
+# order above simply puts the two colours that do collide as far down the
+# list as possible: at two groups (the campaign's CB-vs-P3 case) nothing
+# is nearer a run colour than 8.24.
+GROUP_COLORS = ('#000000', '#BB5566', '#004488', '#DDAA33')
+
+# The other half of the separation, and the half that survives greyscale
+# printing and a palette wrap. Paired with GROUP_COLORS by index, so a
+# fifth group repeats the colour with a different style rather than being
+# indistinguishable from the first.
+GROUP_STYLES = ('-', '--', '-.', ':')
+
+# A group name has to fit a legend entry beside 'mean of N runs (±SEM)'.
+GROUP_NAME_MAX = 40
+
+
+def group_key(path):
+    """The identity a group entry is MATCHED on: absolute and normcase'd,
+    because Windows paths differ in case without differing.
+
+    Comparison only -- what check_groups STORES is the path as the
+    operator spelled it, merely made absolute. Storing the normcased form
+    was the first draft and it is wrong twice over: on Windows every
+    group in the figspec and in the warnings comes out lowercased, so
+    'this group names P3_1_2.5mL_20260728' is reported as
+    'p3_1_2.5ml_20260728', and the figspec -- which exists to be read by
+    a human six months later -- stops matching the run folder's real
+    name. Normalising at the comparison instead costs one normcase per
+    lookup and keeps the file honest.
+
+    Never raises: a group entry is a string out of a config file or a
+    command line, and a path that cannot be resolved simply matches
+    nothing rather than taking the figure down."""
+    try:
+        return os.path.normcase(os.path.abspath(path))
+    except (OSError, ValueError):
+        return os.path.normcase(str(path))
+
+
+def check_groups(value):
+    """-> (the canonical groups value, None) or (None, the CLI's error).
+
+    Its own checker for the same reason check_dpi is: make_opts and the
+    window's remembered-options cleaner must give a malformed value the
+    identical answer, so a hand-edited config cannot smuggle past what
+    the window itself would refuse.
+
+    THE CANONICAL FORM is [[name, [run key, ...]], ...] -- LISTS, not the
+    tuples every other structured value in this file uses, and that is
+    the one place `#313` bent the house style on purpose. `groups` lives
+    in opts, opts is what build_figspec stores verbatim, and the figspec
+    is JSON: with tuples the value written to disk and the value in
+    memory compare UNEQUAL after a round trip, which is exactly the
+    'a re-render that is not' failure the spec exists to catch and would
+    have turned every spec test into a special case. JSON has no tuples,
+    so the canonical form does not either.
+
+    IN THE OPERATOR'S ORDER, never sorted: that order picks the colours
+    (group_style), so sorting here would quietly repaint a figure on
+    reload.
+
+    Empty groups are DROPPED, not refused: the window can hold a name
+    with nothing in it while the operator is mid-edit, and an empty group
+    draws nothing either way. Everything else is refused, because a
+    duplicate name or a run in two groups has no defensible reading."""
+    if value is None:
+        return [], None
+    if isinstance(value, (str, bytes)) or not hasattr(value, '__iter__'):
+        return None, ('--group needs NAME=RUN[,RUN...] '
+                      '(got a bare value)')
+    out, seen_names, seen_runs = [], {}, {}
+    for entry in value:
+        if (isinstance(entry, (str, bytes))
+                or not hasattr(entry, '__iter__')):
+            return None, f"group entry {entry!r} is not a NAME=RUNS pair"
+        pair = list(entry)
+        if len(pair) != 2:
+            return None, (f"group entry {entry!r} must be exactly "
+                          f"(name, runs)")
+        name, members = pair
+        if not isinstance(name, str) or not name.strip():
+            return None, f"group name {name!r} is empty"
+        name = name.strip()
+        if len(name) > GROUP_NAME_MAX:
+            return None, (f"group name {name!r} is longer than "
+                          f"{GROUP_NAME_MAX} characters")
+        low = name.casefold()
+        if low in seen_names:
+            return None, (f"two groups are both named "
+                          f"{seen_names[low]!r} -- names label the "
+                          f"curves and must differ")
+        seen_names[low] = name
+        if isinstance(members, (str, bytes)) or not hasattr(members,
+                                                            '__iter__'):
+            return None, f"group {name!r} has no list of runs"
+        keys, seen_here = [], set()
+        for m in members:
+            if not isinstance(m, str) or not m.strip():
+                return None, f"group {name!r} names an empty run"
+            stored = os.path.abspath(m.strip())
+            key = group_key(stored)
+            if key in seen_runs and seen_runs[key] != name:
+                return None, (f"{os.path.basename(m.strip())} is in both "
+                              f"{seen_runs[key]!r} and {name!r} -- a run "
+                              f"belongs to at most one group")
+            seen_runs[key] = name
+            if key not in seen_here:
+                seen_here.add(key)
+                keys.append(stored)
+        if keys:
+            out.append([name, keys])
+    return out, None
+
+
+def parse_group_flag(text):
+    """'--group NAME=RUN[,RUN...]' -> ((name, [runs]), None) or
+    (None, the CLI's error)."""
+    if not isinstance(text, str) or '=' not in text:
+        return None, (f"--group {text!r} needs the form "
+                      f"NAME=RUN[,RUN...]")
+    name, _, rest = text.partition('=')
+    members = [m.strip() for m in rest.split(',') if m.strip()]
+    if not name.strip():
+        return None, f"--group {text!r} has no group name"
+    if not members:
+        return None, f"--group {text!r} names no runs"
+    return (name.strip(), members), None
+
+
+def run_group(run, groups):
+    """Which group `run` belongs to, or None.
+
+    Matched on the resolved directory first, and only then on the bare
+    folder name -- `#323` put runs from several parents on one figure and
+    two of them can share a name, so the path is the identity and the
+    name is the convenience the command line needs."""
+    if not groups:
+        return None
+    key = group_key(run.get('dir') or '')
+    for name, members in groups:
+        if any(group_key(m) == key for m in members):
+            return name
+    base = os.path.normcase(run.get('name') or '')
+    if not base:
+        return None
+    for name, members in groups:
+        if any(os.path.normcase(os.path.basename(m)) == base
+               for m in members):
+            return name
+    return None
+
+
+def group_sets(runs, groups):
+    """-> [(group name, [its runs])] in the operator's group order, for
+    the groups that actually have a run on this figure, plus the runs
+    that landed in no group at all as a second return value.
+
+    Empty of groups -> ([], runs): every caller then falls back to the
+    single whole-selection aggregate, which is what `#268` shipped and
+    what a figure with no groups must keep drawing."""
+    if not groups:
+        return [], list(runs)
+    members = {name: [] for name, _ in groups}
+    loose = []
+    for run in runs:
+        name = run_group(run, groups)
+        if name is None:
+            loose.append(run)
+        else:
+            members[name].append(run)
+    return ([(name, members[name]) for name, _ in groups
+             if members[name]], loose)
+
+
+def group_style(index):
+    """-> (color, linestyle) for the index'th group drawn.
+
+    A LATIN SQUARE over the two lists rather than two independent cycles.
+    Both are four long, so `colors[i % 4], styles[i % 4]` would repeat the
+    whole pair every four groups and the fifth curve would be the first
+    one again; the `i // 4` shift makes the pair unique for sixteen. The
+    first four are still (black solid, red dashed, blue dash-dot, yellow
+    dotted), so one group draws exactly the black solid curve the
+    ungrouped aggregate has always drawn."""
+    n = len(GROUP_COLORS)
+    return (GROUP_COLORS[index % n],
+            GROUP_STYLES[(index + index // n) % len(GROUP_STYLES)])
+
 
 def first_breakdown_kv(run):
     """The nominal kV of this run's FIRST current-confirmed breakdown, or
@@ -995,7 +1232,8 @@ def _pt_above_axes(ax, pt, base=None):
                        fig=ax.get_figure(), x=0, y=pt, units='points')
 
 
-def _aggregate_series(ax, ag, band=True, labels=True):
+def _aggregate_series(ax, ag, band=True, labels=True,
+                      color=AGGREGATE_COLOR, ls='-'):
     """The aggregate mean curve + its SEM band + a support count on the
     levels that earn one -> the (x, y) pairs it plotted, for the
     log-scale policy.
@@ -1009,19 +1247,24 @@ def _aggregate_series(ax, ag, band=True, labels=True):
     dropped level by level wherever fewer than two runs contributed, which
     is why fill_between gets a `where` mask rather than a whole-curve
     call -- a level with no SEM leaves a GAP in the band instead of being
-    bridged by its neighbours' confidence."""
+    bridged by its neighbours' confidence.
+
+    `color`/`ls` default to the ungrouped aggregate's black solid, so a
+    figure without groups draws exactly what it drew before `#313`. A
+    GROUP mean passes its own pair from group_style() -- the colours are
+    a different Tol palette on purpose (see GROUP_COLORS), and the style
+    is what still separates the curves in greyscale and past a wrap."""
     xs = [l['kv'] for l in ag]
     ys = [l['mean'] for l in ag]
     pts = list(zip(xs, ys))
-    ax.plot(xs, ys, '-', color=AGGREGATE_COLOR, linewidth=2.2, zorder=5)
+    ax.plot(xs, ys, ls, color=color, linewidth=2.2, zorder=5)
     ax.plot(xs, ys, 's', markersize=4.0, linestyle='', zorder=6,
-            color=AGGREGATE_COLOR, markerfacecolor=AGGREGATE_COLOR,
-            markeredgecolor=AGGREGATE_COLOR)
+            color=color, markerfacecolor=color, markeredgecolor=color)
     if band and len(ag) > 1:
         have = [l['sem'] is not None for l in ag]
         lo = [l['mean'] - (l['sem'] or 0.0) for l in ag]
         hi = [l['mean'] + (l['sem'] or 0.0) for l in ag]
-        ax.fill_between(xs, lo, hi, where=have, color=AGGREGATE_COLOR,
+        ax.fill_between(xs, lo, hi, where=have, color=color,
                         alpha=0.18, linewidth=0, zorder=1)
         pts += list(zip(xs, lo)) + list(zip(xs, hi))
     if labels:
@@ -1100,7 +1343,8 @@ def _aggregate_caption(runs, ag, opts, cap):
             + '\n' + support + '  ' + stop)
 
 
-def _warn_aggregate(runs, ag, opts, cap, warn):
+def _warn_aggregate(runs, ag, opts, cap, warn, what='aggregate',
+                    labels=True):
     """Say on the CONSOLE what the figure can only say in six-point type.
 
     Two things, and both are the kind a reader should meet before quoting
@@ -1112,29 +1356,38 @@ def _warn_aggregate(runs, ag, opts, cap, warn):
     the P3-family campaign carries none at all, so on those runs the
     aggregate runs the whole staircase THROUGH an area collapse that no
     current channel corroborated. Saying nothing there would let a figure
-    imply the cap had been applied and found nothing to cut."""
+    imply the cap had been applied and found nothing to cut.
+
+    `what` names the curve these lines are about -- 'aggregate' for the
+    whole selection, "group 'CB'" for one group of `#313`. Every group
+    gets its own full set, because n = 1 for one of them and n = 5 for
+    the other is exactly the difference an operator must not have to
+    infer. `labels` is false when the figure could not print the
+    per-level counts (grouped figures cannot: see _group_caption), and
+    the interpolation line then stops promising them."""
     n_runs = len(runs)
     if n_runs < 2:
-        warn(f"aggregate: {n_runs} run selected -- NO BAND drawn. The "
+        warn(f"{what}: {n_runs} run -- NO BAND drawn. The "
              f"aggregate band is the standard error of the mean and needs "
              f"at least 2 runs; the mean line is still the run itself")
     interp = [l for l in ag if l['n_interpolated']]
     if interp:
         worst = min(interp, key=lambda l: (l['n_measured'], l['kv']))
-        warn(f"aggregate: {len(interp)} of {len(ag)} levels carry "
+        where = ("every level short of the caption's n carries its own "
+                 "'a+b' count on the figure, and " if labels else '')
+        warn(f"{what}: {len(interp)} of {len(ag)} levels carry "
              f"interpolated contributions (thinnest measured support: "
              f"{worst['kv']:g} kV, {worst['n_measured']} measured / "
-             f"{worst['n_interpolated']} interpolated) -- every level "
-             f"short of the caption's n carries its own 'a+b' count on "
-             f"the figure, and --aggregate-exact pools only real readings")
+             f"{worst['n_interpolated']} interpolated) -- {where}"
+             f"--aggregate-exact pools only real readings")
     thin = [l for l in ag if l['n'] < n_runs]
     if thin:
-        warn(f"aggregate: {len(thin)} of {len(ag)} levels are supported by "
+        warn(f"{what}: {len(thin)} of {len(ag)} levels are supported by "
              f"fewer than all {n_runs} runs (a run is never extrapolated "
              f"past its own measured range); levels with n < 2 carry no "
              f"band at all")
     if cap is not None:
-        warn(f"aggregate: capped at {cap:g} kV, the first current-confirmed "
+        warn(f"{what}: capped at {cap:g} kV, the first current-confirmed "
              f"breakdown -- past it the mean mixes intact and collapsed "
              f"devices, which is not a physical quantity")
     else:
@@ -1143,9 +1396,137 @@ def _warn_aggregate(runs, ag, opts, cap, warn):
                  f"({', '.join(advis)}), which confirms nothing and draws "
                  f"nothing -- read the top of the staircase by eye before "
                  f"quoting the mean there." if advis else '')
-        warn(f"aggregate: no run carries a current-confirmed breakdown, so "
+        warn(f"{what}: no run carries a current-confirmed breakdown, so "
              f"the first-breakdown cap did not fire and the mean runs to "
              f"the end of the staircase.{extra}")
+
+
+# The caption's width budget, in characters, at 7 pt on a 12.6 in figure.
+#
+# The existing caption keeps its lines inside this by hand, and
+# _aggregate_caption says so -- "each kept under ~215 characters... The
+# existing caption's longest line is the width budget to match." That
+# rule is right and the number in it was an estimate: the line it names
+# (draw_area's "Points = per-level..." block, which every area figure has
+# always carried and which renders inside the frame) is 248 characters.
+# So the budget is measured off the line that demonstrably fits rather
+# than guessed at, and 248 is it.
+#
+# A GROUPED caption cannot be kept inside it by hand, which is why this
+# is a constant with a truncator behind it instead of a comment: its
+# lines grow with the number of groups and with the length of the names
+# an operator typed. Measured 2026-08-10 on the campaign's own CB-vs-P3
+# figure, the first draft's support line reached ~256 and the figure cut
+# it mid-word at "the console names eac|", losing the sentence that says
+# where the per-level counts went.
+#
+# FOUND WHILE MEASURING THIS, and NOT fixed here: that same "Points ="
+# line runs to 280 characters on a DEFAULT area figure, because
+# ", bands ±2% machine / ±1% traced" is appended whenever the budget
+# bands are drawn -- which is every figure that is not under an
+# aggregate. Rendered on the corpus it clips to "…never averaged), banc"
+# and loses the band widths entirely. That is a pre-existing defect on
+# the most ordinary figure this tool draws, it predates `#313`, and
+# fixing it moves the default figure's pixels -- which is a deliberate
+# change with its own byte-identity guard to answer, not something to
+# slip into a grouping PR. Dated entry in SLDEA_HANDOFF.md; the number
+# is here so whoever takes it does not have to measure it again.
+CAPTION_LINE_MAX = 248
+
+
+def _fit(line, limit=CAPTION_LINE_MAX):
+    """`line` truncated to the caption's width, with an ellipsis.
+
+    A caption a reader cannot finish is not a caption -- but a caption
+    that runs off the page is worse, because nothing on the figure says
+    it did. Every line the group caption builds from operator-supplied
+    text goes through here."""
+    return line if len(line) <= limit else line[:limit - 1].rstrip() + '…'
+
+
+def _group_caption(drawn, opts, hidden):
+    """What a GROUPED aggregate's curves, bands and caps mean (`#313`).
+
+    `drawn` is [(name, runs, ag, cap, color, style)], one per group that
+    reached the figure, in drawing order.
+
+    Longer than the ungrouped caption because it has strictly more to
+    say: the band policy is decided PER GROUP, and on this campaign the
+    two groups land on opposite sides of it -- carbon black is a single
+    run and gets no band, P3 is five and gets one. A caption that stated
+    the policy once would be false about one of the two curves.
+
+    THE PER-LEVEL SUPPORT COUNTS ARE NOT PRINTED on a grouped figure, and
+    that is a decision rather than an omission. `#312` moved them to
+    'exceptions only' precisely because one row of numbers above the x
+    axis already collided with the marker key; G groups want G rows in
+    the same strip, at the same x positions, in 6 pt type, and nothing on
+    the figure would say which row belonged to which curve. So each
+    group's support is stated here in words, and the console names the
+    thinnest level of each."""
+    names = {'-': 'solid', '--': 'dashed', '-.': 'dash-dot', ':': 'dotted'}
+    heads = []
+    for name, runs, ag, _cap, _color, style in drawn:
+        n = len(runs)
+        heads.append(f"{name} ({names.get(style, style)}, {n} run"
+                     f"{'' if n == 1 else 's'}"
+                     f"{'' if n >= 2 else ' — NO BAND'})")
+    head = ("AGGREGATE BY GROUP (squares): " + '; '.join(heads)
+            + f". Bands are SEM (σ/√n), NOT the ±{TRACED_BAND_PCT:g}–"
+              f"{MACHINE_BAND_PCT:g}% instrument budget.")
+    lone = [name for name, runs, _a, _c, _col, _s in drawn if len(runs) < 2]
+    if lone:
+        head += (f" {', '.join(lone)} has one run: an aggregate needs ≥ 2 "
+                 f"runs to earn a band.")
+    grid = ('Grid: exact-key pooling — only levels a run really measured.'
+            if opts.get('aggregate_exact') else
+            'Grid: runs interpolated onto the common levels, never '
+            'extrapolated past a run\'s own range and never across a '
+            'breakdown.')
+    if hidden:
+        grid += '  Contributing runs hidden (--aggregate-only).'
+    bits, capped = [], False
+    for name, _runs, ag, cap, _color, _style in drawn:
+        full = aggregate_full_n(ag)
+        thin = len(aggregate_thin_levels(ag))
+        capped = capped or cap is not None
+        bits.append(f"{name}: n = {full} over {len(ag)} levels"
+                    + (f", {thin} short or interpolated"
+                       if thin else ", all measured")
+                    + (f", capped at {cap:g} kV" if cap is not None
+                       else ''))
+    # the cap sentence ONCE, not per group: it is the same sentence every
+    # time it does not fire, and repeating it is what pushed the first
+    # draft of this line off the right edge of the figure
+    support = ('Support — ' + '; '.join(bits) + '.'
+               + ('  Caps are the first current-confirmed breakdown.'
+                  if capped else '  No group carries a current-confirmed '
+                                 'breakdown, so no cap fired.'))
+    counts = ("Per-level support counts are not printed when groups share "
+              "a panel; the console names each group's thinnest level.")
+    return ('\n' + _fit(head) + '\n' + _fit(grid) + '\n' + _fit(support)
+            + '\n' + counts)
+
+
+def _group_members_caption(drawn, limit=CAPTION_LINE_MAX):
+    """Which runs each group's mean is made of, as one caption line.
+
+    Load-bearing under --aggregate-only above all: with the contributing
+    curves hidden the legend no longer names them, and a mean whose
+    members a reader cannot recover is not a citable figure. Truncated
+    to `limit` characters with the count kept, because the tidy CSV's new
+    'group' column is the complete answer and this line only has to be
+    enough to recognise the figure."""
+    bits = [f"{name} = " + ', '.join(r['name'] for r in runs)
+            for name, runs, _ag, _cap, _col, _st in drawn]
+    line = 'Members: ' + '; '.join(bits) + '.'
+    if len(line) > limit:
+        # the pointer to the full answer is part of the budget, not an
+        # addition to it -- truncating to `limit` and THEN appending is
+        # how a truncator produces a line longer than the one it cut
+        tail = "… (full membership in the tidy CSV's group column)"
+        line = line[:max(0, limit - len(tail))].rstrip(' ,;') + tail
+    return '\n' + line
 
 
 def _series(ax, xs, ys, traced, color, ls, bands, band_traced=None):
@@ -1269,7 +1650,15 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     # test suite and the older callers: a missing key means "the behaviour
     # that existed before this option", never a KeyError mid-figure.
     budget_bands = opts['bands'] and not opts.get('aggregate')
-    for run in runs:
+    # `#313`: with the aggregate on, --aggregate-only draws the group (or
+    # whole-selection) means ALONE. The runs are still loaded, still
+    # guarded, still in the tidy CSV -- only this loop stops, which is
+    # what turns fifteen curves plus two means into two means. Refused
+    # any influence when the aggregate is off, because then it would be a
+    # flag that emptied the figure.
+    hide_runs = bool(opts.get('aggregate_only')) and bool(
+        opts.get('aggregate'))
+    for run in ([] if hide_runs else runs):
         color = run['color']
         lvs = levels(run)
         if not lvs:
@@ -1364,37 +1753,90 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     # a figure with nothing to mark keeps the layout it always had.
     agg_support_row = False
     if opts.get('aggregate'):
-        cap_kv = aggregate_cap_kv(runs)
-        # n = 1 is a REFUSAL, not a fallback (`#268`, decided 2026-08-09):
-        # the band drops out entirely and the caption says why. A single
-        # run's spread about itself is zero, and quietly substituting the
-        # instrument budget would dress a claim about the instrument up as
-        # a claim about the family.
-        band = len(runs) >= 2
+        # ONE mean, or one per operator-assigned group (`#313`). The two
+        # paths are the same code with a different list of run sets: a
+        # group is not a special kind of aggregate, it is an aggregate
+        # over fewer runs, and every rule `#268` decided -- the SEM band,
+        # the n = 1 refusal, the two guardrails, the first-breakdown cap
+        # -- is therefore computed from THAT group's runs and no others.
+        # With no groups the list is a single unnamed set, so a figure
+        # that predates this draws exactly what it drew before.
+        sets, loose = group_sets(runs, opts.get('groups') or ())
+        grouped = bool(sets)
+        if grouped and loose:
+            # what happens to them depends on whether the runs are drawn
+            # at all -- 'they are drawn but average into nothing' is a
+            # false sentence under --aggregate-only, where they are on
+            # the figure in no form whatsoever
+            fate = ('they are not on the figure at all and average into '
+                    'nothing' if hide_runs else
+                    'they are drawn but average into nothing')
+            warn(f"aggregate by group: {len(loose)} selected run(s) are in "
+                 f"no group ({', '.join(r['name'] for r in loose)}) -- "
+                 f"{fate}; assign them or deselect them")
+        if len(sets) > len(GROUP_COLORS):
+            warn(f"{len(sets)} groups > {len(GROUP_COLORS)} group colours "
+                 f"-- colours repeat (line styles still differ); consider "
+                 f"fewer groups per figure")
         label_ax = axl if axl is not None else axr
-        ag = None
-        for ax, norm, sink in ((axl, False, ysl_all), (axr, True, ysr_all)):
-            if ax is None:
-                continue
-            ag = aggregate_levels(runs, norm=norm,
-                                  exact=opts.get('aggregate_exact'))
+        drawn_groups = []
+        for i, (name, subset) in enumerate(
+                sets if grouped else [(None, runs)]):
+            color, ls = group_style(i) if grouped else (AGGREGATE_COLOR, '-')
+            cap_kv = aggregate_cap_kv(subset)
+            # n = 1 is a REFUSAL, not a fallback (`#268`, decided
+            # 2026-08-09): the band drops out entirely and the caption
+            # says why. A single run's spread about itself is zero, and
+            # quietly substituting the instrument budget would dress a
+            # claim about the instrument up as a claim about the family.
+            # PER GROUP, and on this campaign that is the common case and
+            # not a corner: the carbon-black group is one run.
+            band = len(subset) >= 2
+            ag = None
+            for ax, norm, sink in ((axl, False, ysl_all),
+                                   (axr, True, ysr_all)):
+                if ax is None:
+                    continue
+                ag = aggregate_levels(subset, norm=norm,
+                                      exact=opts.get('aggregate_exact'))
+                if not ag:
+                    continue
+                # counts only on an UNGROUPED figure -- G groups would
+                # want G rows of 6 pt numbers at the same x positions,
+                # with nothing saying which row is whose (_group_caption)
+                pts = _aggregate_series(
+                    ax, ag, band=band, color=color, ls=ls,
+                    labels=(not grouped) and ax is label_ax)
+                if ax is label_ax and not grouped:
+                    agg_support_row = bool(aggregate_thin_levels(ag))
+                xs_all += [x for x, _ in pts]
+                sink += [y for _, y in pts]
             if not ag:
+                warn(f"{'group ' + repr(name) if grouped else 'aggregate'}: "
+                     f"nothing to average -- no run contributed a level "
+                     f"below the first-breakdown cap")
                 continue
-            pts = _aggregate_series(ax, ag, band=band, labels=ax is label_ax)
-            if ax is label_ax:
-                agg_support_row = bool(aggregate_thin_levels(ag))
-            xs_all += [x for x, _ in pts]
-            sink += [y for _, y in pts]
-        if ag:
-            agg_caption = _aggregate_caption(runs, ag, opts, cap_kv)
+            drawn_groups.append((name, subset, ag, cap_kv, color, ls))
+            n = len(subset)
+            if grouped:
+                label = (f"{name} — mean of {n} runs (±SEM)" if band
+                         else f"{name} — mean of 1 run (no band)")
+            else:
+                label = (f"aggregate mean of {n} runs (±SEM)" if band
+                         else 'aggregate mean (1 run — no band)')
             run_handles.append(Line2D(
-                [], [], color=AGGREGATE_COLOR, marker='s', markersize=4.0,
-                label=(f"aggregate mean of {len(runs)} runs (±SEM)"
-                       if band else 'aggregate mean (1 run — no band)')))
-            _warn_aggregate(runs, ag, opts, cap_kv, warn)
-        else:
-            warn('aggregate: nothing to average -- no run contributed a '
-                 'level below the first-breakdown cap')
+                [], [], color=color, linestyle=ls, marker='s',
+                markersize=4.0, label=label))
+            _warn_aggregate(subset, ag, opts, cap_kv, warn,
+                            what=(f"group {name!r}" if grouped
+                                  else 'aggregate'),
+                            labels=not grouped)
+        if drawn_groups and grouped:
+            agg_caption = (_group_caption(drawn_groups, opts, hide_runs)
+                           + _group_members_caption(drawn_groups))
+        elif drawn_groups:
+            name, subset, ag, cap_kv, _c, _s = drawn_groups[0]
+            agg_caption = _aggregate_caption(subset, ag, opts, cap_kv)
 
     scale_notes = []
     # the headings both panels will carry, resolved in ONE place so the
@@ -1426,21 +1868,37 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
         style_rows.append(('breakdown, no reviewed area',
                            {'linestyle': '--'}))
     main_legend = _legend(legend_ax, run_handles, style_rows)
-    if opts.get('marker_key', True):
+    # the open/closed key explains the RUN markers, and with the runs
+    # hidden there are none on the figure to explain -- the same rule that
+    # keeps it out of current/power mode (`#267`), reached from the other
+    # direction. The window greys the box to say so rather than leaving a
+    # tick that does nothing.
+    if opts.get('marker_key', True) and not hide_runs:
         _marker_key(legend_ax, main_legend, lift=agg_support_row)
 
-    cap = ("Points = per-level pre/post snapshot pair"
-           + (" (post solid, pre dashed)" if opts['prepost']
-              else " mean") + ".  "
-           "Open markers = hand-traced boundary (outer toe, ±1%); "
-           "filled = machine half-height convention; a level mixing the "
-           "two plots its machine member(s) only (conventions differ "
-           "+5.5% area, never averaged)"
-           + (", bands ±2% machine / ±1% traced" if budget_bands
-              else "") + ".\n"
-           "X = current-confirmed breakdown (recomputed, 2026-08-05 "
-           "semantics).  X axis: nominal kV (measured_kV telemetry "
-           "incomplete on all runs)."
+    if hide_runs:
+        # The whole first block below describes per-run markers, bands and
+        # breakdown X marks, none of which was drawn. Left standing it
+        # would be a caption about a figure that is not there.
+        cap = ("Per-run curves HIDDEN — this panel carries the aggregate "
+               "means alone; every contributing run is still in the tidy "
+               "CSV beside this figure, with its group.\n"
+               "X axis: nominal kV (measured_kV telemetry incomplete on "
+               "all runs).")
+    else:
+        cap = ("Points = per-level pre/post snapshot pair"
+               + (" (post solid, pre dashed)" if opts['prepost']
+                  else " mean") + ".  "
+               "Open markers = hand-traced boundary (outer toe, ±1%); "
+               "filled = machine half-height convention; a level mixing "
+               "the two plots its machine member(s) only (conventions "
+               "differ +5.5% area, never averaged)"
+               + (", bands ±2% machine / ±1% traced" if budget_bands
+                  else "") + ".\n"
+               "X = current-confirmed breakdown (recomputed, 2026-08-05 "
+               "semantics).  X axis: nominal kV (measured_kV telemetry "
+               "incomplete on all runs).")
+    cap = (cap
            + agg_caption
            + _cadence_caption(cadence_notes)
            + _scale_caption(scale_notes))
@@ -1707,14 +2165,14 @@ def save_figure(runs, opts, path, warn=lambda m: None):
 # tidy CSV
 # ---------------------------------------------------------------------------
 
-TIDY_COLS = ['run', 'snapshot', 'nominal_kV', 'phase', 'tag', 'area_mm2',
-             'convention', 'expansion_A_A0', 'measured_uA', 'power_mW',
-             'traced', 'method', 'conf', 'user_reviewed',
+TIDY_COLS = ['run', 'group', 'snapshot', 'nominal_kV', 'phase', 'tag',
+             'area_mm2', 'convention', 'expansion_A_A0', 'measured_uA',
+             'power_mW', 'traced', 'method', 'conf', 'user_reviewed',
              'breakdown_confirmed', 'breakdown_advisory',
              'saved_breakdown_brand', 'notes']
 
 
-def write_tidy(runs, path):
+def write_tidy(runs, path, groups=()):
     """Per-snapshot tidy export. EVERY row of every run is written --
     including 'post-breakdown'-annotated ones (the P3_5 rule). Runs kept
     despite a suspect pre-scale-fix era ('suspect_kept', current/power
@@ -1724,12 +2182,21 @@ def write_tidy(runs, path):
     'convention' names each area's edge definition ('half-height'
     machine / 'outer-toe' hand trace; +5.2-5.7% apart — never compare
     absolute mm² across them), and power_mW is the run-median-corrected
-    product (see power_mw): both audit 2026-08-05."""
+    product (see power_mw): both audit 2026-08-05.
+
+    'group' is the operator's grouping (`#313`), blank for a run in no
+    group, and it sits SECOND -- beside 'run', because it is the other
+    half of the same question. It is in the CSV for the reason the CSV
+    exists at all: a figure whose two lines are the CB mean and the P3
+    mean cannot be reproduced from a table that does not say which run
+    was in which line. Written from the same opts the figure was drawn
+    from, so it cannot describe a different grouping than the picture."""
     with open(path, 'w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
         w.writerow(TIDY_COLS)
         for run in runs:
             hide_areas = run.get('suspect_kept', False)
+            group = run_group(run, groups) or ''
             med = run_ua_median(run)
             for r in run['rows']:
                 area = None if hide_areas else r['area_mm2']
@@ -1739,7 +2206,7 @@ def write_tidy(runs, path):
                 exp = (area / run['a0'] if area and run['a0'] else '')
                 pw = power_mw(r, med)
                 w.writerow([
-                    run['name'], r['snapshot'],
+                    run['name'], group, r['snapshot'],
                     '' if r['kv'] is None else r['kv'],
                     r['phase'], r['tag'],
                     '' if area is None else area,
@@ -1768,7 +2235,7 @@ def write_tidy(runs, path):
 # grow its own idea of what a figure's options or filenames are.
 #
 # ---------------------------------------------------------------------------
-# ADDING A NEW OPTION: SEVEN landing sites, and five of them fail SILENTLY
+# ADDING A NEW OPTION: NINE landing sites, and seven of them fail SILENTLY
 #
 # It was five until `#314`. Two more surfaced there, and neither was a
 # special case -- each is the general form of a category the original five
@@ -1782,6 +2249,34 @@ def write_tidy(runs, path):
 #      option had been one or the other; `dpi` was the first NUMBER. Miss
 #      it and a corrupt value in the options file survives a round trip
 #      instead of being rejected.
+#
+# ...and two more surfaced in `#313`, whose `groups` is the first option
+# that is neither a flag, a name nor a number but a STRUCTURE -- a list of
+# (name, runs) pairs naming particular run directories:
+#
+#   8. _parse_argv()'s flag tables. SILENT for a REPEATABLE option. The
+#      parser was written so that "later duplicate valued flags win"
+#      (`--out a --out b` used to send 'b' run-hunting), which is right
+#      for every option that names one value and silently wrong for
+#      --group, where the second occurrence is a second GROUP. An option
+#      that can be given more than once needs _REPEATED_FLAGS, or the
+#      figure quietly loses every group but the last.
+#   9. write_tidy()'s TIDY_COLS. SILENT. The tidy CSV is the figure's
+#      evidence, so an option that changes WHICH ROWS BELONG TOGETHER --
+#      as against how they are drawn -- has to appear in it, or the
+#      figure cannot be reproduced from its own data. `groups` is the
+#      first such option: without the column, a two-line CB-vs-P3 figure
+#      exports a CSV that cannot say which run was in which line.
+#      (`subplots` is the counter-example that proves the rule and is
+#      deliberately NOT in the CSV: it changes the layout, not the
+#      grouping of the numbers.)
+#
+# A structured option also lands on site 4 in a way a flag does not: the
+# window's cleaner needs a checker of its own for it (STRUCTURED_OPTIONS,
+# beside ENUM_OPTIONS and NUMERIC_OPTIONS), and the value must survive a
+# JSON round trip through both the options file and the figspec -- which
+# is why check_groups coerces lists back to tuples instead of refusing
+# them. Nothing warns if it does not; the groups simply vanish on reload.
 #
 # The lesson generalises: the count is not the point. Before adding an
 # option, ask which CATEGORY it belongs to -- flag, name, number, artifact
@@ -1799,6 +2294,15 @@ def write_tidy(runs, path):
 # `aggregate` has to reach BOTH area panels and the caption, and
 # `aggregate_exact` is read only by aggregate_levels, so a half-consumed
 # version of either draws a figure that looks perfectly finished.
+#
+# `#313` has been through, and it is the first option that describes
+# neither the drawing nor the file but the DATA's own structure:
+# `groups` says which runs belong together, so it reaches sites 1-5 like
+# any option, site 8 because it is repeatable on the command line, and
+# site 9 because the tidy CSV has to carry it. `aggregate_only` travelled
+# with it as an ordinary flag and hit only the familiar five -- a useful
+# contrast, since the two shipped together and only one of them was new
+# in kind.
 #
 # `#314` (`fmt` and `dpi`) has been through too, and it is the first
 # option pair that does NOT describe the drawing -- it describes the file.
@@ -1880,7 +2384,8 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
               logx=False, logy=False, marker_key=True,
               title_first=None, title_second=None, subplots='both',
               cadence_guard=False, aggregate=False,
-              aggregate_exact=False, fmt=DEFAULT_FORMAT, dpi=None):
+              aggregate_exact=False, groups=(), aggregate_only=False,
+              fmt=DEFAULT_FORMAT, dpi=None):
     """-> (opts dict, error message or None).
 
     The CLI builds this from its flags and the window from its tick boxes,
@@ -1899,7 +2404,16 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
     what resolution would re-render something other than what it names.
     The key is `fmt` rather than `format` (the flag is --format): a
     parameter called `format` shadows the builtin in every signature it
-    passes through."""
+    passes through.
+
+    `groups` (`#313`) is the first option that is neither a flag, a name
+    nor a number -- see check_groups for the canonical form and why it is
+    ordered rather than sorted. It is NOT refused outside area mode the
+    way `aggregate` is: an operator's grouping of their own runs is not
+    made wrong by looking at a current plot, and it draws nothing there
+    because nothing outside the aggregate reads it. `aggregate_only` is
+    refused with the aggregate off, though, because there it would empty
+    the figure rather than tidy it."""
     if fmt not in FORMATS:
         return None, f"unknown --format {fmt} ({' | '.join(FORMATS)})"
     dpi, dpi_err = check_dpi(dpi)
@@ -1928,6 +2442,18 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
         return None, ('--aggregate applies to area mode only '
                       '(current/power draw one point per snapshot, '
                       'not one per level)')
+    groups, groups_err = check_groups(groups)
+    if groups_err:
+        return None, groups_err
+    if aggregate_only and not aggregate:
+        # REFUSED, not ignored, and this is the one combination where the
+        # difference matters: "hide the runs" with nothing to replace
+        # them is an EMPTY figure, which no operator ever wants and which
+        # a silently-ignored flag would hand them anyway on the next
+        # --from-spec.
+        return None, ('--aggregate-only needs --aggregate (it hides the '
+                      'per-run curves in favour of the aggregate; with no '
+                      'aggregate there would be nothing left to draw)')
     return {'mode': mode, 'vs_area': bool(vs_area),
             'prepost': bool(prepost), 'mean': bool(mean),
             'bands': bool(bands), 'breakdown': bool(breakdown),
@@ -1940,6 +2466,8 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
             'cadence_guard': bool(cadence_guard),
             'aggregate': bool(aggregate),
             'aggregate_exact': bool(aggregate_exact),
+            'groups': groups,
+            'aggregate_only': bool(aggregate_only),
             'fmt': fmt, 'dpi': dpi}, None
 
 
@@ -2079,7 +2607,10 @@ def export(runs, opts, out_dir, stem, warn=lambda m: None):
     img, tidy = output_paths(out_dir, stem, opts['mode'],
                              opts.get('fmt', DEFAULT_FORMAT))
     save_figure(runs, opts, img, warn)
-    write_tidy(runs, tidy)
+    # the grouping the FIGURE was drawn from, never a second opinion
+    # (`#313`, landing site 9): the CSV is the figure's evidence, and
+    # evidence that disagrees with the picture is worse than none
+    write_tidy(runs, tidy, opts.get('groups') or ())
     # the EFFECTIVE stem (output_paths defaults a blank one), so a
     # re-render from this spec lands on the same filenames
     write_figspec(runs, opts, figspec_path(img),
@@ -2197,6 +2728,23 @@ def prepare_runs(args, opts, warn=lambda m: None, allow_suspect=False,
                  f"comparisons inherit that difference (A/A0 is safe)")
     for i, run in enumerate(runs):
         run['color'] = TOL_BRIGHT[i % len(TOL_BRIGHT)]
+    # A group entry that matches nothing on this figure is the `#313`
+    # typo, and it is silent by construction: the group simply averages
+    # fewer runs and still draws a perfectly convincing curve. Reported
+    # here rather than in draw_area because this is where the plottable
+    # set is finally known -- a run excluded by the scale-era guard is a
+    # legitimate reason for a group to shrink, and the warning that
+    # explains it has already been given above.
+    dirs = {group_key(r['dir']) for r in runs}
+    names = {os.path.normcase(r['name']) for r in runs}
+    for name, members in (opts.get('groups') or ()):
+        missing = [os.path.basename(m) for m in members
+                   if group_key(m) not in dirs
+                   and os.path.normcase(os.path.basename(m)) not in names]
+        if missing:
+            warn(f"group {name!r}: {len(missing)} named run(s) are not on "
+                 f"this figure ({', '.join(missing)}) -- the group's mean "
+                 f"is over the {len(members) - len(missing)} that are")
     return runs
 
 
@@ -2270,10 +2818,20 @@ def _selftest(out_png):
 _BOOL_FLAGS = ('--vs-area', '--prepost', '--mean', '--no-bands',
                '--no-breakdown', '--allow-suspect-scale', '--selftest',
                '--gui', '--logx', '--logy', '--no-marker-key',
-               '--cadence-guard', '--aggregate', '--aggregate-exact')
+               '--cadence-guard', '--aggregate', '--aggregate-exact',
+               '--aggregate-only')
 _VALUED_FLAGS = ('--mode', '--out', '--stem', '--title',
                  '--title-first', '--title-second', '--subplots',
-                 '--from-spec', '--format', '--dpi')
+                 '--from-spec', '--format', '--dpi', '--group')
+
+# Valued flags whose SECOND occurrence is a second value, not a correction
+# (`#313`, landing site 8). Every other valued flag names one thing and
+# "later wins" is right for it -- `--out a --out b` used to send 'b' run
+# hunting, which is the review this parser was tightened by. --group is
+# the first where that rule is backwards: two --group flags are two
+# GROUPS, and last-wins would draw one curve where the operator asked for
+# two, with no error anywhere.
+_REPEATED_FLAGS = ('--group',)
 
 _orig_stdout = None     # keeps the replaced wrapper alive: a GC'd
                         # TextIOWrapper closes the buffer it shares with
@@ -2301,7 +2859,11 @@ def _parse_argv(argv):
     invocation (message already printed). One consuming left-to-right pass:
     later duplicate valued flags win, a valued flag missing its value or a
     misspelled --flag errors out instead of leaking into positionals
-    (review 2026-08-05: `--out a --out b` used to send 'b' run-hunting)."""
+    (review 2026-08-05: `--out a --out b` used to send 'b' run-hunting).
+
+    A flag in _REPEATED_FLAGS ACCUMULATES instead, arriving as a list --
+    the exception `#313` needed and the reason that tuple exists rather
+    than a special case here."""
     args, flags, vals = [], set(), {}
     i = 0
     while i < len(argv):
@@ -2313,7 +2875,10 @@ def _parse_argv(argv):
                 print(f"{a} requires a value")
                 _usage()
                 return None
-            vals[a] = argv[i + 1]
+            if a in _REPEATED_FLAGS:
+                vals.setdefault(a, []).append(argv[i + 1])
+            else:
+                vals[a] = argv[i + 1]
             i += 1
         elif a.startswith('--'):
             print(f"unknown flag: {a}")
@@ -2353,6 +2918,22 @@ def _cli_opts(flags, vals, base=None):
         """a --no-... flag: present turns it off, absent inherits"""
         return False if flag in flags else bool(base.get(key, True))
 
+    # `#313`. The same precedence as everything else -- any --group at
+    # all REPLACES the spec's grouping wholesale rather than merging into
+    # it, because a half-merged grouping is a figure nobody described.
+    # With no --group the base's own value is inherited, which is the
+    # part that keeps --from-spec honest: build_figspec stores dict(opts)
+    # and this table is what rebuilds it, so a key missing HERE is a
+    # re-render that silently draws a different figure (site 2).
+    groups = base.get('groups', ())
+    if '--group' in vals:
+        groups = []
+        for text in vals['--group']:
+            pair, err = parse_group_flag(text)
+            if err:
+                return None, err
+            groups.append(pair)
+
     return make_opts(mode=val('--mode', 'mode', 'area'),
                      vs_area=on('--vs-area', 'vs_area'),
                      prepost=on('--prepost', 'prepost'),
@@ -2371,6 +2952,9 @@ def _cli_opts(flags, vals, base=None):
                      aggregate=on('--aggregate', 'aggregate'),
                      aggregate_exact=on('--aggregate-exact',
                                         'aggregate_exact'),
+                     groups=groups,
+                     aggregate_only=on('--aggregate-only',
+                                       'aggregate_only'),
                      # `#314`. Both go through val() like any other named
                      # option, so `--from-spec spec.json --format png`
                      # re-renders a spec'd SVG as a PNG at the spec's own

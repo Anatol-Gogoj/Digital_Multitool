@@ -215,29 +215,80 @@ def test_initial_state_preselects_several_runs():
         a = _fake_run(p, 'A_run')
         b = _fake_run(p, 'B_run')
         elsewhere = _fake_run(other, 'C_run')
-        parent, pre = g.initial_state([a, b])
-        assert parent == os.path.abspath(p)
-        assert sorted(pre) == ['A_run', 'B_run']
-        # the first argument picks the parent; a run from another parent
-        # cannot be listed alongside it, so it does not preselect
-        parent, pre = g.initial_state([a, elsewhere])
-        assert parent == os.path.abspath(p) and pre == ['A_run']
+        parents, pre = g.initial_state([a, b])
+        assert parents == [os.path.abspath(p)]
+        assert sorted(pre) == sorted([a, b])
         # a bare parent still preselects its newest run. se.newest_run
         # orders by MTIME, and two directories created back to back can
         # land on the same tick -- so the fixture states which is newer
         # instead of racing the clock.
         os.utime(a, (1_700_000_000, 1_700_000_000))
         os.utime(b, (1_800_000_000, 1_800_000_000))
-        parent, pre = g.initial_state([p])
-        assert parent == os.path.abspath(p) and pre == ['B_run'], pre
+        parents, pre = g.initial_state([p])
+        assert parents == [os.path.abspath(p)] and pre == [b], pre
+    finally:
+        for d in (p, other):
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def test_runs_from_several_parents_all_reach_the_selection():
+    """THE `#323` BUG. The first argument picked THE parent and every run
+    living anywhere else was dropped without a word -- so the comparison
+    the campaign is for (carbon black under one Upload folder, the P3
+    family under another) could not be put on one figure at all.
+
+    Both halves are asserted, because the resolver being right is not the
+    same claim as the window listing them: initial_state has to return
+    both parents AND both runs, and the window has to end up with both
+    rows selected and both directories in selected_dirs()."""
+    import tkinter as tk
+    p, other = _mktmp(), _mktmp()
+    try:
+        a = _fake_run(p, 'CB_run')
+        elsewhere = _fake_run(other, 'P3_run')
+        parents, pre = g.initial_state([a, elsewhere])
+        assert parents == [os.path.abspath(p), os.path.abspath(other)]
+        assert sorted(pre) == sorted([a, elsewhere]), pre
+        try:
+            root = tk.Tk()
+        except tk.TclError as e:
+            print(f"   (skipped: no display for Tk: {e})")
+            return
+        try:
+            root.withdraw()
+            win = g.PlotWindow(root, parents, pre, remember=False)
+            assert len(win.runs) == 2, win.runs
+            assert sorted(os.path.abspath(d)
+                          for d in win.selected_dirs()) == sorted(
+                              [os.path.abspath(a),
+                               os.path.abspath(elsewhere)])
+            # the list SAYS where each run came from, since two runs in
+            # different folders can share a name -- as a tag keyed to the
+            # numbered folder list above it, because the column is ~250 px
+            # and the folder's own name does not fit in it
+            tags = sorted(l.split(']')[0] + ']' for _d, l in win.runs)
+            assert tags == ['[1]', '[2]'], tags
+            label = win.lbl_parent.cget('text')
+            assert label.startswith('[1] ' + os.path.abspath(p)), \
+                'the folder list is not numbered to match'
+            assert '[2] ' + os.path.abspath(other) in label
+            # ...and the memory names the folder it is keyed on
+            assert win.parent == os.path.abspath(p)
+            assert 'remembered against [1]' in label
+            # one parent only: no tag at all, and nothing to say
+            win2 = g.PlotWindow(root, [os.path.abspath(p)], remember=False)
+            assert not any(l.startswith('[') for _d, l in win2.runs)
+            assert win2.lbl_parent.cget('text') == os.path.abspath(p)
+        finally:
+            _shut(root)
     finally:
         for d in (p, other):
             shutil.rmtree(d, ignore_errors=True)
 
 
 def test_initial_state_falls_back_without_arguments():
-    parent, pre = g.initial_state([])
-    assert parent, 'no parent at all'
+    parents, pre = g.initial_state([])
+    assert parents and parents[0], 'no parent at all'
     assert isinstance(pre, list)
 
 
@@ -985,6 +1036,17 @@ def test_remembered_options_round_trip_per_parent_folder():
                        'marker_key': True, 'subplots': 'both',
                        'cadence_guard': False, 'aggregate': False,
                        'aggregate_exact': False,
+                       # `#313`. 'aggregate_only' is an ordinary drawing
+                       # answer and joins like the rest. 'groups' is the
+                       # one entry here that names PARTICULAR RUNS, which
+                       # is what the run selection is deliberately kept
+                       # out for -- it joins anyway because it is a
+                       # LABELLING of runs and not a choice of them: it
+                       # is keyed on absolute run directories, so a group
+                       # naming a run nobody selected draws nothing, and
+                       # a stale one is inert rather than wrong. Re-typing
+                       # 'these six are P3' every session is not.
+                       'groups': [], 'aggregate_only': False,
                        # `#314`'s pair joins for a different reason from
                        # every key above it: not how the figure is drawn,
                        # but what it is written as. A house that exports
@@ -1906,6 +1968,183 @@ def test_a_greyed_bands_box_says_which_of_its_two_reasons_it_is():
         # ...and the budget itself is still one hover away
         assert tip.endswith(g.BANDS_TIP), 'the greyed tip dropped the budget'
         assert 'Never quote it as an uncertainty.' in tip
+
+
+# ---------------------------------------------------------------------------
+# operator-assigned groups in the window (`#313`)
+# ---------------------------------------------------------------------------
+
+def test_assigning_runs_to_groups_reaches_the_opts_the_figure_is_drawn_from():
+    """The whole chain in one case: select runs, type a name, press
+    Assign -- and the grouping has to arrive in current_opts, because a
+    group box that edited state the redraw never read would be the exact
+    wiring gap this window has had before."""
+    import tkinter as tk
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        _fake_run(b.tmp, 'R2')
+        win.populate()
+        assert len(win.runs) == 2, win.runs
+        assert win.current_opts()[0]['groups'] == []
+        # nothing selected: refused with a sentence, not a traceback
+        win.run_box.selection_clear(0, tk.END)
+        assert win.assign_group('CB', win.selected_dirs())
+        win.run_box.selection_clear(0, tk.END)
+        win.run_box.selection_set(0)
+        assert win.assign_group('CB', win.selected_dirs()) is None
+        win.run_box.selection_clear(0, tk.END)
+        win.run_box.selection_set(1)
+        assert win.assign_group('P3', win.selected_dirs()) is None
+        opts, err = win.current_opts()
+        assert not err, err
+        assert [n for n, _m in opts['groups']] == ['CB', 'P3'], opts['groups']
+        assert opts['groups'][0][1] == [os.path.abspath(win.runs[0][0])]
+        # ORDER IS THE OPERATOR'S: it picks the colours, so it survives
+        assert win.group_list() == opts['groups']
+        # a run moves between groups rather than being in both, which is
+        # what the engine refuses outright
+        win.run_box.selection_clear(0, tk.END)
+        win.run_box.selection_set(0)
+        assert win.assign_group('P3', win.selected_dirs()) is None
+        assert [n for n, _m in win.group_list()] == ['P3'], win.group_list()
+        assert len(win.group_list()[0][1]) == 2
+        # ...and 'ungroup' takes them back out without touching the rest
+        win.run_box.selection_set(0, tk.END)
+        assert win.assign_group('', win.selected_dirs()) is None
+        assert win.group_list() == []
+        assert win.current_opts()[0]['groups'] == []
+
+
+def test_the_group_box_reports_what_it_will_and_will_not_draw():
+    """A grouping draws nothing unless the aggregate is on and the mode is
+    area. The box is left LIVE in every mode -- it edits runs, like the
+    run list, not the drawing -- so what would otherwise be a greying
+    rule has to be said in words instead."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        assert 'No groups' in win.group_summary()
+        win.run_box.selection_set(0)
+        win.assign_group('CB', win.selected_dirs())
+        win._groups_changed()
+        assert 'CB (1)' in win.group_summary()
+        assert 'Turn on the cross-run aggregate' in win.group_summary()
+        win.v_aggregate.set(True)
+        win._toggled()
+        assert 'Turn on the cross-run aggregate' not in win.group_summary()
+        assert win.lbl_groups.cget('text') == win.group_summary()
+        # the aggregate is area-only, so the summary says so there too
+        win.v_mode.set('current')
+        win._mode_changed()
+        assert 'Area mode only' in win.group_summary(), win.group_summary()
+        # ...and the grouping is still carried in opts in that mode: a
+        # figspec exported from current mode must not forget a grouping
+        # the window is still showing
+        assert win.current_opts()[0]['groups'], win.current_opts()[0]
+
+
+def test_hiding_the_runs_greys_what_it_makes_inert_and_silences_the_click():
+    """Two consequences of `#313`'s hide, both of which would otherwise be
+    a control or a message that lies.
+
+    The marker key explains the open/closed RUN markers, and with no run
+    markers on the figure it explains nothing -- greyed, like every other
+    inert control here. And the click-through resolves a double-click
+    against per-run rows; with the runs hidden there are none, and the
+    fall-through message ('no data point within 30 px') would send an
+    operator on to aim more carefully at markers that are not there."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        assert _state(win.cb_aggregate_only) == 'disabled', 'live with no aggregate'
+        assert _state(win.cb_marker_key) == 'normal'
+        win.v_aggregate.set(True)
+        win._toggled()
+        assert _state(win.cb_aggregate_only) == 'normal'
+        win.v_aggregate_only.set(True)
+        win._toggled()
+        assert _state(win.cb_marker_key) == 'disabled', 'key still live'
+        win.redraw()
+        opts, err = win.current_opts()
+        assert not err and opts['aggregate_only'] is True
+        # nothing on the figure is clickable, and the window says why
+        assert g.plot_points(win._prepared, opts) == []
+
+        class _E:
+            dblclick = True
+            x = y = 100
+            inaxes = None
+        assert win.on_click(_E()) is None
+        said = win.lbl_click.cget('text')
+        assert 'hidden' in said, said
+        # UNTICKING THE AGGREGATE cannot leave an unusable combination:
+        # make_opts refuses aggregate_only without it, and an error where
+        # the figure goes is not what unticking a box should produce
+        win.v_aggregate.set(False)
+        win._toggled()
+        opts2, err2 = win.current_opts()
+        assert err2 is None, err2
+        assert opts2['aggregate_only'] is False
+        assert _state(win.cb_marker_key) == 'normal', 'key stayed greyed'
+
+
+def test_a_grouping_survives_a_round_trip_through_the_options_file():
+    """`#313`'s open question, answered: groups PERSIST, per parent
+    folder, alongside the other remembered options.
+
+    They are the one remembered entry that names particular runs, which
+    the run SELECTION is deliberately kept out of the file for. The
+    difference is that a grouping is keyed on absolute run directories
+    and draws nothing unless a run it names is both selected and the
+    aggregate is on -- so a stale group is inert, where a stale selection
+    would silently plot the wrong batch."""
+    import tkinter as tk
+    p = _mktmp()
+    try:
+        cfg = os.path.join(p, 'opts.json')
+        a = _fake_run(p, 'A_run')
+        groups = [['CB', [a]]]
+        opts, err = sp.make_opts(aggregate=True, groups=groups)
+        assert err is None, err
+        assert g.save_options(p, opts, path=cfg) == cfg
+        back = g.load_options(p, path=cfg)
+        assert back['groups'] == opts['groups'], back.get('groups')
+        assert back['aggregate_only'] is False
+        # a hand-edited file cannot smuggle past what the window itself
+        # would refuse -- STRUCTURED_OPTIONS is the site `#314`'s
+        # NUMERIC_OPTIONS was, one category further out
+        assert 'groups' in g.STRUCTURED_OPTIONS
+        for bad in ({'groups': 'not a list'}, {'groups': None},
+                    {'groups': [['CB', ['x']], ['CB', ['y']]]},
+                    {'groups': [['CB', ['x']], ['P3', ['x']]]}):
+            assert 'groups' not in g._clean_options(bad), bad
+        # ...and an empty one round-trips as itself rather than vanishing
+        assert g._clean_options({'groups': []})['groups'] == []
+        # the window OPENS on the remembered grouping
+        try:
+            root = tk.Tk()
+        except tk.TclError as e:
+            print(f"   (skipped: no display for Tk: {e})")
+            return
+        try:
+            root.withdraw()
+            real = g.OPTIONS_PATH
+            g.OPTIONS_PATH = cfg
+            try:
+                win = g.PlotWindow(root, p, preselect=['A_run'])
+            finally:
+                g.OPTIONS_PATH = real
+            assert [n for n, _m in win.group_list()] == ['CB'], \
+                win.group_list()
+            assert win.current_opts()[0]['groups'] == opts['groups']
+        finally:
+            _shut(root)
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
 
 
 def test_the_taller_draw_column_still_measures_and_still_scrolls():

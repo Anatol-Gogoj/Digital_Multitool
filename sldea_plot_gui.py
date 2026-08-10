@@ -20,12 +20,14 @@ the same tidy CSV beside the same PNG. The headless paths are untouched;
 Two deliberate shapes:
 
   * Preview DRAWS ONLY. Nothing reaches the disk until Export, which names
-    both files it wrote in the window. A preview that quietly littered the
+    the files it wrote in the window. A preview that quietly littered the
     run folder with PNGs would be worse than the CLI, not better.
-  * Export always writes the tidy per-snapshot CSV beside the PNG. That
-    CSV is the figure's evidence -- it is what makes a figure traceable
-    back to its numbers -- so there is no "just the picture" option here
-    (sldea_plot.export enforces it for both front ends).
+  * Export always writes the tidy per-snapshot CSV beside the figure.
+    That CSV is the figure's evidence -- it is what makes a figure
+    traceable back to its numbers -- so there is no "just the picture"
+    option here, whichever format the picture is in (sldea_plot.export
+    enforces it for both front ends; `#314` made the format and the dpi
+    the operator's choice and left that rule untouched).
 
 Two things the window remembers or reaches for, both additive:
 
@@ -59,7 +61,8 @@ Usage:
 
 Pick several runs, choose area / current / power, tick what to draw.
 Double-click a point on the figure to open that frame in Edge Review.
-Export writes the 300 dpi PNG and its tidy per-snapshot CSV together.
+Export writes the figure, its tidy per-snapshot CSV and its figspec
+sidecar together -- PNG (at a dpi you set, 300 by default) or SVG.
 
 The draw options are remembered PER PARENT FOLDER in a per-user file --
 ~/.local/share/scpi_control/sldea_plot_gui.json, or the same name under
@@ -233,12 +236,19 @@ OPTIONS_FALLBACK = os.path.join(os.path.expanduser('~'), '.cache',
 # a stale set would quietly plot the wrong batch.
 REMEMBERED = ('mode', 'prepost', 'mean', 'bands', 'breakdown', 'vs_area',
               'logx', 'logy', 'marker_key', 'subplots', 'cadence_guard',
-              'aggregate', 'aggregate_exact')
+              'aggregate', 'aggregate_exact', 'fmt', 'dpi')
 
 # The remembered options that are NAMES rather than flags, each with the
 # vocabulary sldea_plot validates it against -- read from sldea_plot so a
 # value the engine has retired can never survive a round trip here.
-ENUM_OPTIONS = {'mode': sp.MODES, 'subplots': sp.SUBPLOTS}
+ENUM_OPTIONS = {'mode': sp.MODES, 'subplots': sp.SUBPLOTS,
+                'fmt': sp.FORMATS}
+
+# ...and the ones that are NUMBERS (`#314` brought the first), each with
+# the engine's own checker. Same principle as ENUM_OPTIONS: the window
+# does not restate a range sldea_plot already owns, so a hand-edited
+# config cannot smuggle a dpi past the refusal make_opts would give it.
+NUMERIC_OPTIONS = {'dpi': sp.check_dpi}
 
 
 def options_key(parent):
@@ -263,8 +273,17 @@ def _clean_options(d):
     for k, allowed in ENUM_OPTIONS.items():
         if d.get(k) in allowed:
             out[k] = d[k]
+    for k, check in NUMERIC_OPTIONS.items():
+        if k in d:
+            value, err = check(d[k])
+            # `None` reads as 'unset' to the checker and would silently
+            # reinstate the default; a key that is PRESENT and unusable is
+            # dropped like any other unrecognizable entry
+            if err is None and d[k] is not None:
+                out[k] = value
     for k in REMEMBERED:
-        if k not in ENUM_OPTIONS and isinstance(d.get(k), bool):
+        if (k not in ENUM_OPTIONS and k not in NUMERIC_OPTIONS
+                and isinstance(d.get(k), bool)):
             out[k] = d[k]
     if isinstance(d.get('out_dir'), str) and d['out_dir'].strip():
         out['out_dir'] = d['out_dir']
@@ -598,6 +617,30 @@ DRAW_TIPS = {
         "because current and power draw a single panel."),
 }
 
+# Hover text for the two options that describe the FILE rather than the
+# drawing (`#314`). Their own dict because they belong to the Export box
+# and never touch the preview -- the canvas is at screen dpi and stays
+# there whichever of these is set.
+EXPORT_TIPS = {
+    'fmt': (
+        "PNG is the default and what every figure in the handoff is. SVG "
+        "is vector — enlarge it or re-letter it without touching the "
+        "data. Its size follows the number of drawn ELEMENTS rather than "
+        "the pixel count, which is why the confirmation names it: "
+        "measured 2026-08-10, seven runs with pre/post and the mean came "
+        "to 322 kB against the same figure's 310 kB PNG, but a denser one "
+        "has no such promise. The tidy CSV and the figspec are written "
+        "for both."),
+    'dpi': (
+        f"Raster resolution, {sp.DEFAULT_DPI} by default, "
+        f"{sp.DPI_MIN}–{sp.DPI_MAX}. Outside that range it is REFUSED "
+        f"rather than quietly clamped — a typed '30000' asks for a render "
+        f"that looks exactly like a hang. Greyed under SVG because a "
+        f"vector file has no dots per inch to set: the backend pins it to "
+        f"72 and scales in user units, so a number here could only ever "
+        f"be one that did nothing."),
+}
+
 
 # ---------------------------------------------------------------------------
 # the controls column (`#271`)
@@ -802,6 +845,12 @@ class PlotWindow:
         self.v_subplots = tk.StringVar(value=o['subplots'])
         self.v_title_first = tk.StringVar(value=o['title_first'] or '')
         self.v_title_second = tk.StringVar(value=o['title_second'] or '')
+        # the `#314` export options. Strings, both of them: the format is
+        # a name and the dpi is what an operator TYPES, so it is validated
+        # by the engine (sp.check_dpi, through current_opts) rather than
+        # by an IntVar that raises TclError on a half-typed number.
+        self.v_fmt = tk.StringVar(value=o['fmt'])
+        self.v_dpi = tk.StringVar(value=str(o['dpi']))
         chosen_out = out_dir or mem.get('out_dir')
         self.v_out = tk.StringVar(
             value=chosen_out or default_out_dir(parent_dir))
@@ -985,11 +1034,44 @@ class PlotWindow:
             df, "Panel 1:", self.v_title_first, DRAW_TIPS['title_first'])
         self.e_title_second = self._title_row(
             df, "Panel 2:", self.v_title_second, DRAW_TIPS['title_second'])
-        self._sync_enabled()
 
         # --- export
-        xf = ttk.LabelFrame(left, text="Export (PNG + tidy CSV)", padding=6)
+        xf = ttk.LabelFrame(left, text="Export (figure + tidy CSV)",
+                            padding=6)
         xf.pack(fill=tk.X, pady=(8, 0))
+        # format and resolution (`#314`) sit HERE and not in Draw: they
+        # change the file, never the picture, and the preview canvas is at
+        # screen dpi whatever they say. One row for both, because the Draw
+        # column is what `#271`'s measured floor is taken from.
+        frow = ttk.Frame(xf)
+        frow.pack(fill=tk.X, pady=(0, 4))
+        lbl_fmt = ttk.Label(frow, text="Format:")
+        lbl_fmt.pack(side=tk.LEFT)
+        add_tooltip(lbl_fmt, EXPORT_TIPS['fmt'])
+        self.rb_fmt = {}
+        for name in sp.FORMATS:
+            rb = ttk.Radiobutton(frow, text=name.upper(), value=name,
+                                 variable=self.v_fmt,
+                                 command=self._format_changed)
+            rb.pack(side=tk.LEFT, padx=(6, 0))
+            add_tooltip(rb, EXPORT_TIPS['fmt'])
+            self.rb_fmt[name] = rb
+        self.lbl_dpi = ttk.Label(frow, text="dpi:")
+        self.lbl_dpi.pack(side=tk.LEFT, padx=(12, 0))
+        # a Spinbox says the range is bounded before anything is typed;
+        # the refusal outside it is still the engine's, since the box can
+        # be typed into freely
+        self.sb_dpi = ttk.Spinbox(frow, from_=sp.DPI_MIN, to=sp.DPI_MAX,
+                                  increment=50, width=6,
+                                  textvariable=self.v_dpi,
+                                  command=self._show_targets)
+        self.sb_dpi.pack(side=tk.LEFT, padx=(4, 0))
+        # NO redraw binding, deliberately: the dpi cannot change the
+        # preview, and a redraw per keystroke would blank the figure on
+        # the '5' of '500' while the number is still half typed
+        self.sb_dpi.bind('<KeyRelease>', lambda _e: self._show_targets())
+        for w in (self.lbl_dpi, self.sb_dpi):
+            add_tooltip(w, EXPORT_TIPS['dpi'])
         orow = ttk.Frame(xf)
         orow.pack(fill=tk.X)
         ttk.Label(orow, text="Folder:").pack(side=tk.LEFT)
@@ -1058,6 +1140,11 @@ class PlotWindow:
         # pan and zoom rectangles, and launching a program on a stray
         # click while someone is dragging a zoom box would be hostile.
         self.canvas.mpl_connect('button_press_event', self.on_click)
+
+        # LAST: the greying rules span both boxes now (`#314` greys the dpi
+        # from the format radios in the Export frame), so the first sync
+        # can only run once every widget it touches exists.
+        self._sync_enabled()
 
     def _title_row(self, master, label, var, tip=None):
         """One 'Label: [entry]' heading row in the Draw column. -> the
@@ -1208,6 +1295,21 @@ class PlotWindow:
         live(self.e_title, first_drawn)
         live(self.e_title_first, first_drawn)
         live(self.e_title_second, area and which != 'first')
+        # the dpi is dots per INCH of raster, and SVG has no raster: the
+        # backend pins the figure to 72 dpi and scales in user units, so
+        # _savefig does not pass one at all. Greyed rather than silently
+        # ignored, which is what `#314` asked for, and greyed rather than
+        # hidden for the reason every other rule here is (`#314`).
+        raster = self.v_fmt.get() != 'svg'
+        live(self.sb_dpi, raster)
+        live(self.lbl_dpi, raster)
+
+    def _format_changed(self):
+        """PNG <-> SVG: the dpi field goes live or grey, and the target
+        filenames change extension. No redraw -- the preview canvas is at
+        screen dpi and neither option can reach it."""
+        self._sync_enabled()
+        self._show_targets()
 
     def _toggled(self):
         """A control whose own state changes what ELSE is live: re-sync
@@ -1262,7 +1364,16 @@ class PlotWindow:
             # mode switch should produce.
             subplots='both' if which == 'second' and not area else which,
             title_first=self.v_title_first.get().strip() or None,
-            title_second=self.v_title_second.get().strip() or None)
+            title_second=self.v_title_second.get().strip() or None,
+            # `#314`. NOT neutralised under SVG the way vs_area and
+            # subplots are above: a dpi beside a vector format is inert,
+            # not illegal, and make_opts takes the pair happily. Keeping
+            # the typed value means the figspec records what was chosen
+            # and `--from-spec --format png` re-renders at it, instead of
+            # at a default nobody asked for. A blank box is the absence of
+            # a request, so check_dpi reads it as the default; a bad or
+            # out-of-range one is REFUSED here, in the CLI's own words.
+            fmt=self.v_fmt.get(), dpi=self.v_dpi.get())
 
     # -- drawing -----------------------------------------------------------
 
@@ -1437,14 +1548,26 @@ class PlotWindow:
             self._show_targets()
 
     def _show_targets(self):
-        """Name both files BEFORE the click. The CLI prints what it wrote;
-        a window that only said 'Saved' would be a step backwards."""
+        """Name every file BEFORE the click. The CLI prints what it wrote;
+        a window that only said 'Saved' would be a step backwards.
+
+        It is also where a refused dpi surfaces while it is being typed
+        (`#314`): the message goes here rather than into the figure pane,
+        because the preview is not what an unusable dpi spoils."""
         opts, err = self.current_opts()
         mode = self.v_mode.get() if err else opts['mode']
-        png, csvp = sp.output_paths(self.v_out.get(), self.v_stem.get(), mode)
-        self.lbl_targets.config(
-            text=f"→ {os.path.basename(png)}\n→ {os.path.basename(csvp)}")
-        return png, csvp
+        fmt = self.v_fmt.get() if err else opts['fmt']
+        if fmt not in sp.FORMATS:                  # only via a stale config
+            fmt = sp.DEFAULT_FORMAT
+        img, csvp = sp.output_paths(self.v_out.get(), self.v_stem.get(),
+                                    mode, fmt)
+        lines = [f"→ {os.path.basename(img)}",
+                 f"→ {os.path.basename(csvp)}",
+                 f"→ {os.path.basename(sp.figspec_path(img))}"]
+        if err:
+            lines.append(f"REFUSED: {err}")
+        self.lbl_targets.config(text='\n'.join(lines))
+        return img, csvp
 
     def _export(self):
         opts, err = self.current_opts()
@@ -1463,7 +1586,7 @@ class PlotWindow:
             return
         warns = list(self._warns)
         try:
-            png, csvp = sp.export(self._prepared, opts, out_dir,
+            img, csvp = sp.export(self._prepared, opts, out_dir,
                                   self.v_stem.get(), warns.append)
         except OSError as e:
             messagebox.showerror("Plot", f"Could not write the figure:\n{e}")
@@ -1472,9 +1595,14 @@ class PlotWindow:
         self.remember_now()          # they committed to these options
         messagebox.showinfo(
             "Exported",
-            f"Figure (300 dpi) and its tidy per-snapshot CSV:\n\n"
-            f"{png}\n{csvp}\n\nThe CSV is the figure's evidence — keep the "
-            f"pair together.")
+            # the format, the dpi where it means anything, and the SIZE --
+            # an SVG's is the one thing about an export that does not
+            # follow from the settings, since it counts drawn elements
+            # rather than pixels (`#314`, and describe_output has the
+            # measurement)
+            f"Figure ({sp.describe_output(img, opts)}) and its tidy "
+            f"per-snapshot CSV:\n\n{img}\n{csvp}\n\nThe CSV is the "
+            f"figure's evidence — keep the pair together.")
 
 
 # ---------------------------------------------------------------------------

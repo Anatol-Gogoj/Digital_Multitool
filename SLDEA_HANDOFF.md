@@ -13,6 +13,281 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## Cadence guard: no corpus run can support a point-in-time breakdown mark, and the default flip is Anatol's call (2026-08-09)
+
+**TL;DR:** the breakdown X on a cross-run figure says "the device broke
+*here*". `#264` asks whether that claim is honest when the run only
+measured current every few seconds. Measured today on the 13-run
+campaign corpus, read-only: **zero runs carry a `telemetry.csv`**, and
+of the **854** gaps between snapshots the smallest is **1.80 s** — not
+one gap is at or under the **1 s** threshold the code uses, so **all 13
+runs are coarse**. The guard that annotates this already ships and is
+**OFF by default**; only the default is open. Two things the owner
+should weigh before flipping it: it restyles **18 X marks across the 3
+runs that carry any**, and the plot window's remembered-options file
+would silently keep the old behaviour for anyone who has opened that
+window before, while a colleague on a clean machine sees the new one.
+**No decision is made here — this entry is the evidence for one.** My
+recommendation: keep it OFF until the first telemetry-era captures
+exist, and if it is ever flipped, ship the memory migration in the same
+change.
+
+**Observation → decision.** Everything below was measured today against
+`Upload 20260804\SLDEA_data (1)`, read-only, through the plotter's own
+loaders (`sp.load_run`, `sp.run_cadence`) so the numbers are the ones
+the figure would use, not a re-implementation.
+
+*What the corpus actually sampled.* 13 run folders, each with a
+`data.csv`; **0 of 13 carry `telemetry.csv`** (`find -iname telemetry*`
+returns nothing anywhere under the upload). So every run's cadence falls
+to the fallback branch of `run_cadence` (`sldea_plot.py:350-379`): the
+median gap between snapshot timestamps. Corpus-wide there are **854**
+positive gaps — **min 1.801 s, median 8.055 s, mean 25.99 s, max
+57.243 s** (min in `SLDEA_20260723_155425`, max in
+`P3_2_2.5mL_20260728`). Against `CADENCE_COARSE_S = 1.0`
+(`sldea_plot.py:347`, justified there as `sldea_profile`'s slowest
+guaranteed telemetry kV/µA period, `sldea_profile.py:456`): **0 of 854
+gaps fall at or under it, 854 of 854 above.** The issue's "~8 s apart"
+is right on the nose as a corpus median; it is also the optimistic end.
+
+*Per-run medians, and why the median is itself misleading here.* Five
+07-23-era runs sit at **4.59 / 5.91 / 6.14 / 7.10 / 7.17 s**; the eight
+07-28/07-29 runs sit at **32.48–32.53 s**. Median of the 13 run
+medians: **32.49 s**; spread **4.59 s to 32.53 s**, a 7× range that a
+single figure can and does mix. But the 32.5 s figure is an artifact
+worth knowing about before it is printed on a caption: those runs'
+spacing is strictly **bimodal** — alternating ~8 s and ~57 s
+(`P3_1_2.5mL_20260728`'s first gaps: 7.20, 56.83, 8.02, 57.07, 7.94,
+56.83…), the pre-ramp/post-ramp pair then the ramp-settle pause.
+Corpus-wide **534 gaps are ≤ 10 s and 320 are ≥ 30 s, with nothing at
+all between 20 s and 30 s.** A 50/50 bimodal split puts the median in
+the empty middle: **no run ever waited 32.5 s for anything.** The guard
+is not wrong to call these runs coarse — every gap is far above 1 s
+either way — but `_cadence_note`'s "every 32.5 s"
+(`sldea_plot.py:392-398`) states a spacing that does not occur. If the
+default is ever flipped, that caption should quote the worst gap or the
+pair, not the median; as an opt-in it is a smaller problem, which is one
+more reason the two questions are separable.
+
+*Where the marks actually are.* Confirmed (X-drawing) breakdown flags
+exist in **3 of 13 runs, all from the 07-23 era**:
+`SLDEA_20260723_152205` rows 45-48, `SLDEA_20260723_155425` row 48,
+`SLDEA_20260723_233451` rows 56-68 — **18 flagged rows, hence 18 X
+marks**, at cadences of 7.17 s, 4.59 s and 6.14 s. Three further runs
+carry advisories, which draw nothing: `P3_5_2.5mL_0729` row 46
+(`collapse? area -36% (no current signature)`), `P3_7_2.3mL_20260729`
+row 64 and `SLDEA_20260729_104531` row 53 (both `transient discharge?`).
+The remaining seven runs are clean. One stale-brand warning still fires,
+as expected and already documented: P3_5's 35 branded rows are not
+current-confirmed.
+
+*`#264`'s own example does not reproduce, and the entry should say so.*
+The issue names "P3_6's advisory event … deviation +0.0 µA at the event"
+as its recorded case. **`P3_6_2.5mL_20260729` has no confirmed flags, no
+advisories, and no breakdown branding at all**: 81 parseable µA rows,
+median −16.00 µA, worst deviation 14.62 µA against a 20 µA threshold,
+zero `_BREAKDOWN` frame names, zero notes mentioning breakdown. The
+example is real but **misattributed — it is `P3_5_2.5mL_0729` row 46**,
+whose current reads exactly −16.00 µA, i.e. **deviation +0.00 µA**, while
+the area collapses 36 % (609028 → 364384 px across rows 44-46). That row
+also happens to sit at the far end of a **57.01 s** gap (12:14:29.854 →
+12:15:26.864), which makes it a *better* illustration of the issue's
+point than the run it was filed under: an area collapse whose current
+channel was working, said nothing, and had a minute of unobserved time
+in front of it. `#264`'s argument survives intact; only the run name in
+its body is wrong and should be corrected there.
+
+*The mechanism, as shipped (merged via PR #279 / #284, opt-in).* Nothing
+below changed today.
+Threshold: `CADENCE_COARSE_S = 1.0` — `sldea_plot.py:347`.
+Detection: `run_cadence` — `sldea_plot.py:350-379`; a present
+`telemetry.csv` short-circuits to 0.5 s (`TELEMETRY_MAX_HZ`,
+`sldea_profile.py:451`) without parsing the file, else the median
+snapshot gap, else `(None, 'unknown')` — and an unknown cadence is
+deliberately **not** coarse (`coarse_cadence`, `sldea_plot.py:382-389`).
+Rendering: the mark is **annotated, never suppressed** — hollow white
+face with a coloured edge (`_cross_marks`, `sldea_plot.py:603-616`) plus
+a caption naming the spacing (`_cadence_caption`,
+`sldea_plot.py:559-570`), wired into both draw paths at
+`sldea_plot.py:731` and `sldea_plot.py:934`, each only inside
+`if opts['breakdown']`.
+Engine default: `make_opts(..., cadence_guard=False)` —
+`sldea_plot.py:1123`, stored at `sldea_plot.py:1158`.
+CLI: `--cadence-guard` in `_BOOL_FLAGS` at `sldea_plot.py:1444`, wired
+at `sldea_plot.py:1541`.
+GUI: the indented child checkbox "…and flag coarse current sampling" at
+`sldea_plot_gui.py:902-906`, enabled only while breakdown marks are on
+(`sldea_plot_gui.py:1149`), initialised at `sldea_plot_gui.py:778`,
+tooltip at `sldea_plot_gui.py:561-566` — which already says in as many
+words that the default "is an open decision for the bench (`#264`), not
+a rendering preference".
+
+*Consequence 1 — a flip restyles every figure this suite has drawn a
+mark on.* **13 of 13 corpus runs are coarse**, so under a flipped
+default no historical run escapes: every one of the **18 X marks** in
+the 3 marked runs goes hollow, every figure containing any of those runs
+gains the sampling caption, and the console/window gains a warning line
+per coarse run. Figures drawn only from the other 10 runs are unchanged
+in the marks (they have none) but still gain the caption whenever
+breakdown marks are on and a marked run is present. This is
+presentation of the measurement chain, not a bug fix, which is why it is
+a bench decision. One partial mitigation already exists and is worth
+knowing: the figspec sidecar records the option explicitly — the corpus's
+one exported figure, `plots\sldea_plot_area.figspec.json`, carries
+`"cadence_guard": false` (and `"breakdown": false`), and `--from-spec`
+prefers the spec's value over the built-in default
+(`_cli_opts`, `sldea_plot.py:1499-1521`), so **any figure re-rendered
+from its spec keeps the style it was published with.** Only fresh
+renders change.
+
+*Consequence 2 — the persistence trap, and it is the real hazard.*
+Precedence is **defaults < remembered < explicit** (`sldea_plot_gui.py:746-756`,
+and the module docstring at `sldea_plot_gui.py:35-37`). `cadence_guard`
+is in `REMEMBERED` (`sldea_plot_gui.py:234-235`), and `save_options`
+writes the **whole** remembered set every time —
+`entry = {k: opts[k] for k in REMEMBERED if k in opts}`,
+`sldea_plot_gui.py:311` — from `_closing`, i.e. on **every window close**
+(`sldea_plot_gui.py:1115`) and on every export
+(`sldea_plot_gui.py:1420`). So anyone who has opened the plot window
+once already has a per-parent-folder `cadence_guard: false` on disk in
+`~/.local/share/scpi_control/sldea_plot_gui.json`. Flip the engine
+default and **that stored `false` wins** — `o.update(...)` at
+`sldea_plot_gui.py:753` applies the remembered value over the default,
+and `explicit_opts` (`sldea_plot_gui.py:339-354`) cannot rescue it: it
+derives "explicit" by diffing against `make_opts()`'s defaults, so a CLI
+invocation sitting on the new default is indistinguishable from one that
+never mentioned the option. Result: the operator who has used the window
+before sees the old marks, a colleague on a fresh machine sees hollow
+ones, **and neither is told they disagree** — the worst failure mode for
+a figure that goes into a report. Any flip therefore needs the memory
+handled in the same change: bump the options-file `version`
+(`sldea_plot_gui.py:325`) and drop or migrate stale `cadence_guard`
+keys, or move the key out of `REMEMBERED` entirely.
+
+*One implementation note for whoever executes a flip.* It is two edits,
+not one. `_cli_opts`'s `on()` helper hardcodes its own fallback —
+`return True if flag in flags else bool(base.get(key, False))`,
+`sldea_plot.py:1521` — and `_cli_opts` always passes an explicit value
+into `make_opts`, so changing `sldea_plot.py:1123` alone would flip the
+GUI and library callers while leaving the CLI on the old behaviour. A
+real flip turns `--cadence-guard` into `--no-cadence-guard`
+(`_BOOL_FLAGS`, `sldea_plot.py:1444`) and moves the wiring at
+`sldea_plot.py:1541` from `on(...)` to `off(...)`, matching how
+`--no-bands` / `--no-breakdown` / `--no-marker-key` are already done.
+
+*Options on the table.* **(a) Leave OFF, revisit when telemetry-era runs
+exist** — costs nothing, keeps every published figure byte-identical,
+and defers the call to a point where the guard actually discriminates
+between runs instead of flagging all of them. **(b) Flip ON now** —
+maximally honest about the corpus, but every mark this suite has ever
+drawn restyles at once, on evidence that is uniform (13/13 coarse) and
+therefore carries no comparative information yet; needs the memory
+migration and the two-place CLI edit above. **(c) Flip ON and fix the
+caption first** — same as (b) plus quoting the real spacings rather than
+a bimodal median that names an interval no run used. **(d) Widen the
+threshold** (say to 2 s so a 2 Hz sidecar is comfortably inside) — does
+not change today's answer, since the smallest gap in the entire corpus
+is 1.80 s and all 13 runs stay coarse either way; worth noting only so
+nobody proposes it as an escape.
+
+*Recommendation, for Anatol to accept or overrule.* **(a) now, then (c)
+when telemetry-era captures land.** While 13 of 13 runs are coarse the
+guard is a constant, and a constant annotation on every figure teaches a
+reader nothing — its value appears the moment some runs are 0.5 s and
+others 32 s and the figure has to distinguish them. Until then the
+opt-in flag, the tooltip and this entry carry the honesty; nobody is
+being misled by a default that has been documented as provisional since
+the mechanism merged. Two things to do independently of the default,
+both cheap and neither a behaviour change: **correct `#264`'s body**
+from P3_6 to `P3_5_2.5mL_0729` row 46, and note the bimodal-median
+caption problem on the same issue so a future flip does not print
+"every 32.5 s" on a figure. (Measurements this session, read-only
+against the campaign corpus; scripts kept in the session scratch.
+Decision itself NOT taken — `#264` stays open and stays in
+`PROJECT_HANDOFF.md`'s parked decisions.)
+
+## Cross-run aggregate: the band means a different thing at each n, and the common grid is interpolated by default (2026-08-09)
+
+**TL;DR:** `#268` wants a mean curve across several runs with a shaded
+band. Decision, from Anatol: the band is the **standard error of the
+mean** (σ/√n) when averaging a family of runs, and the **calibrated
+±1–2 % budget** when averaging one run's pre/post pair. Pre/post drawn
+as separate lines keeps no band, which is what already ships. Runs are
+put on a **common grid by interpolation by default**, with exact-key
+pooling behind a toggle. The aggregate stops at the first breakdown.
+None of this is implemented yet — this entry is the policy the
+implementation has to satisfy.
+
+**Observation → decision.** Measured today on the five poolable P3-family
+runs, read-only from the campaign corpus, using A/A₀ so the pre-2026-07-28
+`active_area_mm2` scale bug divides out. (P3_7 carries no row tagged
+`baseline`, so it has no A₀ and drops out of every aggregate — five runs
+pool, not six. Worth knowing before any *n* is quoted in print.)
+
+*Why the family band is SEM, not the budget.* Per-level spread across
+runs is SD median 4.94 %, max 15.63 %; the corresponding SEM is median
+2.21 %, max 6.99 %. SEM exceeds the ±2 % end of the budget at **23 of 40
+levels, every one of them above 4 kV**. Below 4 kV the two are the same
+size (SEM 0.87–2.21 %) and either would look alike; above it the
+instrument stops being the limit and a budget band would overstate
+confidence in the mean by up to ~3.5×, exactly where the physics gets
+interesting. The line drawn is the mean, so the band belongs to the
+mean.
+
+*Why the pre/post pair takes the budget instead.* Two reasons, and the
+second is the real one. First, n = 2 is one degree of freedom — a SD
+from a pair carries ~76 % relative uncertainty on itself, so a
+calibrated external term beats it. Second, and decisive: the pre/post
+difference **is not a sampling error**. Across 200 complete pairs the
+direction is consistent in 4 or 5 of 5 runs at nearly every level, and
+it flips sign at breakdown — post-ramp reads *smaller* than pre-ramp
+below (−0.36 % to −1.77 %) and *larger* above (+1.11 % to +3.01 %).
+Treating that spread as random error would report relaxation as noise.
+This also confirms the existing suppression at `sldea_plot.py:711`: with
+pre/post drawn apart, the difference between the two lines is the
+information and a band would compete with it.
+
+*Why the aggregate stops at first breakdown.* Mean A/A₀ climbs to 2.041
+at 5.25 kV and then collapses to ~1.18–1.27 for the rest of the
+staircase. Past that point the average mixes intact and collapsed
+devices, which is not a physical quantity. The SD signature confirms the
+mechanism rather than merely suggesting it: spread spikes to ~15 %
+through the transition, then falls again at 5.75 kV as the runs
+re-agree on having collapsed.
+
+*Why the grid is interpolated by default.* Eight runs step 0.25 kV; one
+steps 0.2 and shares only eight levels with them. Exact-key pooling
+drops that run at 33 of 41 levels, so *n* alternates 4/5 level to level
+and the SEM band steps discontinuously for a reason that is an artifact
+of grid choice, not of the devices. Interpolation keeps *n* uniform.
+Three guardrails make it honest, and an implementation without them
+does not satisfy this decision: **never extrapolate** past a run's own
+measured range (the 0–5 kV and 0–6 kV runs must leave the aggregate
+above their maxima, not be extended into it); **never interpolate across
+a breakdown event**, since the curve is not smooth there — which the
+first-breakdown cap already mostly enforces; and **record per level how
+many contributing values were measured versus interpolated**, and
+surface it, because a level carried by one measured run and four
+interpolated ones is not the same evidence as five measured ones.
+Exact-key pooling stays available as a toggle for anyone who wants only
+real readings.
+
+*One thing this entry does NOT do.* The SEM figures above are an
+empirical descriptor of these five runs — one electrode family, two
+dates — not a budget term. `SLDEA_MEASUREMENT.md:196-201` already sets
+the house rule for this ("do not put a per-run spread in the budget…
+one operator, one disc, one method: that is a first data point, not a
+distribution"); that warning is about calibration repeatability, so it
+does not block SEM as a *band*, but the same logic applies and nobody
+should promote these numbers into the budget later. Note also that the
+budget for A/A₀ is **±1–2 %** (`SLDEA_MEASUREMENT.md:22`), a range, not
+the flat ±2 % that shorthand elsewhere has used; a figure caption should
+quote the range. The electrode-family grouping half of `#268` is
+untouched here and stays blocked — the `Electrode family:` field it keys
+on is carried by zero of the 13 corpus runs. (Decision Anatol,
+measurements in the 2026-08-09 session; both scripts kept in that
+session's scratch.)
+
 ## setup.txt stays a text document; structure, if ever needed, arrives as a sidecar (2026-08-08)
 
 **TL;DR:** Anatol asked whether `setup.txt` should become JSON or CSV.

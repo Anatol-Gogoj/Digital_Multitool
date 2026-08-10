@@ -85,6 +85,33 @@ def _fake_run(parent, name, processed=True, csv_name='data.csv'):
     return d
 
 
+class _Skip(Exception):
+    """Raised by a case this desktop cannot host. Counted, never silent."""
+
+
+def _need_room(w, col, tall):
+    """Skip unless the window actually GOT the height the case asked for.
+
+    Tk clamps a geometry request to the work area silently. On a 1573x841
+    desktop the window stopped at 822 px, the controls really did still
+    overflow, and `assert not col.bar_shown` failed -- reported for a week
+    as a fifth "environmental" suite failure when the code was correct and
+    the SCREEN was too short (diagnosed 2026-08-09).
+
+    Two cases share this premise, so guarding only one leaves the other
+    failing identically. The Draw column needs roughly `tall + 120` of
+    window, which wants ~1150 px of screen once the title bar and taskbar
+    are taken -- note that the 1920x1080 vm-setup asks for does NOT clear
+    it.
+    """
+    have = col._cv.winfo_height()
+    if have < tall:
+        raise _Skip(
+            f'desktop too short: the column needs {tall}px and the window '
+            f'could only give it {have}px (screen '
+            f'{w.win.winfo_screenwidth()}x{w.win.winfo_screenheight()})')
+
+
 def test_importing_the_module_opens_no_window():
     # It is imported by test collectors, by sldea_plot --gui and by the
     # app's button. Only launch() may create a Tk root.
@@ -410,6 +437,7 @@ def test_the_controls_column_scrolls_only_when_it_overflows():
         tall = col.body.winfo_reqheight()
         assert tall > 200, 'fixture built no controls to overflow'
         w.resize(f'1000x{tall + 120}')
+        _need_room(w, col, tall)
         assert not col.bar_shown, 'bar shown with room to spare'
         assert not col.bar.winfo_ismapped()
         w.resize(f'1000x{max(g.MIN_H, tall - 200)}')
@@ -1252,6 +1280,7 @@ def test_the_taller_draw_column_still_measures_and_still_scrolls():
         assert col.natural_width() >= col.body.winfo_reqwidth()
         # appears on genuine overflow, goes away with room -- and rewinds
         w.resize(f'1000x{tall + 120}')
+        _need_room(w, col, tall)
         assert not col.bar_shown, 'bar shown with room to spare'
         assert not col.bar.winfo_ismapped()
         w.resize(f'1000x{max(g.MIN_H, tall - 150)}')
@@ -1265,10 +1294,20 @@ def test_the_taller_draw_column_still_measures_and_still_scrolls():
 
 def _run():
     names = [n for n in sorted(globals()) if n.startswith('test_')]
+    ran = skipped = 0
     for n in names:
-        globals()[n]()
+        try:
+            globals()[n]()
+        except _Skip as why:
+            skipped += 1
+            print('skip', n, f'({why})')
+            continue
+        ran += 1
         print('ok ', n)
-    print(f"{len(names)} tests passed")
+    tail = f"{ran} of {len(names)} tests ran"
+    if skipped:
+        tail += f" ({skipped} skipped, desktop too short)"
+    print(tail)
 
 
 if __name__ == '__main__':

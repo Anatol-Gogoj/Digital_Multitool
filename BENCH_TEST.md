@@ -1,4 +1,4 @@
-# Bench test checklist — signal gen (§A–§L, historical) + SLDEA telemetry/watchdog (§M–§O, current)
+# Bench test checklist — signal gen (§A–§L, historical) + SLDEA telemetry/watchdog (§M–§O) + fiducial-ring experiment (§P, current)
 
 **Setup:** BNC from sig gen **CH1 → scope CH1** (1 MΩ input). ~15 min total.
 Launch: `.venv/bin/python gui.py`
@@ -218,6 +218,268 @@ not depend on it and should be done first.
    - [ ] the ramp goes to 0 promptly and the log says `aborted`
    - [ ] `telemetry.csv` is complete up to the abort
 5. If anything trips the watchdog, keep everything — the run folder is then the first live-recorded breakdown.
+
+## P. SLDEA fiducial contrast ring — the one-visit experiment (`#194`) — ⚡ P3–P6 REQUIRE HV ⚡
+
+> **P1 and P2 are dry (HV off) and they come first on purpose** — they are
+> the two cheap checks that can kill the whole experiment, and running
+> them after the Trek is up wastes the visit. **P3 onward energizes to
+> 10 kV**: authorized operator, Linux bench, and a live run is ended with
+> **■ Abort**, exactly as §O.
+>
+> **Never a metallic, silver, graphite or otherwise conductive ink.** The
+> ring lands *on* the electrode boundary; a conductive one is a
+> breakdown path at 10 kV and a second electrode in the measurement.
+> Water-based pigment paint pen only. If the pen's barrel does not say
+> what it is, do not use it.
+
+**What this gates.** Whether low-CNT / transparent devices
+(`P3_7_2.3mL_20260729` and anything cast like it) are measurable *at
+all*, and how much of `#198` is left to do. It is an experiment, not a
+regression check: **no app change is involved and none is needed.** The
+detector measures an ink step at the electrode boundary — it has no
+opinion about whether that ink is CNT or pigment.
+
+### P0. The numbers the ring has to clear
+
+A ring only helps if it clears the detector's own gates. These are the
+gates, in the shipped code:
+
+| Gate | Where | Rule |
+|---|---|---|
+| Resting-disc step floor (the px→mm anchor) | `sldea_edge.py:3293` | a ray is kept only if `median(outs) - median(ins) >= 4.0` gray, and **≥ 40 of 360 rays** must survive (`sldea_edge.py:3301`) |
+| Responding-disc adaptive cut (`disc-fit`) | `sldea_edge.py:2254` | `cut = max(3.0, 0.35 * median(step))` over the rays that already cleared a `> 2.0` gray pre-filter (`sldea_edge.py:2249`); needs ≥ 40 points and ≥ 90 open sectors (`sldea_edge.py:2274`) |
+| Audit boundary (the accept/refuse cross-check) | `sldea_edge.py:3016` | the same `max(3.0, 0.35 * median(step))` rule |
+| Contrast term inside `conf` | `sldea_edge.py:2310` | `contrast = median(step) / 12.0`, clipped to 1 — **12 gray levels saturates it**; it is 0.30 of `conf` (`sldea_edge.py:2314`) |
+
+Measured, not assumed:
+
+- **`P3_7_2.3mL_20260729` fails on the first gate.** Running the shipped
+  `baseline_disc` on its baseline frame returns the refusal *"only 19 of
+  360 radial rays found a clean dark→light ink step (need 40) — the disc
+  edge is too faint"*. That is the whole of `#194` in one sentence, and
+  it is why the run's `sldea_diag.txt` header reads
+  `resting disc : NOT FOUND` and its mm figures fall back to an
+  *activated* frame.
+- **A device that works clears it comfortably.** `P3_2_2.5mL_20260728`
+  keeps 204 edge points at conf 0.871, and its per-ray step measured at
+  the fitted centre has **median ≈ 11.7 gray** (p25 8.3, p75 14.6).
+  `P3_6_2.5mL_20260729`: 178 points, median ≈ 7.0 gray.
+- **Sensor noise on these frames is σ ≈ 3.15 gray levels**
+  (`P3_7`'s own `sldea_diag.txt`, border-band upper bound). So the 4.0
+  floor is only ~1.3 σ — passing it barely is not passing it.
+
+**Therefore the ring must produce a sustained dark→light step of ≈ 12–25
+gray levels, uniformly around the full circumference.**
+
+- **≥ 12** because that saturates the contrast term at
+  `sldea_edge.py:2310`, sits at ~4 σ of the measured sensor noise, matches
+  the best working device in the corpus, and leaves margin against `#193`:
+  at the worst photometric gain that campaign measured (0.71) a 12-gray
+  step still reads 8.5 — twice the 4.0 floor. At `P3_7`'s actual step
+  there is no margin at all, which is why `#193` and `#194` bind together
+  on exactly these devices.
+- **Not much above ~25, and uniformity beats depth.** The cuts at
+  `sldea_edge.py:2254` and `:3016` are a *fraction of the scene's own
+  median step*, so a very dark but patchy ring raises the median and
+  therefore raises the cut, and the thin or skipped arcs of that same
+  ring then fall below it and are discarded. Worked example: a ring
+  stepping 40 gray over three quarters of the circumference sets
+  `cut ≈ 14`, which throws away every ray on the faint quarter — and, on
+  the control device in P5, every genuine CNT ray too. **A patchy 40-gray
+  ring is worse than an even 12-gray one.** Draw it in one continuous
+  pass, not in touch-ups.
+
+### P1. Solvent compatibility — sacrificial device, no HV, ~30 min
+
+Do not put a pen on a device you care about until this passes.
+
+1. Take a **sacrificial device** — same membrane and same cast as the real
+   ones, no data value.
+2. Seat the **16 mm laser-cut application mask** over it (the same mask
+   that anchors the diameter, `SLDEA_MEASUREMENT.md` §2.4) and draw the
+   ring against the mask edge in **one continuous pass**. The mask is
+   what makes the ring concentric with the electrode boundary by
+   construction — do not freehand it.
+   - [ ] mark the **low-field side** if the build allows it
+3. Lift the mask, wait **15 minutes**, then inspect under the bench lamp:
+   - [ ] no swelling, blistering, wrinkling or tackiness along the ring
+   - [ ] no bleed — the line has not crept outward into the membrane
+   - [ ] the membrane still snaps back when gently prodded (no local softening)
+4. If any of those fail: **stop, write down which pen and which symptom,
+   and end the section.** A different pen is a different experiment and
+   needs P1 again from the top.
+5. Re-inspect this device **24 h later** and photograph it. Slow solvent
+   attack will not show in 15 minutes, and the answer matters even
+   though it arrives after the visit.
+
+### P2. Does the ring actually clear the floor? — DRY RUN, HV off, ~15 min
+
+This is the gate that decides whether the HV is worth switching on. It
+uses the §M dry-run mechanic, so it commands nothing.
+
+1. Mount the ringed sacrificial device on the rig exactly as a real run,
+   camera framed as usual.
+2. **Webcam** tab: **Stabilize (pin gain 0)**, then **🔒 Apply & Lock**
+   (`#193` — every gray level of the margin above matters here)
+   - [ ] note the exposure/gain the Stabilize step landed on
+3. **SLDEA Test** tab, **DRY RUN — HV OFF ticked**, button amber
+   **▶ Run (DRY)**. Short profile: **Start 0, End 1, Step 0.5, Ramp 2,
+   Landing 10**. Note the `run dir:` line.
+4. Analyse it:
+   ```
+   .venv/bin/python sldea_diag.py RUNDIR
+   ```
+5. Read the **`resting disc :`** line in the header it prints:
+   - [ ] it reads `diam … px … conf …`, **not** `NOT FOUND`
+   - [ ] `conf` is **≥ 0.80** (`P3_2` reads 0.871, `P3_6` 0.827)
+   - [ ] `circ` **≥ 0.97** and `fill` **≥ 0.85**
+   - [ ] the diameter is within ~2 % of what the same rig gives on a
+         standard device — the ring is on the 16 mm mask circle, so it
+         must land where the CNT edge lands, not a pen-width outside it
+6. Open `sldea_diag_contact.png` and look at the drawn outline:
+   - [ ] the outline sits **on** the ring, all the way round
+   - [ ] no arc where the outline jumps off to a shadow or the mask witness mark
+
+**If the ring does not clear this, do not energize.** Write down the
+`resting disc` line verbatim, keep `sldea_diag.txt`/`.json`/`_contact.png`,
+and stop — that is a complete and useful negative result, and it costs no
+HV time. A darker or more even pen is the retry, not more voltage.
+
+### P3. Dielectric check at 10 kV — sacrificial device, ~15 min
+
+Now the ring is proven visible, prove it is electrically inert. Still the
+sacrificial device — this is the step that is allowed to destroy one.
+
+1. Untick DRY RUN (button reads **▶ Run — LIVE HV**, red). Take the
+   scope-monitor auto-fix if it offers one, as §O.
+2. Profile: **Start 0, End 10, Step 0.5, Landing 15** — a fast climb, the
+   point is the current, not the areas.
+3. Watch the run log and the µA:
+   - [ ] the `watchdog baseline … µA` line appears before the ramp
+   - [ ] **no confirmed breakdown flag** at any level
+   - [ ] `measured_uA` stays within **±20 µA** of the run's own median for
+         the whole climb. That is the shipped
+         `breakdown_dev_ua` (`sldea_edge.py:95`), ground-truthed
+         2026-08-04: real events sustain 26.5–208 µA of deviation,
+         false/borderline stay ≤ 14.6
+   - [ ] compare against a bare device on the same rig — if none is at
+         hand, `P3_2`/`P3_6`'s `data.csv` is the reference
+4. Then look at the device:
+   - [ ] no arc track, pinhole or scorch **along the ring**
+   - [ ] the ring has not migrated, smeared or darkened
+
+**Any of these fails ⇒ the ring is not dielectrically safe with that pen,
+and P4/P5 do not happen.** Keep the run folder — a ring-induced breakdown
+is the single most valuable frame set this section can produce.
+
+### P4. The CONTROL — a normal-contrast device, bare then ringed, ~55 min
+
+**This is the step the experiment cannot be read without.** Without it
+there is no way to separate *"the ring helped"* from *"the ring changed
+everything"*: a low-contrast device that starts working after being
+marked proves nothing on its own, because the low-contrast device has no
+before-picture worth comparing to.
+
+Same device, twice, so the comparison is not device-to-device:
+
+1. **Bare pass.** A standard 2.5 mL device, no ring, full ramp but coarse:
+   **Start 0, End 10, Step 0.5, Landing 60** (~22 min). The control is
+   about agreement, not resolution.
+   - [ ] `setup.txt` carries `Ink concentration: 2.5 mL` and the nominal
+         16 mm diameter
+   - [ ] rename the run folder to end `_CTRL_bare` before touching the device
+2. **Ring it in place if you can.** Mask on, one pass, same pen as P1.
+   Not moving the device between passes removes the largest confound
+   there is; if it must come off the rig, say so in `NOTES.txt`.
+3. **Ringed pass.** Identical profile, identical camera settings (do not
+   re-Stabilize between passes — that would change the photometry you are
+   trying to hold still).
+   - [ ] rename to end `_CTRL_ring`
+4. Compare the two, at the desk if need be:
+   - [ ] **`baseline_disc` diameter agrees within ~0.4 %** between passes —
+         that is the auto-verified anchor's own residual
+         (`SLDEA_MEASUREMENT.md` §2.1a), and the resting geometry is the
+         thing a ring is most likely to shift
+   - [ ] **A/A₀ expansion ratios agree within the ±0.8 % area budget**
+         (`SLDEA_MEASUREMENT.md` §2.1/§2.5). Compare **ratios, not
+         absolute areas** — `#194` caveat 3 is right that the ring
+         redefines the boundary convention from "CNT half-height edge" to
+         "marker-ring edge", and ratios are immune to that
+   - [ ] `disc-fit` still **wins** on the ringed pass at a comparable rate,
+         and the frames-needing-review count has not gone up
+   - [ ] the `nostep_pct` figure from the boundary audit has not risen —
+         a rise is the `sldea_edge.py:3016` cut-raising failure mode from
+         P0, i.e. the ring is too dark or too patchy
+
+> A second ramp on one device is not perfectly identical to the first
+> (viscoelastic settling, and any partial damage from pass 1). That is
+> why the acceptance is on the **resting diameter** and on **ratios**,
+> both of which survive it, rather than on absolute areas.
+
+### P5. The TEST — the low-contrast device, ~45 min
+
+1. A device cast at the low concentration that motivated this
+   (**2.3 mL**). If `P3_7_2.3mL_20260729` itself is still sound, use it —
+   its bare `sldea_diag.txt` already exists as the before-picture, which
+   no fresh device can give you.
+2. Ring it, mask-guided, one pass.
+3. Full standard profile — the same one `P3_7` ran: **Start 0, End 10,
+   Step 0.25, Ramp 5, Landing 60** (~43 min), so the result is
+   corpus-quality and not just a demo.
+4. Then:
+   ```
+   .venv/bin/python sldea_diag.py RUNDIR
+   ```
+   - [ ] `resting disc :` is **found** (it was `NOT FOUND` on `P3_7`)
+   - [ ] the `[MED ] No trustworthy resting-disc trace` verdict is **gone**
+   - [ ] frames needing review is well under 48/48, and median confidence
+         is above 0.00 — both were pinned at the failure value on `P3_7`
+   - [ ] `disc-fit` appears in the `method` column instead of only
+         `GATED` / `diff-lo` / `tex-ratio`
+   - [ ] area grows with voltage instead of the 44 % of steps that went
+         backwards
+5. If the wrinkle wash-out band still refuses, **note which kV levels** —
+   that is the number `#198` is sized on.
+
+### P6. Send back
+
+Per run folder, these five and no frames (a few hundred kB total):
+`data.csv`, `setup.txt`, `run.log`, `sldea_diag.txt`, `sldea_diag.json`.
+Plus `sldea_diag_contact.png` and `sldea_diag.png` for the P2, P4-ringed
+and P5 runs — the contact sheet is the one thing no residual can stand in
+for. Plus `edge_labels.json` if any frame was traced in Edge Review.
+
+Also send, once:
+
+- [ ] a **`NOTES.txt`** written by hand into each run folder — `setup.txt`
+      has no free-text field, so the ring is otherwise unrecorded. State:
+      pen make and model, "water-based pigment", mask-guided single pass,
+      which side, dwell time before the run, and for P4 whether the device
+      came off the rig between passes
+- [ ] the **15-minute and 24-hour photos** of the P1 sacrificial device
+- [ ] the P2 `resting disc :` line verbatim, and the exposure/gain
+      Stabilize landed on
+- [ ] run folders named `…_CTRL_bare`, `…_CTRL_ring`, and the P5 test run
+      by the corpus convention (`DEVICE_CONCENTRATION_DATE`)
+
+### What each outcome means for `#198`
+
+- **P4 clean and P5 recovers the ramp** → transparent devices are
+  measurable with a $3 pen, and the wrinkle wash-out band shrinks to
+  whatever the ring did *not* fix. `#198`'s only claimed unique win is
+  that band, so it shrinks by the same amount — likely to a nice-to-have,
+  and worth re-scoping before any label work starts.
+- **P5 recovers the resting disc but the wash-out frames still refuse** →
+  the calibration anchor is fixed (which alone rescues `P3_7`'s mm
+  figures) but `#198` keeps its niche intact and should proceed as
+  written.
+- **P4 perturbs the control** (diameter or ratios outside the gates
+  above) → the ring is not a free win, and `#198` gets *more* important,
+  not less, because there is then no cheap physical fix.
+- **P1, P2 or P3 fails** → `#194` is answered *no* on physical grounds
+  and `#198` is unblocked immediately at full scope. This is why P1–P3
+  are cheap and come first.
 
 ---
 

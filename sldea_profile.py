@@ -64,16 +64,32 @@ def measured_ua(imon_scope_v):
 ELECTRODE_CHOICES = ('', 'CNT',
                      'Carbon Solutions P3-SWNT', 'Carbon Solutions P2-SWNT',
                      'nano-c Invisicon 3900', 'nano-c Invisicon 3500',
+                     # Spray-applied nano-c, added 2026-08-12. The brand
+                     # token is written 'nano-c' to match the entries above
+                     # -- see the 'nanoc ' needle below for why the
+                     # hyphen is not merely cosmetic.
+                     'nano-c 3900 Spray', 'nano-c 3500 Spray',
                      'carbon black', 'eGaIn')
 # Substring needles, matched against the lowercased value padded with
-# spaces. None of the four brand names contains "cnt", so the CNT family
+# spaces. None of the six brand names contains "cnt", so the CNT family
 # also keys on what the products ARE: 'swnt'/'mwnt' (Carbon Solutions
 # sells single-wall nanotube ink) and the 'invisicon' brand (nano-c's
 # transparent CNT ink). Order matters -- the first family that matches
 # wins.
+#
+# 'nanoc ' carries a TRAILING SPACE on purpose. The spray entries added
+# 2026-08-12 were first proposed as "NanoC 3500 Spray", which matched no
+# needle at all and canonicalised to 'other' -- a silent
+# mis-classification, since nothing downstream can tell a deliberate
+# 'other' from a brand nobody taught the matcher. The hyphenless
+# spelling is what an operator types, so it is accepted here rather than
+# only in the dropdown. The space is what keeps it from also swallowing
+# 'nanocomposite', 'nanoclay' and 'nanocellulose', which are plausible
+# electrode materials and are NOT nanotube ink -- the same guard the
+# 'cb ' / ' cb' needles below already use.
 _ELECTRODE_FAMILIES = (
     ('cnt', ('cnt', 'carbon nanotube', 'nanotube', 'swnt', 'mwnt',
-             'invisicon', 'nano-c')),
+             'invisicon', 'nano-c', 'nanoc ')),
     ('carbon_black', ('carbon black', 'carbonblack', 'cb ', ' cb', 'c-black')),
     ('liquid_metal', ('egain', 'e-gain', 'galinstan', 'liquid metal',
                       'liquidmetal')),

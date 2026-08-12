@@ -20,10 +20,13 @@ gates, and 2 `test_sldea_plot_gui` scroll cases need more screen height
 than this desktop has. **The lab PC has not been measured since #296 and
 #303 landed** — it will inherit both, but its number is still unknown.
 
-**⚠ Corpus safety is still protocol-only.** The read-only share is not
-attached, `SCPI_SLDEA_DIR` still points at a path that does not resolve
-on the VM, and the corpus is reachable **writable** at `Z:\SLDEA_data`.
-The two §B items at the top of this sheet are what close it.
+**Corpus: backed up, still not protected.** The backup is confirmed
+archived out of the shared directory (Anatol, 2026-08-12) — the
+irreplaceable-data risk is closed. The *access* risk is not: the
+read-only share is still not attached, `SCPI_SLDEA_DIR` still points at
+a path that does not resolve on the VM, and the live corpus is still
+reachable **writable** at `Z:\SLDEA_data` (verified this date). The
+share relayout in §B is what closes that half.
 
 **⚠ Screen height: the ≥1150 px figure is stale for the tests.**
 Measured at 1920×1200 on 2026-08-12 — the Draw column needs 1186 px and
@@ -36,17 +39,25 @@ clears it.
 
 ## A. Anywhere — a VM or any fresh checkout (code + synthetic tests)
 
-- [ ] **Close the nine shipped-but-open issues** — `#307` `#311` `#312`
-      `#313` `#314` `#315` `#316` `#323` `#49`. Each was verified
-      against `main` on 2026-08-12; the evidence table is in
+- [x] **Close the nine shipped-but-open issues** — `#307` `#311` `#312`
+      `#313` `#314` `#315` `#316` `#323` `#49`. DONE 2026-08-12, each
+      verified against `main` first; the evidence table is in
       `PROJECT_HANDOFF.md` under "Roster changes 2026-08-09 →
-      2026-08-12". They stayed open because the PRs correctly avoided
-      closing keywords, not because anything is unfinished.
-- [ ] **`#268` — decide, then close or trim.** The aggregate shipped
-      (#310, #324). The electrode-family sub-item is **superseded**, not
-      pending: it keyed on a field zero of 13 corpus runs carry, and
-      `#313`'s operator-assigned grouping needs no field. Record which
-      reading you take.
+      2026-08-12".
+- [ ] **`#268` electrode-family grouping — UNBLOCKED 2026-08-12**, by
+      Anatol's decision to backfill the fields by hand. Two halves, in
+      order:
+      **(a) the backfill itself** (lab PC / wherever the corpus is —
+      see §B), and **(b) the code**, which does not exist: nothing in
+      `sldea_plot.py` or `sldea_plot_gui.py` reads the electrode fields,
+      and `GROUP_ASSIGN_TIP` asserts no run carries them, so that text
+      goes stale on the first backfilled run. Per `#313` the field
+      **pre-fills** grouping and never replaces it.
+      **Blocked on one answer first:** does `P3` in the campaign folder
+      names mean the Carbon Solutions P3-SWNT ink, or device 3?
+      `electrode_family()` refuses to guess from device tokens, so a
+      bare `P3` lands in `other` — the answer decides whether the
+      backfill is mechanical or needs the notes.
 - [ ] **Fix the screen-height figure in `provision-guest.ps1`** — it
       still asks for ≥1150 px. Host-side edit; the script is out of repo
       by decision, so no PR can reach it. The in-repo copy of the stale
@@ -69,14 +80,19 @@ clears it.
 
 ## B. Lab PC / host only (data- or display-bound)
 
-- [ ] **Verify the corpus backup** (`GATES.md` G9). Anatol copied it to
-      `D:\SLDEA_corpus_backup_20260809` on 2026-08-09; `D:` in the guest
-      is the empty optical drive, so **the copy has never been checked
-      from anywhere**. Check the file count and the P3_6 `data.csv`
-      sha256 against the manifest in `GATES.md` — robocopy on that box
-      hangs on a locked file without `/R:2 /W:5`, so a silently partial
-      copy is the realistic failure. **Then a second copy off that
-      machine**: 3.41 GB, irreplaceable, currently one machine deep.
+- [x] **Corpus backup — DONE, confirmed by Anatol 2026-08-12**: archived
+      and out of the shared directory. `GATES.md` G9 is closed.
+- [ ] **Backfill `Compliant electrode:` and `Ink concentration:` across
+      the corpus** — the (a) half of `#268`'s family grouping, and the
+      first campaign-wide write the corpus has taken. Write the
+      MATERIAL, never the family (`Electrode family:` is derived by
+      `sldea_profile.electrode_family()`); omit `Ink concentration:`
+      entirely for carbon black and eGaIn rather than writing it blank;
+      add lines only where a real value exists, since an absent line
+      ("predates the field") and `(not specified)` ("declined") are a
+      deliberate distinction. Settle the `P3` question in §A first. Do
+      it as a reviewed batch with a dry run and a diff, not 13 hand
+      edits.
 - [ ] **Then the share relayout** (decided: option c) — move
       `SLDEA_data` out of the read-write share's root, attach it as a
       genuine read-only share, repoint `SCPI_SLDEA_DIR`. Same pass: fix

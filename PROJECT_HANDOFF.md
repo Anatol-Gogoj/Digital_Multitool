@@ -24,19 +24,31 @@ with a settable dpi (`#314`) · heading hints in the empty title boxes
 (`#311`) · n in the caption with counts only where a level falls short
 (`#312`).
 
-**⚠ Nine shipped issues are still OPEN, and that is a bookkeeping debt,
-not a decision.** None of the merged PRs used a closing keyword —
-correct practice given cold-start trap 4, which has fired three times —
-but nobody then closed them by hand. Verified shipped against this tree
-on 2026-08-12: `#307` `#311` `#312` `#313` `#314` `#315` `#316` `#323`,
-plus `#49`, whose audit said "close once `#298` merges" and `#298` has
-merged. **`#268` is the one to read before closing**: its aggregate
-shipped, but its electrode-family sub-item did not and cannot — the
-`Electrode family:` field it keys on is carried by zero of the 13
-corpus runs. `#313` answered the operator's real need by making
-grouping OPERATOR-ASSIGNED instead, so the sub-item is superseded rather
-than pending. Close `#268` against `#313` or keep it for the automatic
-grouping, but do not leave the reason unrecorded.
+**Nine shipped issues were closed by hand on 2026-08-12** — `#307`
+`#311` `#312` `#313` `#314` `#315` `#316` `#323`, plus `#49`, whose
+audit said "close once `#298` merges". They had stayed open because no
+merged PR used a closing keyword — correct practice given cold-start
+trap 4, which has fired three times — and nobody then closed them
+manually. Each was verified against this tree before closing, by
+finding its implementation AND its tests; the evidence table is under
+"Roster changes 2026-08-09 → 2026-08-12" below.
+
+**`#268` stays open, and its electrode-family half is UNBLOCKED as of
+2026-08-12.** Its aggregate shipped (#310, #324). The family sub-item
+was parked because the `Electrode family:` field is carried by zero of
+the 13 corpus runs — **Anatol's decision this date is to backfill the
+electrode and concentration by hand** from the run names and the lab
+notes, so the sub-item is pending again rather than superseded. Two
+schema details make the obvious approach wrong and are recorded on the
+issue: the operator writes `Compliant electrode:` (the MATERIAL) and
+`Electrode family:` is DERIVED from it by
+`sldea_profile.electrode_family()`, never typed; and `Ink
+concentration:` is omitted entirely for carbon black and eGaIn rather
+than written blank. **The open question is whether `P3` in the campaign
+folder names is the Carbon Solutions P3-SWNT ink or device 3** —
+`electrode_family()` deliberately refuses to guess from device tokens,
+so a bare `P3` canonicalises to `other`, and the answer decides whether
+the backfill is mechanical or needs the notes.
 
 **Suite baseline, in the new vocabulary: 39/39 SUITES on the VM.** The
 old "34/38" and "38/38" lines counted something else — `#303`/`#306`
@@ -56,16 +68,20 @@ now; `vm-setup\provision-guest.ps1` and `RUN_SHEET.md` both still say
 1150. **Manual capture is unaffected** — `capture.py` needs ≥1090 and
 1200 clears it, so the release-capture stage still runs here.
 
-**Still unresolved from `GATES.md`, all outside this lane.** G9: the
-corpus backup at `D:\SLDEA_corpus_backup_20260809` is host-side and has
-never been verified from here — the file count and the P3_6 `data.csv`
-sha256 are recorded in that file to check against, and a second copy off
-that machine is still worth having. G10: the share relayout has not
-happened, so **the corpus is still reachable WRITABLE at
-`Z:\SLDEA_data`** and `SCPI_SLDEA_DIR` still points at the
-`\\VBOXSVR\SLDEA_data\...` path that does not resolve on this guest.
-Corpus safety remains protocol-only. G11 the control round, G12 `#215`,
-G13 the bench visit are all unchanged.
+**`GATES.md` G9 is CLOSED** — Anatol confirmed 2026-08-12 that the
+backup is archived and out of the shared directory. The
+irreplaceable-data risk that gated the share relayout is gone, which
+also clears the way for the `#268` backfill above: that is the first
+campaign-wide WRITE the corpus has taken, and it would not have been
+defensible before this.
+
+**G10 is not closed, and the two are separate risks.** The share
+relayout has not happened, so **the live corpus is still reachable
+WRITABLE at `Z:\SLDEA_data`** (verified this date) and
+`SCPI_SLDEA_DIR` still points at the `\\VBOXSVR\SLDEA_data\...` path
+that does not resolve on this guest. Access is still protocol-only.
+G11 the control round, G12 `#215`, G13 the bench visit are all
+unchanged.
 
 **A release bump is the natural next milestone, and is now possible
 here.** Main is **62 commits past the `v1.2.0` tag** and the manual PDF
@@ -985,13 +1001,21 @@ PR title:
 | `#323` runs from several parent folders | #324 | `initial_state` collects parents; options and `default_out_dir` stay keyed on the first, and the window says which |
 | `#49` housekeeping audit | #298 | the audit found five of six bullets already dead; `.gitignore` was the live one and `#298` fixed it |
 
-**`#268` needs a judgment, not a close.** Its aggregate half shipped in
-#310 and grew group support in #324. Its electrode-family half is
-**superseded, not pending**: it keyed on `Electrode family:`, which zero
-of 13 corpus runs carry, and `#313` delivered operator-assigned grouping
-that needs no field and works on every run that exists. Whoever closes
-it should say that, so the sub-item does not get re-filed as missing
-work.
+**All nine were closed on 2026-08-12** with the evidence above quoted on
+each issue.
+
+**`#268` stays open — its family half came back.** The aggregate shipped
+in #310 and grew group support in #324. The electrode-family sub-item
+was parked as unbuildable because zero of 13 corpus runs carry
+`Electrode family:`; **Anatol elected on 2026-08-12 to backfill the
+electrode and concentration by hand**, which makes it buildable again.
+Full schema notes are on the issue. The part that still needs writing:
+nothing in `sldea_plot.py` or `sldea_plot_gui.py` reads the electrode
+fields at all, and `GROUP_ASSIGN_TIP` states as fact that no run carries
+the field — that sentence goes stale on the first backfilled run and
+must change in the same PR. Per `#313`'s design point the field
+**pre-fills** the grouping and never replaces it, or a run with a wrong
+label becomes ungroupable.
 
 **Why none of these auto-closed.** The PRs deliberately wrote their
 issue references in backticks with no closing keyword — the rule from

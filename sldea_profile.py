@@ -64,16 +64,32 @@ def measured_ua(imon_scope_v):
 ELECTRODE_CHOICES = ('', 'CNT',
                      'Carbon Solutions P3-SWNT', 'Carbon Solutions P2-SWNT',
                      'nano-c Invisicon 3900', 'nano-c Invisicon 3500',
+                     # Spray-applied nano-c, added 2026-08-12. The brand
+                     # token is written 'nano-c' to match the entries above
+                     # -- see the 'nanoc ' needle below for why the
+                     # hyphen is not merely cosmetic.
+                     'nano-c 3900 Spray', 'nano-c 3500 Spray',
                      'carbon black', 'eGaIn')
 # Substring needles, matched against the lowercased value padded with
-# spaces. None of the four brand names contains "cnt", so the CNT family
+# spaces. None of the six brand names contains "cnt", so the CNT family
 # also keys on what the products ARE: 'swnt'/'mwnt' (Carbon Solutions
 # sells single-wall nanotube ink) and the 'invisicon' brand (nano-c's
 # transparent CNT ink). Order matters -- the first family that matches
 # wins.
+#
+# 'nanoc ' carries a TRAILING SPACE on purpose. The spray entries added
+# 2026-08-12 were first proposed as "NanoC 3500 Spray", which matched no
+# needle at all and canonicalised to 'other' -- a silent
+# mis-classification, since nothing downstream can tell a deliberate
+# 'other' from a brand nobody taught the matcher. The hyphenless
+# spelling is what an operator types, so it is accepted here rather than
+# only in the dropdown. The space is what keeps it from also swallowing
+# 'nanocomposite', 'nanoclay' and 'nanocellulose', which are plausible
+# electrode materials and are NOT nanotube ink -- the same guard the
+# 'cb ' / ' cb' needles below already use.
 _ELECTRODE_FAMILIES = (
     ('cnt', ('cnt', 'carbon nanotube', 'nanotube', 'swnt', 'mwnt',
-             'invisicon', 'nano-c')),
+             'invisicon', 'nano-c', 'nanoc ')),
     ('carbon_black', ('carbon black', 'carbonblack', 'cb ', ' cb', 'c-black')),
     ('liquid_metal', ('egain', 'e-gain', 'galinstan', 'liquid metal',
                       'liquidmetal')),
@@ -106,6 +122,19 @@ def electrode_family(text):
     return 'other'
 
 
+# Application methods that are not dispensed as a measured volume, matched
+# as substrings like the family needles above. This is a SECOND axis:
+# 'spray' is not a material and does not change the family, so a
+# spray-applied CNT is still `cnt` and still groups with every other CNT
+# run -- it just has no millilitres to record (Anatol, 2026-08-12).
+#
+# Kept separate from _ELECTRODE_FAMILIES on purpose. Folding "no
+# concentration" into the family would have forced spray-applied CNT into
+# its own family or into 'other', and either one would split the CNT group
+# that `#268`'s aggregate exists to draw.
+_NO_CONCENTRATION_NEEDLES = ('spray',)
+
+
 def concentration_applies(electrode):
     """Is an ink concentration a meaningful thing to record here? (`#276`)
 
@@ -116,6 +145,11 @@ def concentration_applies(electrode):
     never asks about it, and setup.txt does not carry the key at all. A CB
     run should not look like a CNT run that forgot to fill something in.
 
+    SPRAY-APPLIED electrodes are excluded for the same reason but on a
+    different axis (2026-08-12): a spray goes on as coats, not as a
+    measured millilitre, so the number would be a fiction. The material is
+    still whatever it is -- `nano-c 3500 Spray` remains family `cnt`.
+
     Everything else may have one and is offered it: the CNT family, and any
     custom material the operator typed (we do not know that a material we
     have never heard of is not an ink).
@@ -124,6 +158,9 @@ def concentration_applies(electrode):
     fact as "this electrode has no concentration", and greying the box
     before the operator has said what the device is would just look broken.
     """
+    padded = f" {(electrode or '').strip().lower()} "
+    if any(nd in padded for nd in _NO_CONCENTRATION_NEEDLES):
+        return False
     return electrode_family(electrode) not in ('carbon_black', 'liquid_metal')
 
 

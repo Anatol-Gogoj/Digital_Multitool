@@ -320,7 +320,20 @@ def test_card_tracks_the_view_and_draws_centered():
             img = app._render_card(i, cands, chosen, view=(vw, vh))
             assert (img.width, img.height) == (w, h), (vw, vh)
             app._view_wh = (vw, vh)        # what <Configure> would track
-            app._draw(i, cands, chosen)
+            # State the view size OUTRIGHT rather than relying on the
+            # canvas being unrealized. _view_size() prefers the live canvas
+            # and falls back to _view_wh only at 1x1; a withdrawn root used
+            # to land there, so this loop's three sizes reached _draw by
+            # accident. Since 2026-08-12 the window sizes itself to its
+            # layout at construction, which realizes the canvas, and the
+            # fallback stopped firing -- so the case is pinned explicitly
+            # and the three sizes stay meaningful.
+            real_view_size = app._view_size
+            app._view_size = lambda vw=vw, vh=vh: (vw, vh)
+            try:
+                app._draw(i, cands, chosen)
+            finally:
+                app._view_size = real_view_size
             items = app.canvas.find_all()
             assert len(items) == 1
             assert app.canvas.coords(items[0]) == [vw // 2, vh // 2]
@@ -4053,6 +4066,108 @@ def test_the_second_click_banks_the_round_and_Back_undoes_it():
 # UnicodeEncodeError on this repo's console.
 # ---------------------------------------------------------------------------
 
+def test_no_control_is_ever_discarded_by_a_small_window():
+    """The bug: Tk's packer does not clip a too-small window, it DROPS the
+    widgets that do not fit -- silently, with nothing on screen to say so.
+
+    Measured on the shipped 1150x760 default before the fix: at 900x600
+    Reject, Unreview and the How-to button were gone; at 700x500 the entire
+    right-hand panel went with them, so no frame could be accepted,
+    rejected or traced. The window looked normal.
+
+    Every control must stay MAPPED at every size, reachable by scrolling
+    rather than deleted. `winfo_ismapped` is the assertion because it is
+    exactly what the packer turns off when it discards a slave.
+    """
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_small_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        controls = ['run_box', 'browse_btn', 'detect_btn', 'adv_btn',
+                    'scale_btn', 'save_btn', 'info', 'cand_frame',
+                    'accept_btn', 'reject_btn', 'prev_btn', 'next_btn',
+                    'unrev_btn', 'howto_btn', 'status', 'canvas']
+        for w, h in ((1600, 1000), (1150, 760), (900, 600), (700, 500),
+                     (560, 420)):
+            root.geometry(f'{w}x{h}')
+            root.update_idletasks()
+            root.update()
+            gone = [n for n in controls
+                    if not getattr(app, n).winfo_ismapped()]
+            assert not gone, f"at {w}x{h} the packer discarded: {gone}"
+
+        # ...and at the small end that reachability is the SCROLLBARS doing
+        # it, not the layout having quietly shrunk something to nothing.
+        assert app._scroll._vbar_shown, "no vertical bar on a short window"
+        assert app._scroll._hbar_shown, "no horizontal bar on a narrow window"
+        assert app._scroll.body.winfo_reqwidth() > root.winfo_width(), (
+            "the body should keep its natural width and overflow")
+
+        # Roomy window: the bars go away and the image viewport GROWS into
+        # the space, which is the behaviour a scroll container most easily
+        # breaks (content pinned at its natural size forever).
+        root.geometry('1600x1000')
+        root.update_idletasks()
+        root.update()
+        assert not app._scroll._vbar_shown and not app._scroll._hbar_shown, (
+            "bars still up on a window with room to spare")
+        big = app.canvas.winfo_width()
+        root.geometry('900x600')
+        root.update_idletasks()
+        root.update()
+        assert app.canvas.winfo_width() < big, (
+            "the image canvas did not track the window")
+    finally:
+        app._cancel_pending()
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_window_opens_at_the_size_its_layout_asks_for():
+    """1150x760 was typed in and measured too narrow: the built layout wants
+    ~1319 px, so the window opened with the fixed-width side panel already
+    squeezed and the progress bar rendered 11 px wide -- on the default
+    geometry, on every machine, since the panel was written.
+
+    The size is now asked of the widgets. Capped to the screen, because a
+    display smaller than the layout is what the scroller is for."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_size_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        root.update_idletasks()
+        root.update()
+        want_w = app._scroll.body.winfo_reqwidth()
+        cap_w = max(640, root.winfo_screenwidth() - 80)
+        if want_w > cap_w:
+            print(f"   (screen too small to check the uncapped case: "
+                  f"wants {want_w}, cap {cap_w})")
+        else:
+            assert root.winfo_width() >= want_w, (
+                f"opened at {root.winfo_width()} for a layout wanting "
+                f"{want_w} -- the side panel is squeezed again")
+        assert root.winfo_width() >= 1150, "never smaller than the old default"
+        assert root.winfo_width() <= cap_w, "wider than the screen allows"
+    finally:
+        app._cancel_pending()
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_howto_text_is_one_copy_and_carries_the_three_traps():
     """`#238`: the panel's words live in ONE module constant, they contain
     the campaign loop and the three things that cost real time, and the two
@@ -4072,20 +4187,27 @@ def test_howto_text_is_one_copy_and_carries_the_three_traps():
                 isinstance(p, tuple) and len(p) == 2 and p[0] == 'code'), p
     t = gui.howto_text()
 
-    # THE LOOP, all four steps, in order
-    for n in ('1.', '2.', '3.', '4.'):
-        assert n in t, f"step {n} missing from the loop"
-    assert t.index('1.') < t.index('2.') < t.index('3.') < t.index('4.')
+    # THE PROCEDURE, all seven steps, in order. Rewritten to ASD-STE100
+    # 2026-08-12: the three traps moved OUT of a trailing section and INTO
+    # the steps they govern, because the standard puts a warning before the
+    # action it applies to -- which is also where an operator meets it.
+    for n in range(1, 8):
+        assert f'{n}.' in t, f"step {n} missing from the procedure"
+    order = [t.index(f'{n}.') for n in range(1, 8)]
+    assert order == sorted(order), "the procedure steps are out of order"
 
     # TRAP 1 -- wash-out frames are traced, not rejected. This is the single
     # instruction a new operator gets wrong, and the reason is that the
     # missing boundary is the frame, not a fault.
-    assert 'TRACED, not rejected' in t
+    assert 'Trace a washed-out frame' in t
+    assert 'Do not reject it' in t
     assert '5.5 kV' in t
-    assert 'Reject means' in t
+    assert 'Reject a frame only if' in t, "the narrow meaning of Reject is gone"
 
-    # TRAP 2 -- Accept stages, Save writes (a live run's correction was lost
-    # to this on 2026-08-06)
+    # TRAP 2 -- Accept stages, Save writes. The 2026-08-06 incident stays in
+    # the text on purpose: STE has no room for the anecdote that carried it,
+    # so it is kept as a dated NOTE rather than dropped. It is the evidence
+    # that this trap is real and not hypothetical.
     assert 'STAGES the anchor' in t
     assert '2026-08-06' in t
     assert 'Save before you close' in t
@@ -4093,15 +4215,18 @@ def test_howto_text_is_one_copy_and_carries_the_three_traps():
     # TRAP 3 -- the scale-only re-anchor skips detection
     assert 'no detection' in t and 're-derives every mm' in t
 
-    # THE BLANKET CLAIM MUST CARRY ITS EXCEPTION. "Nothing is written until
+    # THE BLANKET CLAIM MUST CARRY ITS EXCEPTION. "does not write until
     # Save" is false for a re-anchor on a saved run, which commits data.csv
     # the moment it is confirmed (_reanchor_scale). If the sentence is ever
     # tightened into the simple, wrong version, this fails.
     assert 'until' in t and 'exception' in t, "the Save claim lost its caveat"
 
-    # THE TWO NUMBERS, checked against the code rather than retyped
-    assert f"accept_conf ({se.DEFAULT_SETTINGS['accept_conf']:g}" in t
-    assert f"wrinkle_ratio ({se.DEFAULT_SETTINGS['wrinkle_ratio']:g}" in t
+    # THE TWO NUMBERS. These are now INTERPOLATED into HOWTO_SECTIONS from
+    # se.DEFAULT_SETTINGS, so the help cannot quote a stale default at all --
+    # this assertion confirms the interpolation still reaches the rendered
+    # text, rather than being the only thing standing between us and drift.
+    assert f"accept_conf is {se.DEFAULT_SETTINGS['accept_conf']:g}" in t
+    assert f"wrinkle_ratio is {se.DEFAULT_SETTINGS['wrinkle_ratio']:g}" in t
     assert '1.0 means no' in t, "the w baseline value is not stated"
     assert 'not a probability' in t
 
@@ -4144,11 +4269,16 @@ def test_howto_panel_is_a_singleton_scrolls_and_names_live_controls():
         assert app.howto_btn.pack_info()['side'] == 'right'
         foot = app.howto_btn.master
         assert foot.pack_info()['side'] == 'bottom'
-        # The status strip must still own the window's own bottom edge, and
-        # with side=bottom that is decided by PACK ORDER (each slave takes
-        # the bottom of what is left), so the order is what is asserted --
-        # a withdrawn root has no computed geometry to measure.
-        slaves = root.pack_slaves()
+        # The status strip must still own the bottom edge of the content,
+        # and with side=bottom that is decided by PACK ORDER (each slave
+        # takes the bottom of what is left), so the order is what is
+        # asserted -- a withdrawn root has no computed geometry to measure.
+        #
+        # The slaves are the SCROLLER's body, not the root, since 2026-08-12:
+        # every control moved inside the scroll container so that a small
+        # window scrolls instead of silently discarding widgets. The
+        # ordering rule this asserts is unchanged.
+        slaves = app._scroll.body.pack_slaves()
         assert slaves.index(app.status) < slaves.index(foot), "status moved"
         assert app.status.pack_info()['side'] == 'bottom'
 
@@ -4559,7 +4689,32 @@ def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count
     # line, in name order, in one bounded block -- run_tests.py explains why.
+    import gc
     import traceback
+
+    def _reap():
+        """Collect Tk garbage HERE, in the main thread. (`#280`)
+
+        Diagnosed 2026-08-12. Each display-gated case builds a Tk root and
+        a window, destroys the root, and drops the references -- but the
+        Python objects are freed whenever CPython next collects, which can
+        be inside a detection worker thread. Tk's C layer refuses that:
+        'Tcl_AsyncDelete: async handler deleted by the wrong thread', which
+        ABORTS the process rather than raising, so the summary line never
+        prints and the suite looks like an infrastructure failure instead
+        of a test result.
+
+        It is a race, which is why it read as a box-context flake: it
+        depends on how many objects a case leaves for the collector and on
+        when a thread happens to run. Adding a scroll container to Edge
+        Review made it deterministic by raising the object count, which is
+        how it was finally caught.
+
+        Collecting after every case keeps the freeing on this thread, where
+        Tk allows it.
+        """
+        gc.collect()
+
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     failed = []
     for fn in fns:
@@ -4568,7 +4723,9 @@ def _run():
         except Exception:
             failed.append((fn.__name__, traceback.format_exc()))
             print(f"FAIL {fn.__name__}")
+            _reap()
             continue
+        _reap()
         print(f"ok  {fn.__name__}")
     if not failed:
         print(f"\n{len(fns)} tests passed")

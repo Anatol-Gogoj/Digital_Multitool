@@ -185,6 +185,20 @@ import numpy as np
 
 import sldea_edge as se
 import sldea_trace as strc
+# IMPORTED, NOT COPIED -- the opposite call from Tooltip below, and on that
+# comment's own reasoning. Tooltip is duplicated because it is ~35 lines
+# with no state, no invariants, and nothing measurable goes wrong if the
+# copies drift. ScrollableFrame is the reverse on all three counts: it
+# carries state (which bars are up), one real invariant (the show/hide
+# decision must not flap), and drift here is how controls silently vanish
+# -- the bug it exists to fix.
+#
+# The cross-seam objection is also weaker than it looks: `tk_fontfix` is
+# imported above and is no more inside PROJECT_HANDOFF decision 2's seam
+# than `ui_widgets` is, so the split already has to carry shared utility
+# modules. If it happens, these two travel together or both get copied
+# then -- one decision, made once, with the split in front of us.
+import ui_widgets as uiw
 
 DEFAULT_PARENT = os.environ.get('SCPI_SLDEA_DIR',
                                 '/mnt/shareDrive/robot_incubator/SLDEA_data')
@@ -329,87 +343,108 @@ HOWTO_QUOTED_CONTROLS = (
 )
 
 HOWTO_SECTIONS = [
-    ("Edge Review turns a run's photos into measured areas", [
-        "The machine measures; your job is to check its work and fix what "
-        "it got wrong. Nothing from a review pass reaches data.csv until "
-        "you press 💾 Save to data.csv… — the one exception is a re-anchor "
-        "on an already-saved run, which says so on its own button before "
-        "it writes.",
+    ("1  Purpose", [
+        "Edge Review measures the area of the electrode in each image of "
+        "a run. The software measures the area. Your task is to examine "
+        "the result and correct the errors.",
     ]),
-    ("The loop", [
-        "1.   Pick the run in the Run box at the top. Runs that already "
-        "carry measured areas are marked ✓ processed.",
+    ("2  Before you start", [
+        "WARNING: The software does not write to data.csv until you press "
+        "💾 Save to data.csv…. If you close the window before you save, "
+        "you lose the work of the review.",
 
-        "2.   Press ▶ Detect Edges. Calibration comes first: the camera "
-        "zoom moves between runs, so Detect diverts to the scale dialog "
-        "until this run has its own px→mm anchor. The dialog opens on the "
-        "machine's own fit of the resting disc, and the job it asks of you "
-        "is to JUDGE that circle, not to measure the disc again. Measuring "
-        "by hand is the fallback for when the fit refuses, and it is "
-        "measurably worse — roughly 1 % of diameter per attempt against "
-        "the fit's 0.03–0.80 % residual, because the disc edge is a ~60 px "
-        "gradient with no line to click. ✔ Accept, and detection starts on "
-        "its own.",
-
-        "3.   Work the review queue. Confident frames are accepted "
-        "automatically; the rest wait for you. Keys 1 / 2 / 3 pick "
-        "candidate A / B / C, Enter accepts and moves on, D (or 4) opens "
-        "the hand tracer, R rejects. Next unreviewed jumps to the next "
-        "frame that still needs a human.",
-
-        "4.   💾 Save to data.csv… when the queue is empty. A .bak is kept, "
-        "and the confirm prompt says what is about to be written and how "
-        "many frames will be renamed before you answer.",
+        "There is one exception. A re-anchor on a run that is already "
+        "saved writes to data.csv immediately. The button tells you "
+        "before it writes.",
     ]),
-    ("Three things that cost people real time", [
-        "•   Wash-out frames are TRACED, not rejected. Above about 5.5 kV "
-        "the ink boundary washes out and no boundary-shaped candidate can "
-        "exist — that is the frame being what it is, not the detector "
-        "failing, and your trace IS the measurement there. Reject means "
-        "something narrower: no honest boundary can be drawn even by hand "
-        "(occlusion, breakdown debris, a corrupt frame). Rejecting a "
-        "wash-out frame silently discards a real data point, and it is the "
-        "one instruction a new operator gets wrong.",
+    ("3  Procedure", [
+        "1.   Select the run in the Run box. A run that has measured "
+        "areas shows the ✓ processed mark.",
 
-        "•   ✔ Accept in the scale dialog only STAGES the anchor — the "
-        "Save is what writes it. Nothing on screen implies that, so it is "
-        "worth over-learning: on a live run on 2026-08-06 an operator "
-        "accepted a corrected fit, closed the window before saving, and "
-        "the correction was lost. If you accepted a scale, Save before you "
-        "close. (The dialog's own primary button says which one you are "
-        "in: \"applied at Save\" versus \"RE-ANCHOR NOW\".)",
+        "2.   Press ▶ Detect Edges. NOTE: The camera zoom changes between "
+        "runs. Thus each run must have its own pixel-to-millimetre "
+        "anchor. If this run does not have one, the scale dialog opens "
+        "first.",
 
-        "•   A wrong scale does not mean re-reviewing the run. On a run "
-        "that is already saved, carries pixel measurements and has no "
-        "review pass open, 📏 Calibrate / re-anchor… re-derives every mm² "
-        "straight from the pixels already in data.csv — no detection, no "
-        "second pass over the queue. Which of the two the button is about "
-        "to do follows the run's state and is named in the dialog's title, "
-        "on its primary button and in its confirmation.",
+        "3.   Examine the circle in the scale dialog. The software fits "
+        "the circle to the disc at rest. Your task is to judge this "
+        "circle. CAUTION: Do not measure the disc by hand if the fit is "
+        "good. Hand measurement is less accurate. Hand measurement has an "
+        "error of approximately 1 % of the diameter. The fit has an error "
+        "of 0.03 % to 0.80 %. The edge of the disc is a gradient of "
+        "approximately 60 pixels and has no line to click on. Measure by "
+        "hand only if the fit fails.",
+
+        "4.   Press ✔ Accept. Detection starts automatically. WARNING: "
+        "✔ Accept in the scale dialog only STAGES the anchor. The "
+        "software does not write the anchor until you save. If you "
+        "accepted a scale, Save before you close the window. NOTE: On "
+        "2026-08-06 an operator accepted a corrected fit on a live run, "
+        "closed the window before the save, and lost the correction. The "
+        "primary button in the dialog shows which operation applies: "
+        "\"applied at Save\" or \"RE-ANCHOR NOW\".",
+
+        "5.   Examine each frame in the review queue. The software "
+        "accepts the frames with a high score automatically. The other "
+        "frames wait for you. Press 1, 2 or 3 to select candidate A, B "
+        "or C. Press Enter to accept the candidate and go to the next "
+        "frame. Press D or 4 to open the manual tracer. Press R to reject "
+        "the frame. Press Next unreviewed to go to the next frame that "
+        "needs an operator.",
+
+        "6.   WARNING: Trace a washed-out frame. Do not reject it. Above "
+        "approximately 5.5 kV the boundary of the ink washes out, and no "
+        "candidate with the shape of a boundary can exist. The frame is "
+        "correct and the detector is correct. Your trace is the "
+        "measurement. If you reject a washed-out frame, you discard valid "
+        "data. This is the one instruction that a new operator gets "
+        "wrong. Reject a frame only if no correct boundary can be drawn, "
+        "also by hand. Examples are an obstruction, debris from a "
+        "breakdown, or a damaged image.",
+
+        "7.   Press 💾 Save to data.csv… when the queue is empty. The "
+        "software keeps a .bak file. The confirmation message tells you "
+        "what the software will write, and how many frames it will "
+        "rename.",
     ]),
-    ("The two numbers on every candidate line", [
+    ("4  If the scale is wrong", [
+        "You do not have to review the run again. Use 📏 Calibrate / "
+        "re-anchor… on a run that is saved, that has measurements in "
+        "pixels, and that has no review pass open. The software "
+        "re-derives every mm² from the pixels that are already in "
+        "data.csv. There is no detection and no second pass through the "
+        "queue.",
+
+        "The state of the run selects which of the two operations "
+        "applies. The dialog gives the name of the operation in its "
+        "title, on its primary button, and in its confirmation.",
+    ]),
+    ("5  The two numbers on a candidate line", [
         ('code', "A: disc-fit   12345 px²   conf 0.87   w1.2"),
 
-        "•   conf is the detector's own 0–1 opinion of that outline, built "
-        "from how solid the shape is, how hard the edge steps, whether the "
-        "other candidates agree with it and whether its interior is "
-        "wrinkled. At or above accept_conf (0.75 by default) a frame is "
-        "auto-accepted; below it, the frame comes to you. It is a score, "
-        "not a probability — a confident wrong answer is possible, which "
-        "is exactly why the queue exists.",
+        f"conf is the score of the outline, from 0 to 1. The software "
+        f"calculates it from the shape, the sharpness of the edge, the "
+        f"agreement of the other candidates, and the texture of the "
+        f"interior. The software accepts a frame automatically at or "
+        f"above accept_conf. The default value of accept_conf is "
+        f"{se.DEFAULT_SETTINGS['accept_conf']:g}. Below that value the "
+        f"frame comes to you. NOTE: conf is a score and not a "
+        f"probability. A wrong result with a high score is possible. This "
+        f"is the reason for the review queue.",
 
-        "•   w is the wrinkle index: the texture inside the outline "
-        "compared with the same patch of the 0 kV baseline. 1.0 means no "
-        "texture change at all. At or above wrinkle_ratio (1.4 by default) "
-        "the frame counts as wrinkle-mode, and since the lab defines the "
-        "active area AS the buckled region, a wrinkled interior is "
-        "evidence that the outline is sitting on the right thing.",
+        f"w is the wrinkle index. It compares the texture in the outline "
+        f"with the same area of the 0 kV image. 1.0 means no change of "
+        f"texture. At or above wrinkle_ratio the frame is in wrinkle "
+        f"mode. The default value of wrinkle_ratio is "
+        f"{se.DEFAULT_SETTINGS['wrinkle_ratio']:g}. NOTE: The laboratory "
+        f"defines the active area as the buckled area. Thus a wrinkled "
+        f"interior shows that the outline is on the correct feature.",
     ]),
-    ("If you need more than this", [
-        "The illustrated manual has the screenshots, the tuner and the "
-        "rest of the tool chain: docs/digital-multitool-manual.pdf in the "
-        "repo (or the copy handed out at the bench), section \"Companion "
-        "tools\".",
+    ("6  More information", [
+        "The illustrated manual contains the images, the tuner and the "
+        "other tools. Refer to docs/digital-multitool-manual.pdf in the "
+        "repository, or to the copy given out at the bench, section "
+        "\"Companion tools\".",
     ]),
 ]
 
@@ -1459,6 +1494,12 @@ class EdgeReviewApp:
         self.root = root
         root.title("SLDEA Edge Review — Digital Multitool")
         root.geometry("1150x760")
+        # Corrected after _build_ui, once the layout can be asked what it
+        # actually needs: 1150 was 169 px too narrow for it. The window
+        # opened with the right-hand panel already squeezed under its fixed
+        # SIDE_W and the progress bar rendered 11 px wide -- on the default
+        # geometry, on every machine, since the panel was written.
+        self._want_default_size = True
         self.settings = dict(se.DEFAULT_SETTINGS)
         self.run = None
         self.rundir = None
@@ -1569,9 +1610,53 @@ class EdgeReviewApp:
             # the window: the button still works unstyled
             print(f"edge review: accent style unavailable ({e})")
 
+    def _size_to_layout(self):
+        """Open at the size the layout asks for, capped to the screen.
+
+        The old fixed 1150x760 was measured too narrow: the built layout
+        wants ~1319 px, so the window opened with the fixed-width side
+        panel already squeezed and the progress bar at 11 px. Ask the
+        widgets instead of typing a number, the same rule the toolbar's
+        clock box follows two hundred lines up.
+
+        Capped, because a screen smaller than the layout is exactly the
+        case the scroller now covers -- taking the whole screen and then
+        some would be a worse answer than a scrollbar. Never SHRINKS the
+        window below the old default either: a machine that was fine
+        before stays fine.
+        """
+        if not getattr(self, '_want_default_size', False):
+            return
+        self._want_default_size = False
+        # The geometry manager has to have run before the body can say what
+        # it needs; without this the request reads short and the window
+        # opens at the old, too-narrow default.
+        self.root.update_idletasks()
+        want_w = max(self._scroll.body.winfo_reqwidth(), 1150)
+        want_h = max(self._scroll.body.winfo_reqheight(), 760)
+        # leave room for the window frame and a taskbar rather than
+        # butting the very edge of the display
+        cap_w = max(640, self.root.winfo_screenwidth() - 80)
+        cap_h = max(480, self.root.winfo_screenheight() - 120)
+        self.root.geometry(f'{min(want_w, cap_w)}x{min(want_h, cap_h)}')
+
     def _build_ui(self):
         self._install_styles()
-        top = ttk.Frame(self.root, padding=6)
+        # EVERY control lives inside this scroller, not in the root window.
+        #
+        # Tk's packer does not clip a window that is too small -- it DROPS
+        # the widgets that do not fit, silently and with nothing on screen
+        # to say so. Measured on the shipped 1150x760 default before this
+        # changed: at 900x600 Reject, Unreview and ❓ How to use… were gone;
+        # at 700x500 the whole right-hand panel went with them, so no frame
+        # could be accepted, rejected or traced. The window looked fine.
+        #
+        # stretch_height=True because the middle pane is an image viewport
+        # that must GROW into a tall window, unlike a notebook tab.
+        self._scroll = uiw.ScrollableFrame(self.root, stretch_height=True)
+        self._scroll.pack(fill='both', expand=True)
+        host = self._scroll.body
+        top = ttk.Frame(host, padding=6)
         top.pack(fill='x')
         # THE TOP BAR READS LEFT TO RIGHT AS THE JOB (`#216`): pick the run,
         # press the one accented button, review, save on the far right. The
@@ -1668,9 +1753,10 @@ class EdgeReviewApp:
         self._t0 = None             # start of the CURRENT detection pass
         self._t_session = time.time()   # window open — never reset
         self._clock_on = True
+        self._clock_job = None          # the in-flight tick, for cancelling
         self._tick_clock()
 
-        mid = ttk.Frame(self.root)
+        mid = ttk.Frame(host)
         mid.pack(fill='both', expand=True)
         self.canvas = tk.Canvas(mid, width=VIEW_W, height=VIEW_H, bg='#222',
                                 highlightthickness=0)
@@ -1740,7 +1826,7 @@ class EdgeReviewApp:
         self.queue_lbl = tk.Label(side, text="", fg='#8a5a00', anchor='w',
                                   justify='left')
         self.queue_lbl.pack(fill='x', pady=(8, 0))
-        self.status = tk.Label(self.root, text="idle", bd=1, relief=tk.SUNKEN,
+        self.status = tk.Label(host, text="idle", bd=1, relief=tk.SUNKEN,
                                anchor='w')
         self.status.pack(side=tk.BOTTOM, fill='x')
         # ❓ How to use — BOTTOM-RIGHT of the window (`#238`). Packed at the
@@ -1750,12 +1836,19 @@ class EdgeReviewApp:
         # flush right. Nothing above is touched — the top bar is where the
         # RUN's controls live, and a "where do I start" affordance that sat
         # among them would be one more thing to read before starting.
-        foot = ttk.Frame(self.root, padding=(6, 3))
+        foot = ttk.Frame(host, padding=(6, 3))
         foot.pack(side=tk.BOTTOM, fill='x')
         self.howto_btn = ttk.Button(foot, text=HOWTO_BTN_TEXT,
                                     command=self._howto)
         self.howto_btn.pack(side=tk.RIGHT)
         self._attach_tooltips()
+        self._size_to_layout()
+        # Cancel pending work on <Destroy> rather than on WM_DELETE_WINDOW:
+        # this fires however the window goes away -- the close button, a
+        # direct destroy(), a parent teardown -- where the protocol hook
+        # catches only the first. add='+' because `#281` was exactly this
+        # bind replacing a handler that was already there.
+        self.root.bind('<Destroy>', self._on_destroy, add='+')
 
         for key, fn in (('<Key-1>', lambda e: self._pick_k(0)),
                         ('<Key-2>', lambda e: self._pick_k(1)),
@@ -2030,6 +2123,7 @@ class EdgeReviewApp:
         (`#237`). It is not stopped by Save and not reset by a run switch;
         the detection readout beside it is the one that belongs to a pass
         and is repainted by `_set_detect_clock`."""
+        self._clock_job = None
         if not self._clock_on:
             return
         try:
@@ -2038,7 +2132,10 @@ class EdgeReviewApp:
         except tk.TclError:
             self._clock_on = False      # the window closed under the tick
             return
-        self.root.after(1000, self._tick_clock)
+        # keep the id: the flag stops the NEXT tick, but the one already
+        # scheduled still fires into a destroyed interpreter unless it is
+        # cancelled outright (see _cancel_pending)
+        self._clock_job = self.root.after(1000, self._tick_clock)
 
     def _set_detect_clock(self, n_frames=None, secs=None, total=None):
         """Repaint the DETECTION readout — see `detect_readout` for the
@@ -2580,6 +2677,65 @@ class EdgeReviewApp:
         if self._resize_job is not None:
             self.root.after_cancel(self._resize_job)
         self._resize_job = self.root.after(120, self._redraw_card)
+
+    def _cancel_pending(self):
+        """Drop the debounced redraw and stop the clock. Never raises.
+
+        The same defect `#283` fixed in the plot window, found here while
+        testing the scroll container 2026-08-12: `_canvas_resized` schedules
+        `after(120, _redraw_card)` and NOTHING cancelled it, so resizing the
+        window and then closing it left the callback to fire into a
+        half-destroyed interpreter. It surfaces as Tcl noise on stderr
+        ('invalid command name "..._redraw_card"') at exactly the moment
+        the operator stops looking, which is why it went unnoticed.
+
+        `_tick_clock` already defended itself (it checks `_clock_on` and
+        gives up when the window has gone), so only the resize job was
+        exposed; the clock is stopped here anyway to keep one shutdown path
+        rather than two conventions.
+        """
+        self._clock_on = False
+        for attr in ('_resize_job', '_clock_job'):
+            job = getattr(self, attr, None)
+            setattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
+        # ...and then EVERY other pending callback on this interpreter.
+        #
+        # Tracking the two ids we own is not enough, because we do not own
+        # them all: a dialog, a tooltip's hide timer or a progress poll can
+        # each have one in flight, and any of them firing after destroy is
+        # a Tcl error on stderr at best. At worst the interpreter is torn
+        # down mid-callback and the process dies on
+        # 'Tcl_AsyncDelete: async handler deleted by the wrong thread',
+        # which is a plausible mechanism for `#280`'s runner-context flake:
+        # the suite builds 48 windows across 23 roots, so the odds compound.
+        #
+        # Safe precisely because this only ever runs when the window is
+        # going away -- there is nothing left that a pending callback could
+        # usefully do.
+        try:
+            for jid in self.root.tk.call('after', 'info'):
+                try:
+                    self.root.after_cancel(jid)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _on_destroy(self, ev=None):
+        """<Destroy> on the root: drop pending work before the widgets go.
+
+        Fires for every child too, so it checks the widget -- otherwise the
+        first label torn down would cancel the clock while the window is
+        still very much alive.
+        """
+        if ev is not None and ev.widget is not self.root:
+            return
+        self._cancel_pending()
 
     def _redraw_card(self):
         self._resize_job = None

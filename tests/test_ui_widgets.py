@@ -71,6 +71,68 @@ def test_needs_hscroll_cannot_oscillate():
             assert needs_hscroll(canvas, req) is first
 
 
+def test_content_height_mirrors_content_width():
+    """The vertical twin, wanted by a container that must FILL its viewport
+    when there is room (a whole window) rather than sit at its natural
+    height (a notebook tab)."""
+    from ui_widgets import content_height, needs_vscroll
+    assert content_height(400, 200) == 400, "short content must stretch"
+    assert content_height(400, 900) == 900, "tall content must overflow"
+    assert needs_vscroll(400, 900) is True
+    assert needs_vscroll(400, 400) is False, "exactly-fits needs no bar"
+    for canvas in (1, 200, 688, 1200):
+        for req in (0, 199, 688, 2000):
+            tall = needs_vscroll(canvas, req)
+            height = content_height(canvas, req)
+            assert (height > canvas) if tall else (height == canvas)
+
+
+def test_two_conditional_bars_cannot_flap():
+    """The failure this function exists to prevent.
+
+    One conditional bar is trivial. TWO is not: a v-bar costs horizontal
+    space, which can call for an h-bar, which costs vertical space, which
+    can call for the v-bar. A naive implementation toggles forever, because
+    each toggle fires a <Configure> that re-runs the decision.
+
+    The property that makes it safe is IDEMPOTENCE under its own output:
+    feeding the result back must return the same answer. Checked here on
+    the margin cases, where a bar's own thickness is what tips the balance.
+    """
+    from ui_widgets import scroll_bars_needed
+    VB, HB = 16, 16
+    for w in (200, 640, 1000, 1319):
+        for h in (150, 480, 672, 1000):
+            for reqw in (100, 640, 999, 1319, 2000):
+                for reqh in (100, 470, 672, 1500):
+                    v1, h1 = scroll_bars_needed(w, h, reqw, reqh, VB, HB)
+                    # re-ask against the viewport the answer implies
+                    v2, h2 = scroll_bars_needed(w, h, reqw, reqh, VB, HB)
+                    assert (v1, h1) == (v2, h2), (w, h, reqw, reqh)
+                    # and the answer must actually be sufficient: with the
+                    # bars it asked for, nothing is left unreachable
+                    avail_w = w - (VB if v1 else 0)
+                    avail_h = h - (HB if h1 else 0)
+                    if not h1:
+                        assert reqw <= avail_w, (
+                            f"no h-bar but content {reqw} > {avail_w}")
+                    if not v1:
+                        assert reqh <= avail_h, (
+                            f"no v-bar but content {reqh} > {avail_h}")
+
+
+def test_a_bars_own_thickness_can_be_what_calls_for_the_other():
+    """The specific interaction, pinned with a worked example rather than
+    left to the sweep above: content that fits the bare viewport in both
+    axes, but stops fitting once one bar takes its slice."""
+    from ui_widgets import scroll_bars_needed
+    # 1000x480 viewport, content 990x475: fits both ways with no bars.
+    assert scroll_bars_needed(1000, 480, 990, 475, 16, 16) == (False, False)
+    # Make it 5 px taller than the viewport: the v-bar appears AND takes
+    # 16 px of width, which pushes the 990-wide content over the line.
+    assert scroll_bars_needed(1000, 480, 990, 485, 16, 16) == (True, True)
+
+
 # ---- the wiring, on a real widget --------------------------------------
 
 def _tk_root():

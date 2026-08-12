@@ -20,13 +20,22 @@ gates, and 2 `test_sldea_plot_gui` scroll cases need more screen height
 than this desktop has. **The lab PC has not been measured since #296 and
 #303 landed** — it will inherit both, but its number is still unknown.
 
-**Corpus: backed up, still not protected.** The backup is confirmed
-archived out of the shared directory (Anatol, 2026-08-12) — the
-irreplaceable-data risk is closed. The *access* risk is not: the
-read-only share is still not attached, `SCPI_SLDEA_DIR` still points at
-a path that does not resolve on the VM, and the live corpus is still
-reachable **writable** at `Z:\SLDEA_data` (verified this date). The
-share relayout in §B is what closes that half.
+**Corpus: consolidated and backed up, still not protected.** All 15 runs
+now sit under one parent, `SLDEA_data\runs\` (2026-08-12, a same-volume
+rename verified by file count, byte total and hashes). The backup is
+confirmed archived out of the shared directory — the irreplaceable-data
+risk is closed. The *access* risk is not: the read-only share is still
+not attached and the live corpus is still reachable **writable** at
+`Z:\SLDEA_data` (verified this date). The share relayout in §B closes
+that half.
+
+**⚠ `SCPI_SLDEA_DIR` MUST BECOME `…\SLDEA_data\runs` ON EVERY MACHINE.**
+Both obvious values fail SILENTLY after the relayout — measured this
+date, not reasoned about. `…\Upload 20260804`, which is the current
+lab-PC value, descends into `_baselines\` and serves **2 baseline
+COPIES** as though they were runs. `…\SLDEA_data` stops at the root and
+serves **1** — the scratch playground — because it holds a `data.csv`
+directly. Neither errors; both just hand you the wrong runs.
 
 **⚠ Screen height: the ≥1150 px figure is stale for the tests.**
 Measured at 1920×1200 on 2026-08-12 — the Draw column needs 1186 px and
@@ -96,26 +105,32 @@ clears it.
       ABSENT rather than guessed at 2.5, since absent means "predates the
       field" and a wrong value would be indistinguishable from a
       measured one.
-- [ ] **Runs that are NOT on the `Z:` share and were therefore not
-      backfilled.** Anatol reports "a few stragglers" in
-      `Upload 20260805\SL Ramp Test Initial CB\` that are carbon black,
-      and one more under `Upload 20260805\Single Layer Testing\P3 1.5mL
-      Triazole Bake1\` that is P3 at 1.5 mL. **Neither exists here** —
-      measured 2026-08-12, each of those folders holds exactly one run
-      (`SLCBvalidationTest`, `P3 1.5mL Triazole Bake1-1`), and a sweep
-      for `data.csv` across the whole share finds 18 run folders and no
-      others. So either the share is a partial copy of the lab PC's
-      corpus or the stragglers live somewhere else. Settle which, then
-      re-run the backfill wherever they are — it is idempotent and skips
-      anything already carrying the field.
+- [x] **Stragglers — RESOLVED 2026-08-12, there are none.** Anatol
+      placed the CB runs in `SL Ramp Test Initial CB\` "and that's it";
+      measured, that folder held exactly one run and the Triazole folder
+      one, and a `data.csv` sweep found no others. Everything on the
+      share was backfilled.
+- [x] **Consolidate the runs under one parent — DONE 2026-08-12.** All
+      15 now sit in `SLDEA_data\runs\`, moved by same-volume rename and
+      verified on file count, byte total and the SHA-256 of `data.csv`
+      and `setup.txt`. `PROVENANCE.md` carries a dated relayout block.
+      `_baselines\`, `_analysis\`, `_diag_history\`, `plots\` and the
+      campaign docs stayed under `Upload 20260804\`.
+- [ ] **REPOINT `SCPI_SLDEA_DIR` to `…\SLDEA_data\runs` on the lab PC
+      and the bench fleet — do this before anyone opens a run.** The
+      current lab-PC value silently resolves to the two `_baselines\`
+      copies (see the warning at the top of this sheet). This is the one
+      item the relayout created and it is not optional.
 - [ ] **Then the share relayout** (decided: option c) — move
       `SLDEA_data` out of the read-write share's root, attach it as a
-      genuine read-only share, repoint `SCPI_SLDEA_DIR`. Same pass: fix
-      the two hard-coded corpus paths in the docs, and the plot window's
-      default Export target, which writes beside the runs and will fail
-      read-only. Do **not** shortcut by pointing `SCPI_SLDEA_DIR` at the
-      `Z:` path — it resolves, and hands every tool write access to the
-      sole copy.
+      genuine read-only share, repoint `SCPI_SLDEA_DIR` again to wherever
+      it lands. Bundled with the consolidation above by decision, so
+      recorded paths are invalidated once rather than twice — the
+      consolidation is done, this half is host-side and still owed. Same
+      pass: the plot window's default Export target writes a `plots` dir
+      *beside the runs* and a read-only share will refuse it. Do **not**
+      shortcut by pointing `SCPI_SLDEA_DIR` at the `Z:` path — it
+      resolves, and hands every tool write access to the corpus.
 - [ ] **The control round** (~15–20 min at the Edge Review GUI,
       operator) — the LAST desk-side measurement item. Targets in
       GUI-frame numbers: `DOT_P3_1_20260729` frame 29 ·

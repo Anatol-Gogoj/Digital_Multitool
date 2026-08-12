@@ -83,6 +83,44 @@ now; `vm-setup\provision-guest.ps1` and `RUN_SHEET.md` both still say
 1150. **Manual capture is unaffected** — `capture.py` needs ≥1090 and
 1200 clears it, so the release-capture stage still runs here.
 
+**CORPUS RELAYOUT 2026-08-12 — every run now sits under ONE parent,
+`SLDEA_data\runs\`.** Decided by Anatol; done to stop the hunt across
+three unrelated folders for a device's frames. The 15 runs that were
+split between `Upload 20260804\SLDEA_data (1)\`,
+`Upload 20260805\Single Layer Testing\...` and
+`Upload 20260805\SL Ramp Test Initial CB\` are now siblings, with their
+folder names unchanged. Done as a same-volume `Move-Item` per folder —
+a rename, not a copy — and verified against a manifest taken
+immediately before it: all 15 match on file count, on byte total, and
+on the SHA-256 of both `data.csv` and `setup.txt`. Totals unchanged at
+**1823 files, 3.78 GB**. The emptied `Upload 20260805\` scaffolding was
+removed after confirming it held zero files. `PROVENANCE.md` carries a
+dated relayout block, so the audit trail declares its own paths
+historical instead of silently lying. **Not moved**, and still
+addressed under `Upload 20260804\`: `_baselines\`, `_analysis\`,
+`_diag_history\`, `SLDEA_data (1)\plots\`, and the campaign docs.
+
+> **⚠ REPOINT `SCPI_SLDEA_DIR` TO `…\SLDEA_data\runs` ON EVERY MACHINE.
+> Both of the obvious values are traps, and both fail SILENTLY** —
+> measured this date by running `se.runs_parent` against the new tree,
+> not reasoned about:
+> - `…\SLDEA_data\Upload 20260804` — **the current lab-PC value** —
+>   descends by the one-level rule into `_baselines\` and finds **2
+>   runs**: the baseline COPIES. Not an error and not empty. The wrong
+>   data, quietly.
+> - `…\SLDEA_data` returns ITSELF with **1 run**, because
+>   `_scratch_playground\` holds a `data.csv` directly, so rule 2 fires
+>   at the root and the descent never reaches `runs\`.
+>
+> Only `…\SLDEA_data\runs` resolves to the 15. This is the `#261`
+> descent rule behaving exactly as specified — the layout moved under
+> it.
+
+**Consequence for saved figures:** any figspec or tidy CSV written
+before this date records its runs as absolute paths and will no longer
+resolve. The figures are reproducible by re-selecting the runs; the
+stored spec is not.
+
 **`GATES.md` G9 is CLOSED** — Anatol confirmed 2026-08-12 that the
 backup is archived and out of the shared directory. The
 irreplaceable-data risk that gated the share relayout is gone, which

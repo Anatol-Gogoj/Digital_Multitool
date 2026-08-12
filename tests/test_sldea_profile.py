@@ -337,11 +337,12 @@ def test_electrode_family_maps_the_campaign_materials():
 def test_every_branded_cnt_ink_in_the_dropdown_families_to_cnt():
     """`#272`. The family is the future group-by key (#229), so a device
     built with a named CNT ink must land in the same bucket as one recorded
-    as plain 'CNT' -- and NONE of the four brand names contains the
+    as plain 'CNT' -- and NONE of the six brand names contains the
     substring 'cnt', so this cannot work by accident."""
     from sldea_profile import ELECTRODE_CHOICES, electrode_family
     branded = ('Carbon Solutions P3-SWNT', 'Carbon Solutions P2-SWNT',
-               'nano-c Invisicon 3900', 'nano-c Invisicon 3500')
+               'nano-c Invisicon 3900', 'nano-c Invisicon 3500',
+               'nano-c 3900 Spray', 'nano-c 3500 Spray')
     for name in branded:
         assert name in ELECTRODE_CHOICES, f"{name} missing from the dropdown"
         assert 'cnt' not in name.lower(), "test premise: no literal 'cnt'"
@@ -349,6 +350,24 @@ def test_every_branded_cnt_ink_in_the_dropdown_families_to_cnt():
     # plain CNT is kept: it is what every run recorded before the brands
     assert 'CNT' in ELECTRODE_CHOICES
     assert electrode_family('CNT') == 'cnt'
+
+
+def test_hyphenless_nanoc_is_cnt_but_nanocomposites_are_not():
+    """The spray entries were first proposed as "NanoC 3500 Spray", which
+    matched nothing and came out 'other'. An operator types the brand the
+    way they say it, so both spellings have to land in 'cnt' -- without
+    the needle swallowing unrelated nano-materials that merely start the
+    same way. `#268` makes this load-bearing: the family is what the
+    aggregate groups by, so a mis-filed run silently joins the wrong mean."""
+    from sldea_profile import electrode_family
+    for text in ('NanoC 3500 Spray', 'NanoC 3900 Spray', 'nanoc 3900',
+                 'NanoC', 'nano-c 3500 Spray', 'NANO-C INVISICON 3900'):
+        assert electrode_family(text) == 'cnt', text
+    # ...and the trailing space in the needle is what stops these.
+    # None is nanotube ink; each would otherwise be silently filed as CNT.
+    for text in ('nanocomposite', 'PDMS nanocomposite', 'nanoclay',
+                 'nanocellulose film'):
+        assert electrode_family(text) == 'other', text
 
 
 def test_electrode_family_tolerates_the_obvious_typed_variants():
@@ -409,6 +428,27 @@ def test_concentration_applies_only_where_an_ink_volume_means_something():
     # has no concentration", and grey-before-you-choose looks broken
     for blank in ('', '   ', None):
         assert concentration_applies(blank) is True, repr(blank)
+
+
+def test_a_spray_has_no_millilitres_but_is_still_its_own_material():
+    """Spray-applied electrodes go on as coats, not as a measured volume,
+    so Concentration (mL) is greyed for them (Anatol, 2026-08-12).
+
+    The two halves are asserted together because the whole point is that
+    they are SEPARATE axes: excluding the concentration must not move the
+    material out of `cnt`, or `#268`'s aggregate would draw spray-applied
+    CNT as a different family from brush-applied CNT and split the very
+    group it exists to compare."""
+    from sldea_profile import concentration_applies, electrode_family
+    for spray in ('nano-c 3500 Spray', 'nano-c 3900 Spray',
+                  'NanoC 3900 Spray', 'some bespoke sprayed ink'):
+        assert concentration_applies(spray) is False, spray
+    for spray in ('nano-c 3500 Spray', 'nano-c 3900 Spray',
+                  'NanoC 3900 Spray'):
+        assert electrode_family(spray) == 'cnt', spray
+    # the non-spray brands are untouched -- they are still dispensed by mL
+    for pourable in ('nano-c Invisicon 3500', 'Carbon Solutions P3-SWNT'):
+        assert concentration_applies(pourable) is True, pourable
 
 
 def test_parse_concentration_ml_accepts_only_a_positive_number():

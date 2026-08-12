@@ -1,4 +1,149 @@
-# Project handoff — state as of 2026-08-08
+# Project handoff — state as of 2026-08-12
+
+**TL;DR (2026-08-12, analysis VM — read this first).** Everything
+`GATES.md` listed as blocked has landed. Main is green at `011c976`,
+**no open PRs**, and the VM suite is **39/39 suites**. Two batches
+merged since this file was last written: the eleven gated PRs on
+2026-08-09 (**#296** tests → green on Windows · **#303** honest skip
+reporting · **#306** suites report ALL failures, not the first ·
+**#297** the band policy · **#304** the `#264` decision-prep entry ·
+**#298** launcher + `.gitignore` · **#301** the regenerated docs ·
+**#302** the plot-option seam · **#305** the sweep planner · **#308**
+BENCH_TEST §P · **#309** manual stable slugs), then the **plot-window
+batch** on 2026-08-10 (**#310** `#268`'s cross-run aggregate ·
+**#317**–**#322**, **#324** the operator round that followed it).
+**Nothing is owed at a desk in this lane** — what remains is host-side,
+lab-PC or bench, and is enumerated in `RUN_SHEET.md`.
+
+**What the plot batch delivered**, all with tests on main: the cross-run
+aggregate with a per-group SEM band (`#268`, `#313`) · one figure
+holding runs from several parent folders (`#323`) · PNG-or-SVG export
+with a settable dpi (`#314`) · heading hints in the empty title boxes
+(`#315`) · a coalesced resize that re-lays-out instead of rebuilding
+(`#316`) · every path out of `on_click` either acting or saying why
+(`#311`) · n in the caption with counts only where a level falls short
+(`#312`).
+
+**Nine shipped issues were closed by hand on 2026-08-12** — `#307`
+`#311` `#312` `#313` `#314` `#315` `#316` `#323`, plus `#49`, whose
+audit said "close once `#298` merges". They had stayed open because no
+merged PR used a closing keyword — correct practice given cold-start
+trap 4, which has fired three times — and nobody then closed them
+manually. Each was verified against this tree before closing, by
+finding its implementation AND its tests; the evidence table is under
+"Roster changes 2026-08-09 → 2026-08-12" below.
+
+**`#268` stays open; its electrode-family half is UNBLOCKED and the
+corpus is now LABELLED (2026-08-12).** The aggregate shipped (#310,
+#324). The family sub-item was parked because zero of the 13 corpus runs
+carried `Electrode family:`; Anatol supplied the values this date and
+the backfill is applied — **16 `setup.txt` on the `Z:` share now carry
+`Compliant electrode:`, the derived `Electrode family:` and, where it
+applies, `Ink concentration:`**, each with a
+`.bak-20260812-pre-electrode-backfill` sidecar. The decode: `P3` is the
+Carbon Solutions P3-SWNT ink, the trailing digit is the run number with
+that configuration, the mL token is the ink concentration; every
+`SLDEA_202607*` run is P3 at 2.5 mL; `SLCBvalidationTest` is carbon
+black. Two schema rules the script honours and any future one must:
+`Electrode family:` is DERIVED by importing the app's own
+`electrode_family()` and never typed, and `Ink concentration:` is
+omitted entirely for carbon black and eGaIn rather than written blank.
+
+**Three things the backfill did NOT settle.** `DOT_P3_1_20260729` is
+still unlabelled — P3-SWNT by name, but no mL token and the value is not
+known, so it was left ABSENT rather than guessed, because absent means
+"predates the field" and a wrong number would be indistinguishable from
+a measured one. Anatol reports **stragglers that are not on this share**
+(carbon-black runs under `SL Ramp Test Initial CB\` and one more P3
+1.5 mL under `Single Layer Testing\`): measured this date, each of those
+folders holds exactly one run and a `data.csv` sweep finds 18 run
+folders share-wide and no others — so either `Z:` is a partial copy of
+the lab PC's corpus, or they live elsewhere. And **five of the six
+newly-labelled `SLDEA_202607*` runs are the RETIRED 07-23 family**:
+labelling records what the device was and does not un-retire them, but a
+family prefill keyed on this field would sweep them into the P3 family
+unless it also honours the retirement, which nothing currently records
+in machine-readable form.
+
+**Suite baseline, in the new vocabulary: 39/39 SUITES on the VM.** The
+old "34/38" and "38/38" lines counted something else — `#303`/`#306`
+changed the reporting, so a suite now passes while individually skipping
+gated cases, and the per-test totals in older blocks below are not
+comparable. Eight tests skip here, all honestly reported: 4
+`test_app_launch` and 2 `test_tk_fontfix` need Xvfb/xwininfo and
+fontconfig (Linux — they will never run on Windows), and 2
+`test_sldea_plot_gui` scroll cases skip as "desktop too short".
+
+**Correction: the ≥1150 px screen-height figure is stale for the tests.**
+Measured on this VM 2026-08-12 at **1920×1200**: the Draw column needs
+**1186 px** and the window can only give it **1181** — it misses by
+five. `#268` added two Draw rows after that threshold was written, which
+is what moved it. The screen wants **≥ ~1205 px** for those two cases
+now; `vm-setup\provision-guest.ps1` and `RUN_SHEET.md` both still say
+1150. **Manual capture is unaffected** — `capture.py` needs ≥1090 and
+1200 clears it, so the release-capture stage still runs here.
+
+**CORPUS RELAYOUT 2026-08-12 — every run now sits under ONE parent,
+`SLDEA_data\runs\`.** Decided by Anatol; done to stop the hunt across
+three unrelated folders for a device's frames. The 15 runs that were
+split between `Upload 20260804\SLDEA_data (1)\`,
+`Upload 20260805\Single Layer Testing\...` and
+`Upload 20260805\SL Ramp Test Initial CB\` are now siblings, with their
+folder names unchanged. Done as a same-volume `Move-Item` per folder —
+a rename, not a copy — and verified against a manifest taken
+immediately before it: all 15 match on file count, on byte total, and
+on the SHA-256 of both `data.csv` and `setup.txt`. Totals unchanged at
+**1823 files, 3.78 GB**. The emptied `Upload 20260805\` scaffolding was
+removed after confirming it held zero files. `PROVENANCE.md` carries a
+dated relayout block, so the audit trail declares its own paths
+historical instead of silently lying. **Not moved**, and still
+addressed under `Upload 20260804\`: `_baselines\`, `_analysis\`,
+`_diag_history\`, `SLDEA_data (1)\plots\`, and the campaign docs.
+
+> **⚠ REPOINT `SCPI_SLDEA_DIR` TO `…\SLDEA_data\runs` ON EVERY MACHINE.
+> Both of the obvious values are traps, and both fail SILENTLY** —
+> measured this date by running `se.runs_parent` against the new tree,
+> not reasoned about:
+> - `…\SLDEA_data\Upload 20260804` — **the current lab-PC value** —
+>   descends by the one-level rule into `_baselines\` and finds **2
+>   runs**: the baseline COPIES. Not an error and not empty. The wrong
+>   data, quietly.
+> - `…\SLDEA_data` returns ITSELF with **1 run**, because
+>   `_scratch_playground\` holds a `data.csv` directly, so rule 2 fires
+>   at the root and the descent never reaches `runs\`.
+>
+> Only `…\SLDEA_data\runs` resolves to the 15. This is the `#261`
+> descent rule behaving exactly as specified — the layout moved under
+> it.
+
+**Consequence for saved figures:** any figspec or tidy CSV written
+before this date records its runs as absolute paths and will no longer
+resolve. The figures are reproducible by re-selecting the runs; the
+stored spec is not.
+
+**`GATES.md` G9 is CLOSED** — Anatol confirmed 2026-08-12 that the
+backup is archived and out of the shared directory. The
+irreplaceable-data risk that gated the share relayout is gone, which
+also clears the way for the `#268` backfill above: that is the first
+campaign-wide WRITE the corpus has taken, and it would not have been
+defensible before this.
+
+**G10 is not closed, and the two are separate risks.** The share
+relayout has not happened, so **the live corpus is still reachable
+WRITABLE at `Z:\SLDEA_data`** (verified this date) and
+`SCPI_SLDEA_DIR` still points at the `\\VBOXSVR\SLDEA_data\...` path
+that does not resolve on this guest. Access is still protocol-only.
+G11 the control round, G12 `#215`, G13 the bench visit are all
+unchanged.
+
+**A release bump is the natural next milestone, and is now possible
+here.** Main is **62 commits past the `v1.2.0` tag** and the manual PDF
+was last built 2026-08-09, before the whole plot batch. The capture
+stage runs on this VM (the venv has pypdf and reportlab; the display
+clears `capture.py`'s threshold). Note it stacks a SECOND unpromoted
+release: v1.2.0 is still a pre-release pending §M.
+
+---
 
 **FINAL 2026-08-08 — Part II shipped; the NEXT SESSION MAY RUN IN A VM
 (read this block first there).** The manual gained **Part II — "How it
@@ -889,6 +1034,47 @@ rework. What is genuinely left at a desk, in order:
    to Git LFS / release-assets-only.
 4. **`demos/` fate** — decision material for open issue #32 (GUI
    framework); archive the trio when #32 is decided.
+
+## Roster changes 2026-08-09 → 2026-08-12
+
+**Shipped but still OPEN — the close list, each verified against this
+tree on 2026-08-12 rather than recalled.** Every one was checked by
+finding its implementation and its tests on `main`, not by trusting the
+PR title:
+
+| Issue | Shipped by | Evidence on main |
+|---|---|---|
+| `#307` manual keys off live Tk labels | #309 (`74c8f49`) | `gui.MANUAL_TABS` is the one slug vocabulary; `capture.py` writes `tab_<slug>`, `annotate.py` and `build_manual.py` read it, `content.json` re-keyed |
+| `#311` click-through dies after Edge Review closes | #318, test fix #322 | `on_click` documents the rule and every branch sets `lbl_click`; four silent returns gone |
+| `#312` n-labels overlap, bands box inert | #320 | n in the caption, counts only on levels short of it; the box greys with a tooltip naming why |
+| `#313` aggregate BY GROUP | #324 | `groups` is a remembered, structured option (`sp.check_groups`); `aggregate_only` hides contributors |
+| `#314` PNG-or-SVG export with a dpi | #319 | format selector, dpi greyed under SVG, both recorded in the figspec |
+| `#315` pre-populate the title boxes | #317 | shipped as a HINT over an empty entry, never a value — so blank still means derived |
+| `#316` laggy resize | #321 | coalesced redraw + re-lay-out instead of rebuild; the "moving costs no redraw" test still holds |
+| `#323` runs from several parent folders | #324 | `initial_state` collects parents; options and `default_out_dir` stay keyed on the first, and the window says which |
+| `#49` housekeeping audit | #298 | the audit found five of six bullets already dead; `.gitignore` was the live one and `#298` fixed it |
+
+**All nine were closed on 2026-08-12** with the evidence above quoted on
+each issue.
+
+**`#268` stays open — its family half came back.** The aggregate shipped
+in #310 and grew group support in #324. The electrode-family sub-item
+was parked as unbuildable because zero of 13 corpus runs carry
+`Electrode family:`; **Anatol elected on 2026-08-12 to backfill the
+electrode and concentration by hand**, which makes it buildable again.
+Full schema notes are on the issue. The part that still needs writing:
+nothing in `sldea_plot.py` or `sldea_plot_gui.py` reads the electrode
+fields at all, and `GROUP_ASSIGN_TIP` states as fact that no run carries
+the field — that sentence goes stale on the first backfilled run and
+must change in the same PR. Per `#313`'s design point the field
+**pre-fills** the grouping and never replaces it, or a run with a wrong
+label becomes ungroupable.
+
+**Why none of these auto-closed.** The PRs deliberately wrote their
+issue references in backticks with no closing keyword — the rule from
+cold-start trap 4, after `#159` and `#193` were each auto-closed twice
+by keyword parsing. The rule worked. The cost is that closing is now a
+manual step, and one batch's worth went un-done.
 
 ## Roster changes 2026-08-07 evening
 

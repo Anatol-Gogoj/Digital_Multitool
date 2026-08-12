@@ -115,10 +115,16 @@ def _need_room(w, col, tall):
 
     Two cases share this premise, so guarding only one leaves the other
     failing identically. The Draw column needs roughly `tall + 120` of
-    window, which wants ~1150 px of screen once the title bar and taskbar
-    are taken -- note that the 1920x1080 vm-setup asks for does NOT clear
-    it. `#268` added two more Draw rows, which is what finally pushed this
-    desktop under the line and exposed the bug below.
+    window, which wants MORE THAN 1200 px of screen once the title bar
+    and taskbar are taken -- note that the 1920x1080 vm-setup asks for
+    does not come close. `#268` added two more Draw rows, which is what
+    finally pushed this desktop under the line and exposed the bug below.
+
+    That figure was written as "~1150 px" and is corrected here because
+    it was measured, not estimated: on a 1920x1200 desktop 2026-08-12 the
+    column asked for 1186 px and the window could give it 1181 -- short
+    by five. Prefer the numbers this guard PRINTS over any threshold
+    quoted in prose; they are the two that decide it.
 
     The screen size goes in the message through `w.win.root`: `w.win` is a
     PlotWindow, not a Tk widget, so the original `w.win.winfo_screenwidth()`

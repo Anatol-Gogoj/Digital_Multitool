@@ -909,7 +909,7 @@
    },
    {
     "label": "Concentration (mL)",
-    "what": "How much CNT ink went on this device — the '2.5mL' in a folder name like P3_2.5mL_Triazole, now recorded in the run itself. It is greyed out for carbon black and eGaIn, which are not inks dispensed by volume: when it is greyed the run neither asks for it nor writes it to setup.txt, so a carbon-black run carries no ink key at all. Where it does apply, the run asks before starting without it, and only a positive number is accepted."
+    "what": "How much CNT ink went on this device — the '2.5mL' in a folder name like P3_2.5mL_Triazole, now recorded in the run itself. It is greyed out for carbon black and eGaIn, which are not inks dispensed by volume, and for the spray-applied electrodes, which go on as coats rather than as a measured millilitre: when it is greyed the run neither asks for it nor writes it to setup.txt, so a carbon-black or spray run carries no ink key at all. Greying it does not change the material — a spray-applied CNT is still recorded in the CNT family. Where it does apply, the run asks before starting without it, and only a positive number is accepted."
    },
    {
     "label": "⚡ Breakdown watchdog (LIVE runs)",

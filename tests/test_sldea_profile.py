@@ -430,6 +430,27 @@ def test_concentration_applies_only_where_an_ink_volume_means_something():
         assert concentration_applies(blank) is True, repr(blank)
 
 
+def test_a_spray_has_no_millilitres_but_is_still_its_own_material():
+    """Spray-applied electrodes go on as coats, not as a measured volume,
+    so Concentration (mL) is greyed for them (Anatol, 2026-08-12).
+
+    The two halves are asserted together because the whole point is that
+    they are SEPARATE axes: excluding the concentration must not move the
+    material out of `cnt`, or `#268`'s aggregate would draw spray-applied
+    CNT as a different family from brush-applied CNT and split the very
+    group it exists to compare."""
+    from sldea_profile import concentration_applies, electrode_family
+    for spray in ('nano-c 3500 Spray', 'nano-c 3900 Spray',
+                  'NanoC 3900 Spray', 'some bespoke sprayed ink'):
+        assert concentration_applies(spray) is False, spray
+    for spray in ('nano-c 3500 Spray', 'nano-c 3900 Spray',
+                  'NanoC 3900 Spray'):
+        assert electrode_family(spray) == 'cnt', spray
+    # the non-spray brands are untouched -- they are still dispensed by mL
+    for pourable in ('nano-c Invisicon 3500', 'Carbon Solutions P3-SWNT'):
+        assert concentration_applies(pourable) is True, pourable
+
+
 def test_parse_concentration_ml_accepts_only_a_positive_number():
     """`#276`. The value lands in setup.txt as fact, so junk is refused at
     Run rather than written down."""

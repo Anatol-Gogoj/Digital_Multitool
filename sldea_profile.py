@@ -122,6 +122,19 @@ def electrode_family(text):
     return 'other'
 
 
+# Application methods that are not dispensed as a measured volume, matched
+# as substrings like the family needles above. This is a SECOND axis:
+# 'spray' is not a material and does not change the family, so a
+# spray-applied CNT is still `cnt` and still groups with every other CNT
+# run -- it just has no millilitres to record (Anatol, 2026-08-12).
+#
+# Kept separate from _ELECTRODE_FAMILIES on purpose. Folding "no
+# concentration" into the family would have forced spray-applied CNT into
+# its own family or into 'other', and either one would split the CNT group
+# that `#268`'s aggregate exists to draw.
+_NO_CONCENTRATION_NEEDLES = ('spray',)
+
+
 def concentration_applies(electrode):
     """Is an ink concentration a meaningful thing to record here? (`#276`)
 
@@ -132,6 +145,11 @@ def concentration_applies(electrode):
     never asks about it, and setup.txt does not carry the key at all. A CB
     run should not look like a CNT run that forgot to fill something in.
 
+    SPRAY-APPLIED electrodes are excluded for the same reason but on a
+    different axis (2026-08-12): a spray goes on as coats, not as a
+    measured millilitre, so the number would be a fiction. The material is
+    still whatever it is -- `nano-c 3500 Spray` remains family `cnt`.
+
     Everything else may have one and is offered it: the CNT family, and any
     custom material the operator typed (we do not know that a material we
     have never heard of is not an ink).
@@ -140,6 +158,9 @@ def concentration_applies(electrode):
     fact as "this electrode has no concentration", and greying the box
     before the operator has said what the device is would just look broken.
     """
+    padded = f" {(electrode or '').strip().lower()} "
+    if any(nd in padded for nd in _NO_CONCENTRATION_NEEDLES):
+        return False
     return electrode_family(electrode) not in ('carbon_black', 'liquid_metal')
 
 

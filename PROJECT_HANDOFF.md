@@ -33,22 +33,37 @@ manually. Each was verified against this tree before closing, by
 finding its implementation AND its tests; the evidence table is under
 "Roster changes 2026-08-09 → 2026-08-12" below.
 
-**`#268` stays open, and its electrode-family half is UNBLOCKED as of
-2026-08-12.** Its aggregate shipped (#310, #324). The family sub-item
-was parked because the `Electrode family:` field is carried by zero of
-the 13 corpus runs — **Anatol's decision this date is to backfill the
-electrode and concentration by hand** from the run names and the lab
-notes, so the sub-item is pending again rather than superseded. Two
-schema details make the obvious approach wrong and are recorded on the
-issue: the operator writes `Compliant electrode:` (the MATERIAL) and
-`Electrode family:` is DERIVED from it by
-`sldea_profile.electrode_family()`, never typed; and `Ink
-concentration:` is omitted entirely for carbon black and eGaIn rather
-than written blank. **The open question is whether `P3` in the campaign
-folder names is the Carbon Solutions P3-SWNT ink or device 3** —
-`electrode_family()` deliberately refuses to guess from device tokens,
-so a bare `P3` canonicalises to `other`, and the answer decides whether
-the backfill is mechanical or needs the notes.
+**`#268` stays open; its electrode-family half is UNBLOCKED and the
+corpus is now LABELLED (2026-08-12).** The aggregate shipped (#310,
+#324). The family sub-item was parked because zero of the 13 corpus runs
+carried `Electrode family:`; Anatol supplied the values this date and
+the backfill is applied — **16 `setup.txt` on the `Z:` share now carry
+`Compliant electrode:`, the derived `Electrode family:` and, where it
+applies, `Ink concentration:`**, each with a
+`.bak-20260812-pre-electrode-backfill` sidecar. The decode: `P3` is the
+Carbon Solutions P3-SWNT ink, the trailing digit is the run number with
+that configuration, the mL token is the ink concentration; every
+`SLDEA_202607*` run is P3 at 2.5 mL; `SLCBvalidationTest` is carbon
+black. Two schema rules the script honours and any future one must:
+`Electrode family:` is DERIVED by importing the app's own
+`electrode_family()` and never typed, and `Ink concentration:` is
+omitted entirely for carbon black and eGaIn rather than written blank.
+
+**Three things the backfill did NOT settle.** `DOT_P3_1_20260729` is
+still unlabelled — P3-SWNT by name, but no mL token and the value is not
+known, so it was left ABSENT rather than guessed, because absent means
+"predates the field" and a wrong number would be indistinguishable from
+a measured one. Anatol reports **stragglers that are not on this share**
+(carbon-black runs under `SL Ramp Test Initial CB\` and one more P3
+1.5 mL under `Single Layer Testing\`): measured this date, each of those
+folders holds exactly one run and a `data.csv` sweep finds 18 run
+folders share-wide and no others — so either `Z:` is a partial copy of
+the lab PC's corpus, or they live elsewhere. And **five of the six
+newly-labelled `SLDEA_202607*` runs are the RETIRED 07-23 family**:
+labelling records what the device was and does not un-retire them, but a
+family prefill keyed on this field would sweep them into the P3 family
+unless it also honours the retirement, which nothing currently records
+in machine-readable form.
 
 **Suite baseline, in the new vocabulary: 39/39 SUITES on the VM.** The
 old "34/38" and "38/38" lines counted something else — `#303`/`#306`

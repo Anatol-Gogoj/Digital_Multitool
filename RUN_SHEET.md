@@ -82,17 +82,32 @@ clears it.
 
 - [x] **Corpus backup — DONE, confirmed by Anatol 2026-08-12**: archived
       and out of the shared directory. `GATES.md` G9 is closed.
-- [ ] **Backfill `Compliant electrode:` and `Ink concentration:` across
-      the corpus** — the (a) half of `#268`'s family grouping, and the
-      first campaign-wide write the corpus has taken. Write the
-      MATERIAL, never the family (`Electrode family:` is derived by
-      `sldea_profile.electrode_family()`); omit `Ink concentration:`
-      entirely for carbon black and eGaIn rather than writing it blank;
-      add lines only where a real value exists, since an absent line
-      ("predates the field") and `(not specified)` ("declined") are a
-      deliberate distinction. Settle the `P3` question in §A first. Do
-      it as a reviewed batch with a dry run and a diff, not 13 hand
-      edits.
+- [x] **Backfill `Compliant electrode:` / `Ink concentration:` — DONE
+      2026-08-12 on the `Z:` share**, 16 files, each with a
+      `.bak-20260812-pre-electrode-backfill` sidecar. Values from Anatol:
+      `P3` = Carbon Solutions P3-SWNT with the mL token as the
+      concentration, every `SLDEA_202607*` run is P3 at 2.5 mL,
+      `SLCBvalidationTest` is carbon black (no concentration key).
+      `Electrode family:` was derived by importing the app's own
+      `electrode_family()`, never typed.
+- [ ] **`DOT_P3_1_20260729` — still unlabelled.** P3-SWNT by name and by
+      the SCORECARD's family grouping, but its folder carries no mL token
+      and the concentration is not known (Anatol, 2026-08-12). Left
+      ABSENT rather than guessed at 2.5, since absent means "predates the
+      field" and a wrong value would be indistinguishable from a
+      measured one.
+- [ ] **Runs that are NOT on the `Z:` share and were therefore not
+      backfilled.** Anatol reports "a few stragglers" in
+      `Upload 20260805\SL Ramp Test Initial CB\` that are carbon black,
+      and one more under `Upload 20260805\Single Layer Testing\P3 1.5mL
+      Triazole Bake1\` that is P3 at 1.5 mL. **Neither exists here** —
+      measured 2026-08-12, each of those folders holds exactly one run
+      (`SLCBvalidationTest`, `P3 1.5mL Triazole Bake1-1`), and a sweep
+      for `data.csv` across the whole share finds 18 run folders and no
+      others. So either the share is a partial copy of the lab PC's
+      corpus or the stragglers live somewhere else. Settle which, then
+      re-run the backfill wherever they are — it is idempotent and skips
+      anything already carrying the field.
 - [ ] **Then the share relayout** (decided: option c) — move
       `SLDEA_data` out of the read-write share's root, attach it as a
       genuine read-only share, repoint `SCPI_SLDEA_DIR`. Same pass: fix

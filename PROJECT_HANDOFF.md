@@ -1,4 +1,80 @@
-# Project handoff — state as of 2026-08-08
+# Project handoff — state as of 2026-08-12
+
+**TL;DR (2026-08-12, analysis VM — read this first).** Everything
+`GATES.md` listed as blocked has landed. Main is green at `011c976`,
+**no open PRs**, and the VM suite is **39/39 suites**. Two batches
+merged since this file was last written: the eleven gated PRs on
+2026-08-09 (**#296** tests → green on Windows · **#303** honest skip
+reporting · **#306** suites report ALL failures, not the first ·
+**#297** the band policy · **#304** the `#264` decision-prep entry ·
+**#298** launcher + `.gitignore` · **#301** the regenerated docs ·
+**#302** the plot-option seam · **#305** the sweep planner · **#308**
+BENCH_TEST §P · **#309** manual stable slugs), then the **plot-window
+batch** on 2026-08-10 (**#310** `#268`'s cross-run aggregate ·
+**#317**–**#322**, **#324** the operator round that followed it).
+**Nothing is owed at a desk in this lane** — what remains is host-side,
+lab-PC or bench, and is enumerated in `RUN_SHEET.md`.
+
+**What the plot batch delivered**, all with tests on main: the cross-run
+aggregate with a per-group SEM band (`#268`, `#313`) · one figure
+holding runs from several parent folders (`#323`) · PNG-or-SVG export
+with a settable dpi (`#314`) · heading hints in the empty title boxes
+(`#315`) · a coalesced resize that re-lays-out instead of rebuilding
+(`#316`) · every path out of `on_click` either acting or saying why
+(`#311`) · n in the caption with counts only where a level falls short
+(`#312`).
+
+**⚠ Nine shipped issues are still OPEN, and that is a bookkeeping debt,
+not a decision.** None of the merged PRs used a closing keyword —
+correct practice given cold-start trap 4, which has fired three times —
+but nobody then closed them by hand. Verified shipped against this tree
+on 2026-08-12: `#307` `#311` `#312` `#313` `#314` `#315` `#316` `#323`,
+plus `#49`, whose audit said "close once `#298` merges" and `#298` has
+merged. **`#268` is the one to read before closing**: its aggregate
+shipped, but its electrode-family sub-item did not and cannot — the
+`Electrode family:` field it keys on is carried by zero of the 13
+corpus runs. `#313` answered the operator's real need by making
+grouping OPERATOR-ASSIGNED instead, so the sub-item is superseded rather
+than pending. Close `#268` against `#313` or keep it for the automatic
+grouping, but do not leave the reason unrecorded.
+
+**Suite baseline, in the new vocabulary: 39/39 SUITES on the VM.** The
+old "34/38" and "38/38" lines counted something else — `#303`/`#306`
+changed the reporting, so a suite now passes while individually skipping
+gated cases, and the per-test totals in older blocks below are not
+comparable. Eight tests skip here, all honestly reported: 4
+`test_app_launch` and 2 `test_tk_fontfix` need Xvfb/xwininfo and
+fontconfig (Linux — they will never run on Windows), and 2
+`test_sldea_plot_gui` scroll cases skip as "desktop too short".
+
+**Correction: the ≥1150 px screen-height figure is stale for the tests.**
+Measured on this VM 2026-08-12 at **1920×1200**: the Draw column needs
+**1186 px** and the window can only give it **1181** — it misses by
+five. `#268` added two Draw rows after that threshold was written, which
+is what moved it. The screen wants **≥ ~1205 px** for those two cases
+now; `vm-setup\provision-guest.ps1` and `RUN_SHEET.md` both still say
+1150. **Manual capture is unaffected** — `capture.py` needs ≥1090 and
+1200 clears it, so the release-capture stage still runs here.
+
+**Still unresolved from `GATES.md`, all outside this lane.** G9: the
+corpus backup at `D:\SLDEA_corpus_backup_20260809` is host-side and has
+never been verified from here — the file count and the P3_6 `data.csv`
+sha256 are recorded in that file to check against, and a second copy off
+that machine is still worth having. G10: the share relayout has not
+happened, so **the corpus is still reachable WRITABLE at
+`Z:\SLDEA_data`** and `SCPI_SLDEA_DIR` still points at the
+`\\VBOXSVR\SLDEA_data\...` path that does not resolve on this guest.
+Corpus safety remains protocol-only. G11 the control round, G12 `#215`,
+G13 the bench visit are all unchanged.
+
+**A release bump is the natural next milestone, and is now possible
+here.** Main is **62 commits past the `v1.2.0` tag** and the manual PDF
+was last built 2026-08-09, before the whole plot batch. The capture
+stage runs on this VM (the venv has pypdf and reportlab; the display
+clears `capture.py`'s threshold). Note it stacks a SECOND unpromoted
+release: v1.2.0 is still a pre-release pending §M.
+
+---
 
 **FINAL 2026-08-08 — Part II shipped; the NEXT SESSION MAY RUN IN A VM
 (read this block first there).** The manual gained **Part II — "How it
@@ -889,6 +965,39 @@ rework. What is genuinely left at a desk, in order:
    to Git LFS / release-assets-only.
 4. **`demos/` fate** — decision material for open issue #32 (GUI
    framework); archive the trio when #32 is decided.
+
+## Roster changes 2026-08-09 → 2026-08-12
+
+**Shipped but still OPEN — the close list, each verified against this
+tree on 2026-08-12 rather than recalled.** Every one was checked by
+finding its implementation and its tests on `main`, not by trusting the
+PR title:
+
+| Issue | Shipped by | Evidence on main |
+|---|---|---|
+| `#307` manual keys off live Tk labels | #309 (`74c8f49`) | `gui.MANUAL_TABS` is the one slug vocabulary; `capture.py` writes `tab_<slug>`, `annotate.py` and `build_manual.py` read it, `content.json` re-keyed |
+| `#311` click-through dies after Edge Review closes | #318, test fix #322 | `on_click` documents the rule and every branch sets `lbl_click`; four silent returns gone |
+| `#312` n-labels overlap, bands box inert | #320 | n in the caption, counts only on levels short of it; the box greys with a tooltip naming why |
+| `#313` aggregate BY GROUP | #324 | `groups` is a remembered, structured option (`sp.check_groups`); `aggregate_only` hides contributors |
+| `#314` PNG-or-SVG export with a dpi | #319 | format selector, dpi greyed under SVG, both recorded in the figspec |
+| `#315` pre-populate the title boxes | #317 | shipped as a HINT over an empty entry, never a value — so blank still means derived |
+| `#316` laggy resize | #321 | coalesced redraw + re-lay-out instead of rebuild; the "moving costs no redraw" test still holds |
+| `#323` runs from several parent folders | #324 | `initial_state` collects parents; options and `default_out_dir` stay keyed on the first, and the window says which |
+| `#49` housekeeping audit | #298 | the audit found five of six bullets already dead; `.gitignore` was the live one and `#298` fixed it |
+
+**`#268` needs a judgment, not a close.** Its aggregate half shipped in
+#310 and grew group support in #324. Its electrode-family half is
+**superseded, not pending**: it keyed on `Electrode family:`, which zero
+of 13 corpus runs carry, and `#313` delivered operator-assigned grouping
+that needs no field and works on every run that exists. Whoever closes
+it should say that, so the sub-item does not get re-filed as missing
+work.
+
+**Why none of these auto-closed.** The PRs deliberately wrote their
+issue references in backticks with no closing keyword — the rule from
+cold-start trap 4, after `#159` and `#193` were each auto-closed twice
+by keyword parsing. The rule worked. The cost is that closing is now a
+manual step, and one batch's worth went un-done.
 
 ## Roster changes 2026-08-07 evening
 

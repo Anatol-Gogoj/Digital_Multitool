@@ -905,7 +905,7 @@
    },
    {
     "label": "Electrode",
-    "what": "Which compliant electrode material this device uses. Pick one of the listed inks — Carbon Solutions P2/P3-SWNT, nano-c Invisicon 3500/3900, plain CNT, carbon black, eGaIn — or type any material straight into the box; whatever you type is recorded word for word in setup.txt, alongside a canonical family so runs can be grouped later. Optional, but the run asks before starting without it. Leave it blank if the sample is genuinely unknown, rather than naming something you are not sure of."
+    "what": "Which compliant electrode material this device uses. Pick one of the listed inks — Carbon Solutions P2/P3-SWNT, nano-c Invisicon 3500/3900, nano-c 3500/3900 Spray, plain CNT, carbon black, eGaIn — or type any material straight into the box; whatever you type is recorded word for word in setup.txt, alongside a canonical family so runs can be grouped later. Optional, but the run asks before starting without it. Leave it blank if the sample is genuinely unknown, rather than naming something you are not sure of."
    },
    {
     "label": "Concentration (mL)",

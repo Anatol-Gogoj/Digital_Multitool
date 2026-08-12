@@ -148,9 +148,17 @@ clears it.
 - [ ] **Re-baseline the lab PC** — unmeasured since #296/#303/#306
       changed both the failures and the reporting.
 - [ ] Fleet, analysis PC: `Tools → Update Software…` → footer reads
-      `v1.2.0+…`.
-- [ ] `#280` — runner flake; box-context, so diagnosis happens where it
-      fires. 0 of 4 on the VM, too few to mean anything.
+      `v1.3.0+…` once this merges (the updater takes `main` HEAD, not the
+      tag).
+- [ ] **`#280` — re-run `run_tests.py` HERE, on the box where it fires.**
+      A mechanism matching its signature exactly was found and mitigated
+      2026-08-12: Tk objects freed on a detection worker thread abort the
+      PROCESS with `Tcl_AsyncDelete`, so the summary line never prints and
+      it reads as infrastructure failure. The fix (collect after each case,
+      in the main thread) is on `main`. If the flake is gone on the lab PC,
+      that was it and the issue closes; if it still fires, the mitigation
+      is still right but something else is also in play. Evidence on the
+      issue.
 - [ ] Any manual regeneration (capture = headed desktop + Edge + a
       hydrated run folder). **This can now run on the analysis VM** —
       the venv has pypdf and reportlab and the display clears
@@ -188,10 +196,14 @@ clears it.
 
 ## Parked decisions (Anatol's)
 
-- **Release bump.** Main is **62 commits past `v1.2.0`** and the manual
-  PDF predates the whole plot batch. The capture stage now runs on the
-  VM. Note it stacks a SECOND unpromoted release — v1.2.0 is still a
-  pre-release pending §M.
+- **Release bump — BUILT 2026-08-12, awaiting your tag.** `version.py` is
+  at 1.3.0 and both manuals are regenerated at `v1.3.0+efc347e` (59 pages,
+  14/14 bookmarks, every callout green on the first fail-closed pass).
+  What is left is `git tag v1.3.0` and the GitHub release with the PDF
+  attached — deliberately left to you, because it stacks a **SECOND**
+  unpromoted release: v1.2.0 is still a pre-release pending §M, and §M
+  promotes whichever is current. The updater deploys `main` HEAD
+  regardless of tags, so the fleet gets the code either way.
 - `#264` cadence-guard default — **decide after §M**, when a
   fine-cadence run exists. Zero of 13 corpus runs would pass the check
   today, so a flip now restyles every historical figure. Persistence

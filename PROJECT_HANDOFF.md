@@ -1,5 +1,32 @@
 # Project handoff — state as of 2026-08-12
 
+**RELEASE PREP (2026-08-12, later — v1.3.0 built, NOT yet tagged).**
+`version.py` is at **1.3.0** and both manuals are regenerated from live
+captures at `v1.3.0+efc347e` — **59 pages, 14/14 bookmarks, every callout
+green on the first fail-closed pass**, which is not a given in a cycle
+that added two electrode entries to the SLDEA tab. The whole capture
+chain ran on this VM: 9 tab shots (including `tab_sldea_bottom`), the arb
+editor and both export dialogs, Edge Review against a working COPY of
+`SLCBvalidationTest`, the tuner dialog and three selftests. Nothing under
+`SLDEA_data\runs` was opened by a tool that can write.
+
+**What v1.3.0 contains, over v1.2.0.** The plot-window batch (`#268`
+cross-run aggregate with per-group SEM bands, `#311`–`#316`, `#323`
+several parents on one figure) · the electrode work (two spray entries,
+family `cnt`, no concentration — and the corpus backfilled so every run
+carries `Compliant electrode:`) · **Edge Review's scroll container**,
+which stops a small window silently DELETING controls, plus the window
+sizing itself to its layout instead of a typed-in 1150 · the ❓ How to
+use panel rewritten to ASD-STE100 · the `#283`-twin fix (a debounced
+redraw firing into a destroyed interpreter) · and the `#280` diagnosis.
+
+**Still to do for the release, and deliberately not done unattended:**
+tag `v1.3.0`, publish the GitHub release with the PDF attached. **Note it
+would stack a SECOND unpromoted release** — v1.2.0 is still a
+pre-release pending the §M bench smoke, and §M promotes whichever is
+current. The updater deploys `main` HEAD regardless of tags, so the fleet
+already gets this code once it merges.
+
 **TL;DR (2026-08-12, analysis VM — read this first).** Everything
 `GATES.md` listed as blocked has landed. Main is green at `011c976`,
 **no open PRs**, and the VM suite is **39/39 suites**. Two batches

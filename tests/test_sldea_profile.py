@@ -341,8 +341,7 @@ def test_every_branded_cnt_ink_in_the_dropdown_families_to_cnt():
     substring 'cnt', so this cannot work by accident."""
     from sldea_profile import ELECTRODE_CHOICES, electrode_family
     branded = ('Carbon Solutions P3-SWNT', 'Carbon Solutions P2-SWNT',
-               'nano-c Invisicon 3900', 'nano-c Invisicon 3500',
-               'nano-c 3900 Spray', 'nano-c 3500 Spray')
+               'nano-c Invisicon 3900', 'nano-c Invisicon 3500')
     for name in branded:
         assert name in ELECTRODE_CHOICES, f"{name} missing from the dropdown"
         assert 'cnt' not in name.lower(), "test premise: no literal 'cnt'"
@@ -418,11 +417,16 @@ def test_concentration_applies_only_where_an_ink_volume_means_something():
     volume; carbon black and liquid metal do not."""
     from sldea_profile import concentration_applies
     for yes in ('CNT', 'Carbon Solutions P3-SWNT', 'Carbon Solutions P2-SWNT',
-                'nano-c Invisicon 3900', 'nano-c Invisicon 3500',
                 'p3-swnt', 'some bespoke ink', 'PEDOT:PSS'):
         assert concentration_applies(yes) is True, yes
     for no in ('carbon black', 'Carbon Black', 'CB', 'eGaIn', 'egain',
-               'Galinstan', 'liquid metal'):
+               'Galinstan', 'liquid metal',
+               # the Invisicon pair moved to this list 2026-08-13: it is
+               # the lab's SPRAY, so there are no millilitres to record.
+               # It stays family `cnt` -- see the spray test below, which
+               # asserts both halves together because separating them is
+               # what would split the CNT group.
+               'nano-c Invisicon 3900', 'nano-c Invisicon 3500'):
         assert concentration_applies(no) is False, no
     # blank is applicable: "no electrode chosen yet" is not "this electrode
     # has no concentration", and grey-before-you-choose looks broken
@@ -440,14 +444,27 @@ def test_a_spray_has_no_millilitres_but_is_still_its_own_material():
     CNT as a different family from brush-applied CNT and split the very
     group it exists to compare."""
     from sldea_profile import concentration_applies, electrode_family
+    # No dropdown entry names a spray any more (the '<n> Spray' pair was
+    # removed 2026-08-13 as a duplicate of the Invisicon pair). The rule
+    # stays because the field is FREE TEXT: an operator who types the
+    # application method still gets the right answer, and that is the case
+    # it was written for.
     for spray in ('nano-c 3500 Spray', 'nano-c 3900 Spray',
                   'NanoC 3900 Spray', 'some bespoke sprayed ink'):
         assert concentration_applies(spray) is False, spray
     for spray in ('nano-c 3500 Spray', 'nano-c 3900 Spray',
                   'NanoC 3900 Spray'):
         assert electrode_family(spray) == 'cnt', spray
-    # the non-spray brands are untouched -- they are still dispensed by mL
-    for pourable in ('nano-c Invisicon 3500', 'Carbon Solutions P3-SWNT'):
+    # The Invisicon pair IS the lab's spray (2026-08-13), so it answers the
+    # same way the removed '<n> Spray' entries did -- keyed on the brand, so
+    # a hand-typed 'Invisicon 3900' matches the dropdown.
+    for sprayed in ('nano-c Invisicon 3500', 'nano-c Invisicon 3900',
+                    'Invisicon 3900', 'invisicon'):
+        assert concentration_applies(sprayed) is False, sprayed
+        assert electrode_family(sprayed) == 'cnt', sprayed
+    # ...and the inks that ARE dispensed by volume keep their field
+    for pourable in ('Carbon Solutions P3-SWNT', 'Carbon Solutions P2-SWNT',
+                     'CNT', 'some bespoke ink'):
         assert concentration_applies(pourable) is True, pourable
 
 

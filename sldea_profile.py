@@ -63,12 +63,13 @@ def measured_ua(imon_scope_v):
 # exactly as they always did.
 ELECTRODE_CHOICES = ('', 'CNT',
                      'Carbon Solutions P3-SWNT', 'Carbon Solutions P2-SWNT',
+                     # The Invisicon pair is the WHOLE nano-c offering here.
+                     # A '<n> Spray' pair was added alongside them
+                     # 2026-08-12 and removed 2026-08-13: they name the same
+                     # two products, and two dropdown entries for one
+                     # material is how a corpus ends up with a family split
+                     # across spellings that no analysis can rejoin.
                      'nano-c Invisicon 3900', 'nano-c Invisicon 3500',
-                     # Spray-applied nano-c, added 2026-08-12. The brand
-                     # token is written 'nano-c' to match the entries above
-                     # -- see the 'nanoc ' needle below for why the
-                     # hyphen is not merely cosmetic.
-                     'nano-c 3900 Spray', 'nano-c 3500 Spray',
                      'carbon black', 'eGaIn')
 # Substring needles, matched against the lowercased value padded with
 # spaces. None of the six brand names contains "cnt", so the CNT family
@@ -122,17 +123,24 @@ def electrode_family(text):
     return 'other'
 
 
-# Application methods that are not dispensed as a measured volume, matched
-# as substrings like the family needles above. This is a SECOND axis:
-# 'spray' is not a material and does not change the family, so a
-# spray-applied CNT is still `cnt` and still groups with every other CNT
-# run -- it just has no millilitres to record (Anatol, 2026-08-12).
+# NOT DISPENSED AS A MEASURED VOLUME. A second axis, deliberately separate
+# from _ELECTRODE_FAMILIES: folding "no concentration" into the family
+# would force these into their own family or into 'other', and either one
+# splits the CNT group that `#268`'s aggregate exists to draw. A
+# spray-applied CNT is still `cnt` and still averages with every other CNT
+# run; it just has no millilitres to record.
 #
-# Kept separate from _ELECTRODE_FAMILIES on purpose. Folding "no
-# concentration" into the family would have forced spray-applied CNT into
-# its own family or into 'other', and either one would split the CNT group
-# that `#268`'s aggregate exists to draw.
-_NO_CONCENTRATION_NEEDLES = ('spray',)
+# Two kinds of needle, and the distinction is worth keeping straight:
+#
+#   'spray'      -- an application METHOD, for the free-text case where an
+#                   operator types how the electrode went on.
+#   'invisicon'  -- a PRODUCT that is only ever sprayed. nano-c's Invisicon
+#                   pair is the lab's spray (Anatol, 2026-08-13, when the
+#                   duplicate '<n> Spray' dropdown entries were dropped as
+#                   the same two products). Keyed on the brand rather than
+#                   on the two full entry strings so a hand-typed
+#                   'Invisicon 3900' answers the same way the dropdown does.
+_NO_CONCENTRATION_NEEDLES = ('spray', 'invisicon')
 
 
 def concentration_applies(electrode):
@@ -145,10 +153,12 @@ def concentration_applies(electrode):
     never asks about it, and setup.txt does not carry the key at all. A CB
     run should not look like a CNT run that forgot to fill something in.
 
-    SPRAY-APPLIED electrodes are excluded for the same reason but on a
-    different axis (2026-08-12): a spray goes on as coats, not as a
-    measured millilitre, so the number would be a fiction. The material is
-    still whatever it is -- `nano-c 3500 Spray` remains family `cnt`.
+    SPRAYED electrodes are excluded for the same reason but on a different
+    axis (2026-08-12): a spray goes on as coats, not as a measured
+    millilitre, so the number would be a fiction. That covers the
+    nano-c Invisicon pair, which is this lab's spray (2026-08-13). The
+    material is unchanged either way -- Invisicon is still family `cnt`
+    and still averages with every other CNT run.
 
     Everything else may have one and is offered it: the CNT family, and any
     custom material the operator typed (we do not know that a material we

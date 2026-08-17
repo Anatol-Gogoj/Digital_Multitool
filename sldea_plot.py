@@ -37,8 +37,9 @@ prefix there, or point --out outside the checkout.
 Modes:
     area      (default) two panels: active area (mm^2) vs nominal kV, and
               the same curves normalized to expansion A/A0 (A0 = the run's
-              baseline area). Needs reviewed areas; raw runs are skipped
-              with a warning.
+              baseline area), or to areal strain (A-A0)/A0*100 in percent
+              with --strain-pct. Needs reviewed areas; raw runs are
+              skipped with a warning.
     current   measured_uA vs nominal kV, one point per snapshot. Works on
               raw runs; the run-median current baseline is drawn dotted.
     power     |nominal_kV x (measured_uA - run median)| (mW) vs nominal
@@ -116,7 +117,8 @@ Panels (`#269` titles, `#270` selection):
     The panels a mode actually draws, in the order the flags name them:
 
         area            first  = active area vs nominal kV
-                        second = the same curves as A/A0
+                        second = the same curves as A/A0, or as areal
+                                 strain in percent under --strain-pct
         current, power  first  = the single per-snapshot panel
                         (there is no second panel in these modes)
 
@@ -867,19 +869,40 @@ def aggregate_cap_kv(runs):
     return min(kvs) if kvs else None
 
 
-def run_level_curve(run, norm=False):
+def norm_y(area, a0, pct=False):
+    """The normalized panel's y for one absolute area.
+
+    A / A0 by default. With `pct`, the SAME quantity as strain percent,
+    (A - A0) / A0 * 100 -- which is what the lab quotes and what the
+    SCORECARD's headline numbers are in.
+
+    One function because seven drawing sites and the aggregate all did
+    `y / run['a0']` inline; a units switch applied to six of the seven
+    draws a figure that looks finished and is not.
+
+    The map is AFFINE, so it commutes with the mean and scales the SEM by
+    100 -- percent may be applied to each run's value before aggregation
+    (which is what happens here) or to the aggregate afterwards, and the
+    band is the same either way. That is why the aggregate needed no
+    statistics rethink, only the same conversion in the same place."""
+    r = area / a0
+    return (r - 1.0) * 100.0 if pct else r
+
+
+def run_level_curve(run, norm=False, pct=False):
     """One run as [{key, kv, y, confirmed}], sorted by level.
 
-    `y` is the level's mean area in mm2, or A/A0 when `norm` -- the two
-    area panels aggregate SEPARATELY because A/A0 rescales each run by its
-    own A0, and a spread in mm2 is not the same spread in A/A0. A run with
+    `y` is the level's mean area in mm2, or the normalized value when
+    `norm` (A/A0, or strain percent when `pct`) -- the two area panels
+    aggregate SEPARATELY because normalizing rescales each run by its own
+    A0, and a spread in mm2 is not the same spread in A/A0. A run with
     no A0 contributes nothing to the normalized panel rather than being
     silently dropped into the absolute one."""
     if norm and not run.get('a0'):
         return []
     out = []
     for lv in levels(run):
-        y = lv['mean'] / run['a0'] if norm else lv['mean']
+        y = norm_y(lv['mean'], run['a0'], pct) if norm else lv['mean']
         out.append({'key': round(lv['kv'], 3), 'kv': lv['kv'], 'y': y,
                     'confirmed': lv['confirmed']})
     return out
@@ -909,7 +932,7 @@ def _contribution(curve, key, exact=False):
     return None                                # guardrail 1
 
 
-def aggregate_levels(runs, norm=False, exact=False):
+def aggregate_levels(runs, norm=False, exact=False, pct=False):
     """-> sorted [{kv, n, mean, sd, sem, n_measured, n_interpolated}].
 
     The cross-run mean and its SEM band, per level, capped at the first
@@ -924,7 +947,7 @@ def aggregate_levels(runs, norm=False, exact=False):
     is SHOWN, with its n, rather than quietly dropped; the corpus might
     argue for a floor later, and that is an argument to have in the open,
     not a constant to slip in here."""
-    curves = [c for c in (run_level_curve(r, norm) for r in runs) if c]
+    curves = [c for c in (run_level_curve(r, norm, pct) for r in runs) if c]
     cap = aggregate_cap_kv(runs)
     keys = sorted({p['key'] for c in curves for p in c})
     if cap is not None:
@@ -1147,8 +1170,13 @@ def default_panel_titles(opts, runs=()):
                 'second': None}
     a0s = sorted({round(r['a0'], 1) for r in runs if r.get('a0')})
     a0txt = f"A₀ = {a0s[0]:g} mm²" if len(a0s) == 1 else "per-run A₀"
+    # The heading names the UNITS as well as the baseline: the two curves
+    # are the same measurement, and a reader who sees 104 where they expect
+    # 1.04 needs the panel itself to say which one this is.
+    lead = ('Areal strain from baseline area' if opts.get('strain_pct')
+            else 'Normalized to baseline area')
     return {'first': 'Active area vs voltage',
-            'second': f"Normalized to baseline area ({a0txt})"}
+            'second': f"{lead} ({a0txt})"}
 
 
 def panel_titles(opts, runs=()):
@@ -1637,6 +1665,10 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     run_handles = []
     had_x = had_fallback = had_coarse = False
     cadence_notes = []
+    # The normalized panel's units, read ONCE and passed to every site that
+    # divides by A0. Reading opts at each site instead is how six of seven
+    # get converted and the figure still looks finished.
+    pct = bool(opts.get('strain_pct'))
     # what actually got plotted, per axis -- the log-scale policy reads
     # the DATA and axes-fraction gridlines must not vote (`#263`)
     xs_all, ysl_all, ysr_all = [], [], []
@@ -1673,11 +1705,11 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                     if axl is not None:
                         _series(axl, px, py, pt, color, ls, budget_bands)
                     if axr is not None:
-                        _series(axr, px, [y / run['a0'] for y in py], pt,
+                        _series(axr, px, [norm_y(y, run['a0'], pct) for y in py], pt,
                                 color, ls, budget_bands)
                     xs_all += list(px)
                     ysl_all += list(py)
-                    ysr_all += [y / run['a0'] for y in py]
+                    ysr_all += [norm_y(y, run['a0'], pct) for y in py]
         if opts['mean'] or not opts['prepost']:
             # marker fill follows the CONVENTION of the plotted value:
             # a mixed level's mean uses the machine member(s) only, so
@@ -1690,11 +1722,11 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
             if axl is not None:
                 _series(axl, xs, ys, tr, color, '-', show_bands, band_tr)
             if axr is not None:
-                _series(axr, xs, [y / run['a0'] for y in ys], tr, color,
+                _series(axr, xs, [norm_y(y, run['a0'], pct) for y in ys], tr, color,
                         '-', show_bands, band_tr)
             xs_all += list(xs)
             ysl_all += list(ys)
-            ysr_all += [y / run['a0'] for y in ys]
+            ysr_all += [norm_y(y, run['a0'], pct) for y in ys]
             mixed = [l['kv'] for l in lvs if l['mixed']]
             if mixed:
                 warn(f"{run['name']}: {len(mixed)} level(s) mix a "
@@ -1725,11 +1757,12 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
             if axl is not None:
                 _cross_marks(axl, drawn, color, coarse)
             if axr is not None:
-                _cross_marks(axr, [(x, y / run['a0']) for x, y in drawn],
+                _cross_marks(axr, [(x, norm_y(y, run['a0'], pct))
+                               for x, y in drawn],
                              color, coarse)
             xs_all += [x for x, _ in drawn]
             ysl_all += [y for _, y in drawn]
-            ysr_all += [y / run['a0'] for _, y in drawn]
+            ysr_all += [norm_y(y, run['a0'], pct) for _, y in drawn]
             had_x = had_x or bool(drawn)
             had_coarse = had_coarse or (coarse and bool(drawn))
             had_fallback = had_fallback or bool(unanchored)
@@ -1798,7 +1831,8 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                 if ax is None:
                     continue
                 ag = aggregate_levels(subset, norm=norm,
-                                      exact=opts.get('aggregate_exact'))
+                                      exact=opts.get('aggregate_exact'),
+                                      pct=pct)
                 if not ag:
                     continue
                 # counts only on an UNGROUPED figure -- G groups would
@@ -1848,7 +1882,9 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
         axl.set_title(heads['first'],
                       loc='left', fontweight='bold', fontsize=11)
     if axr is not None:
-        _style_axes(axr, 'Nominal voltage (kV)', 'Expansion  A / A₀')
+        _style_axes(axr, 'Nominal voltage (kV)',
+                'Areal strain  (A − A₀)/A₀  (%)' if pct
+                else 'Expansion  A / A₀')
         _apply_scales(axr, opts, xs_all, ysr_all, scale_notes)
         axr.set_title(heads['second'],
                       loc='left', fontweight='bold', fontsize=11)
@@ -2314,6 +2350,21 @@ def write_tidy(runs, path, groups=()):
 # only -- `dpi` is the first NUMBER remembered, and an unvalidated one
 # out of a hand-edited config would have reached make_opts.
 #
+# `strain_pct` has been through (2026-08-13), and it is the first option
+# that changes the UNITS of a quantity the figure already drew rather than
+# adding, removing or restyling anything. That put its weight in site 5
+# and nowhere surprising: seven places divided by A0 inline, so the
+# conversion went into one function (norm_y) that all of them and the
+# aggregate call, because a units switch applied to six of seven draws a
+# figure that looks perfectly finished. Two consequences worth keeping:
+# the panel HEADING and the axis label both had to follow, since 40 and
+# 1.4 are the same measurement and only the label says which; and the
+# tidy CSV deliberately did NOT follow -- its expansion column stays A/A0
+# so a saved CSV means one thing regardless of how the figure was drawn,
+# which is the opposite of the `#313` decision to put groups in the CSV,
+# and for the same underlying reason (the CSV records the DATA, not the
+# drawing).
+#
 #   1. make_opts() below -- the keyword, its default, any validation.
 #      MISSING THIS IS LOUD: every other site raises TypeError.
 #
@@ -2385,7 +2436,7 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
               title_first=None, title_second=None, subplots='both',
               cadence_guard=False, aggregate=False,
               aggregate_exact=False, groups=(), aggregate_only=False,
-              fmt=DEFAULT_FORMAT, dpi=None):
+              fmt=DEFAULT_FORMAT, dpi=None, strain_pct=False):
     """-> (opts dict, error message or None).
 
     The CLI builds this from its flags and the window from its tick boxes,
@@ -2468,6 +2519,7 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
             'aggregate_exact': bool(aggregate_exact),
             'groups': groups,
             'aggregate_only': bool(aggregate_only),
+            'strain_pct': bool(strain_pct),
             'fmt': fmt, 'dpi': dpi}, None
 
 
@@ -2960,6 +3012,7 @@ def _cli_opts(flags, vals, base=None):
                      # re-renders a spec'd SVG as a PNG at the spec's own
                      # dpi -- and a spec that names neither still gets the
                      # 300 dpi PNG every pre-`#314` spec was written from.
+                     strain_pct=on('--strain-pct', 'strain_pct'),
                      fmt=val('--format', 'fmt', DEFAULT_FORMAT),
                      dpi=val('--dpi', 'dpi', DEFAULT_DPI))
 

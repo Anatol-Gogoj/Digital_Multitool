@@ -1053,6 +1053,11 @@ def test_remembered_options_round_trip_per_parent_folder():
                        # a stale one is inert rather than wrong. Re-typing
                        # 'these six are P3' every session is not.
                        'groups': [], 'aggregate_only': False,
+                       # the normalized panel's units joins as an ordinary
+                       # drawing answer: a lab that quotes strain quotes it
+                       # every session, and re-ticking it each time is the
+                       # annoyance this file exists to end.
+                       'strain_pct': False,
                        # `#314`'s pair joins for a different reason from
                        # every key above it: not how the figure is drawn,
                        # but what it is written as. A house that exports

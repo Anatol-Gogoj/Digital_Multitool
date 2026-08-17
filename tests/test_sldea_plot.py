@@ -555,6 +555,10 @@ def test_make_opts_maps_choices_and_refuses_bad_combinations():
                  # contributing runs are drawn -- both defaults reproduce
                  # the figure that existed before the option
                  'groups': [], 'aggregate_only': False,
+                 # the normalized panel's UNITS. Defaults to the ratio,
+                 # so an options dict built with no arguments still
+                 # describes the figure that existed before the option
+                 'strain_pct': False,
                  # `#314`: the file, not the drawing -- and the defaults
                  # are the file every export wrote before it existed
                  'fmt': 'png', 'dpi': 300}
@@ -1587,6 +1591,62 @@ def test_aggregate_band_is_the_standard_error_of_the_mean():
                    if l['kv'] == 1.0)
         assert abs(lvn['mean'] - 1.15) < 1e-9, lvn
         assert abs(lvn['sem'] - 0.06454972243679028) < 1e-9, lvn
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_strain_percent_is_the_same_measurement_as_the_ratio():
+    """`--strain-pct` renders the normalized panel as (A-A0)/A0*100.
+
+    The identity is what makes this a UNITS switch and not a second
+    analysis: strain is exactly (A/A0 - 1) * 100, so any figure drawn one
+    way can be read the other. Pinned on an expansion, no change, and a
+    contraction -- the last because a shrinking device gives a NEGATIVE
+    strain where the ratio stays positive, and a reader who only ever saw
+    expansion would not notice a sign convention quietly chosen for them.
+    """
+    for a, a0 in ((281.5, 201.1), (201.1, 201.1), (150.0, 201.1)):
+        ratio = sp.norm_y(a, a0)
+        pct = sp.norm_y(a, a0, pct=True)
+        assert abs((ratio - 1.0) * 100.0 - pct) < 1e-9, (a, a0)
+    assert abs(sp.norm_y(201.1, 201.1, pct=True)) < 1e-12, 'A0 must be 0 %'
+    assert sp.norm_y(150.0, 201.1, pct=True) < 0, 'a contraction is negative'
+    # the SCORECARD's headline: A/A0 1.40 is quoted as 40 % strain
+    assert abs(sp.norm_y(281.54, 201.1, pct=True) - 40.0) < 0.1
+
+
+def test_the_strain_aggregate_is_the_ratio_aggregate_rescaled():
+    """The affine claim in norm_y's docstring, checked rather than argued.
+
+    (r-1)*100 commutes with the mean and multiplies the SEM by 100, so the
+    percent aggregate must be the ratio aggregate rescaled EXACTLY -- no
+    statistics were rethought for the units switch. If someone later moves
+    the conversion to after the aggregation, or applies it to the mean but
+    not the band, this is what fails."""
+    d = _mktmp()
+    try:
+        runs = [_agg_run(d, f"R{i}", [1.0], lambda kv, a=a: a)
+                for i, a in enumerate((100.0, 110.0, 120.0, 130.0))]
+        r = next(l for l in sp.aggregate_levels(runs, norm=True)
+                 if l['kv'] == 1.0)
+        p = next(l for l in sp.aggregate_levels(runs, norm=True, pct=True)
+                 if l['kv'] == 1.0)
+        assert p['n'] == r['n'] == 4
+        assert abs(p['mean'] - (r['mean'] - 1.0) * 100.0) < 1e-9, (r, p)
+        assert abs(p['sem'] - r['sem'] * 100.0) < 1e-9, (r, p)
+        assert abs(p['sd'] - r['sd'] * 100.0) < 1e-9, (r, p)
+        # ...and against the hand numbers from the test above: mean 1.15
+        # becomes 15 % with a SEM of 6.4549...
+        assert abs(p['mean'] - 15.0) < 1e-9, p
+        assert abs(p['sem'] - 6.454972243679028) < 1e-9, p
+        # the absolute panel is untouched -- percent describes the
+        # NORMALIZED panel only, and an mm2 axis relabelled as a
+        # percentage would be a lie about the same numbers
+        abs_ratio = next(l for l in sp.aggregate_levels(runs)
+                         if l['kv'] == 1.0)
+        abs_pct = next(l for l in sp.aggregate_levels(runs, pct=True)
+                       if l['kv'] == 1.0)
+        assert abs_pct == abs_ratio, 'percent leaked into the mm² panel'
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

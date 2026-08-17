@@ -324,7 +324,7 @@ OPTIONS_FALLBACK = os.path.join(os.path.expanduser('~'), '.cache',
 REMEMBERED = ('mode', 'prepost', 'mean', 'bands', 'breakdown', 'vs_area',
               'logx', 'logy', 'marker_key', 'subplots', 'cadence_guard',
               'aggregate', 'aggregate_exact', 'groups', 'aggregate_only',
-              'fmt', 'dpi')
+              'strain_pct', 'fmt', 'dpi')
 
 # The remembered options that are NAMES rather than flags, each with the
 # vocabulary sldea_plot validates it against -- read from sldea_plot so a
@@ -772,6 +772,18 @@ DRAW_TIPS = {
         "pair rather than handing back an empty figure. Note that "
         "double-click-to-open-a-frame goes quiet while the runs are "
         "hidden: the points it resolves are the per-run markers."),
+    'strain_pct': (
+        "Draws the normalized panel as AREAL STRAIN, (A − A₀)/A₀ × 100 in "
+        "percent, instead of the expansion ratio A/A₀. Same measurement, "
+        "same baseline, same curve shape — 1.40 becomes 40 % — so it is a "
+        "units choice and not a different analysis. Use it when the figure "
+        "goes next to numbers quoted as strain. The axis label and the "
+        "panel heading both follow, because a reader who sees 40 where "
+        "they expected 1.4 needs the panel to say which one it is. Area "
+        "mode only: it describes the second panel, and the current and "
+        "power modes have none. The tidy CSV keeps its expansion column as "
+        "A/A₀ either way, so a saved CSV means the same thing whichever "
+        "way the figure was drawn."),
     'subplots': (
         "Which of the mode's panels render — a single chosen panel "
         "becomes the figure's ONLY axes and fills the canvas instead of "
@@ -1178,6 +1190,7 @@ class PlotWindow:
         self.v_aggregate = tk.BooleanVar(value=o['aggregate'])
         self.v_aggregate_exact = tk.BooleanVar(value=o['aggregate_exact'])
         self.v_aggregate_only = tk.BooleanVar(value=o['aggregate_only'])
+        self.v_strain_pct = tk.BooleanVar(value=o['strain_pct'])
         # `#313`. NOT a Tk variable: the grouping is a mapping from run
         # directory to group name, which no Tk variable type can hold, so
         # it lives here and current_opts renders it into opts' canonical
@@ -1458,6 +1471,16 @@ class PlotWindow:
             variable=self.v_aggregate_only, command=self._toggled)
         self.cb_aggregate_only.pack(anchor=tk.W, padx=(18, 0))
         add_tooltip(self.cb_aggregate_only, DRAW_TIPS['aggregate_only'])
+        # The normalized panel's UNITS: A/A₀, or areal strain in percent.
+        # NOT indented under the aggregate -- it applies to the per-run
+        # curves just as much, and indentation here reads as "belongs to
+        # the box above". Area mode only, greyed elsewhere by the same
+        # rule as the marker key below.
+        self.cb_strain_pct = ttk.Checkbutton(
+            df, text="Normalized panel as strain %  ((A−A₀)/A₀)",
+            variable=self.v_strain_pct, command=self._toggled)
+        self.cb_strain_pct.pack(anchor=tk.W)
+        add_tooltip(self.cb_strain_pct, DRAW_TIPS['strain_pct'])
         # the open/closed marker key (`#267`). Area mode only -- draw_area
         # is the only drawer that calls _marker_key, because current and
         # power draw one plain dot per snapshot and a key there would
@@ -1963,6 +1986,12 @@ class PlotWindow:
         # none in current/power mode
         hidden = agg and self.v_aggregate_only.get()
         live(self.cb_marker_key, area and not hidden)
+        # the normalized panel's units. Area mode has the only second
+        # panel, and with subplots='first' there is no normalized panel on
+        # the figure at all -- the box is inert in both cases and says so
+        # by greying, like everything else in this column.
+        live(self.cb_strain_pct,
+             area and self.v_subplots.get() != 'first')
         # the aggregate pools PER-LEVEL curves, which only area mode has;
         # make_opts refuses the other pairing outright
         live(self.cb_aggregate, area)
@@ -2073,6 +2102,11 @@ class PlotWindow:
             # above: an error message where the figure goes is not what a
             # mode switch should produce.
             subplots='both' if which == 'second' and not area else which,
+            # The normalized panel's UNITS. Area mode only -- it describes
+            # the second panel, which no other mode has -- and neutralised
+            # rather than refused, for the reason vs_area and subplots are:
+            # a mode switch must produce a figure, not an error message.
+            strain_pct=self.v_strain_pct.get() and area,
             title_first=self.v_title_first.get().strip() or None,
             title_second=self.v_title_second.get().strip() or None,
             # `#314`. NOT neutralised under SVG the way vs_area and

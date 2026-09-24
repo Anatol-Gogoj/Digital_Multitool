@@ -27,21 +27,22 @@ anywhere:
      find out mid-session.
 
      Since 2026-09-24 C also asks each monitor channel's CH<n>:COUPLING?
-     and SELECT:CH<n>?. The Run button's monitor check reads scale,
+     and SELECT:CH<n>?. The SLDEA tab's Run button checks scale,
      attenuation, position and offset, and nothing else, so an I_Out
      left AC-coupled or switched off, or a scope left stopped, passes
-     it, and the watchdog then reads ~0 or one frozen record from the
-     first second (#337's review). The check cannot learn to see those
-     until these replies are known. The trigger's type and source are
-     asked too: in NORMAL trigger mode, a source channel that stops
+     it, and the watchdog would then read ~0 or one frozen record from
+     the first second (#337's review). The check cannot learn to see
+     those until these replies are known. The trigger's type and source
+     are asked too: in NORMAL trigger mode, a source channel that stops
      crossing its level stalls acquisition, and a LIVE run reads only
      two of the scope's channels.
 
   D. --walk: what C's replies, and the watchdog's own read, come back as
      in each of those blind states. You set each state by hand on the
      front panel (I_Out AC-coupled, I_Out off, the scope stopped); the
-     probe reads after each one, then checks the scope is back as it
-     started. BENCH_TEST.md section N2 walks you through it.
+     probe reads after each one, works out which queries follow the
+     front panel, and ends by checking the scope is ready for a LIVE run
+     again. BENCH_TEST.md section N2 walks you through it.
 
 SAFETY
     This opens the SCOPE ONLY. It never touches the signal generator, so
@@ -49,17 +50,21 @@ SAFETY
     OFF: a quiet 0 kV rig is exactly the condition being measured, and a
     live one would corrupt probe A.
 
-    It does not change acquisition state. It programs MEASUREMENT:IMMED
-    TYPE/SOURCE (which every measurement the app takes already does) and
-    otherwise only queries.
+    It does not change acquisition state. Opening the scope sends the
+    driver's connect sequence -- a VISA device clear, *IDN?, and the
+    waveform-transfer format (DATA:ENCDG, DATA:WIDTH), which the app
+    sends on every connect too. After that the probe programs
+    MEASUREMENT:IMMED TYPE/SOURCE (which every measurement the app takes
+    already does) and otherwise only queries.
 
     The --walk has YOU put I_Out into the states a LIVE run must never
-    start in. The probe itself still only queries. It ends by re-reading
-    the scope, and it does not print RESTORED until I_Out reads
-    DC-coupled and on and the scope reads acquiring (a reply it cannot
-    interpret must at least read as it did at the start). If it ends any
-    other way, it prints what to put back: do that before anyone starts
-    a LIVE run, because the Run button's check cannot see any of it yet.
+    start in; the probe itself still only queries. It ends by reading the
+    scope again, and prints RESTORED only when both monitor channels read
+    DC-coupled and on and the scope acquiring -- through queries the walk
+    showed follow the front panel -- and the watchdog's own read is a
+    readable current. Whatever it cannot confirm it names, for you to
+    check on the screen. Put the scope right before anyone starts a LIVE
+    run: the SLDEA tab's Run button cannot check any of this yet.
 
 USAGE
     .venv/bin/python bench/test_sldea_watchdog_probe.py --ich 3 --vch 2
@@ -78,7 +83,8 @@ OUTPUT
     Prints a summary and writes <--out>.txt and <--out>.json (default
     sldea_watchdog_probe.*) so the numbers can be pasted into #189
     without re-typing them. --walk writes <--out>_walk.txt/.json
-    instead, so it never overwrites them.
+    instead, so it never overwrites them, and --selftest defaults to
+    sldea_watchdog_probe_selftest*, so it never lands on a real report.
 """
 # Runnable from anywhere: put the repo root (one level up) on sys.path.
 import os as _os
@@ -460,9 +466,14 @@ def trigger_verdict(replies, ich, vch):
     if kind and _keyword(kind, (('EDGE', 'EDG'),)) is None:
         why = (f"The trigger type is {kind}, not EDGE, and this probe "
                f"reads only the edge source. " + look)
+    elif ch is None and reply_token(source) == 'LINE':
+        why = ("Its source is LINE, the mains, which triggers all the "
+               "time: no channel's settings can stall it.")
     elif ch is None and reply_token(source):
-        why = (f"Its source is {reply_token(source)}, not a channel: no "
-               f"channel's settings can stall it.")
+        why = (f"Its source is {reply_token(source)}, not an analog "
+               f"channel: acquisition waits for it to trigger, and if "
+               f"nothing drives it, every read freezes. Write down what "
+               f"it is.")
     elif ch is None:
         why = "The source did not read back. " + look
     elif ch in (ich, vch):
@@ -516,39 +527,51 @@ def render(report):
 # The states the monitor check has to learn to see, each set by hand on
 # the front panel so every reply is checked against a state someone can
 # see on the screen. Only I_Out changes -- it is what the watchdog reads --
-# and V_Out rides along untouched. (name, what to do, the queries the
-# step should move away from their 'normal' replies)
+# and V_Out rides along untouched.
 WALK_STEPS = (
     ('normal',
      "Set the scope up as a LIVE run uses it: CH{ich} (I_Out) and CH{vch} "
      "(V_Out) DC-coupled and on, and the scope acquiring (Run). If it "
-     "already is, change nothing.",
-     ()),
-    ('i_ac',
-     "Set CH{ich} (I_Out) to AC coupling.",
-     ('CH{ich}:COUPLING?',)),
-    ('i_off',
-     "Set CH{ich} back to DC coupling, then turn CH{ich} OFF.",
-     ('SELECT:CH{ich}?', 'DISPLAY:GLOBAL:CH{ich}:STATE?')),
-    ('stopped',
-     "Turn CH{ich} back ON, then press Run/Stop so the scope stops.",
-     ('ACQUIRE:STATE?',)),
+     "already is, change nothing."),
+    ('i_ac', "Set CH{ich} (I_Out) to AC coupling."),
+    ('i_off', "Set CH{ich} back to DC coupling, then turn CH{ich} OFF."),
+    ('stopped', "Turn CH{ich} back ON, then press Run/Stop so the scope "
+                "stops."),
 )
-RESTORE_TEXT = ("Press Run/Stop again so the scope acquires. CH{ich} should "
-                "be DC-coupled and on.")
-# What restore has to bring back: (property, the queries that read it,
-# their parser). On/off has two candidate queries; either one will do.
-WALK_PROPERTIES = (('CH{ich} coupling', ('CH{ich}:COUPLING?',),
-                    parse_coupling),
-                   ('CH{ich} on/off', ('SELECT:CH{ich}?',
-                                       'DISPLAY:GLOBAL:CH{ich}:STATE?'),
-                    parse_on_off),
-                   ('acquisition', ('ACQUIRE:STATE?',), parse_acquiring))
+RESTORE_TEXT = ("Put the scope back the way a LIVE run needs it: CH{ich} "
+                "(I_Out) and CH{vch} (V_Out) DC-coupled and on, and the "
+                "scope running continuously -- if it shows Stopped, press "
+                "Run/Stop.")
+# What a LIVE run's monitoring needs, one property per entry: (label, the
+# queries that read it, their parser, the reading a LIVE run needs, the
+# walk step that changes it). A '{ch}' property holds for both monitor
+# channels, and the walk changes it on I_Out's. On/off has two candidate
+# queries.
+WALK_PROPERTIES = (
+    ('coupling', ('CH{ch}:COUPLING?',), parse_coupling, 'DC', 'i_ac'),
+    ('on/off', ('SELECT:CH{ch}?', 'DISPLAY:GLOBAL:CH{ch}:STATE?'),
+     parse_on_off, True, 'i_off'),
+    ('acquisition', ('ACQUIRE:STATE?',), parse_acquiring, True, 'stopped'),
+)
+
+
+def _walk_queries(ich):
+    """{query on I_Out's channel: (form, parser, needed reading, step)},
+    in step order."""
+    return {form.format(ch=ich): (form, parse, good, step)
+            for _, forms, parse, good, step in WALK_PROPERTIES
+            for form in forms}
 
 
 def watched_queries(ich):
-    """Every query a walk step moves, in step order."""
-    return [q.format(ich=ich) for _, _, moves in WALK_STEPS for q in moves]
+    """Every query the walk's steps move, in step order."""
+    return list(_walk_queries(ich))
+
+
+def step_moves(name, ich):
+    """The queries walk step `name` should move away from normal use."""
+    return [q for q, (_, _, _, step) in _walk_queries(ich).items()
+            if step == name]
 
 
 def read_values(scope, ich, n, sleep=time.sleep, clock=time.monotonic):
@@ -580,20 +603,23 @@ def snapshot(scope, ich, vch, reads=WALK_READS, sleep=time.sleep,
              clock=time.monotonic):
     """Everything one walk step records: every C query, then the
     watchdog's own read of I_Out at its cadence, then the watched queries
-    once more. A read that switched the channel back on, or restarted an
-    acquisition, shows up as a difference between the two."""
+    and ACQUIRE:STOPAFTER? once more. A read that switched the channel
+    back on, or an acquisition that stopped meanwhile, shows up as a
+    difference between the two."""
     replies = probe_state_queries(scope)
     replies.update(probe_channel_queries(scope, ich, vch))
     values = read_values(scope, ich, reads, sleep, clock)
     return {'replies': replies, 'reads': values,
-            'after': _ask_all(scope, watched_queries(ich))}
+            'after': _ask_all(scope, watched_queries(ich)
+                              + ['ACQUIRE:STOPAFTER?'])}
 
 
 def blind_lines(replies, ich, vch):
-    """(blind, unread) for `replies`: what reads as a state a LIVE run
-    must not start in (a monitor channel not DC-coupled or off, the scope
-    stopped), and what could not be read at all. Unreadable replies are
-    never guessed at."""
+    """(blind, unread) for `replies`, taken at face value: what reads as a
+    state a LIVE run must not start in -- a monitor channel not DC-coupled
+    or off, the scope stopped or set to Single -- and what could not be
+    read at all. One on/off query reading off is enough, and an unreadable
+    reply is never guessed at."""
     blind, unread = [], []
     for role, ch in (('I_Out', ich), ('V_Out', vch)):
         c = parse_coupling(_reply(replies, f'CH{ch}:COUPLING?') or '')
@@ -601,20 +627,21 @@ def blind_lines(replies, ich, vch):
             unread.append(f"CH{ch} coupling")
         elif c != 'DC':
             blind.append(f"CH{ch} ({role}) reads {c}-coupled")
-        on = None
-        for q in (f'SELECT:CH{ch}?', f'DISPLAY:GLOBAL:CH{ch}:STATE?'):
-            on = parse_on_off(_reply(replies, q) or '')
-            if on is not None:
-                break
-        if on is None:
-            unread.append(f"CH{ch} on/off")
-        elif not on:
+        ons = [parse_on_off(_reply(replies, q) or '') for q in
+               (f'SELECT:CH{ch}?', f'DISPLAY:GLOBAL:CH{ch}:STATE?')]
+        if False in ons:
             blind.append(f"CH{ch} ({role}) reads off")
+        elif True not in ons:
+            unread.append(f"CH{ch} on/off")
     acq = parse_acquiring(_reply(replies, 'ACQUIRE:STATE?') or '')
     if acq is None:
         unread.append("acquisition")
     elif not acq:
         blind.append("the scope reads stopped")
+    if parse_stopafter(_reply(replies, 'ACQUIRE:STOPAFTER?')
+                       or '') == 'SEQUENCE':
+        blind.append("the scope is set to stop after one acquisition "
+                     "(Single)")
     return blind, unread
 
 
@@ -657,25 +684,31 @@ def reads_verdict(reads):
 
 
 def moved_lines(step, normal, ich):
-    """Did the queries this step targets move from their 'normal'
-    replies, and are the other watched ones still where they started?"""
+    """Did the queries this step targets move away from their 'normal'
+    replies -- to a bad reading, not a good one -- and are the other
+    watched ones still where they started?"""
     lines = []
-    for q in watched_queries(ich):
+    for q, (_, parse, good, target) in _walk_queries(ich).items():
         a = _reply(normal['replies'], q)
         b = _reply(step['replies'], q)
-        if q in step['moves']:
+        if target == step['name']:
             if a is None or b is None:
                 when = ('at the start or now' if a is None and b is None
                         else 'at the start' if a is None else 'now')
                 lines += _wrap(f"{q}: no reply {when} -- cannot tell "
                                f"whether it moved")
-            elif a != b:
-                lines += _wrap(f"{q}: {a!r} -> {b!r} -- moved, as this "
-                               f"step should")
-            else:
+            elif a == b:
                 lines += _wrap(f"{q}: still {b!r} -- did NOT move. If the "
                                f"screen shows the change, this query does "
                                f"not see it: note that")
+            elif parse(b) == good:
+                lines += _wrap(f"{q}: {a!r} -> {b!r} -- moved, but to the "
+                               f"reading a LIVE run needs, the opposite of "
+                               f"this step's change: note what the screen "
+                               f"shows")
+            else:
+                lines += _wrap(f"{q}: {a!r} -> {b!r} -- moved, as this "
+                               f"step should")
         elif a is not None and b is not None and a != b:
             lines += _wrap(f"{q}: {a!r} -> {b!r} -- not this step's "
                            f"change; left over from an earlier step?")
@@ -689,63 +722,194 @@ def after_lines(step):
         before, after = _reply(step['replies'], q), _reply(step['after'], q)
         if before is not None and after is not None and before != after:
             lines += _wrap(f"{q}: {before!r} before the reads, {after!r} "
-                           f"after -- the reads themselves changed it")
+                           f"after -- it changed while they ran")
     return lines
 
 
-def restore_verdict(normal, now, ich, vch):
+def proven_queries(steps, ich):
+    """The watched queries this walk showed follow the front panel. One
+    counts only if, at the step that changed what it reads, its reply
+    moved away from its reply in normal use -- and not to the reading a
+    LIVE run needs. -> {query form: (reply in normal use, reply at that
+    step)}. A form proven on I_Out's channel is taken to behave the same
+    on V_Out's: it is the same command."""
+    by = {s['name']: s for s in steps}
+    out = {}
+    for q, (form, parse, good, step) in _walk_queries(ich).items():
+        if 'normal' not in by or step not in by:
+            continue
+        a = _reply(by['normal']['replies'], q)
+        b = _reply(by[step]['replies'], q)
+        if a is not None and b is not None and a != b and parse(b) != good:
+            out[form] = (a, b)
+    return out
+
+
+def proof_lines(steps, ich):
+    """Which watched queries followed the front panel, and why the others
+    do not count: the walk's headline result for the monitor check."""
+    by = {s['name']: s for s in steps}
+    proven = proven_queries(steps, ich)
+    lines = []
+    for q, (form, _, _, step) in _walk_queries(ich).items():
+        if form in proven:
+            a, b = proven[form]
+            why = (f"FOLLOWS the front panel: {a!r} in normal use, {b!r} "
+                   f"at step {step}")
+        elif 'normal' not in by or step not in by:
+            why = f"not tested: the walk stopped before step {step}"
+        else:
+            a = _reply(by['normal']['replies'], q)
+            b = _reply(by[step]['replies'], q)
+            if a is None or b is None:
+                why = "no reply, so it cannot be judged"
+            elif a == b:
+                why = (f"did NOT follow the front panel: {b!r} in normal "
+                       f"use and at step {step}")
+            else:
+                why = (f"moved to {b!r} at step {step} -- the reading a "
+                       f"LIVE run needs, the opposite of that step")
+        lines += _wrap(f"{q} {why}")
+    return lines
+
+
+def _distinct_ok(step):
+    """(distinct readable replies, readable replies) in a step's reads."""
+    vals = [r['reply'] for r in step['reads'] if r['status'] == 'ok']
+    return len(set(vals)), len(vals)
+
+
+def _repeats_mark_stopped(steps):
+    """True when this walk showed that on this rig identical reads mean a
+    stopped scope: varied in normal use, one value while stopped."""
+    by = {s['name']: s for s in steps}
+    if 'normal' not in by or 'stopped' not in by:
+        return False
+    dn, nn = _distinct_ok(by['normal'])
+    ds, ns = _distinct_ok(by['stopped'])
+    return nn > 1 and ns > 1 and dn > 1 and ds == 1
+
+
+def _reading(reply, parse, good, proof, normal_reply, on_ich):
+    """'good', 'bad' or None (cannot judge) for one reply of a property.
+
+    A reply the parser knows is read at face value. One it does not know
+    is judged only for a proven query, against that query's own replies in
+    the walk: as in normal use (which the operator set up) is good; as at
+    the step that changed it, on I_Out's channel, is bad."""
+    if reply is None:
+        return None
+    p = parse(reply)
+    if p is not None:
+        return 'good' if p == good else 'bad'
+    if proof is None:
+        return None
+    if on_ich and reply == proof[1]:
+        return 'bad'
+    return 'good' if reply == normal_reply else None
+
+
+def restore_verdict(steps, now, ich, vch):
     """(state, lines) for the scope after the walk.
 
-    A property the walk moved that reads as a known state is judged on
-    what a LIVE run needs -- DC-coupled, on, acquiring -- not on the
-    start: a walk that started blind must end ready, never be sent back
-    to blind. Only a reply this probe cannot interpret falls back to
-    "the same as at the start".
+    Everything a LIVE run's monitoring needs is judged on `now`: both
+    monitor channels DC-coupled and on, the scope acquiring and not set to
+    Single, and the watchdog's own read of I_Out a readable current. The
+    replies from before AND after its reads both count, so a change while
+    they ran is caught.
 
-    state True: nothing reads blind and nothing uninterpreted differs from
-    the start. False: something reads blind (V_Out included), or an
-    uninterpreted reply still differs from the start. None: neither, but a
-    property could not be read at all -- check it on the screen."""
-    changed, unverified = [], []
-    for label, queries, parse in WALK_PROPERTIES:
-        qs = [q.format(ich=ich) for q in queries]
-        if any(parse(_reply(now['replies'], q) or '') is not None
-               for q in qs):
-            continue              # a known state: blind_lines judges it
-        both = [q for q in qs if _reply(normal['replies'], q) is not None
-                and _reply(now['replies'], q) is not None]
-        if not both:
-            unverified.append(label.format(ich=ich))
-        for q in both:
-            a, b = _reply(normal['replies'], q), _reply(now['replies'], q)
-            if a != b:
-                changed.append(f"{q} reads {b!r}; it read {a!r} at the "
-                               f"start")
-    blind, _ = blind_lines(now['replies'], ich, vch)
+    A bad reading counts whichever query gave it. A good one counts only
+    from a query this walk proved follows the front panel
+    (proven_queries): a query that did not move when the operator changed
+    what it reads says nothing about the panel. A walk that started blind
+    is judged on what a LIVE run needs, never sent back to how it started.
+
+    state False (NOT READY FOR A LIVE RUN): something reads bad. None (NOT
+    CONFIRMED): nothing reads bad, but something could not be confirmed and
+    the operator has to check it on the screen. True (RESTORED): all of it
+    confirmed good."""
+    proven = proven_queries(steps, ich)
+    by = {s['name']: s for s in steps}
+    normal = by.get('normal', {'replies': {}})
+    views = (now['replies'], now.get('after') or {})
+    bad, unsure = [], []
+    for label, forms, parse, good, _step in WALK_PROPERTIES:
+        chans = ([(ich, 'I_Out'), (vch, 'V_Out')] if '{ch}' in forms[0]
+                 else [(ich, None)])
+        for ch, role in chans:
+            name = f"CH{ch} ({role}) {label}" if role else label
+            found = []                  # (query, reply, reading, proven)
+            for form in forms:
+                q = form.format(ch=ch)
+                for view in views:
+                    if q in view:
+                        r = _reply(view, q)
+                        found.append((q, r, _reading(
+                            r, parse, good, proven.get(form),
+                            _reply(normal['replies'], q), ch == ich),
+                            form in proven))
+            worst = [f for f in found if f[2] == 'bad']
+            vouched = [f for f in found if f[3]]
+            doubt = [f for f in vouched if f[2] != 'good']
+            if worst:
+                bad.append(f"{name}: {worst[0][0]} reads {worst[0][1]!r}")
+            elif not vouched:
+                unsure.append(f"{name}: no query this walk showed follows "
+                              f"the front panel")
+            elif doubt:
+                q, r = doubt[0][:2]
+                unsure.append(f"{name}: {q} gave "
+                              + ('no reply' if r is None else repr(r))
+                              + ", which the probe cannot judge")
+    for view in views:
+        if parse_stopafter(_reply(view, 'ACQUIRE:STOPAFTER?')
+                           or '') == 'SEQUENCE':
+            bad.append("acquisition: ACQUIRE:STOPAFTER? reads Single "
+                       "(SEQUENCE) -- it stops after one acquisition")
+            break
+    reads = now.get('reads') or []
+    poor = [r for r in reads if r['status'] != 'ok']
+    if poor:
+        bad.append(f"the watchdog's own read of CH{ich}: {len(poor)} of "
+                   f"{len(reads)} not a readable current, e.g. "
+                   f"{poor[0]['reply']!r}")
+    elif (len(reads) > 1 and len({r['reply'] for r in reads}) == 1
+          and _repeats_mark_stopped(steps)):
+        unsure.append(f"the watchdog's own read of CH{ich}: all "
+                      f"{len(reads)} returned {reads[0]['reply']!r}, as "
+                      f"the reads did while the scope was stopped")
     lines = []
-    if changed:
-        lines.append("  NOT RESTORED -- these still differ from the start:")
-        for x in changed:
+    if bad:
+        lines.append("  NOT READY FOR A LIVE RUN -- put these right on the "
+                     "front panel:")
+        for x in bad:
             lines += _wrap(x, indent='    ')
-    if blind:
-        lines.append("  NOT READY FOR A LIVE RUN:")
-        lines += [f"    {x}" for x in blind]
-    if lines:
+    if unsure:
+        lines.append("  It also cannot confirm these -- check them on the "
+                     "screen:" if bad else
+                     "  NOT CONFIRMED -- check these on the screen "
+                     "yourself:")
+        for x in unsure:
+            lines += _wrap(x, indent='    ')
+    if bad:
         return False, lines
-    if unverified:
-        return None, _wrap("NOT CONFIRMED -- nothing reads blind, but the "
-                           "probe could not read: " + ", ".join(unverified)
-                           + ". Check those on the screen.")
-    return True, _wrap("RESTORED -- nothing reads blind, and nothing the "
-                       "walk changed is left changed.")
+    if unsure:
+        return None, lines
+    return True, _wrap("RESTORED -- both monitor channels read DC-coupled "
+                       "and on, and the scope acquiring, through queries "
+                       "this walk showed follow the front panel, and the "
+                       "watchdog's own read is a readable current. Still "
+                       "glance at the screen before a LIVE run.")
 
 
-def put_back_lines(ich):
+def put_back_lines(ich, vch):
     """The reminder for any walk that did not end RESTORED."""
-    return _wrap(f"Before anyone starts a LIVE run, put the scope back: "
-                 f"CH{ich} DC-coupled and on, and Run/Stop pressed so it "
-                 f"acquires. The Run button's monitor check cannot see any "
-                 f"of these yet -- that is what this walk is for.")
+    return _wrap(f"Before anyone starts a LIVE run, put the scope back the "
+                 f"way it needs it: CH{ich} (I_Out) and CH{vch} (V_Out) "
+                 f"DC-coupled and on, and the scope running continuously "
+                 f"(Run/Stop, not Single). The SLDEA tab's Run button "
+                 f"cannot check any of this yet -- that is what this walk "
+                 f"is for.")
 
 
 def step_lines(step, normal, ich, vch):
@@ -794,16 +958,18 @@ def _reads_cell(reads):
 
 
 def walk_table(cols, ich):
-    """One row per query, one column per step: the part to read first.
-    A cell holds the reply cut to 9 characters, or FAIL; the step
-    sections below carry every reply in full."""
+    """One row per query, one column per step: the part to read first. A
+    cell holds the reply's value -- header stripped, cut to 9 characters
+    -- or FAIL; the step sections below carry every reply raw and in
+    full."""
     w = 10
     rows = [f"  {'':27s}" + "".join(f"{s['name']:{w}s}" for s in cols)]
     for q in cols[0]['replies']:
         cells = []
         for s in cols:
             r = s['replies'].get(q) or {}
-            cells.append((r['reply'] if r.get('ok') else 'FAIL')[:w - 1])
+            cell = (reply_token(r['reply']) or "''") if r.get('ok') else 'FAIL'
+            cells.append(cell[:w - 1])
         rows.append(f"  {q:27s}" + "".join(f"{c:{w}s}" for c in cells))
     rows.append(f"  {'MEAN reads of CH%d' % ich:27s}"
                 + "".join(f"{_reads_cell(s['reads']):{w}s}" for s in cols))
@@ -817,12 +983,8 @@ def repeat_verdict(steps):
     by = {s['name']: s for s in steps}
     if 'normal' not in by or 'stopped' not in by:
         return []
-
-    def _distinct(s):
-        vals = [r['reply'] for r in s['reads'] if r['status'] == 'ok']
-        return len(set(vals)), len(vals)
-    dn, nn = _distinct(by['normal'])
-    ds, ns = _distinct(by['stopped'])
+    dn, nn = _distinct_ok(by['normal'])
+    ds, ns = _distinct_ok(by['stopped'])
     if nn < 2 or ns < 2:
         return _wrap("Repeated reads: too few readable reads to compare "
                      "normal use with a stopped scope.")
@@ -858,19 +1020,22 @@ def walk_summary_lines(report):
     L += ["", "Every step at a glance (full replies in the step sections "
               "below):", ""]
     L += walk_table(cols, ich)
+    L += ["", "Which queries follow the front panel -- the monitor check "
+              "can use only these:"]
+    L += proof_lines(steps, ich)
     L += ["", "What it means for a LIVE run", "-" * 70]
     L += trigger_verdict(steps[0]['replies'], ich, vch)
     L += repeat_verdict(steps)
     L.append("")
     if report.get('interrupted'):
         L.append("  INTERRUPTED -- the walk was stopped with Ctrl-C.")
-    elif not rest.get('attempts'):
+    if rest.get('attempts'):
+        L += rest['attempts'][-1]['verdict']
+    elif not report.get('interrupted'):
         L.append("  NOT CHECKED -- the walk stopped before the scope was put "
                  "back and re-read.")
-    else:
-        L += rest['attempts'][-1]['verdict']
     if rest.get('restored') is not True:
-        L += put_back_lines(ich)
+        L += put_back_lines(ich, vch)
     return L
 
 
@@ -886,7 +1051,8 @@ def walk_detail_lines(report):
 
 
 def _console_operator(step, text):
-    """The bench operator: show what to do, wait for Enter. 'q' stops."""
+    """The bench operator: show what to do, wait for Enter. 'q' stops, and
+    so does a closed stdin -- a walk never loops without a person."""
     print("")
     print("\n".join(_wrap(text, indent='>>> ', hang='    ')))
     try:
@@ -895,27 +1061,30 @@ def _console_operator(step, text):
         return 'q'
 
 
-def restore(scope, ich, vch, operator, normal, total, out, reads=WALK_READS,
+def restore(scope, ich, vch, operator, steps, total, out, reads=WALK_READS,
             sleep=time.sleep, clock=time.monotonic, echo=print):
-    """Ask for the scope back, re-read it, and ask again until it reads as
-    it did at the start or the operator stops. Fills `out` as it goes --
-    {'restored', 'attempts'}, 'restored' being the last read's state, None
-    before any read -- so a Ctrl-C mid-way keeps the reads already taken."""
-    did = RESTORE_TEXT.format(ich=ich)
+    """Ask for the scope back the way a LIVE run needs it, read it, and ask
+    again for as long as something reads NOT READY and the operator does
+    not stop. NOT CONFIRMED ends it: reading again cannot confirm what the
+    probe cannot see. Fills `out` as it goes -- {'restored', 'attempts'},
+    'restored' being the last read's state, None before any read -- so a
+    Ctrl-C mid-way keeps the reads already taken."""
+    did = RESTORE_TEXT.format(ich=ich, vch=vch)
     text = f"Step {total} of {total} (restored): {did}"
     while operator('restored', text).strip().lower() != 'q':
         snap = snapshot(scope, ich, vch, reads, sleep, clock)
-        state, verdict = restore_verdict(normal, snap, ich, vch)
+        state, verdict = restore_verdict(steps, snap, ich, vch)
         snap.update(name='restored', did=did, moves=[], state=state,
                     verdict=verdict, attempt=len(out['attempts']) + 1)
         out['attempts'].append(snap)
         out['restored'] = state
-        for ln in step_lines(snap, normal, ich, vch):
+        for ln in step_lines(snap, steps[0], ich, vch):
             echo(ln)
         if state is not False:
             break
-        text = ("Not as it started yet (listed above). Put it back, then "
-                "press Enter to read it again.")
+        text = ("Still not ready for a LIVE run (listed above). Put it "
+                "right on the front panel, then press Enter to read it "
+                "again.")
     return out
 
 
@@ -929,20 +1098,19 @@ def walk(scope, ich, vch, operator, reads=WALK_READS, sleep=time.sleep,
               'restore': None, 'interrupted': False}
     total = len(WALK_STEPS) + 1
     try:
-        for i, (name, text, moves) in enumerate(WALK_STEPS, 1):
+        for i, (name, text) in enumerate(WALK_STEPS, 1):
             did = text.format(ich=ich, vch=vch)
             typed = operator(name, f"Step {i} of {total} ({name}): {did}")
             if typed.strip().lower() == 'q':
                 break
             snap = snapshot(scope, ich, vch, reads, sleep, clock)
-            snap.update(name=name, did=did,
-                        moves=[q.format(ich=ich) for q in moves])
+            snap.update(name=name, did=did, moves=step_moves(name, ich))
             report['steps'].append(snap)
             for ln in step_lines(snap, report['steps'][0], ich, vch):
                 echo(ln)
         if report['steps']:
             report['restore'] = {'restored': None, 'attempts': []}
-            restore(scope, ich, vch, operator, report['steps'][0], total,
+            restore(scope, ich, vch, operator, report['steps'], total,
                     report['restore'], reads, sleep, clock, echo)
     except KeyboardInterrupt:
         report['interrupted'] = True
@@ -1052,7 +1220,9 @@ def _scripted_operator(fake, ich):
                           fake.set_on(ich, False)),
         'stopped': lambda: (fake.set_on(ich, True),
                             fake.set_running(False)),
-        'restored': lambda: fake.set_running(True),
+        'restored': lambda: (fake.set_coupling(ich, 'DC'),
+                             fake.set_on(ich, True),
+                             fake.set_running(True)),
     }
     asked = []
 
@@ -1091,7 +1261,7 @@ def run(scope, args):
 def run_walk(scope, args, operator=None, sleep=time.sleep,
              clock=time.monotonic):
     """Section D end to end: walk, print the summary, write <out>_walk.*.
-    Returns 0 only when the scope was read back as it started."""
+    Returns 0 only when the walk ended RESTORED."""
     report = walk(scope, args.ich, args.vch, operator or _console_operator,
                   sleep=sleep, clock=clock)
     summary = walk_summary_lines(report)
@@ -1126,9 +1296,14 @@ def main(argv=None):
     ap.add_argument('--selftest', action='store_true',
                     help='run against a synthetic scope; no hardware')
     args = ap.parse_args(argv)
+    if args.ich == args.vch:
+        ap.error("--ich and --vch must be different channels: I_Out and "
+                 "V_Out are two monitors")
 
     if args.selftest:
         print("--selftest: synthetic scope, no instruments touched\n")
+        if args.out == DEFAULT_OUT:          # never over a real report
+            args.out = DEFAULT_OUT + '_selftest'
         fake = _FakeScope()
         if args.walk:
             rc = run_walk(fake, args, _scripted_operator(fake, args.ich),

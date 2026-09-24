@@ -179,7 +179,7 @@ saw rather than retrying:**
 the run folder. Skip `frames/` — the four files are a few kB. The run
 folder can be deleted afterwards; it is a rehearsal, not data.
 
-## N. SLDEA watchdog probe — the numbers #189 and the Run button's monitor check are blocked on (no HV)
+## N. SLDEA watchdog probe — the numbers #189 and ▶ Run's monitor check are blocked on (no HV)
 
 > **Scope only, HV off.** The script never opens the signal generator. A
 > quiet 0 kV rig is the condition being measured — a live one would
@@ -205,15 +205,17 @@ want to see the output shape first.
 channel's scale, attenuation, position and offset, and nothing else. So
 an I_Out channel left on AC coupling (a bench profile can do that), an
 I_Out channel switched off, or a scope left stopped all pass the check.
-The breakdown watchdog then reads about 0 µA, or one frozen record, for
-the whole run. The check can only learn to catch these once we know what
-the scope replies in each state, and nobody has recorded that yet. This
-step records it. The app does not change until the replies are in.
+The breakdown watchdog would then read about 0 µA, or one frozen record,
+for the whole run. That is what we expect; nobody has checked it on this
+scope. The check can only learn to catch these once we know what the
+scope replies in each state, so this step records it. The app does not
+change until the replies are in.
 
 > The walk has **you** put I_Out into exactly the states a LIVE run must
-> never start in. At the end it reads the scope again, and it prints
-> `RESTORED` only once I_Out reads DC-coupled and on and the scope reads
-> acquiring.
+> never start in. At the end it reads the scope again. It prints
+> `RESTORED` only when both monitor channels read DC-coupled and on and
+> the scope acquiring, through queries the walk saw follow the front
+> panel, and the watchdog's own read is a readable current.
 
 **Setup:** as N1: scope connected, HV off. Set the scope up the way a
 LIVE run uses it: the I_Out and V_Out channels DC-coupled and on, and the
@@ -225,9 +227,9 @@ screen.
 .venv/bin/python bench/test_sldea_watchdog_probe.py --ich 3 --vch 2 --walk
 ```
 
-It asks for one change at a time. Make each change **on the scope's
-front panel** and press Enter. The probe reads the scope after each one.
-The table assumes I_Out is on CH3:
+Use the same `--ich` / `--vch` as N1. It asks for one change at a time.
+Make each change **on the scope's front panel** and press Enter. The
+probe reads the scope after each one. The table assumes I_Out is on CH3:
 
 | Step | What you do | What that step checks |
 |---|---|---|
@@ -235,7 +237,7 @@ The table assumes I_Out is on CH3:
 | 2 `i_ac` | set CH3 (I_Out) to **AC** coupling | did `CH3:COUPLING?` change |
 | 3 `i_off` | set CH3 back to DC, then turn CH3 **off** | did `SELECT:CH3?` change (and `DISPLAY:GLOBAL:CH3:STATE?`, a second on/off query) |
 | 4 `stopped` | turn CH3 back on, then press **Run/Stop** so the scope stops | did `ACQUIRE:STATE?` change |
-| 5 `restored` | press **Run/Stop** again | that the scope is ready for a LIVE run again |
+| 5 `restored` | put it back: CH3 DC and on, and press **Run/Stop** if the scope shows Stopped | that the scope is ready for a LIVE run again |
 
 At every step it records, word for word, what the scope replied to:
 
@@ -251,8 +253,12 @@ At every step it records, word for word, what the scope replied to:
 Check:
 
 - [ ] each step's section says the query it targets **moved**. If one says `did NOT move` while the screen shows the change, that is a finding: write down which
+- [ ] the summary's list **Which queries follow the front panel** is the main result: a query counts only if it changed when you made the change it reads. Only those can be used by the check this step is for
 - [ ] the first table in the file has one column per step. Check it against what the screen showed at each step
-- [ ] the walk ends with `RESTORED`. If it ends any other way (`NOT READY FOR A LIVE RUN`, `NOT RESTORED`, `NOT CONFIRMED`, `NOT CHECKED` or `INTERRUPTED`), put back what it names on the front panel **before anyone starts a LIVE run**. It reads the scope again after each fix. If it insists on something the screen contradicts, type `q` and write that down
+- [ ] the walk ends with `RESTORED`. **Even then, look at the screen** before anyone starts a LIVE run: both monitor channels DC-coupled and on, and the scope running, not in Single. How to handle the other endings:
+  - `NOT READY FOR A LIVE RUN`: fix what it names on the front panel and press Enter. It reads the scope again, and keeps asking until it is right or you type `q`
+  - `NOT CONFIRMED`, `NOT CHECKED` or `INTERRUPTED`: the probe could not check everything itself. Check each thing it names on the screen yourself before anyone starts a LIVE run
+  - if it insists on something the screen contradicts, type `q` and write that down
 - [ ] **send back** `sldea_watchdog_probe_walk.txt` + `.json`, the trigger mode and source you wrote down, and anything the screen showed that the file cannot: a message when CH3 went off, or a front panel that did not respond while the walk waited
 
 **The trigger mode.** `TRIGGER:A:MODE?` decides whether a channel the
@@ -266,7 +272,9 @@ this scope is in:
   it off freezes every read, just as Stop does. Nothing locks those
   channels during a run, not even with #337. If the source is I_Out
   itself, a quiet I_Out that never crosses the trigger level freezes the
-  reads without anyone touching anything.
+  reads without anyone touching anything. If it is AUX or a digital
+  channel, the scope waits for that input, and if nothing drives it, the
+  reads freeze too.
 
 **At 0 kV, AC coupling may hardly change the number.** At rest, I_Out's
 DC level is just the rig's standing offset: −16 µA through the 07-29

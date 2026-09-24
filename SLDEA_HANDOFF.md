@@ -13,18 +13,18 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
-## The Run button's monitor check cannot see coupling, on/off or a stopped scope, and the bench probe learns the replies first (2026-09-24)
+## ▶ Run's monitor check cannot see coupling, on/off or a stopped scope, and the bench probe learns the replies first (2026-09-24)
 
 **TL;DR:** before a LIVE run, ▶ Run checks each scope monitor channel's
 scale, attenuation, position and offset, and nothing else. So an I_Out
 channel left on AC coupling, an I_Out channel switched off, or a scope
-left stopped all pass, and the breakdown watchdog then reads about 0 µA,
-or one frozen record, from the first second. Catching these needs scope
-queries that have never been run on this MSO24, so this change is
-bench-side only. The §N probe now asks them, and a new walk (BENCH_TEST
-§N2) records what they, and the watchdog's own read, return in each blind
-state. The app itself does not change until a bench session has those
-replies.
+left stopped all pass, and the breakdown watchdog would then read about
+0 µA, or one frozen record, from the first second. Catching these needs
+scope queries that have never been run on this MSO24, so this change is
+bench-side only. The §N probe now asks them. A new walk (BENCH_TEST §N2)
+records what they, and the watchdog's own read, return in each blind
+state, and which of the queries actually follow the front panel. The app
+itself does not change until a bench session has those replies.
 
 **Observation (#337's adversarial review, 2026-09-24; the code at
 `78315cc`).**
@@ -38,17 +38,19 @@ replies.
   whether the scope is acquiring. The auto-fix already *writes*
   `CH<n>:COUPLING DC` and `SELECT:CH<n> ON`, but it is only offered when
   one of the four window checks fails.
-- So these three pass the check today, and each leaves the watchdog
-  unable to see a breakdown:
+- So these three pass the check today. The right-hand column is what we
+  expect, from how Tek scopes behave; none of it has been seen on this
+  scope, and §N2 is what records it:
 
-| State at ▶ Run | What the watchdog then reads |
+| State at ▶ Run | What the watchdog would then read |
 |---|---|
 | I_Out on AC coupling, e.g. from a bench profile loaded before the run | about 0 µA whatever the current, marked `ok`, so it never trips |
 | I_Out switched off | unknown. The 9.9E37 sentinel would count as over-trip and abort a healthy run once the confirm time (3 s by default) ran out. An unreadable reply would log MONITORING LOST after 10 s, and the run would carry on blind |
 | the scope stopped (Stop, or a finished Single) | one frozen record, marked `ok`: no alarm ever fires |
 
-- #337 locks these settings *during* a LIVE run, but nothing checks them
-  at the *start*.
+- #337 (still open) would withhold the app's own writes to these settings
+  *during* a LIVE run. Nothing checks them at the *start*, and nothing in
+  the app stops a hand on the scope's knobs.
 - The trigger mode adds a fourth route. In NORMAL mode the scope acquires
   only on a trigger, so if the trigger source is a channel the run does
   not read, re-coupling that channel or turning it off freezes the reads
@@ -80,25 +82,46 @@ What `bench/test_sldea_watchdog_probe.py` does now:
   C query, then takes six raw `MEASUREMENT:IMMED:VALUE?` reads of I_Out,
   0.5 s apart as the watchdog reads it. Beside each read it says what the
   watchdog would make of it. The step then says whether its target query
-  moved. It also re-reads the watched queries after the reads, so a
-  measurement that switches a channel back on shows up.
-- **The walk ends with a restore check.** It prints `RESTORED` only once
-  I_Out reads DC-coupled and on and the scope reads acquiring. Otherwise
-  it names what to put back before any LIVE run, and asks again after each
-  fix. A setting in a known state is judged on what a LIVE run needs, not
-  on how the walk found it: a walk that started with I_Out on AC must end
-  on DC, and is never told to put the AC back. Only a reply the probe
-  cannot interpret is held to "the same as at the start".
+  moved. It also re-reads the watched queries and `ACQUIRE:STOPAFTER?`
+  after the reads, so a measurement that switches a channel back on, or a
+  scope that stops meanwhile, shows up.
+- **Its main result is a list: which queries follow the front panel.** A
+  query counts only if it changed, at the step that changed what it reads,
+  away from its reply in normal use and not to the reading a LIVE run
+  needs. Only those queries can serve the check.
+- **The walk ends with a restore check, and trusts only what it proved.**
+  - It prints `RESTORED` only when both monitor channels read DC-coupled
+    and on, the scope reads acquiring and not in Single, and the
+    watchdog's own read is a readable current. All of it is judged on the
+    replies from both before and after its reads.
+  - A bad reading counts from any query. A good one counts only from a
+    query on that list. Everything else is `NOT CONFIRMED`, for the
+    operator to check on the screen.
+  - `NOT READY FOR A LIVE RUN` asks again after each fix. `NOT CONFIRMED`
+    ends the walk, because reading again cannot confirm what the probe
+    cannot see.
+  - A walk that started blind is judged on what a LIVE run needs, and is
+    never sent back to how it started.
 
 Why these choices:
 
-- **The operator makes each change by hand.** Two reasons. The probe
-  stays query-only, as its SAFETY note has always said: its only writes
-  are the `MEASUREMENT:IMMED` TYPE and SOURCE every measurement sends,
-  and a test pins that on the real driver. And the check has to recognise
-  a state that a person or a bench profile set. If the probe wrote
-  `COUPLING AC` and read it back, it would only prove the query echoes
-  the probe's own write.
+- **The operator makes each change by hand.** Two reasons.
+  - The probe stays query-only. Apart from the driver's connect sequence
+    (a VISA device clear, `*IDN?`, and the waveform-transfer format
+    `DATA:ENCDG`/`DATA:WIDTH`, which the app also sends on every
+    connect), its only writes are the `MEASUREMENT:IMMED` TYPE and SOURCE
+    that every measurement sends. A test holds that through the real
+    `TekMSO24` constructor, in both modes.
+  - The check has to recognise a state that a person or a bench profile
+    set. If the probe wrote `COUPLING AC` and read it back, it would only
+    prove the query echoes the probe's own write.
+- **Proof before trust.** The first version trusted any reply it could
+  parse, and this entry's adversarial review broke it. `SELECT?` answered
+  1 while `DISPLAY?` followed the panel, and a walk that left CH3 off
+  printed `RESTORED` and exited 0, because the restore read `SELECT?`
+  first. A query that did not move when the operator changed what it
+  reads says nothing about the panel, so it can never vouch for a good
+  state.
 - **The raw reply is always the record.** The readings beside it
   tolerate a header (`:CH3:COUPLING DC`) and Tek's short keywords
   (`NORM`, `RUNST`, `DCREJ`, `EDG`). HEADER is off in practice, but
@@ -112,17 +135,18 @@ Why these choices:
 **Follow-up: to be built only after a bench session has verified the
 replies, citing that session's date.** Not code now.
 
-1. `_sldea_check_monitors` also queries `CH<n>:COUPLING?` and on/off (the
-   query the walk shows answers) on both monitor channels, plus
-   `ACQUIRE:STATE?`.
+1. `_sldea_check_monitors` also queries `CH<n>:COUPLING?` and on/off on
+   both monitor channels, plus `ACQUIRE:STATE?` and
+   `ACQUIRE:STOPAFTER?`. It uses only queries the walk showed follow the
+   front panel.
    - Refuse, or offer to fix, a monitor channel that is not DC-coupled or
-     not on, and a scope that is not acquiring.
+     not on, and a scope that is not acquiring or is in Single.
    - Pass these facts into `monitor_problems` as arguments, so the logic
      stays headless-testable.
    - The auto-fix already writes `COUPLING DC` and `SELECT ON`. A stopped
      scope needs the driver's `run()` (`ACQUIRE:STOPAFTER RUNSTOP`, then
-     `ACQUIRE:STATE RUN`), the same thing the Run button sends and #337
-     leaves allowed.
+     `ACQUIRE:STATE RUN`). That is what the Oscilloscope tab's Run button
+     sends, and #337 leaves that button allowed during a run.
    - A query that fails is still reported as "SKIPPED, not passed", as
      the four window queries are today.
 2. `_sldea_scope_readback` records each monitor channel's coupling and
@@ -141,32 +165,67 @@ replies, citing that session's date.** Not code now.
 
 **Verification.**
 
-- **Tests.** `tests/test_bench_watchdog_probe.py` has 38 tests, and all
-  pass. It needs no hardware.
+- **Adversarial review**, by a fresh agent before the PR opened. Its
+  worst finding: the first version's restore check could print
+  `RESTORED` and exit 0 with I_Out still off or AC-coupled, because it
+  trusted a query that the walk had just shown ignores the panel. It also
+  found that the restore:
+  - ignored the second read of the queries, and Single mode;
+  - put-back text named only CH3 and always said Run/Stop.
+
+  And, outside the restore:
+  - the query-only claim left out the connect sequence;
+  - this entry stated #337 and unobserved scope behaviour as fact;
+  - a HEADER-ON table was unreadable;
+  - a digital or AUX trigger source was called safe;
+  - `--ich == --vch` was accepted;
+  - `--selftest` could overwrite a real report.
+
+  All of it is fixed, each with a test, and the review's own reproduction
+  scripts were re-run against the fix.
+- **Tests.** `tests/test_bench_watchdog_probe.py` has 60 tests, and all
+  pass in under a second. It needs no hardware.
   - The parsers, with and without a header, and short and long keywords.
   - The classification, against the real `TekMSO24` on a recording
     session.
-  - The query-only claim, held on the real driver in both modes, every
-    command.
-  - The whole walk against the selftest's fake front panel: every step
-    moving, a step that did not move, a change left over from an earlier
-    step, a restore that takes two tries, one given up, one quit before
-    the check, a Ctrl-C, a query the scope never answers (it must not
-    loop), a read that switches the channel back on, and a start that
-    already reads blind.
-  - That the walk's output files fall under the existing `.gitignore`
-    patterns.
-- **Mutation.** 73 mutants were run on the final code, and all 73 were
-  caught, each by a named test failure. An earlier pass left four
-  survivors, and each became a test: `DCREJ` described as DC-coupled,
-  errors-only reads left unexplained, table rows with trailing spaces,
-  and two-digit channels. That pass also exposed two harness hazards. An operator that always pressed
-  Enter would hang the suite instead of failing it, and a Ctrl-C escaping
-  the walk would kill the process. Both are fixed, and the selftest's own
-  scripted operator now types q at a third restore prompt.
+  - The query-only claim, held twice. It holds on the driver in both
+    modes. It also holds through `main()` and the real constructor: the
+    first four commands are the connect sequence (device clear, `*IDN?`,
+    `DATA:ENCDG`, `DATA:WIDTH`), and every command after them is a query
+    or a `MEASUREMENT:IMMED` TYPE or SOURCE.
+  - Which queries count as following the front panel, and every restore
+    verdict. That includes the review's cases: a stuck `SELECT?` beside a
+    tracking `DISPLAY?`, a stuck `COUPLING?`, a stop or a Single pressed
+    during the reads, and unreadable V_Out.
+  - The whole walk against the selftest's fake front panel:
+    - every step moving;
+    - a step that did not move;
+    - a change left over from an earlier step;
+    - a restore that takes two tries, one given up, and one quit before
+      the check;
+    - a Ctrl-C, and a closed stdin;
+    - a query the scope never answers, which must not loop;
+    - a read that switches the channel back on;
+    - a start that already reads blind.
+  - That every output name, the selftest's included, falls under the
+    existing `.gitignore` patterns.
+- **Mutation.** 100 mutants were run on the final code, and all 100 were
+  caught, each by a named test failure.
+  - The first version's pass left four survivors, and each became a
+    test: `DCREJ` described as DC-coupled, errors-only reads left
+    unexplained, table rows with trailing spaces, and two-digit channels.
+    It also exposed two harness hazards. An operator that always pressed
+    Enter would hang the suite instead of failing it, and a Ctrl-C
+    escaping the walk would kill the process. Both are fixed, and the
+    selftest's own scripted operator now types q at a third restore
+    prompt.
+  - The redesign's pass left three survivors, and each became a test:
+    one proven query vouching while another went silent, `_reading`'s
+    own contract, and Single pressed during the reads.
 - **Selftests.** `--selftest` and `--selftest --walk` both run clean.
-- **Python 3.11.** The bench runs 3.11. A tokenizer scan found no f-string
-  that needs 3.12, and the scan was itself checked on known-bad samples.
+- **Python 3.11.** The bench runs 3.11. Two independent tokenizer scans,
+  mine and the reviewer's, found no f-string that needs 3.12. Each scan
+  was itself checked on known-bad samples.
 - **Full suite, on the Windows PC:** 37 of 40 suites pass. The three that
   fail are the known Windows-only ones: `test_easywave_export` and
   `test_sldea_plot_gui` (#331) and `test_tk_fontfix` (#332).

@@ -11,11 +11,13 @@ These pin the probe's own logic:
 - it reads a reply the same way whether the scope sends a header or a
   short keyword, and never guesses at one it does not know;
 - it classifies a measurement exactly as the driver does;
-- it only ever queries;
-- the walk does not call the scope restored when it is not.
+- beyond the driver's connect sequence, it only ever queries;
+- the walk trusts a query only once the query has followed the front
+  panel, and never calls the scope RESTORED when it is not.
 
 Run: .venv/bin/python tests/test_bench_watchdog_probe.py
 """
+import builtins
 import contextlib
 import fnmatch
 import importlib.util
@@ -67,10 +69,58 @@ def _replies(pairs, failed=()):
 HEALTHY = (('CH3:COUPLING?', 'DC'), ('SELECT:CH3?', '1'),
            ('CH2:COUPLING?', 'DC'), ('SELECT:CH2?', '1'),
            ('ACQUIRE:STATE?', '1'))
+# Every reply the walk judges, in the state a LIVE run needs.
+FULL = {'CH3:COUPLING?': 'DC', 'SELECT:CH3?': '1',
+        'DISPLAY:GLOBAL:CH3:STATE?': '1', 'CH2:COUPLING?': 'DC',
+        'SELECT:CH2?': '1', 'DISPLAY:GLOBAL:CH2:STATE?': '1',
+        'ACQUIRE:STATE?': '1', 'ACQUIRE:STOPAFTER?': 'RUNSTOP'}
+# What each walk step changes when every query follows the front panel.
+TRACKING = {'i_ac': {'CH3:COUPLING?': 'AC'},
+            'i_off': {'SELECT:CH3?': '0', 'DISPLAY:GLOBAL:CH3:STATE?': '0'},
+            'stopped': {'ACQUIRE:STATE?': '0'}}
 
 
-def _snap(pairs, failed=()):
-    return {'replies': _replies(pairs, failed), 'reads': [], 'after': {}}
+def _reads(*spec):
+    """Read records from (reply, status) pairs."""
+    return [{'reply': r, 'status': s, 'ms': 12.0,
+             'value': probe.classify_value(r)[0]} for r, s in spec]
+
+
+CHANGING = (('-8.1E-2', 'ok'), ('-7.9E-2', 'ok'))
+FROZEN = (('-8.1E-2', 'ok'), ('-8.1E-2', 'ok'))
+
+
+def _step(name, over=None, failed=(), reads=CHANGING):
+    """A walk step: FULL's replies with `over` laid on top, `failed`
+    queries timing out."""
+    replies = dict(FULL, **(over or {}))
+    return {'name': name, 'reads': _reads(*reads), 'after': {},
+            'replies': _replies([(q, r) for q, r in replies.items()
+                                 if q not in failed], failed)}
+
+
+def _walk_steps(**over):
+    """A walk in which every query followed the front panel. over[step]
+    replaces that step's changes; None leaves the step out, as a walk
+    stopped early would."""
+    steps = [_step('normal', over.get('normal'))]
+    for name in ('i_ac', 'i_off', 'stopped'):
+        change = over.get(name, TRACKING[name])
+        if change is not None:
+            steps.append(_step(name, change, reads=(
+                FROZEN if name == 'stopped' else CHANGING)))
+    return steps
+
+
+def _now(over=None, after=None, failed=(), reads=CHANGING):
+    """A restore read: before the reads as _step, after them the same
+    unless `after` says otherwise."""
+    snap = _step('restored', over, failed, reads)
+    watched = probe.watched_queries(ICH) + ['ACQUIRE:STOPAFTER?']
+    snap['after'] = {q: snap['replies'][q] for q in watched}
+    for q, r in (after or {}).items():
+        snap['after'][q] = {'ok': True, 'reply': r}
+    return snap
 
 
 class _VisaTimeout(Exception):
@@ -86,6 +136,8 @@ class _Session:
     def __init__(self, replies):
         self.replies = replies
         self.sent = []
+        self.timeout = None
+        self.read_termination = self.write_termination = None
 
     def write(self, cmd):
         self.sent.append(cmd)
@@ -96,8 +148,21 @@ class _Session:
             raise _VisaTimeout('VI_ERROR_TMO (-1073807339): timeout')
         return self.replies[cmd] + '\n'
 
+    def clear(self):
+        self.sent.append('<device clear>')
+
     def close(self):
         pass
+
+
+class _RM:
+    """A pyvisa ResourceManager stand-in that hands out one session."""
+
+    def __init__(self, session):
+        self.session = session
+
+    def open_resource(self, resource):
+        return self.session
 
 
 def _driver(replies):
@@ -110,11 +175,33 @@ def _driver(replies):
     return scope
 
 
+class _Panel(probe._FakeScope):
+    """The selftest's fake, with some replies overridden: a constant, a
+    function of the panel, or an exception. This is how a query that
+    ignores the front panel, or a Single button, gets played."""
+
+    def __init__(self, **fixed):
+        super().__init__()
+        # SELECT_CH3Q -> 'SELECT:CH3?': a keyword argument cannot spell a
+        # colon or a question mark, so the trailing Q stands for the '?'
+        self.fixed = {q[:-1].replace('_', ':') + '?': v
+                      for q, v in fixed.items()}
+        self.stopafter = 'RUNSTOP'
+
+    def ask(self, cmd):
+        if cmd in self.fixed:
+            v = self.fixed[cmd]
+            if isinstance(v, Exception):
+                raise v
+            return v(self) if callable(v) else v
+        return super().ask(cmd)
+
+
 class _Bench:
     """A scripted operator on a probe._FakeScope. `actions` maps a walk
     step to what is done on the panel ('q' types q instead). The restore
-    prompt can come round several times; `restores` is used in order and
-    types q once it runs out."""
+    prompt can come round several times; `restores` is used in order, and
+    q is typed once it runs out."""
 
     DEFAULT = {
         'normal': None,
@@ -122,12 +209,15 @@ class _Bench:
         'i_off': lambda f: (f.set_coupling(ICH, 'DC'), f.set_on(ICH, False)),
         'stopped': lambda f: (f.set_on(ICH, True), f.set_running(False)),
     }
+    PUT_RIGHT = staticmethod(lambda f: (f.set_coupling(ICH, 'DC'),
+                                        f.set_on(ICH, True),
+                                        f.set_running(True)))
 
     def __init__(self, fake, actions=None, restores=None):
         self.fake = fake
         self.actions = dict(self.DEFAULT, **(actions or {}))
-        self.restores = list([lambda f: f.set_running(True)]
-                             if restores is None else restores)
+        self.restores = list([self.PUT_RIGHT] if restores is None
+                             else restores)
         self.asked = []
 
     def __call__(self, step, text):
@@ -347,7 +437,14 @@ def test_trigger_verdict():
     assert 'CH3 = I_Out, which the run reads' in own
     assert 'a quiet I_Out' in own
     assert 'CH2 = V_Out' in v(mode='NORMAL', src='CH2')
-    assert 'LINE, not a channel' in v(mode='NORMAL', kind='EDGE', src='LINE')
+    assert 'LINE, the mains, which triggers all the time' in v(
+        mode='NORMAL', kind='EDGE', src='LINE')
+    # a digital channel or AUX is NOT safe: nothing may be driving it
+    for src in ('D0', 'AUX'):
+        flat = v(mode='NORMAL', kind='EDGE', src=src)
+        assert f'{src}, not an analog channel' in flat, flat
+        assert 'if nothing drives it, every read freezes' in flat
+        assert 'cannot' not in flat and 'no channel' not in flat
     assert 'did not read back' in v(mode='NORMAL', kind='EDGE')
     assert 'type is PULSEWIDTH, not EDGE' in v(mode='NORMAL',
                                                kind='PULSEWIDTH', src='CH1')
@@ -364,15 +461,21 @@ def test_blind_lines():
     rej = dict(HEALTHY, **{'CH3:COUPLING?': 'DCREJ', 'CH2:COUPLING?': 'GND'})
     assert probe.blind_lines(_replies(rej.items()), ICH, VCH)[0] == \
         ['CH3 (I_Out) reads DCREJECT-coupled', 'CH2 (V_Out) reads GND-coupled']
-    off = dict(HEALTHY, **{'SELECT:CH2?': '0', 'ACQUIRE:STATE?': '0'})
+    off = dict(HEALTHY, **{'SELECT:CH2?': '0', 'ACQUIRE:STATE?': '0',
+                           'ACQUIRE:STOPAFTER?': 'SEQ'})
     assert probe.blind_lines(_replies(off.items()), ICH, VCH)[0] == \
-        ['CH2 (V_Out) reads off', 'the scope reads stopped']
+        ['CH2 (V_Out) reads off', 'the scope reads stopped',
+         'the scope is set to stop after one acquisition (Single)']
     # SELECT? silent: DISPLAY:GLOBAL...:STATE? answers for on/off instead
     no_select = [(q, r) for q, r in HEALTHY if q != 'SELECT:CH3?']
     blind, unread = probe.blind_lines(
         _replies(no_select + [('DISPLAY:GLOBAL:CH3:STATE?', '0')],
                  failed=['SELECT:CH3?']), ICH, VCH)
     assert blind == ['CH3 (I_Out) reads off'] and unread == []
+    # the two on/off queries disagree: one reading off is enough
+    both = dict(HEALTHY, **{'DISPLAY:GLOBAL:CH3:STATE?': '0'})
+    assert probe.blind_lines(_replies(both.items()), ICH, VCH)[0] == \
+        ['CH3 (I_Out) reads off']
     # nothing readable: named as unread, never guessed as blind or fine
     blind, unread = probe.blind_lines(
         _replies([('CH3:COUPLING?', 'what')], failed=['ACQUIRE:STATE?']),
@@ -382,20 +485,12 @@ def test_blind_lines():
                       'CH2 on/off', 'acquisition']
 
 
-def _reads(*spec):
-    """Read records from (reply, status) pairs."""
-    return [{'reply': r, 'status': s, 'ms': 12.0,
-             'value': probe.classify_value(r)[0]} for r, s in spec]
-
-
 def test_reads_verdict():
-    changing = _flat(probe.reads_verdict(_reads(('-8.1E-2', 'ok'),
-                                                ('-7.9E-2', 'ok'))))
+    changing = _flat(probe.reads_verdict(_reads(*CHANGING)))
     assert '2 reads: 2 ok' in changing and '2 distinct of 2' in changing
     assert 'readable and changing' in changing
     assert 'median -16.00 uA' in changing
-    frozen = _flat(probe.reads_verdict(_reads(('-8.1E-2', 'ok'),
-                                              ('-8.1E-2', 'ok'))))
+    frozen = _flat(probe.reads_verdict(_reads(*FROZEN)))
     assert 'every read returned the same value' in frozen
     sentinel = _flat(probe.reads_verdict(_reads(('9.91E+37', 'offscreen'),) * 3))
     assert '3 offscreen' in sentinel and 'over-trip' in sentinel
@@ -426,67 +521,6 @@ def test_reads_cell():
                                     ('e', 'error'))) == 'ok1/err2'
 
 
-def test_restore_verdict():
-    start = _snap(HEALTHY)
-    state, lines = probe.restore_verdict(start, _snap(HEALTHY), ICH, VCH)
-    assert state is True and 'RESTORED' in _flat(lines)
-    stopped = dict(HEALTHY, **{'ACQUIRE:STATE?': '0'})
-    state, lines = probe.restore_verdict(start, _snap(stopped.items()),
-                                         ICH, VCH)
-    flat = _flat(lines)
-    assert state is False and 'NOT READY FOR A LIVE RUN' in flat
-    assert 'the scope reads stopped' in flat and 'NOT RESTORED' not in flat
-    # V_Out is never touched by the walk, but a LIVE run needs it too
-    v_off = dict(HEALTHY, **{'SELECT:CH2?': '0'})
-    state, lines = probe.restore_verdict(start, _snap(v_off.items()),
-                                         ICH, VCH)
-    assert state is False and 'CH2 (V_Out) reads off' in _flat(lines)
-    # started blind, came back to the start: still not fit for a LIVE run
-    ac = dict(HEALTHY, **{'CH3:COUPLING?': 'AC'}).items()
-    state, lines = probe.restore_verdict(_snap(ac), _snap(ac), ICH, VCH)
-    assert state is False
-    assert 'CH3 (I_Out) reads AC-coupled' in _flat(lines)
-    # started blind, ends DC: ready. Never sent back to the blind start.
-    state, _ = probe.restore_verdict(_snap(ac), _snap(HEALTHY), ICH, VCH)
-    assert state is True
-    # a reply the probe cannot interpret is held to the start instead
-    odd = dict(HEALTHY, **{'SELECT:CH3?': 'X1'})
-    moved = dict(HEALTHY, **{'SELECT:CH3?': 'X0'})
-    state, lines = probe.restore_verdict(_snap(odd.items()),
-                                         _snap(moved.items()), ICH, VCH)
-    assert state is False and 'NOT RESTORED' in _flat(lines)
-    assert "SELECT:CH3? reads 'X0'; it read 'X1' at the start" in \
-        _flat(lines)
-    state, _ = probe.restore_verdict(_snap(odd.items()), _snap(odd.items()),
-                                     ICH, VCH)
-    assert state is True
-    # one on/off query reading a known state settles it, whatever an
-    # uninterpreted second one does
-    both = dict(HEALTHY, **{'DISPLAY:GLOBAL:CH3:STATE?': 'X1'})
-    both_moved = dict(HEALTHY, **{'DISPLAY:GLOBAL:CH3:STATE?': 'X0'})
-    state, _ = probe.restore_verdict(_snap(both.items()),
-                                     _snap(both_moved.items()), ICH, VCH)
-    assert state is True
-    # on/off never answered: nothing to compare, so NOT CONFIRMED -- not a
-    # pass, and not a loop the operator cannot leave either
-    silent = [(q, r) for q, r in HEALTHY if q != 'SELECT:CH3?']
-    state, lines = probe.restore_verdict(
-        _snap(silent, failed=['SELECT:CH3?']),
-        _snap(silent, failed=['SELECT:CH3?']), ICH, VCH)
-    assert state is None and 'NOT CONFIRMED' in _flat(lines)
-    assert 'CH3 on/off' in _flat(lines)
-    # answered at the start, silent now: cannot be called back either
-    state, _ = probe.restore_verdict(
-        start, _snap(silent, failed=['SELECT:CH3?']), ICH, VCH)
-    assert state is None
-    # the second on/off query covers for a silent SELECT?
-    alt = silent + [('DISPLAY:GLOBAL:CH3:STATE?', '1')]
-    state, _ = probe.restore_verdict(_snap(alt, failed=['SELECT:CH3?']),
-                                     _snap(alt, failed=['SELECT:CH3?']),
-                                     ICH, VCH)
-    assert state is True
-
-
 def test_repeat_verdict():
     def steps(normal, stopped):
         return [{'name': 'normal', 'reads': _reads(*normal)},
@@ -513,6 +547,220 @@ def test_wrap_keeps_words_whole():
     assert lines[3] == '     z'
 
 
+# ---------------------------------------------- which queries to trust
+def test_moved_lines_judge_the_direction():
+    normal = _step('normal')
+
+    def lines(name, over, start=normal):
+        return _flat(probe.moved_lines(_step(name, over), start, ICH))
+    assert ("CH3:COUPLING?: 'DC' -> 'AC' -- moved, as this step should"
+            in lines('i_ac', {'CH3:COUPLING?': 'AC'}))
+    assert "CH3:COUPLING?: still 'DC' -- did NOT move" in lines('i_ac', {})
+    assert "ACQUIRE:STATE?: '1' -> '0' -- moved" in lines(
+        'stopped', {'ACQUIRE:STATE?': '0'})
+    # moved, but to the reading a LIVE run needs: the start was AC
+    back = lines('i_ac', {'CH3:COUPLING?': 'DC'},
+                 start=_step('normal', {'CH3:COUPLING?': 'AC'}))
+    assert "moved, but to the reading a LIVE run needs" in back
+    silent = _flat(probe.moved_lines(
+        _step('i_off', {}, failed=['SELECT:CH3?']), normal, ICH))
+    assert "SELECT:CH3?: no reply now -- cannot tell" in silent
+
+
+def test_proven_queries_trust_only_what_followed_the_panel():
+    every = {'CH{ch}:COUPLING?', 'SELECT:CH{ch}?',
+             'DISPLAY:GLOBAL:CH{ch}:STATE?', 'ACQUIRE:STATE?'}
+    assert set(probe.proven_queries(_walk_steps(), ICH)) == every
+    # did not move when its change was made
+    assert 'CH{ch}:COUPLING?' not in probe.proven_queries(
+        _walk_steps(i_ac={}), ICH)
+    # moved, but to the good reading (the start was AC)
+    assert 'CH{ch}:COUPLING?' not in probe.proven_queries(
+        _walk_steps(normal={'CH3:COUPLING?': 'AC'},
+                    i_ac={'CH3:COUPLING?': 'DC'}), ICH)
+    # its step never reached
+    assert 'ACQUIRE:STATE?' not in probe.proven_queries(
+        _walk_steps(stopped=None), ICH)
+    # no reply at its step
+    steps = _walk_steps()
+    steps[2] = _step('i_off', TRACKING['i_off'], failed=['SELECT:CH3?'])
+    assert 'SELECT:CH{ch}?' not in probe.proven_queries(steps, ICH)
+    # a reply it cannot interpret still proves the query, if it moved
+    proven = probe.proven_queries(_walk_steps(
+        normal={'SELECT:CH3?': 'X1'}, i_off={'SELECT:CH3?': 'X0'}), ICH)
+    assert proven['SELECT:CH{ch}?'] == ('X1', 'X0')
+    assert 'DISPLAY:GLOBAL:CH{ch}:STATE?' not in proven   # stayed '1'
+
+
+def test_proof_lines_say_what_counts_and_why():
+    steps = _walk_steps(i_ac={}, stopped=None)
+    steps[2] = _step('i_off', {'SELECT:CH3?': '0'},
+                     failed=['DISPLAY:GLOBAL:CH3:STATE?'])
+    flat = _flat(probe.proof_lines(steps, ICH))
+    assert ("CH3:COUPLING? did NOT follow the front panel: 'DC' in normal "
+            "use and at step i_ac") in flat
+    assert ("SELECT:CH3? FOLLOWS the front panel: '1' in normal use, '0' "
+            "at step i_off") in flat
+    assert ("DISPLAY:GLOBAL:CH3:STATE? no reply, so it cannot be judged"
+            in flat)
+    assert ("ACQUIRE:STATE? not tested: the walk stopped before step "
+            "stopped") in flat
+
+
+# ----------------------------------------------------- restore verdict
+def test_restore_verdict_ready_only_when_all_of_it_is_confirmed():
+    state, lines = probe.restore_verdict(_walk_steps(), _now(), ICH, VCH)
+    assert state is True and 'RESTORED' in _flat(lines)
+    stopped = probe.restore_verdict(_walk_steps(),
+                                    _now({'ACQUIRE:STATE?': '0'}), ICH, VCH)
+    assert stopped[0] is False
+    assert 'NOT READY FOR A LIVE RUN' in _flat(stopped[1])
+    assert "acquisition: ACQUIRE:STATE? reads '0'" in _flat(stopped[1])
+    # V_Out is never touched by the walk, but a LIVE run needs it too
+    v_off = probe.restore_verdict(_walk_steps(), _now({'SELECT:CH2?': '0'}),
+                                  ICH, VCH)
+    assert v_off[0] is False
+    assert "CH2 (V_Out) on/off: SELECT:CH2? reads '0'" in _flat(v_off[1])
+
+
+def test_restore_verdict_a_bad_reading_counts_from_any_query():
+    # the two on/off queries disagree: the one reading off wins
+    state, lines = probe.restore_verdict(
+        _walk_steps(), _now({'DISPLAY:GLOBAL:CH3:STATE?': '0'}), ICH, VCH)
+    assert state is False
+    assert "DISPLAY:GLOBAL:CH3:STATE? reads '0'" in _flat(lines)
+    # even from a query the walk did not prove
+    state, _ = probe.restore_verdict(_walk_steps(i_ac={}),
+                                     _now({'CH3:COUPLING?': 'AC'}), ICH, VCH)
+    assert state is False
+
+
+def test_restore_verdict_never_trusts_a_query_that_ignored_the_panel():
+    # #337-review finding: SELECT? answered 1 whatever the panel did, so
+    # its '1' at the end says nothing. DISPLAY followed the panel and
+    # says off.
+    steps = _walk_steps(i_off={'DISPLAY:GLOBAL:CH3:STATE?': '0'})
+    state, lines = probe.restore_verdict(
+        steps, _now({'DISPLAY:GLOBAL:CH3:STATE?': '0'}), ICH, VCH)
+    assert state is False and "CH3 (I_Out) on/off" in _flat(lines)
+    state, _ = probe.restore_verdict(steps, _now(), ICH, VCH)
+    assert state is True
+    # coupling never moved: its 'DC' at the end cannot be trusted
+    state, lines = probe.restore_verdict(_walk_steps(i_ac={}), _now(),
+                                         ICH, VCH)
+    assert state is None and 'NOT CONFIRMED' in _flat(lines)
+    assert ("CH3 (I_Out) coupling: no query this walk showed follows the "
+            "front panel") in _flat(lines)
+    assert 'RESTORED' not in _flat(lines)
+
+
+def test_restore_verdict_a_blind_start_is_not_sent_back():
+    # I_Out was AC before the walk, so the coupling query never showed it
+    # follows the panel. DC at the end is unconfirmed -- never "put the
+    # AC back" -- and AC at the end is NOT READY.
+    steps = _walk_steps(normal={'CH3:COUPLING?': 'AC'})
+    state, lines = probe.restore_verdict(steps, _now(), ICH, VCH)
+    assert state is None and 'CH3 (I_Out) coupling' in _flat(lines)
+    state, _ = probe.restore_verdict(steps, _now({'CH3:COUPLING?': 'AC'}),
+                                     ICH, VCH)
+    assert state is False
+
+
+def test_restore_verdict_uninterpreted_replies_are_held_to_the_walk():
+    no_disp = ('DISPLAY:GLOBAL:CH3:STATE?', 'DISPLAY:GLOBAL:CH2:STATE?')
+    odd = {'SELECT:CH3?': 'X1', 'SELECT:CH2?': 'X1'}
+    steps = [_step('normal', odd, no_disp),
+             _step('i_ac', dict(odd, **TRACKING['i_ac']), no_disp),
+             _step('i_off', {'SELECT:CH3?': 'X0', 'SELECT:CH2?': 'X1'},
+                   no_disp),
+             _step('stopped', dict(odd, **TRACKING['stopped']), no_disp,
+                   FROZEN)]
+    assert probe.restore_verdict(steps, _now(odd, failed=no_disp),
+                                 ICH, VCH)[0] is True
+    state, lines = probe.restore_verdict(
+        steps, _now({'SELECT:CH3?': 'X0', 'SELECT:CH2?': 'X1'},
+                    failed=no_disp), ICH, VCH)
+    assert state is False and "SELECT:CH3? reads 'X0'" in _flat(lines)
+    state, lines = probe.restore_verdict(
+        steps, _now({'SELECT:CH3?': 'X9', 'SELECT:CH2?': 'X1'},
+                    failed=no_disp), ICH, VCH)
+    assert state is None
+    assert "SELECT:CH3? gave 'X9', which the probe cannot judge" in \
+        _flat(lines)
+
+
+def test_restore_verdict_reads_after_the_reads_and_single():
+    # stopped while the reads ran: the second read of the queries says so
+    state, lines = probe.restore_verdict(
+        _walk_steps(), _now(after={'ACQUIRE:STATE?': '0'}), ICH, VCH)
+    assert state is False and "ACQUIRE:STATE? reads '0'" in _flat(lines)
+    # Single armed: acquiring now, stopped after one record
+    for view in ('before', 'after'):
+        now = (_now({'ACQUIRE:STOPAFTER?': 'SEQ'}) if view == 'before'
+               else _now(after={'ACQUIRE:STOPAFTER?': 'SEQUENCE'}))
+        state, lines = probe.restore_verdict(_walk_steps(), now, ICH, VCH)
+        assert state is False and 'Single' in _flat(lines), view
+
+
+def test_restore_verdict_judges_the_watchdogs_own_read():
+    state, lines = probe.restore_verdict(
+        _walk_steps(), _now(reads=(('9.91E+37', 'offscreen'),) * 3),
+        ICH, VCH)
+    assert state is False
+    assert "the watchdog's own read of CH3: 3 of 3 not a readable current" \
+        in _flat(lines)
+    # identical reads, and this walk showed identical means stopped here
+    state, lines = probe.restore_verdict(_walk_steps(), _now(reads=FROZEN),
+                                         ICH, VCH)
+    assert state is None and 'as the reads did while the scope was stopped' \
+        in _flat(lines)
+    # ...but not when normal use repeated too: no evidence either way
+    steps = _walk_steps()
+    steps[0] = _step('normal', reads=FROZEN)
+    assert probe.restore_verdict(steps, _now(reads=FROZEN),
+                                 ICH, VCH)[0] is True
+
+
+def test_restore_verdict_cannot_confirm_what_it_never_saw():
+    # the walk stopped at the start: nothing proven, nothing confirmed
+    state, lines = probe.restore_verdict(_walk_steps()[:1], _now(), ICH, VCH)
+    assert state is None
+    for prop in ('CH3 (I_Out) coupling', 'CH3 (I_Out) on/off',
+                 'CH2 (V_Out) coupling', 'CH2 (V_Out) on/off',
+                 'acquisition'):
+        assert prop + ': no query' in _flat(lines), prop
+    # a proven query that stopped answering
+    state, lines = probe.restore_verdict(
+        _walk_steps(), _now(failed=['SELECT:CH3?',
+                                    'DISPLAY:GLOBAL:CH3:STATE?']), ICH, VCH)
+    assert state is None and 'gave no reply' in _flat(lines)
+    # ...even when the other proven on/off query reads on: every query the
+    # walk proved must agree before the probe vouches for the property
+    state, lines = probe.restore_verdict(
+        _walk_steps(), _now(failed=['DISPLAY:GLOBAL:CH3:STATE?']), ICH, VCH)
+    assert state is None
+    assert ('CH3 (I_Out) on/off: DISPLAY:GLOBAL:CH3:STATE? gave no reply'
+            in _flat(lines))
+
+
+def test_reading_judges_an_uninterpreted_reply_only_with_proof():
+    r = probe._reading
+    on_off = (probe.parse_on_off, True)
+    assert r('1', *on_off, None, '1', True) == 'good'      # face value
+    assert r('0', *on_off, None, '1', True) == 'bad'
+    assert r(None, *on_off, ('1', '0'), '1', True) is None
+    # a reply it cannot interpret: nothing without proof...
+    assert r('X1', *on_off, None, 'X1', True) is None
+    # ...and with it, only the walk's own two replies mean anything
+    proof = ('X1', 'X0')
+    assert r('X1', *on_off, proof, 'X1', True) == 'good'
+    assert r('X0', *on_off, proof, 'X1', True) == 'bad'
+    assert r('X9', *on_off, proof, 'X1', True) is None
+    # on V_Out's channel only its own normal-use reply counts
+    assert r('X1', *on_off, proof, 'X1', False) == 'good'
+    assert r('X0', *on_off, proof, 'X1', False) is None
+
+
 # ---------------------------------------------------------------- walk
 def test_walk_every_step_moves_and_it_ends_restored():
     fake = probe._FakeScope()
@@ -530,9 +778,12 @@ def test_walk_every_step_moves_and_it_ends_restored():
     assert 'left over' not in lines('i_off') + lines('stopped')
     assert {r['status'] for r in steps['i_off']['reads']} == {'offscreen'}
     assert len({r['reply'] for r in steps['stopped']['reads']}) == 1
+    assert steps['i_ac']['moves'] == ['CH3:COUPLING?']
     assert report['restore']['restored'] is True
     assert len(report['restore']['attempts']) == 1
     assert fake.running and fake.on[ICH] and fake.coupling[ICH] == 'DC'
+    summary = _flat(probe.walk_summary_lines(report))
+    assert summary.count('FOLLOWS the front panel') == 3
 
 
 def test_walk_flags_a_query_that_did_not_move():
@@ -541,14 +792,15 @@ def test_walk_flags_a_query_that_did_not_move():
     normal, i_ac = report['steps'][0], report['steps'][1]
     flat = _flat(probe.step_lines(i_ac, normal, ICH, VCH))
     assert "CH3:COUPLING?: still 'DC' -- did NOT move" in flat
+    # and so it can vouch for nothing at the end
+    assert report['restore']['restored'] is None
+    assert 'CH3 (I_Out) coupling: no query' in _flat(
+        report['restore']['attempts'][-1]['verdict'])
 
 
 def test_walk_flags_a_change_left_over_from_an_earlier_step():
     fake = probe._FakeScope()
-    bench = _Bench(fake,
-                   actions={'i_off': lambda f: f.set_on(ICH, False)},
-                   restores=[lambda f: (f.set_coupling(ICH, 'DC'),
-                                        f.set_running(True))])
+    bench = _Bench(fake, actions={'i_off': lambda f: f.set_on(ICH, False)})
     report = _walk(fake, bench)
     normal, i_off = report['steps'][0], report['steps'][2]
     flat = _flat(probe.step_lines(i_off, normal, ICH, VCH))
@@ -558,12 +810,13 @@ def test_walk_flags_a_change_left_over_from_an_earlier_step():
 
 def test_walk_asks_again_until_the_scope_is_back():
     fake = probe._FakeScope()
-    bench = _Bench(fake, restores=[None, lambda f: f.set_running(True)])
+    bench = _Bench(fake, restores=[None, _Bench.PUT_RIGHT])
     report = _walk(fake, bench)
     attempts = report['restore']['attempts']
     assert bench.asked.count('restored') == 2
     assert [a['state'] for a in attempts] == [False, True]
-    assert 'the scope reads stopped' in _flat(attempts[0]['verdict'])
+    assert "acquisition: ACQUIRE:STATE? reads '0'" in _flat(
+        attempts[0]['verdict'])
     assert report['restore']['restored'] is True
     detail = _flat(probe.walk_detail_lines(report))
     assert 'restored (read 2):' in detail
@@ -575,7 +828,7 @@ def test_walk_asks_again_until_the_scope_is_back():
     assert row[0].split()[1:] == ['1', '1', '1', '0', '1']
 
 
-def test_walk_left_unrestored_says_so_and_exits_nonzero():
+def test_walk_left_unready_says_so_and_exits_nonzero():
     fake = probe._FakeScope()
     bench = _Bench(fake, restores=[None, 'q'])
     with tempfile.TemporaryDirectory() as tmp:
@@ -588,7 +841,17 @@ def test_walk_left_unrestored_says_so_and_exits_nonzero():
     assert saved['restore']['restored'] is False
     flat = _flat([text])
     assert 'NOT READY FOR A LIVE RUN' in flat and 'put the scope back' in flat
-    assert 'CH3 DC-coupled and on, and Run/Stop pressed' in flat
+    assert ('CH3 (I_Out) and CH2 (V_Out) DC-coupled and on, and the scope '
+            'running continuously (Run/Stop, not Single)') in flat
+
+
+def test_walk_not_confirmed_exits_nonzero_and_says_check_the_screen():
+    fake = probe._FakeScope()
+    bench = _Bench(fake, actions={'i_ac': None})
+    with tempfile.TemporaryDirectory() as tmp:
+        rc = _quiet(probe.run_walk, fake, _args(os.path.join(tmp, 'p')),
+                    operator=bench, sleep=lambda s: None)
+    assert rc == 1 and bench.asked.count('restored') == 1
 
 
 def test_walk_stopped_before_the_check_is_not_called_restored():
@@ -599,13 +862,14 @@ def test_walk_stopped_before_the_check_is_not_called_restored():
     assert 'NOT CHECKED' in summary and 'put the scope back' in summary
 
 
-def test_walk_quit_midway_still_checks_the_restore():
+def test_walk_quit_midway_cannot_confirm_what_it_never_tested():
     fake = probe._FakeScope()
-    bench = _Bench(fake, actions={'stopped': 'q'},
-                   restores=[lambda f: f.set_on(ICH, True)])
+    bench = _Bench(fake, actions={'stopped': 'q'})
     report = _walk(fake, bench)
     assert [s['name'] for s in report['steps']] == ['normal', 'i_ac', 'i_off']
-    assert report['restore']['restored'] is True
+    assert report['restore']['restored'] is None
+    assert 'acquisition: no query' in _flat(
+        report['restore']['attempts'][-1]['verdict'])
     assert probe.repeat_verdict(report['steps']) == []    # never stopped
 
 
@@ -636,15 +900,12 @@ def test_walk_ctrl_c_keeps_what_it_read_and_says_put_back():
     assert report['restore']['restored'] is False
     summary = _flat(probe.walk_summary_lines(report))
     assert 'INTERRUPTED' in summary and 'put the scope back' in summary
+    assert 'NOT READY FOR A LIVE RUN' in summary      # the last read, kept
 
 
 def test_walk_does_not_spin_on_a_query_the_scope_never_answers():
-    class NoOnOff(probe._FakeScope):
-        def ask(self, cmd):
-            if cmd.startswith('SELECT:'):
-                raise IOError('VI_ERROR_TMO: timeout')
-            return super().ask(cmd)
-    fake = NoOnOff()
+    fake = _Panel(SELECT_CH3Q=_VisaTimeout('timeout'),
+                  SELECT_CH2Q=_VisaTimeout('timeout'))
     bench = _Bench(fake)
     report = _walk(fake, bench)
     assert bench.asked.count('restored') == 1
@@ -653,11 +914,108 @@ def test_walk_does_not_spin_on_a_query_the_scope_never_answers():
     flat = _flat(probe.step_lines(i_off, normal, ICH, VCH))
     assert 'SELECT:CH3?: no reply at the start or now' in flat
     summary = _flat(probe.walk_summary_lines(report))
-    assert 'NOT CONFIRMED' in summary and 'CH3 on/off' in summary
-    assert 'put the scope back' in summary
+    assert 'NOT CONFIRMED' in summary and 'put the scope back' in summary
+    assert 'CH3 (I_Out) on/off: no query this walk showed' in summary
 
 
-def test_walk_notices_when_its_own_reads_change_the_state():
+def test_walk_never_trusts_a_query_that_ignored_the_panel():
+    # the #337-review finding, end to end: SELECT? answers 1 whatever the
+    # panel does, DISPLAY follows it, and the operator never turns CH3
+    # back on. The walk must end NOT READY, exit 1 and say put it back.
+    fake = _Panel(SELECT_CH3Q='1', SELECT_CH2Q='1',
+                  DISPLAY_GLOBAL_CH3_STATEQ=lambda s: '1' if s.on[3] else '0',
+                  DISPLAY_GLOBAL_CH2_STATEQ=lambda s: '1' if s.on[2] else '0')
+    bench = _Bench(fake, actions={'stopped': lambda f: f.set_running(False)},
+                   restores=[lambda f: f.set_running(True), 'q'])
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, 'p')
+        rc = _quiet(probe.run_walk, fake, _args(out), operator=bench,
+                    sleep=lambda s: None)
+        text = _flat([_read(out + '_walk.txt')])
+    assert rc == 1
+    assert "SELECT:CH3? did NOT follow the front panel" in text
+    assert "DISPLAY:GLOBAL:CH3:STATE? FOLLOWS the front panel" in text
+    assert ("NOT READY FOR A LIVE RUN -- put these right on the front "
+            "panel: CH3 (I_Out) on/off: DISPLAY:GLOBAL:CH3:STATE? reads "
+            "'0'") in text
+    assert 'put the scope back' in text
+
+
+def test_walk_stuck_coupling_query_is_not_confirmed():
+    # CH3:COUPLING? says DC whatever the panel does; the operator leaves
+    # CH3 on AC. Nothing can vouch for the coupling: NOT CONFIRMED.
+    fake = _Panel(CH3_COUPLINGQ='DC')
+    bench = _Bench(fake, actions={'i_off': lambda f: f.set_on(ICH, False)},
+                   restores=[lambda f: f.set_running(True)])
+    report = _walk(fake, bench)
+    assert fake.coupling[ICH] == 'AC'
+    assert report['restore']['restored'] is None
+    assert 'CH3 (I_Out) coupling: no query' in _flat(
+        report['restore']['attempts'][-1]['verdict'])
+
+
+def test_walk_catches_a_scope_that_stops_while_it_reads():
+    class StopsMidRead(probe._FakeScope):
+        """Stops acquiring on the second read after being armed."""
+        armed, reads = False, 0
+
+        def ask(self, cmd):
+            if cmd == 'MEASUREMENT:IMMED:VALUE?' and self.armed:
+                self.reads += 1
+                if self.reads == 2:
+                    self.set_running(False)
+            return super().ask(cmd)
+    fake = StopsMidRead()
+
+    def put_right_then_stop(f):
+        _Bench.PUT_RIGHT(f)
+        f.armed = True
+    report = _walk(fake, _Bench(fake, restores=[put_right_then_stop]))
+    last = report['restore']['attempts'][-1]
+    assert last['replies']['ACQUIRE:STATE?']['reply'] == '1'   # before
+    assert last['after']['ACQUIRE:STATE?']['reply'] == '0'     # after
+    assert report['restore']['restored'] is False
+    assert "it changed while they ran" in _flat(
+        probe.step_lines(last, report['steps'][0], ICH, VCH))
+
+
+def test_walk_single_armed_is_not_ready():
+    fake = _Panel(ACQUIRE_STOPAFTERQ=lambda s: s.stopafter)
+
+    def press_single(f):
+        _Bench.PUT_RIGHT(f)
+        f.stopafter = 'SEQUENCE'
+    report = _walk(fake, _Bench(fake, restores=[press_single]))
+    assert report['restore']['restored'] is False
+    assert 'Single' in _flat(report['restore']['attempts'][-1]['verdict'])
+
+
+def test_walk_catches_single_pressed_while_it_reads():
+    class SingleMidRead(_Panel):
+        """Single pressed during the restore's reads: only the second read
+        of ACQUIRE:STOPAFTER? can see it."""
+        armed, reads = False, 0
+
+        def ask(self, cmd):
+            if cmd == 'MEASUREMENT:IMMED:VALUE?' and self.armed:
+                self.reads += 1
+                if self.reads == 2:
+                    self.stopafter = 'SEQUENCE'
+            return super().ask(cmd)
+    fake = SingleMidRead(ACQUIRE_STOPAFTERQ=lambda s: s.stopafter)
+
+    def put_right_then_single(f):
+        _Bench.PUT_RIGHT(f)
+        f.armed = True
+    report = _walk(fake, _Bench(fake, restores=[put_right_then_single]))
+    last = report['restore']['attempts'][-1]
+    assert last['replies']['ACQUIRE:STOPAFTER?']['reply'] == 'RUNSTOP'
+    assert last['after']['ACQUIRE:STOPAFTER?']['reply'] == 'SEQUENCE'
+    assert report['restore']['restored'] is False
+    assert 'Single' in _flat(last['verdict'])
+
+
+def test_walk_notices_a_change_while_its_reads_run():
     class SelfEnabling(probe._FakeScope):
         """Measuring an off channel switches it back on: the kind of side
         effect the second read of the watched queries exists to catch."""
@@ -669,9 +1027,9 @@ def test_walk_notices_when_its_own_reads_change_the_state():
     report = _walk(fake, _Bench(fake))
     normal, i_off = report['steps'][0], report['steps'][2]
     flat = _flat(probe.step_lines(i_off, normal, ICH, VCH))
-    assert ("SELECT:CH3?: '0' before the reads, '1' after -- the reads "
-            "themselves changed it") in flat
-    assert 'reads themselves' not in _flat(
+    assert ("SELECT:CH3?: '0' before the reads, '1' after -- it changed "
+            "while they ran") in flat
+    assert 'while they ran' not in _flat(
         probe.step_lines(report['steps'][1], normal, ICH, VCH))
 
 
@@ -683,10 +1041,11 @@ def test_walk_warns_when_the_start_reads_blind():
     flat = _flat(probe.step_lines(normal, normal, ICH, VCH))
     assert 'WARNING: the start reads blind for a LIVE run' in flat
     assert 'CH3 (I_Out) reads AC-coupled' in flat
-    # the i_off step set DC on the way: the walk ends ready, and is not
-    # told to put the AC it started with back
+    # the coupling query never showed it follows the panel, so the end is
+    # NOT CONFIRMED -- and it is never told to put the AC back
     last = report['restore']['attempts'][-1]
-    assert last['state'] is True and fake.coupling[ICH] == 'DC'
+    assert last['state'] is None and fake.coupling[ICH] == 'DC'
+    assert 'CH3 (I_Out) coupling: no query' in _flat(last['verdict'])
 
 
 def test_walk_table_one_column_per_step():
@@ -706,10 +1065,43 @@ def test_walk_table_one_column_per_step():
                                 'ok', 'x3', '=', 'ok', 'x3']
 
 
+def test_walk_table_reads_values_through_a_header():
+    # HEADER ON: a cut-off raw reply would read ':CH3:COUP' in every cell
+    cols = [{'name': n, 'reads': [], 'replies': _replies(
+        [('CH3:COUPLING?', f':CH3:COUPLING {c}'), ('ACQUIRE:STATE?', '')])}
+        for n, c in (('normal', 'DC'), ('i_ac', 'AC'))]
+    rows = {ln.split()[0]: ln.split()[1:]
+            for ln in probe.walk_table(cols, ICH)[1:]}
+    assert rows['CH3:COUPLING?'] == ['DC', 'AC']
+    assert rows['ACQUIRE:STATE?'] == ["''", "''"]
+
+
+def test_console_operator_stops_on_a_closed_stdin():
+    real = builtins.input
+
+    def closed(prompt=''):
+        raise EOFError
+    builtins.input = closed
+    try:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            typed = probe._console_operator(
+                'i_ac', 'Step 2 of 5 (i_ac): Set CH3 (I_Out) to AC coupling.')
+            with tempfile.TemporaryDirectory() as tmp:
+                rc = probe.run_walk(probe._FakeScope(),
+                                    _args(os.path.join(tmp, 'p')),
+                                    sleep=lambda s: None)
+    finally:
+        builtins.input = real
+    assert typed == 'q' and '>>> Step 2 of 5 (i_ac)' in out.getvalue()
+    assert rc == 1            # stopped at the first prompt, never looped
+
+
 # ------------------------------------------------------ safety / audit
 def test_probe_only_queries_on_the_real_driver():
-    # SAFETY in the probe's docstring: MEASUREMENT:IMMED TYPE/SOURCE are
-    # its only writes. Held on the real driver, both modes, every command.
+    # SAFETY in the probe's docstring: after connecting, MEASUREMENT:IMMED
+    # TYPE/SOURCE are its only writes. Held on the real driver, both
+    # modes, every command.
     replies = {'MEASUREMENT:IMMED:VALUE?': '-8.1E-2', 'ACQUIRE:STATE?': '1',
                'CH3:COUPLING?': 'DC', 'CH2:COUPLING?': 'DC',
                'SELECT:CH3?': '1', 'SELECT:CH2?': '1',
@@ -724,7 +1116,8 @@ def test_probe_only_queries_on_the_real_driver():
         _quiet(probe.run, scope, _args(os.path.join(tmp, 'p')))
         report = _quiet(probe.walk, scope, ICH, VCH, operator, reads=2,
                         sleep=lambda s: None)
-    assert report['restore']['restored'] is True
+    # nothing moved, so nothing is proven, so nothing is confirmed
+    assert report['restore']['restored'] is None
     sent = scope.inst.sent
     for cmd in sent:
         assert cmd.endswith('?') or cmd.split(' ')[0] in (
@@ -735,16 +1128,71 @@ def test_probe_only_queries_on_the_real_driver():
         assert q in sent, q
 
 
+def test_main_sends_only_the_connect_sequence_and_queries():
+    # The whole program, through the real TekMSO24 constructor: what the
+    # docstring's SAFETY note says reaches the scope, and nothing else.
+    import instruments
+    replies = {'*IDN?': 'TEKTRONIX,MSO24,TEST,1.0',
+               'MEASUREMENT:IMMED:VALUE?': '-8.1E-2', 'ACQUIRE:STATE?': '1',
+               'CH3:COUPLING?': 'DC', 'CH2:COUPLING?': 'DC',
+               'SELECT:CH3?': '1', 'SELECT:CH2?': '1'}
+    real_rm, real_op = instruments.get_resource_manager, probe._console_operator
+    real_tick = probe.WATCHDOG_TICK_S
+    sessions = []
+
+    def rm():
+        sessions.append(_Session(replies))
+        return _RM(sessions[-1])
+    instruments.get_resource_manager = rm
+    probe._console_operator = lambda step, text: (
+        'q' if step == 'restored' else '')
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, 'p')
+            base = ['--resource', 'USB0::0x0699::0x0105::TEST::INSTR',
+                    '--out', out]
+            assert _quiet(probe.main, base + ['--samples', '2',
+                                              '--timing-samples', '2']) == 0
+            # main() cannot be handed a sleep: without this the walk
+            # paces its reads at the real 0.5 s and the suite waits 10 s
+            probe.WATCHDOG_TICK_S = 0.0
+            assert _quiet(probe.main, base + ['--walk']) == 1
+    finally:
+        instruments.get_resource_manager = real_rm
+        probe._console_operator = real_op
+        probe.WATCHDOG_TICK_S = real_tick
+    assert len(sessions) == 2
+    for s in sessions:
+        assert s.sent[:4] == ['<device clear>', '*IDN?',
+                              'DATA:ENCDG RIBINARY', 'DATA:WIDTH 2'], s.sent[:4]
+        for cmd in s.sent[4:]:
+            assert cmd.endswith('?') or cmd.split(' ')[0] in (
+                'MEASUREMENT:IMMED:TYPE', 'MEASUREMENT:IMMED:SOURCE'), cmd
+        assert 'CH3:COUPLING?' in s.sent
+
+
+def test_the_same_channel_for_both_monitors_is_refused():
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err), \
+                contextlib.redirect_stdout(io.StringIO()):
+            probe.main(['--selftest', '--ich', '3', '--vch', '3'])
+        raise AssertionError("--ich 3 --vch 3 was accepted")
+    except SystemExit as e:
+        assert e.code == 2
+    assert 'different channels' in err.getvalue()
+
+
 def test_walk_outputs_are_gitignored():
-    # Run data never enters the repo: the walk's files must fall under the
-    # patterns that already keep the probe's own report out.
+    # Run data never enters the repo: the walk's and the selftest's files
+    # must fall under the patterns that keep the probe's own report out.
     with open(os.path.join(ROOT, '.gitignore'), encoding='utf-8') as f:
         pats = [ln.strip() for ln in f
                 if ln.strip() and not ln.startswith('#')]
-    for name in (probe.DEFAULT_OUT + '.txt', probe.DEFAULT_OUT + '.json',
-                 probe.DEFAULT_OUT + '_walk.txt',
-                 probe.DEFAULT_OUT + '_walk.json'):
-        assert any(fnmatch.fnmatch(name, p) for p in pats), name
+    for stem in ('', '_walk', '_selftest', '_selftest_walk'):
+        for ext in ('.txt', '.json'):
+            name = probe.DEFAULT_OUT + stem + ext
+            assert any(fnmatch.fnmatch(name, p) for p in pats), name
 
 
 def test_default_report_carries_the_channel_queries():
@@ -775,6 +1223,25 @@ def test_selftest_runs_both_modes():
     assert [s['name'] for s in walked['steps']] == ['normal', 'i_ac',
                                                     'i_off', 'stopped']
     assert walked['restore']['restored'] is True
+
+
+def test_selftest_never_writes_over_a_real_report():
+    cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as tmp:
+        os.chdir(tmp)
+        try:
+            real = ('sldea_watchdog_probe.txt', 'sldea_watchdog_probe_walk.txt')
+            for name in real:
+                with open(name, 'w', encoding='utf-8') as f:
+                    f.write('REAL')
+            assert _quiet(probe.main, ['--selftest', '--walk']) == 0
+            assert _quiet(probe.main, ['--selftest', '--samples', '2',
+                                       '--timing-samples', '2']) == 0
+            assert [_read(name) for name in real] == ['REAL', 'REAL']
+            assert os.path.exists('sldea_watchdog_probe_selftest_walk.txt')
+            assert os.path.exists('sldea_watchdog_probe_selftest.txt')
+        finally:
+            os.chdir(cwd)
 
 
 def _run():

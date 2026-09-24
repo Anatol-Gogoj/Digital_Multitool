@@ -841,22 +841,47 @@ def group_style(index):
 
 
 def first_breakdown_kv(run):
-    """The nominal kV of this run's FIRST current-confirmed breakdown, or
-    None when it has none.
+    """The nominal kV of this run's FIRST current-confirmed breakdown --
+    first in TIME, the earliest flagged row in CSV order -- or None when
+    it has none.
 
     Reads run['flags'], which load_run ALWAYS recomputes from the saved
     current trace -- so this is deliberately independent of opts:
-    where the average stops being a physical quantity is not a rendering
-    preference, and --no-breakdown hides the X marks without making the
-    device's collapse go away."""
+    where a device broke down is not a rendering preference, and
+    --no-breakdown hides the X marks without making the collapse go away.
+
+    Until 2026-09-23 this returned the LOWEST flagged kV. On a rising
+    single sweep that is the same row, but an up/down run that breaks
+    down on the way up keeps confirming on the way down, and the lowest
+    flagged kV then named a level the device had passed intact. The
+    pooled aggregate still stops at that lowest value, and has to -- see
+    lowest_breakdown_kv; this is the cap for an aggregate that averages
+    one leg per run."""
+    hits = [(r['index'], r['kv']) for r in run['rows']
+            if r['index'] in run['flags'] and r['kv'] is not None]
+    return min(hits)[1] if hits else None
+
+
+def lowest_breakdown_kv(run):
+    """The LOWEST nominal kV among this run's current-confirmed breakdown
+    rows, or None when it has none: the value the aggregate cap has
+    always used, and on a rising single sweep the same row as
+    first_breakdown_kv.
+
+    run_level_curve pools every visit to a level into one mean, so the
+    aggregate has to stop below EVERY flagged frame, not just the first.
+    An up/down run that broke at 3.5 kV on the way up and stayed flagged
+    down to 2.0 kV averages its collapsed frames into the 2.0-3.0 kV
+    means, and capping at the first breakdown drew that mixture into the
+    figure (review 2026-09-23)."""
     kvs = [r['kv'] for r in run['rows']
            if r['index'] in run['flags'] and r['kv'] is not None]
     return min(kvs) if kvs else None
 
 
 def aggregate_cap_kv(runs):
-    """Where the aggregate STOPS: the lowest first-breakdown kV across the
-    runs, or None when nothing broke down.
+    """Where the aggregate STOPS: the lowest breakdown kV across the runs
+    (lowest_breakdown_kv of each), or None when nothing broke down.
 
     The LOWEST, not each run's own: past the first collapse the mean mixes
     intact and collapsed devices, which is not a physical quantity. On the
@@ -865,7 +890,8 @@ def aggregate_cap_kv(runs):
     spread spikes to ~15% through the transition before falling again as
     the runs re-agree on having collapsed -- the average of a mixture, not
     an average expansion."""
-    kvs = [k for k in (first_breakdown_kv(r) for r in runs) if k is not None]
+    kvs = [k for k in (lowest_breakdown_kv(r) for r in runs)
+           if k is not None]
     return min(kvs) if kvs else None
 
 

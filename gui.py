@@ -3684,57 +3684,6 @@ LOGGING:
             f"must take over.")
         return True
 
-    def _scope_live_roles(self):
-        """{channel: role} for the scope channels a LIVE SLDEA run reads --
-        {vch: 'V_Out', ich: 'I_Out'} -- or {} when no LIVE run is on."""
-        chs = getattr(self, '_sldea_scope_chs', None)
-        if not chs:
-            return {}
-        vch, ich = chs
-        if vch == ich:                    # one channel set for both
-            return {vch: 'V_Out and I_Out'}
-        return {vch: 'V_Out', ich: 'I_Out'}
-
-    @staticmethod
-    def _and_list(words):
-        """'a', 'a and b', 'a, b and c'."""
-        words = list(words)
-        if len(words) < 2:
-            return ''.join(words)
-        return f"{', '.join(words[:-1])} and {words[-1]}"
-
-    def _scope_live_note(self, head):
-        """The loud note for a scope write a LIVE run holds back."""
-        held = self._and_list(f"CH{c} ({r})"
-                              for c, r in self._scope_live_roles().items())
-        messagebox.showwarning(
-            "Scope in use — LIVE HV run",
-            f"{head}\n\n"
-            f"The run reads {held}. Its breakdown watchdog, telemetry and "
-            f"data.csv depend on those channels and on the timebase, trigger "
-            f"and acquisition that every channel shares, so all of that stays "
-            f"locked until the run ends. The other channels, Run, the "
-            f"measurement reads and Reconnect stay available. Abort the run "
-            f"on the SLDEA tab first if you must change them.")
-
-    def _scope_live_locked(self, channel=None, what='This control'):
-        """True (+ loud note) when a LIVE SLDEA run holds this scope setting.
-
-        With `channel`: that channel's own settings (Enable, Apply CHx),
-        which the run holds on its V_Out and I_Out channels only. Without:
-        a setting every channel shares (Stop, Single, AutoSet), which the
-        run always holds; `what` names it in the note. The decision of
-        2026-09-24 in SLDEA_HANDOFF.md: lock what the run's reads depend
-        on, leave the rest usable, loud note on every attempt."""
-        roles = self._scope_live_roles()
-        if not roles or (channel is not None and channel not in roles):
-            return False
-        if channel is not None:
-            what = f"CH{channel} ({roles[channel]})"
-        self._scope_live_note(f"{what} is locked while a LIVE SLDEA run is "
-                              f"on.")
-        return True
-
     def _sldea_log(self, msg):
         line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n"
         # Best-effort persistence to <run>/run.log: the messages that
@@ -4584,6 +4533,57 @@ LOGGING:
             self.root.after(200, self.lcr_continuous_measurement)
     
     # Scope methods
+    def _scope_live_roles(self):
+        """{channel: role} for the scope channels a LIVE SLDEA run reads --
+        {vch: 'V_Out', ich: 'I_Out'} -- or {} when no LIVE run is on."""
+        chs = getattr(self, '_sldea_scope_chs', None)
+        if not chs:
+            return {}
+        vch, ich = chs
+        if vch == ich:                    # one channel set for both
+            return {vch: 'V_Out and I_Out'}
+        return {vch: 'V_Out', ich: 'I_Out'}
+
+    @staticmethod
+    def _and_list(words):
+        """'a', 'a and b', 'a, b and c'."""
+        words = list(words)
+        if len(words) < 2:
+            return ''.join(words)
+        return f"{', '.join(words[:-1])} and {words[-1]}"
+
+    def _scope_live_note(self, head):
+        """The loud note for a scope write a LIVE run holds back."""
+        held = self._and_list(f"CH{c} ({r})"
+                              for c, r in self._scope_live_roles().items())
+        messagebox.showwarning(
+            "Scope in use — LIVE HV run",
+            f"{head}\n\n"
+            f"The run reads {held}. Its breakdown watchdog, telemetry and "
+            f"data.csv depend on those channels and on the timebase, trigger "
+            f"and acquisition that every channel shares, so all of that stays "
+            f"locked until the run ends. The other channels, Run, the "
+            f"measurement reads and Reconnect stay available. Abort the run "
+            f"on the SLDEA tab first if you must change them.")
+
+    def _scope_live_locked(self, channel=None, what='This control'):
+        """True (+ loud note) when a LIVE SLDEA run holds this scope setting.
+
+        With `channel`: that channel's own settings (Enable, Apply CHx),
+        which the run holds on its V_Out and I_Out channels only. Without:
+        a setting every channel shares (Stop, Single, AutoSet), which the
+        run always holds; `what` names it in the note. The decision of
+        2026-09-24 in SLDEA_HANDOFF.md: lock what the run's reads depend
+        on, leave the rest usable, loud note on every attempt."""
+        roles = self._scope_live_roles()
+        if not roles or (channel is not None and channel not in roles):
+            return False
+        if channel is not None:
+            what = f"CH{channel} ({roles[channel]})"
+        self._scope_live_note(f"{what} is locked while a LIVE SLDEA run is "
+                              f"on.")
+        return True
+
     def reconnect_scope(self):
         self._reconnect('scope', TekMSO24, self.scope_status)
     

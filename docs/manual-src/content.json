@@ -465,7 +465,7 @@
    "If a gray applied readout differs from what you typed, the instrument clamped or coerced your value — believe the gray number.",
    "Amplitude is calibrated for the selected Load (Advanced mode). With Load set to 50 Ω but the output actually open/High-Z, the real voltage is about twice what you asked for.",
    "Loading a preset immediately pushes that configuration to the connected instrument (output on/off is left alone).",
-   "During a live SLDEA run the channel driving the Trek is locked; abort the run on the SLDEA tab before taking over.",
+   "During a live SLDEA run the channel driving the Trek is locked: Apply, Output, Fire and the Waveform Editor's Upload && Select refuse it with a warning, and Reconnect waits until the run ends. The other channel stays usable. Abort the run on the SLDEA tab before taking over.",
    "Custom (ARB) waveform data cannot be sent over USB — the instrument's firmware caps USB commands at 52 bytes and larger transfers freeze it until a power cycle. The app blocks such uploads; use LAN or the Waveform Editor's flash-drive .bin route instead."
   ],
   "callouts": [
@@ -600,6 +600,7 @@
   "cautions": [
    "The two export buttons only save a file — nothing is sent to the instrument. The file holds the shape only: frequency/amplitude/offset are not in it. The GUI pre-fills the target channel, so after recalling the file on the 4055B, one click on Apply CHx Settings pushes them.",
    "\"Upload && Select\" works only over a LAN connection. Over USB the upload is refused (the 4055B's 52-byte firmware cap can wedge the box) — use the flash-drive .bin route instead. With no instrument connected (e.g. the Windows viewing copy) it reports \"not connected\"; designing and exporting still work.",
+   "During a live SLDEA run, \"Upload && Select\" refuses the channel driving the Trek, with a warning. The lock follows the Send to CH box, not the channel the editor was opened on; the other channel still uploads, and saving and exporting are unaffected.",
    "The EasyWaveX CSV uses the Trek convention: 1 V in the file = 1 kV at the Trek output. Check the amplitude field before saving.",
    "Closing the editor with unsaved edits discards them after one confirmation — anything not saved to the library is gone.",
    "Library \"Delete\" permanently removes the saved waveform after one confirmation."

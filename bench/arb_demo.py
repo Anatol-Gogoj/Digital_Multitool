@@ -81,6 +81,9 @@ class _DemoApp:
     def _sg_refresh_applied(self, ch):
         pass
 
+    def _sg_live_locked(self, channel=None, parent=None):
+        return False              # no SLDEA run in the demo owns a channel
+
 
 class _StatusProxy:
     def __init__(self, var):

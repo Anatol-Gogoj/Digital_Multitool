@@ -3656,8 +3656,13 @@ LOGGING:
         self.sldea_run_btn.config(state='normal')
         self.sldea_abort_btn.config(state='disabled')
 
-    def _sg_live_locked(self, channel=None):
-        """True (+ loud note) when a LIVE SLDEA run owns this SG channel."""
+    def _sg_live_locked(self, channel=None, parent=None):
+        """True (+ loud note) when a LIVE SLDEA run owns this SG channel.
+
+        Every Signal Gen writer asks this first: Apply, Output, Fire,
+        Reconnect, and the Waveform Editor's upload. `parent` is the window
+        the note belongs to -- the editor passes itself, like its own
+        dialogs, so the note is not raised behind it."""
         ch = getattr(self, '_sldea_live_ch', None)
         if ch is None or (channel is not None and channel != ch):
             return False
@@ -3666,7 +3671,8 @@ LOGGING:
             f"SG CH{ch} is driving the Trek in a LIVE SLDEA run.\n\n"
             f"Its controls are locked until the run ends (the other channel "
             f"stays available). Abort the run on the SLDEA tab first if you "
-            f"must take over.")
+            f"must take over.",
+            **({} if parent is None else {'parent': parent}))
         return True
 
     def _sldea_log(self, msg):
@@ -5042,6 +5048,10 @@ LOGGING:
 
     def sg_fire_burst(self, channel):
         """Fire one manual burst (needs Burst ON, trigger MAN, output ON)."""
+        # A trigger is a write to the channel like Apply or Output, and a
+        # LIVE run owns its channel (2026-09-24: Fire used to skip the lock).
+        if self._sg_live_locked(channel):
+            return
         if not self.sg:
             messagebox.showerror("Error", "Signal generator not connected")
             return

@@ -570,6 +570,83 @@ Also send, once:
   and `#198` is unblocked immediately at full scope. This is why P1–P3
   are cheap and come first.
 
+## Q. SLDEA video beside the snapshots — DRY-RUN smoke, no HV (2026-09-23)
+
+> **DRY RUN only** — the camera path is what is under test, not the Trek.
+> Linux bench PC with the DFK attached, ~20 min. **The video branch must
+> not merge until this section passes** (CLAUDE.md: never ship
+> bench-unverified instrument I/O).
+
+**What this gates.** A video run holds the DFK's `v4l2-ctl` Bayer stream
+open for the WHOLE run on the recorder's own threads, where the stills
+path only ever opened it for one grab at a time. The stills then come off
+that stream instead of one-shot grabs, and the file is encoded with FFV1,
+which must exist in the bench's OpenCV wheel. None of that could be tried
+at a desk: the desk tests use a fake camera, and FFV1 was measured on a
+Windows OpenCV 5.0 build, not the bench's 4.13.
+
+- [ ] **Q1.** `python sldea_video.py --selftest` on the bench PC prints
+  `FFV1 lossless round trip: OK`. If not, stop: the bench wheel has no
+  encoder, and the tab will offer "Run WITHOUT video" instead.
+- [ ] **Q2.** SLDEA tab → 🎥 **Record**, fps **1**. The size line shows
+  roughly 2.5 GB for the default 0→10 kV profile. Set a short profile
+  (0→2 kV, 1 kV steps, 20 s landings) and press **▶ Run (DRY)**.
+- [ ] **Q3.** Within ~5 s the run log says `video: recording 1 fps to
+  local disk (…)` — **not** `delivered nothing … NO recording`.
+- [ ] **Q4.** Every `data.csv` row has a frame file. Open the baseline PNG
+  next to one from a **stills-only** dry run of the same scene and
+  settings: the same exposure, the same colour, no magenta checkerboard
+  (the Bayer-phase trap, README), mean grey within ±2 levels.
+- [ ] **Q5.** The end of the log: `video: N frames recorded at ~1.00 fps`
+  with **no** `DROPPED`, then `video.mkv and video_frames.csv are in the
+  run folder`. `video.mkv` is ~1 MB per frame.
+- [ ] **Q6.** `video.mkv` plays (VLC or `ffplay`): grey, the right way up,
+  the same field of view as the PNGs, and no frozen stretch.
+- [ ] **Q7.** During a run, Webcam tab → **Start Preview** is refused with
+  *"Camera in use — SLDEA run"* (as are Apply & Lock, Stabilize,
+  Auto-expose, grey-world and the timed/interval/stepped captures).
+- [ ] **Q8.** Start another dry video run and **■ Abort** it mid-landing:
+  the tab frees at once, and the log still ends with the video lines
+  (the move runs after the run, on its own thread).
+- [ ] **Q9.** Tick **then detect edges on every frame** and let a run
+  complete: `video_edges.csv` and `video_edges.png` appear. Where a video
+  frame and a still share a moment, their `area_px` agree within the ±2 %
+  band (open Edge Review on the stills to compare).
+- [ ] **Q10.** Loop health: in `telemetry.csv` (scope connected) the row
+  spacing is still ~0.5 s, as in a stills-only dry run — the stream must
+  not starve the loop that runs the watchdog. `top`: the app under ~50 %
+  of one core.
+- [ ] **Q11.** The real stream rate: during a video run,
+  `v4l2-ctl -d /dev/video0 --get-parm` reports ~10 fps (and the log's
+  `stream N fps` agrees); **after** the run, check it again and note
+  whether the setting persisted. A UVC format call can reset the rate,
+  and a rate that persists would slow later one-shot grabs.
+- [ ] **Q12.** Camera unplugged mid-run (dry): the log says `reopening
+  (attempt n)`, and once replugged, `camera stream reopened`. The stills
+  in between log NO FRAME; the ones after are filed normally.
+- [ ] **Q13.** Gain over a long stream: a **≥ 40-minute** dry video run
+  of an unchanging scene. Compare the baseline still with the **last**
+  still (mean grey within ±2 levels), and look for any `gain` drift in
+  the log. Every still re-stamps the full lock, gain included, as a
+  one-shot grab does; this checks that it holds.
+- [ ] **Q14.** ⚡ **LIVE, but with the Trek's HV output disabled** (HV
+  enable off / interlock open; SG CH output on the scope instead):
+  - Run a short profile with **Record on**, and **■ Abort** mid-ramp.
+    On the scope, the SG output reaches 0 V as fast as in the same
+    abort with Record **off**. The shutdown order puts the SG first;
+    this checks it.
+  - Force a watchdog trip (§N's probe, or a low trip level with a
+    resistor on I_Out). Time-to-0 V is no worse with Record on, and the
+    breakdown frame is filed.
+- [ ] **Q15.** Back to back: straight after a video run whose output dir
+  is the **share**, start a LIVE-mode run (Trek HV still disabled). The
+  tab asks *"A video is still being copied"*. Answer yes, and check the
+  telemetry spacing stays ~0.5 s while the copy runs (throttled to
+  40 MB/s).
+
+Record the date and the Q1/Q5/Q10/Q11/Q13/Q14 numbers in
+`SLDEA_HANDOFF.md`.
+
 ## R. SLDEA Run start gate — a DRY look at the dialogs, Trek HV off (2026-09-23)
 
 > **Keep the Trek's HV output OFF for this whole section.** The runs are

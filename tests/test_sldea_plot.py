@@ -3382,6 +3382,32 @@ def test_the_cli_option_table_cannot_drift_from_make_opts():
         f"_cli_opts invents keys make_opts never made: {invented}"
 
 
+def test_every_flag_the_cli_reads_is_one_the_parser_accepts():
+    """The OTHER side of the seam the test above guards.
+
+    --strain-pct was wired through _cli_opts but never registered in
+    _BOOL_FLAGS, so `sldea_plot.py RUN --strain-pct` died in _parse_argv
+    with "unknown flag" -- the flag the docstring advertised could not be
+    typed (found 2026-09-23). The drift test compares _cli_opts with
+    make_opts and could not see it; this compares _cli_opts with the
+    parser, by reading the flags straight out of its source."""
+    import inspect
+    import re
+    read = set(re.findall(r"'(--[a-z][a-z-]*)'",
+                          inspect.getsource(sp._cli_opts)))
+    assert len(read) > 10, f"the scan found too few flags: {sorted(read)}"
+    missing = sorted(read - set(sp._BOOL_FLAGS) - set(sp._VALUED_FLAGS))
+    assert not missing, (
+        f"_cli_opts reads {missing}, which _parse_argv rejects as unknown "
+        f"-- register them in _BOOL_FLAGS or _VALUED_FLAGS")
+    # ...and the one that was broken, end to end
+    parsed = sp._parse_argv(['somerun', '--strain-pct'])
+    assert parsed is not None, "--strain-pct is rejected by the parser"
+    _args, flags, vals = parsed
+    opts, err = sp._cli_opts(flags, vals)
+    assert err is None and opts['strain_pct'] is True, (opts, err)
+
+
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count

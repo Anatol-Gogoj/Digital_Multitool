@@ -532,6 +532,11 @@ def plot_points(runs, opts, panel=0):
     if opts.get('aggregate_only') and opts.get('aggregate'):
         return []
     out = []
+    # the normalized panel's units, through the engine's own conversion:
+    # this used to divide by A0 inline, so with the strain-% panel on the
+    # click targets sat at 1.0-1.2 while the markers sat at 0-20 and a
+    # double-click resolved to the wrong frame (found 2026-09-23)
+    pct = bool(opts.get('strain_pct'))
     for run in runs:
         if opts['mode'] == 'area':
             a0 = run['a0']
@@ -541,7 +546,8 @@ def plot_points(runs, opts, panel=0):
                 if panel == 1:
                     if not a0:
                         continue
-                    out.append((r['kv'], r['area_mm2'] / a0, run, r))
+                    out.append((r['kv'], sp.norm_y(r['area_mm2'], a0, pct),
+                                run, r))
                 else:
                     out.append((r['kv'], r['area_mm2'], run, r))
             continue

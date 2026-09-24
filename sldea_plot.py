@@ -3099,6 +3099,9 @@ def _selftest(out_png):
 # CLI
 # ---------------------------------------------------------------------------
 
+# Every flag _cli_opts reads must be registered here or in _VALUED_FLAGS:
+# the parser rejects anything else as "unknown flag" before _cli_opts runs
+# (pinned by a source-scan test in tests/test_sldea_plot.py).
 _BOOL_FLAGS = ('--vs-area', '--prepost', '--mean', '--no-bands',
                '--no-breakdown', '--allow-suspect-scale',
                '--allow-old-estimator', '--selftest',

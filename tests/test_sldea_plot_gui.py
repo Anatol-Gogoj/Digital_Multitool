@@ -2259,6 +2259,32 @@ def test_the_taller_draw_column_still_measures_and_still_scrolls():
         assert col._cv.yview()[0] == 0.0, 'hidden bar left the column scrolled'
 
 
+def test_plot_points_follow_the_strain_percent_panel():
+    """With the normalized panel as strain %, the markers sit at
+    (A-A0)/A0*100 -- but plot_points divided by A0 inline and kept the
+    click targets at A/A0, so on that panel a double-click resolved
+    against coordinates the figure never drew and opened the wrong frame
+    (found 2026-09-23). Here every area equals A0: the panel draws both
+    rows at 0 % while the old targets sat at 1.0."""
+    p = _mktmp()
+    try:
+        _fake_run(p, 'A_run', processed=True)
+        runs, opts = _prepared(p, ['A_run'], mode='area', strain_pct=True)
+        a0 = runs[0]['a0']
+        pts = g.plot_points(runs, opts, panel=1)
+        assert [r['index'] for _x, _y, _run, r in pts] == [0, 1]
+        for _x, y, _run, r in pts:
+            want = sp.norm_y(r['area_mm2'], a0, True)
+            assert abs(y - want) < 1e-9, (y, want)
+        assert all(abs(y) < 1e-9 for _x, y, _r, _w in pts), pts
+        # the ratio panel is untouched with strain % off
+        runs, opts = _prepared(p, ['A_run'], mode='area')
+        assert all(abs(y - 1.0) < 1e-9
+                   for _x, y, _r, _w in g.plot_points(runs, opts, panel=1))
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count

@@ -3659,10 +3659,11 @@ LOGGING:
     def _sg_live_locked(self, channel=None, parent=None):
         """True (+ loud note) when a LIVE SLDEA run owns this SG channel.
 
-        Every Signal Gen writer asks this first: Apply, Output, Fire,
-        Reconnect, and the Waveform Editor's upload. `parent` is the window
-        the note belongs to -- the editor passes itself, like its own
-        dialogs, so the note is not raised behind it."""
+        The Signal Gen tab's writers ask this before they write (Apply,
+        Output, Fire, Reconnect), and so does the Waveform Editor's upload.
+        `parent` is the window the note belongs to: the editor passes
+        itself, as its own dialogs do, so the note opens over the editor
+        instead of over the main window."""
         ch = getattr(self, '_sldea_live_ch', None)
         if ch is None or (channel is not None and channel != ch):
             return False

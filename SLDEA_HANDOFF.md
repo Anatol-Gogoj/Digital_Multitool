@@ -27,16 +27,17 @@ and nothing changes when no LIVE run is going.
 it:
 
 - `sg_fire_burst` sent `C<n>:BTWV MTRIG` to either channel.
-- `ArbWaveformEditor.upload` sent four commands to its Send-to channel:
-  `WVDT` (the arb), `BSWV WVTP,ARB` + `ARWV NAME`, `SRATE MODE,TARB`, and
-  `BSWV AMP,<2 × full scale>,OFST,0`. At the editor's default ±10 V full
-  scale that is 20 Vpp, a ±10 kV swing at the DEA. The run loop re-sends
-  only OFST, and only when the staircase moves. It never re-sends WVTP or
-  AMP, so the arb would have played until the run ended.
+- `ArbWaveformEditor.upload` sent five commands to its Send-to channel, in
+  this order: `WVDT` (the arb), `BSWV WVTP,ARB`, `ARWV NAME`,
+  `SRATE MODE,TARB`, and `BSWV AMP,<2 × full scale>,OFST,0`. At the
+  editor's default ±10 V full scale that is 20 Vpp, a ±10 kV swing at the
+  DEA. The run loop re-sends only OFST, and only when the staircase
+  moves. It never re-sends WVTP or AMP, so the arb would have played until
+  the run ended.
 
-The new suite, run against unfixed `78315cc`, records exactly these
-writes on the LIVE channel. `claude/sldea-sweep-interlock` lists the same
-two writers as its follow-ups.
+The new suite, run against unfixed `78315cc`, records these writes on the
+LIVE channel. PR #334 (`claude/sldea-sweep-interlock`) lists the same two
+writers as its follow-ups.
 
 **Decision.**
 
@@ -47,13 +48,22 @@ two writers as its follow-ups.
 - The editor's lock follows its **Send to CH** box, not the channel the
   editor was opened on: an editor opened on CH2 can target CH1.
 - `_sg_live_locked` takes an optional `parent`. The editor passes itself,
-  as its own dialogs all do. A real-Tk check on Windows showed why it
-  matters: without it the native warning belongs to the main window, and
-  the editor stays clickable behind it. Other callers pass nothing and
-  behave as before.
-- A tripwire test lists every function in the app modules that writes
-  the SG, with the reason it may. A new write site fails the suite until
-  someone decides whether the lock applies to it.
+  as its own dialogs all do, so the note opens over the editor. On Linux,
+  where LIVE runs happen, Tk draws the note itself (`msgbox.tcl`): the
+  parent decides where it is centred and which window it stays above, and
+  its grab blocks the whole app either way. On Windows a real-Tk check
+  showed the note owned by the main window without `parent`, with the
+  editor still clickable behind it. Other callers pass nothing and behave
+  as before.
+- An inventory test lists every function in the app modules that writes
+  the SG, with the writes it makes. A new write, in a new function or in
+  a listed one, fails the suite until someone decides whether the lock
+  applies to it. Every writer listed as locked must ask `_sg_live_locked`
+  in a top-level `if ...: return` before its first write, so the
+  inventory alone would have failed on `78315cc` for Fire and the upload.
+  It sees the spellings the app uses (`self.sg`, `app.sg`, `sg`, a write
+  method handed out as a callback, `getattr` with a literal name, the raw
+  `.inst` handle). An alias under another name is its stated blind spot.
 
 **Every SG writer, after this change.**
 
@@ -64,32 +74,77 @@ two writers as its follow-ups.
 | Reconnect | refused while any channel is LIVE (2026-07-25) |
 | **Fire** | `_sg_live_locked` (this entry) |
 | **Waveform Editor upload** | `_sg_live_locked` on the Send-to channel (this entry) |
-| Webcam stepped sweep, timed-capture trigger | checks `_sldea_live_ch` before each write — `claude/sldea-sweep-interlock`, **not merged on 2026-09-24** |
+| Webcam stepped sweep, timed-capture trigger | a `_sldea_live_ch` check before each write, from PR #334 (open on 2026-09-24). On `main` until it merges: **nothing** |
 | The run itself | it owns the channel |
 | Window close | asks the run to ramp down, then switches both outputs OFF |
 
-**Limit (unchanged by this entry).** The lock is checked when the button
-is pressed. A job already in flight when ▶ Run claims the channel is not
-checked again. For Fire the window is the time one short command takes
-to leave, and the claim cannot happen until the operator has answered
-"Energize HV?". The editor's upload runs on the Tk thread, and so does
-the claim, so the two cannot interleave. Apply's background job has the
-same click-time check it always had.
+**Limits.**
 
-**Verification.** `tests/test_sg_live_lock.py` has 14 tests. They drive
-the real `sg_fire_burst`, `apply_sg_channel`, `sg_toggle_output`,
-`_reconnect` and the editor's real `upload` on Tk-free stubs, against a
-fake SG that records every write. On unfixed `78315cc`, 4 fail: both
-refusals, the Send-to rule and `parent`. On this branch all 14 pass. A
-mutation pass (12 mutants: each guard removed, weakened or moved after
-the write; the lock made to cover both channels or none; an unguarded
-write added) was caught 12/12. A real-Tk smoke on Windows built the full
-app with a fake LIVE run on CH1 and pressed the actual buttons. On CH1,
-Fire and Upload were refused with the native warning (the editor owned
-its warning). On CH2 both went through. There is no new instrument I/O
-(the change only withholds writes), so there is no bench gate.
-`bench/arb_demo.py` gets a no-op `_sg_live_locked` so its mock upload
-still works.
+- **A job already in flight when ▶ Run claims the channel.** The lock is
+  checked when the button is pressed, not again when the write goes out.
+  Fire, Output and Apply send from a background job, and each command
+  waits for the generator's I/O lock. The Data Logging tab's SG reads can
+  hold that lock for up to the 5 s VISA timeout each. So on a stalling
+  link, a job clicked just before ▶ Run could land after the run has set
+  up its channel: an Output OFF would leave the run dark, and an Apply
+  could swap its waveform. The run's own dialogs come first, so this
+  needs a link that stalls for seconds. PR #334 closes it: a LIVE start
+  refuses while any Signal Gen job (`sg-io`) is still in flight. The
+  editor's upload runs on the Tk thread, and so does the claim, so those
+  two cannot interleave.
+- **An upload to the other channel still holds up a ramping run.** The
+  upload runs on the Tk thread and holds the generator's I/O lock for the
+  transfer, which the driver allows up to 20 s. While it runs, the window
+  is frozen, ■ Abort included. A run that is ramping waits to send its
+  next offset, in the same loop that samples the breakdown watchdog; a
+  landing sends nothing, so it does not wait. The 2026-07-25 rule keeps
+  the other channel usable. Whether to refuse uploads on both channels
+  during a LIVE run is the owner's call.
+- **The other channel is independent only if the channels are not
+  coupled.** The 4055B has channel coupling / tracking settings (the
+  SDG2000X-class `COUP`). With them on, a write to the other channel could
+  move the driven one. Nothing in the app reads them, and reading them is
+  new instrument I/O. Confirming they are off is a bench follow-up.
+
+**Found by this entry's adversarial review, not fixed here.** Each needs
+its own change:
+
+- **Tools → Update Software → Restart now** calls `root.destroy()` and
+  `os.execv` with no run check. That skips both the window-close shutdown
+  and the run's own zeroing. A LIVE run leaves the Trek energized, and the
+  restarted app shows an idle SLDEA tab.
+- **The monitor scope can be reconfigured mid-run.** A bench-profile load
+  or the Scope tab can do it (AC coupling on I_Out would blind the
+  breakdown watchdog), and neither checks `_sldea_running`.
+- **`_reconnect` can drop the handle.** It sets the handle to None before
+  `_run_bg` checks its `connect` busy key. With a connect already in
+  flight, the handle is dropped and never restored.
+
+**Verification.**
+
+- **Tests:** `tests/test_sg_live_lock.py` has 17 tests. They drive the
+  real `sg_fire_burst`, `apply_sg_channel`, `sg_toggle_output`,
+  `_reconnect`, `_sldea_finished` and the editor's real `upload` on
+  Tk-free stubs, against a fake SG that records every write. The
+  inventory is also tested on modules whose answer is known. On unfixed
+  `78315cc`, 6 fail: both refusals, the Send-to rule, `parent`, the
+  inventory's locked-writer check, and the release test (it fires on the
+  live channel first). On this branch, all 17 pass.
+- **Mutation:** 18 mutants were run, and 17 were caught. They include the
+  three the review found surviving the first version of this suite. The
+  survivor is a DRY run claiming its channel. How `sldea_run` makes the
+  claim is not driven here: PR #334's suite pins it, and on `main` before
+  #334 nothing does.
+- **Real Tk:** a smoke on Windows built the full app with a fake LIVE run
+  on CH1 and pressed the actual buttons. On CH1, Fire and Upload were
+  refused with the native warning, and the editor owned its warning. On
+  CH2, both went through.
+- **No bench gate:** there is no new instrument I/O; the change only
+  withholds writes.
+- **The bench demo:** `bench/arb_demo.py` gets a no-op `_sg_live_locked`.
+  Its mock `upload_arb` now also takes the `points=` that the editor has
+  passed since 2026-06-27 (`fdffcf4`). The demo's upload had raised on it
+  ever since, and now works again.
 
 ## The aggregate averages BY GROUP, the runs it averages can be hidden, and the group palette is a shape argument rather than a colour one (2026-08-10)
 

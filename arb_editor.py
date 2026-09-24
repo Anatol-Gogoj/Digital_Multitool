@@ -803,7 +803,9 @@ class ArbWaveformEditor(tk.Toplevel):
         # full-scale Vpp and zero the offset, and the run never re-sends
         # WVTP or AMP -- the arb would play until the run ends. The lock
         # follows the Send-to channel, not the one the editor opened on;
-        # the other channel stays usable.
+        # the other channel stays usable, but its upload holds the SG's
+        # I/O lock (and this Tk thread) for the transfer, so a run that
+        # is ramping waits for it (SLDEA_HANDOFF.md, 2026-09-24).
         if app._sg_live_locked(ch, parent=self):
             return
         if not app.sg:

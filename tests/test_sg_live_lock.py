@@ -12,23 +12,30 @@ which would swap the run's DC drive for an arb. What is pinned here:
 
 * every writer refuses the channel a LIVE run owns, shows the standard
   warning, and sends the instrument nothing;
-* the other channel, a DRY run and no run at all leave it working (user
-  decision 2026-07-25: lock the driven channel, leave the other usable);
+* the other channel stays usable (user decision 2026-07-25: lock the
+  driven channel, leave the other usable), and with no LIVE claim -- no
+  run, or a DRY run, which claims nothing -- every writer works;
+* `_sldea_finished` releases the claim;
 * the Waveform Editor's lock follows its Send-to channel, not the channel
   the editor was opened on;
-* every SG write site in the app modules is accounted for, so a new one
-  fails here until someone decides whether the lock applies to it.
+* an inventory of every SG write in the app modules, per function: a new
+  write fails here until someone decides whether the lock applies to it,
+  and every writer listed as locked must ask the lock before it writes.
 
 Everything drives the REAL methods on a Tk-free stub app, against a fake
-signal generator that records every write.
+signal generator that records every write. How `sldea_run` makes the
+claim, and holds it through the ramp-down and ■ Abort, is the Run gate's
+suite's job (tests/test_sldea_interlock.py, PR #334).
 
 Run: .venv/bin/python tests/test_sg_live_lock.py
 """
 import ast as _ast
+import collections as _collections
 import contextlib as _contextlib
 import glob as _glob
 import os as _os
 import sys as _sys
+import threading as _threading
 import types as _types
 _ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 _sys.path.insert(0, _ROOT)
@@ -165,10 +172,16 @@ class _App:
     _sg_load_to_wire = G._sg_load_to_wire
     _reconnect = G._reconnect
     _bg_simple = G._bg_simple
+    _sldea_finished = G._sldea_finished
 
     def __init__(self, live=None):
         self.sg = _FakeSG()
         self._sldea_live_ch = live       # None = no run, or a DRY run
+        # what _sldea_finished tidies up when a run ends
+        self._sldea_running = live is not None
+        self._sldea_loglock = _threading.Lock()
+        self._sldea_runlog = self._sldea_prelog = None
+        self.sldea_run_btn = self.sldea_abort_btn = _Label()
         self.bg = []
         self.status_bar = _Label()
         self.sg_status = _Label()
@@ -282,6 +295,21 @@ def test_the_warning_goes_to_the_window_that_asked():
         editor_window = object()
         assert _App(live=1)._sg_live_locked(1, parent=editor_window)
         _assert_warned(mb, 1, parent=editor_window)
+
+
+def test_the_claim_is_released_when_the_run_finishes():
+    """_sldea_finished runs on the Tk side once the worker has zeroed the
+    SG; from then on the channel is the operator's again."""
+    with _patched(_MB()) as mb:
+        app = _App(live=1)
+        app.sg_fire_burst(1)
+        assert app.sg.writes == [], app.sg.writes
+        _assert_warned(mb, 1)
+        app._sldea_finished()
+        assert app._sldea_live_ch is None and not app._sldea_running
+        app.sg_fire_burst(1)
+        assert app.sg.writes == [('burst_trigger', 1, ())], app.sg.writes
+        assert len(mb.calls) == 1, "no second warning after the release"
 
 
 # --------------------------------------------------------------------------
@@ -419,31 +447,47 @@ def test_editor_upload_with_no_live_run_is_unchanged():
 
 
 # --------------------------------------------------------------------------
-# Tripwire: every SG write site in the app is one somebody has looked at
+# Inventory: every SG write in the app is one somebody has looked at
 # --------------------------------------------------------------------------
 
-# Every function in the app modules that writes the signal generator, and
-# why its writes are allowed. A write in any function NOT listed fails the
-# test below: decide whether a LIVE run's channel lock applies to it, add
-# the guard and a test above if it does, then list it here.
+# Every function in the app modules that writes the signal generator: its
+# kind, why it may write, and the writes it makes (method -> count). The
+# scan below must find exactly this. A write in a function not listed, or a
+# new write in one that is, fails the suite: decide whether a LIVE run's
+# channel lock applies to it, guard it and test it above if it does, then
+# update this table. A 'locked' writer must also ask _sg_live_locked in a
+# top-level `if ...: return` before the statement that holds its first
+# write -- checked below, not taken on trust.
 SG_WRITERS = {
-    'gui.InstrumentControlGUI._sldea_worker':
-        'the LIVE run itself -- the owner of the channel',
-    'gui.InstrumentControlGUI._on_app_close':
-        'window close: stops a running run first, then switches both '
-        'outputs OFF',
-    'gui.InstrumentControlGUI.apply_sg_channel': 'locked (_sg_live_locked)',
-    'gui.InstrumentControlGUI.sg_toggle_output': 'locked (_sg_live_locked)',
-    'gui.InstrumentControlGUI.sg_fire_burst': 'locked (_sg_live_locked)',
-    'arb_editor.ArbWaveformEditor.upload':
-        'locked (_sg_live_locked, on the Send-to channel)',
-    # The Webcam tab's two writers run on worker threads, which cannot
-    # raise the warning dialog. claude/sldea-sweep-interlock (2026-09-23,
-    # not yet merged on 2026-09-24) makes each check _sldea_live_ch before
-    # it writes; until it merges, these two do not.
-    'gui.InstrumentControlGUI._cam_seq_worker': 'Webcam stepped sweep',
-    'gui.InstrumentControlGUI._cam_timed_worker':
-        'Webcam timed capture: its burst trigger',
+    'gui.InstrumentControlGUI._sldea_worker': (
+        'owner', 'the LIVE run itself: it owns the channel',
+        {'set_load_polarity': 1, 'set_basic_wave': 1, 'set_output': 1,
+         'set_offset': 1}),
+    'gui.InstrumentControlGUI._on_app_close': (
+        'shutdown', 'window close: stops a running run first, then '
+                    'switches both outputs OFF',
+        {'set_output': 1}),
+    'gui.InstrumentControlGUI.apply_sg_channel': (
+        'locked', 'Apply, and every preset / bench-profile load through it',
+        {'set_basic_wave': 1, 'select_arb': 1, 'set_load_polarity': 1,
+         'set_burst': 1, 'set_sync': 1}),
+    'gui.InstrumentControlGUI.sg_toggle_output': (
+        'locked', 'Output', {'set_output': 1}),
+    'gui.InstrumentControlGUI.sg_fire_burst': (
+        'locked', 'Fire', {'burst_trigger': 1}),
+    'arb_editor.ArbWaveformEditor.upload': (
+        'locked', 'Upload && Select, on the Send-to channel',
+        {'upload_arb': 1, 'select_arb': 1, 'set_sample_rate': 1,
+         'set_basic_wave': 1}),
+    # Worker threads cannot show the note. PR #334
+    # (claude/sldea-sweep-interlock) has each of these two read
+    # _sldea_live_ch before every write instead; without it they do not
+    # check at all.
+    'gui.InstrumentControlGUI._cam_seq_worker': (
+        'worker', 'Webcam stepped sweep', {'set_basic_wave': 1}),
+    'gui.InstrumentControlGUI._cam_timed_worker': (
+        'worker', 'Webcam timed capture: its burst trigger',
+        {'burst_trigger': 1}),
 }
 
 # Driver calls that change the instrument: every setter, upload, select,
@@ -454,38 +498,74 @@ SG_WRITE_CALLS = frozenset(
 
 
 def _is_sg_handle(node):
-    """`sg`, `self.sg`, `app.sg`, `self.app.sg` -- the spellings the app
-    uses. A tripwire for those, not a proof: an alias under another name
-    (the worker's `target` in its shutdown loop) is not seen."""
+    """`sg`, `self.sg`, `app.sg`, `self.app.sg`: the spellings the app
+    uses for the signal generator."""
     return ((isinstance(node, _ast.Name) and node.id == 'sg')
             or (isinstance(node, _ast.Attribute) and node.attr == 'sg'))
 
 
-def _sg_write_sites(modules):
-    """{'module.Class.method': [line, ...]} for every SG write call in
-    `modules` ({name: source}), charged to the outermost def around it --
-    a worker closure or a lambda counts as its method's."""
-    sites = {}
+def _sg_writes(node):
+    """The SG writes under `node`, as method names in source order: a write
+    method named on an SG handle (called or not -- a callback counts),
+    getattr(<handle>, '<write method>'), and any use of the raw VISA handle
+    (<handle>.inst, which can send anything). A tripwire for the spellings
+    the app uses, not a proof: an alias under another name (the run's own
+    `target` in its shutdown loop), a getattr on a computed name, and a
+    command smuggled through ask()/query() are not seen."""
+    found = []
+    for n in _ast.walk(node):
+        if isinstance(n, _ast.Attribute) and _is_sg_handle(n.value):
+            if n.attr in SG_WRITE_CALLS or n.attr == 'inst':
+                found.append((n.lineno, n.col_offset, n.attr))
+        elif (isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name)
+              and n.func.id == 'getattr' and len(n.args) >= 2
+              and _is_sg_handle(n.args[0])
+              and isinstance(n.args[1], _ast.Constant)
+              and n.args[1].value in SG_WRITE_CALLS):
+            found.append((n.lineno, n.col_offset, n.args[1].value))
+    return [name for _, _, name in sorted(found)]
 
-    def visit(node, owner, prefix):
-        for child in _ast.iter_child_nodes(node):
-            if owner is None and isinstance(child, _ast.ClassDef):
-                visit(child, None, f"{prefix}.{child.name}")
+
+def _sg_write_sites(modules):
+    """({'module.Class.method': Counter(write -> count)}, {same: its def})
+    for every SG write in `modules` ({name: source}), charged to the
+    outermost def around it: a worker closure or a lambda counts as its
+    method's. A write outside any def is charged to its module or class."""
+    counts, defs = {}, {}
+
+    def visit(body, prefix):
+        for stmt in body:
+            if isinstance(stmt, _ast.ClassDef):
+                visit(stmt.body, f"{prefix}.{stmt.name}")
                 continue
-            here = owner
-            if owner is None and isinstance(child, (_ast.FunctionDef,
-                                                    _ast.AsyncFunctionDef)):
-                here = f"{prefix}.{child.name}"
-            if (isinstance(child, _ast.Call)
-                    and isinstance(child.func, _ast.Attribute)
-                    and child.func.attr in SG_WRITE_CALLS
-                    and _is_sg_handle(child.func.value)):
-                sites.setdefault(here or prefix, []).append(child.lineno)
-            visit(child, here, prefix)
+            owner = prefix
+            if isinstance(stmt, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                owner = f"{prefix}.{stmt.name}"
+                defs[owner] = stmt
+            writes = _sg_writes(stmt)
+            if writes:
+                counts.setdefault(owner,
+                                  _collections.Counter()).update(writes)
 
     for name, source in modules.items():
-        visit(_ast.parse(source, name), None, name)
-    return sites
+        visit(_ast.parse(source, name).body, name)
+    return counts, {k: v for k, v in defs.items() if k in counts}
+
+
+def _asks_the_lock_first(fn):
+    """True when `fn` has a top-level `if <x>._sg_live_locked(...): ...
+    return` BEFORE the first top-level statement that holds an SG write. A
+    check nested in a branch, one that does not return, or one placed after
+    the write does not count."""
+    for stmt in fn.body:
+        if (isinstance(stmt, _ast.If) and isinstance(stmt.test, _ast.Call)
+                and isinstance(stmt.test.func, _ast.Attribute)
+                and stmt.test.func.attr == '_sg_live_locked'
+                and isinstance(stmt.body[-1], _ast.Return)):
+            return True
+        if _sg_writes(stmt):
+            return False
+    return False
 
 
 def _app_modules():
@@ -499,30 +579,49 @@ def _app_modules():
     return out
 
 
-def test_every_sg_write_site_is_accounted_for():
-    sites = _sg_write_sites(_app_modules())
-    new = {k: v for k, v in sites.items() if k not in SG_WRITERS}
+def test_every_sg_write_in_the_app_is_accounted_for():
+    counts, _ = _sg_write_sites(_app_modules())
+    found = {k: dict(v) for k, v in counts.items()}
+    listed = {k: writes for k, (_, _, writes) in SG_WRITERS.items()}
+    new = {k: v for k, v in found.items() if k not in listed}
     assert not new, (
-        f"signal-generator writes in unlisted functions: {new}. A LIVE "
-        f"SLDEA run owns its channel -- does this path check "
-        f"_sg_live_locked? Guard it and test it here, then add it to "
-        f"SG_WRITERS.")
-    gone = set(SG_WRITERS) - set(sites)
+        f"SG writes in unlisted functions: {new}. A LIVE SLDEA run owns "
+        f"its channel -- does this path ask _sg_live_locked? Guard it and "
+        f"test it above, then list it in SG_WRITERS.")
+    gone = set(listed) - set(found)
     assert not gone, (
         f"listed in SG_WRITERS but no longer writing the SG: {gone} -- "
         f"moved or renamed? Re-check the guard where the write went.")
+    changed = {k: {'found': found[k], 'listed': w}
+               for k, w in listed.items() if k in found and found[k] != w}
+    assert not changed, (
+        f"the SG writes changed in: {changed}. A new write in a listed "
+        f"function is still a new write: check it against the LIVE lock, "
+        f"then update SG_WRITERS.")
 
 
-def test_the_tripwire_sees_the_spellings_it_claims():
-    """Pin the scan on a module whose answer is known: all four handle
-    spellings are caught and charged to the right def, a nested class and
-    a module-level function included -- and another instrument's setter of
-    the same name is not an SG write."""
+def test_every_locked_writer_asks_the_lock_before_its_first_write():
+    _, defs = _sg_write_sites(_app_modules())
+    for name, (kind, _, _) in SG_WRITERS.items():
+        if kind == 'locked':
+            assert name in defs and _asks_the_lock_first(defs[name]), (
+                f"{name} is listed as locked but does not ask "
+                f"_sg_live_locked in a top-level `if ...: return` before "
+                f"its first SG write")
+
+
+def test_the_inventory_sees_the_spellings_it_claims():
+    """Pin the scan on a module whose answer is known: every spelling
+    `_sg_writes` claims is caught, counted and charged to the right def --
+    a nested class and a module-level function included -- another
+    instrument's setter of the same name is not an SG write, and an alias
+    is the stated blind spot."""
     src = ("class A:\n"
            "    def a(self):\n"
            "        self.sg.set_output(1, False)\n"
            "    def b(self, app):\n"
            "        app.sg.burst_trigger(1)\n"
+           "        app.sg.burst_trigger(2)\n"
            "    def c(self):\n"
            "        sg = self.sg\n"
            "        run = lambda: sg.set_offset(1, 0.0)\n"
@@ -532,13 +631,63 @@ def test_the_tripwire_sees_the_spellings_it_claims():
            "        def e(self):\n"
            "            def work():\n"
            "                self.app.sg.upload_arb(1, 'w', [])\n"
+           "    def g(self):\n"
+           "        return self.sg.burst_trigger\n"
+           "    def h(self):\n"
+           "        getattr(self.sg, 'set_output')(1, True)\n"
+           "    def i(self):\n"
+           "        self.sg.inst.write('C1:OUTP ON')\n"
+           "    def j(self):\n"
+           "        gen = self.sg\n"
+           "        gen.set_output(1, True)\n"
            "def f(sg):\n"
            "    sg.write('C1:OUTP ON')\n")
-    assert _sg_write_sites({'m': src}) == {
-        'm.A.a': [3], 'm.A.b': [5], 'm.A.c': [8], 'm.A.B.e': [14],
-        'm.f': [16]}, _sg_write_sites({'m': src})
+    counts, _ = _sg_write_sites({'m': src})
+    assert {k: dict(v) for k, v in counts.items()} == {
+        'm.A.a': {'set_output': 1}, 'm.A.b': {'burst_trigger': 2},
+        'm.A.c': {'set_offset': 1}, 'm.A.B.e': {'upload_arb': 1},
+        'm.A.g': {'burst_trigger': 1}, 'm.A.h': {'set_output': 1},
+        'm.A.i': {'inst': 1}, 'm.f': {'write': 1}}, counts
     assert {'set_output', 'burst_trigger', 'set_offset', 'upload_arb',
             'select_arb', 'set_basic_wave', 'write'} <= SG_WRITE_CALLS
+
+
+def test_the_lock_check_must_come_first_and_must_return():
+    src = ("class C:\n"
+           "    def ok(self, ch):\n"
+           "        '''doc'''\n"
+           "        if self._sg_live_locked(ch):\n"
+           "            return\n"
+           "        self.sg.burst_trigger(ch)\n"
+           "    def chained(self, ch, then=None):\n"
+           "        if self._sg_live_locked(ch):\n"
+           "            if then:\n"
+           "                then()\n"
+           "            return\n"
+           "        def work():\n"
+           "            self.sg.set_output(ch, True)\n"
+           "        self._run_bg(work)\n"
+           "    def late(self, ch):\n"
+           "        self.sg.burst_trigger(ch)\n"
+           "        if self._sg_live_locked(ch):\n"
+           "            return\n"
+           "    def nested(self, ch):\n"
+           "        if ch:\n"
+           "            if self._sg_live_locked(ch):\n"
+           "                return\n"
+           "        self.sg.burst_trigger(ch)\n"
+           "    def no_return(self, ch):\n"
+           "        if self._sg_live_locked(ch):\n"
+           "            pass\n"
+           "        self.sg.burst_trigger(ch)\n"
+           "    def missing(self, ch):\n"
+           "        self.sg.burst_trigger(ch)\n")
+    _, defs = _sg_write_sites({'m': src})
+    verdict = {k.rsplit('.', 1)[1]: _asks_the_lock_first(v)
+               for k, v in defs.items()}
+    assert verdict == {'ok': True, 'chained': True, 'late': False,
+                       'nested': False, 'no_return': False,
+                       'missing': False}, verdict
 
 
 def _run():

@@ -179,11 +179,13 @@ saw rather than retrying:**
 the run folder. Skip `frames/` — the four files are a few kB. The run
 folder can be deleted afterwards; it is a rehearsal, not data.
 
-## N. SLDEA watchdog probe — the numbers #189 is blocked on (no HV)
+## N. SLDEA watchdog probe — the numbers #189 and ▶ Run's monitor check are blocked on (no HV)
 
 > **Scope only, HV off.** The script never opens the signal generator. A
 > quiet 0 kV rig is the condition being measured — a live one would
 > invalidate the result.
+
+### N1. The probe, about a minute
 
 ```
 .venv/bin/python bench/test_sldea_watchdog_probe.py --ich 3 --vch 2
@@ -191,11 +193,98 @@ folder can be deleted afterwards; it is a rehearsal, not data.
 
 - [ ] adjust `--ich` / `--vch` if the Trek monitors are on other channels (they are whatever the SLDEA tab's *I_Out / V_Out scope CH* fields say)
 - [ ] it prints three sections and writes `sldea_watchdog_probe.txt` + `.json`
-- [ ] **send both files back** — section A decides the trip level for the peak-reading watchdog, section C decides how much driver work increment (3) needs
+- [ ] **send both files back** — section A decides the trip level for the peak-reading watchdog, section C decides how much driver work increment (3) needs. Since 2026-09-24 section C also lists each monitor channel's coupling and on/off reply
 
 Runs in about a minute and changes nothing on the scope. `--selftest`
 runs it against a synthetic scope with no instruments attached, if you
 want to see the output shape first.
+
+### N2. What the scope answers when I_Out is blind, about 5 minutes (added 2026-09-24)
+
+**Why.** Before a LIVE run, ▶ Run's monitor check reads each monitor
+channel's scale, attenuation, position and offset, and nothing else. So
+an I_Out channel left on AC coupling (a bench profile can do that), an
+I_Out channel switched off, or a scope left stopped all pass the check.
+The breakdown watchdog would then read about 0 µA, or one frozen record,
+for the whole run. That is what we expect; nobody has checked it on this
+scope. The check can only learn to catch these once we know what the
+scope replies in each state, so this step records it. The app does not
+change until the replies are in.
+
+> The walk has **you** put I_Out into exactly the states a LIVE run must
+> never start in. At the end it reads the scope again. It prints
+> `RESTORED` only when both monitor channels read DC-coupled and on and
+> the scope acquiring, through queries the walk saw follow the front
+> panel, and the watchdog's own read is a readable current.
+
+**Setup:** as N1: scope connected, HV off. Set the scope up the way a
+LIVE run uses it: the I_Out and V_Out channels DC-coupled and on, and the
+scope acquiring (Run/Stop lit green). Then write down the **trigger
+mode** (Auto or Normal) and the **trigger source** channel shown on the
+screen.
+
+```
+.venv/bin/python bench/test_sldea_watchdog_probe.py --ich 3 --vch 2 --walk
+```
+
+Use the same `--ich` / `--vch` as N1. It asks for one change at a time.
+Make each change **on the scope's front panel** and press Enter. The
+probe reads the scope after each one. The table assumes I_Out is on CH3:
+
+| Step | What you do | What that step checks |
+|---|---|---|
+| 1 `normal` | nothing, if the scope is set up as above | the replies in normal use, which every later step is compared with |
+| 2 `i_ac` | set CH3 (I_Out) to **AC** coupling | did `CH3:COUPLING?` change |
+| 3 `i_off` | set CH3 back to DC, then turn CH3 **off** | did `SELECT:CH3?` change (and `DISPLAY:GLOBAL:CH3:STATE?`, a second on/off query) |
+| 4 `stopped` | turn CH3 back on, then press **Run/Stop** so the scope stops | did `ACQUIRE:STATE?` change |
+| 5 `restored` | put it back: CH3 DC and on, and press **Run/Stop** if the scope shows Stopped | that the scope is ready for a LIVE run again |
+
+At every step it records, word for word, what the scope replied to:
+
+- `CH<n>:COUPLING?`, `SELECT:CH<n>?` and `DISPLAY:GLOBAL:CH<n>:STATE?`,
+  for both monitor channels;
+- `ACQUIRE:STATE?`, `ACQUIRE:STOPAFTER?`, `TRIGGER:STATE?`,
+  `TRIGGER:A:MODE?`, the trigger type and source, and the timebase;
+- six `MEASUREMENT:IMMED:VALUE?` reads of MEAN on I_Out, taken 0.5 s
+  apart as the watchdog takes them. Beside each is what the watchdog
+  would make of it: a real current, the off-screen sentinel (which it
+  counts as over-trip), or unreadable.
+
+Check:
+
+- [ ] each step's section says the query it targets **moved**. If one says `did NOT move` while the screen shows the change, that is a finding: write down which
+- [ ] the summary's list **Which queries follow the front panel** is the main result: a query counts only if it changed when you made the change it reads. Only those can be used by the check this step is for
+- [ ] the first table in the file has one column per step. Check it against what the screen showed at each step
+- [ ] the walk ends with `RESTORED`. **Even then, look at the screen** before anyone starts a LIVE run: both monitor channels DC-coupled and on, and the scope running, not in Single. How to handle the other endings:
+  - `NOT READY FOR A LIVE RUN`: fix what it names on the front panel and press Enter. It reads the scope again, and keeps asking until it is right or you type `q`
+  - `NOT CONFIRMED`, `NOT CHECKED` or `INTERRUPTED`: the probe could not check everything itself. Check each thing it names on the screen yourself before anyone starts a LIVE run
+  - if it insists on something the screen contradicts, type `q` and write that down
+- [ ] **send back** `sldea_watchdog_probe_walk.txt` + `.json`, the trigger mode and source you wrote down, and anything the screen showed that the file cannot: a message when CH3 went off, or a front panel that did not respond while the walk waited
+
+**The trigger mode.** `TRIGGER:A:MODE?` decides whether a channel the
+run does not read can freeze it. The walk's summary says which of these
+this scope is in:
+
+- **AUTO:** the scope acquires with or without a trigger, so no channel's
+  settings can stall it.
+- **NORMAL:** the scope acquires only on a trigger. If the trigger source
+  is a channel the run does not read, re-coupling that channel or turning
+  it off freezes every read, just as Stop does. Nothing locks those
+  channels during a run, not even with #337. If the source is I_Out
+  itself, a quiet I_Out that never crosses the trigger level freezes the
+  reads without anyone touching anything. If it is AUX or a digital
+  channel, the scope waits for that input, and if nothing drives it, the
+  reads freeze too.
+
+**At 0 kV, AC coupling may hardly change the number.** At rest, I_Out's
+DC level is just the rig's standing offset: −16 µA through the 07-29
+campaign, 0.9 µA on the 07-23 breakdown runs. So the AC-coupled MEAN can
+land close to the DC-coupled one. What that step proves is the
+`CH3:COUPLING?` reply, and that the value still comes back as an ordinary
+number the watchdog would accept.
+
+`--selftest --walk` runs the whole walk against a synthetic scope, if you
+want to see the prompts first.
 
 ## O. SLDEA live-run verification — ⚡ REQUIRES HV ⚡ (#159, #195, PR #218)
 

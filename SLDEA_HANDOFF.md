@@ -13,6 +13,98 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## A LIVE run asks before the scope's Reconnect closes the session its watchdog reads (2026-09-24)
+
+**TL;DR:** during a LIVE run, pressing Reconnect on the Oscilloscope tab
+used to close the scope at once. The breakdown watchdog was then blind
+until the new session was up, and for longer if the connect failed. Now
+it asks first, default No. Yes reconnects as before, which is still how
+monitoring comes back after a link drop. With no scope connected there
+is nothing to lose, so it doesn't ask.
+
+**Observation.** PR #336's adversarial review found this, and it was
+checked on #336's head `cde5562`. The LIVE lock (audit 2026-07-25 C1)
+refuses the SG's Reconnect only. `_sldea_worker` reads `self.scope` on
+every monitor tick; it does not keep a handle captured at the start, as
+it does for the SG. A scope Reconnect sets `self.scope = None` on the Tk
+thread, then closes the old session and opens a new one on a `_run_bg`
+worker. Until that lands:
+
+- every watchdog read fails. `BreakdownWatchdog.update` ignores an
+  unreadable sample: it does not count toward a trip and does not reset
+  the 3 s streak;
+- telemetry rows and snapshot kV/µA are blank, with status `error`;
+- after 10 s the run logs "CURRENT MONITORING LOST … breakdown watchdog
+  is BLIND" and carries on (policy 2026-07-25).
+
+If the connect fails, `self.scope` stays None until a later Reconnect
+succeeds. A successful one changes no scope setting: after the open, the
+driver sends `*IDN?`, `DATA:ENCDG RIBINARY` and `DATA:WIDTH 2`. The
+worker picks up the new handle on its next tick.
+
+**Decision (Anatol, 2026-09-24).** Three answers were offered: refuse, as
+for the SG; ask first, default No; or leave it allowed. Anatol took the
+recommended one, ask first. The trade-offs:
+
+- Refusing would leave a scope whose link dropped mid-run unrecoverable
+  short of ■ Abort.
+- Leaving it allowed let one press on a healthy link blind the run, with
+  no warning beforehand.
+- The question has the same shape as the run-start "No current
+  monitoring — proceed?" (default No): the operator may choose to run
+  unmonitored, but has to choose it.
+
+This revises one point of the same day's scope-lock decision (branch
+`claude/sldea-scope-lock`, not merged when this was written). That one
+kept Reconnect usable with no question. Its reasons still hold, so
+Reconnect stays usable, behind a question now. When both land, that
+branch's `test_reconnect_stays_usable_during_a_live_run`, its lock note
+("…and Reconnect stay available") and its two manual lines have to
+mention the question.
+
+**How it is built.**
+
+- `_reconnect` asks after its existing checks, in their existing order:
+  the Linux gate, the SG LIVE lock, then PR #336's `'connect'` busy
+  guard. A connect in flight gets the busy note and no question.
+- It asks only when the key is `'scope'`, a scope handle exists, and
+  `_sldea_live_ch` is set. That flag means a LIVE run: a DRY run claims
+  nothing, as with the SG lock. With no handle there is nothing to close.
+  That covers a LIVE run started without a scope, and the retry after a
+  failed Reconnect, which goes straight through.
+- While the question is up, the run keeps reading the old session.
+  Nothing is closed until Yes.
+- No leaves everything as it was.
+- Yes runs the busy check again before touching the handle. The dialog
+  ran the Tk event loop, so the first check is stale. Then, if the run is
+  still on, one run-log line ("⚠ scope Reconnect during the LIVE run
+  (confirmed) …"), then the unchanged Reconnect path.
+- No new SCPI, and no change to the worker or the watchdog.
+
+**Limits.**
+
+- The question cannot tell a healthy link from a dead one. The operator
+  decides, from the run log's "monitor scope read failed" and "CURRENT
+  MONITORING LOST" lines. Asking only until the worker has flagged the
+  loss would need the worker to publish that state. Not done.
+- A LIVE run with both the watchdog and telemetry off reads the scope at
+  snapshots only, and still gets the question. The Tk side cannot see what
+  the worker armed.
+- The run log records the confirmation, not the outcome. A failed
+  connect shows up as "CURRENT MONITORING LOST" 10 s later. A successful
+  one shows up as readings resuming in `telemetry.csv`.
+
+**Verification.**
+
+- **Tests:** `tests/test_scope_reconnect_live.py` has 15 tests, in the
+  stub-app style of #336's suite: the real `_reconnect`, `_run_bg` and
+  `_sg_live_locked` on a Tk-free stub, a real worker thread, and a
+  scripted `askyesno` that can act while it is "up", as the event loop
+  would. On #336's head `cde5562`, the 6 tests that expect the question
+  fail; the other 9 pin behaviour that has not changed, and pass there
+  too. Here all 15 pass, and #336's suite still passes 9/9.
+- **No bench gate:** no new instrument I/O.
+
 ## The aggregate averages BY GROUP, the runs it averages can be hidden, and the group palette is a shape argument rather than a colour one (2026-08-10)
 
 **TL;DR:** the cross-run aggregate produced one mean over everything

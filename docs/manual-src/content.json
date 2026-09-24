@@ -337,6 +337,7 @@
    "AutoSet changes scale, timebase and trigger on the instrument but the fields on this tab do NOT update to match — clicking Apply All Settings afterwards will overwrite what AutoSet chose.",
    "Measurement readouts are snapshots — they only update when you click Get CHx Measurements. Frequency/Period show \"No signal\" on non-periodic input.",
    "If you ever send the scope a manual measurement command, the type token must be FREQUENCY — FREQ is accepted without error but returns a garbage ~2 Hz reading (the tab's own buttons already use the correct token).",
+   "During a live SLDEA run, Reconnect asks first (default No). Reconnecting leaves the run with no kV/µA readings and a breakdown watchdog that cannot trip until the new connection is up — and until a later Reconnect succeeds, if this one fails. Say Yes only if the scope has stopped answering; otherwise abort the run first.",
    "On Windows (no instrument attached) this tab is view/edit-only: every action button just reports \"Oscilloscope not connected\"."
   ],
   "callouts": [
@@ -960,6 +961,7 @@
    "Running live with no scope means no measured kV/µA columns and no breakdown watchdog — the run continues even through a breakdown, and no telemetry.csv is written.",
    "🎚 Tune params… is an advanced tool: it asks for confirmation first, and its Save rewrites the run's setup.txt — the detection settings every later analysis pass will use.",
    "During a live run the driven SG channel is locked; its Signal Gen tab controls refuse changes until the run ends.",
+   "During a live run the Oscilloscope tab's Reconnect asks before it closes the scope: the breakdown watchdog reads current through it and cannot trip until the new connection is up. Use it only to recover a scope that has stopped answering.",
    "On Windows (no instruments connected) only DRY RUN works — a live run refuses to start."
   ],
   "callouts": [

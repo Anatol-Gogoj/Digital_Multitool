@@ -195,7 +195,10 @@ task.
   - the 2 scanner self-tests.
 
   On this branch all 21 pass.
-- **Mutation:** 33 mutants were run, and all 33 were caught.
+- **Mutation:** 33 mutants were run, and all 33 were caught. The final
+  pass was bytecode-safe: `python -B`, no `.pyc` written, and
+  `__pycache__` wiped before every mutant. A same-length mutant written
+  within the same second would otherwise run stale bytecode.
   - The first 16 cover a gate that is removed, moved after `destroy()`
     or asked but not obeyed, a gate keyed on the LIVE claim only, a
     still-stopping run ignored, a silent refusal, a lost parent, swapped
@@ -242,6 +245,12 @@ task.
   - On the combined tree, these suites pass: this one (21/21),
     `test_sldea_interlock` (26/26), `test_sg_live_lock` (17/17) and
     `test_gui_tabs` (6/6).
+- **With #336, #337 and #339:** #336 merges cleanly and #337 conflicts
+  only here. Stacked with #334, #335, #336, #337 and #339 (#339 builds on
+  #336), everything conflicts only in the docs, and this suite passes
+  21/21. #337's `test_reconnect_stays_usable_during_a_live_run` fails on
+  that stack, with or without this branch: #339 makes the scope's
+  Reconnect ask first, and #339's PR body carries that test's follow-up.
 - **#335's SG-write inventory is unaffected,** because this adds no SG
   write.
 - **#335's own entry** lists this finding under "Found by this entry's

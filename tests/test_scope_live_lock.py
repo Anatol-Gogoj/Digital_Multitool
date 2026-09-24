@@ -638,10 +638,12 @@ def test_reconnect_stays_usable_during_a_live_run():
 
 def test_reopening_the_scope_sends_no_setting_a_live_run_reads_through():
     """The premise of the Reconnect decision, pinned on the REAL driver:
-    opening a TekMSO24 sends a device clear, *IDN? and the waveform-
-    transfer format, and nothing else. A new command here -- a *RST, an
-    ACQUIRE, a channel or trigger setting -- fails this test: re-check
-    whether Reconnect may stay usable during a LIVE run first."""
+    opening a TekMSO24 asks VISA for a device clear (PyVISA-py 0.8.1 does
+    not implement one over USB, so the scope never sees it), then sends
+    *IDN? and the waveform-transfer format, and nothing else. A new
+    command here -- a *RST, an ACQUIRE, a channel or trigger setting --
+    fails this test: re-check whether Reconnect may stay usable during a
+    LIVE run first."""
     s = _Session({'*IDN?': 'TEKTRONIX,MSO24,FAKE,1.0'})
     TekMSO24(resource='USB0::FAKE::INSTR', rm=_RM(s))
     assert s.sent == ['<device clear>', '*IDN?', 'DATA:ENCDG RIBINARY',

@@ -4581,11 +4581,13 @@ LOGGING:
 
     def reconnect_scope(self):
         # NOT refused during a LIVE run, unlike the SG's (decision
-        # 2026-09-24). Reopening the scope sends a device clear, *IDN? and
-        # the waveform-transfer format -- no vertical, timebase, trigger or
-        # acquisition setting -- and it is how monitoring comes back after
-        # a link drop: the run re-reads self.scope on every sample, and its
-        # watchdog ignores unreadable ones without resetting its streak.
+        # 2026-09-24). Reopening the scope sends *IDN? and the waveform-
+        # transfer format, nothing else: the driver's VISA device clear
+        # fails over USB on PyVISA-py 0.8.1 and is swallowed. That is no
+        # vertical, timebase, trigger or acquisition setting, and it is how
+        # monitoring comes back after a link drop: the run re-reads
+        # self.scope on every sample, and its watchdog ignores unreadable
+        # ones without resetting its streak.
         self._reconnect('scope', TekMSO24, self.scope_status)
     
     def toggle_channel(self, channel, enable_var):

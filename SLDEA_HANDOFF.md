@@ -63,10 +63,12 @@ building, and the recommended answer was taken on each:
    - Run, which asks for continuous acquisition, the state the run's
      reads need;
    - the reads: Get Measurements, Capture Waveform and Data Logging;
-   - Reconnect. Reopening the scope sends a device clear, `*IDN?` and the
-     waveform-transfer format (`DATA:ENCDG`, `DATA:WIDTH`). That is no
-     vertical, timebase, trigger or acquisition setting, and a test on the
-     real driver now pins it. Reconnect is how monitoring comes back after
+   - Reconnect. Reopening the scope sends `*IDN?` and the waveform-transfer
+     format (`DATA:ENCDG`, `DATA:WIDTH`). The driver also asks VISA for a
+     device clear, which PyVISA-py 0.8.1 does not implement over USB, so
+     nothing else reaches the scope: no vertical, timebase, trigger or
+     acquisition setting. A test on the real driver now pins that.
+     Reconnect is how monitoring comes back after
      a link drop: the worker re-reads `self.scope` on every sample, and the
      watchdog ignores unreadable samples without resetting its streak. The
      SG's Reconnect stays refused, because it would close the handle the

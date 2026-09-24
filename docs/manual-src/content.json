@@ -64,7 +64,7 @@
   ],
   "cautions": [
    "Closing the main window is a shutdown: signal-generator outputs go off, LCR bias goes off, a running SLDEA test is stopped and ramped down, and instruments return to front-panel control.",
-   "Loading a bench profile immediately rewrites the settings of every connected instrument (outputs stay as they are) — do not load one mid-measurement.",
+   "Loading a bench profile immediately rewrites the settings of every connected instrument (outputs stay as they are) — do not load one mid-measurement. During a live SLDEA run, what the run relies on is held back with a warning: the SG channel driving the Trek, and the scope's V_Out and I_Out channels, timebase and trigger.",
    "If the status bar says the shared drive was unavailable and the save went to a local copy, the profile/preset is on this PC only — colleagues cannot see it until it is saved again with the share back.",
    "Update Software… replaces the shared deployment for everyone on the bench, not just you; after it finishes you must restart the app to actually run the new version.",
    "Update Software… and its Restart now both refuse while an SLDEA run is going — LIVE, DRY, or still stopping after ■ Abort. A restart replaces the app at once, so it would end a LIVE run before the run could set the signal generator back to 0 V, leaving the Trek energized. ■ Abort the run, or let it finish, then update.",
@@ -339,6 +339,7 @@
    "AutoSet changes scale, timebase and trigger on the instrument but the fields on this tab do NOT update to match — clicking Apply All Settings afterwards will overwrite what AutoSet chose.",
    "Measurement readouts are snapshots — they only update when you click Get CHx Measurements. Frequency/Period show \"No signal\" on non-periodic input.",
    "If you ever send the scope a manual measurement command, the type token must be FREQUENCY — FREQ is accepted without error but returns a garbage ~2 Hz reading (the tab's own buttons already use the correct token).",
+   "During a live SLDEA run, the run's V_Out and I_Out channels and the settings every channel shares are locked, with a warning: Apply CHx Config and Enable Channel refuse those two channels, and Stop, Single and AutoSet refuse outright. Apply All Settings sends only the other channels. Run and the measurement buttons still work, and Reconnect asks first.",
    "During a live SLDEA run, Reconnect asks first (default No) while the scope is connected. Reconnecting leaves the run with no kV/µA readings and a breakdown watchdog that cannot trip until the new connection is up — and until a later Reconnect succeeds, if this one fails; that retry does not ask. Say Yes only if the scope has stopped answering, and never in the run's first seconds, while its watchdog is still arming; otherwise abort the run first.",
    "On Windows (no instrument attached) this tab is view/edit-only: every action button just reports \"Oscilloscope not connected\"."
   ],
@@ -962,6 +963,7 @@
    "If the scope-monitor check warns and you pick 'run anyway', the run completes but logs blank measured kV and wrong currents — this silently ruined five runs on 2026-07-25.",
    "A wrong DEA diameter corrupts the px-to-mm scale: every area number from that run is wrong and setup.txt must be hand-fixed before re-analysis.",
    "Running live with no scope means no measured kV/µA columns and no breakdown watchdog — the run continues even through a breakdown, and no telemetry.csv is written.",
+   "During a live run the scope channels it reads (V_Out, I_Out), the timebase and trigger, and Stop, Single and AutoSet are locked on the Oscilloscope tab: the breakdown watchdog reads I_Out, and a re-coupled or frozen channel could blind it.",
    "🎚 Tune params… is an advanced tool: it asks for confirmation first, and its Save rewrites the run's setup.txt — the detection settings every later analysis pass will use.",
    "During a live run the driven SG channel is locked; its Signal Gen tab controls (Apply, Output, Fire, Reconnect) and the Waveform Editor's upload refuse it, and a Webcam-tab sweep will not write it, until the run ends. ▶ Run itself refuses to start while a sweep is writing its channel, a timed capture or camera adjustment is running, or (live runs) a Signal Gen tab command is still being sent; a sweep on the other channel is asked about (Enter = No).",
    "During a live run the Oscilloscope tab's Reconnect asks before it closes the scope: the breakdown watchdog reads current through it and cannot trip until the new connection is up. Use it only to recover a scope that has stopped answering, and not in the run's first seconds, while the watchdog is still arming.",

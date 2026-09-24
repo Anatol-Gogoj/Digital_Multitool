@@ -825,6 +825,43 @@ class InstrumentControlGUI:
             self.status_bar.config(
                 text="Still working on the previous connect operation...")
             return
+        # During a LIVE run the scope asks first (owner's decision
+        # 2026-09-24). The run reads self.scope on every monitor tick -- the
+        # breakdown watchdog, telemetry, each snapshot's kV/uA -- so closing
+        # it leaves the run blind until the new session is up, and until a
+        # later Reconnect succeeds if this one fails. Worse in the worker's
+        # first seconds: it arms the watchdog only if a scope is there when
+        # it gets to it. Reconnect is also how monitoring comes back after a
+        # link drop, which is why the scope asks where the SG above is
+        # refused. No scope, nothing to lose.
+        if (key == 'scope' and self.scope is not None
+                and getattr(self, '_sldea_live_ch', None) is not None):
+            if not messagebox.askyesno(
+                    "Scope in use — LIVE HV run",
+                    "A LIVE SLDEA run is reading this scope: its breakdown "
+                    "watchdog, telemetry and snapshot kV/µA all come from "
+                    "it.\n\nReconnecting closes the scope's session. Until "
+                    "a new one is open, the run reads no kV or µA and the "
+                    "watchdog cannot trip. If the connect fails, that lasts "
+                    "until a Reconnect succeeds. The run keeps going either "
+                    "way.\n\nSay Yes only if the scope has stopped "
+                    "answering. If it is still answering, or the run "
+                    "started only seconds ago (its watchdog is still "
+                    "arming), say No: abort the run on the SLDEA tab first, "
+                    "then reconnect.\n\nReconnect the scope now?",
+                    default='no'):
+                return
+            # The question ran the event loop, so the checks above are
+            # stale: a connect started meanwhile would drop the handle just
+            # as before (same check, same note), and the run may be over.
+            if 'connect' in self._bg_busy:
+                self.status_bar.config(
+                    text="Still working on the previous connect operation...")
+                return
+            if getattr(self, '_sldea_live_ch', None) is not None:
+                self._sldea_log("⚠ scope Reconnect during the LIVE run "
+                                "(confirmed) — no kV/µA readings until its "
+                                "new session is open")
         old = getattr(self, key)
         setattr(self, key, None)   # nothing may use the handle meanwhile
         label.config(text="Connecting...", fg="#b36b00")

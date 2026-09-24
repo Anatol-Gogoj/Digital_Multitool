@@ -30,8 +30,10 @@ class _MockSG:
     """Stand-in for BK4055B: accepts uploads, sends nothing."""
     idn = "DEMO,4055B,MOCK,0"
 
-    def upload_arb(self, channel, name, samples, freq_hz, amp_vpp=1.0,
-                   offset_v=0.0, phase_deg=0.0):
+    # Same signature as BK4055B.upload_arb: the editor has passed points=
+    # since 2026-06-27, and the old mock raised on it.
+    def upload_arb(self, channel, name, samples, freq_hz=None, amp_vpp=None,
+                   offset_v=None, phase_deg=None, points=None):
         return re.sub(r'[^A-Za-z0-9_]', '_', str(name))[:16] or 'wave'
 
     def select_arb(self, channel, name):
@@ -80,6 +82,9 @@ class _DemoApp:
 
     def _sg_refresh_applied(self, ch):
         pass
+
+    def _sg_live_locked(self, channel=None, parent=None):
+        return False              # no SLDEA run in the demo owns a channel
 
 
 class _StatusProxy:

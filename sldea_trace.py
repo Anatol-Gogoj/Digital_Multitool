@@ -57,7 +57,7 @@ LABELS_VERSION = 1
 
 # Which detection pass the stored machine candidate came from. A single
 # frame detected on demand cannot carry the ramp-order hysteresis bonus
-# or the same-kV pair reconciliation (both move conf by up to 0.05), so
+# or the same-landing pair reconciliation (both move conf by up to 0.05), so
 # the label says which convention its conf follows instead of letting the
 # calibration curve mix two of them silently. And because the hysteresis
 # bonus is applied BEFORE candidates() sorts, its absence can also change
@@ -738,7 +738,7 @@ def calibration_summary(pairs, target_iou=0.8, bins=(0.0, 0.5, 0.75,
         lines += [
             f"  * {len(od)} of {len(arr)} point(s) come from a "
             f"single-frame on-demand detect ({SCOPE_FRAME}), not the run",
-            "      pass: no ramp-order hysteresis bonus and no same-kV "
+            "      pass: no ramp-order hysteresis bonus and no snapshot-"
             "pair reconciliation, so the",
             "      conf can read up to 0.05 low AND a different candidate "
             "can rank first (measured",

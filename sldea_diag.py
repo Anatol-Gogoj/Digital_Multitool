@@ -75,9 +75,9 @@ What it measures, and the failure each one pins down:
   electrodes), the BASELINE anchor (resting-disc trace and the mm/px it
   implies, with its own gates), per-frame ci% (the disc-fit's 85% CI on
   area -- a statistical statement, unlike conf, which is a
-  review-ordering score), and CONSISTENCY (same-kV pair agreement and
-  monotonicity, with pair reconciliation applied exactly as the GUI
-  applies it before auto-accept).
+  review-ordering score), and CONSISTENCY (each landing's snapshot pair
+  agreeing, and monotonicity, with pair reconciliation applied exactly as
+  the GUI applies it before auto-accept).
 
 Nothing is modified: the run's setup.txt is read, never written.
 """
@@ -1018,14 +1018,14 @@ def verdicts(d):
         if nmm or nd:
             worst = next(iter(cons.get('annos', {}).values()), '')
             out.append(('MED', 'The ramp is not self-consistent',
-                        f"{nmm} frames in mismatching same-kV pairs, {nd} "
+                        f"{nmm} frames in mismatching snapshot pairs, {nd} "
                         f"area dips while the voltage rose (e.g. {worst}). "
                         f"The two snapshots of one step photograph the "
                         f"same state -- when their areas differ, the "
                         f"detection, not the device, changed."))
         else:
             out.append(('OK', 'The ramp is self-consistent',
-                        f"same-kV pairs agree and the area never dips "
+                        f"snapshot pairs agree and the area never dips "
                         f"against a rising voltage across "
                         f"{cons['checked']} detected frames "
                         f"({cons.get('pairs_confirmed', 0)} pair-confirmed, "

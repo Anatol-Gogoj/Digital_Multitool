@@ -15,33 +15,39 @@ docket** — read it, not this line, for what is queued.
 
 ## A LIVE run asks before the scope's Reconnect closes the session its watchdog reads (2026-09-24)
 
-**TL;DR:** during a LIVE run, pressing Reconnect on the Oscilloscope tab
-used to close the scope at once. The breakdown watchdog was then blind
-until the new session was up, and for longer if the connect failed. Now
-it asks first, default No. Yes reconnects as before, which is still how
-monitoring comes back after a link drop. With no scope connected there
-is nothing to lose, so it doesn't ask.
+**TL;DR:** during a LIVE run, the Oscilloscope tab's Reconnect used to
+close the scope at once. That left the breakdown watchdog blind until a
+new session was up, and for longer if the connect failed. Now it asks
+first, default No. Yes reconnects as before, which is how a dropped link
+is recovered without aborting.
 
 **Observation.** PR #336's adversarial review found this, and it was
-checked on #336's head `cde5562`. The LIVE lock (audit 2026-07-25 C1)
-refuses the SG's Reconnect only. `_sldea_worker` reads `self.scope` on
-every monitor tick; it does not keep a handle captured at the start, as
-it does for the SG. A scope Reconnect sets `self.scope = None` on the Tk
-thread, then closes the old session and opens a new one on a `_run_bg`
-worker. Until that lands:
+checked on #336's head `cde5562`. Of the five Reconnect buttons, the LIVE
+lock (audit 2026-07-25 C1) refuses only the SG's. `_sldea_worker` reads
+`self.scope` on every monitor tick. Unlike the SG's, the scope handle is
+not captured at the start. A scope Reconnect sets `self.scope = None` on
+the Tk thread, then closes the old session and opens a new one on a
+`_run_bg` worker. Until that lands:
 
 - every watchdog read fails. `BreakdownWatchdog.update` ignores an
-  unreadable sample: it does not count toward a trip and does not reset
-  the 3 s streak;
-- telemetry rows and snapshot kV/µA are blank, with status `error`;
-- after 10 s the run logs "CURRENT MONITORING LOST … breakdown watchdog
-  is BLIND" and carries on (policy 2026-07-25).
+  unreadable sample: it neither counts toward a trip nor resets the 3 s
+  streak;
+- periodic telemetry rows are blank, with `i_status` `error`. A snapshot
+  taken meanwhile skips its scope read: blank kV/µA, status `skipped`,
+  nothing logged;
+- 10 s after the first failed read, the run logs "CURRENT MONITORING LOST
+  … breakdown watchdog is BLIND" and carries on (policy 2026-07-25). A
+  connect that takes longer than that raises the alarm too, followed by
+  "current monitoring recovered".
 
 If the connect fails, `self.scope` stays None until a later Reconnect
 succeeds. A successful one sends no vertical, timebase or trigger
-command. The driver's open does a VISA device clear, then sends `*IDN?`,
-`DATA:ENCDG RIBINARY` and `DATA:WIDTH 2`, which set the waveform-transfer
-format only. The worker picks up the new handle on its next tick.
+command. After the USB open, the driver sends `*IDN?`, `DATA:ENCDG
+RIBINARY` and `DATA:WIDTH 2`, which set the waveform-transfer format. Its
+device-clear call does nothing over USB: PyVISA-py 0.8.1 does not
+implement one, and the driver swallows the error. The monitor loop picks
+up the new handle on its next tick. The worker's first seconds are the
+exception; see Limits.
 
 **Decision (Anatol, 2026-09-24).** Three answers were offered: refuse, as
 for the SG; ask first, default No; or leave it allowed. Anatol took the
@@ -52,16 +58,20 @@ recommended one, ask first. The trade-offs:
 - Leaving it allowed let one press on a healthy link blind the run, with
   no warning beforehand.
 - The question has the same shape as the run-start "No current
-  monitoring — proceed?" (default No): the operator may choose to run
+  monitoring — proceed?" (default No). The operator may choose to run
   unmonitored, but has to choose it.
 
-This revises one point of the same day's scope-lock decision (branch
-`claude/sldea-scope-lock`, not merged when this was written). That one
-kept Reconnect usable with no question. Its reasons still hold, so
-Reconnect stays usable, behind a question now. When both land, that
-branch's `test_reconnect_stays_usable_during_a_live_run`, its lock note
-("…and Reconnect stay available") and its two manual lines have to
-mention the question.
+This revises one row of the same day's scope-lock decision (PR #337, open
+when this was written), which kept Reconnect usable with no question. Its
+reasons still hold, so Reconnect stays usable, but behind a question now.
+Whichever of the two merges second has to bring #337's texts in line:
+
+- its `test_reconnect_stays_usable_during_a_live_run`, which fails on the
+  unexpected question;
+- its lock note ("…and Reconnect stay available");
+- its Oscilloscope-tab manual line ("…and Reconnect still work");
+- its handoff entry;
+- the comment in its `reconnect_scope()`.
 
 **How it is built.**
 
@@ -69,41 +79,107 @@ mention the question.
   the Linux gate, the SG LIVE lock, then PR #336's `'connect'` busy
   guard. A connect in flight gets the busy note and no question.
 - It asks only when the key is `'scope'`, a scope handle exists, and
-  `_sldea_live_ch` is set. That flag means a LIVE run: a DRY run claims
-  nothing, as with the SG lock. With no handle there is nothing to close.
+  `_sldea_live_ch` is set. That flag means a LIVE run; a DRY run claims
+  nothing, as with the SG lock.
+- With no handle there is nothing to close, so it goes straight through.
   That covers a LIVE run started without a scope, and the retry after a
-  failed Reconnect, which goes straight through.
+  failed Reconnect.
 - While the question is up, the run keeps reading the old session.
   Nothing is closed until Yes.
 - No leaves everything as it was.
-- Yes runs the busy check again before touching the handle. The dialog
-  ran the Tk event loop, so the first check is stale. Then, if the run is
-  still on, one run-log line ("⚠ scope Reconnect during the LIVE run
-  (confirmed) …"), then the unchanged Reconnect path.
+- Yes runs the busy check again before touching the handle, because the
+  dialog ran the Tk event loop and the first check is stale. Then, if the
+  run is still on, it writes one run-log line ("⚠ scope Reconnect during
+  the LIVE run (confirmed) …") and takes the unchanged Reconnect path.
 - No new SCPI, and no change to the worker or the watchdog.
 
 **Limits.**
 
-- The question cannot tell a healthy link from a dead one. The operator
-  decides, from the run log's "monitor scope read failed" and "CURRENT
-  MONITORING LOST" lines. Asking only until the worker has flagged the
-  loss would need the worker to publish that state. Not done.
-- A LIVE run with both the watchdog and telemetry off reads the scope at
-  snapshots only, and still gets the question. The Tk side cannot see what
-  the worker armed.
-- The run log records the confirmation, not the outcome. A failed
-  connect shows up as "CURRENT MONITORING LOST" 10 s later. A successful
-  one shows up as readings resuming in `telemetry.csv`.
+- **A Yes in the worker's first seconds leaves the whole run without a
+  watchdog, and nothing says so.**
+  - The worker builds the watchdog once, after the run folder, the camera
+    controls and the SG setup, and only if `self.scope` is set at that
+    moment.
+  - Telemetry opens the same way, but logs "telemetry armed but the scope
+    is gone". The watchdog logs nothing, and the run-start line has
+    already called it armed.
+  - The window is about 0.3–1 s by #337's review, and up to 5 s with the
+    video branch. A Yes during the 1.5 s of baseline learning that follows
+    costs the baseline instead: the trip falls back to absolute.
+  - This is older than the question: before it, one click with no
+    question did the same. So the question only tells the operator to say
+    No in the run's first seconds.
+  - The fix is to arm from `wd_on and not dry`, so the 10 s alarm covers
+    the gap. That changes the run itself, so it is its own change. #337
+    reached the same verdict.
+- **Not bench-checked: closing a session in the middle of a read.**
+  - The question sends the operator to Reconnect exactly when the scope
+    has stopped answering. That is when the worker is likely blocked in a
+    read (up to the 5 s timeout), holding the instrument lock.
+  - `close()` takes no lock, so PyVISA-py disposes of the session under
+    that read. Reconnect has always done this. Whether it fails cleanly
+    or can take the process down, skipping the SG ramp-down, is unknown.
+  - It can be checked without HV: start a DRY run with telemetry on, pull
+    and replug the scope USB, press Reconnect, repeat a few times, and
+    watch for a hang or crash.
+- **The question cannot tell a healthy link from a dead one.** The
+  operator decides, from the run log's "monitor scope read failed" and
+  "CURRENT MONITORING LOST" lines, which appear when the watchdog or
+  telemetry is on. Asking only until the worker has flagged the loss
+  would need the worker to publish that state. Not done.
+- **A LIVE run with both the watchdog and telemetry off still gets the
+  question,** although it reads the scope at snapshots only. `sldea_run`
+  computes what it arms (`wd_on`, `tel_on`) but does not keep it, and the
+  worker can still fail to arm it (the first limit).
+- **The run log records the confirmation, not the outcome.** A failed
+  connect shows up as "CURRENT MONITORING LOST", 10 s after the first
+  failed read. A successful one shows up as readings resuming in
+  `telemetry.csv`.
 
 **Verification.**
 
 - **Tests:** `tests/test_scope_reconnect_live.py` has 15 tests, in the
-  stub-app style of #336's suite: the real `_reconnect`, `_run_bg` and
-  `_sg_live_locked` on a Tk-free stub, a real worker thread, and a
+  stub-app style of #336's suite. It runs the real `_reconnect`, `_run_bg`
+  and `_sg_live_locked` on a Tk-free stub, with a real worker thread and a
   scripted `askyesno` that can act while it is "up", as the event loop
-  would. On #336's head `cde5562`, the 6 tests that expect the question
-  fail; the other 9 pin behaviour that has not changed, and pass there
-  too. Here all 15 pass, and #336's suite still passes 9/9.
+  would.
+  - On #336's head `cde5562`, the 6 tests that expect the question fail.
+    The other 9 pass there too: 8 pin behaviour that has not changed, and
+    one (no log line when the run ends during the question) also holds
+    for code that never asks.
+  - Here all 15 pass, and #336's suite still passes 9/9.
+- **Adversarial review,** before the PR, as CLAUDE.md asks for HV-safety
+  paths. Two independent passes ran: one tried to break the change, the
+  other merge-checked it.
+  - **No bypass.** The only writers of `self.scope` are `__init__`,
+    start-up auto-connect, `_reconnect` and window close, which stops the
+    run first. Nothing on a timer calls a Reconnect.
+  - **Tk.** Tk 8.6's `msgbox.tcl` maps Escape, window close and destroy
+    to No for a yes/no box. Forced on this PC's Tk, the same Tcl dialog
+    returned False for all of them, and ran about 15 `after` callbacks
+    while it was up.
+  - **The re-check.** Nothing in gui.py can add a `'connect'` job or
+    claim a run from a callback, so the re-check is defensive today.
+    `_sldea_finished` can release the claim meanwhile, which the log
+    guard handles.
+  - **Mutation:** 46 mutants, 38 caught. Of the 8 survivors:
+    - 4 are equivalent: the truthiness of the handle and of the claim,
+      the log guard reading `_sldea_running`, and a key test that also
+      names the SG, which its lock refuses first;
+    - 1 needs a run ending and a connect starting during the dialog,
+      which its grab rules out;
+    - 3 dropped a sentence of the dialog. Two of those sentences are now
+      pinned; the third is gone.
+  - **What the review changed in this entry:** the start-up window, the
+    device clear that is never sent, the `skipped` snapshot status, and
+    the wording.
+  - **Merges:** `gui.py` merges cleanly with #334, #335 and #337's head.
+    #337 then needs the text changes listed above. Otherwise only the top
+    of this file and `content.json` conflict.
+- **Full suite, on the Windows PC:** 38 of 41 suites pass. The three
+  failures are the known Windows-only ones: #331 fixes
+  `test_easywave_export` and the plot window's resize race, and #332
+  fixes `test_tk_fontfix`.
 - **No bench gate:** no new instrument I/O.
 
 ## The aggregate averages BY GROUP, the runs it averages can be hidden, and the group palette is a shape argument rather than a colour one (2026-08-10)

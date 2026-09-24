@@ -9,8 +9,11 @@ telemetry row, each snapshot's kV/uA -- and a scope Reconnect sets that
 handle to None, then closes the session and opens a new one on a worker
 thread. Until the new session is up the watchdog cannot trip; if the
 connect fails it stays blind until a later Reconnect succeeds. The run
-logs "CURRENT MONITORING LOST" after 10 s and carries on (policy
-2026-07-25).
+logs "CURRENT MONITORING LOST" after 10 s of that and carries on (policy
+2026-07-25). In the worker's first seconds it is worse: the watchdog is
+armed only if a scope handle is there when the worker gets to it. That
+is the worker's own gap, left to its own change; the question tells the
+operator to say No then.
 
 Reconnect is also how monitoring comes back after a link drop, so the
 owner's decision of 2026-09-24 is to ASK, default No, rather than refuse
@@ -223,15 +226,19 @@ def test_the_question_comes_before_anything_is_touched():
 
 def test_the_question_says_what_goes_blind():
     """The operator decides on what the question says, so it has to say it:
-    the watchdog cannot trip, a failed connect lasts, the run keeps going,
-    and the safe alternative."""
+    the session closes, nothing is read and the watchdog cannot trip, a
+    failed connect lasts, the run keeps going, when to say No, and the
+    safe alternative."""
     with _patched(_MB(answer=False)) as mb:
         _App(live=2).reconnect_scope(lambda: _FakeInst('NEW scope'))
     [(_kind, _title, msg, _kw)] = mb.calls
     for phrase in ('LIVE SLDEA run is reading this scope',
-                   'breakdown watchdog', 'watchdog cannot trip',
+                   'breakdown watchdog', "closes the scope's session",
+                   'reads no kV or µA', 'watchdog cannot trip',
                    'If the connect fails', 'until a Reconnect succeeds',
-                   'The run keeps going either way', 'stopped answering',
+                   'The run keeps going either way',
+                   'Say Yes only if the scope has stopped answering',
+                   'started only seconds ago', 'say No',
                    'abort the run on the SLDEA tab first',
                    'Reconnect the scope now?'):
         assert phrase in msg, (phrase, msg)
@@ -298,13 +305,19 @@ def test_a_run_that_ends_during_the_question_logs_nothing():
     assert app.log == [], app.log
 
 
-def test_the_second_busy_note_is_the_one_run_bg_gives():
-    """Word for word, as PR #336 pins for the first one."""
-    app = _App()
-    app._bg_busy.add('connect')
-    assert G._run_bg(app, lambda: None, lambda _r, _e: None,
+def test_the_refusal_after_the_question_says_what_run_bg_says():
+    """Word for word, as PR #336 pins for the check before the question:
+    the note from the check after it is the one _run_bg itself gives."""
+    app = _App(live=1)
+    with _patched(_MB(answer=True,
+                      during=lambda: app._bg_busy.add('connect'))):
+        app.reconnect_scope(lambda: _FakeInst('NEW scope'))
+    ref = _App()
+    ref._bg_busy.add('connect')
+    assert G._run_bg(ref, lambda: None, lambda _r, _e: None,
                      busy='connect') is False
-    assert app.status_bar.text == BUSY_NOTE, app.status_bar.text
+    assert app.status_bar.text == ref.status_bar.text == BUSY_NOTE, \
+        (app.status_bar.text, ref.status_bar.text)
 
 
 def test_a_failed_connect_after_yes_leaves_the_retry_unasked():

@@ -823,9 +823,11 @@ class InstrumentControlGUI:
         # 2026-09-24). The run reads self.scope on every monitor tick -- the
         # breakdown watchdog, telemetry, each snapshot's kV/uA -- so closing
         # it leaves the run blind until the new session is up, and until a
-        # later Reconnect succeeds if this one fails. Reconnect is also how
-        # monitoring comes back after a link drop, which is why the scope
-        # asks where the SG above is refused. No scope, nothing to lose.
+        # later Reconnect succeeds if this one fails. Worse in the worker's
+        # first seconds: it arms the watchdog only if a scope is there when
+        # it gets to it. Reconnect is also how monitoring comes back after a
+        # link drop, which is why the scope asks where the SG above is
+        # refused. No scope, nothing to lose.
         if (key == 'scope' and self.scope is not None
                 and getattr(self, '_sldea_live_ch', None) is not None):
             if not messagebox.askyesno(
@@ -836,9 +838,11 @@ class InstrumentControlGUI:
                     "a new one is open, the run reads no kV or µA and the "
                     "watchdog cannot trip. If the connect fails, that lasts "
                     "until a Reconnect succeeds. The run keeps going either "
-                    "way.\n\nReconnect only if the scope has stopped "
-                    "answering (the run log says so). Otherwise, abort the "
-                    "run on the SLDEA tab first.\n\nReconnect the scope now?",
+                    "way.\n\nSay Yes only if the scope has stopped "
+                    "answering. If it is still answering, or the run "
+                    "started only seconds ago (its watchdog is still "
+                    "arming), say No: abort the run on the SLDEA tab first, "
+                    "then reconnect.\n\nReconnect the scope now?",
                     default='no'):
                 return
             # The question ran the event loop, so the checks above are

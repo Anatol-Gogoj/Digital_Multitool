@@ -877,8 +877,8 @@
     "what": "Transition time between levels and hold time at each level."
    },
    {
-    "label": "Settle (s) / Snap lead (s)",
-    "what": "When the two photos per landing are taken: settle = wait after the ramp before the post-ramp photo; snap lead = how long before the next ramp the pre-ramp photo fires."
+    "label": "Snapshots each landing: Post-ramp / Pre-ramp (s)",
+    "what": "When the two photos per landing are taken, each field named after the tag its photo gets: Post-ramp = seconds after the ramp ends, so the DEA settles at the new voltage first; Pre-ramp = seconds before the next ramp starts, after the full hold. Each field carries the symbol its photo gets on the preview."
    },
    {
     "label": "Repeat / Up/down (hysteresis)",
@@ -890,7 +890,7 @@
    },
    {
     "label": "Preview — kV vs time",
-    "what": "Live plot of the staircase; dots mark photo moments (gray baseline, green post-ramp, red pre-ramp) and a red playhead tracks a running test."
+    "what": "Live plot of the staircase. Each photo moment is marked by SHAPE as well as colour, so the marks read in any colour vision and in greyscale: open circle = camera warm-up, grey diamond = 0 kV baseline, blue triangle = post-ramp, yellow square = pre-ramp (legend along the top). Hover a mark for its landing, kV and time; a dashed black playhead tracks a running test."
    },
    {
     "label": "Output dir / Run name (blank = auto)",

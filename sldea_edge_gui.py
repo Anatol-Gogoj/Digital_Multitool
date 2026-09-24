@@ -6629,8 +6629,9 @@ class EdgeReviewApp:
                                 "median baseline)",
                 'area_jump_pct': "area collapse (%) while voltage rises: "
                                  "confirms breakdown only with a current "
-                                 "event at the same kV level, otherwise "
-                                 "an advisory note",
+                                 "event on the same landing (that visit "
+                                 "to the kV level), otherwise an "
+                                 "advisory note",
                 'wrinkle_ratio': "wrinkle index (texture vs baseline) at/"
                                  "above this = wrinkle-mode; first such "
                                  "frame is noted as the onset",

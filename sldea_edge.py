@@ -2768,6 +2768,18 @@ def _snap_phase(tag):
     return next((p for p in ('post', 'pre') if tag.startswith(p)), '')
 
 
+def _row_kv(row):
+    """nominal_kV parsed exactly as the functions below parse it for
+    themselves (`float(cell or '')`, so a blank cell -- or a numeric 0
+    handed in by code rather than read from a CSV -- is no kV), finite
+    only: a row has a landing exactly when they see a kV for it."""
+    try:
+        kv = float(row.get('nominal_kV') or '')
+    except (TypeError, ValueError):
+        return None
+    return kv if math.isfinite(kv) else None
+
+
 def sweep_landings(rows):
     """Where each run-CSV row sits in the sweep -> a list parallel to
     `rows`: None for a row without a parseable nominal_kV, else
@@ -2778,7 +2790,8 @@ def sweep_landings(rows):
                   landing; a landing at the SAME kV as the one before (the
                   bottom level, landed twice where two up/down cycles
                   meet) takes the direction of the ramp OUT of it,
-       'cycle':   1, 2, ... advancing wherever a falling leg turns to rise}
+       'cycle':   1, 2, ... advancing wherever a falling leg turns to rise:
+                  a count of hysteresis loops, not the Repeat pass}
 
     A landing is the rows photographed during one hold: consecutive rows
     at one nominal kV. Where two landings share a kV back to back (that
@@ -2794,16 +2807,20 @@ def sweep_landings(rows):
     real landing number on a run of 99+ landings) never splits on its
     step: tripped during a hold its kV is that landing's, and it belongs
     to it; tripped mid-ramp its kV differs, and it is a landing of its own.
+    The one case its row cannot settle: a trip in the first seconds of a
+    hold at the same kV as the landing before (the bottom level where two
+    cycles meet), before that hold's first snapshot, joins the earlier one.
 
-    On a run where no kV recurs once the rows have left it -- every rising
-    single sweep -- each kV is exactly one landing, all 'rise' in cycle 1,
-    so anything keyed on landings behaves there exactly as it did keyed on
-    kV."""
+    On a run that lands on each kV once -- every rising single sweep, and
+    every falling one that does not end on 0 kV, where its last landing
+    and the baseline would be two visits of 0 kV -- each kV is exactly one
+    landing, so anything keyed on landings behaves there exactly as it did
+    keyed on kV. A rising sweep comes out all 'rise', in cycle 1."""
     out = [None] * len(rows)
     kvs = [0.0]            # landing 0, the resting start, recorded or not
     cur, n = None, 0
     for i, row in enumerate(rows):
-        kv = _num(row.get('nominal_kV'))
+        kv = _row_kv(row)
         if kv is None:
             continue
         tag = str(row.get('tag') or '').strip()

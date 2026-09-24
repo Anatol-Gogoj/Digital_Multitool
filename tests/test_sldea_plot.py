@@ -2067,34 +2067,58 @@ def test_aggregate_stops_at_the_first_breakdown_across_the_runs():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def _staircase_run(d, name, profile, broke):
+    """`profile`'s rows as the runner writes them, breaking down at the
+    steps in `broke`: current off baseline and the area collapsed."""
+    rows = [{'snapshot': n, 'step': s['step'], 'tag': s['tag'],
+             'nominal_kV': round(s['nominal_kv'], 3),
+             'measured_uA': -300.0 if s['step'] in broke else -16.0,
+             'active_area_mm2': (40.0 if s['step'] in broke
+                                 else 100.0 + 10 * s['nominal_kv']),
+             'timestamp': '2026-09-23T10:00:00',
+             'notes': 'edge:disc-fit conf 0.93'}
+            for n, s in enumerate(profile.snapshots, start=1)]
+    _fake_run(os.path.join(d, name), rows)
+    return sp.load_run(os.path.join(d, name), lambda m: None)
+
+
 def test_first_breakdown_is_the_first_event_in_time():
     """An up/down run that breaks down at 3.5 kV on the way UP keeps
-    confirming on the way down (its current stays off baseline to 2 kV),
-    so the LOWEST flagged kV is 2.0 -- a level the device passed intact
-    going up. first_breakdown_kv returned that minimum until 2026-09-23,
-    and the aggregate cap stopped every run in the figure there."""
+    confirming on the way down, to 2 kV. Its FIRST breakdown is 3.5 kV;
+    until 2026-09-23 first_breakdown_kv returned the lowest flagged kV,
+    2.0, a level the device passed intact going up.
+
+    The pooled aggregate must still stop at 2.0. Its per-level curve
+    averages every visit to a level, so this run's 2.0-3.0 kV means hold
+    its collapsed frames from the way down, and capping at the first
+    breakdown drew that mixture into the figure (review 2026-09-23). A
+    falling single sweep keeps its old cap the same way."""
     import sldea_profile
     d = _mktmp()
     try:
-        p = sldea_profile.SldeaProfile(start_kv=0, end_kv=4, step_kv=0.5,
-                                       updown=True)
-        broke = range(7, 13)        # 3.5 kV up, 4.0, then 3.5 .. 2.0 down
-        rows = [{'snapshot': n, 'step': s['step'], 'tag': s['tag'],
-                 'nominal_kV': round(s['nominal_kv'], 3),
-                 'measured_uA': -300.0 if s['step'] in broke else -16.0,
-                 'active_area_mm2': 100.0 + 10 * s['nominal_kv'],
-                 'timestamp': '2026-09-23T10:00:00',
-                 'notes': 'edge:disc-fit conf 0.93'}
-                for n, s in enumerate(p.snapshots, start=1)]
-        _fake_run(os.path.join(d, 'UPDOWN'), rows)
-        run = sp.load_run(os.path.join(d, 'UPDOWN'), lambda m: None)
-        kvs = [run['rows'][i]['kv'] for i in sorted(run['flags'])]
+        updown = _staircase_run(d, 'UPDOWN', sldea_profile.SldeaProfile(
+            start_kv=0, end_kv=4, step_kv=0.5, updown=True),
+            broke=range(7, 13))     # 3.5 kV up, 4.0, then 3.5 .. 2.0 down
+        kvs = [updown['rows'][i]['kv'] for i in sorted(updown['flags'])]
         assert kvs == [3.5, 3.5, 4.0, 4.0, 3.5, 3.5, 3.0, 3.0,
                        2.5, 2.5, 2.0, 2.0], kvs
-        assert sp.first_breakdown_kv(run) == 3.5
+        assert sp.first_breakdown_kv(updown) == 3.5
+        assert sp.lowest_breakdown_kv(updown) == 2.0
         fine = _agg_run(d, 'FINE', [0.5 * i for i in range(1, 9)],
                         lambda kv: 100.0 + 11 * kv)
-        assert sp.aggregate_cap_kv([run, fine]) == 3.5
+        assert sp.aggregate_cap_kv([updown, fine]) == 2.0
+        ag = sp.aggregate_levels([updown, fine])
+        mixed = {p['key'] for p in sp.run_level_curve(updown)
+                 if p['confirmed']}
+        assert mixed and not mixed & {lv['kv'] for lv in ag}, ag
+        assert max(lv['kv'] for lv in ag) == 1.5
+        # a falling single sweep, 6 -> 1 kV, broken from 3.0 kV on: the
+        # first breakdown is its HIGHEST flagged kV, the cap its lowest
+        falling = _staircase_run(d, 'FALLING', sldea_profile.SldeaProfile(
+            start_kv=6, end_kv=1, step_kv=0.5), broke=range(7, 12))
+        assert sp.first_breakdown_kv(falling) == 3.0
+        assert sp.aggregate_cap_kv([falling]) \
+            == sp.lowest_breakdown_kv(falling) == 1.0
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

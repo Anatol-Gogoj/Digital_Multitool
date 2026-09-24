@@ -20,10 +20,10 @@ at one kV as a single "pair", and the pair check loosened the more often
 a level was visited. Repeat runs got confidence they had not earned,
 sometimes enough to auto-accept. Real hysteresis between the legs went
 to review as "detection disagreement". A pair is now the two snapshots
-of one landing, a current spike only backs a collapse on its own visit,
-and the plot's first breakdown is the first in time. Single sweeps
-(every run recorded so far) come out exactly as before, and tests pin
-that.
+of one landing, and a current spike only backs a collapse on its own
+visit. Runs that land on each kV once come out exactly as before, and
+tests pin that. That includes every rising sweep, which is every run
+recorded so far.
 
 **Observation → decision.**
 
@@ -39,31 +39,31 @@ that.
   to 0.77, past `accept_conf`: a contradiction auto-accepted on both
   sides. On up/down ×2 with 30% hysteresis between the legs, all 16
   disc-fit frames below the peak were capped into review.
-- The same whole-run key was used in three more places.
+- The same whole-run key was used in two more places.
   `breakdown_flags` let a current event at the same kV **on the other
   leg** corroborate an area collapse, and a confirmed flag brands every
   later frame `_BREAKDOWN`: the P3_5 failure, reached by another road.
   `ramp_consistency` wrote "pair mismatch" into data.csv on all four
   frames of a level whenever the legs differed by more than 12%, which
-  is whenever the run showed the hysteresis it was recorded for.
-  `sldea_plot.first_breakdown_kv` returned the **lowest** flagged kV. A
-  run that breaks down on the way up keeps confirming on the way down,
-  so the cross-run cap stopped every run at a level that device had
-  passed intact.
+  is whenever the run showed the hysteresis it was recorded for. And
+  `sldea_plot.first_breakdown_kv`, documented as the run's FIRST
+  breakdown, returned the lowest flagged kV.
 - *Decision:* `se.sweep_landings(rows)` works out, from nominal kV in
   CSV order, each row's **landing** (one hold), **leg** (the direction
   of the ramp into it) and **cycle**. Pairing, corroboration and the
-  consistency notes group by landing, and `first_breakdown_kv` takes the
-  earliest flagged row. The tolerance formula is untouched: it is back
-  to the two members it was written for.
+  consistency notes group by landing. The tolerance formula is
+  untouched: it is back to the two members it was written for.
 - *How a landing is found:* consecutive rows at one kV. Where two
   landings share a kV back to back, a row opens a new one only when
   **all** the evidence it carries agrees: a `step` the landing does not
-  hold AND a snapshot phase it already holds (either one alone when the
-  row carries only one). The runner writes both and they always agree.
+  hold AND a snapshot phase it already holds. Either kind alone decides
+  when a row carries only that kind: the 07-23 tags with no step column,
+  or steps with no tags. The runner writes both and they always agree.
   Demanding both keeps the grouping of layouts the runner never wrote:
   `sldea_plot`'s fixtures (pre-ramp before post-ramp, no step) and
-  `sldea_diag`'s self-test run (a step per snapshot).
+  `sldea_diag`'s self-test run (a step per snapshot). Two layouts no
+  known writer produces now split where they used to pool: a step per
+  snapshot with no tags, and a duplicated snapshot with no step column.
 - *The watchdog's trip row* (tag `breakdown`, step 99: a sentinel, and
   also a real landing number on runs of 99+ landings) never splits a
   landing on its step. If it tripped during a hold, it belongs to that
@@ -72,37 +72,70 @@ that.
   tripped single sweep flags exactly as before. If it tripped mid-ramp,
   it is a landing of its own. This is the one place where "pair only the
   two snapshots" bends, and it bends on purpose: excluding the row would
-  change tripped single sweeps.
-- *No change on single sweeps, proven:* the three `78315cc` functions
+  change tripped single sweeps. One case the rows cannot settle: a trip
+  in the first seconds of a hold at the same kV as the landing before
+  (the bottom level where two cycles meet), before that hold's first
+  snapshot, joins the earlier landing.
+- *Decision: `first_breakdown_kv` is now first in time, and the
+  aggregate cap does not follow it* (from the adversarial review, same
+  day). A time-ordered cap was the task as written, and on `main` it is
+  wrong. `run_level_curve` pools every visit to a level. An up/down run
+  that broke at 3.5 kV on the way up and stayed flagged down to 2.0 kV
+  therefore holds its collapsed frames in its 2.0–3.0 kV means. A
+  time-ordered cap drew that mixture into the aggregate: 101–109 at
+  those levels, against 122–133 from a healthy run. On a falling single
+  sweep, the cap would have kept exactly its collapsed levels. The cap
+  keeps the lowest flagged kV under an honest name,
+  `lowest_breakdown_kv`, so every figure is exactly as before. The first
+  breakdown in time becomes the cap once the aggregate averages one leg
+  per run (last bullet).
+- *No change where no kV recurs, proven:* the three `78315cc` functions
   are frozen verbatim in `tests/test_sldea_edge.py` as oracles.
   Randomized inputs over five profiles and every layout must reproduce
   them exactly: stats, confs, tags and flag order. The layouts are the
   runner's rows, a trip in the hold or mid-ramp, the 07-23 tags, no
-  step, neither step nor tag, and both fixture layouts. Three plausible
-  wrong rules each fail those tests: the trip row always alone, step
-  alone decides, and post-after-pre splits. The eight local bench runs
-  (`Downloads\Tuning\SLDEA_data`, read-only, SHA-1 of all 436 files
-  unchanged) were run through both versions with a real detection pass.
-  Every row's landing equals its `step`, and the results match exactly:
-  pairs on 420 frames (382 of them confirmed or capped by the pair
-  pass), breakdown flags on all eight (the three breakdown runs carry
-  4, 1 and 13 confirmed rows), consistency notes, and first-breakdown kV
-  (5.75, 6.0, 5.6).
+  step, neither step nor tag, rows built in code with numeric cells,
+  and both fixture layouts. Five plausible wrong rules each fail those
+  tests: the trip row always alone, step alone decides, post-after-pre
+  splits, no resting landing, and kV parsed differently from the
+  chain's own `float(cell or '')`. A sixth, phase alone decides, changes
+  no single sweep and fails the landing tests instead. The eight local
+  bench runs (`Downloads\Tuning\SLDEA_data`, read-only, SHA-1 of all 436
+  files unchanged) were run through both versions with a real detection
+  pass. Every row's landing equals its `step`, and the results match
+  exactly: pairs on 420 frames (382 of them confirmed or capped by the
+  pair pass), breakdown flags on all eight (the three breakdown runs
+  carry 4, 1 and 13 confirmed rows), consistency notes, and the
+  breakdown kV (5.75, 6.0, 5.6). The adversarial pass then ran 38,000
+  randomized runner single sweeps in eight layouts and 4,000 up/down and
+  repeat runs against the change. Beyond the cap, it found a crash on
+  rows built in code with a numeric 0 kV. It is fixed: the helper parses
+  kV as the chain does, and the oracles cover it.
+- *Changed on purpose, on one kind of single sweep:* a falling staircase
+  that ends on 0 kV lands there after the whole sweep. Its warm-up,
+  baseline and last landing were one "pair", and a device still
+  relaxing read as a mismatch on all four frames. They are separate
+  landings now, pinned by a test.
 - *Not changed:* the collapse and dip rules keep their "kV did not
   decrease" gate. On a falling leg it already skips the step-to-step
   checks, and it still checks inside a landing.
   `sldea_diag.repeat_pairs` is photometric instrumentation, not
-  measurement.
+  measurement. The wording that called the rule "same kV" now says
+  landing in four places: the Edge Review tooltip, the manual source
+  (`addendum_b_edge.json`, rebuilt at the next release), the diag
+  report and the trace report.
 - *For `claude/plot-hysteresis-axis`* (unmerged; it has its own
   `sweep_legs`): it gives the same landings, legs and cycles on every
   CSV the runner writes. For drawing, it makes the trip row a landing
   of its own and splits on step alone, which is fine there. When it
   lands, it can read `se.sweep_landings` instead of deriving them
-  again. Its aggregate averages an up/down run's first rising leg. The
-  cap is now the first breakdown in time, which is exact when the
-  device broke on that leg. When the device broke later, on the way
-  down, the cap is conservative: it shortens the averaged leg but never
-  mixes. Keying the cap to the averaged leg is that branch's call.
+  again. Its aggregate averages an up/down run's first rising leg. That
+  is where `first_breakdown_kv` becomes the right cap: that leg's first
+  breakdown, or no cap from the run if it broke later. Until then,
+  `aggregate_cap_kv` stays on `lowest_breakdown_kv`. Note that `cycle`
+  counts hysteresis loops, not Repeat passes: a plain repeat's second
+  pass starts on a falling ramp, and its cycle turns only when the
+  voltage rises again.
 
 ## The aggregate averages BY GROUP, the runs it averages can be hidden, and the group palette is a shape argument rather than a colour one (2026-08-10)
 

@@ -1510,13 +1510,37 @@ def test_sweep_landings_trip_row_and_layouts_the_runner_never_writes():
     for layout in (plot_style, diag_style):
         assert [q['landing'] for q in se.sweep_landings(layout)] \
             == [0, 1, 1, 2, 2]
-    # where rows DO carry it, it splits: the 07-23 tags with no step
-    # column still part the bottom level's two landings at the cycle
-    # boundary, because the snapshot phase repeats
+    # where rows DO carry it, it splits -- on either kind alone. The 07-23
+    # tags with no step column part the bottom level's two landings at
+    # the cycle boundary because the snapshot phase repeats; steps with
+    # no tags part them because the step changes.
+    steps = [int(r['step']) for r in _updown_x2()]
     legacy = [dict(r, step='', tag=r['tag'].replace('-ramp', ''))
               for r in _updown_x2()]
-    assert [q['landing'] for q in se.sweep_landings(legacy)] \
-        == [int(r['step']) for r in _updown_x2()]
+    untagged = [dict(r, tag='') for r in _updown_x2()]
+    for layout in (legacy, untagged):
+        assert [q['landing'] for q in se.sweep_landings(layout)] == steps
+
+
+def test_falling_sweep_to_zero_stops_pairing_its_end_with_the_baseline():
+    """A falling staircase that ends on 0 kV lands there after the whole
+    sweep -- the one single sweep that visits a kV twice. Keyed by kV,
+    the warm-up, the baseline and that last landing were one 'pair', and
+    a device still relaxing at the end read as a detection mismatch on
+    all four frames. They are separate landings now."""
+    p = sldea_profile.SldeaProfile(start_kv=3, end_kv=0, step_kv=1)
+    rows = _profile_rows(p)
+    assert [q['landing'] for q in se.sweep_landings(rows)] \
+        == [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
+    results = {i: {'area_px': 100000.0 * (1 + 0.1 * float(
+        r['nominal_kV']))} for i, r in enumerate(rows)}
+    last = [i for i, r in enumerate(rows) if r['step'] == '4']
+    for i in last:
+        results[i] = {'area_px': 116000.0}   # 16% over the baseline
+    assert se.ramp_consistency(rows, results) == {}
+    old = _ramp_consistency_78315cc(rows, results)
+    assert sorted(old) == [0, 1] + last, old
+    assert all(n == 'pair mismatch 15% at 0 kV' for n in old.values())
 
 
 def test_updown_hysteresis_is_not_a_pair_mismatch():
@@ -1695,7 +1719,13 @@ def _single_sweeps():
                       for r in base]),
                     (label + ', no step', [dict(r, step='') for r in base]),
                     (label + ', no step or tag',
-                     [dict(r, step='', tag='') for r in base])]
+                     [dict(r, step='', tag='') for r in base]),
+                    # rows built in code rather than read from a CSV: a
+                    # numeric 0 kV must stay "no kV", as it always was
+                    (label + ', numeric cells',
+                     [dict(r, step=int(r['step']),
+                           nominal_kV=float(r['nominal_kV']))
+                      for r in base])]
         by_step = {}
         for r in rows:
             by_step.setdefault(r['step'], []).append(r)

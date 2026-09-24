@@ -1648,8 +1648,9 @@ ANALYSIS:
         to a dialog (queue-marshalled, never touching Tk off the main thread)."""
         if self._updating:
             return
-        # Refused up front during an SLDEA run: its Restart would be refused
-        # until the run ends anyway (see _sldea_run_blocks).
+        # Refused up front during an SLDEA run (owner, 2026-09-24): its
+        # Restart would be refused until the run ends anyway, and the update
+        # copies onto the shared drive runs save to. See _sldea_run_blocks.
         if self._sldea_run_blocks('update'):
             return
         script = self._find_update_script()
@@ -1781,37 +1782,41 @@ ANALYSIS:
         the operator to ■ Abort. A run ends through ■ Abort, never as a
         side effect of a restart.
 
-        `_sldea_running` is the right flag: it goes True before the worker
-        writes the SG, and False only in _sldea_finished, after the worker
-        has zeroed it -- so a run that is still stopping is refused too. A
-        DRY run is refused as well: a restart would cut it off before it
+        `_sldea_running` is the right flag: sldea_run sets it before it
+        starts the worker, so before the worker's first SG write, and it
+        clears only in _sldea_finished, which the worker queues as the last
+        step of its finally -- after its attempt to zero the SG. So a run
+        that is still stopping is refused too. (If the attempt fails, the
+        HV NOT ZEROED alarm goes up and the flag still clears.) Both
+        orderings are pinned in tests/test_update_restart_guard.py. A DRY
+        run is refused as well: a restart would cut it off before it
         closes its run folder."""
         if not getattr(self, '_sldea_running', False):
             return False
         ch = getattr(self, '_sldea_live_ch', None)     # None: a DRY run
         if getattr(self, '_sldea_stop', False):
-            state = (f"The LIVE HV run on SG CH{ch} is still stopping. It "
-                     f"sets the SG to 0 V and switches it off before it "
-                     f"ends." if ch is not None else
-                     "The DRY run is still stopping.")
+            state = (f"The LIVE HV run on SG CH{ch} is still stopping."
+                     if ch is not None else "The DRY run is still stopping.")
             then = "Wait until ▶ Run is available again on the SLDEA tab"
         else:
             state = (f"A LIVE HV run is driving the Trek on SG CH{ch}."
                      if ch is not None else
                      "A DRY run is in progress on the SLDEA tab.")
             then = "■ Abort the run on the SLDEA tab (or let it finish)"
-        cut = ("stop the run from ramping down, leaving the Trek energized "
-               "while the restarted app shows an idle SLDEA tab"
-               if ch is not None else
-               "cut the run off before it closes its run folder")
         if action == 'restart':
             title = "Restart refused — SLDEA run in progress"
-            why = f"Restarting now would {cut}."
+            why = ("Restarting now would end the run before it can set the "
+                   "SG to 0 V and switch it off, leaving the Trek energized "
+                   "while the restarted app shows an idle SLDEA tab."
+                   if ch is not None else
+                   "Restarting now would cut the run off before it closes "
+                   "its run folder.")
             then += ", then press Restart now again."
         else:
             title = "Update refused — SLDEA run in progress"
-            why = ("Update after the run ends: the restart that loads the "
-                   f"new version would {cut}.")
+            why = ("Update after the run ends: Restart now is refused until "
+                   "then anyway, and the update copies files onto the "
+                   "shared drive the run may be saving to.")
             then += ", then choose Tools → Update Software… again."
         kw = {} if parent is None else {'parent': parent}
         messagebox.showwarning(title, f"{state}\n\n{why}\n\n{then}", **kw)

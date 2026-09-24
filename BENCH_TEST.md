@@ -1,4 +1,4 @@
-# Bench test checklist — signal gen (§A–§L, historical) + SLDEA telemetry/watchdog (§M–§O) + fiducial-ring experiment (§P, current)
+# Bench test checklist — signal gen (§A–§L, historical) + SLDEA telemetry/watchdog (§M–§O) + fiducial-ring experiment (§P, current) + SLDEA Run start gate (§R)
 
 **Setup:** BNC from sig gen **CH1 → scope CH1** (1 MΩ input). ~15 min total.
 Launch: `.venv/bin/python gui.py`
@@ -569,6 +569,36 @@ Also send, once:
 - **P1, P2 or P3 fails** → `#194` is answered *no* on physical grounds
   and `#198` is unblocked immediately at full scope. This is why P1–P3
   are cheap and come first.
+
+## R. SLDEA Run start gate — a DRY look at the dialogs, Trek HV off (2026-09-23)
+
+> **Keep the Trek's HV output OFF for this whole section.** The runs are
+> DRY, but the stepped sweeps in steps 1 and 4 really write the signal
+> generator: they are set to hold 0 V, and through an enabled Trek 1 V is
+> 1 kV at the DEA, so a typo in the level would matter. The gate itself
+> only ever withholds writes, so this is a look at the real dialogs, not
+> a merge gate. The logic, including every LIVE-side check, is
+> headless-tested in `tests/test_sldea_interlock.py`.
+
+**Setup:** the Linux bench PC with the signal generator and camera
+connected, and the Trek's HV output off. ~5 min. SLDEA tab: **Start 0**,
+**End 1**, **Step 0.5**, **Ramp 2**, **Landing 10**, **SG CH: 1**, any
+value in the **Electrode** box (an empty one asks its own question
+first), and **DRY RUN — HV OFF** ticked.
+
+1. Webcam tab → Stepped capture: **SG CH 1**, levels `0`, dwell `120` → **Run sweep** (one 0 V level, held for two minutes)
+2. SLDEA tab → **▶ Run (DRY)**
+   - [ ] an error box titled **SLDEA — run blocked** names SG CH1 and says *Stop sweep*, with no question before it
+   - [ ] the SLDEA tab's log pane shows `run refused — a stepped sweep is writing SG CH1, the run's channel`
+3. Webcam tab → **Stop sweep**, then SLDEA → **▶ Run (DRY)**
+   - [ ] the camera pre-flight opens, so the gate has cleared. **✖ Cancel** it
+4. Webcam tab: **SG CH 2**, levels `0`, dwell `120` → **Run sweep**. Then SLDEA → **▶ Run (DRY)**
+   - [ ] a question titled **Stepped sweep still running** names CH2, and **Enter** answers **No**: nothing starts
+   - [ ] press ▶ Run again and answer **Yes**: the camera pre-flight opens. Start the run and let it finish. Some snapshots may log `NO FRAME` (the question warned about that), and the run folder's `run.log` has the line `run-anyway beside a stepped sweep on SG CH2`
+   - [ ] afterwards, **Stop sweep** if the button still reads so
+
+**Send back:** anything that differed, the wording of any box that read
+badly, and the `run.log` from step 4.
 
 ---
 

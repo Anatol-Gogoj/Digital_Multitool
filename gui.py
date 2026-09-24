@@ -808,6 +808,16 @@ class InstrumentControlGUI:
         if key == 'sg' and getattr(self, '_sldea_live_ch', None) is not None:
             self._sg_live_locked(self._sldea_live_ch)
             return
+        # One connect at a time, refused BEFORE the handle or the label is
+        # touched. _run_bg's own check comes after the lines below, and it
+        # was the only one until review 2026-09-24: with another tab's
+        # Reconnect in flight, this tab was left with no handle, its label
+        # stuck at "Connecting..." and its old session open, until a later
+        # Reconnect succeeded. The note is _run_bg's own, word for word.
+        if 'connect' in self._bg_busy:
+            self.status_bar.config(
+                text="Still working on the previous connect operation...")
+            return
         old = getattr(self, key)
         setattr(self, key, None)   # nothing may use the handle meanwhile
         label.config(text="Connecting...", fg="#b36b00")

@@ -447,16 +447,38 @@ class _Win:
         return self
 
     def settle(self, secs=0.6):
-        """Pump the loop until the coalesced redraw has fired and Tk has
-        finished re-laying the window out."""
+        """Pump the loop until Tk has finished re-laying the window out AND
+        the coalesced redraw has fired. -> True when none is left pending.
+
+        `secs` of pumping covers the first half. It used to be all of it,
+        sized when every redraw was coalesced over REDRAW_MS -- and `#316`
+        then gave a resize its own RESIZE_MS, which left the <Configure>
+        100 ms to arrive in. The Linux runs this suite passed on made
+        that; a Windows 11 PC did not. There the canvas heard of a
+        geometry() 120-320 ms later (the toplevel alone took 80-130 ms to
+        resize), the redraw landed 575-730 ms after it, mostly once the
+        pumping had stopped, and the resize case compared the PREVIOUS
+        size's layout with a rebuild at this one (2026-09-23).
+
+        So the second half waits for the redraw itself, however late the
+        platform delivers the event. The bound is the module's own
+        promise: a pending redraw is held back at most MAX_DEFER_MS past
+        its window, and one still pending after that is a figure that
+        stopped tracking its window."""
         t0 = time.time()
         while time.time() - t0 < secs:
             self.root.update()
             time.sleep(0.02)
+        limit = time.time() + (g.RESIZE_MS + g.MAX_DEFER_MS) / 1000.0 + 1.0
+        while self.win._redraw_after is not None and time.time() < limit:
+            self.root.update()
+            time.sleep(0.02)
+        return self.win._redraw_after is None
 
     def resize(self, size):
         self.root.geometry(size)
-        self.settle()
+        assert self.settle(), \
+            f'the coalesced redraw never landed after resizing to {size}'
 
     def __exit__(self, *_exc):
         if self.root is not None:
@@ -495,8 +517,33 @@ def test_resize_the_figure_follows_the_window():
         # layout engine rather than a shortcut. It is not automatic:
         # tight_layout reads wspace off the axes it finds, so run on its
         # own output it drifted the panels 8-12% narrower.
+        #
+        # Only a shortcut that RAN, at THIS size, is worth comparing, so
+        # that is pinned first, through a spy on the one method it goes
+        # through. Unpinned, a resize that stopped taking the shortcut
+        # would compare a rebuild with a rebuild and pass -- and a settle
+        # that ended too early compared the PREVIOUS size's layout and
+        # failed as though the shortcut had landed somewhere else, which
+        # read as a DPI bug. Once landed, the shortcut was identical to
+        # the rebuild to the last bit, both at 96 dpi and in a DPI-aware
+        # process at 175% (Windows 11, 2026-09-23; see _Win.settle).
+        ran = []                   # (figure inches, shortcut taken) per call
+        real_relayout = w.win.relayout
+
+        def inches():
+            return tuple(float(v) for v in w.win.fig.get_size_inches())
+
+        def relayout():
+            took = real_relayout()
+            ran.append((inches(), took))
+            return took
+        w.win.relayout = relayout
         for size in ('900x600', '1300x850', '900x600'):
+            del ran[:]
             w.resize(size)
+            assert ran and ran[-1] == (inches(), True), (
+                f'the resize to {size} never took the shortcut at the size '
+                f'it left the figure: relayout calls {ran}, now {inches()}')
             shortcut = [tuple(ax.get_position().bounds)
                         for ax in w.win.fig.axes]
             assert shortcut, f'nothing drawn to lay out at {size}'

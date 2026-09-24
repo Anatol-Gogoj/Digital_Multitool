@@ -260,6 +260,246 @@ task.
   worker's `_sldea_finished` call into a nested `finally`. The real-worker
   tests here check exactly that ordering. Their stub (`_RunApp`) may need
   the recorder state that branch adds.
+## ▶ Run refuses to start beside a Webcam-tab sweep, and a sweep never writes a LIVE run's channel (2026-09-23)
+
+**TL;DR:** a stepped sweep started on the Webcam tab before a run used to
+keep writing the signal generator during it, and on the run's own channel
+that overwrote the Trek drive for up to a whole landing. ▶ Run now
+refuses to start beside anything that could still write its channel or
+grab its camera, and asks (Enter = No) only about a sweep on the other
+channel. A sweep also stops, rather than write, the channel a LIVE run
+owns.
+
+**Observation.** An adversarial review of `78315cc` found that
+`sldea_run` never looked at the Webcam tab. The stepped sweep
+(`_cam_seq_worker`) writes `set_basic_wave(ch, OFST=v)` once per level.
+The run loop re-sends its offset only when the commanded kV changes
+(`abs(kv - last_kv) > 1e-4`), so a level that lands mid-landing stays
+until the next ramp. This is not an exotic wiring: the sweep's own
+tooltip says its channel drives "the device under the camera", which on
+this rig means through the Trek. The LIVE channel lock (`_sg_live_locked`,
+2026-07-25) covered only the Signal Gen tab's controls used *during* a
+run.
+
+**Decision (the owner's rule, 2026-09-23).**
+
+- **Refused** (`_sldea_start_conflicts` / `_sldea_start_gate`):
+  - a stepped sweep on the run's SG channel. DRY runs too, because the
+    sweep can still energize the Trek; the DRY message adds that a
+    stopped sweep leaves its last level behind;
+  - a timed capture;
+  - any capture that is still stopping;
+  - a camera adjustment (the `camera-ctrl` job behind Apply & Lock /
+    Auto-expose / Auto-WB once / Stabilize), which rewrites the camera
+    settings the run is about to lock;
+  - for LIVE runs, a Signal Gen tab command still being sent (`sg-io`).
+    An Apply landing after the run set up its channel could swap the
+    waveform, and the run re-sends only its offset. No poller holds
+    `sg-io`, so this refuses only right after an operator's own click.
+- **Asked, Enter = No:** a sweep on the other channel. It does not write
+  the drive channel, but it competes for the camera, and a snapshot that
+  loses logs NO FRAME. A yes is written into `run.log`. This is the line
+  the LIVE channel lock already draws: the driven channel is locked and
+  the other stays usable.
+- **When:** first, before any HV question and before the camera is
+  touched. Then again at the commit point, after the camera pre-flight,
+  because every dialog in between waits on the operator for as long as
+  they take. The commit check never asks. The sweep allowed at the top
+  passes; any other sweep is refused there. That way no dialog can yield
+  to Tk between the check and `_sldea_live_ch` claiming the channel.
+- **Judged by the thread, one worker at a time:** a capture counts as
+  running while its worker THREAD is alive, because after Stop it still
+  finishes the step it was on. The Webcam starters now refuse to start a
+  new capture over a worker that is still finishing
+  (`_cam_worker_alive`), so `cam_seq_thread` is always the only live
+  worker and the gate can see it. The adversarial review found this
+  hole, and a probe confirmed it. A sweep whose write stalls on the
+  instrument lock is stopped, and then displaced by a new capture. It
+  becomes invisible to the gate, and its write lands after the run's
+  set-up: 2.5 kV instead of 1.0 kV for 5 s in the probe.
+- **The worker check:** `_cam_seq_worker` reads `_sldea_live_ch` before
+  every write and stops with *Capture failed: SG CHn is driving the Trek
+  in a LIVE SLDEA run* instead of writing. The timed capture's burst
+  trigger follows the same rule. The claim it reads is held from the
+  commit point until `_sldea_finished` runs on the Tk side, after the
+  worker has zeroed the SG and switched its output off, ■ Abort
+  included. A test pins that span.
+- **Left alone:** the live preview and the interval capture. `sldea_run`
+  already stops the preview, and the interval capture stops with it
+  (audit 2026-07-25). The gate does not tell camera indices apart: the
+  run always shoots camera 0, the one camera this rig has.
+
+**Not covered (follow-ups).**
+
+- **Two more lock bypasses:** the Signal Gen tab's **Fire** button
+  (`sg_fire_burst`) and the Waveform Editor's LAN upload (`arb_editor.py`,
+  which also rewrites WVTP/OFST on its channel) both bypass the LIVE
+  channel lock.
+- **A DRY run never checks its SG channel is at rest.** A finished sweep,
+  or an earlier Apply, can leave it at a level with the output on.
+  Checking needs signal-generator reads, so it is new instrument I/O and
+  needs a bench session first.
+- **Mid-run starts on main:** a sweep can still be *started* on a DRY
+  run's channel mid-run, because the worker check guards LIVE runs only.
+  The unmerged `claude/sldea-video-capture` adds `_cam_owned_by_sldea()`
+  start guards, which close that for every run.
+
+**Merging with `claude/sldea-video-capture`.** The two changes are
+complementary. A trial merge conflicts in three places, and each resolves
+by keeping both sides:
+
+- the top of `sldea_run`'s `try:` (this gate first, then the video
+  pre-flight);
+- this entry beside the video entry;
+- BENCH_TEST §R after §Q.
+
+Both test suites pass on the merged tree. Two follow-ups belong to that
+merge:
+
+- With Record ticked, an other-channel sweep should be refused rather
+  than asked about, because the recorder holds the camera for the whole
+  run.
+- The gate should count a previous run's recorder that is still shutting
+  down (`_sldea_recorder.reader_alive()`) as holding the camera.
+
+**Verification.**
+
+- **Tests:** `tests/test_sldea_interlock.py` has 26 tests. They drive the
+  real `sldea_run`, the gate, both Webcam starters, both capture workers,
+  `sldea_abort`, `_sldea_finished` and the real `_sldea_worker` against a
+  fake signal generator that records which thread wrote what.
+- **Reviews:** two adversarial passes, one on the logic and threading,
+  one on the tests and these docs. Every finding is fixed above or listed
+  as a follow-up.
+- **Mutation:** 29 mutants, each guard removed or weakened in turn. They
+  include every mutant either reviewer reported as surviving the first
+  version of the suite, and all 29 fail at least one test.
+- **No bench gate:** there is no new instrument I/O (the change only
+  withholds writes). BENCH_TEST §R is a five-minute DRY look at the
+  dialogs for the next bench visit.
+## A pair is one landing, not one kV: up/down and repeat runs stop pooling their visits (2026-09-23)
+
+**TL;DR:** on an up/down or repeat run, Edge Review treated every frame
+at one kV as a single "pair", and the pair check loosened the more often
+a level was visited. Repeat runs got confidence they had not earned,
+sometimes enough to auto-accept. Real hysteresis between the legs went
+to review as "detection disagreement". A pair is now the two snapshots
+of one landing, and a current spike only backs a collapse on its own
+visit. Runs that land on each kV once come out exactly as before, and
+tests pin that. That includes every rising sweep, which is every run
+recorded so far.
+
+**Observation → decision.**
+
+- *Observed* (read in the code on `78315cc`, then measured on fixtures
+  built from `SldeaProfile(...).snapshots`): `reconcile_pairs` keyed the
+  best candidates by nominal kV over the whole run. `sequence()` lands
+  every level below the peak twice on an up/down run, and the bottom one
+  twice in a row where two cycles meet. Repeat multiplies all of it. A
+  "pair" was therefore four frames (2N × 2 on a repeat), and the
+  tolerance, a SUM over the members, grew with them: 12% for a real
+  blob-tier pair, 24% across both legs, 72% for up/down ×3. On repeat
+  ×3, pairs 16.5% apart came out `pair_confirmed`, taking conf from 0.72
+  to 0.77, past `accept_conf`: a contradiction auto-accepted on both
+  sides. On up/down ×2 with 30% hysteresis between the legs, all 16
+  disc-fit frames below the peak were capped into review.
+- The same whole-run key was used in two more places.
+  `breakdown_flags` let a current event at the same kV **on the other
+  leg** corroborate an area collapse, and a confirmed flag brands every
+  later frame `_BREAKDOWN`: the P3_5 failure, reached by another road.
+  `ramp_consistency` wrote "pair mismatch" into data.csv on all four
+  frames of a level whenever the legs differed by more than 12%, which
+  is whenever the run showed the hysteresis it was recorded for. And
+  `sldea_plot.first_breakdown_kv`, documented as the run's FIRST
+  breakdown, returned the lowest flagged kV.
+- *Decision:* `se.sweep_landings(rows)` works out, from nominal kV in
+  CSV order, each row's **landing** (one hold), **leg** (the direction
+  of the ramp into it) and **cycle**. Pairing, corroboration and the
+  consistency notes group by landing. The tolerance formula is
+  untouched: it is back to the two members it was written for.
+- *How a landing is found:* consecutive rows at one kV. Where two
+  landings share a kV back to back, a row opens a new one only when
+  **all** the evidence it carries agrees: a `step` the landing does not
+  hold AND a snapshot phase it already holds. Either kind alone decides
+  when a row carries only that kind: the 07-23 tags with no step column,
+  or steps with no tags. The runner writes both and they always agree.
+  Demanding both keeps the grouping of layouts the runner never wrote:
+  `sldea_plot`'s fixtures (pre-ramp before post-ramp, no step) and
+  `sldea_diag`'s self-test run (a step per snapshot). Two layouts no
+  known writer produces now split where they used to pool: a step per
+  snapshot with no tags, and a duplicated snapshot with no step column.
+- *The watchdog's trip row* (tag `breakdown`, step 99: a sentinel, and
+  also a real landing number on runs of 99+ landings) never splits a
+  landing on its step. If it tripped during a hold, it belongs to that
+  landing, where grouping by kV always put it. Its current therefore
+  still corroborates a collapse the post-ramp frame had shown, and a
+  tripped single sweep flags exactly as before. If it tripped mid-ramp,
+  it is a landing of its own. This is the one place where "pair only the
+  two snapshots" bends, and it bends on purpose: excluding the row would
+  change tripped single sweeps. One case the rows cannot settle: a trip
+  in the first seconds of a hold at the same kV as the landing before
+  (the bottom level where two cycles meet), before that hold's first
+  snapshot, joins the earlier landing.
+- *Decision: `first_breakdown_kv` is now first in time, and the
+  aggregate cap does not follow it* (from the adversarial review, same
+  day). A time-ordered cap was the task as written, and on `main` it is
+  wrong. `run_level_curve` pools every visit to a level. An up/down run
+  that broke at 3.5 kV on the way up and stayed flagged down to 2.0 kV
+  therefore holds its collapsed frames in its 2.0–3.0 kV means. A
+  time-ordered cap drew that mixture into the aggregate: 101–109 at
+  those levels, against 122–133 from a healthy run. On a falling single
+  sweep, the cap would have kept exactly its collapsed levels. The cap
+  keeps the lowest flagged kV under an honest name,
+  `lowest_breakdown_kv`, so every figure is exactly as before. The first
+  breakdown in time becomes the cap once the aggregate averages one leg
+  per run (last bullet).
+- *No change where no kV recurs, proven:* the three `78315cc` functions
+  are frozen verbatim in `tests/test_sldea_edge.py` as oracles.
+  Randomized inputs over five profiles and every layout must reproduce
+  them exactly: stats, confs, tags and flag order. The layouts are the
+  runner's rows, a trip in the hold or mid-ramp, the 07-23 tags, no
+  step, neither step nor tag, rows built in code with numeric cells,
+  and both fixture layouts. Five plausible wrong rules each fail those
+  tests: the trip row always alone, step alone decides, post-after-pre
+  splits, no resting landing, and kV parsed differently from the
+  chain's own `float(cell or '')`. A sixth, phase alone decides, changes
+  no single sweep and fails the landing tests instead. The eight local
+  bench runs (`Downloads\Tuning\SLDEA_data`, read-only, SHA-1 of all 436
+  files unchanged) were run through both versions with a real detection
+  pass. Every row's landing equals its `step`, and the results match
+  exactly: pairs on 420 frames (382 of them confirmed or capped by the
+  pair pass), breakdown flags on all eight (the three breakdown runs
+  carry 4, 1 and 13 confirmed rows), consistency notes, and the
+  breakdown kV (5.75, 6.0, 5.6). The adversarial pass then ran 38,000
+  randomized runner single sweeps in eight layouts and 4,000 up/down and
+  repeat runs against the change. Beyond the cap, it found a crash on
+  rows built in code with a numeric 0 kV. It is fixed: the helper parses
+  kV as the chain does, and the oracles cover it.
+- *Changed on purpose, on one kind of single sweep:* a falling staircase
+  that ends on 0 kV lands there after the whole sweep. Its warm-up,
+  baseline and last landing were one "pair", and a device still
+  relaxing read as a mismatch on all four frames. They are separate
+  landings now, pinned by a test.
+- *Not changed:* the collapse and dip rules keep their "kV did not
+  decrease" gate. On a falling leg it already skips the step-to-step
+  checks, and it still checks inside a landing.
+  `sldea_diag.repeat_pairs` is photometric instrumentation, not
+  measurement. The wording that called the rule "same kV" now says
+  landing in four places: the Edge Review tooltip, the manual source
+  (`addendum_b_edge.json`, rebuilt at the next release), the diag
+  report and the trace report.
+- *For `claude/plot-hysteresis-axis`* (unmerged; it has its own
+  `sweep_legs`): it gives the same landings, legs and cycles on every
+  CSV the runner writes. For drawing, it makes the trip row a landing
+  of its own and splits on step alone, which is fine there. When it
+  lands, it can read `se.sweep_landings` instead of deriving them
+  again. Its aggregate averages an up/down run's first rising leg. That
+  is where `first_breakdown_kv` becomes the right cap: that leg's first
+  breakdown, or no cap from the run if it broke later. Until then,
+  `aggregate_cap_kv` stays on `lowest_breakdown_kv`. Note that `cycle`
+  counts hysteresis loops, not Repeat passes: a plain repeat's second
+  pass starts on a falling ramp, and its cycle turns only when the
+  voltage rises again.
 
 ## The aggregate averages BY GROUP, the runs it averages can be hidden, and the group palette is a shape argument rather than a colour one (2026-08-10)
 

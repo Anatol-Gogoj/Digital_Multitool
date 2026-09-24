@@ -30,8 +30,8 @@ active area is the ink edge of that known object, tracked by rays and a
 robust ellipse — the full responding disc, leads and the passive
 wrinkle ring excluded, with a real 85% CI on area from the edge
 scatter. Gated frames with a known disc report 'resting' instead of an
-empty row. Same-kV pair agreement and channel hysteresis are folded
-into confidence (reconcile_pairs / prev_method).
+empty row. Same-landing pair agreement and channel hysteresis are
+folded into confidence (reconcile_pairs / prev_method).
 
 A note on 'conf': it is a review-ordering score — the strength of
 internally consistent evidence — NOT a calibrated probability that the
@@ -2752,6 +2752,96 @@ def needs_review(cands, settings):
 
 
 # ---------------------------------------------------------------------------
+# sweep position (2026-09-23)
+#
+# An "Up/down (hysteresis)" run lands on every level below the peak twice --
+# once rising, once falling -- and Repeat lands on the whole sweep again, so
+# on such a run one nominal kV names several moments. Pairing, breakdown
+# corroboration and the consistency notes used to key on the kV alone and
+# pooled them. The CSV carries no direction field and needs none: its order
+# is time order, and the direction of every ramp is in the kV sequence.
+# ---------------------------------------------------------------------------
+
+def _snap_phase(tag):
+    """'post' / 'pre' for a landing snapshot, else ''. A prefix match, so
+    the 07-23 era's 'post'/'pre' read like 'post-ramp'/'pre-ramp'."""
+    return next((p for p in ('post', 'pre') if tag.startswith(p)), '')
+
+
+def sweep_landings(rows):
+    """Where each run-CSV row sits in the sweep -> a list parallel to
+    `rows`: None for a row without a parseable nominal_kV, else
+
+      {'landing': 0 for the 0 kV frames before the first ramp (warm-up,
+                  baseline), then 1, 2, ... one per voltage landing,
+       'leg':     'rise' or 'fall', the direction of the ramp INTO the
+                  landing; a landing at the SAME kV as the one before (the
+                  bottom level, landed twice where two up/down cycles
+                  meet) takes the direction of the ramp OUT of it,
+       'cycle':   1, 2, ... advancing wherever a falling leg turns to rise}
+
+    A landing is the rows photographed during one hold: consecutive rows
+    at one nominal kV. Where two landings share a kV back to back (that
+    cycle boundary; a single-level repeat) the rows' own evidence splits
+    them -- a `step` the landing does not hold, a snapshot phase it
+    already holds -- and a row starts a new landing only when ALL the
+    evidence it carries says so. The runner writes both on every row and
+    they always agree; demanding both keeps the grouping of CSVs it never
+    wrote (fixtures with pre-ramp before post-ramp, or a step per
+    snapshot) exactly what it always was.
+
+    The watchdog's trip row (tag 'breakdown', step 99 -- a sentinel, and a
+    real landing number on a run of 99+ landings) never splits on its
+    step: tripped during a hold its kV is that landing's, and it belongs
+    to it; tripped mid-ramp its kV differs, and it is a landing of its own.
+
+    On a run where no kV recurs once the rows have left it -- every rising
+    single sweep -- each kV is exactly one landing, all 'rise' in cycle 1,
+    so anything keyed on landings behaves there exactly as it did keyed on
+    kV."""
+    out = [None] * len(rows)
+    kvs = [0.0]            # landing 0, the resting start, recorded or not
+    cur, n = None, 0
+    for i, row in enumerate(rows):
+        kv = _num(row.get('nominal_kV'))
+        if kv is None:
+            continue
+        tag = str(row.get('tag') or '').strip()
+        phase = _snap_phase(tag)
+        step = None if tag.startswith('breakdown') else _num(row.get('step'))
+        resting = tag.startswith('baseline') or tag == 'warmup' or step == 0
+        new = cur is None or kv != cur['kv']
+        if not new and not (resting and n == 0):
+            evidence = []
+            if step is not None and cur['steps']:
+                evidence.append(step not in cur['steps'])
+            if phase and cur['phases']:
+                evidence.append(phase in cur['phases'])
+            new = bool(evidence) and all(evidence)
+        if new:
+            if not (cur is None and resting):
+                n += 1
+                kvs.append(kv)
+            cur = {'kv': kv, 'steps': set(), 'phases': set()}
+        if step is not None:
+            cur['steps'].add(step)
+        if phase:
+            cur['phases'].add(phase)
+        out[i] = n
+    legs, cycles = ['rise'], [1]
+    for k in range(1, len(kvs)):
+        d = kvs[k] - kvs[k - 1]
+        if abs(d) < 1e-9 and k + 1 < len(kvs):
+            d = kvs[k + 1] - kvs[k]
+        leg = legs[-1] if abs(d) < 1e-9 else ('rise' if d > 0 else 'fall')
+        cycles.append(cycles[-1] + (1 if leg == 'rise' and legs[-1] == 'fall'
+                                    else 0))
+        legs.append(leg)
+    return [None if k is None else
+            {'landing': k, 'leg': legs[k], 'cycle': cycles[k]} for k in out]
+
+
+# ---------------------------------------------------------------------------
 # breakdown heuristics
 # ---------------------------------------------------------------------------
 
@@ -2782,7 +2872,14 @@ def breakdown_flags(rows, accepted_areas, settings):
     (P3_5: a 36% "collapse" from the manual-trace -> disc-fit method
     switch renamed 35 healthy frames while the current never left
     +-11 uA of baseline). In the no-median fallback the legacy behaviour
-    (collapse alone confirms) is kept."""
+    (collapse alone confirms) is kept.
+
+    "The same level" means the same LANDING -- the same visit of that kV
+    (sweep_landings, 2026-09-23). An up/down run passes each level twice
+    and a repeat run passes it again, and an event on the other leg or
+    the other pass is another moment of the run: it used to vouch for a
+    collapse it never saw, and a confirmed flag brands every frame after
+    it. On a single sweep each kV is one landing, so nothing changes."""
     flags, advis = {}, {}
     ua_lim = float(settings['breakdown_ua'])
     dev_lim = float(settings.get('breakdown_dev_ua',
@@ -2832,6 +2929,9 @@ def breakdown_flags(rows, accepted_areas, settings):
         except (TypeError, ValueError):
             return None
 
+    landing = [None if p is None else p['landing']
+               for p in sweep_landings(rows)]
+    event_landings = {landing[j] for j in events} - {None}
     prev_area = prev_kv = None
     for i, row in enumerate(rows):
         area = accepted_areas.get(i)
@@ -2840,9 +2940,7 @@ def breakdown_flags(rows, accepted_areas, settings):
                 and kv >= prev_kv
                 and area < prev_area * (1.0 - jump / 100.0)):
             pct = 100 * (1 - area / prev_area)
-            corroborated = median is None or any(
-                (k := _kv(rows[j])) is not None and abs(k - kv) < 1e-9
-                for j in events)
+            corroborated = median is None or landing[i] in event_landings
             if corroborated:
                 flags.setdefault(i, f"breakdown? area collapsed {pct:.0f}%")
             elif i not in flags:
@@ -2888,9 +2986,9 @@ def wrinkle_onset(rows, results, settings):
 
 
 def reconcile_pairs(rows, cands_by_idx, settings):
-    """Fold same-kV pair agreement into confidence, BEFORE auto-accept.
+    """Fold pair agreement into confidence, BEFORE auto-accept.
 
-    The two snapshots of one step are independent detections of one
+    The two snapshots of one landing are independent detections of one
     physical state -- the strongest per-frame evidence the run offers.
     When their best candidates agree within a tolerance derived from
     their own fit CIs, both gain +0.05 (tagged 'pair_confirmed'); when
@@ -2907,19 +3005,26 @@ def reconcile_pairs(rows, cands_by_idx, settings):
     outside the circle in both) agree beautifully -- that is the
     correlated-error case pair agreement cannot certify against, and
     the audit's verdict about THIS boundary outranks consistency
-    between two of them."""
+    between two of them.
+
+    A pair is the snapshots of ONE landing (sweep_landings, 2026-09-23),
+    no longer every frame at its kV. An up/down run made each level
+    below the peak a "pair" of four frames, and N passes of a repeat
+    2N (x2 again with up/down), while the tolerance -- a SUM over the
+    members -- grew with the visit count: 12% for a real blob-tier pair,
+    24% across both legs, 72% for up/down x3. Repeat runs collected
+    'pair_confirmed' boosts no pair had earned, a step toward
+    auto-accept; genuine hysteresis between legs read as detection
+    disagreement and was capped into review. On a single sweep each kV
+    is one landing, so the pairs -- and every result -- are unchanged."""
     acc = float(settings.get('accept_conf', 0.75))
-    by_kv = {}
-    for i, row in enumerate(rows):
-        try:
-            kv = float(row.get('nominal_kV') or '')
-        except (TypeError, ValueError):
-            continue
+    by_landing = {}
+    for i, pos in enumerate(sweep_landings(rows)):
         cl = cands_by_idx.get(i)
-        if cl:
-            by_kv.setdefault(kv, []).append(cl[0])
+        if pos is not None and cl:
+            by_landing.setdefault(pos['landing'], []).append(cl[0])
     stats = {'confirmed': 0, 'capped': 0}
-    for kv, members in sorted(by_kv.items()):
+    for members in by_landing.values():
         if len(members) < 2:
             continue
         areas = [float(b['area_px']) for b in members]
@@ -3034,15 +3139,21 @@ def ramp_consistency(rows, results, settings=None,
     """Annotations for the physics a per-frame detector cannot see.
     -> {row_index: note}
 
-    Two invariants the rig guarantees: the two snapshots of one step
-    (pre-ramp / post-ramp) photograph the same state, so their areas must
+    Two invariants the rig guarantees: the two snapshots of one landing
+    (post-ramp / pre-ramp) photograph the same state, so their areas must
     agree; and the area cannot shrink while the voltage rises, short of
     breakdown. Violations are ANNOTATED for review, never averaged away:
     a pair mismatch usually means the two frames' detections picked
     different objects or tiers, and a dip usually IS the interesting
     event (pull-in, breakdown) or a detection failure -- both are for a
     human. `results` maps row index -> accepted candidate dict (the same
-    shape apply_results takes)."""
+    shape apply_results takes).
+
+    Pairs are per landing (sweep_landings, 2026-09-23), as in
+    reconcile_pairs: the rising and falling visits of one kV are
+    different states, and hysteresis between them written into the CSV
+    as a 'pair mismatch' on all four frames was the physics the up/down
+    run was recorded to show."""
     def _area(i):
         r = results.get(i)
         try:
@@ -3058,14 +3169,14 @@ def ramp_consistency(rows, results, settings=None,
             return None
 
     annos = {}
-    by_step = {}
-    for i, row in enumerate(rows):
-        kv = _kv(row)
-        if kv is not None and _area(i) is not None:
-            by_step.setdefault(kv, []).append(i)
-    for kv, idxs in sorted(by_step.items()):
+    by_landing = {}
+    for i, pos in enumerate(sweep_landings(rows)):
+        if pos is not None and _area(i) is not None:
+            by_landing.setdefault(pos['landing'], []).append(i)
+    for idxs in by_landing.values():
         if len(idxs) < 2:
             continue
+        kv = _kv(rows[idxs[0]])
         vals = [_area(i) for i in idxs]
         lo, hi = min(vals), max(vals)
         mid = (hi + lo) / 2.0

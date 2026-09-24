@@ -1508,9 +1508,9 @@ class EdgeReviewApp:
         # from an ON-DEMAND single-frame detect, so a trace of a frame no
         # pass ever covered still has a machine candidate to be ground
         # truth against (#162). Deliberately NOT cands_all: a lone frame
-        # carries neither the ramp-order hysteresis bonus nor the same-kV
-        # pair reconciliation, so these candidates must never enter the
-        # review pass, the A/B/C radios, `has_pass` or a saved
+        # carries neither the ramp-order hysteresis bonus nor the
+        # same-landing pair reconciliation, so these candidates must never
+        # enter the review pass, the A/B/C radios, `has_pass` or a saved
         # active_area_px — see _machine_pairing (review 2026-08-06).
         self.results = {}       # row index -> chosen candidate | None=rejected
         self.traces = {}        # row index -> STAGED candidate D (#172)
@@ -2983,8 +2983,8 @@ class EdgeReviewApp:
         So the pairing is CREATED rather than reported, by detecting the
         one frame (_detect_one, cached per frame including its failures).
         A real pass ALWAYS wins over an on-demand result for the same
-        frame: its conf carries the ramp hysteresis and the same-kV
-        reconciliation, which is the convention the curve is read in.
+        frame: its conf carries the ramp hysteresis and the same-landing
+        pair reconciliation, which is the convention the curve is read in.
 
         Review state is never touched here -- not results, not
         auto_idx/auto_rej, not the scale gate, not cands_all -- so an

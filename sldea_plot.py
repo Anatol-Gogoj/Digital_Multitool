@@ -848,10 +848,17 @@ def first_breakdown_kv(run):
     current trace -- so this is deliberately independent of opts:
     where the average stops being a physical quantity is not a rendering
     preference, and --no-breakdown hides the X marks without making the
-    device's collapse go away."""
-    kvs = [r['kv'] for r in run['rows']
-           if r['index'] in run['flags'] and r['kv'] is not None]
-    return min(kvs) if kvs else None
+    device's collapse go away.
+
+    FIRST IN TIME -- the earliest flagged row in CSV order -- not the
+    lowest flagged kV (2026-09-23). On a rising single sweep those are
+    the same row. An up/down run that breaks down on the way up keeps
+    confirming on the way down, and the lowest flagged kV was then a
+    level the device had passed intact, which is where the aggregate
+    cap used to stop every run in the figure."""
+    hits = [(r['index'], r['kv']) for r in run['rows']
+            if r['index'] in run['flags'] and r['kv'] is not None]
+    return min(hits)[1] if hits else None
 
 
 def aggregate_cap_kv(runs):

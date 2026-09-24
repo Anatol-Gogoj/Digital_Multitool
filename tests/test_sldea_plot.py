@@ -2067,6 +2067,38 @@ def test_aggregate_stops_at_the_first_breakdown_across_the_runs():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_first_breakdown_is_the_first_event_in_time():
+    """An up/down run that breaks down at 3.5 kV on the way UP keeps
+    confirming on the way down (its current stays off baseline to 2 kV),
+    so the LOWEST flagged kV is 2.0 -- a level the device passed intact
+    going up. first_breakdown_kv returned that minimum until 2026-09-23,
+    and the aggregate cap stopped every run in the figure there."""
+    import sldea_profile
+    d = _mktmp()
+    try:
+        p = sldea_profile.SldeaProfile(start_kv=0, end_kv=4, step_kv=0.5,
+                                       updown=True)
+        broke = range(7, 13)        # 3.5 kV up, 4.0, then 3.5 .. 2.0 down
+        rows = [{'snapshot': n, 'step': s['step'], 'tag': s['tag'],
+                 'nominal_kV': round(s['nominal_kv'], 3),
+                 'measured_uA': -300.0 if s['step'] in broke else -16.0,
+                 'active_area_mm2': 100.0 + 10 * s['nominal_kv'],
+                 'timestamp': '2026-09-23T10:00:00',
+                 'notes': 'edge:disc-fit conf 0.93'}
+                for n, s in enumerate(p.snapshots, start=1)]
+        _fake_run(os.path.join(d, 'UPDOWN'), rows)
+        run = sp.load_run(os.path.join(d, 'UPDOWN'), lambda m: None)
+        kvs = [run['rows'][i]['kv'] for i in sorted(run['flags'])]
+        assert kvs == [3.5, 3.5, 4.0, 4.0, 3.5, 3.5, 3.0, 3.0,
+                       2.5, 2.5, 2.0, 2.0], kvs
+        assert sp.first_breakdown_kv(run) == 3.5
+        fine = _agg_run(d, 'FINE', [0.5 * i for i in range(1, 9)],
+                        lambda kv: 100.0 + 11 * kv)
+        assert sp.aggregate_cap_kv([run, fine]) == 3.5
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_aggregate_is_refused_outside_area_mode_in_both_front_ends():
     """current/power plot one point per SNAPSHOT, with no level structure
     to pool. Refused loudly rather than ignored: a flag that quietly does

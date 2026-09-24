@@ -13,6 +13,97 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## A pair is one landing, not one kV: up/down and repeat runs stop pooling their visits (2026-09-23)
+
+**TL;DR:** on an up/down or repeat run, Edge Review treated every frame
+at one kV as a single "pair", and the pair check loosened the more often
+a level was visited. Repeat runs got confidence they had not earned,
+sometimes enough to auto-accept. Real hysteresis between the legs went
+to review as "detection disagreement". A pair is now the two snapshots
+of one landing, a current spike only backs a collapse on its own visit,
+and the plot's first breakdown is the first in time. Single sweeps
+(every run recorded so far) come out exactly as before, and tests pin
+that.
+
+**Observation → decision.**
+
+- *Observed* (read in the code on `78315cc`, then measured on fixtures
+  built from `SldeaProfile(...).snapshots`): `reconcile_pairs` keyed the
+  best candidates by nominal kV over the whole run. `sequence()` lands
+  every level below the peak twice on an up/down run, and the bottom one
+  twice in a row where two cycles meet. Repeat multiplies all of it. A
+  "pair" was therefore four frames (2N × 2 on a repeat), and the
+  tolerance, a SUM over the members, grew with them: 12% for a real
+  blob-tier pair, 24% across both legs, 72% for up/down ×3. On repeat
+  ×3, pairs 16.5% apart came out `pair_confirmed`, taking conf from 0.72
+  to 0.77, past `accept_conf`: a contradiction auto-accepted on both
+  sides. On up/down ×2 with 30% hysteresis between the legs, all 16
+  disc-fit frames below the peak were capped into review.
+- The same whole-run key was used in three more places.
+  `breakdown_flags` let a current event at the same kV **on the other
+  leg** corroborate an area collapse, and a confirmed flag brands every
+  later frame `_BREAKDOWN`: the P3_5 failure, reached by another road.
+  `ramp_consistency` wrote "pair mismatch" into data.csv on all four
+  frames of a level whenever the legs differed by more than 12%, which
+  is whenever the run showed the hysteresis it was recorded for.
+  `sldea_plot.first_breakdown_kv` returned the **lowest** flagged kV. A
+  run that breaks down on the way up keeps confirming on the way down,
+  so the cross-run cap stopped every run at a level that device had
+  passed intact.
+- *Decision:* `se.sweep_landings(rows)` works out, from nominal kV in
+  CSV order, each row's **landing** (one hold), **leg** (the direction
+  of the ramp into it) and **cycle**. Pairing, corroboration and the
+  consistency notes group by landing, and `first_breakdown_kv` takes the
+  earliest flagged row. The tolerance formula is untouched: it is back
+  to the two members it was written for.
+- *How a landing is found:* consecutive rows at one kV. Where two
+  landings share a kV back to back, a row opens a new one only when
+  **all** the evidence it carries agrees: a `step` the landing does not
+  hold AND a snapshot phase it already holds (either one alone when the
+  row carries only one). The runner writes both and they always agree.
+  Demanding both keeps the grouping of layouts the runner never wrote:
+  `sldea_plot`'s fixtures (pre-ramp before post-ramp, no step) and
+  `sldea_diag`'s self-test run (a step per snapshot).
+- *The watchdog's trip row* (tag `breakdown`, step 99: a sentinel, and
+  also a real landing number on runs of 99+ landings) never splits a
+  landing on its step. If it tripped during a hold, it belongs to that
+  landing, where grouping by kV always put it. Its current therefore
+  still corroborates a collapse the post-ramp frame had shown, and a
+  tripped single sweep flags exactly as before. If it tripped mid-ramp,
+  it is a landing of its own. This is the one place where "pair only the
+  two snapshots" bends, and it bends on purpose: excluding the row would
+  change tripped single sweeps.
+- *No change on single sweeps, proven:* the three `78315cc` functions
+  are frozen verbatim in `tests/test_sldea_edge.py` as oracles.
+  Randomized inputs over five profiles and every layout must reproduce
+  them exactly: stats, confs, tags and flag order. The layouts are the
+  runner's rows, a trip in the hold or mid-ramp, the 07-23 tags, no
+  step, neither step nor tag, and both fixture layouts. Three plausible
+  wrong rules each fail those tests: the trip row always alone, step
+  alone decides, and post-after-pre splits. The eight local bench runs
+  (`Downloads\Tuning\SLDEA_data`, read-only, SHA-1 of all 436 files
+  unchanged) were run through both versions with a real detection pass.
+  Every row's landing equals its `step`, and the results match exactly:
+  pairs on 420 frames (382 of them confirmed or capped by the pair
+  pass), breakdown flags on all eight (the three breakdown runs carry
+  4, 1 and 13 confirmed rows), consistency notes, and first-breakdown kV
+  (5.75, 6.0, 5.6).
+- *Not changed:* the collapse and dip rules keep their "kV did not
+  decrease" gate. On a falling leg it already skips the step-to-step
+  checks, and it still checks inside a landing.
+  `sldea_diag.repeat_pairs` is photometric instrumentation, not
+  measurement.
+- *For `claude/plot-hysteresis-axis`* (unmerged; it has its own
+  `sweep_legs`): it gives the same landings, legs and cycles on every
+  CSV the runner writes. For drawing, it makes the trip row a landing
+  of its own and splits on step alone, which is fine there. When it
+  lands, it can read `se.sweep_landings` instead of deriving them
+  again. Its aggregate averages an up/down run's first rising leg. The
+  cap is now the first breakdown in time, which is exact when the
+  device broke on that leg. When the device broke later, on the way
+  down, the cap is conservative: it shortens the averaged leg but never
+  mixes. Keying the cap to the averaged leg is that branch's call.
+
 ## The aggregate averages BY GROUP, the runs it averages can be hidden, and the group palette is a shape argument rather than a colour one (2026-08-10)
 
 **TL;DR:** the cross-run aggregate produced one mean over everything

@@ -159,15 +159,22 @@ def test_a_launcher_that_names_itself_is_run_again():
 
 
 def test_a_named_launcher_that_is_not_a_file_is_ignored():
-    """A relative path, a missing file or a folder in SCPI_LAUNCHER is
-    ignored: the guess and the old restart carry on as if it were unset."""
+    """A relative path -- even one that names a file in the working
+    directory -- a missing file or a folder in SCPI_LAUNCHER is ignored:
+    the guess and the old restart carry on as if it were unset."""
     with _chain() as c:
-        for bad in ('launch_gui.sh', _os.path.join(c.home, 'gone.sh'),
-                    c.home, ''):
-            env = dict(c.env, SCPI_LAUNCHER=bad)
-            got = _cmd(c.cache_app, env)
-            assert got == (BASH, ['bash', c.launcher, '--an-arg']), (bad, got)
-            assert _cmd(c.clone, env) == UNCHANGED, bad
+        cwd = _os.getcwd()
+        _os.chdir(c.share)             # 'launch_gui.sh' is a file here
+        try:
+            for bad in ('launch_gui.sh', _os.path.join(c.home, 'gone.sh'),
+                        c.home, ''):
+                env = dict(c.env, SCPI_LAUNCHER=bad)
+                got = _cmd(c.cache_app, env)
+                assert got == (BASH, ['bash', c.launcher, '--an-arg']), \
+                    (bad, got)
+                assert _cmd(c.clone, env) == UNCHANGED, bad
+        finally:
+            _os.chdir(cwd)
 
 
 def test_anywhere_else_the_restart_is_unchanged():

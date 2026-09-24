@@ -458,15 +458,34 @@ def test_restart_runs_a_launcher_that_named_itself():
 def test_the_launcher_restart_is_still_refused_during_a_run():
     """The gate comes first whatever Restart would run: during a LIVE run,
     DRY run or one still stopping, a launcher that is there changes
-    nothing -- the same warning, no destroy, no exec."""
-    for run, stopping in ((1, False), ('dry', False), (2, True)):
-        for where in ('cache', 'named'):
-            app = _App(run=run, stopping=stopping)
-            mb = _MB()
-            with _patched(mb, app.events) as fake_os, _launcher(where):
-                app._restart_app()
-            _refused(app, fake_os)
-            _one_warning(mb, RESTART_REFUSED)
+    nothing -- the same warning, no destroy, no exec. And the launcher is
+    not even looked for: that is a stat on the share, which on a dead NAS
+    can block the Tk thread while the run needs it."""
+    looked = []
+
+    def recorder(*a, **k):
+        looked.append(a)
+        return real(*a, **k)
+
+    real = relaunch.restart_command
+    relaunch.restart_command = recorder
+    try:
+        for run, stopping in ((1, False), ('dry', False), (2, True)):
+            for where in ('cache', 'named'):
+                app = _App(run=run, stopping=stopping)
+                mb = _MB()
+                with _patched(mb, app.events) as fake_os, _launcher(where):
+                    app._restart_app()
+                _refused(app, fake_os)
+                _one_warning(mb, RESTART_REFUSED)
+        assert looked == [], "looked for the launcher during a run"
+        # the recorder is live: once the run is over it IS asked
+        app = _App(run=None)
+        with _patched(_MB(), app.events) as fake_os, _launcher('cache'):
+            app._restart_app()
+        assert len(looked) == 1 and fake_os.execs, (looked, fake_os.execs)
+    finally:
+        relaunch.restart_command = real
 
 
 # --------------------------------------------------------------------------

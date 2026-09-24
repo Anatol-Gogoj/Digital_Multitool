@@ -1116,6 +1116,11 @@ def test_remembered_options_round_trip_per_parent_folder():
                        # every session, and re-ticking it each time is the
                        # annoyance this file exists to end.
                        'strain_pct': False,
+                       # 2026-09-23: the x axis and the up/down leg view
+                       # join as drawing answers too -- a lab that reads
+                       # its runs against time, or never wants arrows,
+                       # does so every session
+                       'x': 'kv', 'split_legs': True, 'arrows': True,
                        # `#314`'s pair joins for a different reason from
                        # every key above it: not how the figure is drawn,
                        # but what it is written as. A house that exports
@@ -2283,6 +2288,64 @@ def test_plot_points_follow_the_strain_percent_panel():
                    for _x, y, _r, _w in g.plot_points(runs, opts, panel=1))
     finally:
         shutil.rmtree(p, ignore_errors=True)
+
+
+def test_plot_points_follow_the_time_axis():
+    """On the elapsed-time axis a double-click has to resolve against the
+    snapshots' TIMES. plot_points placed every target at its kV, which on
+    that axis is where no marker was drawn (2026-09-23)."""
+    p = _mktmp()
+    try:
+        _fake_run(p, 'A_run', processed=True)
+        # the fixture's two snapshots are a minute apart on the wall clock
+        for mode in ('area', 'current'):
+            runs, opts = _prepared(p, ['A_run'], mode=mode, x='time')
+            xs = [x for x, _y, _r, _w in g.plot_points(runs, opts)]
+            assert xs == [0.0, 1.0], (mode, xs)
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_the_time_axis_greys_and_neutralises_the_kv_only_options():
+    """Pre/post, the mean line and the aggregate pool by kV; make_opts
+    refuses them beside --x time. The window greys them and neutralises
+    them -- a figure, not an error, when the axis is switched -- and KEEPS
+    the ticks, so switching back restores what the operator had."""
+    with _Win() as w:
+        if not w.ok:
+            return
+        win = w.win
+        win.v_prepost.set(True)
+        win.v_aggregate.set(True)
+        win.v_x.set('time')
+        win._toggled()
+        w.settle()
+        for cb in (win.cb_prepost, win.cb_mean, win.cb_aggregate,
+                   win.cb_aggregate_only, win.cb_arrows):
+            assert str(cb.cget('state')) == 'disabled', cb.cget('text')
+        opts, err = win.current_opts()
+        assert err is None, err
+        assert opts['x'] == 'time' and not opts['prepost'] \
+            and not opts['aggregate'], opts
+        win.v_x.set('kv')
+        win._toggled()
+        opts, err = win.current_opts()
+        assert err is None and opts['prepost'] and opts['aggregate'], opts
+        assert str(win.cb_prepost.cget('state')) == 'normal'
+        # the arrows are the leg split's CHILD: inert without it
+        assert str(win.cb_arrows.cget('state')) == 'normal'
+        win.v_split_legs.set(False)
+        win._toggled()
+        assert str(win.cb_arrows.cget('state')) == 'disabled'
+
+
+def test_the_axis_and_leg_controls_explain_themselves():
+    for key in ('x', 'split_legs', 'arrows'):
+        assert len(g.DRAW_TIPS[key]) > 60, key
+    # the two facts an operator most needs from the hover
+    assert 'first rising leg' in g.DRAW_TIPS['split_legs']
+    assert 'point right' in g.DRAW_TIPS['arrows']
+    assert set(g.ENUM_OPTIONS['x']) == set(sp.X_AXES)
 
 
 def _run():

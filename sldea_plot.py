@@ -12,7 +12,8 @@ Usage:
                          [--subplots both|first|second] [--cadence-guard]
                          [--aggregate] [--aggregate-exact]
                          [--group NAME=RUN[,RUN...]] [--aggregate-only]
-                         [--format png|svg] [--dpi N] [--strain-pct]
+                         [--strain-pct] [--x kv|time] [--merge-legs]
+                         [--no-arrows] [--format png|svg] [--dpi N]
     python sldea_plot.py --from-spec FILE.figspec.json [flags to override]
     python sldea_plot.py --gui [RUN ...]        # window (see below)
     python sldea_plot.py --selftest [OUT.png]
@@ -51,6 +52,23 @@ Modes:
               rows keep the raw product, flagged in the caption.
     --vs-area swaps the x axis to active area (current/power modes only;
               needs reviewed areas like area mode).
+    --x time  draws every mode against elapsed time since each run started
+              (minutes; the scheduled t_planned_s, else the wall-clock
+              timestamps) instead of nominal kV: one point per snapshot in
+              the order taken, so an up/down or repeated run no longer
+              folds back over itself. Refuses --prepost/--mean/--aggregate
+              (they pool per kV level) and --vs-area.
+
+Up/down and repeated runs:
+    A run whose voltage also FELL (Up/down, or a Repeat that restarts
+    below where it ended) is drawn leg by leg: one line per leg,
+    triangle-up points rising and triangle-down falling, per LANDING
+    rather than per kV level -- keyed by kV, the two legs used to average
+    into one point and --prepost kept only the last leg. Small arrowheads
+    follow the direction of travel. The aggregate takes such a run's
+    first rising leg. --merge-legs restores the per-kV averaging and
+    --no-arrows drops the arrowheads; a single sweep is unaffected by
+    either.
 
 Rendering:
     - Default lines are the per-level MEAN of the pre/post snapshot pair;
@@ -275,6 +293,13 @@ TOL_BRIGHT = ['#4477AA', '#66CCEE', '#228833', '#CCBB44',
 
 MODES = ('area', 'current', 'power')
 
+# What a figure's x axis can be (2026-09-23). 'kv' is nominal voltage, the
+# only axis until now; 'time' is elapsed time since the run started, the
+# axis on which an up/down or repeated run stops folding back over itself.
+# --vs-area stays its own flag: it predates this, and it is a current/
+# power-mode switch rather than a third general axis.
+X_AXES = ('kv', 'time')
+
 # which panel(s) a figure renders (`#270`). 'first'/'second' name the same
 # panels --title-first/--title-second do, so one vocabulary covers both.
 SUBPLOTS = ('both', 'first', 'second')
@@ -329,6 +354,13 @@ def _f(text):
         return None
 
 
+def _int(text):
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
+
+
 def _median(vals):
     """Same even-count median as sldea_edge.breakdown_flags, so the drawn
     baseline matches the value printed in the detector's reason text."""
@@ -366,6 +398,11 @@ def load_rows(rundir):
             'snapshot': (r.get('snapshot') or '').strip(),
             'tag': tag, 'phase': phase,
             'kv': _f(r.get('nominal_kV')),
+            # the landing number and the scheduled time: read so an up/down
+            # run's legs and an elapsed-time axis can be derived (see
+            # sweep_legs / elapsed_times); blank on old runs and fixtures
+            'step': _int(r.get('step')),
+            't_planned': _f(r.get('t_planned_s')),
             'ua': _f(r.get('measured_uA')),
             'area_mm2': _f(r.get('active_area_mm2')),
             'area_px': _f(r.get('active_area_px')),
@@ -381,6 +418,146 @@ def load_rows(rundir):
     return rows
 
 
+# ---------------------------------------------------------------------------
+# sweep direction (2026-09-23)
+#
+# An "Up/down (hysteresis)" run visits every level below the peak twice --
+# once rising, once falling -- and Repeat visits the whole sweep again.
+# Everything above keys snapshots by kV, which on such a run AVERAGES the
+# two legs into one point per level: the loop the run was recorded to show
+# disappears from the figure, and --prepost's per-kV dict let the falling
+# leg overwrite the rising one outright. The data carries no direction
+# field, but it does not need one: CSV order is time order, and the
+# direction of every ramp is written in the nominal kV sequence.
+# ---------------------------------------------------------------------------
+
+def sweep_legs(rows):
+    """Annotate `rows` IN PLACE with where each sits in the sweep:
+
+      'landing'  0 for the 0 kV frames before the first ramp (warm-up,
+                 baseline), then 1, 2, ... one per voltage landing -- a
+                 landing's post-ramp and pre-ramp snapshots share one
+      'leg'      'rise' or 'fall': the direction of the ramp INTO the
+                 landing. A landing at the SAME kV as the one before --
+                 the bottom level landed twice where two up/down cycles
+                 meet -- takes the direction of the ramp OUT of it
+      'cycle'    1, 2, ...: advances wherever a falling leg turns to rise
+
+    Rows without a kV get landing None, leg '' and cycle None. Landing
+    identity comes from the `step` column when the run has one; runs that
+    predate it (and the test fixtures) split a landing where the kV
+    changes or a post-ramp snapshot follows a pre-ramp one. A watchdog
+    'breakdown' row is always a landing of its own: it records the kV at
+    the moment of the trip, which may be partway up a ramp.
+
+    A single sweep comes out all 'rise' in cycle 1 -- the property every
+    caller relies on to leave single-sweep figures exactly as they were.
+    Returns `rows`."""
+    landing, key, last, kvs = -1, None, None, []
+    for r in rows:
+        r['landing'] = None
+        r['leg'], r['cycle'] = '', None
+        if r['kv'] is None:
+            continue
+        if r['phase'] == 'baseline' or r['tag'] == 'warmup' or (
+                r['step'] == 0 and landing <= 0):
+            r['landing'] = 0
+            if landing < 0:
+                landing = 0
+                kvs.append(0.0)
+            continue
+        if r['tag'].startswith('breakdown'):
+            new = True
+        elif r['step'] is not None and last is not None \
+                and last['step'] is not None:
+            new = r['step'] != last['step']
+        else:
+            new = (last is None or key is None
+                   or round(r['kv'], 6) != key
+                   or (r['phase'] == 'post' and last['phase'] == 'pre'))
+        if new or landing < 1:
+            landing = max(landing, 0) + 1
+            if len(kvs) == 0:
+                kvs.append(0.0)          # the 0 kV start, even unrecorded
+            kvs.append(r['kv'])
+        r['landing'] = landing
+        key = round(r['kv'], 6)
+        last = r
+    legs, cycles = ['rise'], [1]         # landing 0: the resting start
+    for i in range(1, len(kvs)):
+        d = kvs[i] - kvs[i - 1]
+        if abs(d) < 1e-9 and i + 1 < len(kvs):
+            d = kvs[i + 1] - kvs[i]
+        leg = legs[-1] if abs(d) < 1e-9 else ('rise' if d > 0 else 'fall')
+        cycle = cycles[-1] + (1 if leg == 'rise' and legs[-1] == 'fall'
+                              else 0)
+        legs.append(leg)
+        cycles.append(cycle)
+    for r in rows:
+        if r['landing'] is not None:
+            r['leg'] = legs[r['landing']]
+            r['cycle'] = cycles[r['landing']]
+    return rows
+
+
+def multi_leg(run):
+    """True when the run's voltage ever FELL between landings: an up/down
+    run, or a repeat whose next cycle starts below where the last ended.
+    Only such runs are drawn leg by leg -- a single sweep keeps exactly
+    the figure it always had."""
+    return any(r.get('leg') == 'fall' for r in run['rows'])
+
+
+def elapsed_times(rows):
+    """Annotate `rows` IN PLACE with 'elapsed_s', seconds since the run
+    started, and return where it came from: 't_planned_s', 'timestamp' or
+    None.
+
+    The scheduled time is preferred: it is on the run's own monotonic
+    clock (the one telemetry.csv uses), so it is exact to the schedule and
+    immune to the grab latency folded into each wall-clock timestamp. It
+    is used only when EVERY row with a kV carries one -- a run is never
+    drawn half on one clock and half on the other. Otherwise the
+    timestamps, zeroed at the first that parses; a row with neither gets
+    None and is left off a time axis rather than guessed at."""
+    rows_kv = [r for r in rows if r['kv'] is not None]
+    if rows_kv and all(r['t_planned'] is not None for r in rows_kv):
+        for r in rows:
+            r['elapsed_s'] = r['t_planned']
+        return 't_planned_s'
+    stamps = []
+    for r in rows:
+        try:
+            stamps.append(datetime.datetime.fromisoformat(r['timestamp']))
+        except (TypeError, ValueError):
+            stamps.append(None)
+    t0 = next((s for s in stamps if s is not None), None)
+    for r, s in zip(rows, stamps):
+        r['elapsed_s'] = (None if s is None or t0 is None
+                          else (s - t0).total_seconds())
+    return 'timestamp' if t0 is not None else None
+
+
+def x_value(r, opts):
+    """Where row `r` sits on this figure's x axis, or None when it has no
+    such coordinate. ONE function because the drawers, the breakdown
+    marks and the window's click-through must all agree on it -- the
+    lesson norm_y was written to learn."""
+    if opts.get('x') == 'time':
+        t = r.get('elapsed_s')
+        return None if t is None else t / 60.0
+    if opts.get('vs_area'):
+        return r['area_mm2']
+    return r['kv']
+
+
+def x_label(opts):
+    if opts.get('x') == 'time':
+        return 'Elapsed time (min)'
+    return 'Active area (mm²)' if opts.get('vs_area') \
+        else 'Nominal voltage (kV)'
+
+
 def load_run(arg, warn):
     """-> run dict (name, rows, A0, flags, advisories, saved-brand rows) or
     None when the argument does not resolve. `warn` collects messages."""
@@ -389,6 +566,8 @@ def load_run(arg, warn):
         warn(f"not a run directory: {arg}")
         return None
     rows = load_rows(rundir)
+    sweep_legs(rows)
+    t_src = elapsed_times(rows)
     settings = se.load_settings(rundir)
 
     # breakdown: ALWAYS recomputed from the saved current trace; areas go
@@ -455,7 +634,9 @@ def load_run(arg, warn):
             # radius, None for a run saved before they were recorded
             'tracker_limits': {k: stamp.get(k)
                                for k in se.TRACKER_LIMIT_KEYS},
-            'saved_brand': saved_brand}
+            'saved_brand': saved_brand,
+            # which clock the elapsed-time axis reads (elapsed_times)
+            't_src': t_src}
 
 
 # How often the run measured CURRENT, above which a breakdown mark's
@@ -580,7 +761,7 @@ def _estimator_caption(runs):
 # per-level aggregation (the pre/post pair collapses to one level entry)
 # ---------------------------------------------------------------------------
 
-def levels(run, value=lambda r: r['area_mm2']):
+def levels(run, value=lambda r: r['area_mm2'], by='kv', rows=None):
     """-> sorted [{kv, mean, post, pre, traced, all_traced, mixed,
     traced_post, traced_pre, confirmed}] over rows with a kV and a value.
     Baseline-tagged rows join their kV level like any snapshot (the
@@ -594,18 +775,35 @@ def levels(run, value=lambda r: r['area_mm2']):
     to neither — the old mean did it on 11 levels of the real batch and
     the caption labeled the result 'outer toe, ±1%'. A `mixed` level's
     mean now uses the machine member(s) only (the campaign's primary
-    convention), plots FILLED, and keeps the machine band."""
+    convention), plots FILLED, and keeps the machine band.
+
+    `by='landing'` (2026-09-23) groups per LANDING instead of per kV, in
+    time order, and each entry also carries its 'landing', 'leg' and
+    'cycle' (see sweep_legs). That is the grouping an up/down run needs:
+    keyed by kV, its rising and falling visits to one level were averaged
+    into a single point, and --prepost's post/pre slots were simply
+    overwritten by whichever leg came last. On a single sweep every kV
+    has exactly one landing, so the two groupings hold the same numbers.
+    `rows` restricts the rows considered (default: the whole run)."""
     by_kv = {}
-    for r in run['rows']:
+    for r in (run['rows'] if rows is None else rows):
         v = value(r)
         if r['kv'] is None or v is None:
             continue
-        lv = by_kv.setdefault(round(r['kv'], 3), {
+        if by == 'landing':
+            if r.get('landing') is None:
+                continue
+            k = r['landing']
+        else:
+            k = round(r['kv'], 3)
+        lv = by_kv.setdefault(k, {
             'kv': r['kv'], 'vals': [], 'vals_machine': [],
             'post': None, 'pre': None,
             'traced': False, 'all_traced': True, 'mixed': False,
             'traced_post': False, 'traced_pre': False,
             'confirmed': False})
+        if by == 'landing' and 'leg' not in lv:
+            lv.update(landing=k, leg=r['leg'], cycle=r['cycle'])
         lv['vals'].append(v)
         if not r['traced']:
             lv['vals_machine'].append(v)
@@ -993,7 +1191,15 @@ def norm_y(area, a0, pct=False):
     return (r - 1.0) * 100.0 if pct else r
 
 
-def run_level_curve(run, norm=False, pct=False):
+def first_rise_rows(run):
+    """The rows of the run's FIRST rising leg (its resting 0 kV frames
+    included) -- what an up/down run contributes to the aggregate when
+    its legs are drawn apart. See run_level_curve."""
+    return [r for r in run['rows']
+            if r.get('leg') == 'rise' and r.get('cycle') == 1]
+
+
+def run_level_curve(run, norm=False, pct=False, legs=False):
     """One run as [{key, kv, y, confirmed}], sorted by level.
 
     `y` is the level's mean area in mm2, or the normalized value when
@@ -1001,11 +1207,18 @@ def run_level_curve(run, norm=False, pct=False):
     aggregate SEPARATELY because normalizing rescales each run by its own
     A0, and a spread in mm2 is not the same spread in A/A0. A run with
     no A0 contributes nothing to the normalized panel rather than being
-    silently dropped into the absolute one."""
+    silently dropped into the absolute one.
+
+    `legs` (2026-09-23): a run whose voltage also FELL contributes its
+    first rising leg only. The aggregate pools one curve per run on a kV
+    grid, and averaging a device's rising and falling visits to a level
+    is the very blending the leg-split view exists to stop; the first
+    rise is the leg every single-sweep run in the pool also has."""
     if norm and not run.get('a0'):
         return []
     out = []
-    for lv in levels(run):
+    rows = first_rise_rows(run) if legs and multi_leg(run) else None
+    for lv in levels(run, rows=rows):
         y = norm_y(lv['mean'], run['a0'], pct) if norm else lv['mean']
         out.append({'key': round(lv['kv'], 3), 'kv': lv['kv'], 'y': y,
                     'confirmed': lv['confirmed']})
@@ -1036,7 +1249,7 @@ def _contribution(curve, key, exact=False):
     return None                                # guardrail 1
 
 
-def aggregate_levels(runs, norm=False, exact=False, pct=False):
+def aggregate_levels(runs, norm=False, exact=False, pct=False, legs=False):
     """-> sorted [{kv, n, mean, sd, sem, n_measured, n_interpolated}].
 
     The cross-run mean and its SEM band, per level, capped at the first
@@ -1051,7 +1264,8 @@ def aggregate_levels(runs, norm=False, exact=False, pct=False):
     is SHOWN, with its n, rather than quietly dropped; the corpus might
     argue for a floor later, and that is an argument to have in the open,
     not a constant to slip in here."""
-    curves = [c for c in (run_level_curve(r, norm, pct) for r in runs) if c]
+    curves = [c for c in (run_level_curve(r, norm, pct, legs) for r in runs)
+              if c]
     cap = aggregate_cap_kv(runs)
     keys = sorted({p['key'] for c in curves for p in c})
     if cap is not None:
@@ -1279,7 +1493,8 @@ def default_panel_titles(opts, runs=()):
     # 1.04 needs the panel itself to say which one this is.
     lead = ('Areal strain from baseline area' if opts.get('strain_pct')
             else 'Normalized to baseline area')
-    return {'first': 'Active area vs voltage',
+    return {'first': ('Active area vs time' if opts.get('x') == 'time'
+                      else 'Active area vs voltage'),
             'second': f"{lead} ({a0txt})"}
 
 
@@ -1318,6 +1533,31 @@ def _cadence_caption(notes):
     return (f"\nHollow X = confirmed, sampled slower than "
             f"{CADENCE_COARSE_S:g} s (onset lies before the mark).  "
             f"Sampling: " + '; '.join(notes) + '.')
+
+
+def _time_axis_caption(runs):
+    """The caption's x-axis sentence for the elapsed-time axis, naming the
+    clock every run was read on (elapsed_times) -- the scheduled time and
+    the wall-clock stamp differ by each grab's latency, and a figure that
+    travels without its command line has to say which it is."""
+    srcs = {r.get('t_src') for r in runs if r.get('t_src')}
+    if srcs == {'t_planned_s'}:
+        how = "the scheduled t_planned_s, on each run's own clock"
+    elif srcs == {'timestamp'}:
+        how = "wall-clock timestamps from each run's first snapshot"
+    elif srcs:
+        how = "scheduled times; wall-clock stamps where a run lacks them"
+    else:
+        how = "no run carried a usable time"
+    return f"X axis: elapsed time since each run started ({how})."
+
+
+def _legs_caption(opts, point="one landing's post/pre mean"):
+    """The caption line a leg-split figure earns, and no other figure."""
+    return ("\nUp/down runs: one line per leg, triangle-up rising and "
+            f"triangle-down falling, each point {point}"
+            + ("; arrows follow the direction of travel"
+               if opts.get('arrows', True) else "") + ".")
 
 
 def _scale_caption(notes):
@@ -1681,19 +1921,29 @@ def _band_edges(y, p_pct, pct=False):
 
 
 def _series(ax, xs, ys, traced, color, ls, bands, band_traced=None,
-            pct=False):
+            pct=False, markers=None):
     """One curve: line + per-point open/closed markers + traced-aware band.
     `traced` drives the marker fill; `band_traced` (default: same) drives
     the band width -- the mean line passes the AND-aggregate there so a
     mixed pre/post level keeps the machine +-2% band. `pct` says `ys` are
     strain percent (the normalized panel under --strain-pct); every other
     caller leaves it False, so the mm2 panel and the A/A0 panel keep the
-    band they always had."""
+    band they always had.
+
+    `markers` (2026-09-23) gives each point its own marker -- '^' on a
+    rising leg, 'v' on a falling one -- and None skips a point: a leg's
+    line starts at the turn, on a point its own leg already marked.
+    Absent, every point is the 'o' it always was, drawn by the same
+    calls in the same order."""
     if band_traced is None:
         band_traced = traced
     ax.plot(xs, ys, ls, color=color, linewidth=1.8, zorder=3)
-    for x, y, tr in zip(xs, ys, traced):
-        ax.plot([x], [y], 'o', markersize=4.5, zorder=4, color=color,
+    for i, (x, y, tr) in enumerate(zip(xs, ys, traced)):
+        mk = 'o' if markers is None else markers[i]
+        if mk is None:
+            continue
+        ax.plot([x], [y], mk, markersize=4.5 if mk == 'o' else 5.5,
+                zorder=4, color=color,
                 markerfacecolor='white' if tr else color,
                 markeredgecolor=color, markeredgewidth=1.2)
     if bands and len(xs) > 1:
@@ -1775,6 +2025,175 @@ def _marker_key(ax, main_legend, lift=False):
                      title_fontsize=7, **extra)
 
 
+# ---------------------------------------------------------------------------
+# up/down legs and the elapsed-time axis (2026-09-23)
+# ---------------------------------------------------------------------------
+
+LEG_MARKERS = {'rise': '^', 'fall': 'v'}
+
+# The legend rows the leg markers earn -- only on a figure that drew a run
+# leg by leg, so a single-sweep figure keeps the legend it always had.
+LEG_STYLE_ROWS = (('rising leg', {'linestyle': '', 'marker': '^'}),
+                  ('falling leg', {'linestyle': '', 'marker': 'v'}))
+
+
+def _leg_paths(ents, yf, trk, btrk):
+    """Time-ordered landing entries (levels(by='landing')) -> one
+    (xs, ys, traced, band_traced, markers) per leg.
+
+    Every leg after the first starts its LINE at the previous leg's last
+    point, so the drawn path turns at the peak the way the voltage did --
+    but not its MARKER there (None): that point belongs to the leg that
+    reached it, and is already marked by it."""
+    out, prev, grp = [], None, []
+
+    def flush():
+        pts = ([prev] if prev is not None else []) + grp
+        marks = ([None] if prev is not None else []) + [
+            LEG_MARKERS.get(e['leg'], 'o') for e in grp]
+        out.append(([e['kv'] for e in pts], [yf(e) for e in pts],
+                    [e[trk] for e in pts], [e[btrk] for e in pts], marks))
+
+    for e in ents:
+        if grp and (e['leg'], e['cycle']) != (grp[-1]['leg'],
+                                              grp[-1]['cycle']):
+            flush()
+            prev, grp = grp[-1], []
+        grp.append(e)
+    if grp:
+        flush()
+    return out
+
+
+def _draw_area_legs(axl, axr, run, lvs, opts, color, budget_bands, pct,
+                    sinks, arrows):
+    """draw_area for a run whose voltage also FELL: the same curves the
+    per-level view draws -- pre/post and/or the mean -- but per LANDING,
+    one line per leg, triangle-up on a rising leg and triangle-down on a
+    falling one. Keyed by kV these legs averaged into one point per level,
+    and --prepost's post/pre slots kept only whichever leg came last.
+
+    Travel paths go into `arrows` (panel -> [(xs, ys, color)]) for
+    _direction_arrows, which runs once the scales are final: the mean
+    line's when it is drawn, else the post-ramp line's -- one set per
+    run, not one per series."""
+    xs_all, ysl_all, ysr_all = sinks
+    a0 = run['a0']
+    series = []
+    if opts['prepost']:
+        series += [(key, ls, 'traced_' + key, 'traced_' + key, budget_bands)
+                   for key, ls in (('post', '-'), ('pre', '--'))]
+    if opts['mean'] or not opts['prepost']:
+        # the same fill rule as the per-level mean: all_traced, so a mixed
+        # landing's machine-only mean plots filled (audit 2026-08-05)
+        series.append(('mean', '-', 'all_traced', 'all_traced',
+                       budget_bands and not opts['prepost']))
+    arrow_key = series[-1][0] if series[-1][0] == 'mean' else 'post'
+    for key, ls, trk, btrk, bands in series:
+        ents = [e for e in lvs if e[key] is not None]
+        if not ents:
+            continue
+        for panel, ax in ((0, axl), (1, axr)):
+            if ax is None:
+                continue
+            if panel == 0:
+                def yf(e):
+                    return e[key]
+            else:
+                def yf(e):
+                    return norm_y(e[key], a0, pct)
+            for xs, ys, tr, btr, mks in _leg_paths(ents, yf, trk, btrk):
+                _series(ax, xs, ys, tr, color, ls, bands, btr,
+                        pct=(pct and panel == 1), markers=mks)
+                if key == arrow_key:
+                    arrows[panel].append((xs, ys, color))
+        xs_all += [e['kv'] for e in ents]
+        ysl_all += [e[key] for e in ents]
+        ysr_all += [norm_y(e[key], a0, pct) for e in ents]
+
+
+def _draw_area_time(axl, axr, run, opts, color, budget_bands, pct, split,
+                    sinks):
+    """draw_area against ELAPSED TIME: one point per snapshot, joined in
+    the order they were taken. No per-level pooling -- on this axis every
+    snapshot already has a place of its own, which is the point of it. On
+    a run whose voltage also fell, the points still carry their leg's
+    triangle, so the time series says which stretch was the way down.
+    -> True when anything was drawn."""
+    xs_all, ysl_all, ysr_all = sinks
+    pts = [(x_value(r, opts), r) for r in run['rows']
+           if r['area_mm2'] is not None and x_value(r, opts) is not None]
+    if not pts:
+        return False
+    xs = [x for x, _r in pts]
+    ys = [r['area_mm2'] for _x, r in pts]
+    tr = [r['traced'] for _x, r in pts]
+    mks = ([LEG_MARKERS.get(r['leg'], 'o') for _x, r in pts] if split
+           else None)
+    yr = [norm_y(y, run['a0'], pct) for y in ys]
+    if axl is not None:
+        _series(axl, xs, ys, tr, color, '-', budget_bands, markers=mks)
+    if axr is not None:
+        _series(axr, xs, yr, tr, color, '-', budget_bands, pct=pct,
+                markers=mks)
+    xs_all += xs
+    ysl_all += ys
+    ysr_all += yr
+    return True
+
+
+def _direction_arrows(ax, paths):
+    """Small arrowheads along each travelled path, pointing the way the
+    voltage went: `paths` = [(xs, ys, color)], each a leg's line.
+
+    Deliberately sparse -- a quarter, a half and three quarters of the way
+    along a leg, or its middle segment when it is short -- and only on
+    segments that move in x: a vertical step within one landing has no
+    direction in voltage. Drawn AFTER the scales are final, and placed in
+    the axis' own scaled space (log10 on a log axis), so a head sits ON
+    the drawn line rather than beside it. Never on a line drawn sorted by
+    kV: every arrow there would point right, claiming a direction the
+    data never had -- which is why only the leg-split paths reach here.
+    Kept out of the layout, so arrows cannot move a figure's margins."""
+    import numpy as np
+    if ax is None or not paths:
+        return
+    fx, fy = ax.xaxis.get_transform(), ax.yaxis.get_transform()
+    ix, iy = fx.inverted(), fy.inverted()
+
+    def fwd(tr, v):
+        return float(tr.transform(np.array([[v]], float))[0][0])
+
+    for xs, ys, color in paths:
+        segs = [i for i in range(len(xs) - 1) if xs[i + 1] != xs[i]]
+        if not segs:
+            continue
+        if len(segs) >= 4:
+            picks = sorted({segs[int(len(segs) * f)]
+                            for f in (0.25, 0.5, 0.75)})
+        else:
+            picks = [segs[len(segs) // 2]]
+        for i in picks:
+            try:
+                sx0, sx1 = fwd(fx, xs[i]), fwd(fx, xs[i + 1])
+                sy0, sy1 = fwd(fy, ys[i]), fwd(fy, ys[i + 1])
+            except (ValueError, TypeError):
+                continue
+            if not all(map(math.isfinite, (sx0, sx1, sy0, sy1))):
+                continue
+
+            def at(f):
+                return (fwd(ix, sx0 + f * (sx1 - sx0)),
+                        fwd(iy, sy0 + f * (sy1 - sy0)))
+            a = ax.annotate('', xy=at(0.56), xytext=at(0.44),
+                            arrowprops=dict(arrowstyle='-|>', color=color,
+                                            lw=0, alpha=0.85,
+                                            mutation_scale=13,
+                                            shrinkA=0, shrinkB=0),
+                            zorder=3.5)
+            a.set_in_layout(False)
+
+
 def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     """Draw the two-panel area figure into ALREADY-CREATED axes.
 
@@ -1818,13 +2237,34 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     # flag that emptied the figure.
     hide_runs = bool(opts.get('aggregate_only')) and bool(
         opts.get('aggregate'))
+    # 2026-09-23: the elapsed-time axis, and up/down runs drawn leg by leg.
+    # A single sweep takes neither branch below -- the else is the code
+    # that always drew it, untouched -- so its figure cannot move.
+    timeax = opts.get('x') == 'time'
+    split_any = False
+    arrow_paths = {0: [], 1: []}
     for run in ([] if hide_runs else runs):
         color = run['color']
-        lvs = levels(run)
-        if not lvs:
-            continue
+        split = opts.get('split_legs', True) and multi_leg(run)
+        if timeax:
+            if not _draw_area_time(axl, axr, run, opts, color, budget_bands,
+                                   pct, split, (xs_all, ysl_all, ysr_all)):
+                continue
+            split_any = split_any or split
+            lvs = []
+        elif split:
+            lvs = levels(run, by='landing')
+            if not lvs:
+                continue
+            split_any = True
+            _draw_area_legs(axl, axr, run, lvs, opts, color, budget_bands,
+                            pct, (xs_all, ysl_all, ysr_all), arrow_paths)
+        else:
+            lvs = levels(run)
+            if not lvs:
+                continue
         xs = [l['kv'] for l in lvs]
-        if opts['prepost']:
+        if opts['prepost'] and not (timeax or split):
             for key, ls in (('post', '-'), ('pre', '--')):
                 pts = [(l['kv'], l[key], l['traced_' + key])
                        for l in lvs if l[key] is not None]
@@ -1838,7 +2278,7 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                     xs_all += list(px)
                     ysl_all += list(py)
                     ysr_all += [norm_y(y, run['a0'], pct) for y in py]
-        if opts['mean'] or not opts['prepost']:
+        if (opts['mean'] or not opts['prepost']) and not timeax:
             # marker fill follows the CONVENTION of the plotted value:
             # a mixed level's mean uses the machine member(s) only, so
             # it plots filled — the OR-aggregate used to open-mark a
@@ -1847,14 +2287,19 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
             band_tr = [l['all_traced'] for l in lvs]
             ys = [l['mean'] for l in lvs]
             show_bands = budget_bands and not opts['prepost']
-            if axl is not None:
-                _series(axl, xs, ys, tr, color, '-', show_bands, band_tr)
-            if axr is not None:
-                _series(axr, xs, [norm_y(y, run['a0'], pct) for y in ys], tr, color,
-                        '-', show_bands, band_tr, pct=pct)
-            xs_all += list(xs)
-            ysl_all += list(ys)
-            ysr_all += [norm_y(y, run['a0'], pct) for y in ys]
+            if split:
+                pass                     # drawn per leg by _draw_area_legs
+            else:
+                if axl is not None:
+                    _series(axl, xs, ys, tr, color, '-', show_bands,
+                            band_tr)
+                if axr is not None:
+                    _series(axr, xs, [norm_y(y, run['a0'], pct)
+                                      for y in ys], tr, color,
+                            '-', show_bands, band_tr, pct=pct)
+                xs_all += list(xs)
+                ysl_all += list(ys)
+                ysr_all += [norm_y(y, run['a0'], pct) for y in ys]
             mixed = [l['kv'] for l in lvs if l['mixed']]
             if mixed:
                 warn(f"{run['name']}: {len(mixed)} level(s) mix a "
@@ -1869,18 +2314,23 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
             coarse = coarse_cadence(run, opts)
             drawn, unanchored = [], []
             for r in run['rows']:
-                if r['index'] not in run['flags'] or r['kv'] is None:
+                # x_value is the row's kV on the kV axis, so this is the
+                # same test and the same position as ever there -- and the
+                # moment of the event on the elapsed-time axis
+                bx = x_value(r, opts)
+                if r['index'] not in run['flags'] or r['kv'] is None \
+                        or bx is None:
                     continue
                 if r['area_mm2'] is not None:
-                    drawn.append((r['kv'], r['area_mm2']))
+                    drawn.append((bx, r['area_mm2']))
                 else:
                     # confirmed but no reviewed area (e.g. frame rejected
                     # in review): anchor the event to its kV rather than
                     # silently dropping it
                     for ax in panels:
-                        ax.axvline(r['kv'], color=color, linestyle='--',
+                        ax.axvline(bx, color=color, linestyle='--',
                                    linewidth=0.9, alpha=0.55, zorder=1)
-                    xs_all.append(r['kv'])
+                    xs_all.append(bx)
                     unanchored.append(r['index'])
             if axl is not None:
                 _cross_marks(axl, drawn, color, coarse)
@@ -1960,7 +2410,8 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                     continue
                 ag = aggregate_levels(subset, norm=norm,
                                       exact=opts.get('aggregate_exact'),
-                                      pct=pct)
+                                      pct=pct,
+                                      legs=opts.get('split_legs', True))
                 if not ag:
                     continue
                 # counts only on an UNGROUPED figure -- G groups would
@@ -1999,27 +2450,45 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
         elif drawn_groups:
             name, subset, ag, cap_kv, _c, _s = drawn_groups[0]
             agg_caption = _aggregate_caption(subset, ag, opts, cap_kv)
+        # an up/down run pools its first rising leg only (run_level_curve)
+        # -- which the figure has to SAY, since its own curve shows both
+        updown = sorted({r['name'] for _n, subset, _a, _k, _c, _s
+                         in drawn_groups for r in subset if multi_leg(r)})
+        if updown and opts.get('split_legs', True):
+            agg_caption += ("\nUp/down runs contribute their FIRST RISING "
+                            "leg to the mean: " + ', '.join(updown) + ".")
+            warn(f"aggregate: {', '.join(updown)} also ran DOWN in "
+                 f"voltage -- only the first rising leg joins the mean, "
+                 f"since averaging a device's rising and falling visits "
+                 f"to a level is the blending the leg view exists to stop")
 
     scale_notes = []
     # the headings both panels will carry, resolved in ONE place so the
     # window can show the same answer without drawing (`#315`)
     heads = panel_titles(opts, runs)
+    arrows = opts.get('arrows', True) and not timeax
     if axl is not None:
-        _style_axes(axl, 'Nominal voltage (kV)', 'Active area (mm²)')
+        _style_axes(axl, x_label(opts), 'Active area (mm²)')
         _apply_scales(axl, opts, xs_all, ysl_all, scale_notes)
+        if arrows:
+            _direction_arrows(axl, arrow_paths[0])
         axl.set_title(heads['first'],
                       loc='left', fontweight='bold', fontsize=11)
     if axr is not None:
-        _style_axes(axr, 'Nominal voltage (kV)',
+        _style_axes(axr, x_label(opts),
                 'Areal strain  (A − A₀)/A₀  (%)' if pct
                 else 'Expansion  A / A₀')
         _apply_scales(axr, opts, xs_all, ysr_all, scale_notes)
+        if arrows:
+            _direction_arrows(axr, arrow_paths[1])
         axr.set_title(heads['second'],
                       loc='left', fontweight='bold', fontsize=11)
     style_rows = []
     if opts['prepost']:
         style_rows += [('post-ramp snapshot', {'linestyle': '-'}),
                        ('pre-ramp snapshot', {'linestyle': '--'})]
+    if split_any:
+        style_rows += list(LEG_STYLE_ROWS)
     if had_x:
         style_rows.append(('breakdown (current-confirmed)',
                            {'linestyle': '', 'marker': 'X'}))
@@ -2049,6 +2518,16 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                "CSV beside this figure, with its group.\n"
                "X axis: nominal kV (measured_kV telemetry incomplete on "
                "all runs).")
+    elif timeax:
+        cap = ("Points = one per snapshot, joined in the order taken"
+               + (" (triangle-up on a rising leg, triangle-down on a "
+                  "falling one)" if split_any else "") + ".  "
+               "Open markers = hand-traced boundary (outer toe, ±1%); "
+               "filled = machine half-height convention"
+               + (", bands ±2% machine / ±1% traced" if budget_bands
+                  else "") + ".\n"
+               "X = current-confirmed breakdown (recomputed, 2026-08-05 "
+               "semantics).  " + _time_axis_caption(runs))
     else:
         # The band is +-p of the AREA. Under strain percent the panel's
         # numbers are strain points, so "+-2%" there could be read as
@@ -2078,6 +2557,8 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                "X = current-confirmed breakdown (recomputed, 2026-08-05 "
                "semantics).  X axis: nominal kV (measured_kV telemetry "
                "incomplete on all runs)." + strain_note)
+        if split_any:
+            cap += _legs_caption(opts)
     cap = (cap
            + agg_caption
            + _estimator_caption(runs)
@@ -2086,11 +2567,12 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     fig.text(0.01, 0.005, cap, fontsize=7, color='#555555')
     # The caption grew three lines under the aggregate and the fixed 5%
     # strip clipped the last of them. Reserved space follows the LINE
-    # COUNT -- but only when the aggregate is on, so every figure that
-    # existed before `#268` still lays out to the same pixels (the
-    # window/CLI byte-identity test would catch it if it did not).
+    # COUNT -- but only when the aggregate, the time axis or a leg-split
+    # run adds lines, so every figure that existed before `#268` still
+    # lays out to the same pixels (the window/CLI byte-identity test
+    # would catch it if it did not).
     bottom = 0.05
-    if opts.get('aggregate'):
+    if opts.get('aggregate') or timeax or split_any:
         bottom = min(0.025 + 0.025 * (cap.count('\n') + 1), 0.30)
     _tight(fig, (0, bottom, 1, 1))
     return fig
@@ -2191,8 +2673,11 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
         return r['ua']
 
     def xval(r):
-        return r['area_mm2'] if opts['vs_area'] else r['kv']
+        return x_value(r, opts)
 
+    timeax = opts.get('x') == 'time'
+    split_any = False
+    arrow_paths = []
     run_handles = []
     had_x = had_adv = had_coarse = False
     raw_power = []
@@ -2214,9 +2699,27 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
             continue
         xs = [p[0] for p in pts]
         ys = [p[1] for p in pts]
-        ax.plot(xs, ys, '-', color=color, linewidth=1.4, alpha=0.85,
-                zorder=3)
-        ax.plot(xs, ys, 'o', color=color, markersize=3, zorder=4)
+        if opts.get('split_legs', True) and multi_leg(run):
+            # 2026-09-23: already drawn in travel order, but on the kV
+            # axis the way down retraced the way up in one colour with
+            # nothing to tell them apart. One line per leg, turning at
+            # the peak, each snapshot marked by its leg's triangle.
+            split_any = True
+            for lx, ly in _signal_legs(pts):
+                ax.plot(lx, ly, '-', color=color, linewidth=1.4,
+                        alpha=0.85, zorder=3)
+                if not timeax:
+                    arrow_paths.append((lx, ly, color))
+            for leg in ('rise', 'fall', ''):
+                sel = [(x, y) for x, y, r in pts if r['leg'] == leg]
+                if sel:
+                    ax.plot([s[0] for s in sel], [s[1] for s in sel],
+                            LEG_MARKERS.get(leg, 'o'), color=color,
+                            markersize=4.5 if leg else 3, zorder=4)
+        else:
+            ax.plot(xs, ys, '-', color=color, linewidth=1.4, alpha=0.85,
+                    zorder=3)
+            ax.plot(xs, ys, 'o', color=color, markersize=3, zorder=4)
         xs_all += xs
         ys_all += ys
         if not power and not opts['vs_area']:
@@ -2254,16 +2757,18 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
                     had_adv = True
         run_handles.append(Line2D([], [], color=color, label=run['name']))
 
-    xlabel = ('Active area (mm²)' if opts['vs_area']
-              else 'Nominal voltage (kV)')
     ylabel = ('|kV × (µA − run median)|  (mW)' if power
               else 'Measured current (µA)')
-    _style_axes(ax, xlabel, ylabel)
+    _style_axes(ax, x_label(opts), ylabel)
     scale_notes = []
     _apply_scales(ax, opts, xs_all, ys_all, scale_notes)
+    if opts.get('arrows', True):
+        _direction_arrows(ax, arrow_paths)
     ax.set_title(panel_titles(opts, runs)['first'],
                  loc='left', fontweight='bold', fontsize=11)
     style_rows = []
+    if split_any:
+        style_rows += list(LEG_STYLE_ROWS)
     if had_x:
         style_rows.append(('breakdown (current-confirmed)',
                            {'linestyle': '', 'marker': 'X'}))
@@ -2292,11 +2797,37 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
            # --vs-area puts areas on the x axis: a kept old-estimator
            # run is named here as it is on the area figure
            + (_estimator_caption(runs) if opts['vs_area'] else '')
+           + (("\n" + _time_axis_caption(runs)) if timeax else "")
+           + (_legs_caption(opts, 'one snapshot') if split_any else "")
            + _cadence_caption(cadence_notes)
            + _scale_caption(scale_notes))
     fig.text(0.01, 0.005, cap, fontsize=7, color='#555555')
-    _tight(fig, (0, 0.05, 1, 1))
+    # a fixed 5% strip, as ever -- unless the time axis or a leg-split run
+    # added caption lines, which would otherwise be clipped
+    bottom = 0.05
+    if timeax or split_any:
+        bottom = min(0.025 + 0.025 * (cap.count('\n') + 1), 0.30)
+    _tight(fig, (0, bottom, 1, 1))
     return fig
+
+
+def _signal_legs(pts):
+    """[(x, y, row)] in CSV order -> [(xs, ys)], one per leg (consecutive
+    rows sharing a leg and cycle), each after the first starting at the
+    previous leg's last point so the line turns where the voltage did."""
+    out, prev, grp = [], None, []
+    for p in pts:
+        r = p[2]
+        if grp and (r['leg'], r['cycle']) != (grp[-1][2]['leg'],
+                                              grp[-1][2]['cycle']):
+            seq = ([prev] if prev is not None else []) + grp
+            out.append(([q[0] for q in seq], [q[1] for q in seq]))
+            prev, grp = grp[-1], []
+        grp.append(p)
+    if grp:
+        seq = ([prev] if prev is not None else []) + grp
+        out.append(([q[0] for q in seq], [q[1] for q in seq]))
+    return out
 
 
 def figure_signal(runs, opts, path, warn=lambda m: None):
@@ -2349,7 +2880,8 @@ def save_figure(runs, opts, path, warn=lambda m: None):
 # tidy CSV
 # ---------------------------------------------------------------------------
 
-TIDY_COLS = ['run', 'group', 'snapshot', 'nominal_kV', 'phase', 'tag',
+TIDY_COLS = ['run', 'group', 'snapshot', 'nominal_kV', 'elapsed_s',
+             'phase', 'tag', 'leg', 'cycle',
              'area_mm2', 'convention', 'area_estimator', 'opencv_version',
              'numpy_version', 'ray_win_hi', 'disc_fit_r_max',
              'expansion_A_A0',
@@ -2410,7 +2942,13 @@ def write_tidy(runs, path, groups=()):
     exists at all: a figure whose two lines are the CB mean and the P3
     mean cannot be reproduced from a table that does not say which run
     was in which line. Written from the same opts the figure was drawn
-    from, so it cannot describe a different grouping than the picture."""
+    from, so it cannot describe a different grouping than the picture.
+
+    'elapsed_s', 'leg' and 'cycle' (2026-09-23) are DATA columns, written
+    for every figure whatever its options: the elapsed-time axis's x, and
+    the grouping an up/down run is drawn by (see sweep_legs) -- a figure
+    whose rising and falling curves cannot be told apart in its own CSV
+    is not reproducible from it."""
     with open(path, 'w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
         w.writerow(TIDY_COLS)
@@ -2441,10 +2979,14 @@ def write_tidy(runs, path, groups=()):
                         for k in se.TRACKER_LIMIT_KEYS)
                 exp = (area / run['a0'] if area and run['a0'] else '')
                 pw = power_mw(r, med)
+                t = r.get('elapsed_s')
                 w.writerow([
                     run['name'], group, r['snapshot'],
                     '' if r['kv'] is None else r['kv'],
+                    '' if t is None else round(t, 3),
                     r['phase'], r['tag'],
+                    r.get('leg', ''),
+                    '' if r.get('cycle') is None else r['cycle'],
                     '' if area is None else area,
                     conv, est, cv_ver, np_ver, win_hi, r_max,
                     f"{exp:.4f}" if exp != '' else '',
@@ -2636,7 +3178,8 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
               title_first=None, title_second=None, subplots='both',
               cadence_guard=False, aggregate=False,
               aggregate_exact=False, groups=(), aggregate_only=False,
-              fmt=DEFAULT_FORMAT, dpi=None, strain_pct=False):
+              fmt=DEFAULT_FORMAT, dpi=None, strain_pct=False,
+              x='kv', split_legs=True, arrows=True):
     """-> (opts dict, error message or None).
 
     The CLI builds this from its flags and the window from its tick boxes,
@@ -2664,7 +3207,18 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
     made wrong by looking at a current plot, and it draws nothing there
     because nothing outside the aggregate reads it. `aggregate_only` is
     refused with the aggregate off, though, because there it would empty
-    the figure rather than tidy it."""
+    the figure rather than tidy it.
+
+    `x`, `split_legs` and `arrows` (2026-09-23): the x axis (X_AXES), and
+    how a run whose voltage also FELL is drawn -- leg by leg with
+    triangle-up/-down markers, and arrowheads in the direction of travel.
+    The last two default ON, the second deliberate exception after
+    `marker_key`: averaging a device's rising and falling visits to a
+    level is not a figure anyone asked for, and a single sweep has one
+    leg, so neither changes one byte of it (the test suite proves that
+    against the pre-change engine, and that --merge-legs --no-arrows
+    reproduces the old up/down figure too). --x time refuses the options
+    that pool snapshots on the kV axis, and --vs-area, the other x switch."""
     if fmt not in FORMATS:
         return None, f"unknown --format {fmt} ({' | '.join(FORMATS)})"
     dpi, dpi_err = check_dpi(dpi)
@@ -2705,6 +3259,23 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
         return None, ('--aggregate-only needs --aggregate (it hides the '
                       'per-run curves in favour of the aggregate; with no '
                       'aggregate there would be nothing left to draw)')
+    x = x or 'kv'
+    if x not in X_AXES:
+        return None, f"unknown --x {x} ({' | '.join(X_AXES)})"
+    if x == 'time':
+        # REFUSED, each of them, for the reason `#268` refused the
+        # aggregate outside area mode: a flag that silently did nothing
+        # would re-render as a different figure on the next --from-spec
+        if vs_area:
+            return None, ('--x time and --vs-area both choose the x axis '
+                          '-- pick one')
+        if prepost or mean:
+            return None, ('--prepost and --mean pool each level\'s '
+                          'snapshots on the kV axis; with --x time every '
+                          'snapshot is already its own point')
+        if aggregate:
+            return None, ('--aggregate pools runs on a common kV grid, '
+                          'which has no meaning against --x time')
     return {'mode': mode, 'vs_area': bool(vs_area),
             'prepost': bool(prepost), 'mean': bool(mean),
             'bands': bool(bands), 'breakdown': bool(breakdown),
@@ -2720,6 +3291,7 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
             'groups': groups,
             'aggregate_only': bool(aggregate_only),
             'strain_pct': bool(strain_pct),
+            'x': x, 'split_legs': bool(split_legs), 'arrows': bool(arrows),
             'fmt': fmt, 'dpi': dpi}, None
 
 
@@ -3107,10 +3679,11 @@ _BOOL_FLAGS = ('--vs-area', '--prepost', '--mean', '--no-bands',
                '--allow-old-estimator', '--selftest',
                '--gui', '--logx', '--logy', '--no-marker-key',
                '--cadence-guard', '--aggregate', '--aggregate-exact',
-               '--aggregate-only', '--strain-pct')
+               '--aggregate-only', '--strain-pct', '--merge-legs',
+               '--no-arrows')
 _VALUED_FLAGS = ('--mode', '--out', '--stem', '--title',
                  '--title-first', '--title-second', '--subplots',
-                 '--from-spec', '--format', '--dpi', '--group')
+                 '--from-spec', '--format', '--dpi', '--group', '--x')
 
 # Valued flags whose SECOND occurrence is a second value, not a correction
 # (`#313`, landing site 8). Every other valued flag names one thing and
@@ -3249,6 +3822,12 @@ def _cli_opts(flags, vals, base=None):
                      # dpi -- and a spec that names neither still gets the
                      # 300 dpi PNG every pre-`#314` spec was written from.
                      strain_pct=on('--strain-pct', 'strain_pct'),
+                     # 2026-09-23. The two leg options default ON, so they
+                     # are "--no-..." style switches like --no-bands: a
+                     # spec that says true re-renders true unless told off
+                     x=val('--x', 'x', 'kv'),
+                     split_legs=off('--merge-legs', 'split_legs'),
+                     arrows=off('--no-arrows', 'arrows'),
                      fmt=val('--format', 'fmt', DEFAULT_FORMAT),
                      dpi=val('--dpi', 'dpi', DEFAULT_DPI))
 

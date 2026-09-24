@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Headless tests for the SLDEA Run <-> Webcam-tab interlock (no hardware,
-no Tk).
+"""Headless tests for the SLDEA Run start gate: what else may be driving
+the signal generator or holding the camera when ▶ Run is pressed (no
+hardware, no Tk).
 
 The gap (adversarial review 2026-09-23, on 78315cc): ▶ Run never looked at
 the Webcam tab. A stepped sweep started BEFORE a run kept writing the
@@ -10,18 +11,24 @@ changes, so one foreign write could hold the wrong voltage for a whole
 landing. What is pinned here:
 
 * Run refuses beside a stepped sweep on its own SG channel, a timed
-  capture, a capture that is still stopping, or a camera adjustment; it
-  ASKS (Enter = No) beside a sweep on the other channel.
-* The check comes before any HV question, before the camera is touched,
-  and again at the commit point, after the last dialog.
-* The sweep worker checks channel ownership before EVERY write, so a
-  sweep started during a LIVE run never lands a write on its channel. The
-  timed capture's burst trigger follows the same rule.
+  capture, a capture that is still stopping, a camera adjustment, and (LIVE
+  only) a Signal Gen tab command in flight. It ASKS (Enter = No) beside a
+  sweep on the other channel.
+* The check comes before any HV question and before the camera is
+  touched, and again at the commit point. The commit check never asks, so
+  nothing can yield to Tk between it and the channel claim.
+* The Webcam tab runs one capture worker at a time, so the gate always
+  sees a worker that is still finishing a step.
+* The sweep worker checks channel ownership before EVERY write, and the
+  LIVE claim lasts from the commit point until after the Trek is zeroed
+  (■ Abort included), so a sweep aimed at the run's channel never lands a
+  write in between. The timed capture's burst trigger follows the same
+  rule.
 
-Everything below drives the REAL methods -- sldea_run, the Webcam
-starters, both capture workers, and the real _sldea_worker where it
-matters -- on a stub app, against a fake signal generator that records
-which thread wrote what.
+Everything below drives the REAL methods -- sldea_run, the gate, the
+Webcam starters, both capture workers, sldea_abort, _sldea_finished and,
+where it matters, the real _sldea_worker -- on a stub app, against a fake
+signal generator that records which thread wrote what.
 
 Run: .venv/bin/python tests/test_sldea_interlock.py
 """
@@ -39,11 +46,13 @@ _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
 import gui  # noqa: E402
 
 G = gui.InstrumentControlGUI
-# every question the interlock never asks, answered for the LIVE path with
-# no scope connected (the stub has none)
+# the questions a LIVE run asks with no scope connected (the stub has none)
 LIVE_OK = {'No current monitoring': True, 'Energize HV?': True}
 SWEEP_Q = 'Stepped sweep still running'
-BUSY = 'SLDEA — Webcam tab busy'
+BUSY = 'SLDEA — run blocked'
+# unrelated background work that must never hold a run off
+OTHER_JOBS = {'connect', 'scope-io', 'psu-io', 'lcr-io', 'dmm-io',
+              'lcr-corr'}
 
 
 def _var(value):
@@ -54,26 +63,61 @@ class _Widget:
     def config(self, **_kw):
         pass
 
+    def insert(self, *_a):
+        pass
+
+    see = delete = insert
+
+
+class _Root:
+    """Tk root stand-in: after() queues its callbacks, and run_pending()
+    plays them the way the mainloop would once it gets round to it."""
+
+    def __init__(self):
+        self.pending = []
+        self._lock = _threading.Lock()
+
+    def after(self, _ms, fn=None, *args):
+        if fn is not None:
+            with self._lock:
+                self.pending.append((fn, args))
+        return 'after#'
+
+    def run_pending(self):
+        while True:
+            with self._lock:
+                if not self.pending:
+                    return
+                fn, args = self.pending.pop(0)
+            fn(*args)
+
 
 class _FakeSG:
     """BK4055B stand-in. Records every write as (thread name, call,
-    channel, args). `on_write` runs after each set_basic_wave: a hook for
-    claiming the channel between two sweep levels."""
+    channel, args), then calls `on_call(call, channel, args)` if set.
+    With `hold` set, set_basic_wave first waits on it -- a write stuck
+    behind the instrument lock -- and sets `held` while it waits."""
 
     def __init__(self):
         self.writes = []
-        self.on_write = None
+        self.on_call = None
+        self.hold = None
+        self.held = _threading.Event()
         self._lock = _threading.Lock()
 
     def _rec(self, call, channel, *args):
         with self._lock:
             self.writes.append((_threading.current_thread().name, call,
                                 channel, args))
+        if self.on_call is not None:
+            self.on_call(call, channel, args)
 
     def set_basic_wave(self, channel, **params):
+        if self.hold is not None:
+            self.held.set()
+            if not self.hold.wait(10):
+                raise TimeoutError("held write never released")
         self._rec('set_basic_wave', channel, params)
-        if self.on_write is not None:
-            self.on_write(channel, params)
 
     def set_offset(self, channel, offset_v):
         self._rec('set_offset', channel, offset_v)
@@ -86,9 +130,6 @@ class _FakeSG:
 
     def burst_trigger(self, channel):
         self._rec('burst_trigger', channel)
-
-    def from_thread(self, fragment):
-        return [w for w in self.writes if fragment in w[0]]
 
 
 class _MB:
@@ -129,11 +170,14 @@ class _App:
     methods under test, stubs for Tk, the camera and the pre-flight."""
     SLDEA_POLL_S = G.SLDEA_POLL_S
     sldea_run = G.sldea_run
-    _sldea_webcam_conflict = G._sldea_webcam_conflict
-    _sldea_webcam_gate = G._sldea_webcam_gate
+    sldea_abort = G.sldea_abort
+    _sldea_finished = G._sldea_finished
+    _sldea_start_conflicts = G._sldea_start_conflicts
+    _sldea_start_gate = G._sldea_start_gate
     _sldea_cam_value = G._sldea_cam_value
     _sldea_capture = G._sldea_capture
     cam_toggle_sequence = G.cam_toggle_sequence
+    _cam_worker_alive = G._cam_worker_alive
     _cam_start_sequence = G._cam_start_sequence
     _cam_start_timed = G._cam_start_timed
     _cam_seq_worker = G._cam_seq_worker
@@ -151,14 +195,15 @@ class _App:
         self.worker_done = _threading.Event()
         self.worker_args = self.worker_error = None
         self.lines, self.events = [], []
-        self.on_preflight = None
-        self.root = _types.SimpleNamespace(after=lambda *a, **k: None)
+        self.on_preflight = self.on_cam_stop = None
+        self.root = _Root()
         self.sg, self.scope, self.cam = _FakeSG(), None, None
         # SLDEA tab
         self._sldea_running = False
         self._sldea_stop = False
         self._sldea_prelog = self._sldea_runlog = None
         self._sldea_loglock = _threading.Lock()
+        self.sldea_log = _Widget()
         self.sldea_dryrun = _var(dry)
         self.sldea_vars = {k: _var(v) for k, v in {
             'sgch': str(sgch), 'vch': '2', 'ich': '3', 'diam_mm': '16',
@@ -226,15 +271,14 @@ class _App:
         finally:
             self.worker_done.set()
 
-    def _sldea_finished(self):
-        pass
-
     def _sldea_animate_cursor(self):
         pass
 
     # --- Webcam side ----------------------------------------------------
     def cam_stop_preview(self):
         self.events.append('cam_stop_preview')
+        if self.on_cam_stop is not None:
+            self.on_cam_stop()
 
     def _drain_cam_queue(self):
         pass
@@ -288,15 +332,23 @@ def _drain(q):
             return out
 
 
-def _assert_refused(app, mb):
-    """Nothing the run does happened: no claim, no worker, no SG write, no
-    camera touched, and the run.log buffer disarmed."""
+def _assert_refused(app, mb, at_top=True):
+    """Nothing the run does happened: no claim, no worker, and the run.log
+    buffer disarmed. Refused at the top, it also asked no HV question and
+    never touched the camera."""
     assert not app._sldea_running
     assert getattr(app, '_sldea_live_ch', None) is None
     assert not app.worker_done.is_set()
-    assert app.sg.writes == [], app.sg.writes
     assert app._sldea_prelog is None
     assert mb.titles('showerror') == [BUSY], mb.calls
+    if at_top:
+        assert mb.titles('askyesno') == [], mb.calls
+        assert app.events == [], app.events
+
+
+def _assert_clean_run(app):
+    assert app.worker_error is None, repr(app.worker_error)
+    assert not any(l.startswith('ERROR') for l in app.lines), app.lines
 
 
 def _wait_for(pred, timeout=5.0):
@@ -308,8 +360,17 @@ def _wait_for(pred, timeout=5.0):
     return pred()
 
 
+def _sweep(app, ch=1, key='OFST', values=(2.0, 3.0, 4.0)):
+    """Run the real sweep worker to completion, as its thread would."""
+    app.cam_seq_running = True
+    app._cam_seq_gen = object()
+    app._cam_seq_worker(ch, key, list(values), 0.0, None, '.', 'cap',
+                        {'kind': 'cv2', 'index': 0})
+    return _drain(app.cam_seq_queue)
+
+
 # --------------------------------------------------------------------------
-# Run refuses (or asks) while a Webcam-tab job is running
+# Run refuses (or asks) while something else is running
 # --------------------------------------------------------------------------
 
 def test_live_run_refuses_beside_a_sweep_on_its_own_channel():
@@ -319,8 +380,6 @@ def test_live_run_refuses_beside_a_sweep_on_its_own_channel():
         _busy(app, 'sweep', ch=1)
         app.sldea_run()
         _assert_refused(app, mb)
-        assert mb.titles() == [BUSY], "refused BEFORE any HV question"
-        assert app.events == [], "refused before the camera was touched"
         msg = mb.message(BUSY)
         assert 'SG CH1' in msg and 'whole landing' in msg, msg
         assert 'Webcam tab → Stop sweep' in msg, msg
@@ -339,20 +398,22 @@ def test_live_run_asks_about_a_sweep_on_the_other_channel_enter_is_no():
         assert kw.get('default') == 'no', kw
         assert 'SG CH2' in msg and '(CH1)' in msg and 'NO FRAME' in msg, msg
         assert not app._sldea_running and not app.worker_done.is_set()
-        assert app.sg.writes == [] and app._sldea_prelog is None
+        assert app._sldea_prelog is None and app.events == []
         assert any('run cancelled' in l for l in app.lines), app.lines
 
 
 def test_an_allowed_sweep_is_asked_about_once_and_lands_in_run_log():
-    """Yes means yes for THAT sweep: the commit-point re-check must not ask
-    again, and the choice is recorded where the run's data lives."""
+    """Yes means yes for THAT sweep: the commit-point re-check lets it
+    through, and the choice is recorded where the run's data lives."""
     mb = _MB({SWEEP_Q: True})
     with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
         app = _App(tmp, dry=True, sgch=1, real_worker=True)
         _busy(app, 'sweep', ch=2)
         app.sldea_run()
         assert app.worker_done.wait(30), app.lines
-        assert app.worker_error is None, repr(app.worker_error)
+        _assert_clean_run(app)
+        assert any(l.startswith('run complete') for l in app.lines), \
+            app.lines
         assert mb.titles() == [SWEEP_Q], mb.calls
         with open(_os.path.join(tmp, 'RUN', 'run.log'),
                   encoding='utf-8') as f:
@@ -372,17 +433,29 @@ def test_a_timed_capture_refuses_live_and_dry():
             assert 'timed capture' in msg and 'Webcam tab → Stop.' in msg
 
 
+def test_a_capture_of_unknown_kind_is_refused_not_ignored():
+    # a starter that forgot to record its kind must fail safe, not open
+    mb = _MB()
+    with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+        app = _App(tmp, dry=False, sgch=1)
+        _busy(app, None)
+        app.sldea_run()
+        _assert_refused(app, mb)
+        assert 'A capture is running' in mb.message(BUSY)
+
+
 def test_a_capture_still_stopping_refuses_it_is_judged_by_its_thread():
     """Stop clears the flag at once; the worker still finishes the step it
     was on (a camera grab, or an SG write already under way)."""
-    for kind, ch in (('sweep', 1), ('sweep', 2), ('timed', None)):
-        mb = _MB()
-        with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
-            app = _App(tmp, dry=False, sgch=1)
-            _busy(app, kind, ch=ch, running=False, alive=True)
-            app.sldea_run()
-            _assert_refused(app, mb)
-            assert 'still stopping' in mb.message(BUSY)
+    for dry in (False, True):
+        for kind, ch in (('sweep', 1), ('sweep', 2), ('timed', None)):
+            mb = _MB()
+            with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+                app = _App(tmp, dry=dry, sgch=1)
+                _busy(app, kind, ch=ch, running=False, alive=True)
+                app.sldea_run()
+                _assert_refused(app, mb)
+                assert 'still stopping' in mb.message(BUSY)
 
 
 def test_a_finished_worker_is_not_in_the_way():
@@ -405,30 +478,48 @@ def test_a_camera_adjustment_in_flight_refuses():
         assert 'Apply & Lock' in mb.message(BUSY)
 
 
+def test_a_refusal_beats_the_question_about_an_other_channel_sweep():
+    """Nothing to ask about when the run cannot start anyway: a camera
+    adjustment beside an other-channel sweep is refused outright."""
+    mb = _MB({SWEEP_Q: True})             # a Yes, were it asked
+    with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+        app = _App(tmp, dry=False, sgch=1)
+        _busy(app, 'sweep', ch=2)
+        app._bg_busy.add('camera-ctrl')
+        app.sldea_run()
+        _assert_refused(app, mb)
+        assert 'Apply & Lock' in mb.message(BUSY)
+
+
 def test_every_reason_is_listed_in_one_dialog():
     mb = _MB()
     with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
         app = _App(tmp, dry=False, sgch=1)
         _busy(app, 'sweep', ch=1)
-        app._bg_busy.add('camera-ctrl')
+        app._bg_busy.update({'camera-ctrl', 'sg-io'})
         app.sldea_run()
         _assert_refused(app, mb)
         msg = mb.message(BUSY)
-        assert 'SG CH1' in msg and 'Apply & Lock' in msg, msg
+        for part in ('SG CH1', 'Apply & Lock', 'Signal Gen tab'):
+            assert part in msg, (part, msg)
         [line] = [l for l in app.lines if l.startswith('run refused')]
-        assert 'SG CH1' in line and 'camera adjustment' in line, line
+        for part in ('SG CH1', 'camera adjustment', 'Signal Gen tab'):
+            assert part in line, (part, line)
 
 
 def test_dry_runs_follow_the_same_channel_rule_in_their_own_words():
     """A DRY run writes no SG channel, but a sweep on the channel it is set
-    to drive the Trek with can still energize the Trek."""
+    to drive the Trek with can still energize the Trek -- and a stopped
+    sweep leaves its last level behind, which the message says."""
     mb = _MB()
     with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
         app = _App(tmp, dry=True, sgch=2)
         _busy(app, 'sweep', ch=2)
         app.sldea_run()
         _assert_refused(app, mb)
-        assert 'would not be dry' in mb.message(BUSY)
+        msg = mb.message(BUSY)
+        assert 'would not be dry' in msg, msg
+        assert 'last level' in msg and 'CH2 to 0 V' in msg, msg
     mb = _MB({SWEEP_Q: False})
     with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
         app = _App(tmp, dry=True, sgch=2)
@@ -439,15 +530,31 @@ def test_dry_runs_follow_the_same_channel_rule_in_their_own_words():
         assert not app._sldea_running
 
 
+def test_a_signal_gen_command_in_flight_holds_off_a_live_run_only():
+    """An Apply that landed after the run had set up its channel could swap
+    the waveform under it, and the run re-sends only its offset. A DRY run
+    writes no SG channel, so it is not held off."""
+    mb = _MB()
+    with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+        app = _App(tmp, dry=False, sgch=1)
+        app._bg_busy.add('sg-io')
+        app.sldea_run()
+        _assert_refused(app, mb)
+        assert 'Signal Gen tab' in mb.message(BUSY)
+    mb = _MB()
+    with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+        app = _App(tmp, dry=True, sgch=1)
+        app._bg_busy.add('sg-io')
+        app.sldea_run()
+        assert app.worker_done.wait(5) and mb.calls == [], mb.calls
+
+
 def test_nothing_running_starts_exactly_as_before():
-    # unrelated background work never blocks a run
-    for dry, questions in ((True, []),
-                           (False, ['No current monitoring',
-                                    'Energize HV?'])):
+    for dry, questions in ((True, []), (False, list(LIVE_OK))):
         mb = _MB(LIVE_OK)
         with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
             app = _App(tmp, dry=dry, sgch=2)
-            app._bg_busy.update({'sg-io', 'connect'})
+            app._bg_busy.update(OTHER_JOBS)
             app.sldea_run()
             assert app.worker_done.wait(5), app.lines
             assert mb.titles() == questions, mb.calls
@@ -456,46 +563,110 @@ def test_nothing_running_starts_exactly_as_before():
             assert app.worker_args[3] == 2 and app.worker_args[6] is dry
 
 
+def test_the_gate_judges_a_sweep_by_the_channel_it_started_on():
+    """Not by the channel box, which the operator can retarget while the
+    sweep runs: a CH1 sweep with the box turned to 2 is still on the run's
+    channel, and a CH2 sweep with the box turned to 1 is still only asked
+    about."""
+    for sweep_ch, box, refused in (('1', '2', True), ('2', '1', False)):
+        mb = _MB(dict(LIVE_OK, **{SWEEP_Q: False}))
+        with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+            app = _App(tmp, dry=False, sgch=1)
+            app.cam_sg_ch = _var(sweep_ch)
+            app.cam_step_dwell = _var('30')      # parked mid-dwell
+            app._cam_start_sequence()
+            assert _wait_for(lambda: app.sg.writes), "sweep never wrote"
+            app.cam_sg_ch = _var(box)            # retargeted mid-sweep
+            app.events = []
+            app.sldea_run()
+            if refused:
+                _assert_refused(app, mb)
+            else:
+                assert mb.titles() == [SWEEP_Q], mb.calls
+                assert not app._sldea_running
+            app.cam_toggle_sequence()
+            app.cam_seq_thread.join(5)
+
+
 # --------------------------------------------------------------------------
 # The commit-point re-check: the dialogs can take as long as the operator
 # likes, so what was clear at the top may not be clear at the end
 # --------------------------------------------------------------------------
 
 def test_the_commit_recheck_refuses_a_sweep_started_during_the_dialogs():
-    mb = _MB(LIVE_OK)
-    with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
-        app = _App(tmp, dry=False, sgch=1)
-        app.on_preflight = lambda: _busy(app, 'sweep', ch=1)
-        app.sldea_run()
-        assert 'preflight' in app.events          # it got that far...
-        _assert_refused(app, mb)                  # ...and stopped there
-        assert mb.titles() == ['No current monitoring', 'Energize HV?',
-                               BUSY], mb.calls
+    for dry in (False, True):
+        mb = _MB(LIVE_OK)
+        with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+            app = _App(tmp, dry=dry, sgch=1)
+            app.on_preflight = lambda: _busy(app, 'sweep', ch=1)
+            app.sldea_run()
+            assert 'preflight' in app.events     # it got that far...
+            _assert_refused(app, mb, at_top=False)   # ...and no further
+            assert mb.titles() == ([] if dry else list(LIVE_OK)) + [BUSY]
+            assert ('would not be dry' in mb.message(BUSY)) == dry
 
 
-def test_the_commit_recheck_asks_again_only_about_a_different_sweep():
+def test_the_commit_recheck_never_asks_it_refuses_a_different_sweep():
+    """A question at the commit point would hand Tk the event loop between
+    the check and the claim, so a sweep other than the one allowed at the
+    top is refused there, never asked about."""
     mb = _MB(dict(LIVE_OK, **{SWEEP_Q: True}))
     with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
         app = _App(tmp, dry=False, sgch=1)
         _busy(app, 'sweep', ch=2)
         app.on_preflight = lambda: _busy(app, 'sweep', ch=2)  # a NEW sweep
         app.sldea_run()
-        assert mb.titles('askyesno').count(SWEEP_Q) == 2, mb.calls
-        assert app.worker_done.wait(5)
+        assert mb.titles('askyesno').count(SWEEP_Q) == 1, mb.calls
+        _assert_refused(app, mb, at_top=False)
+        assert 'while this run was being set up' in mb.message(BUSY)
+
+
+def test_the_commit_recheck_runs_even_when_the_preflight_is_skipped():
+    mb = _MB(LIVE_OK)
+    with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+        app = _App(tmp, dry=False, sgch=1)
+        app._sldea_skip_preflight = True
+        app.on_cam_stop = lambda: _busy(app, 'sweep', ch=1)
+        app.sldea_run()
+        assert 'preflight' not in app.events
+        _assert_refused(app, mb, at_top=False)
+
+
+# --------------------------------------------------------------------------
+# The Webcam tab: one worker at a time, recorded at its start
+# --------------------------------------------------------------------------
+
+def test_a_new_capture_never_displaces_a_worker_still_stopping():
+    for start, title in (('_cam_start_sequence', 'Stepped capture'),
+                         ('_cam_start_timed', 'Timed capture')):
+        mb = _MB()
+        with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+            app = _App(tmp)
+            _busy(app, 'sweep', ch=1, running=False, alive=True)
+            worker, token = app.cam_seq_thread, app._cam_seq_gen
+            getattr(app, start)()
+            assert app.cam_seq_thread is worker, start
+            assert app._cam_seq_gen is token and not app.cam_seq_running
+            assert 'still stopping' in mb.message(title)
+            assert app.events == [], "freed the camera before refusing"
+
+
+def test_the_webcam_starters_record_what_they_started():
+    with _tempfile.TemporaryDirectory() as tmp, _patched(_MB()):
+        app = _App(tmp)
+        app.cam_sg_ch = _var('2')
+        app._cam_start_sequence()
+        assert (app._cam_seq_kind, app._cam_seq_ch) == ('sweep', 2)
+        app.cam_seq_thread.join(5)
+        app.cam_seq_running = False              # as the drain would
+        app._cam_start_timed()
+        assert (app._cam_seq_kind, app._cam_seq_ch) == ('timed', None)
+        app.cam_seq_thread.join(5)
 
 
 # --------------------------------------------------------------------------
 # The workers: channel ownership checked before EVERY SG write
 # --------------------------------------------------------------------------
-
-def _sweep(app, ch=1, key='OFST', values=(2.0, 3.0, 4.0)):
-    """Run the real sweep worker to completion, as its thread would."""
-    app.cam_seq_running = True
-    app._cam_seq_gen = object()
-    app._cam_seq_worker(ch, key, list(values), 0.0, None, '.', 'cap',
-                        {'kind': 'cv2', 'index': 0})
-    return _drain(app.cam_seq_queue)
-
 
 def test_the_sweep_writes_nothing_to_a_channel_a_live_run_owns():
     for key in ('OFST', 'AMP'):               # an amplitude sweep as well
@@ -514,9 +685,10 @@ def test_the_sweep_checks_before_every_write_not_only_the_first():
     with _tempfile.TemporaryDirectory() as tmp, _patched(_MB()):
         app = _App(tmp)
         app._sldea_live_ch = None
-        # a LIVE run claims CH1 the moment the sweep's first level lands
-        app.sg.on_write = lambda ch, params: setattr(app, '_sldea_live_ch',
-                                                     1)
+
+        def claim(call, ch, args):          # a LIVE run takes CH1 the
+            app._sldea_live_ch = 1          # moment level 1 has landed
+        app.sg.on_call = claim
         events = _sweep(app, ch=1)
         assert [w[3][0] for w in app.sg.writes] == [{'OFST': 2.0}], \
             app.sg.writes
@@ -553,25 +725,8 @@ def test_the_timed_capture_never_fires_a_trigger_on_a_live_channel():
         assert [w[1:3] for w in app.sg.writes] == [('burst_trigger', 2)]
 
 
-def test_the_webcam_starters_record_what_they_started():
-    """The interlock reads these, never the widgets: the operator can
-    retarget the channel box while the sweep is running."""
-    with _tempfile.TemporaryDirectory() as tmp, _patched(_MB()):
-        app = _App(tmp)
-        app.cam_sg_ch = _var('2')
-        app._cam_start_sequence()
-        assert (app._cam_seq_kind, app._cam_seq_ch) == ('sweep', 2)
-        app.cam_seq_thread.join(5)
-        app.cam_sg_ch = _var('1')                # retargeted afterwards
-        assert app._cam_seq_ch == 2
-        app.cam_seq_running = False              # as the drain would
-        app._cam_start_timed()
-        assert (app._cam_seq_kind, app._cam_seq_ch) == ('timed', None)
-        app.cam_seq_thread.join(5)
-
-
 # --------------------------------------------------------------------------
-# End to end: the real starters and runners on both sides
+# End to end: the real starters, runners and workers on both sides
 # --------------------------------------------------------------------------
 
 def test_end_to_end_a_real_sweep_holds_off_a_live_run_until_it_stops():
@@ -581,10 +736,9 @@ def test_end_to_end_a_real_sweep_holds_off_a_live_run_until_it_stops():
         app.cam_step_dwell = _var('30')          # parked mid-dwell
         app._cam_start_sequence()
         assert _wait_for(lambda: app.sg.writes), "sweep never wrote"
+        app.events = []
         app.sldea_run()
-        assert mb.titles() == [BUSY], mb.calls
-        assert not app._sldea_running and not app.worker_done.is_set()
-        assert getattr(app, '_sldea_live_ch', None) is None
+        _assert_refused(app, mb)
         app.cam_toggle_sequence()                # the real Stop
         app.cam_seq_thread.join(5)
         assert not app.cam_seq_thread.is_alive()
@@ -595,36 +749,73 @@ def test_end_to_end_a_real_sweep_holds_off_a_live_run_until_it_stops():
             ('set_basic_wave', 1, ({'OFST': 2.5},))], app.sg.writes
 
 
-def test_end_to_end_a_sweep_during_a_live_run_never_writes_its_channel():
-    """The worker check on its own, behind every start-time guard: a real
-    LIVE run (the real _sldea_worker) owns CH1 while a sweep worker targets
-    CH1. The run's drive must be the run's alone, start to finish."""
+def test_end_to_end_a_stalled_write_holds_off_the_next_capture_and_the_run():
+    """The displaced-worker hole (adversarial review, 2026-09-23). Stop
+    clears the flag while the sweep's write is still stuck behind the
+    instrument lock. A new capture used to replace cam_seq_thread and hide
+    that worker from the gate, and the write then landed after the run had
+    set up its channel. Now neither may start until the worker is gone."""
     mb = _MB(LIVE_OK)
     with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
-        app = _App(tmp, dry=False, sgch=1, real_worker=True)
+        app = _App(tmp, dry=False, sgch=1)
+        app.sg.hold = _threading.Event()
+        app._cam_start_sequence()                # its write sticks
+        assert app.sg.held.wait(5), "the sweep never reached its write"
+        worker = app.cam_seq_thread
+        app.cam_toggle_sequence()                # Stop: flag off, alive
+        app._cam_start_timed()
+        assert app.cam_seq_thread is worker, "a new capture displaced it"
+        assert 'still stopping' in mb.message('Timed capture')
+        app.events = []
         app.sldea_run()
-        assert _wait_for(lambda: ('set_output', 1, (True,)) in
-                         [w[1:] for w in app.sg.writes]), app.lines
-        app.cam_seq_running = True
-        app._cam_seq_gen = object()
-        sweep = _threading.Thread(
-            target=app._cam_seq_worker, name='sweep-worker',
-            args=(1, 'OFST', [2.5, 3.5], 0.0, None, tmp, 'cap',
-                  {'kind': 'cv2', 'index': 0}), daemon=True)
-        sweep.start()
-        sweep.join(5)
-        assert app.worker_done.wait(30), app.lines
-        assert app.worker_error is None, repr(app.worker_error)
-        assert any(l.startswith('run complete') for l in app.lines), \
-            app.lines
-        assert app.sg.from_thread('sweep-worker') == [], app.sg.writes
-        [(kind, text)] = _drain(app.cam_seq_queue)
-        assert kind == 'error' and 'LIVE SLDEA run' in text, text
-        # every write came from the run, and it ended zeroed and off
-        run = app.sg.from_thread('_sldea_worker')
-        assert run == app.sg.writes, app.sg.writes
-        assert [w[1:] for w in run[-2:]] == [('set_offset', 1, (0.0,)),
-                                             ('set_output', 1, (False,))]
+        _assert_refused(app, mb)
+        assert 'still stopping' in mb.message(BUSY)
+        app.sg.hold.set()                        # the write lands at last
+        worker.join(5)
+        assert not worker.is_alive()
+        app.sldea_run()
+        assert app.worker_done.wait(5) and app._sldea_live_ch == 1
+        assert [w[1:3] for w in app.sg.writes] == [('set_basic_wave', 1)]
+
+
+def test_the_live_claim_lasts_until_the_trek_is_zeroed_abort_included():
+    """The worker check is only as good as the claim it reads. A real LIVE
+    run: a sweep aimed at its channel mid-landing, and again at the final
+    output-off, must be refused -- after ■ Abort as well -- and the channel
+    is free again only once the run has finished on the Tk side."""
+    for abort in (False, True):
+        mb = _MB(LIVE_OK)
+        with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+            app = _App(tmp, dry=False, sgch=1, real_worker=True)
+            probes = []
+
+            def probe(call, ch, args):
+                if call == 'set_offset' and args[0] > 0 and not probes:
+                    probes.append(('mid-landing', _sweep(app, ch=1)))
+                    if abort:
+                        app.sldea_abort()
+                elif call == 'set_output' and args == (False,):
+                    probes.append(('at output off', _sweep(app, ch=1)))
+            app.sg.on_call = probe
+            app.sldea_run()
+            assert app.worker_done.wait(30), app.lines
+            _assert_clean_run(app)
+            assert any(l.startswith('run aborted' if abort
+                                    else 'run complete')
+                       for l in app.lines), app.lines
+            assert [p[0] for p in probes] == ['mid-landing',
+                                              'at output off'], probes
+            for where, events in probes:
+                assert [e[0] for e in events] == ['error'], (where, events)
+            # only the run's own set-up ever wrote a waveform
+            assert [w[3] for w in app.sg.writes
+                    if w[1] == 'set_basic_wave'] == [
+                ({'WVTP': 'DC', 'OFST': 0.0},)], app.sg.writes
+            # the claim is released by _sldea_finished on the Tk side
+            assert app._sldea_live_ch == 1
+            app.root.run_pending()
+            assert app._sldea_live_ch is None and not app._sldea_running
+            assert _sweep(app, ch=1)[-1][0] == 'done'
 
 
 def _run():

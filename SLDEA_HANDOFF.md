@@ -15,13 +15,13 @@ docket** — read it, not this line, for what is queued.
 
 ## ▶ Run refuses to start beside a Webcam-tab sweep, and a sweep never writes a LIVE run's channel (2026-09-23)
 
-**TL;DR:** a stepped sweep started on the Webcam tab before a run kept
-writing the signal generator during the run. On the run's own channel it
-overwrote the Trek drive, and the wrong voltage could hold for a whole
-landing. ▶ Run now refuses to start while a sweep is writing its channel,
-a timed capture is running, or a camera adjustment is in progress. It
-asks (Enter = No) about a sweep on the other channel. Separately, the
-sweep checks before every level that no LIVE run owns its channel.
+**TL;DR:** a stepped sweep started on the Webcam tab before a run used to
+keep writing the signal generator during it, and on the run's own channel
+that overwrote the Trek drive for up to a whole landing. ▶ Run now
+refuses to start beside anything that could still write its channel or
+grab its camera, and asks (Enter = No) only about a sweep on the other
+channel. A sweep also stops, rather than write, the channel a LIVE run
+owns.
 
 **Observation.** An adversarial review of `78315cc` found that
 `sldea_run` never looked at the Webcam tab. The stepped sweep
@@ -36,13 +36,19 @@ run.
 
 **Decision (the owner's rule, 2026-09-23).**
 
-- **Refused:** a stepped sweep on the run's SG channel (DRY runs too,
-  because the sweep can still energize the Trek); a timed capture; any
-  capture that is still stopping; a camera adjustment (the `camera-ctrl`
-  job behind Apply & Lock / Auto-expose / Auto-WB once / Stabilize), which
-  rewrites the exposure the run is about to lock. A capture counts as
-  running while its worker THREAD is alive, not while its flag is set:
-  after Stop the worker still finishes the step it was on.
+- **Refused** (`_sldea_start_conflicts` / `_sldea_start_gate`):
+  - a stepped sweep on the run's SG channel. DRY runs too, because the
+    sweep can still energize the Trek; the DRY message adds that a
+    stopped sweep leaves its last level behind;
+  - a timed capture;
+  - any capture that is still stopping;
+  - a camera adjustment (the `camera-ctrl` job behind Apply & Lock /
+    Auto-expose / Auto-WB once / Stabilize), which rewrites the camera
+    settings the run is about to lock;
+  - for LIVE runs, a Signal Gen tab command still being sent (`sg-io`).
+    An Apply landing after the run set up its channel could swap the
+    waveform, and the run re-sends only its offset. No poller holds
+    `sg-io`, so this refuses only right after an operator's own click.
 - **Asked, Enter = No:** a sweep on the other channel. It does not write
   the drive channel, but it competes for the camera, and a snapshot that
   loses logs NO FRAME. A yes is written into `run.log`. This is the line
@@ -51,36 +57,79 @@ run.
 - **When:** first, before any HV question and before the camera is
   touched. Then again at the commit point, after the camera pre-flight,
   because every dialog in between waits on the operator for as long as
-  they take. Nothing between that re-check and `_sldea_live_ch` claiming
-  the channel yields to Tk. A sweep the operator already allowed is not
-  asked about twice; a different one is.
+  they take. The commit check never asks. The sweep allowed at the top
+  passes; any other sweep is refused there. That way no dialog can yield
+  to Tk between the check and `_sldea_live_ch` claiming the channel.
+- **Judged by the thread, one worker at a time:** a capture counts as
+  running while its worker THREAD is alive, because after Stop it still
+  finishes the step it was on. The Webcam starters now refuse to start a
+  new capture over a worker that is still finishing
+  (`_cam_worker_alive`), so `cam_seq_thread` is always the only live
+  worker and the gate can see it. The adversarial review found this
+  hole, and a probe confirmed it. A sweep whose write stalls on the
+  instrument lock is stopped, and then displaced by a new capture. It
+  becomes invisible to the gate, and its write lands after the run's
+  set-up: 2.5 kV instead of 1.0 kV for 5 s in the probe.
 - **The worker check:** `_cam_seq_worker` reads `_sldea_live_ch` before
   every write and stops with *Capture failed: SG CHn is driving the Trek
   in a LIVE SLDEA run* instead of writing. The timed capture's burst
-  trigger follows the same rule. On `main` nothing stops a sweep from
-  being STARTED during a run; the unmerged `claude/sldea-video-capture`
-  adds `_cam_owned_by_sldea()` start guards for that direction. The two
-  changes are complementary. A trial merge conflicts in three places, and
-  each resolves by keeping both sides: the top of `sldea_run`'s `try:`
-  (interlock first, then the video pre-flight), this entry beside the
-  video entry, and BENCH_TEST §R after §Q. Both test suites pass on the
-  merged tree.
+  trigger follows the same rule. The claim it reads is held from the
+  commit point until `_sldea_finished` runs on the Tk side, after the
+  worker has zeroed the SG and switched its output off, ■ Abort
+  included. A test pins that span.
 - **Left alone:** the live preview and the interval capture. `sldea_run`
   already stops the preview, and the interval capture stops with it
-  (audit 2026-07-25).
+  (audit 2026-07-25). The gate does not tell camera indices apart: the
+  run always shoots camera 0, the one camera this rig has.
 
-**Not covered (follow-ups).** Two more signal-generator writers bypass
-the LIVE channel lock: the Signal Gen tab's **Fire burst** button
-(`sg_fire_burst`), and the Waveform Editor's LAN upload (`arb_editor.py`),
-which also rewrites WVTP/OFST on its channel.
+**Not covered (follow-ups).**
 
-**Verification.** `tests/test_sldea_interlock.py` has 19 tests. They
-drive the real `sldea_run`, both Webcam starters, both capture workers
-and the real `_sldea_worker` against a fake signal generator that records
-which thread wrote what. A mutation pass removed or weakened each guard
-in turn, and all 12 mutants were caught. There is no new instrument I/O
-(the change only withholds writes), so there is no bench gate. BENCH_TEST
-§R is a five-minute DRY look at the dialogs for the next bench visit.
+- **Two more lock bypasses:** the Signal Gen tab's **Fire** button
+  (`sg_fire_burst`) and the Waveform Editor's LAN upload (`arb_editor.py`,
+  which also rewrites WVTP/OFST on its channel) both bypass the LIVE
+  channel lock.
+- **A DRY run never checks its SG channel is at rest.** A finished sweep,
+  or an earlier Apply, can leave it at a level with the output on.
+  Checking needs signal-generator reads, so it is new instrument I/O and
+  needs a bench session first.
+- **Mid-run starts on main:** a sweep can still be *started* on a DRY
+  run's channel mid-run, because the worker check guards LIVE runs only.
+  The unmerged `claude/sldea-video-capture` adds `_cam_owned_by_sldea()`
+  start guards, which close that for every run.
+
+**Merging with `claude/sldea-video-capture`.** The two changes are
+complementary. A trial merge conflicts in three places, and each resolves
+by keeping both sides:
+
+- the top of `sldea_run`'s `try:` (this gate first, then the video
+  pre-flight);
+- this entry beside the video entry;
+- BENCH_TEST §R after §Q.
+
+Both test suites pass on the merged tree. Two follow-ups belong to that
+merge:
+
+- With Record ticked, an other-channel sweep should be refused rather
+  than asked about, because the recorder holds the camera for the whole
+  run.
+- The gate should count a previous run's recorder that is still shutting
+  down (`_sldea_recorder.reader_alive()`) as holding the camera.
+
+**Verification.**
+
+- **Tests:** `tests/test_sldea_interlock.py` has 26 tests. They drive the
+  real `sldea_run`, the gate, both Webcam starters, both capture workers,
+  `sldea_abort`, `_sldea_finished` and the real `_sldea_worker` against a
+  fake signal generator that records which thread wrote what.
+- **Reviews:** two adversarial passes, one on the logic and threading,
+  one on the tests and these docs. Every finding is fixed above or listed
+  as a follow-up.
+- **Mutation:** 29 mutants, each guard removed or weakened in turn. They
+  include every mutant either reviewer reported as surviving the first
+  version of the suite, and all 29 fail at least one test.
+- **No bench gate:** there is no new instrument I/O (the change only
+  withholds writes). BENCH_TEST §R is a five-minute DRY look at the
+  dialogs for the next bench visit.
 
 ## The aggregate averages BY GROUP, the runs it averages can be hidden, and the group palette is a shape argument rather than a colour one (2026-08-10)
 

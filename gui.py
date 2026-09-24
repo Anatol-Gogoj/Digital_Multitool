@@ -313,6 +313,12 @@ class InstrumentControlGUI:
         self.cam_seq_running = False
         self.cam_seq_thread = None
         self.cam_seq_queue = queue.Queue()
+        # What the running stepped/timed capture is, recorded at its start
+        # for the SLDEA Run interlock: 'sweep' or 'timed', and the SG
+        # channel a sweep writes. Never read back from the widgets -- the
+        # operator can change those while the sweep runs.
+        self._cam_seq_kind = None
+        self._cam_seq_ch = None
 
         # Footer BEFORE the notebook: same packing rule as `#27`, one level
         # up. The packer serves slaves in packing order, so the footer must
@@ -813,6 +819,54 @@ class InstrumentControlGUI:
         if key == 'sg' and getattr(self, '_sldea_live_ch', None) is not None:
             self._sg_live_locked(self._sldea_live_ch)
             return
+        # One connect at a time, refused BEFORE the handle or the label is
+        # touched. _run_bg's own check comes after the lines below, and it
+        # was the only one until review 2026-09-24: with another tab's
+        # Reconnect in flight, this tab was left with no handle and its
+        # label stuck at "Connecting..." until a later Reconnect succeeded.
+        # A scope dropped that way mid-run left a LIVE run's breakdown
+        # watchdog blind. The note is _run_bg's own, word for word.
+        if 'connect' in self._bg_busy:
+            self.status_bar.config(
+                text="Still working on the previous connect operation...")
+            return
+        # During a LIVE run the scope asks first (owner's decision
+        # 2026-09-24). The run reads self.scope on every monitor tick -- the
+        # breakdown watchdog, telemetry, each snapshot's kV/uA -- so closing
+        # it leaves the run blind until the new session is up, and until a
+        # later Reconnect succeeds if this one fails. Worse in the worker's
+        # first seconds: it arms the watchdog only if a scope is there when
+        # it gets to it. Reconnect is also how monitoring comes back after a
+        # link drop, which is why the scope asks where the SG above is
+        # refused. No scope, nothing to lose.
+        if (key == 'scope' and self.scope is not None
+                and getattr(self, '_sldea_live_ch', None) is not None):
+            if not messagebox.askyesno(
+                    "Scope in use — LIVE HV run",
+                    "A LIVE SLDEA run is reading this scope: its breakdown "
+                    "watchdog, telemetry and snapshot kV/µA all come from "
+                    "it.\n\nReconnecting closes the scope's session. Until "
+                    "a new one is open, the run reads no kV or µA and the "
+                    "watchdog cannot trip. If the connect fails, that lasts "
+                    "until a Reconnect succeeds. The run keeps going either "
+                    "way.\n\nSay Yes only if the scope has stopped "
+                    "answering. If it is still answering, or the run "
+                    "started only seconds ago (its watchdog is still "
+                    "arming), say No: abort the run on the SLDEA tab first, "
+                    "then reconnect.\n\nReconnect the scope now?",
+                    default='no'):
+                return
+            # The question ran the event loop, so the checks above are
+            # stale: a connect started meanwhile would drop the handle just
+            # as before (same check, same note), and the run may be over.
+            if 'connect' in self._bg_busy:
+                self.status_bar.config(
+                    text="Still working on the previous connect operation...")
+                return
+            if getattr(self, '_sldea_live_ch', None) is not None:
+                self._sldea_log("⚠ scope Reconnect during the LIVE run "
+                                "(confirmed) — no kV/µA readings until its "
+                                "new session is open")
         old = getattr(self, key)
         setattr(self, key, None)   # nothing may use the handle meanwhile
         label.config(text="Connecting...", fg="#b36b00")
@@ -1653,6 +1707,11 @@ ANALYSIS:
         to a dialog (queue-marshalled, never touching Tk off the main thread)."""
         if self._updating:
             return
+        # Refused up front during an SLDEA run (owner, 2026-09-24): its
+        # Restart would be refused until the run ends anyway, and the update
+        # copies onto the shared drive runs save to. See _sldea_run_blocks.
+        if self._sldea_run_blocks('update'):
+            return
         script = self._find_update_script()
         if not script:
             messagebox.showerror(
@@ -1682,7 +1741,10 @@ ANALYSIS:
         btns.pack(fill='x', padx=8, pady=(0, 8))
         close_btn = tk.Button(btns, text="Close", command=win.destroy, state='disabled')
         close_btn.pack(side='right')
-        restart_btn = tk.Button(btns, text="Restart now", command=self._restart_app,
+        # The run check happens on the click, not here: a run can be started
+        # while this dialog is open.
+        restart_btn = tk.Button(btns, text="Restart now",
+                                command=lambda: self._restart_app(parent=win),
                                 state='disabled')
         restart_btn.pack(side='right', padx=(0, 6))
 
@@ -1752,13 +1814,72 @@ ANALYSIS:
                 txt, f"\n✗ Update failed (exit {rc}). See output above.\n")
             self.status_bar.config(text=f"Update failed (exit {rc})")
 
-    def _restart_app(self):
-        """Re-exec the GUI process to load freshly-updated code."""
+    def _restart_app(self, parent=None):
+        """Re-exec the GUI process to load freshly-updated code.
+
+        Never while an SLDEA run is going (2026-09-24, see
+        _sldea_run_blocks). With no run going it is NOT the window-close
+        shutdown: instrument outputs stay exactly as they are."""
+        if self._sldea_run_blocks('restart', parent=parent):
+            return
         try:
             self.root.destroy()
         except Exception:
             pass
         os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    def _sldea_run_blocks(self, action, parent=None):
+        """True (+ a warning saying why) while an SLDEA run is going, so
+        `action` ('restart' or 'update') must wait for it to end.
+
+        Found 2026-09-24 by the adversarial review of the SG writer lock:
+        Restart now re-exec'd mid-run. os.execv replaces the process at
+        once, so neither the run's own zeroing (the worker's finally) nor
+        the window-close shutdown ever ran, and a LIVE run left the Trek
+        energized behind an idle SLDEA tab -- the same class as audit
+        2026-07-25 C1. The owner's decision (2026-09-24): refuse, and send
+        the operator to ■ Abort. A run ends through ■ Abort, never as a
+        side effect of a restart.
+
+        `_sldea_running` is the right flag: sldea_run sets it before it
+        starts the worker, so before the worker's first SG write, and it
+        clears only in _sldea_finished, which the worker queues as the last
+        step of its finally -- after its attempt to zero the SG. So a run
+        that is still stopping is refused too. (If the attempt fails, the
+        HV NOT ZEROED alarm goes up and the flag still clears.) Both
+        orderings are pinned in tests/test_update_restart_guard.py. A DRY
+        run is refused as well: a restart would cut it off before it
+        closes its run folder."""
+        if not getattr(self, '_sldea_running', False):
+            return False
+        ch = getattr(self, '_sldea_live_ch', None)     # None: a DRY run
+        if getattr(self, '_sldea_stop', False):
+            state = (f"The LIVE HV run on SG CH{ch} is still stopping."
+                     if ch is not None else "The DRY run is still stopping.")
+            then = "Wait until ▶ Run is available again on the SLDEA tab"
+        else:
+            state = (f"A LIVE HV run is driving the Trek on SG CH{ch}."
+                     if ch is not None else
+                     "A DRY run is in progress on the SLDEA tab.")
+            then = "■ Abort the run on the SLDEA tab (or let it finish)"
+        if action == 'restart':
+            title = "Restart refused — SLDEA run in progress"
+            why = ("Restarting now would end the run before it can set the "
+                   "SG to 0 V and switch it off, leaving the Trek energized "
+                   "while the restarted app shows an idle SLDEA tab."
+                   if ch is not None else
+                   "Restarting now would cut the run off before it closes "
+                   "its run folder.")
+            then += ", then press Restart now again."
+        else:
+            title = "Update refused — SLDEA run in progress"
+            why = ("Update after the run ends: Restart now is refused until "
+                   "then anyway, and the update copies files onto the "
+                   "shared drive the run may be saving to.")
+            then += ", then choose Tools → Update Software… again."
+        kw = {} if parent is None else {'parent': parent}
+        messagebox.showwarning(title, f"{state}\n\n{why}\n\n{then}", **kw)
+        return True
 
     def create_scope_tab(self):
         """Create oscilloscope control tab"""
@@ -3112,6 +3233,146 @@ LOGGING:
         self.sldea_refresh_presets()
         self.status_bar.config(text=f"SLDEA preset deleted: {name}")
 
+    def _sldea_start_conflicts(self, sgch, dry):
+        """What else is running that a run set to SG CH`sgch` must not
+        start beside?
+
+        -> (reasons, ask, job). `reasons` lists (short, full) texts for why
+        the run cannot start yet; `ask` is the question to put before it
+        may; nothing in either = clear. `job` is the start token of the
+        sweep `ask` is about, so the commit-point re-check can tell the
+        sweep the operator allowed from any other.
+
+        Found 2026-09-23 by an adversarial review of 78315cc: nothing
+        stopped a run from starting while the Webcam tab's stepped sweep
+        was still writing the signal generator. On the run's own channel
+        the sweep overwrites the Trek drive, and the run loop re-sends its
+        offset only when the commanded kV changes, so a wrong level can
+        hold for a whole landing. Every Webcam-tab job also wants the
+        camera (the run always shoots camera 0, the one camera this rig
+        has), and a camera-control job rewrites the settings the run is
+        about to lock. The owner's rule (2026-09-23): refuse, except a
+        sweep on the OTHER SG channel, which is asked about -- the line the
+        LIVE channel lock already draws (driven channel locked, the other
+        usable). A capture is judged by its worker THREAD, not its flag:
+        after Stop the worker still finishes the step it was on, and the
+        Webcam starters never let a new capture displace it (see
+        _cam_worker_alive). A Signal Gen tab command still in flight holds
+        off a LIVE run as well: landing after the run has set up its
+        channel, it could change the drive under the run, which re-sends
+        only its offset.
+        """
+        reasons = []
+        ask = job = None
+        if self._cam_worker_alive():
+            kind, ch = self._cam_seq_kind, self._cam_seq_ch
+            if not self.cam_seq_running:
+                reasons.append((
+                    "a Webcam-tab capture is still stopping",
+                    "The Webcam tab's capture is still stopping: it "
+                    "finishes the step it was on first (a photo, or a "
+                    "signal-generator write already under way). That "
+                    "usually takes a moment."))
+            elif kind == 'sweep' and ch == sgch:
+                reasons.append((
+                    f"a stepped sweep is writing SG CH{ch}, the run's "
+                    f"channel",
+                    f"A stepped sweep on the Webcam tab is writing SG "
+                    f"CH{ch}, the channel this run "
+                    + (f"is set to drive the Trek with. A DRY run started "
+                       f"now would not be dry: the sweep can still energize "
+                       f"the Trek. Stop it first (Webcam tab → Stop sweep). "
+                       f"A sweep leaves CH{ch} at its last level when it "
+                       f"stops, so also set CH{ch} to 0 V, or its output "
+                       f"OFF, on the Signal Gen tab." if dry else
+                       "drives the Trek with. It would overwrite the drive "
+                       "mid-run, and the run re-sends its voltage only when "
+                       "the staircase moves, so a wrong level could hold "
+                       "for a whole landing. Stop it first: Webcam tab → "
+                       "Stop sweep.")))
+            elif kind == 'sweep':
+                job = getattr(self, '_cam_seq_gen', None)
+                ask = (
+                    f"A stepped sweep on the Webcam tab is still writing SG "
+                    f"CH{ch}. "
+                    + ("This DRY run writes no SG channel, but the sweep"
+                       if dry else
+                       f"It does not write this run's drive channel "
+                       f"(CH{sgch}), but it")
+                    + " photographs every level with the camera this run's "
+                      "snapshots need. A snapshot that loses the camera to "
+                      "it is logged NO FRAME.\n\n"
+                      "Stop it first (Webcam tab → Stop sweep) unless you "
+                      "mean to run both.\n\n"
+                      "Start the run with the sweep still going?")
+            else:
+                timed = kind == 'timed'
+                reasons.append((
+                    "a timed capture is running" if timed
+                    else "a Webcam-tab capture is running",
+                    ("A timed capture" if timed else "A capture")
+                    + " is running on the Webcam tab. It takes photos on "
+                      "its own schedule, competing with this run's "
+                      "snapshots for the camera. Stop it first"
+                    + (": Webcam tab → Stop." if timed
+                       else " on the Webcam tab.")))
+        if 'camera-ctrl' in self._bg_busy:
+            reasons.append((
+                "a camera adjustment is running",
+                "A camera adjustment (Apply & Lock, Auto-expose, Auto-WB "
+                "once or Stabilize) is still running on the Webcam tab. It "
+                "rewrites the camera settings this run is about to lock. "
+                "It finishes by itself, usually within seconds."))
+        if not dry and 'sg-io' in self._bg_busy:
+            reasons.append((
+                "a Signal Gen tab command is still being sent",
+                "A command from the Signal Gen tab (Apply, Output, Fire or "
+                "Read Instrument) is still being sent. A write "
+                "that landed after this run had set up its channel could "
+                "change the drive under it. It finishes by itself, usually "
+                "within seconds."))
+        return reasons, ask, job
+
+    def _sldea_start_gate(self, sgch, dry, allowed=None, final=False):
+        """Apply _sldea_start_conflicts: refuse, or ask. -> (go, allowed).
+
+        `allowed` is the sweep the operator agreed to run beside. `final`
+        is the commit-point re-check, and it never asks: a sweep other than
+        the allowed one is refused instead, so no dialog can yield to Tk
+        between this check and the run claiming its channel."""
+        reasons, ask, job = self._sldea_start_conflicts(sgch, dry)
+        if ask and job is not None and job is allowed:
+            ask = None                          # asked once already
+        if ask and final:
+            ask = None
+            reasons.append((
+                f"a stepped sweep on SG CH{self._cam_seq_ch} was started "
+                f"during setup",
+                f"A stepped sweep on SG CH{self._cam_seq_ch} was started on "
+                f"the Webcam tab while this run was being set up. Stop it, "
+                f"or press ▶ Run again to be asked about it."))
+        if reasons:
+            self._sldea_log("run refused — "
+                            + "; ".join(short for short, _ in reasons))
+            messagebox.showerror(
+                "SLDEA — run blocked",
+                "This run cannot start yet:\n\n• "
+                + "\n\n• ".join(full for _, full in reasons)
+                + "\n\nPress ▶ Run again once it is clear.")
+            return False, None
+        if ask:
+            if not messagebox.askyesno("Stepped sweep still running", ask,
+                                       default='no'):
+                self._sldea_log("run cancelled — a stepped sweep is still "
+                                "running on the Webcam tab")
+                return False, None
+            self._sldea_log(
+                f"⚠ Webcam tab: operator chose run-anyway beside a stepped "
+                f"sweep on SG CH{self._cam_seq_ch} — snapshots may lose the "
+                f"camera to it")
+            return True, job
+        return True, allowed
+
     def sldea_run(self):
         if self._sldea_running:
             return
@@ -3122,13 +3383,19 @@ LOGGING:
         dry = self.sldea_dryrun.get()
         # start buffering log lines NOW: the monitor-check outcome must land
         # in run.log even though the run dir does not exist yet (D4).
-        # `started` disarms the buffer on EVERY early exit below (no SG,
-        # monitor-dialog cancel, Energize-HV cancel, camera pre-flight
+        # `started` disarms the buffer on EVERY early exit below (start gate,
+        # no SG, monitor-dialog cancel, Energize-HV cancel, camera pre-flight
         # cancel): an armed prelog with no worker to flush it silently
         # swallowed session log lines forever (review 2026-08-04).
         self._sldea_prelog = []
         started = False
         try:
+            # The start gate comes FIRST, before any HV question: a stepped
+            # sweep on the Webcam tab may be writing this run's SG channel.
+            sgch = int(self.sldea_vars['sgch'].get())
+            go, allowed_sweep = self._sldea_start_gate(sgch, dry)
+            if not go:
+                return
             if not dry:
                 if not INSTRUMENTS_SUPPORTED:
                     messagebox.showinfo("Linux only", NOT_LINUX_NOTE)
@@ -3151,11 +3418,9 @@ LOGGING:
                 if not messagebox.askyesno(
                         "Energize HV?",
                         f"LIVE run — this drives the Trek up to "
-                        f"{max(p.levels):g} kV via SG "
-                        f"CH{self.sldea_vars['sgch'].get()}"
+                        f"{max(p.levels):g} kV via SG CH{sgch}"
                         f".\n\n{p.summary()}\n\nProceed?", default='no'):
                     return
-            sgch = int(self.sldea_vars['sgch'].get())
             vch = int(self.sldea_vars['vch'].get())
             ich = int(self.sldea_vars['ich'].get())
             # Provenance (2026-08-04): read back the vertical setup actually
@@ -3265,6 +3530,14 @@ LOGGING:
                 if not self._sldea_preflight(cam_exp, cam_gain):
                     self._sldea_log("run cancelled at camera pre-flight")
                     return
+            # ...and again at the commit point, where it asks nothing: every
+            # question above waits on the operator for as long as they take,
+            # and nothing between this check and _sldea_live_ch claiming the
+            # channel may yield to Tk.
+            go, _ = self._sldea_start_gate(sgch, dry, allowed_sweep,
+                                           final=True)
+            if not go:
+                return
             self._sldea_stop = False
             self._sldea_bd_tripped = False
             self._sldea_running = True
@@ -3666,8 +3939,14 @@ LOGGING:
         self.sldea_run_btn.config(state='normal')
         self.sldea_abort_btn.config(state='disabled')
 
-    def _sg_live_locked(self, channel=None):
-        """True (+ loud note) when a LIVE SLDEA run owns this SG channel."""
+    def _sg_live_locked(self, channel=None, parent=None):
+        """True (+ loud note) when a LIVE SLDEA run owns this SG channel.
+
+        The Signal Gen tab's writers ask this before they write (Apply,
+        Output, Fire, Reconnect), and so does the Waveform Editor's upload.
+        `parent` is the window the note belongs to: the editor passes
+        itself, as its own dialogs do, so the note opens over the editor
+        instead of over the main window."""
         ch = getattr(self, '_sldea_live_ch', None)
         if ch is None or (channel is not None and channel != ch):
             return False
@@ -3676,7 +3955,8 @@ LOGGING:
             f"SG CH{ch} is driving the Trek in a LIVE SLDEA run.\n\n"
             f"Its controls are locked until the run ends (the other channel "
             f"stays available). Abort the run on the SLDEA tab first if you "
-            f"must take over.")
+            f"must take over.",
+            **({} if parent is None else {'parent': parent}))
         return True
 
     def _sldea_log(self, msg):
@@ -5118,6 +5398,10 @@ LOGGING:
 
     def sg_fire_burst(self, channel):
         """Fire one manual burst (needs Burst ON, trigger MAN, output ON)."""
+        # A trigger is a write to the channel like Apply or Output, and a
+        # LIVE run owns its channel (2026-09-24: Fire used to skip the lock).
+        if self._sg_live_locked(channel):
+            return
         if not self.sg:
             messagebox.showerror("Error", "Signal generator not connected")
             return
@@ -6648,6 +6932,12 @@ LOGGING:
             messagebox.showinfo("Timed capture",
                                 "A capture is already running -- stop it first.")
             return
+        if self._cam_worker_alive():       # one worker at a time
+            messagebox.showinfo("Timed capture",
+                                "The last capture is still stopping -- it "
+                                "finishes the step it was on first. Try "
+                                "again in a moment.")
+            return
         try:
             delays = webcam.timed_delays(
                 explicit=self.cam_tm_delays.get(),
@@ -6695,6 +6985,7 @@ LOGGING:
 
         self.cam_seq_running = True
         self._cam_seq_gen = object()   # Stop→Start must not revive old worker
+        self._cam_seq_kind, self._cam_seq_ch = 'timed', None
         self._cam_active_btn = self.cam_tm_btn
         self._cam_active_idle = "Start timed capture"
         self._cam_active_status = self.cam_tm_status
@@ -6726,6 +7017,13 @@ LOGGING:
         rows = []
         try:
             if trigger_ch is not None:
+                # the stepped sweep's rule: never write a LIVE run's channel
+                if getattr(self, '_sldea_live_ch', None) == trigger_ch:
+                    self.cam_seq_queue.put((
+                        'error', f"SG CH{trigger_ch} is driving the Trek in "
+                                 f"a LIVE SLDEA run — burst trigger not "
+                                 f"fired"))
+                    return
                 self.sg.burst_trigger(trigger_ch)
             t0 = time.monotonic()
             for n, d in enumerate(delays):
@@ -6809,6 +7107,12 @@ LOGGING:
         if not self.sg:
             messagebox.showerror("Stepped capture", "Signal generator not connected")
             return
+        if self._cam_worker_alive():       # one worker at a time
+            messagebox.showinfo("Stepped capture",
+                                "The last capture is still stopping -- it "
+                                "finishes the step it was on first. Try "
+                                "again in a moment.")
+            return
         try:
             values = webcam.parse_level_list(self.cam_step_levels.get())
             if values is None:
@@ -6844,6 +7148,7 @@ LOGGING:
                                     f"_focus.csv")
         self.cam_seq_running = True
         self._cam_seq_gen = object()   # Stop→Start must not revive old worker
+        self._cam_seq_kind, self._cam_seq_ch = 'sweep', ch
         self._cam_active_btn = self.cam_seq_btn
         self._cam_active_idle = "Run sweep"
         self._cam_active_status = self.cam_seq_status
@@ -6875,6 +7180,18 @@ LOGGING:
             for n, v in enumerate(values):
                 if not alive():
                     break
+                # Checked before EVERY write (2026-09-23): a LIVE SLDEA run
+                # owns its SG channel, and its loop re-sends the offset only
+                # when the commanded kV changes, so one level written here
+                # could hold the Trek at the wrong voltage for a whole
+                # landing. The Run interlock refuses to start beside a
+                # sweep on its channel; this covers a sweep started after.
+                if getattr(self, '_sldea_live_ch', None) == ch:
+                    self.cam_seq_queue.put((
+                        'error', f"SG CH{ch} is driving the Trek in a LIVE "
+                                 f"SLDEA run — sweep stopped before writing "
+                                 f"{v:g}"))
+                    return
                 self.sg.set_basic_wave(ch, **{key: float(v)})
                 # dwell in small chunks so Stop stays responsive
                 end = time.monotonic() + dwell
@@ -6907,6 +7224,18 @@ LOGGING:
             except Exception:
                 pass
         self.cam_seq_queue.put(('done', len(values), csv_path))
+
+    def _cam_worker_alive(self):
+        """True while the stepped/timed capture worker is still running --
+        including after Stop, while it finishes the step it was on.
+
+        One worker at a time (2026-09-23): the SLDEA Run gate judges the
+        Webcam tab by `cam_seq_thread` alone, so a new capture must never
+        displace a worker that is still finishing. Its last SG write can
+        be waiting on the instrument lock, and once displaced it would be
+        invisible to the gate (adversarial review of the Run interlock)."""
+        t = self.cam_seq_thread
+        return t is not None and t.is_alive()
 
     def _drain_cam_queue(self):
         # Shared by the voltage sweep and the timed capture; the active

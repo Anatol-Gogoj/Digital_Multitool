@@ -280,6 +280,1039 @@ the over-trip streak survives the gap.
 - **No bench gate:** there is no new instrument I/O; the change only
   withholds writes.
 
+## A LIVE run asks before the scope's Reconnect closes the session its watchdog reads (2026-09-24)
+
+**TL;DR:** during a LIVE run, the Oscilloscope tab's Reconnect used to
+close the scope at once. That left the breakdown watchdog blind until a
+new session was up, and for longer if the connect failed. Now it asks
+first, default No. Yes reconnects as before, which is how a dropped link
+is recovered without aborting.
+
+**Observation.** PR #336's adversarial review found this, and it was
+checked on #336's head `cde5562`. Of the five Reconnect buttons, the LIVE
+lock (audit 2026-07-25 C1) refuses only the SG's. `_sldea_worker` reads
+`self.scope` on every monitor tick. Unlike the SG's, the scope handle is
+not captured at the start. A scope Reconnect sets `self.scope = None` on
+the Tk thread, then closes the old session and opens a new one on a
+`_run_bg` worker. Until that lands:
+
+- every watchdog read fails. `BreakdownWatchdog.update` ignores an
+  unreadable sample: it neither counts toward a trip nor resets the 3 s
+  streak;
+- periodic telemetry rows are blank, with `i_status` `error`. A snapshot
+  taken meanwhile skips its scope read: blank kV/µA, status `skipped`,
+  nothing logged;
+- 10 s after the first failed read, the run logs "CURRENT MONITORING LOST
+  … breakdown watchdog is BLIND" and carries on (policy 2026-07-25). A
+  connect that takes longer than that raises the alarm too, followed by
+  "current monitoring recovered".
+
+If the connect fails, `self.scope` stays None until a later Reconnect
+succeeds. A successful one sends no vertical, timebase or trigger
+command. After the USB open, the driver sends `*IDN?`, `DATA:ENCDG
+RIBINARY` and `DATA:WIDTH 2`, which set the waveform-transfer format. Its
+device-clear call does nothing over USB: PyVISA-py 0.8.1 does not
+implement one, and the driver swallows the error. The monitor loop picks
+up the new handle on its next tick. The worker's first seconds are the
+exception; see Limits.
+
+**Decision (Anatol, 2026-09-24).** Three answers were offered: refuse, as
+for the SG; ask first, default No; or leave it allowed. Anatol took the
+recommended one, ask first. The trade-offs:
+
+- Refusing would leave a scope whose link dropped mid-run unrecoverable
+  short of ■ Abort.
+- Leaving it allowed let one press on a healthy link blind the run, with
+  no warning beforehand.
+- The question has the same shape as the run-start "No current
+  monitoring — proceed?" (default No). The operator may choose to run
+  unmonitored, but has to choose it.
+
+This revises one row of the same day's scope-lock decision (PR #337, open
+when this was written), which kept Reconnect usable with no question. Its
+reasons still hold, so Reconnect stays usable, but behind a question now.
+Whichever of the two merges second has to bring #337's texts in line:
+
+- its `test_reconnect_stays_usable_during_a_live_run`, which fails on the
+  unexpected question;
+- its lock note ("…and Reconnect stay available");
+- its Oscilloscope-tab manual line ("…and Reconnect still work");
+- its handoff entry;
+- the comment in its `reconnect_scope()`.
+
+**How it is built.**
+
+- `_reconnect` asks after its existing checks, in their existing order:
+  the Linux gate, the SG LIVE lock, then PR #336's `'connect'` busy
+  guard. A connect in flight gets the busy note and no question.
+- It asks only when the key is `'scope'`, a scope handle exists, and
+  `_sldea_live_ch` is set. That flag means a LIVE run; a DRY run claims
+  nothing, as with the SG lock.
+- With no handle there is nothing to close, so it goes straight through.
+  That covers a LIVE run started without a scope, and the retry after a
+  failed Reconnect.
+- While the question is up, the run keeps reading the old session.
+  Nothing is closed until Yes.
+- No leaves everything as it was.
+- Yes runs the busy check again before touching the handle, because the
+  dialog ran the Tk event loop and the first check is stale. Then, if the
+  run is still on, it writes one run-log line ("⚠ scope Reconnect during
+  the LIVE run (confirmed) …") and takes the unchanged Reconnect path.
+- No new SCPI, and no change to the worker or the watchdog.
+
+**Limits.**
+
+- **A Yes in the worker's first seconds leaves the whole run without a
+  watchdog, and nothing says so.**
+  - The worker builds the watchdog once, after the run folder, the camera
+    controls and the SG setup, and only if `self.scope` is set at that
+    moment.
+  - Telemetry opens the same way, but logs "telemetry armed but the scope
+    is gone". The watchdog logs nothing, and the run-start line has
+    already called it armed.
+  - The window is about 0.3–1 s by #337's review, and up to 5 s with the
+    video branch. A Yes during the 1.5 s of baseline learning that follows
+    costs the baseline instead: the trip falls back to absolute.
+  - This is older than the question: before it, one click with no
+    question did the same. So the question only tells the operator to say
+    No in the run's first seconds.
+  - The fix is to arm from `wd_on and not dry`, so the 10 s alarm covers
+    the gap. That changes the run itself, so it is its own change. #337
+    reached the same verdict.
+- **Not bench-checked: closing a session in the middle of a read.**
+  - The question sends the operator to Reconnect exactly when the scope
+    has stopped answering. That is when the worker is likely blocked in a
+    read (up to the 5 s timeout), holding the instrument lock.
+  - `close()` takes no lock, so PyVISA-py disposes of the session under
+    that read. Reconnect has always done this. Whether it fails cleanly
+    or can take the process down, skipping the SG ramp-down, is unknown.
+  - It can be checked without HV: start a DRY run with telemetry on, pull
+    and replug the scope USB, press Reconnect, repeat a few times, and
+    watch for a hang or crash.
+- **The question cannot tell a healthy link from a dead one.** The
+  operator decides, from the run log's "monitor scope read failed" and
+  "CURRENT MONITORING LOST" lines, which appear when the watchdog or
+  telemetry is on. Asking only until the worker has flagged the loss
+  would need the worker to publish that state. Not done.
+- **A LIVE run with both the watchdog and telemetry off still gets the
+  question,** although it reads the scope at snapshots only. `sldea_run`
+  computes what it arms (`wd_on`, `tel_on`) but does not keep it, and the
+  worker can still fail to arm it (the first limit).
+- **The run log records the confirmation, not the outcome.** A failed
+  connect shows up as "CURRENT MONITORING LOST", 10 s after the first
+  failed read. A successful one shows up as readings resuming in
+  `telemetry.csv`.
+
+**Verification.**
+
+- **Tests:** `tests/test_scope_reconnect_live.py` has 15 tests, in the
+  stub-app style of #336's suite. It runs the real `_reconnect`, `_run_bg`
+  and `_sg_live_locked` on a Tk-free stub, with a real worker thread and a
+  scripted `askyesno` that can act while it is "up", as the event loop
+  would.
+  - On #336's head `cde5562`, the 6 tests that expect the question fail.
+    The other 9 pass there too: 8 pin behaviour that has not changed, and
+    one (no log line when the run ends during the question) also holds
+    for code that never asks.
+  - Here all 15 pass, and #336's suite still passes 9/9.
+- **Adversarial review,** before the PR, as CLAUDE.md asks for HV-safety
+  paths. Two independent passes ran: one tried to break the change, the
+  other merge-checked it.
+  - **No bypass.** The only writers of `self.scope` are `__init__`,
+    start-up auto-connect, `_reconnect` and window close, which stops the
+    run first. Nothing on a timer calls a Reconnect.
+  - **Tk.** Tk 8.6's `msgbox.tcl` maps Escape, window close and destroy
+    to No for a yes/no box. Forced on this PC's Tk, the same Tcl dialog
+    returned False for all of them, and ran about 15 `after` callbacks
+    while it was up.
+  - **The re-check.** Nothing in gui.py can add a `'connect'` job or
+    claim a run from a callback, so the re-check is defensive today.
+    `_sldea_finished` can release the claim meanwhile, which the log
+    guard handles.
+  - **Mutation:** 46 mutants, 38 caught. Of the 8 survivors:
+    - 4 are equivalent: the truthiness of the handle and of the claim,
+      the log guard reading `_sldea_running`, and a key test that also
+      names the SG, which its lock refuses first;
+    - 1 needs a run ending and a connect starting during the dialog,
+      which its grab rules out;
+    - 3 dropped a sentence of the dialog. Two of those sentences are now
+      pinned; the third is gone.
+  - **What the review changed in this entry:** the start-up window, the
+    device clear that is never sent, the `skipped` snapshot status, and
+    the wording.
+  - **Merges:** `gui.py` merges cleanly with #334, #335 and #337's head.
+    #337 then needs the text changes listed above. Otherwise only the top
+    of this file and `content.json` conflict.
+- **Full suite, on the Windows PC:** 38 of 41 suites pass. The three
+  failures are the known Windows-only ones: #331 fixes
+  `test_easywave_export` and the plot window's resize race, and #332
+  fixes `test_tk_fontfix`.
+- **No bench gate:** no new instrument I/O.
+
+## Fire and the Waveform Editor's upload obey the LIVE channel lock (2026-09-24)
+
+**TL;DR:** during a LIVE run, two buttons could still write the signal
+generator channel that drives the Trek: the Signal Gen tab's **Fire**, and
+the Waveform Editor's **Upload && Select**. The upload would have switched
+the Trek's DC drive to an arb at 20 Vpp. Both now refuse that channel with
+the same warning that Apply and Output show. The other channel still works,
+and nothing changes when no LIVE run is going.
+
+**Observation (on `78315cc`).** The LIVE lock (`_sg_live_locked`,
+2026-07-25) guarded Apply, Output and Reconnect. Two writers never asked
+it:
+
+- `sg_fire_burst` sent `C<n>:BTWV MTRIG` to either channel.
+- `ArbWaveformEditor.upload` sent five commands to its Send-to channel, in
+  this order: `WVDT` (the arb), `BSWV WVTP,ARB`, `ARWV NAME`,
+  `SRATE MODE,TARB`, and `BSWV AMP,<2 × full scale>,OFST,0`. At the
+  editor's default ±10 V full scale that is 20 Vpp, a ±10 kV swing at the
+  DEA. The run loop re-sends only OFST, and only when the staircase
+  moves. It never re-sends WVTP or AMP, so the arb would have played until
+  the run ended.
+
+The new suite, run against unfixed `78315cc`, records these writes on the
+LIVE channel. PR #334 (`claude/sldea-sweep-interlock`) lists the same two
+writers as its follow-ups.
+
+**Decision.**
+
+- Both call `_sg_live_locked` before anything else, as Apply does. The
+  owner's rule of 2026-07-25 stands: lock the driven channel, leave the
+  other usable, show the loud note. A DRY run owns no channel, so it
+  locks nothing.
+- The editor's lock follows its **Send to CH** box, not the channel the
+  editor was opened on: an editor opened on CH2 can target CH1.
+- `_sg_live_locked` takes an optional `parent`. The editor passes itself,
+  as its own dialogs all do, so the note opens over the editor. On Linux,
+  where LIVE runs happen, Tk draws the note itself (`msgbox.tcl`): the
+  parent decides where it is centred and which window it stays above, and
+  its grab blocks the whole app either way. On Windows a real-Tk check
+  showed the note owned by the main window without `parent`, with the
+  editor still clickable behind it. Other callers pass nothing and behave
+  as before.
+- An inventory test lists every function in the app modules that writes
+  the SG, with the writes it makes. A new write, in a new function or in
+  a listed one, fails the suite until someone decides whether the lock
+  applies to it. Every writer listed as locked must ask `_sg_live_locked`
+  in a top-level `if ...: return` before its first write, so the
+  inventory alone would have failed on `78315cc` for Fire and the upload.
+  It sees the spellings the app uses (`self.sg`, `app.sg`, `sg`, a write
+  method handed out as a callback, `getattr` with a literal name, the raw
+  `.inst` handle). An alias under another name is its stated blind spot.
+
+**Every SG writer, after this change.**
+
+| Writer | What keeps it off a LIVE run's channel |
+|---|---|
+| Apply (and preset / bench-profile loads, which chain through it) | `_sg_live_locked` (2026-07-25) |
+| Output | `_sg_live_locked` (2026-07-25) |
+| Reconnect | refused while any channel is LIVE (2026-07-25) |
+| **Fire** | `_sg_live_locked` (this entry) |
+| **Waveform Editor upload** | `_sg_live_locked` on the Send-to channel (this entry) |
+| Webcam stepped sweep, timed-capture trigger | a `_sldea_live_ch` check before each write, from PR #334 (open on 2026-09-24). On `main` until it merges: **nothing** |
+| The run itself | it owns the channel |
+| Window close | asks the run to ramp down, then switches both outputs OFF |
+
+**Limits.**
+
+- **A job already in flight when ▶ Run claims the channel.** The lock is
+  checked when the button is pressed, not again when the write goes out.
+  Fire, Output and Apply send from a background job, and each command
+  waits for the generator's I/O lock. The Data Logging tab's SG reads can
+  hold that lock for up to the 5 s VISA timeout each. So on a stalling
+  link, a job clicked just before ▶ Run could land after the run has set
+  up its channel: an Output OFF would leave the run dark, and an Apply
+  could swap its waveform. The run's own dialogs come first, so this
+  needs a link that stalls for seconds. PR #334 closes it: a LIVE start
+  refuses while any Signal Gen job (`sg-io`) is still in flight. The
+  editor's upload runs on the Tk thread, and so does the claim, so those
+  two cannot interleave.
+- **An upload to the other channel still holds up a ramping run.** The
+  upload runs on the Tk thread and holds the generator's I/O lock for the
+  transfer, which the driver allows up to 20 s. While it runs, the window
+  is frozen, ■ Abort included. A run that is ramping waits to send its
+  next offset, in the same loop that samples the breakdown watchdog; a
+  landing sends nothing, so it does not wait. The 2026-07-25 rule keeps
+  the other channel usable. Whether to refuse uploads on both channels
+  during a LIVE run is the owner's call.
+- **The other channel is independent only if the channels are not
+  coupled.** The 4055B has channel coupling / tracking settings (the
+  SDG2000X-class `COUP`). With them on, a write to the other channel could
+  move the driven one. Nothing in the app reads them, and reading them is
+  new instrument I/O. Confirming they are off is a bench follow-up.
+
+**Found by this entry's adversarial review, not fixed here.** Each needs
+its own change:
+
+- **Tools → Update Software → Restart now** calls `root.destroy()` and
+  `os.execv` with no run check. That skips both the window-close shutdown
+  and the run's own zeroing. A LIVE run leaves the Trek energized, and the
+  restarted app shows an idle SLDEA tab. *Fixed by #338 (merged
+  2026-09-24): Restart now and Update Software refuse during a run.*
+- **The monitor scope can be reconfigured mid-run.** A bench-profile load
+  or the Scope tab can do it (AC coupling on I_Out would blind the
+  breakdown watchdog), and neither checks `_sldea_running`.
+- **`_reconnect` can drop the handle.** It sets the handle to None before
+  `_run_bg` checks its `connect` busy key. With a connect already in
+  flight, the handle is dropped and never restored. *Fixed by #336
+  (merged 2026-09-24): Reconnect checks for a connect in flight before it
+  touches the handle.*
+
+**Verification.**
+
+- **Tests:** `tests/test_sg_live_lock.py` has 17 tests. They drive the
+  real `sg_fire_burst`, `apply_sg_channel`, `sg_toggle_output`,
+  `_reconnect`, `_sldea_finished` and the editor's real `upload` on
+  Tk-free stubs, against a fake SG that records every write. The
+  inventory is also tested on modules whose answer is known. On unfixed
+  `78315cc`, 6 fail: both refusals, the Send-to rule, `parent`, the
+  inventory's locked-writer check, and the release test (it fires on the
+  live channel first). On this branch, all 17 pass.
+- **Mutation:** 18 mutants were run, and 17 were caught. They include the
+  three the review found surviving the first version of this suite. The
+  survivor is a DRY run claiming its channel. How `sldea_run` makes the
+  claim is not driven here: PR #334's suite pins it, and on `main` before
+  #334 nothing does.
+- **Real Tk:** a smoke on Windows built the full app with a fake LIVE run
+  on CH1 and pressed the actual buttons. On CH1, Fire and Upload were
+  refused with the native warning, and the editor owned its warning. On
+  CH2, both went through.
+- **No bench gate:** there is no new instrument I/O; the change only
+  withholds writes.
+- **The bench demo:** `bench/arb_demo.py` gets a no-op `_sg_live_locked`.
+  Its mock `upload_arb` now also takes the `points=` that the editor has
+  passed since 2026-06-27 (`fdffcf4`). The demo's upload had raised on it
+  ever since, and now works again.
+
+## ▶ Run's monitor check cannot see coupling, on/off or a stopped scope, and the bench probe learns the replies first (2026-09-24)
+
+**TL;DR:** before a LIVE run, ▶ Run checks each scope monitor channel's
+scale, attenuation, position and offset, and nothing else. So an I_Out
+channel left on AC coupling, an I_Out channel switched off, or a scope
+left stopped all pass, and the breakdown watchdog would then read about
+0 µA, or one frozen record, from the first second. Catching these needs
+scope queries that have never been run on this MSO24, so this change is
+bench-side only. The §N probe now asks them. A new walk (BENCH_TEST §N2)
+records what they, and the watchdog's own read, return in each blind
+state, and which of the queries actually follow the front panel. The app
+itself does not change until a bench session has those replies.
+
+**Observation (#337's adversarial review, 2026-09-24; the code at
+`78315cc`).**
+
+- `_sldea_check_monitors` (`gui.py`) queries `SCALE?`,
+  `PROBEFUNC:EXTATTEN?`, `POSITION?` and `OFFSET?` on the V_Out and I_Out
+  channels, and `sldea_profile.monitor_problems` judges only the visible
+  window and the attenuation. `_sldea_scope_readback` records the same
+  four in `setup.txt`.
+- Neither asks whether a channel is DC-coupled, whether it is on, or
+  whether the scope is acquiring. The auto-fix already *writes*
+  `CH<n>:COUPLING DC` and `SELECT:CH<n> ON`, but it is only offered when
+  one of the four window checks fails.
+- So these three pass the check today. The right-hand column is what we
+  expect, from how Tek scopes behave; none of it has been seen on this
+  scope, and §N2 is what records it:
+
+| State at ▶ Run | What the watchdog would then read |
+|---|---|
+| I_Out on AC coupling, e.g. from a bench profile loaded before the run | about 0 µA whatever the current, marked `ok`, so it never trips |
+| I_Out switched off | unknown. The 9.9E37 sentinel would count as over-trip and abort a healthy run once the confirm time (3 s by default) ran out. An unreadable reply would log MONITORING LOST after 10 s, and the run would carry on blind |
+| the scope stopped (Stop, or a finished Single) | one frozen record, marked `ok`: no alarm ever fires |
+
+- #337 (still open) would withhold the app's own writes to these settings
+  *during* a LIVE run. Nothing checks them at the *start*, and nothing in
+  the app stops a hand on the scope's knobs.
+- The trigger mode adds a fourth route. In NORMAL mode the scope acquires
+  only on a trigger, so if the trigger source is a channel the run does
+  not read, re-coupling that channel or turning it off freezes the reads
+  just as Stop does. #337 leaves those channels free. If the source is
+  I_Out itself, a quiet I_Out that never crosses the trigger level does
+  the same with nothing touched. The app never sets the trigger mode, so
+  whether the rig is in NORMAL mode is itself unknown.
+
+**Decision: bench first.** `CLAUDE.md` says never ship bench-unverified
+instrument I/O. `CH<n>:COUPLING?` and `SELECT:CH<n>?` have never been
+run on this scope, and the check cannot be designed until we know their
+replies and what `MEASUREMENT:IMMED:VALUE?` returns in each blind state.
+So this change touches only `bench/`, `tests/` and the docs. `gui.py` and
+`sldea_profile.py` are unchanged.
+
+What `bench/test_sldea_watchdog_probe.py` does now:
+
+- **Section C** asks each monitor channel for `CH<n>:COUPLING?`,
+  `SELECT:CH<n>?` and `DISPLAY:GLOBAL:CH<n>:STATE?`. The last is a second
+  on/off candidate, in case `SELECT?` does not answer, so one bench visit
+  settles it. C also asks `TRIGGER:A:TYPE?`, `TRIGGER:A:EDGE:SOURCE?` and
+  `HORIZONTAL:SCALE?`, beside the `ACQUIRE:STATE?`, `ACQUIRE:STOPAFTER?`
+  and `TRIGGER:A:MODE?` it already asked for #189. Each reply is printed
+  raw, with a plain-words reading beside it, and C ends with a line on
+  whether the trigger can stall the run.
+- **Section D, `--walk`** (BENCH_TEST §N2). The operator sets four
+  states on the front panel, one at a time: normal use, I_Out AC-coupled,
+  I_Out off, and the scope stopped. In each state the probe reads every
+  C query, then takes six raw `MEASUREMENT:IMMED:VALUE?` reads of I_Out,
+  0.5 s apart as the watchdog reads it. Beside each read it says what the
+  watchdog would make of it. The step then says whether its target query
+  moved. It also re-reads the watched queries and `ACQUIRE:STOPAFTER?`
+  after the reads, so a measurement that switches a channel back on, or a
+  scope that stops meanwhile, shows up.
+- **Its main result is a list: which queries follow the front panel.** A
+  query counts only if it changed, at the step that changed what it reads,
+  away from its reply in normal use and not to the reading a LIVE run
+  needs. Only those queries can serve the check.
+- **The walk ends with a restore check, and trusts only what it proved.**
+  - It prints `RESTORED` only when both monitor channels read DC-coupled
+    and on, the scope reads acquiring and not in Single, and the
+    watchdog's own read is a readable current. All of it is judged on the
+    replies from both before and after its reads.
+  - A bad reading counts from any query. A good one counts only from a
+    query on that list. Everything else is `NOT CONFIRMED`, for the
+    operator to check on the screen.
+  - `NOT READY FOR A LIVE RUN` asks again after each fix. `NOT CONFIRMED`
+    ends the walk, because reading again cannot confirm what the probe
+    cannot see.
+  - A walk that started blind is judged on what a LIVE run needs, and is
+    never sent back to how it started.
+
+Why these choices:
+
+- **The operator makes each change by hand.** Two reasons.
+  - The probe stays query-only. Apart from the driver's connect sequence
+    (a VISA device clear, `*IDN?`, and the waveform-transfer format
+    `DATA:ENCDG`/`DATA:WIDTH`, which the app also sends on every
+    connect), its only writes are the `MEASUREMENT:IMMED` TYPE and SOURCE
+    that every measurement sends. A test holds that through the real
+    `TekMSO24` constructor, in both modes.
+  - The check has to recognise a state that a person or a bench profile
+    set. If the probe wrote `COUPLING AC` and read it back, it would only
+    prove the query echoes the probe's own write.
+- **Proof before trust.** The first version trusted any reply it could
+  parse, and this entry's adversarial review broke it. `SELECT?` answered
+  1 while `DISPLAY?` followed the panel, and a walk that left CH3 off
+  printed `RESTORED` and exited 0, because the restore read `SELECT?`
+  first. A query that did not move when the operator changed what it
+  reads says nothing about the panel, so it can never vouch for a good
+  state.
+- **The raw reply is always the record.** The readings beside it
+  tolerate a header (`:CH3:COUPLING DC`) and Tek's short keywords
+  (`NORM`, `RUNST`, `DCREJ`, `EDG`). HEADER is off in practice, but
+  nobody has seen these replies. A reply the probe cannot read is shown
+  as not recognised, never guessed at.
+- **The read verdicts use the driver's own rules.** The walk classifies
+  a measurement reply exactly as `TekMSO24.measure_raw` does, header
+  intolerance included, because the point is what the watchdog would
+  have seen. A test holds the two together on the real driver.
+
+**Follow-up: to be built only after a bench session has verified the
+replies, citing that session's date.** Not code now.
+
+1. `_sldea_check_monitors` also queries `CH<n>:COUPLING?` and on/off on
+   both monitor channels, plus `ACQUIRE:STATE?` and
+   `ACQUIRE:STOPAFTER?`. It uses only queries the walk showed follow the
+   front panel.
+   - Refuse, or offer to fix, a monitor channel that is not DC-coupled or
+     not on, and a scope that is not acquiring or is in Single.
+   - Pass these facts into `monitor_problems` as arguments, so the logic
+     stays headless-testable.
+   - The auto-fix already writes `COUPLING DC` and `SELECT ON`. A stopped
+     scope needs the driver's `run()` (`ACQUIRE:STOPAFTER RUNSTOP`, then
+     `ACQUIRE:STATE RUN`). That is what the Oscilloscope tab's Run button
+     sends, and #337 leaves that button allowed during a run.
+   - A query that fails is still reported as "SKIPPED, not passed", as
+     the four window queries are today.
+2. `_sldea_scope_readback` records each monitor channel's coupling and
+   on/off state in `setup.txt`, so a run records what it was coupled
+   with.
+3. Let the walk's replies decide how hard to gate:
+   - If `MEASUREMENT:IMMED:VALUE?` on a switched-off channel returns the
+     sentinel, that run would false-trip, and a refusal fits.
+   - If identical reads reliably mark a stopped scope at the rig's
+     timebase, detecting a mid-run freeze is possible. That is the older
+     STOP-detection follow-up in `PROJECT_HANDOFF.md`, and it stays a
+     separate change.
+   - If `TRIGGER:A:MODE?` reads NORMAL on the rig, the check also has to
+     settle the trigger-source question above. If it reads AUTO, that
+     question is moot.
+
+**Verification.**
+
+- **Adversarial review**, by a fresh agent before the PR opened. Its
+  worst finding: the first version's restore check could print
+  `RESTORED` and exit 0 with I_Out still off or AC-coupled, because it
+  trusted a query that the walk had just shown ignores the panel. It also
+  found that the restore:
+  - ignored the second read of the queries, and Single mode;
+  - put-back text named only CH3 and always said Run/Stop.
+
+  And, outside the restore:
+  - the query-only claim left out the connect sequence;
+  - this entry stated #337 and unobserved scope behaviour as fact;
+  - a HEADER-ON table was unreadable;
+  - a digital or AUX trigger source was called safe;
+  - `--ich == --vch` was accepted;
+  - `--selftest` could overwrite a real report.
+
+  All of it is fixed, each with a test, and the review's own reproduction
+  scripts were re-run against the fix.
+- **Tests.** `tests/test_bench_watchdog_probe.py` has 60 tests, and all
+  pass in under a second. It needs no hardware.
+  - The parsers, with and without a header, and short and long keywords.
+  - The classification, against the real `TekMSO24` on a recording
+    session.
+  - The query-only claim, held twice. It holds on the driver in both
+    modes. It also holds through `main()` and the real constructor: the
+    first four commands are the connect sequence (device clear, `*IDN?`,
+    `DATA:ENCDG`, `DATA:WIDTH`), and every command after them is a query
+    or a `MEASUREMENT:IMMED` TYPE or SOURCE.
+  - Which queries count as following the front panel, and every restore
+    verdict. That includes the review's cases: a stuck `SELECT?` beside a
+    tracking `DISPLAY?`, a stuck `COUPLING?`, a stop or a Single pressed
+    during the reads, and unreadable V_Out.
+  - The whole walk against the selftest's fake front panel:
+    - every step moving;
+    - a step that did not move;
+    - a change left over from an earlier step;
+    - a restore that takes two tries, one given up, and one quit before
+      the check;
+    - a Ctrl-C, and a closed stdin;
+    - a query the scope never answers, which must not loop;
+    - a read that switches the channel back on;
+    - a start that already reads blind.
+  - That every output name, the selftest's included, falls under the
+    existing `.gitignore` patterns.
+- **Mutation.** 100 mutants were run on the final code, and all 100 were
+  caught, each by a named test failure.
+  - The first version's pass left four survivors, and each became a
+    test: `DCREJ` described as DC-coupled, errors-only reads left
+    unexplained, table rows with trailing spaces, and two-digit channels.
+    It also exposed two harness hazards. An operator that always pressed
+    Enter would hang the suite instead of failing it, and a Ctrl-C
+    escaping the walk would kill the process. Both are fixed, and the
+    selftest's own scripted operator now types q at a third restore
+    prompt.
+  - The redesign's pass left three survivors, and each became a test:
+    one proven query vouching while another went silent, `_reading`'s
+    own contract, and Single pressed during the reads.
+- **Selftests.** `--selftest` and `--selftest --walk` both run clean.
+- **Python 3.11.** The bench runs 3.11. Two independent tokenizer scans,
+  mine and the reviewer's, found no f-string that needs 3.12. Each scan
+  was itself checked on known-bad samples.
+- **Full suite, on the Windows PC:** 37 of 40 suites pass, in both full
+  runs. The three that fail are the known Windows-only ones:
+  `test_easywave_export` and `test_sldea_plot_gui` (#331) and
+  `test_tk_fontfix` (#332).
+  - In the first run, `test_sldea_plot_gui` also failed
+    `test_the_click_through_is_discoverable_and_does_not_go_stale` once,
+    with an `IndexError` on the window's prepared runs.
+  - It did not recur in three standalone runs on this branch, nor in
+    three on `origin/main`. There, the known resize race failed 2 of 3
+    runs, and the third skipped 2 tests ("desktop too short").
+  - No file this change touches is imported by that suite.
+- **Merges** (trial merges onto this branch's final commit):
+  - Every open branch with its own top entry in this file conflicts with
+    this change only here. That is #333, #334, #335, #337, #338, #339,
+    #340, and the local video and plot branches. Keep both entries.
+  - `BENCH_TEST.md` merges cleanly with #334's §R and the video branch's
+    §Q, because this change edits §N only. #331, #332 and #336 merge
+    cleanly.
+  - Stacked with #331–#334, #336–#338, #340 and the local plot and
+    preview-marker branches, all 46 suites pass on the Windows PC.
+  - #335, #339 and the video branch conflict with other branches in that
+    stack, in files this change does not touch.
+- **No bench gate:** this adds no app I/O. The probe is the bench tool.
+
+## Update Software and its Restart now refuse while an SLDEA run is going (2026-09-24)
+
+**TL;DR:** Tools → Update Software → **Restart now** used to restart the
+app even in the middle of a LIVE run. The restart replaced the app at once,
+so the run never got to set the SG back to 0 V, and the Trek stayed
+energized while the new app showed an idle SLDEA tab. Now both Update
+Software and Restart now refuse while any SLDEA run is going (LIVE, DRY,
+or still stopping after ■ Abort), and say to ■ Abort first. With no run
+going, nothing changes.
+
+**Observation (on `78315cc`).** The adversarial review of PR #335 (the SG
+writer lock) found this. `_restart_app` called `root.destroy()`, then
+`os.execv(sys.executable, [sys.executable] + sys.argv)`, and checked
+nothing. During a LIVE run the SG channel that drives the Trek (1 V = 1 kV
+at the DEA) is ON at the run's current offset. `os.execv` replaces the
+process immediately, so two things never ran:
+
+- the run worker's `finally` block, which sets the offset to 0 and
+  switches the output off. The worker is a daemon thread and died with
+  the process;
+- the window-close shutdown (`_on_app_close`). It sets `_sldea_stop`,
+  waits up to ~3 s for the worker, then switches both SG outputs off.
+
+It is the same class of hazard as audit 2026-07-25 C1, where Reconnect
+nulled `self.sg` mid-run and skipped the ramp-down. Starting an update
+did not check for a run either. The update dialog is not modal, so a run
+could also be started under an open dialog whose Restart button was
+already enabled.
+
+**Decision (owner, 2026-09-24).** Two options went to the owner:
+
+- **(a)** refuse Restart during a run, and send the operator to ■ Abort;
+- **(b)** route Restart through the window-close shutdown before
+  re-executing.
+
+(b) was turned down. Mid-run it would end the run with the best-effort
+3 s wait instead of ■ Abort. It would also switch both SG outputs off on
+every restart. The owner chose (a), and also refusing the update itself
+during a run.
+
+- **One check: `_sldea_run_blocks(action, parent=None)`.** While
+  `_sldea_running` is set, it shows a warning and returns True. The
+  warning says which kind of run it is: a LIVE run on SG CH*n*, a DRY
+  run, or a run still stopping after ■ Abort. It says what a restart
+  would do and what to do instead. A LIVE run would end before it could
+  set the SG to 0 V and switch it off, leaving the Trek energized. A DRY
+  run would be cut off before it closes its run folder.
+- **Why `_sldea_running`:** `sldea_run` sets it before it starts the
+  worker, so before the worker's first SG write. It clears only in
+  `_sldea_finished`, which the worker queues as the last step of its
+  `finally`, after its attempt to set the SG to 0 V and switch it off.
+  So a run that is still stopping is refused too. Nothing in `sldea_run`
+  writes the SG before the flag is set. If the zeroing attempt fails on
+  a dead link, the HV NOT ZEROED alarm goes up and the flag still
+  clears, as it did on `78315cc`. Until this entry nothing tested either
+  ordering; both are now tested on the real worker (see Verification).
+- **A DRY run is refused as well.** It drives nothing, but a restart
+  would cut it off before it closes its run folder.
+- **Restart now checks on every click**, not when the dialog was built.
+  Its warning is parented on the update dialog.
+- **Update Software checks first**, before the script lookup and before
+  its own confirmation question. Its warning gives the owner's two
+  reasons for refusing the update and not only the restart:
+  - Restart now is refused until the run ends anyway.
+  - The update copies files onto the shared drive the run may be saving
+    to. It rsyncs and pip-installs onto the same NAS as the default
+    output folder. A stalled share has delayed this run loop's HV path
+    before (review 2026-08-05). Whether an update's traffic causes such
+    stalls was not measured.
+- **With no run going, nothing changes.** Update asks its question as
+  before. Restart destroys the window and re-execs the same command line.
+  Restart is still **not** the window-close shutdown: SG outputs and LCR
+  bias stay exactly as they are. The manual now says so.
+
+**Adversarial review (before the PR).** There was no blocker. The gate
+held on the real worker: Restart pressed while the worker was zeroing the
+SG was refused.
+
+- **The MAJOR finding: nothing tested the two orderings the gate relies
+  on.** Any of three changes would have re-opened the hazard, and every
+  suite would still pass:
+  - a worker that queued `_sldea_finished` at the top of its `finally`;
+  - an error path that cleared the flag;
+  - a `sldea_run` that claimed the run after starting the worker.
+
+  All three are now tested on the real worker.
+- **Also fixed:**
+  - the process-ender check was narrower than the hazard;
+  - a stale `_sldea_stop` after ■ Abort was untested;
+  - the messages said "ramp-down" for what is a step to 0 V;
+  - the update refusal gave a reason that did not hold;
+  - the display-less part of the suite did not check the button's parent
+    wiring;
+  - the first version of the figures below was imprecise.
+- **Left to the owner:** the first two Limits below.
+
+**Limits.**
+
+- **The flag clears even when the zeroing failed.** This is unchanged
+  from `78315cc`. The HV NOT ZEROED alarm is modal. Once the operator has
+  acknowledged it, Restart is allowed while the Trek may still be
+  energized. Whether to refuse Restart until a not-zeroed alarm has been
+  dealt with is the owner's call.
+- **Starting a run while an update is running is not refused.**
+  `sldea_run` does not read `_updating`, and the update dialog is not
+  modal. Restart stays safe, because it is checked on the click. But the
+  share traffic the owner gave as a reason can still overlap a run in
+  that order. If the owner wants this refused too, PR #334's start gate
+  (`_sldea_start_conflicts`) is the natural home.
+- **Window close is unchanged.** It is still a best-effort ramp for a run
+  (it waits up to ~3 s). A LIVE run still ends through ■ Abort
+  (CLAUDE.md).
+- **The flag could stick on.** Update and Restart would then be refused
+  for the whole session, saying a run is in progress. Two ways, neither
+  seen:
+  - the worker dies before its `try` block;
+  - `sldea_run` raises between setting the flag and starting the worker
+    (its `finally` only disarms the log buffer).
+
+  ▶ Run would be stuck the same way already. Window close still works:
+  it waits 3 s, then switches both SG outputs off.
+- **The process-ender check sees only the spellings the app uses:**
+  - `os.exec*`, `os._exit`, `os.abort` and `sys.exit`;
+  - `raise SystemExit`;
+  - the Tk root's `destroy` and any `.quit`;
+  - those names imported from `os` or `sys`.
+
+  It counts both calls and names handed out as callbacks. It does not see
+  an alias under another name (`r = self.root; r.destroy()`), a widget's
+  `winfo_toplevel().destroy()`, or a `getattr`. Its scope is gui.py plus
+  every repo module it imports, worked out from the source.
+- **Some endings no in-app check can cover.** A signal (Ctrl-C, SIGTERM),
+  logout or a crash also ends the process without the worker's
+  `finally`. Only hardware can cover those.
+
+**Found while doing this, not fixed here.** **Restart now probably
+reloads the OLD code on the bench.** `launch_gui.sh` runs `gui.py` from a
+per-user local cache (`~/.cache/scpi_control/SCPI_Control`), and it
+refreshes that cache only when the launcher itself starts. The update
+deploys to the share. `os.execv` re-runs the cached path, with the cached
+`PYTHONPATH`, without going through the launcher. So the restarted app is
+the version that was already running. The exception is when the cache sync
+failed at launch: the app then runs from the share, and a restart would
+load the new code. This was read from `deploy/launch_gui.sh.reference`;
+the live copy on the share was not checked. It is filed as a separate
+task.
+
+**Verification.**
+
+- **Tests:** `tests/test_update_restart_guard.py` has 21 tests.
+  `gui.messagebox` is a recorder, and `gui.os` is a stand-in whose `execv`
+  records the call instead of re-executing. The tests:
+  - **Stub tests:** they drive the real `_restart_app`,
+    `_sldea_run_blocks`, `open_update_software`, `_sldea_finished` and
+    `sldea_abort` on a Tk-free stub.
+  - **Real-worker tests:** they run the real `_sldea_worker` as a LIVE run
+    on a fake SG whose switch-off blocks, ended three ways: it completes,
+    it is aborted, or its SG link fails during setup. While the worker is
+    stuck in its zeroing, Restart and Update are refused. Afterwards both
+    work. `_sldea_finished` is queued once, after the offset has gone to
+    0 and the output off.
+  - **Source checks:** one pins that `sldea_run` claims the run before it
+    starts the worker. Another pins the button's parent wiring, and it
+    runs without a display.
+  - **Real-Tk test:** it builds the real update dialog, starts a fake LIVE
+    run after the update has finished, and presses the real Restart now
+    button.
+  - **Process-ender inventory:** every call that can end the bench app's
+    process, with the gate check for the gated ones, plus two self-tests
+    of the scanner.
+- **The same suite on unfixed `78315cc`:** 13 of the 21 fail. The suite
+  binds the new helper with `getattr`, so it still runs on code without
+  the gate. The 8 that pass:
+  - 4 check behaviour that must not change: restart with no run, a
+    restart whose window is already gone, update with no run, and an
+    aborted run that has ended;
+  - 1 checks the claim-before-start rule, which `78315cc` already had;
+  - the inventory, because `78315cc` has the same four sites (the gate
+    check beside it is the one that fails);
+  - the 2 scanner self-tests.
+
+  On this branch all 21 pass.
+- **Mutation:** 33 mutants were run, and all 33 were caught. The final
+  pass was bytecode-safe: `python -B`, no `.pyc` written, and
+  `__pycache__` wiped before every mutant. A same-length mutant written
+  within the same second would otherwise run stale bytecode.
+  - The first 16 cover a gate that is removed, moved after `destroy()`
+    or asked but not obeyed, a gate keyed on the LIVE claim only, a
+    still-stopping run ignored, a silent refusal, a lost parent, swapped
+    messages, a changed argv, and Restart turned into the window-close
+    shutdown.
+  - 11 are the reviewer's. They include the 7 that survived the first
+    version of this suite: the three flag-ordering mutants, over-refusal
+    on a stale stop flag, a Quit path with `sys.exit`,
+    `from os import execv`, and a lost update reason.
+  - 6 are new: a Quit menu item handing out `root.destroy`, `.quit()`,
+    `raise SystemExit`, ■ Abort clearing the flag, `_sldea_finished`
+    queued twice, and the button passing no parent.
+- **Real Tk, full app (Windows):** two runs, on the final text, with a
+  fake LIVE run on SG CH1.
+  - Update Software was refused with the native warning, owned by the
+    main window.
+  - With no run going, the usual question came up (answered Yes) and the
+    real update dialog opened.
+  - A LIVE run was then started under the open dialog. Restart now was
+    refused while the run was going and while it was stopping, each time
+    with the warning owned by the update dialog.
+  - Once the run had ended, the same button asked for the restart.
+
+  Stubbed: `os.execv`, `_find_update_script` and `_update_worker` (no
+  script ran). The Tools menu item is greyed on Windows by design, so it
+  was called directly. The dialogs were read and answered through user32.
+- **Suite:** `run_tests.py` gave 38/40 on the Windows lab PC, twice. The
+  two failures are that PC's known environmental ones: the `/tmp` path in
+  `test_easywave_export` (#331) and MiKTeX's `fc-list` in
+  `test_tk_fontfix` (#332). The reviewer's run gave 37/40; the extra
+  failure was `test_sldea_plot_gui`'s intermittent resize race, which #331
+  also fixes. `test_app_launch` skips its 4 tests on that PC (no Xvfb).
+- **No bench gate:** there is no new instrument I/O; the change only
+  withholds a restart.
+
+**Merge notes.**
+
+- **With #334 and #335:** each PR adds a top entry to this file; keep
+  all of them. That is this branch's only conflict. Trial merges of the
+  final tree were run with #334 alone, with #335 alone, and with both.
+  - gui.py and content.json merge cleanly each time. When both are
+    merged, content.json does conflict, but between #334 and #335
+    themselves.
+  - On the combined tree, these suites pass: this one (21/21),
+    `test_sldea_interlock` (26/26), `test_sg_live_lock` (17/17) and
+    `test_gui_tabs` (6/6).
+- **With #336, #337 and #339:** #336 merges cleanly and #337 conflicts
+  only here. Stacked with #334, #335, #336, #337 and #339 (#339 builds on
+  #336), everything conflicts only in the docs, and this suite passes
+  21/21. #337's `test_reconnect_stays_usable_during_a_live_run` fails on
+  that stack, with or without this branch: #339 makes the scope's
+  Reconnect ask first, and #339's PR body carries that test's follow-up.
+- **#335's SG-write inventory is unaffected,** because this adds no SG
+  write.
+- **#335's own entry** lists this finding under "Found by this entry's
+  adversarial review, not fixed here". Once both are merged, that bullet
+  is answered here.
+- **The unpushed video branch** (`claude/sldea-video-capture`) moves the
+  worker's `_sldea_finished` call into a nested `finally`. The real-worker
+  tests here check exactly that ordering. Their stub (`_RunApp`) may need
+  the recorder state that branch adds.
+
+## ▶ Run refuses to start beside a Webcam-tab sweep, and a sweep never writes a LIVE run's channel (2026-09-23)
+
+**TL;DR:** a stepped sweep started on the Webcam tab before a run used to
+keep writing the signal generator during it, and on the run's own channel
+that overwrote the Trek drive for up to a whole landing. ▶ Run now
+refuses to start beside anything that could still write its channel or
+grab its camera, and asks (Enter = No) only about a sweep on the other
+channel. A sweep also stops, rather than write, the channel a LIVE run
+owns.
+
+**Observation.** An adversarial review of `78315cc` found that
+`sldea_run` never looked at the Webcam tab. The stepped sweep
+(`_cam_seq_worker`) writes `set_basic_wave(ch, OFST=v)` once per level.
+The run loop re-sends its offset only when the commanded kV changes
+(`abs(kv - last_kv) > 1e-4`), so a level that lands mid-landing stays
+until the next ramp. This is not an exotic wiring: the sweep's own
+tooltip says its channel drives "the device under the camera", which on
+this rig means through the Trek. The LIVE channel lock (`_sg_live_locked`,
+2026-07-25) covered only the Signal Gen tab's controls used *during* a
+run.
+
+**Decision (the owner's rule, 2026-09-23).**
+
+- **Refused** (`_sldea_start_conflicts` / `_sldea_start_gate`):
+  - a stepped sweep on the run's SG channel. DRY runs too, because the
+    sweep can still energize the Trek; the DRY message adds that a
+    stopped sweep leaves its last level behind;
+  - a timed capture;
+  - any capture that is still stopping;
+  - a camera adjustment (the `camera-ctrl` job behind Apply & Lock /
+    Auto-expose / Auto-WB once / Stabilize), which rewrites the camera
+    settings the run is about to lock;
+  - for LIVE runs, a Signal Gen tab command still being sent (`sg-io`).
+    An Apply landing after the run set up its channel could swap the
+    waveform, and the run re-sends only its offset. No poller holds
+    `sg-io`, so this refuses only right after an operator's own click.
+- **Asked, Enter = No:** a sweep on the other channel. It does not write
+  the drive channel, but it competes for the camera, and a snapshot that
+  loses logs NO FRAME. A yes is written into `run.log`. This is the line
+  the LIVE channel lock already draws: the driven channel is locked and
+  the other stays usable.
+- **When:** first, before any HV question and before the camera is
+  touched. Then again at the commit point, after the camera pre-flight,
+  because every dialog in between waits on the operator for as long as
+  they take. The commit check never asks. The sweep allowed at the top
+  passes; any other sweep is refused there. That way no dialog can yield
+  to Tk between the check and `_sldea_live_ch` claiming the channel.
+- **Judged by the thread, one worker at a time:** a capture counts as
+  running while its worker THREAD is alive, because after Stop it still
+  finishes the step it was on. The Webcam starters now refuse to start a
+  new capture over a worker that is still finishing
+  (`_cam_worker_alive`), so `cam_seq_thread` is always the only live
+  worker and the gate can see it. The adversarial review found this
+  hole, and a probe confirmed it. A sweep whose write stalls on the
+  instrument lock is stopped, and then displaced by a new capture. It
+  becomes invisible to the gate, and its write lands after the run's
+  set-up: 2.5 kV instead of 1.0 kV for 5 s in the probe.
+- **The worker check:** `_cam_seq_worker` reads `_sldea_live_ch` before
+  every write and stops with *Capture failed: SG CHn is driving the Trek
+  in a LIVE SLDEA run* instead of writing. The timed capture's burst
+  trigger follows the same rule. The claim it reads is held from the
+  commit point until `_sldea_finished` runs on the Tk side, after the
+  worker has zeroed the SG and switched its output off, ■ Abort
+  included. A test pins that span.
+- **Left alone:** the live preview and the interval capture. `sldea_run`
+  already stops the preview, and the interval capture stops with it
+  (audit 2026-07-25). The gate does not tell camera indices apart: the
+  run always shoots camera 0, the one camera this rig has.
+
+**Not covered (follow-ups).**
+
+- **Two more lock bypasses:** the Signal Gen tab's **Fire** button
+  (`sg_fire_burst`) and the Waveform Editor's LAN upload (`arb_editor.py`,
+  which also rewrites WVTP/OFST on its channel) both bypass the LIVE
+  channel lock. *Fixed by #335 (2026-09-24): both now ask
+  `_sg_live_locked` first; see its entry above.*
+- **A DRY run never checks its SG channel is at rest.** A finished sweep,
+  or an earlier Apply, can leave it at a level with the output on.
+  Checking needs signal-generator reads, so it is new instrument I/O and
+  needs a bench session first.
+- **Mid-run starts on main:** a sweep can still be *started* on a DRY
+  run's channel mid-run, because the worker check guards LIVE runs only.
+  The unmerged `claude/sldea-video-capture` adds `_cam_owned_by_sldea()`
+  start guards, which close that for every run.
+
+**Merging with `claude/sldea-video-capture`.** The two changes are
+complementary. A trial merge conflicts in three places, and each resolves
+by keeping both sides:
+
+- the top of `sldea_run`'s `try:` (this gate first, then the video
+  pre-flight);
+- this entry beside the video entry;
+- BENCH_TEST §R after §Q.
+
+Both test suites pass on the merged tree. Two follow-ups belong to that
+merge:
+
+- With Record ticked, an other-channel sweep should be refused rather
+  than asked about, because the recorder holds the camera for the whole
+  run.
+- The gate should count a previous run's recorder that is still shutting
+  down (`_sldea_recorder.reader_alive()`) as holding the camera.
+
+**Verification.**
+
+- **Tests:** `tests/test_sldea_interlock.py` has 26 tests. They drive the
+  real `sldea_run`, the gate, both Webcam starters, both capture workers,
+  `sldea_abort`, `_sldea_finished` and the real `_sldea_worker` against a
+  fake signal generator that records which thread wrote what.
+- **Reviews:** two adversarial passes, one on the logic and threading,
+  one on the tests and these docs. Every finding is fixed above or listed
+  as a follow-up.
+- **Mutation:** 29 mutants, each guard removed or weakened in turn. They
+  include every mutant either reviewer reported as surviving the first
+  version of the suite, and all 29 fail at least one test.
+- **No bench gate:** there is no new instrument I/O (the change only
+  withholds writes). BENCH_TEST §R is a five-minute DRY look at the
+  dialogs for the next bench visit.
+
+## A pair is one landing, not one kV: up/down and repeat runs stop pooling their visits (2026-09-23)
+
+**TL;DR:** on an up/down or repeat run, Edge Review treated every frame
+at one kV as a single "pair", and the pair check loosened the more often
+a level was visited. Repeat runs got confidence they had not earned,
+sometimes enough to auto-accept. Real hysteresis between the legs went
+to review as "detection disagreement". A pair is now the two snapshots
+of one landing, and a current spike only backs a collapse on its own
+visit. Runs that land on each kV once come out exactly as before, and
+tests pin that. That includes every rising sweep, which is every run
+recorded so far.
+
+**Observation → decision.**
+
+- *Observed* (read in the code on `78315cc`, then measured on fixtures
+  built from `SldeaProfile(...).snapshots`): `reconcile_pairs` keyed the
+  best candidates by nominal kV over the whole run. `sequence()` lands
+  every level below the peak twice on an up/down run, and the bottom one
+  twice in a row where two cycles meet. Repeat multiplies all of it. A
+  "pair" was therefore four frames (2N × 2 on a repeat), and the
+  tolerance, a SUM over the members, grew with them: 12% for a real
+  blob-tier pair, 24% across both legs, 72% for up/down ×3. On repeat
+  ×3, pairs 16.5% apart came out `pair_confirmed`, taking conf from 0.72
+  to 0.77, past `accept_conf`: a contradiction auto-accepted on both
+  sides. On up/down ×2 with 30% hysteresis between the legs, all 16
+  disc-fit frames below the peak were capped into review.
+- The same whole-run key was used in two more places.
+  `breakdown_flags` let a current event at the same kV **on the other
+  leg** corroborate an area collapse, and a confirmed flag brands every
+  later frame `_BREAKDOWN`: the P3_5 failure, reached by another road.
+  `ramp_consistency` wrote "pair mismatch" into data.csv on all four
+  frames of a level whenever the legs differed by more than 12%, which
+  is whenever the run showed the hysteresis it was recorded for. And
+  `sldea_plot.first_breakdown_kv`, documented as the run's FIRST
+  breakdown, returned the lowest flagged kV.
+- *Decision:* `se.sweep_landings(rows)` works out, from nominal kV in
+  CSV order, each row's **landing** (one hold), **leg** (the direction
+  of the ramp into it) and **cycle**. Pairing, corroboration and the
+  consistency notes group by landing. The tolerance formula is
+  untouched: it is back to the two members it was written for.
+- *How a landing is found:* consecutive rows at one kV. Where two
+  landings share a kV back to back, a row opens a new one only when
+  **all** the evidence it carries agrees: a `step` the landing does not
+  hold AND a snapshot phase it already holds. Either kind alone decides
+  when a row carries only that kind: the 07-23 tags with no step column,
+  or steps with no tags. The runner writes both and they always agree.
+  Demanding both keeps the grouping of layouts the runner never wrote:
+  `sldea_plot`'s fixtures (pre-ramp before post-ramp, no step) and
+  `sldea_diag`'s self-test run (a step per snapshot). Two layouts no
+  known writer produces now split where they used to pool: a step per
+  snapshot with no tags, and a duplicated snapshot with no step column.
+- *The watchdog's trip row* (tag `breakdown`, step 99: a sentinel, and
+  also a real landing number on runs of 99+ landings) never splits a
+  landing on its step. If it tripped during a hold, it belongs to that
+  landing, where grouping by kV always put it. Its current therefore
+  still corroborates a collapse the post-ramp frame had shown, and a
+  tripped single sweep flags exactly as before. If it tripped mid-ramp,
+  it is a landing of its own. This is the one place where "pair only the
+  two snapshots" bends, and it bends on purpose: excluding the row would
+  change tripped single sweeps. One case the rows cannot settle: a trip
+  in the first seconds of a hold at the same kV as the landing before
+  (the bottom level where two cycles meet), before that hold's first
+  snapshot, joins the earlier landing.
+- *Decision: `first_breakdown_kv` is now first in time, and the
+  aggregate cap does not follow it* (from the adversarial review, same
+  day). A time-ordered cap was the task as written, and on `main` it is
+  wrong. `run_level_curve` pools every visit to a level. An up/down run
+  that broke at 3.5 kV on the way up and stayed flagged down to 2.0 kV
+  therefore holds its collapsed frames in its 2.0–3.0 kV means. A
+  time-ordered cap drew that mixture into the aggregate: 101–109 at
+  those levels, against 122–133 from a healthy run. On a falling single
+  sweep, the cap would have kept exactly its collapsed levels. The cap
+  keeps the lowest flagged kV under an honest name,
+  `lowest_breakdown_kv`, so every figure is exactly as before. The first
+  breakdown in time becomes the cap once the aggregate averages one leg
+  per run (last bullet).
+- *No change where no kV recurs, proven:* the three `78315cc` functions
+  are frozen verbatim in `tests/test_sldea_edge.py` as oracles.
+  Randomized inputs over five profiles and every layout must reproduce
+  them exactly: stats, confs, tags and flag order. The layouts are the
+  runner's rows, a trip in the hold or mid-ramp, the 07-23 tags, no
+  step, neither step nor tag, rows built in code with numeric cells,
+  and both fixture layouts. Five plausible wrong rules each fail those
+  tests: the trip row always alone, step alone decides, post-after-pre
+  splits, no resting landing, and kV parsed differently from the
+  chain's own `float(cell or '')`. A sixth, phase alone decides, changes
+  no single sweep and fails the landing tests instead. The eight local
+  bench runs (`Downloads\Tuning\SLDEA_data`, read-only, SHA-1 of all 436
+  files unchanged) were run through both versions with a real detection
+  pass. Every row's landing equals its `step`, and the results match
+  exactly: pairs on 420 frames (382 of them confirmed or capped by the
+  pair pass), breakdown flags on all eight (the three breakdown runs
+  carry 4, 1 and 13 confirmed rows), consistency notes, and the
+  breakdown kV (5.75, 6.0, 5.6). The adversarial pass then ran 38,000
+  randomized runner single sweeps in eight layouts and 4,000 up/down and
+  repeat runs against the change. Beyond the cap, it found a crash on
+  rows built in code with a numeric 0 kV. It is fixed: the helper parses
+  kV as the chain does, and the oracles cover it.
+- *Changed on purpose, on one kind of single sweep:* a falling staircase
+  that ends on 0 kV lands there after the whole sweep. Its warm-up,
+  baseline and last landing were one "pair", and a device still
+  relaxing read as a mismatch on all four frames. They are separate
+  landings now, pinned by a test.
+- *Not changed:* the collapse and dip rules keep their "kV did not
+  decrease" gate. On a falling leg it already skips the step-to-step
+  checks, and it still checks inside a landing.
+  `sldea_diag.repeat_pairs` is photometric instrumentation, not
+  measurement. The wording that called the rule "same kV" now says
+  landing in four places: the Edge Review tooltip, the manual source
+  (`addendum_b_edge.json`, rebuilt at the next release), the diag
+  report and the trace report.
+- *For `claude/plot-hysteresis-axis`* (unmerged; it has its own
+  `sweep_legs`): it gives the same landings, legs and cycles on every
+  CSV the runner writes. For drawing, it makes the trip row a landing
+  of its own and splits on step alone, which is fine there. When it
+  lands, it can read `se.sweep_landings` instead of deriving them
+  again. Its aggregate averages an up/down run's first rising leg. That
+  is where `first_breakdown_kv` becomes the right cap: that leg's first
+  breakdown, or no cap from the run if it broke later. Until then,
+  `aggregate_cap_kv` stays on `lowest_breakdown_kv`. Note that `cycle`
+  counts hysteresis loops, not Repeat passes: a plain repeat's second
+  pass starts on a falling ramp, and its cycle turns only when the
+  voltage rises again.
+
 ## The aggregate averages BY GROUP, the runs it averages can be hidden, and the group palette is a shape argument rather than a colour one (2026-08-10)
 
 **TL;DR:** the cross-run aggregate produced one mean over everything

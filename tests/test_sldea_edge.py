@@ -7,14 +7,17 @@ import os as _os
 import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
     _os.path.abspath(__file__))))
+import copy
 import csv
 import os
+import random
 import shutil
 import tempfile
 
 import numpy as np
 
 import sldea_edge as se
+import sldea_profile
 
 
 def _disc_frame(r, level=40.0, size=240, base=100.0):
@@ -1391,6 +1394,604 @@ def test_ramp_consistency_flags_pairs_and_dips():
     # agreeing, monotone results raise nothing
     ok = {i: {'area_px': 100.0 + 10 * (i // 2)} for i in range(6)}
     assert se.ramp_consistency(rows, ok) == {}
+
+
+# ---------------------------------------------------------------------------
+# Landing-aware pairing (2026-09-23). An "Up/down (hysteresis)" or Repeat
+# run lands on one kV several times; pairing, breakdown corroboration and
+# the consistency notes now group per LANDING (se.sweep_landings), not per
+# kV. Fixtures come from SldeaProfile(...).snapshots -- the schedule the
+# runner itself executes -- and single sweeps are pinned against the
+# kV-keyed versions this replaced, frozen at the end of this block.
+# ---------------------------------------------------------------------------
+
+def _profile_rows(profile, ua=None):
+    """data.csv as the runner writes it for `profile`, read back the way
+    csv.DictReader does it: every cell a string. `ua(n, snap)` gives row
+    n's measured_uA (None -> a blank cell); default a flat -16 uA, the
+    07-29 campaign's instrument offset."""
+    rows = []
+    for n, s in enumerate(profile.snapshots):
+        cur = -16.0 if ua is None else ua(n, s)
+        rows.append({
+            'snapshot': str(n + 1), 'step': str(s['step']), 'tag': s['tag'],
+            'nominal_kV': str(round(s['nominal_kv'], 3)),
+            'measured_uA': '' if cur is None else str(round(cur, 2)),
+            'frame_file': profile.frame_filename(
+                s['step'], s['nominal_kv'], s['tag'])})
+    return rows
+
+
+def _updown_x2():
+    """Up/down x2 over 1-2-3 kV: landings 1,2,3,2,1 | 1,2,3,2,1. Every
+    level below the peak is visited twice per cycle, and the bottom one
+    twice IN A ROW where the cycles meet (steps 5 and 6)."""
+    return _profile_rows(sldea_profile.SldeaProfile(
+        start_kv=0, end_kv=3, step_kv=1, updown=True, repeat=2))
+
+
+_UPDOWN_X2_FALLING = {4, 5, 9, 10}      # the ramp INTO these steps falls
+
+
+def _snapshot_rows(rows):
+    return [i for i, r in enumerate(rows)
+            if r['tag'] in ('post-ramp', 'pre-ramp')]
+
+
+def test_sweep_landings_reads_legs_and_cycles_from_the_kv_sequence():
+    rows = _updown_x2()
+    pos = se.sweep_landings(rows)
+    # the runner's own step IS the landing (0 = warm-up + baseline)
+    assert [q['landing'] for q in pos] == [int(r['step']) for r in rows]
+    got = {q['landing']: (q['leg'], q['cycle']) for q in pos}
+    assert got == {0: ('rise', 1), 1: ('rise', 1), 2: ('rise', 1),
+                   3: ('rise', 1), 4: ('fall', 1), 5: ('fall', 1),
+                   6: ('rise', 2), 7: ('rise', 2), 8: ('rise', 2),
+                   9: ('fall', 2), 10: ('fall', 2)}, got
+    assert {k for k, (leg, _c) in got.items() if leg == 'fall'} \
+        == _UPDOWN_X2_FALLING
+    # a rising single sweep: one landing per kV, all 'rise' in cycle 1 --
+    # the property the "unchanged" tests below rest on
+    single = _profile_rows(sldea_profile.SldeaProfile(
+        start_kv=0, end_kv=2, step_kv=0.5))
+    pos = se.sweep_landings(single)
+    assert [q['landing'] for q in pos] == [int(r['step']) for r in single]
+    assert {(q['leg'], q['cycle']) for q in pos} == {('rise', 1)}
+    # a plain repeat restarts below where it ended: the ramp INTO its
+    # first landing falls, and the next cycle begins where it rises again
+    rep = _profile_rows(sldea_profile.SldeaProfile(
+        start_kv=0, end_kv=2, step_kv=1, repeat=2, baseline=False))
+    assert [(q['landing'], q['leg'], q['cycle'])
+            for q in se.sweep_landings(rep)[::2]] == [
+        (1, 'rise', 1), (2, 'rise', 1), (3, 'fall', 1), (4, 'rise', 2)]
+    # a row without a kV has no position and does not break its landing
+    gap = [{'step': '1', 'tag': 'post-ramp', 'nominal_kV': '1.0'},
+           {'nominal_kV': ''},
+           {'step': '1', 'tag': 'pre-ramp', 'nominal_kV': '1.0'}]
+    pos = se.sweep_landings(gap)
+    assert pos[1] is None and pos[0]['landing'] == pos[2]['landing'] == 1
+
+
+def test_sweep_landings_trip_row_and_layouts_the_runner_never_writes():
+    """The watchdog's trip row is step 99 whatever landing it tripped in,
+    so its step is never evidence: tripped during a hold it belongs to
+    that landing (where grouping by kV always put it), mid-ramp it is a
+    landing of its own -- and on a run of 99+ landings it must not join
+    the REAL landing 99."""
+    p = sldea_profile.SldeaProfile(start_kv=0, end_kv=10, step_kv=0.25,
+                                   updown=True, repeat=2)
+    rows = _profile_rows(p)
+    cut = next(i for i, r in enumerate(rows)
+               if r['step'] == '120' and r['tag'] == 'post-ramp')
+    trip = {'step': '99', 'tag': 'breakdown'}
+    held = rows[:cut + 1] + [dict(trip, nominal_kV=rows[cut]['nominal_kV'])]
+    pos = se.sweep_landings(held)
+    assert pos[-1]['landing'] == 120, pos[-1]
+    real_99 = [i for i, r in enumerate(held)
+               if r['step'] == '99' and r['tag'] != 'breakdown']
+    assert len(real_99) == 2
+    assert [i for i, q in enumerate(pos) if q['landing'] == 99] == real_99
+    seq = p.sequence()                   # landing k sits at seq[k - 1]
+    assert seq[120] < seq[119]           # 120 -> 121 is a falling ramp
+    ramp = rows[:cut + 2] + [dict(trip, nominal_kV=str(
+        round((seq[119] + seq[120]) / 2, 3)))]
+    pos = se.sweep_landings(ramp)
+    assert (pos[-1]['landing'], pos[-1]['leg']) == (121, 'fall'), pos[-1]
+    # layouts the runner never writes keep the grouping they always had:
+    # pre-ramp before post-ramp with no step column (sldea_plot's
+    # fixtures), and a step per snapshot (sldea_diag's self-test run). No
+    # row carries evidence of a second landing, so each level stays one.
+    plot_style = [{'tag': 'baseline', 'nominal_kV': '0'},
+                  {'tag': 'pre-ramp', 'nominal_kV': '0.5'},
+                  {'tag': 'post-ramp', 'nominal_kV': '0.5'},
+                  {'tag': 'pre-ramp', 'nominal_kV': '1.0'},
+                  {'tag': 'post-ramp', 'nominal_kV': '1.0'}]
+    diag_style = [dict(r, step=str(n)) for n, r in enumerate(plot_style)]
+    for layout in (plot_style, diag_style):
+        assert [q['landing'] for q in se.sweep_landings(layout)] \
+            == [0, 1, 1, 2, 2]
+    # where rows DO carry it, it splits -- on either kind alone. The 07-23
+    # tags with no step column part the bottom level's two landings at
+    # the cycle boundary because the snapshot phase repeats; steps with
+    # no tags part them because the step changes.
+    steps = [int(r['step']) for r in _updown_x2()]
+    legacy = [dict(r, step='', tag=r['tag'].replace('-ramp', ''))
+              for r in _updown_x2()]
+    untagged = [dict(r, tag='') for r in _updown_x2()]
+    for layout in (legacy, untagged):
+        assert [q['landing'] for q in se.sweep_landings(layout)] == steps
+
+
+def test_falling_sweep_to_zero_stops_pairing_its_end_with_the_baseline():
+    """A falling staircase that ends on 0 kV lands there after the whole
+    sweep -- the one single sweep that visits a kV twice. Keyed by kV,
+    the warm-up, the baseline and that last landing were one 'pair', and
+    a device still relaxing at the end read as a detection mismatch on
+    all four frames. They are separate landings now."""
+    p = sldea_profile.SldeaProfile(start_kv=3, end_kv=0, step_kv=1)
+    rows = _profile_rows(p)
+    assert [q['landing'] for q in se.sweep_landings(rows)] \
+        == [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
+    results = {i: {'area_px': 100000.0 * (1 + 0.1 * float(
+        r['nominal_kV']))} for i, r in enumerate(rows)}
+    last = [i for i, r in enumerate(rows) if r['step'] == '4']
+    for i in last:
+        results[i] = {'area_px': 116000.0}   # 16% over the baseline
+    assert se.ramp_consistency(rows, results) == {}
+    old = _ramp_consistency_78315cc(rows, results)
+    assert sorted(old) == [0, 1] + last, old
+    assert all(n == 'pair mismatch 15% at 0 kV' for n in old.values())
+
+
+def test_updown_hysteresis_is_not_a_pair_mismatch():
+    """The falling leg of a hysteresis run sits ABOVE the rising one --
+    the loop the run was recorded to show. Keyed by kV, each level below
+    the peak was one 'pair' of eight frames 30% apart, and every disc-fit
+    frame there was capped into review. Keyed by landing, each post/pre
+    pair agrees within 0.5% and is confirmed."""
+    rows = _updown_x2()
+    cands = {}
+    for i in _snapshot_rows(rows):
+        r = rows[i]
+        area = 100000.0 * (1 + 0.2 * float(r['nominal_kV']))
+        if int(r['step']) in _UPDOWN_X2_FALLING:
+            area *= 1.30                         # hysteresis between legs
+        if r['tag'] == 'pre-ramp':
+            area *= 1.005                        # the pair itself agrees
+        cands[i] = [{'method': 'disc-fit', 'area_px': area, 'conf': 0.80,
+                     'ci85_pct': 0.5, 'spread_pct': 0.0}]
+    s = dict(se.DEFAULT_SETTINGS)
+    before = copy.deepcopy(cands)
+    assert se.reconcile_pairs(rows, cands, s) == {'confirmed': 20,
+                                                  'capped': 0}
+    assert all(c[0].get('pair_confirmed') and c[0]['conf'] == 0.85
+               and 'pair_mismatch_pct' not in c[0] for c in cands.values())
+    # the same run through the kV-keyed code: only the peak (visited once
+    # per cycle, all rising) confirmed; the 16 frames below it capped
+    assert _reconcile_pairs_78315cc(rows, before, s) == {'confirmed': 4,
+                                                         'capped': 16}
+
+
+def test_repeat_run_pairs_no_longer_confirm_on_a_pooled_tolerance():
+    """Repeat x3: each level landed three times, six frames. The kV-keyed
+    tolerance summed six blob-tier members (6% each) to 36%, so pairs 16.5%
+    apart -- past the 12% a real pair allows -- came out 'pair_confirmed',
+    and the +0.05 lifted 0.72 over accept_conf: a contradiction
+    auto-accepted on both sides. Per landing they fall between confirm
+    (12%) and cap (24%): untouched, and still in review."""
+    rows = _profile_rows(sldea_profile.SldeaProfile(
+        start_kv=0, end_kv=2, step_kv=1, repeat=3))
+    cands = {}
+    for i in _snapshot_rows(rows):
+        r = rows[i]
+        area = 100000.0 * (1 + 0.2 * float(r['nominal_kV']))
+        if r['tag'] == 'pre-ramp':
+            area *= 1.18                         # a tier flip in the landing
+        cands[i] = [{'method': 'diff-lo', 'area_px': area, 'conf': 0.72,
+                     'ci85_pct': None, 'spread_pct': 0.0}]
+    s = dict(se.DEFAULT_SETTINGS)
+    before = copy.deepcopy(cands)
+    assert se.reconcile_pairs(rows, cands, s) == {'confirmed': 0,
+                                                  'capped': 0}
+    assert all(c[0]['conf'] == 0.72 and not c[0].get('pair_confirmed')
+               and se.needs_review(c, s) for c in cands.values())
+    assert _reconcile_pairs_78315cc(rows, before, s) == {'confirmed': 12,
+                                                         'capped': 0}
+    assert all(c[0]['conf'] == 0.77 and not se.needs_review(c, s)
+               for c in before.values())
+
+
+def test_breakdown_corroboration_stays_on_its_own_landing():
+    """An area collapse needs a current event on the SAME visit of its
+    level. An up/down run passes 2 kV on the way up and again on the way
+    down; a single recovered spike on the way DOWN used to confirm a
+    detection collapse on the way UP -- a confirmed flag, so every frame
+    after it branded _BREAKDOWN -- while the current had not moved when
+    the device was there."""
+    p = sldea_profile.SldeaProfile(start_kv=0, end_kv=3, step_kv=0.5,
+                                   updown=True)
+    assert p.sequence()[3] == p.sequence()[7] == 2.0   # steps 4 and 8
+
+    def spike_at(step):
+        return _profile_rows(p, ua=lambda n, s: -80.0 if (
+            s['step'] == step and s['tag'] == 'post-ramp') else -16.0)
+    rows = spike_at(8)                           # 2 kV on the way DOWN
+    up_pre = next(i for i, r in enumerate(rows)
+                  if r['step'] == '4' and r['tag'] == 'pre-ramp')
+    areas = {i: 100000.0 * (1 + 0.1 * float(rows[i]['nominal_kV']))
+             for i in _snapshot_rows(rows)}
+    areas[up_pre] *= 0.5                         # the detection collapse
+    s = se.DEFAULT_SETTINGS
+    flags, advis = se.breakdown_flags(rows, areas, s)
+    assert flags == {}, flags
+    assert 'no current signature' in advis[up_pre], advis
+    old_flags, _ = _breakdown_flags_78315cc(rows, areas, s)
+    assert 'area collapsed' in old_flags.get(up_pre, ''), old_flags
+    # the same collapse WITH a spike on its own landing still confirms
+    flags, _ = se.breakdown_flags(spike_at(4), areas, s)
+    assert 'area collapsed' in flags.get(up_pre, ''), flags
+
+
+def test_watchdog_trip_still_corroborates_the_landing_it_interrupted():
+    """The trip row a watchdog writes during a hold carries that hold's
+    kV, so grouping by kV always let its current vouch for a collapse the
+    post-ramp frame had already shown. Keyed by landing it still does --
+    the row belongs to the hold it interrupted -- so a tripped single
+    sweep is flagged exactly as before."""
+    rows = _profile_rows(sldea_profile.SldeaProfile(
+        start_kv=0, end_kv=3, step_kv=0.5))
+    post = next(i for i, r in enumerate(rows)
+                if r['step'] == '4' and r['tag'] == 'post-ramp')
+    rows = rows[:post + 1] + [{'step': '99', 'tag': 'breakdown',
+                               'nominal_kV': rows[post]['nominal_kV'],
+                               'measured_uA': '-240.0'}]
+    areas = {i: 100000.0 * (1 + 0.1 * float(rows[i]['nominal_kV']))
+             for i in _snapshot_rows(rows)}
+    areas[post] *= 0.5
+    s = se.DEFAULT_SETTINGS
+    flags, advis = se.breakdown_flags(rows, areas, s)
+    assert 'area collapsed' in flags.get(post, ''), (flags, advis)
+    assert (flags, advis) == _breakdown_flags_78315cc(rows, areas, s)
+
+
+def test_consistency_notes_pair_within_a_landing():
+    """ramp_consistency keyed its pairs by kV as well, and wrote an
+    up/down run's hysteresis into data.csv as a 'pair mismatch' on all
+    four frames of each level. Per landing, the legs may differ and a
+    pair may not -- and a real mismatch inside one landing still gets
+    exactly the note it always had."""
+    rows = _profile_rows(sldea_profile.SldeaProfile(
+        start_kv=0, end_kv=3, step_kv=1, updown=True))   # 1,2,3,2,1
+    results = {}
+    for i in _snapshot_rows(rows):
+        a = 100000.0 * (1 + 0.2 * float(rows[i]['nominal_kV']))
+        results[i] = {'area_px': a * (1.30 if rows[i]['step'] in ('4', '5')
+                                      else 1.0)}
+    assert se.ramp_consistency(rows, results) == {}
+    old = _ramp_consistency_78315cc(rows, results)
+    assert sorted(old) == _snapshot_rows(rows)[:4] + _snapshot_rows(rows)[6:]
+    assert all(n.startswith('pair mismatch') for n in old.values()), old
+    post, pre = [i for i, r in enumerate(rows) if r['step'] == '4']
+    results[pre] = {'area_px': results[pre]['area_px'] * 1.2}
+    assert se.ramp_consistency(rows, results) == {
+        post: 'pair mismatch 18% at 2 kV', pre: 'pair mismatch 18% at 2 kV'}
+
+
+def _single_sweeps():
+    """Every layout a single sweep has been written in -> [(name, rows)]:
+    the runner's rows at five profiles (rising and falling staircases,
+    with and without the warm-up frame, either snapshot alone); the
+    watchdog tripping during a hold -- after the post-ramp snapshot or
+    after the pre-ramp one -- or mid-ramp; the 07-23 tags; no step
+    column; neither step nor tag; and the two layouts only fixtures use,
+    pre-ramp before post-ramp and a step per snapshot."""
+    P = sldea_profile.SldeaProfile
+    profiles = {
+        'rise': P(start_kv=0, end_kv=3, step_kv=0.5),
+        'fine': P(start_kv=0, end_kv=10, step_kv=0.25, baseline_warmup_s=0),
+        'post-only': P(start_kv=1, end_kv=4, n_steps=4, snap_pre=False),
+        'pre-only': P(start_kv=0, end_kv=2, step_kv=0.2, snap_post=False,
+                      baseline=False),
+        'falling': P(start_kv=6, end_kv=1, step_kv=1),
+    }
+    trip = {'step': '99', 'tag': 'breakdown'}
+    out = []
+    for name, p in profiles.items():
+        rows = _profile_rows(p)
+        seq = p.sequence()
+        mid = str(len(seq) // 2)
+        runs = [(name, rows)]
+        for tag in ('post-ramp', 'pre-ramp'):
+            at = [i for i, r in enumerate(rows)
+                  if r['step'] == mid and r['tag'] == tag]
+            if at:
+                runs.append((f"{name}, trip after {tag}", rows[:at[0] + 1]
+                             + [dict(trip, nominal_kV=rows[at[0]]
+                                     ['nominal_kV'])]))
+        last = max(i for i, r in enumerate(rows) if r['step'] == mid)
+        k = int(mid)
+        runs.append((f"{name}, trip mid-ramp", rows[:last + 1] + [dict(
+            trip, nominal_kV=str(round((seq[k - 1] + seq[k]) / 2, 3)))]))
+        for label, base in runs:
+            out += [(label, base),
+                    (label + ', 07-23 tags',
+                     [dict(r, tag=r['tag'].replace('-ramp', ''))
+                      for r in base]),
+                    (label + ', no step', [dict(r, step='') for r in base]),
+                    (label + ', no step or tag',
+                     [dict(r, step='', tag='') for r in base]),
+                    # rows built in code rather than read from a CSV: a
+                    # numeric 0 kV must stay "no kV", as it always was
+                    (label + ', numeric cells',
+                     [dict(r, step=int(r['step']),
+                           nominal_kV=float(r['nominal_kV']))
+                      for r in base])]
+        by_step = {}
+        for r in rows:
+            by_step.setdefault(r['step'], []).append(r)
+        pre_first = [dict(r, step='') for g in by_step.values()
+                     for r in sorted(g, key=lambda r: r['tag'] != 'pre-ramp')]
+        out += [(name + ', pre-ramp first', pre_first),
+                (name + ', step per snapshot',
+                 [dict(r, step=str(n)) for n, r in enumerate(pre_first)])]
+    return out
+
+
+def _random_best(rng, row):
+    """A best candidate shaped like candidates() makes one, scattered
+    enough to land in all three reconcile_pairs bands."""
+    area = 100000.0 * (1 + 0.1 * float(row['nominal_kV']))
+    area *= 1 + rng.choice([0.0, 0.01, 0.05, 0.1, 0.2, 0.4]) \
+        * rng.uniform(-1, 1)
+    best = {'method': rng.choice(['disc-fit', 'resting', 'diff-lo']),
+            'area_px': area, 'conf': round(rng.uniform(0.5, 0.97), 3),
+            'ci85_pct': rng.choice([None, round(rng.uniform(0.2, 3), 2)])}
+    if rng.random() < 0.1:
+        best['audit_nostep'] = 22.0
+    return best
+
+
+def _random_ua(rng, n):
+    """n measured_uA cells: a campaign offset with bench-sized noise,
+    excursions of 1-3 adjacent rows, blank cells -- and now and then too
+    few readable rows for a median (the legacy absolute rule)."""
+    base, cells, left, dev = rng.choice([-16.0, 0.9]), [], 0, 0.0
+    for _ in range(n):
+        if not left and rng.random() < 0.08:
+            left = rng.randint(1, 3)
+            dev = rng.choice([-1, 1]) * rng.uniform(25, 200)
+        ua = base + (dev if left else rng.gauss(0, 1.5))
+        left = max(0, left - 1)
+        cells.append('' if rng.random() < 0.05 else f"{ua:.2f}")
+    if rng.random() < 0.1:
+        keep = set(rng.sample(range(n), min(3, n)))
+        cells = [c if i in keep else '' for i, c in enumerate(cells)]
+    return cells
+
+
+def test_single_sweep_pairing_is_unchanged():
+    """A single sweep never lands on a kV twice, so its landings ARE its
+    kV groups and reconcile_pairs must do exactly what it did -- every
+    stat, every conf, every tag -- in every layout, trip row included."""
+    rng = random.Random(20260923)
+    s = dict(se.DEFAULT_SETTINGS)
+    seen = {'confirmed': 0, 'capped': 0}
+    for name, rows in _single_sweeps():
+        for _ in range(8):
+            cands = {i: [_random_best(rng, r)] for i, r in enumerate(rows)
+                     if rng.random() < 0.85}
+            old = copy.deepcopy(cands)
+            want = _reconcile_pairs_78315cc(rows, old, s)
+            assert se.reconcile_pairs(rows, cands, s) == want, name
+            assert cands == old, name
+            for k in seen:
+                seen[k] += want[k]
+    assert seen['confirmed'] and seen['capped'], seen   # both bands ran
+
+
+def test_single_sweep_breakdown_flags_are_unchanged():
+    """Same pin for breakdown_flags: confirmed and advisory dicts equal,
+    in the same order, with collapses both corroborated by a current
+    event and demoted for want of one (median path, not the fallback)."""
+    rng = random.Random(20260924)
+    s = dict(se.DEFAULT_SETTINGS)
+    seen = {'corroborated': 0, 'demoted': 0}
+    for name, rows in _single_sweeps():
+        for _ in range(8):
+            cells = _random_ua(rng, len(rows))
+            if ', trip' in name:           # the watchdog only trips on one
+                cells[-1] = f"{-16.0 - rng.uniform(60, 300):.2f}"
+            rows = [dict(r, measured_uA=ua) for r, ua in zip(rows, cells)]
+            areas = {i: 100000.0 * (1 + 0.1 * float(r['nominal_kV']))
+                     * (0.5 if rng.random() < 0.12 else 1.0)
+                     for i, r in enumerate(rows) if rng.random() < 0.8}
+            want = _breakdown_flags_78315cc(rows, areas, s)
+            got = se.breakdown_flags(rows, areas, s)
+            assert [list(d.items()) for d in got] \
+                == [list(d.items()) for d in want], name
+            if sum(r['measured_uA'] != '' for r in rows) >= 5:
+                seen['corroborated'] += sum('area collapsed' in v
+                                            for v in want[0].values())
+                seen['demoted'] += sum('no current signature' in v
+                                       for v in want[1].values())
+    assert seen['corroborated'] and seen['demoted'], seen
+
+
+def test_single_sweep_consistency_notes_are_unchanged():
+    rng = random.Random(20260925)
+    seen = 0
+    for name, rows in _single_sweeps():
+        for _ in range(8):
+            results = {i: {'area_px': 100000.0 * (1 + 0.1 * float(
+                r['nominal_kV'])) * rng.choice([1, 1, 1, 1.2, 0.8, 0.5])}
+                for i, r in enumerate(rows) if rng.random() < 0.85}
+            want = _ramp_consistency_78315cc(rows, results)
+            assert se.ramp_consistency(rows, results) == want, name
+            seen += sum(n.startswith('pair mismatch') for n in want.values())
+    assert seen
+
+
+# The kV-keyed code this block replaced, frozen VERBATIM from 78315cc
+# (docstrings dropped) as the oracle for "a single sweep behaves exactly
+# as before". Do not edit these to make a test pass: changing what a
+# single sweep does needs its own dated entry in SLDEA_HANDOFF.md first.
+
+def _reconcile_pairs_78315cc(rows, cands_by_idx, settings):
+    acc = float(settings.get('accept_conf', 0.75))
+    by_kv = {}
+    for i, row in enumerate(rows):
+        try:
+            kv = float(row.get('nominal_kV') or '')
+        except (TypeError, ValueError):
+            continue
+        cl = cands_by_idx.get(i)
+        if cl:
+            by_kv.setdefault(kv, []).append(cl[0])
+    stats = {'confirmed': 0, 'capped': 0}
+    for kv, members in sorted(by_kv.items()):
+        if len(members) < 2:
+            continue
+        areas = [float(b['area_px']) for b in members]
+        lo, hi = min(areas), max(areas)
+        mid = (hi + lo) / 2.0
+        if mid <= 0:
+            continue
+        rel = (hi - lo) / mid
+        tol = max(0.04, sum(
+            (1.5 * b['ci85_pct'] / 100.0)
+            if b.get('ci85_pct') is not None else 0.06 for b in members))
+        if rel <= tol:
+            for b in members:
+                b['pair_confirmed'] = True
+                cap = round(acc - 0.01, 3) \
+                    if (b.get('audit_nostep') or b.get('audit_bias')) \
+                    else 0.99
+                b['conf'] = round(min(cap, b['conf'] + 0.05), 3)
+            stats['confirmed'] += len(members)
+        elif rel > 2.0 * tol:
+            for b in members:
+                b['pair_mismatch_pct'] = round(100 * rel, 1)
+                if b['conf'] > acc - 0.01:
+                    b['conf'] = round(acc - 0.01, 3)
+            stats['capped'] += len(members)
+    return stats
+
+
+def _breakdown_flags_78315cc(rows, accepted_areas, settings):
+    flags, advis = {}, {}
+    ua_lim = float(settings['breakdown_ua'])
+    dev_lim = float(settings.get('breakdown_dev_ua',
+                                 se.DEFAULT_SETTINGS['breakdown_dev_ua']))
+    jump = float(settings['area_jump_pct'])
+
+    def _adv(i, msg):
+        advis[i] = (advis[i] + '; ' + msg) if i in advis else msg
+
+    uas = {}
+    for i, row in enumerate(rows):
+        try:
+            uas[i] = float(row.get('measured_uA') or '')
+        except (TypeError, ValueError):
+            pass
+    median = None
+    events = {}                    # event rows: i -> signed deviation
+    if len(uas) >= 5:
+        vals = sorted(uas.values())
+        n = len(vals)
+        median = (vals[n // 2] if n % 2 else
+                  0.5 * (vals[n // 2 - 1] + vals[n // 2]))
+        events = {i: ua - median for i, ua in uas.items()
+                  if abs(ua - median) >= dev_lim}
+        confirmed = set()
+        ev = sorted(events)
+        for a, b in zip(ev, ev[1:]):
+            if b - a == 1:                       # adjacent rows, no gap
+                confirmed.update((a, b))
+        if max(uas) in events:                   # terminal: run ends over
+            confirmed.add(max(uas))
+        for i in ev:
+            d = abs(events[i])
+            if i in confirmed:
+                flags[i] = (f"breakdown? I dev {d:.0f}uA >= {dev_lim:g}uA "
+                            f"(baseline {median:.1f}uA)")
+            else:
+                _adv(i, f"transient discharge? I dev {d:.0f}uA")
+    else:
+        for i, ua in uas.items():
+            if abs(ua) > ua_lim:
+                flags[i] = f"breakdown? I={ua:.0f}uA > {ua_lim:g}uA"
+
+    def _kv(row):
+        try:
+            return float(row.get('nominal_kV') or '')
+        except (TypeError, ValueError):
+            return None
+
+    prev_area = prev_kv = None
+    for i, row in enumerate(rows):
+        area = accepted_areas.get(i)
+        kv = _kv(row)
+        if (area and prev_area and kv is not None and prev_kv is not None
+                and kv >= prev_kv
+                and area < prev_area * (1.0 - jump / 100.0)):
+            pct = 100 * (1 - area / prev_area)
+            corroborated = median is None or any(
+                (k := _kv(rows[j])) is not None and abs(k - kv) < 1e-9
+                for j in events)
+            if corroborated:
+                flags.setdefault(i, f"breakdown? area collapsed {pct:.0f}%")
+            elif i not in flags:
+                _adv(i, f"collapse? area -{pct:.0f}% (no current signature)")
+        if area:
+            prev_area, prev_kv = area, kv
+    for i in flags:
+        advis.pop(i, None)
+    return flags, advis
+
+
+def _ramp_consistency_78315cc(rows, results, settings=None,
+                              pair_tol=0.12, dip_slack=0.10):
+    def _area(i):
+        r = results.get(i)
+        try:
+            a = float(r.get('area_px')) if r else None
+        except (TypeError, ValueError):
+            return None
+        return a if a and a > 0 else None
+
+    def _kv(row):
+        try:
+            return float(row.get('nominal_kV') or '')
+        except (TypeError, ValueError):
+            return None
+
+    annos = {}
+    by_step = {}
+    for i, row in enumerate(rows):
+        kv = _kv(row)
+        if kv is not None and _area(i) is not None:
+            by_step.setdefault(kv, []).append(i)
+    for kv, idxs in sorted(by_step.items()):
+        if len(idxs) < 2:
+            continue
+        vals = [_area(i) for i in idxs]
+        lo, hi = min(vals), max(vals)
+        mid = (hi + lo) / 2.0
+        if mid > 0 and (hi - lo) / mid > pair_tol:
+            for i in idxs:
+                annos[i] = (f"pair mismatch "
+                            f"{100 * (hi - lo) / mid:.0f}% at {kv:g} kV")
+    prev_a = prev_kv = None
+    for i, row in enumerate(rows):
+        kv, a = _kv(row), _area(i)
+        if kv is None or a is None:
+            continue
+        if (prev_a and prev_kv is not None and kv >= prev_kv
+                and a < prev_a * (1.0 - dip_slack)):
+            annos.setdefault(i, f"area dip {100 * (1 - a / prev_a):.0f}% "
+                                f"vs previous step")
+        prev_a, prev_kv = a, kv
+    return annos
 
 
 def test_load_run_says_what_is_missing():

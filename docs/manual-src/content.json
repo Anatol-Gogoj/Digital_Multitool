@@ -46,7 +46,7 @@
    },
    {
     "label": "Tools > Update Software…",
-    "what": "Pulls the latest release, redeploys the shared-drive copy for all users, then offers Restart now (Linux bench only)."
+    "what": "Pulls the latest release, redeploys the shared-drive copy for all users, then offers Restart now (Linux bench only). Neither starts while an SLDEA run is going."
    },
    {
     "label": "Shared preset storage",
@@ -67,6 +67,8 @@
    "Loading a bench profile immediately rewrites the settings of every connected instrument (outputs stay as they are) — do not load one mid-measurement. During a live SLDEA run, what the run relies on is held back with a warning: the SG channel driving the Trek, and the scope's V_Out and I_Out channels, timebase and trigger.",
    "If the status bar says the shared drive was unavailable and the save went to a local copy, the profile/preset is on this PC only — colleagues cannot see it until it is saved again with the share back.",
    "Update Software… replaces the shared deployment for everyone on the bench, not just you; after it finishes you must restart the app to actually run the new version.",
+   "Update Software… and its Restart now both refuse while an SLDEA run is going — LIVE, DRY, or still stopping after ■ Abort. A restart replaces the app at once, so it would end a LIVE run before the run could set the signal generator back to 0 V, leaving the Trek energized. ■ Abort the run, or let it finish, then update.",
+   "Restart now is not a shutdown: unlike closing the window, it leaves signal-generator outputs and LCR bias exactly as they are.",
    "On Windows the connection lines show 'Linux bench only — view/edit (presets OK)' and Update Software… is greyed out — this is normal; presets and bench profiles can still be prepared and shared."
   ],
   "callouts": [
@@ -338,6 +340,8 @@
    "Measurement readouts are snapshots — they only update when you click Get CHx Measurements. Frequency/Period show \"No signal\" on non-periodic input.",
    "If you ever send the scope a manual measurement command, the type token must be FREQUENCY — FREQ is accepted without error but returns a garbage ~2 Hz reading (the tab's own buttons already use the correct token).",
    "During a live SLDEA run, the run's V_Out and I_Out channels and the settings every channel shares are locked, with a warning: Apply CHx Config and Enable Channel refuse those two channels, and Stop, Single and AutoSet refuse outright. Apply All Settings sends only the other channels. Run, the measurement buttons and Reconnect still work.",
+
+   "During a live SLDEA run, Reconnect asks first (default No) while the scope is connected. Reconnecting leaves the run with no kV/µA readings and a breakdown watchdog that cannot trip until the new connection is up — and until a later Reconnect succeeds, if this one fails; that retry does not ask. Say Yes only if the scope has stopped answering, and never in the run's first seconds, while its watchdog is still arming; otherwise abort the run first.",
    "On Windows (no instrument attached) this tab is view/edit-only: every action button just reports \"Oscilloscope not connected\"."
   ],
   "callouts": [
@@ -466,7 +470,7 @@
    "If a gray applied readout differs from what you typed, the instrument clamped or coerced your value — believe the gray number.",
    "Amplitude is calibrated for the selected Load (Advanced mode). With Load set to 50 Ω but the output actually open/High-Z, the real voltage is about twice what you asked for.",
    "Loading a preset immediately pushes that configuration to the connected instrument (output on/off is left alone).",
-   "During a live SLDEA run the channel driving the Trek is locked; abort the run on the SLDEA tab before taking over.",
+   "During a live SLDEA run the channel driving the Trek is locked: Apply, Output, Fire and the Waveform Editor's Upload && Select refuse it with a warning, and Reconnect is refused until the run ends. The other channel stays usable. Abort the run on the SLDEA tab before taking over.",
    "Custom (ARB) waveform data cannot be sent over USB — the instrument's firmware caps USB commands at 52 bytes and larger transfers freeze it until a power cycle. The app blocks such uploads; use LAN or the Waveform Editor's flash-drive .bin route instead."
   ],
   "callouts": [
@@ -601,6 +605,7 @@
   "cautions": [
    "The two export buttons only save a file — nothing is sent to the instrument. The file holds the shape only: frequency/amplitude/offset are not in it. The GUI pre-fills the target channel, so after recalling the file on the 4055B, one click on Apply CHx Settings pushes them.",
    "\"Upload && Select\" works only over a LAN connection. Over USB the upload is refused (the 4055B's 52-byte firmware cap can wedge the box) — use the flash-drive .bin route instead. With no instrument connected (e.g. the Windows viewing copy) it reports \"not connected\"; designing and exporting still work.",
+   "During a live SLDEA run, \"Upload && Select\" refuses the channel driving the Trek, with a warning. The lock follows the Send to CH box, not the channel the editor was opened on. The other channel still uploads, but the window freezes, ■ Abort included, until the transfer ends. Saving and exporting are unaffected.",
    "The EasyWaveX CSV uses the Trek convention: 1 V in the file = 1 kV at the Trek output. Check the amplitude field before saving.",
    "Closing the editor with unsaved edits discards them after one confirmation — anything not saved to the library is gone.",
    "Library \"Delete\" permanently removes the saved waveform after one confirmation."
@@ -961,7 +966,8 @@
    "Running live with no scope means no measured kV/µA columns and no breakdown watchdog — the run continues even through a breakdown, and no telemetry.csv is written.",
    "During a live run the scope channels it reads (V_Out, I_Out), the timebase and trigger, and Stop, Single and AutoSet are locked on the Oscilloscope tab: the breakdown watchdog reads I_Out, and a re-coupled or frozen channel could blind it.",
    "🎚 Tune params… is an advanced tool: it asks for confirmation first, and its Save rewrites the run's setup.txt — the detection settings every later analysis pass will use.",
-   "During a live run the driven SG channel is locked; its Signal Gen tab controls refuse changes until the run ends.",
+   "During a live run the driven SG channel is locked; its Signal Gen tab controls (Apply, Output, Fire, Reconnect) and the Waveform Editor's upload refuse it, and a Webcam-tab sweep will not write it, until the run ends. ▶ Run itself refuses to start while a sweep is writing its channel, a timed capture or camera adjustment is running, or (live runs) a Signal Gen tab command is still being sent; a sweep on the other channel is asked about (Enter = No).",
+   "During a live run the Oscilloscope tab's Reconnect asks before it closes the scope: the breakdown watchdog reads current through it and cannot trip until the new connection is up. Use it only to recover a scope that has stopped answering, and not in the run's first seconds, while the watchdog is still arming.",
    "On Windows (no instruments connected) only DRY RUN works — a live run refuses to start."
   ],
   "callouts": [

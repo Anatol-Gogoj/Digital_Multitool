@@ -8,8 +8,9 @@ breakdown watchdog samples I_Out every 0.5 s, telemetry and data.csv record
 both, and setup.txt records their vertical setup as read back at the start.
 Until 2026-09-24 nothing kept the Oscilloscope tab or a bench-profile load
 off those channels mid-run: AC coupling on I_Out, Stop, Single or AutoSet
-would blind or mis-scale the watchdog, and it would not know. The rule the
-owner agreed on 2026-09-24, pinned here:
+could blind or mis-scale the watchdog, and it would not know (how Tek
+scopes are expected to behave; not bench-verified). The rule the owner
+agreed on 2026-09-24, pinned here:
 
 * a LIVE run claims its V_Out and I_Out channels and the settings every
   channel shares. Enable and Apply on those two channels, Stop, Single and
@@ -18,15 +19,18 @@ owner agreed on 2026-09-24, pinned here:
   scope through it -- sends the other channels only, with one note naming
   what it held back;
 * the other channels, Run, the reads (measurements, waveform capture) and
-  Reconnect stay usable;
-* a DRY run claims nothing, like the SG lock, and _sldea_finished releases
-  the claim;
-* an inventory of every scope call in the app modules, per function: a new
-  one fails here until someone decides whether the lock applies to it.
+  Reconnect stay usable -- and, on the REAL driver, reopening the scope
+  and the reads send nothing a LIVE run's reads depend on;
+* a DRY run claims nothing, like the SG lock; the claim holds through
+  ■ Abort and a BREAKDOWN-ABORT, and only _sldea_finished releases it;
+* an inventory of the scope calls in the app modules, per function, in
+  the spellings the app uses: a new one fails here until someone decides
+  whether the lock applies to it.
 
 Everything drives the REAL methods on a Tk-free stub app, against a fake
-scope that records every call that changes it. The claim is driven
-through the real sldea_run and, end to end, the real run worker.
+scope that records every call that changes it and who made each read.
+The claim is driven through the real sldea_run and, end to end, the real
+run worker; two tests build the real TekMSO24 on a recording session.
 
 Run: .venv/bin/python tests/test_scope_live_lock.py
 """
@@ -106,12 +110,15 @@ class _FakeScope:
     """TekMSO24 stand-in. Records every call that changes the scope as
     (call, args); the signatures follow the real driver's. `ask` never
     answers, so the run's pre-start checks skip, as on a failed query.
-    measure_raw returns `reading` volts on every channel (0.05 V = 10 uA
-    on I_Out) and calls `on_read(channel)` first when that is set."""
+    measure_raw records (type, channel, the function that asked) -- the
+    run's watchdog reads from _sldea_worker, its snapshots from
+    _sldea_capture -- calls `on_read(channel, caller)` first when that is
+    set, and returns `volts(channel)`: 0.05 V everywhere by default, which
+    is 10 uA on I_Out."""
     idn = 'FAKE,MSO24'
 
-    def __init__(self, reading=0.05):
-        self.reading = reading
+    def __init__(self, volts=None):
+        self.volts = volts or (lambda channel: 0.05)
         self.writes = []
         self.reads = []
         self.on_read = None
@@ -152,14 +159,15 @@ class _FakeScope:
         raise IOError('no answer in tests')
 
     def measure_raw(self, meas_type, channel):
+        caller = _sys._getframe(1).f_code.co_name
         if self.on_read is not None:
-            self.on_read(channel)
-        self.reads.append((meas_type, channel))
-        return self.reading, 'ok'
+            self.on_read(channel, caller)
+        self.reads.append((meas_type, channel, caller))
+        return self.volts(channel), 'ok'
 
     def get_all_measurements(self, channel):
         self.reads.append(('all', channel))
-        return {'mean': self.reading}
+        return {'mean': self.volts(channel)}
 
     def get_waveform(self, channel):
         self.reads.append(('waveform', channel))
@@ -174,6 +182,41 @@ class _FakeScope:
     def channels_written(self):
         return {args[0] for call, args in self.writes
                 if call in ('set_channel_enable', 'set_vertical')}
+
+
+class _Session:
+    """pyvisa resource stand-in under the REAL TekMSO24: records every
+    command it is sent and answers queries from `answers` ('0' otherwise).
+    `raw` holds the replies read_raw hands out, in order."""
+
+    def __init__(self, answers=None):
+        self.answers = dict(answers or {})
+        self.sent, self.raw = [], []
+        self.timeout = self.read_termination = self.write_termination = None
+
+    def clear(self):
+        self.sent.append('<device clear>')
+
+    def write(self, command):
+        self.sent.append(command)
+
+    def query(self, command):
+        self.sent.append(command)
+        return self.answers.get(command, '0')
+
+    def read_raw(self):
+        return self.raw.pop(0) if self.raw else b''
+
+    def close(self):
+        self.sent.append('<close>')
+
+
+class _RM:
+    def __init__(self, session):
+        self.session = session
+
+    def open_resource(self, _resource):
+        return self.session
 
 
 class _FakeSG:
@@ -261,6 +304,7 @@ class _App:
     _apply_bench_profile = G._apply_bench_profile
     _set_entry = staticmethod(G._set_entry)
     sldea_run = G.sldea_run
+    sldea_abort = G.sldea_abort
     _sldea_finished = G._sldea_finished
     _sldea_check_monitors = G._sldea_check_monitors
     _sldea_scope_readback = G._sldea_scope_readback
@@ -405,7 +449,7 @@ def _assert_noted(mb, head):
     assert msg.startswith(head), msg
     assert READS in msg, msg
     assert 'Reconnect stay available' in msg, msg
-    assert kw == {}, kw
+    assert set(kw) <= {'parent'}, kw
 
 
 # --------------------------------------------------------------------------
@@ -469,6 +513,21 @@ def test_the_claim_is_released_when_the_run_finishes():
         assert len(mb.calls) == 1, "no second note after the release"
 
 
+def test_abort_keeps_the_claim_until_the_run_has_finished():
+    """■ Abort only asks the worker to stop. Like the SG's, the claim holds
+    until _sldea_finished, which runs after the Trek is zeroed and the
+    run's files are closed."""
+    with _patched(_MB()) as mb:
+        app = _App(live=(2, 3))
+        app.sldea_abort()
+        assert app._sldea_stop and app._sldea_scope_chs == (2, 3)
+        app.scope_stop()
+        assert app.scope.writes == [] and len(mb.notes()) == 1, mb.calls
+        app._sldea_finished()
+        app.scope_stop()
+        assert app.scope.calls() == ['stop'], app.scope.writes
+
+
 # --------------------------------------------------------------------------
 # Oscilloscope tab: Enable, Apply CHx, Stop, Single, AutoSet -- and what
 # stays usable: the free channels, Run, the reads, Reconnect
@@ -482,6 +541,13 @@ def test_apply_refuses_a_monitor_channel_and_the_other_channels_still_apply():
         assert app.scope.writes == [] and app.bg == [], app.scope.writes
         _assert_noted(mb, 'CH3 (I_Out) is locked')
         mb.calls.clear()
+        # the lock is asked before the fields are: a half-typed field on a
+        # held channel gets the lock note, not a Configuration Error
+        app.channel_widgets[2]['vscale'].set('')
+        app.apply_channel_config(2)
+        assert app.scope.writes == [], app.scope.writes
+        _assert_noted(mb, 'CH2 (V_Out) is locked')
+        mb.calls.clear()
         app.apply_channel_config(4)
         assert app.scope.writes == [
             ('set_channel_enable', (4, False)),
@@ -490,18 +556,21 @@ def test_apply_refuses_a_monitor_channel_and_the_other_channels_still_apply():
 
 
 def test_enable_refuses_a_monitor_channel_and_puts_its_tick_back():
-    """The tick box flips BEFORE its command runs, so a refusal that left
-    it would show CH2 off while the scope still shows it on."""
+    """The tick box flips BEFORE its command runs, so a refused click must
+    put it back, whichever way it went. CH2-CH4 start unticked, so the
+    usual refused click is unticked -> ticked."""
     with _patched(_MB()) as mb:
         app = _App(live=(2, 3))
-        tick = app.channel_widgets[2]['enable']
-        tick.set(True)
-        tick.set(False)                          # the click...
-        app.toggle_channel(2, tick)              # ...then its command
+        for ch, was in ((3, False), (2, True)):
+            tick = app.channel_widgets[ch]['enable']
+            tick.set(was)
+            tick.set(not was)                    # the click...
+            app.toggle_channel(ch, tick)         # ...then its command
+            assert tick.get() is was, (ch, "the refused click left its tick")
+            _assert_noted(mb, f"CH{ch} ({app._scope_live_roles()[ch]}) is "
+                              f"locked")
+            mb.calls.clear()
         assert app.scope.writes == [] and app.bg == [], app.scope.writes
-        assert tick.get() is True, "the refused click left its tick"
-        _assert_noted(mb, 'CH2 (V_Out) is locked')
-        mb.calls.clear()
         free = app.channel_widgets[4]['enable']
         free.set(True)
         app.toggle_channel(4, free)
@@ -565,6 +634,44 @@ def test_reconnect_stays_usable_during_a_live_run():
             assert old.writes == [] and app.scope.writes == []
     finally:
         gui.TekMSO24 = saved
+
+
+def test_reopening_the_scope_sends_no_setting_a_live_run_reads_through():
+    """The premise of the Reconnect decision, pinned on the REAL driver:
+    opening a TekMSO24 sends a device clear, *IDN? and the waveform-
+    transfer format, and nothing else. A new command here -- a *RST, an
+    ACQUIRE, a channel or trigger setting -- fails this test: re-check
+    whether Reconnect may stay usable during a LIVE run first."""
+    s = _Session({'*IDN?': 'TEKTRONIX,MSO24,FAKE,1.0'})
+    TekMSO24(resource='USB0::FAKE::INSTR', rm=_RM(s))
+    assert s.sent == ['<device clear>', '*IDN?', 'DATA:ENCDG RIBINARY',
+                      'DATA:WIDTH 2'], s.sent
+
+
+def test_the_reads_change_only_the_measurement_and_data_source():
+    """What 'probe' means in SCOPE_DRIVER, pinned on the REAL driver: a
+    measurement programs the scope's one MEASUREMENT:IMMED slot and a
+    waveform capture its DATA source, and nothing else. That is why Get
+    Measurements, Capture Waveform and Data Logging stay usable during a
+    LIVE run: the run's measure_raw re-programs the slot on every read."""
+    s = _Session({'MEASUREMENT:IMMED:VALUE?': '0.05', 'WFMPRE:NR_PT?': '2',
+                  'WFMPRE:XINCR?': '0.001'})
+    scope = TekMSO24(resource='USB0::FAKE::INSTR', rm=_RM(s))
+    del s.sent[:]
+    assert scope.measure_raw('MEAN', 3) == (0.05, 'ok')
+    assert s.sent == ['MEASUREMENT:IMMED:TYPE MEAN',
+                      'MEASUREMENT:IMMED:SOURCE CH3',
+                      'MEASUREMENT:IMMED:VALUE?'], s.sent
+    del s.sent[:]
+    scope.get_all_measurements(3)
+    assert len(s.sent) == 18 and all(
+        c.startswith('MEASUREMENT:IMMED:') for c in s.sent), s.sent
+    del s.sent[:]
+    s.raw = [b'#14\x00\x01\x00\x02\n']           # two int16 samples
+    assert scope.get_waveform(3)['npts'] == 2
+    assert s.sent[0] == 'DATA:SOURCE CH3' and all(
+        c.startswith(('DATA:SOURCE CH3', 'WFMPRE:', 'CURVE?'))
+        for c in s.sent), s.sent
 
 
 # --------------------------------------------------------------------------
@@ -672,6 +779,24 @@ def test_a_live_run_claims_its_monitor_channels_and_a_dry_run_none():
             assert (app.scope.calls() == []) is (not dry), app.scope.writes
 
 
+def test_a_live_run_with_no_scope_still_claims_its_channels():
+    """Started without a scope (the operator said yes to 'No current
+    monitoring'), a LIVE run still claims: a scope connected mid-run is
+    read at every snapshot, so it gets the same protection."""
+    mb = _MB({'No current monitoring': True, 'Energize HV?': True})
+    with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+        app = _App(tmp, dry=False)
+        app.scope = None
+        app.sldea_run()
+        assert app.worker_done.wait(5), app.lines
+        assert mb.titles() == ['No current monitoring', 'Energize HV?']
+        assert app._sldea_scope_chs == (2, 3)
+        app.scope = _FakeScope()                 # Reconnect, mid-run
+        app.scope_autoset()
+        app.apply_channel_config(3)
+        assert app.scope.writes == [] and len(mb.notes()) == 2, mb.calls
+
+
 def test_a_live_run_cancelled_before_the_commit_point_claims_nothing():
     """The claim is made where the SG's is, after the last question: a run
     the operator backs out of leaves the scope as it found it."""
@@ -706,20 +831,26 @@ def test_the_claim_follows_the_channels_the_run_started_with():
         assert mb.titles() == [LOCK], mb.calls
 
 
+def _ramping(app):
+    return any(w[0] == 'set_offset' and w[2] > 0 for w in app.sg.writes)
+
+
 def test_end_to_end_the_claim_holds_while_the_run_reads_the_scope():
-    """A real LIVE run with its watchdog armed. At the first I_Out read
-    after the ramp has started, every locked control is pressed: none of
-    them reaches the scope, the watchdog keeps reading, and the scope is
-    free again only once the run has finished on the Tk side."""
+    """A real LIVE run with its watchdog armed. At the watchdog's first
+    I_Out read after the ramp has started, every locked control is
+    pressed: none of them reaches the scope, the watchdog keeps reading
+    I_Out, and the scope is free again only once the run has finished on
+    the Tk side."""
     mb = _MB(LIVE_OK)
     with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
         app = _App(tmp, dry=False, real_worker=True, wd_on=True)
+        app._sldea_build_profile = lambda: (_short_profile(landing_s=2.0),
+                                            None)
         pressed = []
 
-        def meddle(channel):
-            ramping = any(w[0] == 'set_offset' and w[2] > 0
-                          for w in app.sg.writes)
-            if ramping and not pressed:
+        def meddle(channel, caller):
+            if (channel == 3 and caller == '_sldea_worker' and _ramping(app)
+                    and not pressed):
                 pressed.append(len(app.scope.reads))
                 app.scope_autoset()
                 app.scope_stop()
@@ -734,14 +865,16 @@ def test_end_to_end_the_claim_holds_while_the_run_reads_the_scope():
         assert any(l.startswith('run complete') for l in app.lines), \
             app.lines
         assert not app._sldea_bd_tripped, app.lines
-        assert pressed, "the run never read the scope while ramping"
+        assert pressed, "the watchdog never read I_Out while ramping"
         # six refusals; Apply All's note is the one that also sends
         assert len(mb.notes()) == 6, mb.calls
         assert app.scope.channels_written() == {1, 4}, app.scope.writes
         assert not {'autoset', 'stop', 'single', 'set_horizontal',
                     'set_trigger_edge'} & set(app.scope.calls())
-        # the watchdog kept reading I_Out after the presses
-        later = [r for r in app.scope.reads[pressed[0]:] if r == ('MEAN', 3)]
+        # the WATCHDOG kept reading I_Out after the presses -- not just the
+        # snapshots, which read it too
+        later = [r for r in app.scope.reads[pressed[0]:]
+                 if r == ('MEAN', 3, '_sldea_worker')]
         assert len(later) >= 2, app.scope.reads
         # held until _sldea_finished runs on the Tk side
         assert app._sldea_scope_chs == (2, 3)
@@ -749,6 +882,41 @@ def test_end_to_end_the_claim_holds_while_the_run_reads_the_scope():
         assert app._sldea_scope_chs is None and not app._sldea_running
         app.scope_autoset()
         assert app.scope.calls()[-1] == 'autoset', app.scope.writes
+
+
+def test_end_to_end_a_breakdown_trip_holds_the_claim_until_the_end():
+    """The watchdog trips (120 uA once the ramp starts, 1 s confirm): the
+    breakdown frame's own reads happen under the claim, and it is released
+    by _sldea_finished like any other ending, not before."""
+    mb = _MB(LIVE_OK)
+    with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+        app = _App(tmp, dry=False, real_worker=True, wd_on=True)
+        app.sldea_vars['wd_s'].set('1')
+        app._sldea_build_profile = lambda: (_short_profile(landing_s=6.0),
+                                            None)
+        app.scope.volts = lambda ch: 0.6 if ch == 3 and _ramping(app) \
+            else 0.0
+        tried = []
+
+        def at_the_frame(channel, caller):
+            if caller == '_sldea_capture' and app._sldea_bd_tripped \
+                    and not tried:
+                tried.append(channel)
+                app.scope_autoset()
+        app.scope.on_read = at_the_frame
+        app.sldea_run()
+        assert app.worker_done.wait(30), app.lines
+        assert app.worker_error is None, repr(app.worker_error)
+        assert app._sldea_bd_tripped, app.lines
+        assert any(l.startswith('run BREAKDOWN-ABORT') for l in app.lines), \
+            app.lines
+        assert tried and app.scope.writes == [], app.scope.writes
+        assert len(mb.notes()) == 1, mb.calls
+        assert app._sldea_scope_chs == (2, 3)
+        app.root.run_pending()
+        assert app._sldea_scope_chs is None
+        app.scope_autoset()
+        assert app.scope.calls() == ['autoset'], app.scope.writes
 
 
 # --------------------------------------------------------------------------
@@ -767,18 +935,20 @@ SCOPE_DRIVER = {
     # back, all under the instrument lock -- the run's own reads do this too
     'measure': 'probe', 'measure_raw': 'probe',
     'get_all_measurements': 'probe', 'get_waveform': 'probe',
-    # read only, or the session itself
-    'ask': 'read', 'query': 'read', 'read': 'read', 'read_raw': 'read',
+    # end the session: hands the front panel back / closes the link
     'close': 'session', 'go_local': 'session',
+    # read only -- though ask()/query() send whatever they are given
+    'ask': 'read', 'query': 'read', 'read': 'read', 'read_raw': 'read',
 }
 SCOPE_CALLS = frozenset(n for n, kind in SCOPE_DRIVER.items()
-                        if kind in ('write', 'probe'))
+                        if kind in ('write', 'probe', 'session'))
 
-# Every function in the app modules that calls the scope's writes or
-# probes: its kind, why, and the calls it makes (method -> count). The scan
-# below must find exactly this. A call in a function not listed, or a new
-# call in one that is, fails the suite: decide whether a LIVE run's scope
-# lock applies to it, guard it and test it above, then update this table.
+# Every function in the app modules that calls the scope's writes, probes
+# or session calls: its kind, why, and the calls it makes (method ->
+# count). The scan below must find exactly this. A call in a function not
+# listed, or a new call in one that is, fails the suite: decide whether a
+# LIVE run's scope lock applies to it, guard it and test it above, then
+# update this table.
 # 'locked' must ask _scope_live_locked in a top-level `if ...: return`
 # before the statement holding its first call; 'partial' must read
 # _scope_live_roles first -- both checked below, not taken on trust.
@@ -826,23 +996,28 @@ def _is_scope_handle(node):
 
 
 def _scope_calls(node):
-    """The scope writes and probes under `node`, as method names in source
-    order: a listed method named on a scope handle (called or not -- a
-    callback counts), getattr(<handle>, '<listed method>'), and any use of
-    the raw VISA handle (<handle>.inst, which can send anything). A
-    tripwire for the spellings the app uses, not a proof: an alias under
-    another name (the shutdown loop's `inst`), a getattr on a computed
-    name, and a command smuggled through ask()/query() are not seen."""
+    """The scope writes, probes and session calls under `node`, as method
+    names in source order: a listed method named on a scope handle (called
+    or not -- a callback counts) or on the TekMSO24 class, getattr(<handle>,
+    '<listed method>'), and any use of the raw VISA handle (<handle>.inst,
+    getattr'd or not, which can send anything). A tripwire for the
+    spellings the app uses, not a proof. Not seen: an alias under another
+    name (the shutdown loop's `inst`, Reconnect's `old`), type(<handle>),
+    a getattr on a computed name, a command smuggled through ask() or
+    query(), and anything inside the driver itself."""
     found = []
+    watched = SCOPE_CALLS | {'inst'}
     for n in _ast.walk(node):
-        if isinstance(n, _ast.Attribute) and _is_scope_handle(n.value):
-            if n.attr in SCOPE_CALLS or n.attr == 'inst':
-                found.append((n.lineno, n.col_offset, n.attr))
+        if isinstance(n, _ast.Attribute) and n.attr in watched and (
+                _is_scope_handle(n.value)
+                or (isinstance(n.value, _ast.Name)
+                    and n.value.id == 'TekMSO24')):
+            found.append((n.lineno, n.col_offset, n.attr))
         elif (isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name)
               and n.func.id == 'getattr' and len(n.args) >= 2
               and _is_scope_handle(n.args[0])
               and isinstance(n.args[1], _ast.Constant)
-              and n.args[1].value in SCOPE_CALLS):
+              and n.args[1].value in watched):
             found.append((n.lineno, n.col_offset, n.args[1].value))
     return [name for _, _, name in sorted(found)]
 
@@ -966,8 +1141,8 @@ def test_the_inventory_sees_the_spellings_it_claims():
     `_scope_calls` claims is caught, counted and charged to the right def
     -- a nested class and a module-level function included -- a read is
     not a write, another instrument's method of the same name is not the
-    scope's, a dict called `scope` is not the scope, and an alias is the
-    stated blind spot."""
+    scope's, a dict called `scope` is not the scope, and an alias or
+    type(<handle>) is the stated blind spot."""
     src = ("class A:\n"
            "    def a(self):\n"
            "        self.scope.set_vertical(3, 1.0, coupling='AC')\n"
@@ -995,6 +1170,11 @@ def test_the_inventory_sees_the_spellings_it_claims():
            "    def k(self):\n"
            "        dso = self.scope\n"
            "        dso.stop()\n"
+           "        type(self.scope).autoset(self.scope)\n"
+           "    def m(self):\n"
+           "        self.scope.close()\n"
+           "        getattr(self.scope, 'inst').write('*RST')\n"
+           "        TekMSO24.stop(self.scope)\n"
            "def f(scope):\n"
            "    scope.write('ACQUIRE:STATE STOP')\n")
     counts, _ = _scope_call_sites({'m': src})
@@ -1002,7 +1182,9 @@ def test_the_inventory_sees_the_spellings_it_claims():
         'm.A.a': {'set_vertical': 1}, 'm.A.b': {'stop': 2},
         'm.A.c': {'autoset': 1}, 'm.A.B.e': {'set_horizontal': 1},
         'm.A.g': {'autoset': 1}, 'm.A.h': {'single': 1},
-        'm.A.i': {'inst': 1}, 'm.f': {'write': 1}}, counts
+        'm.A.i': {'inst': 1},
+        'm.A.m': {'close': 1, 'inst': 1, 'stop': 1},
+        'm.f': {'write': 1}}, counts
 
 
 def test_the_lock_checks_must_come_first_and_must_return():

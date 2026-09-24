@@ -16,34 +16,42 @@ docket** — read it, not this line, for what is queued.
 ## A LIVE run locks the scope channels it reads, and the settings they share (2026-09-24)
 
 **TL;DR:** during a LIVE run, the Oscilloscope tab or a bench-profile load
-could reconfigure the two scope channels that the breakdown watchdog reads.
-AC coupling on I_Out, a Stop or an AutoSet would blind or mis-scale the
-watchdog, and the run would not notice. Now a LIVE run locks its V_Out and
-I_Out channels, the timebase and trigger, and Stop, Single and AutoSet. A
-refused control shows a loud note, as the SG lock does. The other two
-channels, Run, the measurement reads and Reconnect still work, and a DRY
-run locks nothing.
+could reconfigure the scope channels the run reads: AC coupling, Stop or
+AutoSet on the I_Out channel could blind the breakdown watchdog without
+anyone noticing. Now a LIVE run locks its V_Out and I_Out channels, the
+timebase and trigger, and Stop, Single and AutoSet, with a loud note like
+the SG lock's. The other two channels, Run, the reads and Reconnect stay
+usable, DRY runs lock nothing, and only writes are withheld.
 
-**Observation (on `78315cc`).** #335's adversarial review found this, and
-it was checked on `origin/main` 78315cc. The run reads the Trek's monitors
-off the channels picked on the SLDEA tab, with the scope's MEAN
+**Observation (from the code at `78315cc`).** #335's adversarial review
+found this, and the code confirms it. The run reads the Trek's monitors
+off the two channels picked on the SLDEA tab, with the scope's MEAN
 measurement (`MEASUREMENT:IMMED`):
 
-- the watchdog reads I_Out every 0.5 s;
-- telemetry and every snapshot read both channels;
+- the breakdown watchdog reads I_Out every 0.5 s;
+- telemetry and every snapshot read both channels, for `telemetry.csv`
+  and `data.csv`;
 - `setup.txt` records the vertical setup that `sldea_run` read back at
   the start.
 
-No scope writer checked for a run:
+No scope writer checked for a run. Here is what each could do mid-run:
 
-| Writer | What it could do mid-run |
+| Writer | Mid-run effect |
 |---|---|
-| Apply CHx Config, Enable Channel on I_Out | AC or GND coupling strips the DC current the watchdog measures, so it reads about 0 and cannot trip. A smaller V/div pushes I_Out off-screen, which the watchdog counts as over-trip: a false BREAKDOWN-ABORT 3 s later. |
-| the same on V_Out | measured kV mis-scaled or blank, and `setup.txt` no longer describes the run |
-| Stop, Single | freeze the acquisition, so every later read returns that one record, marked `ok`. The monitoring-lost alarm never fires. |
-| AutoSet | re-picks every channel's scale, the timebase and the trigger |
-| the timebase | sets the window MEAN averages over: at 10 s/div a breakdown current is spread over 100 s |
-| Apply All Settings, Tools → Load Bench Profile | all of the above at once, on all four channels |
+| Apply CHx Config on I_Out | AC or GND coupling strips the DC current, so I_Out reads about 0 and the watchdog cannot trip. A small enough V/div, or a position shift, pushes I_Out off-screen. The scope then answers its 9.9E37 sentinel, which the watchdog counts as over-trip: a false BREAKDOWN-ABORT once the confirm time (3 s by default) runs out. |
+| Apply CHx Config on V_Out | measured kV reads about 0 (AC/GND) or goes blank (off-screen), and `setup.txt` no longer describes the run |
+| Enable Channel, turning either off | what the MSO24 answers for a channel that is off is unknown: an invalid reply reads as monitoring lost, the sentinel as over-trip |
+| Stop, Single | freeze the acquisition, so every later read comes from one record, marked `ok`, and the monitoring-lost alarm never fires |
+| AutoSet | re-picks scale, timebase and trigger |
+| the timebase (Apply All) | sets the record MEAN averages over: 10 s/div is 100 s |
+| Apply All Settings, Tools → Load Bench Profile | the coupling, scale and position of all four channels, plus the timebase and trigger, at once |
+
+Only the off-screen sentinel is bench-verified: on V_Out, 2026-07-25 and
+07-29 (the `measure_raw` docstring). The rest is how Tek scopes are
+expected to behave. Nobody has checked AC/GND coupling on the MSO24, roll
+mode at slow timebases, or what AutoSet picks. None of it is needed to
+justify the lock: each is a write the run did not choose, landing on a
+setting its safety reads depend on.
 
 **Decision (Anatol, 2026-09-24).** Three questions were asked before
 building, and the recommended answer was taken on each:
@@ -52,43 +60,55 @@ building, and the recommended answer was taken on each:
    every channel shares. Enable and Apply CHx on V_Out and I_Out refuse,
    and so do Stop, Single and AutoSet. These stay usable:
    - the other two channels;
-   - Run, which can only restart acquisition;
-   - the reads: Get Measurements, Capture Waveform, Data Logging;
-   - Reconnect. It sends no vertical, timebase or trigger setting, and it
-     is how monitoring comes back after a link drop. The worker re-reads
-     `self.scope` on every sample, and the watchdog ignores unreadable
-     samples without resetting its streak. The SG's Reconnect stays
-     refused: it would close the handle the run drives the Trek with.
+   - Run, which asks for continuous acquisition, the state the run's
+     reads need;
+   - the reads: Get Measurements, Capture Waveform and Data Logging;
+   - Reconnect. Reopening the scope sends a device clear, `*IDN?` and the
+     waveform-transfer format (`DATA:ENCDG`, `DATA:WIDTH`). That is no
+     vertical, timebase, trigger or acquisition setting, and a test on the
+     real driver now pins it. Reconnect is how monitoring comes back after
+     a link drop: the worker re-reads `self.scope` on every sample, and the
+     watchdog ignores unreadable samples without resetting its streak. The
+     SG's Reconnect stays refused, because it would close the handle the
+     run drives the Trek with.
 2. **Which runs.** LIVE only, like the SG lock. The watchdog and the
    `setup.txt` readback exist only on LIVE runs. A DRY run is the rig
    check, where retuning the scope while it runs is the point.
 3. **Apply All mid-run sends what is not locked.** The free channels go.
-   The monitor channels, timebase and trigger are held back, and one note
-   names them. Their values stay in the fields, to send after the run. A
-   bench-profile load pushes the scope through Apply All, so it is held
-   back the same way. The profile's LCR and SG parts are unchanged: the
+   The monitor channels, timebase and trigger are held back, with one note
+   naming them, and their values stay in the fields to send after the run.
+   A bench-profile load pushes the scope through Apply All, so it is held
+   back the same way. The profile's LCR and SG parts are unchanged, and the
    SG's own lock still guards the channel driving the Trek.
 
 How it is built:
 
 - `sldea_run` makes the claim, `_sldea_scope_chs = (vch, ich)`, at the
   commit point beside `_sldea_live_ch`. That is after the monitor check's
-  own rescale and the `setup.txt` readback, and a run cancelled at any
-  question claims nothing.
+  own rescale, the `setup.txt` readback and every question, so a run
+  cancelled at any question claims nothing. A LIVE run started without a
+  scope claims too, because a scope connected mid-run is read at every
+  snapshot.
 - The claim records the channels the run started with. The SLDEA tab's
-  boxes stay editable during a run and do not move it.
-- `_sldea_finished` releases the claim, on the Tk side, after the
-  worker's last scope read.
+  boxes stay editable during a run, and changing them does not move it.
+- `_sldea_finished` releases the claim on the Tk side, after the Trek is
+  zeroed and the run's files are closed. That holds after ■ Abort and
+  after a BREAKDOWN-ABORT too: the claim is never released earlier.
 - `_scope_live_locked(channel)` holds a channel only if it is V_Out or
   I_Out. Called without a channel, it means a shared setting, which is
-  always held.
-- A refused Enable click puts its tick back. The tick box flips before
-  its command runs, so without this it would show a state the scope does
-  not have.
+  always held. The lock is checked before a channel's fields are, so a
+  half-typed field on a held channel gets the lock note, not a
+  Configuration Error.
+- A refused Enable click puts its tick back. The box flips before its
+  command runs, and a click the scope never saw must not change it.
 - Apply All checks only the fields it will send, so a half-typed field it
   is holding back cannot block the rest.
-- The change only withholds writes. It adds no SCPI and no read, and
-  sends nothing that was not sent before.
+- The helpers sit under `# Scope methods`, not beside `_sg_live_locked`.
+  The video branch inserts its camera lock beside `_sg_live_locked`. When
+  a keep-both merge combines two insertions at one spot, the trailing
+  `return True` ends up shared, so `_scope_live_locked` returned None and
+  every scope write went through again.
+- The change only withholds writes: it adds no SCPI and no read.
 
 **Every scope caller, after this change.**
 
@@ -98,80 +118,163 @@ How it is built:
 | Apply All Settings, bench-profile load | sends the other channels only; V_Out, I_Out, timebase and trigger held back |
 | Stop, Single, AutoSet | refused |
 | Run | allowed, by decision |
-| Get Measurements, Capture Waveform, Data Logging | allowed. They set the scope's one shared measurement (or data source) under its I/O lock, and the run re-sets the measurement on every read. |
-| Reconnect | allowed, by decision |
+| Get Measurements, Capture Waveform, Data Logging | allowed. They set the scope's one shared measurement slot or data source under its I/O lock, and the run re-sets the slot on every read. |
+| Reconnect | allowed, by decision; it sends only the connect sequence above |
+| startup auto-connect | the same connect sequence |
+| window close | a shutdown: asks the run to stop first (up to about 3 s), then hands the scope back to local and closes it |
 | the run: monitor-check rescale, watchdog, telemetry, snapshots | it owns them |
 
-`tests/test_scope_live_lock.py` keeps an inventory of every scope write
-and probe in the app, with the calls each function makes. A new one fails
-the suite until someone classifies it, just as #335's inventory does for
-the SG.
+`tests/test_scope_live_lock.py` keeps an inventory of the scope calls in
+the app (writes, probes and session calls), per function, with the calls
+each function makes. A new one fails the suite until someone classifies it,
+as #335's inventory does for the SG.
+
+It sees the spellings the app uses:
+
+- `self.scope`, `app.scope` and a bare `scope`;
+- a method handed out as a callback;
+- `getattr` with a literal name;
+- methods called on the `TekMSO24` class;
+- the raw `.inst` handle.
+
+It does not see:
+
+- an alias under another name, such as the shutdown loop's `inst` or
+  Reconnect's `old`;
+- `type(<handle>)`;
+- `getattr` on a computed name;
+- a command smuggled through `ask()` or `query()`;
+- anything inside the driver.
+
+For the driver, two tests pin what connecting and the read paths send.
 
 **Limits.**
 
-- **A scope job already in flight when ▶ Run claims.** For example, an
-  AutoSet or Apply All clicked just before ▶ Run. A LIVE run always asks
-  "Energize HV?" before claiming, and the monitor check's queries wait
-  for the scope's I/O lock, so such a job normally lands first, and the
-  readback then records its result. Refusing a LIVE start while a
-  `scope-io` job is in flight belongs in PR #334's start gate, which
-  already does this for `sg-io`. That is a follow-up once #334 merges.
+- **A scope job already in flight when ▶ Run is pressed.** The scope's I/O
+  lock is taken per command, not per job. Apply All is 22 separately
+  locked commands, and AutoSet sends one command and then waits 2 s
+  outside the lock. So the monitor check, which runs before "Energize
+  HV?", can read a half-applied setup and pass it. What normally lets the
+  job finish before the `setup.txt` readback is the operator's time in
+  "Energize HV?", and even then the readback records only scale, position,
+  offset and attenuation. Refusing a LIVE start while a `scope-io` job is
+  in flight belongs in PR #334's start gate, which already does this for
+  `sg-io`. That is a follow-up once #334 merges.
+- **Nothing checks, at run start, the state the lock protects mid-run.**
+  The monitor check and the readback query scale, attenuation, position
+  and offset. They never query coupling, channel on/off or acquisition
+  state. So a run can start already blind, which is the state the lock now
+  prevents mid-run. Two ways:
+  - a bench profile loaded before ▶ Run that puts I_Out on AC coupling;
+  - Stop pressed before ▶ Run.
+  
+  Either passes the check. Checking needs `CH<n>:COUPLING?`,
+  `SELECT:CH<n>?` and `ACQUIRE:STATE?`. That is new instrument I/O, so a
+  bench session comes first. `bench/test_sldea_watchdog_probe.py` already
+  reads `ACQUIRE:STATE?` and `TRIGGER:A:MODE?` (#189). The other two go
+  into its `STATE_QUERIES`, and then into the monitor check.
 - **The trigger source can be a free channel.** The trigger settings are
-  locked, but a free channel's own settings are not. Suppose the trigger
-  mode is NORMAL (the app never sets it; AUTO is the scope's default).
-  Then re-coupling the source channel so it never crosses the level would
-  stop acquisition, and the reads would freeze as they do after a Stop.
-  Finding out which channel is the source needs a `TRIG:A:EDGE:SOURCE?`
-  read. That is new instrument I/O, so it is a bench follow-up, not code.
+  locked, but a free channel's own settings are not. The app never sets
+  the trigger mode, and AUTO is the scope's default. If the mode is
+  NORMAL, re-coupling the source channel so it never crosses the level
+  would stop acquisition and freeze the reads, as Stop does. The bench
+  probe's `TRIGGER:A:MODE?` answers whether this can happen at all. Naming
+  the source needs a `TRIG:A:EDGE:SOURCE?` read, which is bench-first.
 - **The front panel.** Nothing in the app stops a hand on the scope's
   knobs.
 - **Reads still share the instrument.** A waveform capture or a Data
-  Logging sample holds the scope's I/O lock for its transfer, which delays
-  the watchdog's next read by that long. That was true before too, and
-  the watchdog is slow by design: it needs 3 s of sustained current.
-- **Not bench-verified.** Tek scopes take measurements on the acquired
-  record, so a stopped MSO24 is expected to answer `MEASUREMENT:IMMED`
-  from its frozen record. What it answers for a channel that is turned off
-  was not checked either. Neither changes the rule: both actions are now
-  refused on a LIVE run's channels.
-- **The inventory's blind spots:** an alias under another name, `getattr`
-  on a computed name, and a command smuggled through `ask()`/`query()`.
+  Logging sample holds the scope's I/O lock for its transfer, and delays
+  the watchdog's next read by that long. That was true before too, and the
+  watchdog is slow by design: it needs 3 s of sustained current by
+  default.
+- **Run.** If pressing it restarts the record, one read may come back as
+  the sentinel. That starts an over-trip streak but cannot complete one.
+  Not bench-verified.
+
+**Found by this entry's adversarial review, not fixed here.** Both
+findings are older than this change, and both concern the Reconnect that
+this entry keeps usable:
+
+- **A scope Reconnect while another instrument's connect is in flight
+  drops the scope for the rest of the run.** `_reconnect` nulled the
+  handle before `_run_bg` refused the job, and nothing restored it. The
+  review reproduced it with the real worker: I_Out at 200 µA against a
+  100 µA trip, "CURRENT MONITORING LOST … watchdog is BLIND" after 10 s,
+  and the run ended "complete". PR #336 fixes `_reconnect`; merge it with
+  this one or before it.
+- **A Reconnect during the worker's setup leaves the whole run without a
+  watchdog, silently.** The worker builds the watchdog only if
+  `self.scope` is set at that moment. That window is about 0.3–1 s after
+  the camera pre-flight closes, and longer with the video branch, which
+  first waits up to 5 s for its first frame. The start banner still says
+  the watchdog is on, and no alarm fires, because the reads succeed. The
+  review reproduced it: the control run trips, and the run with the
+  Reconnect ends "complete" at 200 µA. The fix is to arm the watchdog from
+  `wd_on and not dry` and let the existing 10 s alarm cover a missing
+  scope. That changes the run itself, so it is its own change.
+
+Also, Reconnect closes the old session without taking its I/O lock. A read
+in progress is expected to fail as one unreadable sample (from pyvisa-py;
+not bench-verified). Any Reconnect blinds the watchdog while it runs, and
+the over-trip streak survives the gap.
 
 **Verification.**
 
-- **Tests:** `tests/test_scope_live_lock.py` has 22 tests. They drive the
-  real Oscilloscope-tab writers, `_apply_bench_profile`, `_reconnect`,
-  `sldea_run` and `_sldea_finished` on a Tk-free stub, against a fake
-  scope that records every write. One of them runs the real
-  `_sldea_worker` through a LIVE run with the watchdog armed and presses
-  every locked control mid-ramp. All 22 pass. The suite cannot even import
-  on unfixed `78315cc`, since it binds the new helpers, so the mutation
-  pass is the measure of what it catches.
-- **Mutation:** 27 mutants were run, and all 27 were caught:
-  - each guard removed, or moved after its write;
-  - the tick not put back;
-  - Run locked too;
-  - Apply All not filtering, sending the timebase and trigger anyway,
-    checking the fields it holds back, or skipping its note or status
-    text;
-  - the claim made on DRY runs, never made, with the roles swapped, made
-    before the dialogs, or never released;
-  - either role dropped, or the same-channel case dropped;
-  - shared settings not held, the channel test inverted, the note
-    silenced;
-  - Reconnect refused;
-  - a new scope write in a read path.
-- **Full suite, on the Windows PC:** 38 of 40 suites pass. Both failures
-  are known and Windows-only, and open PRs fix them: #331
-  (`test_easywave_export` writes to `/tmp`) and #332 (`test_tk_fontfix`).
+- **Tests:** `tests/test_scope_live_lock.py` has 27 tests, and all pass.
+  - They drive the real Oscilloscope-tab writers, `_apply_bench_profile`,
+    `_reconnect`, `sldea_run`, `sldea_abort` and `_sldea_finished` on a
+    Tk-free stub. The stub talks to a fake scope that records every write,
+    and which function made each read.
+  - Two tests run the real `_sldea_worker` through a LIVE run with the
+    watchdog armed. One presses every locked control at the watchdog's
+    first I_Out read after the ramp starts, then checks that the watchdog
+    itself, not just the snapshots, kept reading I_Out. The other trips
+    the watchdog and presses AutoSet while the breakdown frame is taken.
+  - Two tests build the real `TekMSO24` on a recording session.
+  - The suite cannot import on unfixed `78315cc`, because it binds the new
+    helpers.
+- **Mutation:** 42 mutants were run, and all 42 were caught. They include
+  every survivor the review found that is in this suite's reach:
+  - the tick restored the wrong way;
+  - the claim made only with a scope, released by ■ Abort, or kept after
+    a trip;
+  - the lock asked after the fields are checked;
+  - the watchdog stopping, or reading V_Out, once the ramp starts;
+  - the scope closed, handed back to local, or written raw in a read path;
+  - `*RST` or a Stop added to the connect sequence;
+  - a Stop in the waveform read, or a coupling write in a measurement.
+
+  The first 27 cover:
+  - every guard removed, or moved after its write;
+  - Run locked;
+  - each Apply All filter, note or status text dropped;
+  - the claim made on DRY runs, never made, swapped, made too early or
+    never released;
+  - either role dropped, and the same-channel case;
+  - Reconnect refused.
+
+  A command smuggled through `ask()` or `query()` stays a stated blind
+  spot.
+- **Full suite, on the Windows PC:** 37 of 40 suites pass. All three
+  failures are known and Windows-only, and open PRs fix them:
+  - #331: `test_easywave_export` writes to `/tmp`;
+  - #331: `test_sldea_plot_gui` has a resize race, which passed on an
+    earlier run of this branch;
+  - #332: `test_tk_fontfix`.
 - **Real Tk:** on Windows, the full app ran with a fake scope and a fake
-  LIVE claim on CH2 and CH3, and the actual widgets were pressed:
+  LIVE claim on CH2 and CH3, and the actual widgets were pressed. The
+  harness is a one-off script and is not in the repo.
   - Apply CH3, Enable CH2, Stop, Single and AutoSet each showed the native
     note, owned by the main window, and sent nothing. The CH2 tick box
     stayed unticked.
   - Apply CH4, Enable CH4 and Run went through.
-  - Apply All showed its note and sent CH1 and CH4 only.
+  - Apply All sent CH1 and CH4 only.
   - After `_sldea_finished`, AutoSet went through.
+- **Merges** (trial merges on this branch's final commit):
+  - #334, #335 and `claude/sldea-video-capture` each conflict only in this
+    file's top entries; keep both.
+  - #336 merges cleanly.
+  - With all of them stacked, every suite involved passes.
 - **No bench gate:** there is no new instrument I/O; the change only
   withholds writes.
 

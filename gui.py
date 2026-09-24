@@ -813,11 +813,6 @@ class InstrumentControlGUI:
         if key == 'sg' and getattr(self, '_sldea_live_ch', None) is not None:
             self._sg_live_locked(self._sldea_live_ch)
             return
-        # The scope is NOT refused mid-run (decision 2026-09-24): reopening
-        # it sends no vertical, timebase or trigger setting, and it is how
-        # monitoring comes back after a link drop. The run re-reads
-        # self.scope on every sample, and its watchdog ignores unreadable
-        # ones without resetting its streak.
         old = getattr(self, key)
         setattr(self, key, None)   # nothing may use the handle meanwhile
         label.config(text="Connecting...", fg="#b36b00")
@@ -4585,6 +4580,12 @@ LOGGING:
         return True
 
     def reconnect_scope(self):
+        # NOT refused during a LIVE run, unlike the SG's (decision
+        # 2026-09-24). Reopening the scope sends a device clear, *IDN? and
+        # the waveform-transfer format -- no vertical, timebase, trigger or
+        # acquisition setting -- and it is how monitoring comes back after
+        # a link drop: the run re-reads self.scope on every sample, and its
+        # watchdog ignores unreadable ones without resetting its streak.
         self._reconnect('scope', TekMSO24, self.scope_status)
     
     def toggle_channel(self, channel, enable_var):
@@ -5417,7 +5418,8 @@ LOGGING:
             messagebox.showerror("Error", "Oscilloscope not connected")
             return
         # Single stops after one record, and every later read -- a LIVE
-        # run's watchdog included -- would return that record's value.
+        # run's watchdog included -- would come from that record (how Tek
+        # measurements work; not bench-verified here).
         if self._scope_live_locked(what="Single"):
             return
         self._bg_simple(lambda: self.scope.single(),
@@ -5428,7 +5430,8 @@ LOGGING:
             messagebox.showerror("Error", "Oscilloscope not connected")
             return
         # Deliberately NOT locked during a LIVE run (decision 2026-09-24):
-        # it can only restart acquisition, which the run's reads need.
+        # it asks for continuous acquisition, the state the run's reads
+        # need.
         self._bg_simple(lambda: self.scope.run(), "Scope running",
                         busy='scope-io')
 
@@ -5436,8 +5439,9 @@ LOGGING:
         if not self.scope:
             messagebox.showerror("Error", "Oscilloscope not connected")
             return
-        # Stop freezes the record: a LIVE run's watchdog would read one
-        # stale current, marked ok, until the run ends.
+        # Stop freezes the record, so a LIVE run's watchdog would read one
+        # stale current, marked ok, until the run ends (how Tek
+        # measurements work; not bench-verified here).
         if self._scope_live_locked(what="Stop"):
             return
         self._bg_simple(lambda: self.scope.stop(), "Scope stopped",
@@ -5447,8 +5451,8 @@ LOGGING:
         if not self.scope:
             messagebox.showerror("Error", "Oscilloscope not connected")
             return
-        # AutoSet re-picks every channel's scale, the timebase and the
-        # trigger: a LIVE run would read through a setup nobody recorded.
+        # AutoSet re-picks scale, timebase and trigger (see the manual): a
+        # LIVE run would read through a setup nobody chose or recorded.
         if self._scope_live_locked(what="AutoSet"):
             return
         self.status_bar.config(text="Running AutoSet...")

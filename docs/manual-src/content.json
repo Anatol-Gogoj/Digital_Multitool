@@ -959,7 +959,7 @@
    "If the scope-monitor check warns and you pick 'run anyway', the run completes but logs blank measured kV and wrong currents — this silently ruined five runs on 2026-07-25.",
    "A wrong DEA diameter corrupts the px-to-mm scale: every area number from that run is wrong and setup.txt must be hand-fixed before re-analysis.",
    "Running live with no scope means no measured kV/µA columns and no breakdown watchdog — the run continues even through a breakdown, and no telemetry.csv is written.",
-   "During a live run the scope channels it reads (V_Out, I_Out), the timebase and trigger, and Stop, Single and AutoSet are locked on the Oscilloscope tab: the breakdown watchdog reads I_Out, and a re-coupled or frozen channel would blind it.",
+   "During a live run the scope channels it reads (V_Out, I_Out), the timebase and trigger, and Stop, Single and AutoSet are locked on the Oscilloscope tab: the breakdown watchdog reads I_Out, and a re-coupled or frozen channel could blind it.",
    "🎚 Tune params… is an advanced tool: it asks for confirmation first, and its Save rewrites the run's setup.txt — the detection settings every later analysis pass will use.",
    "During a live run the driven SG channel is locked; its Signal Gen tab controls refuse changes until the run ends.",
    "On Windows (no instruments connected) only DRY RUN works — a live run refuses to start."

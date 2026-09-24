@@ -3,11 +3,13 @@
 
 Run: .venv/bin/python tests/test_tk_fontfix.py
 
-Two of these need fontconfig's `fc-list` and are SKIPPED where it does not
-exist, which is every Windows box. The skips are counted and named in the
-tail line rather than being reported as passes -- `run_tests.py` echoes a
-suite's last stdout line verbatim, so a silent skip would read in the
-runner summary exactly like coverage that ran.
+Two of these ask fontconfig's `fc-list` about deploy/fonts.conf, so they run
+only where the app hands that file to fontconfig (POSIX) and `fc-list` is on
+PATH. Everywhere else they are SKIPPED -- on every Windows box, including one
+where MiKTeX has put its own fc-list.exe on PATH. The skips are counted and
+their reason named in the tail line rather than being reported as passes --
+`run_tests.py` echoes a suite's last stdout line verbatim, so a silent skip
+would read in the runner summary exactly like coverage that ran.
 """
 import os as _os
 import sys as _sys
@@ -17,6 +19,7 @@ import glob
 import os
 import shutil
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
 
 import tk_fontfix
@@ -31,13 +34,66 @@ KNOWN_TK_ENTRY_POINTS = ('gui.py', 'sldea_edge_gui.py', 'sldea_plot_gui.py',
 
 
 class _Skip(Exception):
-    """Raised by a test that cannot run in this environment."""
+    """Raised by a test that cannot run in this environment.
+
+    `reason` is short and is what the tail line names; `detail`, when given,
+    is printed only on the test's own skip line.
+    """
+
+    def __init__(self, reason, detail=None):
+        super().__init__(f'{reason} -- {detail}' if detail else reason)
+        self.reason = reason
 
 
 def _need(binary):
     """Skip the calling test when `binary` is not on PATH."""
     if shutil.which(binary) is None:
         raise _Skip(f'{binary} not on PATH')
+
+
+def _need_tk_fontconfig():
+    """Skip unless the app hands deploy/fonts.conf to a fontconfig here.
+
+    `tk_fontfix.apply()` points FONTCONFIG_FILE at the file on POSIX and is a
+    no-op everywhere else; the platform check below is the one it makes, and
+    test_apply_sets_env_and_respects_an_existing_value pins that. On Windows
+    Tk draws through GDI and never reads fontconfig at all.
+
+    `fc-list` on PATH is not the same question. MiKTeX installs its own
+    fc-list.exe on PATH, so on the Windows 11 PC (2026-09-23) the old
+    `_need('fc-list')` gate let both cases run. They died decoding its
+    output (see `_fc_list`) -- and decoded, they PASS on a file nothing read:
+    MiKTeX builds fontconfig with its getenv("FONTCONFIG_FILE") compiled out,
+    and its fc-list prints byte-identical output for this file, a non-XML
+    one, or none at all.
+    """
+    if os.name != 'posix':
+        found = shutil.which('fc-list')
+        raise _Skip(f'Tk on {sys.platform} does not use fontconfig',
+                    'tk_fontfix.apply() is a no-op off POSIX, so nothing '
+                    'here hands deploy/fonts.conf to fontconfig'
+                    + (f'; ignoring {found}' if found else ''))
+    _need('fc-list')
+
+
+def _fc_list(env):
+    """Run `fc-list` under `env`; stdout and stderr always come back as str.
+
+    Decoded as UTF-8, fontconfig's own encoding, with undecodable bytes
+    replaced: a replaced byte cannot hide or forge the ASCII these cases
+    look for, so decoding can neither fail a case nor pass one. With
+    `text=True` it could do both. On Linux one font whose FILE NAME is not
+    UTF-8 raised UnicodeDecodeError out of run(), failing both cases over a
+    font they never asked about (reproduced under WSL, 2026-09-23). On
+    Windows subprocess decodes in a reader thread: MiKTeX's UTF-8 hit
+    cp1252's unmapped byte 0x8d, the thread died and the stream came back
+    None -- the cases died on `None.splitlines()`, and `r.stderr or ''`
+    would have read an undecoded stderr as one free of "Fontconfig error".
+    """
+    r = subprocess.run(['fc-list'], env=env, capture_output=True,
+                       encoding='utf-8', errors='replace')
+    assert r.returncode == 0, f'fc-list exited {r.returncode}: {r.stderr}'
+    return r
 
 
 def _tk_entry_points():
@@ -66,22 +122,19 @@ def test_config_exists_and_is_valid_xml():
 def test_fontconfig_actually_accepts_the_file():
     # Parsing as XML is not enough: fontconfig must load it without error.
     # Linux-verified only -- the 2026-07-27 regression this pins can only
-    # be reproduced where fontconfig exists.
-    _need('fc-list')
-    r = subprocess.run(['fc-list'], env={**os.environ,
-                                         'FONTCONFIG_FILE': CONF},
-                       capture_output=True, text=True)
-    assert 'Fontconfig error' not in (r.stderr or ''), r.stderr
+    # be reproduced where Tk reads fontconfig.
+    _need_tk_fontconfig()
+    r = _fc_list({**os.environ, 'FONTCONFIG_FILE': CONF})
+    assert 'Fontconfig error' not in r.stderr, r.stderr
     assert r.stdout.strip(), "no fonts at all -- the system include broke"
 
 
 def test_colour_emoji_is_rejected_but_fonts_remain():
     # Linux-verified only, same reason as above.
-    _need('fc-list')
+    _need_tk_fontconfig()
 
     def n_colour(env):
-        r = subprocess.run(['fc-list'], env=env, capture_output=True,
-                           text=True)
+        r = _fc_list(env)
         return (sum('color emoji' in l.lower()
                     for l in r.stdout.splitlines()),
                 len(r.stdout.splitlines()))
@@ -145,12 +198,15 @@ def _run():
     fns = [v for k, v in sorted(globals().items())
            if k.startswith('test_') and callable(v)]
     ran = skipped = 0
+    reasons = []                        # each distinct skip reason, in order
     failed = []
     for fn in fns:
         try:
             fn()
         except _Skip as why:
             skipped += 1
+            if why.reason not in reasons:
+                reasons.append(why.reason)
             print(f"skip {fn.__name__}  ({why})")
             continue
         except Exception:
@@ -163,7 +219,9 @@ def _run():
         print(f"ok  {fn.__name__}")
     tail = f"{ran} of {len(fns)} tests ran"
     if skipped:
-        tail += f" ({skipped} skipped, needs fontconfig)"
+        # Named by the skips themselves, not a fixed label: "needs
+        # fontconfig" was false on a box that has one (MiKTeX's).
+        tail += f" ({skipped} skipped, {'; '.join(reasons)})"
     print(f"\n{tail}")
     if not failed:
         return 0

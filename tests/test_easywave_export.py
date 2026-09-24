@@ -13,6 +13,7 @@ import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
     _os.path.abspath(__file__))))
 import os
+import tempfile
 
 from easywave_export import (EASYWAVE_POINTS, build_easywave_csv,
                              parse_easywave_csv, resample_linear,
@@ -99,9 +100,14 @@ def test_template_round_trip_byte_identical():
     assert rebuilt == original, "rebuild must be byte-identical to the template"
 
 
-def test_write_easywave_csv(tmp='/tmp/_easywave_test.csv'):
-    n = write_easywave_csv(tmp, [0.0, 1.0], 1.0, 1.0, 0.5)
+def test_write_easywave_csv():
+    # tempfile, not a '/tmp/...' literal: Windows has no /tmp, so the
+    # write raised FileNotFoundError before anything was tested -- the
+    # same fix test_arb_bin.py's write test already carries.
+    fd, tmp = tempfile.mkstemp(prefix='easywave_', suffix='.csv')
+    os.close(fd)
     try:
+        n = write_easywave_csv(tmp, [0.0, 1.0], 1.0, 1.0, 0.5)
         with open(tmp, 'rb') as f:
             blob = f.read()
         assert len(blob) == n

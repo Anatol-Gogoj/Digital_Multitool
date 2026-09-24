@@ -37,6 +37,7 @@ from datetime import datetime
 import bench_profiles
 from bench_profiles import BenchProfileStore
 import presets_path
+import relaunch
 from instruments import BK894, TekMSO24, BK4055B, BK9174B, BK5493C
 import lcr_format
 import scope_trace
@@ -54,6 +55,11 @@ from waveform_render import unit_waveform, scale_waveform
 from version import version_string
 import webcam
 import threading
+
+# The folder this gui.py runs from. On the bench that is the share
+# launcher's local cache, which decides what Restart now runs (see
+# relaunch.py). Module-level so tests can pretend to run from there.
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ---- The tabs, and their STABLE slugs -------------------------------------
 # (slug, progress noun, builder method name), in the order the tabs are
@@ -1747,7 +1753,9 @@ ANALYSIS:
         close_btn.config(state='normal')
         if rc == 0:
             self._append_update_text(
-                txt, "\n✓ Update complete. Restart to load the new version.\n")
+                txt, "\n✓ Update complete. Restart now to load the new "
+                     "version. The first start after an update takes about "
+                     "half a minute while this PC's copy is refreshed.\n")
             self.status_bar.config(text="Update complete — restart to apply")
             restart_btn.config(state='normal')
         else:
@@ -1760,14 +1768,21 @@ ANALYSIS:
 
         Never while an SLDEA run is going (2026-09-24, see
         _sldea_run_blocks). With no run going it is NOT the window-close
-        shutdown: instrument outputs stay exactly as they are."""
+        shutdown: instrument outputs stay exactly as they are.
+
+        When the app runs from the share launcher's local cache, it re-runs
+        the launcher, which refreshes the cache first (relaunch.py,
+        2026-09-24). Re-running the app's own command line from there
+        reloaded the OLD cached code: the update deploys to the share."""
         if self._sldea_run_blocks('restart', parent=parent):
             return
+        prog, argv = relaunch.restart_command(
+            APP_DIR, os.environ, sys.argv, sys.executable)
         try:
             self.root.destroy()
         except Exception:
             pass
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        os.execv(prog, argv)
 
     def _sldea_run_blocks(self, action, parent=None):
         """True (+ a warning saying why) while an SLDEA run is going, so

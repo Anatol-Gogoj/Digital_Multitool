@@ -37,6 +37,47 @@ mirrors the app to the local cache **only when `version.py`'s stamp changed**,
 then runs Python from local disk while keeping the working directory on the
 share so presets stay shared between users.
 
+**Restart now goes back through the launcher (2026-09-24).** `Tools → Update
+Software…` deploys to the share, not to anyone's cache, and only `launch_gui.sh`
+refreshes the cache. Restart now used to re-exec the app's own command line,
+which is the *cached* `gui.py` with the cached `PYTHONPATH`, so it came back as
+the version that was already running. This was reproduced against the reference
+copy on 2026-09-24. The bench check is pending: see `PROJECT_HANDOFF.md`.
+
+Now, when the app runs from `${SCPI_CACHE:-$HOME/.cache/scpi_control}/SCPI_Control`,
+Restart runs `bash /mnt/shareDrive/_software/launch_gui.sh` instead
+(`relaunch.py`). That re-syncs the cache (about 25 s, under the launcher's
+update window) and starts the new version.
+
+A launcher can name itself for Restart by exporting `SCPI_LAUNCHER=<its own
+path>`. None does yet. The GitHub fallback could do it in the installer's
+heredoc.
+
+Everywhere else, Restart re-execs as before:
+- a dev clone;
+- the GitHub fallback's `~/.cache/scpi_control_git`;
+- the share copy, when the launcher's sync failed.
+
+For the two clones, that reloads code the update did not touch, so start the app
+again from the icon instead.
+
+Two side effects come from running the new launcher inside the old one, which is
+still waiting on the restarted process:
+- if the restarted app then exits with an error, the "failed to start" dialog
+  appears twice;
+- `launch.log.prev` holds the session before the restart, followed by a copy of
+  the restarted one.
+
+`tests/test_relaunch.py` pins the cache path and the share path against the
+repo copies of the launch chain, and runs the reference launcher end to end on
+POSIX. The live share copy can still drift from them.
+
+**Line endings trap (found 2026-09-24).** A Windows checkout (`core.autocrlf`)
+has CRLF endings in `deploy/*.sh` and `*.reference`, and bash rejects those
+files (`set: pipefail\r: invalid option name`). The share is hosted on a Windows
+PC, so never copy a launcher onto it from a Windows checkout without converting
+the endings to LF.
+
 **How the launchers actually reach `/usr/local/bin` (corrected 2026-08-05).**
 Both `scpi-launch.sh` and `scpi-from-github.sh` are *generated* by
 `install_lab_launchers.sh` (repo copy: `deploy/install_lab_launchers.sh`),

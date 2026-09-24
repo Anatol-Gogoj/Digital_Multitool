@@ -1,6 +1,6 @@
 # Project handoff — state as of 2026-08-12
 
-**RESTART NOW RELOADED THE OLD VERSION (2026-09-24, PR #TBD, stacked on
+**RESTART NOW RELOADED THE OLD VERSION (2026-09-24, PR #340, stacked on
 #338; bench check BEFORE merge, by Anatol's decision).** **TL;DR:** on the
 bench, Tools → Update Software → Restart now came back as the version that
 was already running. The update deploys to the share, but the app runs from

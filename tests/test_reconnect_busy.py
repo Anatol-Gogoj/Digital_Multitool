@@ -6,17 +6,22 @@ The gap (found 2026-09-24 by the adversarial review of PR #335, verified
 on 78315cc): `_reconnect` nulled the instrument handle and set its tab's
 label to "Connecting..." BEFORE `_run_bg` looked at the 'connect' busy
 key. With another tab's Reconnect still in flight, `_run_bg` refused and
-the job never ran. Nothing closed the old session or opened a new one, the
-handle stayed None and the label stayed at "Connecting...". Until a later
-Reconnect succeeded, the app treated the instrument as gone: with the
-signal generator, Output refused and window close skipped the outputs-OFF
-shutdown, and a LIVE run refused to start. (During the start-up
-auto-connect the same refusal did no lasting harm: the handle was still
-None, and auto-connect's result overwrote both.) What is pinned here:
+the job never ran: no new session, the handle left None, the label left
+at "Connecting...". Until a later Reconnect succeeded, the app treated
+the instrument as gone. With the signal generator, Output refused, window
+close skipped the outputs-OFF shutdown, and a LIVE run refused to start.
+The LIVE lock covers the SG only, so the scope could be dropped this way
+in the middle of a LIVE run: the breakdown watchdog went blind (the run
+logs it after 10 s and carries on). During the start-up auto-connect the
+same refusal did no lasting harm: the handle was still None, and
+auto-connect's result overwrote both. What is pinned here:
 
 * a refused Reconnect leaves the handle, its session and the tab's label
   as they were, opens nothing, and says why in the status bar with the
-  note `_run_bg` itself gives -- on every tab;
+  note `_run_bg` itself gives -- on every tab, and for the scope during a
+  LIVE run;
+* only a connect refuses: the pollers' ticks and every other background
+  job leave Reconnect alone;
 * the LIVE-run lock still answers an SG Reconnect first;
 * a Reconnect with nothing else in flight is unchanged: the handle is None
   before the worker runs, the old session closes before the new one opens,
@@ -32,6 +37,7 @@ Run: .venv/bin/python tests/test_reconnect_busy.py
 import contextlib as _contextlib
 import os as _os
 import queue as _queue
+import re as _re
 import sys as _sys
 import threading as _threading
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
@@ -171,6 +177,23 @@ def test_a_refused_reconnect_leaves_the_instrument_as_it_was():
             assert mb.calls == [], mb.calls
 
 
+def test_a_refused_scope_reconnect_mid_run_keeps_the_watchdogs_scope():
+    """The LIVE lock guards only the SG. A LIVE run reads self.scope on
+    every monitor tick, so a scope Reconnect refused behind another tab's
+    connect must leave that handle alone: dropping it blinded the breakdown
+    watchdog. The refusal is the busy note, not the SG lock's warning."""
+    with _patched() as mb:
+        app = _App(live=1)
+        app._bg_busy.add('connect')
+        scope, before = app.scope, app.scope_status.state()
+        app._reconnect('scope', lambda: _FakeInst('NEW scope'),
+                       app.scope_status)
+        assert app.scope is scope and not scope.closed
+        assert app.scope_status.state() == before, app.scope_status.state()
+        assert app.status_bar.text == BUSY_NOTE and mb.calls == [], mb.calls
+        assert app.jobs_started() == 0, app.started
+
+
 def test_the_refusal_note_is_the_one_run_bg_gives():
     """Word for word: one refusal, one wording, whichever check says it."""
     app = _App()
@@ -262,8 +285,37 @@ def test_the_live_lock_still_answers_an_sg_reconnect_first():
 
 
 # --------------------------------------------------------------------------
-# Nothing in flight: unchanged
+# No other connect: unchanged
 # --------------------------------------------------------------------------
+
+def _other_jobs():
+    """Every other busy key in the app, read off gui.py so that a new one
+    is covered too: the pollers' ticks, instrument commands, the LCR
+    correction, camera adjustments."""
+    with open(gui.__file__, encoding='utf-8') as f:
+        keys = set(_re.findall(r"busy='([^']+)'", f.read())) - {'connect'}
+    assert {'psu-io', 'dmm-io', 'lcr-io', 'sg-io'} <= keys, keys
+    return keys
+
+
+def test_other_background_jobs_do_not_hold_off_a_reconnect():
+    """Only a connect refuses. The PSU, DMM and LCR pollers hold their keys
+    on every tick: refusing on any job would make Reconnect fail at random,
+    and the note would blame a connect for it."""
+    others = _other_jobs()
+    for key in KEYS:
+        with _patched() as mb:
+            app = _App()
+            app._bg_busy.update(others)
+            old = getattr(app, key)
+            app._reconnect(key, lambda k=key: _FakeInst(f'NEW {k}'),
+                           getattr(app, f'{key}_status'))
+            assert app.started == [('connect', True)], (key, app.started)
+            app.root.pump()
+            assert old.closed and getattr(app, key).idn == f'NEW {key}'
+            assert app._bg_busy == others, app._bg_busy
+            assert app.status_bar.text is None and mb.calls == [], mb.calls
+
 
 def test_a_reconnect_with_nothing_in_flight_goes_ahead_as_before():
     """The handle is None before the worker runs ("nothing may use the

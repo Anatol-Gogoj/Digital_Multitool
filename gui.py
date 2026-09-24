@@ -811,9 +811,10 @@ class InstrumentControlGUI:
         # One connect at a time, refused BEFORE the handle or the label is
         # touched. _run_bg's own check comes after the lines below, and it
         # was the only one until review 2026-09-24: with another tab's
-        # Reconnect in flight, this tab was left with no handle, its label
-        # stuck at "Connecting..." and its old session open, until a later
-        # Reconnect succeeded. The note is _run_bg's own, word for word.
+        # Reconnect in flight, this tab was left with no handle and its
+        # label stuck at "Connecting..." until a later Reconnect succeeded.
+        # A scope dropped that way mid-run left a LIVE run's breakdown
+        # watchdog blind. The note is _run_bg's own, word for word.
         if 'connect' in self._bg_busy:
             self.status_bar.config(
                 text="Still working on the previous connect operation...")

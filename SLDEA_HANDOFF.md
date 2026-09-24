@@ -38,9 +38,10 @@ worker. Until that lands:
   is BLIND" and carries on (policy 2026-07-25).
 
 If the connect fails, `self.scope` stays None until a later Reconnect
-succeeds. A successful one changes no scope setting: after the open, the
-driver sends `*IDN?`, `DATA:ENCDG RIBINARY` and `DATA:WIDTH 2`. The
-worker picks up the new handle on its next tick.
+succeeds. A successful one sends no vertical, timebase or trigger
+command. The driver's open does a VISA device clear, then sends `*IDN?`,
+`DATA:ENCDG RIBINARY` and `DATA:WIDTH 2`, which set the waveform-transfer
+format only. The worker picks up the new handle on its next tick.
 
 **Decision (Anatol, 2026-09-24).** Three answers were offered: refuse, as
 for the SG; ask first, default No; or leave it allowed. Anatol took the

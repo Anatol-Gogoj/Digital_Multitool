@@ -37,6 +37,7 @@ from datetime import datetime
 import bench_profiles
 from bench_profiles import BenchProfileStore
 import presets_path
+import relaunch
 from instruments import BK894, TekMSO24, BK4055B, BK9174B, BK5493C
 import lcr_format
 import scope_trace
@@ -54,6 +55,11 @@ from waveform_render import unit_waveform, scale_waveform
 from version import version_string
 import webcam
 import threading
+
+# The folder this gui.py runs from. On the bench that is the share
+# launcher's local cache, which decides what Restart now runs (see
+# relaunch.py). Module-level so tests can pretend to run from there.
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ---- The tabs, and their STABLE slugs -------------------------------------
 # (slug, progress noun, builder method name), in the order the tabs are
@@ -1648,6 +1654,11 @@ ANALYSIS:
         to a dialog (queue-marshalled, never touching Tk off the main thread)."""
         if self._updating:
             return
+        # Refused up front during an SLDEA run (owner, 2026-09-24): its
+        # Restart would be refused until the run ends anyway, and the update
+        # copies onto the shared drive runs save to. See _sldea_run_blocks.
+        if self._sldea_run_blocks('update'):
+            return
         script = self._find_update_script()
         if not script:
             messagebox.showerror(
@@ -1677,7 +1688,10 @@ ANALYSIS:
         btns.pack(fill='x', padx=8, pady=(0, 8))
         close_btn = tk.Button(btns, text="Close", command=win.destroy, state='disabled')
         close_btn.pack(side='right')
-        restart_btn = tk.Button(btns, text="Restart now", command=self._restart_app,
+        # The run check happens on the click, not here: a run can be started
+        # while this dialog is open.
+        restart_btn = tk.Button(btns, text="Restart now",
+                                command=lambda: self._restart_app(parent=win),
                                 state='disabled')
         restart_btn.pack(side='right', padx=(0, 6))
 
@@ -1739,7 +1753,11 @@ ANALYSIS:
         close_btn.config(state='normal')
         if rc == 0:
             self._append_update_text(
-                txt, "\n✓ Update complete. Restart to load the new version.\n")
+                txt, "\n✓ Update complete. Restart now to load the new "
+                     "version: this PC's copy is refreshed first, so the "
+                     "app is gone for about half a minute. Close any Edge "
+                     "Review, tuner or plot window before you restart. "
+                     "Instrument outputs stay as they are.\n")
             self.status_bar.config(text="Update complete — restart to apply")
             restart_btn.config(state='normal')
         else:
@@ -1747,13 +1765,81 @@ ANALYSIS:
                 txt, f"\n✗ Update failed (exit {rc}). See output above.\n")
             self.status_bar.config(text=f"Update failed (exit {rc})")
 
-    def _restart_app(self):
-        """Re-exec the GUI process to load freshly-updated code."""
+    def _restart_app(self, parent=None):
+        """Re-exec the GUI process to load freshly-updated code.
+
+        Never while an SLDEA run is going (2026-09-24, see
+        _sldea_run_blocks). With no run going it is NOT the window-close
+        shutdown: instrument outputs stay exactly as they are.
+
+        When the app runs from the share launcher's local cache, it runs
+        the launch chain again -- the desktop launcher, as a click on the
+        icon does, or else the share launcher -- which refreshes the cache
+        first (relaunch.py, 2026-09-24). Re-running the app's own command
+        line from there reloaded the OLD cached code: the update deploys
+        to the share."""
+        if self._sldea_run_blocks('restart', parent=parent):
+            return
+        prog, argv = relaunch.restart_command(
+            APP_DIR, os.environ, sys.argv, sys.executable)
         try:
             self.root.destroy()
         except Exception:
             pass
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        os.execv(prog, argv)
+
+    def _sldea_run_blocks(self, action, parent=None):
+        """True (+ a warning saying why) while an SLDEA run is going, so
+        `action` ('restart' or 'update') must wait for it to end.
+
+        Found 2026-09-24 by the adversarial review of the SG writer lock:
+        Restart now re-exec'd mid-run. os.execv replaces the process at
+        once, so neither the run's own zeroing (the worker's finally) nor
+        the window-close shutdown ever ran, and a LIVE run left the Trek
+        energized behind an idle SLDEA tab -- the same class as audit
+        2026-07-25 C1. The owner's decision (2026-09-24): refuse, and send
+        the operator to ■ Abort. A run ends through ■ Abort, never as a
+        side effect of a restart.
+
+        `_sldea_running` is the right flag: sldea_run sets it before it
+        starts the worker, so before the worker's first SG write, and it
+        clears only in _sldea_finished, which the worker queues as the last
+        step of its finally -- after its attempt to zero the SG. So a run
+        that is still stopping is refused too. (If the attempt fails, the
+        HV NOT ZEROED alarm goes up and the flag still clears.) Both
+        orderings are pinned in tests/test_update_restart_guard.py. A DRY
+        run is refused as well: a restart would cut it off before it
+        closes its run folder."""
+        if not getattr(self, '_sldea_running', False):
+            return False
+        ch = getattr(self, '_sldea_live_ch', None)     # None: a DRY run
+        if getattr(self, '_sldea_stop', False):
+            state = (f"The LIVE HV run on SG CH{ch} is still stopping."
+                     if ch is not None else "The DRY run is still stopping.")
+            then = "Wait until ▶ Run is available again on the SLDEA tab"
+        else:
+            state = (f"A LIVE HV run is driving the Trek on SG CH{ch}."
+                     if ch is not None else
+                     "A DRY run is in progress on the SLDEA tab.")
+            then = "■ Abort the run on the SLDEA tab (or let it finish)"
+        if action == 'restart':
+            title = "Restart refused — SLDEA run in progress"
+            why = ("Restarting now would end the run before it can set the "
+                   "SG to 0 V and switch it off, leaving the Trek energized "
+                   "while the restarted app shows an idle SLDEA tab."
+                   if ch is not None else
+                   "Restarting now would cut the run off before it closes "
+                   "its run folder.")
+            then += ", then press Restart now again."
+        else:
+            title = "Update refused — SLDEA run in progress"
+            why = ("Update after the run ends: Restart now is refused until "
+                   "then anyway, and the update copies files onto the "
+                   "shared drive the run may be saving to.")
+            then += ", then choose Tools → Update Software… again."
+        kw = {} if parent is None else {'parent': parent}
+        messagebox.showwarning(title, f"{state}\n\n{why}\n\n{then}", **kw)
+        return True
 
     def create_scope_tab(self):
         """Create oscilloscope control tab"""

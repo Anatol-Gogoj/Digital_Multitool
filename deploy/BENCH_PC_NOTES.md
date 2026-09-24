@@ -37,6 +37,70 @@ mirrors the app to the local cache **only when `version.py`'s stamp changed**,
 then runs Python from local disk while keeping the working directory on the
 share so presets stay shared between users.
 
+**Restart now goes back through the launcher (2026-09-24).** `Tools → Update
+Software…` deploys to the share, not to anyone's cache, and only `launch_gui.sh`
+refreshes the cache. Restart now used to re-exec the app's own command line,
+which is the *cached* `gui.py` with the cached `PYTHONPATH`, so it came back as
+the version that was already running. This was reproduced against the reference
+copy on 2026-09-24. The bench check is pending: see `PROJECT_HANDOFF.md`.
+
+Now, when the app runs from `${SCPI_CACHE:-$HOME/.cache/scpi_control}/SCPI_Control`,
+Restart runs what a click on the icon runs, `bash /usr/local/bin/scpi-launch.sh`
+(`relaunch.py`). It is on local disk and probes the share with a timed read. On a
+working share it runs `launch_gui.sh`, which re-syncs the cache (about 25 s, under
+the launcher's update window) and starts the new version. On a dead share it falls
+back as the icon does and says so. A PC without that desktop launcher runs
+`bash /mnt/shareDrive/_software/launch_gui.sh` directly, but only if a byte of it
+can be read. The Tk thread never touches the share when the desktop launcher is
+there.
+
+This also covers the desktop launcher's own share-down session (step 3 above:
+the cache run with `~/.local/share/scpi_control` as the working directory). The
+update in that session needed the share, so the restart finds the share up again
+and goes back to the normal path, with presets shared again. If the share has
+died again, the fallbacks show a note and bring back the cached copy.
+
+A launcher can name itself for Restart by exporting `SCPI_LAUNCHER=<its own
+path>`. None does yet. The GitHub fallback could do it in the installer's
+heredoc.
+
+Everywhere else, Restart re-execs as before:
+- a dev clone;
+- the GitHub fallback's `~/.cache/scpi_control_git`;
+- the share copy, when the launcher's sync failed.
+
+For the two clones, that reloads code the update did not touch, so start the app
+again from the icon instead.
+
+What to know about the restart:
+- **The app is gone for about half a minute after an update** (before, about
+  3 s). Outputs stay as they are, as the owner decided for Restart. If the new
+  version then fails to start, the app does not come back until someone starts
+  it. Switch outputs off first if they must not be left unattended.
+- **Close Edge Review, the tuner and plot windows before restarting.** They run
+  from the cache, which the re-sync rewrites under them (`rsync --delete`), so a
+  later lazy import could load files from the other version. Any start from the
+  icon after a deploy does the same.
+- **The new launcher runs inside the old one**, which is still waiting on the
+  same process, and each restart adds one more level. If the restarted app then
+  exits with an error, the "failed to start" dialog appears once per level:
+  twice after one restart. `launch.log.prev` holds the session before the
+  restart, followed by a copy of the restarted one. `PYTHONPATH` repeats the
+  cache pylibs once per level, which is harmless.
+- **The re-sync has no lock.** A second click on the icon during it starts a
+  second copy, as it always could after a deploy.
+
+`tests/test_relaunch.py` pins the desktop launcher, the cache path and the share
+path against the repo copies of the launch chain. On POSIX it also runs the
+reference launchers end to end, including a share that dies between the update
+and the restart. The live copies can still drift from the repo copies.
+
+**Line endings trap (found 2026-09-24).** A Windows checkout (`core.autocrlf`)
+has CRLF endings in `deploy/*.sh` and `*.reference`, and bash rejects those
+files (`set: pipefail\r: invalid option name`). The share is hosted on a Windows
+PC, so never copy a launcher onto it from a Windows checkout without converting
+the endings to LF.
+
 **How the launchers actually reach `/usr/local/bin` (corrected 2026-08-05).**
 Both `scpi-launch.sh` and `scpi-from-github.sh` are *generated* by
 `install_lab_launchers.sh` (repo copy: `deploy/install_lab_launchers.sh`),

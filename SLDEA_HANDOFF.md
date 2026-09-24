@@ -13,6 +13,135 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## Update Software and its Restart now refuse while an SLDEA run is going (2026-09-24)
+
+**TL;DR:** Tools → Update Software → **Restart now** used to restart the
+app even in the middle of a LIVE run. The restart replaced the app at once,
+so the run never ramped down and the Trek stayed energized while the new
+app showed an idle SLDEA tab. Now both Update Software and Restart now
+refuse while any SLDEA run is going (LIVE, DRY, or still stopping after
+■ Abort), and say to ■ Abort first. With no run going, nothing changes.
+
+**Observation (on `78315cc`).** The adversarial review of PR #335 (the SG
+writer lock) found this. `_restart_app` called `root.destroy()`, then
+`os.execv(sys.executable, [sys.executable] + sys.argv)`, and checked
+nothing. During a LIVE run the SG channel that drives the Trek (1 V = 1 kV
+at the DEA) is ON at the run's current offset. `os.execv` replaces the
+process immediately, so two things never ran:
+
+- the run worker's `finally` block, which sets the offset to 0 and
+  switches the output off. The worker is a daemon thread and died with
+  the process;
+- the window-close shutdown (`_on_app_close`). It sets `_sldea_stop`,
+  waits up to ~3 s for the worker, then switches both SG outputs off.
+
+It is the same class of hazard as audit 2026-07-25 C1, where Reconnect
+nulled `self.sg` mid-run and skipped the ramp-down. Starting an update
+did not check for a run either. The update dialog is not modal, so a run
+could also be started under an open dialog whose Restart button was
+already enabled.
+
+**Decision (owner, 2026-09-24).** Two options went to the owner:
+
+- **(a)** refuse Restart during a run, and send the operator to ■ Abort;
+- **(b)** route Restart through the window-close shutdown before
+  re-executing.
+
+(b) was turned down. Mid-run it would end the run with the best-effort
+3 s wait instead of ■ Abort. It would also switch both SG outputs off on
+every restart. The owner chose (a), and also refusing the update itself
+during a run.
+
+- **One check: `_sldea_run_blocks(action, parent=None)`.** While
+  `_sldea_running` is set, it shows a warning and returns True. The
+  warning says which kind of run it is: a LIVE run on SG CH*n*, a DRY
+  run, or a run still stopping after ■ Abort. It says what a restart
+  would do (a LIVE run would not ramp down and the Trek would stay
+  energized; a DRY run would be cut off before it closes its run
+  folder) and what to do instead.
+- **Why `_sldea_running`:** it goes True before the worker writes the
+  SG, and back to False only in `_sldea_finished`, after the worker's
+  `finally` has zeroed the SG. So a run that is still stopping is
+  refused too. Nothing in `sldea_run` writes the SG before the flag is
+  set.
+- **A DRY run is refused as well.** It drives nothing, but a restart
+  would cut it off before it closes its run folder.
+- **Restart now checks on every click**, not when the dialog was built.
+  Its warning is parented on the update dialog.
+- **Update Software checks first**, before the script lookup and before
+  its own confirmation question. The owner's reasons for refusing the
+  update and not only the restart: the refusal comes up front instead of
+  after the download, and the update rsyncs and pip-installs onto the
+  same NAS the run saves its frames to. A stalled share has delayed this
+  run loop's HV path before (review 2026-08-05). Whether an update's
+  traffic causes such stalls was not measured.
+- **With no run going, nothing changes.** Update asks its question as
+  before. Restart destroys the window and re-execs the same command line.
+  Restart is still **not** the window-close shutdown: SG outputs and LCR
+  bias stay exactly as they are. The manual now says so.
+
+**Limits.**
+
+- Window close is unchanged. It is still a best-effort ramp for a run
+  (it waits up to ~3 s). A LIVE run still ends through ■ Abort
+  (CLAUDE.md).
+- If `_sldea_running` ever latched on, Update would stay refused for the
+  session. That needs the worker to die before its `try` block, where
+  nothing can raise in practice. ▶ Run would be stuck the same way
+  already, and window close still works.
+- A test requires every `os.exec*` / `os._exit` / `os.abort` call in the
+  app modules to ask the gate first. It sees the `os.<name>` spelling the
+  app uses. `from os import execv`, or a call through another alias,
+  would not be seen.
+
+**Found while doing this, not fixed here.** **Restart now probably
+reloads the OLD code on the bench.** `launch_gui.sh` runs `gui.py` from a
+per-user local cache (`~/.cache/scpi_control/SCPI_Control`), and it
+refreshes that cache only when the launcher itself starts. The update
+deploys to the share. `os.execv` re-runs the cached path without going
+through the launcher, so the restarted app is the version that was
+already running. This was read from `deploy/launch_gui.sh.reference`; the
+live copy on the share was not checked. It is its own change.
+
+**Verification.**
+
+- **Tests:** `tests/test_update_restart_guard.py` has 13 tests. They drive
+  the real `_restart_app`, `_sldea_run_blocks`, `open_update_software` and
+  `_sldea_finished` on a Tk-free stub. `gui.messagebox` is a recorder, and
+  `gui.os` is a stand-in whose `execv` records the call instead of
+  re-executing. One test builds the real update dialog on real Tk, starts
+  a fake LIVE run after the update has finished, and presses the real
+  Restart now button. On unfixed `78315cc`, 9 fail: every refusal, the
+  release when the run ends, the real button and the exec-call check.
+  The 4 that pass pin behaviour that is meant to stay the same. On this
+  branch, all 13 pass.
+- **Mutation:** 16 mutants were run, and all 16 were caught. They cover a
+  gate removed, moved after `destroy()`, or asked but not obeyed; a gate
+  keyed on the LIVE claim only; a still-stopping run ignored; a silent
+  refusal; a lost parent; swapped messages; a changed argv; and Restart
+  turned into the window-close shutdown.
+- **Real Tk, full app (Windows):** the full app with a fake LIVE run on
+  CH1. Update Software was refused with the native warning, owned by the
+  main window. With no run, the real update dialog opened, and the
+  confirmation question was asked as before. A LIVE run was then started
+  under the open dialog, and Restart now was refused, both while running
+  and while stopping, with the warning owned by the update dialog. Once
+  the run ended, the same button asked for the restart (`os.execv`
+  stubbed).
+- **Suite:** `run_tests.py` gives 38/40 on the Windows lab PC. The two
+  failures are its known environmental ones: the `/tmp` path in
+  `test_easywave_export` (PR #331) and MiKTeX's `fc-list` in
+  `test_tk_fontfix` (PR #332).
+- **No bench gate:** there is no new instrument I/O; the change only
+  withholds a restart.
+
+**Merge notes.** PRs #334 and #335 each add a top entry to this file; keep
+both. Nothing else overlaps. #335's SG-write inventory is unaffected,
+because this adds no SG write. The `content.json` lines changed here are
+not the ones #334 or #335 change. #335's entry lists this finding under
+"Found by this entry's adversarial review, not fixed here"; once both are
+merged, that bullet is answered here.
+
 ## The aggregate averages BY GROUP, the runs it averages can be hidden, and the group palette is a shape argument rather than a colour one (2026-08-10)
 
 **TL;DR:** the cross-run aggregate produced one mean over everything

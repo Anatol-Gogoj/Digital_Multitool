@@ -214,20 +214,22 @@ class _App:
 def _patched(mb, events):
     """The messagebox recorder and the os stand-in, in gui only, and the
     app's command line as ARGV. No launcher can be found -- no
-    SCPI_LAUNCHER, and a share launcher that does not exist -- so the
-    restart is the old one unless a test sets one up (_launcher)."""
+    SCPI_LAUNCHER, and desktop and share launchers that do not exist -- so
+    the restart is the old one unless a test sets one up (_launcher)."""
     fake_os = _OS(events)
-    saved = (gui.messagebox, gui.os, _sys.argv, relaunch.SHARE_LAUNCHER,
+    saved = (gui.messagebox, gui.os, _sys.argv, relaunch.DESKTOP_LAUNCHER,
+             relaunch.SHARE_LAUNCHER,
              _os.environ.pop(relaunch.LAUNCHER_ENV, None))
     gui.messagebox, gui.os, _sys.argv = mb, fake_os, list(ARGV)
-    relaunch.SHARE_LAUNCHER = _os.path.join(_ROOT, 'no-such-dir',
-                                            'launch_gui.sh')
+    nowhere = _os.path.join(_ROOT, 'no-such-dir')
+    relaunch.DESKTOP_LAUNCHER = _os.path.join(nowhere, 'scpi-launch.sh')
+    relaunch.SHARE_LAUNCHER = _os.path.join(nowhere, 'launch_gui.sh')
     try:
         assert gui.os is fake_os      # never reach a real execv
         yield fake_os
     finally:
-        (gui.messagebox, gui.os, _sys.argv, relaunch.SHARE_LAUNCHER,
-         named) = saved
+        (gui.messagebox, gui.os, _sys.argv, relaunch.DESKTOP_LAUNCHER,
+         relaunch.SHARE_LAUNCHER, named) = saved
         _os.environ.pop(relaunch.LAUNCHER_ENV, None)
         if named is not None:
             _os.environ[relaunch.LAUNCHER_ENV] = named
@@ -237,28 +239,38 @@ def _patched(mb, events):
 def _launcher(where):
     """Inside _patched: a launcher Restart must run again -> its path.
 
-    'cache': the app runs from the share launcher's cache (gui.APP_DIR
-    moved there, SCPI_CACHE pointing at it) and the share launcher exists.
+    'desktop': the bench. The app runs from the share launcher's cache
+    (gui.APP_DIR moved there, SCPI_CACHE pointing at it), and the desktop
+    and share launchers both exist: the desktop one is run.
+    'share': the same without the desktop launcher: the share one is run.
     'named': a launcher exported SCPI_LAUNCHER; the app runs from here."""
     keys = ('SCPI_CACHE', relaunch.LAUNCHER_ENV)
-    saved = (gui.APP_DIR, relaunch.SHARE_LAUNCHER,
+    saved = (gui.APP_DIR, relaunch.DESKTOP_LAUNCHER, relaunch.SHARE_LAUNCHER,
              {k: _os.environ.get(k) for k in keys})
     with _tempfile.TemporaryDirectory() as tmp:
-        launcher = _os.path.join(tmp, 'launch_gui.sh')
-        with open(launcher, 'w') as f:
-            f.write('#!/usr/bin/env bash\n')
-        if where == 'cache':
+        made = {}
+        for name in ('scpi-launch.sh', 'launch_gui.sh', 'named.sh'):
+            made[name] = _os.path.join(tmp, name)
+            with open(made[name], 'w') as f:
+                f.write('#!/usr/bin/env bash\n')
+        if where in ('desktop', 'share'):
             cache = _os.path.join(tmp, 'cache')
             gui.APP_DIR = _os.path.join(cache, 'SCPI_Control')
             _os.makedirs(gui.APP_DIR)
             _os.environ['SCPI_CACHE'] = cache
-            relaunch.SHARE_LAUNCHER = launcher
+            relaunch.SHARE_LAUNCHER = made['launch_gui.sh']
+            if where == 'desktop':
+                relaunch.DESKTOP_LAUNCHER = made['scpi-launch.sh']
+                expected = made['scpi-launch.sh']
+            else:
+                expected = made['launch_gui.sh']
         else:
-            _os.environ[relaunch.LAUNCHER_ENV] = launcher
+            _os.environ[relaunch.LAUNCHER_ENV] = expected = made['named.sh']
         try:
-            yield launcher
+            yield expected
         finally:
-            gui.APP_DIR, relaunch.SHARE_LAUNCHER, env = saved
+            (gui.APP_DIR, relaunch.DESKTOP_LAUNCHER, relaunch.SHARE_LAUNCHER,
+             env) = saved
             for k, v in env.items():
                 _os.environ.pop(k, None)
                 if v is not None:
@@ -425,22 +437,24 @@ def test_restart_still_re_execs_when_the_window_is_already_gone():
     assert mb.calls == [], mb.calls
 
 
-def test_restart_from_the_launcher_cache_runs_the_share_launcher():
+def test_restart_from_the_launcher_cache_runs_the_launch_chain_again():
     """The bench's case (2026-09-24): the app runs from the share
     launcher's cache, which only the launcher refreshes, so re-running the
-    app's own command line reloaded the OLD code. Restart runs the
-    launcher -- after destroy, one execv, no dialog, no instrument
-    touched. A destroy() that raises still does not stop it."""
-    for fail in (False, True):
-        app = _App(run=None)
-        app.root = _Root(app.events, fail=fail)
-        mb = _MB()
-        with _patched(mb, app.events) as fake_os, \
-                _launcher('cache') as launcher:
-            app._restart_app()
-            _relaunched(app, fake_os, launcher)
-        assert mb.calls == [], mb.calls
-        assert not app.touched(), app.touched()
+    app's own command line reloaded the OLD code. Restart runs the desktop
+    launcher, as the icon does (or, without one, the share launcher) --
+    after destroy, one execv, no dialog, no instrument touched. A
+    destroy() that raises still does not stop it."""
+    for where in ('desktop', 'share'):
+        for fail in (False, True):
+            app = _App(run=None)
+            app.root = _Root(app.events, fail=fail)
+            mb = _MB()
+            with _patched(mb, app.events) as fake_os, \
+                    _launcher(where) as launcher:
+                app._restart_app()
+                _relaunched(app, fake_os, launcher)
+            assert mb.calls == [], mb.calls
+            assert not app.touched(), app.touched()
 
 
 def test_restart_runs_a_launcher_that_named_itself():
@@ -471,7 +485,7 @@ def test_the_launcher_restart_is_still_refused_during_a_run():
     relaunch.restart_command = recorder
     try:
         for run, stopping in ((1, False), ('dry', False), (2, True)):
-            for where in ('cache', 'named'):
+            for where in ('desktop', 'share', 'named'):
                 app = _App(run=run, stopping=stopping)
                 mb = _MB()
                 with _patched(mb, app.events) as fake_os, _launcher(where):
@@ -481,11 +495,26 @@ def test_the_launcher_restart_is_still_refused_during_a_run():
         assert looked == [], "looked for the launcher during a run"
         # the recorder is live: once the run is over it IS asked
         app = _App(run=None)
-        with _patched(_MB(), app.events) as fake_os, _launcher('cache'):
+        with _patched(_MB(), app.events) as fake_os, _launcher('desktop'):
             app._restart_app()
         assert len(looked) == 1 and fake_os.execs, (looked, fake_os.execs)
     finally:
         relaunch.restart_command = real
+
+
+def test_app_dir_is_the_folder_gui_py_runs_from():
+    """_restart_app decides from gui.APP_DIR whether the app runs from the
+    launcher's cache, and every test above moves it. So pin what it is:
+    the folder of gui.py itself, from __file__ -- not the working
+    directory (the share, on the bench) or sys.argv."""
+    here = _os.path.realpath(_os.path.dirname(_os.path.abspath(gui.__file__)))
+    assert _os.path.realpath(gui.APP_DIR) == here == _os.path.realpath(
+        _ROOT), (gui.APP_DIR, here)
+    [value] = [n.value for n in _gui_tree().body
+               if isinstance(n, _ast.Assign)
+               and [getattr(t, 'id', None) for t in n.targets] == ['APP_DIR']]
+    assert _ast.unparse(value) == \
+        'os.path.dirname(os.path.abspath(__file__))', _ast.unparse(value)
 
 
 # --------------------------------------------------------------------------
@@ -1210,7 +1239,8 @@ def _run():
         print(f"ok  {fn.__name__}")
     tail = f"{ran} of {len(fns)} tests ran"
     if skipped:
-        tail += f" ({skipped} skipped, needs a display for Tk)"
+        tail += (f" ({skipped} skipped: needs a display for Tk, or bash"
+                 f" on PATH)")
     print(f"\n{tail}")
     if not failed:
         return 0

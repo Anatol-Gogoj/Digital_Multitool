@@ -1754,8 +1754,10 @@ ANALYSIS:
         if rc == 0:
             self._append_update_text(
                 txt, "\n✓ Update complete. Restart now to load the new "
-                     "version. The first start after an update takes about "
-                     "half a minute while this PC's copy is refreshed.\n")
+                     "version: this PC's copy is refreshed first, so the "
+                     "app is gone for about half a minute. Close any Edge "
+                     "Review, tuner or plot window before you restart. "
+                     "Instrument outputs stay as they are.\n")
             self.status_bar.config(text="Update complete — restart to apply")
             restart_btn.config(state='normal')
         else:
@@ -1770,10 +1772,12 @@ ANALYSIS:
         _sldea_run_blocks). With no run going it is NOT the window-close
         shutdown: instrument outputs stay exactly as they are.
 
-        When the app runs from the share launcher's local cache, it re-runs
-        the launcher, which refreshes the cache first (relaunch.py,
-        2026-09-24). Re-running the app's own command line from there
-        reloaded the OLD cached code: the update deploys to the share."""
+        When the app runs from the share launcher's local cache, it runs
+        the launch chain again -- the desktop launcher, as a click on the
+        icon does, or else the share launcher -- which refreshes the cache
+        first (relaunch.py, 2026-09-24). Re-running the app's own command
+        line from there reloaded the OLD cached code: the update deploys
+        to the share."""
         if self._sldea_run_blocks('restart', parent=parent):
             return
         prog, argv = relaunch.restart_command(

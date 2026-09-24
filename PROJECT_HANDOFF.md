@@ -5,30 +5,38 @@
 bench, Tools → Update Software → Restart now came back as the version that
 was already running. The update deploys to the share, but the app runs from
 a per-user cache that only `launch_gui.sh` refreshes, and Restart re-exec'd
-the cached `gui.py`. Now Restart runs the launcher again when the app runs
-from that cache (`relaunch.py`; the details are in `deploy/BENCH_PC_NOTES.md`).
+the cached `gui.py`. Now, when the app runs from that cache, Restart runs
+what a click on the icon runs, `/usr/local/bin/scpi-launch.sh`, or else the
+share launcher (`relaunch.py`; details in `deploy/BENCH_PC_NOTES.md`).
 
 What is proven and what is not:
-- **Reproduced 2026-09-24** against `deploy/launch_gui.sh.reference` in WSL,
-  with a fake share and cache and the real `_restart_app`.
+- **Reproduced 2026-09-24** in WSL against `deploy/launch_gui.sh.reference`,
+  with a fake share and cache. The restart was the real `_restart_app` body,
+  lifted from gui.py because WSL has no tkinter.
+- **Tested end to end.** `tests/test_relaunch.py` runs the reference share
+  launcher and the installer's desktop launcher the same way, with a
+  stand-in app, on any POSIX box with bash and rsync.
 - **Not yet confirmed on hc18kx2.** Neither the bench nor the live share
   could be reached from the Windows PC. The fix acts only when the app runs
   from the launcher's cache. Elsewhere, Restart does what it did before.
 
-- **Bench check A: confirm the bug.** About 2 min; it deploys nothing.
+- **Bench check A: confirm the bug and the launchers.** About 2 min; it
+  deploys nothing.
   1. Run `grep -nE 'gui\.py|^CACHE=|^RUN_APP=' /mnt/shareDrive/_software/launch_gui.sh`.
      It must show `RUN_APP="$CACHE/SCPI_Control"`, and `"$PY" "$RUN_APP/gui.py"`
      as the command that starts the app.
-  2. With the app open, `ps -o args= -C python3.11` must show
+  2. Run `grep -n 'launch_gui' /usr/local/bin/scpi-launch.sh`. The desktop
+     launcher must run `bash "$SHARE/launch_gui.sh"`.
+  3. With the app open, `ps -o args= -C python3.11` must show
      `~/.cache/scpi_control/SCPI_Control/gui.py`.
-  3. If this PC's footer is behind `main`, run Update Software → Restart now.
+  4. If this PC's footer is behind `main`, run Update Software → Restart now.
      The bug shows as a footer that did not change, while
      `grep -m1 __version__ /mnt/shareDrive/_software/SCPI_Control/version.py`
      shows the new stamp.
 - **Bench check B: verify the fix.** About 5 min. Between steps 1 and 3,
   everyone who starts the app gets this branch, which is main + #338 + the
   fix.
-  1. Run `git clone -q --depth 1 -b claude/restart-through-launcher https://github.com/Anatol-Gogoj/Digital_Multitool /tmp/restart-fix && SCPI_SRC=/tmp/restart-fix bash /mnt/shareDrive/_software/update_software.sh`.
+  1. Run `rm -rf /tmp/restart-fix && git clone -q --depth 1 -b claude/restart-through-launcher https://github.com/Anatol-Gogoj/Digital_Multitool /tmp/restart-fix && SCPI_SRC=/tmp/restart-fix bash /mnt/shareDrive/_software/update_software.sh`.
   2. Close the app and start it from the icon. The footer shows
      `+<branch hash>`.
   3. Tools → Update Software…, which deploys `main` again, then Restart now.
@@ -38,14 +46,18 @@ What is proven and what is not:
 - **The update that first installs this fix on a PC is restarted by the OLD
   code**, so that one restart still shows the old version. Start the app
   from the icon once after that update.
-- **Known limits:**
-  - After an update, Restart now takes about half a minute, the time of the
-    cache re-sync. The manual and the dialog say so.
-  - If the restarted app then fails, its error dialog appears twice.
+- **Known limits** (details in BENCH_PC_NOTES):
+  - After an update the app is gone for about half a minute, and outputs
+    stay as they are. If the new version fails to start, the app does not
+    come back on its own.
+  - Close Edge Review, tuner and plot windows before restarting: the re-sync
+    rewrites the files they run from. The manual and the dialog say so.
+  - A failed restarted app shows its error dialog once per launcher level:
+    twice after one restart.
   - The GitHub fallback's clone still re-execs itself. It can opt in by
     exporting `SCPI_LAUNCHER`.
-  - `tests/test_relaunch.py` pins the guess against the repo's copies of the
-    launcher, updater and installer, not against the live share copy.
+  - The tests pin the guess against the repo copies of the launchers,
+    updater and installer. The live copies are what check A reads.
 
 **RELEASE PREP (2026-08-12, later — v1.3.0 built, NOT yet tagged).**
 `version.py` is at **1.3.0** and both manuals are regenerated from live

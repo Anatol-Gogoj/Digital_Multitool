@@ -270,6 +270,9 @@ class InstrumentControlGUI:
         self._sldea_profile = None
         self._sldea_running = False
         self._sldea_stop = False
+        # (V_Out, I_Out) scope channels a LIVE run reads, while it runs --
+        # their settings and the shared ones are locked (2026-09-24)
+        self._sldea_scope_chs = None
         self._sldea_plot = None        # preview geometry, for the run cursor
         self._sldea_elapsed = 0.0      # current run time (worker -> cursor)
         # run-log persistence (D4 2026-08-04): the Tk log dies with the
@@ -586,7 +589,9 @@ class InstrumentControlGUI:
         if scope.get('trig_slope'):
             self.scope_trig_slope.set(scope['trig_slope'])
         # Push to whatever is connected; each apply guards itself and runs
-        # in the background under its own busy key.
+        # in the background under its own busy key. A LIVE SLDEA run holds
+        # back what it relies on: the SG channel driving the Trek, and the
+        # scope's monitor channels, timebase and trigger.
         if self.lcr and lcr:
             self.apply_lcr_config()
         if self.scope and scope:
@@ -808,6 +813,11 @@ class InstrumentControlGUI:
         if key == 'sg' and getattr(self, '_sldea_live_ch', None) is not None:
             self._sg_live_locked(self._sldea_live_ch)
             return
+        # The scope is NOT refused mid-run (decision 2026-09-24): reopening
+        # it sends no vertical, timebase or trigger setting, and it is how
+        # monitoring comes back after a link drop. The run re-reads
+        # self.scope on every sample, and its watchdog ignores unreadable
+        # ones without resetting its streak.
         old = getattr(self, key)
         setattr(self, key, None)   # nothing may use the handle meanwhile
         label.config(text="Connecting...", fg="#b36b00")
@@ -3267,6 +3277,10 @@ LOGGING:
             # it ends (user decision 2026-07-25: lock the active channel,
             # leave the other usable, loud note on any attempt).
             self._sldea_live_ch = sgch if not dry else None
+            # ...and the scope channels its watchdog, telemetry and setup.txt
+            # readback depend on, with the settings every channel shares
+            # (user decision 2026-09-24: LIVE only, like the SG lock).
+            self._sldea_scope_chs = (vch, ich) if not dry else None
             self.sldea_run_btn.config(state='disabled')
             self.sldea_abort_btn.config(state='normal')
             self._sldea_elapsed = 0.0
@@ -3648,6 +3662,7 @@ LOGGING:
     def _sldea_finished(self):
         self._sldea_running = False
         self._sldea_live_ch = None
+        self._sldea_scope_chs = None
         # runs after the worker's final finally-block logs, so the SG
         # never-zeroed alarm still reaches run.log before detaching
         with self._sldea_loglock:
@@ -3667,6 +3682,57 @@ LOGGING:
             f"Its controls are locked until the run ends (the other channel "
             f"stays available). Abort the run on the SLDEA tab first if you "
             f"must take over.")
+        return True
+
+    def _scope_live_roles(self):
+        """{channel: role} for the scope channels a LIVE SLDEA run reads --
+        {vch: 'V_Out', ich: 'I_Out'} -- or {} when no LIVE run is on."""
+        chs = getattr(self, '_sldea_scope_chs', None)
+        if not chs:
+            return {}
+        vch, ich = chs
+        if vch == ich:                    # one channel set for both
+            return {vch: 'V_Out and I_Out'}
+        return {vch: 'V_Out', ich: 'I_Out'}
+
+    @staticmethod
+    def _and_list(words):
+        """'a', 'a and b', 'a, b and c'."""
+        words = list(words)
+        if len(words) < 2:
+            return ''.join(words)
+        return f"{', '.join(words[:-1])} and {words[-1]}"
+
+    def _scope_live_note(self, head):
+        """The loud note for a scope write a LIVE run holds back."""
+        held = self._and_list(f"CH{c} ({r})"
+                              for c, r in self._scope_live_roles().items())
+        messagebox.showwarning(
+            "Scope in use — LIVE HV run",
+            f"{head}\n\n"
+            f"The run reads {held}. Its breakdown watchdog, telemetry and "
+            f"data.csv depend on those channels and on the timebase, trigger "
+            f"and acquisition that every channel shares, so all of that stays "
+            f"locked until the run ends. The other channels, Run, the "
+            f"measurement reads and Reconnect stay available. Abort the run "
+            f"on the SLDEA tab first if you must change them.")
+
+    def _scope_live_locked(self, channel=None, what='This control'):
+        """True (+ loud note) when a LIVE SLDEA run holds this scope setting.
+
+        With `channel`: that channel's own settings (Enable, Apply CHx),
+        which the run holds on its V_Out and I_Out channels only. Without:
+        a setting every channel shares (Stop, Single, AutoSet), which the
+        run always holds; `what` names it in the note. The decision of
+        2026-09-24 in SLDEA_HANDOFF.md: lock what the run's reads depend
+        on, leave the rest usable, loud note on every attempt."""
+        roles = self._scope_live_roles()
+        if not roles or (channel is not None and channel not in roles):
+            return False
+        if channel is not None:
+            what = f"CH{channel} ({roles[channel]})"
+        self._scope_live_note(f"{what} is locked while a LIVE SLDEA run is "
+                              f"on.")
         return True
 
     def _sldea_log(self, msg):
@@ -4526,6 +4592,11 @@ LOGGING:
         if not self.scope:
             return
         on = enable_var.get()
+        # A LIVE run's monitor channel stays on: the click never reaches the
+        # scope, so its tick goes back too.
+        if self._scope_live_locked(channel):
+            enable_var.set(not on)
+            return
         self._bg_simple(
             lambda: self.scope.set_channel_enable(channel, on),
             f"CH{channel} {'enabled' if on else 'disabled'}",
@@ -4535,6 +4606,8 @@ LOGGING:
         """Apply configuration for a specific channel"""
         if not self.scope:
             messagebox.showerror("Error", "Oscilloscope not connected")
+            return
+        if self._scope_live_locked(channel):   # a LIVE run's V_Out / I_Out
             return
         widgets = self.channel_widgets[channel]
         try:
@@ -5272,22 +5345,34 @@ LOGGING:
             messagebox.showerror("Delete Error", str(e))
 
     def apply_all_scope_config(self):
-        """Apply all scope settings at once"""
+        """Apply all scope settings at once.
+
+        During a LIVE SLDEA run it sends only the channels the run does not
+        read: the run's V_Out / I_Out channels and the shared timebase and
+        trigger are held back, with one note (decision 2026-09-24). A bench
+        profile load pushes the scope through here, so it is held back the
+        same way."""
         if not self.scope:
             messagebox.showerror("Error", "Oscilloscope not connected")
             return
-        
-        # Collect + validate everything on the main thread first
+        held = self._scope_live_roles()
+
+        # Collect + validate everything on the main thread first -- only
+        # what will be sent: a held-back field cannot block the rest
         try:
             channels = []
             for ch in range(1, 5):
+                if ch in held:
+                    continue
                 widgets = self.channel_widgets[ch]
                 channels.append((ch, widgets['enable'].get(),
                                  float(widgets['vscale'].get()),
                                  float(widgets['position'].get()),
                                  widgets['coupling'].get()))
-            hscale = float(self.scope_hscale.get())
-            trig_level = float(self.scope_trig_level.get())
+            hscale = trig_level = None
+            if not held:
+                hscale = float(self.scope_hscale.get())
+                trig_level = float(self.scope_trig_level.get())
         except (TypeError, ValueError) as e:
             messagebox.showerror("Configuration Error", str(e))
             return
@@ -5297,24 +5382,43 @@ LOGGING:
                 trig_source = f'CH{ch}'
                 break
         trig_slope = self.scope_trig_slope.get()
+        if held:
+            sent = self._and_list(f"CH{c}" for c, *_ in channels)
+            self._scope_live_note(
+                f"Apply All Settings sends only {sent} while a LIVE SLDEA "
+                f"run is on. "
+                + ', '.join(f"CH{c} ({r})" for c, r in held.items())
+                + ", the timebase and the trigger are held back. Their "
+                  "values stay in the fields, to send after the run.")
+            ok_text = (f"{sent} applied; "
+                       + ', '.join(f"CH{c}" for c in held)
+                       + ", the timebase and the trigger held back for the "
+                         "LIVE SLDEA run")
+        else:
+            ok_text = (f"All settings applied. Trigger: {trig_source} @ "
+                       f"{trig_level}V")
 
         def work():
             for ch, enable, vscale, position, coupling in channels:
                 self.scope.set_channel_enable(ch, enable)
                 self.scope.set_vertical(ch, scale=vscale, position=position,
                                         coupling=coupling)
-            self.scope.set_horizontal(scale=hscale)
-            self.scope.set_trigger_edge(source=trig_source, level=trig_level,
-                                        slope=trig_slope)
+            if not held:
+                self.scope.set_horizontal(scale=hscale)
+                self.scope.set_trigger_edge(source=trig_source,
+                                            level=trig_level,
+                                            slope=trig_slope)
 
-        self._bg_simple(
-            work,
-            f"All settings applied. Trigger: {trig_source} @ {trig_level}V",
-            busy='scope-io', err_title="Configuration Error")
+        self._bg_simple(work, ok_text, busy='scope-io',
+                        err_title="Configuration Error")
 
     def scope_single(self):
         if not self.scope:
             messagebox.showerror("Error", "Oscilloscope not connected")
+            return
+        # Single stops after one record, and every later read -- a LIVE
+        # run's watchdog included -- would return that record's value.
+        if self._scope_live_locked(what="Single"):
             return
         self._bg_simple(lambda: self.scope.single(),
                         "Single acquisition armed", busy='scope-io')
@@ -5323,6 +5427,8 @@ LOGGING:
         if not self.scope:
             messagebox.showerror("Error", "Oscilloscope not connected")
             return
+        # Deliberately NOT locked during a LIVE run (decision 2026-09-24):
+        # it can only restart acquisition, which the run's reads need.
         self._bg_simple(lambda: self.scope.run(), "Scope running",
                         busy='scope-io')
 
@@ -5330,12 +5436,20 @@ LOGGING:
         if not self.scope:
             messagebox.showerror("Error", "Oscilloscope not connected")
             return
+        # Stop freezes the record: a LIVE run's watchdog would read one
+        # stale current, marked ok, until the run ends.
+        if self._scope_live_locked(what="Stop"):
+            return
         self._bg_simple(lambda: self.scope.stop(), "Scope stopped",
                         busy='scope-io')
     
     def scope_autoset(self):
         if not self.scope:
             messagebox.showerror("Error", "Oscilloscope not connected")
+            return
+        # AutoSet re-picks every channel's scale, the timebase and the
+        # trigger: a LIVE run would read through a setup nobody recorded.
+        if self._scope_live_locked(what="AutoSet"):
             return
         self.status_bar.config(text="Running AutoSet...")
 

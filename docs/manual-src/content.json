@@ -64,7 +64,7 @@
   ],
   "cautions": [
    "Closing the main window is a shutdown: signal-generator outputs go off, LCR bias goes off, a running SLDEA test is stopped and ramped down, and instruments return to front-panel control.",
-   "Loading a bench profile immediately rewrites the settings of every connected instrument (outputs stay as they are) — do not load one mid-measurement.",
+   "Loading a bench profile immediately rewrites the settings of every connected instrument (outputs stay as they are) — do not load one mid-measurement. During a live SLDEA run, what the run relies on is held back with a warning: the SG channel driving the Trek, and the scope's V_Out and I_Out channels, timebase and trigger.",
    "If the status bar says the shared drive was unavailable and the save went to a local copy, the profile/preset is on this PC only — colleagues cannot see it until it is saved again with the share back.",
    "Update Software… replaces the shared deployment for everyone on the bench, not just you; after it finishes you must restart the app to actually run the new version.",
    "On Windows the connection lines show 'Linux bench only — view/edit (presets OK)' and Update Software… is greyed out — this is normal; presets and bench profiles can still be prepared and shared."
@@ -337,6 +337,7 @@
    "AutoSet changes scale, timebase and trigger on the instrument but the fields on this tab do NOT update to match — clicking Apply All Settings afterwards will overwrite what AutoSet chose.",
    "Measurement readouts are snapshots — they only update when you click Get CHx Measurements. Frequency/Period show \"No signal\" on non-periodic input.",
    "If you ever send the scope a manual measurement command, the type token must be FREQUENCY — FREQ is accepted without error but returns a garbage ~2 Hz reading (the tab's own buttons already use the correct token).",
+   "During a live SLDEA run, the run's V_Out and I_Out channels and the settings every channel shares are locked, with a warning: Apply CHx Config and Enable Channel refuse those two channels, and Stop, Single and AutoSet refuse outright. Apply All Settings sends only the other channels. Run, the measurement buttons and Reconnect still work.",
    "On Windows (no instrument attached) this tab is view/edit-only: every action button just reports \"Oscilloscope not connected\"."
   ],
   "callouts": [
@@ -958,6 +959,7 @@
    "If the scope-monitor check warns and you pick 'run anyway', the run completes but logs blank measured kV and wrong currents — this silently ruined five runs on 2026-07-25.",
    "A wrong DEA diameter corrupts the px-to-mm scale: every area number from that run is wrong and setup.txt must be hand-fixed before re-analysis.",
    "Running live with no scope means no measured kV/µA columns and no breakdown watchdog — the run continues even through a breakdown, and no telemetry.csv is written.",
+   "During a live run the scope channels it reads (V_Out, I_Out), the timebase and trigger, and Stop, Single and AutoSet are locked on the Oscilloscope tab: the breakdown watchdog reads I_Out, and a re-coupled or frozen channel would blind it.",
    "🎚 Tune params… is an advanced tool: it asks for confirmation first, and its Save rewrites the run's setup.txt — the detection settings every later analysis pass will use.",
    "During a live run the driven SG channel is locked; its Signal Gen tab controls refuse changes until the run ends.",
    "On Windows (no instruments connected) only DRY RUN works — a live run refuses to start."

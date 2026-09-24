@@ -13,6 +13,126 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## A run can record lossless video beside its snapshots, and detect edges on every frame afterwards (2026-09-23) — NOT bench-verified yet (BENCH_TEST §Q)
+
+**TL;DR:** tick 🎥 **Record** on the SLDEA tab and the run also records a
+lossless grey video (`video.mkv`, FFV1, 1–2 fps suggested, ~1 MB a
+frame). Each frame's time and commanded kV go in `video_frames.csv`. The
+snapshots are still taken on schedule, so `data.csv` and every tool that
+reads it are unchanged. Afterwards, `sldea_video.py RUN` (or the tab's
+checkbox) runs Edge Review's own detector on every frame. **Desk-tested
+only; it must pass BENCH_TEST §Q before it merges.**
+
+**Observation → decision.**
+
+- *Asked for* (operator): video instead of, or beside, the snapshots, and
+  edge detection on all its frames. *Decided with the operator:* video
+  **beside** the snapshots, since the stills survive a recorder failure
+  and every downstream tool keeps working. The video is **lossless at
+  1–2 fps** because it is for measurement: compression smears the fine
+  texture the wrinkle channel reads.
+- *Measured* (this machine, OpenCV 5.0; the bench's 4.13 is §Q1):
+  - FFV1 8-bit grey is 0.97 MB per 1080p frame at the sensor's σ ≈ 2.5,
+    40–50 ms to encode, and **bit-exact** on decode. So ~2.5 GB for a
+    43-minute run at 1 fps.
+  - HuffYUV was larger and **not** bit-exact through OpenCV; MJPG is 14×
+    smaller but lossy. Both were rejected.
+- *Observed, and fixed on the way:* every still was a one-shot grab on
+  the thread that runs the watchdog and the ramp. Each grab re-stamped
+  every locked control through `v4l2-ctl` (two calls per control, 10 s
+  timeouts) and then streamed with a 45 s timeout, once retried. A
+  wedged camera could therefore hold the HV loop, and Abort, for
+  minutes.
+  - In a video run, the recorder's own threads own the camera, and the
+    loop only takes a copy of the newest frame (lock + copy). That
+    includes the breakdown frame on a watchdog trip.
+  - A stills-only run is unchanged. Moving it onto the same stream is
+    the obvious next step, but it changes the stills path for every run
+    and wants its own bench check.
+- *Decided:*
+  - **Before any HV:** the recorder starts before the SG output goes on.
+    If the stream delivers nothing in 5 s, the run falls back to
+    one-shot stills rather than losing them.
+  - **At the end:** the recorder stops (bounded) only after the SG is
+    zeroed and `data.csv` is closed.
+  - **Staging:** the file is written to local disk during the run (the
+    share has measured multi-second stalls) and moved into the run
+    folder by a separate thread afterwards. The move logs straight into
+    that run's `run.log`, because a new run may already own
+    `_sldea_log`.
+  - **Before HV is offered:** the tab refuses to start a video run
+    without an FFV1 encoder or local disk space for the estimate. It
+    offers a snapshots-only run instead, before any HV question.
+- *Decided:* all-frames detection runs **after** the run, as a separate
+  program, never during it: ~0.2 s a frame would contend with the HV
+  loop.
+  - It runs the stills' own path: `se.candidates` against the run's
+    baseline still, with the saved settings and the frame-to-frame
+    method bonus in time order.
+  - Scale comes from the saved anchor, else the baseline-disc fit.
+  - There is no review queue at thousands of frames. Every row carries
+    `conf` and `needs_review` instead, in `video_edges.csv`, and never in
+    `data.csv`.
+  - *Measured:* `imread`'s grey decode and `cvtColor` round differently
+    (up to 1 level on half the pixels). The baseline still is therefore
+    converted the way the video frames are, so reference and frames
+    share one conversion.
+- *Observed, and fixed:* nothing stopped the Webcam tab from opening the
+  camera, or rewriting its locked exposure, in the middle of a run. A
+  preview made the run's stills log NO FRAME, and Apply & Lock changed
+  exposure mid-run. Refused now during any SLDEA run, with the reason,
+  like a LIVE-owned SG channel.
+- *Adversarial review* (required for the HV runner, CLAUDE.md), same
+  day. **Verdict:** no path where the SG is zeroed later or not at all.
+  The zeroing is untouched and still first, and a video run removes
+  camera waits from the HV thread. It found five things to fix before a
+  bench visit, all fixed and each pinned by a test:
+  - **F1** A stream that dies mid-run was never reopened, so every
+    remaining still was lost. It is now reopened with backoff.
+  - **F2** Stills off the stream missed the per-still gain stamp
+    one-shot grabs get. A full restamp is now requested ~0.6 s before
+    each still, on the reader thread, and the frame read straight after
+    any stamp stall is discarded, since it may have been buffered during
+    it.
+  - **F3** A still could come from a frame captured up to 2 s *before*
+    its scheduled moment. It now takes only a frame captured after both
+    the stamp and the schedule. It retries on later ticks, never
+    blocking, and logs NO FRAME after 1.5 s. The frame's own time goes
+    into the notes, the telemetry event and run.log.
+  - **F4** The encoder could wait forever when its stop signal was
+    dropped behind a stalled disk. It now exits by itself.
+  - **F7** Telemetry now closes before the video's up-to-10 s stop, and
+    the tab release is in an outer `finally`.
+- *Also fixed from the review:*
+  - Frames after the staircase are no longer recorded under its planned
+    kV (**F5**).
+  - An Abort during camera startup no longer switches the SG on (**F8**).
+  - A slow open finishing after `stop()` no longer orphans the stream
+    (**F9**).
+  - `setup.txt` records the video *outcome* (**F11**).
+  - The move copies to `.part` then renames, is throttled, and runs as a
+    detached `sldea_video.py --finalize` that survives closing the app.
+    Detection runs on the local copy first (**F6/F12**).
+  - A LIVE start asks while a previous run's video is still copying to
+    the share (**F6**).
+  - "Read camera", which rewrites the lock, is guarded too (**P2**).
+- *Filed, not fixed here:*
+  - **P1** A stepped sweep started before a run keeps driving the SG
+    mid-run. This is pre-existing and has its own task.
+  - **F16 (design note)** An hour of native FFmpeg encoding and
+    debayering now runs in the process that supervises the HV, so a
+    native crash would leave the SG at its last offset with no watchdog.
+    That is the same exposure the live preview's debayer always had, but
+    for longer. Moving capture into a child process is the fix if the
+    bench ever shows a crash.
+- *Open:*
+  - BENCH_TEST §Q, the whole of it, now including the LIVE step with
+    the Trek HV disabled (**Q14**), which a DRY run cannot exercise.
+  - The long-stream gain check (**Q13**).
+  - Whether the bench's OpenCV wheel has FFV1 at all (**Q1**).
+  - Whether `--set-parm` actually sets the stream rate (**Q11**,
+    review F15).
+
 ## Up/down runs are drawn leg by leg, and the plot gains an elapsed-time axis (2026-09-23)
 
 **TL;DR:** in the plot window an "Up/down (hysteresis)" run was averaged

@@ -46,7 +46,7 @@
    },
    {
     "label": "Tools > Update Software…",
-    "what": "Pulls the latest release, redeploys the shared-drive copy for all users, then offers Restart now (Linux bench only)."
+    "what": "Pulls the latest release, redeploys the shared-drive copy for all users, then offers Restart now (Linux bench only). Neither starts while an SLDEA run is going."
    },
    {
     "label": "Shared preset storage",
@@ -67,6 +67,8 @@
    "Loading a bench profile immediately rewrites the settings of every connected instrument (outputs stay as they are) — do not load one mid-measurement.",
    "If the status bar says the shared drive was unavailable and the save went to a local copy, the profile/preset is on this PC only — colleagues cannot see it until it is saved again with the share back.",
    "Update Software… replaces the shared deployment for everyone on the bench, not just you; after it finishes you must restart the app to actually run the new version.",
+   "Update Software… and its Restart now both refuse while an SLDEA run is going — LIVE, DRY, or still stopping after ■ Abort. A restart replaces the app at once, so it would end a LIVE run before the run could set the signal generator back to 0 V, leaving the Trek energized. ■ Abort the run, or let it finish, then update.",
+   "Restart now is not a shutdown: unlike closing the window, it leaves signal-generator outputs and LCR bias exactly as they are.",
    "On Windows the connection lines show 'Linux bench only — view/edit (presets OK)' and Update Software… is greyed out — this is normal; presets and bench profiles can still be prepared and shared."
   ],
   "callouts": [

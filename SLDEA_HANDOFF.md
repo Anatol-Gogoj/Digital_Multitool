@@ -226,16 +226,28 @@ replies, citing that session's date.** Not code now.
 - **Python 3.11.** The bench runs 3.11. Two independent tokenizer scans,
   mine and the reviewer's, found no f-string that needs 3.12. Each scan
   was itself checked on known-bad samples.
-- **Full suite, on the Windows PC:** 37 of 40 suites pass. The three that
-  fail are the known Windows-only ones: `test_easywave_export` and
-  `test_sldea_plot_gui` (#331) and `test_tk_fontfix` (#332).
-  - In that full run, `test_sldea_plot_gui` also failed
+- **Full suite, on the Windows PC:** 37 of 40 suites pass, in both full
+  runs. The three that fail are the known Windows-only ones:
+  `test_easywave_export` and `test_sldea_plot_gui` (#331) and
+  `test_tk_fontfix` (#332).
+  - In the first run, `test_sldea_plot_gui` also failed
     `test_the_click_through_is_discoverable_and_does_not_go_stale` once,
     with an `IndexError` on the window's prepared runs.
   - It did not recur in three standalone runs on this branch, nor in
     three on `origin/main`. There, the known resize race failed 2 of 3
     runs, and the third skipped 2 tests ("desktop too short").
   - No file this change touches is imported by that suite.
+- **Merges** (trial merges onto this branch's final commit):
+  - Every open branch with its own top entry in this file conflicts with
+    this change only here. That is #333, #334, #335, #337, #338, #339,
+    #340, and the local video and plot branches. Keep both entries.
+  - `BENCH_TEST.md` merges cleanly with #334's §R and the video branch's
+    §Q, because this change edits §N only. #331, #332 and #336 merge
+    cleanly.
+  - Stacked with #331–#334, #336–#338, #340 and the local plot and
+    preview-marker branches, all 46 suites pass on the Windows PC.
+  - #335, #339 and the video branch conflict with other branches in that
+    stack, in files this change does not touch.
 - **No bench gate:** this adds no app I/O. The probe is the bench tool.
 
 ## The aggregate averages BY GROUP, the runs it averages can be hidden, and the group palette is a shape argument rather than a colour one (2026-08-10)

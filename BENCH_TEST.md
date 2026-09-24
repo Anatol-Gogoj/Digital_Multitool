@@ -481,6 +481,35 @@ Also send, once:
   and `#198` is unblocked immediately at full scope. This is why P1–P3
   are cheap and come first.
 
+## R. SLDEA Run ↔ Webcam-tab interlock — DRY-RUN smoke, no HV (2026-09-23)
+
+> **No high voltage.** Every step is a DRY run or a refusal, so the Trek
+> stays off. The interlock only ever withholds signal-generator writes,
+> which makes this a look at the real dialogs rather than a merge gate.
+> The logic is headless-tested in `tests/test_sldea_interlock.py`,
+> including the LIVE-side check (a sweep started during a LIVE run stops
+> before writing), so that part needs no bench time.
+
+**Setup:** the Linux bench PC with the signal generator and camera
+connected, Trek/HV off. ~5 min. SLDEA tab: **Start 0**, **End 1**,
+**Step 0.5**, **Ramp 2**, **Landing 10**, SG channel **1**, and
+**DRY RUN — HV OFF** ticked.
+
+1. Webcam tab → Stepped capture: **SG CH 1**, levels `0, 0.1`, dwell `30` → **Run sweep**
+2. SLDEA tab → **▶ Run (DRY)**
+   - [ ] an error box titled **SLDEA — Webcam tab busy** names SG CH1 and says *Stop sweep*, and no other question came before it
+   - [ ] the run log shows `run refused — Webcam tab busy: …` and no `run dir:` line
+3. Webcam tab → **Stop sweep**, then at once SLDEA → **▶ Run (DRY)**
+   - [ ] either the box says the capture *is still stopping*, or, if the sweep had already finished, the camera pre-flight opens (✖ Cancel it)
+4. Webcam tab: **SG CH 2**, levels `0, 0.1`, dwell `30` → **Run sweep**. Then SLDEA → **▶ Run (DRY)**
+   - [ ] a question titled **Stepped sweep still running** names CH2, and **Enter** answers **No**: nothing starts
+   - [ ] press ▶ Run again and answer **Yes**: the camera pre-flight opens. Start the run and let it finish. Some snapshots may log `NO FRAME` (the question warned about that), and `run.log` has the line `run-anyway beside a stepped sweep on SG CH2`
+5. Webcam tab → **Stop sweep**. Click **Auto-expose**, then at once SLDEA → **▶ Run (DRY)**
+   - [ ] refused, naming the camera adjustment. It finishes by itself in a few seconds, and ▶ Run then works
+
+**Send back:** anything that differed, the wording of any box that read
+badly, and the `run.log` from step 4.
+
 ---
 
 **Pass =** every box ticked. Anything off: note section letter + what the applied readout / front panel / scope showed.

@@ -46,7 +46,7 @@
    },
    {
     "label": "Tools > Update Software…",
-    "what": "Pulls the latest release, redeploys the shared-drive copy for all users, then offers Restart now (Linux bench only). Neither starts while an SLDEA run is going."
+    "what": "Pulls the latest release, redeploys the shared-drive copy for all users, then offers Restart now (Linux bench only), which reopens the app on the new version. The first start after an update takes about half a minute while this PC's copy is refreshed. Neither starts while an SLDEA run is going."
    },
    {
     "label": "Shared preset storage",

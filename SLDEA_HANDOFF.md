@@ -20,8 +20,9 @@ could reconfigure the scope channels the run reads: AC coupling, Stop or
 AutoSet on the I_Out channel could blind the breakdown watchdog without
 anyone noticing. Now a LIVE run locks its V_Out and I_Out channels, the
 timebase and trigger, and Stop, Single and AutoSet, with a loud note like
-the SG lock's. The other two channels, Run, the reads and Reconnect stay
-usable, DRY runs lock nothing, and only writes are withheld.
+the SG lock's. The other two channels, Run and the reads stay usable,
+Reconnect asks first (default No), DRY runs lock nothing, and only
+writes are withheld.
 
 **Observation (from the code at `78315cc`).** #335's adversarial review
 found this, and the code confirms it. The run reads the Trek's monitors
@@ -72,7 +73,10 @@ building, and the recommended answer was taken on each:
      a link drop: the worker re-reads `self.scope` on every sample, and the
      watchdog ignores unreadable samples without resetting its streak. The
      SG's Reconnect stays refused, because it would close the handle the
-     run drives the Trek with.
+     run drives the Trek with. Revised the same day (branch
+     `claude/scope-reconnect-live-ask`): during a LIVE run the scope's
+     Reconnect now asks first, default No, because any Reconnect blinds
+     the watchdog while it runs.
 2. **Which runs.** LIVE only, like the SG lock. The watchdog and the
    `setup.txt` readback exist only on LIVE runs. A DRY run is the rig
    check, where retuning the scope while it runs is the point.
@@ -121,7 +125,7 @@ How it is built:
 | Stop, Single, AutoSet | refused |
 | Run | allowed, by decision |
 | Get Measurements, Capture Waveform, Data Logging | allowed. They set the scope's one shared measurement slot or data source under its I/O lock, and the run re-sets the slot on every read. |
-| Reconnect | allowed, by decision; it sends only the connect sequence above |
+| Reconnect | allowed after a question, default No (revised the same day); it sends only the connect sequence above |
 | startup auto-connect | the same connect sequence |
 | window close | a shutdown: asks the run to stop first (up to about 3 s), then hands the scope back to local and closes it |
 | the run: monitor-check rescale, watchdog, telemetry, snapshots | it owns them |
@@ -552,7 +556,9 @@ its own change:
   2026-09-24): Restart now and Update Software refuse during a run.*
 - **The monitor scope can be reconfigured mid-run.** A bench-profile load
   or the Scope tab can do it (AC coupling on I_Out would blind the
-  breakdown watchdog), and neither checks `_sldea_running`.
+  breakdown watchdog), and neither checks `_sldea_running`. *Fixed by
+  #337 (2026-09-24): a LIVE run locks its monitor channels, timebase,
+  trigger and Stop/Single/AutoSet; see its entry above.*
 - **`_reconnect` can drop the handle.** It sets the handle to None before
   `_run_bg` checks its `connect` busy key. With a connect already in
   flight, the handle is dropped and never restored. *Fixed by #336

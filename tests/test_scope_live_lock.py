@@ -18,9 +18,11 @@ agreed on 2026-09-24, pinned here:
 * Apply All Settings -- and so a bench-profile load, which pushes the
   scope through it -- sends the other channels only, with one note naming
   what it held back;
-* the other channels, Run, the reads (measurements, waveform capture) and
-  Reconnect stay usable -- and, on the REAL driver, reopening the scope
-  and the reads send nothing a LIVE run's reads depend on;
+* the other channels, Run and the reads (measurements, waveform capture)
+  stay usable, and so does Reconnect, behind a question (default No) since
+  the same day's revision (tests/test_scope_reconnect_live.py) -- and, on
+  the REAL driver, reopening the scope and the reads send nothing a LIVE
+  run's reads depend on;
 * a DRY run claims nothing, like the SG lock; the claim holds through
   ■ Abort and a BREAKDOWN-ABORT, and only _sldea_finished releases it;
 * an inventory of the scope calls in the app modules, per function, in
@@ -448,7 +450,7 @@ def _assert_noted(mb, head):
     assert (kind, title) == ('showwarning', LOCK), mb.calls
     assert msg.startswith(head), msg
     assert READS in msg, msg
-    assert 'Reconnect stay available' in msg, msg
+    assert 'Reconnect asks first' in msg, msg
     assert set(kw) <= {'parent'}, kw
 
 
@@ -612,7 +614,10 @@ def test_run_and_the_reads_stay_usable_during_a_live_run():
 def test_reconnect_stays_usable_during_a_live_run():
     """The owner's decision of 2026-09-24: reopening the scope changes no
     vertical, timebase or trigger setting, and it is how monitoring comes
-    back after a link drop. Unlike the SG, whose Reconnect is refused."""
+    back after a link drop. Unlike the SG, whose Reconnect is refused.
+    Revised the same day: it asks first, default No, since any Reconnect
+    blinds the watchdog while it runs. Yes reconnects as before;
+    tests/test_scope_reconnect_live.py pins the rest of the question."""
     opened = []
 
     class _Reopened(_FakeScope):
@@ -623,12 +628,16 @@ def test_reconnect_stays_usable_during_a_live_run():
     saved = gui.TekMSO24
     gui.TekMSO24 = _Reopened
     try:
-        with _patched(_MB()) as mb:
+        # the question shares the lock note's title
+        with _patched(_MB({LOCK: True})) as mb:
             app = _App(live=(2, 3))
             old = app.scope
             app.reconnect_scope()
             assert old.closed and [app.scope] == opened, (old.closed, opened)
-            assert app.bg == ['connect'] and mb.calls == [], mb.calls
+            [(kind, title, _msg, kw)] = mb.calls
+            assert (kind, title, kw) == ('askyesno', LOCK,
+                                         {'default': 'no'}), mb.calls
+            assert app.bg == ['connect'], app.bg
             assert app.scope_status.text.startswith('Connected'), \
                 app.scope_status.text
             assert old.writes == [] and app.scope.writes == []

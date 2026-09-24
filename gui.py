@@ -4837,9 +4837,9 @@ LOGGING:
             f"The run reads {held}. Its breakdown watchdog, telemetry and "
             f"data.csv depend on those channels and on the timebase, trigger "
             f"and acquisition that every channel shares, so all of that stays "
-            f"locked until the run ends. The other channels, Run, the "
-            f"measurement reads and Reconnect stay available. Abort the run "
-            f"on the SLDEA tab first if you must change them.")
+            f"locked until the run ends. The other channels, Run and the "
+            f"measurement reads stay available, and Reconnect asks first. "
+            f"Abort the run on the SLDEA tab first if you must change them.")
 
     def _scope_live_locked(self, channel=None, what='This control'):
         """True (+ loud note) when a LIVE SLDEA run holds this scope setting.
@@ -4860,8 +4860,9 @@ LOGGING:
         return True
 
     def reconnect_scope(self):
-        # NOT refused during a LIVE run, unlike the SG's (decision
-        # 2026-09-24). Reopening the scope sends *IDN? and the waveform-
+        # NOT refused during a LIVE run, unlike the SG's: _reconnect asks
+        # first, default No (decision 2026-09-24, revised the same day from
+        # "allowed"). Reopening the scope sends *IDN? and the waveform-
         # transfer format, nothing else: the driver's VISA device clear
         # fails over USB on PyVISA-py 0.8.1 and is swallowed. That is no
         # vertical, timebase, trigger or acquisition setting, and it is how

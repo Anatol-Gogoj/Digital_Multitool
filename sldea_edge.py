@@ -1628,6 +1628,37 @@ def load_gray(path):
     return None if img is None else img.astype(np.float32)
 
 
+# Pedestal-free image-content check (2026-10-02). A frame whose central
+# window spans fewer gray levels than this holds no usable picture: the
+# 2026-10-01 run (exposure 3) spans 2, every other frame in the corpus
+# spans 30 or more.
+FLAT_CONTRAST_GRAY = 20.0
+
+
+def image_content(gray, roi_frac=0.85):
+    """Spread of gray levels in the central search window of a frame.
+
+    -> {'p5', 'p95', 'contrast', 'sat_pct', 'flat'}: contrast is
+    p95 - p5 (independent of the camera's black pedestal), sat_pct the
+    percent of window pixels at or above 250, flat is contrast below
+    FLAT_CONTRAST_GRAY. None when gray is None or empty."""
+    if gray is None or getattr(gray, 'size', 0) == 0:
+        return None
+    g = np.asarray(gray, dtype=np.float32)
+    if g.ndim == 3:
+        g = g.mean(axis=2)
+    h, w = g.shape[:2]
+    f = min(max(float(roi_frac), 0.05), 1.0)
+    dy = int(round(h * (1.0 - f) / 2.0))
+    dx = int(round(w * (1.0 - f) / 2.0))
+    win = g[dy:h - dy, dx:w - dx]
+    p5, p95 = (float(v) for v in np.percentile(win, (5, 95)))
+    contrast = p95 - p5
+    return {'p5': p5, 'p95': p95, 'contrast': contrast,
+            'sat_pct': 100.0 * float((win >= 250).mean()),
+            'flat': contrast < FLAT_CONTRAST_GRAY}
+
+
 # ---------------------------------------------------------------------------
 # texture: wrinkle energy and the electrode-strip footprint
 # ---------------------------------------------------------------------------

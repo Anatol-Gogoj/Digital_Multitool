@@ -261,6 +261,58 @@ def test_every_live_tab_carries_its_slug():
         root.destroy()
 
 
+def test_the_sldea_tab_says_which_camera_settings_a_run_will_use():
+    """A run takes its exposure and gain from the Webcam tab's entry
+    boxes, and until 2026-10-02 nothing on the SLDEA tab said so: the
+    2026-10-01 run went out at exposure 3 with no screen showing that
+    number. The line is re-read whenever a tab is selected, and it says
+    in words when the Webcam tab has locked something else."""
+    from tkinter import ttk
+    import gui
+    root, app = _app()
+    if root is None:
+        return
+    saved = dict(gui.webcam.LOCKED_CONTROLS)
+    try:
+        line = app.sldea_cam_line
+        assert 'Camera for this run: exposure' in line.cget('text'), (
+            line.cget('text'))
+
+        def reselect():
+            app.select_manual_tab('webcam')
+            _settle(root, 3)
+            app.select_manual_tab('sldea')
+            _settle(root, 3)
+            return line.cget('text')
+
+        # stand-ins for the two boxes the Webcam tab builds from a camera
+        for attr, value in (('cam_exposure', '3'), ('cam_gain', '0')):
+            box = ttk.Entry(root)
+            box.insert(0, value)
+            setattr(app, attr, box)
+        gui.webcam.set_locked({})
+        assert reselect() == ("Camera for this run: exposure 3, gain 0, set "
+                              "on the Webcam tab")
+        assert line.winfo_ismapped(), "the line is not on the tab"
+        gui.webcam.set_locked({'exposure_time_absolute': 30, 'gain': 0})
+        text = reselect()
+        assert text.startswith("Camera for this run: exposure 3, gain 0")
+        assert 'LOCKED exposure 30' in text and 'Apply & Lock' in text, text
+        app.cam_exposure.delete(0, 'end')        # an unreadable box
+        assert 'The exposure is a built-in default' in reselect()
+        # ...and without a tab change: the Webcam tab fills its boxes from
+        # the camera in a background job at startup, possibly after this
+        # tab is showing, so the pointer coming onto the tab re-reads them
+        app.cam_exposure.insert(0, '7')
+        line.master.event_generate('<Enter>')
+        _settle(root, 3)
+        assert line.cget('text').startswith(
+            "Camera for this run: exposure 7, gain 0"), line.cget('text')
+    finally:
+        gui.webcam.set_locked(saved)
+        root.destroy()
+
+
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count

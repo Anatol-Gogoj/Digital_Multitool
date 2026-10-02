@@ -220,6 +220,45 @@ def test_exposure_verdict_separates_the_real_corpus():
     assert 73.74 > 3.0 * BASELINE_CLIP_SAT_PCT
 
 
+def test_exposure_verdict_flat_tier_closes_the_pedestal_hole():
+    """The dark tier (mean < 40) cannot fire on the bench camera: its
+    black pedestal is about 64 gray, so the 2026-10-01 run, a flat dark
+    gray at exposure 3, read mean 67 and passed as 'exposure OK'. The
+    flat tier (2026-10-02) judges contrast instead, through the dict
+    sldea_edge.image_content returns, and contrast does not move with
+    the pedestal. tests/test_sldea_preflight.py carries the rest of the
+    gate; this pins the tier beside the ones it joins."""
+    from sldea_profile import (exposure_verdict, BASELINE_DARK_MEAN,
+                               FLAT_DARK_MEAN)
+    # the hole, on that run's own baseline numbers: mean 67.16, 0% sat
+    assert 67.16 > BASELINE_DARK_MEAN
+    assert exposure_verdict(67.16, 0.0) == ('ok', 'exposure OK')
+    flat = {'p5': 66.0, 'p95': 68.0, 'contrast': 2.0, 'sat_pct': 0.0,
+            'flat': True}
+    level, msg = exposure_verdict(67.16, 0.0, flat)
+    assert level == 'flat', (level, msg)
+    assert msg.startswith('NO PICTURE: the frame is flat (contrast 2 gray '
+                          'levels). The disc is not visible.'), msg
+    assert msg.endswith('Raise the exposure or the light on the Webcam '
+                        'tab.'), msg
+    # the lowest contrast of any other corpus frame is 30.7 (a baseline at
+    # mean 129, measured 2026-10-02): with the content dict in hand every
+    # older tier answers as it did without it
+    picture = {'p5': 110.0, 'p95': 140.7, 'contrast': 30.7, 'sat_pct': 0.0,
+               'flat': False}
+    for mean, sat, want in ((180.1, 0.17, 'ok'), (129.0, 0.06, 'ok'),
+                            (116.4, 0.0, 'ok'), (20.0, 0.0, 'dark'),
+                            (220.0, 1.0, 'bright'),
+                            (235.3, 73.74, 'clipped')):
+        assert exposure_verdict(mean, sat, picture)[0] == want, (mean, sat)
+        assert exposure_verdict(mean, sat)[0] == want, (mean, sat)
+    # a white frame is flat too, and "lower the exposure" is what fixes it
+    assert exposure_verdict(255.0, 100.0, flat)[0] == 'clipped'
+    # the advice boundary sits between the flat run (67) and the darkest
+    # usable baseline in the corpus (116)
+    assert 67.16 < FLAT_DARK_MEAN < 116.4
+
+
 def test_watchdog_baseline_credibility_bound():
     # A learned '0 kV rest level' beyond min(30, trip/2) uA is not an
     # instrument offset (worst honest one observed: -16 uA, 07-29) but a

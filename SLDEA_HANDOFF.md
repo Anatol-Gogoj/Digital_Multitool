@@ -13,6 +13,198 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## A run cannot start, or carry on, on a picture with nothing in it (2026-10-02)
+
+**TL;DR:** on 2026-10-01 a LIVE run went out with the camera at exposure
+3: every frame a flat dark gray, and 25 of 26 frames rejected after 209 s
+of HV up to 3 kV. The pre-flight could not have stopped it, because a
+flat frame read "exposure OK" and Return pressed a default "Looks good"
+button. Now a flat frame is refused like a blown-out one, Return starts a
+run only from a clean pre-flight, every pre-flight is logged, and the run
+stops itself right after its own baseline frame if that frame is flat.
+
+**Observation (measured 2026-10-02 on the code at `1eb85b2` and the 16
+runs held locally, 899 frames).**
+
+- **The dark tier cannot fire.** `exposure_verdict` calls a frame dark
+  below mean 40. The bench camera's black level sits near 64 gray
+  (inferred from frame minima; nobody has shot a capped frame), and the
+  lowest frame mean in the corpus is 66.68. All 26 frames of
+  `SLDEA_20261001_151016` read mean 66.7 to 67.7 with 0 % saturated, and
+  all 26 come out `exposure OK`. No frame in the corpus reaches `dark`.
+- **Contrast separates that run from everything else.** Contrast here is
+  p95 minus p5 of the central 85 % window (`sldea_edge.image_content`).
+  It reads 2.3 gray levels or less on those 26 frames and 30.0 or more on
+  the other 873 (lowest: the P3_7 baseline), whichever of the code's two
+  gray conversions is used. It does not move with the black level.
+- **The dialog made the wrong answer the easy one.** The start button
+  read "Looks good", held the focus, and Return pressed it, whatever the
+  verdict. `dark` and `bright` were plain text beside it. Only `clipped`
+  asked twice and only `clipped` reached `run.log`: the 10-01 `run.log`
+  has no pre-flight line at all.
+- **The pre-flight frame is not always the run's picture.** The
+  pre-flight writes the Webcam tab's exposure and gain entries, then
+  `webcam.oneshot_rgb` re-stamps `webcam.LOCKED_CONTROLS` just before the
+  shutter, so the frame is exposed with the lock. The run overlays the
+  entries on the lock. When entry and lock differ (the startup sync from
+  a power-cycled camera, Read camera, Auto-expose, or a typed value
+  without Apply & Lock) the operator approves one exposure and records
+  another. Whether that happened on 10-01 cannot be proven from the run
+  folder: a lock that itself held 3 fits the data equally. Nothing on the
+  SLDEA tab showed the camera settings either way.
+- **The baseline is the first frame taken the way the run takes them.**
+  The warm-up and baseline frames are the only ones shot with the run's
+  own lock before the staircase. The baseline is shot in the same loop
+  tick in which the first ramp begins: the 10-01 `data.csv` reads
+  -0.0014 kV at the warm-up and -0.0066 kV at the baseline, and a replay
+  of that profile through the real runner with a fake signal generator
+  wrote 0.012 kV before the baseline grab.
+- **The resting-disc fit refuses 6 of the 16 baselines.** They include a
+  device that is not a disc, the 08-06 dark-disc run that was reviewed by
+  hand, and the two 08-05 runs the clipped gate already stops. The whole
+  pre-flight report, fit included, takes 0.09 to 0.15 s per baseline on
+  this PC.
+
+**Decision.**
+
+1. **A `flat` verdict, treated exactly like `clipped`.**
+   `exposure_verdict(mean, sat_pct, content)` returns `flat` when
+   `image_content` says so: contrast under 20 gray levels, which is 8.6
+   times the worst 10-01 frame and two thirds of the lowest other frame.
+   The dialog shows it in bold red with the words `NO PICTURE: the frame
+   is flat (contrast N gray levels). The disc is not visible.` and one
+   instruction that follows the frame's level: raise the exposure below
+   mean 100, lower it above 215, otherwise check that the device is under
+   the camera. Starting needs a second Yes (default No) and leaves a
+   `run.log` line. `clipped` is judged first, because a white frame is
+   flat too and "lower the exposure" is what fixes it. The two-argument
+   call answers as before, and the `dark` tier stays for a camera whose
+   black level is low.
+2. **Return starts a run only from a clean pre-flight.** The start button
+   is focused and bound to Return only when the verdict is `ok`, the
+   picture check really ran, and the preview matches the run's settings.
+   Otherwise the button reads "Start anyway (reason)", the focus sits on
+   Adjust, and Return is bound to nothing.
+3. **Every pre-flight is logged:** mean, saturated percent, contrast,
+   focus score and verdict in one line, then the disc line and the camera
+   settings. A pre-flight with no frame, or one whose check failed, logs
+   the question and the answer. Starting past a warning that is not a
+   gate logs the button that was pressed.
+4. **The disc line is advice, not a gate.** It reads `Disc found: D px
+   across, fit quality Q`, or the fit's own refusal sentence followed by
+   "Edge Review will not be able to measure this run automatically." A
+   gate here would refuse every device that is not a disc. If OpenCV is
+   missing or the fit raises, the line is simply absent.
+5. **The camera settings are on screen.** The SLDEA tab and the dialog
+   both read `Camera for this run: exposure E, gain G, set on the Webcam
+   tab`. The tab line is re-read when a tab is selected and when the
+   pointer comes onto the tab, because the Webcam tab fills its boxes
+   from the camera in the background at startup. When the lock holds
+   another value for any of the four controls the run stamps, the tab
+   line says so in amber, with a warning sign and in words, and the
+   dialog says in bold `This preview was NOT taken with the run's
+   settings`, names both values, and loses its default button.
+   The advice is to check the boxes first and then press Apply & Lock,
+   because Apply & Lock locks whatever the boxes hold. A value with no
+   readable box is called a built-in default in both places. A camera
+   with no device path gets no warning: neither the pre-flight nor the
+   run stamps anything on it, so the preview is the run's picture. No
+   camera call was added, moved or reordered. Making the pre-flight use
+   the run's control set is camera I/O and waits for a bench session;
+   BENCH_TEST §S carries the exact change.
+6. **The run checks its own baseline.** After the baseline snapshot is
+   saved, `_sldea_worker` runs `image_content` on it. A flat one sets the
+   stop flag that ■ Abort sets and logs a loud line, so the loop exits
+   and the existing `finally` block zeroes the signal generator and
+   switches its output off. A second line records what the drive had been
+   commanded to. DRY runs do the same, so the check can be rehearsed
+   without HV. If the check raises, that is logged and the run carries on
+   unchanged. No frame means no check. The status line then reads
+   `STOPPED: NO PICTURE in the baseline frame` in red, and a box says
+   what to do next.
+
+**What the stop does and does not claim.**
+
+- **It stops right after the baseline frame, not at 0 kV, and it says
+  so.** The loop writes the signal generator before it shoots, and the
+  baseline is due at the instant the first ramp starts, so the drive is
+  one loop tick into that ramp on every run, stopped or not. In the
+  replay it was 12 V (0.125 kV/s for one tick), held for the 0.46 s the
+  grab and the check took, against 3 kV for 209 s on 10-01. `run.log`
+  prints the number (`the drive had been commanded to 0.012 kV when the
+  run stopped`) instead of assuming zero.
+- **With a ramp time of 0 that tick is the whole first step.**
+  `kv_at` returns the first landing at once, so such a run has always
+  shot its baseline with the first level already commanded (0.25 kV on
+  the default step), and a flat stop there logs `commanded to 0.250 kV`.
+  The stop cannot undo that tick. Shooting the baseline before the first
+  ramp write would fix both, but it changes the order of the HV loop and
+  is not part of this change. It is an open item.
+- **A pre-flight override does not carry into the run.** An operator who
+  answers Yes to "Start the run anyway?" on a flat pre-flight still gets
+  a run that stops itself if its own baseline is flat too, and the
+  question says so. That is deliberate: the override exists for the case
+  where the preview and the run differ, not to run on no picture.
+
+**Not done, on purpose.**
+
+- **A pedestal-aware signal floor** (window median minus a stored black
+  level). The black level follows the brightness control (35 or less on
+  07-23, about 64 since) and no capped frame exists, so a stored value
+  goes stale. Contrast needs no pedestal.
+- **A gate on the disc fit's refusal, a focus threshold, and reading the
+  controls back after stamping.** The fit refuses legitimate runs; the
+  focus score has one negative (0.19 on 10-01 against 6.9 or more
+  elsewhere); UVC read-back echoes the command, and the firmware rewrites
+  gain within half a second.
+- **Moving the pre-flight ahead of "Energize HV?" and relabelling
+  Adjust.** Both are worth doing; neither is needed for this gate.
+
+**Risks.**
+
+- The threshold rests on one flat run. The nearest usable frame (the
+  P3_7 baseline, 30.0 to 30.7) is 1.5 times the threshold, so a dimmer
+  low-contrast device would be stopped, and the only way through is to
+  light it better or to change `FLAT_CONTRAST_GRAY`.
+- The baseline check costs 43 ms (median of 30 on a 1920x1080 frame, max
+  48 ms) on the runner thread, once per run, at the baseline tick.
+- A run with no baseline frame at all (camera busy or unplugged) is not
+  stopped by this check. It carries on as it always did, with `NO FRAME`
+  in the log.
+- Three `run.log` appends sit between a flat baseline and the zeroing
+  writes, where an operator's abort has one. On a stalled share that is
+  time with the drive still at its first-tick value. The breakdown path
+  already logs before it zeroes, at real HV.
+- The independent adversarial review that HV-path changes get before
+  their PR opens had not been run on this one when it was committed. It
+  was written in one session, re-read line by line in a second, and
+  mutation-checked. That is not the independent pass.
+
+**Verification.**
+
+- **Tests:** `tests/test_sldea_preflight.py` has 41 tests, with fakes
+  for the camera, the signal generator and Tk. They cover the helper, the
+  verdict tiers (on the real corpus baselines when `SLDEA_CORPUS_DIR`
+  names them, on synthetic frames always), the default-button rule as a
+  table and on the real dialog, the settings warning, and the real
+  `_sldea_worker`: a flat baseline ends a DRY and a LIVE run with the
+  same writes as ■ Abort, a normal one changes nothing, a check that
+  raises does not stop the run, and a log call that raises at the stop
+  still ends in the zeroing writes. One test each joins
+  `tests/test_sldea_profile.py`, `tests/test_sldea_edge.py` and
+  `tests/test_gui_tabs.py`.
+- **Corpus:** of 899 frames the new verdict calls 26 flat (all of 10-01),
+  20 clipped (as before) and 853 ok; the old verdict called 879 ok.
+- **Mutation:** 36 mutants, each removing or weakening one guard: the
+  flat tier, each non-default button rule, the second question, each log
+  line, the worker's stop and the order of its stop flag, its exception
+  handling, the frame hand-back, the drive it reports, the threshold and
+  the window. All 36 fail at least one test.
+- **Bench gate:** BENCH_TEST §S (flat frame refused, flat baseline stops
+  a DRY run and a LIVE run with the Trek's HV disabled, a normal frame
+  starts normally, the settings warning, Cancel leaves the camera alone)
+  has to pass before this merges.
+
 ## A LIVE run locks the scope channels it reads, and the settings they share (2026-09-24)
 
 **TL;DR:** during a LIVE run, the Oscilloscope tab or a bench-profile load

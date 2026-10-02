@@ -1869,6 +1869,49 @@ def test_flat_frame_statement_is_plain_and_quotes_the_contrast():
         assert 'no visible disc' in gui.flat_frame_text(bad), bad
 
 
+def test_flat_view_sentence_promises_a_stretch_only_when_there_is_one():
+    """The sentence about what the hand tools show of a flat frame follows
+    the rule that builds the picture. The 2026-10-01 frame (2 gray levels)
+    has a percentile window, so its view is stretched and noisy. A frame
+    that is one single gray level has none, the hand tools show it as it
+    is, and neither sentence may promise a stretched view (review
+    2026-10-02)."""
+    import sldea_edge_gui as gui
+    incident = se.image_content(_incident_frame())
+    uniform = se.image_content(_incident_frame(disc=68))
+    assert incident['flat'] and uniform['flat']
+    assert gui.cal_content_window(incident) is not None
+    assert gui.cal_content_window(uniform) is None
+    # the frame the notice was written for keeps its wording
+    assert gui.flat_view_text(incident) == (
+        "The view below is stretched from those few gray levels, so it is "
+        "very noisy.")
+    assert gui.flat_view_text(incident, opening=True) == (
+        '"Look at the frame anyway" opens the hand tools on a '
+        'contrast-stretched view so the picture can be inspected.')
+    # one single gray level: no stretch exists and none is promised
+    assert gui.flat_view_text(uniform) == (
+        "This frame is almost one single gray, so the view below is the "
+        "plain picture.")
+    assert gui.flat_view_text(uniform, opening=True) == (
+        '"Look at the frame anyway" opens the hand tools on the plain '
+        'picture: this frame is almost one single gray, so there is '
+        'nothing to stretch.')
+    for opening in (False, True):
+        txt = gui.flat_view_text(uniform, opening=opening)
+        for false_word in ('contrast-stretched', 'is stretched', 'noisy'):
+            assert false_word not in txt, (opening, txt)
+        txt.encode('ascii')
+    # the dialog's stand-in is the length of the sentence it replaces, so
+    # it cannot cost the warning block a line
+    assert (len(gui.flat_view_text(uniform))
+            <= len(gui.flat_view_text(incident)) + 2)
+    # no usable content is the same case: nothing to stretch
+    for bad in (None, {}, {'p5': 'x', 'p95': 68.0}):
+        assert 'plain picture' in gui.flat_view_text(bad), bad
+        assert 'plain picture' in gui.flat_view_text(bad, opening=True)
+
+
 def test_flat_cancel_says_what_the_scale_still_is():
     """Cancel on the flat-frame notice changes nothing. A plain calibrate
     never clears the session's anchor, so "No scale set" is only true when

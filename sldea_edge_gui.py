@@ -1119,6 +1119,38 @@ def flat_frame_text(content):
             f"test.")
 
 
+def flat_view_text(content, opening=False):
+    """What the hand tools SHOW of a flat frame, as one plain sentence.
+
+    `opening` False is the sentence the dialog keeps beside the statement
+    while the hand tools are open; True is the one the opening notice
+    gives for its "Look at the frame anyway" button.
+
+    Worded from the same rule the dialog uses to build the picture, so the
+    two cannot disagree: with no automatic fit the hand view is stretched
+    exactly when cal_content_window has a window to give. On a frame that
+    is one single gray level (a lens cap, a fully saturated frame) it has
+    none and the hand tools show the plain frame. Promising "a
+    contrast-stretched view" there was false in exactly the
+    camera-not-set-up case (review 2026-10-02).
+
+    Pure, so the wording is a headless test."""
+    stretched = cal_content_window(content) is not None
+    if opening:
+        if stretched:
+            return ("\"Look at the frame anyway\" opens the hand tools on "
+                    "a contrast-stretched view so the picture can be "
+                    "inspected.")
+        return ("\"Look at the frame anyway\" opens the hand tools on the "
+                "plain picture: this frame is almost one single gray, so "
+                "there is nothing to stretch.")
+    if stretched:
+        return ("The view below is stretched from those few gray levels, "
+                "so it is very noisy.")
+    return ("This frame is almost one single gray, so the view below is "
+            "the plain picture.")
+
+
 def flat_cancel_text(content, in_use=None, recorded=None):
     """The status-strip sentence after Cancel on the flat-frame notice.
 
@@ -3962,11 +3994,9 @@ class EdgeReviewApp:
             tk.Label(dlg,
                      text="Cancel leaves the scale as it was "
                           "(recommended).\n"
-                          "\"Look at the frame anyway\" opens the hand "
-                          "tools on a contrast-stretched view so the "
-                          "picture can be inspected. A scale accepted "
-                          "there is recorded as measured on a frame with "
-                          "no visible disc.",
+                          + flat_view_text(content, opening=True)
+                          + " A scale accepted there is recorded as "
+                          "measured on a frame with no visible disc.",
                      justify='left', wraplength=480).pack(
                          anchor='w', padx=14, pady=(0, 10))
             row = tk.Frame(dlg)
@@ -4326,10 +4356,11 @@ class EdgeReviewApp:
                 # is amplifying a handful of gray levels. On the 2026-10-01
                 # frame that view does show the disc (about 387 px across,
                 # a 1 gray-level step), grainy and with a coarse edge, so
-                # the sentence says "noisy" and not "nothing".
-                gate += ("⚠ " + flat_frame_text(content) + " The view below "
-                         "is stretched from those few gray levels, so it "
-                         "is very noisy.\n")
+                # the sentence says "noisy" and not "nothing". A frame
+                # that is ONE gray level has no window to stretch and is
+                # shown as it is; flat_view_text says that instead.
+                gate += ("⚠ " + flat_frame_text(content) + " "
+                         + flat_view_text(content) + "\n")
             if not verify_ok:
                 # THE REFUSAL, STATED. When baseline_disc will not fit this
                 # baseline there is nothing to verify and the operator has

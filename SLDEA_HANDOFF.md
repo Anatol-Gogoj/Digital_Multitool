@@ -102,6 +102,10 @@ threshold or override was changed.
    other button. "Look at the frame anyway" is a second, named button
    (a click, or Space with the focus on it) that opens the hand tools,
    with the statement kept on screen.
+   A frame that is one single gray level (a lens cap, a saturated frame)
+   has no window to stretch, so the hand tools show it as it is; the
+   notice and the dialog then say "the plain picture" and do not promise
+   a stretched view (`flat_view_text`).
    Cancel changes nothing, and the status strip then says which scale
    still stands (`flat_cancel_text`): `No new scale set; the earlier
    anchor (N px) is still in use` when the session holds one, `... the
@@ -190,26 +194,32 @@ crop; a diameter is circle geometry or two click positions in image px.
   recommendation (repeat the test); whether it should say "too dark to
   measure" instead is a wording call.
 
-**Verification.** `tests/test_sldea_calibration.py` (68, 6 new, headless)
+**Verification.** `tests/test_sldea_calibration.py` (69, 7 new, headless)
 pins the arithmetic: the flat rule, the percentile window, the untouched
-test against every gesture's smallest step, the statement, the Cancel
-wording, the caveat and its two leads.
-`tests/test_sldea_edge_gui.py` (62, 8 new, needs a display) drives the
+test against every gesture's smallest step, the statement and what it
+says the view is, the Cancel wording, the caveat and its two leads.
+`tests/test_sldea_edge_gui.py` (63, 9 new, needs a display) drives the
 dialog: the refusal by button, by Enter, on the last round's Finish and
-after Back; the two-point refusal; the notice with Enter cancelling from
-either button and with the window grab refused, then the second step
-through both prompts to a record that says OVER-GATE, FLAT FRAME and the
-window;
+after Back, with a different scripted spawn for every round so that a
+dialog remembering only its first spawn fails; the two-point refusal;
+the notice with Enter cancelling from either button and with the window
+grab refused, then the second step through both prompts to a record that
+says OVER-GATE, FLAT FRAME and the window; a single-gray frame shown
+plain and said to be;
 Cancel at the notice with a session anchor, with only a recorded one and
 on the re-anchor route; no notice on a faint frame the fit still found a
 disc on (step 15 gray); the Save strip, with the plot failing and with an
 honest over-gate anchor; a committed re-anchor's strip; and the same
 gestures recording byte-identical diameters with the stretch on and off,
-in both hand modes. Each new behaviour was also switched off in a scratch
-copy to confirm its case fails. On a copy of the real 2026-10-01 run the
-dialog opened on the notice, three Continue presses on the spawns banked
-nothing, and Cancel with the 623.73 px guess in the session left it in
-place and said so.
+in both hand modes. That last case runs on a frame with a bright band
+beside the disc, where the fit window (153.75 to 201.25) and the
+percentile window (133.5 to 255) are different numbers, so it also shows
+which of the two the hand modes take when a fit exists. Each new
+behaviour was also switched off in a scratch copy to confirm its case
+fails (31 of 31 mutations caught). On a copy of the real 2026-10-01 run
+the dialog opened on the notice, three Continue presses on the spawns
+banked nothing, and Cancel with the 623.73 px guess in the session left
+it in place and said so.
 
 ## A LIVE run locks the scope channels it reads, and the settings they share (2026-09-24)
 

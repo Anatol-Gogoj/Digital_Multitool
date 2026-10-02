@@ -3585,15 +3585,27 @@ def test_an_untouched_circle_round_is_refused_by_the_button_and_by_enter():
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)
         gui.messagebox = spy
-        # a spawn that passes every OTHER check a round has (plausible
-        # size, inside the frame), so the only reason left to refuse it is
-        # that nobody touched it
-        gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 70.0)
+        # spawns that pass every OTHER check a round has (plausible size,
+        # inside the frame), so the only reason left to refuse one is that
+        # nobody touched it.
+        #
+        # A DIFFERENT circle for every spawn (review 2026-10-02). With one
+        # constant circle for all of them, a dialog that remembered only
+        # its FIRST spawn would still have refused rounds 2 and 3 here,
+        # because their spawns equalled round 1's, while in the app (random
+        # spawns) it would have banked them untouched. Two of the three
+        # circles in the 2026-10-01 log were rounds 2 and 3.
+        spawns = [(160.0, 120.0, 65.0),      # round 1
+                  (160.0, 120.0, 70.0),      # round 2
+                  (160.0, 120.0, 75.0),      # round 3
+                  (160.0, 120.0, 72.0)]      # round 2 again, after Back
+        _fixed_spawn(gui, spawns)
         refusal = ('Calibrate', gui.CAL_UNTOUCHED_MSG)
 
         def poke(win):
             p = app._cal_probe
             st, step = p['st'], p['step_btn']
+            saw['spawn_seen'] = [st['spawn']]
             # (1) THE BUTTON on a raw spawn
             step.invoke()
             saw['button'] = (st['round'], list(st['diams']),
@@ -3624,9 +3636,17 @@ def test_an_untouched_circle_round_is_refused_by_the_button_and_by_enter():
             saw['after_drag'] = (st['round'], list(st['diams']),
                                  len(spy.warned))
             # (4) THE NEXT ROUND'S SPAWN is untouched again
+            saw['spawn_seen'].append(st['spawn'])
             step.invoke()
             saw['round2'] = (st['round'], len(st['diams']),
                              len(spy.warned))
+            if saw['round2'][:2] != (2, 1):
+                # round 2's raw spawn was banked. Stop here, so the case
+                # fails on its own assertion (4) below and not on a
+                # window the remaining steps would have finished and
+                # closed.
+                win.destroy()
+                return
             # (5) A RESIZE ALONE counts: one wheel notch of radius
             cx, cy, r = st['circle']
             p['set_circle'](cx, cy, r + gui.cal_wheel_dr(1))
@@ -3635,6 +3655,7 @@ def test_an_untouched_circle_round_is_refused_by_the_button_and_by_enter():
                                    len(spy.warned))
             # (6) THE LAST ROUND, untouched: the Finish button must not
             # carry a raw spawn into the gates behind it
+            saw['spawn_seen'].append(st['spawn'])
             saw['last_btn'] = step.cget('text')
             step.invoke()
             saw['last'] = (st['round'], len(st['diams']), len(spy.warned),
@@ -3642,6 +3663,7 @@ def test_an_untouched_circle_round_is_refused_by_the_button_and_by_enter():
             # (7) Back re-randomises the round it lands on, so that round
             # is a fresh spawn and is refused until it is touched too
             p['back_btn'].invoke()
+            saw['spawn_seen'].append(st['spawn'])
             saw['after_back'] = (st['round'], len(st['diams']),
                                  st['circle'] == st['spawn'])
             step.invoke()
@@ -3667,12 +3689,13 @@ def test_an_untouched_circle_round_is_refused_by_the_button_and_by_enter():
         assert saw['dragged'][0], (
             "the synthetic drag never reached the dialog, so nothing here "
             "showed that a real gesture clears the refusal")
-        assert saw['dragged'][1] == 70.0, saw['dragged']
-        assert saw['after_drag'] == (2, [140.0], 2), saw['after_drag']
-        # (4) per ROUND, not per dialog
+        assert saw['dragged'][1] == 65.0, saw['dragged']
+        assert saw['after_drag'] == (2, [130.0], 2), saw['after_drag']
+        # (4) per ROUND, not per dialog: round 2's spawn is a different
+        # circle from round 1's, and it is refused all the same
         assert saw['round2'] == (2, 1, 3), saw['round2']
         # (5) resizing without moving is a fit as well
-        assert saw['after_resize'] == (3, [140.0, 141.0], 3), \
+        assert saw['after_resize'] == (3, [130.0, 141.0], 3), \
             saw['after_resize']
         # (6) the last round's Finish is refused the same way, the dialog
         # stays open, and no gate was reached
@@ -3681,6 +3704,11 @@ def test_an_untouched_circle_round_is_refused_by_the_button_and_by_enter():
         # (7) Back lands on round 2 with a fresh, untouched spawn
         assert saw['after_back'] == (2, 1, True), saw['after_back']
         assert saw['back_untouched'] == (2, 1, 5), saw['back_untouched']
+        # THE REMEMBERED SPAWN FOLLOWED EVERY ROUND. SELF-CHECK first: the
+        # scripted circles really are four different ones, or the lines
+        # above could pass on a dialog that remembers only its first.
+        assert len(set(spawns)) == 4, spawns
+        assert saw['spawn_seen'] == spawns, (saw['spawn_seen'], spawns)
         assert all(w == refusal for w in spy.warned), spy.warned
         assert not spy.asked, ("an untouched round reached a gate: "
                                + str(spy.asked))
@@ -3980,6 +4008,68 @@ def test_a_flat_frame_opens_on_a_plain_statement_with_cancel_default():
         assert 'REUSED' in stat and cav in stat, stat
     finally:
         gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_single_gray_frame_is_shown_plain_and_says_so():
+    """A calibration frame that is ONE gray level (a lens cap, a fully
+    saturated frame) has no window to stretch, so the hand tools show it
+    as it is. The notice and the dialog's warning line say that, and do
+    not promise the stretched, noisy view the 2026-10-01 frame gets."""
+    import sldea_edge_gui as gui
+    import cv2
+    root = _tk_root_or_skip('single gray frame')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_cal_onegray_')
+    real_mb = gui.messagebox
+    saw, steps = {}, []
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        cv2.imwrite(os.path.join(run, 'frames',
+                                 'SLDEA_s00_00.00kV_baseline.png'),
+                    np.full((240, 320), 68, np.uint8))
+        app = gui.EdgeReviewApp(root, path=run)
+        content = gui.se.image_content(app._base_gray())
+        assert content['flat'] and content['contrast'] == 0.0, content
+        assert gui.cal_content_window(content) is None
+        spy = _ModalSpy(real_mb, app)
+        gui.messagebox = spy
+
+        def look(win):
+            p = app._cal_probe
+            if p.get('notice') is win:
+                steps.append('notice')
+                saw['notice'] = _cal_display(win)
+                p['look_btn'].invoke()
+                return
+            steps.append('dialog')
+            st = p['st']
+            saw['hand'] = (st['hand_stretch'], st['hand_lut'])
+            saw['lines'] = '\n'.join(_cal_visible_lines(win))
+            win.destroy()
+
+        app.root.wait_window = look
+        app._calibrate_scale()
+        assert steps == ['notice', 'dialog'], steps
+        sentence = gui.flat_frame_text(content)
+        assert '(contrast 0 gray levels)' in sentence, sentence
+        # THE NOTICE: the statement, and what the second button opens
+        assert sentence in saw['notice'], saw['notice']
+        assert gui.flat_view_text(content, opening=True) in saw['notice'], \
+            saw['notice']
+        assert 'plain picture' in saw['notice'], saw['notice']
+        assert 'contrast-stretched' not in saw['notice'], saw['notice']
+        # THE DIALOG: the frame as it is, under a line that says so
+        assert saw['hand'] == (None, None), saw['hand']
+        assert sentence in saw['lines'], saw['lines']
+        assert gui.flat_view_text(content) in saw['lines'], saw['lines']
+        assert 'plain picture' in saw['lines'], saw['lines']
+        assert 'noisy' not in saw['lines'], saw['lines']
+        assert app.manual_ref is None and not spy.asked, spy.asked
+    finally:
+        gui.messagebox = real_mb
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)
 
@@ -4352,11 +4442,28 @@ def test_hand_modes_show_a_stretched_view_and_record_the_same_diameters():
     saw = {}
     try:
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        # A BRIGHT BAND BESIDE THE DISC (review 2026-10-02), the way foil
+        # sits beside a real one. On the plain fixture the frame's p5 and
+        # p95 ARE the disc and the paper (165 and 190), so the percentile
+        # window and the fit window were the same pair of numbers and the
+        # first half of this case could not tell which of the two rules
+        # the hand modes used. With the band p95 is 235 and they differ.
+        base = os.path.join(run, 'frames', 'SLDEA_s00_00.00kV_baseline.png')
+        banded = cv2.imread(base, cv2.IMREAD_GRAYSCALE)
+        banded[:, 270:] = 235
+        cv2.imwrite(base, banded)
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)
         gui.messagebox = spy
         fit = app._auto_disc()
         assert fit and fit.get('diam_px'), "fixture has no automatic fit"
+        assert abs(fit['diam_px'] - 160.0) < 0.5, fit['diam_px']
+        # SELF-CHECK: the two rules give different windows on this frame
+        fit_win = gui.cal_stretch_window(165.0, 190.0)
+        pct_win = gui.cal_content_window(
+            gui.se.image_content(app._base_gray()))
+        assert fit_win == (153.75, 201.25), fit_win
+        assert pct_win == (133.5, 255.0), pct_win
 
         # ---- (1) WHAT THE HAND MODES SHOW, with a fit on the frame ------
         def look(win, m):
@@ -4370,6 +4477,7 @@ def test_hand_modes_show_a_stretched_view_and_record_the_same_diameters():
                 from PIL import ImageTk
                 shown = ImageTk.getimage(st['photo']).convert('L')
                 saw['extrema_' + m] = shown.getextrema()
+                saw['hist_' + m] = shown.histogram()
             except Exception as e:            # an older Pillow: skip
                 saw['extrema_' + m] = None
                 print(f"   (canvas pixels not readable here: {e})")
@@ -4387,20 +4495,37 @@ def test_hand_modes_show_a_stretched_view_and_record_the_same_diameters():
             app.manual_ref = None
             app._calibrate_scale(mode=m)
         assert saw['verify'] is not None, "the verify mode lost its stretch"
+        # the verify mode's window is the fit's: disc and paper levels
+        assert saw['verify'] == fit_win, (saw['verify'], fit_win)
         for m in (CIRCLE, TWOPOINT):
             # the SAME window the verify mode shows, so the picture does
-            # not change when the operator switches method
+            # not change when the operator switches method ...
             assert saw['hand_' + m] == saw['verify'], (m, saw['hand_' + m],
                                                        saw['verify'])
+            # ... and NOT the frame's percentiles, which are a different
+            # window here. Which of the two a fitted frame gets is the one
+            # measurement-chain choice in this dialog (SLDEA_HANDOFF
+            # 2026-10-02: the fit window moves the displayed edge by up to
+            # 2.8 % of diameter, the percentile window by under 0.3 %), so
+            # a silent flip between them has to fail here.
+            assert saw['hand_' + m] != pct_win, (m, saw['hand_' + m])
             assert saw['lut_' + m] is not None, m
         assert saw['hand_after_switch'] == saw['verify']
         # ... and it reached the CANVAS: the fixture is disc 165 on paper
-        # 190, and what is displayed is those two levels through the table
+        # 190 beside a 235 band, and what is displayed is those three
+        # levels through the table (the band clips to white)
         lut = saw['lut_' + CIRCLE]
-        assert lut[165] < 100 and lut[190] > 190, (lut[165], lut[190])
+        assert lut == gui.cal_stretch_lut(*fit_win)
+        assert lut[165] < 100 and 190 < lut[190] < 255, (lut[165], lut[190])
+        assert lut[235] == 255, lut[235]
         if saw['extrema_' + CIRCLE] is not None:
-            assert saw['extrema_' + CIRCLE] == (lut[165], lut[190]), (
-                saw['extrema_' + CIRCLE], lut[165], lut[190])
+            assert saw['extrema_' + CIRCLE] == (lut[165], lut[235]), (
+                saw['extrema_' + CIRCLE], lut[165], lut[235])
+            # the paper is on the canvas at ITS stretched level (under
+            # the percentile window it would sit at a darker gray)
+            hist = saw['hist_' + CIRCLE]
+            assert hist[lut[190]] > hist[lut[165]] > 0, (
+                hist[lut[190]], hist[lut[165]])
             # the two-point view is the same picture through the same
             # table, rotated: its empty corners are the darkest thing on
             # it, and the bicubic rotation rings a little at the disc
@@ -4468,7 +4593,6 @@ def test_hand_modes_show_a_stretched_view_and_record_the_same_diameters():
 
         # ---- (3) NO FIT: the window comes from the frame's percentiles ---
         # a real picture the fitter cannot use (paper plus a bright band)
-        base = os.path.join(run, 'frames', 'SLDEA_s00_00.00kV_baseline.png')
         blank = np.full((240, 320), 190, np.uint8)
         blank[:, 40:90] = 235
         cv2.imwrite(base, blank)

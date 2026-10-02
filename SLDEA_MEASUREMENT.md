@@ -1,6 +1,8 @@
 # SLDEA active-area measurement — error budget and how the algorithm works
 
-Status: 2026-08-07 (§2.1a; the rest 2026-08-01). Every number in this
+Status: 2026-10-02 (the `disc-fit` / `resting` / refit rows of §1.1,
+§1.2 and §2.1, and the resting-reference row: area estimator 2);
+2026-08-07 (§2.1a); the rest 2026-08-01. Every number in this
 document is **measured**, not estimated — sources are the four
 calibration rounds (47 operator labels across both campaigns), the
 per-run scale calibration (two hand methods A/B compared against the
@@ -19,7 +21,7 @@ in the same PR.
 
 | You are reporting | Quote | Dominated by | Conditions |
 |---|---|---|---|
-| **Expansion ratio A/A₀** (area-vs-kV curves) | **±1–2%** | fit CI + second-order residual of the edge-definition offset | auto-accepted `disc-fit` / `resting` / refit frames |
+| **Expansion ratio A/A₀** (area-vs-kV curves) | **±1–2%** | fit CI + second-order residual of the edge-definition offset + the resting reference (§2.1) | auto-accepted `disc-fit` / `resting` / refit frames, **saved with area estimator 2** (`area_estimator: 2` in the run's `setup.txt`, 2026-10-02). Rows saved before that divide an ellipse by a circle: a run-specific 0 to +7 % on every `disc-fit` row and a step at the resting hand-over. Reprocess, never mix |
 | **Absolute area (mm²), edge convention stated** | **±1–2%** | scale anchor + fit CI | methods section states the half-height convention |
 | **Absolute area (mm²), convention not stated** | **±3%** (or a one-sided +5.5% band) | the edge-definition offset | avoid this — state the convention instead |
 | **Hand-traced areas** (wash-out frames ≥5.5 kV) | **±1%** precision, outer-toe convention | operator repeatability | machine has no boundary there; traces are the measurement |
@@ -28,9 +30,9 @@ in the same PR.
 
 | Winning method | What it actually measures | Validated accuracy | Auto-accepts? |
 |---|---|---|---|
-| `disc-fit` | ink-edge boundary, robust ellipse | IoU vs operator: median 0.89, min 0.82 (n=26); own 85% CI 0.2–0.7% | yes, at conf ≥ 0.75 with a clean audit |
-| `resting` | asserts the baseline area on no-change frames | audit-bounded to ≤ ~2%; clean controls score IoU 0.94–0.95 | yes |
-| `disc-fit` + `resting_refit` | measured boundary on a bias-tripped "no-change" frame | matches the audit-predicted creep (+4.1/+4.6% at P3_1 2.0 kV vs +3.8/+4.2 predicted) | yes, only if its own audit is clean |
+| `disc-fit` | ink-edge boundary, robust ellipse. Since 2026-10-02 the area is the ellipse divided by what the same tracker reads on the run's resting frames, so A and A₀ are one estimator | IoU vs operator: median 0.89, min 0.82 (n=26); own 85% CI 0.2–0.7%; against two fit-free edge series (six campaign runs): rms 0.7 to 1.1 % up to 4 kV, 1.5 % from 4.25 kV to the peak, where it reads a median 1.2 % low against one of them | yes, at conf ≥ 0.75 with a clean audit |
+| `resting` | asserts the baseline area. Since 2026-10-02 only on the baseline frame itself and on no-change frames the tracker cannot measure | audit-bounded to ≤ ~2% where it still applies; clean controls score IoU 0.94–0.95 | yes |
+| `disc-fit` + `resting_refit` | measured boundary on a "no-change" frame: every such frame the tracker can fit (2026-10-02; before, only bias-tripped ones) | on the 0 to 0.5 kV frames of the six campaign runs it reads A₀ with 0.13 to 1.48 % SD per run (worst frames −2.2 % and +3.2 %). The older figure (+4.1/+4.6% at P3_1 2.0 kV vs +3.8/+4.2 predicted) was taken with estimator 1 and has not been repeated | yes, only if its own audit is clean |
 | `manual-trace` (candidate D) | the operator's polygon | ground truth by definition; ±1% area precision, self-agreement IoU ceiling 0.973 | committed by the user |
 | `diff-*` / `tex-ratio` (patch tiers) | the changed/wrinkled *region*, not the boundary | IoU ~0.43; area −40..−69% vs the true boundary | in practice held in review by the spread/pair rules — if one ever auto-accepts, treat it as suspect and trace the frame |
 
@@ -67,7 +69,8 @@ in the same PR.
 | Nominal diameter (the value the mm scale hangs on) | systematic | **closed** — anchored by the laser-cut application mask | lab confirmation 2026-08-01 (see §2.4) |
 | `disc-fit` statistical CI (edge-point scatter) | random, per frame | **0.2–0.7%** (85% CI) | fit CI, both campaigns |
 | Operator trace precision (the validation floor) | random | **~1%** area (0.2–2.5%); IoU ceiling 0.973 | repeatability round, 9 repeat pairs |
-| Clean `resting` claims | bounded | ≤ ~2% (the 3 px audit-bias gate; the refit measures anything past it) | audit + resting-refit |
+| Clean `resting` claims | bounded | ≤ ~2% (the 3 px audit-bias gate; the refit measures anything past it). Since 2026-10-02 only frames the tracker cannot fit are claimed; on the campaign runs none above 0 kV | audit + resting-refit |
+| Resting reference (tracker ellipse ÷ circle on the run's quiet frames; divides every `disc-fit` area) | systematic, per run | ratio 0.9945 to 1.0742 on the six campaign runs (median of 5 frames at 0 to 0.5 kV); those frames scatter 0.23 to 1.46 % (SD), so the reference itself is good to about 0.1 to 0.8 %; recorded per run in `setup.txt` (`rest_fit_ratio`, `rest_fit_frames`, `rest_fit_sd_pct`) | harness replay 2026-10-02 |
 | Onset frames (audit-capped fits, interpolated arc) | systematic, local | ~1–2% excess understatement after decomposition | round 3, corrected by round 4 |
 | Wrong-feature tracking (halo, smoothing shift) | systematic | bounded **< ~0.3%** area (per-run median audit bias −0.4..+0.4 px) | boundary self-audit, all six runs |
 
@@ -436,10 +439,13 @@ difference-images (three tiers), a texture-ratio channel (wrinkling
 raises local energy against the frame's own baseline — the P3 devices
 activate by wrinkling with almost no brightness change), and the
 boundary tracker, which ray-casts from the known resting center and
-robust-fits an ellipse to the ink edge itself. A frame showing no
-detectable change is *stated* as "area = resting area" rather than
-left blank — and if a self-audit finds the ink step measurably off
-that circle, the fitter re-measures it (the resting-refit).
+robust-fits an ellipse to the ink edge itself. Its area is divided by
+what the same tracker reads on the run's resting frames (baseline and
+0 to 0.5 kV), so A and A₀ come from one estimator (2026-10-02). A
+frame showing no detectable change is not left blank: the tracker
+measures it when it can (the resting-refit; before 2026-10-02 only
+when a self-audit found the ink step off the resting circle), and
+otherwise it is *stated* as "area = resting area".
 Confidence folds in internal agreement, an incumbent bonus, and
 pre/post snapshot agreement; anything under 0.75, or contradicted by
 the audit, queues for review, where the reviewer picks a candidate or
@@ -535,7 +541,8 @@ architecture**, held together by three invariants:
 | Human per-fit σ ≈ 1.0–1.1% of diameter **regardless of method or stroke** (A 1.03%, A′ 1.11%, B 2.09%); stroke cost is BIAS not precision (A +2.07% vs A′ +0.77% in diameter, the §1.3 outer toe) | A/B/A′ session, eleven interleaved calibrations on one disc against a 577.08 px automatic fit, one operator, 2026-08-06 evening (`#215` comment). **One operator, one disc, one session — §2.1's 0.4%/0.8% remain the numbers to quote** |
 | Auto-verified anchor uncertainty = the fit's own residual, 0.40% of diameter (2.3 px / 577.08 px over 204 edge points) | `se.fit_resid_pct` on `baseline_disc`'s output. **Conservative** (per-point scatter, not the fitted radius's SE, which is ~√n smaller). σ/SE/range are **undefined** for such an anchor, not zero, and it contributes nothing to §2.5's operator-repeat leg. **The fit's systematic term is unmeasured, and no cross-check of it exists** (declaring the fitted disc 16 mm makes §2.4's mask test pass by construction) |
 | Audit bias bound ±0.4 px per run | Boundary self-audit medians, all six runs |
-| Refit accuracy (+4.1/+4.6% vs predicted +3.8/+4.2%) | Resting-refit validation vs stored labels (2026-07-30) |
+| Refit accuracy (+4.1/+4.6% vs predicted +3.8/+4.2%) | Resting-refit validation vs stored labels (2026-07-30), estimator 1; not repeated under estimator 2 |
+| Resting reference 0.9945 to 1.0742; quiet-frame SD 0.13 to 1.48 %; `disc-fit` vs fit-free series rms 0.7 to 1.5 % | Harness replay of the 16-run corpus under OpenCV 4.13, 2026-10-02, against the review's common-ray and half-height series (`SLDEA_HANDOFF.md`, same date). Six campaign runs; five of them have no saved human review |
 | Onset excess ~1–2% | Round 3 (−6.9%) decomposed by round 4's controls |
 | Old-CSV 2.3–2.7× scale error | Baseline re-measurement, 2026-07-28 |
 | 16 mm anchor closed (laser-cut mask) | Lab confirmation (Anatol), 2026-08-01 |

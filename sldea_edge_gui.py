@@ -3261,17 +3261,36 @@ class EdgeReviewApp:
         accepted = sum(1 for r in self.results.values() if r)
         rejected = sum(1 for r in self.results.values() if r is None)
         n_unread = sum(1 for i in q if i in self.load_fail)
+        # ONE ESTIMATOR PER SAVE (2026-10-02). Since that date a tracker
+        # ('disc-fit') area is reported on the resting-disc basis; before
+        # it, it was the raw ellipse, a few percent away and by a
+        # different amount on every run. A kept row from the old
+        # estimator beside this pass's rows would be exactly the mixed
+        # column the change exists to end, so those rows are emptied and
+        # marked (se.stale_estimator_rows), and the dialog says so.
+        old_stamp = se.load_stamp(self.rundir)
+        stale = se.stale_estimator_rows(old_stamp, self.run['rows'],
+                                        self.results)
         # unreviewed rows KEEP their previous pass's px measurement,
         # re-scaled to this session's anchor (one scale per save, audit
         # 2026-08-05) — the dialog used to claim they were 'left blank'
         n_kept = sum(
             1 for i in q
-            if (self.run['rows'][i].get('active_area_px') or '').strip())
+            if (self.run['rows'][i].get('active_area_px') or '').strip()
+            and i not in stale)
         unrev = (f"unreviewed: {len(q)}"
                  + (f" ({n_kept} keep the previous pass's px, re-scaled "
                     f"to THIS anchor)" if n_kept else " (left blank)")
                  + (f"\n  incl. {n_unread} UNREADABLE frame(s) — kept, "
-                    f"not re-measured" if n_unread else ""))
+                    f"not re-measured" if n_unread else "")
+                 + (f"\n  ⚠ {len(stale)} unreviewed row(s) hold an "
+                    f"automatic outline area (disc-fit) saved BEFORE the "
+                    f"2026-10-02 area fix. Old and new areas differ by a "
+                    f"few percent, so these rows will be EMPTIED and "
+                    f"marked 're-review' (the old numbers stay in "
+                    f"data.csv.bak). Review them first if you want them "
+                    f"measured in this Save."
+                    if stale else ""))
         # ... and SAY BY HOW MUCH (#215). "re-scaled to THIS anchor" is
         # true but abstract; an operator who re-reviewed one frame needs
         # the number, because the whole mm² column moves by it.
@@ -3388,7 +3407,7 @@ class EdgeReviewApp:
         csv_path = self.run.get('csv_path') or ''
         try:
             se.apply_results(self.run['rows'], self.results, scale,
-                             self.flags, annos)
+                             self.flags, annos, stale=stale)
             plan = se.plan_breakdown_marks(self.run, self.flags)
             se.write_back(self.rundir, self.run)
         except Exception as e:
@@ -3410,6 +3429,32 @@ class EdgeReviewApp:
                 + ('\n…' if len(rn_errors) > 4 else '')
                 + "\n\nSave again once the files are reachable — the "
                   "branding self-heals in either direction.")
+        # Stamp WHICH area estimator wrote the rows just committed, and
+        # the resting reference the tracker rows were divided by, into
+        # the Edge Detection settings block (2026-10-02). Knob lines are
+        # left exactly as they are on file (settings=None). A failed
+        # stamp is said out loud: without it the next Save reads this
+        # run as old-estimator and empties its unreviewed tracker rows
+        # (fail-safe, but the operator should know why).
+        stamp = se.estimator_stamp(se.rest_reference(
+            self.run['rows'], self.cands_all))
+        if (not self.cands_all
+                and old_stamp.get('area_estimator') == se.AREA_ESTIMATOR):
+            # no detection pass this session (a trace-only Save): the
+            # tracker rows on file are still the earlier pass's, and so
+            # is the reference they were divided by
+            stamp = dict(old_stamp)
+        try:
+            se.save_settings(self.rundir, None, stamp=stamp)
+        except OSError as e:
+            messagebox.showwarning(
+                "Save: setup.txt not stamped",
+                f"data.csv is saved, but setup.txt could not be "
+                f"updated:\n\n{e}\n\nSave again once the folder is "
+                f"reachable. Until then this run is not marked as "
+                f"measured with the current area method, and a later "
+                f"Save would empty its unreviewed automatic (disc-fit) "
+                f"rows for re-review.")
         # persist the anchor that produced every mm² in this save — the
         # run's absolute scale used to be a pair of clicks recorded
         # nowhere (audit 2026-08-05); the 📏 dialog offers it for reuse.

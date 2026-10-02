@@ -501,6 +501,13 @@ def analyze(rundir, max_frames=24):
               for p in hot if p['idx'] in by_idx]
 
     repeats = repeat_pairs(run, base.shape, roi_frac)
+    # Edge Review detects the baseline row as well, and the tracker's
+    # reading of it is part of the run's resting reference
+    # (se.rest_reference, 2026-10-02). Hand the run-level pass the same
+    # row, or the tracker areas quoted here would sit on a different
+    # reference than the review's.
+    if disc_ref is not None:
+        cands_store.setdefault(base_i, se.candidates(base, base, settings))
     # pair reconciliation happens exactly where the GUI does it: after
     # detection, before the accept decision the report quotes
     recon = se.reconcile_pairs(rows, cands_store, settings)
@@ -509,6 +516,12 @@ def analyze(rundir, max_frames=24):
         if cl:
             p['conf'] = float(cl[0]['conf'])
             p['needs_review'] = bool(se.needs_review(cl, settings))
+            # reconcile_pairs also moves every tracker area onto the
+            # run's resting reference (2026-10-02): quote that area, not
+            # the single-frame one candidates() could reach alone
+            p['area_px'] = round(float(cl[0]['area_px']), 0)
+    # what the tracker reads on the resting disc, over the circle
+    rest_ref = se.rest_reference(rows, cands_store)
     res_best = {p['idx']: {'area_px': p['area_px']}
                 for p in per if p['area_px']}
     cons_annos = se.ramp_consistency(rows, res_best)
@@ -536,6 +549,7 @@ def analyze(rundir, max_frames=24):
             'foil_pct': round(100.0 * float(foil.mean()), 1)
             if foil is not None else 0.0,
             'baseline_disc': ref_out, 'consistency': consistency,
+            'rest_reference': rest_ref,
             # the anchor Edge Review's Save actually used and recorded
             # (setup.txt, since 2026-08-05) — the saved mm² comes from
             # THIS, not from the automatic disc fit above
@@ -1175,6 +1189,20 @@ def report(d):
         else:
             A("resting disc    : NOT FOUND (baseline_disc refused -- mm "
               "figures fall back to an activated frame)")
+    if d.get('baseline_disc'):
+        rest = d.get('rest_reference')
+        if rest:
+            sd = ('' if rest.get('sd_pct') is None
+                  else f", they scatter {rest['sd_pct']:.2f}% (SD)")
+            A(f"tracker at rest : reads {rest['k']:.4f} x the resting "
+              f"circle (median of {rest['n']} quiet frame"
+              f"{'' if rest['n'] == 1 else 's'} at 0-"
+              f"{se.REST_REF_MAX_KV:g} kV{sd}); every disc-fit area is "
+              f"divided by this, so a resting disc reads A0")
+        else:
+            A("tracker at rest : NO READING (the tracker could not fit "
+              "the resting disc on any quiet frame): disc-fit areas "
+              "stay raw and always go to review")
     anchor = d.get('scale_anchor')
     if anchor:
         # #215 fields are all optional: a pre-2026-08-06 anchor prints

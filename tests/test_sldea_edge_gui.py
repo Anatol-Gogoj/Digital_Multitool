@@ -2340,6 +2340,104 @@ def test_save_commits_csv_before_renames():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_save_stamps_the_estimator_and_never_mixes_it_with_the_old_one():
+    """2026-10-02: a tracker ('disc-fit') area means something different
+    from what it meant before (the raw ellipse then, the resting-disc
+    basis now; a run-specific 0 to 7 % apart). Save therefore (1) stamps
+    which estimator wrote data.csv, and the resting reference it used,
+    into setup.txt's Edge Detection block without pinning any knob, and
+    (2) on a run that carries no such stamp, EMPTIES an unreviewed row
+    still holding an old tracker area instead of keeping it beside the
+    new rows, and says so in the Save dialog before anything is
+    written."""
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('estimator stamp')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_stamp_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        csv_path = os.path.join(run, 'data.csv')
+        with open(csv_path, newline='') as f:
+            r = csv.DictReader(f)
+            cols, rows = r.fieldnames, list(r)
+        # a previous, pre-fix review left a tracker area on row 2
+        rows[2].update({'active_area_px': '15000',
+                        'active_area_mm2': '112.500',
+                        'active_diam_mm': '11.968',
+                        'notes': 'edge:disc-fit conf 0.93'})
+        with open(csv_path, 'w', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            w.writeheader()
+            w.writerows(rows)
+        assert se.load_stamp(run) == {}
+
+        app = gui.EdgeReviewApp(root, path=run)
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect_all_sync()
+        i2 = app.frame_rows[2]
+        app.results.pop(i2, None)             # row 2 is left unreviewed
+        app.auto_idx.discard(i2)
+        app.save()
+        said = mb.asked[-1][1]
+        assert '1 unreviewed row(s) hold an automatic outline area' \
+            in said, said
+        assert 'BEFORE the 2026-10-02 area fix' in said, said
+        assert 'EMPTIED' in said and 'data.csv.bak' in said
+        assert 'keep the previous pass' not in said, said
+        with open(csv_path, newline='', encoding='utf-8-sig') as f:
+            saved = list(csv.DictReader(f))
+        assert saved[2]['active_area_px'] == ''
+        assert saved[2]['active_area_mm2'] == ''
+        assert saved[2]['notes'] == se.STALE_ESTIMATOR_NOTE
+        assert saved[0]['active_area_px'], "the reviewed rows were written"
+        stamp = se.load_stamp(run)
+        assert stamp['area_estimator'] == se.AREA_ESTIMATOR, stamp
+        assert stamp['rest_fit_frames'] == 1, stamp      # baseline only
+        assert abs(stamp['rest_fit_ratio'] - 1.0) < 0.03, stamp
+        text = open(os.path.join(run, 'setup.txt'),
+                    encoding='utf-8').read()
+        assert text.count(se.EDGE_HDR) == 1
+        assert 'min_diff' not in text, "Save pinned a knob nobody saved"
+        assert se.ANCHOR_HDR in text          # the anchor block survives
+
+        # the run is stamped now: a kept tracker row is this estimator's
+        # and stays (re-scaled to the anchor, as before)
+        app.run['rows'][i2].update({'active_area_px': '15000',
+                                    'notes': 'edge:disc-fit conf 0.93'})
+        app.save()
+        said = mb.asked[-1][1]
+        assert 'BEFORE the 2026-10-02' not in said, said
+        assert "1 keep the previous pass's px" in said, said
+        with open(csv_path, newline='', encoding='utf-8-sig') as f:
+            saved = list(csv.DictReader(f))
+        assert saved[2]['active_area_px'] == '15000'
+        assert saved[2]['notes'] == 'edge:disc-fit conf 0.93'
+        assert se.load_stamp(run)['area_estimator'] == se.AREA_ESTIMATOR
+
+        # a later session that saves WITHOUT a detection pass (a
+        # trace-only Save) keeps every row, and leaves the stamp and the
+        # reference recorded in it exactly as they were
+        before = se.load_stamp(run)
+        assert 'rest_fit_ratio' in before
+        app2 = gui.EdgeReviewApp(root, path=run)
+        app2.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        assert not app2.cands_all
+        app2.save()
+        assert 'BEFORE the 2026-10-02' not in mb.asked[-1][1]
+        assert se.load_stamp(run) == before
+        with open(csv_path, newline='', encoding='utf-8-sig') as f:
+            assert list(csv.DictReader(f))[2]['active_area_px'] == '15000'
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_0723_era_run_saves_end_to_end():
     """audit 2026-08-05 (mutation finding): the 14-column-era compat
     branch in save() never executed under any test, and without it a

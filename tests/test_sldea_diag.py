@@ -313,6 +313,74 @@ def test_analyze_reports_localization_and_scale_context():
     assert _os.path.exists(png)
 
 
+def _ink_run(dirpath):
+    """A run the boundary tracker can work on: a dark ink disc (r=70) on
+    paper, photographed at rest three times (baseline, 0.25 kV post and
+    pre) and twice at 3 kV, grown to r=76 with a rippled interior."""
+    import csv
+    import cv2
+    frames = _os.path.join(dirpath, 'frames')
+    _os.makedirs(frames, exist_ok=True)
+    yy, xx = np.mgrid[0:360, 0:640]
+    rows = []
+    specs = (('baseline', 0.0, 70, False), ('post-ramp', 0.25, 70, False),
+             ('pre-ramp', 0.25, 70, False), ('post-ramp', 3.0, 76, True),
+             ('pre-ramp', 3.0, 76, True))
+    for k, (tag, kv, r, ripple) in enumerate(specs):
+        img = np.full((360, 640), 190.0, np.float32)
+        disc = (xx - 320) ** 2 + (yy - 180) ** 2 <= r * r
+        img[disc] = 172.0
+        if ripple:
+            img[disc] += 6.0 * np.sin((xx[disc] + yy[disc]) / 2.5)
+        img += np.random.default_rng(40 + k).normal(0, 1.5, img.shape)
+        fn = f'SLDEA_s{k:02d}_{kv:05.2f}kV_{tag}.png'
+        cv2.imwrite(_os.path.join(frames, fn),
+                    np.clip(img, 0, 255).astype(np.uint8))
+        rows.append({'step': (k + 1) // 2, 'tag': tag, 'nominal_kV': kv,
+                     'frame_file': fn})
+    with open(_os.path.join(dirpath, 'data.csv'), 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=['step', 'tag', 'nominal_kV',
+                                          'frame_file'])
+        w.writeheader()
+        w.writerows(rows)
+    with open(_os.path.join(dirpath, 'setup.txt'), 'w') as f:
+        f.write("SLDEA Test -- synthetic\nDEA nominal diameter: 16 mm\n")
+    return dirpath
+
+
+def test_report_states_what_the_tracker_reads_on_the_resting_disc():
+    """Since 2026-10-02 a disc-fit area is the tracker's ellipse divided
+    by what the same tracker reads on the run's quiet frames. The
+    diagnostic has to show that divisor and how many frames it rests on,
+    and has to quote the areas AFTER the run-level pass moved them onto
+    it: the per-frame number alone is on a one-frame reference."""
+    root = tempfile.mkdtemp(prefix='diag_rest_')
+    d = sd.analyze(_ink_run(_os.path.join(root, 'SLDEA_k')))
+    rest = d['rest_reference']
+    assert rest and rest['n'] == 3, rest
+    assert abs(rest['k'] - 1.0) < 0.02, rest        # a round disc
+    assert rest['sd_pct'] is not None and rest['sd_pct'] < 1.5, rest
+    a0 = d['baseline_disc']['area_px']
+    by_kv = {}
+    for p in d['frames']:
+        by_kv.setdefault(p['kv'], []).append(p)
+    assert all(p['method'] == 'disc-fit' for p in by_kv[0.25] + by_kv[3.0])
+    for p in by_kv[0.25]:
+        assert abs(p['area_px'] / a0 - 1.0) < 0.015, p['area_px'] / a0
+    for p in by_kv[3.0]:
+        assert abs(p['area_px'] / a0 - (76 / 70) ** 2) < 0.03, \
+            p['area_px'] / a0
+    text = sd.report(d)
+    assert 'tracker at rest : reads' in text
+    assert 'median of 3 quiet frames at 0-0.5 kV' in text
+    text.encode('ascii')
+    # no resting disc, no line: nothing is claimed about a tracker
+    # that never ran
+    bare = sd.report(sd.analyze(sd._synth_run(
+        _os.path.join(root, 'SLDEA_w'), 'wrinkle')))
+    assert 'tracker at rest' not in bare
+
+
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count

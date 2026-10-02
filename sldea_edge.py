@@ -28,10 +28,21 @@ Since 2026-07-29 the primary channel is the BOUNDARY TRACKER
 (baseline_disc, radial rays + robust circle fit), and each frame's
 active area is the ink edge of that known object, tracked by rays and a
 robust ellipse — the full responding disc, leads and the passive
-wrinkle ring excluded, with a real 85% CI on area from the edge
-scatter. Gated frames with a known disc report 'resting' instead of an
-empty row. Same-landing pair agreement and channel hysteresis are
+wrinkle ring excluded, with an edge-scatter figure on area (ci85_pct;
+not a measured confidence interval, see _disc_fit_candidate). Gated
+frames with a known disc report 'resting' instead of an
+empty row (since 2026-10-02 only where the tracker cannot measure
+them). Same-landing pair agreement and channel hysteresis are
 folded into confidence (reconcile_pairs / prev_method).
+
+Since 2026-10-02 a 'disc-fit' area is reported ON THE RESTING-DISC
+BASIS (area estimator 2): the fitted ellipse's area divided by what the
+same tracker reads on the run's own quiet frames (baseline and the
+0-0.5 kV snapshots), times the baseline_disc circle area. A0 was a
+circle and A(V) an ellipse extrapolated across the lead sectors, and on
+the same resting frame the two disagreed by -0.4 to +7.4 % (run
+specific), which put a step into every saved A/A0. See rest_fit_ratio /
+rest_reference and SLDEA_HANDOFF.md 2026-10-02.
 
 A note on 'conf': it is a review-ordering score — the strength of
 internally consistent evidence — NOT a calibrated probability that the
@@ -107,6 +118,28 @@ DEFAULT_SETTINGS = {
 }
 _NUM = r'[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?'
 
+# Which definition of area_px the detector reports (2026-10-02).
+#   1 = a 'disc-fit' row is the raw fitted-ellipse area, while A0 and
+#       every 'resting' row are the baseline_disc circle (everything
+#       saved before 2026-10-02; no stamp in setup.txt).
+#   2 = a 'disc-fit' row is the fitted-ellipse area on the resting-disc
+#       basis (see rest_reference): one functional top and bottom.
+# The two differ by a run-specific factor (0.9965 to 1.074 on the
+# campaign runs), so rows of the two kinds must never share a CSV.
+AREA_ESTIMATOR = 2
+# Result stamps: facts about the numbers Edge Review's Save wrote into
+# data.csv, kept in the Edge Detection settings block beside the knobs.
+# They are NOT settings: load_settings never returns them (so nothing
+# can tune them), save_settings carries them over untouched unless a
+# Save hands it new ones, and load_stamp reads them back.
+STAMP_KEYS = ('area_estimator', 'rest_fit_ratio', 'rest_fit_frames',
+              'rest_fit_sd_pct')
+# Frames at or below this nominal kV, before the first landing above
+# it, are the run's QUIET frames: the resting reference is the tracker's
+# own reading of them. 0.5, not "every frame labelled resting": resting
+# labels run to 2.5 kV, where the disc has really grown 1 to 3 %.
+REST_REF_MAX_KV = 0.5
+
 
 # ---------------------------------------------------------------------------
 # settings <-> setup.txt
@@ -138,14 +171,71 @@ def load_settings(rundir):
     return s
 
 
-def save_settings(rundir, settings):
+def _block_lines(text):
+    """-> (knob lines, stamp dict) of the edge-settings section in
+    `text` ('' / {} when there is none). Knob lines come back as the
+    'key: value' text they were written as, in file order."""
+    knobs, stamp = [], {}
+    if EDGE_HDR not in text:
+        return knobs, stamp
+    for line in text.split(EDGE_HDR, 1)[1].splitlines():
+        mm = re.match(r'\s*([a-z_]+)\s*:\s*(' + _NUM + r')\s*$', line)
+        if not mm:
+            continue
+        if mm.group(1) in STAMP_KEYS:
+            stamp[mm.group(1)] = float(mm.group(2))
+        elif mm.group(1) in DEFAULT_SETTINGS:
+            knobs.append(f"{mm.group(1)}: {mm.group(2)}")
+    return knobs, stamp
+
+
+def load_stamp(rundir):
+    """The result stamps Edge Review's Save recorded for this run's
+    data.csv -> {key: float} over STAMP_KEYS, {} when there are none.
+
+    No 'area_estimator' key means the areas on disk (if any) were written
+    before 2026-10-02, i.e. by estimator 1: raw ellipse areas on
+    'disc-fit' rows against a circle A0. Same tolerant read as
+    load_settings."""
+    path = os.path.join(rundir, 'setup.txt')
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            text = f.read()
+    except OSError:
+        return {}
+    return _block_lines(text)[1]
+
+
+def estimator_stamp(rest):
+    """The stamps a Save writes for results measured against `rest`
+    (rest_reference's answer, or None when the run has no reference).
+    The spread is left out below three frames rather than written as 0:
+    a single fit has no spread, and 0 would read as 'perfect'."""
+    out = {'area_estimator': AREA_ESTIMATOR}
+    if rest and rest.get('k'):
+        out['rest_fit_ratio'] = round(float(rest['k']), 5)
+        out['rest_fit_frames'] = int(rest.get('n') or 1)
+        if rest.get('sd_pct') is not None:
+            out['rest_fit_sd_pct'] = round(float(rest['sd_pct']), 3)
+    return out
+
+
+def save_settings(rundir, settings, stamp=None):
     """Append/replace the edge-settings section in the run's setup.txt.
 
     Reads and writes UTF-8 with errors='replace' — the bare locale-codec
     open here carried the same UnicodeDecodeError hazard load_settings
     was hardened against, and a cp1252 WRITE of any replacement char
     raised right back out (audit 2026-08-05). Preserves the scale-anchor
-    block (save_scale_anchor), which sits before this section."""
+    block (save_scale_anchor), which sits before this section.
+
+    `stamp` (2026-10-02): the result stamps (STAMP_KEYS) of the Save
+    that wrote data.csv. Given, they REPLACE the stamps on file; None
+    (the tuner, Advanced) carries the ones on file over untouched --
+    retuning a knob does not change what estimator the saved areas came
+    from. `settings` None keeps the knob lines on file exactly as they
+    are (none, on a run nobody tuned): Edge Review's Save records its
+    stamp without pinning knobs the operator never chose to save."""
     path = os.path.join(rundir, 'setup.txt')
     try:
         with open(path, encoding='utf-8', errors='replace') as f:
@@ -153,9 +243,16 @@ def save_settings(rundir, settings):
     except OSError:
         text = ''
     text, anchor = _split_anchor(text)
+    old_knobs, old_stamp = _block_lines(text)
     if EDGE_HDR in text:
         text = text.split(EDGE_HDR, 1)[0].rstrip() + '\n'
-    lines = [EDGE_HDR] + [f"{k}: {settings[k]:g}" for k in DEFAULT_SETTINGS]
+    if stamp is None:
+        stamp = old_stamp
+    lines = [EDGE_HDR] + (
+        old_knobs if settings is None
+        else [f"{k}: {settings[k]:g}" for k in DEFAULT_SETTINGS]) + [
+        f"{k}: {float(stamp[k]):g}" for k in STAMP_KEYS
+        if stamp.get(k) is not None]
     # Atomic (tmp + replace): the in-place truncate used to destroy the
     # run's only metadata record on a mid-write NAS failure (audit
     # 2026-07-25).
@@ -2134,10 +2231,22 @@ def _disc_fit_candidate(prep, settings, ref, assume_responding=False):
     that survives is trimmed by the robust ellipse fit. Area comes from
     the FITTED shape, not a pixel blob -- no merge-close area steps.
 
-    spread_pct on this candidate is the fit's own 85% confidence
-    interval on area (percent): the cross-tier area spread it replaces
-    measured threshold sensitivity, and for a boundary fit the honest
-    analogue is the measurement's own dispersion."""
+    spread_pct on this candidate is ci85_pct, the fit's own edge-scatter
+    figure on area (percent): 1.44 * 2 * 1.4826 * median|radial
+    residual| / sqrt(n rays) / r_eq. The cross-tier area spread it
+    replaces measured threshold sensitivity, and for a boundary fit the
+    analogue is the measurement's own dispersion. It is NOT a measured
+    confidence interval (2026-10-02): it treats the rays as independent
+    and the shape as known, and on quiet frames (0-0.5 kV) the
+    frame-to-frame SD of this fit is 0.2 to 1.5 % against a ci85 of 0.2
+    to 0.4 %. It also describes this frame's fit only: the resting
+    reference the area is divided by (rest_reference) has its own
+    scatter, recorded per run as rest_fit_sd_pct.
+
+    The area returned HERE is the raw ellipse, pi*a*b, at the detector's
+    scale. candidates() puts it on the resting-disc basis before anyone
+    reads it (apply_rest_reference); the raw value stays on the
+    candidate as fit_area_px."""
     import cv2
     if ref is None:
         return None
@@ -2324,7 +2433,11 @@ def _disc_fit_candidate(prep, settings, ref, assume_responding=False):
             'contour': np.stack([ex, ey], axis=1),
             'contrast': round(contrast, 3), 'conf_own': round(conf, 3),
             'ci85_pct': round(float(ci85), 2), 'n_edge': int(len(pin)),
-            'arc_cov': round(cov, 2)}
+            'arc_cov': round(cov, 2),
+            # how much of the outline the tracker could look at: degrees
+            # of azimuth NOT blocked by the strips and leads. The rest
+            # is carried by the ellipse, unmeasured.
+            'open_deg': int(open_sectors)}
 
 
 def _resting_candidate(prep, settings, ref):
@@ -2334,7 +2447,13 @@ def _resting_candidate(prep, settings, ref):
     resting area' -- not an empty row. Confidence grows with the margin
     below the gate (a frame at half the gate is more certainly unchanged
     than one brushing it). Low-kV frames then auto-accept with a real
-    area instead of queueing for review over nothing."""
+    area instead of queueing for review over nothing.
+
+    Since 2026-10-02 this claim is the fallback, not the first answer:
+    candidates() lets the tracker measure every gated frame it can fit
+    and ranks an acceptable measurement above the claim. The claim is
+    what the row reports on the baseline frame itself, and wherever the
+    tracker refuses, fails its audit or scores under accept_conf."""
     if ref is None:
         return None
     p99 = float(np.percentile(prep['sub'], 99))
@@ -2440,7 +2559,93 @@ def _apply_audit_gates(cand, aud, settings):
     return capped
 
 
-def _resting_refit(prep, settings, ref):
+_REST_FIT_CACHE = {}
+
+
+def rest_fit_ratio(base_gray, settings):
+    """What the boundary tracker itself reads on the RESTING disc:
+    (its fitted-ellipse area on the baseline frame) / (the baseline_disc
+    circle area). None when either fit refuses.
+
+    Why it exists (2026-10-02): A0 is the baseline_disc CIRCLE, every
+    'disc-fit' row is an ELLIPSE fitted to the rays in foil-free sectors
+    and extrapolated across the blocked lead sectors. On the same 0 kV
+    frame the two read 1.074 (DOT_P3_1), 1.030, 1.031, 1.022, 1.006 and
+    0.9965 apart on the six campaign runs, so A/A0 stepped by that much
+    where 'resting' handed over to 'disc-fit'. Dividing a disc-fit area
+    by this ratio makes numerator and denominator one functional.
+
+    This is the single-frame reference candidates() can reach on its
+    own. One frame is noisy by about 1 % (P3_2: 1.030 on the baseline,
+    1.018 as the median of five quiet frames), so a run-level pass
+    replaces it with a multi-frame median (rest_reference, called from
+    reconcile_pairs). Cached like baseline_disc and on the same key: the
+    self-fit depends on the baseline and on nothing baseline_disc does
+    not already depend on."""
+    key = _disc_key(base_gray, settings)
+    if key in _REST_FIT_CACHE:
+        return _REST_FIT_CACHE[key]
+    k = None
+    ref = baseline_disc(base_gray, settings)
+    if ref is not None and ref.get('area_px'):
+        prep = prepared_diff(base_gray, base_gray, settings)
+        c = _disc_fit_candidate(prep, settings, ref, assume_responding=True)
+        if c is not None:
+            f = prep['f']
+            k = float(c['area_px']) / (f * f) / float(ref['area_px'])
+    if len(_REST_FIT_CACHE) >= 4:
+        _REST_FIT_CACHE.pop(next(iter(_REST_FIT_CACHE)))
+    _REST_FIT_CACHE[key] = k
+    return k
+
+
+def apply_rest_reference(cands, rest):
+    """Put every tracker ('disc-fit') candidate in `cands` on the
+    resting-disc basis, in place:
+
+        area_px = fit_area_px / rest['k']
+
+    fit_area_px is the raw area of the fitted ellipse (what the drawn
+    contour encloses) and rest['k'] is what the same tracker reads on
+    the resting disc relative to the baseline_disc circle. A resting
+    disc therefore reports the circle area, pi*r0^2, whichever of the
+    two code paths measured it; the px-to-mm scale and the baseline row
+    stay on the circle. diam_px follows as the equivalent diameter. The
+    contour, centre and audit are NOT touched: they are where the
+    tracker found the ink edge.
+
+    Tagged on the candidate: rest_k (the divisor) and rest_n (how many
+    quiet frames it is the median of; 1 = the baseline frame alone).
+    Always derived from fit_area_px, so applying it twice, or again
+    with a better reference, is safe.
+
+    `rest` None = the tracker could not read the resting disc on any
+    quiet frame. There is then no honest way to compare this ellipse
+    with the circle A0: the raw area is reported, tagged
+    rest_ref_missing, and needs_review sends it to a human whatever its
+    confidence. The other way out, fitting a circle to the activated
+    frame as well, is the circle prior candidates() rejected on
+    2026-07-23, and it stays rejected."""
+    k = float(rest['k']) if rest and rest.get('k') else None
+    for c in cands or []:
+        if c.get('method') != 'disc-fit' or c.get('fit_area_px') is None:
+            continue
+        raw = float(c['fit_area_px'])
+        if k:
+            c['area_px'] = raw / k
+            c['rest_k'] = k
+            c['rest_n'] = int(rest.get('n') or 1)
+            c.pop('rest_ref_missing', None)
+        else:
+            c['area_px'] = raw
+            c.pop('rest_k', None)
+            c.pop('rest_n', None)
+            c['rest_ref_missing'] = True
+        c['diam_px'] = float(2.0 * np.sqrt(c['area_px'] / np.pi))
+    return cands
+
+
+def _resting_refit(prep, settings, ref, fit=None):
     """The fitter run on a bias-tripped gated frame (2026-07-30,
     calibration round 4): 'resting' claimed the baseline circle while
     the audit measured the ink step off it -- the disc creeping out
@@ -2452,8 +2657,13 @@ def _resting_refit(prep, settings, ref):
     the ring interior -- reads ~0 here and is NOT filtered on; the
     fit's evidence is its arc coverage, step contrast and residual,
     plus its own audit, applied by the caller. Post-processing mirrors
-    the main candidates() path exactly."""
-    c = _disc_fit_candidate(prep, settings, ref, assume_responding=True)
+    the main candidates() path exactly.
+
+    `fit`: the assume_responding fit of this frame when the caller has
+    it already (candidates() fits every gated frame once for the resting
+    reference); the same call is made here when it is not given."""
+    c = dict(fit) if fit is not None else _disc_fit_candidate(
+        prep, settings, ref, assume_responding=True)
     if c is None:
         return None
     f = prep['f']
@@ -2510,6 +2720,24 @@ def candidates(base_gray, img_gray, settings, prev_method=None):
     when the audit measures the ink step OFF that circle (audit_bias),
     the fitter re-measures the boundary (resting-refit) instead of
     letting the stale claim stand.
+
+    One area functional (2026-10-02): a 'disc-fit' area is returned on
+    the resting-disc basis, fit_area_px / rest_k, where rest_k is what
+    the tracker itself reads on the resting disc over the baseline_disc
+    circle (apply_rest_reference). Called on its own (the tuner, one
+    frame of the diagnostic) this function uses the baseline frame's
+    fit (rest_fit_ratio, rest_n 1); reconcile_pairs then replaces it
+    with the run's multi-frame median. With no reference at all the
+    tracker's area stays raw and is tagged rest_ref_missing: it can be
+    chosen by a human but never auto-accepts.
+
+    Gated frames, same date: the tracker fits every gated frame it can
+    (not only a bias-tripped one), and a fit that would auto-accept on
+    its own outranks the 'resting' claim, which stays as runner-up. The
+    claim still states the circle area exactly and carries fit_ratio,
+    the tracker's reading of its frame over the circle, which is what
+    the run's reference is the median of. The baseline frame itself is
+    never refit; a frame the tracker refuses keeps the claim alone.
 
     Honest no-change gate: if the ROI diff's 99th percentile is below
     min_diff, the intensity tiers return nothing (low-kV frames really
@@ -2581,11 +2809,22 @@ def candidates(base_gray, img_gray, settings, prev_method=None):
             out.append(dfc)
         else:
             weak.append(dfc)
+    rest_fit = None
     if gated and not out and not weak:
         # no change, and the resting disc is known: state the resting
         # area instead of an empty row (see _resting_candidate)
         rc = _resting_candidate(prep, settings, ref)
         if rc is not None:
+            # ... and let the tracker read this frame too (2026-10-02).
+            # Its reading is kept on the claim as fit_ratio, because the
+            # quiet frames are where the run's resting reference comes
+            # from (rest_reference), and the same fit competes with the
+            # claim below.
+            rest_fit = _disc_fit_candidate(prep, settings, ref,
+                                           assume_responding=True)
+            if rest_fit is not None and ref.get('area_px'):
+                rc['fit_ratio'] = (float(rest_fit['area_px']) / (f * f)
+                                   / float(ref['area_px']))
             out.append(rc)
     if not out and weak:
         # Nothing passed the fill filter, but SOMETHING changed (diff gate
@@ -2714,27 +2953,56 @@ def candidates(base_gray, img_gray, settings, prev_method=None):
     if best['method'] in ('disc-fit', 'resting'):
         aud = audit_boundary(prep, best, settings)
         if aud is not None:
-            capped = _apply_audit_gates(best, aud, settings)
-            # Resting-refit (2026-07-30, calibration round 4): a bias-
-            # tripped 'resting' claim means the ink step is measurably
-            # off the claimed circle -- operator-verified at 2.0 kV
-            # (+4.0/+6.5% area beyond the trace's own definitional
-            # baseline, matching the audit's predicted creep). The
-            # fitter tracks that ink step directly, so measure the
-            # boundary instead of asserting it. The refit is audited
-            # like any winner and takes the frame only on its own
-            # merits; the capped resting claim stays as runner-up for
-            # the human, and a refused or audit-dirty fit changes
-            # nothing.
-            if (capped and best['method'] == 'resting'
-                    and best.get('audit_bias') is not None):
-                rf = _resting_refit(prep, settings, ref)
-                if rf is not None:
-                    aud2 = audit_boundary(prep, rf, settings)
-                    if aud2 is not None:
-                        _apply_audit_gates(rf, aud2, settings)
-                        out.append(rf)
-                        out.sort(key=lambda c: c['conf'], reverse=True)
+            _apply_audit_gates(best, aud, settings)
+    # Resting-refit (2026-07-30, calibration round 4): a bias-tripped
+    # 'resting' claim means the ink step is measurably off the claimed
+    # circle (operator-verified at 2.0 kV). The fitter tracks that ink
+    # step directly, so measure the boundary instead of asserting it.
+    #
+    # Since 2026-10-02 the tracker's reading competes on EVERY gated
+    # frame it can fit, not only after a bias trip. Until the tracker
+    # and A0 were one functional that was impossible (the fit read 0 to
+    # 7 % above the circle on a disc that had not moved). Now it can
+    # say what the claim only assumed: with the claim kept, the six
+    # campaign runs had 80 'resting' rows above 0 kV, per run a mean
+    # 0.3 to 0.75 % under a fit-free edge measurement (worst row 2.1 %,
+    # DOT_P3_1 at 2.5 kV; one row in four more than 1 %), and which
+    # rows were claimed and which measured hung on a 3 px audit gate
+    # that OpenCV 4.13 and 5.0 decide differently. The price is the
+    # tracker's own scatter on rows that used to read exactly A0:
+    # 0.1 to 1.5 % SD per run on the 0-0.5 kV frames. So:
+    # a fit that would auto-accept on its own merits (audited, conf at
+    # or above accept_conf) outranks the claim, by the same rule that
+    # keeps a changed patch from outranking the boundary. The claim
+    # stays as the runner-up for the human. A refused, unaudited,
+    # audit-capped or low-confidence fit changes nothing: the claim
+    # stands exactly as before. The baseline frame itself (an all-zero
+    # difference) is never refit: it is the resting disc by definition,
+    # and its area is the circle the px-to-mm scale is anchored on.
+    if (best['method'] == 'resting' and rest_fit is not None
+            and sub.any()):
+        rf = _resting_refit(prep, settings, ref, fit=rest_fit)
+        aud2 = audit_boundary(prep, rf, settings) if rf is not None \
+            else None
+        if aud2 is not None:
+            _apply_audit_gates(rf, aud2, settings)
+            if (rf['conf'] >= float(settings.get('accept_conf', 0.75))
+                    and best['conf'] >= rf['conf']):
+                best['conf'] = round(max(0.0, rf['conf'] - 0.01), 3)
+                best['capped_by'] = 'disc-fit'
+            out.append(rf)
+            out.sort(key=lambda c: c['conf'], reverse=True)
+    # LAST, so ranking, containment and the audit above all worked on the
+    # geometry the tracker actually found: put every tracker area on the
+    # resting-disc basis (one functional for A and A0, 2026-10-02).
+    fits = [c for c in out if c['method'] == 'disc-fit']
+    if fits:
+        for c in fits:
+            c['fit_area_px'] = float(c['area_px'])
+            if ref is not None and ref.get('area_px'):
+                c['fit_ratio'] = c['fit_area_px'] / float(ref['area_px'])
+        k0 = rest_fit_ratio(base_gray, settings)
+        apply_rest_reference(fits, {'k': k0, 'n': 1} if k0 else None)
     return out[:3]
 
 
@@ -2745,6 +3013,10 @@ def needs_review(cands, settings):
     if not cands:
         return True
     if cands[0].get('fallback'):
+        return True
+    if cands[0].get('rest_ref_missing'):
+        # a tracker ellipse with no resting reference is not on the
+        # basis A0 is on (apply_rest_reference): never auto-accepted
         return True
     if cands[0]['conf'] < float(settings['accept_conf']):
         return True
@@ -3002,8 +3274,60 @@ def wrinkle_onset(rows, results, settings):
     return onset, annos
 
 
+def rest_reference(rows, cands_by_idx):
+    """The run's resting reference for the tracker -> {'k', 'n',
+    'sd_pct'} or None.
+
+    k is the MEDIAN, over the run's quiet frames, of fit_ratio: the
+    tracker's fitted-ellipse area on that frame over the baseline_disc
+    circle area. candidates() leaves fit_ratio on every tracker fit and
+    on every 'resting' candidate (whose gated frame it fits for exactly
+    this purpose). Quiet = nominal kV at or below REST_REF_MAX_KV and
+    before the first landing above it, so the falling leg of an up/down
+    run and the frames after a breakdown never enter. n is how many
+    frames gave a fit; sd_pct their sample SD in percent of k, None
+    below three frames.
+
+    Fewer frames: with one or two the median is still used (a run
+    stepped in 1 kV has only its baseline frame) and n says so. With
+    NONE (the quiet rows are not in `cands_by_idx`, or the tracker
+    refused all of them) the single-frame reference candidates()
+    already applied is returned as it stands, and None when there is
+    not even that."""
+    vals = []
+    for i, row in enumerate(rows):
+        kv = _row_kv(row)
+        if kv is None:
+            continue
+        if abs(kv) > REST_REF_MAX_KV + 1e-9:
+            break
+        if str(row.get('tag') or '').startswith('breakdown'):
+            continue
+        for c in cands_by_idx.get(i) or []:
+            if c.get('fit_ratio'):
+                vals.append(float(c['fit_ratio']))
+                break
+    if vals:
+        k = float(np.median(vals))
+        sd = (100.0 * float(np.std(vals, ddof=1)) / k
+              if len(vals) >= 3 else None)
+        return {'k': k, 'n': len(vals), 'sd_pct': sd}
+    for cl in cands_by_idx.values():
+        for c in cl or []:
+            if c.get('method') == 'disc-fit' and c.get('rest_k'):
+                return {'k': float(c['rest_k']),
+                        'n': int(c.get('rest_n') or 1), 'sd_pct': None}
+    return None
+
+
 def reconcile_pairs(rows, cands_by_idx, settings):
     """Fold pair agreement into confidence, BEFORE auto-accept.
+
+    First (2026-10-02) every tracker candidate of the run is put on the
+    run's resting reference (rest_reference: the multi-frame median that
+    replaces the single baseline-frame one candidates() could reach), so
+    the areas compared below, and everything accepted after, are on one
+    basis. A run whose candidates carry no tracker fit is untouched.
 
     The two snapshots of one landing are independent detections of one
     physical state -- the strongest per-frame evidence the run offers.
@@ -3035,6 +3359,9 @@ def reconcile_pairs(rows, cands_by_idx, settings):
     disagreement and was capped into review. On a single sweep each kV
     is one landing, so the pairs -- and every result -- are unchanged."""
     acc = float(settings.get('accept_conf', 0.75))
+    rest = rest_reference(rows, cands_by_idx)
+    for cl in cands_by_idx.values():
+        apply_rest_reference(cl, rest)
     by_landing = {}
     for i, pos in enumerate(sweep_landings(rows)):
         cl = cands_by_idx.get(i)
@@ -3591,7 +3918,37 @@ def _num(v):
     return f if np.isfinite(f) else None
 
 
-def apply_results(rows, results, scale, flags, annos=None):
+STALE_ESTIMATOR_NOTE = ('not kept: measured with the old area method '
+                        '(before 2026-10-02) - re-review this frame')
+
+
+def stale_estimator_rows(stamp, rows, results):
+    """Row indices whose saved tracker area this Save must not keep.
+
+    A row that is NOT in `results` (still in the review queue at Save)
+    normally keeps the previous pass's px. That is only safe while the
+    previous pass and this one mean the same thing by area_px. `stamp`
+    is load_stamp() of the run BEFORE this Save: when its area_estimator
+    is not the current one (absent = estimator 1, everything saved
+    before 2026-10-02), a kept 'edge:disc-fit' row is a raw ellipse
+    area, a run-specific 0 to 7 % away from the rows this Save writes.
+    Those rows are returned; apply_results blanks them and says why, so
+    one data.csv never holds two estimators. Rows of every other method
+    ('resting', a hand trace, the blob tiers) mean the same under both
+    estimators and are left alone."""
+    try:
+        ver = int(float((stamp or {}).get('area_estimator') or 1))
+    except (TypeError, ValueError):
+        ver = 1
+    if ver == AREA_ESTIMATOR:
+        return []
+    return [i for i, row in enumerate(rows)
+            if i not in results
+            and 'edge:disc-fit' in (row.get('notes') or '')
+            and (row.get('active_area_px') or '').strip()]
+
+
+def apply_results(rows, results, scale, flags, annos=None, stale=()):
     """Fill the active_area_* / wrinkle_idx / notes columns in `rows`
     (in place). `annos` are informational notes (e.g. wrinkle-mode) appended
     alongside the breakdown flags but never treated as breakdown.
@@ -3611,11 +3968,24 @@ def apply_results(rows, results, scale, flags, annos=None):
     active_area_mm2 column with nothing marking the boundary — a 56.1%
     artificial area step on the real-data repro, larger than the 35%
     collapse threshold. A stale mm² whose px is missing (pre-2026-07-25
-    bug era) is blanked rather than left on a foreign scale."""
+    bug era) is blanked rather than left on a foreign scale.
+
+    ONE ESTIMATOR PER SAVE (2026-10-02): `stale` (stale_estimator_rows)
+    names kept rows whose px an older area estimator wrote. They are
+    blanked like a rejected row, with STALE_ESTIMATOR_NOTE in place of
+    their old note, instead of being re-scaled next to rows that mean
+    something else by area. data.csv.bak still holds the old values."""
     annos = annos or {}
+    stale = set(stale or ())
     for i, row in enumerate(rows):
         r = results.get(i)
-        if r:
+        if i in stale and i not in results:
+            for col in ('active_area_px', 'active_area_mm2',
+                        'active_diam_mm', 'wrinkle_idx'):
+                if col in row or col == 'active_area_px':
+                    row[col] = ''
+            note = STALE_ESTIMATOR_NOTE
+        elif r:
             row['active_area_px'] = f"{r['area_px']:.0f}"
             if scale:
                 row['active_area_mm2'] = f"{r['area_px'] * scale * scale:.3f}"

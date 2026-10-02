@@ -13,6 +13,211 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## A and A0 are one estimator: tracker areas are reported on the resting-disc basis (2026-10-02)
+
+**TL;DR:** A0 was measured with a circle fit and every `disc-fit` area
+with an ellipse, and on the same resting disc the two disagreed by up to
+7 %, so saved A/A0 curves jumped where "resting" rows handed over to
+"disc-fit" rows (DOT_P3_1: 1.000 at 2.0 kV, 1.098 at 2.75 kV). Now a
+`disc-fit` area is divided by what the same tracker reads on the run's
+own quiet frames, so a resting disc reads A0 either way, and low-voltage
+frames are measured instead of assumed unchanged. Areas saved before
+today use the old estimator: reprocess them, never mix (Save now stamps
+`area_estimator: 2` in `setup.txt`).
+
+**Observation (scientific review 2026-10-02, findings S1 to S4 and S15,
+re-measured here with the harness under the pinned OpenCV 4.13).**
+
+- Two estimators. `baseline_disc` (robust circle) gave A0, the baseline
+  row and every `resting` row. `_disc_fit_candidate` (robust ellipse on
+  the rays in foil-free sectors, extrapolated across the blocked lead
+  sectors) gave every `disc-fit` row. Nothing compared the two.
+- Same frame, two answers. The tracker's ellipse over the circle, on the
+  baseline frame itself (zero physical change): 1.0742 (DOT_P3_1), 1.0295
+  (P3_2), 1.0313 (P3_3), 1.0062 (P3_5), 1.0216 (P3_6), 0.9965 (104531);
+  retired runs 1.1470 (152205) and 0.9960 (233451).
+- The reviewers showed the edge POINTS agree (kept points sit at 0.998 to
+  1.008 r0 on quiet frames). The shape model differs: the ellipse
+  stretches along the lead axis, where no ray is measured.
+- The step is in the saved data. DOT_P3_1 `data.csv` holds 217438 px on
+  every saved row up to 2.0 kV and 238685 px at 2.75 kV. In the harness replay the
+  step at the hand-over was +8.76 % (DOT_P3_1, 2.0 kV), +5.13 % (P3_2),
+  +5.26 % (P3_3), +4.30 % (P3_5), +3.75 % (P3_6) and -0.54 % (104531).
+- Side effect: on DOT_P3_1 at 2.0 to 2.5 kV one snapshot of each pair won
+  as `resting` (1.000) and the other as a refit (1.088 to 1.097), so
+  `reconcile_pairs` read an 8 to 9 % mismatch and queued all six frames.
+- `resting` rows hid real growth (findings S35, S50). With the claim
+  kept, the six campaign runs had 80 `resting` rows above 0 kV. Against
+  a fit-free edge measurement they sat a mean 0.33 to 0.75 % low per run,
+  worst row 2.1 % (DOT_P3_1, 2.5 kV pre-ramp, the frame the operator
+  traced at 1.042 x A0), one row in four more than 1 %.
+
+**Decision.**
+
+1. **One functional.** A `disc-fit` candidate keeps its ellipse and its
+   contour, and reports `area_px = fit_area_px / rest_k`. `fit_area_px`
+   is the raw ellipse area. `rest_k` is the resting reference: the
+   tracker's own ellipse area on the resting disc, over the circle area.
+   A resting disc therefore reads A0 through either code path.
+2. **The reference is a median over quiet frames, by voltage.**
+   `rest_reference` takes the median of the tracker's reading over the
+   baseline frame and the snapshots at or below 0.5 kV that come before
+   the first landing above 0.5 kV. Not "frames labelled resting": those
+   run to 2.5 kV, where the disc has really grown 1 to 3 %. Not one
+   frame: a single fit is noisy by about 1 % (P3_2 reads 1.0295 on the
+   baseline and 1.0176 as the median of five).
+3. **Where it lives.** `candidates()` has no run context, so it applies
+   the baseline frame's own fit (`rest_fit_ratio`, cached like
+   `baseline_disc`). `reconcile_pairs`, which every run-level caller
+   already runs before accepting anything, replaces it with the run
+   median on every tracker candidate, runner-ups included. The tuner and
+   a single diagnostic frame keep the one-frame reference; the candidate
+   says which it got (`rest_n`).
+4. **Fewer frames.** With one or two quiet frames the median is still
+   used and the count is recorded. With none (Assctuator2, where the
+   tracker cannot fit at all, and SquareStack-1, where it refuses the
+   resting frames but fits four activated ones) there is no reference:
+   the raw ellipse is reported, tagged `rest_ref_missing`, and
+   `needs_review` never lets it auto-accept. No circle is fitted to an
+   activated frame (the circle prior stays rejected).
+5. **Gated frames are measured, not asserted.** The refit used to run
+   only after the 3 px audit-bias gate tripped. It could not run
+   everywhere, because the fit read up to 7 % over the circle on a disc
+   that had not moved. With one functional it can: the tracker fits
+   every gated frame, and a fit that would auto-accept on its own
+   (audited, conf at or above `accept_conf`) outranks the `resting`
+   claim, by the same rule that keeps a changed patch from outranking
+   the boundary. The claim stays as runner-up. It is still what the row
+   reports on the baseline frame itself (never refit: its area is the
+   circle the scale hangs on) and wherever the fit refuses, fails its
+   audit or scores low. On the six campaign runs every former `resting`
+   row above 0 kV is now measured.
+6. **The scale does not move.** px to mm stays on the `baseline_disc`
+   circle, the baseline row is still pi*r0^2, `suspect_old_scale` and
+   the nominal-diameter anchor are untouched, and the `data.csv` columns
+   are unchanged.
+7. **`spread_pct` on a `disc-fit` is unchanged in formula and corrected
+   in name.** It is `ci85_pct`, the fit's edge-scatter figure (1.44 x 2
+   x 1.4826 x median radial residual / sqrt(n rays) / r_eq). It is not a
+   measured confidence interval: on the quiet frames it reads 0.22 to
+   0.39 % while the fits themselves scatter 0.23 to 1.46 % (SD, per
+   run). It does not include the resting reference's own scatter, which
+   Save records per run as `rest_fit_sd_pct`.
+8. **Old and new numbers cannot share a file.** Save writes
+   `area_estimator: 2`, `rest_fit_ratio`, `rest_fit_frames` and (from
+   three frames) `rest_fit_sd_pct` into the Edge Detection block of
+   `setup.txt`, through `save_settings`, without touching the knob
+   lines. A run with no such stamp is estimator 1. On such a run an
+   unreviewed row that still holds an old `edge:disc-fit` area is
+   emptied at Save and marked for re-review (the Save dialog says how
+   many; `data.csv.bak` keeps the old values). `resting`, hand-trace and
+   patch-tier rows mean the same under both estimators and are kept.
+
+**What it does on the corpus** (harness replay, OpenCV 4.13, 16 runs,
+899 frames; "before" is `main` at `1eb85b2`):
+
+| Run | Tracker / circle: baseline frame, run median (5 frames), SD | A/A0 on the 0 to 0.5 kV frames: mean, SD | Step at the old hand-over: before, after | Peak A/A0: before, after | Fit-free at that frame (common-ray, half-height) |
+|---|---|---|---|---|---|
+| DOT_P3_1 | 1.0742, 1.0742, 1.06 % | 0.9962, 1.06 % | +8.76 %, +0.98 % (2.0 kV) | 1.630, 1.517 (6.0 kV) | 1.548, 1.523 |
+| P3_2 | 1.0295, 1.0176, 1.00 % | 1.0000, 0.86 % | +5.13 %, +1.37 % (1.25 kV) | 1.581, 1.553 (4.25 kV) | 1.574, 1.559 |
+| P3_3 | 1.0313, 1.0313, 0.23 % | 1.0004, 0.23 % | +5.26 %, +0.67 % (1.25 kV) | 1.608, 1.560 (4.5 kV) | 1.588, 1.532 |
+| P3_5 | 1.0062, 1.0098, 0.99 % | 1.0017, 0.96 % | +4.30 %, +1.58 % (1.25 kV) | 1.540, 1.525 (4.25 kV) | 1.569, 1.595 |
+| P3_6 | 1.0216, 1.0256, 0.24 % | 1.0006, 0.13 % | +3.75 %, +0.38 % (1.0 kV) | 1.521, 1.483 (4.0 kV) | 1.542, 1.524 |
+| 104531 | 0.9965, 0.9945, 1.46 % | 1.0052, 1.48 % | -0.54 %, +0.24 % (2.75 kV) | 1.048, 1.053 (4.75 kV) | 1.020, 1.016 |
+
+- Status counts: 472 auto, 328 review, 99 no-edge before; 478, 322, 99
+  after. The six new auto-accepts are DOT_P3_1 rows 15 to 20 (2.0 to
+  2.5 kV), whose 8 to 9 % "pair mismatch" was the estimator step. No row
+  lost its auto-accept, on any run.
+- DOT_P3_1 row 20 (2.5 kV pre-ramp): 1.000 x A0 before (`resting`, in
+  review), 221292 px = 1.018 x A0 now (auto). The operator's trace of
+  that frame is 226645 px = 1.042 x A0; the two fit-free series read
+  1.021 and 1.024 there.
+- Worst quiet frames: 0.978 (DOT_P3_1, 0.5 kV pre-ramp) and 1.032
+  (104531, 0.5 kV pre-ramp). That is the tracker's own frame-to-frame scatter,
+  now visible on rows that used to read exactly 1.000.
+- Detection time: about 10 % more (one extra fit per gated frame).
+
+**What is left in the numbers** (auto-accepted machine rows up to each
+run's peak, six campaign runs, against the reviewers' two fit-free
+series: the common-ray ratio and the half-height radius):
+
+| Band | n | vs common-ray: median, rms | vs half-height: median, rms |
+|---|---|---|---|
+| 0 to 0.5 kV | 24 | -0.08 %, 0.87 % | -0.11 %, 0.92 % |
+| 0.75 to 2 kV | 72 | -0.06 %, 0.70 % | -0.11 %, 0.79 % |
+| 2.25 to 4 kV | 94 | -0.29 %, 1.01 % | -0.32 %, 1.09 % |
+| 4.25 kV to peak | 28 | -1.15 %, 1.53 % | -0.23 %, 1.55 % |
+
+Before the change the same four bands had rms 0.24, 1.60, 2.97 and
+4.62 % against the common-ray series.
+
+- The ellipse/circle ratio is not constant as the disc grows (the
+  reviewers measured 7.8 % shrinking to 4.6 % on DOT_P3_1), so dividing
+  by the resting ratio over-corrects at large expansion. That is the
+  -1.15 % median near the peak. Per run near the peak, against the
+  common-ray series: DOT_P3_1 -0.95 %, P3_2 -1.64 %, P3_3 -1.77 %, P3_5
+  -2.16 %, 104531 +0.73 %; P3_6 at 2.25 to 4 kV -1.78 %. Worst single
+  rows: -3.8 % (P3_6) and +3.3 % (104531).
+- The size of the resting ratio does not predict the residual: P3_6
+  (1.026) is worse than DOT_P3_1 (1.074). So no gate was put on the
+  ratio. It is recorded per run for the reader to judge.
+- Retired 152205 reads 1.147 at rest (the ellipse runs to the foil
+  tab). Its quiet frames now read 1.000 +/- 0.18 %, but in the
+  reviewers' forced-fit table the rescaled ellipse sits about 8 % under
+  the common-ray series at 3.5 to 5 kV. That run stays retired.
+- Quiet-frame scatter is the tracker's, not the reference's: 0.13 to
+  1.48 % SD per run, with single-frame flips of 2 to 3 %. The
+  reference's own uncertainty is about 1.25 x SD / sqrt(5), 0.1 to
+  0.8 % per run, common to every `disc-fit` row of that run.
+
+**Measured and not taken.**
+
+- *Keep asserting `resting` (measured as a variant, same harness).*
+  Quiet frames read exactly 1.000 and the step at the old hand-over
+  falls to +0.6 to +3.3 % on the five P3 runs, real growth appearing
+  at once. Against the common-ray series the 80 claimed rows have rms
+  0.79 % (max 2.1 %, every run biased low) and the same rows measured
+  have rms 0.72 % (max 3.0 %, bias within 0.5 % and of either sign).
+  The error is the same size; measuring removes the one-sided bias,
+  the dead band, and the dependence on a
+  3 px gate that OpenCV 4.13 and 5.0 decide differently. With the claim
+  kept, DOT_P3_1 rows 15, 17 and 20 would newly auto-accept at 1.000
+  while their pair partners read 1.013 to 1.021.
+- *Reference from the baseline frame alone.* One fit, about 1 % noise,
+  and it is the frame exposed differently from the rest on 13 of 16
+  runs (finding S48).
+- *Reference over every `resting`-labelled frame.* Biases A0 high by
+  the growth those frames hide.
+- *Closing the lead arcs with the resting radius, or a circle fit on
+  activated frames.* Both are the circle prior on an activated shape.
+
+**Reprocessing saved runs.** In this data copy only DOT_P3_1 has saved
+areas (58 rows: 41 `disc-fit`, 16 `resting`, 1 hand trace). Open the run
+in Edge Review, reuse its anchor, run Detect, work the review queue,
+Save. The 41 old tracker rows either get re-measured or are emptied
+with a note. A quick look without re-review: an old `disc-fit` px
+divided by the run's `rest_fit_ratio` (DOT_P3_1: 1.0742) is the new
+number for the same fit. Do not write that into a CSV by hand. One
+thing to watch on DOT_P3_1: row 20 auto-accepts now, so a plain
+Detect and Save replaces its hand trace (226645 px) with the machine's
+221292 px unless the trace is staged again.
+
+**Not done here.** `sldea_plot` does not read the stamp yet, so it
+cannot warn when an unstamped run is plotted beside a stamped one. The
+tracker's frame-to-frame scatter (S24, S49), the 1.69x ceiling (S51)
+and the hand-trace convention (S13) are separate findings.
+
+**Tests.** `tests/test_sldea_edge.py`: a resting disc on a scene with a
+7.5 % ellipse/circle gap reads A0 through the tracker; a uniformly
+scaled disc reads the scale squared with the leads blocked; a bulge
+confined to a blocked lead sector leaves the area unchanged and the
+candidate states how much outline it saw (`open_deg`); no reference
+means review, not a guess; the reference is the median of the 0 to
+0.5 kV frames only; stamps round-trip and never become settings; an old
+tracker row is never kept beside new ones. Two existing tests pinned
+the old gated-frame behavior and were updated.
+
 ## A LIVE run locks the scope channels it reads, and the settings they share (2026-09-24)
 
 **TL;DR:** during a LIVE run, the Oscilloscope tab or a bench-profile load

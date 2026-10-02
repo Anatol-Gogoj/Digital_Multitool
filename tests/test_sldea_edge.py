@@ -1040,19 +1040,46 @@ def test_disc_fit_tracks_the_moving_ink_edge():
 
 
 def test_resting_candidate_states_the_known_area_on_gated_frames():
-    """A gated frame with a known resting disc is not 'nothing': the
-    honest measurement is that the area equals the resting area. It must
-    auto-accept -- low-kV frames used to queue for review over frames
-    that show no change at all."""
+    """A gated frame with a known resting disc is not 'nothing'. It must
+    auto-accept with a real area: low-kV frames used to queue for
+    review over frames that show no change at all.
+
+    Since 2026-10-02 that area is MEASURED when the tracker can fit the
+    frame (tracker and A0 are one functional now, so a disc that has
+    not moved reads A0 within the fit's noise), and the 'resting' claim
+    (area equals the resting area, exactly) is the runner-up. Where
+    the tracker refuses, the claim stands alone as it always did."""
     rng = np.random.default_rng(11)
     base = _bridged_scene(with_disc=True)
     img = np.clip(base + rng.normal(0, 1.0, base.shape), 0,
                   255).astype(np.float32)
     s = dict(se.DEFAULT_SETTINGS)
-    cands = se.candidates(base, img, s)
-    assert len(cands) == 1 and cands[0]['method'] == 'resting', cands
     ref = se.baseline_disc(base, s)
+    cands = se.candidates(base, img, s)
+    assert [c['method'] for c in cands] == ['disc-fit', 'resting'], cands
+    assert cands[0].get('resting_refit')
+    assert abs(cands[0]['area_px'] / ref['area_px'] - 1.0) < 0.01, \
+        cands[0]['area_px'] / ref['area_px']
+    assert cands[0]['conf'] >= 0.75
+    assert not se.needs_review(cands, s)
+    assert abs(cands[1]['area_px'] - ref['area_px']) < 1e-6
+    # the tracker refuses (pinned by refusing the assume_responding
+    # call): the claim alone, exact, auto-accepted, as before
+    orig = se._disc_fit_candidate
+
+    def refuse(prep, settings, ref, assume_responding=False):
+        if assume_responding:
+            return None
+        return orig(prep, settings, ref, assume_responding)
+
+    se._disc_fit_candidate = refuse
+    try:
+        cands = se.candidates(base, img, s)
+    finally:
+        se._disc_fit_candidate = orig
+    assert len(cands) == 1 and cands[0]['method'] == 'resting', cands
     assert abs(cands[0]['area_px'] - ref['area_px']) < 1e-6
+    assert 'fit_ratio' not in cands[0]
     assert cands[0]['conf'] >= 0.75
     assert not se.needs_review(cands, s)
     # and with no baseline disc there is nothing to state: gated frames
@@ -1317,16 +1344,20 @@ def test_bias_tripped_resting_is_refit_to_the_moved_edge():
     rest = next(c for c in cands if c['method'] == 'resting')
     assert rest.get('audit_bias') is not None and rest['audit_bias'] < -3.0
     assert rest['conf'] == round(s['accept_conf'] - 0.01, 3), rest['conf']
-    # with the bias gate off the stale claim auto-accepts unchallenged --
-    # the gate is what makes the refit possible at all
+    # Until 2026-10-02 the bias gate was what made the refit possible at
+    # all: with it off, the stale claim auto-accepted unchallenged. The
+    # tracker now reads every gated frame it can fit, so the crept edge
+    # is measured with the gate off too, and the claim (untagged: no
+    # gate judged it) is the runner-up.
     s0 = dict(s)
     s0['audit_bias_px'] = 0.0
     c0 = se.candidates(base, img, s0)
-    assert c0[0]['method'] == 'resting'
-    assert c0[0].get('audit_bias') is None
-    assert c0[0]['conf'] >= s0['accept_conf'], c0[0]['conf']
+    assert c0[0]['method'] == 'disc-fit' and c0[0].get('resting_refit')
+    assert c0[0]['area_px'] > 1.06 * ref['area_px']
     assert not se.needs_review(c0, s0)
-    assert not any(c.get('resting_refit') for c in c0)
+    rest0 = next(c for c in c0 if c['method'] == 'resting')
+    assert rest0.get('audit_bias') is None
+    assert rest0['conf'] < c0[0]['conf']
 
 
 def test_refit_refusal_keeps_the_capped_resting_claim():
@@ -2354,6 +2385,397 @@ def test_write_back_extends_columns_for_era_rows():
         assert row['wrinkle_idx'] == '1.70'
     finally:
         shutil.rmtree(d)
+
+
+# ---------------------------------------------------------------------------
+# one area functional for A and A0 (2026-10-02)
+# ---------------------------------------------------------------------------
+
+def _flared_scene(scale=1.0, ripple=False, lead_bulge=0.0, noise_seed=7,
+                  gain=1.0, offset=0.0):
+    """The bridged scene with the ink drawn out TOWARD the lead gaps:
+    in the arcs the tracker can see, the outline stretches smoothly
+    toward the lead axis (r = 100 * (1 + 0.12 cos^2), 12 % at most);
+    inside the lead sectors, within 20 degrees of the axis, it is back
+    on the r=100 circle. That is the DOT_P3_1 shape. The circle fit
+    (baseline_disc) settles near the circle; the tracker cannot see the
+    lead sectors, fits an ellipse to the stretched arcs and carries it
+    across the gap, and so reads about 7-8 % more area on a disc that
+    has not moved.
+
+    `scale` grows the whole outline about the centre, `ripple` textures
+    the interior the way an activated disc does, `lead_bulge` pushes the
+    outline out ONLY within 8 degrees of the lead axis (inside the
+    sectors the strips block), `noise_seed` draws the sensor noise."""
+    rng = np.random.default_rng(7)
+    h, w = 540, 960
+    img = np.full((h, w), 190.0, np.float32)
+    yy, xx = np.mgrid[0:h, 0:w]
+    th = np.degrees(np.arctan2(yy - 270.0, xx - 480.0))
+    off = np.minimum(np.abs(th), 180.0 - np.abs(th))   # deg off lead axis
+    r_edge = 100.0 * (1.0 + 0.12 * np.cos(np.radians(off)) ** 2)
+    r_edge = np.where(off < 20.0, 100.0, r_edge)
+    if lead_bulge:
+        r_edge = r_edge * (1.0 + lead_bulge * (off < 8.0))
+    disc = np.hypot(xx - 480.0, yy - 270.0) <= r_edge * scale
+    img[disc] = 172.0
+    if ripple:
+        img[disc] += 6.0 * np.sin((xx[disc] + yy[disc]) / 2.5)
+    img[230:310, 0:330] = _crinkle((80, 330), rng)      # left strip
+    img[230:310, 630:960] = _crinkle((80, 330), rng)    # right strip
+    img[262:278, 330:392] = 174.0                       # CNT traces
+    img[262:278, 568:630] = 174.0
+    img[310:352, 270:345] = 165.0                       # shadows
+    img[310:352, 615:690] = 165.0
+    img += np.random.default_rng(noise_seed).normal(
+        0, 1.5, img.shape).astype(np.float32)
+    return np.clip(img * gain + offset, 0, 255).astype(np.float32)
+
+
+def test_resting_disc_reads_one_through_the_tracker_too():
+    """THE DEFECT (2026-10-02): A0 was the baseline_disc circle, every
+    'disc-fit' row the tracker's ellipse. On the same resting frame the
+    two disagreed by a run-specific 0 to 7 %, so A/A0 stepped at the
+    hand-over from 'resting' to 'disc-fit'. Pinned here on a scene that
+    has the defect: the tracker's raw ellipse reads more than 5 % over
+    the circle, and the REPORTED area of a resting disc is still A0."""
+    base = _flared_scene()
+    s = dict(se.DEFAULT_SETTINGS)
+    ref = se.baseline_disc(base, s)
+    k0 = se.rest_fit_ratio(base, s)
+    assert ref is not None and k0 is not None
+    assert k0 > 1.05, f"scene lost the defect it exists to show: {k0}"
+    # the baseline differenced with itself: the resting disc by
+    # definition, stated on the circle exactly, never refit
+    own = se.candidates(base, base, s)
+    assert [c['method'] for c in own] == ['resting'], own
+    assert own[0]['area_px'] == ref['area_px']
+    assert abs(own[0]['fit_ratio'] - k0) < 1e-12
+    # the tracker's own fit of that frame, put on the resting basis,
+    # is A0 to rounding: numerator and denominator are one estimator
+    prep = se.prepared_diff(base, base, s)
+    fit = se._resting_refit(prep, s, ref)
+    fit['fit_area_px'] = fit['area_px']
+    se.apply_rest_reference([fit], {'k': k0, 'n': 1})
+    assert abs(fit['area_px'] / ref['area_px'] - 1.0) < 1e-9
+    assert fit['fit_area_px'] / ref['area_px'] > 1.05    # the old number
+    # a second photograph of the same resting disc (new sensor noise):
+    # the tracker measures it, and reads 1.000 within its noise where
+    # the old estimator wrote +7 %
+    quiet = _flared_scene(noise_seed=11)
+    cands = se.candidates(base, quiet, s)
+    best = cands[0]
+    assert best['method'] == 'disc-fit' and best.get('resting_refit'), \
+        [(c['method'], c['conf']) for c in cands]
+    assert abs(best['area_px'] / ref['area_px'] - 1.0) < 0.01, \
+        best['area_px'] / ref['area_px']
+    assert best['fit_area_px'] / ref['area_px'] > 1.05
+    assert best['rest_k'] == k0 and best['rest_n'] == 1
+    assert abs(best['diam_px'] - 2 * np.sqrt(best['area_px'] / np.pi)) < 1e-9
+    assert not se.needs_review(cands, s)
+    # the claim it outranked is still there for the human, on the circle
+    rest = next(c for c in cands if c['method'] == 'resting')
+    assert rest['area_px'] == ref['area_px']
+    assert rest['conf'] < best['conf']
+    # ... even when the claim scores higher on its own (a wide gate
+    # margin plus the incumbent bonus): a measurement that would
+    # auto-accept outranks a claim, by rule and not by a coin flip
+    s2 = dict(s)
+    s2['min_diff'] = 60.0
+    c2 = se.candidates(base, quiet, s2, prev_method='resting')
+    assert [c['method'] for c in c2] == ['disc-fit', 'resting'], c2
+    assert c2[1].get('hyst_bonus') and c2[1].get('capped_by') == 'disc-fit'
+    assert c2[1]['conf'] == round(c2[0]['conf'] - 0.01, 3)
+
+
+def test_uniformly_scaled_disc_reads_the_scale_squared():
+    """A disc that grows by s in every direction has s^2 the area, and
+    A/A0 must say so with the lead sectors blocked. The raw ellipse over
+    the circle says k * s^2 (k = 1.08 on this scene): right about the
+    growth, wrong about the disc. Photometric mismatch included, as on
+    every real frame."""
+    base = _flared_scene()
+    s = dict(se.DEFAULT_SETTINGS)
+    ref = se.baseline_disc(base, s)
+    k0 = se.rest_fit_ratio(base, s)
+    for scale in (1.05, 1.12):
+        img = _flared_scene(scale=scale, ripple=True, noise_seed=23,
+                            gain=0.9, offset=5.0)
+        cands = se.candidates(base, img, s)
+        best = cands[0]
+        assert best['method'] == 'disc-fit', \
+            (scale, [(c['method'], c['conf']) for c in cands])
+        got = best['area_px'] / ref['area_px']
+        assert abs(got / scale ** 2 - 1.0) < 0.015, (scale, got)
+        raw = best['fit_area_px'] / ref['area_px']
+        assert abs(raw / scale ** 2 - k0) < 0.02, (scale, raw, k0)
+        assert abs(raw / scale ** 2 - 1.0) > 0.05, (scale, raw)
+        # the outline drawn for the human is the ellipse the tracker
+        # found, not a shrunken copy of it
+        c = np.asarray(best['contour'], float)
+        poly = 0.5 * abs(np.dot(c[:, 0], np.roll(c[:, 1], 1))
+                         - np.dot(c[:, 1], np.roll(c[:, 0], 1)))
+        assert abs(poly / best['fit_area_px'] - 1.0) < 0.02, poly
+
+
+def test_bulge_inside_a_blocked_lead_sector_is_not_measured():
+    """What happens when the disc moves ONLY where the tracker cannot
+    look: nothing. The strips and the leads that feed them block whole
+    sectors (the lab's ruling: leads are not active area), no ray is
+    cast there, and the ellipse is carried across the gap from the
+    visible arcs. A 15 % bulge confined to the lead axis therefore
+    leaves the reported area where it was: it is neither measured nor
+    guessed at. The candidate says how much outline it could see
+    (open_deg), so the blind span is on the record instead of implied."""
+    base = _flared_scene()
+    s = dict(se.DEFAULT_SETTINGS)
+    ref = se.baseline_disc(base, s)
+    plain = se.candidates(base, _flared_scene(noise_seed=11), s)[0]
+    bulged = se.candidates(
+        base, _flared_scene(lead_bulge=0.15, noise_seed=11), s)[0]
+    assert plain['method'] == bulged['method'] == 'disc-fit'
+    a_plain = plain['area_px'] / ref['area_px']
+    a_bulged = bulged['area_px'] / ref['area_px']
+    assert abs(a_bulged - a_plain) < 0.005, (a_plain, a_bulged)
+    assert abs(a_bulged - 1.0) < 0.01, a_bulged
+    # the blind span is stated: both lead sectors are closed to the fit
+    assert 180 <= bulged['open_deg'] <= 330, bulged['open_deg']
+    assert bulged['open_deg'] == plain['open_deg']
+
+
+def test_no_resting_reference_goes_to_review_not_to_a_guess():
+    """The fallback. When the tracker cannot read the resting disc there
+    is no honest factor between its ellipse and the circle A0. The raw
+    ellipse area is then reported, TAGGED, and never auto-accepted --
+    whatever its confidence. A reference found later (the run-level
+    pass) lifts the tag and puts the area on the resting basis."""
+    base, img = _bridged_pair(r_active=112)
+    s = dict(se.DEFAULT_SETTINGS)
+    orig = se.rest_fit_ratio
+    se.rest_fit_ratio = lambda base_gray, settings: None
+    try:
+        cands = se.candidates(base, img, s)
+    finally:
+        se.rest_fit_ratio = orig
+    best = cands[0]
+    assert best['method'] == 'disc-fit' and best['rest_ref_missing']
+    assert best['area_px'] == best['fit_area_px']
+    assert 'rest_k' not in best
+    assert best['conf'] >= s['accept_conf']
+    assert se.needs_review(cands, s), "a raw ellipse auto-accepted"
+    raw = best['fit_area_px']
+    for _ in range(2):                       # idempotent
+        se.apply_rest_reference(cands, {'k': 1.04, 'n': 3})
+        assert abs(best['area_px'] - raw / 1.04) < 1e-6
+        assert best['rest_k'] == 1.04 and best['rest_n'] == 3
+        assert 'rest_ref_missing' not in best
+    assert abs(best['diam_px'] - 2 * np.sqrt(raw / 1.04 / np.pi)) < 1e-6
+    assert not se.needs_review(cands, s)
+    # and back: losing the reference restores the raw area and the tag
+    se.apply_rest_reference(cands, None)
+    assert best['area_px'] == raw and best['rest_ref_missing']
+    assert se.needs_review(cands, s)
+
+
+def _fit_cand(ratio, a0=200000.0, k=1.05, conf=0.93, method='disc-fit'):
+    """A candidate as candidates() leaves it: a tracker fit reading
+    `ratio` x the circle, provisionally on a single-frame reference k
+    (or a 'resting' claim carrying the tracker's reading of its frame)."""
+    if method == 'resting':
+        return {'method': 'resting', 'area_px': a0, 'conf': conf,
+                'ci85_pct': 0.0, 'fit_ratio': ratio}
+    return {'method': 'disc-fit', 'area_px': a0 * ratio / k,
+            'diam_px': 2 * np.sqrt(a0 * ratio / k / np.pi), 'conf': conf,
+            'ci85_pct': 0.3, 'fit_area_px': a0 * ratio, 'fit_ratio': ratio,
+            'rest_k': k, 'rest_n': 1}
+
+
+def test_rest_reference_is_the_median_of_the_low_voltage_frames():
+    """'Pre-onset' means LOW VOLTAGE, not 'labelled resting'. Resting
+    labels run to 2.5 kV on DOT_P3_1, where the disc has really grown
+    1 to 3 %: taking those into the reference would bias A0 high. And
+    one frame is not enough (a single fit is noisy by about 1 %), so
+    the reference is the median over the baseline and the 0-0.5 kV
+    snapshots of the first ramp."""
+    kvs = [0.0, 0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 2.0, 0.25, 0.0]
+    rows = [{'nominal_kV': f"{kv:g}" if kv else '0.0', 'tag': 'post-ramp'}
+            for kv in kvs]
+    rows[0]['tag'] = 'baseline'
+    reads = [1.050, 1.062, 1.041, 1.049, 1.090, 1.070, 1.072, 1.100,
+             1.200, 1.200]
+    cands = {i: [_fit_cand(r, method='resting' if i < 5 else 'disc-fit')]
+             for i, r in enumerate(reads)}
+    # a 'resting'-labelled frame at 0.75 kV must not enter either
+    cands[5] = [_fit_cand(1.070, method='resting')]
+    rest = se.rest_reference(rows, cands)
+    assert rest['n'] == 5, rest
+    assert abs(rest['k'] - 1.050) < 1e-12, rest       # median, not mean
+    want_sd = 100 * np.std(reads[:5], ddof=1) / 1.050
+    assert abs(rest['sd_pct'] - want_sd) < 1e-9, rest
+    # fewer frames: one or two still give a reference, and n says so;
+    # no spread is invented below three
+    two = se.rest_reference(rows, {0: cands[0], 3: cands[3], 7: cands[7]})
+    assert two['n'] == 2 and abs(two['k'] - 1.0495) < 1e-12, two
+    assert two['sd_pct'] is None
+    # none: the single-frame reference candidates() applied stands...
+    kept = se.rest_reference(rows, {7: cands[7]})
+    assert kept == {'k': 1.05, 'n': 1, 'sd_pct': None}, kept
+    # ...and with not even that there is no reference at all
+    bare = {7: [{'method': 'disc-fit', 'area_px': 1.0, 'conf': 0.9,
+                 'fit_area_px': 1.0, 'rest_ref_missing': True}]}
+    assert se.rest_reference(rows, bare) is None
+    assert se.rest_reference(rows, {}) is None
+    # a frame the tracker refused simply does not vote
+    cands[1] = [{'method': 'resting', 'area_px': 200000.0, 'conf': 0.9,
+                 'ci85_pct': 0.0}]
+    assert se.rest_reference(rows, cands)['n'] == 4
+
+
+def test_reconcile_pairs_moves_the_whole_run_onto_one_reference():
+    """candidates() can only reach the baseline frame's fit; the run-
+    level pass replaces it with the median over the quiet frames, on
+    EVERY tracker candidate (a runner-up the operator may still pick
+    included), before pairs are compared or anything is accepted."""
+    rows = [{'nominal_kV': kv, 'tag': t} for kv, t in (
+        ('0.0', 'baseline'), ('0.25', 'post-ramp'), ('0.25', 'pre-ramp'),
+        ('3.0', 'post-ramp'), ('3.0', 'pre-ramp'))]
+    cands = {0: [_fit_cand(1.050, method='resting')],
+             1: [_fit_cand(1.030), _fit_cand(1.030, method='resting')],
+             2: [_fit_cand(1.030), _fit_cand(1.030, method='resting')],
+             3: [_fit_cand(1.300), {'method': 'tex-ratio', 'conf': 0.5,
+                                    'area_px': 90000.0}],
+             4: [{'method': 'diff-hi', 'conf': 0.8, 'area_px': 250000.0},
+                 _fit_cand(1.310, conf=0.7)]}
+    before = cands[3][0]['area_px']
+    stats = se.reconcile_pairs(rows, cands, dict(se.DEFAULT_SETTINGS))
+    assert set(stats) == {'confirmed', 'capped'}, stats
+    for i, slot, ratio in ((1, 0, 1.03), (2, 0, 1.03), (3, 0, 1.30),
+                           (4, 1, 1.31)):
+        c = cands[i][slot]
+        assert c['rest_k'] == 1.03 and c['rest_n'] == 3, c
+        assert abs(c['area_px'] - 200000.0 * ratio / 1.03) < 1e-6, c
+    assert cands[3][0]['area_px'] != before
+    # the quiet frames read exactly A0 on the reference they define
+    assert abs(cands[1][0]['area_px'] - 200000.0) < 1e-6
+    # untouched: claims, blob tiers, and their areas
+    assert cands[0][0]['area_px'] == 200000.0
+    assert cands[4][0]['area_px'] == 250000.0
+    assert cands[3][1]['area_px'] == 90000.0
+    # a second pass changes nothing more (it re-derives from the raw fit)
+    snap = [c['area_px'] for cl in cands.values() for c in cl]
+    se.reconcile_pairs(rows, cands, dict(se.DEFAULT_SETTINGS))
+    assert snap == [c['area_px'] for cl in cands.values() for c in cl]
+    assert se.rest_reference(rows, cands) == {
+        'k': 1.03, 'n': 3,
+        'sd_pct': 100 * np.std([1.05, 1.03, 1.03], ddof=1) / 1.03}
+
+
+def test_result_stamps_roundtrip_and_never_become_settings():
+    """The estimator version and the resting reference a Save used live
+    in the Edge Detection settings block as plain 'key: value' lines.
+    They are facts about data.csv, not knobs: load_settings must not
+    return them, a knob save (tuner, Advanced) must carry them over, and
+    a stamp-only save must not pin knobs nobody chose to save."""
+    d = tempfile.mkdtemp(prefix='edge_stamp_')
+    try:
+        with open(os.path.join(d, 'setup.txt'), 'w') as f:
+            f.write("SLDEA Test -- x\nDEA nominal diameter: 16 mm\n")
+        assert se.load_stamp(d) == {}                 # an old run
+        assert se.load_stamp(os.path.join(d, 'nope')) == {}
+        rest = {'k': 1.0741840660966293, 'n': 5, 'sd_pct': 1.0617}
+        stamp = se.estimator_stamp(rest)
+        assert stamp == {'area_estimator': se.AREA_ESTIMATOR,
+                         'rest_fit_ratio': 1.07418, 'rest_fit_frames': 5,
+                         'rest_fit_sd_pct': 1.062}
+        # a stamp-only save: block created, NO knob lines written
+        se.save_settings(d, None, stamp=stamp)
+        text = open(os.path.join(d, 'setup.txt')).read()
+        assert text.count(se.EDGE_HDR) == 1
+        assert 'area_estimator: 2\n' in text and 'min_diff' not in text
+        assert 'rest_fit_ratio: 1.07418\n' in text
+        assert 'DEA nominal diameter' in text
+        assert se.load_stamp(d) == {k: float(v) for k, v in stamp.items()}
+        s = se.load_settings(d)
+        assert s == dict(se.DEFAULT_SETTINGS), "a stamp leaked into settings"
+        # a knob save carries the stamp over and writes the knobs
+        s['blur_px'] = 7
+        se.save_settings(d, s)
+        assert se.load_stamp(d)['rest_fit_ratio'] == 1.07418
+        assert se.load_settings(d)['blur_px'] == 7
+        # the next Save replaces the stamp and keeps the knob lines as
+        # they are; a reference under three frames writes no spread, and
+        # no reference writes the version alone
+        se.save_settings(d, None, stamp=se.estimator_stamp(
+            {'k': 1.02, 'n': 1, 'sd_pct': None}))
+        assert se.load_stamp(d) == {'area_estimator': 2.0,
+                                    'rest_fit_ratio': 1.02,
+                                    'rest_fit_frames': 1.0}
+        assert se.load_settings(d)['blur_px'] == 7
+        se.save_settings(d, None, stamp=se.estimator_stamp(None))
+        assert se.load_stamp(d) == {'area_estimator': 2.0}
+        assert se.load_settings(d)['blur_px'] == 7
+        text = open(os.path.join(d, 'setup.txt')).read()
+        assert text.count(se.EDGE_HDR) == 1 and text.count('blur_px') == 1
+    finally:
+        shutil.rmtree(d)
+
+
+def test_old_estimator_rows_are_never_kept_beside_new_ones():
+    """ONE ESTIMATOR PER SAVE. An unreviewed row keeps the previous
+    pass's px. That is fine while both passes mean the same by area. A
+    'disc-fit' px written before 2026-10-02 is the raw ellipse, 0 to 7 %
+    from what this pass writes, so a Save on an unstamped run empties
+    those rows and says why. Everything else is kept as before."""
+    def rows():
+        return [
+            {'tag': 'baseline', 'nominal_kV': '0', 'active_area_px': '200000',
+             'active_area_mm2': '201.062', 'active_diam_mm': '16.000',
+             'wrinkle_idx': '', 'notes': 'edge:resting conf 0.95'},
+            {'tag': 'post-ramp', 'nominal_kV': '3', 'active_area_px': '236000',
+             'active_area_mm2': '237.253', 'active_diam_mm': '17.380',
+             'wrinkle_idx': '1.10', 'notes': 'edge:disc-fit conf 0.93'},
+            {'tag': 'pre-ramp', 'nominal_kV': '3', 'active_area_px': '237000',
+             'active_area_mm2': '238.258', 'active_diam_mm': '17.417',
+             'wrinkle_idx': '1.12',
+             'notes': 'edge:disc-fit conf 0.74 (user); wrinkle-mode'},
+            {'tag': 'post-ramp', 'nominal_kV': '5', 'active_area_px': '290000',
+             'active_area_mm2': '291.540', 'active_diam_mm': '19.266',
+             'wrinkle_idx': '1.80',
+             'notes': 'edge:manual-trace conf 1.00 (user)'},
+            {'tag': 'pre-ramp', 'nominal_kV': '5', 'active_area_px': '',
+             'active_area_mm2': '', 'active_diam_mm': '', 'wrinkle_idx': '',
+             'notes': 'rejected (no reliable edge)'}]
+    scale = 16.0 / (2 * np.sqrt(200000 / np.pi))
+    new = {'area_px': 221000.0, 'diam_px': 530.4, 'conf': 0.95,
+           'method': 'disc-fit', 'wrinkle': 1.1}
+    r = rows()
+    results = {1: dict(new)}               # row 2 stays unreviewed
+    stale = se.stale_estimator_rows({}, r, results)
+    assert stale == [2], stale
+    se.apply_results(r, results, scale, {}, stale=stale)
+    assert r[1]['active_area_px'] == '221000'
+    assert r[1]['notes'] == 'edge:disc-fit conf 0.95'
+    for col in ('active_area_px', 'active_area_mm2', 'active_diam_mm',
+                'wrinkle_idx'):
+        assert r[2][col] == '', (col, r[2][col])
+    assert r[2]['notes'] == se.STALE_ESTIMATOR_NOTE
+    assert r[0]['active_area_px'] == '200000'      # resting: same meaning
+    assert r[3]['active_area_px'] == '290000'      # a hand trace: kept
+    assert r[4]['notes'] == 'rejected (no reliable edge)'
+    # the emptied row holds no px and is not listed again. Row 1 would
+    # be, if the stamp write had failed and the run still read as old:
+    # the failure mode is 're-review', never 'two estimators in one CSV'
+    assert se.stale_estimator_rows({}, r, {}) == [1]
+    # a run stamped with the current estimator keeps everything
+    cur = {'area_estimator': float(se.AREA_ESTIMATOR)}
+    r = rows()
+    assert se.stale_estimator_rows(cur, r, results) == []
+    se.apply_results(r, results, scale, {})
+    assert r[2]['active_area_px'] == '237000'
+    # an older or unreadable stamp is treated as old
+    assert se.stale_estimator_rows({'area_estimator': 1.0}, rows(),
+                                   results) == [2]
+    assert se.stale_estimator_rows(None, rows(), results) == [2]
 
 
 def _run():

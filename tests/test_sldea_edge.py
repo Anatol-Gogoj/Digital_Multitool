@@ -2598,6 +2598,12 @@ def test_run_health_reports_missing_voltage_its_stop_point_and_its_sign():
         assert '-4.08 kV measured at 4.00 kV commanded' in it['text']
         # a student must never be told to flip an HV setting from here
         assert 'Do not change any high-voltage setting' in it['text']
+        # the check is about the SIGN. It never compared the size with
+        # the commanded voltage, so it must not vouch for it: the 07-23
+        # runs read 14 to 48 % low under the sentence that said "usable"
+        assert 'usable' not in it['text'], it['text']
+        sign_only = 'looks only at the sign, not at the size'
+        assert sign_only in it['text'], it['text']
         assert not _codes(items, 'stop')
         # the runner's own line says the monitor sign was accounted for
         inv = _health_run(os.path.join(d, 'b'), rows=rows, runlog=log,
@@ -2639,13 +2645,73 @@ def test_run_health_counts_blank_current_cells():
         it = _item(se.run_health(some), 'ua_missing')
         assert it['level'] == 'warn'
         assert '2 of 5 frames' in it['text'] and '2.00 kV' in it['text']
-        assert 'breakdown check skips' in it['text']
+        # 3 readings are too few for breakdown_flags' median rule
+        assert 'With only 3 current readings' in it['text'], it['text']
+        assert 'larger than 50 microamps' in it['text'], it['text']
+        assert 'area alone' in it['text'], it['text']
+        # enough readings for the median rule: the blanks are only blanks
+        many = _health_run(os.path.join(d, 'many'), rows=[
+            ('baseline', 0.0, '0.0', '-16.0'),
+            ('post-ramp', 2.0, '2.0', '-16.0'),
+            ('pre-ramp', 2.0, '2.0', ''),
+            ('post-ramp', 4.0, '4.0', '-16.0'),
+            ('pre-ramp', 4.0, '4.0', '-16.0'),
+            ('post-ramp', 6.0, '6.0', '-16.0'),
+            ('pre-ramp', 6.0, '6.0', '-16.0')])
+        it = _item(se.run_health(many), 'ua_missing')
+        assert '1 of 7 frames' in it['text'], it['text']
+        assert 'nothing to read on those frames' in it['text'], it['text']
+        assert 'area alone' not in it['text'], it['text']
         allb = _health_run(os.path.join(d, 'all'), rows=[
             ('baseline', 0.0, '0.0', ''), ('post-ramp', 2.0, '2.0', ''),
             ('pre-ramp', 2.0, '2.0', ''), ('post-ramp', 4.0, '4.0', ''),
             ('pre-ramp', 4.0, '4.0', '')])
         it = _item(se.run_health(allb), 'ua_missing')
         assert 'no current readings at all (5 frames)' in it['text']
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_current_sentences_say_what_breakdown_flags_will_do():
+    """Review 2026-10-02: the all-blank sentence read 'Edge Review
+    confirms a breakdown from the current, so on this run it cannot flag
+    one'. False: under HEALTH_MIN_UA_ROWS parseable readings
+    breakdown_flags takes its legacy rule, where an area collapse ALONE
+    confirms and Save renames frames on it. The sentence and the rule are
+    held together here, on both sides of the threshold."""
+    assert se.HEALTH_MIN_UA_ROWS == 5
+    tags = [('baseline', 0.0), ('post-ramp', 2.0), ('pre-ramp', 2.0),
+            ('post-ramp', 4.0), ('pre-ramp', 4.0), ('post-ramp', 6.0),
+            ('pre-ramp', 6.0)]
+    # a 50 % area collapse at row 3, where the voltage rose
+    areas = {0: 1000.0, 1: 1000.0, 2: 1000.0, 3: 500.0, 4: 500.0,
+             5: 500.0, 6: 500.0}
+    d = tempfile.mkdtemp(prefix='edge_health_rule_')
+    try:
+        for n_read in (0, se.HEALTH_MIN_UA_ROWS - 1, se.HEALTH_MIN_UA_ROWS):
+            rows = [(tag, kv, f'{kv:.1f}', '-16.0' if k < n_read else '')
+                    for k, (tag, kv) in enumerate(tags)]
+            rd = _health_run(os.path.join(d, f'n{n_read}'), rows=rows)
+            text = _item(se.run_health(rd), 'ua_missing')['text']
+            flags, advis = se.breakdown_flags(
+                se.load_run(rd)['rows'], areas, se.load_settings(rd))
+            if n_read < se.HEALTH_MIN_UA_ROWS:
+                # the legacy rule: the collapse is a CONFIRMED flag
+                assert flags == {3: 'breakdown? area collapsed 50%'}, \
+                    (n_read, flags)
+                assert advis == {}, (n_read, advis)
+                assert 'from a sudden drop in area alone' in text, text
+                assert 'less reliable' in text, text
+            else:
+                # the median rule: the same collapse is only an advisory
+                assert flags == {}, (n_read, flags)
+                assert list(advis) == [3], (n_read, advis)
+                assert 'area alone' not in text, text
+            # never again the claim that no flag can come
+            assert 'cannot flag' not in text, text
+        none = _item(se.run_health(os.path.join(d, 'n0')),
+                     'ua_missing')['text']
+        assert 'cannot check the current for a breakdown' in none, none
     finally:
         shutil.rmtree(d)
 
@@ -2660,9 +2726,11 @@ def test_run_health_says_when_and_why_a_run_ended_early():
                                 "[10:00:41] run aborted: 5/9 frames\n")
         it = _item(se.run_health(ab), 'ended_early')
         assert it['level'] == 'warn'
+        assert it['text'].startswith('The run stopped early'), it['text']
         assert '5 of 9 planned frames' in it['text'], it['text']
         assert 'up to 4.00 kV' in it['text']
         assert 'operator pressed Abort' in it['text']
+        assert 'still going' not in it['text'], it['text']
         # an older run has no run.log: say that the reason is unknown
         old = _health_run(os.path.join(d, 'old'), setup=setup, runlog=None)
         assert 'no run.log' in _item(se.run_health(old),
@@ -2670,8 +2738,14 @@ def test_run_health_says_when_and_why_a_run_ended_early():
         # a log that just stops: the program or the PC died
         cut = _health_run(os.path.join(d, 'cut'), setup=setup,
                           runlog="[10:00:00] run dir: /x\n")
-        assert 'no end-of-run line' in _item(se.run_health(cut),
-                                             'ended_early')['text']
+        text = _item(se.run_health(cut), 'ended_early')['text']
+        assert 'no end-of-run line' in text, text
+        # ...or the run is being captured right now (Edge Review opens on
+        # the newest run folder): a live run is not called "stopped"
+        assert text.startswith('The run is not finished'), text
+        assert 'stopped early' not in text, text
+        assert 'If the run is still going, wait until it ends' in text, text
+        assert '5 of 9 planned frames' in text, text
         err = _health_run(os.path.join(d, 'err'), setup=setup,
                           runlog="[10:00:00] run dir: /x\n"
                                  "[10:00:09] ERROR: camera unplugged\n")
@@ -2683,6 +2757,25 @@ def test_run_health_says_when_and_why_a_run_ended_early():
                                    "[09:00:30] run aborted: 2/5 frames\n"
                                    + _HEALTH_LOG_OK)
         assert 'ended_early' not in _codes(se.run_health(twice))
+        # ...and what the EARLIER run logged must not leak into this one:
+        # its watchdog trip is not this run's trip, and its error is not
+        # why this run stopped
+        first = ("[09:00:00] run dir: /x\n"
+                 "[09:00:20] ERROR: camera unplugged\n"
+                 "[09:00:28] BREAKDOWN CONFIRMED - I=OFF-SCREEN sustained "
+                 ">3s\n"
+                 "[09:00:30] run BREAKDOWN-ABORT: 2/5 frames\n")
+        clean = _health_run(os.path.join(d, 'twice_trip'),
+                            runlog=first + _HEALTH_LOG_OK)
+        assert se.run_health(clean) == [], se.run_health(clean)
+        cut2 = _health_run(os.path.join(d, 'twice_cut'), setup=setup,
+                           runlog=first + "[10:00:00] run dir: /x\n")
+        items = se.run_health(cut2)
+        assert 'watchdog_trip' not in _codes(items), items
+        early = _item(items, 'ended_early')['text']
+        assert 'no end-of-run line' in early, early
+        assert 'camera unplugged' not in early, early
+        assert 'watchdog' not in early, early
     finally:
         shutil.rmtree(d)
 
@@ -2711,6 +2804,10 @@ def test_run_health_reports_a_watchdog_stop_without_calling_it_a_flag():
         it = _item(items, 'watchdog_trip')
         assert it['level'] == 'warn' and 'at 4.40 kV' in it['text'], it
         assert 'may not show up as a breakdown mark' in it['text']
+        # it does not claim the current is the ONLY thing that can mark
+        # one: with few readings an area collapse alone does
+        assert 'only from the current' not in it['text'], it['text']
+        assert 'the current readings and the measured areas' in it['text']
         assert run['rows'] == before, "advice must not touch the rows"
         # the trip row is not one of the PLANNED frames: 4 of 5 taken
         early = _item(items, 'ended_early')
@@ -2951,6 +3048,17 @@ def test_stale_analysis_notes_do_not_pile_up():
     assert kept[0]['notes'].count('breakdown?') == 1, kept[0]
     assert '>= 30uA' in kept[0]['notes'], kept[0]
     assert kept[0]['notes'].count('transient discharge?') == 1, kept[0]
+    # only the cell's OLD token is replaced, and only once: two notes of
+    # one kind found by the same Save are two findings, and both are kept
+    two = [{'active_area_px': '100',
+            'notes': 'edge:disc-fit conf 0.91; '
+                     'transient discharge? I dev 120uA'}]
+    se.apply_results(two, {}, None, {},
+                     {0: 'transient discharge? I dev 137uA; '
+                         'transient discharge? I dev 140uA'})
+    assert two[0]['notes'] == ('edge:disc-fit conf 0.91; '
+                               'transient discharge? I dev 137uA; '
+                               'transient discharge? I dev 140uA'), two[0]
     # nothing added: the cell is byte-identical, odd spacing and all (the
     # scale-only re-anchor commits through this branch)
     odd = [{'active_area_px': '100', 'notes': 'edge:disc-fit conf 0.91;x '}]

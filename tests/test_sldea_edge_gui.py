@@ -4717,6 +4717,15 @@ def test_run_health_words_put_stop_first_and_never_lean_on_colour():
     assert warn['text'] not in hint and gui.HINT_DETECT not in hint
     assert hint.endswith(gui.HINT_AFTER_STOP)
     assert 'Detect Edges' in gui.HINT_AFTER_STOP     # advice, not a lock
+    # ...and it says what the button will DO on such a run, not that it
+    # "still works": the scale gate opens on the hand measurement the
+    # STOP has just told the student not to make
+    assert 'measure the scale by hand' in gui.HINT_AFTER_STOP
+    assert 'frames folder' in gui.HINT_AFTER_STOP
+    assert 'still works' not in gui.HINT_AFTER_STOP
+    # the help panel names the strip, and its STOP mark as it is drawn
+    assert f"{gui.HEALTH_TITLE} strip" in gui.howto_text()
+    assert gui.HEALTH_MARKS['stop'] in gui.howto_text()
     # one mark per level, each a symbol plus a word, all different
     assert set(gui.HEALTH_MARKS) == set(se.HEALTH_LEVELS)
     marks = list(gui.HEALTH_MARKS.values()) + [gui.HEALTH_OK_MARK]
@@ -4733,7 +4742,15 @@ def test_run_health_words_put_stop_first_and_never_lean_on_colour():
 
 
 def _strip_text(app):
-    return app.health_txt.get('1.0', 'end-1c')
+    # without the 'more below' cue: whether it is on the header depends
+    # on the strip's width, which is not what these tests are about
+    return app.health_txt.get('1.0', 'end-1c').replace(
+        f"   {gui_more()}", '')
+
+
+def gui_more():
+    import sldea_edge_gui as gui
+    return gui.HEALTH_MORE
 
 
 def test_run_health_strip_shows_on_pick_and_blocks_nothing():
@@ -4742,6 +4759,7 @@ def test_run_health_strip_shows_on_pick_and_blocks_nothing():
     a run now says so at once, STOP first, in the strip and on the empty
     canvas, and it stays ADVICE: Detect and Save work as before."""
     import cv2
+    import sldea_edge as se
     import sldea_edge_gui as gui
     root = _tk_root_or_skip('run health strip')
     if root is None:
@@ -4785,7 +4803,20 @@ def test_run_health_strip_shows_on_pick_and_blocks_nothing():
         assert 'run health: 1 STOP' in app.info.cget('text')
         # ADVISORY ONLY: Detect is armed, detection runs, Save arms
         assert str(app.detect_btn['state']) == 'normal'
-        strip_h = app.health_txt.winfo_reqheight()
+        # WHAT THE HINT PROMISES IS WHAT DETECT DOES (review 2026-10-02):
+        # with no anchor the press goes to the scale gate, and on this
+        # picture the gate has no automatic fit to verify, so it opens on
+        # a hand measurement
+        assert app._hint.endswith(gui.HINT_AFTER_STOP), app._hint
+        gate = []
+        app._calibrate_scale = lambda **kw: gate.append(kw)
+        try:
+            app.detect()
+        finally:
+            del app._calibrate_scale
+        assert gate == [{'then_detect': True}], gate
+        assert app._auto_disc() is None
+        assert se.cal_open_mode(app._auto_disc()) != se.CAL_MODE_VERIFY
         app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
         app.detect_all_sync()
         assert str(app.save_btn['state']) == 'normal'
@@ -4803,7 +4834,7 @@ def test_run_health_strip_shows_on_pick_and_blocks_nothing():
         assert not [it for it in app.health if it['level'] == 'stop']
         assert gui.HEALTH_MARKS['stop'] not in _strip_text(app)
         assert app._hint == gui.HINT_DETECT, app._hint
-        assert app.health_txt.winfo_reqheight() == strip_h
+        assert int(app.health_txt.cget('height')) == gui.HEALTH_LINES
         # the fixture has no electrical readings, and the strip says so
         assert gui.HEALTH_MARKS['warn'] in _strip_text(app)
 
@@ -4818,7 +4849,6 @@ def test_run_health_strip_shows_on_pick_and_blocks_nothing():
             f"{gui.HEALTH_TITLE}: {gui.HEALTH_NO_RUN}"
 
         # the check itself failing costs the advice, never the pick
-        import sldea_edge as se
         real = se.run_health
 
         def boom(*a, **k):
@@ -4833,6 +4863,25 @@ def test_run_health_strip_shows_on_pick_and_blocks_nothing():
         assert [it['code'] for it in app.health] == ['health_failed']
         assert str(app.detect_btn['state']) == 'normal'
         assert app._hint == gui.HINT_DETECT
+
+        # a run that fails to LOAD leaves no verdict behind: the strip
+        # held the previous run's items a moment ago, and they must not
+        # stay on screen under the new run's name
+        assert app.health and gui.HEALTH_MARKS['info'] in _strip_text(app)
+        real_load = se.load_run
+
+        def no_load(*a, **k):
+            raise OSError('disk gone')
+
+        se.load_run = no_load
+        try:
+            app._populate_runs(blank)
+        finally:
+            se.load_run = real_load
+        assert app.run is None and app.health is None
+        assert _strip_text(app) == \
+            f"{gui.HEALTH_TITLE}: {gui.HEALTH_NO_RUN}"
+        assert app._hint == gui.HINT_PICK_RUN, app._hint
     finally:
         gui.messagebox = real_mb
         if app is not None:
@@ -4841,10 +4890,14 @@ def test_run_health_strip_shows_on_pick_and_blocks_nothing():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_auto_does_not_press_detect_over_a_stop():
-    """--auto presses Detect 300 ms after launch, which opens the scale
-    dialog over the health strip before it can be read. With a STOP on
-    the strip it is not pressed; the button itself stays live."""
+def test_auto_presses_detect_on_a_stop_run_like_on_any_other():
+    """Run health is advice, and --auto is not an exception (review
+    2026-10-02: an earlier draft held the 300 ms Detect press back on a
+    STOP. That is a gate on the SLDEA tab's auto-process path, and
+    whether it should pause there is the owner's decision, not this
+    strip's). The press is made on a blank run and on a good one alike;
+    the STOP stays on the strip and on the canvas for whoever then closes
+    the scale dialog."""
     import cv2
     import sldea_edge_gui as gui
     pressed = []
@@ -4857,21 +4910,25 @@ def test_auto_does_not_press_detect_over_a_stop():
         cv2.imwrite(os.path.join(blank, 'frames',
                                  'SLDEA_s00_00.00kV_baseline.png'),
                     np.full((240, 320), 67, np.uint8))
-        for run, expect in ((blank, []), (good, [good])):
+        for run in (blank, good):
             root = _tk_root_or_skip('auto over a stop')
             if root is None:
                 return
             app = None
             try:
                 app = gui.EdgeReviewApp(root, path=run, auto=True)
+                stops = [it for it in app.health if it['level'] == 'stop']
+                assert bool(stops) == (run == blank), (run, app.health)
                 end = time.time() + 0.7          # past the 300 ms timer
                 while time.time() < end:
                     root.update()
                     time.sleep(0.02)
-                assert pressed == expect, (run, pressed)
+                assert pressed == [run], (run, pressed)
                 assert str(app.detect_btn['state']) == 'normal'
-                held = gui.AUTO_HELD_TEXT in app.status.cget('text')
-                assert held == (run == blank), app.status.cget('text')
+                if run == blank:
+                    # the advice is still there to be read
+                    assert gui.HEALTH_MARKS['stop'] in _strip_text(app)
+                    assert app._hint.startswith(gui.HEALTH_MARKS['stop'])
             finally:
                 if app is not None:
                     app._cancel_pending()
@@ -4879,6 +4936,90 @@ def test_auto_does_not_press_detect_over_a_stop():
             del pressed[:]
     finally:
         gui.EdgeReviewApp.detect = real_detect
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_health_strip_adds_its_height_to_the_window_not_to_the_image():
+    """Review 2026-10-02: on the old 760 px floor the strip's 85 px came
+    straight out of the review canvas (563 px tall against 648 before the
+    strip existed), on every run and for the whole review. The floor now
+    grows by the strip, so the image keeps its height; what the strip
+    SAYS never moves the image, however many lines it holds; and when it
+    holds more than it shows, the header says so."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_strip_h_')
+    app = None
+
+    def settle():
+        for _ in range(3):
+            root.update_idletasks()
+            root.update()
+
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        settle()
+        strip_h = app._health_box.winfo_reqheight()
+        body_h = app._scroll.body.winfo_reqheight()
+        assert strip_h >= 40, strip_h         # HEALTH_LINES lines of text
+        want_h = max(body_h, 760 + strip_h)
+        cap_h = max(480, root.winfo_screenheight() - 120)
+        if want_h > cap_h:
+            print(f"   (screen too small to check the uncapped case: "
+                  f"wants {want_h}, cap {cap_h})")
+        else:
+            # a window manager may round the request by a pixel or two;
+            # the strip this is about is some 80 px
+            assert abs(root.winfo_height() - want_h) <= 4, (
+                f"opened {root.winfo_height()} px tall for a layout "
+                f"wanting {want_h}")
+            # what the image had to spare under the 760 floor before the
+            # strip existed is still the image's
+            slack = max(0, 760 - (body_h - strip_h))
+            assert app.canvas.winfo_height() >= gui.VIEW_H + slack - 2, (
+                app.canvas.winfo_height(), gui.VIEW_H, slack)
+
+        def header():
+            return app.health_txt.get('1.0', '1.end')
+
+        # the content changes, the image does not move
+        h0 = app.canvas.winfo_height()
+        many = [{'level': 'warn', 'code': f'c{k}',
+                 'text': 'A sentence long enough to fill a line. ' * 4}
+                for k in range(8)]
+        app._show_health(many)
+        settle()
+        assert app.canvas.winfo_height() == h0
+        assert int(app.health_txt.cget('height')) == gui.HEALTH_LINES
+        # more lines than the strip shows: the header says to scroll
+        assert header().endswith(gui.HEALTH_MORE), header()
+        ranges = app.health_txt.tag_ranges('more')
+        assert ranges and gui.HEALTH_MORE in \
+            app.health_txt.get(ranges[0], ranges[1])
+        assert str(app.health_txt.cget('state')) == 'disabled'
+        # everything fits: no cue, and still the same image
+        app._show_health([])
+        settle()
+        assert app.canvas.winfo_height() == h0
+        assert gui.HEALTH_MORE not in app.health_txt.get('1.0', 'end-1c')
+        assert not app.health_txt.tag_ranges('more')
+        # the cue is painted once, not once per repaint
+        app._show_health(many)
+        app._health_more_cue()
+        app._health_more_cue()
+        settle()
+        assert app.health_txt.get('1.0', 'end-1c').count(
+            gui.HEALTH_MORE) == 1
+    finally:
+        if app is not None:
+            app._cancel_pending()
+        root.destroy()
         shutil.rmtree(d, ignore_errors=True)
 
 

@@ -3566,6 +3566,13 @@ HEALTH_SAT_PCT = 25.0
 # A voltage reading smaller than this (kV) carries no sign worth judging:
 # the 0.25 kV landing reads about 0.26 kV, the 0 kV noise about 0.01.
 HEALTH_SIGN_MIN_KV = 0.05
+# breakdown_flags compares the current with the run's median only when at
+# least this many rows hold a parseable measured_uA. With fewer it falls
+# back to its legacy rule, where an area collapse ALONE confirms (and
+# renames frames). run_health changes nothing about that: it only has to
+# SAY which rule the run will get, so this mirrors breakdown_flags' own
+# `len(uas) >= 5`, and a test holds the two together.
+HEALTH_MIN_UA_ROWS = 5
 
 _SETUP_TOTAL = re.compile(
     r'^Total:.*\(\s*\d+\s+landings?,\s*(\d+)\s+frames?\)', re.M)
@@ -3863,8 +3870,8 @@ def run_health(rundir, run=None):
                 f"commanded voltage on {len(opposite)} of {len(signed)} "
                 f"readings (for example {mkv[j]:+.2f} kV measured at "
                 f"{kvs[j]:.2f} kV commanded), and setup.txt does not "
-                f"record an inverted Trek. The size of each reading is "
-                f"still usable."
+                f"record an inverted Trek. This check looks only at the "
+                f"sign, not at the size of a reading."
                 + (" A scope window framed for the other sign can be why "
                    "the readings stop early." if blank else "")
                 + " Do not change any high-voltage setting yourself: tell "
@@ -3872,22 +3879,51 @@ def run_health(rundir, run=None):
         with_kv = [i for i, kv in enumerate(kvs) if kv is not None]
         no_ua = [i for i in with_kv
                  if _num(rows[i].get('measured_uA')) is None]
-        if no_ua and len(no_ua) == len(with_kv):
+        # Which rule breakdown_flags will apply, counted its own way
+        # (every row, float()). Below HEALTH_MIN_UA_ROWS it is the legacy
+        # rule: a large area drop confirms a breakdown with no current
+        # behind it, and Save renames frames on it. The sentence must not
+        # promise the opposite (review 2026-10-02).
+        n_ua = 0
+        for r in rows:
+            try:
+                float(r.get('measured_uA') or '')
+                n_ua += 1
+            except (TypeError, ValueError):
+                pass
+        area_alone = n_ua < HEALTH_MIN_UA_ROWS
+        if no_ua and len(no_ua) == len(with_kv) and area_alone:
             say('warn', 'ua_missing',
                 f"This run has no current readings at all ({len(with_kv)} "
-                f"frames). Edge Review confirms a breakdown from the "
-                f"current, so on this run it cannot flag one. Judge from "
-                f"the pictures whether the device survived, and ask "
-                f"before you use the top voltages.")
+                f"frames), so Edge Review cannot check the current for a "
+                f"breakdown. It can still mark one from a sudden drop in "
+                f"area alone, which is less reliable. Judge from the "
+                f"pictures whether the device survived, and ask before "
+                f"you use the top voltages.")
         elif no_ua:
-            say('warn', 'ua_missing',
+            blank_txt = (
                 f"No current reading on {len(no_ua)} of {len(with_kv)} "
                 f"frames (the first one is at {kvs[no_ua[0]]:.2f} kV). A "
                 f"blank can mean the current was too large for the scope "
                 f"window, which is what a breakdown looks like, or that "
-                f"the scope did not answer. The breakdown check skips "
-                f"frames without a current: look at those frames "
-                f"yourself, and ask if the device looks damaged.")
+                f"the scope did not answer.")
+            if area_alone:
+                lim = float(settings.get('breakdown_ua',
+                                         DEFAULT_SETTINGS['breakdown_ua']))
+                say('warn', 'ua_missing',
+                    f"{blank_txt} With only {n_ua} current "
+                    f"reading{'' if n_ua == 1 else 's'} in the run, Edge "
+                    f"Review cannot compare the current with its usual "
+                    f"level. It marks a breakdown from a reading larger "
+                    f"than {lim:g} microamps, or from a sudden drop in "
+                    f"area alone, which is less reliable. Look at the "
+                    f"frames without a reading yourself, and ask if the "
+                    f"device looks damaged.")
+            else:
+                say('warn', 'ua_missing',
+                    f"{blank_txt} The current check for a breakdown has "
+                    f"nothing to read on those frames: look at them "
+                    f"yourself, and ask if the device looks damaged.")
 
     # Did the run reach its end.
     n_rows = sum(1 for r in rows
@@ -3901,6 +3937,7 @@ def run_health(rundir, run=None):
         total = planned or end[2]
         top = max((kv for kv in kvs if kv is not None), default=None)
         top_txt = f", up to {top:.2f} kV" if top is not None else ''
+        lead, wait = "The run stopped early", ""
         if end and end[0] == 'aborted':
             why = "run.log says the operator pressed Abort"
         elif end and end[0] == 'BREAKDOWN-ABORT':
@@ -3911,16 +3948,22 @@ def run_health(rundir, run=None):
         elif log['error']:
             why = f"run.log records an error: {log['error']}"
         elif log['found']:
-            why = ("run.log has no end-of-run line, so the program or "
-                   "the PC probably stopped in the middle")
+            # No end line is also what a run looks like WHILE it is
+            # being captured, and Edge Review opens on the newest run
+            # folder: do not call a live run "stopped".
+            lead = "The run is not finished"
+            why = ("run.log has no end-of-run line: the run is still "
+                   "going, or the program or the PC stopped in the middle")
+            wait = (" If the run is still going, wait until it ends and "
+                    "pick it again.")
         else:
             why = ("this folder has no run.log, so the reason was not "
                    "recorded")
         say('warn', 'ended_early',
-            f"The run stopped early: {n_rows} of {total} planned frames "
-            f"were taken{top_txt} ({why}). The frames that exist can "
-            f"still be reviewed, but the sweep is incomplete: say so "
-            f"wherever you report this run.")
+            f"{lead}: {n_rows} of {total} planned frames were taken"
+            f"{top_txt} ({why}).{wait} The frames that exist can still "
+            f"be reviewed, but the sweep is incomplete: say so wherever "
+            f"you report this run.")
 
     # The watchdog's trip: reported, never turned into a flag here.
     trips = [i for i, r in enumerate(rows)
@@ -3932,10 +3975,11 @@ def run_health(rundir, run=None):
         say('warn', 'watchdog_trip',
             f"The current watchdog stopped this run{at}: the current "
             f"stayed too high, which usually means the device broke down "
-            f"there. Edge Review marks a breakdown only from the current "
-            f"readings in data.csv, so this stop may not show up as a "
-            f"breakdown mark. Look at the last frames, and ask before "
-            f"you use the data near that voltage.")
+            f"there. Edge Review does not use this stop when it marks a "
+            f"breakdown: it decides from the current readings and the "
+            f"measured areas in data.csv, so this stop may not show up "
+            f"as a breakdown mark. Look at the last frames, and ask "
+            f"before you use the data near that voltage.")
 
     # Pictures the CSV promises and the disk does not hold.
     lost = [i for i in missing if i != base_i]
@@ -4198,19 +4242,26 @@ def apply_results(rows, results, scale, flags, annos=None):
                         if col in row:
                             row[col] = ''
         before = list(tokens)
+        fresh = set()       # positions this pass has already rewritten
         for extra in (flags.get(i), annos.get(i)):
             for tok in _note_tokens(extra):
                 if tok in tokens:
                     continue
                 if not reviewed:
                     # the kept cell may already hold this annotation
-                    # with an older number: replace it, do not pile up
+                    # with an older number: replace it, do not pile up.
+                    # Only a token that was in the cell BEFORE this pass
+                    # is replaced, and only once: two notes of one kind
+                    # found by the same Save are two findings.
                     kind = _note_kind(tok)
-                    same = [k for k, old in enumerate(tokens)
-                            if kind.strip() and _note_kind(old) == kind
-                            and not old.startswith(RUNNER_NOTE_PREFIXES)]
+                    same = [k for k in range(len(before))
+                            if k not in fresh and kind.strip()
+                            and _note_kind(tokens[k]) == kind
+                            and not tokens[k].startswith(
+                                RUNNER_NOTE_PREFIXES)]
                     if same:
                         tokens[same[0]] = tok
+                        fresh.add(same[0])
                         continue
                 tokens.append(tok)
         # an unreviewed row nothing was added to keeps its cell

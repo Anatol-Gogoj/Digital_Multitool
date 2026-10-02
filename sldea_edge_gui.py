@@ -25,8 +25,9 @@ toolbar, what the run's own files say went wrong at capture
 (se.run_health): a blank or overexposed baseline, a refused disc fit,
 missing voltage or current readings, an early end, a watchdog stop,
 missing frames, off-screen samples in telemetry.csv. STOP items are
-repeated first on the empty canvas. It is advice: it blocks nothing,
-and it is not a breakdown verdict.
+repeated first on the empty canvas. It is advice: it blocks nothing
+(--auto presses Detect on a STOP run as on any other), and it is not a
+breakdown verdict.
 
 ONE 📏 BUTTON, TWO OUTCOMES (operator 2026-08-06 late, `#215`).
 📏 Calibrate… and 📏 Re-anchor scale… were folded into a single
@@ -172,9 +173,7 @@ out-of-tolerance anchor without a word being read (review 2026-08-06).
 
 With --auto (used by the SLDEA tab's "auto process"), the calibrate
 dialog opens on launch and detection chains automatically once
-calibration finishes. The one exception (2026-10-02): when Run health
-shows a STOP for the run, --auto starts nothing and the status line
-says why; the Detect button itself stays live. Keyboard: 1/2/3 pick a candidate, R reject,
+calibration finishes. Keyboard: 1/2/3 pick a candidate, R reject,
 4/D/T open the manual tracer (#162/#172 -- its Done stages the polygon
 as candidate D; Accept commits it like any other candidate),
 Left/Right navigate, Enter accept + next.
@@ -369,7 +368,10 @@ HOWTO_SECTIONS = [
     ]),
     ("3  Procedure", [
         "1.   Select the run in the Run box. A run that has measured "
-        "areas shows the ✓ processed mark.",
+        "areas shows the ✓ processed mark. Read the Run health strip "
+        "below the toolbar before you continue. It tells you what went "
+        "wrong during the capture of the run. A line that starts with "
+        "✘ STOP tells you that the run cannot be measured.",
 
         "2.   Press ▶ Detect Edges. NOTE: The camera zoom changes between "
         "runs. Thus each run must have its own pixel-to-millimetre "
@@ -717,15 +719,21 @@ HEALTH_COLORS = {'stop': '#EE6677', 'warn': '#CCBB44', 'info': '#66CCEE',
 # What follows the STOP sentences on the empty canvas. It replaces
 # HINT_DETECT there: "press Detect to start" directly under "this run
 # cannot be measured" would be two instructions that contradict each other.
-HINT_AFTER_STOP = ("This is advice only:  ▶ Detect Edges  still works if "
-                   "you want to see the frames for yourself.")
-# --auto presses Detect for the operator, and the scale dialog then
-# opens over the strip 300 ms after launch. With a STOP on the strip
-# the press is held back so the STOP can be read first: the 2026-10-01
-# anchor was three hand circles on a blank frame. Nothing is locked.
-AUTO_HELD_TEXT = ("automatic detection was NOT started: Run health shows "
-                  "a STOP for this run (read the strip under the "
-                  "toolbar). ▶ Detect Edges still works.")
+# It says what the button WILL do, because the button is not locked: with
+# no usable baseline picture the automatic fit has nothing to verify, so
+# the scale gate in detect() opens on the hand measurement. The first
+# wording ("Detect still works if you want to see the frames") sent the
+# student into the very calibration the STOP forbids (review 2026-10-02).
+HINT_AFTER_STOP = ("Nothing is locked. But  ▶ Detect Edges  cannot use "
+                   "the baseline picture of this run, so it will first "
+                   "ask you to measure the scale by hand. To only look at "
+                   "the pictures, open the frames folder inside the run "
+                   "folder.")
+# Shown on the header line while the strip holds more lines than it
+# shows. Measured on the 16 corpus runs at the default width: seven fit
+# the five lines, nine need 7 to 11, and a student who never scrolls
+# would read half of those (review 2026-10-02).
+HEALTH_MORE = "▼ more below: scroll with the mouse wheel or the bar"
 
 
 def health_counts(items):
@@ -1640,7 +1648,7 @@ class EdgeReviewApp:
         self._hint = None        # the empty-canvas "press this" line (`#216`)
         self.health = None       # se.run_health items of the loaded run;
         # None while no run is loaded. Shown, never consulted: no gate
-        # reads it (2026-10-02)
+        # reads it, and --auto does not either (2026-10-02)
         self._primary_font = None   # kept alive by _install_styles (`#216`)
         self._build_ui()
         start = path or DEFAULT_PARENT
@@ -1652,11 +1660,7 @@ class EdgeReviewApp:
         if goto is not None:
             self.goto_row(goto)
         if auto and self.rundir:
-            if any(it.get('level') == 'stop' for it in self.health or ()):
-                # see AUTO_HELD_TEXT: the press is held, not the button
-                self.status.config(text=AUTO_HELD_TEXT)
-            else:
-                root.after(300, self.detect)
+            root.after(300, self.detect)
 
     # ---------------- UI scaffolding ----------------
     def _install_styles(self):
@@ -1724,7 +1728,14 @@ class EdgeReviewApp:
         # opens at the old, too-narrow default.
         self.root.update_idletasks()
         want_w = max(self._scroll.body.winfo_reqwidth(), 1150)
-        want_h = max(self._scroll.body.winfo_reqheight(), 760)
+        # The run-health strip (2026-10-02) sits between the toolbar
+        # and the image. On the old 760 floor its 85 px came straight out
+        # of the review canvas (563 px tall against 648), on every run,
+        # for the whole review. The floor therefore grows by the strip:
+        # the image keeps the height it had before the strip existed. The
+        # screen cap below still applies.
+        strip_h = self._health_box.winfo_reqheight()
+        want_h = max(self._scroll.body.winfo_reqheight(), 760 + strip_h)
         # leave room for the window frame and a taskbar rather than
         # butting the very edge of the display
         cap_w = max(640, self.root.winfo_screenwidth() - 80)
@@ -1856,6 +1867,7 @@ class EdgeReviewApp:
         # they are bound on the window and a disabled Text types nothing.
         hbox = ttk.Frame(host, padding=(6, 0, 6, 2))
         hbox.pack(fill='x')
+        self._health_box = hbox         # _size_to_layout asks its height
         self.health_txt = tk.Text(hbox, height=HEALTH_LINES, wrap='word',
                                   takefocus=0, cursor='arrow',
                                   relief='groove', bd=1, padx=6, pady=3,
@@ -1867,6 +1879,7 @@ class EdgeReviewApp:
         self.health_txt.pack(side=tk.LEFT, fill='x', expand=True)
         mark_font = self._primary_font or 'TkDefaultFont'
         self.health_txt.tag_configure('head', font=mark_font)
+        self.health_txt.tag_configure('more', font=mark_font)
         for level, colour in HEALTH_COLORS.items():
             # the colour only repeats the mark's own symbol and word
             self.health_txt.tag_configure(level, background=colour,
@@ -1874,6 +1887,8 @@ class EdgeReviewApp:
                                           font=mark_font)
         for seq in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
             self.health_txt.bind(seq, self._health_wheel)
+        # how many lines the text wraps to depends on the strip's width
+        self.health_txt.bind('<Configure>', self._health_more_cue)
         self._show_health(None)
 
         mid = ttk.Frame(host)
@@ -2108,6 +2123,30 @@ class EdgeReviewApp:
                 t.insert(tk.END, f"  {it.get('text', '')}")
         t.config(state='disabled')
         t.yview_moveto(0.0)
+        self._health_more_cue()
+
+    def _health_more_cue(self, _ev=None):
+        """Put HEALTH_MORE on the header line while the strip holds more
+        display lines than its HEALTH_LINES, and take it off when it does
+        not. Called after every repaint and on every width change (the
+        wrap decides the count). Before the strip has a width there is
+        nothing to count, and the first <Configure> comes back here."""
+        t = self.health_txt
+        t.config(state='normal')
+        try:
+            old = t.tag_ranges('more')
+            if old:
+                t.delete(old[0], old[1])
+            if t.winfo_width() <= 1:
+                return
+            lines = 1 + int(t.tk.call(t._w, 'count', '-update',
+                                      '-displaylines', '1.0', 'end-1c'))
+            if lines > HEALTH_LINES:
+                t.insert('1.end', f"   {HEALTH_MORE}", 'more')
+        except (tk.TclError, ValueError, TypeError):
+            pass                # a cue is never worth a traceback
+        finally:
+            t.config(state='disabled')
 
     def _health_wheel(self, ev):
         """The wheel over the strip scrolls the strip and stops there:

@@ -73,7 +73,7 @@ note).
    | `dry_run` | info | `setup.txt` says the HV was off; the two electrical checks are skipped |
    | `kv_missing` | warn | powered rows without `measured_kV`; says how many and where the readings stop |
    | `kv_sign` | info | measured kV opposes the commanded sign and `setup.txt` has no `Trek control polarity: INVERTED` line |
-   | `ua_missing` | warn | rows without `measured_uA` |
+   | `ua_missing` | warn | rows without `measured_uA`; says which breakdown rule the run will get |
    | `ended_early` | warn | fewer rows than `setup.txt` planned, or `run.log` ends `aborted` short of the plan; says why when `run.log` knows |
    | `watchdog_trip` | warn | a row tagged `breakdown`, a `WATCHDOG` note, or the `BREAKDOWN` lines of `run.log` |
    | `frames_missing` | warn | frames named in the CSV and absent on disk |
@@ -88,10 +88,29 @@ note).
    - `kv_sign` tells the student not to change any high-voltage setting.
      Ticking "Trek inverts" negates the SG control, which flips the live
      HV polarity; that is not a fix to hand out from an analysis window.
+     It says that it looks only at the sign. It does not vouch for the
+     size of a reading: the two 07-23 runs read 14 to 48 % below the
+     commanded voltage, and Assctuator's 1.00 kV frame reads 0.17 kV.
+   - `ua_missing` and `watchdog_trip` say what `breakdown_flags` will do,
+     not what it does on a healthy run. With fewer than 5 parseable
+     `measured_uA` rows it takes its legacy rule, where an area collapse
+     alone confirms and Save renames frames on it. Three corpus runs are
+     in that case: both 2026-08-05 runs (0 readings) and Assctuator (3).
+     On the 51 rows of `0805_103546` a 50 % area drop at row 30 returns
+     `{30: 'breakdown? area collapsed 50%'}` as a confirmed flag. The
+     sentence therefore reads "cannot check the current ... can still mark
+     one from a sudden drop in area alone, which is less reliable".
+     `HEALTH_MIN_UA_ROWS = 5` mirrors that threshold and a test holds the
+     two together on both sides of it.
    - The telemetry status columns are found by name in the header. A
      `skipped` row is not counted as a sample of that channel.
    - A reused run name appends to `run.log`, so only the part after the
      last `run dir:` line is read.
+   - A `run.log` with no end-of-run line is also what a run looks like
+     while it is being captured, and Edge Review opens on the newest run
+     folder. That case reads "The run is not finished ... If the run is
+     still going, wait until it ends and pick it again", not "stopped
+     early".
    - The 25 % saturation cut is not tuned. It sits in the empty gap
      between the two clusters above.
 3. **The strip.** Under the toolbar, five lines tall with its own
@@ -102,11 +121,31 @@ note).
    first thing on the empty canvas. With no `stop` item the canvas hint
    is the old one, word for word. Detect and Save are not gated on any of
    it.
-   - One thing does change on a `stop`: `--auto` does not press Detect.
-     The SLDEA tab's auto-process opens Edge Review with `--auto`, which
-     pressed Detect 300 ms after launch, and the scale dialog then opened
-     over the strip before anyone could read it. The status line says the
-     press was held back; the button itself stays live.
+   - `--auto` is not an exception. The SLDEA tab's auto-process opens
+     Edge Review with `--auto`, which presses Detect 300 ms after launch;
+     it does so on a `stop` run as on any other, and the scale dialog
+     then opens over the strip. The `stop` is still on the strip and on
+     the canvas when that dialog is closed.
+   - Under a `stop` the canvas does not say "Detect still works". It says
+     what the button will do: with no usable baseline picture the scale
+     gate has no automatic fit to verify, so Detect first asks for a hand
+     measurement of the scale, which is what the `image_flat` sentence
+     has just told the student not to make. The hint points at the
+     frames folder for looking at the pictures.
+   - The strip adds its height to the window. On the old 760 px floor
+     its 85 px came out of the review canvas: 983 x 563 against 983 x 648
+     on main at the default 1319 px width. `_size_to_layout` now asks for
+     760 plus the strip, so the window opens 845 px tall and the canvas
+     is 983 x 648 again. On a screen capped below that (768 px tall: a
+     648 px window) the canvas keeps its 560 px and the page scrolls
+     109 px instead of 24.
+   - At the default width seven of the 16 corpus runs fit the five
+     lines, the six campaign runs among them. The other nine need 7 to
+     11, so the header says `more below: scroll with the mouse wheel or
+     the bar` whenever the text is longer than the five lines shown.
+   - The "How to use" panel (step 1) and the manual's Edge Review entry
+     in `docs/manual-src/content.json` name the strip and its STOP mark.
+     The manual PDF follows at the next release, as usual.
 4. **The runner's notes survive Save.** `RUNNER_NOTE_PREFIXES =
    ('WATCHDOG', 'V_Out ', 'I_Out ')` is a whitelist of the tokens the
    runner writes (`_sldea_capture` and the trip branch of
@@ -116,6 +155,8 @@ note).
    regenerated, so analysis notes cannot accumulate. An unreviewed row
    keeps its cell, as before; a flag or annotation added to it now
    replaces an older token with the same words and a different number.
+   Only a token that was in the cell before the Save is replaced, and
+   only once, so two notes of one kind found by the same Save both stay.
    A row nothing was added to keeps its cell byte for byte, which the
    scale-only re-anchor relies on (checked on all 899 rows: 0 changed).
    - A whitelist and not "keep everything that is not an edge token":
@@ -150,6 +191,16 @@ reuses it.
 
 **Not decided here. These are Anatol's calls.**
 
+- **Should `--auto` hold its Detect press on a `stop`?** A first draft
+  of this change did, and the review took it out: it is a gate on the
+  auto-process path, and the strip is advice. The case for it is the
+  2026-10-01 run, where the scale dialog would open over the strip
+  300 ms after launch on a blank picture.
+- **The legacy area-only breakdown rule is unchanged.** Under 5 current
+  readings an area collapse alone still confirms a breakdown and renames
+  frames (three corpus runs, above). The strip now says so; whether a
+  run with no current readings should be allowed to rename frames at all
+  is not decided here.
 - **Breakdown confirmation and renaming are unchanged.** A watchdog trip
   row is reported by the strip and still confirms nothing by itself:
   `breakdown_flags` reads only `measured_uA`, so a trip on a clipped or
@@ -172,18 +223,27 @@ reuses it.
 - **Hand-typed notes on a reviewed row are still dropped**, as before.
   Only the whitelist is kept.
 
-**Tests.** `tests/test_sldea_edge.py` gains 15 cases (95 pass):
+**Tests.** `tests/test_sldea_edge.py` gains 16 cases (96 pass):
 `image_content`, each `run_health` check on a synthetic run folder, the
-notes surviving two Saves through `load_run` and `write_back`, and stale
-analysis notes not piling up. `tests/test_sldea_edge_gui.py` gains 4 (58
-pass): the wording helpers, the strip on a real window (STOP first, Detect
-and Save still work, same height on the next run, a failing check costs
-only the advice), `--auto` holding its Detect press over a STOP, and two
-Saves through the real Save button. 18 mutants of the new edge code were
-run and all 18 were caught.
+current sentences held against `breakdown_flags` on both sides of the
+5-reading threshold, an earlier run's lines in a reused `run.log` not
+leaking into this run, the notes surviving two Saves through `load_run`
+and `write_back`, and stale analysis notes not piling up.
+`tests/test_sldea_edge_gui.py` gains 5 (59 pass): the wording helpers,
+the strip on a real window (STOP first, Detect goes to the scale gate
+and that gate has no fit to verify, Detect and Save still work, a
+failing check costs only the advice, a failed load leaves no verdict
+behind), `--auto` pressing Detect on a STOP run, the window growing by
+the strip while the canvas keeps its height, the scroll cue, and two
+Saves through the real Save button. 38 mutants were run against these
+tests (18 of the new edge code, 20 of the wording, strip and notes
+changes that followed the review); all 38 were caught.
 
 **No bench gate.** Analysis side only: no instrument I/O, no capture or
-HV code, and no new file type in a run folder.
+HV code, and no new file type in a run folder. One look is still owed on
+the Linux bench PC, with no HV: the strip was only seen on Windows, so
+open one real run there and check that the marks and the five-line strip
+draw as intended.
 
 ## A LIVE run locks the scope channels it reads, and the settings they share (2026-09-24)
 

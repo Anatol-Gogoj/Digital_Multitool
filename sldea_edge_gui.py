@@ -696,8 +696,11 @@ CAL_SPAWN_JITTER = 0.06             # spawn centre jitter / ROI min-dimension
                                     # circle inside the ROI by arithmetic,
                                     # not by the clamp; and 2*0.40 = 0.80
                                     # stays inside the plausibility gate
-                                    # below, so a raw spawn is always an
-                                    # acceptable (if wrong) fit
+                                    # below, so a raw spawn always has a
+                                    # plausible SIZE. That is why the size
+                                    # gate cannot catch a round nobody
+                                    # fitted; cal_untouched does
+                                    # (2026-10-02)
 CAL_WHEEL_FINE_PX = 0.5             # wheel notch -> radius, fine
 CAL_WHEEL_COARSE_PX = 5.0           # Shift+wheel notch -> radius
 CAL_MIN_DIAM_FRAC = 0.06            # an acceptable diameter, as a fraction
@@ -1006,6 +1009,161 @@ def cal_stretch_lut(lo, hi):
         else:
             out.append(int(round(255.0 * (i - lo) / span)))
     return out
+
+
+# ---------------------------------------------------------------------------
+# THE HAND MODES' GUARDRAILS (2026-10-02)
+#
+# Run SLDEA_20261001_151016: the automatic fit refused, the hand dialog
+# showed the RAW frame (the disc is a 1 gray-level step on it, so the
+# picture was a flat grey field), and three circles of 612.85, 557.21 and
+# 701.14 px across were accepted through two override prompts. All three
+# sit inside the dialog's own spawn band (550.8 to 734.4 px at 1080p) and
+# the disc is about 387 px, so the accepted anchor was 1.61x too large.
+# That is what untouched spawns look like. It cannot be proved (no centre
+# and no gesture was logged), and nothing was saved from the run.
+#
+# Nothing here adds a threshold or touches a gate. Three things changed:
+#
+#   1. The hand modes show the frame through a DISPLAY contrast stretch, as
+#      the verify mode always has. With an automatic fit on this frame the
+#      window is the verify mode's own (cal_stretch_window); with no fit it
+#      comes from the frame's percentiles (cal_content_window).
+#   2. A circle round whose circle still sits exactly where the dialog
+#      spawned it is refused (cal_untouched). A spawn is a random starting
+#      point, not a measurement.
+#   3. A frame se.image_content calls flat opens on a plain statement with
+#      Cancel as the default (flat_frame_text); the hand tools stay
+#      reachable behind a second, deliberate button.
+#
+# The stretch is a lookup table applied to the throwaway display crop.
+# Every diameter comes from circle geometry or click coordinates in image
+# px, never from a pixel value, so no measured number can change with it.
+# What it CAN change is where a person puts the mark, which is why this is
+# a measurement-chain change with its own SLDEA_HANDOFF entry.
+# ---------------------------------------------------------------------------
+CAL_UNTOUCHED_MSG = "Move the circle onto the edge of the disc first."
+CAL_NO_POINTS_MSG = "Click the two opposite edges of the disc first."
+
+
+def cal_content_window(content, pad_frac=CAL_STRETCH_PAD_FRAC):
+    """(lo, hi) gray levels to map across black to white for the HAND
+    modes' display when there is no automatic fit to take the disc and
+    paper levels from, or None.
+
+    `content` is se.image_content's dict for the frame on screen. The
+    window is its p5 to p95, padded on each side by `pad_frac` of that
+    spread, the same padding cal_stretch_window uses. On a P3 baseline
+    (p5 149, p95 193) that is about 129 to 213; on the 2026-10-01 frame
+    (p5 66, p95 68) it is 65.1 to 68.9, which is the window that makes its
+    1 gray-level disc visible at all.
+
+    Unlike cal_stretch_window this does NOT refuse a narrow window. That
+    rule protects the verify mode from judging a fit on amplified noise;
+    here there is no fit, the operator has to see whatever the frame
+    holds, and a flat frame is announced as flat before this picture is
+    shown (flat_frame_text). cal_stretch_window itself is unchanged.
+
+    None when there is no content, or when the frame is a single gray
+    level (a window under 1 gray level wide has nothing in it to show).
+
+    Pure, so the arithmetic is a headless test."""
+    if not content:
+        return None
+    try:
+        p5, p95 = float(content['p5']), float(content['p95'])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (math.isfinite(p5) and math.isfinite(p95)) or p95 <= p5:
+        return None
+    pad = float(pad_frac) * (p95 - p5)
+    lo = max(0.0, p5 - pad)
+    hi = min(255.0, p95 + pad)
+    if hi - lo < 1.0:
+        return None
+    return (lo, hi)
+
+
+def cal_untouched(circle, spawn):
+    """True when a circle round's circle is still EXACTLY the circle the
+    dialog spawned for it: never dragged, never resized, never nudged.
+
+    Exact equality, on purpose. This is not a tolerance and not a new
+    gate: it only tells "the operator did something" from "the operator
+    pressed Continue on the random starting circle". One arrow-key nudge
+    clears it, so it cannot judge whether a fit is any good; the SE gate
+    and the anchor guard still do that.
+
+    False when either circle is missing (nothing was spawned, so there is
+    nothing to compare against)."""
+    if circle is None or spawn is None:
+        return False
+    try:
+        return (tuple(float(v) for v in circle)
+                == tuple(float(v) for v in spawn))
+    except (TypeError, ValueError):
+        return False
+
+
+def flat_frame_text(content):
+    """The plain statement a flat calibration frame opens with. One place,
+    so the opening notice, the dialog's warning line and the status strip
+    all say the same sentence."""
+    try:
+        n = int(round(float((content or {}).get('contrast'))))
+    except (TypeError, ValueError):
+        n = 0
+    return (f"This frame shows no visible disc (contrast {n} gray "
+            f"level{'' if n == 1 else 's'}). Calibrating by hand here "
+            f"would be a guess. Check the camera exposure and repeat the "
+            f"test.")
+
+
+def anchor_caveat(ref):
+    """What is NOT settled about a HAND anchor, as one clause for the
+    status strip, or '' when there is nothing to say.
+
+    The calibration dialog's own status line says OVER GATE and NOT
+    cross-checked the moment an anchor is accepted over a prompt, and
+    setup.txt keeps both. But that line is replaced by the detection
+    readout seconds later and by "saved in ..." at Save, so the one
+    sentence a student reads after saving used to carry no warning at all.
+    This is the same wording, rebuilt from the anchor itself so it can be
+    repeated wherever the anchor is put to use (Save, reuse, re-anchor).
+
+    Reads only what the anchor records: `se_pct` (or the range and n it
+    is derived from) against se.CAL_SE_PCT, and the first words of the
+    `guard` note that se.anchor_guard_note wrote. A reused anchor loaded
+    from setup.txt therefore gets the same sentence as a fresh one.
+
+    '' for a verified automatic fit: it has no rounds and no guard to
+    override, and its own status wording already says it is not
+    cross-checked."""
+    if not ref or se.guard_is_vacuous(ref):
+        return ''
+    bits = []
+    sep = ref.get('se_pct')
+    if sep is None and ref.get('spread_pct') is not None:
+        nr = ref.get('n_rounds')
+        sig = se.sigma_from_range(ref.get('spread_pct'), nr)
+        sep = (sig / math.sqrt(nr)) if (sig and nr) else None
+    try:
+        if sep is not None and float(sep) > se.CAL_SE_PCT:
+            bits.append(f"hand rounds OVER GATE (SE {float(sep):.2f}% of "
+                        f"diameter, limit {se.CAL_SE_PCT:g}%)")
+    except (TypeError, ValueError):
+        pass
+    note = str(ref.get('guard') or '')
+    if note.startswith('NOT CROSS-CHECKED'):
+        bits.append("NOT cross-checked (no automatic disc fit)")
+    elif note.startswith('OVERRIDDEN'):
+        bits.append("cross-check OVERRIDDEN")
+    if 'FLAT FRAME' in note:
+        bits.append("measured on a frame with no visible disc")
+    if not bits:
+        return ''
+    return ("⚠ SCALE NOT VERIFIED: " + ', '.join(bits)
+            + ". Every mm² in this run inherits it")
 
 
 def verify_zoom(diam_px, canvas_w, canvas_h,
@@ -2448,7 +2606,11 @@ class EdgeReviewApp:
                        f"avg of {nr if nr is not None else '?'}, range "
                        f"{spr:.2f}%"
                        + (f", SE {sep:.2f}%"
-                          + ('' if sep <= se.CAL_SE_PCT else ' ⚠')
+                          # the words, not only the sign (2026-10-02): this
+                          # line replaces the dialog's own "OVER GATE"
+                          # status seconds after it is written
+                          + ('' if sep <= se.CAL_SE_PCT
+                             else ' ⚠ OVER GATE')
                           if sep is not None
                           else ', SE not convertible ⚠') + ')')
             guard = se.anchor_guard(self.manual_ref['diam_px'],
@@ -3444,8 +3606,18 @@ class EdgeReviewApp:
                      else "no mm scale — use 📏 Calibrate / "
                           "re-anchor")
         bd_txt = f", {renamed} frame(s) renamed" if renamed else ""
+        # WHAT THE STUDENT READS AFTER SAVING (2026-10-02). The dialog said
+        # OVER GATE / NOT cross-checked when the anchor was accepted, and
+        # setup.txt keeps it, but this strip used to end the session on
+        # "saved ... data.csv updated" with no trace of either. On run
+        # 1001_151016 that would have been the last word on an anchor 1.61x
+        # too large. The caveat goes FIRST after "saved", because the strip
+        # is one unwrapped line and its tail is what a narrow window cuts.
+        cav = anchor_caveat(self.manual_ref)
         self.status.config(
-            text=f"saved in {took} — data.csv updated ({scale_txt}){bd_txt}")
+            text=f"saved in {took} — "
+                 + (f"{cav}. " if cav else '')
+                 + f"data.csv updated ({scale_txt}){bd_txt}")
 
     def _save_plot(self, scale):
         import matplotlib
@@ -3686,6 +3858,92 @@ class EdgeReviewApp:
             print(f"calibrate: could not read the fit's refusal: {e}")
             return None
 
+    def _flat_frame_notice(self, content):
+        """The plain statement a FLAT calibration frame opens with (run
+        SLDEA_20261001_151016, 2026-10-02). -> True only when the operator
+        deliberately chose to look at the frame anyway.
+
+        Shown BEFORE the calibration dialog is built, when
+        se.image_content says the frame holds no usable picture and there
+        is no automatic fit to verify. On that run the hand dialog opened
+        straight onto a flat grey field with a random circle on it and a
+        Continue button under it, and nothing said "stop, this picture is
+        unusable": three spawn-sized circles were accepted as the anchor.
+
+        NAMED BUTTONS, not a native yes/no. The two override prompts that
+        follow a hand fit are native boxes where "No" accepts in one and
+        "Yes" accepts in the next; a new prompt must not add a third
+        polarity to remember. Cancel is the default button, and Enter,
+        Escape and the window's own close box all mean Cancel. Looking at
+        the frame anyway takes a click (or Space) on the other button, so
+        it is a deliberate second step and never a reflex.
+
+        The hand tools are NOT removed. The owner still has to be able to
+        inspect such a frame, and every gate that follows a hand fit (the
+        untouched-circle refusal, the SE gate, the cross-check prompt) is
+        unchanged and still stands between this notice and an anchor.
+
+        Published as the dialog singleton while it is up, for the same
+        reason the calibration dialog is: the grab is pointer-only, so a
+        key reaching the main window must front this notice rather than
+        stack a second one behind it."""
+        out = {'go': False}
+        dlg = tk.Toplevel(self.root)
+        try:
+            dlg.title("Calibrate: no visible disc")
+            dlg.transient(self.root)
+            dlg.resizable(False, False)
+            # the warning sign and the bold weight are the cue; no colour
+            tk.Label(dlg, text="⚠ " + flat_frame_text(content),
+                     justify='left', wraplength=480,
+                     font=('TkDefaultFont', 11, 'bold')).pack(
+                         anchor='w', padx=14, pady=(14, 6))
+            tk.Label(dlg,
+                     text="Cancel sets no scale on this run (recommended).\n"
+                          "\"Look at the frame anyway\" opens the hand "
+                          "tools on a contrast-stretched view so the "
+                          "picture can be inspected. A scale accepted "
+                          "there is recorded as measured on a frame with "
+                          "no visible disc.",
+                     justify='left', wraplength=480).pack(
+                         anchor='w', padx=14, pady=(0, 10))
+            row = tk.Frame(dlg)
+            row.pack(fill='x', padx=14, pady=(0, 12))
+
+            def go():
+                out['go'] = True
+                dlg.destroy()
+
+            look_btn = tk.Button(row, text="Look at the frame anyway",
+                                 command=go)
+            look_btn.pack(side=tk.LEFT)
+            cancel_btn = tk.Button(row, text="Cancel (Esc)",
+                                   default='active', command=dlg.destroy)
+            cancel_btn.pack(side=tk.RIGHT)
+            # Enter is Cancel wherever the focus is: a key press must not
+            # be able to open the hand tools on a frame like this one
+            dlg.bind('<Return>', lambda _e: (dlg.destroy(), 'break')[1])
+            dlg.bind('<Escape>', lambda _e: (dlg.destroy(), 'break')[1])
+            dlg.protocol('WM_DELETE_WINDOW', dlg.destroy)
+            cancel_btn.focus_set()
+            self._cal_win = dlg
+            # TEST SEAM, alive only while the notice is (like the dialog's
+            # own probe). Nothing in the app reads it.
+            self._cal_probe = {'notice': dlg, 'content': content,
+                               'look_btn': look_btn,
+                               'cancel_btn': cancel_btn}
+            dlg.grab_set()
+            self.root.wait_window(dlg)
+        finally:
+            self._cal_win = None
+            self._cal_probe = None
+            try:
+                if dlg.winfo_exists():
+                    dlg.destroy()
+            except tk.TclError:
+                pass
+        return out['go']
+
     def _calibrate_scale(self, then_detect=False, mode=None, intent=None):
         """The px→mm SCALE GATE — THREE METHODS (operator decision
         2026-08-05, `#215` 2026-08-06). Detect and Save both require it per
@@ -3851,7 +4109,16 @@ class EdgeReviewApp:
         2026-08-05). In the circle mode the plain wheel is the FINE RESIZE so
         it cannot fight the sizing gesture; in the two-point mode there is
         nothing to resize, so the plain wheel zooms. Geometry is always
-        full-res image coordinates."""
+        full-res image coordinates.
+
+        **THE HAND MODES' GUARDRAILS (2026-10-02)**, after run
+        SLDEA_20261001_151016 accepted three spawn-sized circles as its
+        anchor (see the block above cal_content_window). The hand modes
+        show the frame through the same kind of DISPLAY stretch the verify
+        mode uses; a circle round is refused while its circle still sits
+        exactly where it was spawned; and a frame with no usable picture
+        opens on a plain statement first (_flat_frame_notice). No gate, no
+        threshold and no override was changed."""
         import random
         if not self.run:
             messagebox.showinfo("Calibrate", "Pick a run first")
@@ -3902,6 +4169,33 @@ class EdgeReviewApp:
         refusal = (None if verify_ok else self._auto_disc_refusal())
         opens_c = (verify_ok and mode is None) or (mode == se.CAL_MODE_VERIFY
                                                   and verify_ok)
+        # ---- IS THERE A PICTURE TO CALIBRATE ON AT ALL? (2026-10-02) -----
+        # Measured on the frame the dialog is about to SHOW (the anchor
+        # frame, which on the fallback path is not the baseline), with the
+        # shared se.image_content metric, so "flat" means here what it
+        # means everywhere else. Never allowed to raise: losing the check
+        # must cost the warning, not the calibration.
+        content = None
+        try:
+            content = se.image_content(
+                np.asarray(img.convert('L')),
+                self.settings.get('roi_frac', 0.85))
+        except Exception as e:
+            print(f"calibrate: image-content check failed: {e}")
+        # Only when there is no fit to verify. A frame with an automatic
+        # fit on it has a disc the machine found, so "no visible disc"
+        # would be false there, and the verify mode is what opens.
+        flat = bool(content and content.get('flat') and not verify_ok)
+        if flat and not self._flat_frame_notice(content):
+            # Cancel, the default. Said on the status strip in the same
+            # sentence, because the notice is gone and "Detect is gated on
+            # the scale calibration" would send the student straight back
+            # into it without the reason.
+            print("calibrate: flat frame (contrast "
+                  f"{content['contrast']:.1f} gray levels), no scale set")
+            self.status.config(text="⚠ No scale set. "
+                                    + flat_frame_text(content))
+            return
         win = tk.Toplevel(self.root)
         try:
             # THE INTENT IS ON THE TITLE, and the wording comes from ONE
@@ -3933,6 +4227,18 @@ class EdgeReviewApp:
             # ordinary run this label carries nothing and is not packed at
             # all, so it costs the picture no height.
             gate = ''
+            if flat:
+                # The operator chose to look anyway (_flat_frame_notice).
+                # The statement stays on screen for as long as the hand
+                # tools do, with the one thing the picture now needs said
+                # about it: the stretch that makes anything visible here
+                # is amplifying a handful of gray levels. On the 2026-10-01
+                # frame that view does show the disc (about 387 px across,
+                # a 1 gray-level step), grainy and with a coarse edge, so
+                # the sentence says "noisy" and not "nothing".
+                gate += ("⚠ " + flat_frame_text(content) + " The view below "
+                         "is stretched from those few gray levels, so it "
+                         "is very noisy.\n")
             if not verify_ok:
                 # THE REFUSAL, STATED. When baseline_disc will not fit this
                 # baseline there is nothing to verify and the operator has
@@ -4237,6 +4543,15 @@ class EdgeReviewApp:
                   # as the operator panned would change the picture they are
                   # judging while they judge it.
                   'stretch': None, 'lut': None,
+                  # the HAND modes' own display window and lookup table
+                  # (2026-10-02), computed once below for the same reason.
+                  # Separate from the verify pair above so prepare_verify
+                  # resetting its own cannot blank the hand modes' view.
+                  'hand_stretch': None, 'hand_lut': None,
+                  # circle: the circle exactly as this round SPAWNED it, so
+                  # a round nobody moved or resized can be told from a fit
+                  # (cal_untouched)
+                  'spawn': None,
                   # the anchor guard's modal has to print the mean and the
                   # reference diameter for its warning to be actionable at
                   # all, so declining it and refitting means the next
@@ -4307,6 +4622,10 @@ class EdgeReviewApp:
                 st['circle'] = spawn_circle(
                     img.width, img.height,
                     self.settings.get('roi_frac', 0.85), rnd)
+                # kept beside the live circle: set_circle is the only thing
+                # that moves st['circle'] afterwards (drag, wheel, arrows),
+                # so the two differ exactly when the operator did something
+                st['spawn'] = st['circle']
 
             def set_circle(cx, cy, r):
                 st['circle'] = clamp_circle(cx, cy, r, full_box,
@@ -4471,15 +4790,25 @@ class EdgeReviewApp:
                 cv.delete('all')
                 if cx1 > cx0 and cy1 > cy0:
                     crop = src.crop((cx0, cy0, cx1, cy1))
-                    # THE VERIFY MODE ONLY, and only on the DISPLAY copy: the
-                    # ink step is ~20 gray levels on a ~186 background, which
-                    # is nearly invisible, and an operator squinting at a flat
-                    # grey field is not verifying anything. The measurement is
-                    # already finished and used the raw frame — this LUT
+                    # ONLY ON THE DISPLAY COPY: the ink step is ~20 gray
+                    # levels on a ~186 background, which is nearly invisible,
+                    # and an operator squinting at a flat grey field is not
+                    # verifying anything. In the verify mode the measurement
+                    # is already finished and used the raw frame: this LUT
                     # touches `crop`, a throwaway, and nothing else.
-                    if verify() and st['lut']:
+                    #
+                    # THE HAND MODES TOO, since 2026-10-02. They used to show
+                    # the raw frame, which is the mode an operator lands in
+                    # exactly when the picture is hardest to see: the fit
+                    # refuses on faint discs, and on run 1001_151016 the
+                    # hand dialog showed a flat grey field with a 1
+                    # gray-level disc nobody could see in it. A hand round
+                    # is circle geometry or two click positions in image px,
+                    # so the LUT cannot reach a recorded diameter either.
+                    lut = st['lut'] if verify() else st['hand_lut']
+                    if lut:
                         try:
-                            crop = crop.point(st['lut'] * len(crop.getbands()))
+                            crop = crop.point(lut * len(crop.getbands()))
                         except (ValueError, TypeError):
                             pass          # never lose the picture to a LUT
                     dw = max(1, int(round((cx1 - cx0) * vt.zoom)))
@@ -4696,6 +5025,30 @@ class EdgeReviewApp:
                                                               when)
                 if guard is not None:
                     note = se.anchor_guard_note(guard, overridden)
+                    # THE RECORD SAYS WHAT WAS ACCEPTED OVER (2026-10-02).
+                    # setup.txt already carried se_pct, and the log line
+                    # carries verdict=OVER-GATE, but the anchor block a
+                    # student opens did not say in words that the rounds
+                    # were accepted past the gate. ASCII, one clause each,
+                    # appended to the same free-text field the guard's own
+                    # decision is recorded in.
+                    if stats and se.se_ok(stats) is False:
+                        note += (f"; OVER-GATE: SE {stats['se_pct']:.2f}% "
+                                 f"of diameter against the "
+                                 f"{se.CAL_SE_PCT:g}% gate - accepted "
+                                 f"anyway by operator")
+                    if flat:
+                        note += (f"; FLAT FRAME: contrast "
+                                 f"{content['contrast']:.0f} gray levels, "
+                                 f"no visible disc")
+                    if st['hand_stretch']:
+                        # hand fits made before this date were made on the
+                        # RAW view, so the window is part of how the rounds
+                        # were produced and a later reader needs it to
+                        # compare the two
+                        note += (f"; display stretched "
+                                 f"{st['hand_stretch'][0]:.0f}-"
+                                 f"{st['hand_stretch'][1]:.0f} gray")
                     if st['disclosed']:
                         # these rounds were fitted AFTER a cross-check had
                         # printed the mean and the reference, so their
@@ -4784,6 +5137,8 @@ class EdgeReviewApp:
                     extra += " ⚠ NOT cross-checked (no automatic disc fit)"
                 elif guard is not None and overridden:
                     extra += " ⚠ guard OVERRIDDEN"
+                if flat:
+                    extra += " ⚠ FLAT FRAME (no visible disc)"
                 self.status.config(
                     text=f"scale calibrated: "
                          f"{self.settings['diam_mm']:g} mm = "
@@ -5261,9 +5616,26 @@ class EdgeReviewApp:
             def continue_round(_ev=None):
                 dpx = round_diameter()
                 if dpx is None:
-                    say_live("⚠ place BOTH edge points before "
-                             "continuing — click one edge, then "
-                             "the point opposite it")
+                    # the two-point mode's untouched round: nothing was
+                    # clicked, or only one point was. Said in the same
+                    # plain form as the circle's refusal below.
+                    say_live("⚠ " + CAL_NO_POINTS_MSG + " One edge, then "
+                             "the point opposite it.")
+                    return
+                if (not two_point()
+                        and cal_untouched(st['circle'], st['spawn'])):
+                    # AN UNTOUCHED SPAWN IS NOT A FIT (2026-10-02). The
+                    # circle is exactly where the dialog put it, at the
+                    # random size the dialog gave it, so banking it would
+                    # record the dialog's own random number as the
+                    # operator's measurement. Run 1001_151016's log is
+                    # what that looks like: three diameters, all inside
+                    # the spawn band, none near the disc.
+                    # Reached by the button AND by Enter (continue_key
+                    # calls this for an intermediate round), so neither
+                    # can bank one. Not a threshold: one nudge clears it.
+                    say_live("⚠ " + CAL_UNTOUCHED_MSG)
+                    messagebox.showwarning("Calibrate", CAL_UNTOUCHED_MSG)
                     return
                 if not cal_diam_plausible(dpx, img.width, img.height,
                                           self.settings.get('roi_frac',
@@ -5370,6 +5742,38 @@ class EdgeReviewApp:
                 repaint()
                 return 'break'
 
+            def fit_stretch_window():
+                """(lo, hi) display window from the AUTOMATIC FIT's own disc
+                and paper levels on this frame, or None when there is no
+                fit, no measurable step, or the measurement fails.
+
+                Lifted out of prepare_verify unchanged (2026-10-02) so the
+                hand modes can show the same window the verify mode does.
+                The rule itself (cal_stretch_window, refused under a 6
+                gray-level step) is untouched."""
+                ref = auto_ref() or {}
+                if not ref.get('diam_px'):
+                    return None
+                try:
+                    arr = np.asarray(img.convert('L'), float)
+                    dl, pl = disc_paper_lum(arr, float(ref['cx']),
+                                            float(ref['cy']),
+                                            0.5 * float(ref['diam_px']))
+                    # the fit measured the paper level with foil and
+                    # glint already rejected; no annulus here can do
+                    # that, so its number wins whenever the fit
+                    # reported one
+                    if ref.get('paper_lum') is not None:
+                        pl = float(ref['paper_lum'])
+                    return cal_stretch_window(dl, pl)
+                except Exception as e:
+                    # a stretch is a convenience; losing it must not cost
+                    # the verification, and a silently RAW display is
+                    # stated in the evidence block rather than pretended
+                    # about
+                    print(f"calibrate: contrast stretch unavailable: {e}")
+                    return None
+
             def prepare_verify():
                 """The verify mode's setup: measure the display contrast
                 window from the frame's OWN disc and paper levels, once —
@@ -5382,30 +5786,10 @@ class EdgeReviewApp:
                 st['rimg'] = None
                 st['pts'], st['ptsv'] = [], []
                 st['stretch'], st['lut'] = None, None
-                ref = auto_ref() or {}
-                if ref.get('diam_px'):
-                    try:
-                        arr = np.asarray(img.convert('L'), float)
-                        dl, pl = disc_paper_lum(arr, float(ref['cx']),
-                                                float(ref['cy']),
-                                                0.5 * float(ref['diam_px']))
-                        # the fit measured the paper level with foil and
-                        # glint already rejected; no annulus here can do
-                        # that, so its number wins whenever the fit
-                        # reported one
-                        if ref.get('paper_lum') is not None:
-                            pl = float(ref['paper_lum'])
-                        win_lohi = cal_stretch_window(dl, pl)
-                    except Exception as e:
-                        # a stretch is a convenience; losing it must not cost
-                        # the verification, and a silently RAW display is
-                        # stated in the evidence block rather than pretended
-                        # about
-                        print(f"calibrate: contrast stretch unavailable: {e}")
-                        win_lohi = None
-                    if win_lohi:
-                        st['stretch'] = win_lohi
-                        st['lut'] = cal_stretch_lut(*win_lohi)
+                win_lohi = fit_stretch_window()
+                if win_lohi:
+                    st['stretch'] = win_lohi
+                    st['lut'] = cal_stretch_lut(*win_lohi)
                 # ALWAYS, and after the stretch rather than before: losing
                 # the stretch must not also lose the framing, which is the
                 # half of this the operator cannot work around by zooming.
@@ -5487,6 +5871,11 @@ class EdgeReviewApp:
                         if recorded.get(k) is not None:
                             self.manual_ref[k] = recorded[k]
                     dpx = float(recorded['diam_px'])
+                    # a reused anchor brings its own record with it, so
+                    # what was accepted over when it was made is said
+                    # again here (anchor_caveat) rather than laundered by
+                    # the reuse
+                    cav = anchor_caveat(self.manual_ref)
                     self.status.config(
                         text=f"scale REUSED from the recorded "
                              f"{meth} anchor: "
@@ -5494,7 +5883,8 @@ class EdgeReviewApp:
                              f"{dpx:.0f} px "
                              f"({self.settings['diam_mm'] / dpx:.5f} "
                              f"mm/px) — overrides every automatic "
-                             f"reference at Save")
+                             f"reference at Save"
+                             + (f". {cav}" if cav else ''))
                     win.destroy()
 
             cont = tk.Button(btns, text='', command=step)
@@ -5913,6 +6303,20 @@ class EdgeReviewApp:
             # opens round 1 in that mode
             n_var.set(str(se.CAL_MODE_ROUNDS.get(mode_var.get(),
                                                  se.CAL_ROUNDS)))
+            # THE HAND MODES' DISPLAY WINDOW (2026-10-02), computed ONCE
+            # for the same reason the verify mode's is: a window that moved
+            # between rounds would change the picture the rounds are
+            # compared on. With an automatic fit ON THIS FRAME it is the
+            # verify mode's own window, so both show the same picture;
+            # otherwise (no fit, a fit that belongs to a different frame,
+            # or a step too small for that rule) it comes from the frame's
+            # percentiles. DISPLAY ONLY: nothing below reads a pixel.
+            hand_win = fit_stretch_window() if verify_ok else None
+            if hand_win is None:
+                hand_win = cal_content_window(content)
+            if hand_win:
+                st['hand_stretch'] = hand_win
+                st['hand_lut'] = cal_stretch_lut(*hand_win)
             restart_all()
             cv.focus_set()
             self._cal_win = win
@@ -5925,6 +6329,12 @@ class EdgeReviewApp:
             # this.
             self._cal_probe = {'st': st, 'vt': vt, 'canvas': cv,
                                'disp': disp, 'mode_var': mode_var,
+                               # the ONE function every operator gesture
+                               # moves the circle through, so a test can
+                               # move it the way a drag does; and what the
+                               # image-content check said about this frame
+                               'set_circle': set_circle,
+                               'content': content, 'flat': flat,
                                'n_var': n_var, 'stroke_var': stroke_var,
                                # verify: the evidence block and the two
                                # buttons whose enablement IS the mode
@@ -6230,7 +6640,11 @@ class EdgeReviewApp:
                  + (f", {plan['n_blank']} blanked" if plan['n_blank'] else '')
                  + (f", every area ×{plan['mult']:.4f}" if plan['mult']
                     else '')
-                 + rest)
+                 + rest
+                 # a re-anchor commits the column the way a Save does, so
+                 # it carries the same caveat (2026-10-02)
+                 + (f". {anchor_caveat(new_ref)}"
+                    if anchor_caveat(new_ref) else ''))
 
     def _reanchor_msg(self, plan, prev, new_ref):
         """The re-anchor confirmation, WITH NUMBERS.

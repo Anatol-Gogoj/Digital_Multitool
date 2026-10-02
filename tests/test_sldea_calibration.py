@@ -1691,6 +1691,283 @@ def test_contrast_stretch_is_measured_from_the_frame_and_refuses_a_flat_one():
     assert gui.disc_paper_lum(np.zeros((4, 4)), 2, 2, 1) == (None, None)
 
 
+# ---------------------------------------------------------------------------
+# THE HAND MODES' GUARDRAILS (2026-10-02)
+#
+# Run SLDEA_20261001_151016: exposure 3, so the baseline spans 2 gray levels
+# and the disc is a 1 gray-level step. The automatic fit refused, the hand
+# dialog showed the raw frame, and three circles that never left the dialog's
+# spawn band were accepted through two override prompts. Logged:
+#   diams=612.85,557.21,701.14px range=23.07% se=7.87% verdict=OVER-GATE
+#   auto=none outcome=accepted-override
+# against a disc of about 387 px. Everything below is the arithmetic of the
+# three guardrails; the dialog itself is driven in test_sldea_edge_gui.py.
+# ---------------------------------------------------------------------------
+
+INCIDENT_DIAMS_PX = (612.85, 557.21, 701.14)
+INCIDENT_DISC_PX = 387.0
+
+
+def _incident_frame(h=240, w=320, paper=68, disc=66, r=60):
+    """A frame shaped like the 2026-10-01 baseline: dark, and with a disc
+    that is only a couple of gray levels below the paper."""
+    import numpy as np
+    yy, xx = np.mgrid[0:h, 0:w]
+    a = np.full((h, w), float(paper), np.float32)
+    a[(xx - w // 2) ** 2 + (yy - h // 2) ** 2 <= r * r] = float(disc)
+    return a
+
+
+def test_image_content_tells_a_flat_frame_from_a_picture():
+    """The shared pedestal-free check. On the corpus the 2026-10-01 run
+    reads contrast 1 to 2 and every other frame 30 or more, so 20 sits in
+    the empty gap between them."""
+    import numpy as np
+    assert se.FLAT_CONTRAST_GRAY == 20.0
+    c = se.image_content(_incident_frame())
+    assert c['p5'] == 66.0 and c['p95'] == 68.0, c
+    assert c['contrast'] == 2.0 and c['flat'] is True, c
+    assert c['sat_pct'] == 0.0, c
+    # the synthetic run every dialog case uses: disc 165 on paper 190
+    yy, xx = np.mgrid[0:240, 0:320]
+    ok = np.full((240, 320), 190.0, np.float32)
+    ok[(xx - 160) ** 2 + (yy - 120) ** 2 <= 80 * 80] = 165.0
+    c = se.image_content(ok)
+    assert c['contrast'] == 25.0 and c['flat'] is False, c
+    # PEDESTAL-FREE: lifting every pixel by the same amount changes the
+    # levels and not the spread, so a bright but featureless frame is as
+    # flat as a dark one
+    lifted = se.image_content(_incident_frame() + 120.0)
+    assert lifted['contrast'] == 2.0 and lifted['flat'] is True, lifted
+    assert lifted['p5'] == 186.0, lifted
+    # the window is the CENTRAL one: a bright frame edge outside it is not
+    # picture content
+    edged = _incident_frame()
+    edged[:5, :] = 255.0
+    edged[:, :5] = 255.0
+    assert se.image_content(edged)['flat'] is True
+    assert se.image_content(edged, roi_frac=1.0)['sat_pct'] > 0.0
+    # saturation is reported, as a percent of the window
+    sat = np.full((100, 100), 255.0, np.float32)
+    c = se.image_content(sat)
+    assert c['sat_pct'] == 100.0 and c['flat'] is True, c
+    # a colour frame is averaged, and nothing to look at is None
+    rgb = np.dstack([ok, ok, ok])
+    assert se.image_content(rgb)['contrast'] == 25.0
+    assert se.image_content(None) is None
+    assert se.image_content(np.zeros((0, 0), np.float32)) is None
+    # a hostile roi_frac is clamped, never a crash or an empty window
+    for rf in (-1.0, 0.0, 5.0):
+        assert se.image_content(ok, roi_frac=rf) is not None, rf
+
+
+def test_hand_display_window_comes_from_frame_percentiles_when_no_fit():
+    """With no automatic fit there is no disc or paper level to build the
+    verify mode's window from, so the hand modes take theirs from the
+    frame's own p5 and p95. DISPLAY ONLY, and the verify mode's rule is
+    exactly what it was."""
+    import sldea_edge_gui as gui
+    # the 2026-10-01 frame: p5 66, p95 68 -> 65.1 to 68.9
+    lo, hi = gui.cal_content_window(se.image_content(_incident_frame()))
+    assert abs(lo - 65.1) < 1e-6 and abs(hi - 68.9) < 1e-6, (lo, hi)
+    # ... which is the window that separates its disc from its paper. On
+    # the raw frame they are 66 and 68 out of 255; here they are far apart
+    lut = gui.cal_stretch_lut(lo, hi)
+    assert lut[68] - lut[66] > 100, (lut[66], lut[68])
+    assert lut[66] < lut[67] < lut[68]
+    # a P3 baseline (measured p5 149, p95 193): about 129 to 213
+    lo, hi = gui.cal_content_window({'p5': 149.0, 'p95': 193.0})
+    assert abs(lo - 129.2) < 1e-6 and abs(hi - 212.8) < 1e-6, (lo, hi)
+    # the same padding the verify window uses, and clamped to 0..255
+    assert gui.cal_content_window({'p5': 100.0, 'p95': 200.0},
+                                  pad_frac=0.0) == (100.0, 200.0)
+    assert gui.cal_content_window({'p5': 5.0, 'p95': 250.0}) == (0.0, 255.0)
+    # NOTHING TO SHOW is None, and the caller then shows the raw frame: no
+    # content, a damaged dict, or a frame that is one single gray level
+    for bad in (None, {}, {'p5': 66.0}, {'p5': 'x', 'p95': 68.0},
+                {'p5': 190.0, 'p95': 190.0}, {'p5': 200.0, 'p95': 100.0},
+                {'p5': float('nan'), 'p95': 68.0}):
+        assert gui.cal_content_window(bad) is None, bad
+    uniform = se.image_content(_incident_frame(disc=68))
+    assert uniform['contrast'] == 0.0
+    assert gui.cal_content_window(uniform) is None
+    # THE VERIFY MODE'S RULE IS UNTOUCHED: it still refuses a step under 6
+    # gray levels, which is the 2026-10-01 frame's 2
+    assert gui.CAL_STRETCH_MIN_SPAN == 6.0
+    assert gui.cal_stretch_window(66.0, 68.0) is None
+    lo, hi = gui.cal_stretch_window(166.0, 186.0)
+    assert abs(lo - 157.0) < 1e-6 and abs(hi - 195.0) < 1e-6, (lo, hi)
+
+
+def test_the_display_stretch_never_touches_the_frame_it_displays():
+    """A hand diameter is circle geometry or the distance between two
+    clicks, in image px. The stretch is a lookup table applied to a
+    throwaway crop, so it cannot reach either, and it does not alter the
+    frame the crop was cut from."""
+    import numpy as np
+    from PIL import Image
+    import sldea_edge_gui as gui
+    arr = np.clip(_incident_frame(), 0, 255).astype(np.uint8)
+    img = Image.fromarray(arr).convert('RGB')
+    before = img.tobytes()
+    content = se.image_content(np.asarray(img.convert('L')))
+    lut = gui.cal_stretch_lut(*gui.cal_content_window(content))
+    crop = img.crop((40, 30, 280, 210))
+    shown = crop.point(lut * len(crop.getbands()))
+    # the picture changed ...
+    assert shown.tobytes() != crop.tobytes()
+    lo_hi = shown.convert('L').getextrema()
+    assert lo_hi[1] - lo_hi[0] > 100, lo_hi
+    # ... and the frame did not, so everything measured off it is the same
+    assert img.tobytes() == before
+    again = se.image_content(np.asarray(img.convert('L')))
+    assert again == content, (again, content)
+    # the numbers a round records never see a pixel at all
+    assert gui.two_point_diameter((100.0, 120.0), (260.0, 120.0)) == 160.0
+    cx, cy, r = gui.clamp_circle(160.0, 120.0, 80.0, (0, 0, 320, 240),
+                                 contain=False)
+    assert 2.0 * r == 160.0
+
+
+def test_an_untouched_spawn_is_told_from_a_fit():
+    """A circle round whose circle is still exactly its spawn is refused.
+    Not a tolerance and not a new gate: it only tells "the operator did
+    something" from "the operator pressed Continue on the random start"."""
+    import sldea_edge_gui as gui
+    assert gui.CAL_UNTOUCHED_MSG == \
+        "Move the circle onto the edge of the disc first."
+    assert gui.CAL_NO_POINTS_MSG == \
+        "Click the two opposite edges of the disc first."
+    w, h, rf = 1920, 1080, 0.85
+    box = (0.0, 0.0, float(w), float(h))
+    rnd = random.Random(20261001)
+    for _ in range(50):
+        spawn = gui.spawn_circle(w, h, rf, rnd)
+        assert gui.cal_untouched(spawn, spawn)
+        assert gui.cal_untouched(tuple(spawn), list(spawn))
+        # a drag that goes nowhere is still untouched: the dialog moves the
+        # circle through clamp_circle, which must hand a raw spawn back
+        cx, cy, r = spawn
+        assert gui.cal_untouched(
+            gui.clamp_circle(cx, cy, r, box, contain=False), spawn)
+        # EVERY operator gesture clears it, at its smallest step: an arrow
+        # nudge (1 px), a Shift+arrow resize (1 px) and one wheel notch
+        # (0.5 px of radius)
+        for key, shift in (('Left', False), ('Up', False), ('Right', True)):
+            d = gui.cal_key_delta(key, shift)
+            moved = gui.clamp_circle(cx + d[0], cy + d[1], r + d[2], box,
+                                     contain=False)
+            assert not gui.cal_untouched(moved, spawn), (key, shift)
+        wheeled = gui.clamp_circle(cx, cy, r + gui.cal_wheel_dr(1), box,
+                                   contain=False)
+        assert not gui.cal_untouched(wheeled, spawn)
+    # nothing spawned, or garbage, is not "untouched": there is nothing to
+    # compare against, and a refusal must not fire on a missing record
+    for a, b in ((None, (1.0, 2.0, 3.0)), ((1.0, 2.0, 3.0), None),
+                 (None, None), ((1.0, 2.0, 'x'), (1.0, 2.0, 3.0))):
+        assert gui.cal_untouched(a, b) is False, (a, b)
+    # WHY NO EXISTING GATE CAUGHT THE INCIDENT: the spawn band at 1080p is
+    # 550.8 to 734.4 px, all three logged diameters sit inside it, and the
+    # whole band passes the size plausibility gate by construction
+    span = min(w, h) * rf
+    band = (2 * gui.CAL_SPAWN_R_FRAC[0] * span,
+            2 * gui.CAL_SPAWN_R_FRAC[1] * span)
+    assert abs(band[0] - 550.8) < 1e-6 and abs(band[1] - 734.4) < 1e-6, band
+    for dpx in INCIDENT_DIAMS_PX:
+        assert band[0] <= dpx <= band[1], dpx
+        assert gui.cal_diam_plausible(dpx, w, h, rf), dpx
+    assert not (band[0] <= INCIDENT_DISC_PX <= band[1])
+    # and what was accepted: the logged statistics, and how far off it was
+    st = se.calibration_stats(list(INCIDENT_DIAMS_PX))
+    assert abs(st['spread_pct'] - 23.07) < 0.01, st
+    assert abs(st['se_pct'] - 7.87) < 0.01, st
+    assert se.se_ok(st) is False
+    assert abs(st['mean'] / INCIDENT_DISC_PX - 1.61) < 0.005, st['mean']
+
+
+def test_flat_frame_statement_is_plain_and_quotes_the_contrast():
+    import sldea_edge_gui as gui
+    txt = gui.flat_frame_text(se.image_content(_incident_frame()))
+    assert txt == ("This frame shows no visible disc (contrast 2 gray "
+                   "levels). Calibrating by hand here would be a guess. "
+                   "Check the camera exposure and repeat the test."), txt
+    txt.encode('ascii')
+    assert '(contrast 1 gray level)' in gui.flat_frame_text({'contrast': 1.2})
+    assert '(contrast 0 gray levels)' in gui.flat_frame_text({'contrast': 0})
+    # a damaged dict still yields the sentence, never a traceback
+    for bad in (None, {}, {'contrast': None}, {'contrast': 'x'}):
+        assert 'no visible disc' in gui.flat_frame_text(bad), bad
+
+
+def test_anchor_caveat_repeats_what_was_accepted_over():
+    """The dialog says OVER GATE and NOT cross-checked when a hand anchor
+    is accepted past a prompt, but that status line is replaced within
+    seconds. anchor_caveat rebuilds the same words from the anchor's own
+    record so Save, reuse and re-anchor can say them again."""
+    import sldea_edge_gui as gui
+    none_guard = se.anchor_guard(623.73, None, MASK_MM)
+    assert none_guard['available'] is False
+    # THE INCIDENT ANCHOR, as its record would have read
+    st = se.calibration_stats(list(INCIDENT_DIAMS_PX))
+    ref = {'method': se.ANCHOR_METHOD_MANUAL, 'diam_px': st['mean'],
+           'n_rounds': 3, 'spread_pct': st['spread_pct'],
+           'se_pct': st['se_pct'],
+           'guard': se.anchor_guard_note(none_guard, True)}
+    cav = gui.anchor_caveat(ref)
+    assert 'SCALE NOT VERIFIED' in cav, cav
+    assert 'OVER GATE' in cav and 'SE 7.87% of diameter' in cav, cav
+    assert 'limit 0.4%' in cav, cav
+    assert 'NOT cross-checked' in cav, cav
+    assert 'visible disc' not in cav, cav
+    assert '\n' not in cav
+    # ... and when it was also measured on a flat frame
+    flat = dict(ref, guard=ref['guard']
+                + '; FLAT FRAME: contrast 2 gray levels, no visible disc')
+    assert 'frame with no visible disc' in gui.anchor_caveat(flat)
+    # a record that kept only the range and n (pre 2026-08-06 evening)
+    # gives the same verdict: the SE is derived the way the gate derives it
+    old = {k: v for k, v in ref.items() if k != 'se_pct'}
+    assert 'SE 7.87% of diameter' in gui.anchor_caveat(old)
+    # THE HONEST CASE IS OVER THE GATE TOO, and the strip says so: three
+    # rounds at the measured hand sigma of 1.05 % have SE 0.61 % against
+    # 0.4 %. That is why removing the override is the owner's decision.
+    auto = _auto_ref()
+    clear = se.anchor_guard(P3_2_AUTO_PX, auto, MASK_MM)
+    honest = {'method': se.ANCHOR_METHOD_MANUAL, 'diam_px': P3_2_AUTO_PX,
+              'n_rounds': 3, 'se_pct': 1.05 / math.sqrt(3),
+              'guard': se.anchor_guard_note(clear, False)}
+    cav = gui.anchor_caveat(honest)
+    assert 'OVER GATE' in cav and 'SE 0.61%' in cav, cav
+    assert 'cross-check' not in cav, cav
+    # a guard the operator overrode is named as that
+    trip = se.anchor_guard(P3_2_MANUAL_PX, auto, MASK_MM)
+    over = {'method': se.ANCHOR_METHOD_MANUAL, 'diam_px': P3_2_MANUAL_PX,
+            'n_rounds': 5, 'se_pct': 0.2,
+            'guard': se.anchor_guard_note(trip, True)}
+    cav = gui.anchor_caveat(over)
+    assert 'cross-check OVERRIDDEN' in cav and 'OVER GATE' not in cav, cav
+    # NOTHING TO SAY is the empty string, so a clean anchor adds no text:
+    # inside the gate with a clear guard, a tripped guard the operator did
+    # NOT override (that anchor was never accepted), a two-click era anchor
+    # with no rounds at all, a verified automatic fit, and no anchor
+    for quiet in (
+            {'method': se.ANCHOR_METHOD_MANUAL, 'diam_px': 577.0,
+             'n_rounds': 5, 'se_pct': 0.3,
+             'guard': se.anchor_guard_note(clear, False)},
+            {'method': se.ANCHOR_METHOD_MANUAL, 'diam_px': 577.0,
+             'n_rounds': 5, 'se_pct': se.CAL_SE_PCT},
+            {'method': se.ANCHOR_METHOD_MANUAL, 'diam_px': 590.26},
+            {'method': se.ANCHOR_METHOD_VERIFIED, 'diam_px': 577.1,
+             'guard': 'AUTO-VERIFIED by eye: ... NOT cross-checked'},
+            {'method': se.ANCHOR_METHOD_MANUAL, 'diam_px': 577.0,
+             'n_rounds': 9, 'spread_pct': 5.0},
+            None, {}):
+        assert gui.anchor_caveat(quiet) == '', quiet
+    # a hand-edited se_pct cannot raise
+    assert gui.anchor_caveat({'method': se.ANCHOR_METHOD_MANUAL,
+                              'diam_px': 577.0, 'se_pct': 'lots'}) == ''
+
+
 def test_verify_evidence_is_four_lines_and_still_says_the_honest_part():
     """The text the operator judges on, pinned as text so both its BUDGET
     and its honesty are tests rather than a screenshot.

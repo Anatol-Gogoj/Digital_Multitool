@@ -680,6 +680,33 @@ def _cal_step_button(win):
     return btn[0]
 
 
+def _hand_fit(app, dx=1.0):
+    """Stand in for the operator MOVING the circle onto the disc before a
+    circle round is banked. -> True when a circle was moved.
+
+    Since 2026-10-02 a round whose circle still sits exactly where the
+    dialog spawned it is refused ("Move the circle onto the edge of the
+    disc first."), because run SLDEA_20261001_151016 accepted three
+    spawn-sized circles as its anchor. Every case here that scripts the spawn
+    AS the operator's fit therefore has to do what an operator does: touch
+    it. This goes through the dialog's OWN set_circle (published on the
+    probe), the one function a drag, the wheel and the arrow keys all move
+    the circle through, so it is the real path and not a poke at state.
+
+    The centre moves `dx` px and the RADIUS is left exactly as scripted,
+    so every diameter these cases assert on is unchanged. A no-op outside
+    the circle mode (the two-point mode has nothing spawned to move, and
+    the verify mode's circle is the machine's)."""
+    p = getattr(app, '_cal_probe', None) or {}
+    st = p.get('st')
+    if not st or st.get('mode') != CIRCLE or not st.get('circle'):
+        return False
+    cx, cy, r = st['circle']
+    p['set_circle'](cx + dx, cy, r)
+    assert st['circle'][2] == r, (st['circle'], r)
+    return True
+
+
 def _cal_display(win):
     """Everything the operator can READ in the dialog right now — the
     instruction block, the round header and the live readout. Used to
@@ -786,6 +813,7 @@ class _ModalSpy:
         self.asked = []          # [(title, kwargs)]
         self.msgs = []           # the question text itself
         self.seen = []           # dialog text at the moment of asking
+        self.warned = []         # [(title, text)] of every showwarning
 
     def _record(self, title, kw, three, msg=''):
         self.asked.append((title, dict(kw)))
@@ -806,6 +834,15 @@ class _ModalSpy:
 
     def askyesnocancel(self, title, msg='', **kw):
         return self._record(title, kw, True, msg)
+
+    def showwarning(self, title, msg='', **kw):
+        # RECORDED, never shown. A refusal the dialog raises as a native
+        # warning box (an untouched circle, an implausible size) used to
+        # fall through __getattr__ to the real messagebox, which would
+        # block the whole suite on a button nobody is there to press. A
+        # case that forgets to move its circle now FAILS on its own
+        # assertions instead of hanging.
+        self.warned.append((title, msg))
 
     def defaults(self):
         return [kw.get('default') for _t, kw in self.asked]
@@ -873,6 +910,7 @@ def test_calibration_dialog_drives_three_rounds_and_both_gates():
                 return
             btn = _cal_step_button(win)
             taken.append(btn.cget('text'))
+            _hand_fit(app)          # the operator moves each spawn first
             btn.invoke()
 
     try:
@@ -999,6 +1037,7 @@ def test_calibration_warnings_default_to_declining_them():
                     return
                 btn = _cal_step_button(win)
                 taken.append(btn.cget('text'))
+                _hand_fit(app)
                 btn.invoke()
 
         app.root.wait_window = lambda win: advance(win, [])
@@ -1082,6 +1121,10 @@ def test_return_key_cannot_finish_a_calibration():
             for _ in range(_n):
                 if not win.winfo_exists():
                     break
+                # only Enter is under test, so each round is a real
+                # (moved) fit: an UNTOUCHED spawn is refused before Enter
+                # can bank it, which has its own case
+                _hand_fit(app)
                 win.event_generate('<Return>', when='now')
                 win.update()
                 if win.winfo_exists():
@@ -1155,6 +1198,7 @@ def test_mid_round_display_never_reveals_a_previous_fit():
                 if not win.winfo_exists():
                     return
                 snaps.append(_cal_display(win))
+                _hand_fit(app)
                 _cal_step_button(win).invoke()
 
         app.root.wait_window = advance
@@ -1252,6 +1296,7 @@ def test_unavailable_cross_check_is_stated_not_implied():
             for _ in range(6):
                 if not win.winfo_exists():
                     return
+                _hand_fit(app)
                 _cal_step_button(win).invoke()
 
         app.root.wait_window = advance
@@ -1561,6 +1606,7 @@ def test_every_round_set_is_logged_accepted_or_declined():
             for _ in range(12):
                 if not win.winfo_exists():
                     return
+                _hand_fit(app)
                 _cal_step_button(win).invoke()
 
         app.root.wait_window = advance
@@ -1846,7 +1892,9 @@ def test_mode_chooser_restarts_the_set_and_carries_the_modes_default_n():
             # opens on the DEFAULT mode with that mode's round count
             saw['open'] = (p['mode_var'].get(), p['n_var'].get(),
                            p['st']['mode'], p['st']['n'])
-            # one round in ...
+            # one round in ... (a moved circle: an untouched spawn is
+            # refused, and would leave this on round 1)
+            _hand_fit(app)
             _cal_step_button(win).invoke()
             saw['mid'] = (p['st']['round'], len(p['st']['diams']))
             # ... then switch to B: restarted, 5 rounds, rotated display
@@ -3419,12 +3467,24 @@ def test_a_refused_fit_falls_through_to_the_hand_measurement_and_says_why():
     saw = {}
     try:
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
-        # overwrite the baseline with a FLAT field: readable, but the fit
-        # has nothing to seed on. (Not a 0-byte file -- that is the
-        # fallback-frame path, which test_unavailable_cross_check covers.)
+        # overwrite the baseline with a field that has NO DISC on it:
+        # readable, but the fit has nothing to seed on. (Not a 0-byte file
+        # -- that is the fallback-frame path, which
+        # test_unavailable_cross_check covers.)
+        #
+        # Plain paper plus one bright band, not a uniform field any more
+        # (2026-10-02): a frame with no gray-level spread at all is now a
+        # FLAT frame and opens on its own plain statement first
+        # (test_a_flat_frame_opens_on_a_plain_statement_with_cancel_default).
+        # This case is the other refusal -- a real picture the fitter
+        # cannot use, which is what P3_7 is -- so its frame must carry one.
         base = os.path.join(run, 'frames', 'SLDEA_s00_00.00kV_baseline.png')
-        cv2.imwrite(base, np.full((240, 320), 190, np.uint8))
+        blank = np.full((240, 320), 190, np.uint8)
+        blank[:, 40:90] = 235
+        cv2.imwrite(base, blank)
         app = gui.EdgeReviewApp(root, path=run)
+        assert not gui.se.image_content(app._base_gray())['flat'], \
+            "the fixture reads as a flat frame, which is a different case"
         assert app._base_gray() is not None, "the baseline must still read"
         assert app._auto_disc() is None, "the fixture no longer refuses"
         why = app._auto_disc_refusal()
@@ -3479,6 +3539,643 @@ def test_a_refused_fit_falls_through_to_the_hand_measurement_and_says_why():
         assert 'NO automatic fit on this run' in saw['text']
     finally:
         gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# THE HAND MODES' GUARDRAILS (2026-10-02), through the real dialog
+#
+# Run SLDEA_20261001_151016 accepted three spawn-sized circles as its
+# px->mm anchor: the automatic fit had refused, the hand dialog showed a raw
+# frame with no visible disc, and two override prompts were clicked through.
+# The arithmetic is pinned headlessly in tests/test_sldea_calibration.py;
+# these cases drive the dialog itself, so they need a display.
+# ---------------------------------------------------------------------------
+
+def _flat_run(dirpath):
+    """_fake_run with its baseline replaced by a frame shaped like the
+    2026-10-01 one: dark, and with a disc only 2 gray levels below the
+    paper. Readable, so this is NOT the fallback-frame path; the fit simply
+    has nothing to seed on, and se.image_content calls it flat."""
+    import cv2
+    run = _fake_run(dirpath)
+    yy, xx = np.mgrid[0:240, 0:320]
+    flat = np.full((240, 320), 68, np.uint8)
+    flat[(xx - 160) ** 2 + (yy - 120) ** 2 <= 60 * 60] = 66
+    cv2.imwrite(os.path.join(run, 'frames',
+                             'SLDEA_s00_00.00kV_baseline.png'), flat)
+    return run
+
+
+def test_an_untouched_circle_round_is_refused_by_the_button_and_by_enter():
+    """A circle round whose circle still sits exactly where the dialog
+    spawned it is not a fit, and neither the Continue button nor Enter may
+    bank it. One real gesture clears the refusal; the next round's fresh
+    spawn brings it back."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('untouched circle round')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_cal_untouched_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    saw = {}
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        spy = _ModalSpy(real_mb, app)
+        gui.messagebox = spy
+        # a spawn that passes every OTHER check a round has (plausible
+        # size, inside the frame), so the only reason left to refuse it is
+        # that nobody touched it
+        gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 70.0)
+        refusal = ('Calibrate', gui.CAL_UNTOUCHED_MSG)
+
+        def poke(win):
+            p = app._cal_probe
+            st, step = p['st'], p['step_btn']
+            # (1) THE BUTTON on a raw spawn
+            step.invoke()
+            saw['button'] = (st['round'], list(st['diams']),
+                             list(spy.warned), _cal_display(win))
+            # (2) ENTER on a raw spawn. On screen, because a synthetic key
+            # on an unviewable window is silently dropped.
+            _cal_onscreen(root, win)
+            win.focus_force()
+            win.update()
+            win.event_generate('<Return>', when='now')
+            win.update()
+            saw['enter'] = (st['round'], list(st['diams']),
+                            len(spy.warned))
+            # (3) A REAL DRAG: press inside the circle, move, release. The
+            # round then banks, at the radius it was spawned with.
+            vt, cv = p['vt'], p['canvas']
+            vx, vy = vt.to_view(st['circle'][0], st['circle'][1])
+            cv.event_generate('<Button-1>', x=int(vx), y=int(vy),
+                              when='now')
+            cv.event_generate('<B1-Motion>', x=int(vx) + 14, y=int(vy) + 6,
+                              when='now')
+            cv.event_generate('<ButtonRelease-1>', x=int(vx) + 14,
+                              y=int(vy) + 6, when='now')
+            cv.update()
+            saw['dragged'] = (st['circle'] != st['spawn'],
+                              st['circle'][2])
+            step.invoke()
+            saw['after_drag'] = (st['round'], list(st['diams']),
+                                 len(spy.warned))
+            # (4) THE NEXT ROUND'S SPAWN is untouched again
+            step.invoke()
+            saw['round2'] = (st['round'], len(st['diams']),
+                             len(spy.warned))
+            # (5) A RESIZE ALONE counts: one wheel notch of radius
+            cx, cy, r = st['circle']
+            p['set_circle'](cx, cy, r + gui.cal_wheel_dr(1))
+            step.invoke()
+            saw['after_resize'] = (st['round'], list(st['diams']),
+                                   len(spy.warned))
+            # (6) THE LAST ROUND, untouched: the Finish button must not
+            # carry a raw spawn into the gates behind it
+            saw['last_btn'] = step.cget('text')
+            step.invoke()
+            saw['last'] = (st['round'], len(st['diams']), len(spy.warned),
+                           win.winfo_exists())
+            # (7) Back re-randomises the round it lands on, so that round
+            # is a fresh spawn and is refused until it is touched too
+            p['back_btn'].invoke()
+            saw['after_back'] = (st['round'], len(st['diams']),
+                                 st['circle'] == st['spawn'])
+            step.invoke()
+            saw['back_untouched'] = (st['round'], len(st['diams']),
+                                     len(spy.warned))
+            win.destroy()
+
+        app.root.wait_window = poke
+        app._calibrate_scale(mode=CIRCLE)
+        # (1) refused, said in the plain words, in a warning box AND on the
+        # dialog's own live line, and nothing was banked
+        rnd, diams, warned, text = saw['button']
+        assert (rnd, diams) == (1, []), saw['button'][:2]
+        assert warned == [refusal], warned
+        assert gui.CAL_UNTOUCHED_MSG in text, text[:400]
+        # (2) Enter met the same refusal. SELF-CHECK first: the second
+        # warning is the only evidence the key press arrived at all.
+        assert saw['enter'][2] == 2, (
+            "no <Return> reached the dialog, so the Enter half of this "
+            f"case tested nothing: {saw['enter']}")
+        assert saw['enter'][:2] == (1, []), saw['enter']
+        # (3) a drag is a fit. SELF-CHECK: the drag really moved it.
+        assert saw['dragged'][0], (
+            "the synthetic drag never reached the dialog, so nothing here "
+            "showed that a real gesture clears the refusal")
+        assert saw['dragged'][1] == 70.0, saw['dragged']
+        assert saw['after_drag'] == (2, [140.0], 2), saw['after_drag']
+        # (4) per ROUND, not per dialog
+        assert saw['round2'] == (2, 1, 3), saw['round2']
+        # (5) resizing without moving is a fit as well
+        assert saw['after_resize'] == (3, [140.0, 141.0], 3), \
+            saw['after_resize']
+        # (6) the last round's Finish is refused the same way, the dialog
+        # stays open, and no gate was reached
+        assert 'Finish' in saw['last_btn'], saw['last_btn']
+        assert saw['last'] == (3, 2, 4, True), saw['last']
+        # (7) Back lands on round 2 with a fresh, untouched spawn
+        assert saw['after_back'] == (2, 1, True), saw['after_back']
+        assert saw['back_untouched'] == (2, 1, 5), saw['back_untouched']
+        assert all(w == refusal for w in spy.warned), spy.warned
+        assert not spy.asked, ("an untouched round reached a gate: "
+                               + str(spy.asked))
+        assert app.manual_ref is None, app.manual_ref
+        # no round-set was completed, so nothing was logged either
+        assert not os.path.exists(os.path.join(run, gui.se.CAL_LOG_NAME))
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_an_untouched_two_point_round_is_refused():
+    """The two-point mode spawns nothing, so its untouched round is the one
+    with no clicks (or only one). The button and Enter both refuse it in
+    plain words, and the second click is still what banks a round."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('untouched two-point round')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_cal_nopts_')
+    real_mb = gui.messagebox
+    saw = {}
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        spy = _ModalSpy(real_mb, app)
+        gui.messagebox = spy
+
+        def poke(win):
+            _cal_onscreen(root, win)
+            p = app._cal_probe
+            st, step = p['st'], p['step_btn']
+            # nothing clicked at all
+            step.invoke()
+            saw['none'] = (st['round'], list(st['diams']), len(st['pts']),
+                           _cal_display(win))
+            # ONE point is not a diameter either
+            _click_at_original(app, (80.0, 120.0))
+            step.invoke()
+            saw['one'] = (st['round'], list(st['diams']), len(st['pts']),
+                          _cal_display(win))
+            # ... nor by Enter
+            win.focus_force()
+            win.update()
+            win.event_generate('<Return>', when='now')
+            win.update()
+            saw['enter'] = (st['round'], list(st['diams']), len(st['pts']))
+            # the SECOND click banks the round, as it always did
+            _click_at_original(app, (240.0, 120.0))
+            saw['two'] = (st['round'], len(st['diams']))
+            win.destroy()
+
+        app.root.wait_window = poke
+        app._calibrate_scale(mode=TWOPOINT)
+        assert saw['none'][:3] == (1, [], 0), saw['none'][:3]
+        assert gui.CAL_NO_POINTS_MSG in saw['none'][3], saw['none'][3][:400]
+        assert saw['one'][:3] == (1, [], 1), saw['one'][:3]
+        assert gui.CAL_NO_POINTS_MSG in saw['one'][3], saw['one'][3][:400]
+        assert saw['enter'] == (1, [], 1), saw['enter']
+        assert saw['two'] == (2, 1), saw['two']
+        assert not spy.asked and app.manual_ref is None
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_flat_frame_opens_on_a_plain_statement_with_cancel_default():
+    """A calibration frame with no usable picture (2026-10-01: contrast 2
+    gray levels) opens on a plain statement, not on a random circle with a
+    Continue button under it. Cancel is the default and sets no scale; the
+    hand tools stay reachable through one deliberate button, and an anchor
+    accepted there says in its record and on the status strip what it was
+    accepted over."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    root = _tk_root_or_skip('flat frame opening')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_cal_flat_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    saw, calls = {}, []
+    try:
+        run = _flat_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        content = gui.se.image_content(app._base_gray())
+        assert content['flat'] and content['contrast'] == 2.0, content
+        assert app._auto_disc() is None, "the flat fixture has a fit"
+        spy = _ModalSpy(real_mb, app)
+        gui.messagebox = spy
+        sentence = gui.flat_frame_text(content)
+        log = os.path.join(run, gui.se.CAL_LOG_NAME)
+
+        # ---- (1) THE DEFAULT: Enter cancels, and no scale is set --------
+        def enter_on_the_notice(win):
+            calls.append(win)
+            p = app._cal_probe
+            assert p and p.get('notice') is win, (
+                "a flat frame opened something other than the notice")
+            saw['singleton'] = app._cal_win is win
+            saw['text'] = _cal_display(win)
+            saw['title'] = win.title()
+            saw['buttons'] = [b.cget('text')
+                              for b in _widgets(win, 'button')]
+            saw['default'] = (str(p['cancel_btn'].cget('default')),
+                              str(p['look_btn'].cget('default')))
+            _cal_onscreen(root, win)
+            win.focus_force()
+            win.update()
+            win.event_generate('<Return>', when='now')
+            win.update()
+            saw['closed_by_enter'] = not win.winfo_exists()
+            if win.winfo_exists():
+                win.destroy()
+
+        app.root.wait_window = enter_on_the_notice
+        app._calibrate_scale()
+        assert len(calls) == 1, (
+            "the hand dialog opened behind a cancelled notice: "
+            + str(len(calls)))
+        assert saw['singleton'], "the notice was not the dialog singleton"
+        # THE STATEMENT, word for word, quoting the measured contrast
+        assert sentence == ("This frame shows no visible disc (contrast 2 "
+                            "gray levels). Calibrating by hand here would "
+                            "be a guess. Check the camera exposure and "
+                            "repeat the test."), sentence
+        assert sentence in saw['text'], saw['text']
+        assert 'no visible disc' in saw['title'], saw['title']
+        # NAMED BUTTONS, and Cancel is the default one
+        assert saw['buttons'] == ['Look at the frame anyway',
+                                  'Cancel (Esc)'], saw['buttons']
+        # Tk's `default` option: 'active' draws the default ring, and
+        # 'disabled' is its resting value (no ring), not a greyed button
+        assert saw['default'] == ('active', 'disabled'), saw['default']
+        assert saw['closed_by_enter'], (
+            "Enter did not cancel the notice (or no <Return> reached it)")
+        assert app.manual_ref is None, app.manual_ref
+        assert app._cal_win is None and app._cal_probe is None
+        stat = app.status.cget('text')
+        assert 'No scale set' in stat and sentence in stat, stat
+        assert not spy.asked and not os.path.exists(log)
+        # ... and the Detect gate lands on the same notice, runs no
+        # detection behind a cancel, and leaves the REASON on the strip
+        # rather than the generic "Detect is gated" line
+        calls.clear()
+        app.status.config(text='')
+        app.detect()
+        assert len(calls) == 1 and not app.cands_all, (len(calls),
+                                                       app.cands_all)
+        stat = app.status.cget('text')
+        assert sentence in stat and 'gated' not in stat, stat
+
+        # ---- (2) THE DELIBERATE SECOND STEP ------------------------------
+        gui.spawn_circle = real_spawn
+        _fixed_spawn(gui, [(160.0, 120.0, 65.0), (160.0, 120.0, 70.0),
+                           (160.0, 120.0, 75.0)])
+        # the SE gate: No = accept as measured; no cross-check: Yes
+        spy.answers[:] = [False, True]
+        steps = []
+
+        def look_then_fit(win):
+            p = app._cal_probe
+            if p.get('notice') is win:
+                steps.append('notice')
+                p['look_btn'].invoke()
+                return
+            steps.append('dialog')
+            st = p['st']
+            saw['mode'] = st['mode']
+            saw['flat'] = p['flat']
+            saw['hand'] = st['hand_stretch']
+            saw['has_lut'] = st['hand_lut'] is not None
+            saw['lines'] = _cal_visible_lines(win)
+            saw['radios'] = [rb.cget('value')
+                             for rb in _widgets_of(win, tk.Radiobutton)]
+            for _ in range(8):
+                if not win.winfo_exists():
+                    return
+                _hand_fit(app)
+                _cal_step_button(win).invoke()
+
+        app.root.wait_window = look_then_fit
+        app._calibrate_scale()
+        assert steps == ['notice', 'dialog'], steps
+        # the hand tools opened, on the circle, with nothing to verify
+        assert saw['mode'] == CIRCLE and saw['flat'] is True, saw
+        assert VERIFY not in saw['radios'], saw['radios']
+        # the statement is STILL on screen while the tools are open, and
+        # it says what the stretched picture is made of
+        j = '\n'.join(saw['lines'])
+        assert sentence in j and 'very noisy' in j, j
+        assert 'NO automatic fit on this run' in j, j
+        # the view is stretched from the frame's own percentiles (p5 66,
+        # p95 68 -> 65.1 to 68.9): the only window this frame has
+        assert saw['has_lut'], "the hand view was not stretched"
+        assert abs(saw['hand'][0] - 65.1) < 1e-6, saw['hand']
+        assert abs(saw['hand'][1] - 68.9) < 1e-6, saw['hand']
+        # BOTH existing gates still stood in the way, in order, each
+        # defaulting to declining. Nothing was removed or loosened.
+        assert [t for t, _kw in spy.asked] == \
+            ['Rounds disagree', 'Anchor NOT cross-checked'], spy.asked
+        assert spy.defaults() == ['cancel', 'no'], spy.asked
+        ref = app.manual_ref
+        assert ref is not None and ref['rounds_px'] == [130.0, 140.0, 150.0]
+        # THE RECORD says what it was accepted over, in words, in the one
+        # field setup.txt keeps for that
+        g = ref['guard']
+        g.encode('ascii')
+        assert g.startswith('NOT CROSS-CHECKED'), g
+        assert 'accepted anyway by operator' in g, g
+        assert ('OVER-GATE: SE 4.87% of diameter against the 0.4% gate'
+                in g), g
+        assert 'FLAT FRAME: contrast 2 gray levels, no visible disc' in g, g
+        assert 'display stretched 65-69 gray' in g, g
+        # ... the dialog's own status line says it ...
+        stat = app.status.cget('text')
+        for needle in ('OVER GATE', 'NOT cross-checked', 'FLAT FRAME'):
+            assert needle in stat, (needle, stat)
+        # ... the log line is what it always was ...
+        line = _log_lines(log)[-1]
+        assert 'verdict=OVER-GATE' in line, line
+        assert 'outcome=accepted-override' in line and 'auto=none' in line
+        # ... and it survives the round trip through setup.txt, so a later
+        # session rebuilds the same caveat from the file alone
+        cav = gui.anchor_caveat(ref)
+        for needle in ('SCALE NOT VERIFIED', 'OVER GATE',
+                       'NOT cross-checked', 'no visible disc'):
+            assert needle in cav, (needle, cav)
+        gui.se.save_scale_anchor(
+            app.rundir, app._anchor_record(ref, 16.0 / ref['diam_px']))
+        back = gui.se.load_scale_anchor(app.rundir)
+        assert back['guard'] == g, back['guard']
+        assert gui.anchor_caveat(back) == cav, gui.anchor_caveat(back)
+
+        # ---- (3) REUSING that anchor does not launder it -----------------
+        app2 = gui.EdgeReviewApp(root, path=run)
+        steps.clear()
+
+        def look_then_reuse(win):
+            p = app2._cal_probe
+            if p.get('notice') is win:
+                steps.append('notice')
+                p['look_btn'].invoke()
+                return
+            steps.append('dialog')
+            btns = _cal_buttons(win)
+            key = [t for t in btns if 'Reuse' in t]
+            assert key, sorted(btns)
+            btns[key[0]].invoke()
+
+        app2.root.wait_window = look_then_reuse
+        app2._calibrate_scale()
+        assert steps == ['notice', 'dialog'], steps
+        assert app2.manual_ref and app2.manual_ref['reused'] is True
+        stat = app2.status.cget('text')
+        assert 'REUSED' in stat and cav in stat, stat
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_status_strip_after_save_still_says_what_was_accepted_over():
+    """The dialog's "OVER GATE / NOT cross-checked" status line is replaced
+    by the detection readout within seconds and by "saved in ..." at Save.
+    The words must survive both, because the strip after Save is the last
+    thing a student reads about the run."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('save status caveat')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_save_caveat_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    try:
+        se_mod = gui.se
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        fit = app._auto_disc()
+        assert fit and fit.get('diam_px'), "fixture has no automatic fit"
+        # three rounds that disagree (SE 4.87 %) and average 12 % off the
+        # automatic fit, accepted over BOTH prompts
+        st = se_mod.calibration_stats([130.0, 140.0, 150.0])
+        assert se_mod.se_ok(st) is False
+        guard = se_mod.anchor_guard(st['mean'], fit, 16.0)
+        assert guard['warn'], "the fixture anchor no longer trips the guard"
+        app.manual_ref = {
+            'method': se_mod.ANCHOR_METHOD_MANUAL, 'diam_px': st['mean'],
+            'cal_mode': CIRCLE, 'n_rounds': 3,
+            'rounds_px': list(st['values']), 'spread_px': st['spread_px'],
+            'spread_pct': st['spread_pct'], 'sigma_pct': st['sigma_pct'],
+            'se_pct': st['se_pct'],
+            'guard': se_mod.anchor_guard_note(guard, True)}
+        cav = gui.anchor_caveat(app.manual_ref)
+        assert 'OVER GATE' in cav and 'cross-check OVERRIDDEN' in cav, cav
+        app.detect_all_sync()
+        # the detection readout names the gate in WORDS, not a bare sign
+        txt = app.status.cget('text')
+        assert 'SE 4.87% ⚠ OVER GATE' in txt, txt
+        app.save()
+        txt = app.status.cget('text')
+        assert txt.startswith('saved in '), txt
+        assert cav in txt, txt
+        # ahead of the routine detail: the strip is one unwrapped line and
+        # its tail is what a narrow window cuts off
+        assert txt.index('SCALE NOT VERIFIED') < txt.index('data.csv '
+                                                           'updated'), txt
+        assert 'manual-calibration (140 px)' in txt, txt
+        # setup.txt holds the anchor that produced the column, caveat and
+        # all, so the next session can say it again
+        back = se_mod.load_scale_anchor(run)
+        assert gui.anchor_caveat(back) == cav, back
+        # A CLEAN ANCHOR ADDS NOTHING: inside the gate, guard clear
+        app.manual_ref = {
+            'method': se_mod.ANCHOR_METHOD_MANUAL,
+            'diam_px': float(fit['diam_px']), 'cal_mode': TWOPOINT,
+            'n_rounds': 5, 'spread_pct': 0.5, 'se_pct': 0.1,
+            'guard': se_mod.anchor_guard_note(
+                se_mod.anchor_guard(fit['diam_px'], fit, 16.0), False)}
+        assert gui.anchor_caveat(app.manual_ref) == ''
+        app.detect_all_sync()
+        assert 'OVER GATE' not in app.status.cget('text')
+        app.save()
+        txt = app.status.cget('text')
+        assert txt.startswith('saved in '), txt
+        assert 'NOT VERIFIED' not in txt and '⚠' not in txt, txt
+        assert 'data.csv updated' in txt, txt
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_hand_modes_show_a_stretched_view_and_record_the_same_diameters():
+    """The hand modes show the frame through a display stretch, as the
+    verify mode does: the verify mode's own window when there is a fit on
+    this frame, the frame's percentiles when there is not. And it is
+    DISPLAY ONLY: the same gestures record the same diameters, to the last
+    digit, with the stretch on and with it off."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    import cv2
+    root = _tk_root_or_skip('hand-mode display stretch')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_cal_stretch_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    real_win, real_cwin = gui.cal_stretch_window, gui.cal_content_window
+    real_rot = gui.rotation_angles
+    saw = {}
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        spy = _ModalSpy(real_mb, app)
+        gui.messagebox = spy
+        fit = app._auto_disc()
+        assert fit and fit.get('diam_px'), "fixture has no automatic fit"
+
+        # ---- (1) WHAT THE HAND MODES SHOW, with a fit on the frame ------
+        def look(win, m):
+            p = app._cal_probe
+            st = p['st']
+            assert st['mode'] == m, (m, st['mode'])
+            saw['hand_' + m] = st['hand_stretch']
+            lut = st['hand_lut']
+            saw['lut_' + m] = lut
+            try:
+                from PIL import ImageTk
+                shown = ImageTk.getimage(st['photo']).convert('L')
+                saw['extrema_' + m] = shown.getextrema()
+            except Exception as e:            # an older Pillow: skip
+                saw['extrema_' + m] = None
+                print(f"   (canvas pixels not readable here: {e})")
+            if m == CIRCLE:
+                # the verify mode's own window, on the same dialog
+                for rb in _widgets_of(win, tk.Radiobutton):
+                    if rb.cget('value') == VERIFY:
+                        rb.invoke()
+                saw['verify'] = st['stretch']
+                saw['hand_after_switch'] = st['hand_stretch']
+            win.destroy()
+
+        for m in (CIRCLE, TWOPOINT):
+            app.root.wait_window = lambda win, m=m: look(win, m)
+            app.manual_ref = None
+            app._calibrate_scale(mode=m)
+        assert saw['verify'] is not None, "the verify mode lost its stretch"
+        for m in (CIRCLE, TWOPOINT):
+            # the SAME window the verify mode shows, so the picture does
+            # not change when the operator switches method
+            assert saw['hand_' + m] == saw['verify'], (m, saw['hand_' + m],
+                                                       saw['verify'])
+            assert saw['lut_' + m] is not None, m
+        assert saw['hand_after_switch'] == saw['verify']
+        # ... and it reached the CANVAS: the fixture is disc 165 on paper
+        # 190, and what is displayed is those two levels through the table
+        lut = saw['lut_' + CIRCLE]
+        assert lut[165] < 100 and lut[190] > 190, (lut[165], lut[190])
+        if saw['extrema_' + CIRCLE] is not None:
+            assert saw['extrema_' + CIRCLE] == (lut[165], lut[190]), (
+                saw['extrema_' + CIRCLE], lut[165], lut[190])
+            # the two-point view is the same picture through the same
+            # table, rotated: its empty corners are the darkest thing on
+            # it, and the bicubic rotation rings a little at the disc
+            # edge, so the paper reads AT LEAST its stretched level
+            assert saw['lut_' + TWOPOINT] == lut
+            assert saw['extrema_' + TWOPOINT][0] == lut[17] == 0, \
+                saw['extrema_' + TWOPOINT]
+            assert saw['extrema_' + TWOPOINT][1] >= lut[190], \
+                saw['extrema_' + TWOPOINT]
+
+        # ---- (2) THE SAME GESTURES RECORD THE SAME NUMBERS ---------------
+        # Circle: three scripted circles, each moved one px. Two-point:
+        # the same two clicks at five FIXED rotation angles. Run once with
+        # the stretch and once with both window rules returning None.
+        gui.rotation_angles = lambda n, rnd=None: [
+            (37.0 + 61.0 * k) % 360.0 for k in range(int(n))]
+
+        def fit_circles(win):
+            saw['on'] = app._cal_probe['st']['hand_lut'] is not None
+            for _ in range(8):
+                if not win.winfo_exists():
+                    return
+                _hand_fit(app)
+                _cal_step_button(win).invoke()
+
+        def fit_points(win):
+            saw['on'] = app._cal_probe['st']['hand_lut'] is not None
+            _cal_onscreen(root, win)
+            for _ in range(12):
+                if not win.winfo_exists():
+                    return
+                _click_at_original(app, (80.0, 120.0))
+                _click_at_original(app, (240.0, 120.0))
+                _finish_if_last(win)
+
+        got = {}
+        for stretched in (True, False):
+            if not stretched:
+                gui.cal_stretch_window = lambda *_a, **_k: None
+                gui.cal_content_window = lambda *_a, **_k: None
+            for m, drive in ((CIRCLE, fit_circles), (TWOPOINT, fit_points)):
+                gui.spawn_circle = real_spawn
+                _fixed_spawn(gui, [(160.0, 120.0, 79.0),
+                                   (160.0, 120.0, 80.0),
+                                   (160.0, 120.0, 81.0)])
+                # the circle set's 2.5 % range trips the SE gate: No =
+                # accept as measured. The two-point set asks nothing.
+                spy.answers[:] = [False] if m == CIRCLE else []
+                app.manual_ref = None
+                app.root.wait_window = drive
+                app._calibrate_scale(mode=m)
+                assert saw['on'] is stretched, (m, stretched, saw['on'])
+                ref = app.manual_ref
+                assert ref is not None, (m, stretched, spy.asked)
+                got[(m, stretched)] = (list(ref['rounds_px']),
+                                       ref['diam_px'], ref['spread_px'])
+        for m in (CIRCLE, TWOPOINT):
+            assert got[(m, True)] == got[(m, False)], (
+                f"mode {m}: the display stretch changed a recorded "
+                f"diameter: {got[(m, True)]} vs {got[(m, False)]}")
+        assert got[(CIRCLE, True)][0] == [158.0, 160.0, 162.0], got
+        assert len(got[(TWOPOINT, True)][0]) == 5, got
+        assert all(abs(v - 160.0) < 2.0 for v in got[(TWOPOINT, True)][0])
+        gui.cal_stretch_window, gui.cal_content_window = real_win, real_cwin
+
+        # ---- (3) NO FIT: the window comes from the frame's percentiles ---
+        # a real picture the fitter cannot use (paper plus a bright band)
+        base = os.path.join(run, 'frames', 'SLDEA_s00_00.00kV_baseline.png')
+        blank = np.full((240, 320), 190, np.uint8)
+        blank[:, 40:90] = 235
+        cv2.imwrite(base, blank)
+        app3 = gui.EdgeReviewApp(root, path=run)
+        assert app3._auto_disc() is None, "the fixture no longer refuses"
+        content = gui.se.image_content(app3._base_gray())
+        assert not content['flat'], content
+
+        def look3(win):
+            st = app3._cal_probe['st']
+            saw['nofit'] = (st['mode'], st['hand_stretch'], st['stretch'],
+                            st['hand_lut'] is not None)
+            win.destroy()
+
+        app3.root.wait_window = look3
+        app3._calibrate_scale()
+        mode, hand, vstretch, has_lut = saw['nofit']
+        assert mode == CIRCLE and vstretch is None and has_lut, saw['nofit']
+        assert hand == gui.cal_content_window(content), (hand, content)
+        assert hand == (169.75, 255.0), hand
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        gui.cal_stretch_window, gui.cal_content_window = real_win, real_cwin
+        gui.rotation_angles = real_rot
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)
 

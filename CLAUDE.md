@@ -17,6 +17,7 @@ milestones, not this one.
 | `PROJECT_HANDOFF.md` | where things stand right now; open decisions |
 | `RUN_SHEET.md` | the same docket as a tick-off list, split VM-or-any-checkout / lab-PC / bench-no-HV / bench-HV. A dated snapshot — regenerate it, never maintain it alongside the handoff |
 | `README.md` | setup, transports, every bench-verified instrument quirk |
+| `docs/SLDEA_QUICKSTART.md` | the new student's bench procedure, unpowered rig to exported plot; it opens with a box the lab must fill in (HV authorization, discharge, emergency) |
 | `SLDEA_HANDOFF.md` | measurement-chain decision log (append-only, dated) |
 | `SLDEA_MEASUREMENT.md` | the error budget — what uncertainty to quote and why |
 | `docs/manual-src/README.md` | user-manual pipeline + the release checklist |

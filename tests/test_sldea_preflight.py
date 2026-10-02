@@ -185,11 +185,76 @@ def test_flat_advice_follows_the_frame_level():
     assert 'Raise the exposure' in exposure_verdict(67.0, 0.0, flat)[1]
     assert 'Lower the exposure' in exposure_verdict(220.0, 0.0, flat)[1]
     mid = exposure_verdict(150.0, 0.0, flat)[1]
-    assert 'Check that the device is under the camera' in mid, mid
+    assert mid.endswith(
+        "The disc is not visible. Check that the device is under the "
+        "camera and that the disc is at least a third of the picture's "
+        "height across, then the exposure and the light on the Webcam "
+        "tab."), mid
     for mean in (67.0, 150.0, 220.0):
         level, msg = exposure_verdict(mean, 0.0, flat)
         assert level == 'flat' and msg.startswith('NO PICTURE:'), msg
         assert 'The disc is not visible.' in msg, msg
+
+
+def test_flat_is_judged_before_dark_on_a_low_black_level():
+    """A black frame on a camera whose black level is low (the 07-23
+    setup, 35 gray or less) sits under the dark tier's mean AND is flat.
+    It has to meet the gate and its default-No question, not the
+    one-click 'dark' warning, so the flat tier is judged first."""
+    assert exposure_verdict(20.0, 0.0)[0] == 'dark'
+    level, msg = exposure_verdict(20.0, 0.0,
+                                  {'flat': True, 'contrast': 1.0})
+    assert level == 'flat' and 'Raise the exposure' in msg, (level, msg)
+    black = _flat_frame(level=20)
+    rep = preflight_report(black, 3, 0, {}, 0.2)
+    assert rep['mean'] < sldea_profile.BASELINE_DARK_MEAN, rep['mean']
+    assert rep['level'] == 'flat' and rep['gate'] is True, rep
+    assert rep['start_default'] is False
+    assert 'no picture' in rep['start_label'], rep['start_label']
+    assert rep['log_lines'][0].endswith('verdict FLAT'), rep['log_lines']
+    # the runner's check is the same rule: it stops on that frame too
+    assert baseline_picture_check(black)[0] is True
+
+
+def test_a_small_disc_on_even_paper_reads_flat_and_the_advice_says_so():
+    """A KNOWN LIMIT, pinned so it is not a surprise at the bench. p5
+    and p95 do not see a dark disc that covers under 5 % of the central
+    window: on an even background such a frame reads flat although the
+    disc is in the picture, and the runner's stop has no override.
+
+    Measured 2026-10-02, paper 170, disc 110, noise sigma 2: at
+    1920x1080 a 308 px disc reads contrast 10 and a 310 px one 63; at
+    640x480 the same edge is between 118 and 120 px. No bench run has
+    come near it: the smallest fitted disc in the corpus is 361 px of
+    1080 (6.8 % of the window), and every corpus background spans 37.7
+    gray levels or more by itself. The way through is tighter framing,
+    which is what the mid-level advice asks for."""
+    third = "at least a third of the picture's height across"
+    for h, w, r_flat, r_seen in ((480, 640, 59, 60), (1080, 1920, 154, 155)):
+        small = _disc_frame(h=h, w=w, r=r_flat)
+        seen = _disc_frame(h=h, w=w, r=r_seen)
+        c = sldea_edge.image_content(small)
+        assert c['flat'] and c['contrast'] <= 12.0, (h, w, c)
+        d = sldea_edge.image_content(seen)
+        assert not d['flat'] and d['contrast'] >= 55.0, (h, w, d)
+        # the runner's check is the same rule, and it names the fix
+        flat, line = baseline_picture_check(small)
+        assert flat and third in line, line
+        assert baseline_picture_check(seen)[0] is False
+    small, seen = _disc_frame(r=59), _disc_frame(r=60)
+    rep = preflight_report(small, 23, 0, {}, 10.0)
+    assert rep['level'] == 'flat' and rep['gate'], rep
+    assert not rep['start_default'] and third in rep['hint'], rep['hint']
+    assert preflight_report(seen, 23, 0, {}, 10.0)['level'] == 'ok'
+    # a disc a third of the picture's height across is clear of the limit
+    assert not sldea_edge.image_content(_disc_frame(r=80))['flat']
+    # the limit needs an EVEN background: the same small disc on paper
+    # that spans 40 gray levels by itself is a picture
+    uneven = small.astype(_np.int16)
+    uneven[:, uneven.shape[1] // 2:] += 40
+    uneven = _np.clip(uneven, 0, 255).astype(_np.uint8)
+    assert not sldea_edge.image_content(uneven)['flat']
+    assert baseline_picture_check(uneven)[0] is False
 
 
 # What each corpus baseline measured on 2026-10-02 (contrast is p95 - p5 of

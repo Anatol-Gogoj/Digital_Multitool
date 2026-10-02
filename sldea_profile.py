@@ -369,8 +369,16 @@ def flat_message(contrast, mean):
     elif m < FLAT_DARK_MEAN:
         advice = "Raise the exposure or the light on the Webcam tab."
     else:
-        advice = ("Check that the device is under the camera, then the "
-                  "exposure and the light on the Webcam tab.")
+        # A dark disc that covers under 5 % of the central window does
+        # not move p5, so on an even background it reads flat although
+        # it is in the picture (measured 2026-10-02 at 1920x1080: a
+        # 308 px disc reads contrast 10, a 310 px one 63). A third of
+        # the picture's height clears that limit with room; the
+        # smallest fitted disc in the corpus is 361 px of 1080.
+        advice = ("Check that the device is under the camera and that "
+                  "the disc is at least a third of the picture's height "
+                  "across, then the exposure and the light on the Webcam "
+                  "tab.")
     return (f"NO PICTURE: the frame is flat (contrast {float(contrast):.0f} "
             f"gray levels). The disc is not visible. {advice}")
 
@@ -406,7 +414,10 @@ def exposure_verdict(mean, sat_pct, content=None):
     Contrast is pedestal-free: that run spans 2 gray levels, every
     other frame in the corpus 30 or more. Judged after 'clipped'
     because a fully white frame is flat too, and "lower the exposure"
-    is the advice that fixes that one.
+    is the advice that fixes that one. Judged BEFORE 'dark' because a
+    black frame on a camera with a low black level (the 07-23 setup,
+    35 gray or less) is flat as well, and it has to meet this gate and
+    its default-No question, not the one-click 'dark' warning.
 
     Kept here, clock-free and Tk-free, so the thresholds can be tested
     against the measured corpus instead of eyeballed in a dialog."""

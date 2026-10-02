@@ -254,6 +254,10 @@ def test_exposure_verdict_flat_tier_closes_the_pedestal_hole():
         assert exposure_verdict(mean, sat)[0] == want, (mean, sat)
     # a white frame is flat too, and "lower the exposure" is what fixes it
     assert exposure_verdict(255.0, 100.0, flat)[0] == 'clipped'
+    # flat is judged BEFORE dark: a black frame on a low black level (mean
+    # 20, under the dark tier) must meet the gate, not a one-click warning
+    assert exposure_verdict(20.0, 0.0)[0] == 'dark'
+    assert exposure_verdict(20.0, 0.0, flat)[0] == 'flat'
     # the advice boundary sits between the flat run (67) and the darkest
     # usable baseline in the corpus (116)
     assert 67.16 < FLAT_DARK_MEAN < 116.4

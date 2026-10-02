@@ -75,11 +75,14 @@ runs held locally, 899 frames).**
    is flat (contrast N gray levels). The disc is not visible.` and one
    instruction that follows the frame's level: raise the exposure below
    mean 100, lower it above 215, otherwise check that the device is under
-   the camera. Starting needs a second Yes (default No) and leaves a
+   the camera and that the disc is at least a third of the picture's
+   height across. Starting needs a second Yes (default No) and leaves a
    `run.log` line. `clipped` is judged first, because a white frame is
-   flat too and "lower the exposure" is what fixes it. The two-argument
-   call answers as before, and the `dark` tier stays for a camera whose
-   black level is low.
+   flat too and "lower the exposure" is what fixes it. `flat` is judged
+   before `dark`, so a black frame on a camera whose black level is low
+   meets this gate and not the one-click `dark` warning. The two-argument
+   call answers as before, and the `dark` tier stays for a dim frame that
+   still holds a picture, which only such a camera can produce.
 2. **Return starts a run only from a clean pre-flight.** The start button
    is focused and bound to Return only when the verdict is `ok`, the
    picture check really ran, and the preview matches the run's settings.
@@ -166,6 +169,23 @@ runs held locally, 899 frames).**
   P3_7 baseline, 30.0 to 30.7) is 1.5 times the threshold, so a dimmer
   low-contrast device would be stopped, and the only way through is to
   light it better or to change `FLAT_CONTRAST_GRAY`.
+- The check does not see a small disc on an even background, and the
+  run's own stop has no override. p5 and p95 ignore a dark disc that
+  covers under 5 % of the central window. Synthetic 1920x1080 frames
+  (paper 170 with noise sigma 2, disc 110): a disc 310 px across reads
+  contrast 63, one 308 px across reads 10, so `flat`. The log and the box
+  then say "The disc is not visible" over a disc that is in the picture,
+  and on a 300 px disc the dialog's own disc line reads `Disc found: 300
+  px across, fit quality 0.97` right under it. A 16 mm disc framed under
+  about 310 px across on even paper is therefore stopped at its
+  baseline, and the way through is tighter framing: the mid-level advice
+  asks for a disc at least a third of the picture's height across
+  (360 px of 1080). Not seen on the bench so far. The 10 baselines with
+  a disc fit run 361 to 774 px across (the smallest covers 6.8 % of the
+  window), and with the disc masked out their backgrounds alone span
+  37.7 gray levels or more. The helper's text is shared with sibling
+  branches, so its percentiles were left alone and the limit is pinned
+  by a test instead.
 - The baseline check costs 43 ms (median of 30 on a 1920x1080 frame, max
   48 ms) on the runner thread, once per run, at the baseline tick.
 - A run with no baseline frame at all (camera busy or unplugged) is not
@@ -175,14 +195,20 @@ runs held locally, 899 frames).**
   writes, where an operator's abort has one. On a stalled share that is
   time with the drive still at its first-tick value. The breakdown path
   already logs before it zeroes, at real HV.
-- The independent adversarial review that HV-path changes get before
-  their PR opens had not been run on this one when it was committed. It
-  was written in one session, re-read line by line in a second, and
-  mutation-checked. That is not the independent pass.
+- Nothing here is bench-verified: BENCH_TEST §S has not been run. The
+  independent adversarial review that HV-path changes get before their
+  PR opens was run on 2026-10-02, after the first commit, and returned
+  "ready" with two should-fix items. Both are in: the order `flat`
+  before `dark` is pinned by a test, and the small-disc limit above is
+  measured, written down and pinned.
+- The baseline stop also ends DRY runs and electrical-only runs whose
+  camera sees nothing (lamp off, lens cap on). BENCH_TEST §M, §O and §R
+  now say what the camera must see. The only other way through is no
+  camera frame at all, behind the existing default-No question.
 
 **Verification.**
 
-- **Tests:** `tests/test_sldea_preflight.py` has 41 tests, with fakes
+- **Tests:** `tests/test_sldea_preflight.py` has 43 tests, with fakes
   for the camera, the signal generator and Tk. They cover the helper, the
   verdict tiers (on the real corpus baselines when `SLDEA_CORPUS_DIR`
   names them, on synthetic frames always), the default-button rule as a
@@ -190,16 +216,23 @@ runs held locally, 899 frames).**
   `_sldea_worker`: a flat baseline ends a DRY and a LIVE run with the
   same writes as ■ Abort, a normal one changes nothing, a check that
   raises does not stop the run, and a log call that raises at the stop
-  still ends in the zeroing writes. One test each joins
+  still ends in the zeroing writes. Two came out of the review: `flat`
+  is judged before `dark` (a black frame at mean 20 meets the gate), and
+  a small disc on even paper reads flat at the measured size, with the
+  framing advice in the message. One test each joins
   `tests/test_sldea_profile.py`, `tests/test_sldea_edge.py` and
   `tests/test_gui_tabs.py`.
 - **Corpus:** of 899 frames the new verdict calls 26 flat (all of 10-01),
   20 clipped (as before) and 853 ok; the old verdict called 879 ok.
-- **Mutation:** 36 mutants, each removing or weakening one guard: the
-  flat tier, each non-default button rule, the second question, each log
-  line, the worker's stop and the order of its stop flag, its exception
-  handling, the frame hand-back, the drive it reports, the threshold and
-  the window. All 36 fail at least one test.
+- **Mutation:** 40 mutants, each removing or weakening one guard: the
+  flat tier and its place before `dark`, each non-default button rule,
+  the second question, each log line, the worker's stop and the order of
+  its stop flag, its exception handling, the frame hand-back, the drive
+  it reports, the threshold, the window, the percentiles and the framing
+  advice. All 40 fail at least one test. One further mutant from the
+  review survives and is harmless: without the outer `if flat_stop:
+  break` the loop makes one status tick and one 0.1 s poll sleep before
+  the same zeroing writes.
 - **Bench gate:** BENCH_TEST §S (flat frame refused, flat baseline stops
   a DRY run and a LIVE run with the Trek's HV disabled, a normal frame
   starts normally, the settings warning, Cancel leaves the camera alone)

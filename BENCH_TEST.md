@@ -141,6 +141,12 @@ Launch: `.venv/bin/python gui.py`
 Windows), oscilloscope connected and powered, Trek/HV off. ~20 min.
 Launch: `.venv/bin/python gui.py`
 
+**The camera must see a lit scene (added 2026-10-02).** A run now stops
+itself after two frames when its baseline picture is flat (§S), and a DRY
+run does the same. Either light the scene until the pre-flight's numbers
+line reads `contrast 20 gray levels` or more, or unplug the camera and
+answer **Yes** to the pre-flight's `No camera frame available` question.
+
 1. **Oscilloscope** tab shows **Connected** — [ ] if not, stop here; without a scope there is no telemetry to test
 2. **SLDEA Test** tab → find the **📈 Scope kV/µA log (telemetry.csv)** box
    - [ ] **Enabled** is ticked and **Rate (Hz)** reads `2`
@@ -294,7 +300,10 @@ want to see the prompts first.
 > closing the app only attempts a best-effort ramp.
 
 This verifies #159 and finishes the telemetry smoke. Sections M and N do
-not depend on it and should be done first.
+not depend on it and should be done first. The camera rule in §M's setup
+holds here too (added 2026-10-02): a lit scene with `contrast 20 gray
+levels` or more at the pre-flight, or no camera at all, otherwise the run
+stops itself at its baseline frame.
 
 1. Same short profile as §M, but untick DRY RUN → button reads **▶ Run — LIVE HV** (red)
 2. The **scope monitor check** runs first. If it reports a problem it offers **"Fix it automatically"**
@@ -584,7 +593,10 @@ Also send, once:
 connected, and the Trek's HV output off. ~5 min. SLDEA tab: **Start 0**,
 **End 1**, **Step 0.5**, **Ramp 2**, **Landing 10**, **SG CH: 1**, any
 value in the **Electrode** box (an empty one asks its own question
-first), and **DRY RUN — HV OFF** ticked.
+first), and **DRY RUN — HV OFF** ticked. The camera must see a lit scene
+(the pre-flight's numbers line reads `contrast 20 gray levels` or more;
+added 2026-10-02): step 4 lets a run finish, and a run now stops itself
+at a flat baseline picture (§S).
 
 1. Webcam tab → Stepped capture: **SG CH 1**, levels `0`, dwell `120` → **Run sweep** (one 0 V level, held for two minutes)
 2. SLDEA tab → **▶ Run (DRY)**

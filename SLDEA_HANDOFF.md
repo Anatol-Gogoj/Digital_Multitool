@@ -48,8 +48,7 @@ affine and already had a test).
 - The band is built in ratio space and then mapped to the displayed unit:
   its edges are `norm_y` of `r(1 − p)` and `r(1 + p)`, with `r = 1 + y/100`.
   The half-width is `p × 100 × A/A₀` points: ±2 at 0 % strain, ±2.8 at
-  40 %. A contraction no longer crosses its own edges (A/A₀ 0.8 gives ±1.6
-  points).
+  40 %. A contraction no longer crosses its own edges.
 - Only the strain panel's band changes. Ten figure variants of a synthetic
   run were rendered before and after. Nine are byte-identical: default,
   `--prepost`, `--prepost --mean`, `--no-bands`, `--subplots first`, strain
@@ -57,15 +56,14 @@ affine and already had a test).
   the strain figure with bands differs.
 - That figure's caption gets one sentence on its second line: "Strain bands
   = ±2% machine / ±1% traced of the AREA: ±2 / ±1 points at 0 % strain,
-  wider as the area grows." It goes on the second line because the first is
+  wider as strain grows." It goes on the second line because the first is
   already wider than the figure (see the note above `CAPTION_LINE_MAX` in
   `sldea_plot.py`) and a clause added there would be cut off. It prints only
-  when the strain panel and the bands are both drawn.
+  when the strain panel and the bands are both drawn, and it ends at about
+  98 % of the frame width; a test measures that in pixels.
 - `--strain-pct` joins the parser's flag list and the usage block, wired to
   the option the window's tick box sets. A test now requires the usage block
   and the parser to name the same flags.
-- The tests read the band polygon off the axes in both units and check the
-  caption's numbers against it.
 
 **Open (Anatol's call): bands under `--prepost`.** Not changed here. The
 2026-08-09 entry says "Pre/post drawn as separate lines keeps no band, which

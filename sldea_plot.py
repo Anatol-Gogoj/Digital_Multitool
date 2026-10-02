@@ -1597,7 +1597,7 @@ def _band_edges(y, p_pct, pct=False):
     so scaling it by (1 -/+ p) would be +-p of the STRAIN: zero width at
     rest and 2.6 to 10.5 times too narrow on the campaign runs. Instead
     the ratio is recovered as r = 1 + y / 100 and mapped back through
-    norm_y, which gives a half-width of p * 100 * A/A0 points -- +-2
+    norm_y, which gives a half-width of p * 100 * A/A0 points: +-2
     points at rest, wider as the area grows."""
     f = p_pct / 100.0
     if not pct:
@@ -1981,15 +1981,17 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
         # "+-2 points everywhere", which is true only at rest. The note
         # rides on the caption's SECOND line, not the first: the first is
         # already wider than the figure (see CAPTION_LINE_MAX's comment)
-        # and a clause appended to it would be cut off. Only when the
-        # strain panel is really drawn, with bands on.
+        # and a clause appended to it would be cut off. The wording is
+        # kept short on purpose: this line ends at about 98 % of the frame
+        # width, and the test measures it in pixels. Only when the strain
+        # panel is really drawn, with bands on.
         strain_note = ''
         if budget_bands and pct and axr is not None:
             strain_note = (
                 f"  Strain bands = ±{MACHINE_BAND_PCT:g}% machine / "
                 f"±{TRACED_BAND_PCT:g}% traced of the AREA: "
                 f"±{MACHINE_BAND_PCT:g} / ±{TRACED_BAND_PCT:g} points at "
-                f"0 % strain, wider as the area grows.")
+                f"0 % strain, wider as strain grows.")
         cap = ("Points = per-level pre/post snapshot pair"
                + (" (post solid, pre dashed)" if opts['prepost']
                   else " mean") + ".  "

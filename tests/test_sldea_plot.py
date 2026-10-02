@@ -1777,7 +1777,7 @@ def test_the_strain_band_holds_under_prepost_and_never_inverts():
     """Under --prepost each line carries its own band (an old behaviour, see
     the open question in SLDEA_HANDOFF.md); whichever of them are drawn,
     each must be p * A/A0 points wide in strain mode. The test does not
-    say whether prepost SHOULD draw bands -- that is the owner's call."""
+    say whether prepost SHOULD draw bands; that is the owner's call."""
     if not _has_mpl():
         return
     d = _mktmp()
@@ -1806,7 +1806,7 @@ def test_the_strain_caption_states_the_band_that_is_drawn():
         run, sfig = _band_fixture(d, strain_pct=True)
         cap = _caption(sfig)
         m = re.search(r"±([\d.]+) / ±([\d.]+) points at 0 % "
-                      r"strain, wider as the area grows", cap)
+                      r"strain, wider as strain grows", cap)
         assert m, cap
         machine_pts, traced_pts = float(m.group(1)), float(m.group(2))
         assert machine_pts == sp.MACHINE_BAND_PCT
@@ -1827,6 +1827,21 @@ def test_the_strain_caption_states_the_band_that_is_drawn():
         # the aggregate captions are held to
         assert len(cap.split('\n')[1]) <= sp.CAPTION_LINE_MAX, \
             len(cap.split('\n')[1])
+        # and measured in pixels, the way a reader meets it: a character
+        # count is only a proxy. The line must end inside the frame with
+        # a little room, because a font or kerning change moves it by
+        # about 0.2 %. The same line without the sentence is far shorter,
+        # so a failure here means the sentence was lengthened.
+        sfig.canvas.draw()
+        rend = sfig.canvas.get_renderer()
+        box = [t for t in sfig.texts if 'Points = per-level' in t.get_text()]
+        assert len(box) == 1, len(box)
+        probe = sfig.text(box[0].get_position()[0], 0.5,
+                          box[0].get_text().split('\n')[1],
+                          fontsize=box[0].get_fontsize())
+        right = probe.get_window_extent(rend).x1 / sfig.bbox.width
+        probe.remove()
+        assert right <= 0.99, 'caption line 2 ends at %.3f' % right
         # ratio mode, no bands, a single mm2 panel and the aggregate each
         # draw no strain band, so none of them may claim one
         _r, rfig = _band_fixture(d2)

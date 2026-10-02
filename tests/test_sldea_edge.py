@@ -1037,26 +1037,453 @@ def test_disc_fit_tracks_the_moving_ink_edge():
     assert best['conf'] >= 0.75, best['conf']
     assert best['spread_pct'] == best['ci85_pct'] < 4.0, best
     assert not se.needs_review(cands, s)
+    # 2026-10-02: the area is the baseline circle times the common-ray
+    # ratio, and its equivalent diameter hangs on the same circle
+    ref = se.baseline_disc(base, s)
+    assert abs(best['area_px'] - ref['area_px'] * best['area_ratio']) \
+        < 1e-3 * ref['area_px']
+    assert abs(best['area_px'] / ref['area_px'] / 1.12 ** 2 - 1.0) < 0.01
+    assert abs(np.pi * (best['diam_px'] / 2) ** 2 - best['area_px']) \
+        < 1e-6 * best['area_px']
+    # the contract Edge Review and the labels rely on is intact
+    for key in ('method', 'area_px', 'diam_px', 'cx', 'cy', 'conf',
+                'spread_pct', 'ci85_pct', 'contour', 'wrinkle', 'audit',
+                'circ', 'solidity', 'contrast', 'n_edge', 'arc_cov'):
+        assert key in best, key
 
 
-def test_resting_candidate_states_the_known_area_on_gated_frames():
-    """A gated frame with a known resting disc is not 'nothing': the
-    honest measurement is that the area equals the resting area. It must
-    auto-accept -- low-kV frames used to queue for review over frames
-    that show no change at all."""
+def _refuse_gated_tracker():
+    """Context: make the tracker refuse on gated frames only (the
+    assume_responding call), as a washed or blocked edge would."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def cm():
+        orig = se._disc_fit_candidate
+
+        def refuse(prep, settings, ref, assume_responding=False):
+            if assume_responding:
+                return None
+            return orig(prep, settings, ref, assume_responding)
+
+        se._disc_fit_candidate = refuse
+        try:
+            yield
+        finally:
+            se._disc_fit_candidate = orig
+
+    return cm()
+
+
+def test_gated_frame_is_measured_and_resting_is_the_fallback():
+    """A gated frame with a known resting disc is not 'nothing'. Until
+    2026-10-02 it was STATED as exactly the resting area ('resting');
+    that wrote up to ~2 % of real low-voltage growth as zero. Now the
+    tracker measures it (common-ray ratio), the measurement auto-accepts
+    and reads the resting area to within its noise on an unchanged
+    frame, and the asserted claim is the runner-up. (This test used to
+    pin `len(cands) == 1 and method == 'resting'` with area == A0.)"""
     rng = np.random.default_rng(11)
     base = _bridged_scene(with_disc=True)
     img = np.clip(base + rng.normal(0, 1.0, base.shape), 0,
                   255).astype(np.float32)
     s = dict(se.DEFAULT_SETTINGS)
-    cands = se.candidates(base, img, s)
-    assert len(cands) == 1 and cands[0]['method'] == 'resting', cands
     ref = se.baseline_disc(base, s)
-    assert abs(cands[0]['area_px'] - ref['area_px']) < 1e-6
-    assert cands[0]['conf'] >= 0.75
+    cands = se.candidates(base, img, s)
+    best = cands[0]
+    assert best['method'] == 'disc-fit' and best.get('resting_refit'), \
+        [(c['method'], c['conf']) for c in cands]
+    assert abs(best['area_px'] / ref['area_px'] - 1.0) < 0.005, \
+        best['area_px'] / ref['area_px']
+    assert best['conf'] >= 0.75
     assert not se.needs_review(cands, s)
+    rest = next(c for c in cands if c['method'] == 'resting')
+    assert abs(rest['area_px'] - ref['area_px']) < 1e-6
+    assert rest['conf'] < best['conf']
+    # where the tracker cannot measure, the claim stands as it always
+    # did: exactly the resting area, auto-accepted
+    with _refuse_gated_tracker():
+        fb = se.candidates(base, img, s)
+    assert len(fb) == 1 and fb[0]['method'] == 'resting', fb
+    assert abs(fb[0]['area_px'] - ref['area_px']) < 1e-6
+    assert fb[0]['conf'] >= 0.75
+    assert not se.needs_review(fb, s)
     # and with no baseline disc there is nothing to state: gated frames
     # stay empty exactly as before (the no-change-gate test pins that)
+
+
+def test_weak_gated_measurement_does_not_unseat_a_clean_resting_claim():
+    """The measurement takes a gated frame only when it is fit to
+    auto-accept on its own. A weak one (below accept_conf) must not turn
+    a frame that used to auto-accept into review work: the audit-clean
+    'resting' claim keeps the frame, the measurement is the runner-up."""
+    rng = np.random.default_rng(11)
+    base = _bridged_scene(with_disc=True)
+    img = np.clip(base + rng.normal(0, 1.0, base.shape), 0,
+                  255).astype(np.float32)
+    s = dict(se.DEFAULT_SETTINGS)
+    orig = se._disc_fit_candidate
+
+    def weak(prep, settings, ref, assume_responding=False):
+        c = orig(prep, settings, ref, assume_responding)
+        if c is not None and assume_responding:
+            c['conf_own'] = 0.60
+        return c
+
+    se._disc_fit_candidate = weak
+    try:
+        cands = se.candidates(base, img, s)
+    finally:
+        se._disc_fit_candidate = orig
+    assert cands[0]['method'] == 'resting', \
+        [(c['method'], c['conf']) for c in cands]
+    assert cands[0].get('capped_by') is None
+    assert not se.needs_review(cands, s)
+    assert any(c.get('resting_refit') and c['conf'] == 0.60
+               for c in cands[1:])
+
+
+# ---------------------------------------------------------------------------
+# The common-ray area ratio (2026-10-02): A and A0 are one functional.
+# ---------------------------------------------------------------------------
+
+def _flared_scene(scale=1.0, bulge_px=0.0, noise_seed=7):
+    """A resting disc that is NOT a circle where it matters: the ink
+    flares outward beside the two lead sectors, as on the campaign
+    devices (measured edge points beside the leads sit 4-11 % outside
+    the circle radius). The flare runs on INTO the sectors the foil
+    hides, where no ray can follow it: the shape the free ellipse
+    over-stretches across. `scale` grows the whole outline about its
+    centre; `bulge_px` pushes the edge out only inside +-8 degrees of
+    the right-hand lead, i.e. entirely inside a blocked sector."""
+    rng = np.random.default_rng(7)
+    h, w = 540, 960
+    img = np.full((h, w), 190.0, np.float32)
+    yy, xx = np.mgrid[0:h, 0:w]
+    th = np.arctan2(yy - 270.0, xx - 480.0)
+    rr = np.hypot(xx - 480.0, yy - 270.0)
+    wr = np.radians(40.0)
+    d_right = np.abs(th)
+    d_left = np.pi - np.abs(th)
+    edge = 100.0 * scale * (1.0 + 0.10 * (np.exp(-(d_right / wr) ** 2)
+                                          + np.exp(-(d_left / wr) ** 2)))
+    if bulge_px:
+        edge = np.where(d_right <= np.radians(8.0), edge + bulge_px, edge)
+    img[rr <= edge] = 172.0
+    img[230:310, 0:330] = _crinkle((80, 330), rng)      # left strip
+    img[230:310, 630:960] = _crinkle((80, 330), rng)    # right strip
+    img[262:278, 330:392] = 174.0                       # leads
+    img[262:278, 568:630] = 174.0
+    img += np.random.default_rng(noise_seed).normal(
+        0, 1.5, img.shape).astype(np.float32)
+    return np.clip(img, 0, 255).astype(np.float32)
+
+
+def _track(base, img, s):
+    """The tracker forced on a frame (responding gates waived), with its
+    area as a multiple of the baseline circle. -> (candidate, A/A0)."""
+    ref = se.baseline_disc(base, s)
+    assert ref is not None, se.baseline_disc_refusal(base, s)
+    prep = se.prepared_diff(base, img, s)
+    c = se._disc_fit_candidate(prep, s, ref, assume_responding=True)
+    assert c is not None, "tracker refused"
+    f = prep['f']
+    return c, c['area_px'] / (f * f) / ref['area_px']
+
+
+def test_baseline_differenced_with_itself_reads_exactly_a0():
+    """R1, the defect of 2026-10-02: A0 was the baseline CIRCLE while
+    every measured row was pi*a*b of an ELLIPSE extrapolated across the
+    blocked lead sectors, and on the very same 0 kV frame the two
+    disagreed by -0.4 to +7.4 % (campaign runs). One functional top and
+    bottom means the baseline measured against itself is 1.000 (exactly,
+    not approximately), while the ellipse on that frame still shows the
+    old offset."""
+    s = dict(se.DEFAULT_SETTINGS)
+    base = _flared_scene()
+    ref = se.baseline_disc(base, s)
+    c, ratio = _track(base, base, s)
+    assert c['area_ratio'] == 1.0, c['area_ratio']
+    assert abs(ratio - 1.0) < 1e-9, ratio
+    assert c['ci85_pct'] == 0.0, c['ci85_pct']
+    # the scene really is the failing shape: the old estimator's number
+    # for this frame is several percent off the circle it was divided by
+    assert c['ellipse_over_circle'] > 1.02, c['ellipse_over_circle']
+    # the px->mm anchor still hangs on the circle: equivalent diameter
+    f = se.prepared_diff(base, base, s)['f']
+    assert abs(c['diam_px'] / f - ref['diam_px']) < 1e-6
+    # the baseline ROW stays the definition of A0: a 'resting' claim with
+    # the circle's area and diameter, not a measurement of itself
+    cands = se.candidates(base, base, s)
+    assert len(cands) == 1 and cands[0]['method'] == 'resting', cands
+    assert cands[0]['area_px'] == ref['area_px']
+    assert cands[0]['diam_px'] == ref['diam_px']
+    assert not cands[0].get('resting_refit')
+
+
+def test_uniformly_scaled_disc_reads_the_scale_squared_with_leads_blocked():
+    """R1: grow the whole outline by s and the reported A/A0 must be s^2,
+    although about a third of the perimeter is behind the leads and the
+    outline is not a circle. The ellipse's own area (what was reported
+    before) carries the baseline offset into every one of these."""
+    s = dict(se.DEFAULT_SETTINGS)
+    base = _flared_scene()
+    for scale in (1.0, 1.03, 1.06, 1.12):
+        img = _flared_scene(scale=scale, noise_seed=11)
+        c, ratio = _track(base, img, s)
+        assert c['hidden_pct'] > 20.0, c['hidden_pct']
+        assert abs(ratio / scale ** 2 - 1.0) < 0.005, (scale, ratio)
+        assert abs(c['ellipse_over_circle'] / scale ** 2 - 1.0) > 0.02, \
+            (scale, c['ellipse_over_circle'])
+        assert c['ci85_pct'] < 1.0, c['ci85_pct']
+    # and through candidates(): no step between a quiet frame and the
+    # first frame the change map notices
+    ref = se.baseline_disc(base, s)
+    quiet = se.candidates(base, _flared_scene(noise_seed=11), s)
+    moved = se.candidates(base, _flared_scene(scale=1.12, noise_seed=11), s)
+    assert quiet[0]['method'] == moved[0]['method'] == 'disc-fit'
+    assert abs(quiet[0]['area_px'] / ref['area_px'] - 1.0) < 0.005
+    assert abs(moved[0]['area_px'] / ref['area_px'] / 1.12 ** 2 - 1.0) \
+        < 0.005
+
+
+def test_bulge_inside_a_blocked_sector_is_not_seen_and_says_so():
+    """The stated assumption, pinned: the hidden part of the perimeter
+    is taken to strain like the visible part. A disc that bulges ONLY
+    behind a lead has no ray on the bulge, so the ratio does not move:
+    the estimator neither guesses the bulge nor extrapolates into it.
+    That blindness is not silent: every candidate says what share of the
+    perimeter it never measured (`hidden_pct`)."""
+    s = dict(se.DEFAULT_SETTINGS)
+    base = _flared_scene()
+    flat, r_flat = _track(base, _flared_scene(noise_seed=11), s)
+    bulged, r_bulged = _track(base, _flared_scene(bulge_px=30.0,
+                                                  noise_seed=11), s)
+    # 30 px over 16 degrees is ~3 % of the disc's true area
+    assert abs(r_bulged - 1.0) < 0.005, r_bulged
+    assert abs(r_bulged - r_flat) < 0.005, (r_flat, r_bulged)
+    assert bulged['hidden_pct'] > 20.0, bulged['hidden_pct']
+    assert bulged['n_common'] <= 360 * (1 - bulged['hidden_pct'] / 100) + 1
+
+
+def _rays(r, lo, hi):
+    """360 rays at radius r, measured only where lo <= degree < hi."""
+    out = np.full(360, np.nan)
+    out[lo:hi] = r
+    return out
+
+
+def test_common_ray_ratio_refuses_rather_than_fabricates():
+    """R3. Too few common rays, rays reaching under 120 degrees, rays on
+    one side of the disc, or no baseline rays at all: no number."""
+    full = np.full(360, 100.0)
+    res, why = se._common_ray_ratio(full, full * 1.1, 100.0)
+    assert why is None and abs(res['ratio'] - 1.21) < 1e-9, (res, why)
+    assert res['n_common'] == 360 and res['hidden_pct'] == 0.0
+    assert res['one_sided'] < 1e-9
+    # no baseline rays
+    res, why = se._common_ray_ratio(None, full, 100.0)
+    assert res is None and 'baseline' in why, why
+    # 59 common rays
+    res, why = se._common_ray_ratio(full, _rays(110.0, 0, 59), 100.0)
+    assert res is None and '59 rays' in why, why
+    # rays on BOTH frames are what counts, not on either
+    res, why = se._common_ray_ratio(_rays(100.0, 0, 200),
+                                    _rays(110.0, 150, 360), 100.0)
+    assert res is None and '50 rays' in why, why
+    # 100 rays squeezed into 100 degrees: 5 blocks, under the 120 deg floor
+    res, why = se._common_ray_ratio(full, _rays(110.0, 0, 100), 100.0)
+    assert res is None and '100 deg' in why, why
+    # 150 degrees on one side: enough rays and blocks, but one-sided
+    res, why = se._common_ray_ratio(full, _rays(110.0, 0, 150), 100.0)
+    assert res is None and 'one side' in why, why
+    # two opposed 75-degree arcs (the campaign geometry): balanced, fine
+    two = _rays(110.0, 50, 125)
+    two[230:305] = 110.0
+    res, why = se._common_ray_ratio(full, two, 100.0)
+    assert why is None and res['one_sided'] < 0.05, (res, why)
+    assert abs(res['ratio'] - 1.21) < 1e-9
+    assert abs(res['hidden_pct'] - 100.0 * 210 / 360) < 1e-6
+
+
+def test_common_ray_ratio_trims_jumped_rays_and_counts_them():
+    """A ray that lands on another feature on one of the two frames is
+    an outlier in r_k/r_k(0) and is dropped; the count is reported. A
+    smooth ellipse-like change of shape is NOT trimmed."""
+    rng = np.random.default_rng(3)
+    base = 100.0 + rng.normal(0, 0.3, 360)
+    frame = 1.05 * base + rng.normal(0, 0.3, 360)
+    clean, _ = se._common_ray_ratio(base, frame, 100.0)
+    bad = frame.copy()
+    bad[40:52] += 25.0                       # 12 rays jump to a wrinkle
+    res, why = se._common_ray_ratio(base, bad, 100.0)
+    assert why is None
+    assert res['n_trimmed'] >= 12, res
+    assert abs(res['ratio'] - clean['ratio']) < 0.003, (res, clean)
+    untrimmed = float(np.sum(bad ** 2) / np.sum(base ** 2))
+    assert abs(untrimmed - clean['ratio']) > 0.01     # it mattered
+    # anisotropy: the disc goes oblong (radius +8 % one way, +2 % the
+    # other). Every ray is real and every ray stays in.
+    th = np.radians(np.arange(360.0))
+    obl = 100.0 * (1.05 + 0.03 * np.cos(2 * th))
+    res, why = se._common_ray_ratio(np.full(360, 100.0), obl, 100.0)
+    assert why is None and res['n_trimmed'] == 0, res
+    assert abs(res['ratio'] - float(np.mean(obl ** 2)) / 1e4) < 1e-9
+
+
+def test_common_ray_spread_is_a_repeatable_block_bootstrap():
+    """spread_pct: half-width of the central 85 % of a block bootstrap
+    over 20-degree blocks. Zero when the frames are identical, the same
+    number on every call (fixed seed: a Save must reproduce), small
+    when the blocks agree and large when they do not."""
+    rng = np.random.default_rng(5)
+    base = 100.0 + rng.normal(0, 0.3, 360)
+    same, _ = se._common_ray_ratio(base, base.copy(), 100.0)
+    assert same['ratio'] == 1.0 and same['spread_pct'] == 0.0
+    frame = 1.05 * base + rng.normal(0, 0.3, 360)
+    a, _ = se._common_ray_ratio(base, frame, 100.0)
+    b, _ = se._common_ray_ratio(base, frame, 100.0)
+    assert a['spread_pct'] == b['spread_pct'] and a['ratio'] == b['ratio']
+    assert 0.0 < a['spread_pct'] < 0.3, a['spread_pct']
+    # one half of the disc strains 4 % more than the other: the visible
+    # blocks disagree, so which blocks were visible matters, and the
+    # spread says so
+    th = np.radians(np.arange(360.0))
+    uneven = base * (1.05 + 0.02 * np.sign(np.cos(th)))
+    u, _ = se._common_ray_ratio(base, uneven, 100.0)
+    assert u['spread_pct'] > 5 * a['spread_pct'], (u, a)
+
+
+def test_fixed_centre_drift_sensitivity_matches_the_stated_formula():
+    """The rays are cast from the BASELINE centre. A disc that shifts by
+    d px without growing leaves the ratio alone when the rays balance
+    around it, and moves it by about 2 * one_sided * d / r0 when they do
+    not. That is the number the one-sidedness limit is built on."""
+    th = np.radians(np.arange(360.0))
+    r0, d = 100.0, 1.0
+    base = np.full(360, r0)
+    # exact radius of a circle of radius r0 centred d px to the right
+    shifted = d * np.cos(th) + np.sqrt(r0 ** 2 - (d * np.sin(th)) ** 2)
+    # the campaign geometry: two opposed lead gaps, rays balanced
+    bal = shifted.copy()
+    bal[:30] = bal[330:] = np.nan
+    bal[150:210] = np.nan
+    res, why = se._common_ray_ratio(base, bal, r0)
+    assert why is None and res['one_sided'] < 0.01
+    assert abs(res['ratio'] - 1.0) < 2e-4, res['ratio']
+    # a single 200-degree arc facing the shift: allowed, but exposed
+    arc = np.full(360, np.nan)
+    arc[:100] = shifted[:100]
+    arc[260:] = shifted[260:]
+    res, why = se._common_ray_ratio(base, arc, r0)
+    assert why is None and 0.5 < res['one_sided'] <= 0.6, (res, why)
+    predicted = 2.0 * res['one_sided'] * d / r0
+    assert abs((res['ratio'] - 1.0) - predicted) < 0.15 * predicted, \
+        (res['ratio'], predicted)
+
+
+def test_estimator_version_is_stamped_and_never_moved_by_a_settings_save():
+    """R5. Edge Review's Save stamps `area_estimator: N` into the run's
+    edge-settings section (Key: value, through save_settings). No stamp
+    = the old ellipse estimator. Saving SETTINGS (tuner, settings
+    dialog) must keep whatever stamp is there, and stamping must not
+    pin detection settings nobody chose."""
+    d = tempfile.mkdtemp(prefix='edge_est_')
+    try:
+        with open(os.path.join(d, 'setup.txt'), 'w', encoding='utf-8') as f:
+            f.write("SLDEA run\nDEA nominal diameter: 16 mm\n")
+        assert se.saved_area_estimator(d) is None
+        assert not se.has_saved_settings(d)
+        # a settings save on an unstamped run does not invent a stamp
+        s = se.load_settings(d)
+        s['blur_px'] = 9
+        se.save_settings(d, s)
+        assert se.saved_area_estimator(d) is None
+        assert se.has_saved_settings(d)
+        # the Save stamp: settings lines untouched, stamp added
+        before = se.load_settings(d)
+        se.stamp_area_estimator(d)
+        assert se.saved_area_estimator(d) == se.AREA_ESTIMATOR_VERSION == 2
+        assert se.load_settings(d) == before
+        text = open(os.path.join(d, 'setup.txt'), encoding='utf-8').read()
+        assert text.count(se.EDGE_HDR) == 1
+        assert text.count('area_estimator: 2') == 1
+        assert 'blur_px: 9' in text
+        # a later settings save keeps the stamp; stamping is idempotent
+        s['blur_px'] = 7
+        se.save_settings(d, s)
+        se.stamp_area_estimator(d)
+        se.stamp_area_estimator(d)
+        text = open(os.path.join(d, 'setup.txt'), encoding='utf-8').read()
+        assert text.count('area_estimator: 2') == 1 and 'blur_px: 7' in text
+        assert se.load_settings(d)['blur_px'] == 7
+        # an explicit older version can be written (and read back)
+        se.save_settings(d, s, area_estimator=1)
+        assert se.saved_area_estimator(d) == 1
+    finally:
+        shutil.rmtree(d)
+    # a run nobody tuned: the stamp alone, no settings pinned, the scale
+    # anchor block preserved
+    d = tempfile.mkdtemp(prefix='edge_est_')
+    try:
+        with open(os.path.join(d, 'setup.txt'), 'w', encoding='utf-8') as f:
+            f.write("SLDEA run\nDEA nominal diameter: 12 mm\n")
+        se.save_scale_anchor(d, {'method': 'auto-verified',
+                                 'diam_px': 577.1, 'diam_mm': 12.0,
+                                 'mm_per_px': 12.0 / 577.1})
+        se.stamp_area_estimator(d)
+        text = open(os.path.join(d, 'setup.txt'), encoding='utf-8').read()
+        block = text.split(se.EDGE_HDR, 1)[1].strip().splitlines()
+        assert block == ['area_estimator: 2'], block
+        assert not se.has_saved_settings(d)
+        assert se.load_settings(d) == dict(se.DEFAULT_SETTINGS, diam_mm=12.0)
+        assert se.load_scale_anchor(d)['diam_px'] == 577.1
+    finally:
+        shutil.rmtree(d)
+    # no setup.txt at all: nothing to read, and the stamp creates one
+    d = tempfile.mkdtemp(prefix='edge_est_')
+    try:
+        assert se.saved_area_estimator(d) is None
+        se.stamp_area_estimator(d)
+        assert se.saved_area_estimator(d) == 2
+    finally:
+        shutil.rmtree(d)
+
+
+def test_stale_estimator_rows_names_kept_ellipse_areas_only():
+    """R5. A Save keeps the previous pass's px on rows still in the
+    review queue. On a run last saved by the ellipse estimator those are
+    old numbers beside new ones: exactly the rows this names, so the
+    caller can mark them."""
+    rows = [
+        {'active_area_px': '217438', 'notes': 'edge:resting conf 0.95'},
+        {'active_area_px': '238685', 'notes': 'edge:disc-fit conf 0.99'},
+        {'active_area_px': '226645',
+         'notes': 'edge:manual-trace conf 1.00 (user)'},
+        {'active_area_px': '', 'notes': 'edge:disc-fit conf 0.70'},
+        {'active_area_px': '240000',
+         'notes': 'edge:disc-fit conf 0.74 (user); pair mismatch 9%'},
+        {'active_area_px': '99000', 'notes': 'edge:tex-ratio conf 0.80'},
+        {'active_area_px': '250000', 'notes': 'edge:disc-fit conf 0.93'},
+    ]
+    results = {6: {'area_px': 251000.0}}          # re-measured this pass
+    assert se.stale_estimator_rows(rows, results, None) == [1, 4]
+    assert se.stale_estimator_rows(rows, results, 1) == [1, 4]
+    assert se.stale_estimator_rows(rows, results,
+                                   se.AREA_ESTIMATOR_VERSION) == []
+    assert se.stale_estimator_rows(rows, {}, None) == [1, 4, 6]
+    # the note is ASCII and survives apply_results' anno channel once
+    se.AREA_ESTIMATOR_STALE_NOTE.encode('ascii')
+    annos = {i: se.AREA_ESTIMATOR_STALE_NOTE for i in (1, 4)}
+    se.apply_results(rows, results and {6: {
+        'area_px': 251000.0, 'diam_px': 565.0, 'conf': 0.9,
+        'method': 'disc-fit', 'wrinkle': 1.0}}, None, {}, annos)
+    se.apply_results(rows, {}, None, {}, annos)          # a second Save
+    assert rows[1]['notes'] == ('edge:disc-fit conf 0.99; '
+                                + se.AREA_ESTIMATOR_STALE_NOTE)
+    assert rows[1]['active_area_px'] == '238685'
+    assert rows[4]['notes'].count(se.AREA_ESTIMATOR_STALE_NOTE) == 1
+    assert se.AREA_ESTIMATOR_STALE_NOTE not in rows[0]['notes']
 
 
 def test_disc_fit_adaptive_cut_keeps_a_uniformly_faint_edge():
@@ -1317,16 +1744,32 @@ def test_bias_tripped_resting_is_refit_to_the_moved_edge():
     rest = next(c for c in cands if c['method'] == 'resting')
     assert rest.get('audit_bias') is not None and rest['audit_bias'] < -3.0
     assert rest['conf'] == round(s['accept_conf'] - 0.01, 3), rest['conf']
-    # with the bias gate off the stale claim auto-accepts unchallenged --
-    # the gate is what makes the refit possible at all
+    # the area is the like-for-like ratio: (106/100)^2 = 1.1236
+    assert abs(best['area_px'] / ref['area_px'] / 1.1236 - 1.0) < 0.01, \
+        best['area_px'] / ref['area_px']
+    # Since 2026-10-02 the measurement no longer waits for the bias gate:
+    # every gated frame is measured. With the gate OFF this used to pin
+    # the stale claim auto-accepting unchallenged (`c0[0]['method'] ==
+    # 'resting'`, no refit); now the tracker takes the frame anyway and
+    # the un-audited claim, which would have auto-accepted at exactly A0
+    # on a disc that grew 12 %, is only the runner-up.
     s0 = dict(s)
     s0['audit_bias_px'] = 0.0
     c0 = se.candidates(base, img, s0)
-    assert c0[0]['method'] == 'resting'
-    assert c0[0].get('audit_bias') is None
-    assert c0[0]['conf'] >= s0['accept_conf'], c0[0]['conf']
+    assert c0[0]['method'] == 'disc-fit' and c0[0].get('resting_refit')
+    assert abs(c0[0]['area_px'] - best['area_px']) < 1e-6
     assert not se.needs_review(c0, s0)
-    assert not any(c.get('resting_refit') for c in c0)
+    rest0 = next(c for c in c0 if c['method'] == 'resting')
+    assert rest0.get('audit_bias') is None
+    assert rest0['conf'] < c0[0]['conf']
+    # ...and where the tracker refuses, the gate-off claim stands alone,
+    # exactly as before
+    with _refuse_gated_tracker():
+        c1 = se.candidates(base, img, s0)
+    assert c1[0]['method'] == 'resting'
+    assert c1[0]['conf'] >= s0['accept_conf'], c1[0]['conf']
+    assert not se.needs_review(c1, s0)
+    assert not any(c.get('resting_refit') for c in c1)
 
 
 def test_refit_refusal_keeps_the_capped_resting_claim():
@@ -1377,6 +1820,48 @@ def test_pair_agreement_cannot_lift_an_audit_capped_boundary():
     # the audited member stays below accept; its clean partner still gains
     assert cands[0][0]['conf'] == capped, cands[0][0]['conf']
     assert cands[1][0]['conf'] == 0.98, cands[1][0]['conf']
+
+
+def test_tracker_spread_does_not_widen_the_pair_tolerance():
+    """2026-10-02: the tracker's ci85_pct became a block-bootstrap spread
+    that grows with uneven strain (2-4 % at high voltage). Fed into the
+    pair tolerance it let the two snapshots of one landing disagree by
+    10 % and both auto-accept (P3_3 at 10 kV in the corpus replay). The
+    tracker therefore hands the pair check `pair_ci_pct` = 0, and a
+    tracked pair meets the 4 % / 8 % rule it always met in practice."""
+    rows = [{'nominal_kV': '10'}, {'nominal_kV': '10'},
+            {'nominal_kV': '9'}, {'nominal_kV': '9'}]
+    acc = se.DEFAULT_SETTINGS['accept_conf']
+
+    def pair(extra):
+        return {
+            0: [dict({'method': 'disc-fit', 'area_px': 345960.0,
+                      'conf': 0.99, 'ci85_pct': 2.75}, **extra)],
+            1: [dict({'method': 'disc-fit', 'area_px': 312875.0,
+                      'conf': 0.92, 'ci85_pct': 1.55}, **extra)],
+            2: [dict({'method': 'disc-fit', 'area_px': 100000.0,
+                      'conf': 0.80, 'ci85_pct': 2.5}, **extra)],
+            3: [dict({'method': 'disc-fit', 'area_px': 105500.0,
+                      'conf': 0.80, 'ci85_pct': 2.5}, **extra)],
+        }
+
+    cands = pair({'pair_ci_pct': 0.0})
+    stats = se.reconcile_pairs(rows, cands, dict(se.DEFAULT_SETTINGS))
+    # 10.0 % apart: past 2 x 4 % -> both capped into review
+    assert cands[0][0]['conf'] == cands[1][0]['conf'] == round(acc - 0.01, 3)
+    assert cands[0][0]['pair_mismatch_pct'] == 10.0
+    # 5.4 % apart: neither confirmed nor capped
+    assert cands[2][0]['conf'] == cands[3][0]['conf'] == 0.80
+    assert stats == {'confirmed': 0, 'capped': 2}, stats
+    # what the spread would have done on its own: 6.45 % and 7.5 %
+    # tolerances, so nothing capped and the 5.4 % pair 'confirmed'
+    loose = pair({})
+    assert se.reconcile_pairs(rows, loose, dict(se.DEFAULT_SETTINGS)) == \
+        {'confirmed': 2, 'capped': 0}
+    # and the tracker really does hand the check that zero
+    base, img = _bridged_pair(r_active=112)
+    best = se.candidates(base, img, dict(se.DEFAULT_SETTINGS))[0]
+    assert best['method'] == 'disc-fit' and best['pair_ci_pct'] == 0.0
 
 
 def test_ramp_consistency_flags_pairs_and_dips():

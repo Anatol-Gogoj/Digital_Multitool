@@ -3272,6 +3272,23 @@ class EdgeReviewApp:
                     f"to THIS anchor)" if n_kept else " (left blank)")
                  + (f"\n  incl. {n_unread} UNREADABLE frame(s) — kept, "
                     f"not re-measured" if n_unread else ""))
+        # Old and new numbers must never sit in one column unlabelled
+        # (2026-10-02). The area method changed (ellipse -> common-ray
+        # ratio, se.AREA_ESTIMATOR_VERSION): a kept row on a run last
+        # saved by the old method still holds an ellipse area, which read
+        # -0.4 to +7.4 % against the same frame's A0. Say so here, and
+        # mark each such row in its notes below; the run is stamped with
+        # the current version only after the CSV is written.
+        stale = se.stale_estimator_rows(
+            self.run['rows'], self.results,
+            se.saved_area_estimator(self.rundir))
+        if stale:
+            unrev += (f"\n  WARNING: {len(stale)} of the kept row(s) hold an "
+                      f"area from the OLD area method (the fitted ellipse, "
+                      f"used until 2026-10-01). It reads up to several % "
+                      f"higher than the method used now. Each one gets the "
+                      f"note '{se.AREA_ESTIMATOR_STALE_NOTE}'. Review those "
+                      f"frames before you compare this run with others.")
         # ... and SAY BY HOW MUCH (#215). "re-scaled to THIS anchor" is
         # true but abstract; an operator who re-reviewed one frame needs
         # the number, because the whole mm² column moves by it.
@@ -3369,6 +3386,10 @@ class EdgeReviewApp:
                         if self.load_fail[i] == 'unreadable' else
                         'frame processing failed - kept, not re-measured')
                 annos[i] = (annos[i] + '; ' + note) if i in annos else note
+        # a kept area the old estimator wrote says so in its own row
+        for i in stale:
+            note = se.AREA_ESTIMATOR_STALE_NOTE
+            annos[i] = (annos[i] + '; ' + note) if i in annos else note
         if 'wrinkle_idx' not in self.run['columns']:
             # older runs predate the column; slot it in before notes
             cols = self.run['columns']
@@ -3426,6 +3447,20 @@ class EdgeReviewApp:
             self.status.config(
                 text=f"saved, but recording the scale anchor in "
                      f"setup.txt failed: {e}")
+        # ... and which area estimator wrote the areas (2026-10-02): the
+        # stamp is what lets the next Save, and anyone reading the CSV,
+        # tell these numbers from the old ellipse areas. Written only
+        # now, after data.csv committed. A failure must be SEEN: with no
+        # stamp the run reads as old-method data.
+        try:
+            se.stamp_area_estimator(self.rundir)
+        except OSError as e:
+            messagebox.showwarning(
+                "Save: area-method stamp not written",
+                f"data.csv is saved, but setup.txt could not be updated:"
+                f"\n\n{e}\n\nUntil it is, this run looks as if the OLD "
+                f"area method measured it. Save again once the folder is "
+                f"writable.")
         # detect→Save, the whole round trip, said in the status line where
         # it always was. Save no longer STOPS the toolbar clock (`#237`):
         # that clock is now the session, a session outlives a Save (the

@@ -4685,6 +4685,92 @@ def test_goto_a_row_with_no_frame_lands_next_door_and_says_so():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_save_stamps_the_area_method_and_marks_kept_old_areas():
+    """2026-10-02: the disc-fit area changed from the fitted ellipse to
+    the common-ray ratio. A Save keeps the previous pass's px on rows
+    still in the review queue, so on a run last saved by the OLD method
+    a re-save would put old and new numbers in one column. Save must (a)
+    say so in its dialog, (b) mark each such row in its notes, (c) stamp
+    the run with the current method only after the CSV is written, and
+    (d) stay quiet on the next Save, when the stamp is current."""
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('estimator stamp')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_est_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        # a previous Save by the old method: row 1 a machine ellipse
+        # area, row 2 a hand trace. No stamp in setup.txt = old method.
+        csv_path = os.path.join(run, 'data.csv')
+        with open(csv_path, newline='') as f:
+            r = csv.DictReader(f)
+            rows, cols = list(r), r.fieldnames
+        rows[1].update(active_area_px='9000', active_area_mm2='90.000',
+                       active_diam_mm='10.700',
+                       notes='edge:disc-fit conf 0.93')
+        rows[2].update(active_area_px='15000', active_area_mm2='150.000',
+                       active_diam_mm='13.800',
+                       notes='edge:manual-trace conf 1.00 (user)')
+        with open(csv_path, 'w', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            w.writeheader()
+            w.writerows(rows)
+        assert se.saved_area_estimator(run) is None
+        app = gui.EdgeReviewApp(root, path=run)
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect_all_sync()
+        # both activated rows are still in the review queue at Save
+        app.results.pop(1, None)
+        app.results.pop(2, None)
+        assert app._queue_list() == [1, 2]
+        app.save()
+        msg = mb.asked[-1][1]
+        assert '1 of the kept row(s)' in msg and 'OLD area method' in msg, msg
+        assert se.AREA_ESTIMATOR_STALE_NOTE in msg
+        with open(csv_path, newline='', encoding='utf-8-sig') as f:
+            saved = list(csv.DictReader(f))
+        assert saved[1]['active_area_px'] == '9000'
+        assert saved[1]['notes'] == ('edge:disc-fit conf 0.93; '
+                                     + se.AREA_ESTIMATOR_STALE_NOTE)
+        assert se.AREA_ESTIMATOR_STALE_NOTE not in saved[2]['notes']
+        assert se.AREA_ESTIMATOR_STALE_NOTE not in saved[0]['notes']
+        # the stamp: current version, in the edge-settings block, and it
+        # pinned no detection setting nobody chose
+        assert se.saved_area_estimator(run) == se.AREA_ESTIMATOR_VERSION
+        assert not se.has_saved_settings(run)
+        assert se.load_scale_anchor(run)['diam_px'] == 160.0
+        assert not mb.warnings, mb.warnings
+        # a second Save: the stamp is current, nothing new is claimed
+        # stale, and the mark already on the row is not doubled
+        app.save()
+        assert 'OLD area method' not in mb.asked[-1][1], mb.asked[-1][1]
+        with open(csv_path, newline='', encoding='utf-8-sig') as f:
+            saved = list(csv.DictReader(f))
+        assert saved[1]['notes'].count(se.AREA_ESTIMATOR_STALE_NOTE) == 1
+        # a stamp that cannot be written is SAID, not swallowed
+        real_stamp = se.stamp_area_estimator
+
+        def boom(*a, **k):
+            raise OSError(13, 'Permission denied')
+
+        se.stamp_area_estimator = boom
+        try:
+            app.save()
+        finally:
+            se.stamp_area_estimator = real_stamp
+        assert mb.warnings and 'stamp not written' in mb.warnings[-1][0], \
+            mb.warnings
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count

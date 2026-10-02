@@ -26,12 +26,18 @@ suspect steps: a Trek current spike and an area collapse while voltage rises.
 Since 2026-07-29 the primary channel is the BOUNDARY TRACKER
 ('disc-fit'): the resting disc is measured on the baseline
 (baseline_disc, radial rays + robust circle fit), and each frame's
-active area is the ink edge of that known object, tracked by rays and a
-robust ellipse — the full responding disc, leads and the passive
-wrinkle ring excluded, with a real 85% CI on area from the edge
-scatter. Gated frames with a known disc report 'resting' instead of an
-empty row. Same-landing pair agreement and channel hysteresis are
-folded into confidence (reconcile_pairs / prev_method).
+active area is the ink edge of that known object, tracked by rays: the
+full responding disc, leads and the passive wrinkle ring excluded.
+Since 2026-10-02 the AREA is a like-for-like ratio: the same rays are
+measured on the baseline frame and on the frame, and the area is the
+baseline circle times sum(r^2)/sum(r0^2) over the rays both frames
+share (AREA_ESTIMATOR_VERSION 2; the robust ellipse is kept for the
+drawn outline and the self-audit only). Its spread is a block-bootstrap
+figure, not a calibrated confidence interval. Gated frames with a known
+disc are measured the same way, and report 'resting' (area asserted
+equal to the resting area) only where the tracker cannot. Same-landing
+pair agreement and channel hysteresis are folded into confidence
+(reconcile_pairs / prev_method).
 
 A note on 'conf': it is a review-ordering score — the strength of
 internally consistent evidence — NOT a calibrated probability that the
@@ -138,8 +144,90 @@ def load_settings(rundir):
     return s
 
 
-def save_settings(rundir, settings):
+def _edge_block(text):
+    """The saved edge-settings section as {key: value text}, in file
+    order; {} when the run has none. Every `key: number` line counts,
+    known setting or not, so a field this version does not read (or a
+    newer one's) survives a re-save."""
+    out = {}
+    if EDGE_HDR in text:
+        for line in text.split(EDGE_HDR, 1)[1].splitlines():
+            mm = re.match(r'\s*([a-z_]+)\s*:\s*(' + _NUM + r')\s*$', line)
+            if mm:
+                out[mm.group(1)] = mm.group(2)
+    return out
+
+
+def _setup_text(rundir):
+    try:
+        with open(os.path.join(rundir, 'setup.txt'), encoding='utf-8',
+                  errors='replace') as f:
+            return f.read()
+    except OSError:
+        return ''
+
+
+def saved_area_estimator(rundir):
+    """Which area estimator wrote this run's saved 'disc-fit' areas: the
+    `area_estimator:` stamp in the edge-settings section, or None when
+    there is no stamp. No stamp on a run that holds saved areas means
+    version 1 (the ellipse, through 2026-10-01); see
+    AREA_ESTIMATOR_VERSION."""
+    val = _edge_block(_setup_text(rundir)).get(AREA_ESTIMATOR_KEY)
+    try:
+        return int(float(val)) if val is not None else None
+    except ValueError:
+        return None
+
+
+def has_saved_settings(rundir):
+    """Does this run carry saved DETECTION settings, that is, at least
+    one DEFAULT_SETTINGS key in its edge-settings section? A section holding
+    only the estimator stamp (an Edge Review Save on a run nobody tuned)
+    does not count: the tuner's 'tuned' flag asks this, and a stamp is
+    not a tuning."""
+    return any(k in DEFAULT_SETTINGS
+               for k in _edge_block(_setup_text(rundir)))
+
+
+def stale_estimator_rows(rows, results, saved_version):
+    """Rows whose area a Save would KEEP although an older area
+    estimator wrote it: not decided in this pass (absent from `results`),
+    still holding an `active_area_px`, and noted as a machine boundary
+    fit ('edge:disc-fit'), on a run whose stamp (`saved_version`, None =
+    no stamp = version 1) is older than AREA_ESTIMATOR_VERSION.
+
+    The other kinds of row are not stale: a hand trace is not an
+    estimator's output, the patch tiers did not change, and a 'resting'
+    row is A0 under both versions. -> sorted row indices. The caller
+    marks them (AREA_ESTIMATOR_STALE_NOTE) so old and new numbers never
+    sit in one column unlabelled."""
+    if (saved_version or 1) >= AREA_ESTIMATOR_VERSION:
+        return []
+    out = []
+    for i, row in enumerate(rows):
+        if i in results:
+            continue
+        if not (row.get('active_area_px') or '').strip():
+            continue
+        if 'edge:disc-fit' in (row.get('notes') or ''):
+            out.append(i)
+    return out
+
+
+def save_settings(rundir, settings, area_estimator=None):
     """Append/replace the edge-settings section in the run's setup.txt.
+
+    `area_estimator`: the estimator version to stamp into the section
+    (`area_estimator: N`, see AREA_ESTIMATOR_VERSION). None keeps the
+    stamp the run already has: saving SETTINGS says nothing about which
+    estimator wrote the areas in data.csv, so the tuner and the settings
+    dialog must not move it. Only Edge Review's Save, which writes the
+    areas, passes it (through stamp_area_estimator).
+
+    `settings` None rewrites the section with the setting lines it
+    already holds (none, on a run that never saved any): the way to
+    stamp a run without pinning settings nobody chose.
 
     Reads and writes UTF-8 with errors='replace' — the bare locale-codec
     open here carried the same UnicodeDecodeError hazard load_settings
@@ -153,9 +241,19 @@ def save_settings(rundir, settings):
     except OSError:
         text = ''
     text, anchor = _split_anchor(text)
+    old = _edge_block(text)
     if EDGE_HDR in text:
         text = text.split(EDGE_HDR, 1)[0].rstrip() + '\n'
-    lines = [EDGE_HDR] + [f"{k}: {settings[k]:g}" for k in DEFAULT_SETTINGS]
+    if settings is None:
+        lines = [EDGE_HDR] + [f"{k}: {old[k]}" for k in DEFAULT_SETTINGS
+                              if k in old]
+    else:
+        lines = [EDGE_HDR] + [f"{k}: {settings[k]:g}"
+                              for k in DEFAULT_SETTINGS]
+    stamp = area_estimator if area_estimator is not None \
+        else old.get(AREA_ESTIMATOR_KEY)
+    if stamp is not None:
+        lines.append(f"{AREA_ESTIMATOR_KEY}: {int(float(stamp))}")
     # Atomic (tmp + replace): the in-place truncate used to destroy the
     # run's only metadata record on a mid-write NAS failure (audit
     # 2026-07-25).
@@ -166,6 +264,17 @@ def save_settings(rundir, settings):
                 + '\n'.join(lines) + '\n')
     os.replace(tmp, path)
     return path
+
+
+def stamp_area_estimator(rundir, version=None):
+    """Record in setup.txt which area estimator wrote the areas a Save
+    just put into data.csv (`area_estimator: N` in the edge-settings
+    section). The run's saved detection settings are left exactly as
+    they were. -> the setup.txt path."""
+    return save_settings(
+        rundir, None,
+        area_estimator=AREA_ESTIMATOR_VERSION if version is None
+        else version)
 
 
 # The px→mm anchor Save used, persisted per run. Before 2026-08-05 the
@@ -2109,35 +2218,103 @@ def _fit_ellipse_robust(pts):
     return ell, keep
 
 
-def _disc_fit_candidate(prep, settings, ref, assume_responding=False):
-    """Boundary of the RESPONDING DISC, tracked from the known resting
-    disc -- the active area as the lab records it (2026-07-28 decision:
-    the full responding disc, wrinkled and non-wrinkled together, leads
-    excluded).
+# ---------------------------------------------------------------------------
+# The area functional of the boundary tracker (2026-10-02).
+#
+# Through 2026-10-01 a 'disc-fit' row was pi*a*b of the fitted ellipse while
+# A0 (the baseline row and every 'resting' row) was the baseline_disc CIRCLE.
+# On the same 0 kV frame the two disagree by -0.4 to +7.4 % on the campaign
+# runs (+14.7 % on retired 152205): the ellipse sees only the foil-free rays
+# and extrapolates across the blocked lead sectors, where it over-stretches.
+# So every disc-fit A/A0 carried a run-specific offset and the curve stepped
+# at the resting -> disc-fit hand-over. The edge POINTS were never the
+# problem (they sit at 0.998-1.008 r0 on quiet frames); the shape model was.
+#
+# Now the area is a RATIO of like to like. The same ray code measures the
+# baseline frame and the current frame from the same centre, and
+#
+#     area_px = A0_circle * sum(r_k(frame)^2) / sum(r_k(baseline)^2)
+#
+# over the rays k measured on BOTH frames. sum(r^2) over evenly spaced rays
+# is the polar area integral of the sectors those rays stand in, so this is
+# the area ratio of the visible sectors: no shape model, no extrapolation.
+# The ellipse is still fitted, for the drawn outline, the sanity gates and
+# the self-audit. It no longer supplies the number.
+#
+# THE ASSUMPTION, stated plainly: the part of the perimeter the rays
+# cannot use strains like the part they can. That part is large: on the
+# campaign runs 32-55 % of the perimeter has no measurable edge even at
+# rest (foil, leads, faint ink), and a typical accepted frame's ratio
+# uses about half of the perimeter (`hidden_pct`, the unused share:
+# median 48 %, 33-69 % from the 5th to the 95th percentile). Nothing in
+# the image can check the assumption.
+# ---------------------------------------------------------------------------
 
-    `assume_responding` (the resting-refit path, 2026-07-30): waive the
-    two change-map "is the disc responding" gates -- the whole point of
-    that path is a frame whose change map is BELOW the no-change gate
-    while the audit has already measured the ink step off the claimed
-    circle, so the change map is known-silent and the step is known-
-    measurable. Every ink-profile quality gate (adaptive step cut, ray
-    count, arc coverage, ellipse residual/shape/size) still applies.
+# Which functional wrote the 'disc-fit' areas of a run. Edge Review stamps
+# it into the run's Edge Detection settings block at Save (save_settings),
+# so a run says which estimator wrote its areas.
+#   1 = pi*a*b of the ellipse over the baseline circle (through 2026-10-01;
+#       also what a run with NO stamp holds)
+#   2 = common-ray ratio times the baseline circle (2026-10-02)
+AREA_ESTIMATOR_VERSION = 2
+AREA_ESTIMATOR_KEY = 'area_estimator'
+# The note a kept row gets when its area predates the current estimator.
+AREA_ESTIMATOR_STALE_NOTE = ('old area method (ellipse) - kept, '
+                             'not re-measured')
+
+# When the common-ray ratio REFUSES (refuse rather than fabricate). The
+# corpus behind the numbers (OpenCV 4.13, 2026-10-02): the 450
+# auto-accepted tracker frames on eight runs never had fewer than 92
+# common rays or 8 occupied blocks, so the first two limits sit below
+# everything that was validated. They did not fire once on the corpus;
+# they are there for the scene nobody has measured yet.
+RAY_MIN_COMMON = 60      # rays measured on BOTH frames, after the trim
+RAY_BLOCK_DEG = 20       # angular block of the bootstrap (rays correlate:
+                         # lag-1 about 0.5, so single rays are not samples)
+RAY_MIN_BLOCKS = 6       # occupied blocks of 18: the rays reach >= 120 deg
+# One-sidedness = length of the mean unit vector of the ray directions:
+# 0 when the rays balance around the disc, 1 when they all point one way.
+# The rays are cast from the BASELINE centre, so a disc that shifts (rig
+# drift, or one side expanding more) changes the ratio by about
+# 2 * one_sided * shift / r0. Measured on the corpus by re-casting each
+# frame's rays from a centre moved one detector px: median 0.22 % of area
+# per full-res px of shift, 90th percentile 0.39 %, worst 0.70 %, i.e.
+# 0.04 % / 0.08 % / 0.14 % at the ~0.2 px median rig drift.
+# Above 0.6 (roughly: every ray inside one half-turn) the ratio read
+# +6.0 % (median; +0.1 to +15.9 %) over an independent sector measurement
+# on the 24 frames that had one; below it the median is +0.1 % (450
+# frames; -1.0 % in the 0.45-0.6 band, mostly run P3_5). This is the
+# limit that fires: 31 corpus frames, 26 of them already in review.
+RAY_MAX_ONE_SIDED = 0.6
+RAY_TRIM_SIGMA = 2.5     # robust trim on the per-ray ratio r_k/r_k(0)
+RAY_BOOT_N = 300         # bootstrap resamples (fixed seed: repeatable)
+
+
+def _disc_rays(prep, settings, ref, assume_responding=False):
+    """The MEASUREMENT step of the boundary tracker: the ink-edge radius
+    on each of 360 rays cast from the resting-disc centre. Split out of
+    _disc_fit_candidate (2026-10-02) so the baseline frame and every
+    later frame are measured by literally the same code. That is what
+    makes the area a ratio of like to like (_common_ray_ratio).
 
     The blob channels answer 'which changed region is biggest'; this one
-    answers 'where is the edge of the object we know is there'. Rays are
-    cast from the resting-disc centre over a fused change map (sigma-
-    scaled intensity diff OR texture ratio, so displacement and wrinkle
-    both count); each ray takes the OUTERMOST sustained change edge, so
-    interior wrinkle gaps do not matter. Rays through the strips are
-    excluded by azimuth (the electrode leads feed the tape in those same
-    sectors, and the lab says leads are not active area); a lead bulge
-    that survives is trimmed by the robust ellipse fit. Area comes from
-    the FITTED shape, not a pixel blob -- no merge-close area steps.
+    answers 'where is the edge of the object we know is there'. Rays
+    through the strips are excluded by azimuth (the electrode leads feed
+    the tape in those same sectors, and the lab says leads are not active
+    area). The fused change map (sigma-scaled intensity diff OR texture
+    ratio) only decides whether the disc, and each sector, is responding.
 
-    spread_pct on this candidate is the fit's own 85% confidence
-    interval on area (percent): the cross-tier area spread it replaces
-    measured threshold sensitivity, and for a boundary fit the honest
-    analogue is the measurement's own dispersion."""
+    `assume_responding` (the measured-gated-frame path, 2026-07-30): waive
+    the two change-map "is the disc responding" gates. That path is a
+    frame whose change map is BELOW the no-change gate, so the change map
+    is known-silent while the ink step is still there to measure. Every
+    ink-profile quality gate (adaptive step cut, ray count, arc coverage)
+    still applies.
+
+    -> None when the tracker cannot run, else {'r': length-360 array of
+    edge radii in detector px (NaN where the ray is blocked or has no
+    usable step), 'pts' / 'steps': the rays that passed, in ray order,
+    plus the geometry the ellipse fit and its scoring need}."""
     import cv2
     if ref is None:
         return None
@@ -2254,6 +2431,7 @@ def _disc_fit_candidate(prep, settings, ref, assume_responding=False):
     cut = max(3.0, 0.35 * float(np.median([s for _k, _g, s in raw])))
     pts = []
     steps = []
+    r_ray = np.full(nray, np.nan)
     for k, gi, stepc in raw:
         if stepc < cut:
             continue
@@ -2269,10 +2447,161 @@ def _disc_fit_candidate(prep, settings, ref, assume_responding=False):
         pts.append((cx0 + redge * np.cos(th[k]),
                     cy0 + redge * np.sin(th[k])))
         steps.append(stepc)
+        r_ray[k] = redge
     pts = np.asarray(pts, np.float64)
     open_sectors = int((~blocked).sum())
     if len(pts) < 40 or open_sectors < 90:
         return None
+    return {'r': r_ray, 'pts': pts, 'steps': np.asarray(steps, np.float64),
+            'open_sectors': open_sectors, 'cx0': cx0, 'cy0': cy0, 'r0': r0,
+            'change': change, 'level': level, 'fo': fo}
+
+
+_BASE_RAYS_CACHE = {}
+
+
+def _baseline_rays(base_full, settings, ref):
+    """The BASELINE frame's own edge radii, from the same ray code that
+    measures every later frame (_disc_rays on the baseline differenced
+    with itself, responding gates waived because nothing can have
+    changed). This is the denominator of the common-ray ratio: A0 is
+    measured by the path that measures A(V), ray for ray.
+
+    -> length-360 array (NaN = no usable edge on that ray), or None when
+    the tracker cannot measure the baseline at all. Then no frame of
+    the run gets a disc-fit area (there is nothing to take a ratio to).
+    Memoized per baseline like baseline_disc."""
+    if base_full is None or ref is None:
+        return None
+    key = (_disc_key(base_full, settings), round(float(ref['cx']), 2),
+           round(float(ref['cy']), 2), round(float(ref['diam_px']), 2))
+
+    def build():
+        rays = _disc_rays(prepared_diff(base_full, base_full, settings),
+                          settings, ref, assume_responding=True)
+        return None if rays is None else rays['r']
+
+    return _memo(_BASE_RAYS_CACHE, key, build)
+
+
+def _common_ray_ratio(r_base, r_frame, r0):
+    """Area ratio frame/baseline from the rays measured on BOTH frames.
+
+        ratio = sum(r_k(frame)^2) / sum(r_k(baseline)^2)
+
+    `r_base` / `r_frame`: per-ray edge radii from _disc_rays (same centre,
+    same ray directions; NaN = not measured). `r0`: resting radius in the
+    same px, used only to floor the trim.
+
+    Robust trim: rays whose own ratio r_k(frame)/r_k(baseline) sits more
+    than RAY_TRIM_SIGMA robust sigmas (MAD) from the median are dropped:
+    a ray that jumped to a wrinkle highlight or a lead edge on one of
+    the two frames. A smooth change of shape survives it (an ellipse-like
+    variation never reaches 2.5 sigma of itself); a NARROW local bulge
+    does not, and is not counted. `n_trimmed` says how many rays went.
+
+    Refuses, as (None, reason), when fewer than RAY_MIN_COMMON rays are
+    common, when they occupy fewer than RAY_MIN_BLOCKS of the eighteen
+    20-degree blocks, or when they sit on one side of the disc
+    (one-sidedness > RAY_MAX_ONE_SIDED; see the constants for why).
+
+    -> ({'ratio', 'spread_pct', 'n_common', 'n_trimmed', 'n_blocks',
+         'one_sided', 'hidden_pct'}, None)
+
+    `spread_pct` is the half-width of the central 85 % of a block
+    bootstrap of the ratio (whole 20-degree blocks resampled, because
+    neighbouring rays are correlated), in percent of area. It says how
+    much the ratio depends on WHICH parts of the visible edge were
+    measured: ray noise plus real block-to-block differences in strain,
+    so it grows as the disc deforms unevenly. It is NOT a total
+    uncertainty and not a calibrated confidence interval. Measured
+    behaviour is in SLDEA_HANDOFF.md (2026-10-02). It knows nothing about
+    the hidden sectors, the edge-definition offset or the scale."""
+    if r_base is None or r_frame is None:
+        return None, 'the baseline frame has no measurable ink edge'
+    n = len(r_base)
+    idx = np.flatnonzero(np.isfinite(r_base) & np.isfinite(r_frame))
+    if idx.size < RAY_MIN_COMMON:
+        return None, (f"only {idx.size} rays are measured on both the "
+                      f"baseline and this frame (need {RAY_MIN_COMMON})")
+    q = r_frame[idx] / r_base[idx]
+    med = float(np.median(q))
+    # floor: a quarter of a detector pixel of radius, so identical
+    # frames do not trim each other on rounding dust
+    sig = max(1.4826 * float(np.median(np.abs(q - med))),
+              0.25 / max(float(r0), 1.0))
+    use = idx[np.abs(q - med) <= RAY_TRIM_SIGMA * sig]
+    if use.size < RAY_MIN_COMMON:
+        return None, (f"only {use.size} common rays agree with each other "
+                      f"(need {RAY_MIN_COMMON})")
+    deg = use * (360.0 / n)
+    blk = (deg // RAY_BLOCK_DEG).astype(int)
+    ids = np.unique(blk)
+    if ids.size < RAY_MIN_BLOCKS:
+        return None, (f"the common rays reach only "
+                      f"{ids.size * RAY_BLOCK_DEG} deg of the circle "
+                      f"(need {RAY_MIN_BLOCKS * RAY_BLOCK_DEG})")
+    th = np.radians(deg)
+    one_sided = float(np.hypot(np.cos(th).mean(), np.sin(th).mean()))
+    if one_sided > RAY_MAX_ONE_SIDED:
+        return None, (f"the common rays sit on one side of the disc "
+                      f"(one-sidedness {one_sided:.2f}, limit "
+                      f"{RAY_MAX_ONE_SIDED:g})")
+    s1 = np.array([float(np.sum(r_frame[use[blk == b]] ** 2)) for b in ids])
+    s0 = np.array([float(np.sum(r_base[use[blk == b]] ** 2)) for b in ids])
+    ratio = float(s1.sum() / s0.sum())
+    rng = np.random.RandomState(20261002)
+    pick = rng.randint(0, ids.size, size=(RAY_BOOT_N, ids.size))
+    bs = s1[pick].sum(axis=1) / s0[pick].sum(axis=1)
+    lo, hi = np.quantile(bs, (0.075, 0.925))
+    return {'ratio': ratio,
+            'spread_pct': 100.0 * 0.5 * float(hi - lo) / ratio,
+            'n_common': int(use.size),
+            'n_trimmed': int(idx.size - use.size),
+            'n_blocks': int(ids.size),
+            'one_sided': one_sided,
+            'hidden_pct': 100.0 * (1.0 - use.size / float(n))}, None
+
+
+def _disc_fit_candidate(prep, settings, ref, assume_responding=False):
+    """Boundary of the RESPONDING DISC, tracked from the known resting
+    disc -- the active area as the lab records it (2026-07-28 decision:
+    the full responding disc, wrinkled and non-wrinkled together, leads
+    excluded).
+
+    AREA (2026-10-02): the baseline circle's area times the common-ray
+    ratio: the same rays measured on the baseline frame and on this
+    one, same code, no shape model (see the block comment above
+    _disc_rays, and _common_ray_ratio). A frame identical to the
+    baseline therefore reads exactly A0, and there is no step when a run
+    hands over from 'resting' rows to measured ones. Refuses (None) when
+    the baseline has no measurable rays or too few / too one-sided
+    common rays survive. NO circle prior: nothing about the activated
+    shape is assumed, only that the hidden sectors strain like the
+    visible ones.
+
+    The robust ELLIPSE is still fitted through the frame's edge points.
+    It is the drawn outline, it carries the sanity gates (size, centre,
+    roundness, residual) and the self-audit, and its area over the
+    baseline circle is kept as `ellipse_over_circle` (what the old
+    estimator would have reported) for provenance. It is not the area.
+
+    `assume_responding`: see _disc_rays.
+
+    `ci85_pct` (shown as spread_pct) keeps its key but changed meaning:
+    it is _common_ray_ratio's block-bootstrap spread, no longer the
+    edge-scatter formula (which assumed a known shape and independent
+    rays; the 2026-10-02 review measured it covering 21-49 % where it
+    claimed 85 %)."""
+    rays = _disc_rays(prep, settings, ref, assume_responding)
+    if rays is None:
+        return None
+    pts, steps = rays['pts'], rays['steps']
+    cx0, cy0, r0 = rays['cx0'], rays['cy0'], rays['r0']
+    fo, change, level = rays['fo'], rays['change'], rays['level']
+    open_sectors = rays['open_sectors']
+    h, w = change.shape
+    yy, xx = np.ogrid[0:h, 0:w]
     fit = _fit_ellipse_robust(pts)
     if fit is None:
         return None
@@ -2300,13 +2629,14 @@ def _disc_fit_candidate(prep, settings, ref, assume_responding=False):
     if med_res > 0.06 * r_eq:
         return None
     cov = len(pin) / float(open_sectors)
-    # 85% CI on area from the edge scatter: dA = perimeter * dr, and the
-    # mean-radius error is sigma_r / sqrt(n)
-    se_r = 1.4826 * med_res / np.sqrt(max(len(pin), 1))
-    ci85 = 100.0 * 1.44 * 2.0 * se_r / r_eq
+    # THE AREA: like-for-like ratio against the baseline's own rays. The
+    # ellipse above is the outline and the gates, never the number.
+    cr, _why = _common_ray_ratio(
+        _baseline_rays(prep['base_full'], settings, ref), rays['r'], r0)
+    if cr is None:
+        return None                     # refuse rather than fabricate
     # boundary strength: the ink edge's own sustained dark->light step
     # (10-25 gray levels on the P3 devices), on the kept rays
-    steps = np.asarray(steps, np.float64)
     contrast = max(0.0, min(1.0, float(np.median(steps[keep])) / 12.0))
     ring_in = ((xx - exc) ** 2 + (yy - eyc) ** 2 <= (0.92 * r_eq) ** 2) \
         & ~fo
@@ -2318,13 +2648,25 @@ def _disc_fit_candidate(prep, settings, ref, assume_responding=False):
         - b * np.sin(th2) * np.sin(np.radians(phi))
     ey = eyc + a * np.cos(th2) * np.sin(np.radians(phi)) \
         + b * np.sin(th2) * np.cos(np.radians(phi))
-    return {'method': 'disc-fit', 'area_px': float(np.pi * a * b),
-            'diam_px': float(2 * r_eq), 'cx': float(exc), 'cy': float(eyc),
+    # area and its equivalent diameter hang on the baseline CIRCLE (r0),
+    # so the px->mm anchor and A0 = pi*r0^2 stay one definition
+    return {'method': 'disc-fit',
+            'area_px': float(np.pi * r0 * r0 * cr['ratio']),
+            'diam_px': float(2.0 * r0 * np.sqrt(cr['ratio'])),
+            'cx': float(exc), 'cy': float(eyc),
             'circ': round(float(circ), 3), 'solidity': round(fill, 3),
             'contour': np.stack([ex, ey], axis=1),
             'contrast': round(contrast, 3), 'conf_own': round(conf, 3),
-            'ci85_pct': round(float(ci85), 2), 'n_edge': int(len(pin)),
-            'arc_cov': round(cov, 2)}
+            'ci85_pct': round(cr['spread_pct'], 2), 'n_edge': int(len(pin)),
+            # the bootstrap spread is not the pair check's noise figure
+            # (see reconcile_pairs): tracked pairs meet the 4 % floor
+            'pair_ci_pct': 0.0,
+            'arc_cov': round(cov, 2),
+            'area_ratio': round(cr['ratio'], 5),
+            'n_common': cr['n_common'], 'n_trimmed': cr['n_trimmed'],
+            'one_sided': round(cr['one_sided'], 3),
+            'hidden_pct': round(cr['hidden_pct'], 1),
+            'ellipse_over_circle': round(float(a * b / (r0 * r0)), 5)}
 
 
 def _resting_candidate(prep, settings, ref):
@@ -2334,7 +2676,15 @@ def _resting_candidate(prep, settings, ref):
     resting area' -- not an empty row. Confidence grows with the margin
     below the gate (a frame at half the gate is more certainly unchanged
     than one brushing it). Low-kV frames then auto-accept with a real
-    area instead of queueing for review over nothing."""
+    area instead of queueing for review over nothing.
+
+    Since 2026-10-02 this is the FALLBACK, not the rule: candidates()
+    measures a gated frame with the tracker whenever it can (the
+    common-ray ratio reads a quiet frame to a few tenths of a percent),
+    and the claim made here stands only for the baseline frame itself
+    (which is A0 by definition) or where the tracker refuses or
+    is not fit to accept. It is an ASSERTION of exactly A0 with no
+    width, bounded only by the audit-bias gate (about 2 % of area)."""
     if ref is None:
         return None
     p99 = float(np.percentile(prep['sub'], 99))
@@ -2441,13 +2791,18 @@ def _apply_audit_gates(cand, aud, settings):
 
 
 def _resting_refit(prep, settings, ref):
-    """The fitter run on a bias-tripped gated frame (2026-07-30,
-    calibration round 4): 'resting' claimed the baseline circle while
-    the audit measured the ink step off it -- the disc creeping out
-    (or the circle sitting off the ink) below the no-change gate's
-    sensitivity. Measuring beats asserting: track the step where it
-    actually is. Change-map responding gates are waived (the audit
-    already proved a measurable step; the change map is silent by
+    """The tracker run on a GATED frame: measure the ink edge instead of
+    asserting 'area = resting area'. Born 2026-07-30 (calibration round
+    4) for the bias-tripped case only: 'resting' claimed the baseline
+    circle while the audit measured the ink step off it, the disc
+    creeping out below the no-change gate's sensitivity. Since
+    2026-10-02 candidates() calls it for EVERY gated frame with a known
+    disc: the common-ray ratio reads a quiet frame to a few tenths of a
+    percent, so there is no reason left to write exactly A0 on a frame
+    that grew 1-2 % (the dead band the asserted rows drew at low kV).
+    The tag stays `resting_refit` for the readers that know it.
+
+    Change-map responding gates are waived (the change map is silent by
     construction on a gated frame), so `solidity` -- change-fill of
     the ring interior -- reads ~0 here and is NOT filtered on; the
     fit's evidence is its arc coverage, step contrast and residual,
@@ -2501,15 +2856,19 @@ def candidates(base_gray, img_gray, settings, prev_method=None):
     wrinkle energy does. It competes on confidence like any other tier.
 
     And, when the resting disc is known (baseline_disc), the boundary
-    tracker (method 'disc-fit'): rays from the resting centre over a
-    fused diff/texture change map, robust ellipse fit, leads and strips
-    excluded -- the active area as the lab defines it, the full
-    responding disc. Its spread_pct is its own 85% CI on area. On a
-    gated frame with a known disc, a 'resting' candidate states that the
-    area equals the resting area instead of leaving an empty row -- and
-    when the audit measures the ink step OFF that circle (audit_bias),
-    the fitter re-measures the boundary (resting-refit) instead of
-    letting the stale claim stand.
+    tracker (method 'disc-fit'): rays from the resting centre find the
+    ink edge, leads and strips excluded: the active area as the lab
+    defines it, the full responding disc. Its AREA is the baseline
+    circle times the common-ray ratio (the same rays measured on the
+    baseline frame and on this one; 2026-10-02), its outline the robust
+    ellipse through the edge points, and its spread_pct the block-
+    bootstrap spread of that ratio (see _common_ray_ratio for what that
+    is and is not). On a gated frame with a known disc the tracker
+    MEASURES too (resting-refit, responding gates waived) and that
+    measurement takes the frame when it is fit to auto-accept; the
+    'resting' candidate (the area asserted equal to the resting area)
+    stays as the runner-up, and stands alone only on the baseline
+    frame itself or where the tracker refuses.
 
     Honest no-change gate: if the ROI diff's 99th percentile is below
     min_diff, the intensity tiers return nothing (low-kV frames really
@@ -2536,6 +2895,10 @@ def candidates(base_gray, img_gray, settings, prev_method=None):
         # a trustworthy-looking note. No baseline, no candidates;
         # callers surface the refusal to the operator.
         return []
+    # the baseline row itself: A0 by definition, nothing to measure
+    is_baseline = (img_gray is base_gray
+                   or (np.shape(img_gray) == np.shape(base_gray)
+                       and np.array_equal(img_gray, base_gray)))
     prep = prepared_diff(base_gray, img_gray, settings)
     sub, x0, y0, f = (prep['sub'], prep['x0'], prep['y0'],
                       prep['f'])
@@ -2714,27 +3077,37 @@ def candidates(base_gray, img_gray, settings, prev_method=None):
     if best['method'] in ('disc-fit', 'resting'):
         aud = audit_boundary(prep, best, settings)
         if aud is not None:
-            capped = _apply_audit_gates(best, aud, settings)
-            # Resting-refit (2026-07-30, calibration round 4): a bias-
-            # tripped 'resting' claim means the ink step is measurably
-            # off the claimed circle -- operator-verified at 2.0 kV
-            # (+4.0/+6.5% area beyond the trace's own definitional
-            # baseline, matching the audit's predicted creep). The
-            # fitter tracks that ink step directly, so measure the
-            # boundary instead of asserting it. The refit is audited
-            # like any winner and takes the frame only on its own
-            # merits; the capped resting claim stays as runner-up for
-            # the human, and a refused or audit-dirty fit changes
-            # nothing.
-            if (capped and best['method'] == 'resting'
-                    and best.get('audit_bias') is not None):
-                rf = _resting_refit(prep, settings, ref)
-                if rf is not None:
-                    aud2 = audit_boundary(prep, rf, settings)
-                    if aud2 is not None:
-                        _apply_audit_gates(rf, aud2, settings)
-                        out.append(rf)
-                        out.sort(key=lambda c: c['conf'], reverse=True)
+            _apply_audit_gates(best, aud, settings)
+        # MEASURE, do not assert (resting-refit 2026-07-30, made the rule
+        # 2026-10-02). A 'resting' winner is the claim 'area = A0'. It
+        # used to be re-measured only after the audit tripped the bias
+        # gate, so every frame inside that gate was written as exactly
+        # A0: on the corpus 112 frames, holding up to 2.6 % of real
+        # growth (median 0.3 %), and a flat dead band at the foot of
+        # every curve.
+        # The common-ray ratio reads a quiet frame to 0.1-0.3 %, so the
+        # tracker now measures every gated frame. The measurement is
+        # audited like any winner and takes the frame only when it is
+        # fit to auto-accept on its own (confident, audit clean); the
+        # asserted claim then steps down to runner-up, tagged. A weak
+        # or audit-dirty measurement changes nothing about the claim: an
+        # audit-clean claim still stands (the old behaviour), a bias-
+        # tripped one stays capped beside the measurement for the human.
+        # The baseline frame itself is A0 by definition: measuring it
+        # against itself would be a check that cannot fail.
+        if best['method'] == 'resting' and not is_baseline:
+            rf = _resting_refit(prep, settings, ref)
+            if rf is not None:
+                aud2 = audit_boundary(prep, rf, settings)
+                if aud2 is not None:
+                    rf_capped = _apply_audit_gates(rf, aud2, settings)
+                    acc = float(settings.get('accept_conf', 0.75))
+                    if (not rf_capped and rf['conf'] >= acc
+                            and best['conf'] >= rf['conf']):
+                        best['conf'] = round(max(0.0, rf['conf'] - 0.01), 3)
+                        best['capped_by'] = 'disc-fit'
+                    out.append(rf)
+                    out.sort(key=lambda c: c['conf'], reverse=True)
     return out[:3]
 
 
@@ -3016,6 +3389,18 @@ def reconcile_pairs(rows, cands_by_idx, settings):
     matching ramp_consistency's 12% pair rule. Mutates the best
     candidates in place; -> {'confirmed': n, 'capped': n}.
 
+    A member may carry `pair_ci_pct`, the per-frame figure to use HERE
+    in place of its `ci85_pct`. The tracker sets it to 0 (2026-10-02):
+    its ci85_pct is now the block-bootstrap spread of the common-ray
+    ratio, which holds the real block-to-block differences in strain,
+    something both snapshots of a landing share, so not the pair's
+    noise. Left in, it widened the tolerance with strain and passed a
+    10 % pre/post disagreement on both sides (P3_3, 10 kV). With 0 the
+    4 % floor governs a tracked pair, exactly as it did in practice
+    before (the old CI term was 0.3-1 % per member and never reached
+    the floor). Measured same-landing scatter of the new areas: robust
+    SD 0.3-0.4 % up to 4 kV, about 1.2 % above.
+
     A member tagged 'audit_nostep' or 'audit_bias' stays capped below
     accept_conf even when its pair agrees: two snapshots interpolated
     over the same washed-out arc (or stated resting while the edge sat
@@ -3050,9 +3435,9 @@ def reconcile_pairs(rows, cands_by_idx, settings):
         if mid <= 0:
             continue
         rel = (hi - lo) / mid
+        cis = [b.get('pair_ci_pct', b.get('ci85_pct')) for b in members]
         tol = max(0.04, sum(
-            (1.5 * b['ci85_pct'] / 100.0)
-            if b.get('ci85_pct') is not None else 0.06 for b in members))
+            (1.5 * ci / 100.0) if ci is not None else 0.06 for ci in cis))
         if rel <= tol:
             for b in members:
                 b['pair_confirmed'] = True

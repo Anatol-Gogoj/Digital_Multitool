@@ -263,6 +263,20 @@ def test_report_renders_for_every_synthetic_run():
         assert want in text, want
 
 
+def test_report_does_not_call_the_spread_a_confidence_interval():
+    """2026-10-02: the ci% column is the block-bootstrap spread of the
+    common-ray ratio. The legend used to call it 'the disc-fit's own 85%
+    confidence interval', a name the old edge-scatter formula never
+    earned (measured coverage 21-49 %) and the new number does not claim.
+    The key says what it is, and what it leaves out."""
+    root = tempfile.mkdtemp(prefix='diag_ci_')
+    d = sd.analyze(sd._synth_run(_os.path.join(root, 'SLDEA_r'), 'wrinkle'))
+    text = sd.report(d)
+    assert "85% confidence interval" not in text
+    assert 'NOT a calibrated confidence' in text
+    assert 'block bootstrap' in text and 'behind the leads' in text
+
+
 def test_report_is_ascii_so_a_cp1252_console_cannot_kill_it():
     """The bench and analysis consoles are cp1252, and report() goes both
     to stdout and to sldea_diag.txt written with the locale codec — so

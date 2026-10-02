@@ -73,9 +73,11 @@ What it measures, and the failure each one pins down:
   Since 2026-07-29 the report also carries LOCALIZATION (foil% of each
   detection -- statistics looked fine while every outline sat on the
   electrodes), the BASELINE anchor (resting-disc trace and the mm/px it
-  implies, with its own gates), per-frame ci% (the disc-fit's 85% CI on
-  area -- a statistical statement, unlike conf, which is a
-  review-ordering score), and CONSISTENCY (each landing's snapshot pair
+  implies, with its own gates), per-frame ci% (the disc-fit's spread on
+  area: since 2026-10-02 the block-bootstrap spread of its common-ray
+  ratio, not a calibrated confidence interval; still a statement about
+  the measurement, unlike conf, which is a review-ordering score), and
+  CONSISTENCY (each landing's snapshot pair
   agreeing, and monotonicity, with pair reconciliation applied exactly as
   the GUI applies it before auto-accept).
 
@@ -1334,10 +1336,16 @@ def report(d):
     A("         strips -- the localization number; method is the winning")
     A("         candidate tier ('disc-fit' = the ink-edge boundary")
     A("         tracker, 'tex-ratio' = the texture channel, 'resting' =")
-    A("         gated frame stated at the known resting area)")
-    A("  ci%    the disc-fit's own 85% confidence interval on area, from")
-    A("         the edge-point scatter -- a statistical statement, unlike")
-    A("         conf, which is a quality score")
+    A("         frame stated at the known resting area: the baseline")
+    A("         frame, or a gated frame the tracker could not measure)")
+    A("  ci%    the disc-fit's spread on area, in percent: how far the")
+    A("         area moves when different 20-degree blocks of the visible")
+    A("         edge are resampled (central 85 % of a block bootstrap of")
+    A("         the common-ray ratio). NOT a calibrated confidence")
+    A("         interval and not a total uncertainty: it covers the edge")
+    A("         it could see, not the part behind the leads. A statement")
+    A("         about the measurement, unlike conf, which is a quality")
+    A("         score")
     A("  area   what candidates() detects with the run's own settings;")
     A("         the A/B verdict above compares that against the other")
     A("         normalization mode, on the same frames")

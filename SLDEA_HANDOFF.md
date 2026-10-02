@@ -13,6 +13,178 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## Edge Review says what went wrong at capture before the review starts, and Save keeps the runner's notes (2026-10-02)
+
+**TL;DR:** picking a run in Edge Review now shows a "Run health" strip
+that says in plain sentences whether the pictures are usable and what the
+run's own files record about the capture: a blank or overexposed baseline,
+a refused disc fit, missing voltage or current readings, an early end, a
+watchdog stop, missing frames, off-screen samples in `telemetry.csv`. It
+is advice only and blocks nothing. Save no longer erases the notes the
+runner wrote at capture (`V_Out off-screen (clipped)`, the `WATCHDOG`
+note).
+
+**Observation (the 16-run corpus, 899 frames, measured 2026-10-02).**
+
+- The 2026-10-01 run was calibrated by hand on a blank picture and
+  reviewed to an empty queue. Every fact that should have stopped that was
+  already on disk and none was on screen: `setup.txt` says `exposure 3`
+  and `34 frames`, `data.csv` has 26 rows and 8 `V_Out off-screen
+  (clipped)` notes, `run.log` says `run aborted: 26/34 frames`,
+  `telemetry.csv` has `v_status = offscreen` on 66 of 205 voltage samples
+  from 2.15 kV. Edge Review opened it like any other run: an empty canvas
+  and "press Detect".
+- Its frames span 1 to 2 gray levels (p95 minus p5 of the central search
+  window). Every other frame in the corpus spans 30 or more; the lowest
+  is P3_7 at 30. Nothing sits between 2 and 30.
+- Two baselines are overexposed: the 2026-08-05 runs have 77.0 % and
+  72.8 % of the search window at or above 250 gray. The other fourteen
+  have 4.0 % or less. Nothing sits between.
+- `apply_results` built the notes cell of every reviewed row from
+  scratch (`edge:...` or `rejected (no reliable edge)`), so the first
+  Save erased whatever the runner had written there. 117 rows in six runs
+  carry a runner note today. Replayed in memory through two reviewed
+  Saves, 0 of the 117 kept it.
+- No corpus run holds a watchdog trip row (0 of 16), so the `WATCHDOG`
+  half is proven on synthetic rows only.
+- Nothing in Edge Review read `run.log`, the `Total:` line of
+  `setup.txt`, or `telemetry.csv`.
+
+**Decision.**
+
+1. **`se.image_content` and `FLAT_CONTRAST_GRAY = 20`.** One
+   pedestal-free number for "is there a picture": p95 minus p5 of the
+   central window. Sibling branches of this review add the same
+   helper with the same text, so they merge without a conflict.
+2. **`se.run_health(rundir, run=None)`**, pure and headless. It returns
+   `{'level', 'code', 'text'}` items, `stop` first. `stop` means the run
+   cannot be measured as it is, `warn` means a human should look,
+   `info` explains. Each text is a sentence a first-year student can act
+   on.
+
+   | Code | Level | Fires when |
+   |---|---|---|
+   | `no_run_csv` | stop | the folder has no readable data CSV |
+   | `baseline_missing` | stop | no row tagged `baseline` names a frame, or its file is absent |
+   | `baseline_unreadable` | stop | the baseline file does not decode |
+   | `image_flat` | stop | `image_content` calls the baseline flat |
+   | `image_saturated` | warn | 25 % or more of the window is at or above 250 |
+   | `disc_fit_refused` | warn | `baseline_disc` refuses; the text quotes `baseline_disc_refusal` and says most frames will need a manual decision |
+   | `dry_run` | info | `setup.txt` says the HV was off; the two electrical checks are skipped |
+   | `kv_missing` | warn | powered rows without `measured_kV`; says how many and where the readings stop |
+   | `kv_sign` | info | measured kV opposes the commanded sign and `setup.txt` has no `Trek control polarity: INVERTED` line |
+   | `ua_missing` | warn | rows without `measured_uA` |
+   | `ended_early` | warn | fewer rows than `setup.txt` planned, or `run.log` ends `aborted` short of the plan; says why when `run.log` knows |
+   | `watchdog_trip` | warn | a row tagged `breakdown`, a `WATCHDOG` note, or the `BREAKDOWN` lines of `run.log` |
+   | `frames_missing` | warn | frames named in the CSV and absent on disk |
+   | `frames_not_taken` | warn | rows that name no frame |
+   | `telemetry_i_offscreen` | warn | `i_status = offscreen` samples in `telemetry.csv` |
+   | `telemetry_v_offscreen` | info | `v_status = offscreen` samples in `telemetry.csv` |
+   | `setup_missing` | info | the folder has no `setup.txt` |
+
+   - The flat check suppresses `disc_fit_refused`: on a blank picture the
+     refusal is a consequence, and its gray-level wording is what the
+     student misread on 2026-10-01.
+   - `kv_sign` tells the student not to change any high-voltage setting.
+     Ticking "Trek inverts" negates the SG control, which flips the live
+     HV polarity; that is not a fix to hand out from an analysis window.
+   - The telemetry status columns are found by name in the header. A
+     `skipped` row is not counted as a sample of that channel.
+   - A reused run name appends to `run.log`, so only the part after the
+     last `run dir:` line is read.
+   - The 25 % saturation cut is not tuned. It sits in the empty gap
+     between the two clusters above.
+3. **The strip.** Under the toolbar, five lines tall with its own
+   scrollbar, so it changes what it says between runs and never how tall
+   it is. Every item opens with a mark that is a symbol and a word
+   (`✘ STOP`, `⚠ WARNING`, `(i) NOTE`, `✔ OK`); the Paul Tol bright
+   colour behind the mark only repeats it. `stop` sentences are also the
+   first thing on the empty canvas. With no `stop` item the canvas hint
+   is the old one, word for word. Detect and Save are not gated on any of
+   it.
+   - One thing does change on a `stop`: `--auto` does not press Detect.
+     The SLDEA tab's auto-process opens Edge Review with `--auto`, which
+     pressed Detect 300 ms after launch, and the scale dialog then opened
+     over the strip before anyone could read it. The status line says the
+     press was held back; the button itself stays live.
+4. **The runner's notes survive Save.** `RUNNER_NOTE_PREFIXES =
+   ('WATCHDOG', 'V_Out ', 'I_Out ')` is a whitelist of the tokens the
+   runner writes (`_sldea_capture` and the trip branch of
+   `_sldea_worker` in `gui.py`). On a reviewed row they are carried over
+   in front of the rebuilt part: `V_Out off-screen (clipped);
+   edge:disc-fit conf 0.90`. Everything else on a reviewed row is still
+   regenerated, so analysis notes cannot accumulate. An unreviewed row
+   keeps its cell, as before; a flag or annotation added to it now
+   replaces an older token with the same words and a different number.
+   A row nothing was added to keeps its cell byte for byte, which the
+   scale-only re-anchor relies on (checked on all 899 rows: 0 changed).
+   - A whitelist and not "keep everything that is not an edge token":
+     that rule would keep stale `area dip`, `pair mismatch` and
+     `transient discharge?` notes beside the fresh ones.
+   - `I_Out ` is listed ahead of need. The runner writes no current note
+     today; its `run.log` wording is `I_Out off-screen`, and a capture
+     note would be spelled that way.
+   - `sldea_plot` finds the measurement with a search, so a capture note
+     in front of `edge:` does not hide it. A test pins that.
+
+**What the checks say on the 16 runs.** No `stop` on the six campaign
+runs that review fine; the 2026-10-01 run is the only `stop`.
+
+| Run | stop | warn | info |
+|---|---|---|---|
+| DOT_P3_1, P3_2, P3_3, P3_5, P3_6, 0729_104531 | none | `kv_missing` (48 of 80, readings stop above 4.00 kV) | `kv_sign` |
+| P3_7 | none | `disc_fit_refused`, `kv_missing` | `kv_sign` |
+| 0723_152205 | none | `kv_missing` (41 of 48, stop at 1.00 kV) | `kv_sign` |
+| 0723_233451 | none | `kv_missing` (67 of 76), `ended_early` (77 of 101, no run.log) | `kv_sign` |
+| 0805_102417 | none | `image_saturated` (77 %), `disc_fit_refused`, `kv_missing` (all 21), `ua_missing` (all 22), `ended_early` (22 of 61) | none |
+| 0805_103546 | none | `image_saturated` (73 %), `disc_fit_refused`, `kv_missing` (all 50), `ua_missing` (all 51), `ended_early` (51 of 61) | none |
+| 0806_151857 | none | `disc_fit_refused`, `kv_missing` (27 of 59), `ended_early` (60 of 61) | `kv_sign`, `telemetry_v_offscreen` (808 of 1773) |
+| 1001_151016 | `image_flat` (contrast 2) | `kv_missing` (8 of 24, stop above 2.00 kV), `ended_early` (26 of 34, Abort) | `kv_sign`, `telemetry_v_offscreen` (66 of 205) |
+| Assctuator | none | `disc_fit_refused`, `ua_missing` (1 of 4), `ended_early` (4 of 41), `telemetry_i_offscreen` (24 of 90, from 37 s, 0.66 kV) | `kv_sign` |
+| Assctuator2 | none | `kv_missing` (1 of 17), `ended_early` (18 of 41), `telemetry_i_offscreen` (4 of 461, from 248 s, 4.42 kV) | `kv_sign`, `telemetry_v_offscreen` (12 of 243) |
+| SquareStack-1 | none | `kv_missing` (8 of 24), `ua_missing` (9 of 25), `telemetry_i_offscreen` (267 of 649) | `kv_sign`, `telemetry_v_offscreen` (115 of 343) |
+
+The check takes 0.04 to 0.14 s per run on a local disk, the baseline disc
+fit included. That fit is cached, so the calibration dialog that follows
+reuses it.
+
+**Not decided here. These are Anatol's calls.**
+
+- **Breakdown confirmation and renaming are unchanged.** A watchdog trip
+  row is reported by the strip and still confirms nothing by itself:
+  `breakdown_flags` reads only `measured_uA`, so a trip on a clipped or
+  recovered current leaves no flag, no `_BREAKDOWN` rename and no plot
+  cap. Making the tag confirm by definition would also turn a false trip
+  from a mis-ranged current channel into a confirmed breakdown.
+- **Telemetry is not an event source.** `run_health` counts off-screen
+  samples and feeds nothing back. Assctuator (24 samples, 12.9 s) and
+  Assctuator2 (4 samples) are the two destroyed devices in the corpus,
+  and both still return no flag. The off-screen sentinel alone is not
+  proof of a clip: both 2026-08-05 runs returned it at 0 kV.
+- **`data.csv.bak` is still overwritten by every Save.** After this
+  change that copy holds the runner's notes too, but the second Save
+  still replaces the pre-review CSV.
+- **Measured against commanded voltage is not checked.** Assctuator's
+  1.00 kV frame was taken at 0.17 kV. A tolerance would have to scale
+  with the scope's V/div: 13 of the 16 readings in the two 07-23 runs
+  fall outside 0.12 kV + 3 %, and those are scope faults, not drive
+  faults.
+- **Hand-typed notes on a reviewed row are still dropped**, as before.
+  Only the whitelist is kept.
+
+**Tests.** `tests/test_sldea_edge.py` gains 15 cases (95 pass):
+`image_content`, each `run_health` check on a synthetic run folder, the
+notes surviving two Saves through `load_run` and `write_back`, and stale
+analysis notes not piling up. `tests/test_sldea_edge_gui.py` gains 4 (58
+pass): the wording helpers, the strip on a real window (STOP first, Detect
+and Save still work, same height on the next run, a failing check costs
+only the advice), `--auto` holding its Detect press over a STOP, and two
+Saves through the real Save button. 18 mutants of the new edge code were
+run and all 18 were caught.
+
+**No bench gate.** Analysis side only: no instrument I/O, no capture or
+HV code, and no new file type in a run folder.
+
 ## A LIVE run locks the scope channels it reads, and the settings they share (2026-09-24)
 
 **TL;DR:** during a LIVE run, the Oscilloscope tab or a bench-profile load

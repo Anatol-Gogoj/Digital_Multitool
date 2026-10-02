@@ -4685,6 +4685,278 @@ def test_goto_a_row_with_no_frame_lands_next_door_and_says_so():
         shutil.rmtree(d, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# run health strip (2026-10-02) and the capture notes Save used to erase
+# ---------------------------------------------------------------------------
+
+def test_run_health_words_put_stop_first_and_never_lean_on_colour():
+    """The strip's wording is pure, so it is pinned without a display:
+    STOP leads the canvas hint, a run with no STOP starts exactly as it
+    always did, and every level is a symbol AND a word (the colour behind
+    the mark only repeats them)."""
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    import sldea_plot
+    stop = {'level': 'stop', 'code': 'image_flat',
+            'text': 'The baseline picture is blank.'}
+    warn = {'level': 'warn', 'code': 'kv_missing',
+            'text': 'No measured voltage on 3 of 7 powered frames.'}
+    note = {'level': 'info', 'code': 'kv_sign', 'text': 'A note.'}
+    assert gui.health_counts([]) == 'nothing found'
+    assert gui.health_counts([warn]) == '1 warning'
+    assert gui.health_counts([stop, warn, warn, note]) == \
+        '1 STOP, 2 warnings, 1 note'
+    # no STOP: the hint is HINT_DETECT word for word
+    assert gui.health_hint([]) == gui.HINT_DETECT
+    assert gui.health_hint([warn, note]) == gui.HINT_DETECT
+    assert gui.health_hint(None) == gui.HINT_DETECT
+    # a STOP: it is the FIRST thing on the canvas, behind its mark, and
+    # 'press Detect to start' is not printed under 'cannot be measured'
+    hint = gui.health_hint([stop, warn])
+    assert hint.startswith(gui.HEALTH_MARKS['stop'] + ': ' + stop['text'])
+    assert warn['text'] not in hint and gui.HINT_DETECT not in hint
+    assert hint.endswith(gui.HINT_AFTER_STOP)
+    assert 'Detect Edges' in gui.HINT_AFTER_STOP     # advice, not a lock
+    # one mark per level, each a symbol plus a word, all different
+    assert set(gui.HEALTH_MARKS) == set(se.HEALTH_LEVELS)
+    marks = list(gui.HEALTH_MARKS.values()) + [gui.HEALTH_OK_MARK]
+    assert len(set(marks)) == len(marks)
+    for mark in marks:
+        symbol, word = mark.split(' ', 1)
+        assert symbol and word.isalpha() and not symbol.isalpha(), mark
+    # colours come from the Paul Tol bright scheme the plots use
+    assert set(gui.HEALTH_COLORS) == set(se.HEALTH_LEVELS) | {'ok'}
+    tol = {c.lower() for c in sldea_plot.TOL_BRIGHT}
+    for level, colour in gui.HEALTH_COLORS.items():
+        assert colour.lower() in tol, (level, colour)
+    assert len(set(gui.HEALTH_COLORS.values())) == len(gui.HEALTH_COLORS)
+
+
+def _strip_text(app):
+    return app.health_txt.get('1.0', 'end-1c')
+
+
+def test_run_health_strip_shows_on_pick_and_blocks_nothing():
+    """U20 / U51: the 2026-10-01 run was calibrated by hand on a blank
+    picture because nothing on screen said the picture was blank. Picking
+    a run now says so at once, STOP first, in the strip and on the empty
+    canvas, and it stays ADVICE: Detect and Save work as before."""
+    import cv2
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('run health strip')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_health_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    app = None
+    try:
+        good = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        blank = _fake_run(os.path.join(d, 'SLDEA_20260102_000000'))
+        cv2.imwrite(os.path.join(blank, 'frames',
+                                 'SLDEA_s00_00.00kV_baseline.png'),
+                    np.full((240, 320), 67, np.uint8))
+        app = gui.EdgeReviewApp(root, path=blank)
+        assert app.run is not None, "synthetic run failed to load"
+        root.update_idletasks()
+        # the strip is a real, packed part of the window under the toolbar
+        assert app.health_txt.winfo_manager() == 'pack'
+        assert int(app.health_txt.cget('height')) == gui.HEALTH_LINES
+        assert str(app.health_txt.cget('state')) == 'disabled'
+        codes = [(it['level'], it['code']) for it in app.health]
+        assert codes[0] == ('stop', 'image_flat'), codes
+        text = _strip_text(app)
+        assert text.startswith(f"{gui.HEALTH_TITLE}: 1 STOP"), text
+        assert gui.HEALTH_ADVICE in text
+        # STOP is stated before any warning, each behind its text mark
+        at_stop = text.index(gui.HEALTH_MARKS['stop'])
+        at_warn = text.index(gui.HEALTH_MARKS['warn'])
+        assert 0 < at_stop < at_warn, (at_stop, at_warn)
+        assert 'The baseline picture is blank' in text
+        # ...and the mark, not only the sentence, carries the level tag
+        ranges = app.health_txt.tag_ranges('stop')
+        assert ranges and gui.HEALTH_MARKS['stop'] in \
+            app.health_txt.get(ranges[0], ranges[1])
+        # the empty canvas leads with the STOP sentence
+        assert app._hint.startswith(gui.HEALTH_MARKS['stop']), app._hint
+        assert 'The baseline picture is blank' in app._hint
+        assert app.canvas.find_withtag('hint'), "the hint was never drawn"
+        assert 'run health: 1 STOP' in app.info.cget('text')
+        # ADVISORY ONLY: Detect is armed, detection runs, Save arms
+        assert str(app.detect_btn['state']) == 'normal'
+        strip_h = app.health_txt.winfo_reqheight()
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect_all_sync()
+        assert str(app.save_btn['state']) == 'normal'
+        assert app.health and _strip_text(app) == text, \
+            "the strip belongs to the run, not to the pass"
+        app.save()
+        assert 'saved' in app.status.cget('text'), app.status.cget('text')
+        assert not mb.errors, mb.errors
+
+        # a run with a usable picture: no STOP, the usual hint, and the
+        # strip is the SAME HEIGHT (content changes, layout does not)
+        app._populate_runs(good)
+        root.update_idletasks()
+        assert app.rundir == good
+        assert not [it for it in app.health if it['level'] == 'stop']
+        assert gui.HEALTH_MARKS['stop'] not in _strip_text(app)
+        assert app._hint == gui.HINT_DETECT, app._hint
+        assert app.health_txt.winfo_reqheight() == strip_h
+        # the fixture has no electrical readings, and the strip says so
+        assert gui.HEALTH_MARKS['warn'] in _strip_text(app)
+
+        # nothing wrong at all -> the OK line, with its own mark
+        app._show_health([])
+        assert gui.HEALTH_OK_MARK in _strip_text(app)
+        assert 'nothing found' in _strip_text(app)
+        # no run loaded -> the strip says that, and holds no verdict
+        app._show_health(None)
+        assert app.health is None
+        assert _strip_text(app) == \
+            f"{gui.HEALTH_TITLE}: {gui.HEALTH_NO_RUN}"
+
+        # the check itself failing costs the advice, never the pick
+        import sldea_edge as se
+        real = se.run_health
+
+        def boom(*a, **k):
+            raise RuntimeError('health exploded')
+
+        se.run_health = boom
+        try:
+            app._populate_runs(good)
+        finally:
+            se.run_health = real
+        assert app.run is not None and app.rundir == good
+        assert [it['code'] for it in app.health] == ['health_failed']
+        assert str(app.detect_btn['state']) == 'normal'
+        assert app._hint == gui.HINT_DETECT
+    finally:
+        gui.messagebox = real_mb
+        if app is not None:
+            app._cancel_pending()
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_auto_does_not_press_detect_over_a_stop():
+    """--auto presses Detect 300 ms after launch, which opens the scale
+    dialog over the health strip before it can be read. With a STOP on
+    the strip it is not pressed; the button itself stays live."""
+    import cv2
+    import sldea_edge_gui as gui
+    pressed = []
+    real_detect = gui.EdgeReviewApp.detect
+    gui.EdgeReviewApp.detect = lambda self: pressed.append(self.rundir)
+    d = tempfile.mkdtemp(prefix='edge_gui_auto_')
+    try:
+        good = _fake_run(os.path.join(d, 'good', 'SLDEA_20260101_000000'))
+        blank = _fake_run(os.path.join(d, 'blank', 'SLDEA_20260102_000000'))
+        cv2.imwrite(os.path.join(blank, 'frames',
+                                 'SLDEA_s00_00.00kV_baseline.png'),
+                    np.full((240, 320), 67, np.uint8))
+        for run, expect in ((blank, []), (good, [good])):
+            root = _tk_root_or_skip('auto over a stop')
+            if root is None:
+                return
+            app = None
+            try:
+                app = gui.EdgeReviewApp(root, path=run, auto=True)
+                end = time.time() + 0.7          # past the 300 ms timer
+                while time.time() < end:
+                    root.update()
+                    time.sleep(0.02)
+                assert pressed == expect, (run, pressed)
+                assert str(app.detect_btn['state']) == 'normal'
+                held = gui.AUTO_HELD_TEXT in app.status.cget('text')
+                assert held == (run == blank), app.status.cget('text')
+            finally:
+                if app is not None:
+                    app._cancel_pending()
+                root.destroy()
+            del pressed[:]
+    finally:
+        gui.EdgeReviewApp.detect = real_detect
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_save_keeps_the_runners_capture_notes():
+    """S6 / U25: Save rebuilt every reviewed row's notes cell, so the
+    first Save erased the runner's 'V_Out off-screen (clipped)' and the
+    watchdog's WATCHDOG note. Two Saves through the real window: both
+    tokens are still there, once each, in front of the fresh edge note."""
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('save keeps capture notes')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_notes_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    app = None
+    wd = 'WATCHDOG: breakdown confirmed (dev >100µA for 3s)'
+    voff = 'V_Out off-screen (clipped)'
+    try:
+        rundir = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        # what the runner leaves behind: capture notes, written UTF-8
+        run = se.load_run(rundir)
+        run['rows'][1]['notes'] = voff
+        run['rows'][2]['notes'] = f'{wd}; {voff}'
+        se.write_back(rundir, run)
+        os.remove(os.path.join(rundir, 'data.csv.bak'))
+
+        def saved_notes():
+            with open(os.path.join(rundir, 'data.csv'), newline='',
+                      encoding='utf-8-sig') as f:
+                return [r['notes'] for r in csv.DictReader(f)]
+
+        assert saved_notes()[1:] == [voff, f'{wd}; {voff}']
+        for n_save in (1, 2):
+            if app is None:
+                app = gui.EdgeReviewApp(root, path=rundir)
+            else:
+                app._populate_runs(rundir)       # a fresh look at the disk
+            # the strip already reports the trip the note records
+            assert 'watchdog_trip' in [it['code'] for it in app.health]
+            app.manual_ref = {'method': 'manual-calibration',
+                              'diam_px': 160.0}
+            app.detect_all_sync()
+            # decide every frame, so each row takes the REBUILT-notes path
+            for i in app.frame_rows:
+                if i not in app.results:
+                    cands = app.cands_all.get(i) or []
+                    app.results[i] = cands[0] if cands else None
+            assert set(app.frame_rows) <= set(app.results)
+            app.save()
+            assert not mb.errors, mb.errors
+            notes = saved_notes()
+            assert notes[1].startswith(f'{voff}; '), (n_save, notes[1])
+            assert notes[2].startswith(f'{wd}; {voff}; '), (n_save, notes[2])
+            for note in notes[1:]:
+                assert note.count(voff) == 1, (n_save, note)
+                assert note.count('WATCHDOG') <= 1, (n_save, note)
+                # exactly one measurement verdict, never a pile of them
+                assert note.count('edge:') + note.count('rejected (') == 1, \
+                    (n_save, note)
+            assert notes[2].count('WATCHDOG') == 1, (n_save, notes[2])
+            assert 'WATCHDOG' not in notes[0] and voff not in notes[0]
+        # the second Save's backup is the first Save's output: the
+        # capture notes are in that copy too
+        with open(os.path.join(rundir, 'data.csv.bak'), newline='',
+                  encoding='utf-8-sig') as f:
+            bak = [r['notes'] for r in csv.DictReader(f)]
+        assert bak[2].startswith(f'{wd}; {voff}'), bak[2]
+    finally:
+        gui.messagebox = real_mb
+        if app is not None:
+            app._cancel_pending()
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count

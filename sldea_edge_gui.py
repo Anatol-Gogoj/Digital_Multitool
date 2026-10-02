@@ -20,6 +20,14 @@ the 📏 scale dialog until the resting disc has been measured on THIS
 run's baseline frame, Save hard-blocks without it, and the anchor resets
 on every run switch.
 
+RUN HEALTH (2026-10-02): picking a run shows, in a strip under the
+toolbar, what the run's own files say went wrong at capture
+(se.run_health): a blank or overexposed baseline, a refused disc fit,
+missing voltage or current readings, an early end, a watchdog stop,
+missing frames, off-screen samples in telemetry.csv. STOP items are
+repeated first on the empty canvas. It is advice: it blocks nothing,
+and it is not a breakdown verdict.
+
 ONE 📏 BUTTON, TWO OUTCOMES (operator 2026-08-06 late, `#215`).
 📏 Calibrate… and 📏 Re-anchor scale… were folded into a single
 entry point because they open the SAME dialog; what differs is what happens
@@ -164,7 +172,9 @@ out-of-tolerance anchor without a word being read (review 2026-08-06).
 
 With --auto (used by the SLDEA tab's "auto process"), the calibrate
 dialog opens on launch and detection chains automatically once
-calibration finishes. Keyboard: 1/2/3 pick a candidate, R reject,
+calibration finishes. The one exception (2026-10-02): when Run health
+shows a STOP for the run, --auto starts nothing and the status line
+says why; the Detect button itself stays live. Keyboard: 1/2/3 pick a candidate, R reject,
 4/D/T open the manual tracer (#162/#172 -- its Done stages the polygon
 as candidate D; Accept commits it like any other candidate),
 Left/Right navigate, Enter accept + next.
@@ -670,6 +680,80 @@ HINT_PICK_RUN = ("Pick a run in the Run box above,\n"
 HINT_DETECT = ("Press  ▶ Detect Edges  to start.\n"
                "📏 Calibration will guide you first when this run "
                "needs an anchor.")
+
+
+# ---------------------------------------------------------------------------
+# RUN HEALTH: the strip under the toolbar (2026-10-02)
+#
+# What the run's own files say went wrong at capture (se.run_health), shown
+# the moment a run is picked: before the student calibrates on a blank
+# frame or reviews a run that was aborted at 26 of 34. The 2026-10-01 run
+# had every one of its problems on disk and none of them on screen.
+#
+# ADVICE ONLY. The strip never disables Detect or Save and is consulted by
+# neither; it does not confirm a breakdown and renames nothing.
+#
+# Never colour alone: every item starts with a mark that is a symbol AND a
+# word, and the colour behind the mark only repeats it. The four colours
+# are Paul Tol's 'bright' red, yellow, cyan and green, the same scheme
+# sldea_plot.TOL_BRIGHT draws with; black text on each of them clears
+# 4.5:1. This file had no Tol colour before, so these are its first.
+#
+# A FIXED number of lines with its own scrollbar, for #179's reason: the
+# strip must change what it SAYS between runs, never how tall it is, or
+# the image area under it would jump on every run switch.
+# ---------------------------------------------------------------------------
+HEALTH_LINES = 5
+HEALTH_TITLE = "Run health"
+HEALTH_ADVICE = ("(advice only: nothing here blocks ▶ Detect Edges "
+                 "or Save)")
+HEALTH_MARKS = {'stop': "✘ STOP", 'warn': "⚠ WARNING", 'info': "(i) NOTE"}
+HEALTH_OK_MARK = "✔ OK"
+HEALTH_OK_TEXT = ("None of the capture checks found a problem in this "
+                  "run's files.")
+HEALTH_NO_RUN = "no run loaded"
+HEALTH_COLORS = {'stop': '#EE6677', 'warn': '#CCBB44', 'info': '#66CCEE',
+                 'ok': '#228833'}
+# What follows the STOP sentences on the empty canvas. It replaces
+# HINT_DETECT there: "press Detect to start" directly under "this run
+# cannot be measured" would be two instructions that contradict each other.
+HINT_AFTER_STOP = ("This is advice only:  ▶ Detect Edges  still works if "
+                   "you want to see the frames for yourself.")
+# --auto presses Detect for the operator, and the scale dialog then
+# opens over the strip 300 ms after launch. With a STOP on the strip
+# the press is held back so the STOP can be read first: the 2026-10-01
+# anchor was three hand circles on a blank frame. Nothing is locked.
+AUTO_HELD_TEXT = ("automatic detection was NOT started: Run health shows "
+                  "a STOP for this run (read the strip under the "
+                  "toolbar). ▶ Detect Edges still works.")
+
+
+def health_counts(items):
+    """'1 STOP, 2 warnings, 1 note' for a se.run_health list; 'nothing
+    found' for an empty one."""
+    n = {lv: sum(1 for it in items if it.get('level') == lv)
+         for lv in se.HEALTH_LEVELS}
+    parts = []
+    if n['stop']:
+        parts.append(f"{n['stop']} STOP")
+    if n['warn']:
+        parts.append(f"{n['warn']} warning{'' if n['warn'] == 1 else 's'}")
+    if n['info']:
+        parts.append(f"{n['info']} note{'' if n['info'] == 1 else 's'}")
+    return ', '.join(parts) or 'nothing found'
+
+
+def health_hint(items):
+    """The empty canvas's text for a freshly picked run: its STOP items
+    FIRST, each behind the same mark the strip uses. With no STOP item it
+    is HINT_DETECT word for word, so a run with only warnings starts
+    exactly as every run did before."""
+    stops = [it['text'] for it in (items or [])
+             if it.get('level') == 'stop']
+    if not stops:
+        return HINT_DETECT
+    return ('\n\n'.join(f"{HEALTH_MARKS['stop']}: {t}" for t in stops)
+            + '\n\n' + HINT_AFTER_STOP)
 
 
 # ---------------------------------------------------------------------------
@@ -1554,6 +1638,9 @@ class EdgeReviewApp:
         self._howto_scroll = None      # its canvas, published for the tests
         self._tips = {}          # control name -> live Tooltip (`#216`)
         self._hint = None        # the empty-canvas "press this" line (`#216`)
+        self.health = None       # se.run_health items of the loaded run;
+        # None while no run is loaded. Shown, never consulted: no gate
+        # reads it (2026-10-02)
         self._primary_font = None   # kept alive by _install_styles (`#216`)
         self._build_ui()
         start = path or DEFAULT_PARENT
@@ -1565,7 +1652,11 @@ class EdgeReviewApp:
         if goto is not None:
             self.goto_row(goto)
         if auto and self.rundir:
-            root.after(300, self.detect)
+            if any(it.get('level') == 'stop' for it in self.health or ()):
+                # see AUTO_HELD_TEXT: the press is held, not the button
+                self.status.config(text=AUTO_HELD_TEXT)
+            else:
+                root.after(300, self.detect)
 
     # ---------------- UI scaffolding ----------------
     def _install_styles(self):
@@ -1755,6 +1846,35 @@ class EdgeReviewApp:
         self._clock_on = True
         self._clock_job = None          # the in-flight tick, for cancelling
         self._tick_clock()
+
+        # RUN HEALTH strip (2026-10-02), between the toolbar and the
+        # image: the first thing under the Run box, because it is about
+        # the run that was just picked. A read-only Text rather than a
+        # Label so it can hold a fixed HEALTH_LINES and scroll (see
+        # the note at HEALTH_LINES). takefocus=0 keeps it out of the Tab
+        # order; a click on it leaves the review keys working, because
+        # they are bound on the window and a disabled Text types nothing.
+        hbox = ttk.Frame(host, padding=(6, 0, 6, 2))
+        hbox.pack(fill='x')
+        self.health_txt = tk.Text(hbox, height=HEALTH_LINES, wrap='word',
+                                  takefocus=0, cursor='arrow',
+                                  relief='groove', bd=1, padx=6, pady=3,
+                                  font='TkDefaultFont', state='disabled')
+        health_bar = ttk.Scrollbar(hbox, orient='vertical',
+                                   command=self.health_txt.yview)
+        self.health_txt.config(yscrollcommand=health_bar.set)
+        health_bar.pack(side=tk.RIGHT, fill='y')
+        self.health_txt.pack(side=tk.LEFT, fill='x', expand=True)
+        mark_font = self._primary_font or 'TkDefaultFont'
+        self.health_txt.tag_configure('head', font=mark_font)
+        for level, colour in HEALTH_COLORS.items():
+            # the colour only repeats the mark's own symbol and word
+            self.health_txt.tag_configure(level, background=colour,
+                                          foreground='black',
+                                          font=mark_font)
+        for seq in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
+            self.health_txt.bind(seq, self._health_wheel)
+        self._show_health(None)
 
         mid = ttk.Frame(host)
         mid.pack(fill='both', expand=True)
@@ -1947,6 +2067,56 @@ class EdgeReviewApp:
                                 width=max(220, w - 80), tags='hint',
                                 font=('TkDefaultFont', 13))
 
+    # ---------------- run health (advice only) ----------------
+    def _check_health(self):
+        """se.run_health for the loaded run, as a list that is always
+        safe to show. The check is advice, so a failure inside it must
+        cost the advice and never the run pick: it becomes one NOTE."""
+        try:
+            return se.run_health(self.rundir, self.run)
+        except Exception as e:
+            return [{'level': 'info', 'code': 'health_failed',
+                     'text': f"The run health check itself failed ({e}). "
+                             f"Detection and Save are not affected. Please "
+                             f"report this message."}]
+
+    def _show_health(self, items):
+        """Repaint the run-health strip. `items` is a se.run_health list,
+        or None when no run is loaded. STOP items come first (run_health
+        sorts them), each line opens with its mark, and the strip scrolls
+        back to the top so the first thing read is the worst thing."""
+        self.health = None if items is None else list(items)
+        t = self.health_txt
+        t.config(state='normal')
+        t.delete('1.0', tk.END)
+        if items is None:
+            t.insert(tk.END, f"{HEALTH_TITLE}: {HEALTH_NO_RUN}", 'head')
+        else:
+            t.insert(tk.END, f"{HEALTH_TITLE}: {health_counts(items)}",
+                     'head')
+            t.insert(tk.END, f"   {HEALTH_ADVICE}")
+            if not items:
+                t.insert(tk.END, '\n')
+                t.insert(tk.END, f" {HEALTH_OK_MARK} ", 'ok')
+                t.insert(tk.END, f"  {HEALTH_OK_TEXT}")
+            for it in items:
+                level = it.get('level')
+                if level not in HEALTH_MARKS:
+                    level = 'info'
+                t.insert(tk.END, '\n')
+                t.insert(tk.END, f" {HEALTH_MARKS[level]} ", level)
+                t.insert(tk.END, f"  {it.get('text', '')}")
+        t.config(state='disabled')
+        t.yview_moveto(0.0)
+
+    def _health_wheel(self, ev):
+        """The wheel over the strip scrolls the strip and stops there:
+        without the 'break' the page scroller's application-wide wheel
+        binding would move the whole window as well."""
+        up = ev.num == 4 or getattr(ev, 'delta', 0) > 0
+        self.health_txt.yview_scroll(-2 if up else 2, 'units')
+        return 'break'
+
     # ---------------- run selection ----------------
     def _list_runs(self, parent):
         # Any directory holding a run CSV is a run — custom-named runs
@@ -2078,6 +2248,9 @@ class EdgeReviewApp:
         self._set_detect_clock()
         self.save_btn.config(state='disabled')
         self._sync_detect_btn()          # self.run is None again (`#216`)
+        # the health strip belongs to a run too: a failed load must not
+        # leave the previous run's verdict on screen over the new name
+        self._show_health(None)
         try:
             self.run = se.load_run(self.rundir)
             self.settings = se.load_settings(self.rundir)
@@ -2113,9 +2286,16 @@ class EdgeReviewApp:
                  f"has no anchor; diam {self.settings['diam_mm']:g} mm; "
                  f"scale gate re-arms per run)")
         self.canvas.delete('all')
-        self._canvas_hint(HINT_DETECT)
+        # RUN HEALTH (2026-10-02): said now, before any time goes into
+        # calibrating or reviewing. STOP items lead the canvas hint;
+        # with none the hint is HINT_DETECT exactly as before. Advice
+        # only: Detect arms on the next line whatever this found.
+        health = self._check_health()
+        self._show_health(health)
+        self._canvas_hint(health_hint(health))
         self._sync_detect_btn()
-        self.info.config(text=f"{name}\n{n} frames ready")
+        self.info.config(text=f"{name}\n{n} frames ready\n"
+                              f"run health: {health_counts(health)}")
 
     # ---------------- detection ----------------
     def _tick_clock(self):

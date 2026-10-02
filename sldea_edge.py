@@ -8,9 +8,11 @@ directory the Digital Multitool's SLDEA tab wrote:
     SLDEA_<ts>/setup.txt + data.csv + frames/SLDEA_sNN_XX.XXkV_tag.png
 
 A live run also drops `telemetry.csv` there (the ~2 Hz monitor log, since
-2026-08-05). NOTHING in this module reads it: `data.csv` is still the run,
+2026-08-05). The MEASUREMENT never reads it: `data.csv` is still the run,
 `run_csv` cannot resolve to the sidecar, and a folder holding only
-telemetry is not a run.
+telemetry is not a run. The one reader is `run_health` (2026-10-02),
+which counts its off-screen samples for an advisory sentence and feeds
+nothing back into detection, breakdown flags or Save.
 
 Approach: difference-imaging against the 0 kV baseline frame at three
 threshold tiers, plus (2026-07-28) one candidate segmented from the
@@ -1626,6 +1628,37 @@ def load_gray(path):
     import cv2
     img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
     return None if img is None else img.astype(np.float32)
+
+
+# Pedestal-free image-content check (2026-10-02). A frame whose central
+# window spans fewer gray levels than this holds no usable picture: the
+# 2026-10-01 run (exposure 3) spans 2, every other frame in the corpus
+# spans 30 or more.
+FLAT_CONTRAST_GRAY = 20.0
+
+
+def image_content(gray, roi_frac=0.85):
+    """Spread of gray levels in the central search window of a frame.
+
+    -> {'p5', 'p95', 'contrast', 'sat_pct', 'flat'}: contrast is
+    p95 - p5 (independent of the camera's black pedestal), sat_pct the
+    percent of window pixels at or above 250, flat is contrast below
+    FLAT_CONTRAST_GRAY. None when gray is None or empty."""
+    if gray is None or getattr(gray, 'size', 0) == 0:
+        return None
+    g = np.asarray(gray, dtype=np.float32)
+    if g.ndim == 3:
+        g = g.mean(axis=2)
+    h, w = g.shape[:2]
+    f = min(max(float(roi_frac), 0.05), 1.0)
+    dy = int(round(h * (1.0 - f) / 2.0))
+    dx = int(round(w * (1.0 - f) / 2.0))
+    win = g[dy:h - dy, dx:w - dx]
+    p5, p95 = (float(v) for v in np.percentile(win, (5, 95)))
+    contrast = p95 - p5
+    return {'p5': p5, 'p95': p95, 'contrast': contrast,
+            'sat_pct': 100.0 * float((win >= 250).mean()),
+            'flat': contrast < FLAT_CONTRAST_GRAY}
 
 
 # ---------------------------------------------------------------------------
@@ -3505,6 +3538,454 @@ def _baseline_disc_uncached(base_gray, settings):
             'n_edge': int(len(pin)), 'paper_lum': round(paper, 1)}, None
 
 
+# ---------------------------------------------------------------------------
+# run health: what went wrong at capture, said BEFORE the review starts
+#
+# (2026-10-02) Edge Review opened every run the same way: an empty canvas
+# and "press Detect". The 2026-10-01 run (exposure 3, a picture spanning 2
+# gray levels, V_Out off-screen from 2.25 kV, aborted at 26 of 34 frames)
+# was calibrated by hand on a blank frame and reviewed to an empty queue,
+# although every one of those facts was already on disk. run_health reads
+# them back from data.csv, setup.txt, run.log, telemetry.csv and the
+# baseline frame, and says them in plain sentences.
+#
+# It is ADVICE. It changes no row, no flag and no file, and neither the
+# detector nor Save consults it. In particular it is not a breakdown
+# source: a watchdog trip row and an off-screen current in telemetry.csv
+# are REPORTED here, they do not confirm a breakdown, rename a frame or
+# cap a plot. Whether they should is an owner decision (SLDEA_HANDOFF.md,
+# 2026-10-02).
+# ---------------------------------------------------------------------------
+
+HEALTH_LEVELS = ('stop', 'warn', 'info')
+# Percent of the baseline's search window at or above 250 gray from which
+# the picture is called heavily saturated. Not tuned: the corpus has two
+# clusters and nothing between them (the two 2026-08-05 runs read 77.0 and
+# 72.8 %, the other fourteen baselines 4.0 % or less).
+HEALTH_SAT_PCT = 25.0
+# A voltage reading smaller than this (kV) carries no sign worth judging:
+# the 0.25 kV landing reads about 0.26 kV, the 0 kV noise about 0.01.
+HEALTH_SIGN_MIN_KV = 0.05
+
+_SETUP_TOTAL = re.compile(
+    r'^Total:.*\(\s*\d+\s+landings?,\s*(\d+)\s+frames?\)', re.M)
+_RUNLOG_END = re.compile(
+    r'run (complete|aborted|BREAKDOWN-ABORT): (\d+)/(\d+) frames')
+
+
+def _read_text(path):
+    """A run's text file as one string, or None when it cannot be read."""
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _health_setup(rundir):
+    """What run_health needs from setup.txt. Read-only, and tolerant of a
+    missing file or a missing line: every field then keeps its default."""
+    text = _read_text(os.path.join(rundir, 'setup.txt'))
+    out = {'found': text is not None, 'planned': None, 'dry': False,
+           'inverted': False, 'camera': ''}
+    if text is None:
+        return out
+    m = _SETUP_TOTAL.search(text)
+    if m:
+        out['planned'] = int(m.group(1))
+    out['dry'] = bool(re.search(r'^MODE:.*DRY RUN', text, re.M))
+    out['inverted'] = 'Trek control polarity: INVERTED' in text
+    m = re.search(r'^--- Camera ---[ \t]*\n([^\n]+)', text, re.M)
+    if m:
+        out['camera'] = m.group(1).strip()
+    return out
+
+
+def _health_runlog(rundir):
+    """How the run ended, from run.log (written since 2026-08-04; older
+    runs have none). A reused run name appends to the same file, so only
+    the part after the last 'run dir:' line is this run's."""
+    text = _read_text(os.path.join(rundir, 'run.log'))
+    out = {'found': text is not None, 'end': None, 'error': '',
+           'trip': False}
+    if text is None:
+        return out
+    at = text.rfind('run dir:')
+    if at >= 0:
+        text = text[at:]
+    ends = _RUNLOG_END.findall(text)
+    if ends:
+        kind, done, total = ends[-1]
+        out['end'] = (kind, int(done), int(total))
+    errors = re.findall(r'\] ERROR: ([^\n]*)', text)
+    if errors:
+        out['error'] = errors[-1].strip()
+    out['trip'] = ('BREAKDOWN CONFIRMED' in text
+                   or 'BREAKDOWN-ABORT' in text)
+    return out
+
+
+def _health_telemetry(rundir):
+    """Off-screen sample counts from telemetry.csv, or None when the run
+    has no readable sidecar or its header names neither status column.
+
+    The status columns are found by NAME in the header (v_status,
+    i_status), never by position. A row whose status is blank or
+    'skipped' was not sampled on that channel and is not counted as a
+    sample of it. -> {'i_n', 'i_off', 'i_first', 'v_n', 'v_off',
+    'v_first'}; the *_first values are (t_s, nominal_kV) of the first
+    off-screen sample, either of which may be None."""
+    path = os.path.join(rundir, 'telemetry.csv')
+    try:
+        with open(path, newline='', encoding='utf-8-sig',
+                  errors='replace') as f:
+            reader = csv.DictReader(f)
+            names = {(c or '').strip().lower(): c
+                     for c in (reader.fieldnames or [])}
+            rows = list(reader)
+    except (OSError, csv.Error):
+        return None
+    cols = {'i': names.get('i_status'), 'v': names.get('v_status')}
+    if not cols['i'] and not cols['v']:
+        return None
+    out = {'i_n': 0, 'i_off': 0, 'i_first': None,
+           'v_n': 0, 'v_off': 0, 'v_first': None}
+    t_col, kv_col = names.get('t_s'), names.get('nominal_kv')
+    for row in rows:
+        for ch in ('i', 'v'):
+            if not cols[ch]:
+                continue
+            status = (row.get(cols[ch]) or '').strip().lower()
+            if status in ('', 'skipped'):
+                continue
+            out[ch + '_n'] += 1
+            if status == 'offscreen':
+                out[ch + '_off'] += 1
+                if out[ch + '_first'] is None:
+                    out[ch + '_first'] = (_num(row.get(t_col)),
+                                          _num(row.get(kv_col)))
+    return out
+
+
+def _health_when(first):
+    """', first at 37 s into the run (0.66 kV commanded)' for a telemetry
+    (t_s, nominal_kV) pair, leaving out whatever is not known."""
+    t, kv = first or (None, None)
+    if t is None and kv is None:
+        return ''
+    if t is None:
+        return f", first at {kv:.2f} kV commanded"
+    if kv is None:
+        return f", first at {t:.0f} s into the run"
+    return f", first at {t:.0f} s into the run ({kv:.2f} kV commanded)"
+
+
+def run_health(rundir, run=None):
+    """What the run's own files say went wrong at capture.
+
+    -> a list of {'level': 'stop' | 'warn' | 'info', 'code': str,
+    'text': str}, 'stop' items first. An empty list means none of the
+    checks below found anything. `run` is a load_run() result for
+    `rundir`; it is loaded here when left out.
+
+    'stop' means the run cannot be measured as it is (no usable baseline
+    picture); 'warn' means the review can go on but something recorded at
+    capture needs a human look; 'info' explains. Every text is a plain
+    sentence that says what to do. Advisory only: nothing here blocks
+    Detect or Save, and nothing here is a breakdown verdict.
+
+    Codes, in the order they are checked:
+      no_run_csv            the folder has no readable data CSV       stop
+      baseline_missing      no baseline row, or its file is absent    stop
+      baseline_unreadable   the baseline file does not decode         stop
+      image_flat            image_content calls the baseline flat     stop
+      image_saturated       HEALTH_SAT_PCT of it is at or above 250   warn
+      disc_fit_refused      baseline_disc refuses (its own sentence)  warn
+      dry_run               setup.txt says the HV was off             info
+      kv_missing            powered rows without measured_kV          warn
+      kv_sign               measured kV opposes the commanded sign,
+                            and setup.txt has no INVERTED line        info
+      ua_missing            rows without measured_uA                  warn
+      ended_early           fewer rows than setup.txt planned, or
+                            run.log ends 'aborted' short of the plan  warn
+      watchdog_trip         a 'breakdown' tag, a WATCHDOG note, or
+                            run.log's BREAKDOWN lines                 warn
+      frames_missing        frames named in the CSV, absent on disk   warn
+      frames_not_taken      rows that name no frame at all            warn
+      telemetry_i_offscreen I_Out off-screen samples in telemetry.csv warn
+      telemetry_v_offscreen V_Out off-screen samples in telemetry.csv info
+      setup_missing         no setup.txt in the folder                info
+
+    The voltage and current checks are skipped on a dry run: with the HV
+    off there is nothing for them to say."""
+    items = []
+
+    def say(level, code, text):
+        items.append({'level': level, 'code': code, 'text': text})
+
+    if run is None:
+        try:
+            run = load_run(rundir)
+        except (OSError, csv.Error) as e:
+            say('stop', 'no_run_csv',
+                f"This folder cannot be read as a run ({e}). Pick the "
+                f"folder that holds data.csv, setup.txt and the frames "
+                f"folder.")
+            return items
+    rows = run['rows']
+    settings = load_settings(rundir)
+    setup = _health_setup(rundir)
+    log = _health_runlog(rundir)
+    kvs = [_row_kv(r) for r in rows]
+
+    # The pictures: which rows name one, and is it on disk.
+    names = [(r.get('frame_file') or '').strip() for r in rows]
+    listed = [i for i, n in enumerate(names) if n]
+    no_pic = [i for i, n in enumerate(names) if not n]
+    missing = [i for i in listed
+               if not os.path.exists(os.path.join(run['frames_dir'],
+                                                  names[i]))]
+
+    # The baseline frame: the same row Edge Review differences against.
+    base_i = next((i for i in listed
+                   if rows[i].get('tag') == 'baseline'), None)
+    gray = None
+    if base_i is None:
+        say('stop', 'baseline_missing',
+            "This run has no baseline picture: no row of data.csv is "
+            "tagged 'baseline' and names a frame. Edge Review compares "
+            "every frame with the 0 kV baseline, so automatic detection "
+            "cannot run. You can still trace frames by hand (key D); "
+            "otherwise the run has to be repeated.")
+    elif base_i in missing:
+        say('stop', 'baseline_missing',
+            f"The baseline picture {names[base_i]} is listed in data.csv "
+            f"but is not in the frames folder. Without it automatic "
+            f"detection cannot run. Copy the file back from the backup or "
+            f"the lab share and pick the run again; until then you can "
+            f"only trace frames by hand (key D).")
+    else:
+        gray = load_gray(os.path.join(run['frames_dir'], names[base_i]))
+        if gray is None:
+            say('stop', 'baseline_unreadable',
+                f"The baseline picture {names[base_i]} cannot be opened: "
+                f"the file is empty or damaged. Without it automatic "
+                f"detection cannot run. Copy a good file back from the "
+                f"backup or the lab share and pick the run again; until "
+                f"then you can only trace frames by hand (key D).")
+    if gray is not None:
+        content = image_content(gray, settings.get('roi_frac', 0.85))
+        if content is not None and content['flat']:
+            cam = (f" (setup.txt: {setup['camera']})" if setup['camera']
+                   else '')
+            say('stop', 'image_flat',
+                f"The baseline picture is blank: its gray levels span "
+                f"only {content['contrast']:.0f} of 255, and a usable "
+                f"picture spans {FLAT_CONTRAST_GRAY:.0f} or more. No disc "
+                f"can be seen, so this run cannot be measured. The camera "
+                f"exposure or the lighting was wrong at capture{cam}. Do "
+                f"not calibrate by hand and do not Save: repeat the run "
+                f"after the camera is set up.")
+        else:
+            if content is not None and content['sat_pct'] >= HEALTH_SAT_PCT:
+                say('warn', 'image_saturated',
+                    f"{content['sat_pct']:.0f} % of the baseline picture "
+                    f"is pure white (overexposed). The disc edge may be "
+                    f"washed out there, so the automatic fit and the "
+                    f"detection can fail. Look at the baseline picture "
+                    f"before you trust any outline; for the next run, "
+                    f"lower the camera exposure.")
+            # The fit is cached (_DISC_CACHE), so the calibration dialog
+            # that follows on this run reuses it instead of fitting again.
+            try:
+                ref = baseline_disc(gray, settings)
+                why = None if ref is not None else (
+                    baseline_disc_refusal(gray, settings)
+                    or 'the fit gave no reason')
+            except Exception as e:      # advice must never stop a pick
+                why = f"the fit failed with an error ({e})"
+            if why:
+                say('warn', 'disc_fit_refused',
+                    f"The automatic fit of the resting disc refused this "
+                    f"run: {why}. This means you will have to measure the "
+                    f"scale by hand, and most frames will need a manual "
+                    f"decision. First look at the baseline picture: if "
+                    f"you cannot see the edge of the disc yourself, stop "
+                    f"and ask before you continue.")
+
+    # Voltage and current readings (a dry run has none to judge).
+    if setup['dry']:
+        say('info', 'dry_run',
+            "This was a DRY RUN: the high voltage was off (setup.txt). "
+            "The device was never powered, so no expansion is expected "
+            "and the voltage and current checks are skipped. Use it to "
+            "check the camera and the setup, not as data.")
+    else:
+        powered = [i for i, kv in enumerate(kvs)
+                   if kv is not None and kv > 0]
+        mkv = {i: _num(rows[i].get('measured_kV')) for i in powered}
+        read = [i for i in powered if mkv[i] is not None]
+        blank = [i for i in powered if mkv[i] is None]
+        if blank and not read:
+            say('warn', 'kv_missing',
+                f"None of the {len(powered)} powered frames has a "
+                f"measured voltage. Only the commanded voltage is known "
+                f"for this run, and nothing checked that the device "
+                f"really received it. You cannot repair this in the "
+                f"review: report it, and have the scope's voltage channel "
+                f"checked before the next run.")
+        elif blank:
+            hi_read = max(kvs[i] for i in read)
+            lo_blank = min(kvs[i] for i in blank)
+            # 'above' when every blank sits over the last reading (the
+            # campaign: 4.00 / 4.25 kV), 'at' when one landing holds
+            # both (the 07-23 runs: 1.00 kV), else they are scattered
+            where = (f"the readings stop above {hi_read:.2f} kV"
+                     if lo_blank > hi_read else
+                     f"the readings stop at {hi_read:.2f} kV"
+                     if lo_blank == hi_read else
+                     f"readings are missing from {lo_blank:.2f} kV on, "
+                     f"although some higher voltages have one")
+            say('warn', 'kv_missing',
+                f"No measured voltage on {len(blank)} of {len(powered)} "
+                f"powered frames: {where}. For those frames only the "
+                f"commanded voltage is known, and plots use the commanded "
+                f"voltage. You cannot repair this in the review: report "
+                f"it, so the scope's voltage window is set to cover the "
+                f"whole sweep next time.")
+        signed = [i for i in read if abs(mkv[i]) >= HEALTH_SIGN_MIN_KV]
+        opposite = [i for i in signed if mkv[i] * kvs[i] < 0]
+        if (opposite and 2 * len(opposite) > len(signed)
+                and setup['found'] and not setup['inverted']):
+            j = max(opposite, key=lambda i: abs(mkv[i]))
+            say('info', 'kv_sign',
+                f"The measured voltage has the opposite sign to the "
+                f"commanded voltage on {len(opposite)} of {len(signed)} "
+                f"readings (for example {mkv[j]:+.2f} kV measured at "
+                f"{kvs[j]:.2f} kV commanded), and setup.txt does not "
+                f"record an inverted Trek. The size of each reading is "
+                f"still usable."
+                + (" A scope window framed for the other sign can be why "
+                   "the readings stop early." if blank else "")
+                + " Do not change any high-voltage setting yourself: tell "
+                  "your supervisor before the next run.")
+        with_kv = [i for i, kv in enumerate(kvs) if kv is not None]
+        no_ua = [i for i in with_kv
+                 if _num(rows[i].get('measured_uA')) is None]
+        if no_ua and len(no_ua) == len(with_kv):
+            say('warn', 'ua_missing',
+                f"This run has no current readings at all ({len(with_kv)} "
+                f"frames). Edge Review confirms a breakdown from the "
+                f"current, so on this run it cannot flag one. Judge from "
+                f"the pictures whether the device survived, and ask "
+                f"before you use the top voltages.")
+        elif no_ua:
+            say('warn', 'ua_missing',
+                f"No current reading on {len(no_ua)} of {len(with_kv)} "
+                f"frames (the first one is at {kvs[no_ua[0]]:.2f} kV). A "
+                f"blank can mean the current was too large for the scope "
+                f"window, which is what a breakdown looks like, or that "
+                f"the scope did not answer. The breakdown check skips "
+                f"frames without a current: look at those frames "
+                f"yourself, and ask if the device looks damaged.")
+
+    # Did the run reach its end.
+    n_rows = sum(1 for r in rows
+                 if not str(r.get('tag') or '').startswith('breakdown'))
+    end = log['end']
+    planned = setup['planned']
+    early = bool(planned and n_rows < planned)
+    if end and end[0] != 'complete' and end[1] < end[2]:
+        early = True
+    if early:
+        total = planned or end[2]
+        top = max((kv for kv in kvs if kv is not None), default=None)
+        top_txt = f", up to {top:.2f} kV" if top is not None else ''
+        if end and end[0] == 'aborted':
+            why = "run.log says the operator pressed Abort"
+        elif end and end[0] == 'BREAKDOWN-ABORT':
+            why = "run.log says the current watchdog stopped it"
+        elif end:
+            why = ("run.log says the run completed, so rows may have "
+                   "been removed from data.csv afterwards")
+        elif log['error']:
+            why = f"run.log records an error: {log['error']}"
+        elif log['found']:
+            why = ("run.log has no end-of-run line, so the program or "
+                   "the PC probably stopped in the middle")
+        else:
+            why = ("this folder has no run.log, so the reason was not "
+                   "recorded")
+        say('warn', 'ended_early',
+            f"The run stopped early: {n_rows} of {total} planned frames "
+            f"were taken{top_txt} ({why}). The frames that exist can "
+            f"still be reviewed, but the sweep is incomplete: say so "
+            f"wherever you report this run.")
+
+    # The watchdog's trip: reported, never turned into a flag here.
+    trips = [i for i, r in enumerate(rows)
+             if str(r.get('tag') or '').startswith('breakdown')
+             or 'WATCHDOG' in (r.get('notes') or '')]
+    if trips or log['trip']:
+        at = (f" at {kvs[trips[0]]:.2f} kV"
+              if trips and kvs[trips[0]] is not None else '')
+        say('warn', 'watchdog_trip',
+            f"The current watchdog stopped this run{at}: the current "
+            f"stayed too high, which usually means the device broke down "
+            f"there. Edge Review marks a breakdown only from the current "
+            f"readings in data.csv, so this stop may not show up as a "
+            f"breakdown mark. Look at the last frames, and ask before "
+            f"you use the data near that voltage.")
+
+    # Pictures the CSV promises and the disk does not hold.
+    lost = [i for i in missing if i != base_i]
+    if lost:
+        say('warn', 'frames_missing',
+            f"{len(lost)} of {len(listed)} pictures listed in data.csv "
+            f"are not in the frames folder (the first is "
+            f"{names[lost[0]]}). Those frames cannot be measured and "
+            f"stay as they are. Copy the files back from the backup or "
+            f"the lab share, then pick the run again.")
+    if no_pic:
+        at = (f" (the first is at {kvs[no_pic[0]]:.2f} kV)"
+              if kvs[no_pic[0]] is not None else '')
+        say('warn', 'frames_not_taken',
+            f"{len(no_pic)} of {len(rows)} snapshots have no picture: "
+            f"the camera gave no frame at capture{at}. Nothing can be "
+            f"measured for those rows, so they stay blank. Check the "
+            f"camera before the next run.")
+
+    # The dense monitor log, when the run has one.
+    tel = _health_telemetry(rundir)
+    if tel and tel['i_off']:
+        say('warn', 'telemetry_i_offscreen',
+            f"The monitor log (telemetry.csv) has the current off the "
+            f"scope screen on {tel['i_off']} of {tel['i_n']} samples"
+            f"{_health_when(tel['i_first'])}. A current that large can "
+            f"mean the device broke down there, or that the scope's "
+            f"current window was too small. Edge Review does not read "
+            f"this log when it marks breakdowns: look at the frames near "
+            f"that voltage, and ask if the device looks damaged.")
+    if tel and tel['v_off']:
+        say('info', 'telemetry_v_offscreen',
+            f"The monitor log (telemetry.csv) has the voltage off the "
+            f"scope screen on {tel['v_off']} of {tel['v_n']} voltage "
+            f"samples{_health_when(tel['v_first'])}. The voltage was not "
+            f"being measured during those samples. There is nothing to "
+            f"repair in the review: report it with the run.")
+
+    if not setup['found']:
+        say('info', 'setup_missing',
+            "setup.txt is missing from this run folder, so the planned "
+            "number of frames, the camera settings and the voltage "
+            "polarity are not known and those checks were skipped. Look "
+            "for the file in the backup or on the lab share.")
+
+    order = {level: k for k, level in enumerate(HEALTH_LEVELS)}
+    items.sort(key=lambda it: order[it['level']])
+    return items
+
+
 def _is_manual_cal(baseline_ref):
     """Is this anchor one a HUMAN put their name to — and therefore the
     one that overrides every automatic reference at Save?
@@ -3591,6 +4072,44 @@ def _num(v):
     return f if np.isfinite(f) else None
 
 
+# Note tokens the RUNNER writes into data.csv at capture, by their leading
+# text (2026-10-02). apply_results used to build a reviewed row's notes
+# cell from scratch, so the first Save erased them: 117 rows in six corpus
+# runs carry 'V_Out off-screen (clipped)', and the watchdog's trip row
+# carries 'WATCHDOG: breakdown confirmed (...)' (gui.py: _sldea_capture
+# and the trip branch of _sldea_worker). They are facts about the capture
+# that no later pass can recompute, so every row keeps them.
+#
+# A WHITELIST, not "keep whatever is not an edge token": the analysis
+# notes (area dip, pair mismatch, transient discharge, wrinkle-mode,
+# breakdown?) are recomputed at each Save, and a keep-everything rule
+# would pile the stale ones up beside the fresh ones. 'I_Out ' is listed
+# ahead of need: the runner writes no current note today, but its run.log
+# wording is 'I_Out off-screen' and a capture note would be spelled so.
+RUNNER_NOTE_PREFIXES = ('WATCHDOG', 'V_Out ', 'I_Out ')
+
+
+def _note_tokens(note):
+    """The tokens of a notes cell (joined with '; '), blanks dropped."""
+    return [t for t in (p.strip() for p in (note or '').split(';')) if t]
+
+
+def runner_note_tokens(note):
+    """The capture-time tokens of a notes cell, in order, each once: the
+    ones apply_results carries through a Save (RUNNER_NOTE_PREFIXES)."""
+    out = []
+    for tok in _note_tokens(note):
+        if tok.startswith(RUNNER_NOTE_PREFIXES) and tok not in out:
+            out.append(tok)
+    return out
+
+
+def _note_kind(token):
+    """A note token up to its first digit: 'area dip 12% vs previous step'
+    and 'area dip 15% vs previous step' are one annotation, two values."""
+    return re.match(r'[^0-9]*', token).group(0)
+
+
 def apply_results(rows, results, scale, flags, annos=None):
     """Fill the active_area_* / wrinkle_idx / notes columns in `rows`
     (in place). `annos` are informational notes (e.g. wrinkle-mode) appended
@@ -3611,10 +4130,22 @@ def apply_results(rows, results, scale, flags, annos=None):
     active_area_mm2 column with nothing marking the boundary — a 56.1%
     artificial area step on the real-data repro, larger than the 35%
     collapse threshold. A stale mm² whose px is missing (pre-2026-07-25
-    bug era) is blanked rather than left on a foreign scale."""
+    bug era) is blanked rather than left on a foreign scale.
+
+    THE RUNNER'S NOTES SURVIVE (2026-10-02). A reviewed row's notes cell
+    is still rebuilt at every Save, so analysis annotations are
+    regenerated and never accumulate. But the tokens the runner wrote
+    at capture (RUNNER_NOTE_PREFIXES: the WATCHDOG note, 'V_Out
+    off-screen (clipped)') are carried over in front of the rebuilt
+    part. They used to be erased by the first Save. An unreviewed row
+    keeps its whole cell as before; a flag or annotation added to it
+    replaces an older token of the same kind (the same words with a
+    different number) instead of sitting beside it."""
     annos = annos or {}
     for i, row in enumerate(rows):
         r = results.get(i)
+        old_note = row.get('notes') or ''
+        reviewed = i in results
         if r:
             row['active_area_px'] = f"{r['area_px']:.0f}"
             if scale:
@@ -3631,17 +4162,19 @@ def apply_results(rows, results, scale, flags, annos=None):
                 # 'resting'): a previous pass's value must not survive
                 # next to the new area (audit 2026-08-05)
                 row['wrinkle_idx'] = ''
-            note = f"edge:{r['method']} conf {r['conf']:.2f}"
+            edge = f"edge:{r['method']} conf {r['conf']:.2f}"
             if r.get('chosen_by'):
-                note += f" ({r['chosen_by']})"
-        elif i in results:                 # explicitly reviewed + rejected
+                edge += f" ({r['chosen_by']})"
+            tokens = runner_note_tokens(old_note) + [edge]
+        elif reviewed:                     # explicitly reviewed + rejected
             for col in ('active_area_px', 'active_area_mm2',
                         'active_diam_mm', 'wrinkle_idx'):
                 if col in row or col == 'active_area_px':
                     row[col] = ''
-            note = 'rejected (no reliable edge)'
+            tokens = runner_note_tokens(old_note) + [
+                'rejected (no reliable edge)']
         else:
-            note = row.get('notes') or ''
+            tokens = _note_tokens(old_note)
             if scale:
                 px = _num(row.get('active_area_px'))
                 old_mm2 = _num(row.get('active_area_mm2'))
@@ -3664,10 +4197,26 @@ def apply_results(rows, results, scale, flags, annos=None):
                     for col in ('active_area_mm2', 'active_diam_mm'):
                         if col in row:
                             row[col] = ''
+        before = list(tokens)
         for extra in (flags.get(i), annos.get(i)):
-            if extra and extra not in note:
-                note = (note + '; ' if note else '') + extra
-        row['notes'] = note
+            for tok in _note_tokens(extra):
+                if tok in tokens:
+                    continue
+                if not reviewed:
+                    # the kept cell may already hold this annotation
+                    # with an older number: replace it, do not pile up
+                    kind = _note_kind(tok)
+                    same = [k for k, old in enumerate(tokens)
+                            if kind.strip() and _note_kind(old) == kind
+                            and not old.startswith(RUNNER_NOTE_PREFIXES)]
+                    if same:
+                        tokens[same[0]] = tok
+                        continue
+                tokens.append(tok)
+        # an unreviewed row nothing was added to keeps its cell
+        # byte-for-byte (the scale-only re-anchor relies on that)
+        row['notes'] = (old_note if not reviewed and tokens == before
+                        else '; '.join(tokens))
     return rows
 
 

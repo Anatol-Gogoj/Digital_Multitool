@@ -25,7 +25,9 @@ toolbar, what the run's own files say went wrong at capture
 (se.run_health): a blank or overexposed baseline, a refused disc fit,
 missing voltage or current readings, an early end, a watchdog stop,
 missing frames, off-screen samples in telemetry.csv. STOP items are
-repeated first on the empty canvas. It is advice: it blocks nothing
+repeated first on the empty canvas, and again at the top of the scale
+dialog, in its hand-measurement banner and in the verify mode (that
+dialog is modal and covers the strip). It is advice: it blocks nothing
 (--auto presses Detect on a STOP run as on any other), and it is not a
 breakdown verdict.
 
@@ -704,8 +706,22 @@ HINT_DETECT = ("Press  ▶ Detect Edges  to start.\n"
 # A FIXED number of lines with its own scrollbar, for #179's reason: the
 # strip must change what it SAYS between runs, never how tall it is, or
 # the image area under it would jump on every run switch.
+#
+# The number is fixed PER WINDOW, not per machine: HEALTH_LINES where the
+# screen has room for the page, fewer (never under HEALTH_MIN_LINES) on a
+# screen too short for it. Decided once, when the window opens
+# (_fit_short_screen), so it still never changes between runs.
 # ---------------------------------------------------------------------------
 HEALTH_LINES = 5
+# The header and two lines of the worst item. Not 2: the strip's own
+# scrollbar asks about 50 px on Windows, a two-line text 38, so the third
+# line costs 3 px and a second cut line would buy nothing.
+HEALTH_MIN_LINES = 3
+# The least the review canvas may REQUEST on a short screen. The side
+# panel beside it needs about 330 px for its own buttons; frames are drawn
+# to fit the canvas, so a lower request makes the picture smaller, never
+# cut. VIEW_H stays the request wherever the page fits.
+VIEW_MIN_H = 400
 HEALTH_TITLE = "Run health"
 HEALTH_ADVICE = ("(advice only: nothing here blocks ▶ Detect Edges "
                  "or Save)")
@@ -751,17 +767,40 @@ def health_counts(items):
     return ', '.join(parts) or 'nothing found'
 
 
+def health_stops(items):
+    """The STOP items of a se.run_health list as lines, each behind the
+    mark the strip uses (HEALTH_MARKS['stop'], then ': sentence'). []
+    when there is none, and for None (no run loaded)."""
+    return [f"{HEALTH_MARKS['stop']}: {it.get('text', '')}"
+            for it in (items or []) if it.get('level') == 'stop']
+
+
 def health_hint(items):
     """The empty canvas's text for a freshly picked run: its STOP items
     FIRST, each behind the same mark the strip uses. With no STOP item it
     is HINT_DETECT word for word, so a run with only warnings starts
     exactly as every run did before."""
-    stops = [it['text'] for it in (items or [])
-             if it.get('level') == 'stop']
+    stops = health_stops(items)
     if not stops:
         return HINT_DETECT
-    return ('\n\n'.join(f"{HEALTH_MARKS['stop']}: {t}" for t in stops)
-            + '\n\n' + HINT_AFTER_STOP)
+    return '\n\n'.join(stops) + '\n\n' + HINT_AFTER_STOP
+
+
+# The scale dialog's banner when the automatic fit has nothing to offer.
+# GATE_NO_FIT is the sentence it always had. GATE_NO_FIT_STOP replaces it
+# on a run whose health holds a STOP (review 2026-10-02): the dialog is
+# modal, it covers the strip and most of the canvas hint, and with --auto
+# it opens 300 ms after the window does. "Measure the disc BY HAND" in
+# that foreground window was an instruction to do what the STOP behind it
+# forbids, with the fitter's gray-level reason as the only explanation.
+# The STOP sentences now lead the banner (health_stops) and this line
+# sends the student to them. Still advice: no button is locked.
+GATE_NO_FIT = ("⚠ NO automatic fit on this run, so there is nothing to "
+               "verify: measure the disc BY HAND.")
+GATE_NO_FIT_STOP = ("⚠ NO automatic fit on this run, so there is nothing "
+                    "to verify: this window can only measure the disc BY "
+                    "HAND. Read the STOP above first. If it tells you not "
+                    "to measure, press Cancel (Esc).")
 
 
 # ---------------------------------------------------------------------------
@@ -1727,20 +1766,91 @@ class EdgeReviewApp:
         # it needs; without this the request reads short and the window
         # opens at the old, too-narrow default.
         self.root.update_idletasks()
+        # leave room for the window frame and a taskbar rather than
+        # butting the very edge of the display
+        cap_w = max(640, self.root.winfo_screenwidth() - 80)
+        cap_h = max(480, self.root.winfo_screenheight() - 120)
+        # a screen too short for the page: the strip and the canvas ask
+        # for less BEFORE the sizes below are read
+        if self._fit_short_screen(cap_h):
+            self.root.update_idletasks()
         want_w = max(self._scroll.body.winfo_reqwidth(), 1150)
         # The run-health strip (2026-10-02) sits between the toolbar
         # and the image. On the old 760 floor its 85 px came straight out
         # of the review canvas (563 px tall against 648), on every run,
         # for the whole review. The floor therefore grows by the strip:
         # the image keeps the height it had before the strip existed. The
-        # screen cap below still applies.
+        # screen cap still applies.
         strip_h = self._health_box.winfo_reqheight()
         want_h = max(self._scroll.body.winfo_reqheight(), 760 + strip_h)
-        # leave room for the window frame and a taskbar rather than
-        # butting the very edge of the display
-        cap_w = max(640, self.root.winfo_screenwidth() - 80)
-        cap_h = max(480, self.root.winfo_screenheight() - 120)
         self.root.geometry(f'{min(want_w, cap_w)}x{min(want_h, cap_h)}')
+
+    def _fit_short_screen(self, cap_h):
+        """On a screen too short for the page, the run-health strip must
+        not cost what the window showed before the strip existed.
+        -> True when a size request was changed.
+
+        Measured with the screen height forced (review 2026-10-02). The
+        page asks 757 px with the five-line strip, 672 without it:
+
+          864 px (1080p at 125 % scaling), window 744: main shows the
+              whole page; with the strip the page scrolled and the status
+              line was off screen.
+          768 px, window 648: the image canvas ended at y 703. Frames are
+              drawn to fit the canvas, so the bottom 55 px of every
+              picture were below the fold (72 with the page's horizontal
+              bar), where main shows the whole picture.
+
+        Two goals, in this order:
+
+        1. THE STRIP COSTS THE PAGE NOTHING HERE. The page gives back
+           what it is too tall by, up to the strip's own height, so it is
+           no taller than the window or than main's page. Where main
+           fits, this fits; where main scrolls, this scrolls no further.
+        2. THE WHOLE IMAGE STAYS IN VIEW. If the image's bottom edge
+           would still be under the window (and under the horizontal bar
+           a scrolling page gets), the page gives back the rest.
+
+        The strip pays first, down to HEALTH_MIN_LINES: it is read once,
+        the image is looked at for the whole review, and the 'more below'
+        cue covers what no longer shows. What is still owed comes off
+        the canvas's REQUESTED height, never below VIEW_MIN_H. The
+        picture is scaled to the canvas, so it gets smaller, not cut.
+
+        Decided ONCE, when the window opens, so the strip still never
+        changes height between runs. Does nothing when the page fits."""
+        body = self._scroll.body
+        body_h = body.winfo_reqheight()
+        if body_h <= cap_h:
+            return False
+        try:
+            line_h = int(tkfont.nametofont('TkDefaultFont')
+                         .metrics('linespace'))
+        except (tk.TclError, TypeError, ValueError):
+            line_h = 15
+        line_h = max(1, line_h)
+        # goal 1: at most the strip's own height
+        shed = min(body_h - cap_h, self._health_box.winfo_reqheight())
+        if body_h - shed > cap_h:
+            # Goal 2. The page still scrolls: it gets the scroller's
+            # vertical bar, that bar narrows the view, so the horizontal
+            # bar follows and takes its height off the bottom of the
+            # window. Under the image sit the How-to row and the status
+            # line; they stay below the fold, as on main at this size.
+            below = (self._foot.winfo_reqheight()
+                     + self.status.winfo_reqheight())
+            room = cap_h - self._scroll._hbar.winfo_reqheight()
+            shed = max(shed, (body_h - below) - room)
+        drop = min(HEALTH_LINES - HEALTH_MIN_LINES, -(-shed // line_h))
+        self.health_txt.config(height=HEALTH_LINES - drop)
+        # measured, not computed: what a dropped line really gives back
+        # depends on the theme (the strip's scrollbar has a minimum
+        # height of its own)
+        self.root.update_idletasks()
+        shed -= body_h - body.winfo_reqheight()
+        if shed > 0:
+            self.canvas.config(height=max(VIEW_MIN_H, VIEW_H - shed))
+        return True
 
     def _build_ui(self):
         self._install_styles()
@@ -1972,6 +2082,7 @@ class EdgeReviewApp:
         # RUN's controls live, and a "where do I start" affordance that sat
         # among them would be one more thing to read before starting.
         foot = ttk.Frame(host, padding=(6, 3))
+        self._foot = foot               # _fit_short_screen asks its height
         foot.pack(side=tk.BOTTOM, fill='x')
         self.howto_btn = ttk.Button(foot, text=HOWTO_BTN_TEXT,
                                     command=self._howto)
@@ -2127,10 +2238,11 @@ class EdgeReviewApp:
 
     def _health_more_cue(self, _ev=None):
         """Put HEALTH_MORE on the header line while the strip holds more
-        display lines than its HEALTH_LINES, and take it off when it does
-        not. Called after every repaint and on every width change (the
-        wrap decides the count). Before the strip has a width there is
-        nothing to count, and the first <Configure> comes back here."""
+        display lines than it shows (HEALTH_LINES, or fewer on a short
+        screen), and take it off when it does not. Called after every
+        repaint and on every width change (the wrap decides the count).
+        Before the strip has a width there is nothing to count, and the
+        first <Configure> comes back here."""
         t = self.health_txt
         t.config(state='normal')
         try:
@@ -2141,7 +2253,7 @@ class EdgeReviewApp:
                 return
             lines = 1 + int(t.tk.call(t._w, 'count', '-update',
                                       '-displaylines', '1.0', 'end-1c'))
-            if lines > HEALTH_LINES:
+            if lines > int(t.cget('height')):
                 t.insert('1.end', f"   {HEALTH_MORE}", 'more')
         except (tk.TclError, ValueError, TypeError):
             pass                # a cue is never worth a traceback
@@ -4151,7 +4263,16 @@ class EdgeReviewApp:
             # refused, a missing baseline, a diam_mm nobody measured. On an
             # ordinary run this label carries nothing and is not packed at
             # all, so it costs the picture no height.
-            gate = ''
+            # THE RUN'S STOP LEADS (review 2026-10-02). This dialog is
+            # modal and opens over the Run health strip and most of the
+            # canvas hint: measured on the 2026-10-01 run, it covered 910
+            # of the strip's 1290 px, and with --auto it is on screen 300
+            # ms after the window. So the STOP is repeated here, ahead of
+            # the fitter's reason, in the strip's own words. It is advice
+            # like the strip: every control below works as before.
+            stops = health_stops(self.health)
+            stop_text = '\n'.join(stops)
+            gate = stop_text
             if not verify_ok:
                 # THE REFUSAL, STATED. When baseline_disc will not fit this
                 # baseline there is nothing to verify and the operator has
@@ -4165,8 +4286,9 @@ class EdgeReviewApp:
                        "on, so its circle would not belong to this picture."
                        if not same_frame else
                        " Reason: not reported — see the console.")
-                gate += ("⚠ NO automatic fit on this run, so there is "
-                         "nothing to verify: measure the disc BY HAND." + why)
+                gate += (('\n' if gate else '')
+                         + (GATE_NO_FIT_STOP if stops else GATE_NO_FIT)
+                         + why)
             if not anchor_is_baseline:
                 gate += ("\n⚠ The baseline frame is missing — this is a LATER "
                          "frame. Calibrate here only if the disc is visibly "
@@ -4222,6 +4344,37 @@ class EdgeReviewApp:
             gate_lbl = tk.Label(win, text=gate, justify='left',
                                 wraplength=980)
             gate_lbl.pack(**GATE_PACK)
+            # WHAT THE STOP COSTS IN HEIGHT COMES OFF THE PICTURE, so the
+            # window is as tall as it was before the STOP was in it and
+            # Cancel stays on the screen (the measuring modes had about
+            # 35 px to spare on a 1080p bench screen, and a STOP sentence
+            # wraps to three lines). Measured, not guessed: the banner as
+            # it is against the banner without the STOP.
+            stop_px = 0
+            # THE VERIFY MODE SHOWS THE STOP TOO, and only the STOP: every
+            # other warning this banner can carry is impossible there or
+            # already in the evidence block (see sync_buttons). A STOP
+            # with a fit to verify is rare but real: a noise-free disc
+            # 10 to 19 gray levels darker than its paper is 'blank' to
+            # image_content and still fits (measured 2026-10-02, three
+            # frame sizes). stop_vfy_px is what that label costs there,
+            # padding included.
+            stop_vfy_px = 0
+            if stops:
+                plain = (gate[len(stop_text):].lstrip('\n')
+                         .replace(GATE_NO_FIT_STOP, GATE_NO_FIT))
+                plain_px = 0
+                if plain:
+                    probe_lbl = tk.Label(win, text=plain, justify='left',
+                                         wraplength=980)
+                    plain_px = probe_lbl.winfo_reqheight()
+                    probe_lbl.destroy()
+                stop_px = max(0, gate_lbl.winfo_reqheight() - plain_px)
+                probe_lbl = tk.Label(win, text=stop_text, justify='left',
+                                     wraplength=980)
+                stop_vfy_px = (probe_lbl.winfo_reqheight()
+                               + sum(GATE_PACK['pady']))
+                probe_lbl.destroy()
             # ---- the mode chooser (`#215`, 2026-08-06) ----------------
             # Per calibration, not per session, so both methods can be
             # driven on the SAME disc minutes apart — which is the only
@@ -4352,7 +4505,8 @@ class EdgeReviewApp:
             # layout is untouched.
             def canvas_h(for_verify):
                 return max(300, min(760, self.root.winfo_screenheight()
-                                    - (300 if for_verify else 400)))
+                                    - (300 + stop_vfy_px if for_verify
+                                       else 400 + stop_px)))
 
             ch = canvas_h(opens_c)
             cv = tk.Canvas(win, width=cw, height=ch, bg='#111',
@@ -5777,8 +5931,13 @@ class EdgeReviewApp:
                 # the block is warnings-only now, and an ordinary run has none
                 # — so an empty label must not cost the picture a line's height
                 # in the measuring modes either.
-                show_line(gate_lbl, bool(gate) and not vfy, GATE_PACK,
-                          chooser)
+                # ONE EXCEPTION (2026-10-02): a run's STOP stays on screen
+                # in the verify mode as well, alone, because this modal
+                # window covers the Run health strip that carries it.
+                if stops:
+                    gate_lbl.config(text=stop_text if vfy else gate)
+                show_line(gate_lbl, bool(gate) and (not vfy or bool(stops)),
+                          GATE_PACK, chooser)
                 show_line(hdr, not vfy, HDR_PACK, cv)
                 # `live` BOTH WAYS, not just hidden in C: leaving it
                 # forgotten on the way back to A/B hid the circle mode's
@@ -6162,7 +6321,12 @@ class EdgeReviewApp:
                                'round_box': round_box,
                                'rounds_box': rounds_box,
                                'stroke_box': stroke_box,
-                               'n_menu': n_menu, 'stroke_menu': stroke_menu}
+                               'n_menu': n_menu, 'stroke_menu': stroke_menu,
+                               # the warnings banner, and the height the
+                               # run's STOP adds to it in the measuring
+                               # modes and in the verify mode (2026-10-02)
+                               'gate_lbl': gate_lbl, 'stop_px': stop_px,
+                               'stop_vfy_px': stop_vfy_px}
             win.grab_set()
             self.root.wait_window(win)
         finally:

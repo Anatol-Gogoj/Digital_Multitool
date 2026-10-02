@@ -3687,6 +3687,17 @@ def _health_when(first):
     return f", first at {t:.0f} s into the run ({kv:.2f} kV commanded)"
 
 
+def _frame_twin(name):
+    """The other name one frame can carry: the '_BREAKDOWN' name of a
+    plain frame, the plain name of a branded one. plan_breakdown_marks
+    renames between the two, and a Save that failed half way can leave
+    data.csv on one name and the file on the other."""
+    if '_BREAKDOWN' in name:
+        return name.replace('_BREAKDOWN', '')
+    base, ext = os.path.splitext(name)
+    return base + '_BREAKDOWN' + ext
+
+
 def run_health(rundir, run=None):
     """What the run's own files say went wrong at capture.
 
@@ -3718,6 +3729,8 @@ def run_health(rundir, run=None):
       watchdog_trip         a 'breakdown' tag, a WATCHDOG note, or
                             run.log's BREAKDOWN lines                 warn
       frames_missing        frames named in the CSV, absent on disk   warn
+      frames_renamed        frames on disk under their _BREAKDOWN twin
+                            name (or the plain twin of a branded one) warn
       frames_not_taken      rows that name no frame at all            warn
       telemetry_i_offscreen I_Out off-screen samples in telemetry.csv warn
       telemetry_v_offscreen V_Out off-screen samples in telemetry.csv info
@@ -3749,15 +3762,36 @@ def run_health(rundir, run=None):
     names = [(r.get('frame_file') or '').strip() for r in rows]
     listed = [i for i, n in enumerate(names) if n]
     no_pic = [i for i, n in enumerate(names) if not n]
-    missing = [i for i in listed
-               if not os.path.exists(os.path.join(run['frames_dir'],
-                                                  names[i]))]
+    absent = [i for i in listed
+              if not os.path.exists(os.path.join(run['frames_dir'],
+                                                 names[i]))]
 
     # The baseline frame: the same row Edge Review differences against.
     base_i = next((i for i in listed
                    if rows[i].get('tag') == 'baseline'), None)
+    # A picture that sits in the folder under its twin name is not lost
+    # (review 2026-10-02): "copy it back from the backup" was the wrong
+    # advice for a file that is there. The baseline keeps its STOP either
+    # way, because Edge Review opens it by the name data.csv gives.
+    renamed = [i for i in absent if i != base_i
+               and os.path.exists(os.path.join(run['frames_dir'],
+                                               _frame_twin(names[i])))]
+    missing = [i for i in absent if i not in renamed]
     gray = None
-    if base_i is None:
+    if base_i is None and log['found'] and not log['end'] \
+            and not log['error']:
+        # run.log has no end line: this is also what a run looks like in
+        # its first seconds, before the baseline is taken. "The run has
+        # to be repeated" beside "wait until it ends" contradicted itself
+        # (review 2026-10-02).
+        say('stop', 'baseline_missing',
+            "This run has no baseline picture yet: no row of data.csv is "
+            "tagged 'baseline' and names a frame, and run.log shows no "
+            "end of the run. If the run is still going, wait until it "
+            "ends and pick it again. If the program or the PC stopped "
+            "before the baseline was taken, automatic detection cannot "
+            "run: you can only trace frames by hand (key D).")
+    elif base_i is None:
         say('stop', 'baseline_missing',
             "This run has no baseline picture: no row of data.csv is "
             "tagged 'baseline' and names a frame. Edge Review compares "
@@ -3990,6 +4024,16 @@ def run_health(rundir, run=None):
             f"{names[lost[0]]}). Those frames cannot be measured and "
             f"stay as they are. Copy the files back from the backup or "
             f"the lab share, then pick the run again.")
+    if renamed:
+        j = renamed[0]
+        say('warn', 'frames_renamed',
+            f"{len(renamed)} of {len(listed)} pictures are in the frames "
+            f"folder under a different name than data.csv lists (the "
+            f"first is {names[j]}, found as {_frame_twin(names[j])}). "
+            f"Nothing is lost: this is left over from a breakdown mark "
+            f"that a Save did not finish. Edge Review cannot open those "
+            f"frames in this pass. The next Save puts the names right; "
+            f"pick the run again after it to review them.")
     if no_pic:
         at = (f" (the first is at {kvs[no_pic[0]]:.2f} kV)"
               if kvs[no_pic[0]] is not None else '')

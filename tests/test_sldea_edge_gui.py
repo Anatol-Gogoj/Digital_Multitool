@@ -4723,6 +4723,24 @@ def test_run_health_words_put_stop_first_and_never_lean_on_colour():
     assert 'measure the scale by hand' in gui.HINT_AFTER_STOP
     assert 'frames folder' in gui.HINT_AFTER_STOP
     assert 'still works' not in gui.HINT_AFTER_STOP
+    # the same STOP lines lead the scale dialog's banner
+    assert gui.health_stops(None) == []
+    assert gui.health_stops([warn, note]) == []
+    assert gui.health_stops([stop, warn]) == [
+        gui.HEALTH_MARKS['stop'] + ': ' + stop['text']]
+    assert hint.startswith(gui.health_stops([stop, warn])[0])
+    # ...and under a STOP that banner does not ORDER a hand measurement:
+    # it says what the window can do, points at the STOP and names the
+    # way out. Without a STOP the sentence is the one it always was.
+    assert gui.GATE_NO_FIT.endswith('measure the disc BY HAND.')
+    assert gui.GATE_NO_FIT not in gui.GATE_NO_FIT_STOP
+    for words in ('NO automatic fit on this run', 'nothing to verify',
+                  'BY HAND', 'Read the STOP above first', 'Cancel (Esc)'):
+        assert words in gui.GATE_NO_FIT_STOP, words
+    # a short screen may shorten the strip, never to less than a header
+    # and something under it
+    assert 2 <= gui.HEALTH_MIN_LINES < gui.HEALTH_LINES
+    assert 300 <= gui.VIEW_MIN_H < gui.VIEW_H
     # the help panel names the strip, and its STOP mark as it is drawn
     assert f"{gui.HEALTH_TITLE} strip" in gui.howto_text()
     assert gui.HEALTH_MARKS['stop'] in gui.howto_text()
@@ -5017,6 +5035,370 @@ def test_the_health_strip_adds_its_height_to_the_window_not_to_the_image():
         assert app.health_txt.get('1.0', 'end-1c').count(
             gui.HEALTH_MORE) == 1
     finally:
+        if app is not None:
+            app._cancel_pending()
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_short_screen_gets_a_shorter_strip_and_the_whole_image():
+    """Review 2026-10-02: with the screen height forced to 768 the window
+    is capped at 648 px, the page with the five-line strip asked 757, and
+    the review canvas ended 55 px under the window's bottom edge (main
+    shows it whole). Frames are drawn to fit the canvas, so a tenth of
+    every picture was hidden unless the page was scrolled, which scrolls
+    the strip and the toolbar away.
+
+    On such a screen the strip now gives lines back (never fewer than
+    HEALTH_MIN_LINES) and the canvas asks for a little less, so the whole
+    image is inside the window and above the page's own horizontal bar,
+    and the page is no taller than it was before the strip existed.
+    Decided once per window: the strip still does not change height with
+    what it says.
+
+    Three forced heights, because on the analysis PC they take three
+    different paths (the assertions do not assume which):
+      864 (1080p at 125 % scaling)  the strip alone gives enough back
+                                    and the whole page fits, status line
+                                    included, as it does on main
+      768                           the strip and the canvas both give
+      720                           the page is still taller than the
+                                    window (it is on main too), so the
+                                    image must also clear the page's
+                                    horizontal bar"""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        probe = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    real_h = probe.winfo_screenheight()
+    probe.destroy()
+    real_sh = tk.Misc.winfo_screenheight
+    d = tempfile.mkdtemp(prefix='edge_gui_short_')
+    run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+
+    def case(forced, full):
+        """Open the window with the screen height forced. `full` is the
+        (page, strip) height of a window with room for everything, or
+        None to measure exactly that and return it."""
+        root = tk.Tk()
+        app = None
+
+        def settle():
+            for _ in range(3):
+                root.update_idletasks()
+                root.update()
+
+        try:
+            tk.Misc.winfo_screenheight = lambda self: forced
+            app = gui.EdgeReviewApp(root, path=run)
+            settle()
+            body_h = app._scroll.body.winfo_reqheight()
+            lines = int(app.health_txt.cget('height'))
+            asked = int(app.canvas.cget('height'))
+            if full is None:
+                assert lines == gui.HEALTH_LINES, lines
+                assert asked == gui.VIEW_H, asked
+                return body_h, app._health_box.winfo_reqheight()
+            cap_h = forced - 120
+            if full[0] <= cap_h:
+                print(f"   (skipped {forced}: the page fits this screen "
+                      f"with the whole strip)")
+                return None
+            assert abs(root.winfo_height() - cap_h) <= 4, (
+                forced, root.winfo_height())
+            assert gui.HEALTH_MIN_LINES <= lines < gui.HEALTH_LINES, (
+                forced, lines)
+            # THE STRIP COSTS THE PAGE NOTHING HERE: the page is no
+            # taller than the window, or than it was without the strip
+            old_page = full[0] - full[1]
+            assert body_h <= max(cap_h, old_page), (
+                forced, body_h, cap_h, full)
+            # THE WHOLE IMAGE CANVAS IS ON SCREEN: inside the page's
+            # viewport, which ends above the scroller's horizontal bar,
+            # and so inside the window
+            view = app._scroll._canvas
+            view_top = view.winfo_rooty()
+            view_bottom = view_top + view.winfo_height()
+            top = app.canvas.winfo_rooty()
+            bottom = top + app.canvas.winfo_height()
+            assert view_top <= top and bottom <= view_bottom, (
+                f"screen {forced}: canvas y {top}..{bottom}, viewport "
+                f"{view_top}..{view_bottom}")
+            assert bottom <= root.winfo_rooty() + root.winfo_height()
+            assert app.canvas.winfo_height() >= gui.VIEW_MIN_H, (
+                forced, app.canvas.winfo_height())
+            # the strip is whole too, and sits above the image
+            s_top = app.health_txt.winfo_rooty()
+            s_bottom = s_top + app.health_txt.winfo_height()
+            assert view_top <= s_top and s_bottom <= top, (
+                forced, s_top, s_bottom, top)
+            # no control was dropped to make the room
+            for name in ('run_box', 'detect_btn', 'save_btn', 'accept_btn',
+                         'reject_btn', 'howto_btn', 'status', 'canvas'):
+                assert getattr(app, name).winfo_ismapped(), (forced, name)
+            if old_page <= cap_h:
+                # where the page fitted before the strip, it fits now,
+                # status line included
+                st_bottom = (app.status.winfo_rooty()
+                             + app.status.winfo_height())
+                assert body_h <= cap_h, (forced, body_h, cap_h)
+                assert st_bottom <= view_bottom, (
+                    forced, st_bottom, view_bottom)
+            # THE IMAGE GAVE BACK NO MORE THAN WAS OWED. The strip pays
+            # first; a canvas that asks for less than VIEW_H paid the
+            # rest, and then the page is exactly as tall as the window
+            # or as it was before the strip, or the image ends at the
+            # bottom of the view (its own 4 px of padding above it)
+            if gui.VIEW_MIN_H < asked < gui.VIEW_H:
+                assert (abs(body_h - max(cap_h, old_page)) <= 2
+                        or 0 <= view_bottom - bottom <= 6), (
+                    forced, body_h, cap_h, full, bottom, view_bottom)
+            else:
+                assert asked == gui.VIEW_H or asked == gui.VIEW_MIN_H, asked
+
+            # the shorter strip still does not change height with its
+            # text, and its 'more below' cue counts against the lines it
+            # SHOWS: one item per shown line is one display line too many
+            h0 = app.canvas.winfo_height()
+            few = [{'level': 'warn', 'code': f'c{k}', 'text': 'Short.'}
+                   for k in range(lines)]
+            assert 1 + len(few) <= gui.HEALTH_LINES
+            app._show_health(few)
+            settle()
+            assert int(app.health_txt.cget('height')) == lines
+            assert app.canvas.winfo_height() == h0
+            assert app.health_txt.get('1.0', '1.end').endswith(
+                gui.HEALTH_MORE), app.health_txt.get('1.0', '1.end')
+            app._show_health(few[:lines - 1])
+            settle()
+            assert gui.HEALTH_MORE not in app.health_txt.get('1.0',
+                                                             'end-1c')
+            # a run switch does not give the lines back either
+            app._populate_runs(run)
+            settle()
+            assert int(app.health_txt.cget('height')) == lines
+            assert app.canvas.winfo_height() == h0
+            return None
+        finally:
+            tk.Misc.winfo_screenheight = real_sh
+            if app is not None:
+                app._cancel_pending()
+            root.destroy()
+
+    try:
+        full = case(4000, None)
+        for forced in (864, 768, 720):
+            if real_h < forced:
+                print(f"   (skipped {forced}: this display is only "
+                      f"{real_h} px tall)")
+                continue
+            case(forced, full)
+    finally:
+        tk.Misc.winfo_screenheight = real_sh
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_scale_dialog_leads_with_the_runs_stop():
+    """Review 2026-10-02: on a STOP run the scale dialog is what the
+    student actually reads. It is modal, it opens over the Run health
+    strip, and with --auto it is up 300 ms after the window. Its banner
+    said 'measure the disc BY HAND' with the fitter's gray-level reason
+    and not one word of the STOP behind it.
+
+    The STOP sentence now leads that banner, the hand line points at it
+    and names Cancel, and what the banner gained in height comes off the
+    picture so the window is no taller than before. Advice still: the
+    dialog opens, in a hand mode, with every button. A refused fit on a
+    picture that is NOT blank (P3_7) keeps the sentence it always had.
+
+    The verify mode hides that banner, so a STOP run that still has a fit
+    to verify shows the STOP there as the banner's only line."""
+    import cv2
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    root = _tk_root_or_skip('scale dialog STOP')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_cal_stop_')
+    mb = _StubMB(yes=True)
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    gui.messagebox = mb
+    gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
+    app = None
+    saw = {}
+
+    def poke(win):
+        p = app._cal_probe
+        win.update_idletasks()
+        saw['gate'] = p['gate_lbl'].cget('text')
+        saw['shown'] = _cal_rendered(p['gate_lbl'], win)
+        saw['lines'] = _cal_visible_lines(win)
+        saw['stop_px'] = p['stop_px']
+        saw['canvas_h'] = int(p['canvas'].cget('height'))
+        saw['reqh'] = win.winfo_reqheight()
+        saw['mode'] = p['mode_var'].get()
+        saw['buttons'] = [b.cget('text') for b in _widgets(win, 'button')]
+        saw['stop_vfy_px'] = p['stop_vfy_px']
+        if todo['switch_to']:
+            # the same dialog after a switch to another method
+            for rb in _widgets_of(win, tk.Radiobutton):
+                if rb.cget('value') == todo['switch_to']:
+                    rb.invoke()
+            win.update_idletasks()
+            saw['gate2'] = p['gate_lbl'].cget('text')
+            saw['shown2'] = _cal_rendered(p['gate_lbl'], win)
+            saw['lines2'] = _cal_visible_lines(win)
+            saw['canvas_h2'] = int(p['canvas'].cget('height'))
+            saw['mode2'] = p['mode_var'].get()
+        win.destroy()
+
+    todo = {'switch_to': None}
+    try:
+        base = os.path.join('frames', 'SLDEA_s00_00.00kV_baseline.png')
+        blank = _fake_run(os.path.join(d, 'SLDEA_20260102_000000'))
+        cv2.imwrite(os.path.join(blank, base),
+                    np.full((240, 320), 67, np.uint8))
+        app = gui.EdgeReviewApp(root, path=blank)
+        app.root.wait_window = poke
+        stops = [it for it in app.health if it['level'] == 'stop']
+        assert [it['code'] for it in stops] == ['image_flat'], app.health
+
+        # through Detect, which is the press --auto makes after 300 ms
+        app.detect()
+        assert saw, "Detect did not open the scale dialog"
+        with_stop = dict(saw)
+        gate = with_stop['gate']
+        first = f"{gui.HEALTH_MARKS['stop']}: {stops[0]['text']}"
+        assert gate.startswith(first + '\n'), gate[:300]
+        assert with_stop['shown'], "the banner is not on screen"
+        assert first in with_stop['lines'], with_stop['lines']
+        for words in ('The baseline picture is blank',
+                      'cannot be measured', 'Do not calibrate by hand'):
+            assert words in gate, (words, gate)
+        # the STOP is ahead of the fit's refusal and of its reason, and
+        # the refusal no longer orders the hand measurement
+        assert gate.index('The baseline picture is blank') \
+            < gate.index('NO automatic fit on this run') \
+            < gate.index('Reason:'), gate
+        assert gui.GATE_NO_FIT_STOP in gate and gui.GATE_NO_FIT not in gate
+        assert any(b.startswith('Cancel (Esc)')
+                   for b in with_stop['buttons']), with_stop['buttons']
+        # ADVICE: the dialog opened, on a hand mode, and closing it left
+        # Detect gated on the scale exactly as on any run
+        assert with_stop['mode'] == gui.se.CAL_DEFAULT_MODE, with_stop
+        assert 'gated' in app.status.cget('text'), app.status.cget('text')
+        assert str(app.detect_btn['state']) == 'normal'
+        assert not mb.errors and not mb.infos, (mb.errors, mb.infos)
+        # the banner's extra height came off the picture
+        sh = root.winfo_screenheight()
+        assert with_stop['stop_px'] > 0, with_stop
+        assert with_stop['canvas_h'] == max(
+            300, min(760, sh - 400 - with_stop['stop_px'])), (with_stop, sh)
+
+        # the SAME run with nothing on the strip: the dialog is the one
+        # it always was, and no taller or shorter than the one above
+        saw.clear()
+        app._show_health([])
+        app._calibrate_scale()
+        plain = dict(saw)
+        assert gui.HEALTH_MARKS['stop'] not in plain['gate'], plain['gate']
+        assert plain['gate'].startswith(gui.GATE_NO_FIT + ' Reason:'), \
+            plain['gate']
+        assert plain['stop_px'] == 0
+        assert plain['canvas_h'] == max(300, min(760, sh - 400)), plain
+        if min(plain['canvas_h'], with_stop['canvas_h']) > 300:
+            assert abs(with_stop['reqh'] - plain['reqh']) <= 2, (
+                with_stop['reqh'], plain['reqh'])
+        else:
+            print("   (screen too short to compare the two window "
+                  "heights: the picture is at its 300 px floor)")
+
+        # a refused fit on a picture that is not blank is a WARNING on
+        # the strip, and its dialog carries no STOP
+        faint = _fake_run(os.path.join(d, 'SLDEA_20260103_000000'))
+        img = np.full((240, 320), 150, np.uint8)
+        img[:, :110] = 200
+        cv2.imwrite(os.path.join(faint, base), img)
+        app._populate_runs(faint)
+        assert app.rundir == faint
+        codes = [(it['level'], it['code']) for it in app.health]
+        assert ('warn', 'disc_fit_refused') in codes, codes
+        assert not [c for c in codes if c[0] == 'stop'], codes
+        saw.clear()
+        app.detect()
+        assert saw, "Detect did not open the scale dialog"
+        assert gui.HEALTH_MARKS['stop'] not in saw['gate'], saw['gate']
+        assert saw['gate'].startswith(gui.GATE_NO_FIT + ' Reason:'), \
+            saw['gate']
+        assert 'seed' in saw['gate'] and saw['stop_px'] == 0, saw
+
+        # A STOP WITH A FIT TO VERIFY. A disc only 15 gray levels darker
+        # than its paper is 'blank' to image_content (under 20) and the
+        # automatic fit still finds it, so the dialog opens in the verify
+        # mode, whose screen hides the warnings banner. The STOP is the
+        # one line that stays there, alone, and its height comes off the
+        # picture in that mode too.
+        dim = _fake_run(os.path.join(d, 'SLDEA_20260104_000000'))
+        yy, xx = np.mgrid[0:240, 0:320]
+        img = np.full((240, 320), 190, np.uint8)
+        img[(xx - 160) ** 2 + (yy - 120) ** 2 <= 80 * 80] = 175
+        cv2.imwrite(os.path.join(dim, base), img)
+        # no diameter line in setup.txt: the banner of the hand modes
+        # then holds a second warning, which the verify mode must leave
+        # to its own evidence block
+        with open(os.path.join(dim, 'setup.txt'), 'w') as f:
+            f.write("SLDEA Test -- synthetic\n")
+        app._populate_runs(dim)
+        assert app.rundir == dim
+        stops = [it for it in app.health if it['level'] == 'stop']
+        assert [it['code'] for it in stops] == ['image_flat'], app.health
+        first = f"{gui.HEALTH_MARKS['stop']}: {stops[0]['text']}"
+        saw.clear()
+        todo['switch_to'] = gui.se.CAL_MODE_CIRCLE
+        app.detect()
+        assert saw, "Detect did not open the scale dialog"
+        assert saw['mode'] == gui.se.CAL_MODE_VERIFY, saw['mode']
+        assert saw['shown'], "the verify mode hid the run's STOP"
+        assert saw['gate'] == first, saw['gate']
+        assert first in saw['lines'], saw['lines']
+        assert 'NO automatic fit' not in ' '.join(saw['lines']), saw['lines']
+        assert saw['stop_vfy_px'] > 0, saw
+        assert saw['canvas_h'] == max(
+            300, min(760, sh - 300 - saw['stop_vfy_px'])), (saw, sh)
+        # ...and a switch to a hand method keeps it on screen, with the
+        # measuring modes' height
+        assert saw['mode2'] == gui.se.CAL_MODE_CIRCLE, saw['mode2']
+        assert saw['shown2'], "the hand mode lost the banner"
+        assert saw['gate2'].startswith(first + '\n'), saw['gate2']
+        assert 'settings DEFAULT' in saw['gate2'], saw['gate2']
+        assert 'settings DEFAULT' not in saw['gate'], saw['gate']
+        assert first in saw['lines2'], saw['lines2']
+        assert saw['canvas_h2'] == max(
+            300, min(760, sh - 400 - saw['stop_px'])), (saw, sh)
+        # the same picture with nothing on the strip: the verify screen
+        # carries no banner at all, as on every ordinary run, and the
+        # window is as tall as the one with the STOP in it
+        vfy_stop = dict(saw)
+        saw.clear()
+        todo['switch_to'] = None
+        app._show_health([])
+        app._calibrate_scale()
+        assert saw['mode'] == gui.se.CAL_MODE_VERIFY, saw['mode']
+        assert not saw['shown'], saw['gate']
+        assert gui.HEALTH_MARKS['stop'] not in ' '.join(saw['lines'])
+        assert saw['stop_vfy_px'] == 0
+        assert saw['canvas_h'] == max(300, min(760, sh - 300)), (saw, sh)
+        if 300 < vfy_stop['canvas_h'] and saw['canvas_h'] < 760:
+            assert abs(vfy_stop['reqh'] - saw['reqh']) <= 2, (
+                vfy_stop['reqh'], saw['reqh'])
+        else:
+            print("   (this screen pins the verify picture at its 300 or "
+                  "760 px limit: the two window heights are not compared)")
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
         if app is not None:
             app._cancel_pending()
         root.destroy()

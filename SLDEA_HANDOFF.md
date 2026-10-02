@@ -77,6 +77,7 @@ note).
    | `ended_early` | warn | fewer rows than `setup.txt` planned, or `run.log` ends `aborted` short of the plan; says why when `run.log` knows |
    | `watchdog_trip` | warn | a row tagged `breakdown`, a `WATCHDOG` note, or the `BREAKDOWN` lines of `run.log` |
    | `frames_missing` | warn | frames named in the CSV and absent on disk |
+   | `frames_renamed` | warn | frames that are on disk under the other name of the `_BREAKDOWN` pair; says nothing is lost and that the next Save repairs the link |
    | `frames_not_taken` | warn | rows that name no frame |
    | `telemetry_i_offscreen` | warn | `i_status = offscreen` samples in `telemetry.csv` |
    | `telemetry_v_offscreen` | info | `v_status = offscreen` samples in `telemetry.csv` |
@@ -110,11 +111,25 @@ note).
      while it is being captured, and Edge Review opens on the newest run
      folder. That case reads "The run is not finished ... If the run is
      still going, wait until it ends and pick it again", not "stopped
-     early".
+     early". A run opened in its first seconds has no baseline row yet
+     either. Its `baseline_missing` stays a `stop`, but it reads "no
+     baseline picture yet ... wait until it ends and pick it again" and
+     no longer "the run has to be repeated", which contradicted the
+     warning beside it. A log that records an `ERROR` keeps the old
+     sentence.
+   - A picture that is in the frames folder under the other name of its
+     `_BREAKDOWN` pair is not missing. That state is left by a rename
+     that outlived a Save which did not finish, and
+     `plan_breakdown_marks` heals it at the next Save in either
+     direction. It was counted under `frames_missing` with the advice
+     "copy the files back from the backup"; it is now `frames_renamed`.
+     The baseline keeps its `stop` in that state, because Edge Review
+     opens it by the name `data.csv` gives.
    - The 25 % saturation cut is not tuned. It sits in the empty gap
      between the two clusters above.
 3. **The strip.** Under the toolbar, five lines tall with its own
-   scrollbar, so it changes what it says between runs and never how tall
+   scrollbar (three or four on a screen too short for the page, see
+   below), so it changes what it says between runs and never how tall
    it is. Every item opens with a mark that is a symbol and a word
    (`✘ STOP`, `⚠ WARNING`, `(i) NOTE`, `✔ OK`); the Paul Tol bright
    colour behind the mark only repeats it. `stop` sentences are also the
@@ -126,6 +141,22 @@ note).
      it does so on a `stop` run as on any other, and the scale dialog
      then opens over the strip. The `stop` is still on the strip and on
      the canvas when that dialog is closed.
+   - The scale dialog repeats the `stop`. It is modal, and the review
+     measured it on a copy of the 2026-10-01 run: 1020 x 826, covering
+     910 of the strip's 1290 px and most of the canvas hint. Its banner
+     read "NO automatic fit on this run ... measure the disc BY HAND.
+     Reason: ... the paper reads 67 gray", with no word of the `stop`
+     behind it, so the foreground window told the student to do what the
+     `stop` forbids. The `stop` sentences now lead that banner, ahead of
+     the fitter's reason, and under a `stop` the hand line reads "this
+     window can only measure the disc BY HAND. Read the STOP above
+     first. If it tells you not to measure, press Cancel (Esc)". Without
+     a `stop` the banner is the old one, word for word. What the `stop`
+     adds in height comes off the picture (30 px on that run: banner 66
+     against 36 px, picture 599 against 629), so the dialog is 1020 x
+     826 either way and Cancel stays on screen. The verify mode hides
+     the banner; on a `stop` run it shows the `stop` lines alone. Still
+     advice: no button is locked.
    - Under a `stop` the canvas does not say "Detect still works". It says
      what the button will do: with no usable baseline picture the scale
      gate has no automatic fit to verify, so Detect first asks for a hand
@@ -136,9 +167,36 @@ note).
      its 85 px came out of the review canvas: 983 x 563 against 983 x 648
      on main at the default 1319 px width. `_size_to_layout` now asks for
      760 plus the strip, so the window opens 845 px tall and the canvas
-     is 983 x 648 again. On a screen capped below that (768 px tall: a
-     648 px window) the canvas keeps its 560 px and the page scrolls
-     109 px instead of 24.
+     is 983 x 648 again.
+   - On a screen too short for the page the strip gives its height back
+     (`_fit_short_screen`, decided once when the window opens). The
+     first version did not: with the screen height forced to 768 the
+     page asked 757 px in a 648 px window and the bottom 55 px of the
+     review canvas were below the fold, where main shows the whole
+     picture. Now the strip drops to four or three lines
+     (`HEALTH_MIN_LINES = 3`; the `more below` cue counts against the
+     lines shown) and the canvas asks for less (never under
+     `VIEW_MIN_H = 400`), so the page is no taller than the window, or
+     than it was before the strip existed where that was already taller
+     than the window, and the whole image is in view. Frames are drawn
+     to fit the canvas, so the picture gets smaller, not cut. Measured
+     with the screen height forced, on the analysis PC (real height
+     1029 px):
+
+     | Screen | Window | main: page, image y, cut | now: page, strip lines, image y, cut |
+     |---|---|---|---|
+     | 1080 | 760 / 845 | 672, 58..706, 0 | 757, 5, 143..791, 0 |
+     | 900 | 760 / 780 | 672, 58..706, 0 | 757, 5, 143..726, 0 |
+     | 864 | 744 | 672, 58..690, 0 | 742, 4, 128..690, 0 |
+     | 768 | 648 | 672, 58..618, 0 | 672, 3, 113..618, 0 |
+     | 720 | 600 | 672, 58..618, 35 | 633, 3, 113..579, 0 |
+     | 600 | 480 | 672, 58..618, 155 | 567, 3, 113..513, 50 |
+
+     Under about 965 px the window cannot grow by the whole strip, so
+     the image is shorter than on main (505 against 560 px at 768, 562
+     against 632 at 864, 583 against 648 at 900) but whole. No lab
+     display height is recorded in this repo, so which row the bench
+     screens are on is not known here.
    - At the default width seven of the 16 corpus runs fit the five
      lines, the six campaign runs among them. The other nine need 7 to
      11, so the header says `more below: scroll with the mouse wheel or
@@ -194,8 +252,20 @@ reuses it.
 - **Should `--auto` hold its Detect press on a `stop`?** A first draft
   of this change did, and the review took it out: it is a gate on the
   auto-process path, and the strip is advice. The case for it is the
-  2026-10-01 run, where the scale dialog would open over the strip
-  300 ms after launch on a blank picture.
+  2026-10-01 run, where the scale dialog opens over the strip 300 ms
+  after launch on a blank picture. That dialog now leads with the
+  `stop` (decision 3), so the student is no longer told to measure by
+  hand without it; whether `--auto` should also hold its press is still
+  open.
+- **`FLAT_CONTRAST_GRAY = 20` is not tuned either.** It sits in the
+  empty band between 2 and 30. A noise-free synthetic disc 10 to 19
+  gray levels darker than its paper is called blank by `image_content`
+  and `baseline_disc` still fits it (checked at 320 x 240, 1280 x 960
+  and 1920 x 1080); at 5 levels the fit refuses. No real frame is in
+  that band. On such a run the strip says "blank" and the scale dialog
+  opens in the verify mode with the `stop` above the fit's evidence.
+  The constant is shared with the sibling branches, so moving it is one
+  decision for all three.
 - **The legacy area-only breakdown rule is unchanged.** Under 5 current
   readings an area collapse alone still confirms a breakdown and renames
   frames (three corpus runs, above). The strip now says so; whether a
@@ -239,11 +309,25 @@ Saves through the real Save button. 38 mutants were run against these
 tests (18 of the new edge code, 20 of the wording, strip and notes
 changes that followed the review); all 38 were caught.
 
+The second review round added two GUI cases (61 pass) and extended two
+edge cases (still 96): the window opened with the screen height forced
+to 864, 768 and 720 px (strip shorter, whole image in view, page no
+taller than before the strip, nothing given back beyond what was owed),
+the scale dialog on a blank baseline (STOP first, reworded hand line,
+same window height), on a refused fit that is not blank (old banner) and
+on a `stop` run that still has a fit (STOP alone in the verify mode),
+the `frames_renamed` item in both directions against what
+`plan_breakdown_marks` then does, and the live-run wording of
+`baseline_missing`. 32 more mutants of that round's code were run; all
+32 were caught, two of them only after the tests were tightened.
+
 **No bench gate.** Analysis side only: no instrument I/O, no capture or
 HV code, and no new file type in a run folder. One look is still owed on
 the Linux bench PC, with no HV: the strip was only seen on Windows, so
 open one real run there and check that the marks and the five-line strip
-draw as intended.
+draw as intended, and that the whole review image is on screen (the
+short-screen path was only measured by forcing the screen height on the
+analysis PC).
 
 ## A LIVE run locks the scope channels it reads, and the settings they share (2026-09-24)
 

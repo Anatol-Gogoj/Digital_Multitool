@@ -2536,6 +2536,31 @@ def test_run_health_baseline_missing_unreadable_or_untagged_is_a_stop():
             ('pre-ramp', 4.0, '4.0', '-16')])
         it = _item(se.run_health(none), 'baseline_missing')
         assert it['level'] == 'stop' and "tagged 'baseline'" in it['text']
+        assert 'has to be repeated' in it['text'], it['text']
+        # the same finding on a run that is STILL BEING CAPTURED (run.log
+        # has no end line yet): told to wait, not to repeat the run, so
+        # the STOP no longer contradicts the "not finished" warning
+        # beside it (review 2026-10-02)
+        live_log = "[10:00:00] run dir: /x\n"
+        for name, rows in (('live_warmup', [('warmup', 0.0, '0.0', '-16')]),
+                           ('live_header', [])):
+            live = _health_run(os.path.join(d, name), rows=rows,
+                               runlog=live_log)
+            items = se.run_health(live)
+            it = _item(items, 'baseline_missing')
+            assert it['level'] == 'stop', it
+            assert 'no baseline picture yet' in it['text'], it['text']
+            assert 'wait until it ends and pick it again' in it['text']
+            assert 'has to be repeated' not in it['text'], it['text']
+            assert _item(items, 'ended_early')['text'].startswith(
+                'The run is not finished'), items
+        # a log that records an ERROR is not a live run: the old sentence
+        err = _health_run(os.path.join(d, 'err'),
+                          rows=[('warmup', 0.0, '0.0', '-16')],
+                          runlog=live_log + "[10:00:09] ERROR: camera "
+                                            "unplugged\n")
+        assert 'has to be repeated' in _item(se.run_health(err),
+                                             'baseline_missing')['text']
         # a folder that is not a run says so instead of raising
         os.makedirs(os.path.join(d, 'empty'))
         items = se.run_health(os.path.join(d, 'empty'))
@@ -2850,6 +2875,67 @@ def test_run_health_counts_frames_missing_on_disk_and_never_taken():
         it = _item(items, 'frames_not_taken')
         assert '1 of 5 snapshots' in it['text'] and '2.00 kV' in it['text']
         assert 'frames_missing' not in _codes(items)
+
+        # A picture that IS in the folder, under its _BREAKDOWN twin name
+        # (a rename that outlived a Save which did not finish), is not
+        # missing: "copy it back from the backup" was the wrong advice
+        # (review 2026-10-02). It is counted apart and Save repairs it.
+        plain = 'SLDEA_s04_04.00kV_pre-ramp.png'
+        branded = 'SLDEA_s04_04.00kV_pre-ramp_BREAKDOWN.png'
+        assert se._frame_twin(plain) == branded
+        assert se._frame_twin(branded) == plain
+        twin = _health_run(os.path.join(d, 'twin'))
+        fdir = os.path.join(twin, 'frames')
+        os.rename(os.path.join(fdir, plain), os.path.join(fdir, branded))
+        items = se.run_health(twin)
+        assert 'frames_missing' not in _codes(items), items
+        it = _item(items, 'frames_renamed')
+        assert it['level'] == 'warn'
+        assert '1 of 5 pictures' in it['text'], it['text']
+        assert plain in it['text'] and branded in it['text'], it['text']
+        assert 'Nothing is lost' in it['text'], it['text']
+        assert 'next Save' in it['text'], it['text']
+        assert 'backup' not in it['text'], it['text']
+        # ...and what the sentence promises is what Save's rename plan
+        # does: with no breakdown flag the file gets its plain name back
+        run = se.load_run(twin)
+        se.apply_rename_plan(se.plan_breakdown_marks(run, {}))
+        assert os.path.exists(os.path.join(fdir, plain))
+        assert se.run_health(twin) == [], se.run_health(twin)
+        # the other direction: data.csv holds the branded name, the disk
+        # holds the plain file
+        rows = [('baseline', 0.0, '0.0', '-16.0'),
+                ('post-ramp', 2.0, '2.01', '-16.0'),
+                ('pre-ramp', 2.0, '2.02', '-15.8'),
+                ('post-ramp', 4.0, '4.01', '-16.2'),
+                ('pre-ramp', 4.0, '4.03', '-16.0', {'frame_file': branded})]
+        rev = _health_run(os.path.join(d, 'rev'), rows=rows)
+        fdir = os.path.join(rev, 'frames')
+        os.rename(os.path.join(fdir, branded), os.path.join(fdir, plain))
+        items = se.run_health(rev)
+        assert 'frames_missing' not in _codes(items), items
+        text = _item(items, 'frames_renamed')['text']
+        assert f"the first is {branded}, found as {plain}" in text, text
+        # one picture really gone and one renamed are two findings
+        both = _health_run(os.path.join(d, 'both'), skip_files=(
+            'SLDEA_s02_02.00kV_pre-ramp.png',))
+        fdir = os.path.join(both, 'frames')
+        os.rename(os.path.join(fdir, plain), os.path.join(fdir, branded))
+        items = se.run_health(both)
+        assert '1 of 5 pictures' in _item(items, 'frames_missing')['text']
+        assert 'SLDEA_s02_02.00kV_pre-ramp.png' in \
+            _item(items, 'frames_missing')['text']
+        assert '1 of 5 pictures' in _item(items, 'frames_renamed')['text']
+        # the BASELINE under its twin name keeps its STOP: Edge Review
+        # opens it by the name data.csv gives
+        base = _health_run(os.path.join(d, 'base_twin'))
+        fdir = os.path.join(base, 'frames')
+        os.rename(os.path.join(fdir, 'SLDEA_s00_00.00kV_baseline.png'),
+                  os.path.join(fdir,
+                               'SLDEA_s00_00.00kV_baseline_BREAKDOWN.png'))
+        items = se.run_health(base)
+        assert _item(items, 'baseline_missing')['level'] == 'stop'
+        assert 'frames_renamed' not in _codes(items), items
     finally:
         shutil.rmtree(d)
 

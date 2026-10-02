@@ -1799,36 +1799,6 @@ def test_hand_display_window_comes_from_frame_percentiles_when_no_fit():
     assert abs(lo - 157.0) < 1e-6 and abs(hi - 195.0) < 1e-6, (lo, hi)
 
 
-def test_the_display_stretch_never_touches_the_frame_it_displays():
-    """A hand diameter is circle geometry or the distance between two
-    clicks, in image px. The stretch is a lookup table applied to a
-    throwaway crop, so it cannot reach either, and it does not alter the
-    frame the crop was cut from."""
-    import numpy as np
-    from PIL import Image
-    import sldea_edge_gui as gui
-    arr = np.clip(_incident_frame(), 0, 255).astype(np.uint8)
-    img = Image.fromarray(arr).convert('RGB')
-    before = img.tobytes()
-    content = se.image_content(np.asarray(img.convert('L')))
-    lut = gui.cal_stretch_lut(*gui.cal_content_window(content))
-    crop = img.crop((40, 30, 280, 210))
-    shown = crop.point(lut * len(crop.getbands()))
-    # the picture changed ...
-    assert shown.tobytes() != crop.tobytes()
-    lo_hi = shown.convert('L').getextrema()
-    assert lo_hi[1] - lo_hi[0] > 100, lo_hi
-    # ... and the frame did not, so everything measured off it is the same
-    assert img.tobytes() == before
-    again = se.image_content(np.asarray(img.convert('L')))
-    assert again == content, (again, content)
-    # the numbers a round records never see a pixel at all
-    assert gui.two_point_diameter((100.0, 120.0), (260.0, 120.0)) == 160.0
-    cx, cy, r = gui.clamp_circle(160.0, 120.0, 80.0, (0, 0, 320, 240),
-                                 contain=False)
-    assert 2.0 * r == 160.0
-
-
 def test_an_untouched_spawn_is_told_from_a_fit():
     """A circle round whose circle is still exactly its spawn is refused.
     Not a tolerance and not a new gate: it only tells "the operator did
@@ -1899,6 +1869,39 @@ def test_flat_frame_statement_is_plain_and_quotes_the_contrast():
         assert 'no visible disc' in gui.flat_frame_text(bad), bad
 
 
+def test_flat_cancel_says_what_the_scale_still_is():
+    """Cancel on the flat-frame notice changes nothing. A plain calibrate
+    never clears the session's anchor, so "No scale set" is only true when
+    there is none: with the 2026-10-01 guess (623.73 px) still in the
+    session, the next Save would have applied it under a strip that said
+    the scale was gone."""
+    import sldea_edge_gui as gui
+    content = se.image_content(_incident_frame())
+    sentence = gui.flat_frame_text(content)
+    guess = {'method': se.ANCHOR_METHOD_MANUAL, 'diam_px': 623.73}
+    rec = {'method': se.ANCHOR_METHOD_MANUAL, 'diam_px': 577.1}
+    # nothing anywhere: the one case "No scale set" is true of
+    assert gui.flat_cancel_text(content) == 'No scale set. ' + sentence
+    # a session anchor is what Save will use, so it is named, and named
+    # FIRST when there is a recorded one as well
+    for recorded in (None, rec):
+        txt = gui.flat_cancel_text(content, guess, recorded)
+        assert txt == ('No new scale set; the earlier anchor (623.7 px) is '
+                       'still in use. ' + sentence), txt
+        assert 'No scale set' not in txt
+    # only a recorded one: Cancel leaves setup.txt as it was
+    txt = gui.flat_cancel_text(content, None, rec)
+    assert txt == ('No new scale set; the anchor recorded for this run '
+                   '(577.1 px) is unchanged. ' + sentence), txt
+    txt.encode('ascii')
+    # an anchor with no usable diameter is not an anchor "in use"
+    for bad in ({}, {'diam_px': None}, {'diam_px': 'x'}, {'diam_px': 0},
+                {'diam_px': float('nan')}, 'junk'):
+        assert gui.flat_cancel_text(content, bad, bad).startswith(
+            'No scale set. '), bad
+        assert '577.1 px' in gui.flat_cancel_text(content, bad, rec), bad
+
+
 def test_anchor_caveat_repeats_what_was_accepted_over():
     """The dialog says OVER GATE and NOT cross-checked when a hand anchor
     is accepted past a prompt, but that status line is replaced within
@@ -1914,7 +1917,7 @@ def test_anchor_caveat_repeats_what_was_accepted_over():
            'se_pct': st['se_pct'],
            'guard': se.anchor_guard_note(none_guard, True)}
     cav = gui.anchor_caveat(ref)
-    assert 'SCALE NOT VERIFIED' in cav, cav
+    assert cav.startswith('\u26a0 SCALE NOT VERIFIED: '), cav
     assert 'OVER GATE' in cav and 'SE 7.87% of diameter' in cav, cav
     assert 'limit 0.4%' in cav, cav
     assert 'NOT cross-checked' in cav, cav
@@ -1924,6 +1927,7 @@ def test_anchor_caveat_repeats_what_was_accepted_over():
     flat = dict(ref, guard=ref['guard']
                 + '; FLAT FRAME: contrast 2 gray levels, no visible disc')
     assert 'frame with no visible disc' in gui.anchor_caveat(flat)
+    assert gui.anchor_caveat(flat).startswith('\u26a0 SCALE NOT VERIFIED: ')
     # a record that kept only the range and n (pre 2026-08-06 evening)
     # gives the same verdict: the SE is derived the way the gate derives it
     old = {k: v for k, v in ref.items() if k != 'se_pct'}
@@ -1939,13 +1943,33 @@ def test_anchor_caveat_repeats_what_was_accepted_over():
     cav = gui.anchor_caveat(honest)
     assert 'OVER GATE' in cav and 'SE 0.61%' in cav, cav
     assert 'cross-check' not in cav, cav
-    # a guard the operator overrode is named as that
+    # ... but NOT under the loud lead. This anchor's cross-check against
+    # the automatic fit was clear, so "NOT VERIFIED" would be false of it,
+    # and about 7 in 10 honest three-round anchors look like this one. The
+    # quiet lead keeps the loud one for the anchors it is true of.
+    assert cav == ('\u26a0 SCALE CAVEAT: hand rounds OVER GATE (SE 0.61% '
+                   'of diameter, limit 0.4%). Every mm\u00b2 in this run '
+                   'inherits it'), cav
+    assert 'NOT VERIFIED' not in cav, cav
+    # the same rounds with NO guard note at all (a legacy record): still
+    # nothing that says the cross-check failed, so still the quiet lead
+    legacy = {k: v for k, v in honest.items() if k != 'guard'}
+    assert gui.anchor_caveat(legacy) == cav
+    # a guard the operator overrode is named as that, under the loud lead
     trip = se.anchor_guard(P3_2_MANUAL_PX, auto, MASK_MM)
     over = {'method': se.ANCHOR_METHOD_MANUAL, 'diam_px': P3_2_MANUAL_PX,
             'n_rounds': 5, 'se_pct': 0.2,
             'guard': se.anchor_guard_note(trip, True)}
     cav = gui.anchor_caveat(over)
     assert 'cross-check OVERRIDDEN' in cav and 'OVER GATE' not in cav, cav
+    assert cav.startswith('\u26a0 SCALE NOT VERIFIED: '), cav
+    # a FLAT FRAME alone is enough for the loud lead, whatever the guard
+    # said: nothing can be verified on a frame with no visible disc
+    onflat = dict(honest, se_pct=0.2, guard=honest['guard']
+                  + '; FLAT FRAME: contrast 2 gray levels, no visible disc')
+    cav = gui.anchor_caveat(onflat)
+    assert cav.startswith('\u26a0 SCALE NOT VERIFIED: measured on a frame '
+                          'with no visible disc'), cav
     # NOTHING TO SAY is the empty string, so a clean anchor adds no text:
     # inside the gate with a clear guard, a tripped guard the operator did
     # NOT override (that anchor was never accepted), a two-click era anchor

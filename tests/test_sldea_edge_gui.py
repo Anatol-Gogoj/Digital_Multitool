@@ -3476,8 +3476,8 @@ def test_a_refused_fit_falls_through_to_the_hand_measurement_and_says_why():
         # (2026-10-02): a frame with no gray-level spread at all is now a
         # FLAT frame and opens on its own plain statement first
         # (test_a_flat_frame_opens_on_a_plain_statement_with_cancel_default).
-        # This case is the other refusal -- a real picture the fitter
-        # cannot use, which is what P3_7 is -- so its frame must carry one.
+        # This case is the other refusal: a real picture the fitter
+        # cannot use, which is what P3_7 is. So its frame must carry one.
         base = os.path.join(run, 'frames', 'SLDEA_s00_00.00kV_baseline.png')
         blank = np.full((240, 320), 190, np.uint8)
         blank[:, 40:90] = 235
@@ -3752,7 +3752,7 @@ def test_an_untouched_two_point_round_is_refused():
 def test_a_flat_frame_opens_on_a_plain_statement_with_cancel_default():
     """A calibration frame with no usable picture (2026-10-01: contrast 2
     gray levels) opens on a plain statement, not on a random circle with a
-    Continue button under it. Cancel is the default and sets no scale; the
+    Continue button under it. Cancel is the default and changes nothing; the
     hand tools stay reachable through one deliberate button, and an anchor
     accepted there says in its record and on the status strip what it was
     accepted over."""
@@ -3764,6 +3764,7 @@ def test_a_flat_frame_opens_on_a_plain_statement_with_cancel_default():
     d = tempfile.mkdtemp(prefix='edge_cal_flat_')
     real_mb, real_spawn = gui.messagebox, gui.spawn_circle
     saw, calls = {}, []
+    focus_on_look = [False]
     try:
         run = _flat_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
@@ -3790,8 +3791,15 @@ def test_a_flat_frame_opens_on_a_plain_statement_with_cancel_default():
                               str(p['look_btn'].cget('default')))
             _cal_onscreen(root, win)
             win.focus_force()
+            target = win
+            if focus_on_look[0]:
+                # the focus tabbed onto the OTHER button: Enter must still
+                # cancel, not press the button it happens to sit on
+                target = p['look_btn']
+                target.focus_force()
             win.update()
-            win.event_generate('<Return>', when='now')
+            saw['focus_on_look'] = win.focus_get() is p['look_btn']
+            target.event_generate('<Return>', when='now')
             win.update()
             saw['closed_by_enter'] = not win.winfo_exists()
             if win.winfo_exists():
@@ -3820,17 +3828,49 @@ def test_a_flat_frame_opens_on_a_plain_statement_with_cancel_default():
             "Enter did not cancel the notice (or no <Return> reached it)")
         assert app.manual_ref is None, app.manual_ref
         assert app._cal_win is None and app._cal_probe is None
+        # with no anchor anywhere, "No scale set" is the true sentence
+        # (the other two wordings have their own case below)
         stat = app.status.cget('text')
-        assert 'No scale set' in stat and sentence in stat, stat
+        assert stat == '⚠ No scale set. ' + sentence, stat
+        # the notice says what Cancel does WITHOUT claiming to clear
+        # anything: a plain calibrate never clears an anchor
+        assert 'Cancel leaves the scale as it was' in saw['text'], saw['text']
+        assert 'sets no scale' not in saw['text'], saw['text']
         assert not spy.asked and not os.path.exists(log)
+        # A REFUSED GRAB costs the modality, not the notice: Tk can answer
+        # "grab failed: window not viewable", and the statement must still
+        # come up and still cancel
+        def no_grab(_self):
+            raise tk.TclError('grab failed: window not viewable')
+        calls.clear()
+        tk.Toplevel.grab_set = no_grab
+        try:
+            app._calibrate_scale()
+        finally:
+            del tk.Toplevel.grab_set
+        assert len(calls) == 1 and saw['closed_by_enter'], len(calls)
+        assert app.manual_ref is None, app.manual_ref
+        assert app.status.cget('text') == '⚠ No scale set. ' + sentence
         # ... and the Detect gate lands on the same notice, runs no
         # detection behind a cancel, and leaves the REASON on the strip
-        # rather than the generic "Detect is gated" line
+        # rather than the generic "Detect is gated" line.
+        #
+        # This time with the focus ON "Look at the frame anyway": Enter is
+        # still Cancel there. Only a click (or Space) on that button opens
+        # the hand tools.
         calls.clear()
+        focus_on_look[0] = True
         app.status.config(text='')
         app.detect()
+        focus_on_look[0] = False
         assert len(calls) == 1 and not app.cands_all, (len(calls),
                                                        app.cands_all)
+        assert saw['focus_on_look'], (
+            "the focus never reached the Look button, so this half tested "
+            "nothing new")
+        assert saw['closed_by_enter'], (
+            "Enter on the focused Look button did not cancel the notice")
+        assert app.manual_ref is None, app.manual_ref
         stat = app.status.cget('text')
         assert sentence in stat and 'gated' not in stat, stat
 
@@ -3944,6 +3984,252 @@ def test_a_flat_frame_opens_on_a_plain_statement_with_cancel_default():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_cancelling_the_flat_notice_says_what_the_scale_still_is():
+    """Cancel on the flat-frame notice changes nothing, so the status strip
+    has to say what the scale still IS. A plain calibrate never clears the
+    session's anchor: with one in place "No scale set" would be false,
+    because the next Save still applies it (review 2026-10-02). On the
+    re-anchor route the reason must also survive the caller's own
+    "re-anchor cancelled" line."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('flat notice cancel wording')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_cal_flat_cancel_')
+    real_mb = gui.messagebox
+    seen = []
+    try:
+        run = _flat_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        spy = _ModalSpy(real_mb, app)
+        gui.messagebox = spy
+        sentence = gui.flat_frame_text(gui.se.image_content(app._base_gray()))
+
+        def cancel(win):
+            p = app._cal_probe
+            assert p and p.get('notice') is win, (
+                "something other than the flat-frame notice opened")
+            seen.append('notice')
+            p['cancel_btn'].invoke()
+
+        app.root.wait_window = cancel
+        # ---- (1) A SESSION ANCHOR IS IN PLACE: the incident's own guess --
+        guess = {'method': gui.se.ANCHOR_METHOD_MANUAL, 'diam_px': 623.73,
+                 'cal_mode': CIRCLE, 'n_rounds': 3, 'se_pct': 7.87,
+                 'guard': gui.se.anchor_guard_note(None, True)}
+        app.manual_ref = guess
+        app._calibrate_scale()
+        assert seen == ['notice'], seen
+        assert app.manual_ref is guess, "Cancel changed the session anchor"
+        stat = app.status.cget('text')
+        assert stat == ('⚠ No new scale set; the earlier anchor (623.7 px) '
+                        'is still in use. ' + sentence), stat
+        assert 'No scale set' not in stat, stat
+        # ---- (2) NO SESSION ANCHOR, but one on record in setup.txt -------
+        gui.se.save_scale_anchor(
+            app.rundir, app._anchor_record(guess, 16.0 / guess['diam_px']))
+        app.manual_ref = None
+        app._calibrate_scale()
+        assert app.manual_ref is None, app.manual_ref
+        stat = app.status.cget('text')
+        assert stat == ('⚠ No new scale set; the anchor recorded for this '
+                        'run (623.7 px) is unchanged. ' + sentence), stat
+        # ---- (3) THE RE-ANCHOR ROUTE keeps the reason --------------------
+        # rows with px on record, so the re-anchor has something to
+        # re-derive and gets as far as the dialog
+        for r in app.run['rows'][1:]:
+            r['active_area_px'] = '12345.0'
+            r['active_area_mm2'] = '123.45'
+        csv_path = os.path.join(run, 'data.csv')
+        with open(csv_path, 'rb') as f:
+            before = f.read()
+        app.manual_ref = guess
+        del seen[:]
+        app._reanchor_scale()
+        assert seen == ['notice'], seen
+        assert app.manual_ref is guess, "the cancel lost the session anchor"
+        stat = app.status.cget('text')
+        assert stat == ('re-anchor cancelled — data.csv untouched. No new '
+                        'scale set; the earlier anchor (623.7 px) is still '
+                        'in use. ' + sentence), stat
+        # ... and with no session anchor it names the recorded one
+        app.manual_ref = None
+        app._reanchor_scale()
+        assert app.manual_ref is None, app.manual_ref
+        stat = app.status.cget('text')
+        assert stat == ('re-anchor cancelled — data.csv untouched. No new '
+                        'scale set; the anchor recorded for this run '
+                        '(623.7 px) is unchanged. ' + sentence), stat
+        # ---- (4) AN ORDINARY CANCEL keeps its own short line -------------
+        # past the notice and then out of the dialog: that cancel was not
+        # the notice's, so the notice's sentence is not put in its mouth
+        del seen[:]
+
+        def look_then_close(win):
+            p = app._cal_probe
+            if p.get('notice') is win:
+                seen.append('notice')
+                p['look_btn'].invoke()
+                return
+            seen.append('dialog')
+            win.destroy()
+
+        app.root.wait_window = look_then_close
+        app._reanchor_scale()
+        assert seen == ['notice', 'dialog'], seen
+        assert app.status.cget('text') == ('re-anchor cancelled — data.csv '
+                                           'untouched'), \
+            app.status.cget('text')
+        # nothing was asked, nothing was written, on any of the five routes
+        assert not spy.asked, spy.asked
+        with open(csv_path, 'rb') as f:
+            assert f.read() == before, "a cancelled re-anchor wrote data.csv"
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_frame_the_fit_found_a_disc_on_opens_no_flat_notice():
+    """The flat-frame notice is for a frame with NO automatic fit. A faint
+    frame the fit still found a disc on (step 15 gray: under the shared
+    20-level rule, well inside what baseline_disc fits) opens straight on
+    the dialog, because "no visible disc" would be false there."""
+    import sldea_edge_gui as gui
+    import cv2
+    root = _tk_root_or_skip('faint frame with a fit')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_cal_faint_')
+    real_mb = gui.messagebox
+    saw = []
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        yy, xx = np.mgrid[0:240, 0:320]
+        faint = np.full((240, 320), 190, np.uint8)
+        faint[(xx - 160) ** 2 + (yy - 120) ** 2 <= 80 * 80] = 175
+        cv2.imwrite(os.path.join(run, 'frames',
+                                 'SLDEA_s00_00.00kV_baseline.png'), faint)
+        app = gui.EdgeReviewApp(root, path=run)
+        content = gui.se.image_content(app._base_gray())
+        # SELF-CHECK: the fixture is the case under test, both halves of it
+        assert content['flat'] and content['contrast'] == 15.0, content
+        fit = app._auto_disc()
+        assert fit and abs(fit['diam_px'] - 160.0) < 2.0, fit
+        spy = _ModalSpy(real_mb, app)
+        gui.messagebox = spy
+
+        def look(win):
+            p = app._cal_probe
+            saw.append({'notice': p.get('notice') is not None,
+                        'mode': (p.get('st') or {}).get('mode'),
+                        'flat': p.get('flat'),
+                        'content_flat': (p.get('content') or {}).get('flat'),
+                        'text': _cal_display(win)})
+            win.destroy()
+
+        app.root.wait_window = look
+        app._calibrate_scale()                 # opens on the verify mode
+        app._calibrate_scale(mode=CIRCLE)      # and a hand mode, asked for
+        assert len(saw) == 2, len(saw)
+        assert [s['mode'] for s in saw] == [VERIFY, CIRCLE], saw
+        for s in saw:
+            assert s['notice'] is False, "a frame with a fit opened the notice"
+            # the metric did call it flat; the dialog did not act on it
+            assert s['content_flat'] is True and s['flat'] is False, s
+            assert 'no visible disc' not in s['text'], s['text']
+        assert app._cal_flat_cancel is None
+        assert 'no visible disc' not in app.status.cget('text')
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_committed_re_anchor_repeats_the_caveat_on_the_status_strip():
+    """A re-anchor commits the mm2 column the way a Save does, so its
+    status line carries the same caveat. Driven through the real
+    _reanchor_scale: a saved run, three hand rounds over the SE gate whose
+    cross-check against the automatic fit is clear, committed."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    root = _tk_root_or_skip('re-anchor caveat')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_reanchor_caveat_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    saw = {}
+    try:
+        se_mod = gui.se
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        # ---- a SAVED run: detected and saved once, on a clean anchor -----
+        gui.messagebox = _StubMB(yes=True)
+        app = gui.EdgeReviewApp(root, path=run)
+        fit = app._auto_disc()
+        assert fit and fit.get('diam_px'), "fixture has no automatic fit"
+        app.manual_ref = {
+            'method': se_mod.ANCHOR_METHOD_MANUAL,
+            'diam_px': float(fit['diam_px']), 'cal_mode': TWOPOINT,
+            'n_rounds': 5, 'spread_pct': 0.5, 'se_pct': 0.1,
+            'guard': se_mod.anchor_guard_note(
+                se_mod.anchor_guard(fit['diam_px'], fit, 16.0), False)}
+        app.detect_all_sync()
+        app.save()
+        assert app.status.cget('text').startswith('saved in '), \
+            app.status.cget('text')
+        # ---- a fresh session on it: px on record, no review pass open ----
+        app2 = gui.EdgeReviewApp(root, path=run)
+        assert app2._scale_intent()['intent'] == gui.SCALE_INTENT_REANCHOR, \
+            app2._scale_intent()
+        # the SE gate: No = accept as measured. The cross-check is clear
+        # (mean 160 px on a 160 px fit), so it asks nothing. Then the
+        # re-anchor's own three-way question: Yes = commit now.
+        spy = _ModalSpy(real_mb, app2, answers=[False, True])
+        gui.messagebox = spy
+        _fixed_spawn(gui, [(160.0, 120.0, 79.0), (160.0, 120.0, 80.0),
+                           (160.0, 120.0, 81.0)])
+
+        def measure(win):
+            p = app2._cal_probe
+            saw['intent'] = p['intent']
+            for rb in _widgets_of(win, tk.Radiobutton):
+                if rb.cget('value') == CIRCLE:
+                    rb.invoke()
+            saw['mode'] = p['st']['mode']
+            for _ in range(8):
+                if not win.winfo_exists():
+                    return
+                _hand_fit(app2)
+                _cal_step_button(win).invoke()
+
+        app2.root.wait_window = measure
+        app2._reanchor_scale()
+        assert saw == {'intent': gui.SCALE_INTENT_REANCHOR,
+                       'mode': CIRCLE}, saw
+        assert [t for t, _kw in spy.asked] == \
+            ['Rounds disagree', 'Re-anchor scale — SCALE ONLY'], spy.asked
+        ref = app2.manual_ref
+        assert ref is not None and ref['rounds_px'] == [158.0, 160.0,
+                                                        162.0], ref
+        assert ref['guard'].startswith('clear ('), ref['guard']
+        cav = gui.anchor_caveat(ref)
+        # AN HONEST ANCHOR: over the SE gate, cross-check clear. The quiet
+        # lead, because a check did pass.
+        assert cav.startswith('⚠ SCALE CAVEAT: hand rounds OVER GATE '
+                              '(SE '), cav
+        assert 'NOT VERIFIED' not in cav, cav
+        stat = app2.status.cget('text')
+        assert stat.startswith('RE-ANCHORED (scale only, no re-review)'), stat
+        assert stat.endswith('. ' + cav), stat
+        # ... and the record it wrote rebuilds the same sentence
+        back = se_mod.load_scale_anchor(run)
+        assert gui.anchor_caveat(back) == cav, back
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_the_status_strip_after_save_still_says_what_was_accepted_over():
     """The dialog's "OVER GATE / NOT cross-checked" status line is replaced
     by the detection readout within seconds and by "saved in ..." at Save.
@@ -3995,6 +4281,36 @@ def test_the_status_strip_after_save_still_says_what_was_accepted_over():
         # all, so the next session can say it again
         back = se_mod.load_scale_anchor(run)
         assert gui.anchor_caveat(back) == cav, back
+        # THE PLOT OR THE OVERLAYS FAILING does not lose it: data.csv is
+        # already written at this anchor by then, and that strip used to
+        # end on the error text alone
+        def boom(_scale):
+            raise RuntimeError('disk full')
+        app._save_plot = boom
+        app.save()
+        del app._save_plot
+        txt = app.status.cget('text')
+        assert txt.startswith('saved CSV; '), txt
+        assert cav in txt and txt.endswith('plot/overlays failed: disk '
+                                           'full'), txt
+        # AN HONEST ANCHOR OVER THE SE GATE gets the quiet lead: three
+        # rounds at the measured hand sigma (1.05 %), cross-check clear.
+        # "NOT VERIFIED" would be false of it.
+        clear = se_mod.anchor_guard(fit['diam_px'], fit, 16.0)
+        assert not clear['warn'], clear
+        app.manual_ref = {
+            'method': se_mod.ANCHOR_METHOD_MANUAL,
+            'diam_px': float(fit['diam_px']), 'cal_mode': CIRCLE,
+            'n_rounds': 3, 'se_pct': 1.05 / 3 ** 0.5,
+            'guard': se_mod.anchor_guard_note(clear, False)}
+        hon = gui.anchor_caveat(app.manual_ref)
+        assert hon.startswith('⚠ SCALE CAVEAT: hand rounds OVER GATE '
+                              '(SE 0.61% of diameter, limit 0.4%)'), hon
+        app.detect_all_sync()
+        app.save()
+        txt = app.status.cget('text')
+        assert txt.startswith('saved in ') and hon in txt, txt
+        assert 'NOT VERIFIED' not in txt, txt
         # A CLEAN ANCHOR ADDS NOTHING: inside the gate, guard clear
         app.manual_ref = {
             'method': se_mod.ANCHOR_METHOD_MANUAL,
@@ -4009,6 +4325,7 @@ def test_the_status_strip_after_save_still_says_what_was_accepted_over():
         txt = app.status.cget('text')
         assert txt.startswith('saved in '), txt
         assert 'NOT VERIFIED' not in txt and '⚠' not in txt, txt
+        assert 'SCALE CAVEAT' not in txt, txt
         assert 'data.csv updated' in txt, txt
     finally:
         gui.messagebox = real_mb

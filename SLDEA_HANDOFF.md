@@ -98,18 +98,40 @@ threshold or override was changed.
    notice comes first: "This frame shows no visible disc (contrast 2 gray
    levels). Calibrating by hand here would be a guess. Check the camera
    exposure and repeat the test." Cancel is the default; Enter, Esc and
-   the close box all cancel. "Look at the frame anyway" is a second, named
-   button that opens the hand tools, with the statement kept on screen.
+   the close box all cancel, and Enter cancels even with the focus on the
+   other button. "Look at the frame anyway" is a second, named button
+   (a click, or Space with the focus on it) that opens the hand tools,
+   with the statement kept on screen.
+   Cancel changes nothing, and the status strip then says which scale
+   still stands (`flat_cancel_text`): `No new scale set; the earlier
+   anchor (N px) is still in use` when the session holds one, `... the
+   anchor recorded for this run (N px) is unchanged` when only `setup.txt`
+   does, and `No scale set` only when there is neither. A plain calibrate
+   never clears the session's anchor, so with the 623.73 px guess in place
+   "No scale set" would have been false: the next Save still applies it.
+   A re-anchor cancelled at the notice keeps the same sentence after its
+   own `re-anchor cancelled` line.
 4. **The record and the strip say what was accepted over.** The
    `guard:` field in `setup.txt` now adds, in words, `OVER-GATE: SE x% of
    diameter against the 0.4% gate - accepted anyway by operator`, `FLAT
    FRAME: contrast N gray levels, no visible disc`, and the display window
    the rounds were fitted on. The detection readout says `OVER GATE`
-   instead of a bare sign. Save's status line, the reuse line and the
-   re-anchor line carry `SCALE NOT VERIFIED: hand rounds OVER GATE (...),
-   NOT cross-checked (...)`, rebuilt from the anchor's own record
-   (`anchor_caveat`), placed before the routine detail because the strip
-   is one unwrapped line.
+   instead of a bare sign. Save's status line (also the one shown when
+   the plot or the overlays fail), the reuse line and the re-anchor line
+   carry a caveat rebuilt from the anchor's own record (`anchor_caveat`),
+   placed before the routine detail because the strip is one unwrapped
+   line. It has two leads:
+
+   | Lead | Said when | 2026-10-01 anchor |
+   |---|---|---|
+   | `SCALE NOT VERIFIED:` | nothing independent agreed with the anchor: `NOT cross-checked`, `cross-check OVERRIDDEN`, or a flat frame | yes: `hand rounds OVER GATE (SE 7.87% of diameter, limit 0.4%), NOT cross-checked (no automatic disc fit)` |
+   | `SCALE CAVEAT:` | the cross-check was clear and the only flag is the SE gate | no |
+
+   The quiet lead exists because three honest rounds are over the SE gate
+   about 7 times in 10 (28.9 % of 100 000 simulated sets pass at sigma
+   1.05 %, through `calibration_stats` and `se_ok`). "NOT VERIFIED" on an
+   anchor whose cross-check passed would be false, and saying it on most
+   honest anchors would wear the words out for the run that needs them.
 
 **What did not change.** The SE gate (0.4 %), the anchor guard (1 %),
 their order, their prompts, their defaults, and the override. The size
@@ -123,9 +145,23 @@ crop; a diameter is circle geometry or two click positions in image px.
 
 - The stretch changes what a person sees, so it can change where they put
   the mark. Every hand-repeatability number on record (sigma about 1.05 %
-  circle, 2.09 % two-point, 2026-08-06) was measured on the RAW view. The
-  new view is not measured. The window is written into the `guard:` note
-  so the two eras can be told apart.
+  circle, 2.09 % two-point, 2026-08-06) was measured on the RAW view. No
+  person has been measured on the new one. The window is written into the
+  `guard:` note so the two eras can be told apart.
+- How far the picture's edge moves was measured by proxy: the half-height
+  of the median radial profile, on the raw luminance and on the displayed
+  one, for the 10 baselines that have a fit to take a centre from.
+  The **percentile window** keeps the half-height within 0.3 % of diameter
+  of the raw one on all 10. The **fit window** does not: it is narrow and
+  clips the paper, and on DOT_P3_1, P3_2, P3_6 and 0729_104531 the
+  displayed half-height sits 0.9, 1.7, 2.2 and 2.8 % of diameter INSIDE
+  the raw one (the other four discs: under 0.6 %). Against the automatic
+  fit neither view is closer: the mean offset over the 8 disc baselines is
+  0.64 % with the fit window, 0.85 % raw, 0.92 % with the percentile
+  window. The fit window is only used where a fit exists, so the
+  cross-check prompt still stands behind those rounds; the no-fit
+  fallback, which is the path this entry is about, gets the percentile
+  window.
 - The untouched check stops a round nobody fitted. It does not stop a
   careless one: nudge each circle one px and the rounds bank. The SE gate
   and the cross-check prompt are still what stands behind that.
@@ -145,6 +181,10 @@ crop; a diameter is circle geometry or two click positions in image px.
   of the time (science review S42). On a refused-fit run there is no
   cross-check either, so the rule would refuse about 7 in 10 honest
   3-round anchors on exactly the runs that need a hand anchor.
+- *Which window should the hand modes use when a fit exists?* Shipped:
+  the verify mode's, so the picture is the same in all three methods. The
+  percentile window would not move the half-height (previous section),
+  at the cost of a picture that changes when the method does.
 - The notice says "no visible disc". On the stretched view the 2026-10-01
   disc is visible. The sentence is true of the raw frame and of the
   recommendation (repeat the test); whether it should say "too dark to
@@ -152,16 +192,24 @@ crop; a diameter is circle geometry or two click positions in image px.
 
 **Verification.** `tests/test_sldea_calibration.py` (68, 6 new, headless)
 pins the arithmetic: the flat rule, the percentile window, the untouched
-test against every gesture's smallest step, the statement, the caveat.
-`tests/test_sldea_edge_gui.py` (59, 5 new, needs a display) drives the
-dialog: the refusal by button, by Enter and after Back; the two-point
-refusal; the notice with Enter cancelling, then the second step through
-both prompts to a record that says OVER-GATE, FLAT FRAME and the window;
-the Save strip; and the same gestures recording byte-identical diameters
-with the stretch on and off, in both hand modes. Each new behaviour was
-also switched off in a scratch copy to confirm its case fails. On a copy
-of the real 2026-10-01 run the dialog opened on the notice, and three
-Continue presses on the spawns banked nothing.
+test against every gesture's smallest step, the statement, the Cancel
+wording, the caveat and its two leads.
+`tests/test_sldea_edge_gui.py` (62, 8 new, needs a display) drives the
+dialog: the refusal by button, by Enter, on the last round's Finish and
+after Back; the two-point refusal; the notice with Enter cancelling from
+either button and with the window grab refused, then the second step
+through both prompts to a record that says OVER-GATE, FLAT FRAME and the
+window;
+Cancel at the notice with a session anchor, with only a recorded one and
+on the re-anchor route; no notice on a faint frame the fit still found a
+disc on (step 15 gray); the Save strip, with the plot failing and with an
+honest over-gate anchor; a committed re-anchor's strip; and the same
+gestures recording byte-identical diameters with the stretch on and off,
+in both hand modes. Each new behaviour was also switched off in a scratch
+copy to confirm its case fails. On a copy of the real 2026-10-01 run the
+dialog opened on the notice, three Continue presses on the spawns banked
+nothing, and Cancel with the 623.73 px guess in the session left it in
+place and said so.
 
 ## A LIVE run locks the scope channels it reads, and the settings they share (2026-09-24)
 

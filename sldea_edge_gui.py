@@ -1119,6 +1119,41 @@ def flat_frame_text(content):
             f"test.")
 
 
+def flat_cancel_text(content, in_use=None, recorded=None):
+    """The status-strip sentence after Cancel on the flat-frame notice.
+
+    Cancel changes NOTHING, so the sentence has to say what the scale
+    still is and not only that no new one was made. A plain calibrate
+    never clears the session's anchor: a student who accepted a guess,
+    reopened Calibrate, read the notice and cancelled was told "No scale
+    set" while Save would still have used the guess (review 2026-10-02).
+
+    `in_use` is the session's anchor (manual_ref), the one Detect and
+    Save apply. `recorded` is the anchor block in setup.txt, which a
+    cancel leaves as it was too. The session's anchor is named first
+    because it is the one the next Save writes with; "No scale set" is
+    said only when there is neither.
+
+    Pure, so the wording is a headless test."""
+    def px(ref):
+        try:
+            v = float((ref or {}).get('diam_px'))
+        except (TypeError, ValueError, AttributeError):
+            return None
+        return v if (math.isfinite(v) and v > 0) else None
+
+    cur, rec = px(in_use), px(recorded)
+    if cur is not None:
+        head = (f"No new scale set; the earlier anchor ({cur:.1f} px) is "
+                f"still in use.")
+    elif rec is not None:
+        head = (f"No new scale set; the anchor recorded for this run "
+                f"({rec:.1f} px) is unchanged.")
+    else:
+        head = "No scale set."
+    return head + ' ' + flat_frame_text(content)
+
+
 def anchor_caveat(ref):
     """What is NOT settled about a HAND anchor, as one clause for the
     status strip, or '' when there is nothing to say.
@@ -1136,12 +1171,24 @@ def anchor_caveat(ref):
     `guard` note that se.anchor_guard_note wrote. A reused anchor loaded
     from setup.txt therefore gets the same sentence as a fresh one.
 
+    TWO LEADS, and the loud one is kept for the anchors it is true of
+    (review 2026-10-02). "SCALE NOT VERIFIED" is said only when nothing
+    independent agreed with the anchor: no cross-check was available, the
+    cross-check was overridden, or the frame had no visible disc. An
+    anchor whose cross-check against the automatic fit was CLEAR and whose
+    only flag is the SE gate reads "SCALE CAVEAT": a check did pass, and
+    three honest hand rounds are over that gate about 7 times in 10
+    (sigma 1.05 % gives SE 0.61 % against 0.4 %), so the loud lead there
+    would be false and would wear the words out for the run that needs
+    them.
+
     '' for a verified automatic fit: it has no rounds and no guard to
     override, and its own status wording already says it is not
     cross-checked."""
     if not ref or se.guard_is_vacuous(ref):
         return ''
     bits = []
+    unverified = False
     sep = ref.get('se_pct')
     if sep is None and ref.get('spread_pct') is not None:
         nr = ref.get('n_rounds')
@@ -1156,13 +1203,17 @@ def anchor_caveat(ref):
     note = str(ref.get('guard') or '')
     if note.startswith('NOT CROSS-CHECKED'):
         bits.append("NOT cross-checked (no automatic disc fit)")
+        unverified = True
     elif note.startswith('OVERRIDDEN'):
         bits.append("cross-check OVERRIDDEN")
+        unverified = True
     if 'FLAT FRAME' in note:
         bits.append("measured on a frame with no visible disc")
+        unverified = True
     if not bits:
         return ''
-    return ("⚠ SCALE NOT VERIFIED: " + ', '.join(bits)
+    lead = "SCALE NOT VERIFIED" if unverified else "SCALE CAVEAT"
+    return (f"⚠ {lead}: " + ', '.join(bits)
             + ". Every mm² in this run inherits it")
 
 
@@ -1706,6 +1757,10 @@ class EdgeReviewApp:
         # gate dialog would chain a second detect worker (review 2026-08-05)
         self._cal_probe = None  # the live calibration dialog's own state,
         # published for the tests that drive it (see _calibrate_scale)
+        self._cal_flat_cancel = None   # se.image_content's dict when the
+        # LAST _calibrate_scale call ended on Cancel at the flat-frame
+        # notice, else None. _reanchor_scale reads it so its own
+        # "cancelled" line can keep the reason (2026-10-02)
         self._howto_win = None  # ❓ How to use (`#238`) — singleton, and
         # NON-modal on purpose: the whole point is to read it beside the
         # window while working, not instead of it
@@ -3600,7 +3655,13 @@ class EdgeReviewApp:
             self._save_plot(scale)
             self._save_overlays()
         except Exception as e:
-            self.status.config(text=f"saved CSV; plot/overlays failed: {e}")
+            # data.csv is already written at this anchor, so the caveat
+            # belongs on this strip as much as on the one below, and ahead
+            # of the error text for the same reason (2026-10-02)
+            cav = anchor_caveat(self.manual_ref)
+            self.status.config(text="saved CSV; "
+                                    + (f"{cav}. " if cav else '')
+                                    + f"plot/overlays failed: {e}")
             return
         scale_txt = (f"scale {scale:.5f} mm/px [{src}]" if scale
                      else "no mm scale — use 📏 Calibrate / "
@@ -3899,7 +3960,8 @@ class EdgeReviewApp:
                      font=('TkDefaultFont', 11, 'bold')).pack(
                          anchor='w', padx=14, pady=(14, 6))
             tk.Label(dlg,
-                     text="Cancel sets no scale on this run (recommended).\n"
+                     text="Cancel leaves the scale as it was "
+                          "(recommended).\n"
                           "\"Look at the frame anyway\" opens the hand "
                           "tools on a contrast-stretched view so the "
                           "picture can be inspected. A scale accepted "
@@ -3914,16 +3976,25 @@ class EdgeReviewApp:
                 out['go'] = True
                 dlg.destroy()
 
+            def cancel(_ev=None):
+                dlg.destroy()
+                return 'break'
+
             look_btn = tk.Button(row, text="Look at the frame anyway",
                                  command=go)
             look_btn.pack(side=tk.LEFT)
             cancel_btn = tk.Button(row, text="Cancel (Esc)",
-                                   default='active', command=dlg.destroy)
+                                   default='active', command=cancel)
             cancel_btn.pack(side=tk.RIGHT)
             # Enter is Cancel wherever the focus is: a key press must not
-            # be able to open the hand tools on a frame like this one
-            dlg.bind('<Return>', lambda _e: (dlg.destroy(), 'break')[1])
-            dlg.bind('<Escape>', lambda _e: (dlg.destroy(), 'break')[1])
+            # be able to open the hand tools on a frame like this one.
+            # Bound on the two buttons as well as on the window, because a
+            # widget's own binding runs before its window's: with the focus
+            # tabbed onto "Look at the frame anyway", this is what answers
+            # Enter, whatever a Tk build's Button class does with that key.
+            for w in (dlg, look_btn, cancel_btn):
+                w.bind('<Return>', cancel)
+            dlg.bind('<Escape>', cancel)
             dlg.protocol('WM_DELETE_WINDOW', dlg.destroy)
             cancel_btn.focus_set()
             self._cal_win = dlg
@@ -3932,7 +4003,15 @@ class EdgeReviewApp:
             self._cal_probe = {'notice': dlg, 'content': content,
                                'look_btn': look_btn,
                                'cancel_btn': cancel_btn}
-            dlg.grab_set()
+            try:
+                dlg.grab_set()
+            except tk.TclError as e:
+                # Tk can refuse a grab ("grab failed: window not
+                # viewable"). That must cost the modality, not the notice:
+                # wait_window below still holds the calibration until the
+                # operator answers, and the singleton above still fronts
+                # this window instead of stacking a second one.
+                print(f"calibrate: flat-frame notice has no grab: {e}")
             self.root.wait_window(dlg)
         finally:
             self._cal_win = None
@@ -4120,6 +4199,7 @@ class EdgeReviewApp:
         opens on a plain statement first (_flat_frame_notice). No gate, no
         threshold and no override was changed."""
         import random
+        self._cal_flat_cancel = None
         if not self.run:
             messagebox.showinfo("Calibrate", "Pick a run first")
             return
@@ -4191,10 +4271,21 @@ class EdgeReviewApp:
             # sentence, because the notice is gone and "Detect is gated on
             # the scale calibration" would send the student straight back
             # into it without the reason.
+            #
+            # AND WHAT THE SCALE STILL IS (flat_cancel_text). A plain
+            # calibrate never clears manual_ref, so with a session anchor
+            # in place "No scale set" would be false: the next Save still
+            # applies that anchor. On the re-anchor route the caller has
+            # cleared manual_ref to tell a cancel from an accept, so the
+            # line written here is replaced by _reanchor_scale's own,
+            # which reads _cal_flat_cancel to keep the reason.
+            self._cal_flat_cancel = content
             print("calibrate: flat frame (contrast "
-                  f"{content['contrast']:.1f} gray levels), no scale set")
-            self.status.config(text="⚠ No scale set. "
-                                    + flat_frame_text(content))
+                  f"{content['contrast']:.1f} gray levels), cancelled at "
+                  "the notice, no new scale set")
+            self.status.config(
+                text="⚠ " + flat_cancel_text(content, self.manual_ref,
+                                             recorded))
             return
         win = tk.Toplevel(self.root)
         try:
@@ -6511,8 +6602,16 @@ class EdgeReviewApp:
         new_ref = self.manual_ref
         if new_ref is None:
             self.manual_ref = was
-            self.status.config(text="re-anchor cancelled — data.csv "
-                                    "untouched")
+            # Cancelled at the flat-frame notice: keep the reason, and say
+            # which scale is still standing (the session's anchor restored
+            # just above, else the recorded one). Without this the strip
+            # read only "re-anchor cancelled" and the notice's sentence
+            # was gone with the notice (review 2026-10-02).
+            why = self._cal_flat_cancel
+            self.status.config(
+                text="re-anchor cancelled — data.csv untouched"
+                     + (". " + flat_cancel_text(why, was, prev)
+                        if why else ''))
             return
         # the SAME derivation Save performs, on an empty results dict: a
         # human-signed anchor beats every automatic reference, so this is

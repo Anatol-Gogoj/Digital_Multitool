@@ -766,10 +766,17 @@ The load-bearing choices:
    fooled the same way agree beautifully (correlated error is exactly
    what pair agreement cannot certify against). A pair
    *disagreement* caps both snapshots, with one exception since
-   2026-10-03: a tracked boundary with a clean audit whose mate is a
-   patch tier keeps its own confidence (the patch outlines a
-   different object; the patch member stays capped, so the landing is
-   still queued).
+   2026-10-03: a tracked boundary with a recorded, clean audit
+   verdict whose mate is a patch tier keeps its own confidence. The
+   exception relies only on that verdict (the ink step under the
+   outline was measured) and on the patch member staying capped, so
+   the landing is still queued; it does not know why the snapshots
+   disagree. On the review corpus it fired on one definition
+   mismatch (a diff blob inside the tracked disc) and on two one-sided
+   mid-hold collapses (a buckled post-ramp snapshot only a tex-ratio
+   patch outlines, a collapsed pre-ramp disc the tracker reads): there
+   the accepted number is the collapsed state's, and the human sees the
+   collapse through the capped member.
 
 ### Level 5 — referee / metrologist
 

@@ -3748,23 +3748,33 @@ def reconcile_pairs(rows, cands_by_idx, settings):
     is one landing, so the pairs -- and every result -- are unchanged.
 
     One member is NOT capped by a mismatch (2026-10-03): a tracker
-    result ('disc-fit') with a clean audit whose every mate is a patch
-    tier ('tex-ratio' or a 'diff-*' region). The patch tiers outline a
-    changed region or the wrinkled interior, not the boundary, so such
-    a disagreement is one of definition (the mate picked a different
-    object), not two readings of one state that contradict each other;
-    the audit has already checked the ink step under the tracked
-    outline. The tracked member keeps its own confidence (no
-    confirmation bonus either: nothing confirmed it) and is tagged
-    'pair_mate_patch' with the mismatch; the patch members stay capped
-    and tagged as before, so the landing still reaches the review queue
-    through them, and a patch tier can never ride an exemption. On the
-    review corpus (OpenCV 4.13, with the wider tracker window of the
-    same date) this freed 3 audit-clean tracked frames that sat in
-    review only because of their mate, and SquareStack-1 L6 pre (a
+    result ('disc-fit') carrying a recorded audit verdict that tripped
+    neither gate, whose every mate is a patch tier ('tex-ratio' or a
+    'diff-*' region). What the exemption relies on is only this: the
+    tracked member's own audit has measured the ink step under its
+    outline and vouches for its number, and the patch member stays
+    capped, so the landing is still queued for a human. It does NOT
+    claim to know why the two snapshots disagree, and it cannot: on
+    the review corpus (OpenCV 4.13, with the wider tracker window of
+    the same date) it fired three times, once on a disagreement of
+    definition (SLDEA_20260723_233451 L17: a diff-lo blob inside a disc
+    the same size as the tracked mate's) and twice on a one-sided
+    mid-hold collapse (P3_3 L23 and P3_5 L23: the post-ramp snapshot is
+    a buckled membrane that only a tex-ratio patch outlines, the
+    pre-ramp snapshot a smooth collapsed disc the tracker reads). In
+    the collapse case the accepted number is the collapsed state's,
+    consistent with the next landing, and the human still sees the
+    collapse through the capped patch member. The tracked member keeps
+    its own confidence (no confirmation bonus either: nothing confirmed
+    it) and is tagged 'pair_mate_patch' with the mismatch; the patch
+    members stay capped and tagged as before, and a patch tier can
+    never ride an exemption. A tracker with no audit verdict at all
+    (audit_boundary returned None) is capped as before: the exemption
+    must not ride on the absence of a check. SquareStack-1 L6 pre (a
     tex-ratio patch at 0.23 x A0 beside a bias-tripped tracker fit)
-    stays in review. Both-tracker pairs (the mid-hold collapses) and
-    tracker-versus-resting pairs are capped exactly as before."""
+    stays in review. Both-tracker pairs (a collapse both snapshots
+    track) and tracker-versus-resting pairs are capped exactly as
+    before."""
     acc = float(settings.get('accept_conf', 0.75))
     by_landing = {}
     for i, pos in enumerate(sweep_landings(rows)):
@@ -3814,10 +3824,13 @@ def _is_patch_tier(cand):
 
 def _pair_mate_is_patch(cand, members):
     """reconcile_pairs' exemption (2026-10-03): `cand` is a tracker
-    result with a clean audit, and every other member of its landing
-    is a patch tier. See the docstring there."""
+    result with a RECORDED audit verdict (audit_boundary ran and
+    returned one) that tripped neither gate, and every other member of
+    its landing is a patch tier. See the docstring there."""
     if cand.get('method') != 'disc-fit':
         return False
+    if cand.get('audit') is None:
+        return False                    # no verdict is not a clean one
     if cand.get('audit_nostep') or cand.get('audit_bias'):
         return False
     mates = [b for b in members if b is not cand]

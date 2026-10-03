@@ -26,9 +26,9 @@ tiers to choose from now get the tracker: 5 auto-accept with the outline
 on the ink edge, 7 queue with the tracker as candidate A, 1 is still
 hidden behind three patch tiers. No frame that was already accepted
 moved by more than 0.21 % on a campaign run (0.95 % on retired 152205).
-Separately, a tracked frame with a clean audit is no longer capped into
-review because the other snapshot of its landing was won by a patch tier;
-the patch member stays capped, so the landing is still queued.
+Separately, a tracked frame with a clean audit verdict is no longer capped
+into review because the other snapshot of its landing was won by a patch
+tier; the patch member stays capped, so the landing is still queued.
 
 **Observation -> decision.** Measured on the 16 run folders of the review
 copy (899 frames), OpenCV 4.13, replaying detection as Edge Review runs it,
@@ -77,21 +77,36 @@ reference; branch `claude/sldea-tracker-range` stacks on
   in review on the audit. DOT_P3_1 r51 (6.5 kV post) is tracked at
   1.882 (conf 0.70) but drops off the three-candidate list behind three
   off-centre diff patches at 0.01 to 0.02x A0; left for the owner.
-- *Decision: the pair cap spares an audit-clean tracked frame whose mate
-  is a patch tier* (findings S37/S40). The patch tiers outline a changed
-  region or the wrinkled interior, not the boundary, so the mismatch is
-  one of definition; the audit has already checked the ink step under the
-  tracked outline. `reconcile_pairs` leaves that member's confidence alone
-  (no bonus), tags it `pair_mate_patch`, and caps the patch member as
-  before. Both-tracker pairs (the mid-hold collapses) and tracker-versus-
-  resting pairs are capped as before. On the corpus this frees P3_3 r46
-  (5.75 kV pre, 1.217x A0, conf 0.80), P3_5 r46 (5.75 kV pre, 1.242,
-  conf 0.91) and 233451 r34 (3.4 kV pre, 1.159, conf 0.79); with the old
-  tracker limits it would have freed six. SquareStack-1 L6 pre (r12, a
-  tex-ratio patch at 0.23x A0 beside a bias-tripped tracker fit) stays in
-  review, as does every patch member of a mismatch. The frozen `78315cc`
-  pairing oracle in the tests is kept verbatim; the test applies this one
-  exemption to its output.
+- *Decision: the pair cap spares a tracked frame with a clean audit
+  verdict whose mate is a patch tier* (findings S37/S40). The rule relies
+  on two things only: the tracked member's own audit has measured the ink
+  step under its outline and vouches for its number, and the patch member
+  stays capped, so the landing is still queued for a human. It does not
+  claim to know why the two snapshots disagree, and the corpus shows it
+  cannot: of the three landings it frees, one is a disagreement of
+  definition (233451 L17: r33's diff-lo blob sits inside a disc the same
+  size as r34's tracked one) and two are one-sided mid-hold collapses
+  (P3_3 L23 and P3_5 L23: the post-ramp snapshot r45 is a heavily buckled
+  membrane that only a tex-ratio patch outlines, at 1.84x and 1.55x A0;
+  the pre-ramp snapshot r46 is a smooth collapsed disc the tracker reads
+  at 1.217 and 1.242, consistent with the next landing's 1.204 and 1.229).
+  In the collapse case the accepted number is the collapsed state's, and
+  the human still sees the collapse through the capped patch member.
+  `reconcile_pairs` leaves the tracked member's confidence alone (no
+  bonus), tags it `pair_mate_patch`, and caps the patch member as before.
+  A tracker with no recorded verdict (the audit could not run: fewer than
+  12 open audit rays) is capped as before, so the exemption never rides
+  on the absence of a check; on the corpus every tracked winner carries
+  a verdict. Both-tracker pairs (a collapse both snapshots track) and
+  tracker-versus-resting pairs are capped as before. On the corpus this
+  frees P3_3 r46 (5.75 kV pre, 1.217x A0, conf 0.80, audit no-step 2.1 %,
+  bias 0.1 px), P3_5 r46 (5.75 kV pre, 1.242, conf 0.91, no-step 4.4 %,
+  bias 1.3 px) and 233451 r34 (3.4 kV pre, 1.159, conf 0.79, no-step
+  9.6 %, bias 0.6 px); with the old tracker limits it would have freed
+  six. SquareStack-1 L6 pre (r12, a tex-ratio patch at 0.23x A0 beside a
+  bias-tripped tracker fit) stays in review, as does every patch member
+  of a mismatch. The frozen `78315cc` pairing oracle in the tests is kept
+  verbatim; the test applies this one exemption to its output.
 - *Not taken.* Folding pair agreement within one method family only: it
   would have let SquareStack-1 L6 pre auto-accept, since nothing would
   compare the patch with the tracked mate. An anchored search window: see
@@ -106,10 +121,29 @@ before. Numbers are OpenCV 4.13. Nothing on the lab share was
 reprocessed. A run reprocessed through Edge Review after this change
 carries the same `area_estimator: 2` stamp as before: the functional did
 not change, and the wider window moves an already accepted campaign value
-by at most 0.21 % (0.95 % on retired 152205), through the baseline rays
-and the trim, which is under the frame noise. No run outside the review
-copy has been stamped 2 yet; whether this deserves its own stamp is the
-owner's call.
+by at most 0.21 % (0.95 % on retired 152205). Where that movement comes
+from, measured: the baseline rays, the denominator of every ratio, are
+unchanged ray for ray on every campaign run and on 152205, 233451 and
+104531 (360 rays, same finite set, max difference 0.000 px; only
+SquareStack-1 differs, on 4 rays by up to 14.9 px, and it has no tracked
+auto-accepts). The movement is on the frame side: on a few rays the
+wider argmax is taken by a stronger dark-to-light step beyond 1.38 r0,
+and that ray then either fails the sustained-step test and is dropped,
+or jumps outward and is removed by the 2.5 sigma trim. Of the 447 frames
+tracked and auto-accepted on both sides, 72 lose 1 to 14 frame-side rays
+(4 gain one or more), 18 carry rays locked beyond 1.38 r0 (66 rays in
+all: 8 of those frames on campaign runs with one ray each, 9 on 152205
+with 1 to 15, 1 on 233451 with 3), and the ratio moves by a median of
+0.00 %, a 90th percentile of 0.02 %, at most 0.21 % on a campaign run
+and 0.95 % on 152205. The clearest single case is 233451 r43 (4.4 kV
+post, auto-accepted before, queued now): 8 rays at 232 to 240 deg jump
+from 0.91 to 1.52 r0 and 11 rays are lost, moving the ratio from 1.248
+to 1.261 and the ellipse from 1.17 to 1.26x A0, which is why its audit
+now trips. No run outside the review copy has been stamped 2 yet; a row
+accepted from the queue under the old window and one under the new are
+indistinguishable on disk (same stamp), so whether the window deserves
+its own stamp line (`ray_win_hi`, `disc_fit_r_max` beside the version)
+is the owner's call.
 
 ## A and A0 become one measurement: the disc-fit area is a common-ray ratio, and gated frames are measured (2026-10-02)
 

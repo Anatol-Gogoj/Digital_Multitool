@@ -1580,9 +1580,13 @@ def test_tracker_follows_the_disc_past_the_old_ceiling():
 
 def test_tracker_refuses_a_disc_beyond_its_reach():
     """The limits are a ceiling, not a licence: an edge past the search
-    window has no ray on it, and the tracker refuses (no candidate)
-    rather than fitting whatever step is left inside the window. A
-    patch tier may still outline the frame for the human."""
+    window has no ray on it. With no step inside the window the tracker
+    refuses (no candidate), which is what this synthetic scene shows;
+    a step that IS inside the window is still fitted (the lock-in
+    documented in SLDEA_HANDOFF.md 2026-10-03: +8 to +16 % on wrinkled
+    frames whose edge left the window), so the audit, not this gate, is
+    what catches a disc that has outgrown the window. A patch tier may
+    still outline the frame for the human."""
     s = dict(se.DEFAULT_SETTINGS)
     base = _flared_scene()
     ref = se.baseline_disc(base, s)
@@ -2124,15 +2128,16 @@ def test_reconcile_pairs_boosts_agreement_and_caps_contradiction():
         1: [{'method': 'disc-fit', 'area_px': 101000.0, 'conf': 0.78,
              'ci85_pct': 0.5}],
         2: [{'method': 'disc-fit', 'area_px': 140000.0, 'conf': 0.92,
-             'ci85_pct': 0.4}],
+             'ci85_pct': 0.4, 'audit': {'bias_px': 0.3, 'mad_px': 1.1,
+                                        'nostep_pct': 4.0, 'n_rays': 120}}],
         3: [{'method': 'diff-lo', 'area_px': 60000.0, 'conf': 0.88,
              'ci85_pct': None}],
     }
     stats = se.reconcile_pairs(rows, cands, dict(se.DEFAULT_SETTINGS))
-    # 2026-10-03: the tracked member of landing 2 has a clean audit and
-    # its only mate is a patch tier, so it is no longer capped (see
-    # test_audit_clean_tracker_is_not_capped_by_a_patch_mate); the
-    # patch member still is
+    # 2026-10-03: the tracked member of landing 2 carries a clean audit
+    # verdict and its only mate is a patch tier, so it is no longer
+    # capped (see test_audit_clean_tracker_is_not_capped_by_a_patch_mate);
+    # the patch member still is
     assert stats == {'confirmed': 2, 'capped': 1}, stats
     assert cands[0][0]['conf'] == 0.85 and cands[0][0]['pair_confirmed']
     assert cands[1][0]['conf'] == 0.83
@@ -2146,23 +2151,30 @@ def test_reconcile_pairs_boosts_agreement_and_caps_contradiction():
 
 
 def test_audit_clean_tracker_is_not_capped_by_a_patch_mate():
-    """2026-10-03 (review findings S37/S40): about nine audit-clean
-    tracker frames per corpus pass sat in review only because the other
-    snapshot of their landing was won by a patch tier (tex-ratio or a
-    diff region), which outlines a different object. That is a
-    disagreement of definition, not two readings of one state, and the
-    audit has already checked the ink step under the tracked outline.
-    The rule is the narrowest one: the tracked member keeps its own
-    confidence (no bonus) and is tagged; the patch member stays capped,
-    so the landing still reaches the queue through it. Everything
-    else -- both-tracker pairs (a real mid-hold collapse), tracker
-    versus resting, an audit-tripped tracker beside a patch (the
-    SquareStack-1 L6 shape: a 0.23 x A0 tex patch beside a bias-tripped
-    fit) -- is capped exactly as before."""
+    """2026-10-03 (review findings S37/S40): tracker frames with a clean
+    audit sat in review only because the other snapshot of their landing
+    was won by a patch tier (tex-ratio or a diff region). The rule is
+    the narrowest one and relies on exactly two things: the tracked
+    member's own audit verdict vouches for its number (it measured the
+    ink step under the outline and tripped neither gate), and the patch
+    member stays capped, so the landing still reaches the queue through
+    it. It does not claim to know why the snapshots disagree: on the
+    corpus it fired on a definition mismatch (233451 L17) and on
+    one-sided mid-hold collapses where the buckled snapshot has no
+    tracker (P3_3 L23, P3_5 L23). The tracked member keeps its own
+    confidence (no bonus) and is tagged. Everything else -- both-tracker
+    pairs (a collapse both snapshots track), tracker versus resting, an
+    audit-tripped tracker beside a patch (the SquareStack-1 L6 shape: a
+    0.23 x A0 tex patch beside a bias-tripped fit), and a tracker with
+    NO recorded verdict (audit_boundary returned None: the exemption
+    must not ride on the absence of a check) -- is capped exactly as
+    before."""
     s = dict(se.DEFAULT_SETTINGS)
     acc = s['accept_conf']
     cap = round(acc - 0.01, 3)
-    rows = [{'nominal_kV': str(k)} for k in (1, 1, 2, 2, 3, 3, 4, 4, 5, 5)]
+    rows = [{'nominal_kV': str(k)}
+            for k in (1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6)]
+    clean = {'bias_px': 0.2, 'mad_px': 1.4, 'nostep_pct': 3.5, 'n_rays': 130}
 
     def best(method, area, conf, **tags):
         c = {'method': method, 'area_px': area, 'conf': conf,
@@ -2172,36 +2184,46 @@ def test_audit_clean_tracker_is_not_capped_by_a_patch_mate():
 
     cands = {
         # clean tracker beside a tex patch: the tracker is freed
-        0: [best('disc-fit', 356000.0, 0.90)],
+        0: [best('disc-fit', 356000.0, 0.90, audit=dict(clean))],
         1: [best('tex-ratio', 65000.0, 0.93)],
         # SquareStack-1 L6: the tracker's audit tripped, so BOTH stay capped
-        2: [best('disc-fit', 356000.0, 0.90, audit_bias=6.5)],
+        2: [best('disc-fit', 356000.0, 0.90, audit_bias=6.5,
+                 audit=dict(clean, bias_px=6.5))],
         3: [best('tex-ratio', 65000.0, 0.93)],
         # two trackers 20 % apart (a collapse during the hold): both capped
-        4: [best('disc-fit', 160000.0, 0.90)],
-        5: [best('disc-fit', 130000.0, 0.90)],
+        4: [best('disc-fit', 160000.0, 0.90, audit=dict(clean))],
+        5: [best('disc-fit', 130000.0, 0.90, audit=dict(clean))],
         # tracker versus a resting claim: both capped
-        6: [best('disc-fit', 120000.0, 0.90)],
-        7: [best('resting', 100000.0, 0.90)],
+        6: [best('disc-fit', 120000.0, 0.90, audit=dict(clean))],
+        7: [best('resting', 100000.0, 0.90, audit=dict(clean))],
         # clean tracker beside a diff region, tracker below accept_conf
         # on its own: freed from the cap, tagged, still not acceptable
-        8: [best('disc-fit', 150000.0, 0.70)],
+        8: [best('disc-fit', 150000.0, 0.70, audit=dict(clean))],
         9: [best('diff-lo', 60000.0, 0.88)],
+        # a tracker with no verdict at all (too few open audit rays)
+        # beside a tex patch: nothing vouches for it, both capped
+        10: [best('disc-fit', 356000.0, 0.90)],
+        11: [best('tex-ratio', 65000.0, 0.93)],
     }
     stats = se.reconcile_pairs(rows, cands, s)
-    assert stats == {'confirmed': 0, 'capped': 8}, stats
+    assert stats == {'confirmed': 0, 'capped': 10}, stats
     a, b = cands[0][0], cands[1][0]
     assert a['conf'] == 0.90 and 'pair_mismatch_pct' not in a
     assert a['pair_mate_patch'] == 138.2 and not a.get('pair_confirmed')
     assert b['conf'] == cap and b['pair_mismatch_pct'] == 138.2
     assert not se.needs_review([dict(a, spread_pct=2.0)], s)
     assert se.needs_review([dict(b, spread_pct=10.1)], s)
-    for i in (2, 3, 4, 5, 6, 7):
+    for i in (2, 3, 4, 5, 6, 7, 10, 11):
         c = cands[i][0]
         assert c['conf'] == cap and 'pair_mismatch_pct' in c, (i, c)
         assert 'pair_mate_patch' not in c, (i, c)
     assert cands[8][0]['conf'] == 0.70 and cands[8][0]['pair_mate_patch']
     assert cands[9][0]['conf'] == cap and cands[9][0]['pair_mismatch_pct']
+    # the no-verdict tracker is refused by the helper itself, with and
+    # without the gate tags
+    assert not se._pair_mate_is_patch(cands[10][0], [cands[10][0],
+                                                     cands[11][0]])
+    assert se._pair_mate_is_patch(cands[0][0], [cands[0][0], cands[1][0]])
     # the helper's own contract
     assert se._is_patch_tier({'method': 'tex-ratio'})
     assert se._is_patch_tier({'method': 'diff-hi'})
@@ -2836,6 +2858,12 @@ def _random_best(rng, row):
             'ci85_pct': rng.choice([None, round(rng.uniform(0.2, 3), 2)])}
     if rng.random() < 0.1:
         best['audit_nostep'] = 22.0
+    # candidates() records the audit verdict on a tracked or resting
+    # winner whenever audit_boundary can run; now and then it cannot
+    if best['method'] != 'diff-lo' and rng.random() < 0.85:
+        best['audit'] = {'bias_px': 0.5, 'mad_px': 1.5,
+                         'nostep_pct': 22.0 if 'audit_nostep' in best
+                         else 3.0, 'n_rays': 120}
     return best
 
 
@@ -2860,11 +2888,12 @@ def _random_ua(rng, n):
 def _free_patch_mated_trackers(rows, cands, settings):
     """The one documented departure from the frozen oracle (2026-10-03,
     SLDEA_HANDOFF.md of that date): in a landing the oracle capped, a
-    tracker member with a clean audit whose every mate is a patch tier
-    keeps its original confidence and carries the mismatch as
-    'pair_mate_patch' instead of 'pair_mismatch_pct', and is not counted
-    as capped. Applied to the oracle's OUTPUT, so the oracle itself stays
-    verbatim; -> the adjusted stats."""
+    tracker member with a RECORDED audit verdict that tripped neither
+    gate, whose every mate is a patch tier, keeps its original
+    confidence and carries the mismatch as 'pair_mate_patch' instead of
+    'pair_mismatch_pct', and is not counted as capped. Applied to the
+    oracle's OUTPUT, so the oracle itself stays verbatim; -> the
+    adjusted stats."""
     acc = float(settings.get('accept_conf', 0.75))
     freed = 0
     by_landing = {}
@@ -2877,6 +2906,7 @@ def _free_patch_mated_trackers(rows, cands, settings):
             continue
         for b in members:
             if (b['method'] == 'disc-fit'
+                    and b.get('audit') is not None
                     and not (b.get('audit_nostep') or b.get('audit_bias'))
                     and all(se._is_patch_tier(m) for m in members
                             if m is not b)):

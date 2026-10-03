@@ -526,11 +526,20 @@ def analyze(rundir, max_frames=24):
         'annos': {str(k): v for k, v in sorted(cons_annos.items())},
     }
     ref_out = None
+    tracker_rest = None
     if disc_ref is not None:
         ref_out = {kk: vv for kk, vv in disc_ref.items() if kk != 'contour'}
         ref_out['mm_per_px'] = round(float(settings['diam_mm'])
                                      / float(disc_ref['diam_px']), 5)
+        # what the boundary tracker reads on the baseline frame itself
+        # (2026-10-02): every disc-fit area of the run is a ratio to
+        # these rays, so the report says how many there are, what share
+        # of the perimeter they leave unmeasured, how one-sided they
+        # are, and what the old estimator's ellipse made of the resting
+        # disc (the same facts Edge Review's Save stamps into setup.txt)
+        tracker_rest = se.baseline_provenance(base, settings)
     return {'rundir': os.path.abspath(rundir),
+            'tracker_rest': tracker_rest,
             'repeats': repeats,
             'frames_analyzed': len(per), 'baseline_row': base_i,
             'frame_shape': list(base.shape), 'sigma': round(sigma, 2),
@@ -1177,6 +1186,22 @@ def report(d):
         else:
             A("resting disc    : NOT FOUND (baseline_disc refused -- mm "
               "figures fall back to an activated frame)")
+    if d.get('baseline_disc'):
+        # the tracker's own reading of the baseline (2026-10-02): the
+        # denominator of every disc-fit area in this run
+        rest = d.get('tracker_rest')
+        if rest:
+            eoc = rest.get('base_ellipse_over_circle')
+            A(f"tracker at rest : {rest['base_rays']} of 360 rays find the "
+              f"ink edge on the baseline, {rest['base_hidden_pct']:.0f}% "
+              f"of the perimeter hidden (leads, foil), one-sidedness "
+              f"{rest.get('base_one_sided') or 0:.2f}; ellipse/circle "
+              + (f"{eoc:.4f}" if eoc is not None else "not fitted")
+              + " (what the old area method read on the resting disc)")
+        else:
+            A("tracker at rest : NO READING (the tracker finds no ink edge "
+              "on the baseline frame): no frame of this run gets a "
+              "disc-fit area")
     anchor = d.get('scale_anchor')
     if anchor:
         # #215 fields are all optional: a pre-2026-08-06 anchor prints

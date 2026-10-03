@@ -4092,8 +4092,8 @@ def test_no_control_is_ever_discarded_by_a_small_window():
         app = gui.EdgeReviewApp(root, path=run)
         controls = ['run_box', 'browse_btn', 'detect_btn', 'adv_btn',
                     'scale_btn', 'save_btn', 'info', 'cand_frame',
-                    'accept_btn', 'reject_btn', 'prev_btn', 'next_btn',
-                    'unrev_btn', 'howto_btn', 'status', 'canvas']
+                    'tracker_lbl', 'accept_btn', 'reject_btn', 'prev_btn',
+                    'next_btn', 'unrev_btn', 'howto_btn', 'status', 'canvas']
         for w, h in ((1600, 1000), (1150, 760), (900, 600), (700, 500),
                      (560, 420)):
             root.geometry(f'{w}x{h}')
@@ -4685,14 +4685,19 @@ def test_goto_a_row_with_no_frame_lands_next_door_and_says_so():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_save_stamps_the_area_method_and_marks_kept_old_areas():
+def test_save_empties_old_estimator_rows_and_stamps_the_provenance():
     """2026-10-02: the disc-fit area changed from the fitted ellipse to
     the common-ray ratio. A Save keeps the previous pass's px on rows
     still in the review queue, so on a run last saved by the OLD method
-    a re-save would put old and new numbers in one column. Save must (a)
-    say so in its dialog, (b) mark each such row in its notes, (c) stamp
-    the run with the current method only after the CSV is written, and
-    (d) stay quiet on the next Save, when the stamp is current."""
+    a re-save would put old and new numbers in one column and on one
+    plot axis. Save must (a) say in its yes/no dialog how many rows
+    will be emptied, before anything is written, (b) empty each such
+    row with the note in place of its old one (data.csv.bak keeps the
+    numbers), (c) stamp the run with the current method and the
+    baseline's provenance only after the CSV is written, (d) keep such
+    rows on the next Save, when the stamp is current, and (e) on a
+    trace-only Save (no Detect this session) of an old run say that the
+    emptied rows are NOT re-measured."""
     import sldea_edge as se
     import sldea_edge_gui as gui
     root = _tk_root_or_skip('estimator stamp')
@@ -4711,7 +4716,7 @@ def test_save_stamps_the_area_method_and_marks_kept_old_areas():
             r = csv.DictReader(f)
             rows, cols = list(r), r.fieldnames
         rows[1].update(active_area_px='9000', active_area_mm2='90.000',
-                       active_diam_mm='10.700',
+                       active_diam_mm='10.700', wrinkle_idx='1.10',
                        notes='edge:disc-fit conf 0.93')
         rows[2].update(active_area_px='15000', active_area_mm2='150.000',
                        active_diam_mm='13.800',
@@ -4720,38 +4725,83 @@ def test_save_stamps_the_area_method_and_marks_kept_old_areas():
             w = csv.DictWriter(f, fieldnames=cols)
             w.writeheader()
             w.writerows(rows)
-        assert se.saved_area_estimator(run) is None
+        assert se.load_stamp(run) == {}
         app = gui.EdgeReviewApp(root, path=run)
         app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
         app.detect_all_sync()
         # both activated rows are still in the review queue at Save
         app.results.pop(1, None)
         app.results.pop(2, None)
+        app.auto_idx.discard(1)
+        app.auto_idx.discard(2)
         assert app._queue_list() == [1, 2]
         app.save()
         msg = mb.asked[-1][1]
-        assert '1 of the kept row(s)' in msg and 'OLD area method' in msg, msg
-        assert se.AREA_ESTIMATOR_STALE_NOTE in msg
+        assert '1 unreviewed row(s) hold an automatic area' in msg, msg
+        assert 'OLD area method' in msg and 'EMPTIED' in msg, msg
+        assert 'data.csv.bak' in msg
+        assert "1 keep the previous pass's px" in msg, msg   # the trace
+        assert 'NO detection pass' not in msg, msg
         with open(csv_path, newline='', encoding='utf-8-sig') as f:
             saved = list(csv.DictReader(f))
-        assert saved[1]['active_area_px'] == '9000'
-        assert saved[1]['notes'] == ('edge:disc-fit conf 0.93; '
-                                     + se.AREA_ESTIMATOR_STALE_NOTE)
+        for col in ('active_area_px', 'active_area_mm2', 'active_diam_mm',
+                    'wrinkle_idx'):
+            assert saved[1][col] == '', (col, saved[1][col])
+        assert saved[1]['notes'] == se.AREA_ESTIMATOR_STALE_NOTE
+        assert saved[2]['active_area_px'] == '15000'
         assert se.AREA_ESTIMATOR_STALE_NOTE not in saved[2]['notes']
         assert se.AREA_ESTIMATOR_STALE_NOTE not in saved[0]['notes']
-        # the stamp: current version, in the edge-settings block, and it
-        # pinned no detection setting nobody chose
-        assert se.saved_area_estimator(run) == se.AREA_ESTIMATOR_VERSION
+        assert os.path.exists(csv_path + '.bak')
+        # the stamp: current version plus the baseline's provenance, in
+        # the edge-settings block, pinning no detection setting
+        stamp = se.load_stamp(run)
+        assert stamp['area_estimator'] == se.AREA_ESTIMATOR_VERSION, stamp
+        assert stamp.get('base_rays', 0) >= se.RAY_MIN_COMMON, stamp
+        assert 0.0 <= stamp['base_hidden_pct'] < 100.0, stamp
+        assert 'base_one_sided' in stamp, stamp
         assert not se.has_saved_settings(run)
         assert se.load_scale_anchor(run)['diam_px'] == 160.0
         assert not mb.warnings, mb.warnings
-        # a second Save: the stamp is current, nothing new is claimed
-        # stale, and the mark already on the row is not doubled
+        # a second Save: the stamp is current, so a kept tracker row is
+        # this estimator's and stays (re-scaled to the anchor, as before)
+        app.run['rows'][1].update(active_area_px='9100',
+                                  notes='edge:disc-fit conf 0.93')
         app.save()
-        assert 'OLD area method' not in mb.asked[-1][1], mb.asked[-1][1]
+        msg = mb.asked[-1][1]
+        assert 'OLD area method' not in msg, msg
+        assert "2 keep the previous pass's px" in msg, msg
         with open(csv_path, newline='', encoding='utf-8-sig') as f:
             saved = list(csv.DictReader(f))
-        assert saved[1]['notes'].count(se.AREA_ESTIMATOR_STALE_NOTE) == 1
+        assert saved[1]['active_area_px'] == '9100'
+        assert saved[1]['notes'] == 'edge:disc-fit conf 0.93'
+        assert se.load_stamp(run)['base_rays'] == stamp['base_rays']
+        # a trace-only Save on a STAMPED run keeps every row and the
+        # stamp exactly as recorded
+        app2 = gui.EdgeReviewApp(root, path=run)
+        app2.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        assert not app2.cands_all
+        app2.save()
+        assert 'OLD area method' not in mb.asked[-1][1]
+        assert se.load_stamp(run) == stamp
+        with open(csv_path, newline='', encoding='utf-8-sig') as f:
+            assert list(csv.DictReader(f))[1]['active_area_px'] == '9100'
+        # a trace-only Save on an OLD run cannot convert it quietly: the
+        # dialog says the rows are emptied and not re-measured
+        se.save_settings(run, None, stamp=se.estimator_stamp(None, version=1))
+        assert se.saved_area_estimator(run) == 1
+        app3 = gui.EdgeReviewApp(root, path=run)
+        app3.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        mb3 = _StubMB(yes=False)                  # the operator cancels
+        gui.messagebox = mb3
+        app3.save()
+        msg = mb3.asked[-1][1]
+        assert '1 unreviewed row(s) hold an automatic area' in msg, msg
+        assert 'NO detection pass' in msg and 'NOT re-measured' in msg, msg
+        assert 'Detect Edges first' in msg, msg
+        with open(csv_path, newline='', encoding='utf-8-sig') as f:
+            assert list(csv.DictReader(f))[1]['active_area_px'] == '9100'
+        assert se.saved_area_estimator(run) == 1        # nothing written
+        gui.messagebox = mb
         # a stamp that cannot be written is SAID, not swallowed
         real_stamp = se.stamp_area_estimator
 
@@ -4767,6 +4817,60 @@ def test_save_stamps_the_area_method_and_marks_kept_old_areas():
             mb.warnings
     finally:
         gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_tracker_card_says_what_the_number_is_and_what_the_outline_is():
+    """2026-10-02: the tracker's number is the common-ray ratio while
+    the outline it draws is the ellipse, which encloses a different
+    area (7 % more on DOT_P3_1 at rest). The panel under the candidate
+    radios says so in plain words for the tracker candidate on the
+    card, with the audit fields the number rests on (rays used, hidden
+    share, one-sidedness), and says nothing when there is no tracker
+    candidate."""
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    disc = {'method': 'disc-fit', 'area_px': 217500.0, 'conf': 0.98,
+            'area_ratio': 1.0003, 'n_common': 211, 'n_trimmed': 33,
+            'one_sided': 0.062, 'hidden_pct': 41.4,
+            'ellipse_over_circle': 1.07418}
+    rest = {'method': 'resting', 'area_px': 217438.0, 'conf': 0.95}
+    patch = {'method': 'diff-hi', 'area_px': 63040.0, 'conf': 0.63}
+    text = gui.tracker_card_text([rest, disc, patch])
+    assert text.startswith('B is the ray ratio: 1.0003 x A0'), text
+    assert '211 rays' in text and '33 trimmed' in text, text
+    assert '41% of the edge is hidden' in text, text
+    assert 'assumed to strain like the rest' in text, text
+    assert f'one-sidedness 0.06 (refused above {se.RAY_MAX_ONE_SIDED:g})' \
+        in text, text
+    assert 'The drawn outline is the ellipse, not the number' in text, text
+    assert 'encloses 1.074 x A0' in text, text
+    # no tracker candidate: nothing is claimed
+    assert gui.tracker_card_text([rest, patch]) == ''
+    assert gui.tracker_card_text([]) == ''
+    # no trimmed rays: the clause is absent; no ellipse figure: said
+    d2 = dict(disc, n_trimmed=0, ellipse_over_circle=None)
+    t2 = gui.tracker_card_text([d2])
+    assert t2.startswith('A is the ray ratio') and 'trimmed' not in t2, t2
+    assert 'encloses a different area' in t2, t2
+    # the panel follows the frame on screen
+    root = _tk_root_or_skip('tracker card')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_card_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        app.detect_all_sync()
+        assert app.tracker_lbl.cget('height') == gui.TRACKER_LINES
+        for pos in range(len(app.frame_rows)):
+            app.pos = pos
+            app._show()
+            i = app.frame_rows[pos]
+            assert app.tracker_lbl.cget('text') == \
+                gui.tracker_card_text(app.cands_all.get(i, []))
+    finally:
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)
 

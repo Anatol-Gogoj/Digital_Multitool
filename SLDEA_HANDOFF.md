@@ -22,312 +22,219 @@ where "resting" rows handed over to measured ones. Now the same rays are
 measured on the baseline photo and on every frame and the area is A0 times
 how much those rays grew, so a quiet frame reads 1.000 to within 0.1 to
 0.3 % and the jump is gone. Old and new areas are not comparable: reprocess
-saved runs through Edge Review, which now stamps the method into
-`setup.txt` and marks any old area it keeps.
+saved runs through Edge Review, which stamps the method into `setup.txt`
+and empties, never keeps, an old automatic area.
 
-**Observation → decision.** Everything below was measured today on the
-16 run folders of the review copy (899 frames), with the pinned OpenCV
-4.13, by replaying detection exactly as Edge Review runs it
-(`baseline_disc`, `candidates` per frame with `prev_method` chained,
-`reconcile_pairs`, `needs_review`). "Old" is `main` at `1eb85b2`.
+**Observation → decision.** Measured on the 16 run folders of the review
+copy (899 frames), pinned OpenCV 4.13, replaying detection as Edge Review
+runs it; "old" is `main` at `1eb85b2`. The method tables (ellipse/circle
+per run, quiet-frame repeatability, the one-sidedness bins, the result and
+independent-series tables, the trim, the fixed centre, the spread's
+coverage) are in `SLDEA_MEASUREMENT.md` §2.1b, the sections they correct.
 
-- *Observed* (the 2026-10-02 science review: five reviewers, four
-  independent refuters; reproduced here). A0, the baseline row and every
-  `resting` row, was the `baseline_disc` circle. Every `disc-fit` row was
-  π·a·b of a robust ellipse fitted only to rays in foil-free sectors and
-  extrapolated across the blocked ones. The ellipse fitted to the baseline
-  frame itself, over the circle of that same frame:
-
-  | Run | ellipse / circle at 0 kV | old step at the hand-over (points of A/A0) |
-  |---|---|---|
-  | DOT_P3_1_20260729 | 1.074 | +8.8 (1.75 → 2.0 kV) |
-  | P3_2_2.5mL_20260728 | 1.030 | +5.1 (1.0 → 1.25 kV) |
-  | P3_3_2.5mL_20260728 | 1.031 | +5.3 (1.0 → 1.25 kV) |
-  | P3_5_2.5mL_0729 | 1.006 | +4.3 (1.0 → 1.25 kV) |
-  | P3_6_2.5mL_20260729 | 1.022 | +3.8 (0.75 → 1.0 kV) |
-  | SLDEA_20260729_104531 | 0.9965 | −0.5 (2.5 → 2.75 kV) |
-  | SLDEA_20260723_152205 (retired) | 1.147 | |
-  | SLDEA_20260723_233451 (retired) | 0.996 | |
-
-  The edge points were never the problem: the tracker's kept points sit at
-  0.998 to 1.008 r0 on quiet frames. The shape model was. With two opposed
-  lead gaps the free ellipse over-stretches along the lead axis, and that
-  factor multiplied every measured row. The stated A/A0 budget was ±1–2 %.
+- *Observed* (science review of 2026-10-02, reproduced here). A0, the
+  baseline row and every `resting` row, was the `baseline_disc` circle;
+  every `disc-fit` row was π·a·b of a robust ellipse fitted to the
+  foil-free rays and extrapolated across the blocked ones. On the baseline
+  frame itself the ellipse over the circle read 1.074 (DOT_P3_1), 1.030,
+  1.031, 1.006, 1.022, 0.9965 on the six campaign runs (1.147 on retired
+  152205), and the curves stepped +3.8 to +8.8 points of A/A0 at the
+  resting-to-measured hand-over. The edge points were never the problem
+  (0.998 to 1.008 r0 on quiet frames); the shape model was.
 - *Decision: the area is a ratio of like to like.* `_disc_rays` (the
   tracker's ray code, split out unchanged) measures the ink-edge radius on
-  360 rays from the resting centre. It runs on the baseline frame
-  differenced with itself (`_baseline_rays`, memoized per baseline) and on
-  every frame, and
-
-      area_px = π·r0² · Σ r_k(frame)² / Σ r_k(baseline)²
-
-  over the rays k measured on both (`_common_ray_ratio`). Σr² over evenly
-  spaced rays is the polar area integral of the sectors those rays stand
-  in, so this is the area ratio of the visible sectors, with no shape
-  model and no extrapolation. A robust trim drops rays whose own ratio
-  r_k/r_k(0) sits more than 2.5 robust sigmas (MAD) from the median: a ray
-  that jumped to a wrinkle highlight or a lead edge on one of the two
-  frames. Without the trim the quiet-frame scatter doubles (rms 0.22 % →
-  0.49 %). The trim removes a median of 21 rays per accepted frame.
-- *What stays on the circle.* r0 is `baseline_disc`'s radius, so the
-  baseline row is still exactly π·r0², the px→mm anchor and
-  `sldea_plot.suspect_old_scale` are untouched, and `active_diam_mm` is
-  the equivalent diameter 2·r0·√ratio. The `data.csv` columns do not
-  change. The baseline frame itself stays a `resting` row: it is A0 by
-  definition, and measuring it against itself would be a check that
-  cannot fail.
-- *What the ellipse is still for.* It is fitted exactly as before and is
-  the drawn outline, the carrier of the sanity gates (size, centre,
-  roundness, residual) and of the self-audit. Its area over the circle is
-  kept on the candidate as `ellipse_over_circle`, which is what the old
-  estimator would have reported for that frame. No circle prior was added
-  anywhere: nothing about the activated shape is assumed.
+  360 rays from the resting centre, on the baseline frame differenced with
+  itself (`_baseline_rays`, memoized) and on every frame, and
+  `area_px = π·r0² · Σ r_k(frame)² / Σ r_k(baseline)²` over the rays
+  measured on both (`_common_ray_ratio`), after a 2.5 robust-sigma (MAD)
+  trim of the per-ray ratio (median 21 rays per accepted frame; without it
+  the quiet-frame rms doubles, 0.22 % → 0.49 %). No shape model, no
+  extrapolation. r0 stays `baseline_disc`'s radius, so the baseline row is
+  still exactly π·r0², the px→mm anchor is untouched and `active_diam_mm`
+  is 2·r0·√ratio. The ellipse is still fitted: it is the drawn outline, the
+  sanity gates and the self-audit, and its area over the circle rides on
+  the candidate as `ellipse_over_circle`. Edge Review's card says so for
+  every tracker candidate (the outline encloses ellipse_over_circle × A0;
+  the number is the ray ratio).
 - *The assumption, stated plainly:* the part of the perimeter the rays
-  cannot use strains like the part they can. That part is large. On the
-  six campaign runs 32 to 55 % of the perimeter has no measurable edge
-  even at rest (foil, leads, faint ink), and a typical accepted frame's
-  ratio uses about half of the perimeter (`hidden_pct`, the unused share:
-  median 48 %, 33 to 69 % from the 5th to the 95th percentile). Nothing in
-  the image can check the assumption. A disc that bulges only behind a
-  lead does not move the ratio at all; a test pins that, and every
-  candidate reports `hidden_pct` so the blind share is on record. A narrow
-  bulge on visible rays is trimmed as an outlier and is not counted
-  either; `n_trimmed` says how many rays went.
+  cannot use strains like the part they can. It is large (32 to 55 % of
+  the perimeter has no measurable edge at rest; a typical accepted frame's
+  ratio uses about half, `hidden_pct`), and nothing in the image checks
+  it. Its likely sign was measured afterwards: the rays nearest the leads
+  strain 1 to 4 points less than the top and bottom rays at 2.25 to 6 kV on
+  four runs, which puts an over-read of order 1 point at the peak on this
+  estimator (`SLDEA_MEASUREMENT.md`, the note under table 1.1). Evidence,
+  not a correction.
 - *Decision: when the ratio refuses.* Fewer than 60 common rays after the
-  trim; rays in fewer than 6 of the 18 twenty-degree blocks (under 120° of
-  reach, the same floor `baseline_disc` uses for its arc); or
-  one-sidedness above 0.6. One-sidedness is the length of the mean unit
-  vector of the ray directions: 0 when the rays balance around the disc,
-  1 when they all point one way. The first two limits never fired on the
-  corpus. The 450 auto-accepted tracker frames never had fewer than 92
-  common rays or 8 blocks, so the limits sit below everything that was
-  validated and guard the scene nobody has measured yet. The third is
-  evidence-based:
-
-  | one-sidedness | frames with an independent value | ratio minus independent, median |
-  |---|---|---|
-  | 0 to 0.30 | 434 | +0.24 % |
-  | 0.30 to 0.45 | 37 | −0.11 % |
-  | 0.45 to 0.60 | 75 (64 of them P3_5) | −0.97 % |
-  | 0.60 to 0.70 | 6 | +6.5 % |
-  | above 0.70 | 18 | +5.9 % |
-
-  Above 0.6 the 24 frames read +0.1 to +15.9 % (median +6.0 %) over the
-  independent sector measurement. It refuses 31 corpus frames. 26 were
-  already in review. The other 5 are rows 29 to 33 of retired
-  `SLDEA_20260723_233451` (3.0 to 3.4 kV), which used to auto-accept and
-  read +2.0 to +2.7 % over the independent value; their pair partner row 34
-  goes to review with them. A refused frame gets no tracker candidate, as
-  with any other refusal of the tracker: the patch tiers and the hand
-  trace remain.
-- *The fixed centre, quantified.* The rays are cast from the baseline
-  centre on both frames. With full coverage that costs nothing (½∮r²dθ is
-  the area about any interior origin). With gaps, a disc that shifts by d
-  changes the ratio by about 2·one_sided·d/r0. Measured by re-casting
-  every frame's rays from a centre moved one detector px: median 0.22 % of
-  area per full-resolution px of shift on the 450 accepted frames, 0.39 %
-  at the 90th percentile, 0.70 % worst. At the ~0.2 px median rig drift
-  that is 0.04 %, 0.08 % and 0.14 %. P3_5 is the exposed run:
-  one-sidedness about 0.53 through the run, 0.32 %/px. A translation-corrected
-  variant (first harmonic removed) was tried and not taken: it was worse
-  on quiet frames (rms 0.26 % against 0.22 %; P3_5's quiet mean moved from
-  0.9996 to 1.0038) and unstable on one-sided arcs.
-- *Decision: a gated frame is measured, not asserted.* The 2026-07-28
-  decision stated a no-change frame as `resting`, area exactly A0, and
-  the 2026-07-30 resting-refit measured it only after the audit tripped
-  the 3 px bias gate. New evidence reopens that: the 112 corpus frames
-  that auto-accepted as exactly A0 hide real growth (S35 and S50 of the
-  review), and the new ratio is quiet enough to see it. `candidates()` now
-  runs the tracker (`_resting_refit`, responding gates waived) on every
-  gated frame with a known disc. The measurement takes the frame only
-  when it is fit to auto-accept on its own (conf ≥ `accept_conf`, audit
-  clean); the `resting` claim then becomes the runner-up (tagged
-  `capped_by: disc-fit` where it had to be stepped down to get there). A
-  weak or audit-dirty measurement changes
-  nothing: an audit-clean claim still auto-accepts as before, a
-  bias-tripped one stays capped beside the measurement. Of those 112
-  frames, 111 are now measured: median +0.30 %, 90th percentile +1.4 %,
-  maximum +2.6 %, 29 above +1 %. The dead band at the foot of every curve
-  is gone. What it costs is noise where there used to be an exact 1.000:
-
-  | Run | A/A0 at 0.25–0.5 kV, mean of 4 frames | SD | range |
-  |---|---|---|---|
-  | DOT_P3_1 | 1.0003 | 0.08 % | 0.9997 to 1.0013 |
-  | P3_2 | 1.0021 | 0.26 % | 0.9985 to 1.0043 |
-  | P3_3 | 1.0013 | 0.14 % | 0.9993 to 1.0024 |
-  | P3_5 | 0.9996 | 0.17 % | 0.9980 to 1.0018 |
-  | P3_6 | 1.0036 | 0.09 % | 1.0026 to 1.0045 |
-  | 104531 | 0.9999 | 0.13 % | 0.9984 to 1.0010 |
-
-  With the baseline row included (n = 5, 0 to 0.5 kV) the means are 1.0003,
-  1.0016, 1.0011, 0.9997, 1.0029, 0.9999 and the SDs 0.07, 0.24, 0.14,
-  0.14, 0.18, 0.11 %. P3_6's +0.36 % at 0.25 to 0.5 kV may be real: the
-  independent series reads 0.0 to +0.7 % over its own baseline on those
-  four frames.
+  trim, rays in fewer than 6 of the 18 twenty-degree blocks, or
+  one-sidedness (length of the mean unit vector of the ray directions)
+  above 0.6. The first two never fired (accepted frames have ≥ 92 rays and
+  8 blocks). The third refuses 31 frames, 26 already in review: above 0.6
+  the ratio read +6.0 % (median, n = 24) over the independent sector
+  measurement, below it +0.1 %. The 5 others are rows 29 to 33 of retired
+  233451 (3.0 to 3.4 kV, wrinkle onset), which used to auto-accept +2.0 to
+  +2.7 % high; a refused frame has no tracker candidate, as with any other
+  refusal. The limit's value was tuned on this corpus.
+- *Decision: a gated frame is measured, not asserted.* This reopens the
+  2026-07-28 "state resting" decision on new evidence (S35, S50): the 112
+  corpus frames that auto-accepted as exactly A0 hid real growth. The
+  tracker now runs on every gated frame with a known disc
+  (`_resting_refit`, responding gates waived); the measurement takes the
+  frame only when it is fit to auto-accept on its own, and the `resting`
+  claim stays as the runner-up (tagged `capped_by: disc-fit` where it was
+  stepped down). 111 of the 112 are now measured: median +0.30 %, 90th
+  percentile +1.4 %, maximum +2.6 %. The baseline frame itself stays a
+  `resting` row (A0 by definition).
 - *Decision: what `spread_pct` means now.* For a tracker candidate
   `ci85_pct` (shown as `spread_pct`) is the half-width of the central 85 %
-  of a block bootstrap of the ratio: whole 20-degree blocks are resampled
-  300 times with a fixed seed, because neighbouring rays are correlated
-  (lag-1 about 0.5). It says how much the ratio depends on which parts of
-  the visible edge were measured: ray noise plus real block-to-block
-  differences in strain, so it grows with voltage (median 0.57 %, 0.20 %
-  to 1.88 % from the 5th to the 95th percentile, maximum 4.3 % on accepted
-  frames). **It is not a calibrated confidence interval and not a total
-  uncertainty**, and nothing calls it one any more. Its measured behaviour:
-  it holds 66 % of the quiet-frame deviations from A0 (32 frames at 0.25
-  to 0.5 kV, rms deviation 0.22 %); 91 % and 90 % of the detrended
-  same-landing pre/post differences up to 2 kV and from 2 to 4 kV; 50 % and
-  61 % from 4 to 6 kV and above 6 kV, where hold-time creep and collapse
-  dominate. It knows nothing about the hidden sectors. The old number was
-  the edge-scatter formula of the ellipse, which assumed a known shape and
-  independent rays and held 21 to 49 % where it claimed 85 % (S49). The
-  12 % `spread_pct` review clause, unreachable for the old formula, can
-  now fire.
-- *Decision: the spread stays out of the pair tolerance.* `reconcile_pairs`
-  adds 1.5 × `ci85_pct` per member to its 4 % floor. The old term was 0.3
-  to 1 % and never reached the floor. The new spread did: at 10 kV on P3_3
-  it made the tolerance 6.5 %, and two snapshots 10.0 % apart both
-  auto-accepted. The spread holds strain differences both snapshots share,
-  so it is not the pair's noise. The tracker now hands the pair check
-  `pair_ci_pct` = 0 and a tracked pair meets the 4 % / 8 % rule it always
-  met in practice. `reconcile_pairs` reads that key when present and is
-  otherwise unchanged, so the frozen `78315cc` oracle still passes. The
-  measured same-landing scatter of the new areas is 0.3 to 0.4 % (robust
-  SD) up to 4 kV and about 1.2 % above.
-- *Decision: old and new numbers are never mixed silently.*
-  `se.AREA_ESTIMATOR_VERSION` is 2 (1 = the ellipse, and also what a run
+  of a 20-degree block bootstrap of the ratio (300 resamples, fixed seed):
+  median 0.57 %, 0.20 to 1.88 % (5th to 95th percentile), growing with
+  voltage. **It is not a calibrated confidence interval and not a total
+  uncertainty**, and nothing in the code, the GUI, the plot tooltip, the
+  diag legend, the manual source or the budget calls it one any more. The
+  old edge-scatter formula held 21 to 49 % where it claimed 85 % (S49).
+- *Decision: the spread stays out of the pair tolerance.* The new spread
+  holds strain differences both snapshots share; left in `reconcile_pairs`
+  it widened the tolerance to 6.5 % at 10 kV on P3_3 and passed a 10.0 %
+  pre/post disagreement on both sides. The tracker hands the pair check
+  `pair_ci_pct = 0`, so a tracked pair meets the 4 % / 8 % rule it always
+  met in practice; `reconcile_pairs` reads that key when present and is
+  otherwise unchanged (the frozen `78315cc` oracle still passes).
+- *Decision: old and new numbers never meet, in the CSV or on a plot
+  axis.* `se.AREA_ESTIMATOR_VERSION` is 2 (1 = the ellipse, and what a run
   with no stamp holds). Edge Review's Save writes `area_estimator: 2` into
   the run's Edge Detection settings block through `save_settings`, after
-  `data.csv` is committed, and shows a warning if the stamp cannot be
-  written. A Save keeps the previous pass's px on rows still in the review
-  queue. On a run whose stamp is older, each kept row that holds a
-  `disc-fit` area gets the note `old area method (ellipse) - kept, not
-  re-measured`, and the Save dialog counts them. Hand traces, patch tiers
-  and `resting` rows are not marked: the first is not an estimator output,
-  the others did not change. A settings save (tuner, Settings dialog) keeps
-  whatever stamp is there. Stamping a run nobody tuned writes the stamp
-  line alone and pins no detection setting, and the tuner's "tuned" flag
-  ignores such a block.
+  `data.csv` is committed, beside the baseline's provenance
+  (`base_rays`, `base_hidden_pct`, `base_one_sided`,
+  `base_ellipse_over_circle`; `STAMP_KEYS`, which `load_settings` never
+  returns and a settings save carries over untouched). On a run whose
+  stamp is older, an unreviewed row that still holds a `disc-fit` area is
+  **emptied** and its notes replaced by `not kept: measured with the old
+  area method (ellipse, before 2026-10-02) - re-review this frame`
+  (`stale_estimator_rows`, `apply_results(stale=)`; `data.csv.bak` keeps
+  the value), and the yes/no Save dialog states the count before anything
+  is written. A trace-only Save (no Detect this session) on an old run
+  says in the same dialog that those rows are emptied and not re-measured.
+  Hand traces, patch tiers and `resting` rows are never emptied. The
+  tuner's "tuned" flag ignores a block holding only stamps.
+  `sldea_diag` prints one `tracker at rest` line with the same provenance.
 
-**Result on the six campaign runs** (old → new; A/A0 against the run's own
-baseline row).
+**Result on the six campaign runs** (old → new; auto-accepted tracker
+rows; "independent" is the gate reviewer's half-height series on the top
+and bottom sectors, no repo detector code):
 
-| Run | step across the old hand-over landings | auto / review | median abs(pre − post) per landing ≤ 4 kV | peak A/A0, auto-accepted |
-|---|---|---|---|---|
-| DOT_P3_1 | +8.8 → +0.3 points | 56/25 → 63/18 | 0.78 → 0.47 % | 1.630 → 1.557 (6.0 kV) |
-| P3_2 | +5.1 → +1.1 | 67/14 → 67/14 | 0.53 → 0.55 % | 1.581 → 1.575 (4.25 kV) |
-| P3_3 | +5.3 → +0.6 | 71/10 → 69/12 | 0.48 → 0.43 % | 1.608 → 1.584 (4.5 kV) |
-| P3_5 | +4.3 → +1.0 | 60/21 → 60/21 | 0.71 → 0.73 % | 1.540 → 1.579 (4.25 kV) |
-| P3_6 | +3.8 → +1.0 | 52/29 → 52/29 | 0.67 → 0.41 % | 1.521 → 1.532 (4.0 kV) |
-| 104531 | −0.5 → +0.2 | 81/0 → 81/0 | 0.00 → 0.10 % | 1.048 (4.75 kV) → 1.034 (10 kV) |
+| Run | step at the old hand-over, landing means | auto / review | new minus independent ≤ 4 kV, mean (SD) | old minus independent | peak A/A0, auto |
+|---|---|---|---|---|---|
+| DOT_P3_1 | +8.8 → +0.3 points | 56/25 → 63/18 | −0.02 (0.39) | +7.32 | 1.630 → 1.557 |
+| P3_2 | +5.1 → +1.1 | 67/14 → 67/14 | +0.46 (0.44) | +3.03 | 1.581 → 1.575 |
+| P3_3 | +5.3 → +0.6 | 71/10 → 69/12 | 0.00 (0.44) | +3.24 | 1.608 → 1.584 |
+| P3_5 | +4.3 → +1.0 | 60/21 → 60/21 | −0.97 (0.68) | −0.13 | 1.540 → 1.579 |
+| P3_6 | +3.8 → +1.0 | 52/29 → 52/29 | +0.33 (0.71) | +1.42 | 1.521 → 1.532 |
+| 104531 | −0.5 → +0.2 | 81/0 → 81/0 | +0.04 (0.15) | −0.53 | 1.048 → 1.034 |
 
-What is left of each step is real strain between those two landings: the
-new curve has no hand-over, and from the baseline to 0.25 kV it moves by
-−0.1 to +0.3 points. Whole corpus: 472 auto / 328 review / 99 reject →
-471 / 329 / 99. Gained: DOT_P3_1 rows 15 to 20 (2.0 to 2.5 kV), where one
-snapshot used to win as `resting` at 1.000 and the other as an ellipse at
-1.09, a 9 % "pair mismatch" that sent all six to review; and row 80. Lost:
-the six 233451 rows above, and the P3_3 10 kV pair, now 10 % apart and
-capped.
+Frame to frame at the old hand-over (the last frame old code accepted as
+`resting` to the first it measured) the new reading of the same two
+frames is +0.6, +0.7, +0.2, +0.4, −0.0, −0.1 points; from the baseline to
+the 0.25 kV landing the new curve moves +0.05, +0.02, +0.03, −0.07, +0.34,
+−0.12. Whole corpus 472 auto / 328 review / 99 reject → 471 / 329 / 99:
+gained DOT_P3_1 rows 15 to 20 (2.0 to 2.5 kV, the old resting-versus-
+ellipse "pair mismatches") and row 80; lost the six 233451 rows above and
+the P3_3 10 kV pair, now 10 % apart and capped (the independent series
+puts that pair 9 points apart). Quiet frames (0.25 to 0.5 kV) read
+0.9996 to 1.0036 × A0 per run with SD 0.08 to 0.26 %. The one saved
+operator trace, DOT_P3_1 row 20 (226645 px = 1.042 × A0): new 222162 px =
+1.022 × A0, auto-accepted; the old ellipse for that frame was 1.093 × A0.
+Consistent, not a validation.
 
-Against the fit-free series (auto-accepted tracker rows up to 4 kV;
-difference in points of A/A0, mean and SD):
+**Measured and not taken** (same harness; the chosen design in the
+right-hand column).
 
-| Run | old minus independent | new minus independent | new minus the review's prototype |
-|---|---|---|---|
-| DOT_P3_1 | +7.32 (0.34) | −0.02 (0.39) | −0.03 (0.23) |
-| P3_2 | +3.03 (0.63) | +0.46 (0.44) | −0.10 (0.20) |
-| P3_3 | +3.24 (0.79) | 0.00 (0.44) | −0.48 (0.55) |
-| P3_5 | −0.13 (1.04) | −0.97 (0.68) | −0.01 (0.40) |
-| P3_6 | +1.42 (0.96) | +0.33 (0.71) | +0.20 (0.43) |
-| 104531 | −0.53 (0.62) | +0.04 (0.15) | +0.09 (0.13) |
+- *Keep asserting A0 on gated frames* (the 2026-07-28 rule). On the 77
+  frames `main` auto-accepted as `resting` that have an independent value:
+  asserted 1.000 minus independent, pooled bias −0.45 points, rms 0.73,
+  worst −1.84; measured minus independent, bias +0.07, rms 0.22, worst
+  +0.45 (SD 0.21). Per run (rms asserted / measured): DOT_P3_1 0.16 / 0.26,
+  P3_2 0.76 / 0.19, P3_3 0.69 / 0.18, P3_5 0.97 / 0.34, P3_6 0.85 / 0.34,
+  104531 0.79 / 0.14. Step at the old hand-over landings if the lower one
+  stayed asserted: +0.8, +2.5, +2.0, +2.4, +2.1, +0.9 points, against
+  +0.3, +1.1, +0.6, +1.0, +1.0, +0.2 measured. Asserting removes the
+  0.1 to 0.3 % frame noise and puts back a one-sided bias and the dead
+  band; it also leaves DOT_P3_1 rows 15 to 20 as pair mismatches.
+- *A translation-corrected ratio* (first harmonic of r − r0 removed, for
+  rig drift): worse on quiet frames (rms 0.26 % against 0.22 %; P3_5's
+  quiet mean moved from 0.9996 to 1.0038) and unstable on one-sided arcs.
+  The fixed centre costs 0.22 % of area per px of shift (median) and
+  0.04 % at the 0.2 px median rig drift.
+- *A trim-share refusal for retired 152205* (see Scope): its over-reading
+  frames trim 6 to 10 % of their rays against a corpus median of 11 %,
+  and the 12 auto rows above 25 % have no common sign against the
+  independent series. Trim share does not separate the fixture.
+- *The other design judged against this one* (the ellipse divided by a
+  median quiet-frame ellipse/circle, branch `sldea-area-same-estimator-
+  a0`): quiet-frame SD 0.15 to 1.67 % per run (this design 0.08 to
+  0.26 %), 9 of 96 auto rows up to 2 kV more than 1.5 points from the
+  independent series (0 of 96 here), and its constant-offset assumption
+  fails where strain is large (DOT_P3_1 8 to 10 kV: −9.7 points against
+  the series, this design +2.6).
 
-"Independent" is the gate reviewer's half-height radius on top and bottom
-sectors (`series_indep.csv`), which uses no repo detector code; the
-prototype is the tracker reviewer's `exp6_common_ray.csv`. Over the whole
-ramp the new minus independent means are +1.36, +0.48, +0.43, −1.22, +0.61
-and +0.03.
+**Scope.** The two retired 2026-07-23 fixtures are outside the ±1 to 2 %
+figure above 4 kV. 152205 (ellipse/circle 1.147; the tape edge lies
+outside the foil mask) is within 1.5 points of the independent series up
+to 4 kV (SD 3.0) but +8 points above it at 4.25 to 6 kV (n = 3), growing
+from +2 at 3.5 kV; 233451 is within 1 point up to 4 kV and has one auto
+row above (+3.8). The figure is documented in `SLDEA_MEASUREMENT.md`
+§2.5; no refusal was added for them.
 
-The one saved operator trace, DOT_P3_1 row 20 (2.5 kV pre-ramp, 226645 px =
-1.042 × A0): the new area is 222162 px = 1.022 × A0, auto-accepted, 2.0 %
-below the trace. The old code held that row in review as `resting` at
-1.000, and its ellipse for the same frame was 237708 px = 1.093 × A0, 4.9 %
-above the trace. One 16-point trace in the outer-toe convention cannot
-separate values 2 % apart, so this is consistent and not a validation.
-
-**Limits.**
-
-- The hidden-perimeter assumption is not tested by anything here, and it
-  is the largest term left. The independent series is a cross-check
-  between two estimators that both see only part of the edge. P3_5 reads
-  about 1 point below it (−0.97 up to 4 kV, −1.22 over the whole ramp) and
-  I cannot say which is right. The
-  science review puts the spread between shape models at about ±2.5 % at
-  the peaks.
-- Peaks moved by −4.5 % (DOT_P3_1) to +2.5 % (P3_5). They are projected
-  footprints of a membrane that may be buckling (S52), and the tracker
-  still stops at 1.3 r0 (S51). Neither is touched here.
-- The 47 operator labels were scored against the ellipse OUTLINE, which
-  is unchanged. `edge_labels.json` entries written before today hold the
-  old machine area in their `machine` record; `sldea_trace.py` area
-  comparisons against them describe the old estimator.
-- The audit still runs on the ellipse outline. On DOT_P3_1 it passed both
-  the circle and the ellipse on one frame, 7 % apart in area (S1). It is a
-  check on the outline's edge placement over open rays, not on the area.
-- Results still depend on the OpenCV version (S54); all numbers here are
-  4.13.
-- `sldea_plot_gui.BANDS_TIP` still quotes "the disc-fit's own CI
-  (0.2–0.7%)". The plot's bands are a quoted budget and were not changed
-  here; that sentence should follow when the band is next revisited.
-- Nothing was reprocessed on the lab share. Every saved `data.csv` still
-  holds estimator-1 areas until its run goes through Detect and Save
-  again.
+**Limits.** The hidden-perimeter assumption is the largest term left and
+is not tested by anything here (the independent series is a cross-check
+between two estimators that both see part of the edge; P3_5 reads about 1
+point below it and I cannot say which is right). Peaks moved by −4.5 %
+(DOT_P3_1) to +2.5 % (P3_5); the 1.3 r0 ceiling (S51) and the buckled
+footprint (S52) are not touched. The 47 operator labels scored the ellipse
+outline, which is unchanged; `edge_labels.json` entries written before
+today hold the old machine area. The audit still runs on the ellipse
+outline (S1). Numbers are OpenCV 4.13 (S54). Nothing on the lab share was
+reprocessed.
 
 **Reprocessing a saved run.** Open it in Edge Review, confirm the scale
-anchor as usual, Detect Edges, review the queue, Save. The run's
-`setup.txt` then holds `area_estimator: 2`. Rows left unreviewed keep
-their old value and say so in `notes`. A run with no `area_estimator`
-line is estimator 1. Do not plot stamped and unstamped runs on one axis.
-There is no offline conversion: the old offset is not a constant factor
-(on DOT_P3_1 old over new falls from 1.074 at rest to 1.047 at the 6 kV
-peak). `ellipse_over_circle` on each new candidate reproduces the old
-number for that frame (DOT_P3_1 6.0 kV post-ramp: 354377 px against
-the 354378 px in the saved CSV), so an old and a new save of one run
-can be reconciled frame by frame.
+anchor, Detect Edges, review the queue, Save. `setup.txt` then holds
+`area_estimator: 2` and the provenance lines. Rows left unreviewed are
+emptied with the note above; `data.csv.bak` holds the old values. A run
+with no `area_estimator` line is estimator 1. There is no offline
+conversion factor (on DOT_P3_1 old over new falls from 1.074 at rest to
+1.047 at the 6 kV peak); `ellipse_over_circle` reproduces the old number
+per frame (DOT_P3_1 6.0 kV post-ramp: 354377 px against the saved
+354378 px). In this data copy only DOT_P3_1 has saved areas (58 rows);
+its row 20 now auto-accepts at 1.022 × A0, so a plain Detect and Save
+replaces the hand trace unless the trace is staged again.
 
-**Docs.** `SLDEA_MEASUREMENT.md`: the lines this makes false are
-corrected (tables 1.1, 1.2 and 2.1, one Don't, levels 2 to 5, the
-provenance table); nothing else in it was re-measured. The manual source
-`docs/manual-src/addendum_b_edge.json` has four strings corrected (the
-disc-fit and resting rows, the disc-fit bullet, the spread bullet); the
-built manual is regenerated at the next release, as usual.
-`sldea_diag`'s report key no longer calls `ci%` a confidence interval.
+**Open owner decisions.** Measuring gated frames instead of asserting A0;
+the one-sidedness limit 0.6 as a refusal versus a capped review-only
+tracker candidate (a2's `rest_ref_missing` shape); `pair_ci_pct = 0` for
+tracked pairs; which sectors the hidden perimeter follows (a device
+statement that sets a systematic of order 1 point at peak); reprocessing
+DOT_P3_1's saved CSV and the staged hand trace on row 20; renaming
+`ci85_pct` (keeps its key for the candidate contract); the retired
+fixtures' scope; whether Edge Review should draw the measured rays
+instead of the ellipse.
 
-**Tests.** `tests/test_sldea_edge.py` gains eleven cases, among them: the
-baseline measured against itself reads exactly 1.000 while the ellipse on
-that frame is off by more than 2 %; an outline grown by s reads s² within
-0.5 % at s = 1.03, 1.06, 1.12 with about 30 % of the perimeter blocked; a
-bulge only behind a lead leaves the ratio where it was and is reported
-through `hidden_pct`; each refusal; the trim; the bootstrap's
-repeatability; the drift formula; the stamp; the stale rows. Three
-existing tests pinned the old behaviour and were changed on purpose:
-`test_resting_candidate_states_the_known_area_on_gated_frames` (now
-`test_gated_frame_is_measured_and_resting_is_the_fallback`: it pinned a
-lone `resting` candidate at exactly A0 on a noise-only frame);
-`test_bias_tripped_resting_is_refit_to_the_moved_edge` (its last block
-pinned the stale claim auto-accepting when the bias gate is off; the
-frame is now measured either way); and
-`test_disc_fit_tracks_the_moving_ink_edge` (extended, nothing loosened).
-The GUI, tuner and diag suites each gain one case.
-
-**Verification.** OpenCV 4.13: `test_sldea_edge.py` 91 passed,
-`test_sldea_calibration.py` 62, `test_sldea_reanchor.py` 22,
-`test_sldea_diag.py` 18, `test_sldea_tuner.py` 26, `test_sldea_plot.py`
-80, `test_sldea_edge_gui.py` 55, `test_sldea_trace.py` 17,
-`test_sldea_profile.py` 35, `test_sldea_plot_gui.py` 53 of 54 (the one
-failure, `test_resize_the_figure_follows_the_window`, is the known one on
-this PC and does not touch this change). The corpus replay was run three
-times; the last, on the committed tree, reproduces the tables above.
+**Tests.** `tests/test_sldea_edge.py` (93): the baseline measured against
+itself reads exactly 1.000 while the ellipse on that frame is off by more
+than 2 %; an outline grown by s reads s² within 0.5 % with about 30 % of
+the perimeter blocked; a bulge only behind a lead leaves the ratio where
+it was and is reported through `hidden_pct`; the drawn outline encloses
+`ellipse_over_circle` × A0 while `area_px` is the ratio; each refusal; the
+trim; bootstrap repeatability; the drift formula; the stamps round-trip
+and never become settings; the baseline provenance; stale rows are
+emptied and marked; the pair tolerance. Three existing tests pinned the
+old gated-frame behaviour and were changed on purpose
+(`test_gated_frame_is_measured_and_resting_is_the_fallback`,
+`test_bias_tripped_resting_is_refit_to_the_moved_edge`,
+`test_disc_fit_tracks_the_moving_ink_edge`). GUI: the Save dialog counts
+the rows it empties (trace-only Save included), the stamp carries the
+provenance, a failed stamp is said; the card text. Diag: the `tracker at
+rest` line. Tuner: a stamp-only block is not "tuned". Plot GUI: the bands
+tooltip no longer calls the spread a CI.
 
 ## A LIVE run locks the scope channels it reads, and the settings they share (2026-09-24)
 

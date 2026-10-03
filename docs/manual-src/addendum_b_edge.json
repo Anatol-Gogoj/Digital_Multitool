@@ -95,15 +95,15 @@
       "table": {
         "cols": ["Quantity reported", "Quote", "Dominated by"],
         "rows": [
-          ["Expansion ratio A/A₀", "±1–2 %", "Fit CI plus the second-order residual of the edge-definition offset — the scale cancels exactly."],
-          ["Absolute mm², convention stated", "±1–2 %", "Scale anchor plus fit CI."],
+          ["Expansion ratio A/A₀", "±1–2 %", "The disc-fit spread (not a CI) plus the second-order residual of the edge-definition offset — the scale cancels exactly. The hidden-perimeter term is not in this quote."],
+          ["Absolute mm², convention stated", "±1–2 %", "Scale anchor plus the disc-fit spread."],
           ["Absolute mm², convention NOT stated", "±3 % (or a one-sided +5.5 % band)", "The edge-definition offset. Avoid this — state the convention."],
           ["Hand-traced areas (wash-out ≥ 5.5 kV)", "±1 % precision, outer-toe convention", "Operator repeatability. The machine has no boundary there; the traces ARE the measurement."]
         ]
       },
       "bullets": [
         "The per-frame spread is on the candidate itself: disc-fit's spread_pct is the central 85 % of a 20°-block bootstrap of its common-ray ratio (median 0.6 %, 0.2–1.9 % across the corpus, growing with voltage). It is not a calibrated confidence interval, and it knows nothing about the edge hidden behind the leads. On an unchanged disc the area repeats to 0.1–0.3 %. It replaced a cross-tier spread that measured threshold sensitivity, a different quantity.",
-        "The largest single term is definitional, not statistical. On audit-clean control frames the operator's trace sits +5.2–5.7 % in area above the machine's, with a spread across four independent controls of only 0.5 %: the machine takes the HALF-HEIGHT of the ink step, a human tracing by eye lands on the OUTER TOE. Pick a convention, state it, and absolute areas inherit only the scale terms and the per-frame CI.",
+        "The largest single term is definitional, not statistical. On audit-clean control frames the operator's trace sits +5.2–5.7 % in area above the machine's, with a spread across four independent controls of only 0.5 %: the machine takes the HALF-HEIGHT of the ink step, a human tracing by eye lands on the OUTER TOE. Pick a convention, state it, and absolute areas inherit only the scale terms and the per-frame spread.",
         "Ratios are tighter for a geometric reason: the offset behaves as a near-constant annulus of ~7 px on a ~289 px resting radius, and a fixed annulus cancels to second order — at 1.44× area the residual between conventions is ~0.8 %. Honest caveat: it was measured at rest and low kV, and the onset-frame excess of ~1–2 % bounds how much it could grow under large strain.",
         "No machine boundary should be judged against a bar above IoU ~0.97: intra-operator repeatability measured median IoU 0.973 over 9 repeat pairs, area deltas 0.2–2.5 %."
       ]

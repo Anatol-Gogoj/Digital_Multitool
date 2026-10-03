@@ -1489,6 +1489,47 @@ def hot_slot(entries, chosen, sel):
     return None
 
 
+TRACKER_LINES = 4       # tracker_card_text height (text lines), fixed so
+                        # a frame with no tracker candidate changes the
+                        # content, not the layout (#179)
+
+
+def tracker_card_text(cands):
+    """The boundary tracker's own account of a frame, in plain words,
+    for the panel under the candidate radios (2026-10-02). '' when no
+    candidate among A/B/C is a tracker ('disc-fit') result.
+
+    Since 2026-10-02 the tracker's NUMBER is the common-ray ratio (the
+    same rays measured on the baseline frame and on this one, times
+    A0) while the OUTLINE it draws is still the robust ellipse through
+    its edge points, which encloses `ellipse_over_circle` x A0: on
+    DOT_P3_1 that is 7 % more than the number at rest. An operator who
+    judges the outline must be told that the number is not its area,
+    and must see the audit fields the number rests on: how many rays
+    it used (`n_common`), what share of the perimeter it never saw
+    (`hidden_pct`, assumed to strain like the rest), and whether the
+    rays sit on one side of the disc (`one_sided`; the ratio is refused
+    above se.RAY_MAX_ONE_SIDED). Pure, so it is a headless test."""
+    for k, c in enumerate(cands[:3]):
+        if c.get('method') != 'disc-fit' or c.get('area_ratio') is None:
+            continue
+        eoc = c.get('ellipse_over_circle')
+        hidden = c.get('hidden_pct')
+        return (f"{CAND_KEYS[k]} is the ray ratio: {c['area_ratio']:.4f} x A0 "
+                f"from {c.get('n_common', 0)} rays measured on both the "
+                f"baseline and this frame"
+                + (f", {c.get('n_trimmed')} trimmed"
+                   if c.get('n_trimmed') else '')
+                + f". {hidden:.0f}% of the edge is hidden (leads, foil) "
+                  f"and is assumed to strain like the rest; one-sidedness "
+                  f"{c.get('one_sided', 0):.2f} (refused above "
+                  f"{se.RAY_MAX_ONE_SIDED:g}). The drawn outline is the "
+                  f"ellipse, not the number: it encloses "
+                + (f"{eoc:.3f} x A0" if eoc is not None else "a different area")
+                + ".")
+    return ''
+
+
 class EdgeReviewApp:
     def __init__(self, root, path=None, auto=False, goto=None):
         self.root = root
@@ -1804,6 +1845,16 @@ class EdgeReviewApp:
                 else self._choose_current)
             rb.pack(side='left', fill='x', expand=True)
             self.cand_radios.append(rb)
+        # the tracker's account of the frame (2026-10-02): what its
+        # number is, what it rests on, and that the outline is not the
+        # number (tracker_card_text). Fixed height: content changes,
+        # layout does not.
+        self.tracker_lbl = tk.Label(self.cand_frame, text='',
+                                    justify='left', anchor='nw',
+                                    font=('TkDefaultFont', 9),
+                                    height=TRACKER_LINES,
+                                    wraplength=SIDE_W - 36)
+        self.tracker_lbl.pack(fill='x', pady=(4, 0))
         bt = ttk.Frame(side)
         bt.pack(fill='x', pady=6)
         self.accept_btn = ttk.Button(bt, text="✔ Accept (Enter)",
@@ -2614,6 +2665,7 @@ class EdgeReviewApp:
             else:
                 self.cand_radios[k].config(text=f"{CAND_KEYS[k]}: —",
                                            state='disabled')
+        self.tracker_lbl.config(text=tracker_card_text(cands))
         # row D: the staged manual trace, or the invitation to make one
         trace = self.traces.get(i)
         if trace is not None:
@@ -3261,34 +3313,47 @@ class EdgeReviewApp:
         accepted = sum(1 for r in self.results.values() if r)
         rejected = sum(1 for r in self.results.values() if r is None)
         n_unread = sum(1 for i in q if i in self.load_fail)
+        # ONE ESTIMATOR PER SAVE (2026-10-02). The area method changed
+        # (ellipse -> common-ray ratio, se.AREA_ESTIMATOR_VERSION): a
+        # kept row on a run last saved by the old method still holds an
+        # ellipse area, which read -0.4 to +7.4 % against the same
+        # frame's A0 and would be drawn beside this pass's rows on every
+        # plot. Those rows are EMPTIED and marked (se.stale_estimator_rows,
+        # apply_results stale=); the dialog says how many before anything
+        # is written; the run is stamped current only after the CSV is.
+        old_stamp = se.load_stamp(self.rundir)
+        stale = se.stale_estimator_rows(
+            self.run['rows'], self.results,
+            se.saved_area_estimator(self.rundir))
         # unreviewed rows KEEP their previous pass's px measurement,
         # re-scaled to this session's anchor (one scale per save, audit
         # 2026-08-05) — the dialog used to claim they were 'left blank'
         n_kept = sum(
             1 for i in q
-            if (self.run['rows'][i].get('active_area_px') or '').strip())
+            if (self.run['rows'][i].get('active_area_px') or '').strip()
+            and i not in stale)
         unrev = (f"unreviewed: {len(q)}"
                  + (f" ({n_kept} keep the previous pass's px, re-scaled "
                     f"to THIS anchor)" if n_kept else " (left blank)")
                  + (f"\n  incl. {n_unread} UNREADABLE frame(s) — kept, "
                     f"not re-measured" if n_unread else ""))
-        # Old and new numbers must never sit in one column unlabelled
-        # (2026-10-02). The area method changed (ellipse -> common-ray
-        # ratio, se.AREA_ESTIMATOR_VERSION): a kept row on a run last
-        # saved by the old method still holds an ellipse area, which read
-        # -0.4 to +7.4 % against the same frame's A0. Say so here, and
-        # mark each such row in its notes below; the run is stamped with
-        # the current version only after the CSV is written.
-        stale = se.stale_estimator_rows(
-            self.run['rows'], self.results,
-            se.saved_area_estimator(self.rundir))
         if stale:
-            unrev += (f"\n  WARNING: {len(stale)} of the kept row(s) hold an "
-                      f"area from the OLD area method (the fitted ellipse, "
-                      f"used until 2026-10-01). It reads up to several % "
-                      f"higher than the method used now. Each one gets the "
-                      f"note '{se.AREA_ESTIMATOR_STALE_NOTE}'. Review those "
-                      f"frames before you compare this run with others.")
+            unrev += (f"\n  ⚠ {len(stale)} unreviewed row(s) hold an "
+                      f"automatic area (disc-fit) saved with the OLD area "
+                      f"method (the fitted ellipse, used until 2026-10-01). "
+                      f"Old and new areas differ by a few percent, so these "
+                      f"rows will be EMPTIED and marked 're-review' (the old "
+                      f"numbers stay in data.csv.bak). Review them first if "
+                      f"you want them measured in this Save.")
+            if not self.cands_all:
+                # a trace-only Save (no Detect this session): nothing is
+                # re-measured, so the whole old column goes. Said plainly,
+                # so an old run cannot be converted by a Save that only
+                # meant to commit a hand trace.
+                unrev += (f"\n  ⚠ This session ran NO detection pass: the "
+                          f"{len(stale)} row(s) above are emptied and NOT "
+                          f"re-measured. Cancel and ▶ Detect Edges first if "
+                          f"you want them measured.")
         # ... and SAY BY HOW MUCH (#215). "re-scaled to THIS anchor" is
         # true but abstract; an operator who re-reviewed one frame needs
         # the number, because the whole mm² column moves by it.
@@ -3386,10 +3451,6 @@ class EdgeReviewApp:
                         if self.load_fail[i] == 'unreadable' else
                         'frame processing failed - kept, not re-measured')
                 annos[i] = (annos[i] + '; ' + note) if i in annos else note
-        # a kept area the old estimator wrote says so in its own row
-        for i in stale:
-            note = se.AREA_ESTIMATOR_STALE_NOTE
-            annos[i] = (annos[i] + '; ' + note) if i in annos else note
         if 'wrinkle_idx' not in self.run['columns']:
             # older runs predate the column; slot it in before notes
             cols = self.run['columns']
@@ -3409,7 +3470,7 @@ class EdgeReviewApp:
         csv_path = self.run.get('csv_path') or ''
         try:
             se.apply_results(self.run['rows'], self.results, scale,
-                             self.flags, annos)
+                             self.flags, annos, stale=stale)
             plan = se.plan_breakdown_marks(self.run, self.flags)
             se.write_back(self.rundir, self.run)
         except Exception as e:
@@ -3447,20 +3508,40 @@ class EdgeReviewApp:
             self.status.config(
                 text=f"saved, but recording the scale anchor in "
                      f"setup.txt failed: {e}")
-        # ... and which area estimator wrote the areas (2026-10-02): the
-        # stamp is what lets the next Save, and anyone reading the CSV,
-        # tell these numbers from the old ellipse areas. Written only
-        # now, after data.csv committed. A failure must be SEEN: with no
-        # stamp the run reads as old-method data.
+        # ... and which area estimator wrote the areas (2026-10-02), with
+        # the baseline's provenance beside it (what the tracker read on
+        # the resting disc: rays, hidden share, one-sidedness, and the
+        # ellipse-over-circle offset the old method carried on this run).
+        # The stamp is what lets the next Save, and anyone reading the
+        # CSV, tell these numbers from the old ellipse areas. Written
+        # only now, after data.csv committed. A failure must be SEEN:
+        # with no stamp the run reads as old-method data, and the next
+        # Save empties its unreviewed tracker rows.
+        if (not self.cands_all
+                and old_stamp.get('area_estimator')
+                == se.AREA_ESTIMATOR_VERSION):
+            # no detection pass this session (a trace-only Save): the
+            # tracker rows on file are still the earlier pass's, and so
+            # is the provenance recorded for them
+            stamp = dict(old_stamp)
+        else:
+            try:
+                prov = se.baseline_provenance(self._base_gray(),
+                                              self.settings)
+            except Exception as e:         # a truncated baseline can raise
+                print(f"save: baseline provenance not measured: {e}")
+                prov = None
+            stamp = se.estimator_stamp(prov)
         try:
-            se.stamp_area_estimator(self.rundir)
+            se.stamp_area_estimator(self.rundir, stamp)
         except OSError as e:
             messagebox.showwarning(
                 "Save: area-method stamp not written",
                 f"data.csv is saved, but setup.txt could not be updated:"
                 f"\n\n{e}\n\nUntil it is, this run looks as if the OLD "
-                f"area method measured it. Save again once the folder is "
-                f"writable.")
+                f"area method measured it, and the next Save would EMPTY "
+                f"its unreviewed automatic (disc-fit) rows for re-review. "
+                f"Save again once the folder is writable.")
         # detect→Save, the whole round trip, said in the status line where
         # it always was. Save no longer STOPS the toolbar clock (`#237`):
         # that clock is now the session, a session outlives a Save (the

@@ -167,41 +167,57 @@ def _setup_text(rundir):
         return ''
 
 
+def load_stamp(rundir):
+    """The result stamps Edge Review's Save recorded for this run's
+    data.csv -> {key: float} over STAMP_KEYS, {} when there are none.
+    No `area_estimator` key means the saved 'disc-fit' areas (if any)
+    were written by version 1 (the ellipse, through 2026-10-01); see
+    AREA_ESTIMATOR_VERSION. Same tolerant read as load_settings."""
+    out = {}
+    for k, v in _edge_block(_setup_text(rundir)).items():
+        if k in STAMP_KEYS:
+            try:
+                out[k] = float(v)
+            except ValueError:
+                pass
+    return out
+
+
 def saved_area_estimator(rundir):
     """Which area estimator wrote this run's saved 'disc-fit' areas: the
     `area_estimator:` stamp in the edge-settings section, or None when
-    there is no stamp. No stamp on a run that holds saved areas means
-    version 1 (the ellipse, through 2026-10-01); see
-    AREA_ESTIMATOR_VERSION."""
-    val = _edge_block(_setup_text(rundir)).get(AREA_ESTIMATOR_KEY)
-    try:
-        return int(float(val)) if val is not None else None
-    except ValueError:
-        return None
+    there is no stamp (= version 1)."""
+    val = load_stamp(rundir).get(AREA_ESTIMATOR_KEY)
+    return int(val) if val is not None else None
 
 
 def has_saved_settings(rundir):
     """Does this run carry saved DETECTION settings, that is, at least
     one DEFAULT_SETTINGS key in its edge-settings section? A section holding
-    only the estimator stamp (an Edge Review Save on a run nobody tuned)
-    does not count: the tuner's 'tuned' flag asks this, and a stamp is
-    not a tuning."""
+    only the stamps (an Edge Review Save on a run nobody tuned) does not
+    count: the tuner's 'tuned' flag asks this, and a stamp is not a
+    tuning."""
     return any(k in DEFAULT_SETTINGS
                for k in _edge_block(_setup_text(rundir)))
 
 
 def stale_estimator_rows(rows, results, saved_version):
-    """Rows whose area a Save would KEEP although an older area
-    estimator wrote it: not decided in this pass (absent from `results`),
-    still holding an `active_area_px`, and noted as a machine boundary
-    fit ('edge:disc-fit'), on a run whose stamp (`saved_version`, None =
-    no stamp = version 1) is older than AREA_ESTIMATOR_VERSION.
+    """Rows a Save must NOT keep: not decided in this pass (absent from
+    `results`), still holding an `active_area_px`, and noted as a machine
+    boundary fit ('edge:disc-fit'), on a run whose stamp (`saved_version`,
+    None = no stamp = version 1) is older than AREA_ESTIMATOR_VERSION.
+
+    An unreviewed row normally keeps the previous pass's px. That is
+    only safe while both passes mean the same thing by area_px: a
+    'disc-fit' px of version 1 is the ellipse, a run-specific -0.4 to
+    +7.4 % away from what this Save writes, and on a plot axis the two
+    would meet with nothing between them. apply_results(..., stale=)
+    empties these rows and writes AREA_ESTIMATOR_STALE_NOTE in place of
+    their note (data.csv.bak keeps the old values).
 
     The other kinds of row are not stale: a hand trace is not an
     estimator's output, the patch tiers did not change, and a 'resting'
-    row is A0 under both versions. -> sorted row indices. The caller
-    marks them (AREA_ESTIMATOR_STALE_NOTE) so old and new numbers never
-    sit in one column unlabelled."""
+    row is A0 under both versions. -> sorted row indices."""
     if (saved_version or 1) >= AREA_ESTIMATOR_VERSION:
         return []
     out = []
@@ -215,15 +231,16 @@ def stale_estimator_rows(rows, results, saved_version):
     return out
 
 
-def save_settings(rundir, settings, area_estimator=None):
+def save_settings(rundir, settings, stamp=None):
     """Append/replace the edge-settings section in the run's setup.txt.
 
-    `area_estimator`: the estimator version to stamp into the section
-    (`area_estimator: N`, see AREA_ESTIMATOR_VERSION). None keeps the
-    stamp the run already has: saving SETTINGS says nothing about which
-    estimator wrote the areas in data.csv, so the tuner and the settings
-    dialog must not move it. Only Edge Review's Save, which writes the
-    areas, passes it (through stamp_area_estimator).
+    `stamp`: the result stamps (STAMP_KEYS, see estimator_stamp) of the
+    Save that wrote data.csv. Given, they REPLACE the stamp lines on
+    file. None keeps the stamp lines the run already has: saving
+    SETTINGS says nothing about which estimator wrote the areas in
+    data.csv, so the tuner and the settings dialog must not move them.
+    Only Edge Review's Save, which writes the areas, passes a stamp
+    (through stamp_area_estimator).
 
     `settings` None rewrites the section with the setting lines it
     already holds (none, on a run that never saved any): the way to
@@ -250,10 +267,12 @@ def save_settings(rundir, settings, area_estimator=None):
     else:
         lines = [EDGE_HDR] + [f"{k}: {settings[k]:g}"
                               for k in DEFAULT_SETTINGS]
-    stamp = area_estimator if area_estimator is not None \
-        else old.get(AREA_ESTIMATOR_KEY)
-    if stamp is not None:
-        lines.append(f"{AREA_ESTIMATOR_KEY}: {int(float(stamp))}")
+    if stamp is None:
+        stamp = {k: old[k] for k in STAMP_KEYS if k in old}
+    for k in STAMP_KEYS:
+        if stamp.get(k) is not None:
+            v = float(stamp[k])
+            lines.append(f"{k}: {int(v) if k == AREA_ESTIMATOR_KEY else v:g}")
     # Atomic (tmp + replace): the in-place truncate used to destroy the
     # run's only metadata record on a mid-write NAS failure (audit
     # 2026-07-25).
@@ -266,15 +285,30 @@ def save_settings(rundir, settings, area_estimator=None):
     return path
 
 
-def stamp_area_estimator(rundir, version=None):
+def estimator_stamp(provenance=None, version=None):
+    """The stamp lines a Save writes (STAMP_KEYS): the estimator version
+    and, when the tracker could measure the baseline, its provenance
+    (baseline_provenance): the baseline's own ray count, the share of
+    its perimeter no ray could use, the one-sidedness of those rays, and
+    the ellipse-over-circle offset the OLD estimator carried on this run
+    (the size of the correction, readable without a rerun)."""
+    out = {AREA_ESTIMATOR_KEY: AREA_ESTIMATOR_VERSION if version is None
+           else int(version)}
+    for k in STAMP_KEYS[1:]:
+        if provenance and provenance.get(k) is not None:
+            out[k] = provenance[k]
+    return out
+
+
+def stamp_area_estimator(rundir, stamp=None):
     """Record in setup.txt which area estimator wrote the areas a Save
-    just put into data.csv (`area_estimator: N` in the edge-settings
-    section). The run's saved detection settings are left exactly as
-    they were. -> the setup.txt path."""
-    return save_settings(
-        rundir, None,
-        area_estimator=AREA_ESTIMATOR_VERSION if version is None
-        else version)
+    just put into data.csv, plus the baseline provenance (`stamp`, from
+    estimator_stamp; None = the version alone). The run's saved
+    detection settings are left exactly as they were. -> the setup.txt
+    path."""
+    return save_settings(rundir, None,
+                         stamp=estimator_stamp() if stamp is None
+                         else stamp)
 
 
 # The px→mm anchor Save used, persisted per run. Before 2026-08-05 the
@@ -2258,9 +2292,24 @@ def _fit_ellipse_robust(pts):
 #   2 = common-ray ratio times the baseline circle (2026-10-02)
 AREA_ESTIMATOR_VERSION = 2
 AREA_ESTIMATOR_KEY = 'area_estimator'
-# The note a kept row gets when its area predates the current estimator.
-AREA_ESTIMATOR_STALE_NOTE = ('old area method (ellipse) - kept, '
-                             'not re-measured')
+# Result stamps: facts about the numbers Edge Review's Save wrote into
+# data.csv, kept in the Edge Detection settings block beside the knobs
+# (plain `key: value` lines, like everything in setup.txt). They are NOT
+# settings: load_settings never returns them, save_settings carries them
+# over untouched unless a Save hands it new ones, load_stamp reads them
+# back. After the version come the baseline's provenance
+# (baseline_provenance): how many of the 360 rays measured an edge on
+# the baseline frame, the share of the perimeter none could use, the
+# one-sidedness of the rays that did, and the ellipse-over-circle
+# offset the old estimator carried on this run at rest (1.074 on
+# DOT_P3_1: the size of the correction, on record without a rerun).
+STAMP_KEYS = (AREA_ESTIMATOR_KEY, 'base_rays', 'base_hidden_pct',
+              'base_one_sided', 'base_ellipse_over_circle')
+# The note a row gets when a Save empties it because an older estimator
+# wrote its area (stale_estimator_rows). ASCII, for the CSV.
+AREA_ESTIMATOR_STALE_NOTE = ('not kept: measured with the old area method '
+                             '(ellipse, before 2026-10-02) - re-review '
+                             'this frame')
 
 # When the common-ray ratio REFUSES (refuse rather than fabricate). The
 # corpus behind the numbers (OpenCV 4.13, 2026-10-02): the 450
@@ -2482,6 +2531,45 @@ def _baseline_rays(base_full, settings, ref):
         return None if rays is None else rays['r']
 
     return _memo(_BASE_RAYS_CACHE, key, build)
+
+
+def baseline_provenance(base_gray, settings):
+    """What the tracker reads on the run's baseline frame: the facts a
+    Save stamps beside the estimator version (STAMP_KEYS) and sldea_diag
+    prints as 'tracker at rest'.
+
+    -> {'base_rays': rays (of 360) that found an ink edge on the
+    baseline, 'base_hidden_pct': the share of the perimeter none did
+    (the floor of every frame's hidden_pct), 'base_one_sided': the
+    one-sidedness of those rays (see RAY_MAX_ONE_SIDED),
+    'base_ellipse_over_circle': the robust ellipse through the baseline's
+    own edge points over the baseline circle, i.e. the A/A0 the OLD
+    estimator reported for the resting disc on this run (None when the
+    ellipse refuses)}, or None when there is no resting disc or the
+    tracker cannot measure the baseline (then no frame of the run gets a
+    disc-fit area either)."""
+    if base_gray is None:
+        return None
+    ref = baseline_disc(base_gray, settings)
+    if ref is None:
+        return None
+    r = _baseline_rays(base_gray, settings, ref)
+    if r is None:
+        return None
+    ok = np.flatnonzero(np.isfinite(r))
+    th = np.radians(ok * (360.0 / len(r)))
+    out = {'base_rays': int(ok.size),
+           'base_hidden_pct': round(100.0 * (1.0 - ok.size / float(len(r))),
+                                    1),
+           'base_one_sided': round(float(np.hypot(np.cos(th).mean(),
+                                                  np.sin(th).mean())), 3)
+           if ok.size else None,
+           'base_ellipse_over_circle': None}
+    c = _disc_fit_candidate(prepared_diff(base_gray, base_gray, settings),
+                            settings, ref, assume_responding=True)
+    if c is not None:
+        out['base_ellipse_over_circle'] = c['ellipse_over_circle']
+    return out
 
 
 def _common_ray_ratio(r_base, r_frame, r0):
@@ -2999,8 +3087,9 @@ def candidates(base_gray, img_gray, settings, prev_method=None):
     # sensitivity, as always. The tex candidate outlines the wrinkled
     # INTERIOR -- a subset by definition, so its area belongs in no
     # spread; its corroboration is sitting inside the boundary fit. The
-    # disc-fit reports its own fit CI as spread_pct (an area measurement's
-    # honest dispersion), lightly modulated by whether the tiers land
+    # disc-fit reports its own spread as spread_pct (the block-bootstrap
+    # spread of its ray ratio; not a confidence interval), lightly
+    # modulated by whether the tiers land
     # near its boundary. Mixing all areas into one spread made every
     # channel accuse every other of disagreement over a difference of
     # DEFINITION, and 24/24 frames went to review on it.
@@ -3381,11 +3470,12 @@ def reconcile_pairs(rows, cands_by_idx, settings):
     The two snapshots of one landing are independent detections of one
     physical state -- the strongest per-frame evidence the run offers.
     When their best candidates agree within a tolerance derived from
-    their own fit CIs, both gain +0.05 (tagged 'pair_confirmed'); when
-    they disagree past twice that tolerance, both are capped just below
-    accept_conf (tagged 'pair_mismatch_pct'), so a confident-looking
-    tier flip can never auto-accept on both sides of a contradiction.
-    Candidates without a CI (blob tiers) get a 6% default tolerance each,
+    their own per-frame figures (`ci85_pct`, or `pair_ci_pct` where
+    set), both gain +0.05 (tagged 'pair_confirmed'); when they disagree
+    past twice that tolerance, both are capped just below accept_conf
+    (tagged 'pair_mismatch_pct'), so a confident-looking tier flip can
+    never auto-accept on both sides of a contradiction. Candidates
+    without such a figure (blob tiers) get a 6% default tolerance each,
     matching ramp_consistency's 12% pair rule. Mutates the best
     candidates in place; -> {'confirmed': n, 'capped': n}.
 
@@ -3976,10 +4066,16 @@ def _num(v):
     return f if np.isfinite(f) else None
 
 
-def apply_results(rows, results, scale, flags, annos=None):
+def apply_results(rows, results, scale, flags, annos=None, stale=()):
     """Fill the active_area_* / wrinkle_idx / notes columns in `rows`
     (in place). `annos` are informational notes (e.g. wrinkle-mode) appended
     alongside the breakdown flags but never treated as breakdown.
+
+    ONE ESTIMATOR PER SAVE (2026-10-02): `stale` (stale_estimator_rows)
+    names kept rows whose px an older area estimator wrote. They are
+    blanked like a rejected row, with AREA_ESTIMATOR_STALE_NOTE in place
+    of their old note, instead of being re-scaled next to rows that mean
+    something else by area. data.csv.bak still holds the old values.
 
     Reprocess-safe (audit 2026-07-25): rejected rows blank EVERY derived
     column (a previous pass's mm²/wrinkle used to survive next to the
@@ -3998,9 +4094,16 @@ def apply_results(rows, results, scale, flags, annos=None):
     collapse threshold. A stale mm² whose px is missing (pre-2026-07-25
     bug era) is blanked rather than left on a foreign scale."""
     annos = annos or {}
+    stale = set(stale or ())
     for i, row in enumerate(rows):
         r = results.get(i)
-        if r:
+        if i in stale and i not in results:
+            for col in ('active_area_px', 'active_area_mm2',
+                        'active_diam_mm', 'wrinkle_idx'):
+                if col in row or col == 'active_area_px':
+                    row[col] = ''
+            note = AREA_ESTIMATOR_STALE_NOTE
+        elif r:
             row['active_area_px'] = f"{r['area_px']:.0f}"
             if scale:
                 row['active_area_mm2'] = f"{r['area_px'] * scale * scale:.3f}"

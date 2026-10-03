@@ -1382,44 +1382,68 @@ def test_fixed_centre_drift_sensitivity_matches_the_stated_formula():
         (res['ratio'], predicted)
 
 
-def test_estimator_version_is_stamped_and_never_moved_by_a_settings_save():
-    """R5. Edge Review's Save stamps `area_estimator: N` into the run's
-    edge-settings section (Key: value, through save_settings). No stamp
-    = the old ellipse estimator. Saving SETTINGS (tuner, settings
-    dialog) must keep whatever stamp is there, and stamping must not
-    pin detection settings nobody chose."""
+def test_estimator_stamps_roundtrip_and_never_become_settings():
+    """R5. Edge Review's Save stamps `area_estimator: N` and the
+    baseline's provenance (STAMP_KEYS) into the run's edge-settings
+    section as plain Key: value lines, through save_settings. They are
+    facts about data.csv, not knobs: load_settings must never return
+    them, a settings save (tuner, settings dialog) must carry them over
+    untouched, and a stamp-only save must not pin detection settings
+    nobody chose. No stamp = the old ellipse estimator."""
     d = tempfile.mkdtemp(prefix='edge_est_')
     try:
         with open(os.path.join(d, 'setup.txt'), 'w', encoding='utf-8') as f:
             f.write("SLDEA run\nDEA nominal diameter: 16 mm\n")
+        assert se.load_stamp(d) == {}
         assert se.saved_area_estimator(d) is None
         assert not se.has_saved_settings(d)
         # a settings save on an unstamped run does not invent a stamp
         s = se.load_settings(d)
         s['blur_px'] = 9
         se.save_settings(d, s)
-        assert se.saved_area_estimator(d) is None
+        assert se.load_stamp(d) == {}
         assert se.has_saved_settings(d)
-        # the Save stamp: settings lines untouched, stamp added
+        # the Save stamp: settings lines untouched, stamp lines added
         before = se.load_settings(d)
-        se.stamp_area_estimator(d)
+        prov = {'base_rays': 246, 'base_hidden_pct': 31.7,
+                'base_one_sided': 0.008,
+                'base_ellipse_over_circle': 1.07418}
+        stamp = se.estimator_stamp(prov)
+        assert stamp == dict(prov, area_estimator=2)
+        assert tuple(stamp) == se.STAMP_KEYS
+        se.stamp_area_estimator(d, stamp)
         assert se.saved_area_estimator(d) == se.AREA_ESTIMATOR_VERSION == 2
-        assert se.load_settings(d) == before
+        assert se.load_stamp(d) == {k: float(v) for k, v in stamp.items()}
+        assert se.load_settings(d) == before, "a stamp leaked into settings"
+        assert not any(k in se.load_settings(d) for k in se.STAMP_KEYS)
         text = open(os.path.join(d, 'setup.txt'), encoding='utf-8').read()
         assert text.count(se.EDGE_HDR) == 1
-        assert text.count('area_estimator: 2') == 1
-        assert 'blur_px: 9' in text
-        # a later settings save keeps the stamp; stamping is idempotent
+        assert text.count('area_estimator: 2\n') == 1
+        assert 'base_ellipse_over_circle: 1.07418\n' in text
+        assert 'base_rays: 246\n' in text and 'blur_px: 9' in text
+        # a later settings save keeps every stamp line; the version-only
+        # stamp (no provenance) replaces them with the version alone
         s['blur_px'] = 7
         se.save_settings(d, s)
+        assert se.load_stamp(d)['base_rays'] == 246.0
+        assert se.load_settings(d)['blur_px'] == 7
         se.stamp_area_estimator(d)
         se.stamp_area_estimator(d)
+        assert se.load_stamp(d) == {'area_estimator': 2.0}
         text = open(os.path.join(d, 'setup.txt'), encoding='utf-8').read()
         assert text.count('area_estimator: 2') == 1 and 'blur_px: 7' in text
-        assert se.load_settings(d)['blur_px'] == 7
+        assert text.count('blur_px') == 1
+        # a provenance the tracker could not complete writes what it has
+        se.stamp_area_estimator(d, se.estimator_stamp(
+            {'base_rays': 100, 'base_hidden_pct': 72.2,
+             'base_one_sided': 0.41, 'base_ellipse_over_circle': None}))
+        assert se.load_stamp(d) == {'area_estimator': 2.0, 'base_rays': 100.0,
+                                    'base_hidden_pct': 72.2,
+                                    'base_one_sided': 0.41}
         # an explicit older version can be written (and read back)
-        se.save_settings(d, s, area_estimator=1)
+        se.save_settings(d, s, stamp=se.estimator_stamp(None, version=1))
         assert se.saved_area_estimator(d) == 1
+        assert se.load_stamp(d) == {'area_estimator': 1.0}
     finally:
         shutil.rmtree(d)
     # a run nobody tuned: the stamp alone, no settings pinned, the scale
@@ -1444,46 +1468,144 @@ def test_estimator_version_is_stamped_and_never_moved_by_a_settings_save():
     d = tempfile.mkdtemp(prefix='edge_est_')
     try:
         assert se.saved_area_estimator(d) is None
+        assert se.load_stamp(os.path.join(d, 'nope')) == {}
         se.stamp_area_estimator(d)
         assert se.saved_area_estimator(d) == 2
     finally:
         shutil.rmtree(d)
 
 
-def test_stale_estimator_rows_names_kept_ellipse_areas_only():
-    """R5. A Save keeps the previous pass's px on rows still in the
-    review queue. On a run last saved by the ellipse estimator those are
-    old numbers beside new ones: exactly the rows this names, so the
-    caller can mark them."""
-    rows = [
-        {'active_area_px': '217438', 'notes': 'edge:resting conf 0.95'},
-        {'active_area_px': '238685', 'notes': 'edge:disc-fit conf 0.99'},
-        {'active_area_px': '226645',
-         'notes': 'edge:manual-trace conf 1.00 (user)'},
-        {'active_area_px': '', 'notes': 'edge:disc-fit conf 0.70'},
-        {'active_area_px': '240000',
-         'notes': 'edge:disc-fit conf 0.74 (user); pair mismatch 9%'},
-        {'active_area_px': '99000', 'notes': 'edge:tex-ratio conf 0.80'},
-        {'active_area_px': '250000', 'notes': 'edge:disc-fit conf 0.93'},
-    ]
-    results = {6: {'area_px': 251000.0}}          # re-measured this pass
-    assert se.stale_estimator_rows(rows, results, None) == [1, 4]
-    assert se.stale_estimator_rows(rows, results, 1) == [1, 4]
-    assert se.stale_estimator_rows(rows, results,
+def test_baseline_provenance_is_what_the_tracker_reads_at_rest():
+    """The stamped provenance comes from the tracker's own baseline
+    rays: how many of the 360 found an edge, the hidden share, their
+    one-sidedness, and the ellipse-over-circle offset the OLD estimator
+    carried on that scene. On the flared scene the leads hide about a
+    third of the perimeter on both sides, so the rays balance (low
+    one-sidedness) and the ellipse over-reads the circle."""
+    s = dict(se.DEFAULT_SETTINGS)
+    base = _flared_scene()
+    prov = se.baseline_provenance(base, s)
+    assert prov is not None
+    assert tuple(prov) == se.STAMP_KEYS[1:], prov
+    assert 60 <= prov['base_rays'] <= 300, prov
+    assert abs(prov['base_hidden_pct']
+               - 100.0 * (1 - prov['base_rays'] / 360.0)) < 0.06
+    assert 20.0 < prov['base_hidden_pct'] < 80.0, prov
+    assert prov['base_one_sided'] < 0.3, prov
+    c, _ratio = _track(base, base, s)
+    assert prov['base_ellipse_over_circle'] == c['ellipse_over_circle']
+    assert prov['base_ellipse_over_circle'] > 1.02
+    # the stamp carries exactly these facts beside the version
+    assert se.estimator_stamp(prov) == dict(prov, area_estimator=2)
+    # no resting disc, no provenance (and no baseline, none either)
+    assert se.baseline_provenance(_bridged_scene(with_disc=False, seed=3),
+                                  s) is None
+    assert se.baseline_provenance(None, s) is None
+
+
+def test_outline_is_the_ellipse_and_the_number_is_the_ray_ratio():
+    """The split the operator must know about: the drawn outline
+    (`contour`) is still the robust ellipse through the frame's edge
+    points, enclosing `ellipse_over_circle` x A0, while `area_px` is A0
+    times the common-ray ratio (`area_ratio`). On the flared scene the
+    two differ by several percent, as on DOT_P3_1 (7 % at rest). The
+    card says so (sldea_edge_gui.tracker_card_text)."""
+    s = dict(se.DEFAULT_SETTINGS)
+    base = _flared_scene()
+    ref = se.baseline_disc(base, s)
+    for img in (base, _flared_scene(scale=1.06, noise_seed=11)):
+        c, ratio = _track(base, img, s)
+        f = se.prepared_diff(base, img, s)['f']
+        a0_det = ref['area_px'] * f * f
+        # the number: A0 times the ratio (area_ratio is rounded to 5 dp)
+        assert abs(c['area_px'] - a0_det * c['area_ratio']) < 1e-5 * a0_det
+        # the outline: a 72-gon of the ellipse, whose area is pi*a*b to
+        # 0.13 % (the inscribed-polygon factor), i.e. ellipse_over_circle
+        # x A0 and NOT the number
+        pts = np.asarray(c['contour'], float)
+        poly = 0.5 * abs(np.dot(pts[:, 0], np.roll(pts[:, 1], 1))
+                         - np.dot(pts[:, 1], np.roll(pts[:, 0], 1)))
+        assert abs(poly / (c['ellipse_over_circle'] * a0_det) - 1.0) < 0.003, \
+            (poly, c['ellipse_over_circle'], a0_det)
+        assert abs(poly / c['area_px'] - 1.0) > 0.02, (poly, c['area_px'])
+    # through candidates() (full-resolution contour): same split
+    best = se.candidates(base, _flared_scene(scale=1.06, noise_seed=11), s)[0]
+    assert best['method'] == 'disc-fit'
+    assert abs(best['area_px'] / ref['area_px'] - best['area_ratio']) < 1e-4
+    pts = np.asarray(best['contour'], float)
+    poly = 0.5 * abs(np.dot(pts[:, 0], np.roll(pts[:, 1], 1))
+                     - np.dot(pts[:, 1], np.roll(pts[:, 0], 1)))
+    assert abs(poly / (best['ellipse_over_circle'] * ref['area_px']) - 1.0) \
+        < 0.01, (poly, best['ellipse_over_circle'], ref['area_px'])
+
+
+def test_stale_estimator_rows_are_emptied_and_marked_never_kept():
+    """R5, on the plot axis as well as in the CSV. A Save keeps the
+    previous pass's px on rows still in the review queue; on a run last
+    saved by the ellipse estimator those would be old numbers drawn
+    beside new ones. stale_estimator_rows names them and
+    apply_results(stale=) empties them with the note in place of the
+    old one, so sldea_plot never sees them as 'edge:disc-fit' rows."""
+    def rows():
+        return [
+            {'active_area_px': '217438', 'active_area_mm2': '201.062',
+             'active_diam_mm': '16.000', 'wrinkle_idx': '',
+             'notes': 'edge:resting conf 0.95'},
+            {'active_area_px': '238685', 'active_area_mm2': '220.700',
+             'active_diam_mm': '16.763', 'wrinkle_idx': '1.10',
+             'notes': 'edge:disc-fit conf 0.99'},
+            {'active_area_px': '226645', 'active_area_mm2': '209.566',
+             'active_diam_mm': '16.335', 'wrinkle_idx': '1.20',
+             'notes': 'edge:manual-trace conf 1.00 (user)'},
+            {'active_area_px': '', 'notes': 'edge:disc-fit conf 0.70'},
+            {'active_area_px': '240000', 'active_area_mm2': '221.916',
+             'active_diam_mm': '16.809', 'wrinkle_idx': '1.30',
+             'notes': 'edge:disc-fit conf 0.74 (user); pair mismatch 9%'},
+            {'active_area_px': '99000', 'notes': 'edge:tex-ratio conf 0.80'},
+            {'active_area_px': '250000', 'notes': 'edge:disc-fit conf 0.93'},
+        ]
+    results = {6: {'area_px': 251000.0, 'diam_px': 565.0, 'conf': 0.9,
+                   'method': 'disc-fit', 'wrinkle': 1.0}}
+    r = rows()
+    assert se.stale_estimator_rows(r, results, None) == [1, 4]
+    assert se.stale_estimator_rows(r, results, 1) == [1, 4]
+    assert se.stale_estimator_rows(r, results,
                                    se.AREA_ESTIMATOR_VERSION) == []
-    assert se.stale_estimator_rows(rows, {}, None) == [1, 4, 6]
-    # the note is ASCII and survives apply_results' anno channel once
+    assert se.stale_estimator_rows(r, {}, None) == [1, 4, 6]
+    # the note is ASCII (it goes into the CSV)
     se.AREA_ESTIMATOR_STALE_NOTE.encode('ascii')
-    annos = {i: se.AREA_ESTIMATOR_STALE_NOTE for i in (1, 4)}
-    se.apply_results(rows, results and {6: {
-        'area_px': 251000.0, 'diam_px': 565.0, 'conf': 0.9,
-        'method': 'disc-fit', 'wrinkle': 1.0}}, None, {}, annos)
-    se.apply_results(rows, {}, None, {}, annos)          # a second Save
-    assert rows[1]['notes'] == ('edge:disc-fit conf 0.99; '
-                                + se.AREA_ESTIMATOR_STALE_NOTE)
-    assert rows[1]['active_area_px'] == '238685'
-    assert rows[4]['notes'].count(se.AREA_ESTIMATOR_STALE_NOTE) == 1
-    assert se.AREA_ESTIMATOR_STALE_NOTE not in rows[0]['notes']
+    scale = 16.0 / (2 * np.sqrt(217438 / np.pi))
+    stale = se.stale_estimator_rows(r, results, None)
+    se.apply_results(r, results, scale, {}, {4: 'wrinkle-mode'},
+                     stale=stale)
+    for i in (1, 4):
+        for col in ('active_area_px', 'active_area_mm2', 'active_diam_mm',
+                    'wrinkle_idx'):
+            assert r[i][col] == '', (i, col, r[i][col])
+        assert r[i]['notes'].startswith(se.AREA_ESTIMATOR_STALE_NOTE), r[i]
+        assert 'edge:disc-fit' not in r[i]['notes'], r[i]['notes']
+    assert r[4]['notes'] == se.AREA_ESTIMATOR_STALE_NOTE + '; wrinkle-mode'
+    assert r[6]['active_area_px'] == '251000'      # re-measured this pass
+    assert r[6]['notes'] == 'edge:disc-fit conf 0.90'
+    assert r[0]['active_area_px'] == '217438'      # resting: A0 either way
+    assert r[2]['active_area_px'] == '226645'      # a hand trace: kept
+    assert r[5]['active_area_px'] == '99000'       # a patch tier: kept
+    # an emptied row holds no px, so a second Save on the (now stamped)
+    # run lists nothing; had the stamp write failed, row 6 would be
+    # listed next time: the failure mode is 're-review', never two
+    # estimators in one column
+    assert se.stale_estimator_rows(r, {}, se.AREA_ESTIMATOR_VERSION) == []
+    assert se.stale_estimator_rows(r, {}, None) == [6]
+    se.apply_results(r, {}, scale, {})                 # a second Save
+    assert r[1]['notes'] == se.AREA_ESTIMATOR_STALE_NOTE
+    assert r[1]['active_area_px'] == ''
+    # a run stamped with the current estimator keeps everything
+    r = rows()
+    se.apply_results(r, results, scale, {},
+                     stale=se.stale_estimator_rows(
+                         r, results, se.AREA_ESTIMATOR_VERSION))
+    assert r[1]['active_area_px'] == '238685'
+    assert r[1]['notes'] == 'edge:disc-fit conf 0.99'
 
 
 def test_disc_fit_adaptive_cut_keeps_a_uniformly_faint_edge():

@@ -126,6 +126,39 @@ def test_load_rows_parses_notes_phases_and_eras():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_row_emptied_by_the_estimator_change_never_reaches_an_axis():
+    """2026-10-02 (R5): a `disc-fit` area saved by the old ellipse
+    estimator is a few percent off the common-ray areas a later Save
+    writes. Edge Review empties such a row and replaces its note, so
+    here it must read as no area and no method, and the level it sat
+    on is drawn from the measured rows only."""
+    import sldea_edge as se
+    d = _mktmp()
+    try:
+        _fake_run(d, [
+            {'snapshot': 1, 'tag': 'baseline', 'nominal_kV': 0,
+             'active_area_px': 217438, 'active_area_mm2': 201.062,
+             'notes': 'edge:resting conf 0.95'},
+            {'snapshot': 2, 'tag': 'post-ramp', 'nominal_kV': 2.0,
+             'active_area_px': 221000, 'active_area_mm2': 204.356,
+             'notes': 'edge:disc-fit conf 0.97'},
+            {'snapshot': 3, 'tag': 'pre-ramp', 'nominal_kV': 2.0,
+             'notes': se.AREA_ESTIMATOR_STALE_NOTE},
+            {'snapshot': 4, 'tag': 'post-ramp', 'nominal_kV': 3.0,
+             'notes': se.AREA_ESTIMATOR_STALE_NOTE + '; wrinkle-mode'},
+        ])
+        rows = sp.load_rows(d)
+        assert rows[2]['area_px'] is None and rows[2]['area_mm2'] is None
+        assert rows[2]['method'] == '' and rows[2]['conf'] is None
+        assert rows[3]['method'] == '' and rows[3]['area_mm2'] is None
+        run = sp.load_run(d, warn=lambda m: None)
+        lv = sp.levels(run)
+        assert [l['kv'] for l in lv] == [0.0, 2.0], lv
+        assert lv[1]['mean'] == 204.356 and lv[1]['pre'] is None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_stale_breakdown_brand_is_not_confirmed_and_drops_nothing():
     # The P3_5 case: old area-jump heuristic branded frames *_BREAKDOWN and
     # wrote 'post-breakdown' notes while the current stayed flat. The tool

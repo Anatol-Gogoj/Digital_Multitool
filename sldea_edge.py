@@ -2466,6 +2466,33 @@ RAY_MAX_TRIM_SHARE = 0.2
 REVIEW_ONLY_TAGS = ('audit_nostep', 'audit_bias', 'ray_one_sided',
                     'ray_trim_share')
 RAY_BOOT_N = 300         # bootstrap resamples (fixed seed: repeatable)
+# How far out the tracker looks, in units of the resting radius r0
+# (2026-10-03; through 2026-10-02 the window ended at 1.38 r0 and the
+# gate at 1.3 r0, under a comment that called a 1.25x area expansion
+# the full ramp -- the campaign peaks are 2.25 to 2.34x, and the flat
+# shoulder frames just before the buckling, 1.70 to 1.94x, were refused
+# by the gate alone and sat in the review queue with nothing but patch
+# tiers to choose from).
+#   RAY_REACH    the rays are cast this far. A ray that meets foil or
+#                the frame border anywhere inside it is not used at all,
+#                so every ray the tracker reads is clear of the strips
+#                out to here: THIS is the ceiling where the disc would
+#                reach the foil strips, and the window and the gate sit
+#                under it.
+#   RAY_WIN_LO/HI  the ink step is searched between these radii on each
+#                ray (argmax of the dark->light step). Above the window
+#                an edge is not found, and the argmax locks onto an inner
+#                feature instead and reads low.
+#   DISC_FIT_R_MIN/MAX  plausibility gate on the fitted ellipse's
+#                equivalent radius sqrt(a*b)/r0: outside it the fit is
+#                tracking something other than the device (the halo,
+#                the vignetting, the holder) and is refused.
+# Measured on the corpus (OpenCV 4.13): see SLDEA_HANDOFF.md 2026-10-03.
+RAY_REACH = 1.8
+RAY_WIN_LO = 0.80
+RAY_WIN_HI = 1.70
+DISC_FIT_R_MIN = 0.9
+DISC_FIT_R_MAX = 1.75
 
 
 def _disc_rays(prep, settings, ref, assume_responding=False):
@@ -2527,7 +2554,7 @@ def _disc_rays(prep, settings, ref, assume_responding=False):
     change_raw = np.maximum(dn, tn)
     change = np.minimum(change_raw, 1.0)
 
-    rs = np.arange(max(4.0, 0.45 * r0), 1.8 * r0, 1.0)
+    rs = np.arange(max(4.0, 0.45 * r0), RAY_REACH * r0, 1.0)
     nray = 360
     th = np.linspace(0, 2 * np.pi, nray, endpoint=False)
     xs = (cx0 + np.outer(np.cos(th), rs)).astype(np.float32)
@@ -2536,7 +2563,12 @@ def _disc_rays(prep, settings, ref, assume_responding=False):
                      borderMode=cv2.BORDER_CONSTANT, borderValue=0)
     fop = cv2.remap(fo.astype(np.uint8), xs, ys, cv2.INTER_NEAREST,
                     borderMode=cv2.BORDER_CONSTANT, borderValue=1)
-    # strips (and the leads that feed them) block whole SECTORS, +-10 deg
+    # strips (and the leads that feed them) block whole SECTORS, +-10 deg.
+    # A ray is blocked when it meets foil, or leaves the frame (the
+    # border counts as foil), ANYWHERE out to RAY_REACH: the rays that
+    # are read are clear of the strips over the whole search window, so
+    # the tracker can never report the edge of a strip as the ink edge.
+    # That is the hard ceiling the wider window (RAY_WIN_HI) sits under.
     blocked = fop.any(axis=1)
     bi = np.where(blocked)[0]
     for k in bi:
@@ -2577,8 +2609,8 @@ def _disc_rays(prep, settings, ref, assume_responding=False):
     nr = len(rs)
     in_lo = int(np.searchsorted(rs, 0.55 * r0))
     in_hi = int(np.searchsorted(rs, 0.80 * r0))
-    w_lo = int(np.searchsorted(rs, 0.80 * r0))
-    w_hi = min(int(np.searchsorted(rs, 1.38 * r0)), nr - 6)
+    w_lo = int(np.searchsorted(rs, RAY_WIN_LO * r0))
+    w_hi = min(int(np.searchsorted(rs, RAY_WIN_HI * r0)), nr - 6)
     if in_hi <= in_lo or w_hi <= w_lo + 4:
         return None
     # Two passes over the rays: measure every sustained step first, then
@@ -2833,11 +2865,14 @@ def _disc_fit_candidate(prep, settings, ref, assume_responding=False):
     pin = pts[keep]
     a, b = A / 2.0, B / 2.0
     r_eq = float(np.sqrt(a * b))
-    # gates: the responding disc is the resting disc, slightly deformed.
-    # The observed full-ramp expansion is ~1.25x AREA (1.12x radius); a
-    # fit claiming more than 1.3x radius is tracking something else --
-    # the halo, the vignetting, the annulus -- not the device.
-    if not 0.9 <= r_eq / r0 <= 1.3:
+    # gates: the responding disc is the resting disc, deformed. The
+    # campaign discs reach 2.25 to 2.34x the resting AREA (1.50 to 1.53x
+    # radius, owner-reviewed peaks) and the flat shoulder just before
+    # buckling sits at 1.70 to 1.94x; a fit claiming more than
+    # DISC_FIT_R_MAX times the radius is tracking something else -- the
+    # halo, the vignetting, the holder -- not the device (see the
+    # constants above _disc_rays for the measured range).
+    if not DISC_FIT_R_MIN <= r_eq / r0 <= DISC_FIT_R_MAX:
         return None
     if np.hypot(exc - cx0, eyc - cy0) > 0.15 * r0:
         return None
@@ -3710,7 +3745,26 @@ def reconcile_pairs(rows, cands_by_idx, settings):
     'pair_confirmed' boosts no pair had earned, a step toward
     auto-accept; genuine hysteresis between legs read as detection
     disagreement and was capped into review. On a single sweep each kV
-    is one landing, so the pairs -- and every result -- are unchanged."""
+    is one landing, so the pairs -- and every result -- are unchanged.
+
+    One member is NOT capped by a mismatch (2026-10-03): a tracker
+    result ('disc-fit') with a clean audit whose every mate is a patch
+    tier ('tex-ratio' or a 'diff-*' region). The patch tiers outline a
+    changed region or the wrinkled interior, not the boundary, so such
+    a disagreement is one of definition (the mate picked a different
+    object), not two readings of one state that contradict each other;
+    the audit has already checked the ink step under the tracked
+    outline. The tracked member keeps its own confidence (no
+    confirmation bonus either: nothing confirmed it) and is tagged
+    'pair_mate_patch' with the mismatch; the patch members stay capped
+    and tagged as before, so the landing still reaches the review queue
+    through them, and a patch tier can never ride an exemption. On the
+    review corpus (OpenCV 4.13, with the wider tracker window of the
+    same date) this freed 3 audit-clean tracked frames that sat in
+    review only because of their mate, and SquareStack-1 L6 pre (a
+    tex-ratio patch at 0.23 x A0 beside a bias-tripped tracker fit)
+    stays in review. Both-tracker pairs (the mid-hold collapses) and
+    tracker-versus-resting pairs are capped exactly as before."""
     acc = float(settings.get('accept_conf', 0.75))
     by_landing = {}
     for i, pos in enumerate(sweep_landings(rows)):
@@ -3740,11 +3794,34 @@ def reconcile_pairs(rows, cands_by_idx, settings):
             stats['confirmed'] += len(members)
         elif rel > 2.0 * tol:
             for b in members:
+                if _pair_mate_is_patch(b, members):
+                    b['pair_mate_patch'] = round(100 * rel, 1)
+                    continue
                 b['pair_mismatch_pct'] = round(100 * rel, 1)
                 if b['conf'] > acc - 0.01:
                     b['conf'] = round(acc - 0.01, 3)
-            stats['capped'] += len(members)
+                stats['capped'] += 1
     return stats
+
+
+def _is_patch_tier(cand):
+    """A candidate that outlines a changed REGION (the diff tiers) or
+    the wrinkled INTERIOR (tex-ratio) rather than the boundary of the
+    disc. Hand traces, 'resting' claims and the tracker are not."""
+    m = str(cand.get('method') or '')
+    return m == 'tex-ratio' or m.startswith('diff')
+
+
+def _pair_mate_is_patch(cand, members):
+    """reconcile_pairs' exemption (2026-10-03): `cand` is a tracker
+    result with a clean audit, and every other member of its landing
+    is a patch tier. See the docstring there."""
+    if cand.get('method') != 'disc-fit':
+        return False
+    if cand.get('audit_nostep') or cand.get('audit_bias'):
+        return False
+    mates = [b for b in members if b is not cand]
+    return bool(mates) and all(_is_patch_tier(b) for b in mates)
 
 
 def audit_boundary(prep, cand, settings):

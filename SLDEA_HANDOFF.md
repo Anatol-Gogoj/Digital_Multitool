@@ -13,6 +13,104 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## The tracker follows the disc to the shoulder, and a patch-tier mate no longer caps a clean tracked frame (2026-10-03)
+
+**TL;DR:** the boundary tracker refused any fit above 1.3 times the resting
+radius (1.69x area) and searched only to 1.38 r0, under a comment that
+called 1.25x area the full ramp; the campaign discs reach 2.25 to 2.34x. The
+gate is now 1.75 r0 and the window 1.70 r0, both under the 1.8 r0 reach
+inside which any ray that meets foil or the frame border is dropped whole.
+On the review corpus the flat shoulder frames (1.69 to 1.88x area on this
+estimator; the review counted 12 on `main`, 13 here) that had only patch
+tiers to choose from now get the tracker: 5 auto-accept with the outline
+on the ink edge, 7 queue with the tracker as candidate A, 1 is still
+hidden behind three patch tiers. No frame that was already accepted
+moved by more than 0.21 % on a campaign run (0.95 % on retired 152205).
+Separately, a tracked frame with a clean audit is no longer capped into
+review because the other snapshot of its landing was won by a patch tier;
+the patch member stays capped, so the landing is still queued.
+
+**Observation -> decision.** Measured on the 16 run folders of the review
+copy (899 frames), OpenCV 4.13, replaying detection as Edge Review runs it,
+on top of the common-ray estimator of 2026-10-02 (`eval/a1_final2` is the
+reference; branch `claude/sldea-tracker-range` stacks on
+`claude/sldea-area-common-ray`).
+
+- *Observed* (science review finding S51, reproduced here on the new
+  estimator). `_disc_fit_candidate` refused r_eq/r0 above 1.3 and
+  `_disc_rays` searched to 1.38 r0. Thirteen shoulder frames on DOT_P3_1
+  (6.25 kV post and pre, 6.5 kV post), P3_2 (4.5 pre, 4.75 post and pre),
+  P3_3 (4.75 pre, 5.0 post and pre) and P3_6 (4.5 and 4.75, post and pre)
+  were refused by the gate alone and sat in the queue with patch tiers at
+  0.01 to 1.5x A0 as candidates A to C. Where the edge had left the window
+  on wrinkled frames the argmax locked onto an inner step and read low.
+- *Decision: `DISC_FIT_R_MAX` = 1.75, `RAY_WIN_HI` = 1.70, `RAY_REACH` =
+  1.8 (unchanged), as module constants with the measured facts beside
+  them.* The reach is the hard ceiling: a ray that meets foil, or leaves
+  the frame, anywhere inside 1.8 r0 is not read at all, so the window can
+  never put a strip edge under the fit. The absolute relaxation was
+  preferred over a window anchored to the last accepted landing (the
+  refuter measured that one shifting ten accepted DOT frames by +7 to
+  +10 % with no ground truth).
+- *Result.* Corpus 471 auto / 329 review / 99 reject -> 481 / 319 / 99.
+  Newly auto-accepted, outline checked on the ink edge at 1:1 on six
+  azimuths each: DOT_P3_1 r49 (6.25 kV post, 1.701x A0, conf 0.88);
+  P3_2 r35 and r36 (4.5 kV, 1.665 and 1.723); P3_3 r37 to r40 (4.75 and
+  5.0 kV, 1.659 to 1.727, conf 0.99); P3_6 r31 and r50 (1.510, 1.480);
+  P3_5 r32 (1.472); 233451 r37 (1.178); plus the three freed by the pair
+  rule below. Lost: P3_6 r32 and r48 (the audit's no-step arc sits within
+  1.1 points of its 15 % gate on all four P3_6 frames that flipped, two
+  each way: r31 and r50 crossed into acceptance, r32 and r48 out of it),
+  233451 r43 (4.4 kV post, the one auto-accepted lock-in S51
+  found: it reads 1.261 instead of 1.248 and now audits no-step 21 %),
+  SquareStack-1 r21 (a 0.17x A0 tex patch that auto-accepted; the frame
+  now has a tracker candidate at 1.305 and the pair is a mismatch).
+  Accepted areas on both sides: 467 frames, median move 0.00 %, 90th
+  percentile 0.02 %, maximum 0.21 % on a campaign run (DOT_P3_1 r45,
+  P3_6 r74) and 0.95 % on retired 152205. Peaks of the auto-accepted
+  series: DOT_P3_1 1.557 -> 1.701, P3_2 1.575 -> 1.723, P3_3 1.584 ->
+  1.727, P3_5 1.579 -> 1.577, P3_6 1.532 -> 1.510 (r32 to the queue, see
+  above). In the queue, 14 frames now show the
+  tracker as candidate A where they showed a patch tier, and on the
+  wrinkled P3_2 and P3_6 frames at 4.75 to 5.5 kV the tracker's value
+  moved +8 to +16 % (the far edge instead of the inner step); all stay
+  in review on the audit. DOT_P3_1 r51 (6.5 kV post) is tracked at
+  1.882 (conf 0.70) but drops off the three-candidate list behind three
+  off-centre diff patches at 0.01 to 0.02x A0; left for the owner.
+- *Decision: the pair cap spares an audit-clean tracked frame whose mate
+  is a patch tier* (findings S37/S40). The patch tiers outline a changed
+  region or the wrinkled interior, not the boundary, so the mismatch is
+  one of definition; the audit has already checked the ink step under the
+  tracked outline. `reconcile_pairs` leaves that member's confidence alone
+  (no bonus), tags it `pair_mate_patch`, and caps the patch member as
+  before. Both-tracker pairs (the mid-hold collapses) and tracker-versus-
+  resting pairs are capped as before. On the corpus this frees P3_3 r46
+  (5.75 kV pre, 1.217x A0, conf 0.80), P3_5 r46 (5.75 kV pre, 1.242,
+  conf 0.91) and 233451 r34 (3.4 kV pre, 1.159, conf 0.79); with the old
+  tracker limits it would have freed six. SquareStack-1 L6 pre (r12, a
+  tex-ratio patch at 0.23x A0 beside a bias-tripped tracker fit) stays in
+  review, as does every patch member of a mismatch. The frozen `78315cc`
+  pairing oracle in the tests is kept verbatim; the test applies this one
+  exemption to its output.
+- *Not taken.* Folding pair agreement within one method family only: it
+  would have let SquareStack-1 L6 pre auto-accept, since nothing would
+  compare the patch with the tracked mate. An anchored search window: see
+  above.
+
+**Limits.** The reviewed peaks (2.25 to 2.34x) are still not tracked: the
+buckled frames above the shoulder audit no-step at 38 to 55 % and stay in
+review, as S51's refuter found. The 1.75 and 1.70 values were chosen on
+this corpus. The audit's own gates (15 % no-step, 3 px bias) now decide
+four P3_6 frames either way by 0.4 to 1.1 points, which they also did
+before. Numbers are OpenCV 4.13. Nothing on the lab share was
+reprocessed. A run reprocessed through Edge Review after this change
+carries the same `area_estimator: 2` stamp as before: the functional did
+not change, and the wider window moves an already accepted campaign value
+by at most 0.21 % (0.95 % on retired 152205), through the baseline rays
+and the trim, which is under the frame noise. No run outside the review
+copy has been stamped 2 yet; whether this deserves its own stamp is the
+owner's call.
+
 ## A and A0 become one measurement: the disc-fit area is a common-ray ratio, and gated frames are measured (2026-10-02)
 
 **TL;DR:** the resting area A0 was a circle, but every measured row was an

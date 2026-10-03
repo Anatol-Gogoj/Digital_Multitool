@@ -1537,6 +1537,107 @@ def test_bulge_inside_a_blocked_sector_is_not_seen_and_says_so():
     assert bulged['n_common'] <= 360 * (1 - bulged['hidden_pct'] / 100) + 1
 
 
+def test_tracker_follows_the_disc_past_the_old_ceiling():
+    """2026-10-03: through 2026-10-02 the tracker refused any fit above
+    1.3 r0 (1.69x area) and searched only to 1.38 r0, under a comment
+    that called a 1.25x area expansion the full ramp; the campaign peaks
+    are 2.25 to 2.34x and the flat shoulder frames at 1.70 to 1.94x sat
+    in review with nothing but patch tiers to choose from. The same
+    rays must now read a disc grown to the shoulder (and to the
+    reviewed peaks) as scale squared, with the outline on the edge, and
+    the frame must auto-accept."""
+    s = dict(se.DEFAULT_SETTINGS)
+    base = _flared_scene()
+    ref = se.baseline_disc(base, s)
+    assert se.DISC_FIT_R_MAX == 1.75 and se.RAY_WIN_HI == 1.70
+    assert se.RAY_WIN_HI < se.RAY_REACH and se.DISC_FIT_R_MAX < se.RAY_REACH
+    for scale in (1.32, 1.38, 1.45, 1.53):
+        img = _flared_scene(scale=scale, noise_seed=11)
+        c, ratio = _track(base, img, s)
+        assert abs(ratio / scale ** 2 - 1.0) < 0.005, (scale, ratio)
+        r_eq = np.sqrt(c['ellipse_over_circle'])
+        assert 1.3 < r_eq <= se.DISC_FIT_R_MAX, (scale, r_eq)
+        assert c['conf_own'] >= 0.9, (scale, c['conf_own'])
+        cands = se.candidates(base, img, s)
+        assert cands[0]['method'] == 'disc-fit', (scale, cands[0]['method'])
+        assert abs(cands[0]['area_px'] / ref['area_px'] / scale ** 2
+                   - 1.0) < 0.005, scale
+        assert not se.needs_review(cands, s), (scale, cands[0]['conf'])
+    # the old limits really did refuse these: with them the shoulder
+    # disc gets no tracker candidate at all
+    old = (se.DISC_FIT_R_MAX, se.RAY_WIN_HI)
+    se.DISC_FIT_R_MAX, se.RAY_WIN_HI = 1.3, 1.38
+    try:
+        se._BASE_RAYS_CACHE.clear()
+        prep = se.prepared_diff(base, _flared_scene(scale=1.38,
+                                                    noise_seed=11), s)
+        assert se._disc_fit_candidate(prep, s, ref,
+                                      assume_responding=True) is None
+    finally:
+        se.DISC_FIT_R_MAX, se.RAY_WIN_HI = old
+        se._BASE_RAYS_CACHE.clear()
+
+
+def test_tracker_refuses_a_disc_beyond_its_reach():
+    """The limits are a ceiling, not a licence: an edge past the search
+    window has no ray on it, and the tracker refuses (no candidate)
+    rather than fitting whatever step is left inside the window. A
+    patch tier may still outline the frame for the human."""
+    s = dict(se.DEFAULT_SETTINGS)
+    base = _flared_scene()
+    ref = se.baseline_disc(base, s)
+    for scale in (1.78, 1.95):
+        img = _flared_scene(scale=scale, noise_seed=11)
+        prep = se.prepared_diff(base, img, s)
+        assert se._disc_fit_candidate(prep, s, ref,
+                                      assume_responding=True) is None, scale
+        assert all(c['method'] != 'disc-fit'
+                   for c in se.candidates(base, img, s)), scale
+
+
+def test_rays_that_meet_foil_inside_the_reach_are_not_read():
+    """The hard ceiling under the wider window: a ray that meets the
+    foil strips anywhere out to RAY_REACH is dropped whole, on the
+    baseline and on every frame, although the ink edge at 1.0 r0 is
+    perfectly visible on it. So the tracker can never report the edge
+    of a strip as the ink edge, and a strip laid across an open sector
+    costs rays (hidden_pct) but never moves the ratio."""
+    s = dict(se.DEFAULT_SETTINGS)
+    rng = np.random.default_rng(3)
+
+    def with_strip(img, r_lo=145, r_hi=215):
+        # crinkled foil across the top sector, 1.45 to 2.15 r0 out: thick
+        # enough for foil_mask's depth gate (an inscribed 30 px), as the
+        # real strips are
+        out = img.copy()
+        out[270 - r_hi:270 - r_lo, 420:540] = _crinkle((r_hi - r_lo, 120),
+                                                       rng)
+        return out
+
+    plain = _flared_scene()
+    strip = with_strip(_flared_scene())
+    assert se.foil_mask(strip)[55:125, 420:540].all(), "the strip is foil"
+    ref_p = se.baseline_disc(plain, s)
+    ref_s = se.baseline_disc(strip, s)
+    assert ref_s is not None and abs(ref_s['diam_px'] - ref_p['diam_px']) < 3.0
+    r_plain = se._baseline_rays(plain, s, ref_p)
+    r_strip = se._baseline_rays(strip, s, ref_s)
+    top = slice(240, 300)              # rays through the strip (270 = up)
+    assert np.isfinite(r_plain[top]).all(), "the plain scene reads the top"
+    assert not np.isfinite(r_strip[top]).any(),         "a ray through foil inside the reach must not be read"
+    # elsewhere the same rays are read (to the px the recentred disc
+    # allows), and the ratio does not see the strip
+    side = np.r_[0:200, 340:360]
+    both = np.isfinite(r_plain[side]) & np.isfinite(r_strip[side])
+    assert both.sum() == np.isfinite(r_plain[side]).sum() > 120
+    assert np.abs(r_plain[side][both] - r_strip[side][both]).max() < 3.0
+    for scale in (1.0, 1.12, 1.32):
+        img = with_strip(_flared_scene(scale=scale, noise_seed=11))
+        c, ratio = _track(strip, img, s)
+        assert abs(ratio / scale ** 2 - 1.0) < 0.005, (scale, ratio)
+        assert c['hidden_pct'] > 40.0, c['hidden_pct']
+
+
 def _rays(r, lo, hi):
     """360 rays at radius r, measured only where lo <= degree < hi."""
     out = np.full(360, np.nan)
@@ -2028,14 +2129,87 @@ def test_reconcile_pairs_boosts_agreement_and_caps_contradiction():
              'ci85_pct': None}],
     }
     stats = se.reconcile_pairs(rows, cands, dict(se.DEFAULT_SETTINGS))
-    assert stats == {'confirmed': 2, 'capped': 2}, stats
+    # 2026-10-03: the tracked member of landing 2 has a clean audit and
+    # its only mate is a patch tier, so it is no longer capped (see
+    # test_audit_clean_tracker_is_not_capped_by_a_patch_mate); the
+    # patch member still is
+    assert stats == {'confirmed': 2, 'capped': 1}, stats
     assert cands[0][0]['conf'] == 0.85 and cands[0][0]['pair_confirmed']
     assert cands[1][0]['conf'] == 0.83
-    # the contradiction can no longer auto-accept on either side
+    # the contradiction can no longer auto-accept on the PATCH side
     acc = se.DEFAULT_SETTINGS['accept_conf']
-    assert cands[2][0]['conf'] == round(acc - 0.01, 3)
+    assert cands[2][0]['conf'] == 0.92
+    assert cands[2][0]['pair_mate_patch'] == 80.0
+    assert 'pair_mismatch_pct' not in cands[2][0]
     assert cands[3][0]['conf'] == round(acc - 0.01, 3)
-    assert cands[2][0]['pair_mismatch_pct'] == cands[3][0]['pair_mismatch_pct'] == 80.0
+    assert cands[3][0]['pair_mismatch_pct'] == 80.0
+
+
+def test_audit_clean_tracker_is_not_capped_by_a_patch_mate():
+    """2026-10-03 (review findings S37/S40): about nine audit-clean
+    tracker frames per corpus pass sat in review only because the other
+    snapshot of their landing was won by a patch tier (tex-ratio or a
+    diff region), which outlines a different object. That is a
+    disagreement of definition, not two readings of one state, and the
+    audit has already checked the ink step under the tracked outline.
+    The rule is the narrowest one: the tracked member keeps its own
+    confidence (no bonus) and is tagged; the patch member stays capped,
+    so the landing still reaches the queue through it. Everything
+    else -- both-tracker pairs (a real mid-hold collapse), tracker
+    versus resting, an audit-tripped tracker beside a patch (the
+    SquareStack-1 L6 shape: a 0.23 x A0 tex patch beside a bias-tripped
+    fit) -- is capped exactly as before."""
+    s = dict(se.DEFAULT_SETTINGS)
+    acc = s['accept_conf']
+    cap = round(acc - 0.01, 3)
+    rows = [{'nominal_kV': str(k)} for k in (1, 1, 2, 2, 3, 3, 4, 4, 5, 5)]
+
+    def best(method, area, conf, **tags):
+        c = {'method': method, 'area_px': area, 'conf': conf,
+             'ci85_pct': 0.5 if method in ('disc-fit', 'resting') else None}
+        c.update(tags)
+        return c
+
+    cands = {
+        # clean tracker beside a tex patch: the tracker is freed
+        0: [best('disc-fit', 356000.0, 0.90)],
+        1: [best('tex-ratio', 65000.0, 0.93)],
+        # SquareStack-1 L6: the tracker's audit tripped, so BOTH stay capped
+        2: [best('disc-fit', 356000.0, 0.90, audit_bias=6.5)],
+        3: [best('tex-ratio', 65000.0, 0.93)],
+        # two trackers 20 % apart (a collapse during the hold): both capped
+        4: [best('disc-fit', 160000.0, 0.90)],
+        5: [best('disc-fit', 130000.0, 0.90)],
+        # tracker versus a resting claim: both capped
+        6: [best('disc-fit', 120000.0, 0.90)],
+        7: [best('resting', 100000.0, 0.90)],
+        # clean tracker beside a diff region, tracker below accept_conf
+        # on its own: freed from the cap, tagged, still not acceptable
+        8: [best('disc-fit', 150000.0, 0.70)],
+        9: [best('diff-lo', 60000.0, 0.88)],
+    }
+    stats = se.reconcile_pairs(rows, cands, s)
+    assert stats == {'confirmed': 0, 'capped': 8}, stats
+    a, b = cands[0][0], cands[1][0]
+    assert a['conf'] == 0.90 and 'pair_mismatch_pct' not in a
+    assert a['pair_mate_patch'] == 138.2 and not a.get('pair_confirmed')
+    assert b['conf'] == cap and b['pair_mismatch_pct'] == 138.2
+    assert not se.needs_review([dict(a, spread_pct=2.0)], s)
+    assert se.needs_review([dict(b, spread_pct=10.1)], s)
+    for i in (2, 3, 4, 5, 6, 7):
+        c = cands[i][0]
+        assert c['conf'] == cap and 'pair_mismatch_pct' in c, (i, c)
+        assert 'pair_mate_patch' not in c, (i, c)
+    assert cands[8][0]['conf'] == 0.70 and cands[8][0]['pair_mate_patch']
+    assert cands[9][0]['conf'] == cap and cands[9][0]['pair_mismatch_pct']
+    # the helper's own contract
+    assert se._is_patch_tier({'method': 'tex-ratio'})
+    assert se._is_patch_tier({'method': 'diff-hi'})
+    assert not se._is_patch_tier({'method': 'disc-fit'})
+    assert not se._is_patch_tier({'method': 'resting'})
+    assert not se._is_patch_tier({'method': 'trace'})
+    one = {'method': 'disc-fit'}
+    assert not se._pair_mate_is_patch(one, [one])      # alone: no mate
 
 
 def test_audit_boundary_measures_bias_and_circled_noise():
@@ -2683,24 +2857,65 @@ def _random_ua(rng, n):
     return cells
 
 
+def _free_patch_mated_trackers(rows, cands, settings):
+    """The one documented departure from the frozen oracle (2026-10-03,
+    SLDEA_HANDOFF.md of that date): in a landing the oracle capped, a
+    tracker member with a clean audit whose every mate is a patch tier
+    keeps its original confidence and carries the mismatch as
+    'pair_mate_patch' instead of 'pair_mismatch_pct', and is not counted
+    as capped. Applied to the oracle's OUTPUT, so the oracle itself stays
+    verbatim; -> the adjusted stats."""
+    acc = float(settings.get('accept_conf', 0.75))
+    freed = 0
+    by_landing = {}
+    for i, pos in enumerate(se.sweep_landings(rows)):
+        if pos is not None and cands.get(i):
+            by_landing.setdefault(pos['landing'], []).append(cands[i][0])
+    for members in by_landing.values():
+        if len(members) < 2 or not all('pair_mismatch_pct' in b
+                                       for b in members):
+            continue
+        for b in members:
+            if (b['method'] == 'disc-fit'
+                    and not (b.get('audit_nostep') or b.get('audit_bias'))
+                    and all(se._is_patch_tier(m) for m in members
+                            if m is not b)):
+                b['pair_mate_patch'] = b.pop('pair_mismatch_pct')
+                b['conf'] = b['conf_before']
+                freed += 1
+    for cl in cands.values():
+        cl[0].pop('conf_before', None)
+    return freed
+
+
 def test_single_sweep_pairing_is_unchanged():
     """A single sweep never lands on a kV twice, so its landings ARE its
     kV groups and reconcile_pairs must do exactly what it did -- every
-    stat, every conf, every tag -- in every layout, trip row included."""
+    stat, every conf, every tag -- in every layout, trip row included.
+    The single exception since 2026-10-03 is the patch-mate exemption
+    (_free_patch_mated_trackers), applied to the oracle's output and
+    exercised here: the random bests put clean trackers beside diff
+    regions often enough that it fires in every layout."""
     rng = random.Random(20260923)
     s = dict(se.DEFAULT_SETTINGS)
-    seen = {'confirmed': 0, 'capped': 0}
+    seen = {'confirmed': 0, 'capped': 0, 'freed': 0}
     for name, rows in _single_sweeps():
         for _ in range(8):
             cands = {i: [_random_best(rng, r)] for i, r in enumerate(rows)
                      if rng.random() < 0.85}
             old = copy.deepcopy(cands)
+            for cl in old.values():
+                cl[0]['conf_before'] = cl[0]['conf']
             want = _reconcile_pairs_78315cc(rows, old, s)
+            freed = _free_patch_mated_trackers(rows, old, s)
+            want['capped'] -= freed
             assert se.reconcile_pairs(rows, cands, s) == want, name
             assert cands == old, name
-            for k in seen:
+            for k in ('confirmed', 'capped'):
                 seen[k] += want[k]
+            seen['freed'] += freed
     assert seen['confirmed'] and seen['capped'], seen   # both bands ran
+    assert seen['freed'], seen                          # and the exemption
 
 
 def test_single_sweep_breakdown_flags_are_unchanged():

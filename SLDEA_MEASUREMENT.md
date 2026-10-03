@@ -735,7 +735,12 @@ The load-bearing choices:
    follow the taut rim, which migrates inward with kV. Both were
    built, falsified against radial intensity profiles, and rejected.
    The fitter takes the strongest sustained dark→light step per ray
-   at 0.80–1.38 r₀, sub-pixel refined by parabolic interpolation,
+   at 0.80–1.70 r₀ (1.38 through 2026-10-02: that window and the
+   1.3 r₀ gate on the fitted ellipse, now 1.75 r₀, refused the flat
+   shoulder frames at 1.70–1.94× area although the campaign peaks are
+   2.25–2.34×; a ray that meets foil or the frame border inside
+   1.8 r₀ is never read, so the window cannot reach the strips),
+   sub-pixel refined by parabolic interpolation,
    sectors through the electrodes excluded by azimuth. The same rays
    are measured on the baseline frame, and the area is the baseline
    circle × Σr²/Σr₀² over the common rays after a 2.5σ (MAD) trim of
@@ -759,7 +764,12 @@ The load-bearing choices:
    keeps its rank and area but loses the right to auto-accept — and
    pair agreement can never lift it back, because two snapshots
    fooled the same way agree beautifully (correlated error is exactly
-   what pair agreement cannot certify against).
+   what pair agreement cannot certify against). A pair
+   *disagreement* caps both snapshots, with one exception since
+   2026-10-03: a tracked boundary with a clean audit whose mate is a
+   patch tier keeps its own confidence (the patch outlines a
+   different object; the patch member stays capped, so the landing is
+   still queued).
 
 ### Level 5 — referee / metrologist
 

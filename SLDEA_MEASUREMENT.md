@@ -25,8 +25,8 @@ in the same PR.
 
 | You are reporting | Quote | Dominated by | Conditions |
 |---|---|---|---|
-| **Expansion ratio A/A₀** (area-vs-kV curves) | **±1–2%** | the hidden-perimeter assumption (§2.1) + second-order residual of the edge-definition offset | auto-accepted `disc-fit` / `resting` / refit frames **saved with area estimator 2** (2026-10-02 on; `area_estimator: 2` in the run's `setup.txt`). Checked up to 4 kV against an independent sector measurement: per-run mean difference −1.0 to +0.5 points of A/A₀, SD 0.2–0.7. Above 4 kV the figure is not checked; the measured facts there are under this table. Rows saved earlier carry a run-specific offset of −0.4 to +7.4% and do **not** meet this figure: reprocess them |
-| **Absolute area (mm²), edge convention stated** | **±1–2%** | scale anchor + the tracker terms of §2.1 | methods section states the half-height convention; area estimator 2 rows only, as above |
+| **Expansion ratio A/A₀** (area-vs-kV curves) | **±1–2%** | the **measured** terms of §2.1: frame repeatability, the spread, the trim, the second-order residual of the edge-definition offset. **The hidden-perimeter term is not in this figure**: nothing bounds it independently (the series it is checked against shares the hidden sectors), and its likely size, an over-read of order 1 point at the peak, is quoted separately under this table | auto-accepted `disc-fit` / `resting` / refit frames **saved with area estimator 2** (2026-10-02 on; `area_estimator: 2` in the run's `setup.txt`). Checked up to 4 kV against an independent sector measurement that shares the hidden sectors: per-run mean difference −1.0 to +0.5 points of A/A₀, SD 0.2–0.7. Above 4 kV the figure is not checked; the measured facts there are under this table. Rows saved earlier carry a run-specific offset of −0.4 to +7.4% and do **not** meet this figure: reprocess them |
+| **Absolute area (mm²), edge convention stated** | **±1–2%** | scale anchor + the measured tracker terms of §2.1 (the hidden-perimeter term is not in it either) | methods section states the half-height convention; area estimator 2 rows only, as above |
 | **Absolute area (mm²), convention not stated** | **±3%** (or a one-sided +5.5% band) | the edge-definition offset | avoid this — state the convention instead |
 | **Hand-traced areas** (wash-out frames ≥5.5 kV) | **±1%** precision, outer-toe convention | operator repeatability | machine has no boundary there; traces are the measurement |
 
@@ -88,8 +88,13 @@ number):
   beside new rows: an unreviewed one is emptied and its notes say
   `not kept: measured with the old area method (ellipse, before
   2026-10-02) - re-review this frame` (the old value stays in
-  `data.csv.bak`). The Save dialog counts such rows before anything is
-  written.
+  `data.csv.bak` until the next Save). The Save dialog counts such rows
+  before anything is written. Across runs, `sldea_plot` and the plot
+  window refuse a run holding unstamped (or older-stamped) `disc-fit`
+  areas from area axes, the way the 2026-07-28 scale era is refused;
+  the CLI's `--allow-old-estimator` draws it anyway, named in the
+  caption, and the tidy CSV's `area_estimator` column says which
+  estimator wrote each `disc-fit` row.
 - **DON'T** mix machine areas and hand-traced areas in one absolute
   comparison without the +5.5% definitional correction.
 - **DON'T** judge any machine boundary against a bar above IoU ~0.97 —
@@ -111,6 +116,7 @@ number):
 | Nominal diameter (the value the mm scale hangs on) | systematic | **closed** — anchored by the laser-cut application mask | lab confirmation 2026-08-01 (see §2.4) |
 | `disc-fit` spread (block bootstrap of the common-ray ratio) | random + uneven strain, per frame | median **0.6%**, 0.2–1.9% (5th–95th percentile), growing with voltage. **Not a calibrated confidence interval**: it holds 66% of the quiet-frame deviations from A₀ (0.25–0.5 kV, n=32) and about 90% of the detrended same-landing pre/post differences up to 4 kV, but only 50–60% above 4 kV | corpus replay 2026-10-02 (450 auto-accepted tracker rows, 8 runs, OpenCV 4.13) |
 | `disc-fit` repeatability on an unchanged disc | random, per frame | **0.08–0.26%** SD per run at 0.25–0.5 kV (rms 0.22% about A₀ over 32 frames); same-landing pre/post robust SD 0.3–0.4% up to 4 kV, 1.2% above | same replay |
+| The trim (a ray whose own ratio r_k/r_k(0) sits more than 2.5 robust sigmas from the median is dropped before the sum; `n_trimmed` on the card) | **systematic, chosen by the rule**, per frame | trimmed minus untrimmed ratio on the 450 auto-accepted rows, in points of A/A₀: median abs 0.27 / 0.33 / 0.47 / 0.85 / 0.69 by band (0–0.5 / 0.75–2 / 2.25–4 / 4.25–6 / 6.25+ kV), 90th percentile 0.7 / 0.8 / 1.9 / 2.6 / 1.8, maximum **11.8**. On the frames it moves most (`P3_5` rows 31–34 at 4.0–4.25 kV, +10.6 to +11.6; `DOT_P3_1` rows 63–75 at 8–9.5 kV, +8.5 to +11.8; 22–31% of the rays dropped) it is a modelling choice with a first-order effect, not an outlier rule: `P3_5`'s peak is 1.579 trimmed, 1.463 untrimmed, 1.595 by the independent series. Details in §2.1b | same replay, trimmed against untrimmed on the same rays |
 | Hidden perimeter (the edge the rays cannot use is **assumed** to strain like the edge they can. On the campaign runs 32–55% of the perimeter has no measurable edge even at rest (foil, leads, faint ink), and a typical accepted frame's ratio uses about half of the perimeter) | systematic, cannot be checked from the image | not measured. Evidence of its size: agreement with an independent sector measurement within 1 point of A/A₀ per run up to 4 kV; over the whole ramp +0.4 to +1.4 points on four runs, −1.2 on P3_5, 0.0 on 104531; different shape models spread about ±2.5% at the peak. Its likely SIGN: the rays nearest the hidden sectors strain 1–4 points less than the top/bottom rays at 2.25–6 kV on four runs, so the term is probably an over-read of order 1 point at the peak (the note under table 1.1) | corpus replay + science review, 2026-10-02; sector split of the same replay |
 | Fixed ray centre (rays are cast from the BASELINE centre; a shifted disc biases the ratio when the visible rays are one-sided) | systematic, per frame | 0.22% of area per px of shift (median; 0.39% 90th percentile, 0.70% worst) → 0.04% at the ~0.2 px median rig drift. P3_5 is the exposed run (one-sidedness 0.53, 0.32%/px). Frames with one-sidedness > 0.6 are refused: there the ratio read +6.0% (median) over the independent measurement | re-cast from a moved centre, corpus replay 2026-10-02 |
 | Operator trace precision (the validation floor) | random | **~1%** area (0.2–2.5%); IoU ceiling 0.973 | repeatability round, 9 repeat pairs |
@@ -500,7 +506,39 @@ below it and nothing here says which is right.
 **The trim** (2.5 robust sigmas, MAD, on the per-ray ratio) removes a
 median of 21 rays per accepted frame (share of the common rays:
 median 11%, 90th percentile 16%, maximum 31%); without it the
-quiet-frame scatter doubles (rms 0.22% → 0.49%). **The fixed ray
+quiet-frame scatter doubles (rms 0.22% → 0.49%). That is its effect
+on quiet frames only. Its **signed effect at strain** (trimmed minus
+untrimmed ratio, same rays, the 450 auto-accepted rows; the
+reproduction matches the harness ratios to 1e-5):
+
+| kV band | rows | median abs | 90th pct abs | max abs | median signed |
+|---|---|---|---|---|---|
+| 0–0.5 | 32 | 0.27 | 0.68 | 1.56 | −0.15 |
+| 0.75–2 | 98 | 0.33 | 0.77 | 1.30 | −0.24 |
+| 2.25–4 | 116 | 0.47 | 1.90 | 10.58 | −0.15 |
+| 4.25–6 | 51 | 0.85 | 2.63 | 11.59 | +0.16 |
+| 6.25+ | 149 | 0.69 | 1.82 | 11.80 | −0.30 |
+
+(points of A/A₀.) The frames it moves by more than 5 points are the
+six auto rows of `P3_5` at 3.5–4.25 kV (rows 28–31, 33, 34: +5.7 to
++11.6, 20–31% of the rays dropped), the fourteen auto rows of
+`DOT_P3_1` at 8–10 kV (rows 63–80, post-washout: +6.8 to +11.8,
+16–30% dropped) and one row of retired 233451 (+5.7). On those
+frames the rule is dropping a coherent minority of the edge, not
+outliers, and the number rests on which rays it keeps: `P3_5`'s peak
+(row 34) is **1.579 trimmed, 1.463 untrimmed**; the independent
+series reads 1.595 there and 1.567 / 1.452 on rows 33 / 31 (trimmed
+1.540 / 1.446, untrimmed 1.430 / 1.341), so the trimmed value is the
+one that series supports. On `DOT_P3_1` 8.5–9.5 kV the trimmed value
+sits +4.5 to +4.9 above the series and the untrimmed −6.3 to −7.3
+below it; neither reproduces it. The trim is therefore a modelling
+decision with a first-order effect at strain (the row in table 2.1),
+and the card's `n_trimmed` is the only place the operator sees it. A
+review-only tag for a trim share above about 0.2 would route 21 auto
+rows to a human, 18 of them among the 36 rows the trim moves by more
+than 2 points (the other 18 such rows sit at or below 0.2, among 429);
+that is an open owner decision (`SLDEA_HANDOFF.md`, 2026-10-02), not
+a refusal. **The fixed ray
 centre:** re-casting every frame's rays from a centre moved one
 detector px changes the ratio by 0.22% of area per full-resolution px
 (median), 0.39% at the 90th percentile, 0.70% worst; P3_5 is the
@@ -744,6 +782,7 @@ architecture**, held together by three invariants:
 | `disc-fit` spread: median 0.6%, 0.2–1.9%; its coverage; repeatability 0.08–0.26% on an unchanged disc; one-sidedness and drift figures; the 112 formerly-`resting` frames | Corpus replay under OpenCV 4.13, 2026-10-02: 16 run folders, 899 frames, 450 auto-accepted tracker rows on 8 runs. Method and tables in §2.1b. **Replaces "Fit CI 0.2–0.7%"**, the edge-scatter formula of the ellipse fit, which assumed a known shape and independent rays and held 21–49% of repeat differences where it claimed 85% |
 | Agreement with an independent sector measurement (−1.0 to +0.5 points per run up to 4 kV) | Science review 2026-10-02: a half-height radius on top and bottom sectors that uses no repo detector code, six campaign runs, auto-accepted tracker rows. One reviewer's series, computed under OpenCV 5.0; it is a cross-check between two estimators that both see only part of the edge, not ground truth |
 | Sector split above 4 kV (top/bottom-only ratio +2.2 points over the half-height series on DOT_P3_1 at 4.25–6 kV; lead-adjacent rays 1–4 points below top/bottom at 2.25–6 kV; implied over-read of order 1 point at peak) | The same 2026-10-02 replay, the tracker's own rays split by sector (top/bottom = 40–140° and 220–320° from the lead axis, the independent series' sectors), auto-accepted rows. Evidence for the hidden-perimeter term's sign, not a correction (note under table 1.1) |
+| The trim's signed effect (median abs 0.27–0.85 points by band, maximum 11.8; `P3_5` peak 1.579 trimmed / 1.463 untrimmed) | The same replay's rays, the production ratio recomputed with and without the 2.5-sigma trim on the 450 auto-accepted rows (reproduces the harness ratios to 1e-5), review of 2026-10-02 (§2.1b, table 2.1) |
 | Scale 0.4% / repeat 0.3% | Baseline-disc overlays vs by-eye, both campaigns |
 | Scale anchor per run (§2.1a): σ ≈ R/d₂(n), mean SE = σ/√n, area SE = 2·SE | d₂ factors from ASTM E2587 / Duncan (`se.D2_RANGE_FACTORS`, n = 2–8; the code refuses any other n). Range of the n fits recorded in each run's `setup.txt`, plus every round-set in `scale_calibration_log.txt` (Edge Review, 2026-08-06 onward) |
 | The circle mode per-fit σ ≈ 1.05% of diameter (3-round mean SE 0.61% diam / 1.21% area) | Six circle-mode attempts on a scratch copy of `P3_2_2.5mL_20260728`, one operator, 2026-08-06 (`#215` comment). **A first data point, not a distribution — quotable only as that; §2.1's 0.4%/0.8% still apply.** |

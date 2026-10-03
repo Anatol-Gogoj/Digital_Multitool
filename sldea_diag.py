@@ -1192,9 +1192,12 @@ def report(d):
         rest = d.get('tracker_rest')
         if rest:
             eoc = rest.get('base_ellipse_over_circle')
+            # base_hidden_pct is 1 - base_rays/360: the leads and the
+            # foil, and every ray with no usable ink step (faint ink)
             A(f"tracker at rest : {rest['base_rays']} of 360 rays find the "
               f"ink edge on the baseline, {rest['base_hidden_pct']:.0f}% "
-              f"of the perimeter hidden (leads, foil), one-sidedness "
+              f"of the perimeter not usable (behind leads or foil, or no "
+              f"ink step), one-sidedness "
               f"{rest.get('base_one_sided') or 0:.2f}; ellipse/circle "
               + (f"{eoc:.4f}" if eoc is not None else "not fitted")
               + " (what the old area method read on the resting disc)")

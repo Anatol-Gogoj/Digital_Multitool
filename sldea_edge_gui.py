@@ -1489,9 +1489,18 @@ def hot_slot(entries, chosen, sel):
     return None
 
 
-TRACKER_LINES = 4       # tracker_card_text height (text lines), fixed so
+TRACKER_LINES = 8       # tracker_card_text height (text lines), fixed so
                         # a frame with no tracker candidate changes the
-                        # content, not the layout (#179)
+                        # content, not the layout (#179). Sized to the
+                        # LONGEST text the function can produce at the
+                        # panel's wraplength (3-digit ray counts, a 3-digit
+                        # trim, a 1.xxx ellipse figure): 7 lines at the
+                        # 9 pt default font on Windows, measured
+                        # 2026-10-02, plus one line for the wider default
+                        # font of the Linux bench PC. It was 4, and Tk
+                        # clipped the outline sentence, the one thing the
+                        # panel exists to say (review 2026-10-02). The GUI
+                        # test probes the rendered height.
 
 
 def tracker_card_text(cands):
@@ -1506,10 +1515,14 @@ def tracker_card_text(cands):
     DOT_P3_1 that is 7 % more than the number at rest. An operator who
     judges the outline must be told that the number is not its area,
     and must see the audit fields the number rests on: how many rays
-    it used (`n_common`), what share of the perimeter it never saw
-    (`hidden_pct`, assumed to strain like the rest), and whether the
-    rays sit on one side of the disc (`one_sided`; the ratio is refused
-    above se.RAY_MAX_ONE_SIDED). Pure, so it is a headless test."""
+    it used (`n_common`), what share of the perimeter it did NOT use
+    (`hidden_pct` = 1 - n_common/360: behind the leads or the foil, no
+    ink step on the ray, or trimmed; all of it assumed to strain like
+    the rest), and whether the rays sit on one side of the disc
+    (`one_sided`; the ratio is refused above se.RAY_MAX_ONE_SIDED).
+    The outline sentence comes second, right after the number, so it
+    is on screen even if a future font pushes the tail off the panel.
+    Pure, so it is a headless test."""
     for k, c in enumerate(cands[:3]):
         if c.get('method') != 'disc-fit' or c.get('area_ratio') is None:
             continue
@@ -1518,15 +1531,15 @@ def tracker_card_text(cands):
         return (f"{CAND_KEYS[k]} is the ray ratio: {c['area_ratio']:.4f} x A0 "
                 f"from {c.get('n_common', 0)} rays measured on both the "
                 f"baseline and this frame"
-                + (f", {c.get('n_trimmed')} trimmed"
+                + (f" ({c.get('n_trimmed')} more trimmed)"
                    if c.get('n_trimmed') else '')
-                + f". {hidden:.0f}% of the edge is hidden (leads, foil) "
-                  f"and is assumed to strain like the rest; one-sidedness "
-                  f"{c.get('one_sided', 0):.2f} (refused above "
-                  f"{se.RAY_MAX_ONE_SIDED:g}). The drawn outline is the "
-                  f"ellipse, not the number: it encloses "
+                + f". The drawn outline is the ellipse, not the number: "
+                  f"it encloses "
                 + (f"{eoc:.3f} x A0" if eoc is not None else "a different area")
-                + ".")
+                + f". Not used: {hidden:.0f}% of the edge (behind leads or "
+                  f"foil, no ink step, or trimmed), assumed to strain like "
+                  f"the rest. One-sidedness {c.get('one_sided', 0):.2f} "
+                  f"(refused above {se.RAY_MAX_ONE_SIDED:g}).")
     return ''
 
 
@@ -3312,7 +3325,6 @@ class EdgeReviewApp:
         q = self._queue_list()
         accepted = sum(1 for r in self.results.values() if r)
         rejected = sum(1 for r in self.results.values() if r is None)
-        n_unread = sum(1 for i in q if i in self.load_fail)
         # ONE ESTIMATOR PER SAVE (2026-10-02). The area method changed
         # (ellipse -> common-ray ratio, se.AREA_ESTIMATOR_VERSION): a
         # kept row on a run last saved by the old method still holds an
@@ -3325,6 +3337,11 @@ class EdgeReviewApp:
         stale = se.stale_estimator_rows(
             self.run['rows'], self.results,
             se.saved_area_estimator(self.rundir))
+        # an unreadable frame that holds an old-method area is emptied
+        # like any other stale row, so it is counted there and not as
+        # 'kept' (review 2026-10-02)
+        n_unread = sum(1 for i in q
+                       if i in self.load_fail and i not in stale)
         # unreviewed rows KEEP their previous pass's px measurement,
         # re-scaled to this session's anchor (one scale per save, audit
         # 2026-08-05) — the dialog used to claim they were 'left blank'
@@ -3342,9 +3359,12 @@ class EdgeReviewApp:
                       f"automatic area (disc-fit) saved with the OLD area "
                       f"method (the fitted ellipse, used until 2026-10-01). "
                       f"Old and new areas differ by a few percent, so these "
-                      f"rows will be EMPTIED and marked 're-review' (the old "
-                      f"numbers stay in data.csv.bak). Review them first if "
-                      f"you want them measured in this Save.")
+                      f"rows will be EMPTIED and marked 're-review'. The old "
+                      f"numbers stay in data.csv.bak until the NEXT Save "
+                      f"overwrites it; after a Detect, each tracker card "
+                      f"also shows what the old method read ('encloses ... "
+                      f"x A0'). Review them first if you want them measured "
+                      f"in this Save.")
             if not self.cands_all:
                 # a trace-only Save (no Detect this session): nothing is
                 # re-measured, so the whole old column goes. Said plainly,
@@ -3444,9 +3464,10 @@ class EdgeReviewApp:
             annos[i] = (annos[i] + '; ' + note) if i in annos else note
         # a not-measured frame's row records WHY — a file- or code-level
         # fact, never a physical verdict (audit 2026-08-05). ASCII-safe
-        # in the CSV.
+        # in the CSV. A stale row is emptied, not kept, so it gets the
+        # stale note alone (review 2026-10-02).
         for i in q:
-            if i in self.load_fail:
+            if i in self.load_fail and i not in stale:
                 note = ('frame unreadable - kept, not re-measured'
                         if self.load_fail[i] == 'unreadable' else
                         'frame processing failed - kept, not re-measured')

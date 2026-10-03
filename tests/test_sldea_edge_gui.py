@@ -4735,11 +4735,18 @@ def test_save_empties_old_estimator_rows_and_stamps_the_provenance():
         app.auto_idx.discard(1)
         app.auto_idx.discard(2)
         assert app._queue_list() == [1, 2]
+        # ...and row 1's frame could not be read this session: it is
+        # emptied like any stale row, so the dialog must not count it
+        # as 'kept, not re-measured' and its note must not say 'kept'
+        # (review 2026-10-02)
+        app.load_fail[1] = 'unreadable'
         app.save()
         msg = mb.asked[-1][1]
         assert '1 unreviewed row(s) hold an automatic area' in msg, msg
         assert 'OLD area method' in msg and 'EMPTIED' in msg, msg
-        assert 'data.csv.bak' in msg
+        # the .bak is one generation deep, and the dialog says so
+        assert 'data.csv.bak until the NEXT Save' in msg, msg
+        assert 'UNREADABLE' not in msg, msg
         assert "1 keep the previous pass's px" in msg, msg   # the trace
         assert 'NO detection pass' not in msg, msg
         with open(csv_path, newline='', encoding='utf-8-sig') as f:
@@ -4748,6 +4755,9 @@ def test_save_empties_old_estimator_rows_and_stamps_the_provenance():
                     'wrinkle_idx'):
             assert saved[1][col] == '', (col, saved[1][col])
         assert saved[1]['notes'] == se.AREA_ESTIMATOR_STALE_NOTE
+        assert 'kept, not re-measured' not in saved[1]['notes'], \
+            saved[1]['notes']
+        app.load_fail.pop(1, None)
         assert saved[2]['active_area_px'] == '15000'
         assert se.AREA_ESTIMATOR_STALE_NOTE not in saved[2]['notes']
         assert se.AREA_ESTIMATOR_STALE_NOTE not in saved[0]['notes']
@@ -4839,24 +4849,43 @@ def test_tracker_card_says_what_the_number_is_and_what_the_outline_is():
     patch = {'method': 'diff-hi', 'area_px': 63040.0, 'conf': 0.63}
     text = gui.tracker_card_text([rest, disc, patch])
     assert text.startswith('B is the ray ratio: 1.0003 x A0'), text
-    assert '211 rays' in text and '33 trimmed' in text, text
-    assert '41% of the edge is hidden' in text, text
+    assert '211 rays' in text and '(33 more trimmed)' in text, text
+    # the share the number did not use is NOT all 'hidden': it counts
+    # the trimmed rays and the rays with no ink step too (review
+    # 2026-10-02), and the text says what it is made of
+    assert 'Not used: 41% of the edge' in text, text
+    assert 'behind leads or foil, no ink step, or trimmed' in text, text
+    assert 'hidden' not in text, text
     assert 'assumed to strain like the rest' in text, text
-    assert f'one-sidedness 0.06 (refused above {se.RAY_MAX_ONE_SIDED:g})' \
+    assert f'One-sidedness 0.06 (refused above {se.RAY_MAX_ONE_SIDED:g})' \
         in text, text
     assert 'The drawn outline is the ellipse, not the number' in text, text
     assert 'encloses 1.074 x A0' in text, text
+    # the outline sentence follows the number directly: it is the one
+    # sentence the panel exists for, so it sits where it is read first
+    assert text.index('The drawn outline') < text.index('Not used'), text
     # no tracker candidate: nothing is claimed
     assert gui.tracker_card_text([rest, patch]) == ''
     assert gui.tracker_card_text([]) == ''
     # no trimmed rays: the clause is absent; no ellipse figure: said
     d2 = dict(disc, n_trimmed=0, ellipse_over_circle=None)
     t2 = gui.tracker_card_text([d2])
-    assert t2.startswith('A is the ray ratio') and 'trimmed' not in t2, t2
+    assert t2.startswith('A is the ray ratio') and 'more trimmed' not in t2, t2
     assert 'encloses a different area' in t2, t2
-    # the panel follows the frame on screen
-    root = _tk_root_or_skip('tracker card')
-    if root is None:
+    # the panel follows the frame on screen, and SHOWS the whole text:
+    # the label has a fixed height in lines, and Tk clips a text that
+    # wraps to more lines than that without a word of complaint. With
+    # TRACKER_LINES at 4 the outline sentence was the part the operator
+    # never saw (review 2026-10-02). An unconstrained probe Label with
+    # the same font and wraplength says how tall each text really is.
+    # The window is MAPPED (not withdrawn) so winfo_height is the height
+    # the packer really gave the panel, not the 1 px of an unmapped
+    # widget.
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
         return
     d = tempfile.mkdtemp(prefix='edge_gui_card_')
     try:
@@ -4864,13 +4893,44 @@ def test_tracker_card_says_what_the_number_is_and_what_the_outline_is():
         app = gui.EdgeReviewApp(root, path=run)
         app.detect_all_sync()
         assert app.tracker_lbl.cget('height') == gui.TRACKER_LINES
+        root.update_idletasks()
+        root.update()
+        assert app.tracker_lbl.winfo_ismapped()
+        shown_h = app.tracker_lbl.winfo_height()
+        wrap = int(app.tracker_lbl.cget('wraplength'))
+        font = app.tracker_lbl.cget('font')
+
+        def _needed(txt):
+            probe = tk.Label(root, text=txt, justify='left', anchor='nw',
+                             font=font, wraplength=wrap)
+            probe.update_idletasks()
+            h = probe.winfo_reqheight()
+            probe.destroy()
+            return h
+
+        seen_tracker = False
         for pos in range(len(app.frame_rows)):
             app.pos = pos
             app._show()
             i = app.frame_rows[pos]
-            assert app.tracker_lbl.cget('text') == \
-                gui.tracker_card_text(app.cands_all.get(i, []))
+            txt = gui.tracker_card_text(app.cands_all.get(i, []))
+            assert app.tracker_lbl.cget('text') == txt
+            if txt:
+                seen_tracker = True
+                assert _needed(txt) <= shown_h, (
+                    f"frame {i}: the card text needs {_needed(txt)} px, "
+                    f"the panel shows {shown_h}")
+        assert seen_tracker, 'no tracker candidate on the fake run'
+        # ...and the LONGEST text the function can produce (3-digit ray
+        # counts, a 3-digit trim, a 1.xxx ellipse figure) fits too, so
+        # a real run cannot find a longer one than the fake run did
+        worst = dict(disc, n_common=299, n_trimmed=103, hidden_pct=69.9,
+                     one_sided=0.55, ellipse_over_circle=1.14699,
+                     area_ratio=1.55665)
+        assert _needed(gui.tracker_card_text([worst, rest])) <= shown_h
+        assert _needed(gui.tracker_card_text([rest, disc])) <= shown_h
     finally:
+        app._cancel_pending()
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)
 

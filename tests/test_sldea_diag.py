@@ -342,7 +342,11 @@ def test_report_states_what_the_tracker_reads_at_rest():
     line = [ln for ln in text.splitlines() if ln.startswith('tracker at rest')]
     assert len(line) == 1, line
     assert f"{rest['base_rays']} of 360 rays find the ink edge" in line[0]
-    assert '% of the perimeter hidden' in line[0], line
+    # the share is 1 - base_rays/360: leads, foil AND faint-ink rays, so
+    # the line must not call all of it 'hidden' (review 2026-10-02)
+    assert '% of the perimeter not usable' in line[0], line
+    assert 'no ink step' in line[0], line
+    assert 'perimeter hidden' not in line[0], line
     assert 'one-sidedness' in line[0] and 'ellipse/circle' in line[0], line
     assert 'old area method' in line[0], line
     text.encode('ascii')

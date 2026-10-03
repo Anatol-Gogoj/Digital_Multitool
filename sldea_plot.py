@@ -6,6 +6,7 @@ Usage:
                          [--vs-area] [--prepost] [--mean] [--no-bands]
                          [--no-breakdown] [--out DIR] [--stem NAME]
                          [--title TEXT] [--allow-suspect-scale]
+                         [--allow-old-estimator]
                          [--logx] [--logy] [--no-marker-key]
                          [--title-first TEXT] [--title-second TEXT]
                          [--subplots both|first|second] [--cadence-guard]
@@ -112,6 +113,14 @@ Rendering:
       nominal disc; --allow-suspect-scale overrides. In current/power
       modes such runs still plot (currents are unaffected) but their area
       columns are blanked in the tidy CSV so eras cannot be mixed.
+    - disc-fit areas saved by the OLD area method (the fitted ellipse,
+      before 2026-10-02: no 'area_estimator: 2' line in the run's
+      setup.txt) are excluded from area axes the same way; they read
+      -0.4 to +7.4% off the common-ray ratio at rest, a different offset
+      per run. Re-review the run in Edge Review, or --allow-old-estimator
+      draws it anyway, named in the caption, with the estimator in the
+      tidy CSV's area_estimator column. In current/power modes the run
+      plots with its area columns blanked.
 
 Panels (`#269` titles, `#270` selection):
     The panels a mode actually draws, in the order the flags name them:
@@ -418,6 +427,10 @@ def load_run(arg, warn):
             # the px→mm anchor Edge Review recorded at Save (2026-08-05)
             # — cross-run absolute mm² inherits its provenance
             'anchor': se.load_scale_anchor(rundir),
+            # which area estimator wrote the run's 'disc-fit' areas
+            # (2026-10-02): the `area_estimator` stamp Edge Review's Save
+            # puts in setup.txt; None = no stamp = the ellipse (version 1)
+            'estimator': se.saved_area_estimator(rundir),
             'saved_brand': saved_brand}
 
 
@@ -496,6 +509,47 @@ def suspect_old_scale(run):
     diam = float(run['settings'].get('diam_mm', 16.0) or 16.0)
     nominal = math.pi * (diam / 2.0) ** 2
     return abs(run['a0'] - nominal) / nominal > 0.05
+
+
+def old_estimator_areas(run):
+    """True when the run holds 'disc-fit' areas written by an OLDER area
+    estimator than the current one (2026-10-02, se.AREA_ESTIMATOR_VERSION;
+    the run's `area_estimator` stamp in setup.txt says which, and no
+    stamp means the ellipse, version 1).
+
+    Until 2026-10-02 a 'disc-fit' area was the fitted ellipse, which read
+    -0.4 to +7.4 % against the same run's own A0 (a different offset per
+    run); since then it is the common-ray ratio. Edge Review's Save
+    keeps the two apart WITHIN a run (an unreviewed old row is emptied),
+    and this guard keeps them apart ACROSS runs: without it an old run
+    and a reprocessed one overlay on one axis, enter one group mean and
+    land in one tidy CSV with nothing marking the boundary (review
+    2026-10-02). The same shape as suspect_old_scale, and handled by
+    prepare_runs the same way.
+
+    Only 'disc-fit' rows changed meaning: a hand trace is the operator's
+    polygon, the patch tiers did not change and a 'resting' row is A0
+    under both versions, so a run holding only those passes, as does a
+    run whose old rows a Save already emptied (no area, no method)."""
+    ver = run.get('estimator')
+    if ver is not None and ver >= se.AREA_ESTIMATOR_VERSION:
+        return False
+    return any(r['method'] == 'disc-fit'
+               and (r['area_mm2'] is not None or r['area_px'] is not None)
+               for r in run['rows'])
+
+
+def _estimator_caption(runs):
+    """The caption line naming the runs drawn with OLD-estimator areas
+    (kept on --allow-old-estimator), or '' when there are none. A figure
+    that mixes the two estimators has to say so ON the figure: the PNG
+    travels without the command line that made it."""
+    names = [r['name'] for r in runs if r.get('old_estimator_kept')]
+    if not names:
+        return ''
+    return (f"\nOLD area method (ellipse, before 2026-10-02; kept on "
+            f"--allow-old-estimator): {', '.join(names)}. Not comparable "
+            f"with ray-ratio areas (offset -0.4 to +7.4% per run).")
 
 
 # ---------------------------------------------------------------------------
@@ -1962,6 +2016,7 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                "incomplete on all runs).")
     cap = (cap
            + agg_caption
+           + _estimator_caption(runs)
            + _cadence_caption(cadence_notes)
            + _scale_caption(scale_notes))
     fig.text(0.01, 0.005, cap, fontsize=7, color='#555555')
@@ -2170,6 +2225,9 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
               if power else
               "Currents carry each era's instrument offset "
               "(07-29 ≈ −16 µA idle).")
+           # --vs-area puts areas on the x axis: a kept old-estimator
+           # run is named here as it is on the area figure
+           + (_estimator_caption(runs) if opts['vs_area'] else '')
            + _cadence_caption(cadence_notes)
            + _scale_caption(scale_notes))
     fig.text(0.01, 0.005, cap, fontsize=7, color='#555555')
@@ -2228,9 +2286,9 @@ def save_figure(runs, opts, path, warn=lambda m: None):
 # ---------------------------------------------------------------------------
 
 TIDY_COLS = ['run', 'group', 'snapshot', 'nominal_kV', 'phase', 'tag',
-             'area_mm2', 'convention', 'expansion_A_A0', 'measured_uA',
-             'power_mW', 'traced', 'method', 'conf', 'user_reviewed',
-             'breakdown_confirmed', 'breakdown_advisory',
+             'area_mm2', 'convention', 'area_estimator', 'expansion_A_A0',
+             'measured_uA', 'power_mW', 'traced', 'method', 'conf',
+             'user_reviewed', 'breakdown_confirmed', 'breakdown_advisory',
              'saved_breakdown_brand', 'notes']
 
 
@@ -2239,12 +2297,20 @@ def write_tidy(runs, path, groups=()):
     including 'post-breakdown'-annotated ones (the P3_5 rule). Runs kept
     despite a suspect pre-scale-fix era ('suspect_kept', current/power
     modes) get their area columns blanked so bug-era areas cannot leak
-    into downstream analysis.
+    into downstream analysis; so do runs kept despite old-estimator
+    areas ('old_estimator_hidden', the same two modes; 2026-10-02).
 
     'convention' names each area's edge definition ('half-height'
     machine / 'outer-toe' hand trace; +5.2-5.7% apart — never compare
     absolute mm² across them), and power_mW is the run-median-corrected
     product (see power_mw): both audit 2026-08-05.
+
+    'area_estimator' (2026-10-02) says which area estimator wrote each
+    'disc-fit' area: the run's `area_estimator` stamp from setup.txt,
+    1 when the run has none (the ellipse), 2 the common-ray ratio; blank
+    on every other row (a trace, a patch tier and a 'resting' row mean
+    the same under both). It is the column a mixed figure drawn with
+    --allow-old-estimator is separated by afterwards.
 
     'group' is the operator's grouping (`#313`), blank for a run in no
     group, and it sits SECOND -- beside 'run', because it is the other
@@ -2257,14 +2323,18 @@ def write_tidy(runs, path, groups=()):
         w = csv.writer(f)
         w.writerow(TIDY_COLS)
         for run in runs:
-            hide_areas = run.get('suspect_kept', False)
+            hide_areas = (run.get('suspect_kept', False)
+                          or run.get('old_estimator_hidden', False))
             group = run_group(run, groups) or ''
             med = run_ua_median(run)
+            estimator = run.get('estimator') or 1
             for r in run['rows']:
                 area = None if hide_areas else r['area_mm2']
                 conv = ('' if area is None
                         else 'outer-toe' if r['traced']
                         else 'half-height' if r['method'] else '')
+                est = (estimator if area is not None
+                       and r['method'] == 'disc-fit' else '')
                 exp = (area / run['a0'] if area and run['a0'] else '')
                 pw = power_mw(r, med)
                 w.writerow([
@@ -2272,7 +2342,7 @@ def write_tidy(runs, path, groups=()):
                     '' if r['kv'] is None else r['kv'],
                     r['phase'], r['tag'],
                     '' if area is None else area,
-                    conv,
+                    conv, est,
                     f"{exp:.4f}" if exp != '' else '',
                     '' if r['ua'] is None else r['ua'],
                     f"{pw:.3f}" if pw is not None else '',
@@ -2726,13 +2796,14 @@ def describe_output(img_path, opts):
 
 
 def prepare_runs(args, opts, warn=lambda m: None, allow_suspect=False,
-                 load=None):
+                 load=None, allow_old_estimator=False):
     """Resolve, load, era-guard, filter and colour the runs -> list.
 
     Returns [] when nothing is plottable (the caller reports the collected
     warnings). Every guard the CLI grew lives here, so the window inherits
     them instead of reimplementing them: the pre-2026-07-28 scale-bug era,
-    the reviewed-areas requirement, the missing-baseline case, the palette
+    the pre-2026-10-02 area-estimator era (old_estimator_areas), the
+    reviewed-areas requirement, the missing-baseline case, the palette
     wrap and the cross-run anchor-provenance advisory.
 
     `load` overrides load_run. The window redraws on every tick box and
@@ -2751,6 +2822,8 @@ def prepare_runs(args, opts, warn=lambda m: None, allow_suspect=False,
         # renders (the window redraws on every toggle) must not carry a
         # previous mode's blanking decision into this one
         run['suspect_kept'] = False
+        run['old_estimator_kept'] = False
+        run['old_estimator_hidden'] = False
         if suspect_old_scale(run):
             if allow_suspect:
                 warn(f"{run['name']}: pre-{SCALE_FIX_DATE} areas "
@@ -2767,6 +2840,35 @@ def prepare_runs(args, opts, warn=lambda m: None, allow_suspect=False,
                 run['suspect_kept'] = True
                 warn(f"{run['name']}: areas predate the "
                      f"{SCALE_FIX_DATE} scale fix -- run kept for "
+                     f"{opts['mode']} mode (currents unaffected); area "
+                     f"columns blanked in the tidy CSV")
+        # the area-estimator era (2026-10-02), the same way: old 'disc-fit'
+        # areas are the ellipse, new ones the common-ray ratio, and the
+        # two must not meet on one axis, in one mean or in one CSV
+        if old_estimator_areas(run):
+            if allow_old_estimator:
+                # drawn, but SAID: in the caption and in the tidy CSV's
+                # area_estimator column
+                run['old_estimator_kept'] = True
+                warn(f"{run['name']}: disc-fit areas from the OLD area "
+                     f"method (ellipse; no 'area_estimator: "
+                     f"{se.AREA_ESTIMATOR_VERSION}' stamp in setup.txt) "
+                     f"KEPT on --allow-old-estimator -- not comparable "
+                     f"with ray-ratio areas; named in the caption and the "
+                     f"tidy CSV")
+            elif uses_areas:
+                warn(f"{run['name']}: EXCLUDED -- its disc-fit areas were "
+                     f"written by the OLD area method (the fitted ellipse, "
+                     f"before 2026-10-02; setup.txt has no 'area_estimator: "
+                     f"{se.AREA_ESTIMATOR_VERSION}' line), which read -0.4 "
+                     f"to +7.4% off the ray ratio at rest. Re-review the "
+                     f"run in Edge Review (Detect, review, Save), or "
+                     f"override with --allow-old-estimator")
+                continue
+            else:
+                run['old_estimator_hidden'] = True
+                warn(f"{run['name']}: disc-fit areas from the OLD area "
+                     f"method (before 2026-10-02) -- run kept for "
                      f"{opts['mode']} mode (currents unaffected); area "
                      f"columns blanked in the tidy CSV")
         runs.append(run)
@@ -2894,7 +2996,8 @@ def _selftest(out_png):
 # ---------------------------------------------------------------------------
 
 _BOOL_FLAGS = ('--vs-area', '--prepost', '--mean', '--no-bands',
-               '--no-breakdown', '--allow-suspect-scale', '--selftest',
+               '--no-breakdown', '--allow-suspect-scale',
+               '--allow-old-estimator', '--selftest',
                '--gui', '--logx', '--logy', '--no-marker-key',
                '--cadence-guard', '--aggregate', '--aggregate-exact',
                '--aggregate-only')
@@ -3093,7 +3196,9 @@ def main(argv):
 
     warns = []
     runs = prepare_runs(run_args, opts, warns.append,
-                        allow_suspect='--allow-suspect-scale' in flags)
+                        allow_suspect='--allow-suspect-scale' in flags,
+                        allow_old_estimator='--allow-old-estimator'
+                        in flags)
     if not runs:
         for w in warns:
             print('warning:', w)

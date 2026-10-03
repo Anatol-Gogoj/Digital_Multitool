@@ -2295,9 +2295,14 @@ class PlotWindow:
         # pre-2026-07-28 areas (the 2.3-2.7x scale-bug era) are refused
         # outright in the window: the campaign dataset is reprocessed, so
         # the override checkbox was dropped (operator call 2026-08-07).
-        # The CLI keeps --allow-suspect-scale for archaeology.
+        # The CLI keeps --allow-suspect-scale for archaeology. The
+        # pre-2026-10-02 area-estimator era (the ellipse; no
+        # `area_estimator: 2` stamp in setup.txt) is refused the same way:
+        # the message names the run and says to re-review it, and the CLI
+        # keeps --allow-old-estimator for a figure that must mix them.
         runs = sp.prepare_runs(dirs, opts, warns.append,
                                allow_suspect=False,
+                               allow_old_estimator=False,
                                load=self._load)
         self._prepared = runs
         if not runs:

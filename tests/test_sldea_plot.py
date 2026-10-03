@@ -21,7 +21,14 @@ COLS_15 = ['snapshot', 'step', 'tag', 'nominal_kV', 'control_V',
 COLS_14 = [c for c in COLS_15 if c != 'wrinkle_idx']   # 07-23 era
 
 
-def _fake_run(d, rows, cols=COLS_15):
+def _fake_run(d, rows, cols=COLS_15, estimator='current'):
+    """A run folder with these CSV rows. `estimator`: which area
+    estimator its setup.txt says wrote the 'disc-fit' areas -- 'current'
+    stamps se.AREA_ESTIMATOR_VERSION (what every Save writes since
+    2026-10-02, so the fixtures stand for reviewed runs), an int stamps
+    that version, None writes no stamp (a run last saved by the ellipse
+    estimator, which prepare_runs refuses in area mode)."""
+    import sldea_edge as se
     os.makedirs(os.path.join(d, 'frames'), exist_ok=True)
     with open(os.path.join(d, 'data.csv'), 'w', newline='',
               encoding='utf-8') as f:
@@ -29,6 +36,10 @@ def _fake_run(d, rows, cols=COLS_15):
         w.writeheader()
         for r in rows:
             w.writerow({**{c: '' for c in cols}, **r})
+    if estimator is not None:
+        ver = (se.AREA_ESTIMATOR_VERSION if estimator == 'current'
+               else int(estimator))
+        se.save_settings(d, None, stamp=se.estimator_stamp(None, ver))
 
 
 def _healthy_rows(n_levels=8, ts='2026-08-05T10:00:00', tags=('pre-ramp',
@@ -479,6 +490,100 @@ def test_scale_guard_scoping_by_mode():
             shutil.rmtree(p, ignore_errors=True)
 
 
+def test_old_estimator_areas_are_refused_across_runs_like_the_scale_era():
+    """2026-10-02 (R5, across runs): a run whose 'disc-fit' areas were
+    saved by the old area method (the ellipse; no `area_estimator: 2`
+    stamp in setup.txt) reads -0.4 to +7.4 % off the common-ray areas
+    of a reprocessed run. Edge Review keeps the two apart within a run;
+    sldea_plot must keep them apart ACROSS runs the way it keeps the
+    2026-07-28 scale era out: refused from area axes with a message that
+    says to re-review, kept only on an explicit --allow-old-estimator
+    and then NAMED in the caption and in the tidy CSV's area_estimator
+    column, and in current mode kept with its area columns blanked.
+    Runs holding only rows that mean the same under both estimators
+    (resting, hand traces, emptied old rows) pass without a stamp."""
+    import sldea_edge as se
+    if not _has_mpl():
+        return
+    d_old, d_new, d_same, d_v1, out = (_mktmp(), _mktmp(), _mktmp(),
+                                       _mktmp(), _mktmp())
+    try:
+        _fake_run(d_old, _healthy_rows(6), estimator=None)
+        _fake_run(d_new, _healthy_rows(6))              # stamped current
+        # no stamp, but nothing the estimator change touched: the
+        # baseline, hand traces, and an old row a Save already emptied
+        rows = [r for r in _healthy_rows(6)
+                if 'disc-fit' not in r['notes']]
+        rows.append({'snapshot': 99, 'tag': 'post-ramp', 'nominal_kV': 1.0,
+                     'timestamp': '2026-08-05T10:00:00',
+                     'notes': se.AREA_ESTIMATOR_STALE_NOTE})
+        _fake_run(d_same, rows, estimator=None)
+        old = sp.load_run(d_old, lambda m: None)
+        assert old['estimator'] is None and sp.old_estimator_areas(old)
+        new = sp.load_run(d_new, lambda m: None)
+        assert new['estimator'] == se.AREA_ESTIMATOR_VERSION
+        assert not sp.old_estimator_areas(new)
+        assert not sp.old_estimator_areas(sp.load_run(d_same,
+                                                      lambda m: None))
+        # a stamp OLDER than the current version is old too
+        _fake_run(d_v1, _healthy_rows(4), estimator=1)
+        assert sp.old_estimator_areas(sp.load_run(d_v1, lambda m: None))
+
+        # area mode: the old run is refused, and the message says why and
+        # what to do; the stamped and the same-under-both runs draw
+        warns = []
+        opts, _ = sp.make_opts(mode='area')
+        runs = sp.prepare_runs([d_old, d_new, d_same], opts, warns.append)
+        assert [r['dir'] for r in runs] == [d_new, d_same], \
+            [r['name'] for r in runs]
+        said = [w for w in warns if 'OLD area method' in w]
+        assert len(said) == 1 and 'EXCLUDED' in said[0], warns
+        assert 'Re-review' in said[0] and '--allow-old-estimator' in said[0]
+        assert sp.main([d_old, '--out', out]) == 2                # alone
+        # the override: drawn, SAID in the caption, marked in the CSV
+        assert sp.main([d_old, d_new, '--out', out, '--stem', 'mix',
+                        '--allow-old-estimator']) == 0
+        runs = sp.prepare_runs([d_old, d_new], opts, warns.append,
+                               allow_old_estimator=True)
+        assert [r['old_estimator_kept'] for r in runs] == [True, False]
+        cap = _caption(_drawn(runs, opts))
+        assert 'OLD area method' in cap, cap
+        assert os.path.basename(d_old) in cap, cap
+        assert os.path.basename(d_new) not in cap.split('OLD area')[1], cap
+        assert '--allow-old-estimator' in cap, cap
+        with open(os.path.join(out, 'mix.csv'), encoding='utf-8') as f:
+            tidy = list(csv.DictReader(f))
+        by_run = {}
+        for t in tidy:
+            by_run.setdefault(t['run'], []).append(t)
+        for name, want in ((os.path.basename(d_old), '1'),
+                           (os.path.basename(d_new),
+                            str(se.AREA_ESTIMATOR_VERSION))):
+            disc = [t for t in by_run[name] if t['method'] == 'disc-fit']
+            assert disc and all(t['area_estimator'] == want for t in disc), \
+                (name, [t['area_estimator'] for t in disc])
+            other = [t for t in by_run[name] if t['method'] != 'disc-fit']
+            assert other and all(t['area_estimator'] == '' for t in other)
+        # a figure with no old run carries no such caption line and no
+        # mark: the ordinary figure is byte-for-byte what it was
+        cap = _caption(_drawn(sp.prepare_runs([d_new], opts), opts))
+        assert 'OLD area method' not in cap
+        # current mode: the old run is kept (currents are unaffected)
+        # with its area columns blanked, as the scale era is
+        assert sp.main([d_old, '--out', out, '--mode', 'current',
+                        '--stem', 'cur']) == 0
+        with open(os.path.join(out, 'cur.csv'), encoding='utf-8') as f:
+            tidy = list(csv.DictReader(f))
+        assert tidy and all(t['area_mm2'] == '' and t['area_estimator'] == ''
+                            for t in tidy), 'old-estimator areas leaked'
+        # ...but --vs-area puts areas on an axis, so it is refused there
+        assert sp.main([d_old, '--out', out, '--mode', 'current',
+                        '--vs-area', '--stem', 'va']) == 2
+    finally:
+        for p in (d_old, d_new, d_same, d_v1, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
 def test_selftest_renders():
     if not _has_mpl():
         return
@@ -756,6 +861,25 @@ def test_prepare_runs_clears_a_previous_modes_area_blanking():
                                allow_suspect=True, load=load)
         assert runs and runs[0]['suspect_kept'] is False
         assert runs[0] is cache[d], 'the cached dict was not reused'
+        # the estimator-era flags (2026-10-02) are reset the same way: an
+        # old-estimator run is hidden in current mode, kept on the
+        # override, and neither decision survives into the next render
+        d2 = _mktmp()
+        try:
+            _fake_run(d2, _healthy_rows(6), estimator=None)
+            cur = sp.make_opts(mode='current')[0]
+            runs = sp.prepare_runs([d2], cur, load=load)
+            assert runs[0]['old_estimator_hidden'] is True
+            assert runs[0]['old_estimator_kept'] is False
+            runs = sp.prepare_runs([d2], cur, load=load,
+                                   allow_old_estimator=True)
+            assert runs[0]['old_estimator_hidden'] is False
+            assert runs[0]['old_estimator_kept'] is True
+            assert runs[0] is cache[d2]
+            runs = sp.prepare_runs([d2], cur, load=load)
+            assert runs[0]['old_estimator_kept'] is False
+        finally:
+            shutil.rmtree(d2, ignore_errors=True)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

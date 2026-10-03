@@ -23,7 +23,8 @@ measured on the baseline photo and on every frame and the area is A0 times
 how much those rays grew, so a quiet frame reads 1.000 to within 0.1 to
 0.3 % and the jump is gone. Old and new areas are not comparable: reprocess
 saved runs through Edge Review, which stamps the method into `setup.txt`
-and empties, never keeps, an old automatic area.
+and empties, never keeps, an old automatic area; until then the plot
+refuses an unstamped run from area axes, as it refuses the old scale era.
 
 **Observation → decision.** Measured on the 16 run folders of the review
 copy (899 frames), pinned OpenCV 4.13, replaying detection as Edge Review
@@ -48,8 +49,9 @@ coverage) are in `SLDEA_MEASUREMENT.md` §2.1b, the sections they correct.
   `area_px = π·r0² · Σ r_k(frame)² / Σ r_k(baseline)²` over the rays
   measured on both (`_common_ray_ratio`), after a 2.5 robust-sigma (MAD)
   trim of the per-ray ratio (median 21 rays per accepted frame; without it
-  the quiet-frame rms doubles, 0.22 % → 0.49 %). No shape model, no
-  extrapolation. r0 stays `baseline_disc`'s radius, so the baseline row is
+  the quiet-frame rms doubles, 0.22 % → 0.49 %; at strain it is a
+  modelling choice with a first-order effect, see Limits). No shape
+  model, no extrapolation. r0 stays `baseline_disc`'s radius, so the baseline row is
   still exactly π·r0², the px→mm anchor is untouched and `active_diam_mm`
   is 2·r0·√ratio. The ellipse is still fitted: it is the drawn outline, the
   sanity gates and the self-audit, and its area over the circle rides on
@@ -118,6 +120,19 @@ coverage) are in `SLDEA_MEASUREMENT.md` §2.1b, the sections they correct.
   Hand traces, patch tiers and `resting` rows are never emptied. The
   tuner's "tuned" flag ignores a block holding only stamps.
   `sldea_diag` prints one `tracker at rest` line with the same provenance.
+  Across runs (the review's finding: the Save kept the two apart within
+  a run only), `sldea_plot.prepare_runs` refuses a run holding `disc-fit`
+  areas with no `area_estimator` stamp, or an older one, from area axes
+  (`old_estimator_areas`), the way it refuses the 2026-07-28 scale era:
+  the message names the run and says to re-review it; the CLI's
+  `--allow-old-estimator` draws it anyway, named in the caption, and the
+  tidy CSV's new `area_estimator` column says which estimator wrote each
+  `disc-fit` row; in current/power mode the run plots with its area
+  columns blanked; the plot window has no override, as for the scale era.
+  A run holding only hand traces, patch tiers, `resting` rows or emptied
+  rows passes without a stamp. In the review data copy this refuses
+  DOT_P3_1 from area axes until it is reprocessed (the only run there
+  with saved areas).
 
 **Result on the six campaign runs** (old → new; auto-accepted tracker
 rows; "independent" is the gate reviewer's half-height series on the top
@@ -190,7 +205,19 @@ is not tested by anything here (the independent series is a cross-check
 between two estimators that both see part of the edge; P3_5 reads about 1
 point below it and I cannot say which is right). Peaks moved by −4.5 %
 (DOT_P3_1) to +2.5 % (P3_5); the 1.3 r0 ceiling (S51) and the buckled
-footprint (S52) are not touched. The 47 operator labels scored the ellipse
+footprint (S52) are not touched. **The P3_5 peak and the DOT_P3_1
+post-washout rows rest on the trim** (found by this entry's review and
+re-measured on the same rays): trimmed minus untrimmed ratio on the 450
+auto rows is median abs 0.27 / 0.33 / 0.47 / 0.85 / 0.69 points by band
+(0–0.5 / 0.75–2 / 2.25–4 / 4.25–6 / 6.25+ kV), 90th percentile 0.7 /
+0.8 / 1.9 / 2.6 / 1.8, maximum 11.8. P3_5's peak is 1.579 trimmed and
+1.463 untrimmed (the independent series reads 1.595, so the trimmed
+value is the supported one); DOT_P3_1 at 8 to 9.5 kV reads +4.5 to +4.9
+above the series trimmed and −6.3 to −7.3 below it untrimmed. On those
+21 frames the rule drops 16 to 31 % of the rays, a coherent minority of
+the edge, so it is a modelling decision with a first-order effect at
+strain, not an outlier rule; it has a row in `SLDEA_MEASUREMENT.md`
+table 2.1 and the numbers are in §2.1b. The 47 operator labels scored the ellipse
 outline, which is unchanged; `edge_labels.json` entries written before
 today hold the old machine area. The audit still runs on the ellipse
 outline (S1). Numbers are OpenCV 4.13 (S54). Nothing on the lab share was
@@ -216,7 +243,11 @@ statement that sets a systematic of order 1 point at peak); reprocessing
 DOT_P3_1's saved CSV and the staged hand trace on row 20; renaming
 `ci85_pct` (keeps its key for the candidate contract); the retired
 fixtures' scope; whether Edge Review should draw the measured rays
-instead of the ellipse.
+instead of the ellipse; a review-only tag (not a refusal) when the trim
+share `n_trimmed / (n_common + n_trimmed)` exceeds about 0.2, which
+would route 21 auto rows to a human, 18 of them among the 36 rows the
+trim moves by more than 2 points (the other 18 sit at or below 0.2,
+among 429).
 
 **Tests.** `tests/test_sldea_edge.py` (93): the baseline measured against
 itself reads exactly 1.000 while the ellipse on that frame is off by more
@@ -231,10 +262,20 @@ old gated-frame behaviour and were changed on purpose
 (`test_gated_frame_is_measured_and_resting_is_the_fallback`,
 `test_bias_tripped_resting_is_refit_to_the_moved_edge`,
 `test_disc_fit_tracks_the_moving_ink_edge`). GUI: the Save dialog counts
-the rows it empties (trace-only Save included), the stamp carries the
-provenance, a failed stamp is said; the card text. Diag: the `tracker at
-rest` line. Tuner: a stamp-only block is not "tuned". Plot GUI: the bands
-tooltip no longer calls the spread a CI.
+the rows it empties (trace-only Save included; an unreadable frame
+holding an old area is counted as emptied, not kept), the stamp carries
+the provenance, a failed stamp is said; the card text, and that the
+panel SHOWS all of it (an unconstrained probe label with the same font
+and wraplength must need no more height than the panel got, for every
+frame and for the longest text the function can produce; at 4 lines Tk
+clipped the outline sentence). Diag: the `tracker at rest` line. Tuner:
+a stamp-only block is not "tuned". Plot: an unstamped run with
+`disc-fit` areas is refused from area axes, kept on
+`--allow-old-estimator` with the caption line and the `area_estimator`
+column, kept with blanked areas in current mode, refused under
+`--vs-area`; a run with only resting, traced and emptied rows passes;
+the flags reset on a reused run dict. Plot GUI: the bands tooltip no
+longer calls the spread a CI.
 
 ## A LIVE run locks the scope channels it reads, and the settings they share (2026-09-24)
 

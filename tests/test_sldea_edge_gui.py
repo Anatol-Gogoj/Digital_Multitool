@@ -7512,6 +7512,35 @@ def test_edge_review_warns_in_one_line_off_the_pinned_opencv():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_tracker_card_names_an_a0_taken_from_the_scale_anchor():
+    """2026-10-05: when the automatic fit refuses the baseline frame, the
+    baseline row's 'resting' claim is the operator's anchor circle
+    (se.anchor_disc). The panel says so, with the circle's size, so the
+    operator judging that row in the queue knows what A is. A tracker
+    candidate still takes the panel, and an ordinary resting claim
+    still says nothing."""
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    anchor = {'method': se.ANCHOR_METHOD_MANUAL, 'diam_px': 577.4,
+              'cx': 960.0, 'cy': 540.0, 'is_baseline': True}
+    rest = dict(se.anchor_disc(anchor), method='resting', conf=0.74)
+    text = gui.tracker_card_text([rest])
+    assert text.startswith('A is A0 from the scale anchor'), text
+    assert 'refused this baseline frame' in text, text
+    assert '(577 px across)' in text, text
+    patch = {'method': 'diff-hi', 'area_px': 63040.0, 'conf': 0.63}
+    assert gui.tracker_card_text([patch, rest]).startswith(
+        'B is A0 from the scale anchor')
+    plain = {'method': 'resting', 'area_px': 217438.0, 'conf': 0.95}
+    assert gui.tracker_card_text([plain, patch]) == ''
+    disc = {'method': 'disc-fit', 'area_px': 217500.0, 'conf': 0.98,
+            'area_ratio': 1.0003, 'n_common': 211, 'n_trimmed': 0,
+            'trim_share': 0.0, 'one_sided': 0.062, 'hidden_pct': 41.4,
+            'ellipse_over_circle': 1.07}
+    assert gui.tracker_card_text([rest, disc]).startswith(
+        'B is the ray ratio')
+
+
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count

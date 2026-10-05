@@ -2029,6 +2029,8 @@ def tracker_card_text(cands):
     limit that tripped; otherwise it names both limits.
     The outline sentence comes second, right after the number, so it
     is on screen even if a future font pushes the tail off the panel.
+    With no tracker result, a 'resting' claim built from the scale
+    anchor (se.anchor_disc, 2026-10-05) gets one sentence saying so.
     Pure, so it is a headless test."""
     for k, c in enumerate(cands[:3]):
         if c.get('method') != 'disc-fit' or c.get('area_ratio') is None:
@@ -2069,6 +2071,16 @@ def tracker_card_text(cands):
                    if tripped else
                    f" Review only above {lim_pct} trimmed or "
                    f"{se.RAY_MAX_ONE_SIDED:g} one-sided."))
+    # no tracker result: on a baseline frame whose automatic fit refused,
+    # say where the resting claim's A0 came from (2026-10-05)
+    for k, c in enumerate(cands[:3]):
+        if c.get('a0_from') != se.ANCHOR_A0_FROM:
+            continue
+        return (f"{CAND_KEYS[k]} is A0 from the scale anchor: the automatic "
+                f"disc fit refused this baseline frame, so the resting area "
+                f"is the circle measured with 📏 "
+                f"({float(c['diam_px']):.0f} px across). In mm² it is "
+                f"π·(diam_mm/2)² by construction of the scale.")
     return ''
 
 
@@ -3075,7 +3087,7 @@ class EdgeReviewApp:
         threading.Thread(
             target=self._detect_worker,
             args=(gen, self.run, list(self.frame_rows),
-                  dict(self.settings), base),
+                  dict(self.settings), base, dict(self.manual_ref)),
             daemon=True).start()
         self.root.after(100, lambda: self._poll_detect(gen))
 
@@ -3101,7 +3113,8 @@ class EdgeReviewApp:
                 return os.path.basename(p) if p else ''
         return ''
 
-    def _detect_worker(self, gen, run, frame_rows, settings, base):
+    def _detect_worker(self, gen, run, frame_rows, settings, base,
+                       anchor=None):
         # Per-frame try + sentinel in finally: one bad frame (shape
         # mismatch, decode error) used to kill the thread silently and
         # leave 'DETECTING…' stuck forever (audit 2026-07-25). The
@@ -3125,7 +3138,8 @@ class EdgeReviewApp:
                         cands = []
                     else:
                         cands = se.candidates(base, img, settings,
-                                              prev_method=prev)
+                                              prev_method=prev,
+                                              anchor_ref=anchor)
                 except Exception as e:
                     # a readable frame whose DETECTION raised is not a
                     # disk problem — record the true cause, or the
@@ -3203,7 +3217,8 @@ class EdgeReviewApp:
                     self.cands_all[i] = []
                     continue
                 self.cands_all[i] = se.candidates(
-                    base, img, self.settings, prev_method=prev)
+                    base, img, self.settings, prev_method=prev,
+                    anchor_ref=self.manual_ref)
             except Exception as e:
                 # same per-frame containment as the threaded worker —
                 # one bad frame must not abort the whole sync pass
@@ -3810,7 +3825,8 @@ class EdgeReviewApp:
                                 "(so the trace can be paired)…")
         self.root.update_idletasks()
         try:
-            cands = se.candidates(base, img, self.settings)
+            cands = se.candidates(base, img, self.settings,
+                                  anchor_ref=self.manual_ref)
         except Exception as e:
             # same containment as the detect worker: a failed frame must
             # not block the recovery trace -- but the status line must not
@@ -4268,6 +4284,33 @@ class EdgeReviewApp:
                         if self.load_fail[i] == 'unreadable' else
                         'frame processing failed - kept, not re-measured')
                 annos[i] = (annos[i] + '; ' + note) if i in annos else note
+        # A0 STATED FROM THE SCALE ANCHOR (2026-10-05). When the automatic
+        # fit refused the baseline, the baseline row's 'resting' claim
+        # came from the operator's anchor (se.anchor_disc). It must match
+        # the anchor THIS save scales by, so a scale calibration made after
+        # Detect rebuilds it, and the row's notes say where A0 came from.
+        if any(r and r.get('a0_from') == se.ANCHOR_A0_FROM
+               for r in self.results.values()):
+            try:
+                g = self._base_gray()
+                shape = np.shape(g) if g is not None else None
+            except Exception as e:      # a truncated baseline can raise
+                print(f"save: baseline did not load for the A0 check: {e}")
+                shape = None
+            for i, what in se.refresh_anchor_a0(self.results,
+                                                self.manual_ref,
+                                                shape).items():
+                if what == 'dropped':
+                    note = ('A0 not written: the scale anchor changed after '
+                            'Detect and carries no disc centre - '
+                            'recalibrate, then Detect again')
+                    annos[i] = (annos[i] + '; ' + note) if i in annos \
+                        else note
+            for i, r in self.results.items():
+                if r and r.get('a0_from') == se.ANCHOR_A0_FROM:
+                    note = se.ANCHOR_A0_NOTE
+                    annos[i] = (annos[i] + '; ' + note) if i in annos \
+                        else note
         if 'wrinkle_idx' not in self.run['columns']:
             # older runs predate the column; slot it in before notes
             cols = self.run['columns']
@@ -5380,6 +5423,11 @@ class EdgeReviewApp:
                               self.settings.get('roi_frac', 0.85))
             st = {'photo': None, 'pan': None, 'grab': None,
                   'round': 1, 'diams': [], 'circle': None,
+                  # each banked round's disc centre (original image px),
+                  # kept in step with 'diams': the anchor carries their
+                  # mean so the baseline row can still state A0 when the
+                  # automatic fit refuses (se.anchor_disc, 2026-10-05)
+                  'centers': [],
                   # twopoint: the rotated display image, the angle it is
                   # rotated by, the angles still to come in this set, the
                   # angles already used, and the current round's two
@@ -5831,7 +5879,7 @@ class EdgeReviewApp:
 
             def accept(dpx_full, source_frame, src_is_baseline=None,
                        stats=None, guard=None, overridden=False,
-                       verified=None, who=None, when=None):
+                       verified=None, who=None, when=None, center=None):
                 # PROVENANCE (`#215` the verify mode, 2026-08-06 evening). The
                 # method string is how an audit tells "a human MEASURED this"
                 # from "a human APPROVED the machine's measurement" — two
@@ -5850,6 +5898,17 @@ class EdgeReviewApp:
                                                    if src_is_baseline
                                                    is None
                                                    else src_is_baseline)}
+                # the disc's centre (2026-10-05): the mean of the rounds'
+                # centres, or the approved fit's. With it, se.anchor_disc
+                # can state the baseline row's A0 when the automatic fit
+                # refuses that frame. Omitted when it is not known.
+                try:
+                    ccx, ccy = (float(center[0]), float(center[1]))
+                except (TypeError, ValueError, IndexError):
+                    ccx = ccy = None
+                if (ccx is not None and np.isfinite(ccx)
+                        and np.isfinite(ccy)):
+                    self.manual_ref.update({'cx': ccx, 'cy': ccy})
                 if verified:
                     # what quantifies an approved fit is the FIT's quality,
                     # not a spread across rounds there were none of
@@ -6177,7 +6236,8 @@ class EdgeReviewApp:
                 when = time.strftime('%Y-%m-%dT%H:%M:%S')
                 log_set(stats, 'accepted-verified')
                 accept(float(ref['diam_px']), frame_name, stats=stats,
-                       verified=ref, who=who, when=when)
+                       verified=ref, who=who, when=when,
+                       center=(ref.get('cx'), ref.get('cy')))
 
             # `hand_instead` and its ✎ Measure by hand instead button are GONE
             # (operator 2026-08-06 late): the radio row already switches
@@ -6442,7 +6502,8 @@ class EdgeReviewApp:
                 log_set(stats, ('accepted-override' if overridden
                                 else 'accepted'), guard)
                 accept(stats['mean'], frame_name, stats=stats,
-                       guard=guard, overridden=overridden)
+                       guard=guard, overridden=overridden,
+                       center=mean_center())
 
             def continue_key(_ev=None):
                 """What <Return> does — and what it must NOT.
@@ -6502,6 +6563,26 @@ class EdgeReviewApp:
                         return None
                     return two_point_diameter(st['pts'][0], st['pts'][1])
                 return 2.0 * st['circle'][2]
+
+            def round_center():
+                """The current round's disc centre in ORIGINAL image px:
+                the midpoint of the two clicks (two-point, already mapped
+                back through the rotation) or the fitted circle's centre.
+                Read only once round_diameter() has accepted the round."""
+                if two_point():
+                    (xa, ya), (xb, yb) = st['pts'][0], st['pts'][1]
+                    return (0.5 * (float(xa) + float(xb)),
+                            0.5 * (float(ya) + float(yb)))
+                return (float(st['circle'][0]), float(st['circle'][1]))
+
+            def mean_center():
+                """Mean of the banked rounds' centres, or None when they do
+                not match the banked diameters one for one."""
+                cs = st['centers']
+                if not cs or len(cs) != len(st['diams']):
+                    return None
+                return (sum(c[0] for c in cs) / len(cs),
+                        sum(c[1] for c in cs) / len(cs))
 
             def step(_ev=None):
                 """What the PRIMARY button does — one command, dispatched on
@@ -6567,6 +6648,7 @@ class EdgeReviewApp:
                             f"wheel) before continuing.")
                     return
                 st['diams'].append(dpx)
+                st['centers'].append(round_center())
                 if two_point():
                     # the angle this round was judged at, kept for the log:
                     # a round-set whose rotations turned out to cluster is
@@ -6633,6 +6715,8 @@ class EdgeReviewApp:
                     return 'break'      # no rounds here to go back through
                 if st['diams']:
                     st['diams'].pop()
+                    if st['centers']:
+                        st['centers'].pop()
                     if st['rots']:
                         st['rots'].pop()
                     st['round'] = len(st['diams']) + 1
@@ -6701,6 +6785,7 @@ class EdgeReviewApp:
                 st['mode'] = mode_var.get()
                 st['n'] = rounds_wanted()
                 st['round'], st['diams'] = 1, []
+                st['centers'] = []
                 st['rots'] = []
                 if verify():
                     prepare_verify()
@@ -6769,6 +6854,12 @@ class EdgeReviewApp:
                               'verified_by', 'verified_at', 'guard'):
                         if recorded.get(k) is not None:
                             self.manual_ref[k] = recorded[k]
+                    # its recorded disc centre too (2026-10-05), under the
+                    # names se.anchor_disc reads; absent on older anchors
+                    if (recorded.get('disc_cx_px') is not None
+                            and recorded.get('disc_cy_px') is not None):
+                        self.manual_ref['cx'] = recorded['disc_cx_px']
+                        self.manual_ref['cy'] = recorded['disc_cy_px']
                     dpx = float(recorded['diam_px'])
                     # a reused anchor brings its own record with it, so
                     # what was accepted over when it was made is said
@@ -7776,6 +7867,10 @@ class EdgeReviewApp:
             'mm_per_px': scale,
             'anchor_frame': ref.get('frame', ''),
             'anchor_is_baseline': ref.get('is_baseline'),
+            # the measured disc's centre (2026-10-05), so a reused anchor
+            # can still state A0 when the automatic fit refuses
+            'disc_cx_px': ref.get('cx'),
+            'disc_cy_px': ref.get('cy'),
             'auto_diam_px': (self.base_ref or {}).get('diam_px'),
             # #215: the three (or more) fitted diameters, their spread and
             # what the anchor guard said. The spread is the ONLY per-run

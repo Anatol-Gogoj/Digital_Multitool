@@ -494,11 +494,17 @@ _ANCHOR_KEYS = ('method', 'cal_mode', 'diam_px', 'diam_mm', 'mm_per_px',
                 'reanchor', 'prev_diam_px', 'prev_implied_px',
                 'prev_method', 'prev_cal_mode', 'reanchor_rows',
                 'reanchor_blanked',
+                # the measured disc's centre, full-resolution px
+                # (2026-10-05): what lets a REUSED anchor still state the
+                # baseline row's A0 when the automatic fit refuses
+                # (anchor_disc). Absent on every older anchor.
+                'disc_cx_px', 'disc_cy_px',
                 'guard', 'saved', 'user')
 _ANCHOR_FLOATS = ('diam_px', 'diam_mm', 'mm_per_px', 'auto_diam_px',
                   'spread_px', 'spread_pct', 'sigma_pct', 'se_pct',
                   'fit_circ', 'fit_conf', 'fit_resid_px', 'fit_arc_cov',
-                  'prev_diam_px', 'prev_implied_px')
+                  'prev_diam_px', 'prev_implied_px',
+                  'disc_cx_px', 'disc_cy_px')
 _ANCHOR_INTS = ('n_rounds', 'fit_n_edge', 'reanchor_rows',
                 'reanchor_blanked')
 
@@ -3341,8 +3347,16 @@ def _resting_refit(prep, settings, ref):
     return c
 
 
-def candidates(base_gray, img_gray, settings, prev_method=None):
+def candidates(base_gray, img_gray, settings, prev_method=None,
+               anchor_ref=None):
     """Up to 3 candidate outlines for the active area, best first.
+
+    `anchor_ref`: the run's human-signed scale anchor (Edge Review's
+    manual_ref). Used ONLY on the baseline frame and ONLY when
+    baseline_disc refuses it: anchor_disc then supplies the resting disc,
+    so the baseline row still gets its 'resting' claim (A0), tagged
+    `a0_from`. Every other frame, and every run where the automatic fit
+    succeeds, is measured exactly as without it.
 
     `prev_method`: the winning method of the PREVIOUS frame in ramp
     order, when the caller iterates one. The incumbent channel gets a
@@ -3417,6 +3431,10 @@ def candidates(base_gray, img_gray, settings, prev_method=None):
     img_full, base_full = prep['img_full'], prep['base_full']
     ref = baseline_disc(base_gray, settings) if base_gray is not None \
         else None
+    if ref is None and is_baseline:
+        # the fit refused this baseline: the operator's own resting-disc
+        # measurement still states A0 (see anchor_disc)
+        ref = anchor_disc(anchor_ref, np.shape(base_gray))
     min_sol = float(settings.get('min_solidity', 0))
     gated = (float(np.percentile(sub, 99))
              < float(settings.get('min_diff', 10)))
@@ -4371,6 +4389,103 @@ def baseline_disc_refusal(base_gray, settings):
     not called `baseline_disc` for this key gets None, which reads the same
     as "no refusal on record". The dialog calls the fit first, always."""
     return _DISC_WHY.get(_disc_key(base_gray, settings))
+
+
+# The baseline row's A0 when the automatic fit refuses (2026-10-05).
+#
+# candidates() states the baseline row's area as the 'resting' claim, a
+# copy of the resting-disc reference. That reference used to be ONLY
+# baseline_disc, so on a poor baseline frame (blurred, badly exposed,
+# foil across the disc) the fit refused, the baseline row got no
+# candidate, auto-rejected as 'no change vs baseline', and Save left its
+# area blank. Every other accepted frame still had an area, but the run
+# had no A0, and sldea_plot skips a run with no A0 in area mode.
+#
+# Yet the run HAS a resting-disc measurement: the scale gate makes the
+# operator measure the resting disc on the baseline frame before any
+# Detect. Its diameter defines the scale, so the circle it describes is
+# exactly pi*(diam_mm/2)^2 in mm2 by construction. anchor_disc turns that
+# measurement into the same reference shape baseline_disc returns, and
+# candidates() uses it for the baseline row only, only when the fit
+# refused, and only from an anchor a human signed off on THIS frame that
+# carries the disc centre. The resulting claim is tagged `a0_from`, and
+# Save writes that provenance into the row's notes.
+ANCHOR_A0_FROM = 'scale-anchor'
+ANCHOR_A0_NOTE = 'A0 from the scale anchor (automatic disc fit refused)'
+
+
+def anchor_disc(anchor, frame_shape=None):
+    """The resting-disc reference implied by a human-signed scale anchor,
+    shaped like baseline_disc's result (method 'anchor-disc'), or None.
+
+    None unless the anchor is one of ANCHOR_METHODS, was measured on the
+    baseline frame (`is_baseline`), and carries a finite positive
+    `diam_px` and a disc centre (`cx`, `cy`, full-resolution px). With
+    `frame_shape` (h, w) the centre must also lie on that frame: an
+    anchor clicked on a different-sized frame does not describe it.
+
+    The circle is the operator's, not a fit, so it carries no edge
+    statistics (arc_cov, fit_resid_px, n_edge, paper_lum are absent,
+    not zero), and `conf` is the resting claim's to set."""
+    if not anchor or anchor.get('method') not in ANCHOR_METHODS:
+        return None
+    if not anchor.get('is_baseline'):
+        return None
+    try:
+        d = float(anchor.get('diam_px'))
+        cx = float(anchor.get('cx'))
+        cy = float(anchor.get('cy'))
+    except (TypeError, ValueError):
+        return None
+    if not (np.isfinite(d) and np.isfinite(cx) and np.isfinite(cy)):
+        return None
+    if d <= 0:
+        return None
+    if frame_shape is not None:
+        h, w = frame_shape[:2]
+        if not (0.0 <= cx < w and 0.0 <= cy < h):
+            return None
+    r = 0.5 * d
+    th = np.linspace(0, 2 * np.pi, 90, endpoint=False)
+    contour = np.stack([cx + r * np.cos(th), cy + r * np.sin(th)], axis=1)
+    return {'method': 'anchor-disc', 'area_px': float(np.pi * r * r),
+            'diam_px': d, 'cx': cx, 'cy': cy, 'circ': 1.0,
+            'solidity': 1.0, 'contour': contour, 'conf': None,
+            'wrinkle': None, 'spread_pct': 0.0,
+            'a0_from': ANCHOR_A0_FROM}
+
+
+def refresh_anchor_a0(results, anchor, frame_shape=None):
+    """Bring anchor-derived A0 claims in `results` up to date with the
+    CURRENT anchor, in place. -> {row index: 'rebuilt' | 'dropped'}.
+
+    The anchor can change after Detect (a scale calibration while a pass is
+    in memory is held for the next Save). A baseline 'resting' claim
+    built from the OLD anchor would then be written at the NEW anchor's
+    scale and no longer read pi*(diam_mm/2)^2. A claim whose anchor
+    still matches is left alone; one that differs is rebuilt from the
+    current anchor when anchor_disc accepts it, and set to None (a
+    rejected row) when it does not. Rows not built from the anchor are
+    never touched."""
+    out = {}
+    cur = anchor_disc(anchor, frame_shape)
+    for i, r in list(results.items()):
+        if not r or r.get('a0_from') != ANCHOR_A0_FROM:
+            continue
+        if cur is not None and all(
+                abs(float(r.get(k, np.nan)) - float(cur[k])) < 1e-6
+                for k in ('diam_px', 'cx', 'cy')):
+            continue
+        if cur is None:
+            results[i] = None
+            out[i] = 'dropped'
+            continue
+        fresh = dict(r)
+        for k in ('area_px', 'diam_px', 'cx', 'cy', 'contour'):
+            fresh[k] = cur[k]
+        results[i] = fresh
+        out[i] = 'rebuilt'
+    return out
 
 
 def _baseline_disc_uncached(base_gray, settings):

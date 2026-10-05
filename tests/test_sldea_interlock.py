@@ -189,6 +189,8 @@ class _App:
         _sldea_video_preflight = G._sldea_video_preflight
     if hasattr(G, '_cam_owned_by_sldea'):
         _cam_owned_by_sldea = G._cam_owned_by_sldea
+    if hasattr(G, '_sldea_video_wanted'):
+        _sldea_video_wanted = G._sldea_video_wanted
 
     def __init__(self, tmp, dry=True, sgch=1, real_worker=False):
         self.real_worker = real_worker
@@ -385,6 +387,59 @@ def test_live_run_refuses_beside_a_sweep_on_its_own_channel():
         assert 'Webcam tab → Stop sweep' in msg, msg
         assert any(l.startswith('run refused') and 'SG CH1' in l
                    for l in app.lines), app.lines
+
+
+def test_record_video_turns_the_other_channel_question_into_a_refusal():
+    """With Record video ticked the camera is the recording's for the whole
+    run, so an other-channel sweep photographing every level is refused
+    (2026-10-05), LIVE and DRY, at the first gate and with no question.
+    Unticked, the same sweep is asked about exactly as before."""
+    for dry in (False, True):
+        mb = _MB()
+        with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+            app = _App(tmp, dry=dry, sgch=1)
+            app.sldea_vid_on = _var(True)
+            _busy(app, 'sweep', ch=2)
+            app.sldea_run()
+            assert mb.titles() == [BUSY], (dry, mb.calls)
+            msg = mb.message(BUSY)
+            assert 'record video' in msg and 'Record video' in msg, msg
+            assert 'SG CH2' in msg, msg
+            assert not app._sldea_running and not app.worker_done.is_set()
+            assert app.events == [], app.events
+            assert any('run refused' in l and 'video' in l
+                       for l in app.lines), app.lines
+        mb = _MB({SWEEP_Q: False})
+        with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+            app = _App(tmp, dry=dry, sgch=1)
+            _busy(app, 'sweep', ch=2)
+            app.sldea_run()
+            assert mb.titles() == [SWEEP_Q], (dry, mb.calls)
+
+
+def test_a_previous_runs_recorder_still_closing_holds_off_the_next_run():
+    """The recorder keeps reading the camera until its stop() returns,
+    which can outlast the run. The Webcam tab already counts it as holding
+    the camera; a new ▶ Run does too (2026-10-05), LIVE and DRY, and a
+    recorder that has finished is not in the way."""
+    for dry in (False, True):
+        mb = _MB()
+        with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+            app = _App(tmp, dry=dry, sgch=1)
+            app._sldea_recorder = _types.SimpleNamespace(
+                reader_alive=lambda: True)
+            app.sldea_run()
+            assert mb.titles() == [BUSY], (dry, mb.calls)
+            assert 'video recorder is still closing' in mb.message(BUSY)
+            assert not app._sldea_running and app.events == []
+    mb = _MB()
+    with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+        app = _App(tmp, dry=True, sgch=1, real_worker=True)
+        app._sldea_recorder = _types.SimpleNamespace(
+            reader_alive=lambda: False)
+        app.sldea_run()
+        assert app.worker_done.wait(30), app.lines
+        assert BUSY not in mb.titles(), mb.calls
 
 
 def test_live_run_asks_about_a_sweep_on_the_other_channel_enter_is_no():

@@ -69,10 +69,13 @@ TEXT_FIELDS = (
     'wd_ua', 'wd_s',
     # telemetry
     'tel_hz',
+    # video beside the snapshots (2026-09-23)
+    'vid_fps',
 )
 
 # Checkbutton fields, stored as bools.
-BOOL_FIELDS = ('updown', 'trek_inv', 'wd_on', 'tel_on', 'autoproc')
+BOOL_FIELDS = ('updown', 'trek_inv', 'wd_on', 'tel_on', 'autoproc',
+               'vid_on', 'vid_detect')
 
 ALL_FIELDS = TEXT_FIELDS + BOOL_FIELDS
 
@@ -97,6 +100,8 @@ FIELD_LABELS = {
     'wd_s': 'Watchdog confirm (s)',
     'tel_on': 'Telemetry enabled', 'tel_hz': 'Telemetry rate (Hz)',
     'autoproc': 'Auto-open Edge Review',
+    'vid_on': 'Record video', 'vid_fps': 'Video fps',
+    'vid_detect': 'Detect edges on every video frame',
     'run_name': 'Run name', 'runname': 'Run name',
     'dry_run': 'DRY/LIVE state', 'dryrun': 'DRY/LIVE state',
     'live': 'DRY/LIVE state',

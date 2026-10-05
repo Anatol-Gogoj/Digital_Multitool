@@ -42,6 +42,14 @@ plots/
 *.bak
 data*.csv.bak
 telemetry*.csv
+# The run video and what is derived from it (sldea_video.py, 2026-09-23):
+# gigabytes per run, run data like the frames. Named explicitly AND by
+# extension, so a renamed copy is caught too.
+video.mkv
+*.mkv
+video_frames*.csv
+video_edges*.csv
+video_edges*.png
 area_vs_voltage.png
 sldea_diag*.png
 sldea_diag*.json

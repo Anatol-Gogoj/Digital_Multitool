@@ -13,6 +13,50 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## The camera pre-flight shoots under the run's own lock, and says when the Webcam tab's fields and lock disagree (2026-10-05)
+
+**TL;DR:** on run `13_backlight` the pre-flight picture looked fine and
+every run frame came out blown out. The pre-flight was shot at the Webcam
+tab's locked exposure, the run at the panel's exposure field, and the two
+differed. The pre-flight now shoots under exactly the lock the run holds,
+and names the difference when the fields and the lock disagree. A stale
+settings file could also bring an old exposure back into the panel; the
+newer of the two settings files now wins.
+
+**Observation (run `13_backlight`, 2026-10-05, measured from its files).**
+
+- `setup.txt`: exposure 20 (2 ms), gain 0, the same values as front-lit
+  run 13 two hours earlier.
+- All 60 frames, from the warm-up on, are 57-66 % saturated (mean
+  226-227). The exposure was wrong from the first grab, not drifting.
+- The operator saw a reasonable picture in the Webcam preview and in the
+  pre-flight dialog.
+- In the code: `_sldea_worker` overrides the tab's lock with the panel's
+  `cam_exposure`/`cam_gain` for every grab, while `_sldea_preflight`
+  wrote those values and then grabbed through `oneshot_rgb`, which
+  re-stamps the tab's LOCK before the shutter. The preview runs on the
+  lock as well. A good pre-flight and a blown-out run at exposure 20
+  therefore mean the lock held a different exposure from the field.
+- How the field and the lock came apart on the bench is not established.
+  One mechanism the code allows: `save_camera_settings` writes the
+  fallback file when the primary is unwritable, but
+  `load_camera_settings` read the primary first, so a stale primary
+  refilled the panel (and the restored lock) on every rebuild.
+
+**Decision.**
+
+- One definition, `sldea_run_lock`, builds the lock both the pre-flight
+  and the run hold. The pre-flight's grab happens under it, and the tab's
+  own lock is restored afterwards (also when the grab raises).
+- `sldea_lock_mismatch` names a field-vs-lock difference in the dialog
+  and in run.log. The run keeps using the fields, as before; the change
+  is that the pre-flight now shows what that looks like.
+- `load_camera_settings` reads the newer of the two files first.
+- Not new camera I/O: the pre-flight writes the same four controls the
+  run writes seconds later, through the same `apply_locked`. Still to be
+  seen on the bench: with fields and lock different, the dialog's picture
+  matches the run's frames.
+
 ## A run can record lossless video beside its snapshots, and detect edges on every frame afterwards (2026-09-23) — NOT bench-verified yet (BENCH_TEST §Q)
 
 **TL;DR:** tick 🎥 **Record** on the SLDEA tab and the run also records a

@@ -257,10 +257,13 @@ data.csv until you press Save. Closing the window first loses your accept and re
      edge: half the stroke on the disc, half on the paper." Circle mode: drag to move, drag a handle
      to resize, press "Continue ->" after each round. Two-point mode: the second click ends the
      round. After the last round press "Finish calibration (applied at Save)" (Enter will not).
-   - "Rounds disagree": your rounds are too far apart. Answer "Yes = refit all" and measure again;
-     if again, "Cancel" and ask. Never "No = accept as measured". "Anchor NOT cross-checked" ("Use
-     this UNCHECKED anchor anyway?"): nothing can check a hand fit on this run. Yes only if you see
-     the edge clearly and the lab allows hand-measured scales (box item 11); otherwise No.
+   - The questions after the last round open over the calibration window, and their buttons say
+     what they do. Enter and Esc always pick the safe button.
+   - "Rounds disagree": your rounds are too far apart. Press "Refit all" and measure again; if
+     again, "Cancel" and ask. Never "Accept as measured". "Anchor NOT cross-checked" ("Nothing can
+     check this scale."): nothing can check a hand fit on this run. Press "Use unchecked scale"
+     only if you see the edge clearly and the lab allows hand-measured scales (box item 11);
+     otherwise "Cancel".
 4. Detection runs. The status line counts "auto-accepted", "no-change/no-edge" and "need review".
    **Warning sign:** almost every frame "no-change/no-edge" although the voltage went up (on
    2026-10-01: 25 of 26, with "review queue: 0 frame(s) left"). Do not Save. Look at the first and
@@ -329,7 +332,7 @@ On 2026-10-01 (run SLDEA_20261001_151016) three things went wrong in a row, mark
 | First "meas" line has a sign or size the lab did not expect | Trek polarity, the "Trek inverts" box and the scope window disagree | "Abort", ask the lab (box item 3), start a new run |
 | "V_Out off-screen (9.9E37 sentinel)" (failure 2: lost from 2.25 kV, run aborted at 3.0 kV) | The reading left the scope screen (window framed for positive kV, readings negative), though "monitor check: OK" was logged | Not an Abort rule here: ask the lab (box item 10). Section 3, step 5 |
 | Dialog "HV NOT ZEROED" | The app could not zero the signal generator | Do what the dialog says, at once |
-| "Rounds disagree" after hand circles (failure 3: 23 percent apart, accepted) | Hand fits on a disc you cannot see | "Yes = refit all", or "Cancel" and ask |
+| "Rounds disagree" after hand circles (failure 3: 23 percent apart, accepted) | Hand fits on a disc you cannot see | "Refit all", or "Cancel" and ask |
 | 25 of 26 frames "no-change/no-edge", queue empty | Blank pictures, not a stiff device | Do not Save. Look at the first and last frame |
 
 ## 11. Words used in this tool

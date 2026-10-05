@@ -1267,6 +1267,129 @@ def cal_stretch_lut(lo, hi):
 CAL_UNTOUCHED_MSG = "Move the circle onto the edge of the disc first."
 CAL_NO_POINTS_MSG = "Click the two opposite edges of the disc first."
 
+# What each answer key returns from the dialog's ask(): the yes/no/cancel
+# contract the gates were written against when they were native message
+# boxes. The KEYS stay; only what the operator reads on the buttons changed.
+CAL_CHOICE_RESULT = {'yes': True, 'no': False, 'cancel': None}
+
+
+def cal_choice(parent, title, headline, detail, buttons, default):
+    """One calibration gate question, answered with buttons that NAME the
+    action. -> the key of the button pressed ('yes', 'no' or 'cancel').
+
+    WHY NOT messagebox (operator 2026-10-05). Two problems with the native
+    yes/no boxes on a poor baseline frame:
+
+    - the question was a paragraph ending "Use this UNCHECKED anchor
+      anyway?" followed by "No = cancel (...)", so the operator had to
+      read the whole box to learn which of Yes/No did what. The buttons
+      now say "Use unchecked scale" and "Cancel", and the text is a bold
+      one-line headline plus at most a few short lines of detail.
+    - the boxes were created with no parent, so Windows owned them to the
+      main window, and the calibration window (transient to the main
+      window, holding the grab) could sit on top of them. The operator had
+      to drag the calibration window aside to find the question. This
+      dialog is transient to `parent`, centred over it, lifted and
+      focused, so it opens on top of the window that asked.
+
+    The safety rules of the old prompts are kept: Enter, Escape and the
+    window's close box all answer `default`, which every caller sets to
+    the declining button, so no key press can accept a scale. A click (or
+    Space on a focused button) is the only way to pick anything else.
+
+    The grab that was held before (the calibration window's) is handed
+    back when this closes: a Tk grab is not a stack, so without that the
+    calibration window would stop being modal after the first question.
+
+    `buttons` is [(key, label), ...] left to right. Monkeypatched by the
+    GUI tests, which answer it without a display."""
+    out = {'key': default}
+    prev_grab = None
+    dlg = tk.Toplevel(parent)
+    try:
+        dlg.withdraw()               # placed before it is shown, no jump
+        dlg.title(title)
+        dlg.transient(parent)
+        dlg.resizable(False, False)
+        # the warning sign and the bold weight are the cue; no colour
+        tk.Label(dlg, text="⚠ " + headline, justify='left', wraplength=460,
+                 font=('TkDefaultFont', 11, 'bold')).pack(
+                     anchor='w', padx=14, pady=(14, 6))
+        if detail:
+            tk.Label(dlg, text=detail, justify='left',
+                     wraplength=460).pack(anchor='w', padx=14,
+                                          pady=(0, 10))
+        row = tk.Frame(dlg)
+        row.pack(fill='x', padx=14, pady=(2, 12))
+
+        def pick(key):
+            out['key'] = key
+            dlg.destroy()
+
+        def decline(_ev=None):
+            pick(default)
+            return 'break'
+
+        btns = []
+        for key, label in buttons:
+            b = tk.Button(row, text=label, command=lambda k=key: pick(k),
+                          default=('active' if key == default
+                                   else 'normal'))
+            b.pack(side=tk.LEFT, padx=(0, 8))
+            btns.append((key, b))
+        # Enter answers the default wherever the focus is. Bound on each
+        # button as well as on the window because a widget's own binding
+        # runs first: with the focus tabbed onto an accepting button, this
+        # is what answers Enter (the same rule as the flat-frame notice).
+        for w in [dlg] + [b for _k, b in btns]:
+            w.bind('<Return>', decline)
+        dlg.bind('<Escape>', decline)
+        dlg.protocol('WM_DELETE_WINDOW', decline)
+        # centred over the window that asked, kept on the screen
+        dlg.update_idletasks()
+        w_, h_ = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+        try:
+            px, py = parent.winfo_rootx(), parent.winfo_rooty()
+            pw, ph = parent.winfo_width(), parent.winfo_height()
+        except tk.TclError:
+            px = py = 0
+            pw, ph = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
+        x = px + max(0, (pw - w_) // 2)
+        y = py + max(0, (ph - h_) // 3)
+        x = max(0, min(x, dlg.winfo_screenwidth() - w_))
+        y = max(0, min(y, dlg.winfo_screenheight() - h_))
+        dlg.geometry(f"+{x}+{y}")
+        dlg.deiconify()
+        dlg.lift()
+        for key, b in btns:
+            if key == default:
+                b.focus_set()
+        try:
+            dlg.focus_force()
+        except tk.TclError:
+            pass
+        prev_grab = dlg.grab_current()
+        try:
+            dlg.grab_set()
+        except tk.TclError as e:
+            # "grab failed: window not viewable" must cost the modality,
+            # not the question: wait_window still holds the caller
+            print(f"calibrate: question box has no grab: {e}")
+        dlg.wait_window(dlg)
+    finally:
+        try:
+            if dlg.winfo_exists():
+                dlg.destroy()
+        except tk.TclError:
+            pass
+        try:
+            if prev_grab is not None and prev_grab.winfo_exists():
+                prev_grab.grab_set()
+                prev_grab.focus_set()
+        except tk.TclError:
+            pass
+    return out['key']
+
 
 def cal_content_window(content, pad_frac=CAL_STRETCH_PAD_FRAC):
     """(lo, hi) gray levels to map across black to white for the HAND
@@ -4754,6 +4877,13 @@ class EdgeReviewApp:
             dlg.bind('<Escape>', cancel)
             dlg.protocol('WM_DELETE_WINDOW', dlg.destroy)
             cancel_btn.focus_set()
+            # in front of the window that opened it (2026-10-05: the
+            # calibration questions could open behind other windows)
+            dlg.lift()
+            try:
+                dlg.focus_force()
+            except tk.TclError:
+                pass
             self._cal_win = dlg
             # TEST SEAM, alive only while the notice is (like the dialog's
             # own probe). Nothing in the app reads it.
@@ -6065,10 +6195,16 @@ class EdgeReviewApp:
                          f"at Save")
                 win.destroy()
 
-            def ask(title, msg, default, three=False, **kw):
-                """askyesno / askyesnocancel with an EXPLICIT default, and
-                with <Return> taken off the window underneath while the
-                question is up.
+            def ask(title, headline, detail, buttons, default):
+                """One gate question through cal_choice, with an EXPLICIT
+                default, and with <Return> taken off the window underneath
+                while the question is up. -> True / False / None for the
+                'yes' / 'no' / 'cancel' button (CAL_CHOICE_RESULT), the
+                contract these gates had as native message boxes.
+
+                Since 2026-10-05 the buttons NAME their action and the box
+                is owned by this window (cal_choice says why); before that
+                these were askyesno / askyesnocancel.
 
                 Review 2026-08-06, demonstrated not speculated: tkinter's
                 askyesno defaults to YES and was passed no default=, while
@@ -6084,10 +6220,9 @@ class EdgeReviewApp:
                     win.unbind('<Return>')
                 except tk.TclError:
                     pass
-                fn = (messagebox.askyesnocancel if three
-                      else messagebox.askyesno)
                 try:
-                    return fn(title, msg, default=default, **kw)
+                    return CAL_CHOICE_RESULT[cal_choice(
+                        win, title, headline, detail, buttons, default)]
                 finally:
                     st['modal'] = False
                     try:
@@ -6109,31 +6244,27 @@ class EdgeReviewApp:
                 anchor for the first time (review 2026-08-06, minor 6).
                 With neither reference, say plainly that there is no
                 percentage rather than showing None."""
+                # ONE SENTENCE since 2026-10-05 (operator: the gate boxes
+                # were too wordy to tell which button did what). The
+                # number is kept; the reference it is measured against is
+                # said in a clause, not a paragraph.
                 if not n_px_rows:
                     return ''
                 if recorded:
                     pct = se.rescale_pct(recorded['diam_px'], mean_px)
                     if pct is not None:
-                        return (f"\n\nAccepting also moves the "
-                                f"{n_px_rows} already-measured row(s) by "
-                                f"{pct:+.2f}% in mm² at the next Save "
-                                f"(re-derived from px at this anchor, "
-                                f"against the recorded "
-                                f"{recorded['diam_px']:.1f} px).")
+                        return (f"\n\nUsing it changes the {n_px_rows} "
+                                f"measured row(s) by {pct:+.2f}% in mm² "
+                                f"at the next Save.")
                 pct = se.rescale_pct(auto_px, mean_px)
                 if pct is not None:
-                    return (f"\n\nNo anchor is on record for this run, so "
-                            f"those {n_px_rows} mm² were derived at the "
-                            f"AUTOMATIC fit's scale ({auto_px:.1f} px): "
-                            f"accepting moves every one of them "
-                            f"{pct:+.2f}% at the next Save, and it is the "
-                            f"first time the column hangs on a hand-fitted "
-                            f"anchor.")
-                return (f"\n\nNo anchor is on record for this run AND "
-                        f"there is no automatic fit, so there is no "
-                        f"percentage to quote: all {n_px_rows} mm² are "
-                        f"re-derived from px at this anchor, sight unseen, "
-                        f"including rows you do not re-review.")
+                    return (f"\n\nUsing it changes the {n_px_rows} "
+                            f"measured row(s) by {pct:+.2f}% in mm² at "
+                            f"the next Save (they were at the automatic "
+                            f"fit's scale).")
+                return (f"\n\nUsing it re-derives all {n_px_rows} measured "
+                        f"row(s) at this scale at the next Save, with no "
+                        f"earlier scale to compare against.")
 
             def log_set(stats, outcome, guard=None):
                 """Append this completed round-set to the run's calibration
@@ -6223,7 +6354,7 @@ class EdgeReviewApp:
                         "Calibrate",
                         "The automatic fit is no longer available, so there "
                         "is nothing to verify. Measure the disc by hand "
-                        "instead.")
+                        "instead.", parent=win)
                     mode_var.set(se.CAL_DEFAULT_MODE)
                     switch_mode()
                     return
@@ -6294,9 +6425,11 @@ class EdgeReviewApp:
                         + " Refused.")
                     log_set(stats, 'refused-cap')
                     if ask("Rounds cannot be trusted",
-                           se.range_cap_text(stats)
-                           + "\n\nYes = measure again · No = cancel",
-                           default='no', icon='warning'):
+                           se.range_cap_text(stats, choices=False),
+                           "Measure the disc again from round 1, or "
+                           "cancel and keep the scale you had.",
+                           [('yes', "Measure again"), ('no', "Cancel")],
+                           'no'):
                         restart_all()
                         return
                     # Cancel: say on the strip which scale still stands,
@@ -6322,22 +6455,19 @@ class EdgeReviewApp:
                         "error term")
                     if not ask(
                             "Precision cannot be judged",
-                            f"You fitted {stats['n']} round(s), and there "
-                            f"is no d₂ range-to-sigma factor for that "
-                            f"count (the table covers n = "
-                            f"{min(se.D2_RANGE_FACTORS)}–"
-                            f"{max(se.D2_RANGE_FACTORS)}).\n\nSo this "
-                            f"anchor's per-fit precision and its mean "
-                            f"standard error were NOT computed, and the "
-                            f"acceptance gate could not be applied. "
-                            f"Nothing here has been checked against "
-                            f"SLDEA_MEASUREMENT §2.1's ~0.4% diameter "
-                            f"budget."
-                            + rescale_note(stats['mean'], None)
-                            + f"\n\nUse this UNJUDGED anchor anyway?\n\n"
-                              f"No = cancel and calibrate again with a "
-                              f"round count in the table.",
-                            default='no', icon='warning'):
+                            f"{stats['n']} round(s) cannot be checked for "
+                            f"precision.",
+                            f"The precision check covers "
+                            f"{min(se.D2_RANGE_FACTORS)} to "
+                            f"{max(se.D2_RANGE_FACTORS)} rounds (d₂ table, "
+                            f"SLDEA_MEASUREMENT §2.1a), so this scale was "
+                            f"not checked against the ~0.4% diameter "
+                            f"budget. Cancel and calibrate again with a "
+                            f"round count in that range."
+                            + rescale_note(stats['mean'], None),
+                            [('yes', "Use it unchecked"),
+                             ('no', "Cancel")],
+                            'no'):
                         log_set(stats, 'declined-unjudgeable')
                         win.destroy()
                         return
@@ -6401,24 +6531,22 @@ class EdgeReviewApp:
                                   f"is the other method, not more rounds.")
                     else:
                         remedy = ''
+                    # The three choices are the BUTTONS since 2026-10-05,
+                    # so the "Yes = refit · No = accept as measured ·
+                    # Cancel" legend that had to fit one native-box line
+                    # is gone: the operator reads the answer on the button
+                    # they press. The σ line and the remedy are unchanged.
                     ans = ask(
                         "Rounds disagree",
+                        "Your rounds disagree more than the budget allows.",
                         f"σ = {stats['sigma_pct']:.2f} % of diameter  →  "
                         f"±{stats['area_se_pct']:.2f} % in area "
-                        f"(budget ±{2 * se.CAL_SE_PCT:g} %).\n"
-                        f"{remedy}\n\n"
-                        # ONE LINE, and it has to STAY one line: the native
-                        # message box wraps at about 70 characters whatever
-                        # its longest line is, and a choice list that breaks
-                        # mid-choice ("Cancel / = calibrate later") is exactly
-                        # what a glanceable prompt cannot afford. Measured by
-                        # rendering it, not guessed. Cancel carries no gloss
-                        # for the same reason the operator's own sketch gave
-                        # it none — the word is not ambiguous, and what the
-                        # run is left in is on the status line afterwards.
-                        f"Yes = refit all {stats['n']} rounds · "
-                        f"No = accept as measured · Cancel",
-                        default='cancel', three=True, icon='warning')
+                        f"(budget ±{2 * se.CAL_SE_PCT:g} %)."
+                        + (f"\n{remedy}" if remedy else ''),
+                        [('yes', f"Refit all {stats['n']} rounds"),
+                         ('no', "Accept as measured"),
+                         ('cancel', "Cancel")],
+                        'cancel')
                     if ans is None:
                         log_set(stats, 'declined-cancel')
                         win.destroy()
@@ -6445,28 +6573,29 @@ class EdgeReviewApp:
                     # gap in setup.txt (se.anchor_guard_note).
                     say("⚠ NO automatic cross-check was possible — this "
                         "anchor is UNCHECKED")
+                    # THE POOR-BASELINE CASE, and the prompt the operator
+                    # found hardest to answer (2026-10-05): a paragraph
+                    # ending "Use this UNCHECKED anchor anyway?" and a
+                    # gloss on No. The facts it must still carry: nothing
+                    # checked this scale, why, and that agreeing fits are
+                    # not evidence of being right. The P3_2 list of
+                    # systematic errors is in the record and in
+                    # SLDEA_MEASUREMENT, not on the box.
                     if not ask(
                             "Anchor NOT cross-checked",
-                            f"The mean of your {stats['n']} fits is "
-                            f"{stats['mean']:.1f} px, and NOTHING checked "
-                            f"it.\n\nThe automatic baseline disc fit is "
-                            f"unavailable on this run (the baseline frame "
-                            f"will not load, or the fit refused it), so "
-                            f"neither reference could be applied: not the "
-                            f"independent disc fit, and not the "
-                            f"{self.settings['diam_mm']:g} mm mask's "
-                            f"π·(d/2)² resting area. A P3_2-style "
-                            f"systematic error — the stroke on the outer "
-                            f"toe, the wrong feature encircled, the wrong "
-                            f"diam_mm — would pass unnoticed here.\n\n"
-                            f"Your fits agreeing says only that you "
-                            f"are REPEATABLE, not that you are right."
-                            + rescale_note(stats['mean'], None)
-                            + f"\n\nUse this UNCHECKED anchor anyway?\n\n"
-                              f"No = cancel (restore the baseline frame, "
-                              f"or verify the anchor by eye on the "
-                              f"contact sheet first).",
-                            default='no', icon='warning'):
+                            "Nothing can check this scale.",
+                            f"The automatic disc fit refused this baseline "
+                            f"frame (or the frame will not load), so your "
+                            f"{stats['n']} fits (mean "
+                            f"{stats['mean']:.1f} px) have nothing "
+                            f"independent to compare against. Fits that "
+                            f"agree show you are repeatable, not that you "
+                            f"are right.\n\nUse it only if you could see "
+                            f"the disc edge clearly."
+                            + rescale_note(stats['mean'], None),
+                            [('yes', "Use unchecked scale"),
+                             ('no', "Cancel")],
+                            'no'):
                         log_set(stats, 'declined-uncrosschecked', guard)
                         win.destroy()
                         return
@@ -6479,21 +6608,19 @@ class EdgeReviewApp:
                     lines = '\n'.join('• ' + w for w in guard['warn'])
                     if not ask(
                             "Anchor sanity check",
-                            f"The accepted average ({stats['mean']:.1f} px) "
-                            f"disagrees with a reference the app "
-                            f"measured independently:\n\n{lines}\n\n"
-                            f"The scale-anchor budget is ~0.4% diameter "
-                            f"/ ~0.8% area (SLDEA_MEASUREMENT §2.1), so "
-                            f"this is outside it. Common causes: the mark "
-                            f"sat on the outer toe instead of the "
-                            f"half-height, the wrong feature was "
-                            f"measured, or diam_mm does not match this "
-                            f"device's mask."
+                            "Your scale disagrees with the app's own "
+                            "measurement.",
+                            f"Your average is {stats['mean']:.1f} px.\n"
+                            f"{lines}\n\n"
+                            f"Usual causes: the circle sat on the outer "
+                            f"toe instead of half on the edge, the wrong "
+                            f"feature was measured, or diam_mm is wrong "
+                            f"for this mask."
                             + rescale_note(stats['mean'],
-                                           guard['auto_diam_px'])
-                            + f"\n\nUse this anchor ANYWAY?\n\n"
-                              f"No = recalibrate from round 1.",
-                            default='no', icon='warning'):
+                                           guard['auto_diam_px']),
+                            [('yes', "Use it anyway"),
+                             ('no', "Measure again")],
+                            'no'):
                         st['disclosed'] = True
                         log_set(stats, 'declined-guard', guard)
                         restart_all()
@@ -6615,7 +6742,7 @@ class EdgeReviewApp:
                     # calls this for an intermediate round), so neither
                     # can bank one. Not a threshold: one nudge clears it.
                     say_live("⚠ " + CAL_UNTOUCHED_MSG)
-                    messagebox.showwarning("Calibrate", CAL_UNTOUCHED_MSG)
+                    messagebox.showwarning("Calibrate", CAL_UNTOUCHED_MSG, parent=win)
                     return
                 if not cal_diam_plausible(dpx, img.width, img.height,
                                           self.settings.get('roi_frac',
@@ -6637,7 +6764,7 @@ class EdgeReviewApp:
                             "are outside the size range the automatic fit "
                             "accepts. Click the two OPPOSITE edges of the "
                             "shaded disc; a third click starts the pair "
-                            "over.")
+                            "over.", parent=win)
                     else:
                         messagebox.showwarning(
                             "Calibrate",
@@ -6645,7 +6772,7 @@ class EdgeReviewApp:
                             f"disc — it is outside the size range the "
                             f"automatic fit accepts too. Resize the circle "
                             f"onto the disc edge (drag a handle, or the "
-                            f"wheel) before continuing.")
+                            f"wheel) before continuing.", parent=win)
                     return
                 st['diams'].append(dpx)
                 st['centers'].append(round_center())
@@ -7354,6 +7481,11 @@ class EdgeReviewApp:
                                # modes and in the verify mode (2026-10-02)
                                'gate_lbl': gate_lbl, 'stop_px': stop_px,
                                'stop_vfy_px': stop_vfy_px}
+            win.lift()
+            try:
+                win.focus_force()
+            except tk.TclError:
+                pass
             win.grab_set()
             self.root.wait_window(win)
         finally:

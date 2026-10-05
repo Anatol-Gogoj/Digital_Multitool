@@ -13,6 +13,59 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## Calibration questions name their buttons and open over the calibration window (2026-10-05)
+
+**TL;DR:** the questions that follow a hand calibration (mostly met when
+the disc fit refuses a poor baseline frame) were long native Yes/No boxes,
+and they could open behind the calibration window. They are now short
+boxes whose buttons say what they do ("Use unchecked scale" / "Cancel"),
+owned by the calibration window so they always open on top of it. The
+gates, their order, their defaults and what each answer records are
+unchanged.
+
+**Observation (operator, 2026-10-05).** On a run whose baseline frame the
+automatic fit refused, the operator measured by hand and met "Anchor NOT
+cross-checked": 646 characters before the rescale note was appended
+(rendered at n = 3), ending "Use this UNCHECKED anchor anyway?" and then
+"No = cancel (...)". The new box is 304 characters with the same n. It was not clear whether Yes or No
+was the safe answer without reading the whole box. The boxes also opened
+behind the calibration window, which had to be dragged aside to find
+them. The cause of that is in the code: every gate called
+`messagebox.askyesno` / `askyesnocancel` with no `parent=`, so the box was
+owned by the main window, while the calibration window is a transient of
+the main window that holds the grab. On Windows the calibration window
+could stay above the box.
+
+**Decision.**
+
+- The five gate questions (range cap, unjudgeable round count, rounds
+  disagree, not cross-checked, anchor sanity check) go through
+  `cal_choice` in `sldea_edge_gui.py`: a bold one-line headline, a few
+  short lines of detail, and buttons named for the action. The answer
+  keys and the True/False/None contract are the old ones, so `finish()`
+  branches exactly as before.
+- The box is transient to the calibration window, centred over it, lifted
+  and focused, and it hands the calibration window's grab back when it
+  closes (a Tk grab is not a stack).
+- Enter, Escape and the close box all answer the default, which is still
+  the declining button on every gate; Enter is bound on each button so a
+  tabbed focus cannot turn it into an accept. The 2026-08-06 review rule
+  (no key press can accept an anchor) stands.
+- Percentages only on the range-cap and rounds-disagree boxes, as before:
+  a refit is one of their answers.
+- What came off the boxes: the P3_2 list of systematic errors and the
+  "REPEATABLE, not right" paragraph shrank to one sentence; the rescale
+  note is one sentence with its number. The record (`setup.txt`, the
+  calibration log, `sldea_diag`) is unchanged.
+- The in-window warnings (untouched circle, implausible size, fit gone)
+  now pass `parent=` the calibration window, and the calibration window
+  and the flat-frame notice lift and take focus when they open.
+
+Verified on the GUI suite with a display (`tests/test_sldea_edge_gui.py`);
+the new case opens the real box and checks the labels, the transient
+owner, Enter/Escape/close declining, and the grab hand-back. Not yet seen
+by an operator on the bench PC.
+
 ## "Trek inverts" negates the control only, and starts ticked (2026-10-05)
 
 **TL;DR:** owner decision. The box is ticked by default, and ticking it now

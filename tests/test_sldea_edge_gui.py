@@ -832,6 +832,32 @@ class _ModalSpy:
     def askyesno(self, title, msg='', **kw):
         return self._record(title, kw, False, msg)
 
+    def __call__(self, parent, title, headline, detail, buttons, default):
+        """Stands in for gui.cal_choice, the calibration gates' question
+        box since 2026-10-05: buttons that NAME the action. Recorded like
+        a yes/no question, with the button LABELS in kwargs['buttons'],
+        and answered with the button KEY ('yes'/'no'/'cancel') that the
+        True/False/None answer maps to. The message is the headline and
+        the detail, one after the other.
+
+        THE BOX IS OWNED BY THE CALIBRATION WINDOW. A question parented to
+        the main window could open behind the (transient, grabbed)
+        calibration window, which is the bug this box was made to fix, so
+        every question the spy sees while that window is up must name it
+        as its parent."""
+        keys = [k for k, _lbl in buttons]
+        assert default in keys, (title, default, keys)
+        cal_win = getattr(self._app, '_cal_win', None)
+        if cal_win is not None:
+            assert parent is cal_win, (f"{title}: asked with parent "
+                                       f"{parent!r}, not the calibration "
+                                       f"window")
+        kw = {'default': default,
+              'buttons': [lbl for _k, lbl in buttons]}
+        ans = self._record(title, kw, 'cancel' in keys,
+                           headline + '\n' + (detail or ''))
+        return {True: 'yes', False: 'no', None: 'cancel'}[ans]
+
     def askyesnocancel(self, title, msg='', **kw):
         return self._record(title, kw, True, msg)
 
@@ -889,7 +915,7 @@ def test_calibration_dialog_drives_three_rounds_and_both_gates():
     real_mb = gui.messagebox
     spy = _ModalSpy(real_mb)
     answers, asked = spy.answers, spy.asked
-    gui.messagebox = spy
+    gui.messagebox = gui.cal_choice = spy
     # Nine circles, one per round: half 1's set, then half 2's set and
     # its post-restart set. Every triple has range/mean between 3.8 and
     # 4.4 % (the SE gate only goes silent under ~1.17 %, and since
@@ -1031,7 +1057,7 @@ def test_calibration_warnings_default_to_declining_them():
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)             # no answers: all defaults
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def advance(win, taken):
             for _ in range(12):
@@ -1113,7 +1139,7 @@ def test_return_key_cannot_finish_a_calibration():
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         # a fit that would pass both gates if it were ever accepted, so a
         # failure here is unambiguous: only Enter is under test
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
@@ -1206,7 +1232,7 @@ def test_mid_round_display_never_reveals_a_previous_fit():
         app = gui.EdgeReviewApp(root, path=run)
         # spread gate -> accept as measured; anchor guard -> override
         spy = _ModalSpy(real_mb, app, answers=[False, True])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def advance(win):
             for _ in range(6):
@@ -1305,7 +1331,7 @@ def test_unavailable_cross_check_is_stated_not_implied():
         # standing between this anchor and Save is the cross-check
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
         spy = _ModalSpy(real_mb, app, answers=[True])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def advance(win):
             for _ in range(6):
@@ -1458,7 +1484,7 @@ def test_mode_b_measures_in_original_coordinates_under_rotation():
         # the mask-area guard slightly, so answer every question with the
         # override — the gates are tested elsewhere; this is the geometry
         spy = _ModalSpy(real_mb, app, answers=[True] * 8)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def advance(win):
             _cal_onscreen(root, win)
@@ -1538,7 +1564,7 @@ def test_mode_b_is_blind_mid_round_and_shows_no_length_at_all():
         # differ by under 5 %, because a range over that is REFUSED since
         # 2026-10-03 and never reaches the gate this case is about.
         spy = _ModalSpy(real_mb, app, answers=[False, True])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def advance(win):
             _cal_onscreen(root, win)
@@ -1634,7 +1660,7 @@ def test_every_round_set_is_logged_accepted_or_declined():
         _fixed_spawn(gui, [(160.0, 120.0, 65.0), (160.0, 120.0, 66.3),
                            (160.0, 120.0, 67.6)])
         spy = _ModalSpy(real_mb, app, answers=[None])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         app._calibrate_scale(mode=CIRCLE)
         assert app.manual_ref is None, "cancel accepted an anchor"
         assert os.path.exists(log), "a declined round-set was not logged"
@@ -1656,7 +1682,7 @@ def test_every_round_set_is_logged_accepted_or_declined():
         # carrying the rotation angles this time
         gui.spawn_circle = real_spawn
         spy = _ModalSpy(real_mb, app, answers=[True] * 8)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def advance_b(win):
             _cal_onscreen(root, win)
@@ -1725,7 +1751,7 @@ def test_mode_b_keeps_every_safety_fix_of_the_review_round():
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)          # no answers: all defaults
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         # (a) five deliberately scattered chords (160 down to 154 px: a
         # 3.8 % range, over the SE gate and under the 2026-10-03 range cap,
@@ -1757,8 +1783,13 @@ def test_mode_b_keeps_every_safety_fix_of_the_review_round():
         # and nothing else.
         assert 'σ = ' in prompt and '% of diameter' in prompt, prompt
         assert '% in area' in prompt and 'budget ±' in prompt, prompt
-        assert 'Yes = refit' in prompt and 'No = accept as measured' in prompt
-        assert 'Cancel' in prompt, prompt
+        # the three answers are the BUTTONS since 2026-10-05, named for
+        # what they do, so no Yes/No legend has to be read to answer
+        btns = spy.asked[0][1]['buttons']
+        assert len(btns) == 3 and re.fullmatch(r'Refit all \d+ rounds',
+                                                btns[0]), btns
+        assert btns[1:] == ['Accept as measured', 'Cancel'], btns
+        assert 'Yes =' not in prompt and 'No =' not in prompt, prompt
         # AND IT STAYS SHORT. This prompt was 7 non-blank lines / 862 chars
         # and the operator met it on real data; three lines is what was asked
         # for, so three is what is pinned. The per-line cap is what keeps the
@@ -1905,7 +1936,7 @@ def test_mode_chooser_restarts_the_set_and_carries_the_modes_default_n():
     try:
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
-        gui.messagebox = _ModalSpy(real_mb, app, answers=[None])
+        gui.messagebox = gui.cal_choice = _ModalSpy(real_mb, app, answers=[None])
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
 
         def poke(win):
@@ -2932,7 +2963,7 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)          # no answers: all defaults
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         fit = app._auto_disc()
         assert fit and fit.get('diam_px'), "fixture has no automatic fit"
 
@@ -3200,7 +3231,7 @@ def test_every_mode_holds_the_on_screen_line_budget():
             w.writerows(rd)
         app = gui.EdgeReviewApp(root, path=run)
         assert app._px_rows() == 2, app._px_rows()
-        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.messagebox = gui.cal_choice = _ModalSpy(real_mb, app)
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
         fit = app._auto_disc()
         assert fit and fit.get('diam_px'), "fixture has no automatic fit"
@@ -3510,7 +3541,7 @@ def test_a_refused_fit_falls_through_to_the_hand_measurement_and_says_why():
         assert app._auto_disc() is None, "the fixture no longer refuses"
         why = app._auto_disc_refusal()
         assert why and 'seed' in why, why
-        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.messagebox = gui.cal_choice = _ModalSpy(real_mb, app)
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
 
         def poke(win):
@@ -3605,7 +3636,7 @@ def test_an_untouched_circle_round_is_refused_by_the_button_and_by_enter():
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         # spawns that pass every OTHER check a round has (plausible size,
         # inside the frame), so the only reason left to refuse one is that
         # nobody touched it.
@@ -3757,7 +3788,7 @@ def test_an_untouched_two_point_round_is_refused():
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def poke(win):
             _cal_onscreen(root, win)
@@ -3821,7 +3852,7 @@ def test_a_flat_frame_opens_on_a_plain_statement_with_cancel_default():
         assert content['flat'] and content['contrast'] == 2.0, content
         assert app._auto_disc() is None, "the flat fixture has a fit"
         spy = _ModalSpy(real_mb, app)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         sentence = gui.flat_frame_text(content)
         log = os.path.join(run, gui.se.CAL_LOG_NAME)
 
@@ -4060,7 +4091,7 @@ def test_a_single_gray_frame_is_shown_plain_and_says_so():
         assert content['flat'] and content['contrast'] == 0.0, content
         assert gui.cal_content_window(content) is None
         spy = _ModalSpy(real_mb, app)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def look(win):
             p = app._cal_probe
@@ -4117,7 +4148,7 @@ def test_cancelling_the_flat_notice_says_what_the_scale_still_is():
         run = _flat_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         sentence = gui.flat_frame_text(gui.se.image_content(app._base_gray()))
 
         def cancel(win):
@@ -4232,7 +4263,7 @@ def test_a_frame_the_fit_found_a_disc_on_opens_no_flat_notice():
         fit = app._auto_disc()
         assert fit and abs(fit['diam_px'] - 160.0) < 2.0, fit
         spy = _ModalSpy(real_mb, app)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def look(win):
             p = app._cal_probe
@@ -4300,7 +4331,7 @@ def test_a_committed_re_anchor_repeats_the_caveat_on_the_status_strip():
         # (mean 160 px on a 160 px fit), so it asks nothing. Then the
         # re-anchor's own three-way question: Yes = commit now.
         spy = _ModalSpy(real_mb, app2, answers=[False, True])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         _fixed_spawn(gui, [(160.0, 120.0, 79.0), (160.0, 120.0, 80.0),
                            (160.0, 120.0, 81.0)])
 
@@ -4479,7 +4510,7 @@ def test_hand_modes_show_a_stretched_view_and_record_the_same_diameters():
         cv2.imwrite(base, banded)
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         fit = app._auto_disc()
         assert fit and fit.get('diam_px'), "fixture has no automatic fit"
         assert abs(fit['diam_px'] - 160.0) < 0.5, fit['diam_px']
@@ -4655,7 +4686,7 @@ def test_hand_modes_show_a_stretched_view_and_record_the_same_diameters():
 INCIDENT_SPAWNS = [(160.0, 120.0, 61.285), (160.0, 120.0, 55.721),
                    (160.0, 120.0, 70.114)]
 CAP_REFUSAL = ("The three rounds differ by 23.1 percent; more than 5 "
-               "percent cannot be trusted. Measure again, or cancel.")
+               "percent cannot be trusted.")
 
 
 def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
@@ -4702,7 +4733,7 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
 
         # ---- (1) circle mode, fit present, the old override script -------
         spy = _ModalSpy(real_mb, app, answers=[False, True])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         _fixed_spawn(gui, list(INCIDENT_SPAWNS))
         app.root.wait_window = advance
         app.status.config(text='')
@@ -4715,8 +4746,8 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
         assert spy.defaults() == ['no'], spy.asked
         prompt = spy.msgs[0]
         assert prompt.startswith(CAP_REFUSAL), prompt
-        assert 'Yes = measure again' in prompt and 'No = cancel' in prompt, \
-            prompt
+        assert spy.asked[0][1]['buttons'] == ['Measure again', 'Cancel'], \
+            spy.asked[0]
         # PERCENTAGES ONLY, on the prompt and on the dialog behind it (where
         # the only diameter is the current circle's own live readout): a
         # refit is one of the answers, so it must stay blind
@@ -4748,7 +4779,7 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
         # anyway" (the second override of 2026-10-01) is never offered.
         app._auto_disc = lambda: None
         spy = _ModalSpy(real_mb, app, answers=[True, False])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         _fixed_spawn(gui, list(INCIDENT_SPAWNS) * 2)
         states = []
 
@@ -4784,7 +4815,7 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
 
         # ---- (3) the two-point mode: five chords, a 23 % range -----------
         spy = _ModalSpy(real_mb, app, answers=[False, True])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         halves = [61.285, 55.721, 70.114, 62.5, 59.0]
 
         def chords(win):
@@ -4807,8 +4838,8 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
         # 23.4 and 24.0 have both been seen. What is pinned is that the
         # prompt quotes the set's OWN recorded range, well over the cap)
         m = re.match(r'The five rounds differ by (\d+\.\d) percent; more '
-                     r'than 5 percent cannot be trusted\. Measure again, '
-                     r'or cancel\.', spy.msgs[0])
+                     r'than 5 percent cannot be trusted\.$',
+                     spy.msgs[0].split('\n')[0])
         assert m, spy.msgs[0]
         quoted = float(m.group(1))
         assert 20.0 < quoted < 27.0, spy.msgs[0]
@@ -4820,7 +4851,7 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
 
         # ---- (4) a 4 % set reaches the gates it always met, unchanged ----
         spy = _ModalSpy(real_mb, app, answers=[False, True])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         _fixed_spawn(gui, [(160.0, 120.0, 65.0), (160.0, 120.0, 66.3),
                            (160.0, 120.0, 67.6)])
         app.root.wait_window = advance
@@ -4838,7 +4869,7 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
         # ---- (5) the Detect route keeps the reason on the strip ----------
         app.manual_ref = None
         spy = _ModalSpy(real_mb, app)              # all defaults: cancel
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         _fixed_spawn(gui, list(INCIDENT_SPAWNS))
         app._calibrate_scale(then_detect=True, mode=CIRCLE)
         assert app.manual_ref is None and not app.cands_all
@@ -4861,7 +4892,7 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
         app2 = gui.EdgeReviewApp(root, path=run)
         assert app2._scale_intent()['intent'] == gui.SCALE_INTENT_REANCHOR
         spy = _ModalSpy(real_mb, app2, answers=[False])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         _fixed_spawn(gui, list(INCIDENT_SPAWNS))
 
         def measure(win):
@@ -4922,7 +4953,7 @@ def test_switching_into_mode_C_gives_it_the_same_room_as_opening_in_it():
     try:
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
-        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.messagebox = gui.cal_choice = _ModalSpy(real_mb, app)
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
 
         def grab(win, key):
@@ -5000,7 +5031,7 @@ def test_reusing_a_verified_anchor_keeps_it_verified_not_hand_measured():
             'verified_at': '2026-08-06T18:30:00',
             'guard': 'AUTO-VERIFIED by eye: ... NOT cross-checked'})
         app = gui.EdgeReviewApp(root, path=run)
-        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.messagebox = gui.cal_choice = _ModalSpy(real_mb, app)
 
         def poke(win):
             btns = _cal_buttons(win)
@@ -5097,7 +5128,7 @@ def test_measure_by_hand_leaves_mode_C_for_a_BLIND_mode_A_round_set():
     try:
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
-        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.messagebox = gui.cal_choice = _ModalSpy(real_mb, app)
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 70.0)
         fit = app._auto_disc()
         assert fit and fit.get('diam_px')
@@ -5279,7 +5310,7 @@ def test_the_dialog_says_which_of_the_two_folded_actions_it_serves():
     try:
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
-        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.messagebox = gui.cal_choice = _ModalSpy(real_mb, app)
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
 
         def look(tag):
@@ -5388,7 +5419,7 @@ def test_the_second_click_banks_the_round_and_Back_undoes_it():
     try:
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
-        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.messagebox = gui.cal_choice = _ModalSpy(real_mb, app)
 
         def poke(win):
             _cal_onscreen(root, win)
@@ -7541,12 +7572,134 @@ def test_tracker_card_names_an_a0_taken_from_the_scale_anchor():
         'B is the ray ratio')
 
 
+def test_cal_choice_names_its_buttons_and_opens_over_the_dialog():
+    """THE CALIBRATION QUESTION BOX ITSELF (operator 2026-10-05), on a
+    real display. The gate cases above answer it through _ModalSpy; this
+    is the one case that opens it.
+
+    Pinned: the buttons carry the action's name; the box is transient to
+    the window that asked (so Windows keeps it above that window instead
+    of behind it); a click returns that button's key; Enter, even with
+    the focus on an accepting button, Escape and the close box all return
+    the DEFAULT, the declining answer; and the grab the calibration
+    window held is handed back when the box closes."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    root = _tk_root_or_skip('cal_choice')
+    if root is None:
+        return
+    try:
+        parent = tk.Toplevel(root)
+        parent.geometry('480x320+120+120')
+        parent.update()
+        parent.grab_set()
+        seen = {}
+
+        def drive(action):
+            def go():
+                boxes = [w for w in parent.winfo_children()
+                         if isinstance(w, tk.Toplevel)]
+                if not boxes:
+                    seen['error'] = 'no question box opened'
+                    return
+                box = boxes[-1]
+                box.update()
+                btns = {b.cget('text'): b for b in _widgets(box, 'button')}
+                seen['labels'] = list(btns)
+                seen['active'] = [t for t, b in btns.items()
+                                  if str(b.cget('default')) == 'active']
+                seen['transient'] = str(box.transient())
+                seen['viewable'] = bool(box.winfo_viewable())
+                g = box.grab_current()
+                seen['grab'] = str(g) if g is not None else None
+                seen['box'] = str(box)
+                action(box, btns)
+
+            root.after(300, go)
+
+            def stuck():
+                # never hang the suite: a box nobody could close is closed
+                # here, and the answer it returns then fails the case
+                for w in parent.winfo_children():
+                    if isinstance(w, tk.Toplevel):
+                        seen['stuck'] = True
+                        w.destroy()
+            root.after(6000, stuck)
+
+        two = [('yes', 'Use unchecked scale'), ('no', 'Cancel')]
+
+        def ask(buttons=two, default='no'):
+            seen.clear()
+            return gui.cal_choice(parent, 'Anchor NOT cross-checked',
+                                  'Nothing can check this scale.',
+                                  'detail line', buttons, default)
+
+        # a click returns the clicked button's key
+        drive(lambda box, b: b['Use unchecked scale'].invoke())
+        assert ask() == 'yes', seen
+        assert seen['labels'] == ['Use unchecked scale', 'Cancel'], seen
+        assert seen['active'] == ['Cancel'], seen
+        assert seen['transient'] == str(parent), seen
+        assert seen['viewable'] and seen['grab'] == seen['box'], seen
+        assert 'stuck' not in seen, seen
+        # ... and the calibration window has its grab back
+        g = parent.grab_current()
+        assert g is not None and str(g) == str(parent), g
+
+        # Enter with the focus on the ACCEPTING button still declines
+        def enter_on_accept(box, b):
+            btn = b['Use unchecked scale']
+            btn.focus_force()
+            btn.event_generate('<Return>')
+        drive(enter_on_accept)
+        assert ask() == 'no', seen
+        assert 'stuck' not in seen, seen
+
+        # Escape declines
+        drive(lambda box, b: box.event_generate('<Escape>'))
+        assert ask() == 'no', seen
+        assert 'stuck' not in seen, seen
+
+        # the close box declines
+        drive(lambda box, b: box.tk.call(box.protocol('WM_DELETE_WINDOW')))
+        assert ask() == 'no', seen
+        assert 'stuck' not in seen, seen
+
+        # a three-way question declines to cancel
+        three = [('yes', 'Refit all 3 rounds'), ('no', 'Accept as measured'),
+                 ('cancel', 'Cancel')]
+        drive(lambda box, b: box.event_generate('<Escape>'))
+        assert ask(three, 'cancel') == 'cancel', seen
+        assert seen['active'] == ['Cancel'], seen
+        drive(lambda box, b: b['Accept as measured'].invoke())
+        assert ask(three, 'cancel') == 'no', seen
+        g = parent.grab_current()
+        assert g is not None and str(g) == str(parent), g
+    finally:
+        root.destroy()
+
+
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count
     # line, in name order, in one bounded block -- run_tests.py explains why.
     import gc
     import traceback
+
+    gui_mod = None
+    try:
+        import sldea_edge_gui as gui_mod
+    except Exception:
+        pass
+    real_choice = getattr(gui_mod, 'cal_choice', None)
+
+    def _unspy():
+        # the cases restore gui.messagebox themselves; the question box
+        # they also replace (`gui.messagebox = gui.cal_choice = spy`) is
+        # put back here, once per case, so one case's spy cannot answer
+        # the next case's questions
+        if gui_mod is not None and real_choice is not None:
+            gui_mod.cal_choice = real_choice
 
     def _reap():
         """Collect Tk garbage HERE, in the main thread. (`#280`)
@@ -7579,8 +7732,10 @@ def _run():
         except Exception:
             failed.append((fn.__name__, traceback.format_exc()))
             print(f"FAIL {fn.__name__}")
+            _unspy()
             _reap()
             continue
+        _unspy()
         _reap()
         print(f"ok  {fn.__name__}")
     if not failed:

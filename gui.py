@@ -26,6 +26,7 @@ import tk_fontfix                      # must precede tkinter:
 tk_fontfix.apply()                     # colour emoji crash Tk
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
+from tkinter import font as tkfont
 import csv
 import os
 import queue
@@ -44,6 +45,7 @@ import siggen_presets
 from siggen_presets import SignalGenPresetStore
 import sldea_presets
 from sldea_presets import SldeaPresetStore
+import sldea_preview
 import sldea_profile
 from sldea_profile import (SldeaProfile, control_v_for_kv, measured_kv,
                            measured_ua, fmt_duration)
@@ -2576,6 +2578,7 @@ LOGGING:
     # unrelated to this. Profile math lives in sldea_profile.py.
 
     SLDEA_POLL_S = 0.1
+    SLDEA_PREVIEW_FONT = ('TkDefaultFont', 8)
 
     def create_sldea_tab(self):
         _tab = ScrollableTab(self.notebook)
@@ -2586,16 +2589,20 @@ LOGGING:
                              "1 V control = 1 kV, Trek max 10 kV)", padding=10)
         inp.pack(fill='x', padx=10, pady=8)
 
-        def field(r, c, label, key, default, tip=None):
-            ttk.Label(inp, text=label).grid(row=r, column=c*2, sticky='e',
-                                            pady=3, padx=(8, 2))
-            e = ttk.Entry(inp, width=8)
+        def entry(parent, key, default, tip=None, width=8):
+            e = ttk.Entry(parent, width=width)
             e.insert(0, str(default))
-            e.grid(row=r, column=c*2+1, sticky='w', padx=(0, 10))
             e.bind('<KeyRelease>', lambda _ev: self._sldea_refresh())
             if tip:
                 add_tooltip(e, tip)
             self.sldea_vars[key] = e
+            return e
+
+        def field(r, c, label, key, default, tip=None):
+            ttk.Label(inp, text=label).grid(row=r, column=c*2, sticky='e',
+                                            pady=3, padx=(8, 2))
+            entry(inp, key, default, tip).grid(row=r, column=c*2+1,
+                                               sticky='w', padx=(0, 10))
 
         field(0, 0, "Start (kV):", 'start_kv', 0,
               "First voltage. 0 kV is captured as the baseline, not held.")
@@ -2603,34 +2610,69 @@ LOGGING:
         field(0, 2, "Step (kV):", 'step_kv', 0.25, "Voltage increment per step.")
         field(1, 0, "Ramp (s):", 'ramp_s', 5, "Transition time between levels.")
         field(1, 1, "Landing (s):", 'landing_s', 60, "Hold time at each level.")
-        field(1, 2, "Settle (s):", 'settle_s', 2,
-              "Wait after the ramp before the post-ramp snapshot.")
-        field(2, 0, "Snap lead (s):", 'snap_lead_s', 1,
-              "How long before the next step to take the pre-step snapshot.")
-        field(2, 1, "Repeat:", 'repeat', 1, "Repeat the whole sweep N times.")
+        field(1, 2, "Repeat:", 'repeat', 1, "Repeat the whole sweep N times.")
 
         self.sldea_updown = tk.BooleanVar(value=False)
         ttk.Checkbutton(inp, text="Up/down (hysteresis)",
                         variable=self.sldea_updown,
-                        command=self._sldea_refresh).grid(row=2, column=4,
+                        command=self._sldea_refresh).grid(row=1, column=6,
                                                           columnspan=2,
                                                           sticky='w')
+
+        # The two per-landing snapshot timings, side by side and named after
+        # the tags they time (2026-09-23). They were "Settle" and "Snap lead"
+        # on two different rows, which never said which snapshot either one
+        # moved; each now carries the glyph its snapshot gets on the preview.
+        snap_head = ttk.Label(inp, text="Snapshots each landing:")
+        snap_head.grid(row=2, column=0, columnspan=8, sticky='w',
+                       padx=(8, 0), pady=(6, 0))
+        add_tooltip(snap_head, "Two snapshots are taken at every voltage "
+                               "landing, one near each end of the hold. The "
+                               "preview below marks each with the same "
+                               "symbol.")
+        snap = ttk.Frame(inp)
+        snap.grid(row=3, column=0, columnspan=8, sticky='w', padx=(22, 0),
+                  pady=(2, 0))
+        for tag, name, key, default, after, tip in (
+                ('post-ramp', "Post-ramp", 'settle_s', 2,
+                 "s after the ramp ends",
+                 "Seconds after each ramp ends (the landing voltage is "
+                 "reached) before the post-ramp snapshot, so the DEA "
+                 "settles at the new voltage first."),
+                ('pre-ramp', "Pre-ramp", 'snap_lead_s', 1,
+                 "s before the next ramp",
+                 "Seconds before each landing ends (the next ramp starts) "
+                 "that the pre-ramp snapshot is taken, after the DEA has "
+                 "held the voltage for the whole landing.")):
+            self._sldea_glyph(snap, tag).pack(side=tk.LEFT, padx=(0, 3))
+            ttk.Label(snap, text=name).pack(side=tk.LEFT, padx=(0, 4))
+            entry(snap, key, default, tip, width=6).pack(side=tk.LEFT)
+            ttk.Label(snap, text=after).pack(side=tk.LEFT, padx=(4, 22))
         # The 0 kV baseline frame is always captured (checkbox removed
         # 2026-08-02): Edge Review measures every area against it, and an
         # unticked baseline silently made the first mid-run frame the
         # reference — every outline wrong with no error anywhere.
         self.sldea_summary = tk.Label(inp, text="", fg='#1f3a5f', anchor='w',
                                       justify='left')
-        self.sldea_summary.grid(row=4, column=0, columnspan=6, sticky='w',
+        self.sldea_summary.grid(row=4, column=0, columnspan=8, sticky='w',
                                 pady=(6, 0))
 
-        prev = ttk.LabelFrame(f, text="Preview — kV vs time  "
-                              "(dots: gray=baseline  green=post-ramp  red=pre-ramp)", padding=6)
+        # The legend is drawn ON the canvas with the markers' own drawing
+        # code, so it cannot drift from them; the title used to carry it as
+        # colour words ("green=post-ramp red=pre-ramp") -- colour was the
+        # only cue, and green/red is the commonest colour-blind confusion.
+        prev = ttk.LabelFrame(f, text="Preview — kV vs time  (hover a marker "
+                                      "for its landing, kV and time)",
+                              padding=6)
         prev.pack(fill='x', padx=10, pady=8)
-        self.sldea_canvas = tk.Canvas(prev, height=210, bg='white',
+        self.sldea_canvas = tk.Canvas(prev, height=240, bg='white',
                                       highlightthickness=0)
         self.sldea_canvas.pack(fill='x')
         self.sldea_canvas.bind('<Configure>', lambda _ev: self._sldea_redraw())
+        self.sldea_canvas.bind('<Motion>', self._sldea_hover)
+        self.sldea_canvas.bind('<Leave>',
+                               lambda _ev: self.sldea_canvas.delete('hover'))
+        self._sldea_marks = []
 
         outf = ttk.LabelFrame(f, text="Output & Measurement", padding=10)
         outf.pack(fill='x', padx=10, pady=8)
@@ -2980,15 +3022,62 @@ LOGGING:
             self.sldea_summary.config(text=f"⚠ {err}", fg='red')
         self._sldea_redraw()
 
+    def _sldea_draw_marker(self, c, tag, x, y, r, tags=()):
+        """One snapshot marker (shape + Tol fill + black edge) on canvas `c`.
+        The preview, its legend and the field-row glyphs all draw through
+        here, so the three can never disagree."""
+        shape, fill, _label = sldea_preview.MARKERS[tag]
+        kind, coords = sldea_preview.marker_coords(shape, x, y, r)
+        make = c.create_oval if kind == 'oval' else c.create_polygon
+        return make(*coords, fill=fill, outline=sldea_preview.OUTLINE,
+                    width=1, tags=tags)
+
+    def _sldea_ui_scale(self):
+        """Screen px per 96-dpi px (1.0 on a standard display). Tk scales
+        FONTS with the display's dpi but not raw pixel sizes, so the
+        preview's markers and margins are multiplied by this to stay in
+        proportion to its text."""
+        try:
+            f = float(self.root.tk.call('tk', 'scaling')) / (96 / 72)
+        except (tk.TclError, ValueError):
+            return 1.0
+        return min(3.0, max(1.0, f))
+
+    def _sldea_glyph(self, parent, tag, r=5):
+        """A small canvas showing `tag`'s preview marker, to sit beside the
+        field that times that snapshot."""
+        r *= self._sldea_ui_scale()
+        size = int(2 * 1.35 * r) + 4
+        try:
+            bg = ttk.Style().lookup('TFrame', 'background') or None
+        except tk.TclError:
+            bg = None
+        g = tk.Canvas(parent, width=size, height=size, highlightthickness=0,
+                      **({'bg': bg} if bg else {}))
+        self._sldea_draw_marker(g, tag, size / 2, size / 2, r)
+        return g
+
     def _sldea_redraw(self):
         c = self.sldea_canvas
         c.delete('all')
+        self._sldea_marks = []
         p = self._sldea_profile
         w = c.winfo_width()
         h = c.winfo_height()
         w = w if w > 50 else 700           # guard an unrealized canvas (width 1)
-        h = h if h > 50 else 210
-        mL, mR, mT, mB = 52, 14, 26, 26
+        h = h if h > 50 else 240
+        font = self.SLDEA_PREVIEW_FONT
+        fnt = getattr(self, '_sldea_fnt', None)
+        if fnt is None:                        # measured once, not per redraw
+            fnt = self._sldea_fnt = tkfont.Font(root=c, font=font)
+        lh = fnt.metrics('linespace')
+        k = self._sldea_ui_scale()
+        vtop = (max([p.end_kv] + p.levels) or 1.0) if p else 1.0
+        # margins from the font, not constants: Tk grows text with the
+        # display dpi, and fixed pixels crowded the rows on a scaled screen.
+        # mT holds two rows: the legend on top, the playhead's clock below.
+        mL = max(52, fnt.measure(f"{vtop:g} kV") + 14)
+        mR, mT, mB = 14, 2 * lh + 10, lh + 10
         x0, y0, x1, y1 = mL, mT, w - mR, h - mB
         c.create_line(x0, y1, x1, y1)
         c.create_line(x0, y0, x0, y1)
@@ -3000,37 +3089,83 @@ LOGGING:
         self._sldea_plot = {'x0': x0, 'x1': x1, 'y0': y0, 'y1': y1,
                             'total': total}
         vmax = max([p.end_kv] + p.levels) or 1.0
-
-        def X(t):
-            return x0 + (x1 - x0) * t / total
-
-        def Y(v):
-            return y1 - (y1 - y0) * v / vmax
-        pts = []
-        for kind, t0, t1, a, b in p.segments:
-            pts += [X(t0), Y(a), X(t1), Y(b)]
+        pts = sldea_preview.staircase(p, x0, y0, x1, y1)
         if pts:
-            c.create_line(*pts, fill='#1565c0', width=2)
-        colour = {'baseline': '#888888', 'post-ramp': '#2e7d32',
-                  'pre-ramp': '#c62828'}
-        for s in p.snapshots:
-            x, y = X(s['t']), Y(s['nominal_kv'])
-            c.create_oval(x - 3, y - 3, x + 3, y + 3,
-                          fill=colour.get(s['tag'], '#000'), outline='')
-        c.create_text(x0 - 6, Y(vmax), text=f"{vmax:g} kV", anchor='e',
-                      font=('TkDefaultFont', 7))
-        c.create_text(x0 - 6, y1, text="0", anchor='e',
-                      font=('TkDefaultFont', 7))
-        c.create_text(x1, y1 + 12, text=fmt_duration(total), anchor='e',
-                      font=('TkDefaultFont', 7), fill='#555')
-        c.create_text(x0 + 4, y0 - 14, anchor='w', font=('TkDefaultFont', 7),
-                      fill='#555', text=f"{p.n_frames} frames")
+            c.create_line(*pts, fill=sldea_preview.LINE, width=2)
+        marks = sldea_preview.snapshot_points(p, x0, y0, x1, y1)
+        r = sldea_preview.marker_radius(
+            [(x, y) for x, y, s in marks if s['step'] > 0],
+            r_min=sldea_preview.R_MIN * k, r_max=sldea_preview.R_MAX * k)
+        # time order: the baseline lands on top of the warm-up ring it
+        # shares 0 kV with, and each landing's markers over the one before
+        for x, y, s in marks:
+            self._sldea_draw_marker(c, s['tag'], x, y, r,
+                                    tags=('marker', f"marker-{s['tag']}"))
+            self._sldea_marks.append((x, y, r, s))
+        c.create_text(x0 - 6, y0, text=f"{vmax:g} kV", anchor='e',
+                      font=font)
+        # clear of the baseline diamond, which sits on the origin
+        c.create_text(x0 - 6 - 1.25 * r, y1, text="0", anchor='e', font=font)
+        c.create_text(x1, y1 + 4, text=fmt_duration(total), anchor='ne',
+                      font=font, fill='#555')
+        ly = 4 + lh / 2                          # legend row, top margin
+        frames = c.create_text(x0, ly, anchor='w', font=font, fill='#555',
+                               text=f"{p.n_frames} frames")
+        self._sldea_draw_legend(c, sldea_preview.legend_tags(p),
+                                c.bbox(frames)[2] + 22, ly, k)
         if self._sldea_running:                # keep the playhead through a redraw
             self._sldea_draw_cursor(self._sldea_elapsed)
 
+    def _sldea_draw_legend(self, c, tags, left, y, k=1.0):
+        """Marker legend from x=`left`, left to right, glyphs scaled by the
+        display factor `k`. Anchored LEFT on purpose: the tab scrolls
+        sideways when the window is narrower than its widest row, and a
+        right-aligned legend went off-screen."""
+        r = 4.5 * k
+        x = left
+        for tag in tags:
+            self._sldea_draw_marker(c, tag, x + 1.4 * r, y, r, tags='legend')
+            item = c.create_text(x + 2.8 * r + 5, y, anchor='w',
+                                 text=sldea_preview.MARKERS[tag][2],
+                                 font=self.SLDEA_PREVIEW_FONT, fill='#222',
+                                 tags='legend')
+            x = c.bbox(item)[2] + 16 * k
+
+    def _sldea_hover(self, ev):
+        """Describe the snapshot(s) under the pointer in a box by the cursor.
+        Every marker within reach is listed, because the warm-up frame and
+        the baseline share 0 kV and overlap by design."""
+        c = self.sldea_canvas
+        c.delete('hover')
+        p = self._sldea_profile
+        if not p or not self._sldea_marks:
+            return
+        near = [(abs(x - ev.x) + abs(y - ev.y), s)
+                for x, y, r, s in self._sldea_marks
+                if abs(x - ev.x) <= r + 3 and abs(y - ev.y) <= r + 3]
+        if not near:
+            return
+        near.sort(key=lambda d: (d[0], -d[1]['t']))
+        text = "\n".join(sldea_preview.describe(s, p)
+                         for _d, s in near[:3])
+        item = c.create_text(ev.x + 14, ev.y + 12, anchor='nw', text=text,
+                             font=self.SLDEA_PREVIEW_FONT, fill='#000',
+                             justify='left', tags='hover')
+        bx0, by0, bx1, by1 = c.bbox(item)
+        # keep the box on the canvas: flip left/up at the far edges
+        dx = -(bx1 - bx0) - 28 if bx1 + 4 > c.winfo_width() else 0
+        dy = -(by1 - by0) - 24 if by1 + 4 > c.winfo_height() else 0
+        c.move(item, dx, dy)
+        bx0, by0, bx1, by1 = c.bbox(item)
+        box = c.create_rectangle(bx0 - 4, by0 - 3, bx1 + 4, by1 + 3,
+                                 fill='#FFFFFF', outline='#000000',
+                                 tags='hover')
+        c.tag_lower(box, item)
+
     def _sldea_draw_cursor(self, elapsed):
         """Draw/move the run playhead -- a scrolling vertical line at the
-        current test time -- on the preview (tagged so only it is redrawn)."""
+        current test time -- on the preview (tagged so only it is redrawn).
+        Dashed black: it used to be the pre-ramp dots' red."""
         c = self.sldea_canvas
         c.delete('cursor')
         pl = self._sldea_plot
@@ -3038,10 +3173,11 @@ LOGGING:
             return
         frac = min(1.0, max(0.0, elapsed / pl['total']))
         x = pl['x0'] + (pl['x1'] - pl['x0']) * frac
-        c.create_line(x, pl['y0'], x, pl['y1'], fill='#c62828', width=1,
-                      tags='cursor')
-        c.create_text(x, pl['y0'] - 2, text=fmt_duration(elapsed), anchor='s',
-                      fill='#c62828', font=('TkDefaultFont', 7), tags='cursor')
+        c.create_line(x, pl['y0'], x, pl['y1'], fill=sldea_preview.PLAYHEAD,
+                      width=1, dash=(4, 3), tags='cursor')
+        c.create_text(x, pl['y0'] - 3, text=fmt_duration(elapsed), anchor='s',
+                      fill=sldea_preview.PLAYHEAD,
+                      font=self.SLDEA_PREVIEW_FONT, tags='cursor')
 
     def _sldea_animate_cursor(self):
         """Main-thread ~10 Hz loop scrolling the cursor while a run is on."""

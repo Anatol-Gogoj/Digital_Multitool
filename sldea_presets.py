@@ -85,7 +85,8 @@ NEVER_STORED = ('run_name', 'runname', 'dry_run', 'dryrun', 'live')
 FIELD_LABELS = {
     'start_kv': 'Start (kV)', 'end_kv': 'End (kV)', 'step_kv': 'Step (kV)',
     'ramp_s': 'Ramp (s)', 'landing_s': 'Landing (s)',
-    'settle_s': 'Settle (s)', 'snap_lead_s': 'Snap lead (s)',
+    'settle_s': 'Post-ramp snapshot (s after the ramp ends)',
+    'snap_lead_s': 'Pre-ramp snapshot (s before the next ramp)',
     'repeat': 'Repeat', 'updown': 'Up/down (hysteresis)',
     'outdir': 'Output dir',
     'vch': 'V_Out scope CH', 'ich': 'I_Out scope CH', 'sgch': 'SG CH',

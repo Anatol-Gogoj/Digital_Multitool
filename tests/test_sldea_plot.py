@@ -21,7 +21,14 @@ COLS_15 = ['snapshot', 'step', 'tag', 'nominal_kV', 'control_V',
 COLS_14 = [c for c in COLS_15 if c != 'wrinkle_idx']   # 07-23 era
 
 
-def _fake_run(d, rows, cols=COLS_15):
+def _fake_run(d, rows, cols=COLS_15, estimator='current'):
+    """A run folder with these CSV rows. `estimator`: which area
+    estimator its setup.txt says wrote the 'disc-fit' areas -- 'current'
+    stamps se.AREA_ESTIMATOR_VERSION (what every Save writes since
+    2026-10-02, so the fixtures stand for reviewed runs), an int stamps
+    that version, None writes no stamp (a run last saved by the ellipse
+    estimator, which prepare_runs refuses in area mode)."""
+    import sldea_edge as se
     os.makedirs(os.path.join(d, 'frames'), exist_ok=True)
     with open(os.path.join(d, 'data.csv'), 'w', newline='',
               encoding='utf-8') as f:
@@ -29,6 +36,10 @@ def _fake_run(d, rows, cols=COLS_15):
         w.writeheader()
         for r in rows:
             w.writerow({**{c: '' for c in cols}, **r})
+    if estimator is not None:
+        ver = (se.AREA_ESTIMATOR_VERSION if estimator == 'current'
+               else int(estimator))
+        se.save_settings(d, None, stamp=se.estimator_stamp(None, ver))
 
 
 def _healthy_rows(n_levels=8, ts='2026-08-05T10:00:00', tags=('pre-ramp',
@@ -122,6 +133,39 @@ def test_load_rows_parses_notes_phases_and_eras():
         assert rows[1]['conf'] == 0.74 and not rows[1]['traced']
         assert rows[2]['traced'] and rows[2]['user']
         assert rows[0]['method'] == 'resting' and not rows[0]['user']
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_row_emptied_by_the_estimator_change_never_reaches_an_axis():
+    """2026-10-02 (R5): a `disc-fit` area saved by the old ellipse
+    estimator is a few percent off the common-ray areas a later Save
+    writes. Edge Review empties such a row and replaces its note, so
+    here it must read as no area and no method, and the level it sat
+    on is drawn from the measured rows only."""
+    import sldea_edge as se
+    d = _mktmp()
+    try:
+        _fake_run(d, [
+            {'snapshot': 1, 'tag': 'baseline', 'nominal_kV': 0,
+             'active_area_px': 217438, 'active_area_mm2': 201.062,
+             'notes': 'edge:resting conf 0.95'},
+            {'snapshot': 2, 'tag': 'post-ramp', 'nominal_kV': 2.0,
+             'active_area_px': 221000, 'active_area_mm2': 204.356,
+             'notes': 'edge:disc-fit conf 0.97'},
+            {'snapshot': 3, 'tag': 'pre-ramp', 'nominal_kV': 2.0,
+             'notes': se.AREA_ESTIMATOR_STALE_NOTE},
+            {'snapshot': 4, 'tag': 'post-ramp', 'nominal_kV': 3.0,
+             'notes': se.AREA_ESTIMATOR_STALE_NOTE + '; wrinkle-mode'},
+        ])
+        rows = sp.load_rows(d)
+        assert rows[2]['area_px'] is None and rows[2]['area_mm2'] is None
+        assert rows[2]['method'] == '' and rows[2]['conf'] is None
+        assert rows[3]['method'] == '' and rows[3]['area_mm2'] is None
+        run = sp.load_run(d, warn=lambda m: None)
+        lv = sp.levels(run)
+        assert [l['kv'] for l in lv] == [0.0, 2.0], lv
+        assert lv[1]['mean'] == 204.356 and lv[1]['pre'] is None
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -446,6 +490,100 @@ def test_scale_guard_scoping_by_mode():
             shutil.rmtree(p, ignore_errors=True)
 
 
+def test_old_estimator_areas_are_refused_across_runs_like_the_scale_era():
+    """2026-10-02 (R5, across runs): a run whose 'disc-fit' areas were
+    saved by the old area method (the ellipse; no `area_estimator: 2`
+    stamp in setup.txt) reads -0.4 to +7.4 % off the common-ray areas
+    of a reprocessed run. Edge Review keeps the two apart within a run;
+    sldea_plot must keep them apart ACROSS runs the way it keeps the
+    2026-07-28 scale era out: refused from area axes with a message that
+    says to re-review, kept only on an explicit --allow-old-estimator
+    and then NAMED in the caption and in the tidy CSV's area_estimator
+    column, and in current mode kept with its area columns blanked.
+    Runs holding only rows that mean the same under both estimators
+    (resting, hand traces, emptied old rows) pass without a stamp."""
+    import sldea_edge as se
+    if not _has_mpl():
+        return
+    d_old, d_new, d_same, d_v1, out = (_mktmp(), _mktmp(), _mktmp(),
+                                       _mktmp(), _mktmp())
+    try:
+        _fake_run(d_old, _healthy_rows(6), estimator=None)
+        _fake_run(d_new, _healthy_rows(6))              # stamped current
+        # no stamp, but nothing the estimator change touched: the
+        # baseline, hand traces, and an old row a Save already emptied
+        rows = [r for r in _healthy_rows(6)
+                if 'disc-fit' not in r['notes']]
+        rows.append({'snapshot': 99, 'tag': 'post-ramp', 'nominal_kV': 1.0,
+                     'timestamp': '2026-08-05T10:00:00',
+                     'notes': se.AREA_ESTIMATOR_STALE_NOTE})
+        _fake_run(d_same, rows, estimator=None)
+        old = sp.load_run(d_old, lambda m: None)
+        assert old['estimator'] is None and sp.old_estimator_areas(old)
+        new = sp.load_run(d_new, lambda m: None)
+        assert new['estimator'] == se.AREA_ESTIMATOR_VERSION
+        assert not sp.old_estimator_areas(new)
+        assert not sp.old_estimator_areas(sp.load_run(d_same,
+                                                      lambda m: None))
+        # a stamp OLDER than the current version is old too
+        _fake_run(d_v1, _healthy_rows(4), estimator=1)
+        assert sp.old_estimator_areas(sp.load_run(d_v1, lambda m: None))
+
+        # area mode: the old run is refused, and the message says why and
+        # what to do; the stamped and the same-under-both runs draw
+        warns = []
+        opts, _ = sp.make_opts(mode='area')
+        runs = sp.prepare_runs([d_old, d_new, d_same], opts, warns.append)
+        assert [r['dir'] for r in runs] == [d_new, d_same], \
+            [r['name'] for r in runs]
+        said = [w for w in warns if 'OLD area method' in w]
+        assert len(said) == 1 and 'EXCLUDED' in said[0], warns
+        assert 'Re-review' in said[0] and '--allow-old-estimator' in said[0]
+        assert sp.main([d_old, '--out', out]) == 2                # alone
+        # the override: drawn, SAID in the caption, marked in the CSV
+        assert sp.main([d_old, d_new, '--out', out, '--stem', 'mix',
+                        '--allow-old-estimator']) == 0
+        runs = sp.prepare_runs([d_old, d_new], opts, warns.append,
+                               allow_old_estimator=True)
+        assert [r['old_estimator_kept'] for r in runs] == [True, False]
+        cap = _caption(_drawn(runs, opts))
+        assert 'OLD area method' in cap, cap
+        assert os.path.basename(d_old) in cap, cap
+        assert os.path.basename(d_new) not in cap.split('OLD area')[1], cap
+        assert '--allow-old-estimator' in cap, cap
+        with open(os.path.join(out, 'mix.csv'), encoding='utf-8') as f:
+            tidy = list(csv.DictReader(f))
+        by_run = {}
+        for t in tidy:
+            by_run.setdefault(t['run'], []).append(t)
+        for name, want in ((os.path.basename(d_old), '1'),
+                           (os.path.basename(d_new),
+                            str(se.AREA_ESTIMATOR_VERSION))):
+            disc = [t for t in by_run[name] if t['method'] == 'disc-fit']
+            assert disc and all(t['area_estimator'] == want for t in disc), \
+                (name, [t['area_estimator'] for t in disc])
+            other = [t for t in by_run[name] if t['method'] != 'disc-fit']
+            assert other and all(t['area_estimator'] == '' for t in other)
+        # a figure with no old run carries no such caption line and no
+        # mark: the ordinary figure is byte-for-byte what it was
+        cap = _caption(_drawn(sp.prepare_runs([d_new], opts), opts))
+        assert 'OLD area method' not in cap
+        # current mode: the old run is kept (currents are unaffected)
+        # with its area columns blanked, as the scale era is
+        assert sp.main([d_old, '--out', out, '--mode', 'current',
+                        '--stem', 'cur']) == 0
+        with open(os.path.join(out, 'cur.csv'), encoding='utf-8') as f:
+            tidy = list(csv.DictReader(f))
+        assert tidy and all(t['area_mm2'] == '' and t['area_estimator'] == ''
+                            for t in tidy), 'old-estimator areas leaked'
+        # ...but --vs-area puts areas on an axis, so it is refused there
+        assert sp.main([d_old, '--out', out, '--mode', 'current',
+                        '--vs-area', '--stem', 'va']) == 2
+    finally:
+        for p in (d_old, d_new, d_same, d_v1, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
 def test_selftest_renders():
     if not _has_mpl():
         return
@@ -530,6 +668,189 @@ def test_tidy_names_each_areas_edge_convention():
             shutil.rmtree(out, ignore_errors=True)
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_tidy_carries_the_library_versions_the_save_recorded():
+    """Owner decision 29 (2026-10-03): the tidy CSV says which OpenCV
+    and numpy wrote each machine area, from the stamp Edge Review's
+    Save put in setup.txt beside `area_estimator`. Two columns after
+    that one (not a header line, so the file stays a plain CSV): filled
+    on every machine-measured row ('half-height'), blank on a hand
+    trace, on a row without an area, and throughout a run saved before
+    the versions were recorded; blanked with the areas when an old run
+    is kept in current mode."""
+    import sldea_edge as se
+    d = _mktmp()
+    d_old = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))          # stamped by this process
+        # a run stamped before the versions existed: the estimator alone
+        _fake_run(d_old, _healthy_rows(4), estimator=None)
+        se.save_settings(d_old, None,
+                         stamp=se.estimator_stamp(None, libs={}))
+        libs = se.library_versions()
+        assert se.load_stamp(d)['opencv_version'] == libs['opencv_version']
+        assert 'opencv_version' not in se.load_stamp(d_old)
+        run = sp.load_run(d, lambda m: None)
+        old = sp.load_run(d_old, lambda m: None)
+        assert run['lib_versions'] == libs
+        assert old['lib_versions'] == {'opencv_version': '',
+                                       'numpy_version': ''}
+        out = _mktmp()
+        try:
+            path = sp.write_tidy([dict(run, color='#4477AA'),
+                                  dict(old, color='#EE6677')],
+                                 os.path.join(out, 't.csv'))
+            with open(path, newline='', encoding='utf-8') as f:
+                rd = csv.DictReader(f)
+                cols = rd.fieldnames
+                tidy = list(rd)
+            assert cols == sp.TIDY_COLS
+            i = cols.index('area_estimator')
+            assert cols[i + 1:i + 3] == ['opencv_version', 'numpy_version']
+            mine = [t for t in tidy if t['run'] == run['name']]
+            theirs = [t for t in tidy if t['run'] == old['name']]
+            assert mine and theirs
+            for t in mine:
+                want = libs if t['convention'] == 'half-height' else None
+                assert t['opencv_version'] == (want or {}).get(
+                    'opencv_version', ''), t
+                assert t['numpy_version'] == (want or {}).get(
+                    'numpy_version', ''), t
+            assert any(t['convention'] == 'half-height' for t in mine)
+            assert any(t['convention'] == 'outer-toe' for t in mine)
+            assert all(t['opencv_version'] == '' and t['numpy_version'] == ''
+                       for t in theirs)
+            # the resting baseline row is a machine row too
+            base = next(t for t in mine if t['phase'] == 'baseline')
+            assert base['method'] == 'resting'
+            assert base['opencv_version'] == libs['opencv_version']
+            # current mode keeps an old-estimator run with its areas
+            # blanked, and the version columns go with them
+            d_v1 = _mktmp()
+            try:
+                _fake_run(d_v1, _healthy_rows(4), estimator=1)
+                assert sp.main([d_v1, '--out', out, '--mode', 'current',
+                                '--stem', 'cur']) == 0
+                with open(os.path.join(out, 'cur.csv'),
+                          encoding='utf-8') as f:
+                    cur = list(csv.DictReader(f))
+                assert cur and all(t['area_mm2'] == ''
+                                   and t['opencv_version'] == ''
+                                   and t['numpy_version'] == ''
+                                   for t in cur), cur[0]
+            finally:
+                shutil.rmtree(d_v1, ignore_errors=True)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(d_old, ignore_errors=True)
+
+
+def test_tidy_carries_the_tracker_limits_the_save_recorded():
+    """Owner decision 6 (2026-10-03): the tidy CSV says which tracker
+    window each 'disc-fit' area was measured under, from the two limit
+    stamps Edge Review's Save puts in setup.txt beside the versions
+    (ray_win_hi, the ink-step search top; disc_fit_r_max, the ellipse
+    gate; units of the resting radius). They are constants that moved
+    once under the same `area_estimator` (1.38 -> 1.70, 1.3 -> 1.75),
+    so two rows with the same estimator can differ by the window, and
+    the columns tell them apart. Filled exactly where area_estimator
+    is (a 'disc-fit' row with an area), blank on a hand trace, on a
+    'resting' row, and throughout a run saved before the limits were
+    recorded; blanked with the areas when an old run is kept in
+    current mode."""
+    import sldea_edge as se
+    d = _mktmp()
+    d_old = _mktmp()
+    d_win = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))          # stamped by this code
+        # a run stamped before the limits existed
+        _fake_run(d_old, _healthy_rows(4), estimator=None)
+        se.save_settings(d_old, None,
+                         stamp=se.estimator_stamp(None, limits={}))
+        # a run measured under the 2026-10-02 window
+        _fake_run(d_win, _healthy_rows(4), estimator=None)
+        se.save_settings(d_win, None, stamp=se.estimator_stamp(
+            None, limits={'ray_win_hi': 1.38, 'disc_fit_r_max': 1.3}))
+        lims = se.tracker_limits()
+        assert se.load_stamp(d)['ray_win_hi'] == lims['ray_win_hi']
+        assert 'ray_win_hi' not in se.load_stamp(d_old)
+        assert se.load_stamp(d_win)['disc_fit_r_max'] == 1.3
+        run = sp.load_run(d, lambda m: None)
+        old = sp.load_run(d_old, lambda m: None)
+        win = sp.load_run(d_win, lambda m: None)
+        assert run['tracker_limits'] == lims
+        assert old['tracker_limits'] == {'ray_win_hi': None,
+                                         'disc_fit_r_max': None}
+        assert win['tracker_limits'] == {'ray_win_hi': 1.38,
+                                         'disc_fit_r_max': 1.3}
+        assert run['estimator'] == old['estimator'] == win['estimator'] \
+            == se.AREA_ESTIMATOR_VERSION
+        out = _mktmp()
+        try:
+            path = sp.write_tidy([dict(run, color='#4477AA'),
+                                  dict(old, color='#EE6677'),
+                                  dict(win, color='#228833')],
+                                 os.path.join(out, 't.csv'))
+            with open(path, newline='', encoding='utf-8') as f:
+                rd = csv.DictReader(f)
+                cols = rd.fieldnames
+                tidy = list(rd)
+            assert cols == sp.TIDY_COLS
+            i = cols.index('area_estimator')
+            assert cols[i + 1:i + 5] == ['opencv_version', 'numpy_version',
+                                         'ray_win_hi', 'disc_fit_r_max']
+            mine = [t for t in tidy if t['run'] == run['name']]
+            theirs = [t for t in tidy if t['run'] == old['name']]
+            older = [t for t in tidy if t['run'] == win['name']]
+            assert mine and theirs and older
+            for t in mine:
+                if t['area_estimator'] != '':
+                    assert t['method'] == 'disc-fit', t
+                    assert t['ray_win_hi'] == f"{lims['ray_win_hi']:g}", t
+                    assert t['disc_fit_r_max'] \
+                        == f"{lims['disc_fit_r_max']:g}", t
+                else:
+                    assert t['ray_win_hi'] == '' and t['disc_fit_r_max'] == '', t
+            assert any(t['area_estimator'] != '' for t in mine)
+            assert any(t['convention'] == 'outer-toe' for t in mine)
+            # the resting baseline row carries the versions but no
+            # window: A0 is not a tracker reading
+            base = next(t for t in mine if t['phase'] == 'baseline')
+            assert base['method'] == 'resting'
+            assert base['opencv_version'] != '' and base['ray_win_hi'] == ''
+            assert all(t['ray_win_hi'] == '' and t['disc_fit_r_max'] == ''
+                       for t in theirs)
+            for t in older:
+                want = ('1.38', '1.3') if t['area_estimator'] != '' \
+                    else ('', '')
+                assert (t['ray_win_hi'], t['disc_fit_r_max']) == want, t
+            # current mode keeps an old-estimator run with its areas
+            # blanked, and the window columns go with them
+            d_v1 = _mktmp()
+            try:
+                _fake_run(d_v1, _healthy_rows(4), estimator=1)
+                assert se.load_stamp(d_v1)['ray_win_hi'] == lims['ray_win_hi']
+                assert sp.main([d_v1, '--out', out, '--mode', 'current',
+                                '--stem', 'cur']) == 0
+                with open(os.path.join(out, 'cur.csv'),
+                          encoding='utf-8') as f:
+                    cur = list(csv.DictReader(f))
+                assert cur and all(t['area_mm2'] == ''
+                                   and t['ray_win_hi'] == ''
+                                   and t['disc_fit_r_max'] == ''
+                                   for t in cur), cur[0]
+            finally:
+                shutil.rmtree(d_v1, ignore_errors=True)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(d_old, ignore_errors=True)
+        shutil.rmtree(d_win, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------
@@ -723,6 +1044,25 @@ def test_prepare_runs_clears_a_previous_modes_area_blanking():
                                allow_suspect=True, load=load)
         assert runs and runs[0]['suspect_kept'] is False
         assert runs[0] is cache[d], 'the cached dict was not reused'
+        # the estimator-era flags (2026-10-02) are reset the same way: an
+        # old-estimator run is hidden in current mode, kept on the
+        # override, and neither decision survives into the next render
+        d2 = _mktmp()
+        try:
+            _fake_run(d2, _healthy_rows(6), estimator=None)
+            cur = sp.make_opts(mode='current')[0]
+            runs = sp.prepare_runs([d2], cur, load=load)
+            assert runs[0]['old_estimator_hidden'] is True
+            assert runs[0]['old_estimator_kept'] is False
+            runs = sp.prepare_runs([d2], cur, load=load,
+                                   allow_old_estimator=True)
+            assert runs[0]['old_estimator_hidden'] is False
+            assert runs[0]['old_estimator_kept'] is True
+            assert runs[0] is cache[d2]
+            runs = sp.prepare_runs([d2], cur, load=load)
+            assert runs[0]['old_estimator_kept'] is False
+        finally:
+            shutil.rmtree(d2, ignore_errors=True)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

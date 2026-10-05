@@ -20,6 +20,19 @@ the 📏 scale dialog until the resting disc has been measured on THIS
 run's baseline frame, Save hard-blocks without it, and the anchor resets
 on every run switch.
 
+RUN HEALTH (2026-10-02): picking a run shows, in a strip under the
+toolbar, what the run's own files say went wrong at capture
+(se.run_health): a blank or overexposed baseline, a refused disc fit,
+missing voltage or current readings, an early end, a watchdog stop,
+missing frames, off-screen samples in telemetry.csv. STOP items are
+repeated first on the empty canvas, and again at the top of the scale
+dialog, in its hand-measurement banner and in the verify mode (that
+dialog is modal and covers the strip). It is advice: no button is
+locked, and it is not a breakdown verdict. The one thing it holds is
+the --auto launch's own Detect press (decision 16, 2026-10-03): on a
+STOP run the window opens, shows the STOP, and the canvas says why
+nothing started and that Detect still works by hand.
+
 ONE 📏 BUTTON, TWO OUTCOMES (operator 2026-08-06 late, `#215`).
 📏 Calibrate… and 📏 Re-anchor scale… were folded into a single
 entry point because they open the SAME dialog; what differs is what happens
@@ -164,7 +177,9 @@ out-of-tolerance anchor without a word being read (review 2026-08-06).
 
 With --auto (used by the SLDEA tab's "auto process"), the calibrate
 dialog opens on launch and detection chains automatically once
-calibration finishes. Keyboard: 1/2/3 pick a candidate, R reject,
+calibration finishes, unless Run health shows a STOP: then nothing is
+pressed, the canvas says why, and the Detect button is live for a hand
+press (decision 16, 2026-10-03). Keyboard: 1/2/3 pick a candidate, R reject,
 4/D/T open the manual tracer (#162/#172 -- its Done stages the polygon
 as candidate D; Accept commits it like any other candidate),
 Left/Right navigate, Enter accept + next.
@@ -227,6 +242,11 @@ PRIMARY_FG = '#1f3a5f'  # the app's existing accent blue (splash, clock) —
 INFO_LINES = 5          # info label height (text lines): 3 fixed lines +
                         # room for a flag line and its wrap -- a flag must
                         # change content, not layout (#179)
+INFO_FONT = ('TkDefaultFont', 10)   # the info label's font; the card
+                        # measures its note line with the same font, so
+                        # what it says is cut to what the box holds
+                        # (fit_lines, review 2026-10-04)
+INFO_WRAP = SIDE_W - 24  # the info label's wraplength
 
 _TAG_FONT = None
 
@@ -276,6 +296,55 @@ def elide(text, width_px, measure):
         if measure(s) <= width_px:
             return s
     return '…'
+
+
+def wrap_lines(text, width_px, measure):
+    """How many text lines a Tk Label with wraplength=width_px lays
+    `text` out in, counted the way Tk breaks lines: at spaces, a line
+    holding as many words as fit, a word wider than the line broken by
+    character. Pure. Measured against the real Label on 400 random
+    word soups at the card's font (2026-10-04): the same count every
+    time, never fewer. A line's words are measured with the space that
+    follows them, which is what keeps the count from running under."""
+    total = 0
+    for para in text.split('\n'):
+        lines, cur = 1, ''
+        words = para.split(' ')
+        for k, word in enumerate(words):
+            trial = word if not cur else cur + ' ' + word
+            tail = ' ' if k < len(words) - 1 else ''
+            if measure(trial + tail) <= width_px:
+                cur = trial
+                continue
+            if cur:
+                lines += 1
+            cur = word
+            while measure(cur + tail) > width_px and len(cur) > 1:
+                n = len(cur)
+                while n > 1 and measure(cur[:n]) > width_px:
+                    n -= 1
+                lines += 1
+                cur = cur[n:]
+        total += lines
+    return total
+
+
+def fit_lines(text, width_px, lines, measure):
+    """`text` cut to what word-wraps into at most `lines` lines of
+    width_px, with an ellipsis when it was cut; the whole text when it
+    fits. Words go from the end, so the head of the sentence survives.
+    The info panel is a fixed box of INFO_LINES lines (#179): a note
+    must fit the box, never grow it, and the full text goes into a
+    tooltip instead (review 2026-10-04: the monitor-log notes of
+    decision 17 ran to six lines and were clipped mid-sentence)."""
+    if wrap_lines(text, width_px, measure) <= lines:
+        return text
+    words = text.split(' ')
+    for n in range(len(words) - 1, 0, -1):
+        s = ' '.join(words[:n]).rstrip() + '…'
+        if wrap_lines(s, width_px, measure) <= lines:
+            return s
+    return elide(words[0], width_px, measure)
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +428,14 @@ HOWTO_SECTIONS = [
     ]),
     ("3  Procedure", [
         "1.   Select the run in the Run box. A run that has measured "
-        "areas shows the ✓ processed mark.",
+        "areas shows the ✓ processed mark. Read the Run health strip "
+        "below the toolbar before you continue. It tells you what went "
+        "wrong during the capture of the run. A line that starts with "
+        "✘ STOP tells you that the run cannot be measured. When the "
+        "SLDEA tab opened this window by itself after a run (auto "
+        "process), a ✘ STOP also means that detection was not started "
+        "for you: read the strip, then press ▶ Detect Edges yourself if "
+        "you still want to.",
 
         "2.   Press ▶ Detect Edges. NOTE: The camera zoom changes between "
         "runs. Thus each run must have its own pixel-to-millimetre "
@@ -670,6 +746,145 @@ HINT_PICK_RUN = ("Pick a run in the Run box above,\n"
 HINT_DETECT = ("Press  ▶ Detect Edges  to start.\n"
                "📏 Calibration will guide you first when this run "
                "needs an anchor.")
+
+
+# ---------------------------------------------------------------------------
+# RUN HEALTH: the strip under the toolbar (2026-10-02)
+#
+# What the run's own files say went wrong at capture (se.run_health), shown
+# the moment a run is picked: before the student calibrates on a blank
+# frame or reviews a run that was aborted at 26 of 34. The 2026-10-01 run
+# had every one of its problems on disk and none of them on screen.
+#
+# ADVICE ONLY. The strip never disables Detect or Save and is consulted by
+# neither; it does not confirm a breakdown and renames nothing.
+#
+# Never colour alone: every item starts with a mark that is a symbol AND a
+# word, and the colour behind the mark only repeats it. The four colours
+# are Paul Tol's 'bright' red, yellow, cyan and green, the same scheme
+# sldea_plot.TOL_BRIGHT draws with; black text on each of them clears
+# 4.5:1. This file had no Tol colour before, so these are its first.
+#
+# A FIXED number of lines with its own scrollbar, for #179's reason: the
+# strip must change what it SAYS between runs, never how tall it is, or
+# the image area under it would jump on every run switch.
+#
+# The number is fixed PER WINDOW, not per machine: HEALTH_LINES where the
+# screen has room for the page, fewer (never under HEALTH_MIN_LINES) on a
+# screen too short for it. Decided once, when the window opens
+# (_fit_short_screen), so it still never changes between runs.
+# ---------------------------------------------------------------------------
+HEALTH_LINES = 5
+# The header and two lines of the worst item. Not 2: the strip's own
+# scrollbar asks about 50 px on Windows, a two-line text 38, so the third
+# line costs 3 px and a second cut line would buy nothing.
+HEALTH_MIN_LINES = 3
+# The least the review canvas may REQUEST on a short screen. The side
+# panel beside it needs about 330 px for its own buttons; frames are drawn
+# to fit the canvas, so a lower request makes the picture smaller, never
+# cut. VIEW_H stays the request wherever the page fits.
+VIEW_MIN_H = 400
+HEALTH_TITLE = "Run health"
+HEALTH_ADVICE = ("(advice only: nothing here blocks ▶ Detect Edges "
+                 "or Save)")
+HEALTH_MARKS = {'stop': "✘ STOP", 'warn': "⚠ WARNING", 'info': "(i) NOTE"}
+HEALTH_OK_MARK = "✔ OK"
+HEALTH_OK_TEXT = ("None of the capture checks found a problem in this "
+                  "run's files.")
+HEALTH_NO_RUN = "no run loaded"
+HEALTH_COLORS = {'stop': '#EE6677', 'warn': '#CCBB44', 'info': '#66CCEE',
+                 'ok': '#228833'}
+# What follows the STOP sentences on the empty canvas. It replaces
+# HINT_DETECT there: "press Detect to start" directly under "this run
+# cannot be measured" would be two instructions that contradict each other.
+# It says what the button WILL do, because the button is not locked: with
+# no usable baseline picture the automatic fit has nothing to verify, so
+# the scale gate in detect() opens on the hand measurement. The first
+# wording ("Detect still works if you want to see the frames") sent the
+# student into the very calibration the STOP forbids (review 2026-10-02).
+HINT_AFTER_STOP = ("Nothing is locked. But  ▶ Detect Edges  cannot use "
+                   "the baseline picture of this run, so it will first "
+                   "ask you to measure the scale by hand. To only look at "
+                   "the pictures, open the frames folder inside the run "
+                   "folder.")
+# The same place when --auto opened the window (decision 16, 2026-10-03).
+# --auto presses Detect 300 ms after launch, which opens the modal scale
+# dialog over the strip; on a STOP run that press is held back, so the
+# first thing read is the STOP and not a dialog asking for the hand
+# measurement it forbids. The hint says WHY nothing started and that
+# the button itself is live. HINT_AFTER_STOP follows, so the student
+# also knows what the button will do.
+HINT_AUTO_HELD = ("Automatic detection was NOT started: Run health shows "
+                  "a STOP for this run, so the auto-process stopped here "
+                  "for you to read it. You can still press  ▶ Detect "
+                  "Edges  by hand.")
+# The status line at the same moment; short, because the hint carries
+# the full sentence. It says "auto-process", the name the SLDEA tab and
+# the manual use, not the command-line flag (review 2026-10-04).
+AUTO_HELD_TEXT = ("Auto-process held: Run health shows a STOP for this "
+                  "run, so automatic detection was not started. ▶ Detect "
+                  "Edges still works by hand.")
+# Shown on the header line while the strip holds more lines than it
+# shows. Measured on the 16 corpus runs at the default width: seven fit
+# the five lines, nine need 7 to 11, and a student who never scrolls
+# would read half of those (review 2026-10-02).
+HEALTH_MORE = "▼ more below: scroll with the mouse wheel or the bar"
+
+
+def health_counts(items):
+    """'1 STOP, 2 warnings, 1 note' for a se.run_health list; 'nothing
+    found' for an empty one."""
+    n = {lv: sum(1 for it in items if it.get('level') == lv)
+         for lv in se.HEALTH_LEVELS}
+    parts = []
+    if n['stop']:
+        parts.append(f"{n['stop']} STOP")
+    if n['warn']:
+        parts.append(f"{n['warn']} warning{'' if n['warn'] == 1 else 's'}")
+    if n['info']:
+        parts.append(f"{n['info']} note{'' if n['info'] == 1 else 's'}")
+    return ', '.join(parts) or 'nothing found'
+
+
+def health_stops(items):
+    """The STOP items of a se.run_health list as lines, each behind the
+    mark the strip uses (HEALTH_MARKS['stop'], then ': sentence'). []
+    when there is none, and for None (no run loaded)."""
+    return [f"{HEALTH_MARKS['stop']}: {it.get('text', '')}"
+            for it in (items or []) if it.get('level') == 'stop']
+
+
+def health_hint(items, auto_held=False):
+    """The empty canvas's text for a freshly picked run: its STOP items
+    FIRST, each behind the same mark the strip uses. With no STOP item it
+    is HINT_DETECT word for word, so a run with only warnings starts
+    exactly as every run did before. `auto_held` is the --auto launch
+    whose Detect press was held back by a STOP (decision 16): the hint
+    then says so (HINT_AUTO_HELD) before what the button will do."""
+    stops = health_stops(items)
+    if not stops:
+        return HINT_DETECT
+    tail = HINT_AFTER_STOP
+    if auto_held:
+        tail = HINT_AUTO_HELD + '\n\n' + HINT_AFTER_STOP
+    return '\n\n'.join(stops) + '\n\n' + tail
+
+
+# The scale dialog's banner when the automatic fit has nothing to offer.
+# GATE_NO_FIT is the sentence it always had. GATE_NO_FIT_STOP replaces it
+# on a run whose health holds a STOP (review 2026-10-02): the dialog is
+# modal, it covers the strip and most of the canvas hint, and with --auto
+# it opens 300 ms after the window does. "Measure the disc BY HAND" in
+# that foreground window was an instruction to do what the STOP behind it
+# forbids, with the fitter's gray-level reason as the only explanation.
+# The STOP sentences now lead the banner (health_stops) and this line
+# sends the student to them. Still advice: no button is locked.
+GATE_NO_FIT = ("⚠ NO automatic fit on this run, so there is nothing to "
+               "verify: measure the disc BY HAND.")
+GATE_NO_FIT_STOP = ("⚠ NO automatic fit on this run, so there is nothing "
+                    "to verify: this window can only measure the disc BY "
+                    "HAND. Read the STOP above first. If it tells you not "
+                    "to measure, press Cancel (Esc).")
 
 
 # ---------------------------------------------------------------------------
@@ -1489,6 +1704,104 @@ def hot_slot(entries, chosen, sel):
     return None
 
 
+TRACKER_LINES = 10      # tracker_card_text height (text lines), fixed so
+                        # a frame with no tracker candidate changes the
+                        # content, not the layout (#179). Sized to the
+                        # LONGEST text the function can produce at the
+                        # panel's wraplength (3-digit ray counts, a 3-digit
+                        # trim with its share, a 1.xxx ellipse figure, and
+                        # both review-only limits tripped): 9 lines at the
+                        # 9 pt default font on Windows, measured
+                        # 2026-10-03, plus one line for the wider default
+                        # font of the Linux bench PC. It was 4, and Tk
+                        # clipped the outline sentence, the one thing the
+                        # panel exists to say (review 2026-10-02); 8 until
+                        # the review-only sentence arrived. The GUI test
+                        # probes the rendered height.
+
+
+def past_limit_text(value, limit, decimals, unit=''):
+    """`value` (already past `limit`) printed with the fewest decimals
+    in `decimals` at which it still reads above the limit, so a figure
+    just over a limit never shows as equal to it: 0.60012 one-sided
+    printed with the card's two decimals is "0.60 (limit 0.6)", which
+    reads as a contradiction; it prints "0.6001". When even the most
+    decimals read equal (within 0.00005 of the limit), "over <limit>".
+    `unit` follows each number ('%' for the trim share)."""
+    for nd in decimals:
+        text = f"{value:.{nd}f}"
+        if float(text) > limit:
+            return text + unit
+    return f"over {limit:g}{unit}"
+
+
+def tracker_card_text(cands):
+    """The boundary tracker's own account of a frame, in plain words,
+    for the panel under the candidate radios (2026-10-02). '' when no
+    candidate among A/B/C is a tracker ('disc-fit') result.
+
+    Since 2026-10-02 the tracker's NUMBER is the common-ray ratio (the
+    same rays measured on the baseline frame and on this one, times
+    A0) while the OUTLINE it draws is still the robust ellipse through
+    its edge points, which encloses `ellipse_over_circle` x A0: on
+    DOT_P3_1 that is 7 % more than the number at rest. An operator who
+    judges the outline must be told that the number is not its area,
+    and must see the audit fields the number rests on: how many rays
+    it used (`n_common`), what share of the perimeter it did NOT use
+    (`hidden_pct` = 1 - n_common/360: behind the leads or the foil, no
+    ink step on the ray, or trimmed; all of it assumed to strain like
+    the rest), how much of the measured edge the trim dropped
+    (`trim_share`, beside the trimmed count), and whether the rays sit
+    on one side of the disc (`one_sided`). Past se.RAY_MAX_TRIM_SHARE
+    or se.RAY_MAX_ONE_SIDED the candidate is REVIEW ONLY (2026-10-03,
+    owner decisions 2 and 9: tagged `ray_trim_share` / `ray_one_sided`,
+    never auto-accepted), and the last sentence says so and names the
+    limit that tripped; otherwise it names both limits.
+    The outline sentence comes second, right after the number, so it
+    is on screen even if a future font pushes the tail off the panel.
+    Pure, so it is a headless test."""
+    for k, c in enumerate(cands[:3]):
+        if c.get('method') != 'disc-fit' or c.get('area_ratio') is None:
+            continue
+        eoc = c.get('ellipse_over_circle')
+        hidden = c.get('hidden_pct')
+        share = c.get('trim_share')
+        trim_pct = f"{100.0 * share:.0f}%" if share is not None else None
+        lim_pct = f"{100.0 * se.RAY_MAX_TRIM_SHARE:.0f}%"
+        tripped = []
+        # the tripped figure is printed with as many decimals as it
+        # takes to read above the limit (the gate compares the
+        # unrounded value, so 20.4 % or 0.6001 can trip it)
+        if c.get('ray_trim_share') is not None:
+            tripped.append(past_limit_text(
+                100.0 * float(c['ray_trim_share']),
+                100.0 * se.RAY_MAX_TRIM_SHARE, (0, 1, 2), '%')
+                + f" trimmed (limit {lim_pct})")
+        if c.get('ray_one_sided') is not None:
+            tripped.append("one-sided " + past_limit_text(
+                float(c['ray_one_sided']), se.RAY_MAX_ONE_SIDED, (2, 3, 4))
+                + f" (limit {se.RAY_MAX_ONE_SIDED:g})")
+        return (f"{CAND_KEYS[k]} is the ray ratio: {c['area_ratio']:.4f} x A0 "
+                f"from {c.get('n_common', 0)} rays measured on both the "
+                f"baseline and this frame"
+                + (f" ({c.get('n_trimmed')} more trimmed"
+                   + (f", {trim_pct} of the rays" if trim_pct else '')
+                   + ")"
+                   if c.get('n_trimmed') else '')
+                + f". The drawn outline is the ellipse, not the number: "
+                  f"it encloses "
+                + (f"{eoc:.3f} x A0" if eoc is not None else "a different area")
+                + f". Not used: {hidden:.0f}% of the edge (behind leads or "
+                  f"foil, no ink step, or trimmed), assumed to strain like "
+                  f"the rest. One-sidedness {c.get('one_sided', 0):.2f}."
+                + (" REVIEW ONLY, never auto-accepted: "
+                   + ", ".join(tripped) + "."
+                   if tripped else
+                   f" Review only above {lim_pct} trimmed or "
+                   f"{se.RAY_MAX_ONE_SIDED:g} one-sided."))
+    return ''
+
+
 class EdgeReviewApp:
     def __init__(self, root, path=None, auto=False, goto=None):
         self.root = root
@@ -1554,6 +1867,10 @@ class EdgeReviewApp:
         self._howto_scroll = None      # its canvas, published for the tests
         self._tips = {}          # control name -> live Tooltip (`#216`)
         self._hint = None        # the empty-canvas "press this" line (`#216`)
+        self.health = None       # se.run_health items of the loaded run;
+        # None while no run is loaded. Shown, not gated on: no button
+        # reads it. The one reader is the --auto launch below, which
+        # holds its Detect press on a STOP (decision 16, 2026-10-03)
         self._primary_font = None   # kept alive by _install_styles (`#216`)
         self._build_ui()
         start = path or DEFAULT_PARENT
@@ -1565,7 +1882,14 @@ class EdgeReviewApp:
         if goto is not None:
             self.goto_row(goto)
         if auto and self.rundir:
-            root.after(300, self.detect)
+            if any(it.get('level') == 'stop' for it in self.health or ()):
+                # Decision 16 (2026-10-03): the press is held, not the
+                # button. The strip and the canvas carry the STOP, the
+                # canvas says why nothing started, and Detect is live.
+                self._canvas_hint(health_hint(self.health, auto_held=True))
+                self.status.config(text=AUTO_HELD_TEXT)
+            else:
+                root.after(300, self.detect)
 
     # ---------------- UI scaffolding ----------------
     def _install_styles(self):
@@ -1632,13 +1956,91 @@ class EdgeReviewApp:
         # it needs; without this the request reads short and the window
         # opens at the old, too-narrow default.
         self.root.update_idletasks()
-        want_w = max(self._scroll.body.winfo_reqwidth(), 1150)
-        want_h = max(self._scroll.body.winfo_reqheight(), 760)
         # leave room for the window frame and a taskbar rather than
         # butting the very edge of the display
         cap_w = max(640, self.root.winfo_screenwidth() - 80)
         cap_h = max(480, self.root.winfo_screenheight() - 120)
+        # a screen too short for the page: the strip and the canvas ask
+        # for less BEFORE the sizes below are read
+        if self._fit_short_screen(cap_h):
+            self.root.update_idletasks()
+        want_w = max(self._scroll.body.winfo_reqwidth(), 1150)
+        # The run-health strip (2026-10-02) sits between the toolbar
+        # and the image. On the old 760 floor its 85 px came straight out
+        # of the review canvas (563 px tall against 648), on every run,
+        # for the whole review. The floor therefore grows by the strip:
+        # the image keeps the height it had before the strip existed. The
+        # screen cap still applies.
+        strip_h = self._health_box.winfo_reqheight()
+        want_h = max(self._scroll.body.winfo_reqheight(), 760 + strip_h)
         self.root.geometry(f'{min(want_w, cap_w)}x{min(want_h, cap_h)}')
+
+    def _fit_short_screen(self, cap_h):
+        """On a screen too short for the page, the run-health strip must
+        not cost what the window showed before the strip existed.
+        -> True when a size request was changed.
+
+        Measured with the screen height forced (review 2026-10-02). The
+        page asks 757 px with the five-line strip, 672 without it:
+
+          864 px (1080p at 125 % scaling), window 744: main shows the
+              whole page; with the strip the page scrolled and the status
+              line was off screen.
+          768 px, window 648: the image canvas ended at y 703. Frames are
+              drawn to fit the canvas, so the bottom 55 px of every
+              picture were below the fold (72 with the page's horizontal
+              bar), where main shows the whole picture.
+
+        Two goals, in this order:
+
+        1. THE STRIP COSTS THE PAGE NOTHING HERE. The page gives back
+           what it is too tall by, up to the strip's own height, so it is
+           no taller than the window or than main's page. Where main
+           fits, this fits; where main scrolls, this scrolls no further.
+        2. THE WHOLE IMAGE STAYS IN VIEW. If the image's bottom edge
+           would still be under the window (and under the horizontal bar
+           a scrolling page gets), the page gives back the rest.
+
+        The strip pays first, down to HEALTH_MIN_LINES: it is read once,
+        the image is looked at for the whole review, and the 'more below'
+        cue covers what no longer shows. What is still owed comes off
+        the canvas's REQUESTED height, never below VIEW_MIN_H. The
+        picture is scaled to the canvas, so it gets smaller, not cut.
+
+        Decided ONCE, when the window opens, so the strip still never
+        changes height between runs. Does nothing when the page fits."""
+        body = self._scroll.body
+        body_h = body.winfo_reqheight()
+        if body_h <= cap_h:
+            return False
+        try:
+            line_h = int(tkfont.nametofont('TkDefaultFont')
+                         .metrics('linespace'))
+        except (tk.TclError, TypeError, ValueError):
+            line_h = 15
+        line_h = max(1, line_h)
+        # goal 1: at most the strip's own height
+        shed = min(body_h - cap_h, self._health_box.winfo_reqheight())
+        if body_h - shed > cap_h:
+            # Goal 2. The page still scrolls: it gets the scroller's
+            # vertical bar, that bar narrows the view, so the horizontal
+            # bar follows and takes its height off the bottom of the
+            # window. Under the image sit the How-to row and the status
+            # line; they stay below the fold, as on main at this size.
+            below = (self._foot.winfo_reqheight()
+                     + self.status.winfo_reqheight())
+            room = cap_h - self._scroll._hbar.winfo_reqheight()
+            shed = max(shed, (body_h - below) - room)
+        drop = min(HEALTH_LINES - HEALTH_MIN_LINES, -(-shed // line_h))
+        self.health_txt.config(height=HEALTH_LINES - drop)
+        # measured, not computed: what a dropped line really gives back
+        # depends on the theme (the strip's scrollbar has a minimum
+        # height of its own)
+        self.root.update_idletasks()
+        shed -= body_h - body.winfo_reqheight()
+        if shed > 0:
+            self.canvas.config(height=max(VIEW_MIN_H, VIEW_H - shed))
+        return True
 
     def _build_ui(self):
         self._install_styles()
@@ -1756,6 +2158,39 @@ class EdgeReviewApp:
         self._clock_job = None          # the in-flight tick, for cancelling
         self._tick_clock()
 
+        # RUN HEALTH strip (2026-10-02), between the toolbar and the
+        # image: the first thing under the Run box, because it is about
+        # the run that was just picked. A read-only Text rather than a
+        # Label so it can hold a fixed HEALTH_LINES and scroll (see
+        # the note at HEALTH_LINES). takefocus=0 keeps it out of the Tab
+        # order; a click on it leaves the review keys working, because
+        # they are bound on the window and a disabled Text types nothing.
+        hbox = ttk.Frame(host, padding=(6, 0, 6, 2))
+        hbox.pack(fill='x')
+        self._health_box = hbox         # _size_to_layout asks its height
+        self.health_txt = tk.Text(hbox, height=HEALTH_LINES, wrap='word',
+                                  takefocus=0, cursor='arrow',
+                                  relief='groove', bd=1, padx=6, pady=3,
+                                  font='TkDefaultFont', state='disabled')
+        health_bar = ttk.Scrollbar(hbox, orient='vertical',
+                                   command=self.health_txt.yview)
+        self.health_txt.config(yscrollcommand=health_bar.set)
+        health_bar.pack(side=tk.RIGHT, fill='y')
+        self.health_txt.pack(side=tk.LEFT, fill='x', expand=True)
+        mark_font = self._primary_font or 'TkDefaultFont'
+        self.health_txt.tag_configure('head', font=mark_font)
+        self.health_txt.tag_configure('more', font=mark_font)
+        for level, colour in HEALTH_COLORS.items():
+            # the colour only repeats the mark's own symbol and word
+            self.health_txt.tag_configure(level, background=colour,
+                                          foreground='black',
+                                          font=mark_font)
+        for seq in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
+            self.health_txt.bind(seq, self._health_wheel)
+        # how many lines the text wraps to depends on the strip's width
+        self.health_txt.bind('<Configure>', self._health_more_cue)
+        self._show_health(None)
+
         mid = ttk.Frame(host)
         mid.pack(fill='both', expand=True)
         self.canvas = tk.Canvas(mid, width=VIEW_W, height=VIEW_H, bg='#222',
@@ -1777,10 +2212,13 @@ class EdgeReviewApp:
         side.pack_propagate(False)
         self._side = side
         self._side_font = tkfont.nametofont('TkDefaultFont')
+        # the same font object the label draws with, kept so the card
+        # can count its lines before it writes them (fit_lines)
+        self._info_font = tkfont.Font(font=INFO_FONT)
         self.info = tk.Label(side, text="pick a run and Detect",
                              justify='left', anchor='nw',
-                             font=('TkDefaultFont', 10),
-                             height=INFO_LINES, wraplength=SIDE_W - 24)
+                             font=self._info_font,
+                             height=INFO_LINES, wraplength=INFO_WRAP)
         self.info.pack(fill='x', pady=(0, 6))
         self.cand_var = tk.IntVar(value=0)
         self.cand_frame = ttk.LabelFrame(side, text="Candidates", padding=6)
@@ -1804,6 +2242,16 @@ class EdgeReviewApp:
                 else self._choose_current)
             rb.pack(side='left', fill='x', expand=True)
             self.cand_radios.append(rb)
+        # the tracker's account of the frame (2026-10-02): what its
+        # number is, what it rests on, and that the outline is not the
+        # number (tracker_card_text). Fixed height: content changes,
+        # layout does not.
+        self.tracker_lbl = tk.Label(self.cand_frame, text='',
+                                    justify='left', anchor='nw',
+                                    font=('TkDefaultFont', 9),
+                                    height=TRACKER_LINES,
+                                    wraplength=SIDE_W - 36)
+        self.tracker_lbl.pack(fill='x', pady=(4, 0))
         bt = ttk.Frame(side)
         bt.pack(fill='x', pady=6)
         self.accept_btn = ttk.Button(bt, text="✔ Accept (Enter)",
@@ -1837,10 +2285,24 @@ class EdgeReviewApp:
         # RUN's controls live, and a "where do I start" affordance that sat
         # among them would be one more thing to read before starting.
         foot = ttk.Frame(host, padding=(6, 3))
+        self._foot = foot               # _fit_short_screen asks its height
         foot.pack(side=tk.BOTTOM, fill='x')
         self.howto_btn = ttk.Button(foot, text=HOWTO_BTN_TEXT,
                                     command=self._howto)
         self.howto_btn.pack(side=tk.RIGHT)
+        # One plain line, bottom-left, when the OpenCV in this process is
+        # not the one requirements.txt pins (se.opencv_version_warning,
+        # 2026-10-03): every number in SLDEA_MEASUREMENT.md was measured
+        # under the pin. Advisory only: no button, dialog or measurement
+        # changes with it. The glyph carries the meaning beside the
+        # colour (the queue label's amber), never the colour alone. Empty
+        # text on the pinned version, so the row holds the button alone.
+        self.cv_warn = se.opencv_version_warning()
+        self.cv_warn_lbl = tk.Label(foot, fg='#8a5a00', anchor='w',
+                                    text=("⚠ " + self.cv_warn)
+                                    if self.cv_warn else '')
+        if self.cv_warn:
+            self.cv_warn_lbl.pack(side=tk.LEFT, fill='x', expand=True)
         self._attach_tooltips()
         self._size_to_layout()
         # Cancel pending work on <Destroy> rather than on WM_DELETE_WINDOW:
@@ -1900,11 +2362,25 @@ class EdgeReviewApp:
                 TIPS['cand'].format(k=CAND_KEYS[k], n=k + 1))
         self._tips['trace'] = add_tooltip(self.cand_radios[TRACE_SLOT],
                                           TIPS['trace'])
+        # The info panel's tip is not in TIPS: it is the full text of the
+        # flag or advisory the card had to shorten or cut to its fixed
+        # box (_set_info; review 2026-10-04), and empty, so silent, when
+        # the card carries the whole line.
+        self._tips['info'] = add_tooltip(self.info, '')
         # ▶ Detect Edges is the one tip that MOVES: a greyed-out button
         # whose tooltip describes what it would do, without saying why it
         # is grey, leaves the state the affordance was meant to explain
         # unexplained.
         self._sync_detect_btn()
+
+    def _set_info(self, text, tip=''):
+        """The info panel's text, and the full flag or advisory behind
+        its tooltip when the card could not carry it (`tip`); '' clears
+        the tip, so a note never outlives the frame it belongs to."""
+        self.info.config(text=text)
+        info_tip = self._tips.get('info')
+        if info_tip is not None:
+            info_tip.text = tip
 
     def _sync_detect_btn(self):
         """▶ Detect Edges is live exactly when there is a run to detect
@@ -1946,6 +2422,81 @@ class EdgeReviewApp:
                                 fill='#d7dde5', justify='center',
                                 width=max(220, w - 80), tags='hint',
                                 font=('TkDefaultFont', 13))
+
+    # ---------------- run health (advice only) ----------------
+    def _check_health(self):
+        """se.run_health for the loaded run, as a list that is always
+        safe to show. The check is advice, so a failure inside it must
+        cost the advice and never the run pick: it becomes one NOTE."""
+        try:
+            return se.run_health(self.rundir, self.run)
+        except Exception as e:
+            return [{'level': 'info', 'code': 'health_failed',
+                     'text': f"The run health check itself failed ({e}). "
+                             f"Detection and Save are not affected. Please "
+                             f"report this message."}]
+
+    def _show_health(self, items):
+        """Repaint the run-health strip. `items` is a se.run_health list,
+        or None when no run is loaded. STOP items come first (run_health
+        sorts them), each line opens with its mark, and the strip scrolls
+        back to the top so the first thing read is the worst thing."""
+        self.health = None if items is None else list(items)
+        t = self.health_txt
+        t.config(state='normal')
+        t.delete('1.0', tk.END)
+        if items is None:
+            t.insert(tk.END, f"{HEALTH_TITLE}: {HEALTH_NO_RUN}", 'head')
+        else:
+            t.insert(tk.END, f"{HEALTH_TITLE}: {health_counts(items)}",
+                     'head')
+            t.insert(tk.END, f"   {HEALTH_ADVICE}")
+            if not items:
+                t.insert(tk.END, '\n')
+                t.insert(tk.END, f" {HEALTH_OK_MARK} ", 'ok')
+                t.insert(tk.END, f"  {HEALTH_OK_TEXT}")
+            for it in items:
+                level = it.get('level')
+                if level not in HEALTH_MARKS:
+                    level = 'info'
+                t.insert(tk.END, '\n')
+                t.insert(tk.END, f" {HEALTH_MARKS[level]} ", level)
+                t.insert(tk.END, f"  {it.get('text', '')}")
+        t.config(state='disabled')
+        t.yview_moveto(0.0)
+        self._health_more_cue()
+
+    def _health_more_cue(self, _ev=None):
+        """Put HEALTH_MORE on the header line while the strip holds more
+        display lines than it shows (HEALTH_LINES, or fewer on a short
+        screen), and take it off when it does not. Called after every
+        repaint and on every width change (the wrap decides the count).
+        Before the strip has a width there is nothing to count, and the
+        first <Configure> comes back here."""
+        t = self.health_txt
+        t.config(state='normal')
+        try:
+            old = t.tag_ranges('more')
+            if old:
+                t.delete(old[0], old[1])
+            if t.winfo_width() <= 1:
+                return
+            lines = 1 + int(t.tk.call(t._w, 'count', '-update',
+                                      '-displaylines', '1.0', 'end-1c'))
+            if lines > int(t.cget('height')):
+                t.insert('1.end', f"   {HEALTH_MORE}", 'more')
+        except (tk.TclError, ValueError, TypeError):
+            pass                # a cue is never worth a traceback
+        finally:
+            t.config(state='disabled')
+
+    def _health_wheel(self, ev):
+        """The wheel over the strip scrolls the strip and stops there:
+        without the 'break' the page scroller's application-wide wheel
+        binding would move the whole window as well."""
+        up = ev.num == 4 or getattr(ev, 'delta', 0) > 0
+        self.health_txt.yview_scroll(-2 if up else 2, 'units')
+        return 'break'
 
     # ---------------- run selection ----------------
     def _list_runs(self, parent):
@@ -2078,6 +2629,9 @@ class EdgeReviewApp:
         self._set_detect_clock()
         self.save_btn.config(state='disabled')
         self._sync_detect_btn()          # self.run is None again (`#216`)
+        # the health strip belongs to a run too: a failed load must not
+        # leave the previous run's verdict on screen over the new name
+        self._show_health(None)
         try:
             self.run = se.load_run(self.rundir)
             self.settings = se.load_settings(self.rundir)
@@ -2113,9 +2667,16 @@ class EdgeReviewApp:
                  f"has no anchor; diam {self.settings['diam_mm']:g} mm; "
                  f"scale gate re-arms per run)")
         self.canvas.delete('all')
-        self._canvas_hint(HINT_DETECT)
+        # RUN HEALTH (2026-10-02): said now, before any time goes into
+        # calibrating or reviewing. STOP items lead the canvas hint;
+        # with none the hint is HINT_DETECT exactly as before. Advice
+        # only: Detect arms on the next line whatever this found.
+        health = self._check_health()
+        self._show_health(health)
+        self._canvas_hint(health_hint(health))
         self._sync_detect_btn()
-        self.info.config(text=f"{name}\n{n} frames ready")
+        self._set_info(f"{name}\n{n} frames ready\n"
+                       f"run health: {health_counts(health)}")
 
     # ---------------- detection ----------------
     def _tick_clock(self):
@@ -2553,8 +3114,11 @@ class EdgeReviewApp:
 
     def _recount(self):
         areas = {i: r['area_px'] for i, r in self.results.items() if r}
+        # the run folder goes in too (decision 17, 2026-10-03): the
+        # watchdog's trip reading lives in run.log and telemetry.csv, and
+        # the monitor log's streaks become advisory notes
         self.flags, self.advisories = se.breakdown_flags(
-            self.run['rows'], areas, self.settings)
+            self.run['rows'], areas, self.settings, rundir=self.rundir)
 
     # ---------------- review ----------------
     def _current(self):
@@ -2594,11 +3158,26 @@ class EdgeReviewApp:
                f"measured {row.get('measured_kV') or '—'} kV   "
                f"{row.get('measured_uA') or '—'} µA\n"
                f"state: {state}")
+        # The flag or advisory line (elif keeps the fixed info height).
+        # It is cut to the lines the box has left (fit_lines, #179): an
+        # advisory is first put in the card's short words (se.short_note,
+        # same facts), and whenever the card does not carry the full
+        # text the info label's tooltip holds it (review 2026-10-04).
+        mark = full = shown = tip = ''
         if i in self.flags:
-            txt += f"\n⚠ {self.flags[i]}"
-        elif i in self.advisories:      # elif keeps the fixed info height
-            txt += f"\nⓘ {self.advisories[i]}"
-        self.info.config(text=txt)
+            mark, full = '⚠', self.flags[i]
+            shown = full
+        elif i in self.advisories:
+            mark, full = 'ⓘ', self.advisories[i]
+            shown = se.short_note(full)
+        if mark:
+            imeas = self._info_font.measure
+            left = max(1, INFO_LINES - wrap_lines(txt, INFO_WRAP, imeas))
+            line = fit_lines(f"{mark} {shown}", INFO_WRAP, left, imeas)
+            txt += '\n' + line
+            if line != f"{mark} {full}":
+                tip = full
+        self._set_info(txt, tip)
         # radio text is elided to the FIXED panel (#179): the tail (the
         # wrinkle term first) yields before the panel ever resizes
         meas = self._side_font.measure
@@ -2614,6 +3193,7 @@ class EdgeReviewApp:
             else:
                 self.cand_radios[k].config(text=f"{CAND_KEYS[k]}: —",
                                            state='disabled')
+        self.tracker_lbl.config(text=tracker_card_text(cands))
         # row D: the staged manual trace, or the invitation to make one
         trace = self.traces.get(i)
         if trace is not None:
@@ -3260,18 +3840,55 @@ class EdgeReviewApp:
         q = self._queue_list()
         accepted = sum(1 for r in self.results.values() if r)
         rejected = sum(1 for r in self.results.values() if r is None)
-        n_unread = sum(1 for i in q if i in self.load_fail)
+        # ONE ESTIMATOR PER SAVE (2026-10-02). The area method changed
+        # (ellipse -> common-ray ratio, se.AREA_ESTIMATOR_VERSION): a
+        # kept row on a run last saved by the old method still holds an
+        # ellipse area, which read -0.4 to +7.4 % against the same
+        # frame's A0 and would be drawn beside this pass's rows on every
+        # plot. Those rows are EMPTIED and marked (se.stale_estimator_rows,
+        # apply_results stale=); the dialog says how many before anything
+        # is written; the run is stamped current only after the CSV is.
+        old_stamp = se.load_stamp(self.rundir)
+        stale = se.stale_estimator_rows(
+            self.run['rows'], self.results,
+            se.saved_area_estimator(self.rundir))
+        # an unreadable frame that holds an old-method area is emptied
+        # like any other stale row, so it is counted there and not as
+        # 'kept' (review 2026-10-02)
+        n_unread = sum(1 for i in q
+                       if i in self.load_fail and i not in stale)
         # unreviewed rows KEEP their previous pass's px measurement,
         # re-scaled to this session's anchor (one scale per save, audit
         # 2026-08-05) — the dialog used to claim they were 'left blank'
         n_kept = sum(
             1 for i in q
-            if (self.run['rows'][i].get('active_area_px') or '').strip())
+            if (self.run['rows'][i].get('active_area_px') or '').strip()
+            and i not in stale)
         unrev = (f"unreviewed: {len(q)}"
                  + (f" ({n_kept} keep the previous pass's px, re-scaled "
                     f"to THIS anchor)" if n_kept else " (left blank)")
                  + (f"\n  incl. {n_unread} UNREADABLE frame(s) — kept, "
                     f"not re-measured" if n_unread else ""))
+        if stale:
+            unrev += (f"\n  ⚠ {len(stale)} unreviewed row(s) hold an "
+                      f"automatic area (disc-fit) saved with the OLD area "
+                      f"method (the fitted ellipse, used until 2026-10-01). "
+                      f"Old and new areas differ by a few percent, so these "
+                      f"rows will be EMPTIED and marked 're-review'. The old "
+                      f"numbers stay in data.csv.bak until the NEXT Save "
+                      f"overwrites it; after a Detect, each tracker card "
+                      f"also shows what the old method read ('encloses ... "
+                      f"x A0'). Review them first if you want them measured "
+                      f"in this Save.")
+            if not self.cands_all:
+                # a trace-only Save (no Detect this session): nothing is
+                # re-measured, so the whole old column goes. Said plainly,
+                # so an old run cannot be converted by a Save that only
+                # meant to commit a hand trace.
+                unrev += (f"\n  ⚠ This session ran NO detection pass: the "
+                          f"{len(stale)} row(s) above are emptied and NOT "
+                          f"re-measured. Cancel and ▶ Detect Edges first if "
+                          f"you want them measured.")
         # ... and SAY BY HOW MUCH (#215). "re-scaled to THIS anchor" is
         # true but abstract; an operator who re-reviewed one frame needs
         # the number, because the whole mm² column moves by it.
@@ -3362,9 +3979,10 @@ class EdgeReviewApp:
             annos[i] = (annos[i] + '; ' + note) if i in annos else note
         # a not-measured frame's row records WHY — a file- or code-level
         # fact, never a physical verdict (audit 2026-08-05). ASCII-safe
-        # in the CSV.
+        # in the CSV. A stale row is emptied, not kept, so it gets the
+        # stale note alone (review 2026-10-02).
         for i in q:
-            if i in self.load_fail:
+            if i in self.load_fail and i not in stale:
                 note = ('frame unreadable - kept, not re-measured'
                         if self.load_fail[i] == 'unreadable' else
                         'frame processing failed - kept, not re-measured')
@@ -3388,7 +4006,7 @@ class EdgeReviewApp:
         csv_path = self.run.get('csv_path') or ''
         try:
             se.apply_results(self.run['rows'], self.results, scale,
-                             self.flags, annos)
+                             self.flags, annos, stale=stale)
             plan = se.plan_breakdown_marks(self.run, self.flags)
             se.write_back(self.rundir, self.run)
         except Exception as e:
@@ -3426,6 +4044,40 @@ class EdgeReviewApp:
             self.status.config(
                 text=f"saved, but recording the scale anchor in "
                      f"setup.txt failed: {e}")
+        # ... and which area estimator wrote the areas (2026-10-02), with
+        # the baseline's provenance beside it (what the tracker read on
+        # the resting disc: rays, hidden share, one-sidedness, and the
+        # ellipse-over-circle offset the old method carried on this run).
+        # The stamp is what lets the next Save, and anyone reading the
+        # CSV, tell these numbers from the old ellipse areas. Written
+        # only now, after data.csv committed. A failure must be SEEN:
+        # with no stamp the run reads as old-method data, and the next
+        # Save empties its unreviewed tracker rows.
+        if (not self.cands_all
+                and old_stamp.get('area_estimator')
+                == se.AREA_ESTIMATOR_VERSION):
+            # no detection pass this session (a trace-only Save): the
+            # tracker rows on file are still the earlier pass's, and so
+            # is the provenance recorded for them
+            stamp = dict(old_stamp)
+        else:
+            try:
+                prov = se.baseline_provenance(self._base_gray(),
+                                              self.settings)
+            except Exception as e:         # a truncated baseline can raise
+                print(f"save: baseline provenance not measured: {e}")
+                prov = None
+            stamp = se.estimator_stamp(prov)
+        try:
+            se.stamp_area_estimator(self.rundir, stamp)
+        except OSError as e:
+            messagebox.showwarning(
+                "Save: area-method stamp not written",
+                f"data.csv is saved, but setup.txt could not be updated:"
+                f"\n\n{e}\n\nUntil it is, this run looks as if the OLD "
+                f"area method measured it, and the next Save would EMPTY "
+                f"its unreviewed automatic (disc-fit) rows for re-review. "
+                f"Save again once the folder is writable.")
         # detect→Save, the whole round trip, said in the status line where
         # it always was. Save no longer STOPS the toolbar clock (`#237`):
         # that clock is now the session, a session outlives a Save (the
@@ -3932,7 +4584,16 @@ class EdgeReviewApp:
             # refused, a missing baseline, a diam_mm nobody measured. On an
             # ordinary run this label carries nothing and is not packed at
             # all, so it costs the picture no height.
-            gate = ''
+            # THE RUN'S STOP LEADS (review 2026-10-02). This dialog is
+            # modal and opens over the Run health strip and most of the
+            # canvas hint: measured on the 2026-10-01 run, it covered 910
+            # of the strip's 1290 px, and with --auto it is on screen 300
+            # ms after the window. So the STOP is repeated here, ahead of
+            # the fitter's reason, in the strip's own words. It is advice
+            # like the strip: every control below works as before.
+            stops = health_stops(self.health)
+            stop_text = '\n'.join(stops)
+            gate = stop_text
             if not verify_ok:
                 # THE REFUSAL, STATED. When baseline_disc will not fit this
                 # baseline there is nothing to verify and the operator has
@@ -3946,8 +4607,9 @@ class EdgeReviewApp:
                        "on, so its circle would not belong to this picture."
                        if not same_frame else
                        " Reason: not reported — see the console.")
-                gate += ("⚠ NO automatic fit on this run, so there is "
-                         "nothing to verify: measure the disc BY HAND." + why)
+                gate += (('\n' if gate else '')
+                         + (GATE_NO_FIT_STOP if stops else GATE_NO_FIT)
+                         + why)
             if not anchor_is_baseline:
                 gate += ("\n⚠ The baseline frame is missing — this is a LATER "
                          "frame. Calibrate here only if the disc is visibly "
@@ -4003,6 +4665,37 @@ class EdgeReviewApp:
             gate_lbl = tk.Label(win, text=gate, justify='left',
                                 wraplength=980)
             gate_lbl.pack(**GATE_PACK)
+            # WHAT THE STOP COSTS IN HEIGHT COMES OFF THE PICTURE, so the
+            # window is as tall as it was before the STOP was in it and
+            # Cancel stays on the screen (the measuring modes had about
+            # 35 px to spare on a 1080p bench screen, and a STOP sentence
+            # wraps to three lines). Measured, not guessed: the banner as
+            # it is against the banner without the STOP.
+            stop_px = 0
+            # THE VERIFY MODE SHOWS THE STOP TOO, and only the STOP: every
+            # other warning this banner can carry is impossible there or
+            # already in the evidence block (see sync_buttons). A STOP
+            # with a fit to verify is rare but real: a noise-free disc
+            # 10 to 19 gray levels darker than its paper is 'blank' to
+            # image_content and still fits (measured 2026-10-02, three
+            # frame sizes). stop_vfy_px is what that label costs there,
+            # padding included.
+            stop_vfy_px = 0
+            if stops:
+                plain = (gate[len(stop_text):].lstrip('\n')
+                         .replace(GATE_NO_FIT_STOP, GATE_NO_FIT))
+                plain_px = 0
+                if plain:
+                    probe_lbl = tk.Label(win, text=plain, justify='left',
+                                         wraplength=980)
+                    plain_px = probe_lbl.winfo_reqheight()
+                    probe_lbl.destroy()
+                stop_px = max(0, gate_lbl.winfo_reqheight() - plain_px)
+                probe_lbl = tk.Label(win, text=stop_text, justify='left',
+                                     wraplength=980)
+                stop_vfy_px = (probe_lbl.winfo_reqheight()
+                               + sum(GATE_PACK['pady']))
+                probe_lbl.destroy()
             # ---- the mode chooser (`#215`, 2026-08-06) ----------------
             # Per calibration, not per session, so both methods can be
             # driven on the SAME disc minutes apart — which is the only
@@ -4133,7 +4826,8 @@ class EdgeReviewApp:
             # layout is untouched.
             def canvas_h(for_verify):
                 return max(300, min(760, self.root.winfo_screenheight()
-                                    - (300 if for_verify else 400)))
+                                    - (300 + stop_vfy_px if for_verify
+                                       else 400 + stop_px)))
 
             ch = canvas_h(opens_c)
             cv = tk.Canvas(win, width=cw, height=ch, bg='#111',
@@ -5558,8 +6252,13 @@ class EdgeReviewApp:
                 # the block is warnings-only now, and an ordinary run has none
                 # — so an empty label must not cost the picture a line's height
                 # in the measuring modes either.
-                show_line(gate_lbl, bool(gate) and not vfy, GATE_PACK,
-                          chooser)
+                # ONE EXCEPTION (2026-10-02): a run's STOP stays on screen
+                # in the verify mode as well, alone, because this modal
+                # window covers the Run health strip that carries it.
+                if stops:
+                    gate_lbl.config(text=stop_text if vfy else gate)
+                show_line(gate_lbl, bool(gate) and (not vfy or bool(stops)),
+                          GATE_PACK, chooser)
                 show_line(hdr, not vfy, HDR_PACK, cv)
                 # `live` BOTH WAYS, not just hidden in C: leaving it
                 # forgotten on the way back to A/B hid the circle mode's
@@ -5943,7 +6642,12 @@ class EdgeReviewApp:
                                'round_box': round_box,
                                'rounds_box': rounds_box,
                                'stroke_box': stroke_box,
-                               'n_menu': n_menu, 'stroke_menu': stroke_menu}
+                               'n_menu': n_menu, 'stroke_menu': stroke_menu,
+                               # the warnings banner, and the height the
+                               # run's STOP adds to it in the measuring
+                               # modes and in the verify mode (2026-10-02)
+                               'gate_lbl': gate_lbl, 'stop_px': stop_px,
+                               'stop_vfy_px': stop_vfy_px}
             win.grab_set()
             self.root.wait_window(win)
         finally:

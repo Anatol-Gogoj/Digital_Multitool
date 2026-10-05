@@ -13,6 +13,74 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## Up/down runs are drawn leg by leg, and the plot gains an elapsed-time axis (2026-09-23)
+
+**TL;DR:** in the plot window an "Up/down (hysteresis)" run was averaged
+into one point per kV, so the loop it was recorded to show disappeared —
+and "pre/post separately" kept only the falling leg. Such runs are now
+drawn leg by leg by default (▲ rising, ▼ falling, small arrows in the
+direction of travel), and a new x axis, elapsed time, unrolls any run.
+Single-sweep figures are byte-identical to before; `--merge-legs
+--no-arrows` restores the old up/down figure exactly.
+
+**Rebased onto main 2026-10-05** (written 2026-09-23, never pushed until
+then, so it sits above newer entries). Main had since fixed the strain-%
+band (2026-10-02 entry): `_series` takes the panel's units. The leg and
+time-axis paths written here now pass them too; without that, a strain-%
+up/down plot drew a zero-width band at rest, which
+`test_updown_legs_and_the_time_axis_draw_the_strain_band_in_strain_points`
+pins. The `--strain-pct` flag registration in this branch's first commit
+had already reached main another way, so only its double-click fix and its
+flag source-scan test remain.
+
+**Observation → decision.**
+
+- *Observed* (operator report, then read in the code): `levels()` keyed
+  every row by `round(kV, 3)`. A level's rising and falling visits were
+  therefore averaged into its `mean`, and `--prepost`'s `post`/`pre`
+  slots were simply overwritten by whichever leg came last — the rising
+  leg never reached the figure. Current/power already drew in CSV order,
+  but retraced the way up in one colour with nothing to tell the legs
+  apart.
+- The data carries no direction field and needs none: CSV order is time
+  order. `sweep_legs` derives, per row, the **landing** (a landing's
+  post-/pre-ramp pair share one), the **leg** (direction of the ramp INTO
+  the landing; a same-kV landing where two up/down cycles meet takes the
+  ramp OUT of it) and the **cycle**.
+- *Decision* (operator's choice): leg split and arrows ON by default. Only
+  a run whose voltage ever FELL (`multi_leg`) is affected, so every
+  existing single-sweep figure is unchanged — proven byte for byte in all
+  three modes against `78315cc`, the commit this was cut from, and
+  `--merge-legs --no-arrows` reproduces the old up/down figure byte for
+  byte too.
+- *Decision:* the cross-run aggregate takes an up/down run's **first
+  rising leg**, and the caption and a warning say so. Averaging a device's
+  rising and falling visits is the blending this entry removes; the first
+  rise is the leg every single-sweep run in the pool also has.
+- Arrows are never drawn on a line sorted by kV (every arrow would point
+  right whatever the data did) — only on leg-split paths, a few per leg,
+  placed in the axis' own scaled space so they sit on the line on a log
+  axis too.
+- The x axis stays **nominal kV by default** (the 2026-08-04 decision
+  above stands). `--x time` is an option: minutes since the run started,
+  from `t_planned_s` (the run's own monotonic clock) or else the
+  wall-clock timestamps — never both within one run. It refuses
+  `--prepost`/`--mean`/`--aggregate` (they pool by kV) and `--vs-area`
+  (the other x switch); the window greys and neutralises them instead.
+- The tidy CSV gains three DATA columns for every figure: `elapsed_s`,
+  `leg`, `cycle`.
+- Found in passing and fixed: `sldea_plot.py RUN --strain-pct` was
+  rejected by the parser (never registered in `_BOOL_FLAGS`); on the
+  strain-% panel a double-click resolved against A/A₀ coordinates and
+  opened the wrong frame.
+- Found in passing, **not** changed here: Edge Review's `reconcile_pairs`
+  still pools same-kV frames across legs and repeats, with a tolerance
+  that grows with the visit count (filed as its own task). And the plot
+  suite's byte-identity test pins `_BASE_SHA = d11b01ad…`, which is not in
+  `main`'s history — on an ordinary clone it prints "skipped" and counts
+  as a pass, so that guard has not been running; the new leg tests pin
+  `78315cc` instead, which every clone has.
+
 ## Calibration questions name their buttons and open over the calibration window (2026-10-05)
 
 **TL;DR:** the questions that follow a hand calibration (mostly met when

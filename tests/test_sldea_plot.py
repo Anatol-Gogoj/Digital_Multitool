@@ -1192,7 +1192,16 @@ def test_default_output_is_byte_identical_to_the_pre_change_engine():
             # so the claim stays exactly as sharp: every other byte, in
             # every row, identical. On this single sweep they must also say
             # the obvious -- one rising leg, one cycle, the 0 kV rows in it.
-            added = ('group', 'elapsed_s', 'leg', 'cycle')
+            # ...and the provenance stamps of 2026-10-02/03 (the area
+            # estimator, the OpenCV/numpy versions and the tracker's window
+            # limits) were added to TIDY_COLS without being listed here, so
+            # this case failed on main at the CSV step on every clone while
+            # the PNGs stayed byte-identical (found 2026-10-05 during the
+            # leg-branch rebase). They are stamps, not data the base engine
+            # could have written, so they are dropped by name too.
+            added = ('group', 'elapsed_s', 'leg', 'cycle',
+                     'area_estimator', 'opencv_version', 'numpy_version',
+                     'ray_win_hi', 'disc_fit_r_max')
             assert sp.TIDY_COLS[1] == 'group', sp.TIDY_COLS
             for col in added:
                 assert col in sp.TIDY_COLS, col

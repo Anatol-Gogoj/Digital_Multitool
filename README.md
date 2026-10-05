@@ -11,6 +11,8 @@ Python tool for SCPI-based control of bench-top lab instruments (repo historical
 
 A B&K Precision 5493C bench multimeter is also on the bench; its USB never enumerates (known hardware issue), so it is driven over the lab network by the `BK5493C` class instead (LAN-only, port 45454).
 
+**New student at the bench?** Follow [`docs/SLDEA_QUICKSTART.md`](docs/SLDEA_QUICKSTART.md): one page from an unpowered rig to an exported plot.
+
 ## Architecture
 
 USB-TMC instruments are accessed through `pyvisa.ResourceManager('@py')` (the pyvisa-py backend, which talks libusb via pyusb). The kernel `usbtmc` driver is **blacklisted** so libusb can claim the devices without driver contention. Instrument classes auto-discover by VID/PID via PyVISA's resource list -- callers do not pass device paths:

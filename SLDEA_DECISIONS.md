@@ -28,16 +28,12 @@ refuses an unstamped run from area axes, as it refuses the old scale era.
 
 ### 2026-10-03: the owner's decisions 2, 9 and 29 applied (review-only tags, version stamps)
 
-**TL;DR:** a tracker reading whose rays sit on one side of the disc is no
-longer thrown away: it stays on the card as a candidate the reviewer can
-see and pick, but it can never auto-accept. The same review-only treatment
-now applies when the trim dropped more than a fifth of the rays. And every
-Save writes the OpenCV and numpy versions next to the estimator version, the
-tidy CSV carries them, and Edge Review says in one line when it runs off the
-pinned OpenCV. On the corpus 21 rows that used to auto-accept go to a human
-(DOT_P3_1 at 8 to 9.5 kV, P3_5 at 3.5 to 4.25 kV, three quiet frames of
-retired 152205), one retired-fixture row goes the other way, and no number
-moves.
+**TL;DR:** a tracker reading whose rays sit on one side of the disc, or
+whose trim dropped more than a fifth of the rays, now stays on the card
+for the reviewer but can never auto-accept. Every Save also records the
+OpenCV and numpy versions that wrote the areas, and Edge Review says in
+one line when it runs off the pinned OpenCV. On the corpus, 21 rows that
+used to auto-accept now go to a human, and no accepted area moved.
 
 - *Observed (decision 2).* The one-sidedness limit of 2026-10-02 refused
   outright, so on the 14 corpus frames where the tracker had reached a
@@ -47,8 +43,8 @@ moves.
   "31 frames" the 2026-10-02 entry counts came from the offline ray
   statistics with every gate lifted; 17 of those 31 never get a tracker
   candidate in `candidates()` on any version, because the ellipse gates
-  refuse them first, and they sit in review on `main`, on the branch as it
-  stood and now.)
+  refuse them first, and they sit in review on `main`, at `59e506a` and
+  now.)
 - *Decision 2: review only, never refused.* `_common_ray_ratio` no longer
   refuses on one-sidedness. `_apply_ray_gates` (beside `_apply_audit_gates`)
   tags the tracker candidate `ray_one_sided` with the value, caps its conf
@@ -75,12 +71,13 @@ moves.
   3-decimal rounding (a trim share is k/N with N at most 360, so it cannot
   land in [0.2, 0.2005)).
 - *Decision 9: the trim share is a review-only limit too.* The share is
-  `n_trimmed / (n_common + n_trimmed)`, the fraction of the rays measured
-  on both frames that the trim dropped (the definition behind the 21-row
-  figure of 2026-10-02). The decision's literal `n_trimmed / n_common` at
-  0.2 would route 40 auto rows (median 0.118, 90th percentile 0.197 on the
-  450 auto rows of `eval/a1_final3`, against 0.106 / 0.164 for the share);
-  the owner confirms which reading was meant. It rides on every
+  `n_trimmed / (n_common + n_trimmed)`, the share of the rays measured on
+  both frames that the trim dropped; at the limit 0.2 it routes 21
+  auto-accepted corpus rows to review. The alternative reading
+  `n_trimmed / n_common` would route 40 at 0.2 (median 0.118, 90th
+  percentile 0.197 on the 450 auto rows at `59e506a`, against 0.106 /
+  0.164 for the share). Settled 2026-10-05 at merge: the share, as
+  built. It rides on every
   tracker candidate as `trim_share` and on the card beside the trimmed
   count ("33 more trimmed, 14% of the rays"); above `RAY_MAX_TRIM_SHARE =
   0.2` the candidate is tagged `ray_trim_share` and treated exactly as
@@ -123,10 +120,10 @@ moves.
   both sides.
 - *Not changed.* `RAY_MAX_ONE_SIDED` stays 0.6; the trim rule (2.5 robust
   sigma) is untouched; the numbers of every accepted frame are byte for byte
-  those of `eval/a1_final3`. The harness (`sldea_batch_eval.py`) does not
+  those at `59e506a`. The harness (`sldea_batch_eval.py`) does not
   know the new tags, so its `reason` column reads `low_conf` for a tagged A
   and is blank for the three 152205 frames whose tag sits on B; the per-frame
-  list with the tags is in the PR body.
+  list with the tags is in #344's PR body.
 
 **Tests (2026-10-03, extended 2026-10-04).** `tests/test_sldea_edge.py` 98
 (+5): one-sided rays return a number with its one-sidedness instead of

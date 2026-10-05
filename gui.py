@@ -182,6 +182,36 @@ SG_LAN_RESOURCE = os.environ.get('SCPI_SG_LAN',
                                  'TCPIP0::192.168.71.230::INSTR')
 
 
+def sldea_run_lock(lock, cam_exp, cam_gain):
+    """The camera lock an SLDEA run holds: the Webcam tab's lock `lock`
+    with manual exposure, WB off, and the run's exposure and gain on top.
+    One definition for the pre-flight and the run (2026-10-05), so the
+    pre-flight's snapshot is shot under exactly the controls the run's
+    snapshots will be."""
+    return dict(lock or {}, auto_exposure=1, white_balance_automatic=0,
+                exposure_time_absolute=int(cam_exp), gain=int(cam_gain))
+
+
+def sldea_lock_mismatch(lock, cam_exp, cam_gain):
+    """One sentence when the Webcam tab's LOCK holds a different exposure
+    or gain from the panel fields an SLDEA run takes (`cam_exp`,
+    `cam_gain`), else ''. The preview runs on the lock and the run on the
+    fields, so this is the one case where the two pictures differ (run
+    13_backlight, 2026-10-05). Nothing locked = nothing to disagree with."""
+    lock = lock or {}
+    diffs = []
+    for name, label, val in (('exposure_time_absolute', 'exposure', cam_exp),
+                             ('gain', 'gain', cam_gain)):
+        if name in lock and int(lock[name]) != int(val):
+            diffs.append(f"{label} {int(val)} (locked: {int(lock[name])})")
+    if not diffs:
+        return ''
+    return ("The Webcam tab's fields differ from its lock: "
+            + ", ".join(diffs) + ". The Webcam preview uses the lock; this "
+            "run uses the fields, as this picture does. Press Apply & Lock "
+            "on the Webcam tab to make them agree.")
+
+
 def _lan_reachable(resource, timeout=2.0):
     """Quick TCP liveness probe of a TCPIP VISA resource's host, so a missing
     box/cable falls back to USB fast instead of waiting out a long VISA open
@@ -4043,8 +4073,26 @@ LOGGING:
 
     def _sldea_preflight(self, cam_exp, cam_gain):
         """Modal camera pre-flight: one fresh snapshot with a centering
-        reticle + focus/exposure stats. Returns True to proceed."""
+        reticle + focus/exposure stats. Returns True to proceed.
+
+        THE PRE-FLIGHT SHOWS WHAT THE RUN WILL SHOOT (2026-10-05, run
+        13_backlight). It used to write `cam_exp`/`cam_gain` and then grab
+        through oneshot_rgb, which re-stamps the Webcam tab's LOCK just
+        before the shutter -- so the dialog showed the lock's exposure,
+        while the run (`_sldea_worker`) overrides the lock with
+        `cam_exp`/`cam_gain` for every grab. With the panel fields at
+        exposure 20 and a different value locked, the pre-flight looked
+        reasonable and every one of the run's 60 frames came out 57-66 %
+        saturated. The grab now goes through the very lock the run will
+        hold (the tab's lock with the run's four controls on top), and
+        the tab's own lock is put back afterwards. When the panel fields
+        and the tab's lock disagree, the dialog says so: the preview the
+        operator tuned on runs on the lock, the run on the fields."""
         frame = None
+        lock_before = dict(webcam.LOCKED_CONTROLS)
+        mismatch = sldea_lock_mismatch(lock_before, cam_exp, cam_gain)
+        if mismatch:
+            self._sldea_log(f"⚠ camera pre-flight: {mismatch}")
         try:
             spec = webcam.resolve_camera(0)
             if spec.get('device'):
@@ -4054,9 +4102,13 @@ LOGGING:
                                   ('exposure_time_absolute', cam_exp),
                                   ('gain', cam_gain)):
                     webcam.set_control(dev, ctrl, val)
+                webcam.set_locked(sldea_run_lock(lock_before, cam_exp,
+                                                 cam_gain))
             frame = webcam.oneshot_rgb(spec, count=3)
         except Exception:
             frame = None
+        finally:
+            webcam.set_locked(lock_before)
         if frame is None:
             return messagebox.askyesno(
                 "Camera pre-flight",
@@ -4104,6 +4156,12 @@ LOGGING:
                  wraplength=520,
                  font=('TkDefaultFont', 9, 'bold' if clipped else 'normal')
                  ).pack(pady=(2, 0))
+        if mismatch:
+            # the warning sign and the bold weight are the cue; the colour
+            # only repeats it
+            tk.Label(win, text="⚠ " + mismatch, fg='#c62828', wraplength=520,
+                     justify='left', font=('TkDefaultFont', 9, 'bold')
+                     ).pack(pady=(2, 0))
         tk.Label(win, text="Check: DEA centred in the circle · in focus · "
                            "no glare / clipping", fg='#555').pack(pady=(0, 6))
         bf = ttk.Frame(win)
@@ -4498,11 +4556,10 @@ LOGGING:
                     # set is saved and restored in the finally block; a
                     # run must not silently redefine the operator's lock.
                     cam_lock_saved = dict(webcam.LOCKED_CONTROLS)
-                    webcam.set_locked(dict(cam_lock_saved,
-                                           auto_exposure=1,
-                                           white_balance_automatic=0,
-                                           exposure_time_absolute=cam_exp,
-                                           gain=cam_gain))
+                    # one definition, shared with the pre-flight, so the
+                    # dialog shows what this lock shoots (2026-10-05)
+                    webcam.set_locked(sldea_run_lock(cam_lock_saved,
+                                                     cam_exp, cam_gain))
             except Exception as e:
                 self._sldea_log(f"camera setup failed ({e}) — frames skipped")
                 spec = None

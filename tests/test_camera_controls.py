@@ -134,6 +134,38 @@ def test_save_falls_back_when_primary_unwritable():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_stale_primary_never_shadows_a_newer_fallback():
+    """2026-10-05: with a readable but unwritable primary (the root-owned
+    installer directory) holding an OLD lock, every save lands in the
+    fallback, yet load read the primary first -- so each start and each
+    Webcam-panel rebuild brought the old exposure back. The newer file
+    must win, whichever location it is in."""
+    import time
+    d = tempfile.mkdtemp(prefix='camctl_stale_')
+    prim_bak = webcam.CAMERA_SETTINGS_PATH
+    fall_bak = webcam.CAMERA_SETTINGS_FALLBACK
+    webcam.CAMERA_SETTINGS_PATH = os.path.join(d, 'share', 'cam.json')
+    webcam.CAMERA_SETTINGS_FALLBACK = os.path.join(d, 'cache', 'cam.json')
+    try:
+        webcam.save_camera_settings({'exposure_time_absolute': 20},
+                                    path=webcam.CAMERA_SETTINGS_PATH)
+        old = time.time() - 3600
+        os.utime(webcam.CAMERA_SETTINGS_PATH, (old, old))
+        webcam.save_camera_settings({'exposure_time_absolute': 4},
+                                    path=webcam.CAMERA_SETTINGS_FALLBACK)
+        assert webcam.load_camera_settings() == \
+            {'exposure_time_absolute': 4}, webcam.load_camera_settings()
+        # and the other way round: a newer primary still wins
+        os.utime(webcam.CAMERA_SETTINGS_FALLBACK, (old - 60, old - 60))
+        os.utime(webcam.CAMERA_SETTINGS_PATH, None)
+        assert webcam.load_camera_settings() == \
+            {'exposure_time_absolute': 20}
+    finally:
+        webcam.CAMERA_SETTINGS_PATH = prim_bak
+        webcam.CAMERA_SETTINGS_FALLBACK = fall_bak
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count

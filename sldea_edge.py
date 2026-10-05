@@ -569,6 +569,34 @@ D2_RANGE_FACTORS = {2: 1.128, 3: 1.693, 4: 2.059, 5: 2.326,
 # twice this by area ∝ diameter², i.e. 0.8 %, so one threshold covers
 # both rows of §2.1.
 CAL_SE_PCT = 0.4
+# THE RANGE CAP (owner decision 2026-10-03, after run SLDEA_20261001_151016).
+# A hand round-set whose rounds differ by MORE than this, as a percent of
+# their mean diameter, is REFUSED outright: no "accept as measured", no
+# override, no prompt that can say yes. The SE gate above is a budget
+# question ("is the mean precise enough to quote?") and the operator may
+# answer it; this is a plausibility question ("were these circles even
+# put on the same thing?") and nobody can. The incident set was 612.85,
+# 557.21 and 701.14 px, a range of 23.1 % of the mean: three circles the
+# size of the dialog's own random spawn, accepted through both prompts.
+#
+# Where 5 comes from, measured through calibration_stats on 200,000
+# simulated sets per cell (2026-10-03). At the circle mode's measured
+# per-fit sigma of 1.05 % an honest 3-round set is over 5 % 0.18 % of the
+# time (5 rounds 0.68 %, 8 rounds 1.76 %), while three untouched spawns
+# at 1080p land under it only 8.3 % of the time. At the two-point mode's
+# one measured sigma of 2.09 % (SLDEA_MEASUREMENT 2.1a, one session) the
+# cap bites: 5 rounds are over it 44 % of the time, 3 rounds 21 %, 8
+# rounds 69 %. That cost is stated in the handoff entry, not hidden here.
+#
+# A cap on the RANGE, not on sigma or SE, on purpose: the range is the
+# number an operator can picture ("the circles differ by a quarter of
+# the disc"), and it needs no d2 factor, so it judges any round count.
+# It sits far above the range the SE gate itself allows (1.17 % at n=3,
+# 3.22 % at n=8), so every set over the cap is over the SE gate as well
+# for every n in the d2 table, and an honest set never meets the cap
+# first. The gate, the guard and their prompts are unchanged for every
+# set under it.
+CAL_RANGE_CAP_PCT = 5.0
 # Anchor sanity guard (2026-08-06, added on top of #215's flow). Two
 # tolerances, both generous: §2.1 puts the whole scale-anchor term at
 # ~0.4 % diameter / ~0.8 % area, so 1 % is already outside the budget.
@@ -818,6 +846,88 @@ def spread_ok(stats, limit=CAL_SPREAD_PCT):
     A single round has no range, so it passes vacuously — honest for a
     range, and exactly why `se_ok` refuses to do the same."""
     return not stats or stats['n'] < 2 or stats['spread_pct'] <= limit
+
+
+def over_range_cap(stats, cap=CAL_RANGE_CAP_PCT):
+    """THE RANGE CAP (2026-10-03): True when the rounds differ by MORE
+    than `cap` percent of their mean diameter, False when they do not,
+    and None when there is no range to judge (no stats, or one round).
+
+    Strictly more than, so a set at exactly the cap is not refused, and
+    the comparison is on the RECORDED statistic (`spread_pct`, which is
+    100 * (max - min) / mean) so the log line, setup.txt and this verdict
+    all speak of the same number. Unlike se_ok it needs no d2 factor: a
+    range exists for any n >= 2, so a round count outside the table is
+    still capped. True means the dialog refuses the set; it is not a
+    question, and no prompt in the dialog can accept over it."""
+    if not stats:
+        return None
+    if stats.get('n', 0) < 2 or stats.get('spread_pct') is None:
+        return None
+    return float(stats['spread_pct']) > float(cap)
+
+
+_COUNT_WORDS = ('zero', 'one', 'two', 'three', 'four', 'five', 'six',
+                'seven', 'eight', 'nine', 'ten')
+
+
+def _count_word(n):
+    """'three' for 3; digits past ten."""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return str(n)
+    return _COUNT_WORDS[n] if 0 <= n < len(_COUNT_WORDS) else str(n)
+
+
+def range_cap_text(stats, cap=CAL_RANGE_CAP_PCT, choices=True):
+    """The refusal, in plain words: "The three rounds differ by 23.1
+    percent; more than 5 percent cannot be trusted. Measure again, or
+    cancel." With `choices` False the last sentence is left off, for the
+    status strip after the dialog has closed. ASCII, one line.
+
+    The range is quoted to one decimal, and to two when one decimal would
+    round it onto the cap itself ("5.0 percent; more than 5 percent"
+    would read as a contradiction). Pure, so the wording is a headless
+    test."""
+    st = stats or {}
+    n = st.get('n') or 0
+    try:
+        rng = float(st.get('spread_pct'))
+    except (TypeError, ValueError):
+        rng = 0.0
+    shown = f"{rng:.1f}"
+    if shown == f"{float(cap):.1f}":
+        shown = f"{rng:.2f}"
+    body = (f"The {_count_word(n)} rounds differ by {shown} percent; "
+            f"more than {float(cap):g} percent cannot be trusted.")
+    if choices:
+        body += " Measure again, or cancel."
+    return body
+
+
+def cal_verdict(stats, verify=False):
+    """The one word the log line's `verdict=` carries for a round-set,
+    from the gates in the order the dialog applies them:
+
+        NOT-GATED   a verify anchor: one automatic fit, no rounds
+        OVER-CAP    the rounds' range is over CAL_RANGE_CAP_PCT and the
+                    set was refused outright (2026-10-03)
+        PASS        the mean's SE is inside CAL_SE_PCT
+        OVER-GATE   the mean's SE is over it; the operator was asked
+        None        unjudgeable (one round, or no d2 factor for n); the
+                    formatter writes UNJUDGEABLE
+
+    One place, used by the dialog and by the re-anchor record, so the
+    vocabulary cannot drift between the two lines that describe one
+    anchor. The cap is judged before the gate and before the d2 table,
+    because it needs neither: a 23 % range on a round count the table
+    does not cover is still a 23 % range."""
+    if verify:
+        return 'NOT-GATED'
+    if over_range_cap(stats):
+        return 'OVER-CAP'
+    return {True: 'PASS', False: 'OVER-GATE'}.get(se_ok(stats))
 
 
 def rescale_pct(old_diam_px, new_diam_px):
@@ -1190,12 +1300,14 @@ def reanchor_log_record(anchor, plan, when=None, frame=None):
            'mode': (cal_mode_read(a.get('cal_mode'))
                     or (CAL_MODE_VERIFY if vfy else '?')),
            'stats': stats, 'gate': CAL_SE_PCT,
-           # se_ok is already three-valued and refuses n < 2 and a missing
-           # SE, so an unjudgeable set renders 'UNJUDGEABLE' rather than
-           # borrowing a pass it never earned
-           'verdict': ('NOT-GATED' if vfy
-                       else {True: 'PASS',
-                             False: 'OVER-GATE'}.get(se_ok(stats))),
+           # cal_verdict: the same word the dialog's own line used, and
+           # three-valued underneath (se_ok refuses n < 2 and a missing
+           # SE), so an unjudgeable set renders 'UNJUDGEABLE' rather than
+           # borrowing a pass it never earned. An anchor recorded before
+           # the range cap existed, with a range over it, reads OVER-CAP
+           # here: that is what its rounds were, and outcome= says what
+           # was then done with it.
+           'verdict': cal_verdict(stats, vfy),
            'rot_deg': None, 'stroke': None,
            'auto_diam_px': auto_px,
            'auto_pct': (None if vfy or not auto_px else
@@ -1261,6 +1373,10 @@ CAL_LOG_HEADER = (
     'current A/B/C labels.\n'
     '# sigma = per-fit precision (range/d2(n)); se = sigma/sqrt(n) on the '
     'mean; area_se = 2*se.\n'
+    '# verdict: PASS / OVER-GATE = the mean SE against gate=; OVER-CAP '
+    '(since 2026-10-03) = range= was over\n'
+    f'#   the {CAL_RANGE_CAP_PCT:g}% cap and the set was REFUSED, no '
+    'override possible; NOT-GATED = verify; UNJUDGEABLE = no d2 factor.\n'
     '# Compare methods on SIGMA -- it is the only figure that survives a '
     'different n.\n')
 # Written ONCE into a log file that predates the letters->names change, so

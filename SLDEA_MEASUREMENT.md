@@ -170,6 +170,23 @@ never a diameter** — a refit is one of its answers, and a printed diameter
 would make that refit a fitted-to-target one rather than an independent
 round — and its default is **Cancel**, the answer that changes nothing.
 
+**The range cap is not a gate (2026-10-03, owner decision 19).** Before the
+SE gate runs, a round-set whose range is **more than `CAL_RANGE_CAP_PCT` =
+5 % of its mean** is refused outright: no accept-as-measured, no override,
+only "measure again" or cancel (`se.over_range_cap`, logged as
+`verdict=OVER-CAP`). A cap on the range does not reintroduce the two
+defects above, because it is not asking the gate's question. It asks
+whether the rounds were measurements of one thing at all, and for that a
+range needs no d2 factor and no remedy other than starting over. Every set
+over the cap is already over the SE gate (the largest range the gate passes
+is 0.4 x d2(n) x sqrt(n): 1.17 % at n = 3, 3.22 % at n = 8), so the cap
+removes an override, not a pass. Its cost is in the two-point mode: at
+that mode's one measured sigma of 2.09 % the expected 5-round range is
+4.86 %, and about 44 % of honest 5-round sets are refused (200,000
+simulated sets); at the circle mode's 1.05 % the figure is under 2 % at
+every n in the table. Details and the refusal wording: `SLDEA_HANDOFF.md`
+2026-10-03 sub-entry.
+
 #### First real data: the circle mode's per-fit σ ≈ 1.05% (2026-08-06)
 
 Six circle-mode calibration attempts on a scratch copy of

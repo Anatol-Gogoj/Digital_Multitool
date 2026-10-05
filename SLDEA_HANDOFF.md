@@ -21,7 +21,10 @@ its random starting circle were accepted as the px→mm anchor, 1.61x too
 large. The hand modes now show a contrast-stretched view, refuse a round
 whose circle was never moved, and open a frame with no usable picture on a
 plain "repeat the test" statement with Cancel as the default. No gate,
-threshold or override was changed.
+threshold or override was changed in this pass. Added 2026-10-03 (owner
+decision 19, sub-entry at the end of this entry): hand rounds that differ
+by more than 5 percent of their mean are refused outright, with no
+override.
 
 **Observation (run `SLDEA_20261001_151016`, re-measured 2026-10-02).**
 
@@ -185,6 +188,8 @@ crop; a diameter is circle geometry or two click positions in image px.
   of the time (science review S42). On a refused-fit run there is no
   cross-check either, so the rule would refuse about 7 in 10 honest
   3-round anchors on exactly the runs that need a hand anchor.
+  *Answered 2026-10-03 (decision 19): refuse on the range, not on the
+  SE. See the sub-entry below.*
 - *Which window should the hand modes use when a fit exists?* Shipped:
   the verify mode's, so the picture is the same in all three methods. The
   percentile window would not move the half-height (previous section),
@@ -220,6 +225,138 @@ fails (31 of 31 mutations caught). On a copy of the real 2026-10-01 run
 the dialog opened on the notice, three Continue presses on the spawns
 banked nothing, and Cancel with the 623.73 px guess in the session left
 it in place and said so.
+
+### The range cap: hand rounds more than 5 percent apart are refused outright (2026-10-03, owner decision 19)
+
+**TL;DR:** the 2026-10-01 set (three circles 23 percent apart) could
+still be accepted through the two prompts. The dialog now refuses a hand
+round-set whose rounds differ by more than 5 percent of their mean, says
+so in plain words, and offers only "measure again" or cancel. Nothing can
+accept such a set. The SE gate, the anchor guard, their prompts and their
+overrides are unchanged for every set under the cap.
+
+**Observation.**
+
+- The 2026-10-01 rounds were 612.85, 557.21 and 701.14 px: range 143.93 px
+  on a mean of 623.73 px, 23.08 percent. The SE gate asked ("Rounds
+  disagree", SE 7.87 percent against 0.4) and was answered "accept as
+  measured"; the missing cross-check asked and was answered "use anyway".
+  Both are decisions the dialog lets the operator take, and the 2026-10-02
+  pass kept them on purpose.
+- What separates that set from an honest one is the range, not the SE.
+  Through `calibration_stats` and `se_ok` on 200,000 simulated sets per
+  cell (2026-10-03, not in the repo): at the circle mode's
+  measured per-fit sigma of 1.05 percent, an honest 3-round set has a
+  range over 5 percent 0.18 percent of the time (5 rounds 0.68, 8 rounds
+  1.76). Three untouched spawns at 1080p land under 5 percent only 8.3
+  percent of the time (five spawns, 0.4).
+- The SE gate never lets a range over 5 percent through on its own: the
+  largest range that passes it is 0.4 x d2(n) x sqrt(n), 1.17 percent at
+  n = 3 and 3.22 percent at n = 8. So every set the cap refuses was
+  already over the SE gate. The cap takes the override away from those
+  sets and touches nothing else.
+- The cost sits in the two-point mode. Its one measured sigma is 2.09
+  percent (SLDEA_MEASUREMENT 2.1a, one session), so the expected 5-round
+  range is d2(5) x 2.09 = 4.86 percent, just under the cap: 44 percent of
+  honest 5-round two-point sets at that sigma are refused (3 rounds 21, 8
+  rounds 69). In the circle mode the cost is under 2 percent of sets at
+  any round count in the table.
+
+**Decision (owner, 2026-10-03, decision 19).** One new constant,
+`se.CAL_RANGE_CAP_PCT = 5.0`, and one new step in `finish()`.
+
+1. Before the SE gate: when the recorded range (`spread_pct`, 100 x (max
+   - min) / mean, the number the log already writes as `range=`) is
+   strictly more than 5, the dialog says "The three rounds differ by 23.1
+   percent; more than 5 percent cannot be trusted. Measure again, or
+   cancel." Yes = measure again, which starts the set over blind, the
+   same as a mode change. No = cancel, the default; Enter cannot reach the
+   dialog underneath (the same `ask` helper as every prompt). No answer
+   accepts. The SE gate's "accept as measured" and the cross-check's "use
+   anyway" are never shown for such a set, because the set never reaches
+   them. The count is in words ("three", "five"); past ten it is digits.
+2. The prompt and the dialog behind it quote the range as a percentage
+   only, no diameter and no mean, so a refit stays blind. Same rule as the
+   SE gate's prompt.
+3. The log line records the verdict: `verdict=OVER-CAP
+   outcome=refused-cap`, in the same fields and order as every other
+   line, and the log header says what the word means. The verdict word
+   now comes from one function, `se.cal_verdict`, used by the dialog's log
+   line and by the re-anchor record, so the two cannot drift. A re-anchor
+   record built from a stored anchor whose range is over 5 percent reads
+   OVER-CAP too: that is what its rounds were, and `outcome=` says what
+   was done with it.
+4. After cancel the status strip says which scale still stands, in the
+   flat notice's own words (`scale_stands_text`, lifted out of
+   `flat_cancel_text` unchanged), then the refusal without its choices
+   (`cap_refused_text`). The Detect route does not overwrite it with the
+   generic "gated" line, and the re-anchor route keeps it after its own
+   "re-anchor cancelled" line.
+5. Strictly more than 5: a set at exactly 5.00 percent is not refused. A
+   range that would print as "5.0" is printed to two decimals so the
+   sentence can never read "5.0 percent; more than 5 percent".
+6. The cap needs no d2 factor, so a round count outside the table (nine
+   rounds, say) is still capped; such a set under the cap stays
+   UNJUDGEABLE, as before.
+7. The untouched-circle rule of the 2026-10-02 entry stays as it is (the
+   "plus" in decision 19).
+
+**What did not change.** For every set with a range of 5 percent or
+less: the SE gate (0.4 percent), the anchor guard (1 percent), the
+cross-check, their order, their prompts, their defaults and their
+overrides. A 4 percent set reaches "Rounds disagree" and then the guard
+exactly as before, with the same answers. The verify mode has no rounds
+and is not capped. The spawn band, the size gate, the hand view, the
+`setup.txt` fields and the log line format.
+
+**Limits.**
+
+- The cap judges plausibility, not precision. A careless set that stays
+  within 5 percent still reaches the SE gate and can still be accepted
+  over it, with the record saying so, as before.
+- The two-point cost above. Shipped as one number for both hand modes;
+  whether the two-point mode should get its own cap is an owner call.
+- Anchors recorded before 2026-10-03 with a range over 5 percent keep
+  their record and their `se_pct`; `sldea_diag` reads them as before. Only
+  a new re-anchor record on such a run will carry OVER-CAP.
+- No person has measured the two-point mode since 2026-08-06, so the 44
+  percent figure rests on one session's sigma.
+
+**Verification.** `tests/test_sldea_calibration.py` (73, 4 new,
+headless) pins: the cap verdict on the incident set and not on a 4
+percent set; the strict inequality at 5.00 and 5.01; nine rounds capped
+without a d2 factor; the proof that the SE gate's largest passing range
+is under the cap for every n in the d2 table; the wording, that it is
+ASCII and carries no diameter; the log line in the usual field order, the
+header, and the re-anchor record; and the strip's cancel sentence with a
+session anchor, with only a recorded one, and with neither.
+`tests/test_sldea_edge_gui.py` (64, 1 new, needs a display) drives the
+real dialog with the incident set scaled to the fixture (122.57, 111.44,
+140.23 px, range 23.08 percent): the old override script (No, Yes) in the
+circle mode with a fit, where only the refusal is asked and the log line
+says OVER-CAP; the circle mode with no fit, through "measure again" (the
+set restarts on round 1 with nothing banked), a second refusal and
+cancel; the two-point mode with five chords; a 4 percent set reaching
+"Rounds disagree" and the guard with the same answers; the Detect route;
+and the re-anchor route on a saved run, data.csv and the anchor block
+untouched. The existing dialog cases that used sets 14 to 35 percent
+apart to reach the SE gate now use sets 3.8 to 4.4 percent apart, so
+they still reach it. The two-point part runs at random rotations, so
+its range is pinned as "between 20 and 27 percent, and the same number
+the log line records", not as one value. Each behaviour was switched off
+in a scratch copy, 16 of 16 caught by a named test: no cap; cap at 25
+percent; inclusive at 5.00; verdict left OVER-GATE; the mean quoted on
+the prompt; Yes accepting the mean; default Yes; cap after the SE gate;
+refused set unlogged; strip not written; Detect overwriting the strip;
+re-anchor dropping the reason; measure again keeping the banked rounds;
+count in digits; two-point sets uncapped; re-anchor record ignoring the
+cap. The incident was replayed on a scratch copy of the real run with its
+three logged diameters scripted as the fits and the old answers (No, Yes)
+queued: the notice, then the dialog, then one question, no anchor, one
+`verdict=OVER-CAP outcome=refused-cap` line, setup.txt and data.csv byte
+for byte as they were. The batch harness over the 16-run corpus (899
+frames) matches main's baseline exactly, as it should: the cap lives in
+the dialog and the harness never opens it.
 
 ## A LIVE run locks the scope channels it reads, and the settings they share (2026-09-24)
 

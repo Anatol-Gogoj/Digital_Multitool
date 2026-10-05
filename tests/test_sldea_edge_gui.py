@@ -891,16 +891,18 @@ def test_calibration_dialog_drives_three_rounds_and_both_gates():
     answers, asked = spy.answers, spy.asked
     gui.messagebox = spy
     # Nine circles, one per round: half 1's set, then half 2's set and
-    # its post-restart set. Every triple has range/mean >= 14 % (the SE
-    # gate only goes silent under ~1.17 %) so the spread gate always
-    # asks, and every mean is ~140 px against the fixture's ~160 px auto
-    # fit — ~12 % out, guard tolerance 1 % — so the anchor guard always
-    # asks. All nine radii differ, so equal recorded rounds would expose
-    # a dialog that stopped respawning per round.
+    # its post-restart set. Every triple has range/mean between 3.8 and
+    # 4.4 % (the SE gate only goes silent under ~1.17 %, and since
+    # 2026-10-03 a range over 5 % is REFUSED before the gate exists) so
+    # the spread gate always asks, and every mean is ~130 px against the
+    # fixture's ~160 px auto fit (about 18 % out, guard tolerance 1 %),
+    # so the anchor guard always asks. All nine radii differ, so equal
+    # recorded rounds would expose a dialog that stopped respawning per
+    # round.
     real_spawn = _fixed_spawn(gui, [
-        (160.0, 120.0, 65.0), (160.0, 120.0, 70.0), (160.0, 120.0, 75.0),
-        (160.0, 120.0, 64.0), (160.0, 120.0, 71.0), (160.0, 120.0, 76.0),
-        (160.0, 120.0, 63.0), (160.0, 120.0, 69.0), (160.0, 120.0, 77.0)])
+        (160.0, 120.0, 65.0), (160.0, 120.0, 66.3), (160.0, 120.0, 67.6),
+        (160.0, 120.0, 64.0), (160.0, 120.0, 65.2), (160.0, 120.0, 66.5),
+        (160.0, 120.0, 63.0), (160.0, 120.0, 64.4), (160.0, 120.0, 65.8)])
 
     def advance(win, taken):
         """Stand in for root.wait_window: press the Continue/Finish
@@ -1041,16 +1043,28 @@ def test_calibration_warnings_default_to_declining_them():
                 btn.invoke()
 
         app.root.wait_window = lambda win: advance(win, [])
-        # (a) three fits that disagree, so the SPREAD gate asks first: its
-        # default must leave the gate closed, not accept. Scripted rather
-        # than randomized so the question order is deterministic.
-        _fixed_spawn(gui, [(160.0, 120.0, 65.0), (160.0, 120.0, 70.0),
-                           (160.0, 120.0, 75.0)])
+        # (a) three fits that disagree (3.9 %, under the 2026-10-03 range
+        # cap), so the SPREAD gate asks first: its default must leave the
+        # gate closed, not accept. Scripted rather than randomized so the
+        # question order is deterministic.
+        _fixed_spawn(gui, [(160.0, 120.0, 65.0), (160.0, 120.0, 66.3),
+                           (160.0, 120.0, 67.6)])
         app._calibrate_scale(mode=CIRCLE)
         assert app.manual_ref is None, ("an anchor nobody read was "
                                         "accepted: " + str(app.manual_ref))
         assert spy.asked and spy.asked[0][0] == 'Rounds disagree'
         assert spy.defaults()[0] == 'cancel', spy.asked[0]
+        # (a') three fits that disagree by MORE than the cap (the 2026-10-01
+        # set at the fixture's scale): the only question is the refusal,
+        # whose default is cancel, and no gate is reached at all
+        spy.asked.clear()
+        _fixed_spawn(gui, [(160.0, 120.0, 61.285), (160.0, 120.0, 55.721),
+                           (160.0, 120.0, 70.114)])
+        app._calibrate_scale(mode=CIRCLE)
+        assert app.manual_ref is None, app.manual_ref
+        assert [t for t, _kw in spy.asked] == ['Rounds cannot be trusted'], \
+            spy.asked
+        assert spy.defaults() == ['no'], spy.asked
 
         # (b) now make the rounds AGREE so the spread gate passes and the
         # ANCHOR GUARD is the question: a 130 px circle against the
@@ -1181,10 +1195,11 @@ def test_mid_round_display_never_reveals_a_previous_fit():
     root.withdraw()
     d = tempfile.mkdtemp(prefix='edge_cal_blind_')
     real_mb, real_spawn = gui.messagebox, gui.spawn_circle
-    # scripted, distinguishable fits: 130.0, 140.0 then 150.0 px across
+    # scripted, distinguishable fits: 130.0, 132.6 then 135.2 px across
+    # (a 3.9 % range: over the SE gate, under the 2026-10-03 range cap)
     real_spawn = _fixed_spawn(gui, [(160.0, 120.0, 65.0),
-                                    (160.0, 120.0, 70.0),
-                                    (160.0, 120.0, 75.0)])
+                                    (160.0, 120.0, 66.3),
+                                    (160.0, 120.0, 67.6)])
     snaps = []
     try:
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
@@ -1204,11 +1219,11 @@ def test_mid_round_display_never_reveals_a_previous_fit():
         app.root.wait_window = advance
         app._calibrate_scale(mode=CIRCLE)
         assert len(snaps) == 3, snaps
-        assert app.manual_ref['rounds_px'] == [130.0, 140.0, 150.0]
+        assert app.manual_ref['rounds_px'] == [130.0, 132.6, 135.2]
         # round 1 shows only its own circle; rounds 2 and 3 must contain
-        # NO earlier diameter and no running mean (140.0 = the mean of
-        # 130/150 too, so its absence in round 3 covers both)
-        for i, prior in ((1, ('130.0',)), (2, ('130.0', '140.0'))):
+        # NO earlier diameter and no running mean (132.6 = the mean of
+        # 130/135.2 too, so its absence in round 3 covers both)
+        for i, prior in ((1, ('130.0',)), (2, ('130.0', '132.6'))):
             for v in prior:
                 assert v not in snaps[i], (i, v, snaps[i])
         for s in snaps:
@@ -1223,7 +1238,7 @@ def test_mid_round_display_never_reveals_a_previous_fit():
         # each round DOES show the circle currently under the cursor —
         # that is the fit being made, not a target to match
         assert 'circle: 130.0 px across' in snaps[0], snaps[0]
-        assert 'circle: 140.0 px across' in snaps[1], snaps[1]
+        assert 'circle: 132.6 px across' in snaps[1], snaps[1]
         # the spread gate is one of the questions a REFIT can answer, so
         # it too quotes only the percentage — a refit fitted against a
         # disclosed target would be no more independent than round 2 was.
@@ -1232,21 +1247,21 @@ def test_mid_round_display_never_reveals_a_previous_fit():
         # and setup.txt's `spread_pct` (and on the reveal line below).
         assert spy.asked[0][0] == 'Rounds disagree', spy.asked
         prompt = spy.msgs[0]
-        assert '8.44 %' in prompt and '% of diameter' in prompt, prompt
-        assert '9.74 %' in prompt and '% in area' in prompt, prompt
-        for v in ('130.0', '140.0', '150.0'):
+        assert '2.32 %' in prompt and '% of diameter' in prompt, prompt
+        assert '2.67 %' in prompt and '% in area' in prompt, prompt
+        for v in ('130.0', '132.6', '135.2'):
             assert v not in prompt, (v, prompt)
         # nor on the dialog behind it — where the only diameter on screen
         # is the CURRENT circle's own live readout
         for s in spy.seen:
-            for v in ('130.0', '140.0', '150.0'):
+            for v in ('130.0', '132.6', '135.2'):
                 assert v not in s.replace(f"circle: {v} px across", ''), \
                     (v, s)
         # THE REVEAL lands once the fitting is over, on the surface that
         # outlives the dialog
         txt = app.status.cget('text')
-        assert 'mean of 3: 130.0, 140.0, 150.0 px' in txt, txt
-        assert 'spread 20.0 px = 14.29%' in txt, txt
+        assert 'mean of 3: 130.0, 132.6, 135.2 px' in txt, txt
+        assert 'spread 5.2 px = 3.92%' in txt, txt
         assert 'OVER GATE' in txt, txt
     finally:
         gui.messagebox, gui.spawn_circle = real_mb, real_spawn
@@ -1516,10 +1531,12 @@ def test_mode_b_is_blind_mid_round_and_shows_no_length_at_all():
     try:
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
-        # the chords below differ wildly on purpose, so the SE gate trips:
-        # answer it with "accept as measured" (No), then override the
-        # anchor guard (Yes). Answering Yes to the gate would REFIT, which
-        # is the remedy an SE gate can offer and a range gate could not.
+        # the chords below differ on purpose, so the SE gate trips: answer
+        # it with "accept as measured" (No), then override the anchor
+        # guard (Yes). Answering Yes to the gate would REFIT, which is the
+        # remedy an SE gate can offer and a range gate could not. They
+        # differ by under 5 %, because a range over that is REFUSED since
+        # 2026-10-03 and never reaches the gate this case is about.
         spy = _ModalSpy(real_mb, app, answers=[False, True])
         gui.messagebox = spy
 
@@ -1528,10 +1545,11 @@ def test_mode_b_is_blind_mid_round_and_shows_no_length_at_all():
             for k in range(12):
                 if not win.winfo_exists():
                     return
-                # deliberately DIFFERENT chords per round (160, 150, 140,
-                # 130, 120 px in original space) so any leak of a previous
-                # round's value would be a distinguishable string
-                half = 80.0 - 5.0 * k
+                # deliberately DIFFERENT chords per round (160, 158.5, 157,
+                # 155.5, 154 px in original space: a 3.8 % range) so any
+                # leak of a previous round's value would be a
+                # distinguishable string
+                half = 80.0 - 0.75 * k
                 _click_at_original(app, (160.0 - half, 120.0))
                 snaps.append(_cal_display(win))    # mid-round: one point in
                 _click_at_original(app, (160.0 + half, 120.0))
@@ -1610,10 +1628,11 @@ def test_every_round_set_is_logged_accepted_or_declined():
                 _cal_step_button(win).invoke()
 
         app.root.wait_window = advance
-        # (a) mode A, three scattered fits, and the operator CANCELS at the
-        # gate — the exact case that lost the six measurements
-        _fixed_spawn(gui, [(160.0, 120.0, 65.0), (160.0, 120.0, 70.0),
-                           (160.0, 120.0, 75.0)])
+        # (a) mode A, three scattered fits (3.9 %, under the 2026-10-03
+        # range cap so the gate is reached), and the operator CANCELS at
+        # the gate, the exact case that lost the six measurements
+        _fixed_spawn(gui, [(160.0, 120.0, 65.0), (160.0, 120.0, 66.3),
+                           (160.0, 120.0, 67.6)])
         spy = _ModalSpy(real_mb, app, answers=[None])
         gui.messagebox = spy
         app._calibrate_scale(mode=CIRCLE)
@@ -1625,9 +1644,9 @@ def test_every_round_set_is_logged_accepted_or_declined():
         assert 'mode=circle n=3' in one, one
         assert 'outcome=declined-cancel' in one, one
         assert 'verdict=OVER-GATE' in one, one
-        assert 'diams=130.00,140.00,150.00px' in one, one
-        assert 'range=14.29%' in one and 'sigma=8.44%' in one, one
-        assert 'se=4.87%' in one and 'area_se=9.74%' in one, one
+        assert 'diams=130.00,132.60,135.20px' in one, one
+        assert 'range=3.92%' in one and 'sigma=2.32%' in one, one
+        assert 'se=1.34%' in one and 'area_se=2.67%' in one, one
         assert 'gate=0.40%' in one, one
         assert 'stroke=3 px solid' in one and 'rot=-deg' in one, one
         assert re.search(r'auto=\d+\.\d+px\([-+]\d+\.\d+%\)', one), one
@@ -1708,14 +1727,16 @@ def test_mode_b_keeps_every_safety_fix_of_the_review_round():
         spy = _ModalSpy(real_mb, app)          # no answers: all defaults
         gui.messagebox = spy
 
-        # (a) five deliberately scattered chords, every question answered
-        # with its OWN default -> no anchor
+        # (a) five deliberately scattered chords (160 down to 154 px: a
+        # 3.8 % range, over the SE gate and under the 2026-10-03 range cap,
+        # which would refuse the set before the gate), every question
+        # answered with its OWN default -> no anchor
         def advance(win):
             _cal_onscreen(root, win)
             for k in range(14):
                 if not win.winfo_exists():
                     return
-                half = 80.0 - 6.0 * k
+                half = 80.0 - 0.75 * k
                 _click_at_original(app, (160.0 - half, 120.0))
                 _click_at_original(app, (160.0 + half, 120.0))
                 _finish_if_last(win)
@@ -1759,7 +1780,7 @@ def test_mode_b_keeps_every_safety_fix_of_the_review_round():
                      'Raw range', 'SLDEA_MEASUREMENT',
                      'stay hidden until you accept'):
             assert gone not in prompt, (gone, prompt)
-        for v in (160.0, 148.0, 136.0, 124.0, 112.0):
+        for v in (160.0, 158.5, 157.0, 155.5, 154.0):
             assert f"{v:.1f}" not in prompt, (v, prompt)
         # ... and it still names the round count that WOULD clear it, which is
         # the remedy only an SE gate can offer — and the one thing on this
@@ -3903,9 +3924,13 @@ def test_a_flat_frame_opens_on_a_plain_statement_with_cancel_default():
         assert sentence in stat and 'gated' not in stat, stat
 
         # ---- (2) THE DELIBERATE SECOND STEP ------------------------------
+        # three rounds 3.9 % apart: over the SE gate, and under the
+        # 2026-10-03 range cap, which refuses a set like the real one (23 %)
+        # before either prompt (test_the_range_cap_refuses_the_incident_set
+        # _through_both_override_paths drives that)
         gui.spawn_circle = real_spawn
-        _fixed_spawn(gui, [(160.0, 120.0, 65.0), (160.0, 120.0, 70.0),
-                           (160.0, 120.0, 75.0)])
+        _fixed_spawn(gui, [(160.0, 120.0, 65.0), (160.0, 120.0, 66.3),
+                           (160.0, 120.0, 67.6)])
         # the SE gate: No = accept as measured; no cross-check: Yes
         spy.answers[:] = [False, True]
         steps = []
@@ -3953,14 +3978,14 @@ def test_a_flat_frame_opens_on_a_plain_statement_with_cancel_default():
             ['Rounds disagree', 'Anchor NOT cross-checked'], spy.asked
         assert spy.defaults() == ['cancel', 'no'], spy.asked
         ref = app.manual_ref
-        assert ref is not None and ref['rounds_px'] == [130.0, 140.0, 150.0]
+        assert ref is not None and ref['rounds_px'] == [130.0, 132.6, 135.2]
         # THE RECORD says what it was accepted over, in words, in the one
         # field setup.txt keeps for that
         g = ref['guard']
         g.encode('ascii')
         assert g.startswith('NOT CROSS-CHECKED'), g
         assert 'accepted anyway by operator' in g, g
-        assert ('OVER-GATE: SE 4.87% of diameter against the 0.4% gate'
+        assert ('OVER-GATE: SE 1.34% of diameter against the 0.4% gate'
                 in g), g
         assert 'FLAT FRAME: contrast 2 gray levels, no visible disc' in g, g
         assert 'display stretched 65-69 gray' in g, g
@@ -4617,6 +4642,255 @@ def test_hand_modes_show_a_stretched_view_and_record_the_same_diameters():
         gui.messagebox, gui.spawn_circle = real_mb, real_spawn
         gui.cal_stretch_window, gui.cal_content_window = real_win, real_cwin
         gui.rotation_angles = real_rot
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# THE RANGE CAP (owner decision 2026-10-03), through the real dialog
+# ---------------------------------------------------------------------------
+
+# the 2026-10-01 round-set at the fixture's scale (x0.2, same ratios):
+# 122.57, 111.44 and 140.23 px across, a 23.08 % range, mean 124.75 px
+INCIDENT_SPAWNS = [(160.0, 120.0, 61.285), (160.0, 120.0, 55.721),
+                   (160.0, 120.0, 70.114)]
+CAP_REFUSAL = ("The three rounds differ by 23.1 percent; more than 5 "
+               "percent cannot be trusted. Measure again, or cancel.")
+
+
+def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
+    """The 2026-10-01 set (612.85, 557.21, 701.14 px: a 23 % range) was
+    accepted through the SE gate's "accept as measured" and then the
+    missing cross-check's "use anyway". Scaled to the fixture it is now
+    refused before either prompt exists: in the circle mode with a fit
+    (where the cross-check would have TRIPPED), in the circle mode
+    without one (where it would have been UNAVAILABLE), in the two-point
+    mode, and on the re-anchor route. The override scripts that used to
+    accept it answer nothing, because nothing is asked. "Measure again"
+    restarts the set blind; "cancel" closes the dialog and says which
+    scale still stands. A 4 % set then meets exactly the gates it met
+    before, and the log carries the cap's verdict on every refused line."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    root = _tk_root_or_skip('range cap')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_cal_cap_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    se_mod = gui.se
+    saw = {}
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        fit = app._auto_disc()
+        assert fit and fit.get('diam_px'), "fixture has no automatic fit"
+        log = os.path.join(run, se_mod.CAL_LOG_NAME)
+        st_inc = se_mod.calibration_stats([2 * r for _x, _y, r
+                                           in INCIDENT_SPAWNS])
+        assert abs(st_inc['spread_pct'] - 23.08) < 0.01, st_inc
+        # the set would have TRIPPED the cross-check (mean 124.7 px on a
+        # ~160 px fit), so before the cap its path was: SE gate -> No =
+        # accept as measured, guard -> Yes = use anyway
+        assert se_mod.anchor_guard(st_inc['mean'], fit, 16.0)['warn']
+
+        def advance(win, presses=12):
+            for _ in range(presses):
+                if not win.winfo_exists():
+                    return
+                _hand_fit(app)
+                _cal_step_button(win).invoke()
+
+        # ---- (1) circle mode, fit present, the old override script -------
+        spy = _ModalSpy(real_mb, app, answers=[False, True])
+        gui.messagebox = spy
+        _fixed_spawn(gui, list(INCIDENT_SPAWNS))
+        app.root.wait_window = advance
+        app.status.config(text='')
+        app._calibrate_scale(mode=CIRCLE)
+        assert app.manual_ref is None, app.manual_ref
+        # ONE question, the refusal; neither gate's prompt was reached, so
+        # the "No" that used to mean "accept as measured" meant cancel
+        assert [t for t, _kw in spy.asked] == ['Rounds cannot be trusted'], \
+            spy.asked
+        assert spy.defaults() == ['no'], spy.asked
+        prompt = spy.msgs[0]
+        assert prompt.startswith(CAP_REFUSAL), prompt
+        assert 'Yes = measure again' in prompt and 'No = cancel' in prompt, \
+            prompt
+        # PERCENTAGES ONLY, on the prompt and on the dialog behind it (where
+        # the only diameter is the current circle's own live readout): a
+        # refit is one of the answers, so it must stay blind
+        for v in ('122.6', '111.4', '140.2', '124.7', '124.8'):
+            assert v not in prompt, (v, prompt)
+            assert v not in spy.seen[0].replace(f"circle: {v} px across",
+                                                ''), (v, spy.seen[0])
+        assert 'cannot be trusted' in spy.seen[0], spy.seen[0]
+        assert 'Refused' in spy.seen[0], spy.seen[0]
+        # the strip says which scale still stands, and why nothing was set
+        stat = app.status.cget('text')
+        assert stat == ('⚠ No scale set. The three rounds differ by 23.1 '
+                        'percent; more than 5 percent cannot be trusted.'), \
+            stat
+        # the log recorded the cap's verdict, in the usual fields
+        lines = _log_lines(log)
+        assert len(lines) == 1, lines
+        one = lines[0]
+        for needle in ('mode=circle n=3', 'sigma=13.63%', 'se=7.87%',
+                       'gate=0.40%', 'verdict=OVER-CAP', 'range=23.08%',
+                       'diams=122.57,111.44,140.23px',
+                       'outcome=refused-cap'):
+            assert needle in one, (needle, one)
+        assert re.search(r'auto=\d+\.\d+px\([-+]\d+\.\d+%\)', one), one
+        assert 'OVER-GATE' not in one and 'accepted' not in one, one
+
+        # ---- (2) circle mode, NO fit: "measure again" restarts the set
+        # blind, a second refusal, then cancel. The cross-check's "use
+        # anyway" (the second override of 2026-10-01) is never offered.
+        app._auto_disc = lambda: None
+        spy = _ModalSpy(real_mb, app, answers=[True, False])
+        gui.messagebox = spy
+        _fixed_spawn(gui, list(INCIDENT_SPAWNS) * 2)
+        states = []
+
+        def advance_watch(win):
+            st = app._cal_probe['st']
+            for _ in range(6):
+                if not win.winfo_exists():
+                    return
+                _hand_fit(app)
+                _cal_step_button(win).invoke()
+                if win.winfo_exists():
+                    states.append((st['round'], len(st['diams']),
+                                   st['disclosed']))
+
+        app.root.wait_window = advance_watch
+        app._calibrate_scale(mode=CIRCLE)
+        assert app.manual_ref is None, app.manual_ref
+        assert [t for t, _kw in spy.asked] == ['Rounds cannot be trusted',
+                                               'Rounds cannot be trusted'], \
+            spy.asked
+        assert 'Anchor NOT cross-checked' not in [t for t, _ in spy.asked]
+        # after the third press the first set was refused and "measure
+        # again" put the dialog back on round 1 with nothing banked and
+        # nothing disclosed; the sixth press closed it
+        assert states == [(2, 1, False), (3, 2, False), (1, 0, False),
+                          (2, 1, False), (3, 2, False)], states
+        lines = _log_lines(log)
+        assert len(lines) == 3, lines
+        for ln in lines[1:]:
+            assert 'verdict=OVER-CAP' in ln and 'auto=none' in ln, ln
+            assert 'outcome=refused-cap' in ln, ln
+        del app._auto_disc
+
+        # ---- (3) the two-point mode: five chords, a 23 % range -----------
+        spy = _ModalSpy(real_mb, app, answers=[False, True])
+        gui.messagebox = spy
+        halves = [61.285, 55.721, 70.114, 62.5, 59.0]
+
+        def chords(win):
+            _cal_onscreen(root, win)
+            for k in range(12):
+                if not win.winfo_exists():
+                    return
+                half = halves[min(k, 4)]
+                _click_at_original(app, (160.0 - half, 120.0))
+                _click_at_original(app, (160.0 + half, 120.0))
+                _finish_if_last(win)
+
+        app.root.wait_window = chords
+        app._calibrate_scale(mode=TWOPOINT)
+        assert app.manual_ref is None, app.manual_ref
+        assert [t for t, _kw in spy.asked] == ['Rounds cannot be trusted'], \
+            spy.asked
+        # (each round is at its own random rotation and the clicks are
+        # quantized to view px, so the range lands near 23 but not on it:
+        # 23.4 and 24.0 have both been seen. What is pinned is that the
+        # prompt quotes the set's OWN recorded range, well over the cap)
+        m = re.match(r'The five rounds differ by (\d+\.\d) percent; more '
+                     r'than 5 percent cannot be trusted\. Measure again, '
+                     r'or cancel\.', spy.msgs[0])
+        assert m, spy.msgs[0]
+        quoted = float(m.group(1))
+        assert 20.0 < quoted < 27.0, spy.msgs[0]
+        line = _log_lines(log)[-1]
+        assert 'mode=twopoint n=5' in line, line
+        assert 'verdict=OVER-CAP' in line and 'outcome=refused-cap' in line
+        logged = float(re.search(r' range=(\d+\.\d+)%', line).group(1))
+        assert abs(logged - quoted) < 0.051, (logged, quoted, line)
+
+        # ---- (4) a 4 % set reaches the gates it always met, unchanged ----
+        spy = _ModalSpy(real_mb, app, answers=[False, True])
+        gui.messagebox = spy
+        _fixed_spawn(gui, [(160.0, 120.0, 65.0), (160.0, 120.0, 66.3),
+                           (160.0, 120.0, 67.6)])
+        app.root.wait_window = advance
+        app._calibrate_scale(mode=CIRCLE)
+        assert [t for t, _kw in spy.asked] == \
+            ['Rounds disagree', 'Anchor sanity check'], spy.asked
+        ref = app.manual_ref
+        assert ref is not None and ref['rounds_px'] == [130.0, 132.6, 135.2]
+        assert abs(ref['spread_pct'] - 3.92) < 0.01, ref
+        assert 'OVER GATE' in app.status.cget('text')
+        line = _log_lines(log)[-1]
+        assert 'verdict=OVER-GATE' in line and 'range=3.92%' in line, line
+        assert 'outcome=accepted-override' in line, line
+
+        # ---- (5) the Detect route keeps the reason on the strip ----------
+        app.manual_ref = None
+        spy = _ModalSpy(real_mb, app)              # all defaults: cancel
+        gui.messagebox = spy
+        _fixed_spawn(gui, list(INCIDENT_SPAWNS))
+        app._calibrate_scale(then_detect=True, mode=CIRCLE)
+        assert app.manual_ref is None and not app.cands_all
+        stat = app.status.cget('text')
+        assert 'cannot be trusted' in stat and 'gated' not in stat, stat
+
+        # ---- (6) the re-anchor route: a SAVED run, the cap refuses, the
+        # strip keeps the reason and names the recorded anchor ------------
+        gui.messagebox = _StubMB(yes=True)
+        app.manual_ref = {
+            'method': se_mod.ANCHOR_METHOD_MANUAL,
+            'diam_px': float(fit['diam_px']), 'cal_mode': TWOPOINT,
+            'n_rounds': 5, 'spread_pct': 0.5, 'se_pct': 0.1,
+            'guard': se_mod.anchor_guard_note(
+                se_mod.anchor_guard(fit['diam_px'], fit, 16.0), False)}
+        app.detect_all_sync()
+        app.save()
+        assert app.status.cget('text').startswith('saved in ')
+        prev = se_mod.load_scale_anchor(run)
+        app2 = gui.EdgeReviewApp(root, path=run)
+        assert app2._scale_intent()['intent'] == gui.SCALE_INTENT_REANCHOR
+        spy = _ModalSpy(real_mb, app2, answers=[False])
+        gui.messagebox = spy
+        _fixed_spawn(gui, list(INCIDENT_SPAWNS))
+
+        def measure(win):
+            for rb in _widgets_of(win, tk.Radiobutton):
+                if rb.cget('value') == CIRCLE:
+                    rb.invoke()
+            saw['intent'] = app2._cal_probe['intent']
+            for _ in range(8):
+                if not win.winfo_exists():
+                    return
+                _hand_fit(app2)
+                _cal_step_button(win).invoke()
+
+        app2.root.wait_window = measure
+        app2._reanchor_scale()
+        assert saw['intent'] == gui.SCALE_INTENT_REANCHOR
+        assert [t for t, _kw in spy.asked] == ['Rounds cannot be trusted'], \
+            spy.asked
+        assert app2.manual_ref is None, app2.manual_ref
+        stat = app2.status.cget('text')
+        assert stat == ('re-anchor cancelled — data.csv untouched. No new '
+                        'scale set; the anchor recorded for this run '
+                        f"({prev['diam_px']:.1f} px) is unchanged. The "
+                        'three rounds differ by 23.1 percent; more than 5 '
+                        'percent cannot be trusted.'), stat
+        # data.csv and the anchor block are what the Save left
+        assert se_mod.load_scale_anchor(run) == prev
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)
 

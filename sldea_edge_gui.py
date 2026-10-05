@@ -1041,6 +1041,13 @@ def cal_stretch_lut(lo, hi):
 # px, never from a pixel value, so no measured number can change with it.
 # What it CAN change is where a person puts the mark, which is why this is
 # a measurement-chain change with its own SLDEA_HANDOFF entry.
+#
+# THE RANGE CAP (owner decision 2026-10-03) is the one threshold added
+# since: a hand round-set whose rounds differ by more than
+# se.CAL_RANGE_CAP_PCT (5 %) of their mean is refused in finish() before
+# any gate runs, and neither override prompt can reach it. The constant,
+# the judgement (se.over_range_cap) and the wording (se.range_cap_text)
+# live in sldea_edge.py; the dialog only asks "measure again, or cancel".
 # ---------------------------------------------------------------------------
 CAL_UNTOUCHED_MSG = "Move the circle onto the edge of the disc first."
 CAL_NO_POINTS_MSG = "Click the two opposite edges of the disc first."
@@ -1167,6 +1174,19 @@ def flat_cancel_text(content, in_use=None, recorded=None):
     said only when there is neither.
 
     Pure, so the wording is a headless test."""
+    return scale_stands_text(in_use, recorded) + ' ' + flat_frame_text(content)
+
+
+def scale_stands_text(in_use=None, recorded=None):
+    """Which scale still stands after a dialog that set no new one, as
+    the opening sentence of a status-strip line. Lifted out of
+    flat_cancel_text unchanged (2026-10-03) so the range cap's refusal
+    can say the same thing in the same words.
+
+    `in_use` is the session's anchor (manual_ref), the one Detect and
+    Save apply; `recorded` is the anchor block in setup.txt. The
+    session's anchor is named first because it is the one the next Save
+    writes with; "No scale set" is said only when there is neither."""
     def px(ref):
         try:
             v = float((ref or {}).get('diam_px'))
@@ -1176,14 +1196,23 @@ def flat_cancel_text(content, in_use=None, recorded=None):
 
     cur, rec = px(in_use), px(recorded)
     if cur is not None:
-        head = (f"No new scale set; the earlier anchor ({cur:.1f} px) is "
+        return (f"No new scale set; the earlier anchor ({cur:.1f} px) is "
                 f"still in use.")
-    elif rec is not None:
-        head = (f"No new scale set; the anchor recorded for this run "
+    if rec is not None:
+        return (f"No new scale set; the anchor recorded for this run "
                 f"({rec:.1f} px) is unchanged.")
-    else:
-        head = "No scale set."
-    return head + ' ' + flat_frame_text(content)
+    return "No scale set."
+
+
+def cap_refused_text(stats, in_use=None, recorded=None):
+    """The status-strip sentence after the range cap refused a round-set
+    and the operator chose cancel (2026-10-03): which scale still stands,
+    then the refusal itself without its "measure again, or cancel"
+    choices, which no longer apply once the dialog has closed.
+
+    Pure, so the wording is a headless test."""
+    return (scale_stands_text(in_use, recorded) + ' '
+            + se.range_cap_text(stats, choices=False))
 
 
 def anchor_caveat(ref):
@@ -1793,6 +1822,9 @@ class EdgeReviewApp:
         # LAST _calibrate_scale call ended on Cancel at the flat-frame
         # notice, else None. _reanchor_scale reads it so its own
         # "cancelled" line can keep the reason (2026-10-02)
+        self._cal_cap_refused = None   # likewise the round-set's stats
+        # when the LAST call ended on the range cap's refusal and the
+        # operator chose cancel (2026-10-03), else None
         self._howto_win = None  # ❓ How to use (`#238`) — singleton, and
         # NON-modal on purpose: the whole point is to read it beside the
         # window while working, not instead of it
@@ -4227,9 +4259,17 @@ class EdgeReviewApp:
         mode uses; a circle round is refused while its circle still sits
         exactly where it was spawned; and a frame with no usable picture
         opens on a plain statement first (_flat_frame_notice). No gate, no
-        threshold and no override was changed."""
+        threshold and no override was changed.
+
+        **THE RANGE CAP (owner decision 2026-10-03)**, the one threshold
+        added since: finish() refuses a hand round-set whose rounds differ
+        by more than se.CAL_RANGE_CAP_PCT (5 %) of their mean before the
+        SE gate, the cross-check or any override prompt runs. The incident
+        set (range 23.1 %) is refused; a set under the cap meets exactly
+        the gates it met before."""
         import random
         self._cal_flat_cancel = None
+        self._cal_cap_refused = None
         if not self.run:
             messagebox.showinfo("Calibrate", "Pick a run first")
             return
@@ -5357,20 +5397,20 @@ class EdgeReviewApp:
                 logging failure must not be how a measurement is lost."""
                 auto = auto_ref() or {}
                 auto_px = auto.get('diam_px')
-                ok = se.se_ok(stats)
                 vfy = verify()
                 rec = {
                     'when': time.strftime('%Y-%m-%dT%H:%M:%S'),
                     'mode': st['mode'], 'stats': stats,
                     'gate': se.CAL_SE_PCT,
-                    # the verify mode is NOT GATED rather than UNJUDGEABLE: the
-                    # SE gate does not apply to a single automatic fit at all,
-                    # which is different from a round-set whose n has no d₂
-                    # factor. Writing 'UNJUDGEABLE' would imply the gate was
-                    # reached for and missed.
-                    'verdict': ('NOT-GATED' if vfy
-                                else {True: 'PASS',
-                                      False: 'OVER-GATE'}.get(ok)),
+                    # se.cal_verdict, one vocabulary for every line: the
+                    # verify mode is NOT GATED rather than UNJUDGEABLE (the
+                    # SE gate does not apply to a single automatic fit at
+                    # all, which is different from a round-set whose n has
+                    # no d2 factor, and writing 'UNJUDGEABLE' would imply
+                    # the gate was reached for and missed); a set over the
+                    # range cap is OVER-CAP, the verdict the cap's refusal
+                    # records (2026-10-03); the rest is PASS / OVER-GATE.
+                    'verdict': se.cal_verdict(stats, vfy),
                     'rot_deg': (list(st['rots']) if two_point()
                                 else None),
                     'stroke': (stroke_var.get()
@@ -5459,7 +5499,13 @@ class EdgeReviewApp:
                 window). Every gate is a DECISION the operator makes
                 explicitly — the failure this replaces was silence, not a
                 missing number — and every accept-anyway question defaults
-                to declining it. Every exit path logs the round-set."""
+                to declining it. Every exit path logs the round-set.
+
+                Since 2026-10-03 the range cap runs before the SE gate: a
+                set whose rounds differ by more than se.CAL_RANGE_CAP_PCT
+                of their mean is refused, and the cap is the one step
+                that is not a decision. Its only answers are measure
+                again or cancel."""
                 stats = se.calibration_stats(st['diams'])
                 if not stats:
                     return
@@ -5473,6 +5519,41 @@ class EdgeReviewApp:
 
                 say(f"{stats['n']} fits recorded — checking how precise "
                     f"they are…")
+                if se.over_range_cap(stats):
+                    # THE RANGE CAP (owner decision 2026-10-03). Run
+                    # SLDEA_20261001_151016's three rounds differed by
+                    # 23 % of the disc and were accepted through the two
+                    # prompts below. Rounds that far apart are not three
+                    # measurements of one thing, so there is nothing an
+                    # "accept as measured" could be measuring: the set is
+                    # refused BEFORE the SE gate and the cross-check, and
+                    # no answer here reaches either of them. Logged first,
+                    # like every other exit, with verdict=OVER-CAP.
+                    #
+                    # The prompt quotes the range as a PERCENTAGE only, so
+                    # a refit stays blind (no diameter, no mean on screen),
+                    # and it defaults to cancel, the answer that changes
+                    # nothing, like every prompt in this dialog.
+                    say("⚠ " + se.range_cap_text(stats, choices=False)
+                        + " Refused.")
+                    log_set(stats, 'refused-cap')
+                    if ask("Rounds cannot be trusted",
+                           se.range_cap_text(stats)
+                           + "\n\nYes = measure again · No = cancel",
+                           default='no', icon='warning'):
+                        restart_all()
+                        return
+                    # Cancel: say on the strip which scale still stands,
+                    # in the words the flat-frame notice uses, with the
+                    # refusal and without its choices. On the re-anchor
+                    # route the caller rewrites the strip and reads
+                    # _cal_cap_refused to keep the reason.
+                    self._cal_cap_refused = stats
+                    self.status.config(
+                        text="⚠ " + cap_refused_text(stats, self.manual_ref,
+                                                     recorded))
+                    win.destroy()
+                    return
                 ok = se.se_ok(stats)
                 if ok is None:
                     # The round count has no d₂ factor, so sigma and the
@@ -6489,8 +6570,12 @@ class EdgeReviewApp:
         if then_detect:
             if self.manual_ref is not None:
                 self.detect()
-            else:
+            elif self._cal_cap_refused is None:
                 self._gate_status()
+            # else: the range cap refused the set and the strip already
+            # says so and which scale still stands; the generic "Detect is
+            # gated" line would send the student straight back into the
+            # dialog without the reason (same rule as the flat notice)
 
     # ---------------- scale-only re-anchor (`#215`) ----------------
     def _reanchor_scale(self):
@@ -6639,10 +6724,15 @@ class EdgeReviewApp:
             # read only "re-anchor cancelled" and the notice's sentence
             # was gone with the notice (review 2026-10-02).
             why = self._cal_flat_cancel
+            capped = self._cal_cap_refused
             self.status.config(
                 text="re-anchor cancelled — data.csv untouched"
                      + (". " + flat_cancel_text(why, was, prev)
-                        if why else ''))
+                        if why else
+                        # the range cap refused the set and the operator
+                        # cancelled (2026-10-03): same shape, its reason
+                        ". " + cap_refused_text(capped, was, prev)
+                        if capped else ''))
             return
         # the SAME derivation Save performs, on an empty results dict: a
         # human-signed anchor beats every automatic reference, so this is

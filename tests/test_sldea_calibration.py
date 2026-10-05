@@ -2035,6 +2035,205 @@ def test_anchor_caveat_repeats_what_was_accepted_over():
                               'diam_px': 577.0, 'se_pct': 'lots'}) == ''
 
 
+# ---------------------------------------------------------------------------
+# THE RANGE CAP (owner decision 2026-10-03)
+#
+# The 2026-10-01 round-set was accepted through two prompts. Rounds that
+# differ by more than 5 % of their mean are now refused before either prompt
+# exists, and no answer can accept them. The gates below the cap are
+# untouched; the dialog itself is driven in test_sldea_edge_gui.py.
+# ---------------------------------------------------------------------------
+
+FOUR_PCT_DIAMS_PX = (130.0, 132.6, 135.2)       # range 3.92 %, SE 1.34 %
+
+
+def test_the_range_cap_refuses_the_incident_set_and_not_a_4_pct_one():
+    """The cap is a plausibility test on the recorded range, strictly
+    more than 5 %, and it needs no d2 factor. Every set over it is over
+    the SE gate too, so an honest set never meets the cap first."""
+    assert se.CAL_RANGE_CAP_PCT == 5.0
+    inc = se.calibration_stats(list(INCIDENT_DIAMS_PX))
+    assert se.over_range_cap(inc) is True
+    assert se.cal_verdict(inc) == 'OVER-CAP'
+    # a 4 % set goes through to the gates it always met: over the SE gate
+    # (SE 1.34 % against 0.4 %), under the cap
+    four = se.calibration_stats(list(FOUR_PCT_DIAMS_PX))
+    assert abs(four['spread_pct'] - 3.92) < 0.01, four
+    assert abs(four['se_pct'] - 1.34) < 0.01, four
+    assert se.over_range_cap(four) is False
+    assert se.se_ok(four) is False
+    assert se.cal_verdict(four) == 'OVER-GATE'
+    # and a set inside the gate is PASS, as before
+    tight = se.calibration_stats([575.0, 576.0, 577.0])
+    assert se.over_range_cap(tight) is False
+    assert se.cal_verdict(tight) == 'PASS'
+    # STRICTLY more than: exactly 5.00 % is not refused
+    at = se.calibration_stats([97.5, 100.0, 102.5])
+    assert at['spread_pct'] == 5.0 and se.over_range_cap(at) is False, at
+    over = se.calibration_stats([97.5, 100.0, 102.51])
+    assert se.over_range_cap(over) is True
+    # judged on the RECORDED statistic, so a read-back anchor and a fresh
+    # set agree
+    assert se.over_range_cap({'n': 3, 'spread_pct': 23.08}) is True
+    assert se.over_range_cap({'n': 3, 'spread_pct': 4.99}) is False
+    # no range to judge: no stats, one round, no spread
+    for none in (None, {}, se.calibration_stats([577.0]),
+                 {'n': 3, 'spread_pct': None}):
+        assert se.over_range_cap(none) is None, none
+        assert se.cal_verdict(none) is None, none
+    # NO d2 FACTOR NEEDED: nine rounds have no sigma and no SE (the table
+    # stops at 8), but a 23 % range on nine rounds is still a 23 % range
+    nine = se.calibration_stats([100.0] * 8 + [130.0])
+    assert nine['se_pct'] is None and se.se_ok(nine) is None
+    assert se.over_range_cap(nine) is True
+    assert se.cal_verdict(nine) == 'OVER-CAP'
+    nine_ok = se.calibration_stats([100.0] * 8 + [101.0])
+    assert se.over_range_cap(nine_ok) is False
+    assert se.cal_verdict(nine_ok) is None             # UNJUDGEABLE, as before
+    # the verify mode has no rounds and is not capped
+    assert se.cal_verdict(se.verify_stats({'diam_px': 577.1}), True) \
+        == 'NOT-GATED'
+    assert se.cal_verdict(inc, True) == 'NOT-GATED'
+    # EVERY SET OVER THE CAP IS OVER THE SE GATE: the largest range the
+    # gate lets through is 0.4 * d2(n) * sqrt(n), 1.17 % at n=3 and 3.22 %
+    # at n=8, all under 5. So the cap can only refuse a set the gate would
+    # have prompted on, and never one the gate would have passed.
+    for n, f in se.D2_RANGE_FACTORS.items():
+        assert se.CAL_SE_PCT * f * math.sqrt(n) < se.CAL_RANGE_CAP_PCT, n
+    assert abs(se.CAL_SE_PCT * se.d2(8) * math.sqrt(8) - 3.22) < 0.01
+    # THE COST, stated: at the two-point mode's one measured sigma of
+    # 2.09 % (SLDEA_MEASUREMENT 2.1a) the EXPECTED 5-round range is
+    # d2(5) * 2.09 = 4.86 %, just under the cap, so about half of honest
+    # two-point sets at that sigma are refused (44 % of 200,000 simulated
+    # sets, 2026-10-03); the circle mode's 1.05 % sits well under it
+    assert 4.5 < se.d2(5) * 2.09 < se.CAL_RANGE_CAP_PCT
+    assert se.d2(8) * 2.09 > se.CAL_RANGE_CAP_PCT
+    assert se.d2(8) * 1.05 < 3.0
+
+
+def test_range_cap_refusal_is_plain_words_and_quotes_no_diameter():
+    """The refusal in the owner's words, with the range as a percentage
+    only: a refit is one of its two answers, so no diameter and no mean
+    may be on it (the same rule as the SE gate's prompt)."""
+    inc = se.calibration_stats(list(INCIDENT_DIAMS_PX))
+    txt = se.range_cap_text(inc)
+    assert txt == ("The three rounds differ by 23.1 percent; more than 5 "
+                   "percent cannot be trusted. Measure again, or cancel."), txt
+    txt.encode('ascii')
+    for v in ('612', '557', '701', '623.7', '623'):
+        assert v not in txt, (v, txt)
+    # the strip's form, after the dialog has closed: no choices
+    assert se.range_cap_text(inc, choices=False) == (
+        "The three rounds differ by 23.1 percent; more than 5 percent "
+        "cannot be trusted.")
+    # the count in words, as a student reads it
+    five = se.calibration_stats([100.0, 101.0, 102.0, 103.0, 106.0])
+    assert se.range_cap_text(five).startswith("The five rounds differ by "
+                                              "5.9 percent;"), \
+        se.range_cap_text(five)
+    twelve = se.calibration_stats([100.0] * 11 + [107.0])    # 7 / 100.58
+    assert se.range_cap_text(twelve).startswith("The 12 rounds differ by "
+                                                "7.0 percent;"), \
+        se.range_cap_text(twelve)
+    # one decimal, and two when one would round onto the cap itself:
+    # "5.0 percent; more than 5 percent" would read as a contradiction
+    just = se.calibration_stats([97.5, 100.0, 102.51])
+    assert se.range_cap_text(just).startswith("The three rounds differ by "
+                                              "5.01 percent; more than 5 "
+                                              "percent"), \
+        se.range_cap_text(just)
+    # a damaged record cannot raise
+    assert 'percent' in se.range_cap_text(None)
+    assert 'percent' in se.range_cap_text({'n': 'x', 'spread_pct': 'y'})
+
+
+def test_log_line_and_header_record_the_cap_verdict():
+    """A refused set is logged like every other completed round-set, with
+    verdict=OVER-CAP and outcome=refused-cap, in the same field order; the
+    header says what the word means; and a re-anchor record of an anchor
+    whose rounds were over the cap says OVER-CAP too."""
+    inc = se.calibration_stats(list(INCIDENT_DIAMS_PX))
+    line = se.calibration_log_line({
+        'when': 'W', 'mode': se.CAL_MODE_CIRCLE, 'stats': inc,
+        'gate': se.CAL_SE_PCT, 'verdict': se.cal_verdict(inc),
+        'auto_diam_px': None, 'stroke': '3 px solid',
+        'outcome': 'refused-cap', 'frame': 'b.png'})
+    assert line == ('SLDEA-CAL W mode=circle n=3 sigma=13.63% se=7.87% '
+                    'area_se=15.74% gate=0.40% verdict=OVER-CAP '
+                    'range=23.08% mean=623.73px '
+                    'diams=612.85,557.21,701.14px rot=-deg '
+                    'stroke=3 px solid auto=none outcome=refused-cap '
+                    'frame=b.png'), line
+    # the same fields in the same places as an accepted line
+    ok_line = se.calibration_log_line({
+        'when': 'W', 'mode': se.CAL_MODE_CIRCLE,
+        'stats': se.calibration_stats(list(FOUR_PCT_DIAMS_PX)),
+        'gate': se.CAL_SE_PCT, 'verdict': 'OVER-GATE', 'auto_diam_px': None,
+        'stroke': '3 px solid', 'outcome': 'accepted-override',
+        'frame': 'b.png'})
+    keys = lambda s: [b.split('=')[0] for b in s.split(' ') if '=' in b]
+    assert keys(line) == keys(ok_line), (keys(line), keys(ok_line))
+    assert 'verdict=OVER-GATE range=3.92%' in ok_line, ok_line
+    # the header names the verdict and the cap
+    assert 'OVER-CAP' in se.CAL_LOG_HEADER
+    assert f"{se.CAL_RANGE_CAP_PCT:g}% cap" in se.CAL_LOG_HEADER
+    se.CAL_LOG_HEADER.encode('ascii')
+    # a re-anchor record is built from the recorded range and n, and uses
+    # the same word for the same rounds
+    rec = se.reanchor_log_record(
+        {'method': se.ANCHOR_METHOD_MANUAL, 'cal_mode': se.CAL_MODE_CIRCLE,
+         'diam_px': 623.73, 'n_rounds': 3, 'spread_pct': 23.08,
+         'sigma_pct': 13.63, 'se_pct': 7.87},
+        {'n_derive': 4, 'n_blank': 0, 'old_diam_px': 386.8, 'mult': 2.6},
+        when='W', frame='b.png')
+    assert rec['verdict'] == 'OVER-CAP', rec
+    assert 'verdict=OVER-CAP' in se.calibration_log_line(rec)
+    rec4 = se.reanchor_log_record(
+        {'method': se.ANCHOR_METHOD_MANUAL, 'cal_mode': se.CAL_MODE_CIRCLE,
+         'diam_px': 132.6, 'n_rounds': 3, 'spread_pct': 3.92,
+         'sigma_pct': 2.32, 'se_pct': 1.34},
+        {'n_derive': 4, 'n_blank': 0, 'old_diam_px': 160.0, 'mult': 1.5},
+        when='W', frame='b.png')
+    assert rec4['verdict'] == 'OVER-GATE', rec4
+
+
+def test_cap_cancel_strip_says_which_scale_still_stands():
+    """After the cap's refusal and a cancel, the strip opens with the
+    flat notice's own sentence about which scale still stands, then the
+    refusal without its choices. The notice's wording is unchanged by the
+    shared helper."""
+    import sldea_edge_gui as gui
+    inc = se.calibration_stats(list(INCIDENT_DIAMS_PX))
+    tail = (" The three rounds differ by 23.1 percent; more than 5 percent "
+            "cannot be trusted.")
+    assert gui.cap_refused_text(inc) == "No scale set." + tail
+    assert gui.cap_refused_text(inc, {'diam_px': 623.73}, None) == \
+        "No new scale set; the earlier anchor (623.7 px) is still in use." \
+        + tail
+    assert gui.cap_refused_text(inc, None, {'diam_px': 386.8}) == \
+        ("No new scale set; the anchor recorded for this run (386.8 px) "
+         "is unchanged.") + tail
+    # the session's anchor is named first when both exist
+    assert gui.cap_refused_text(inc, {'diam_px': 623.73},
+                                {'diam_px': 386.8}).startswith(
+        "No new scale set; the earlier anchor (623.7 px)")
+    for s in (gui.cap_refused_text(inc, {'diam_px': 623.73},
+                                   {'diam_px': 386.8}),):
+        assert 'Measure again' not in s, s
+        s.encode('ascii')
+    # the flat notice's cancel sentence is the same helper plus its own
+    # statement, word for word as before
+    content = se.image_content(_incident_frame())
+    for in_use, rec in ((None, None), ({'diam_px': 623.73}, None),
+                        (None, {'diam_px': 386.8}),
+                        ({'diam_px': 'x'}, {'diam_px': -1.0})):
+        assert gui.flat_cancel_text(content, in_use, rec) == \
+            gui.scale_stands_text(in_use, rec) + ' ' \
+            + gui.flat_frame_text(content)
+    assert gui.scale_stands_text({'diam_px': 'x'}, {'diam_px': -1.0}) == \
+        "No scale set."
+
+
 def test_verify_evidence_is_four_lines_and_still_says_the_honest_part():
     """The text the operator judges on, pinned as text so both its BUDGET
     and its honesty are tests rather than a screenshot.

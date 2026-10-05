@@ -18,13 +18,11 @@ docket** — read it, not this line, for what is queued.
 **TL;DR:** on run `SLDEA_20261001_151016` the automatic disc fit refused,
 the hand dialog showed a flat grey picture, and three circles the size of
 its random starting circle were accepted as the px→mm anchor, 1.61x too
-large. The hand modes now show a contrast-stretched view, refuse a round
-whose circle was never moved, and open a frame with no usable picture on a
-plain "repeat the test" statement with Cancel as the default. No gate,
-threshold or override was changed in this pass. Added 2026-10-03 (owner
-decision 19, sub-entry at the end of this entry): hand rounds that differ
-by more than 5 percent of their mean are refused outright, with no
-override.
+large. The hand modes now show a contrast-stretched view, refuse a circle
+that was never moved, and open a frame with no usable picture on a "repeat
+the test" notice with Cancel as the default. Since 2026-10-03 (owner
+decision 19, sub-entry below) hand rounds more than 5 percent apart are
+refused outright, with no override.
 
 **Observation (run `SLDEA_20261001_151016`, re-measured 2026-10-02).**
 
@@ -224,16 +222,17 @@ behaviour was also switched off in a scratch copy to confirm its case
 fails (31 of 31 mutations caught). On a copy of the real 2026-10-01 run
 the dialog opened on the notice, three Continue presses on the spawns
 banked nothing, and Cancel with the 623.73 px guess in the session left
-it in place and said so.
+it in place and said so. Run on Windows (OpenCV 4.13) only; the
+Linux-Tk keyboard and messagebox behaviour is not bench-verified yet
+(follow-up checks in #347).
 
 ### The range cap: hand rounds more than 5 percent apart are refused outright (2026-10-03, owner decision 19)
 
 **TL;DR:** the 2026-10-01 set (three circles 23 percent apart) could
-still be accepted through the two prompts. The dialog now refuses a hand
-round-set whose rounds differ by more than 5 percent of their mean, says
-so in plain words, and offers only "measure again" or cancel. Nothing can
-accept such a set. The SE gate, the anchor guard, their prompts and their
-overrides are unchanged for every set under the cap.
+still be accepted through the two prompts. Hand rounds that differ by more
+than 5 percent of their mean are now refused outright: the only choices
+are "measure again" or cancel. Sets under the cap meet the same SE gate,
+anchor guard, prompts and overrides as before.
 
 **Observation.**
 
@@ -242,7 +241,7 @@ overrides are unchanged for every set under the cap.
   disagree", SE 7.87 percent against 0.4) and was answered "accept as
   measured"; the missing cross-check asked and was answered "use anyway".
   Both are decisions the dialog lets the operator take, and the 2026-10-02
-  pass kept them on purpose.
+  entry kept them on purpose.
 - What separates that set from an honest one is the range, not the SE.
   Through `calibration_stats` and `se_ok` on 200,000 simulated sets per
   cell (2026-10-03, not in the repo): at the circle mode's
@@ -356,7 +355,9 @@ queued: the notice, then the dialog, then one question, no anchor, one
 `verdict=OVER-CAP outcome=refused-cap` line, setup.txt and data.csv byte
 for byte as they were. The batch harness over the 16-run corpus (899
 frames) matches main's baseline exactly, as it should: the cap lives in
-the dialog and the harness never opens it.
+the dialog and the harness never opens it. Run on Windows (OpenCV 4.13)
+only; the Linux-Tk keyboard and messagebox behaviour is not
+bench-verified yet (follow-up checks in #347).
 
 ## The strain-mode uncertainty band is ±2 % of the area, and --strain-pct works on the command line (2026-10-02)
 

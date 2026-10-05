@@ -586,7 +586,8 @@ CAL_SE_PCT = 0.4
 # at 1080p land under it only 8.3 % of the time. At the two-point mode's
 # one measured sigma of 2.09 % (SLDEA_MEASUREMENT 2.1a, one session) the
 # cap bites: 5 rounds are over it 44 % of the time, 3 rounds 21 %, 8
-# rounds 69 %. That cost is stated in the handoff entry, not hidden here.
+# rounds 69 %. That cost is stated in the SLDEA_DECISIONS.md 2026-10-03
+# entry, not hidden here.
 #
 # A cap on the RANGE, not on sigma or SE, on purpose: the range is the
 # number an operator can picture ("the circles differ by a quarter of

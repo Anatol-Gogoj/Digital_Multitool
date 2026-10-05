@@ -263,6 +263,103 @@ def test_report_renders_for_every_synthetic_run():
         assert want in text, want
 
 
+def test_report_does_not_call_the_spread_a_confidence_interval():
+    """2026-10-02: the ci% column is the block-bootstrap spread of the
+    common-ray ratio. The legend used to call it 'the disc-fit's own 85%
+    confidence interval', a name the old edge-scatter formula never
+    earned (measured coverage 21-49 %) and the new number does not claim.
+    The key says what it is, and what it leaves out."""
+    root = tempfile.mkdtemp(prefix='diag_ci_')
+    d = sd.analyze(sd._synth_run(_os.path.join(root, 'SLDEA_r'), 'wrinkle'))
+    text = sd.report(d)
+    assert "85% confidence interval" not in text
+    assert 'NOT a calibrated confidence' in text
+    assert 'block bootstrap' in text and 'behind the leads' in text
+
+
+def _ink_run(dirpath):
+    """A run the boundary tracker can work on: a dark ink disc (r=70) on
+    paper, photographed at rest three times (baseline, 0.25 kV post and
+    pre) and twice at 3 kV, grown to r=76 with a rippled interior."""
+    import csv
+    import cv2
+    frames = _os.path.join(dirpath, 'frames')
+    _os.makedirs(frames, exist_ok=True)
+    yy, xx = np.mgrid[0:360, 0:640]
+    rows = []
+    specs = (('baseline', 0.0, 70, False), ('post-ramp', 0.25, 70, False),
+             ('pre-ramp', 0.25, 70, False), ('post-ramp', 3.0, 76, True),
+             ('pre-ramp', 3.0, 76, True))
+    for k, (tag, kv, r, ripple) in enumerate(specs):
+        img = np.full((360, 640), 190.0, np.float32)
+        disc = (xx - 320) ** 2 + (yy - 180) ** 2 <= r * r
+        img[disc] = 172.0
+        if ripple:
+            img[disc] += 6.0 * np.sin((xx[disc] + yy[disc]) / 2.5)
+        img += np.random.default_rng(40 + k).normal(0, 1.5, img.shape)
+        fn = f'SLDEA_s{k:02d}_{kv:05.2f}kV_{tag}.png'
+        cv2.imwrite(_os.path.join(frames, fn),
+                    np.clip(img, 0, 255).astype(np.uint8))
+        rows.append({'step': (k + 1) // 2, 'tag': tag, 'nominal_kV': kv,
+                     'frame_file': fn})
+    with open(_os.path.join(dirpath, 'data.csv'), 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=['step', 'tag', 'nominal_kV',
+                                          'frame_file'])
+        w.writeheader()
+        w.writerows(rows)
+    with open(_os.path.join(dirpath, 'setup.txt'), 'w') as f:
+        f.write("SLDEA Test -- synthetic\nDEA nominal diameter: 16 mm\n")
+    return dirpath
+
+
+def test_report_states_what_the_tracker_reads_at_rest():
+    """2026-10-02: every disc-fit area is a ratio to the rays the tracker
+    measures on the baseline frame. The report has one 'tracker at
+    rest' line with the facts a Save stamps into setup.txt: how many
+    rays found the edge, the hidden share, their one-sidedness, and the
+    ellipse/circle offset the old estimator read on the resting disc.
+    A run with no resting disc claims nothing."""
+    import sldea_edge as se
+    root = tempfile.mkdtemp(prefix='diag_rest_')
+    d = sd.analyze(_ink_run(_os.path.join(root, 'SLDEA_k')))
+    rest = d['tracker_rest']
+    assert rest and tuple(rest) == se.PROVENANCE_KEYS, rest
+    assert rest['base_rays'] >= 300, rest           # no leads: all round
+    assert rest['base_hidden_pct'] < 20.0, rest
+    assert rest['base_one_sided'] < 0.2, rest
+    assert abs(rest['base_ellipse_over_circle'] - 1.0) < 0.02, rest
+    a0 = d['baseline_disc']['area_px']
+    by_kv = {}
+    for p in d['frames']:
+        by_kv.setdefault(p['kv'], []).append(p)
+    assert all(p['method'] == 'disc-fit' for p in by_kv[0.25] + by_kv[3.0])
+    for p in by_kv[0.25]:
+        assert abs(p['area_px'] / a0 - 1.0) < 0.01, p['area_px'] / a0
+    for p in by_kv[3.0]:
+        assert abs(p['area_px'] / a0 - (76 / 70) ** 2) < 0.03, \
+            p['area_px'] / a0
+    text = sd.report(d)
+    line = [ln for ln in text.splitlines() if ln.startswith('tracker at rest')]
+    assert len(line) == 1, line
+    assert f"{rest['base_rays']} of 360 rays find the ink edge" in line[0]
+    # the share is 1 - base_rays/360: leads, foil AND faint-ink rays, so
+    # the line must not call all of it 'hidden' (review 2026-10-02)
+    assert '% of the perimeter not usable' in line[0], line
+    assert 'no ink step' in line[0], line
+    assert 'perimeter hidden' not in line[0], line
+    assert 'one-sidedness' in line[0] and 'ellipse/circle' in line[0], line
+    assert 'old area method' in line[0], line
+    text.encode('ascii')
+    # no resting disc, no line: nothing is claimed about a tracker
+    # that never ran
+    bare = sd.report(sd.analyze(sd._synth_run(
+        _os.path.join(root, 'SLDEA_w'), 'wrinkle')))
+    assert 'tracker at rest' not in bare
+    # a resting disc the tracker cannot measure says so
+    d['tracker_rest'] = None
+    assert 'tracker at rest : NO READING' in sd.report(d)
+
+
 def test_report_is_ascii_so_a_cp1252_console_cannot_kill_it():
     """The bench and analysis consoles are cp1252, and report() goes both
     to stdout and to sldea_diag.txt written with the locale codec — so

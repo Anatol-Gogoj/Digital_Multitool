@@ -18,6 +18,7 @@ as of 2026-08-12; read them for background, never update them.
 | `PROJECT_HANDOFF.md` | frozen 2026-08-12: the project state and open decisions at that date. Code comments cite its "open decision" numbers |
 | `RUN_SHEET.md` | frozen 2026-08-12: that date's docket as a tick-off list |
 | `README.md` | setup, transports, every bench-verified instrument quirk |
+| `CHANGELOG.md` | what shipped in each release, TL;DR first; the GitHub release carries the matching manual PDF |
 | `docs/SLDEA_QUICKSTART.md` | the new student's bench procedure, unpowered rig to exported plot; it opens with a box the lab must fill in (HV authorization, discharge, emergency) |
 | `SLDEA_DECISIONS.md` | measurement-chain decision log (append-only, dated). Renamed from `SLDEA_HANDOFF.md` on 2026-10-05; older code comments and docs still cite the old name |
 | `SLDEA_MEASUREMENT.md` | the error budget — what uncertainty to quote and why |

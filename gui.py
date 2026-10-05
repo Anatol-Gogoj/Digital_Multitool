@@ -2723,7 +2723,11 @@ LOGGING:
                        lambda _ev: self._sldea_conc_sync())
         electrode.bind('<KeyRelease>', lambda _ev: self._sldea_conc_sync())
         self._sldea_conc_sync()
-        self.sldea_trek_inv = tk.BooleanVar(value=False)
+        # Ticked by default (owner decision 2026-10-05): every run on file
+        # with monitor readings read NEGATIVE kV with the box unticked and
+        # no INVERTED line in setup.txt, i.e. the lab's Trek inverts. A
+        # preset still sets it either way; setup.txt records INVERTED.
+        self.sldea_trek_inv = tk.BooleanVar(value=True)
         add_tooltip(ttk.Checkbutton(outf, text="Trek inverts (negate "
                                                 "control)",
                                     variable=self.sldea_trek_inv),
@@ -2731,7 +2735,9 @@ LOGGING:
                     "control voltage (inverting amp config/input). The run "
                     "then drives a negative control so the HV output is "
                     "positive, and the V_Out monitor reading is sign-"
-                    "corrected in the log.").grid(row=5, column=0,
+                    "corrected in the log. Ticked by default: the lab's "
+                    "Trek inverts. Untick it for an amplifier wired "
+                    "non-inverting.").grid(row=5, column=0,
                                                   columnspan=3, sticky='w',
                                                   pady=(4, 0))
         # row=5, BELOW the electrode+concentration pair: those two define

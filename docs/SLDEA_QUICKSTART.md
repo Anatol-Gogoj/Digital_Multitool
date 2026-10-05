@@ -110,7 +110,7 @@ The pre-flight picture appears when you press Run (section 5). Judge it like thi
    channel is on, so it would not notice. Set coupling on the scope itself, or ask. (If the lab
    wants the button used: tick "Enable Channel" and type "Vertical (V/div)" and "Position (div)"
    first.) Do not press "Stop", "Single" or "AutoSet" before a run.
-3. "Trek inverts (negate control)" is unticked at start (a preset can tick it). Ticked, the run (a)
+3. "Trek inverts (negate control)" is ticked at start (a preset can untick it). Ticked, the run (a)
    sends the signal generator a negative control voltage, (b) makes the scope check expect V_Out to
    swing 0 to minus kV, (c) multiplies logged V_Out and I_Out by -1. Its hint: "Tick when the Trek
    outputs NEGATIVE kV for a positive control voltage". Which setting this bench needs is a lab
@@ -120,8 +120,8 @@ The pre-flight picture appears when you press Run (section 5). Judge it like thi
    "meas" kV is what the scope read, after the "Trek inverts" box was applied. At the first landing
    (0.25 kV by default) the size should be close and the sign must be the one the lab gave you. If
    not, press "Abort" and ask. On file, all 14 runs that have readings (2026-10-01 among them) read
-   negative, and none has the "INVERTED" line in setup.txt, so a negative sign may be normal here.
-   The lab decides.
+   negative with the box unticked, and none has the "INVERTED" line in setup.txt. That is why the
+   box now starts ticked: with it, the first "meas" line should read positive. The lab decides.
 5. The off-screen warning starts "V_Out off-screen (9.9E37 sentinel)" and goes on "measured_kV logs
    blank from here; vertical window too small". The scope gave no valid V_Out reading, so from that
    photo on the voltage is not recorded. The run does not stop and areas do not depend on it, but

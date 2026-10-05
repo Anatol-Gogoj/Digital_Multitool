@@ -16,408 +16,167 @@ docket** — read it, not this line, for what is queued.
 ## Edge Review says what went wrong at capture before the review starts, and Save keeps the runner's notes (2026-10-02)
 
 **TL;DR:** picking a run in Edge Review now shows a "Run health" strip
-that says in plain sentences whether the pictures are usable and what the
-run's own files record about the capture: a blank or overexposed baseline,
-a refused disc fit, missing voltage or current readings, an early end, a
-watchdog stop, missing frames, off-screen samples in `telemetry.csv`. It
-is advice only and blocks nothing. Save no longer erases the notes the
-runner wrote at capture (`V_Out off-screen (clipped)`, the `WATCHDOG`
-note). Since 2026-10-03 (sub-entry below) the `--auto` launch holds its
-own Detect press on a STOP run, a run the live watchdog stopped is a
-confirmed breakdown at its trip row unless the reading that tripped it
-was the off-screen sentinel, and streaks in `telemetry.csv` become
-advisory notes.
+that says in plain sentences whether the pictures are usable and what went
+wrong at capture; it is advice and blocks nothing. Save no longer erases
+the notes the runner wrote at capture. Since 2026-10-03 the auto-process
+does not press Detect on a STOP run, a watchdog stop is a confirmed
+breakdown unless its reading was the off-screen sentinel, and the monitor
+log adds advisory notes.
 
 ### 2026-10-03: `--auto` holds on a STOP, the watchdog's trip row confirms, the monitor log advises (decisions 16 and 17)
 
-**TL;DR:** when the SLDEA tab's auto-process opens Edge Review on a run
-with a STOP, nothing is pressed for you: the strip and the canvas show
-the STOP, the canvas says that detection was not started and why, and
-Detect still works by hand. A run that the live watchdog stopped is now
-a confirmed breakdown at its trip row, reason `watchdog trip`, unless
-the reading that tripped it was the scope's off-screen sentinel; then
-the row gets a note saying so and nothing is marked from the trip alone.
-The monitor log (`telemetry.csv`) is read for notes only: a streak of
-samples away from rest becomes a note on the next picture's row, with
-the time, the voltage and the length. It never marks a breakdown and
-never renames a frame.
+**TL;DR:** when the SLDEA tab's auto-process opens Edge Review on a STOP
+run, Detect is no longer pressed for you; the canvas says why and the
+button still works by hand. A run the live watchdog stopped is a confirmed
+breakdown at its trip row, unless the reading that tripped it was the
+scope's off-screen sentinel. Streaks in the monitor log (`telemetry.csv`)
+become advisory notes that never mark a breakdown or rename a frame.
 
-**Observation (code read 2026-10-03, corpus measured the same day).**
+**Observation (code read and corpus measured 2026-10-03).**
 
-- How the runner records a trip (`gui.py`: the trip branch of
-  `_sldea_worker` and `_sldea_capture`; `sldea_profile.TelemetryLog.event`).
-  The watchdog decides on a monitor read. The runner then writes three
-  things. (1) A `run.log` line, `BREAKDOWN CONFIRMED — I=-240 µA
-  sustained >3s`, or `I=OFF-SCREEN (clipping); last readable -16 µA`
-  when that read was the sentinel. (2) A `telemetry.csv` event row,
-  `BREAKDOWN CONFIRMED`, off the same read: `measured_uA` the number and
-  `i_status` `ok`, or a blank current and `i_status` `offscreen`. (3) The
-  `data.csv` trip row: tag `breakdown`, step 99, note `WATCHDOG:
-  breakdown confirmed (dev >100µA for 3s)`, whose `measured_uA` cell is a
-  FRESH scope read taken with the frame, hundreds of ms later: blank
-  when that read was off-screen, and with no current note (only `V_Out`
-  gets one). So the reading that tripped the watchdog is on record in
-  the two sidecars, not in the row.
-- In the Assctuator replay the current stays off-screen 9.5 s past a
-  3 s trip, so a blank cell on the trip row is the expected shape of a
-  hard short. The sentinel alone is not proof of a large current: both
-  2026-08-05 runs returned it at 0 kV.
-- No corpus run holds a trip row (0 of 16). The trip rule is proven on
-  synthetic folders only.
-- The five telemetry runs at `breakdown_dev_ua` = 20 µA, rest = the
-  median of the 0 kV samples (-16.0 µA on four of them, -1.05 on
-  1001_151016): Assctuator has 2 streaks (2 samples 1.5 s into the run
-  at 0.15 to 0.20 kV, 112 µA from rest; 24 off-screen samples from
-  36.6 s for 12.9 s at 0.66 to 1.00 kV, to the end of the log),
-  Assctuator2 one (4 off-screen samples from 248.4 s, 1.7 s, 4.42 to
-  4.50 kV), SquareStack-1 one (636 samples from 7.2 s to the end, 267
-  off-screen, up to 800 µA from rest), 0806_151857 (3456 samples) and
-  1001_151016 (373) none. These are the streaks the review found,
-  sample for sample, and 0 notes on the 3829 healthy samples.
+- The runner writes the reading that tripped the watchdog to `run.log`
+  (`BREAKDOWN CONFIRMED — I=-240 µA sustained >3s`, or `I=OFF-SCREEN
+  (clipping); ...`) and to a `telemetry.csv` event row (`i_status` `ok` or
+  `offscreen`). The `data.csv` trip row (tag `breakdown`, `WATCHDOG` note)
+  holds a fresh read taken with the frame hundreds of ms later (`gui.py`,
+  trip branch of `_sldea_worker`; `sldea_profile.TelemetryLog.event`).
+- In the Assctuator replay the current stays off-screen 9.5 s past a 3 s
+  trip, so a blank trip-row cell is the expected shape of a hard short. The
+  sentinel alone is not proof of a large current: both 2026-08-05 runs
+  returned it at 0 kV.
+- `breakdown_flags` read only `measured_uA`, so a trip on a clipped
+  current left no flag; Assctuator and Assctuator2, the corpus's two
+  destroyed devices, got none. No corpus run holds a trip row (0 of 16).
+- The monitor log at `breakdown_dev_ua` = 20 µA, rest = the median of the
+  0 kV samples (-16.0 µA on four runs, -1.05 µA on 1001_151016), holds
+  these streaks and none in the 3829 samples of the two healthy logs:
+
+| Run | samples | streaks at 20 µA from rest | note lands on |
+|---|---|---|---|
+| Assctuator | 90 | 2 samples at 1.5 s, 0.15 to 0.20 kV, 112 µA from rest; 24 off-screen samples from 36.6 s for 12.9 s, 0.66 to 1.00 kV, to the end of the log | rows 1 (0.5 kV) and 3 (1.0 kV, the torn frame) |
+| Assctuator2 | 461 | 4 off-screen samples from 248.4 s, 1.7 s, 4.42 to 4.50 kV | row 17 (4.5 kV, the destroyed frame) |
+| SquareStack-1 | 649 | 636 samples from 7.2 s to the end, 267 off-screen, up to 800 µA from rest | row 1 (0.5 kV) |
+| 0806_151857 | 3456 | none | none |
+| 1001_151016 | 373 | none | none |
 
 **Decision.**
 
-1. **Decision 16: `--auto` holds its press on a STOP.** In
-   `EdgeReviewApp.__init__`, when `run_health` holds a `stop` item the
-   300 ms Detect press is not scheduled. The canvas shows the STOP
-   lines, then `HINT_AUTO_HELD` ("Automatic detection was NOT started:
-   Run health shows a STOP for this run ... You can still press
-   ▶ Detect Edges by hand"), then `HINT_AFTER_STOP`; the status line
-   reads `AUTO_HELD_TEXT`. No button is locked, a hand press on Detect
-   goes through as before, and a run with no STOP is pressed as before.
-   The hold is the `--auto` launch's alone: the same run opened by hand
-   shows the hint it always did. The "How to use" panel says so.
-2. **Decision 17, the trip row.** `breakdown_flags(rows, areas,
-   settings, rundir=None)` takes the run folder; `_recount` in the GUI
-   and `sldea_plot.load_run` pass it, so Edge Review and the plot reach
-   one verdict. A trip row (`is_trip_row`: tag `breakdown` or the
-   `WATCHDOG` note) is CONFIRMED, reason `breakdown? watchdog trip (I
-   -240uA, telemetry.csv)`, unless the reading that tripped it was the
-   off-screen sentinel. That reading is read from the `BREAKDOWN
-   CONFIRMED` event row of `telemetry.csv` first and the `run.log` line
-   second (`trip_reading`, `trip_verdict`). The sentinel is the ONE
-   exclusion: the row gets the advisory `watchdog trip not confirmed:
-   the reading that tripped it was the off-screen sentinel
-   (telemetry.csv)` and nothing is marked from the trip alone. A trip
-   whose reading is on record nowhere (a run from 2026-07-24 to
-   2026-08-03, when the trip row existed but `run.log` and
-   `telemetry.csv` did not; or a damaged folder) CONFIRMS on the
-   watchdog's own note, reason `breakdown? watchdog trip (reading not
-   on file)`, or `(frame read -16uA, trip reading not on file)` when the
-   row's own cell holds its later read, which is named for what it is
-   and never decides (review 2026-10-04: the first pass did not confirm
-   that case; the decision names one exclusion, so it went). The trip
-   row's own current still goes through the current rule like any
-   other row's: a -240 µA cell on the last row is a terminal event, and
-   the trip reason replaces the current rule's on that one row. Every
-   other row keeps the current-confirmed semantics unchanged, and the
-   legacy area-only fallback under 5 readings stays (decision 18). The
-   flag is one token, because `apply_results` splits a notes cell on
-   `;`.
-3. **Decision 17, the monitor log, advisory only.**
-   `telemetry_streaks(table, dev_lim, min_samples=TELEMETRY_STREAK_MIN)`:
-   a sample is a row with a parseable `measured_uA` or `i_status`
-   `offscreen`; rest is the median of the 0 kV samples; a sample is away
-   when it is off-screen or at least `breakdown_dev_ua` from rest; a
-   streak is at least 2 consecutive away samples (one sample is about
-   0.5 s at the 2 Hz log); a row with neither a reading nor the status
-   is skipped as the watchdog skips it, and neither breaks nor lengthens
-   a streak. `telemetry_advisories` puts each streak's note
-   (`telemetry_note`: `monitor log: current off-screen for 12.9 s from
-   36.6 s into the run (0.66 to 1.00 kV, 24 samples, to the end of the
-   log)`) on the first `data.csv` row whose picture was taken at or
-   after the streak began. The row's time is the `t_s` of the telemetry
-   `snap ... <frame>` event that names its frame, else its
-   `t_planned_s`; a streak no row follows goes on the last timed row.
-   The note rides the annotation channel at Save like `transient
-   discharge?`, is written once, stays beside a confirmed flag, never
-   renames a frame and never confirms. Without the folder, or without a
-   `t_s` column, nothing is said.
-4. **The strip says what the flags will do.** `run_health`'s
-   `watchdog_trip` sentence goes through the same `trip_verdict`:
-   "Edge Review marks that row as a confirmed breakdown: the current at
-   the trip is on record as -240 uA (telemetry.csv), and Save renames
-   its frame and every later one", or "does NOT mark a breakdown from
-   this stop alone: the reading that tripped the watchdog was off the
-   scope screen (the off-screen sentinel, run.log) ... That row gets a
-   note saying so, and its own current reading still counts like any
-   other row's", or, with nothing on file, "marks that row as a
-   confirmed breakdown on the watchdog's own note: the current it
-   tripped on is on record nowhere ... so it could not be checked
-   against the scope's off-screen sentinel". `telemetry_i_offscreen`
-   says the log is read for notes only. `_health_runlog` and
-   `_telemetry_table` are shared by the strip and the flags, so one
-   file is read one way.
-5. **The plot follows.** With the folder passed, `sldea_plot` draws the
-   trip row as confirmed and the monitor-log streaks as open advisory
-   diamonds. On the corpus that adds diamonds to Assctuator (rows 1 and
-   3), Assctuator2 (row 17) and SquareStack-1 (row 1), and nothing to
-   any campaign run.
-6. **The review card shows a note whole or says it is cut (review
-   2026-10-04).** The card's info panel is a fixed box of `INFO_LINES`
-   = 5 text lines (#179: a flag changes content, never layout) with
-   room for two lines of note, and measured on the real label at its
-   font every monitor-log note of the corpus needed six (596 to 836 px
-   at a 306 px wrap), so the card showed "monitor log: current
-   off-screen for 12.9 s from 36.6 s into the run (0.66 to" and never
-   the kV or the counts. Now `se.short_note` puts an advisory in the
-   card's words, the same facts in the order time, kV, what the current
-   did, counts (`monitor log: 36.6 s to the end (12.9 s), 0.66 to 1.00
-   kV, off-screen, 24 samples`), `fit_lines` cuts any flag or note to
-   the lines the box has left (an ellipsis says so; `wrap_lines` counts
-   lines exactly as Tk lays them out, checked on 400 random strings),
-   and whatever the card does not carry whole is the info panel's
-   tooltip. The long form is unchanged and is what Save writes to
-   `data.csv`. On this PC's font all four corpus notes now fit whole;
-   on a wider font the tail is cut and the tooltip holds it. The
-   sentinel advisory was shortened to fit (`watchdog trip not
-   confirmed: the reading that tripped it was the off-screen sentinel
-   (telemetry.csv)`), and the `--auto` status line says "Auto-process
-   held", the name the SLDEA tab and the manual use, not the flag.
+1. **Decision 16: `--auto` holds its Detect press on a STOP.** The 300 ms
+   press is not scheduled when `run_health` holds a `stop`, because on the
+   2026-10-01 run it opened the modal scale dialog over the strip. The
+   canvas and the status line say "Automatic detection was NOT started" and
+   "Auto-process held". No button is locked, and a run with no STOP, or one
+   opened by hand, behaves as before.
+2. **Decision 17, the trip row.** `breakdown_flags(..., rundir=None)` takes
+   the run folder (Edge Review and `sldea_plot` both pass it, so they
+   agree). A trip row (`is_trip_row`) is CONFIRMED, reason `breakdown?
+   watchdog trip (I -240uA, telemetry.csv)`, with the reading taken from
+   `telemetry.csv` first and `run.log` second (`trip_verdict`). The one
+   exclusion is the off-screen sentinel: the row gets an advisory saying so
+   and nothing is marked from the trip alone, because a mis-ranged current
+   channel would otherwise become a confirmed breakdown. A trip whose
+   reading is on record nowhere (a run from 2026-07-24 to 2026-08-03,
+   before either sidecar existed, or a damaged folder) confirms on the
+   watchdog's note, `(reading not on file)`. Every other row keeps the current-confirmed semantics and the
+   area-only fallback under 5 readings (decision 18).
+3. **Decision 17, the monitor log, advisory only.** A sample is away when
+   it is off-screen or at least `breakdown_dev_ua` from rest; a streak is at
+   least `TELEMETRY_STREAK_MIN = 2` consecutive away samples (one sample is
+   about 0.5 s at 2 Hz). Each streak's note (`monitor log: current
+   off-screen for 12.9 s from 36.6 s into the run (0.66 to 1.00 kV, 24
+   samples, to the end of the log)`) goes on the first row whose picture was
+   taken at or after the streak began. It rides the annotation channel at
+   Save, never renames a frame and never confirms.
+4. **The strip and the plot say what the flags do.** The `watchdog_trip`
+   sentence uses the same `trip_verdict`; `sldea_plot` draws the trip row
+   as confirmed and the streaks as advisory diamonds (the table above).
+5. **The review card shows a note whole or says it is cut (2026-10-04).**
+   The info panel is a fixed 5-line box (`INFO_LINES`, #179) with two lines
+   left for a note; three of the four corpus notes needed six (596 to 836 px
+   of text at a 306 px wrap). `se.short_note` gives the card the same facts
+   in the order time, kV, current, counts (`monitor log: 36.6 s to the end
+   (12.9 s), 0.66 to 1.00 kV, off-screen, 24 samples`); `fit_lines` cuts
+   with an ellipsis and the panel's tooltip holds the full text. Save still
+   writes the long form. All four short notes (424 to 568 px, budget about
+   580 px) fit whole on the Windows font.
 
-**Tests.** `tests/test_sldea_edge.py` gains 3 cases (99 pass): the trip
-row read through `telemetry.csv`, `run.log` and the cell (a number, the
-sentinel, nothing on file with and without a later cell read, a log
-that gave up before the trip, the sentinel beside a terminal cell, the
-trip reason replacing the current rule's on its row, under 5 readings
-beside the legacy rule, the rename plan and the strip sentence in each
-case); the streak reader on a synthetic telemetry file (the single
-sample, the skipped row, a sample exactly `breakdown_dev_ua` from rest
-inside a streak, the open streak, the mixed streak, no rest, no
-columns, the short form of each note); the advisories' placement with
-a picture taken exactly on a streak's first sample, silence without the
-folder, the `_BREAKDOWN` twin name, the `t_planned_s` fallback, two
-Saves, no time column. `tests/test_sldea_edge_gui.py` rewrites the
-`--auto` case and adds the card case (62 pass): held on a STOP run with
-the words on the canvas and the status line, a press on the Detect
-widget going through, pressed on a good run, the hold absent when the
-run is opened by hand; the four corpus notes, the trip texts and two
-notes on one row drawn on the real card, each fitting `INFO_LINES` at
-the label's own font, the label's height unchanged, the tooltip holding
-the full text exactly when the card does not, a wrapped state line
-taking its line from the note, `wrap_lines` against the real label on
-120 random strings. Mutants of the decision-17 code (2026-10-04): the
-two the review found alive (`>=` to `>` on the deviation bar and on
-the placement) and seven more, all nine killed.
+**Verification.**
 
-**Open.** `TELEMETRY_STREAK_MIN = 2` is a chosen bar, not a measured
-one. Assctuator's first streak (2 samples at 0.15 to 0.20 kV, 1.5 s in)
-becomes a note on its 0.5 kV row; the rule is applied as written, with
-no judgement on whether that was a real event. The plot's new diamonds
-on the three non-campaign runs were not looked at in a figure. A trip
-with nothing on file confirms, as decision 17 is worded; the owner may
-still prefer the first pass's conservative reading (not confirmed, with
-a note), which is one branch in `trip_verdict`.
+- Decision 16: `tests/test_sldea_edge_gui.py` holds the press on a STOP run and lets a press on the real Detect widget through.
+- Trip row: `tests/test_sldea_edge.py` covers a reading on file, the sentinel, nothing on file and under 5 readings; 9 mutants, all killed.
+- Monitor log: on the 16 runs, the same 32 confirmed flags with and without the folder, plus the 4 notes above and no new flag.
+- Strip and plot: the strip sentence and the rename plan are checked in every trip case; the new plot diamonds were not looked at in a figure.
+- Card: every corpus note drawn on the real card fits `INFO_LINES`; `wrap_lines` matches the real label on 400 random strings.
 
-**No bench gate.** Analysis side only, no instrument I/O. One look on
-the Linux bench PC, HV off: open a copy of `SLDEA_20261001_151016`
-through the SLDEA tab's auto-process and check that no dialog opens,
-the STOP leads the canvas and the Detect button works by hand.
+**Open questions (Anatol's call).**
+
+- `TELEMETRY_STREAK_MIN = 2` is chosen, not measured. At 2, Assctuator's
+  2-sample excursion at 0.15 to 0.20 kV becomes a note on its 0.5 kV row.
+- A trip with nothing on file confirms, as decision 17 is worded. The
+  conservative reading (not confirmed, with a note) is one branch in
+  `trip_verdict`.
+
+### 2026-10-02: the strip, and the runner's notes through Save
 
 **Observation (the 16-run corpus, 899 frames, measured 2026-10-02).**
 
 - The 2026-10-01 run was calibrated by hand on a blank picture and
   reviewed to an empty queue. Every fact that should have stopped that was
-  already on disk and none was on screen: `setup.txt` says `exposure 3`
-  and `34 frames`, `data.csv` has 26 rows and 8 `V_Out off-screen
-  (clipped)` notes, `run.log` says `run aborted: 26/34 frames`,
-  `telemetry.csv` has `v_status = offscreen` on 66 of 205 voltage samples
-  from 2.15 kV. Edge Review opened it like any other run: an empty canvas
-  and "press Detect".
+  on disk and none was on screen: `setup.txt` says `exposure 3`, `data.csv`
+  has 26 rows and 8 `V_Out off-screen (clipped)` notes, `run.log` says
+  `run aborted: 26/34 frames`, and `telemetry.csv` has `v_status =
+  offscreen` on 66 of 205 voltage samples. Edge Review read none of them.
 - Its frames span 1 to 2 gray levels (p95 minus p5 of the central search
-  window). Every other frame in the corpus spans 30 or more; the lowest
-  is P3_7 at 30. Nothing sits between 2 and 30.
-- Two baselines are overexposed: the 2026-08-05 runs have 77.0 % and
-  72.8 % of the search window at or above 250 gray. The other fourteen
-  have 4.0 % or less. Nothing sits between.
-- `apply_results` built the notes cell of every reviewed row from
-  scratch (`edge:...` or `rejected (no reliable edge)`), so the first
-  Save erased whatever the runner had written there. 117 rows in six runs
-  carry a runner note today. Replayed in memory through two reviewed
-  Saves, 0 of the 117 kept it.
-- No corpus run holds a watchdog trip row (0 of 16), so the `WATCHDOG`
-  half is proven on synthetic rows only.
-- Nothing in Edge Review read `run.log`, the `Total:` line of
-  `setup.txt`, or `telemetry.csv`.
+  window); every other corpus frame spans 30 or more (lowest P3_7, 30).
+- The two 2026-08-05 baselines have 77.0 % and 72.8 % of the window at or
+  above 250 gray; the other fourteen have 4.0 % or less.
+- `apply_results` rebuilt the notes cell of every reviewed row, so Save
+  erased the runner's note: 117 rows in six runs carry one, and 0 of 117
+  survived two reviewed Saves.
 
 **Decision.**
 
-1. **`se.image_content` and `FLAT_CONTRAST_GRAY = 20`.** One
-   pedestal-free number for "is there a picture": p95 minus p5 of the
-   central window. Sibling branches of this review add the same
-   helper with the same text, so they merge without a conflict.
-2. **`se.run_health(rundir, run=None)`**, pure and headless. It returns
-   `{'level', 'code', 'text'}` items, `stop` first. `stop` means the run
-   cannot be measured as it is, `warn` means a human should look,
-   `info` explains. Each text is a sentence a first-year student can act
-   on.
-
-   | Code | Level | Fires when |
-   |---|---|---|
-   | `no_run_csv` | stop | the folder has no readable data CSV |
-   | `baseline_missing` | stop | no row tagged `baseline` names a frame, or its file is absent |
-   | `baseline_unreadable` | stop | the baseline file does not decode |
-   | `image_flat` | stop | `image_content` calls the baseline flat |
-   | `image_saturated` | warn | 25 % or more of the window is at or above 250 |
-   | `disc_fit_refused` | warn | `baseline_disc` refuses; the text quotes `baseline_disc_refusal` and says most frames will need a manual decision |
-   | `dry_run` | info | `setup.txt` says the HV was off; the two electrical checks are skipped |
-   | `kv_missing` | warn | powered rows without `measured_kV`; says how many and where the readings stop |
-   | `kv_sign` | info | measured kV opposes the commanded sign and `setup.txt` has no `Trek control polarity: INVERTED` line |
-   | `ua_missing` | warn | rows without `measured_uA`; says which breakdown rule the run will get |
-   | `ended_early` | warn | fewer rows than `setup.txt` planned, or `run.log` ends `aborted` short of the plan; says why when `run.log` knows |
-   | `watchdog_trip` | warn | a row tagged `breakdown`, a `WATCHDOG` note, or the `BREAKDOWN` lines of `run.log`; since 2026-10-03 it says whether the trip confirms |
-   | `frames_missing` | warn | frames named in the CSV and absent on disk |
-   | `frames_renamed` | warn | frames that are on disk under the other name of the `_BREAKDOWN` pair; says nothing is lost and that the next Save repairs the link |
-   | `frames_not_taken` | warn | rows that name no frame |
-   | `telemetry_i_offscreen` | warn | `i_status = offscreen` samples in `telemetry.csv` |
-   | `telemetry_v_offscreen` | info | `v_status = offscreen` samples in `telemetry.csv` |
-   | `setup_missing` | info | the folder has no `setup.txt` |
-
-   - The flat check suppresses `disc_fit_refused`: on a blank picture the
-     refusal is a consequence, and its gray-level wording is what the
-     student misread on 2026-10-01.
-   - `kv_sign` tells the student not to change any high-voltage setting.
-     Ticking "Trek inverts" negates the SG control, which flips the live
-     HV polarity; that is not a fix to hand out from an analysis window.
-     It says that it looks only at the sign. It does not vouch for the
-     size of a reading: the two 07-23 runs read 14 to 48 % below the
-     commanded voltage, and Assctuator's 1.00 kV frame reads 0.17 kV.
-   - `ua_missing` and `watchdog_trip` say what `breakdown_flags` will do,
-     not what it does on a healthy run. With fewer than 5 parseable
-     `measured_uA` rows it takes its legacy rule, where an area collapse
-     alone confirms and Save renames frames on it. Three corpus runs are
-     in that case: both 2026-08-05 runs (0 readings) and Assctuator (3).
-     On the 51 rows of `0805_103546` a 50 % area drop at row 30 returns
-     `{30: 'breakdown? area collapsed 50%'}` as a confirmed flag. The
-     sentence therefore reads "cannot check the current ... can still mark
-     one from a sudden drop in area alone, which is less reliable".
-     `HEALTH_MIN_UA_ROWS = 5` mirrors that threshold and a test holds the
-     two together on both sides of it.
-   - The telemetry status columns are found by name in the header. A
-     `skipped` row is not counted as a sample of that channel.
-   - A reused run name appends to `run.log`, so only the part after the
-     last `run dir:` line is read.
-   - A `run.log` with no end-of-run line is also what a run looks like
-     while it is being captured, and Edge Review opens on the newest run
-     folder. That case reads "The run is not finished ... If the run is
-     still going, wait until it ends and pick it again", not "stopped
-     early". A run opened in its first seconds has no baseline row yet
-     either. Its `baseline_missing` stays a `stop`, but it reads "no
-     baseline picture yet ... wait until it ends and pick it again" and
-     no longer "the run has to be repeated", which contradicted the
-     warning beside it. A log that records an `ERROR` keeps the old
-     sentence.
-   - A picture that is in the frames folder under the other name of its
-     `_BREAKDOWN` pair is not missing. That state is left by a rename
-     that outlived a Save which did not finish, and
-     `plan_breakdown_marks` heals it at the next Save in either
-     direction. It was counted under `frames_missing` with the advice
-     "copy the files back from the backup"; it is now `frames_renamed`.
-     The baseline keeps its `stop` in that state, because Edge Review
-     opens it by the name `data.csv` gives.
-   - The 25 % saturation cut is not tuned. It sits in the empty gap
-     between the two clusters above.
-3. **The strip.** Under the toolbar, five lines tall with its own
-   scrollbar (three or four on a screen too short for the page, see
-   below), so it changes what it says between runs and never how tall
-   it is. Every item opens with a mark that is a symbol and a word
-   (`✘ STOP`, `⚠ WARNING`, `(i) NOTE`, `✔ OK`); the Paul Tol bright
-   colour behind the mark only repeats it. `stop` sentences are also the
-   first thing on the empty canvas. With no `stop` item the canvas hint
-   is the old one, word for word. Detect and Save are not gated on any of
-   it.
-   - `--auto` was not an exception in this round: the SLDEA tab's
-     auto-process opens Edge Review with `--auto`, which pressed Detect
-     300 ms after launch on a `stop` run as on any other, and the scale
-     dialog then opened over the strip. Superseded 2026-10-03 (decision
-     16, sub-entry above): the press is held on a `stop` run.
-   - The scale dialog repeats the `stop`. It is modal, and the review
-     measured it on a copy of the 2026-10-01 run: 1020 x 826, covering
-     910 of the strip's 1290 px and most of the canvas hint. Its banner
-     read "NO automatic fit on this run ... measure the disc BY HAND.
-     Reason: ... the paper reads 67 gray", with no word of the `stop`
-     behind it, so the foreground window told the student to do what the
-     `stop` forbids. The `stop` sentences now lead that banner, ahead of
-     the fitter's reason, and under a `stop` the hand line reads "this
-     window can only measure the disc BY HAND. Read the STOP above
-     first. If it tells you not to measure, press Cancel (Esc)". Without
-     a `stop` the banner is the old one, word for word. What the `stop`
-     adds in height comes off the picture (30 px on that run: banner 66
-     against 36 px, picture 599 against 629), so the dialog is 1020 x
-     826 either way and Cancel stays on screen. The verify mode hides
-     the banner; on a `stop` run it shows the `stop` lines alone. Still
-     advice: no button is locked.
-   - Under a `stop` the canvas does not say "Detect still works". It says
-     what the button will do: with no usable baseline picture the scale
-     gate has no automatic fit to verify, so Detect first asks for a hand
-     measurement of the scale, which is what the `image_flat` sentence
-     has just told the student not to make. The hint points at the
-     frames folder for looking at the pictures.
-   - The strip adds its height to the window. On the old 760 px floor
-     its 85 px came out of the review canvas: 983 x 563 against 983 x 648
-     on main at the default 1319 px width. `_size_to_layout` now asks for
-     760 plus the strip, so the window opens 845 px tall and the canvas
-     is 983 x 648 again.
-   - On a screen too short for the page the strip gives its height back
-     (`_fit_short_screen`, decided once when the window opens). The
-     first version did not: with the screen height forced to 768 the
-     page asked 757 px in a 648 px window and the bottom 55 px of the
-     review canvas were below the fold, where main shows the whole
-     picture. Now the strip drops to four or three lines
-     (`HEALTH_MIN_LINES = 3`; the `more below` cue counts against the
-     lines shown) and the canvas asks for less (never under
-     `VIEW_MIN_H = 400`), so the page is no taller than the window, or
-     than it was before the strip existed where that was already taller
-     than the window, and the whole image is in view. Frames are drawn
-     to fit the canvas, so the picture gets smaller, not cut. Measured
-     with the screen height forced, on the analysis PC (real height
-     1029 px):
-
-     | Screen | Window | main: page, image y, cut | now: page, strip lines, image y, cut |
-     |---|---|---|---|
-     | 1080 | 760 / 845 | 672, 58..706, 0 | 757, 5, 143..791, 0 |
-     | 900 | 760 / 780 | 672, 58..706, 0 | 757, 5, 143..726, 0 |
-     | 864 | 744 | 672, 58..690, 0 | 742, 4, 128..690, 0 |
-     | 768 | 648 | 672, 58..618, 0 | 672, 3, 113..618, 0 |
-     | 720 | 600 | 672, 58..618, 35 | 633, 3, 113..579, 0 |
-     | 600 | 480 | 672, 58..618, 155 | 567, 3, 113..513, 50 |
-
-     Under about 965 px the window cannot grow by the whole strip, so
-     the image is shorter than on main (505 against 560 px at 768, 562
-     against 632 at 864, 583 against 648 at 900) but whole. No lab
-     display height is recorded in this repo, so which row the bench
-     screens are on is not known here.
-   - At the default width seven of the 16 corpus runs fit the five
-     lines, the six campaign runs among them. The other nine need 7 to
-     11, so the header says `more below: scroll with the mouse wheel or
-     the bar` whenever the text is longer than the five lines shown.
-   - The "How to use" panel (step 1) and the manual's Edge Review entry
-     in `docs/manual-src/content.json` name the strip and its STOP mark.
-     The manual PDF follows at the next release, as usual.
+1. **`se.image_content` and `FLAT_CONTRAST_GRAY = 20`:** p95 minus p5 of
+   the central window, one number for "is there a picture", set in the
+   empty gap between 2 and 30.
+2. **`se.run_health(rundir, run=None)`**, pure and headless, returns
+   `stop`, `warn` and `info` items, `stop` first, each a sentence a
+   first-year student can act on. `stop`: `no_run_csv`, `baseline_missing`,
+   `baseline_unreadable`, `image_flat`. `warn`: `image_saturated` (25 % or
+   more at or above 250, in the gap between 4.0 and 72.8 %),
+   `disc_fit_refused` (suppressed under `image_flat`), `kv_missing`,
+   `ua_missing`, `ended_early`, `watchdog_trip`, `frames_missing`,
+   `frames_renamed`, `frames_not_taken`, `telemetry_i_offscreen`. `info`:
+   `dry_run`, `kv_sign`, `telemetry_v_offscreen`, `setup_missing`.
+   `kv_sign` says not to change any HV setting, because ticking "Trek
+   inverts" flips the live polarity. `ua_missing` says that under 5 current
+   readings (`HEALTH_MIN_UA_ROWS`) an area collapse alone confirms and
+   renames, as on both 2026-08-05 runs and Assctuator.
+3. **The strip.** Under the toolbar, five lines with its own scrollbar, so
+   only its content changes between runs. Each item opens with a symbol and
+   a word (`✘ STOP`, `⚠ WARNING`, `(i) NOTE`, `✔ OK`); the Paul Tol color
+   only repeats it. `stop` sentences also lead the empty canvas and the
+   scale dialog's banner, whose hand line then says to press Cancel if the
+   STOP says not to measure. Detect and Save are not gated.
+   - The modal dialog (1020 x 826) covers 910 of the strip's 1290 px; the
+     added banner (66 against 36 px) comes off the picture, so the dialog
+     keeps its size and Cancel stays on screen.
+   - The window grows by the strip's 85 px (760 to 845), so the canvas
+     stays 983 x 648 at the default width instead of 983 x 563. On a short
+     screen the strip drops to 4 or 3 lines (`_fit_short_screen`) and the
+     image shrinks rather than being cut. With the screen height forced on
+     Windows: 583 against 648 px of image at 900, 562 against 632 at 864,
+     505 against 560 at 768, all whole; at 720 the cut below the fold goes
+     from 35 px to 0, at 600 from 155 to 50.
 4. **The runner's notes survive Save.** `RUNNER_NOTE_PREFIXES =
-   ('WATCHDOG', 'V_Out ', 'I_Out ')` is a whitelist of the tokens the
-   runner writes (`_sldea_capture` and the trip branch of
-   `_sldea_worker` in `gui.py`). On a reviewed row they are carried over
-   in front of the rebuilt part: `V_Out off-screen (clipped);
-   edge:disc-fit conf 0.90`. Everything else on a reviewed row is still
-   regenerated, so analysis notes cannot accumulate. An unreviewed row
-   keeps its cell, as before; a flag or annotation added to it now
-   replaces an older token with the same words and a different number.
-   Only a token that was in the cell before the Save is replaced, and
-   only once, so two notes of one kind found by the same Save both stay.
-   A row nothing was added to keeps its cell byte for byte, which the
-   scale-only re-anchor relies on (checked on all 899 rows: 0 changed).
-   - A whitelist and not "keep everything that is not an edge token":
-     that rule would keep stale `area dip`, `pair mismatch` and
-     `transient discharge?` notes beside the fresh ones.
-   - `I_Out ` is listed ahead of need. The runner writes no current note
-     today; its `run.log` wording is `I_Out off-screen`, and a capture
-     note would be spelled that way.
-   - `sldea_plot` finds the measurement with a search, so a capture note
-     in front of `edge:` does not hide it. A test pins that.
+   ('WATCHDOG', 'V_Out ', 'I_Out ')` whitelists the runner's tokens, kept
+   in front of the rebuilt part of a reviewed row. A whitelist, because
+   keeping everything but `edge:` would keep stale `area dip` and `pair
+   mismatch` notes. A row nothing was added to keeps its cell byte for byte
+   (899 rows: 0 changed), which the scale-only re-anchor relies on.
 
-**What the checks say on the 16 runs.** No `stop` on the six campaign
-runs that review fine; the 2026-10-01 run is the only `stop`.
+**What the checks say on the 16 runs** (0.04 to 0.14 s per run). The
+2026-10-01 run is the only `stop`; seven runs fit the strip's five lines.
 
 | Run | stop | warn | info |
 |---|---|---|---|
@@ -433,94 +192,26 @@ runs that review fine; the 2026-10-01 run is the only `stop`.
 | Assctuator2 | none | `kv_missing` (1 of 17), `ended_early` (18 of 41), `telemetry_i_offscreen` (4 of 461, from 248 s, 4.42 kV) | `kv_sign`, `telemetry_v_offscreen` (12 of 243) |
 | SquareStack-1 | none | `kv_missing` (8 of 24), `ua_missing` (9 of 25), `telemetry_i_offscreen` (267 of 649) | `kv_sign`, `telemetry_v_offscreen` (115 of 343) |
 
-The check takes 0.04 to 0.14 s per run on a local disk, the baseline disc
-fit included. That fit is cached, so the calibration dialog that follows
-reuses it.
+**Verification.**
 
-**Not decided here. These are Anatol's calls.**
+- Health checks: each on a synthetic run folder in `tests/test_sldea_edge.py` (99 pass), the current sentences held against `breakdown_flags` on both sides of 5 readings.
+- Strip: `tests/test_sldea_edge_gui.py` (62 pass) on a real window at 864, 768 and 720 px, and the scale dialog on blank and refused-fit runs.
+- Runner notes: two Saves through the real Save button; 117 of 117 corpus notes kept; 70 mutants of this part's code, all caught.
+- No bench gate (analysis side only, no instrument I/O, no capture or HV code). The strip layout and the Tk dialogs were exercised on Windows with OpenCV 4.13; the four lab-PC looks listed in #346 are follow-ups, not gates.
 
-- **Should `--auto` hold its Detect press on a `stop`?** A first draft
-  of this change did, and the review took it out: it is a gate on the
-  auto-process path, and the strip is advice. The case for it is the
-  2026-10-01 run, where the scale dialog opens over the strip 300 ms
-  after launch on a blank picture. Decided 2026-10-03 (decision 16,
-  sub-entry above): it holds.
-- **`FLAT_CONTRAST_GRAY = 20` is not tuned either.** It sits in the
-  empty band between 2 and 30. A noise-free synthetic disc 10 to 19
-  gray levels darker than its paper is called blank by `image_content`
-  and `baseline_disc` still fits it (checked at 320 x 240, 1280 x 960
-  and 1920 x 1080); at 5 levels the fit refuses. No real frame is in
-  that band. On such a run the strip says "blank" and the scale dialog
-  opens in the verify mode with the `stop` above the fit's evidence.
-  The constant is shared with the sibling branches, so moving it is one
-  decision for all three.
-- **The legacy area-only breakdown rule is unchanged.** Under 5 current
-  readings an area collapse alone still confirms a breakdown and renames
-  frames (three corpus runs, above). The strip now says so; whether a
-  run with no current readings should be allowed to rename frames at all
-  is not decided here.
-- **Breakdown confirmation and renaming were unchanged in this round.**
-  A watchdog trip row was reported by the strip and confirmed nothing by
-  itself: `breakdown_flags` read only `measured_uA`, so a trip on a
-  clipped or recovered current left no flag, no `_BREAKDOWN` rename and
-  no plot cap. Making the tag confirm by definition would also turn a
-  false trip from a mis-ranged current channel into a confirmed
-  breakdown. Decided 2026-10-03 (decision 17, sub-entry above): the
-  trip confirms unless its reading was the off-screen sentinel.
-- **Telemetry was not an event source in this round.** `run_health`
-  counted off-screen samples and fed nothing back. Assctuator (24
-  samples, 12.9 s) and Assctuator2 (4 samples) are the two destroyed
-  devices in the corpus, and both returned no flag. The off-screen
-  sentinel alone is not proof of a clip: both 2026-08-05 runs returned
-  it at 0 kV. Decided 2026-10-03 (decision 17, sub-entry above):
-  streaks in the log become advisory notes, never flags.
-- **`data.csv.bak` is still overwritten by every Save.** After this
-  change that copy holds the runner's notes too, but the second Save
-  still replaces the pre-review CSV.
-- **Measured against commanded voltage is not checked.** Assctuator's
-  1.00 kV frame was taken at 0.17 kV. A tolerance would have to scale
-  with the scope's V/div: 13 of the 16 readings in the two 07-23 runs
-  fall outside 0.12 kV + 3 %, and those are scope faults, not drive
-  faults.
-- **Hand-typed notes on a reviewed row are still dropped**, as before.
-  Only the whitelist is kept.
+**Open questions (Anatol's call).**
 
-**Tests.** `tests/test_sldea_edge.py` gains 16 cases (96 pass):
-`image_content`, each `run_health` check on a synthetic run folder, the
-current sentences held against `breakdown_flags` on both sides of the
-5-reading threshold, an earlier run's lines in a reused `run.log` not
-leaking into this run, the notes surviving two Saves through `load_run`
-and `write_back`, and stale analysis notes not piling up.
-`tests/test_sldea_edge_gui.py` gains 5 (59 pass): the wording helpers,
-the strip on a real window (STOP first, Detect goes to the scale gate
-and that gate has no fit to verify, Detect and Save still work, a
-failing check costs only the advice, a failed load leaves no verdict
-behind), `--auto` pressing Detect on a STOP run (rewritten 2026-10-03
-to the hold), the window growing by
-the strip while the canvas keeps its height, the scroll cue, and two
-Saves through the real Save button. 38 mutants were run against these
-tests (18 of the new edge code, 20 of the wording, strip and notes
-changes that followed the review); all 38 were caught.
-
-The second review round added two GUI cases (61 pass) and extended two
-edge cases (still 96): the window opened with the screen height forced
-to 864, 768 and 720 px (strip shorter, whole image in view, page no
-taller than before the strip, nothing given back beyond what was owed),
-the scale dialog on a blank baseline (STOP first, reworded hand line,
-same window height), on a refused fit that is not blank (old banner) and
-on a `stop` run that still has a fit (STOP alone in the verify mode),
-the `frames_renamed` item in both directions against what
-`plan_breakdown_marks` then does, and the live-run wording of
-`baseline_missing`. 32 more mutants of that round's code were run; all
-32 were caught, two of them only after the tests were tightened.
-
-**No bench gate.** Analysis side only: no instrument I/O, no capture or
-HV code, and no new file type in a run folder. One look is still owed on
-the Linux bench PC, with no HV: the strip was only seen on Windows, so
-open one real run there and check that the marks and the five-line strip
-draw as intended, and that the whole review image is on screen (the
-short-screen path was only measured by forcing the screen height on the
-analysis PC).
+- `FLAT_CONTRAST_GRAY = 20` is not tuned: noise-free synthetic discs 10 to
+  19 gray levels below their paper are called blank while `baseline_disc`
+  still fits them. No real frame is in that band.
+- Under 5 current readings the legacy area-only rule still confirms and
+  renames frames (three corpus runs); whether such a run should rename at
+  all is not decided.
+- Measured against commanded voltage is not checked (Assctuator's 1.00 kV
+  frame reads 0.17 kV), but 13 of 16 readings in the two 07-23 runs miss
+  0.12 kV + 3 % from scope faults, so a tolerance must scale with V/div.
+- `data.csv.bak` is overwritten by every Save, and hand-typed notes on a
+  reviewed row are still dropped. Lab display heights are not recorded.
 
 ## The strain-mode uncertainty band is ±2 % of the area, and --strain-pct works on the command line (2026-10-02)
 

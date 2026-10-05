@@ -779,6 +779,45 @@ def test_a_stream_that_delivers_nothing_falls_back_to_one_shot_stills():
             "an empty staging dir was left behind"
 
 
+def test_the_last_still_gets_its_row_even_when_its_frame_never_comes():
+    """Adversarial review 2026-10-05: the loop ends 0.3 s after the
+    staircase, the final pre-ramp is snap_lead_s before it, and a stream
+    still waits up to STILL_WAIT_S for its frame -- so a last still with no
+    frame in time was DROPPED: no data.csv row at all. Here the camera
+    stops delivering well before the last still. Every scheduled still
+    must still have its row; the last one is a NO FRAME row (blank
+    frame_file), and the run still ends complete with N/N."""
+    _need_cv()
+    p = _short_profile()
+    snaps = sorted(p.snapshots, key=lambda s: s['t'])
+    with tempfile.TemporaryDirectory() as tmp:
+        first_open = []
+
+        class _StopsEarly(_FakeCam):
+            # frames until shortly before the last still, then nothing,
+            # for this stream and any the reader reopens
+            def read(self):
+                if time.monotonic() > first_open[0] + snaps[-1]['t'] - 0.6:
+                    time.sleep(self.period)
+                    return None
+                return super().read()
+
+        def stream(spec, fps=10):
+            if not first_open:
+                first_open.append(time.monotonic())
+            return _StopsEarly()
+
+        app = _StubApp()
+        rundir = _drive(app, tmp, stream, _no_oneshot)
+        data = _read_csv(os.path.join(rundir, 'data.csv'))
+        assert len(data) == len(snaps), (len(data), len(snaps), app.lines)
+        assert data[-1]['frame_file'] == '', data[-1]
+        assert data[-1]['tag'] == snaps[-1]['tag'], data[-1]
+        assert data[0]['frame_file'], data[0]
+        assert any(l == f"run complete: {len(snaps)}/{len(snaps)} frames"
+                   for l in app.lines), app.lines
+
+
 def test_the_sg_is_zeroed_before_the_recorder_is_stopped():
     """A LIVE run's shutdown order, with a fake SG: nothing about the
     video may come before the HV is at zero."""

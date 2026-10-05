@@ -4645,6 +4645,23 @@ LOGGING:
                 rec.set_t0(t0)            # frames join the staircase clock
             # which still the last full restamp was requested for, and when
             stamp_for, stamp_req_t = None, None
+
+            def stream_frame_for(i):
+                """(frame, t) off the recorder for still `i`, or (None,
+                None) when no acceptable frame has arrived yet: one
+                captured no earlier than the still's scheduled moment and,
+                when a full restamp was requested for it, no earlier than
+                that restamp. One rule for the run loop and for the stills
+                still pending when the staircase ends (2026-10-05)."""
+                nb = snaps[i]['t']
+                if stamp_for == i and rec.can_restamp:
+                    rt = rec.restamp_done_t()
+                    nb = (max(nb, rt) if rt is not None
+                          and rt >= stamp_req_t else None)
+                if nb is None:
+                    return (None, None)
+                return rec.latest_rgb(not_before=nb)
+
             last_status = -1.0
             last_kv = None
             last_mon = -1.0
@@ -4813,13 +4830,7 @@ LOGGING:
                 while si < len(snaps) and el >= snaps[si]['t']:
                     got = (None, None)
                     if rec is not None:
-                        nb = snaps[si]['t']
-                        if stamp_for == si and rec.can_restamp:
-                            rt = rec.restamp_done_t()
-                            nb = (max(nb, rt) if rt is not None
-                                  and rt >= stamp_req_t else None)
-                        if nb is not None:
-                            got = rec.latest_rgb(not_before=nb)
+                        got = stream_frame_for(si)
                         if got[0] is None and \
                                 el - snaps[si]['t'] < self.SLDEA_STILL_WAIT_S:
                             break              # try again next tick
@@ -4837,6 +4848,25 @@ LOGGING:
                         fg='#8a5a00' if dry else '#a01010')
                     last_status = el
                 time.sleep(self.SLDEA_POLL_S)
+            # THE LAST STILL OF A VIDEO RUN (adversarial review 2026-10-05).
+            # The loop above ends 0.3 s after the staircase, but a stream
+            # still may wait up to STILL_WAIT_S (1.5 s) for its frame, and
+            # the final pre-ramp is scheduled snap_lead_s (1 s by default)
+            # before the end. A still still waiting when the loop ended
+            # was dropped: no data.csv row, no NO FRAME note, and only
+            # "N-1/N frames" in run.log to show it. Waiting longer would
+            # hold the Trek at its last level longer, so instead every
+            # still left pending on a run that reached its end gets one
+            # last look at the stream and then its row, with the frame or
+            # as NO FRAME, exactly as a still that timed out mid-run does.
+            # An aborted or tripped run writes no extra rows, as before.
+            if rec is not None and not self._sldea_stop:
+                while si < len(snaps):
+                    self._sldea_capture(p, snaps[si], si + 1, spec, framedir,
+                                        writer, fh, vch, ich, dry,
+                                        tel=tel, t0=t0, stream=True,
+                                        stream_frame=stream_frame_for(si))
+                    si += 1
             if getattr(self, '_sldea_bd_tripped', False):
                 done = 'BREAKDOWN-ABORT'
             elif self._sldea_stop:

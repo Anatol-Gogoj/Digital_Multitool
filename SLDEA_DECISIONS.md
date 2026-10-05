@@ -39,6 +39,15 @@ merge, none of them in the recording itself:
   would be the recording that fails), and a previous run's recorder that
   is still closing holds off the next ▶ Run, as it already held off the
   Webcam tab. Both pinned in `tests/test_sldea_interlock.py`.
+- The adversarial review of the rebase found the last still of a video
+  run could be **dropped**: the loop ends 0.3 s after the staircase while
+  a stream still waits up to 1.5 s for its frame, so a final pre-ramp
+  with no frame in time got no `data.csv` row at all. Every still left
+  pending on a run that reached its end now gets one last look at the
+  stream and then its row, with the frame or as NO FRAME. The Trek is not
+  held at its last level any longer for it; the cost is one scope read
+  per pending still before the zeroing. Pinned in
+  `tests/test_sldea_video.py`, which fails without it ("3/4 frames").
 
 **Observation → decision.**
 

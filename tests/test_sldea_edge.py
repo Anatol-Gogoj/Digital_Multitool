@@ -1267,6 +1267,70 @@ def test_large_trim_share_makes_the_tracker_review_only():
     assert not se.review_only(c)
 
 
+def test_the_ray_gates_read_the_figures_unrounded():
+    """Review finding (2026-10-04). The candidate carried `one_sided`
+    and `trim_share` rounded to 3 decimals and the gate compared the
+    rounded figure, so the rule was 'at least 0.6005', not 'above
+    0.6': retired 233451 row 47 measures 0.60012, was stored as 0.600
+    and was not tagged (it sat in review only because the no-step
+    audit happened to cap it). Now the candidate carries both figures
+    as _common_ray_ratio measured them, and the gate reads those: a
+    candidate at 0.6001 is tagged, one at exactly 0.6 is not."""
+    base, img = _bridged_pair(r_active=112)
+    s = dict(se.DEFAULT_SETTINGS)
+    acc = float(s['accept_conf'])
+    orig = se._common_ray_ratio
+    raw = []
+
+    def wrapped(nudge):
+        def f(r_base, r_frame, r0):
+            res, why = orig(r_base, r_frame, r0)
+            if res is not None:
+                raw.append(dict(res))
+                if nudge:
+                    res['one_sided'] = 0.60012
+                    res['trim_share'] = 0.20004
+            return res, why
+        return f
+
+    try:
+        se._common_ray_ratio = wrapped(True)
+        cands = se.candidates(base, img, s)
+        raw.clear()
+        se._common_ray_ratio = wrapped(False)
+        control = se.candidates(base, img, s)
+    finally:
+        se._common_ray_ratio = orig
+    fit = next(c for c in cands if c['method'] == 'disc-fit')
+    assert fit['one_sided'] == 0.60012 and fit['trim_share'] == 0.20004, fit
+    assert fit['ray_one_sided'] == 0.60012, fit.get('ray_one_sided')
+    assert fit['ray_trim_share'] == 0.20004, fit.get('ray_trim_share')
+    assert fit['conf'] == round(acc - 0.01, 3), fit['conf']
+    assert se.review_only(fit) and se.needs_review(cands, s)
+    # the untouched run carries the measured figures exactly as the
+    # ratio returned them, not a rounded copy
+    assert control[0]['method'] == 'disc-fit' and raw
+    match = [r for r in raw if round(r['ratio'], 5) == control[0]['area_ratio']]
+    assert match, (control[0]['area_ratio'], [r['ratio'] for r in raw])
+    assert control[0]['one_sided'] in [r['one_sided'] for r in match]
+    assert control[0]['trim_share'] in [r['trim_share'] for r in match]
+    # (this scene's one-sidedness, 0.00953, is not a 3-decimal figure,
+    # so the check above would have failed on the rounded copy)
+    assert control[0]['one_sided'] != round(control[0]['one_sided'], 3)
+    # the helper on the boundary: just over trips, exactly at does not
+    for val, tagged in ((0.6001, True), (0.60012, True), (0.6, False),
+                        (0.5999, False)):
+        c = {'method': 'disc-fit', 'conf': 0.95, 'one_sided': val,
+             'trim_share': 0.0}
+        assert se._apply_ray_gates(c, s) is tagged, (val, c)
+        assert ('ray_one_sided' in c) is tagged, (val, c)
+    for val, tagged in ((0.2001, True), (0.2, False), (0.1999, False)):
+        c = {'method': 'disc-fit', 'conf': 0.95, 'one_sided': 0.1,
+             'trim_share': val}
+        assert se._apply_ray_gates(c, s) is tagged, (val, c)
+        assert ('ray_trim_share' in c) is tagged, (val, c)
+
+
 def test_gated_frame_with_a_review_only_measurement_goes_to_a_human():
     """The gated path (the tracker measuring a no-change frame). A
     measurement the ray ratio marks review only is capped like an

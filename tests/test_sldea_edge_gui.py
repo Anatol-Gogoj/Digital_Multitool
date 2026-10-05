@@ -4896,6 +4896,25 @@ def test_tracker_card_says_what_the_number_is_and_what_the_outline_is():
                                      ray_one_sided=0.66)])
     assert t5.endswith('REVIEW ONLY, never auto-accepted: 31% trimmed '
                        '(limit 20%), one-sided 0.66 (limit 0.6).'), t5
+    # the gate compares the unrounded figures (review 2026-10-04:
+    # retired 233451 row 47 trips at 0.60012), so a figure just past
+    # the limit is printed with enough decimals to read past it, never
+    # as "0.60 (limit 0.6)"; the sentence before it keeps two decimals
+    t6 = gui.tracker_card_text([dict(disc, trim_share=0.20277,
+                                     one_sided=0.60012,
+                                     ray_trim_share=0.20277,
+                                     ray_one_sided=0.60012)])
+    assert t6.endswith('One-sidedness 0.60. REVIEW ONLY, never '
+                       'auto-accepted: 20.3% trimmed (limit 20%), '
+                       'one-sided 0.6001 (limit 0.6).'), t6
+    assert '(33 more trimmed, 20% of the rays)' in t6, t6
+    assert gui.past_limit_text(0.71, 0.6, (2, 3, 4)) == '0.71'
+    assert gui.past_limit_text(0.60012, 0.6, (2, 3, 4)) == '0.6001'
+    assert gui.past_limit_text(0.6004, 0.6, (2, 3, 4)) == '0.6004'
+    assert gui.past_limit_text(0.60004, 0.6, (2, 3, 4)) == 'over 0.6'
+    assert gui.past_limit_text(24.0, 20.0, (0, 1, 2), '%') == '24%'
+    assert gui.past_limit_text(20.04, 20.0, (0, 1, 2), '%') == '20.04%'
+    assert gui.past_limit_text(20.004, 20.0, (0, 1, 2), '%') == 'over 20%'
     # the panel follows the frame on screen, and SHOWS the whole text:
     # the label has a fixed height in lines, and Tk clips a text that
     # wraps to more lines than that without a word of complaint. With
@@ -4947,12 +4966,15 @@ def test_tracker_card_says_what_the_number_is_and_what_the_outline_is():
         assert seen_tracker, 'no tracker candidate on the fake run'
         # ...and the LONGEST text the function can produce (3-digit ray
         # counts, a 3-digit trim with its share, a 1.xxx ellipse figure,
-        # both review-only limits tripped) fits too, so a real run
-        # cannot find a longer one than the fake run did
+        # both review-only limits tripped by figures just past them, so
+        # each is printed with its most decimals) fits too, so a real
+        # run cannot find a longer one than the fake run did
         worst = dict(disc, n_common=299, n_trimmed=103, hidden_pct=69.9,
-                     trim_share=0.256, one_sided=0.99,
-                     ray_trim_share=0.256, ray_one_sided=0.99,
+                     trim_share=0.2004, one_sided=0.60012,
+                     ray_trim_share=0.2004, ray_one_sided=0.60012,
                      ellipse_over_circle=1.14699, area_ratio=1.55665)
+        assert gui.tracker_card_text([worst, rest]).endswith(
+            '20.04% trimmed (limit 20%), one-sided 0.6001 (limit 0.6).')
         need = _needed(gui.tracker_card_text([worst, rest]))
         assert need <= shown_h, (f"the longest card text needs {need} px, "
                                  f"the panel shows {shown_h}")

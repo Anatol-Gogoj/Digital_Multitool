@@ -2887,8 +2887,13 @@ def _disc_fit_candidate(prep, settings, ref, assume_responding=False):
             'arc_cov': round(cov, 2),
             'area_ratio': round(cr['ratio'], 5),
             'n_common': cr['n_common'], 'n_trimmed': cr['n_trimmed'],
-            'trim_share': round(cr['trim_share'], 3),
-            'one_sided': round(cr['one_sided'], 3),
+            # NOT rounded: _apply_ray_gates compares these two with the
+            # review-only limits, and a figure rounded for display made
+            # the rule 'at least 0.6005' (233451 row 47 at 0.60012 read
+            # 0.600 and was not tagged; review 2026-10-04). The card
+            # formats them itself.
+            'trim_share': float(cr['trim_share']),
+            'one_sided': float(cr['one_sided']),
             'hidden_pct': round(cr['hidden_pct'], 1),
             'ellipse_over_circle': round(float(a * b / (r0 * r0)), 5)}
 
@@ -3025,7 +3030,9 @@ def _apply_ray_gates(cand, settings):
     _apply_audit_gates caps a winner; needs_review then sends the frame
     to a human whatever else is on it, and reconcile_pairs never lifts
     the cap. Before this the one-sided case refused outright and the
-    reviewer saw no tracker outline at all. -> True when capped."""
+    reviewer saw no tracker outline at all. The comparison is on the
+    figures as measured (_disc_fit_candidate carries them unrounded),
+    so 0.6001 is over 0.6 and exactly 0.6 is not. -> True when capped."""
     if cand.get('method') != 'disc-fit':
         return False
     capped = False

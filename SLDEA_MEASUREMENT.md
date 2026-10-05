@@ -469,9 +469,10 @@ row 40, P3_3 rows 41–44, 233451 rows 29–33 and 47–50. **Since
 2026-10-03 (owner decision 2) the limit does not refuse**: the
 candidate keeps its number and its outline, is tagged
 `ray_one_sided`, is capped just below `accept_conf`, and the frame goes
-to a human whatever else is on it (13 of the 14 are tagged; row 47 of
-233451 reads 0.600 after rounding and is held in review by the
-no-step audit). All 31 are in review, none auto, none rejected. Through
+to a human whatever else is on it (all 14 are tagged; the gate reads
+the one-sidedness as measured, not rounded, so row 47 of 233451 at
+0.6001 is over the limit). All 31 are in review, none auto, none
+rejected. Through
 2026-10-02 the same 14 frames had no tracker outline at all. The
 60-ray and 120° limits never fired (accepted frames have at least 92
 rays and 8 blocks) and still refuse. The limit's value was tuned on

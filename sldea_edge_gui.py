@@ -1505,6 +1505,21 @@ TRACKER_LINES = 10      # tracker_card_text height (text lines), fixed so
                         # probes the rendered height.
 
 
+def past_limit_text(value, limit, decimals, unit=''):
+    """`value` (already past `limit`) printed with the fewest decimals
+    in `decimals` at which it still reads above the limit, so a figure
+    just over a limit never shows as equal to it: 0.60012 one-sided
+    printed with the card's two decimals is "0.60 (limit 0.6)", which
+    reads as a contradiction; it prints "0.6001". When even the most
+    decimals read equal (within 0.00005 of the limit), "over <limit>".
+    `unit` follows each number ('%' for the trim share)."""
+    for nd in decimals:
+        text = f"{value:.{nd}f}"
+        if float(text) > limit:
+            return text + unit
+    return f"over {limit:g}{unit}"
+
+
 def tracker_card_text(cands):
     """The boundary tracker's own account of a frame, in plain words,
     for the panel under the candidate radios (2026-10-02). '' when no
@@ -1539,11 +1554,18 @@ def tracker_card_text(cands):
         trim_pct = f"{100.0 * share:.0f}%" if share is not None else None
         lim_pct = f"{100.0 * se.RAY_MAX_TRIM_SHARE:.0f}%"
         tripped = []
+        # the tripped figure is printed with as many decimals as it
+        # takes to read above the limit (the gate compares the
+        # unrounded value, so 20.4 % or 0.6001 can trip it)
         if c.get('ray_trim_share') is not None:
-            tripped.append(f"{trim_pct} trimmed (limit {lim_pct})")
+            tripped.append(past_limit_text(
+                100.0 * float(c['ray_trim_share']),
+                100.0 * se.RAY_MAX_TRIM_SHARE, (0, 1, 2), '%')
+                + f" trimmed (limit {lim_pct})")
         if c.get('ray_one_sided') is not None:
-            tripped.append(f"one-sided {c['ray_one_sided']:.2f} "
-                           f"(limit {se.RAY_MAX_ONE_SIDED:g})")
+            tripped.append("one-sided " + past_limit_text(
+                float(c['ray_one_sided']), se.RAY_MAX_ONE_SIDED, (2, 3, 4))
+                + f" (limit {se.RAY_MAX_ONE_SIDED:g})")
         return (f"{CAND_KEYS[k]} is the ray ratio: {c['area_ratio']:.4f} x A0 "
                 f"from {c.get('n_common', 0)} rays measured on both the "
                 f"baseline and this frame"

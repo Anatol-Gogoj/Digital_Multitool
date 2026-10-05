@@ -58,17 +58,29 @@ moves.
   agrees (`REVIEW_ONLY_TAGS`, the audit tags' rule). On the gated path the
   tagged measurement is capped like an audit-dirty one, the `resting` claim
   keeps the top slot, and the frame still goes to a human. Measured: the 14
-  frames hold their tracker again, 13 tagged (one-sidedness 0.614 to 0.794;
-  233451 row 47 reads 0.600 after the candidate's 3-decimal rounding and is
-  not tagged, held in review by `audit_nostep`), all 14 in review, none
-  auto, none rejected; the harness overlay sheets draw the outline on every
-  one of them because the tagged tracker is candidate A there. The limit
-  itself (0.6) is unchanged.
+  frames hold their tracker again, all 14 tagged (one-sidedness 0.6001 to
+  0.794), all 14 in review, none auto, none rejected; the harness overlay
+  sheets draw the outline on every one of them because the tagged tracker
+  is candidate A there. The limit itself (0.6) is unchanged.
+  *Observed (review, 2026-10-04):* the candidate carried its one-sidedness
+  and trim share rounded to 3 decimals and the gate compared the rounded
+  figure, so the rule in force was "at least 0.6005": 233451 row 47
+  measures 0.60012, was stored as 0.600 and was not tagged (it sat in
+  review only because `audit_nostep` happened to cap it). *Decision:* the
+  candidate carries both figures as measured and the gate reads those; the
+  card prints a tripped figure with as many decimals as it takes to read
+  past the limit ("one-sided 0.6001 (limit 0.6)", never "0.60 (limit
+  0.6)"). Row 47 is now tagged; its status, conf and area are unchanged,
+  and no other corpus frame holds a figure between a limit and its
+  3-decimal rounding (a trim share is k/N with N at most 360, so it cannot
+  land in [0.2, 0.2005)).
 - *Decision 9: the trim share is a review-only limit too.* The share is
   `n_trimmed / (n_common + n_trimmed)`, the fraction of the rays measured
   on both frames that the trim dropped (the definition behind the 21-row
-  figure of 2026-10-02; the decision's wording `n_trimmed / n_common` at 0.2
-  would catch 40 auto rows, see the open question). It rides on every
+  figure of 2026-10-02). The decision's literal `n_trimmed / n_common` at
+  0.2 would route 40 auto rows (median 0.118, 90th percentile 0.197 on the
+  450 auto rows of `eval/a1_final3`, against 0.106 / 0.164 for the share);
+  the owner confirms which reading was meant. It rides on every
   tracker candidate as `trim_share` and on the card beside the trimmed
   count ("33 more trimmed, 14% of the rays"); above `RAY_MAX_TRIM_SHARE =
   0.2` the candidate is tagged `ray_trim_share` and treated exactly as
@@ -116,16 +128,18 @@ moves.
   and is blank for the three 152205 frames whose tag sits on B; the per-frame
   list with the tags is in the PR body.
 
-**Tests (2026-10-03).** `tests/test_sldea_edge.py` 97 (+4): one-sided rays
-return a number with its one-sidedness instead of refusing; the trim share is
-reported; a tagged tracker keeps its number and outline, is capped, is not
-lifted by hysteresis or pair agreement, and sends the frame to review from
-any slot; exactly at a limit is not over it; the gated path (claim on top,
-frame in review, the baseline frame never tagged); the pin, the fallback,
-the one-line warning, and the version stamps as text that never become
-settings. GUI 57 (+1): the card wording, the panel height for the longest
-text (`TRACKER_LINES` 8 → 10), and the version warning (absent on the pin,
-one footer line otherwise, Detect and Save unaffected). Plot 83 (+1): the
+**Tests (2026-10-03, extended 2026-10-04).** `tests/test_sldea_edge.py` 98
+(+5): one-sided rays return a number with its one-sidedness instead of
+refusing; the trim share is reported; a tagged tracker keeps its number and
+outline, is capped, is not lifted by hysteresis or pair agreement, and sends
+the frame to review from any slot; exactly at a limit is not over it and
+0.6001 is (the candidate carries the figures unrounded); the gated path
+(claim on top, frame in review, the baseline frame never tagged); the pin,
+the fallback, the one-line warning, and the version stamps as text that
+never become settings. GUI 57 (+1): the card wording (a tripped figure
+prints past the limit), the panel height for the longest text
+(`TRACKER_LINES` 8 → 10), and the version warning (absent on the pin, one
+footer line otherwise, Detect and Save unaffected). Plot 83 (+1): the
 two tidy columns. Diag 19 and tuner 26 follow the `PROVENANCE_KEYS` split;
 calibration 62, reanchor 22, trace 17, plot GUI 52 + 2 skipped + the known
 `test_resize_the_figure_follows_the_window`.

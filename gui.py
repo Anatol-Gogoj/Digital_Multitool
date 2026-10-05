@@ -2725,19 +2725,21 @@ LOGGING:
         self._sldea_conc_sync()
         # Ticked by default (owner decision 2026-10-05): every run on file
         # with monitor readings read NEGATIVE kV with the box unticked and
-        # no INVERTED line in setup.txt, i.e. the lab's Trek inverts. A
-        # preset still sets it either way; setup.txt records INVERTED.
+        # no INVERTED line in setup.txt, i.e. the lab's Trek inverts. Ticked,
+        # the run negates the CONTROL voltage only: the HV output and both
+        # monitors (which measure the output) then read positive, inside the
+        # 0..+kV window the monitor check frames. A preset still sets the
+        # box either way; setup.txt records INVERTED.
         self.sldea_trek_inv = tk.BooleanVar(value=True)
         add_tooltip(ttk.Checkbutton(outf, text="Trek inverts (negate "
                                                 "control)",
                                     variable=self.sldea_trek_inv),
                     "Tick when the Trek outputs NEGATIVE kV for a positive "
                     "control voltage (inverting amp config/input). The run "
-                    "then drives a negative control so the HV output is "
-                    "positive, and the V_Out monitor reading is sign-"
-                    "corrected in the log. Ticked by default: the lab's "
-                    "Trek inverts. Untick it for an amplifier wired "
-                    "non-inverting.").grid(row=5, column=0,
+                    "then drives a negative control so the HV output, and "
+                    "the V_Out and I_Out monitors, read positive. Ticked by "
+                    "default: the lab's Trek inverts. Untick it for an "
+                    "amplifier wired non-inverting.").grid(row=5, column=0,
                                                   columnspan=3, sticky='w',
                                                   pady=(4, 0))
         # row=5, BELOW the electrode+concentration pair: those two define
@@ -3643,24 +3645,25 @@ LOGGING:
                 self._sldea_log(f"⚠ monitor check: CH{ch} ({lbl}) "
                                 f"{'/'.join(missing)} query failed — those "
                                 f"checks were SKIPPED, not passed")
-        # Polarity-aware window (review 2026-08-04): with 'Trek inverts'
-        # the drive is negative and V_Out swings 0..−need, so the check
-        # and the fix plan must frame the window on the OTHER side of 0.
-        v_sign = -1.0 if self.sldea_trek_inv.get() else 1.0
+        # V_Out is framed 0..+need whatever 'Trek inverts' says. The
+        # monitors measure the Trek OUTPUT, and the box exists to make that
+        # output positive by negating the control (2026-10-05). The
+        # 2026-08-04 polarity-aware window framed it 0..-need instead,
+        # which put a correctly ticked run's readings off-screen: on this
+        # bench V_Out reads the opposite sign to the control, so a
+        # negative control gives a POSITIVE V_Out.
         probs = sldea_profile.monitor_problems(
             max(p.levels), v_scale=qs['v_scale'], v_atten=qs['v_atten'],
             i_scale=qs['i_scale'], i_atten=qs['i_atten'], breakdown_ua=wd_ua,
             v_position=qs['v_position'], v_offset=qs['v_offset'],
             i_position=qs['i_position'], i_offset=qs['i_offset'],
-            v_sign=v_sign)
+            v_sign=1.0)
         if not probs:
             self._sldea_log("monitor check: OK")
             return True
         plan = sldea_profile.monitor_fix_plan(max(p.levels), wd_ua,
-                                              v_sign=v_sign)
-        pol = ("Trek INVERTED: V_Out swings 0 to −{:g} V".format(
-                   max(p.levels)) if v_sign < 0
-               else "V_Out swings 0 to +{:g} V".format(max(p.levels)))
+                                              v_sign=1.0)
+        pol = "V_Out swings 0 to +{:g} V".format(max(p.levels))
         msg = ("The oscilloscope cannot correctly record this run:\n\n• "
                + "\n\n• ".join(probs)
                + f"\n\nFix it automatically?  ({pol})\n"
@@ -3690,8 +3693,7 @@ LOGGING:
                                 f"{plan['v_position']:g} div, CH{ich} "
                                 f"{plan['i_scale']:g} V/div position "
                                 f"{plan['i_position']:g} div, 1x "
-                                f"attenuation, offset 0"
-                                + (" (Trek inverted)" if v_sign < 0 else ""))
+                                f"attenuation, offset 0")
             except Exception as e:
                 messagebox.showerror("Scope", f"Could not rescale: {e}")
                 return False
@@ -4032,8 +4034,7 @@ LOGGING:
                     concentration_ml=concentration_ml))
                 if trek_sign < 0:
                     sf.write("Trek control polarity: INVERTED (control = "
-                             "-kV/gain; monitor readings sign-corrected "
-                             "in log)\n")
+                             "-kV/gain; monitor readings logged as read)\n")
                 if scope_setup:
                     sf.write("\n--- Scope vertical (read back at run "
                              "start) ---\n")
@@ -4290,14 +4291,13 @@ LOGGING:
                                 el, datetime.now().isoformat(
                                     timespec='milliseconds'),
                                 p.kv_at(el), 'BREAKDOWN CONFIRMED',
-                                ua=None if ua is None else trek_sign * ua,
-                                i_status=wst)
+                                ua=ua, i_status=wst)
                         self._sldea_capture(
                             p, {'t': el, 'step': 99,
                                 'nominal_kv': p.kv_at(el),
                                 'tag': 'breakdown'},
                             si + 1, spec, framedir, writer, fh, vch, ich,
-                            dry, vsign=trek_sign,
+                            dry,
                             note=f"WATCHDOG: breakdown confirmed "
                                       f"(dev >{wd_ua:g}µA for {wd_s:g}s)",
                             tel=tel, t0=t0)
@@ -4313,15 +4313,14 @@ LOGGING:
                             try:
                                 mv, vst_t = self.scope.measure_raw('MEAN',
                                                                    vch)
-                                kv_t = (trek_sign * measured_kv(mv)
+                                kv_t = (measured_kv(mv)
                                         if mv is not None else None)
                             except Exception:
                                 kv_t, vst_t = None, 'error'
                         tel.sample(
                             el,
                             datetime.now().isoformat(timespec='milliseconds'),
-                            p.kv_at(el),
-                            ua=None if ua is None else trek_sign * ua,
+                            p.kv_at(el), ua=ua,
                             i_status=wst, kv=kv_t, v_status=vst_t or '')
                 if sg is not None:
                     kv = p.kv_at(el)
@@ -4335,7 +4334,7 @@ LOGGING:
                 while si < len(snaps) and el >= snaps[si]['t']:
                     self._sldea_capture(p, snaps[si], si + 1, spec, framedir,
                                         writer, fh, vch, ich, dry,
-                                        vsign=trek_sign, tel=tel, t0=t0)
+                                        tel=tel, t0=t0)
                     si += 1
                 if el - last_status >= 1.0:
                     self._sldea_set_status(
@@ -4434,8 +4433,7 @@ LOGGING:
             return default
 
     def _sldea_capture(self, p, snap, index, spec, framedir, writer, fh,
-                       vch, ich, dry, note='', vsign=1.0, tel=None,
-                       t0=None):
+                       vch, ich, dry, note='', tel=None, t0=None):
         import os
         frame = None
         vst = ist = ''
@@ -4459,10 +4457,13 @@ LOGGING:
             try:
                 if t0 is not None:
                     tel_t = time.monotonic() - t0
-                # vsign applies to BOTH monitors — the Trek inverts V_Out
-                # and I_Out alike (D5 2026-08-04). Detection is deviation/
-                # abs-based, so the old kV-only correction never changed a
-                # verdict; this is provenance hygiene.
+                # Both monitors are logged AS READ (2026-10-05). They measure
+                # the Trek output, and 'Trek inverts' makes that output
+                # positive by negating the control, so a correctly set box
+                # reads positive with no correction. The 2026-08-04 rule
+                # (D5) multiplied both by -1 when the box was ticked, which
+                # turned a correct run's readings negative. Detection is
+                # deviation/abs-based, so neither rule changes a verdict.
                 #
                 # Each reading is converted straight after its OWN read,
                 # not after both: the two measure_raw calls are separate
@@ -4472,9 +4473,9 @@ LOGGING:
                 # the exact ambiguity the status column exists to remove
                 # (#159, review 2026-08-05).
                 mv, vst = self.scope.measure_raw('MEAN', vch)
-                mkv = vsign * measured_kv(mv) if mv is not None else None
+                mkv = measured_kv(mv) if mv is not None else None
                 mi, ist = self.scope.measure_raw('MEAN', ich)
-                mua = vsign * measured_ua(mi) if mi is not None else None
+                mua = measured_ua(mi) if mi is not None else None
                 if vst == 'offscreen':
                     # numeric columns stay numeric: blank cell + a note,
                     # never text in the kV column

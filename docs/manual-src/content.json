@@ -906,7 +906,7 @@
    },
    {
     "label": "Trek inverts (negate control)",
-    "what": "Ticked by default, because the lab's Trek is wired inverting: the run drives a negative control so the HV output stays positive, and the monitor readings are sign-corrected. Untick it for a non-inverting amplifier. A preset sets it either way, and setup.txt records INVERTED when it is ticked."
+    "what": "Ticked by default, because the lab's Trek is wired inverting: the run drives a negative control so the HV output, and both monitors, read positive. That is all the box changes; the readings are logged as read. Untick it for a non-inverting amplifier. A preset sets it either way, and setup.txt records INVERTED when it is ticked."
    },
    {
     "label": "Electrode",

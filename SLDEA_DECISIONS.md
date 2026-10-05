@@ -66,6 +66,42 @@ the new case opens the real box and checks the labels, the transient
 owner, Enter/Escape/close declining, and the grab hand-back. Not yet seen
 by an operator on the bench PC.
 
+## "Trek inverts" negates the control only, and starts ticked (2026-10-05)
+
+**TL;DR:** owner decision. The box is ticked by default, and ticking it now
+changes one thing: the control voltage sent to the signal generator is
+negated. The monitor check frames V_Out from 0 to +kV either way, and V_Out
+and I_Out are logged as read. This reverses the 2026-08-04 rule (D5) that a
+ticked box also framed V_Out 0..-need and multiplied both readings by -1.
+
+**Evidence.** All 14 runs on file with monitor readings read negative kV at
+a positive commanded voltage, with the box unticked and no INVERTED line in
+setup.txt (P3_6_2.5mL_20260729: -4.07 kV measured at 4.00 kV commanded, and
+the readings stop above 4.00 kV because the window was framed for the
+positive side). So on this bench the V_Out monitor reads the opposite sign
+to the control.
+
+**Why D5 was wrong for this bench.** D5 assumed the monitors follow the sign
+of the control. They measure the Trek output. Negating the control flips
+the output and both monitors together, so with the box ticked they read
+positive. Under D5 a ticked run framed the window for negative readings
+(the readings then sat above it) and multiplied them by -1 (logged
+negative): the same failure as the unticked runs on file, with no setting
+of the box that gave a positive, on-screen reading.
+
+**What changed.** `gui.py`: `trek_sign` drives `sg.set_offset` only; the
+monitor check passes `v_sign=1.0`; `_sldea_capture` lost its `vsign`
+argument; telemetry rows carry the readings as read; setup.txt says
+"monitor readings logged as read". `sldea_edge.run_health`: the `kv_sign`
+note is suppressed only for the older "sign-corrected in log" line, so a
+ticked run that still reads negative (a Trek that does not invert) is
+reported, naming the ticked box. Pinned by `tests/test_trek_polarity.py`.
+
+**Bench check.** First LIVE landing with the box ticked: `meas` positive and
+close to the commanded kV, and V_Out on screen for the whole ramp. Decision
+23 (detect the sign at the first landing) still stands for the case where
+this fails.
+
 ## Hand calibration: an untouched circle is not a fit, the hand view is contrast-stretched, and a frame with no picture says so first (2026-10-02)
 
 **TL;DR:** on run `SLDEA_20261001_151016` the automatic disc fit refused,

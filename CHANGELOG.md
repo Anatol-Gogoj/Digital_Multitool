@@ -8,10 +8,17 @@ The measurement-chain decision log (`SLDEA_DECISIONS.md`) is the record of
 
 ## Unreleased
 
-- **"Trek inverts (negate control)" starts ticked.** Every run on file read
-  negative kV with it unticked. A preset still sets it either way, and
-  setup.txt records INVERTED when it is ticked. At the first landing of a
-  LIVE run the "meas" line should now read positive.
+- **"Trek inverts (negate control)" starts ticked, and negates the control
+  only.** Every run on file read negative kV with it unticked: on this bench
+  V_Out reads the opposite sign to the control. Ticked, the run now sends a
+  negative control and nothing else changes: the scope check frames V_Out
+  from 0 to +kV, and both monitors are logged as read, so a correctly set
+  run reads positive. Until now a ticked box also framed V_Out for 0 to -kV
+  and multiplied both readings by -1, which put a correctly set run
+  off-screen and logged it negative. setup.txt records "INVERTED ...
+  monitor readings logged as read"; Edge Review's sign note now also fires
+  when a ticked run reads negative, which means that Trek does not invert.
+  A preset still sets the box either way.
 - **Manual screenshots fixed.** The v1.4.0 manual was captured on a 175
   percent display with a scaling workaround that left the Arb Editor and the
   dialogs cramped and several callouts off target. The capture now pins Tk to

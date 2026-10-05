@@ -6,10 +6,21 @@ manual PDF. Older releases are summarized here and link to their full notes.
 The measurement-chain decision log (`SLDEA_DECISIONS.md`) is the record of
 *why*; this file is the record of *what shipped*.
 
-## Unreleased
+## v1.4.1 (2026-10-05, pre-release)
+
+**TL;DR:** A bugfix release. "Trek inverts" is ticked by default and only
+flips the control, so a correctly set run reads positive kV. The camera
+pre-flight now shows exactly the exposure the run will use, after a backlit
+run whose pre-flight looked fine came out blown out. Edge Review's
+calibration questions are short, open on top, and have buttons that say what
+they do. Also new: optional lossless video beside the snapshots, which has
+**not** been bench-checked yet (BENCH_TEST section Q), so leave Record
+unticked on important runs until it has.
+
+### SLDEA test tab
 
 - **"Trek inverts (negate control)" starts ticked, and negates the control
-  only.** Every run on file read negative kV with it unticked: on this bench
+  only** (#354). Every run on file read negative kV with it unticked: on this bench
   V_Out reads the opposite sign to the control. Ticked, the run now sends a
   negative control and nothing else changes: the scope check frames V_Out
   from 0 to +kV, and both monitors are logged as read, so a correctly set
@@ -19,11 +30,65 @@ The measurement-chain decision log (`SLDEA_DECISIONS.md`) is the record of
   monitor readings logged as read"; Edge Review's sign note now also fires
   when a ticked run reads negative, which means that Trek does not invert.
   A preset still sets the box either way.
-- **Manual screenshots fixed.** The v1.4.0 manual was captured on a 175
-  percent display with a scaling workaround that left the Arb Editor and the
-  dialogs cramped and several callouts off target. The capture now pins Tk to
-  96 dpi; both manuals are regenerated.
+- **The camera pre-flight shows what the run will shoot** (#361). On run
+  13_backlight the pre-flight picture looked fine and all 60 run frames came
+  out 57 to 66 percent saturated. The pre-flight was shot at the Webcam tab's
+  locked exposure, but the run uses the Webcam panel's exposure field, and
+  the two differed. The pre-flight now uses the run's settings, and when the
+  fields and the lock differ it says so in red ("exposure 20 (locked: 4)")
+  and points at Apply & Lock. A stale camera settings file could also bring
+  old values back into the panel at start; the newer of the two settings
+  files now wins.
+- **Optional lossless video beside the snapshots** (#359). Tick Record and
+  the run also records grey FFV1 video at 1 to 2 fps, with each frame's time
+  and commanded kV in `video_frames.csv`; snapshots and `data.csv` are
+  unchanged, and Edge Review's detector can run on every frame afterwards.
+  **Not bench-verified** (BENCH_TEST section Q, including a live run with
+  the Trek HV disabled). With Record ticked, ▶ Run refuses to start beside a
+  Webcam-tab sweep on the other channel, and waits for a previous run's
+  recorder to release the camera.
+- **The run preview marks snapshots by shape** (#357): ▲ post-ramp, ■
+  pre-ramp, ◆ baseline, ○ warm-up, in Tol colours with a legend and hover
+  text, instead of green and red alone. The two timing fields share one row,
+  "Snapshots each landing", named after the snapshot each one moves.
+
+### Edge Review
+
+- **Calibration questions are short, open on top, and name their buttons**
+  (#355, #356). When the disc fit refuses a poor baseline and you measure by
+  hand, the checks that follow used to be long Yes/No boxes that could open
+  behind the calibration window. They are now short boxes with buttons such
+  as "Use unchecked scale" / "Cancel", owned by the calibration window. The
+  re-anchor question reads "Write data.csv now" / "Keep for next Save" /
+  "Cancel". Enter and Esc still pick the safe button; what each answer
+  records is unchanged.
+- **A run whose disc fit refuses the baseline still gets its A0** (#353).
+  The baseline row takes its resting area from the hand-measured scale
+  anchor, so the plot no longer drops such a run in area mode. The row says
+  where its A0 came from.
+- **The trace window no longer jumps sideways** while you place points
+  (#360). Its status line grew wider as the area gained digits and widened
+  the window.
+
+### Plot
+
+- **Up/down runs are drawn leg by leg** (#358): ▲ rising, ▼ falling, with
+  arrows in the direction of travel, instead of one averaged point per kV.
+  A new elapsed-time x axis (`--x time`) unrolls any run; `--merge-legs
+  --no-arrows` gives the old figure back. The tidy CSV gains `elapsed_s`,
+  `leg` and `cycle`. A double-click on the strain-percent panel now opens
+  the right frame.
+
+### Manual and tests
+
+- **Manual screenshots fixed** (#352). The v1.4.0 manual was captured on a
+  175 percent display with a scaling workaround that left the Arb Editor and
+  the dialogs cramped and several callouts off target. The capture now pins
+  Tk to 96 dpi; both manuals are regenerated.
 - The Arb Editor's "Upload && Select" button now reads "Upload & Select".
+- The plot's byte-identity test was failing on every machine since the
+  provenance columns were added to the tidy CSV; it now drops them by name
+  and passes.
 
 ## v1.4.0 (2026-10-05)
 

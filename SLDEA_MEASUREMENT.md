@@ -94,7 +94,11 @@ number):
   areas from area axes, the way the 2026-07-28 scale era is refused;
   the CLI's `--allow-old-estimator` draws it anyway, named in the
   caption, and the tidy CSV's `area_estimator` column says which
-  estimator wrote each `disc-fit` row.
+  estimator wrote each `disc-fit` row. Since 2026-10-03 the same Save
+  also stamps `opencv_version` and `numpy_version` (the process that
+  wrote the areas; every number here is OpenCV 4.13), the tidy CSV
+  carries them beside `area_estimator` on every machine row, and Edge
+  Review shows one warning line when it runs off the pinned OpenCV.
 - **DON'T** mix machine areas and hand-traced areas in one absolute
   comparison without the +5.5% definitional correction.
 - **DON'T** judge any machine boundary against a bar above IoU ~0.97 —
@@ -116,9 +120,9 @@ number):
 | Nominal diameter (the value the mm scale hangs on) | systematic | **closed** — anchored by the laser-cut application mask | lab confirmation 2026-08-01 (see §2.4) |
 | `disc-fit` spread (block bootstrap of the common-ray ratio) | random + uneven strain, per frame | median **0.6%**, 0.2–1.9% (5th–95th percentile), growing with voltage. **Not a calibrated confidence interval**: it holds 66% of the quiet-frame deviations from A₀ (0.25–0.5 kV, n=32) and about 90% of the detrended same-landing pre/post differences up to 4 kV, but only 50–60% above 4 kV | corpus replay 2026-10-02 (450 auto-accepted tracker rows, 8 runs, OpenCV 4.13) |
 | `disc-fit` repeatability on an unchanged disc | random, per frame | **0.08–0.26%** SD per run at 0.25–0.5 kV (rms 0.22% about A₀ over 32 frames); same-landing pre/post robust SD 0.3–0.4% up to 4 kV, 1.2% above | same replay |
-| The trim (a ray whose own ratio r_k/r_k(0) sits more than 2.5 robust sigmas from the median is dropped before the sum; `n_trimmed` on the card) | **systematic, chosen by the rule**, per frame | trimmed minus untrimmed ratio on the 450 auto-accepted rows, in points of A/A₀: median abs 0.27 / 0.33 / 0.47 / 0.85 / 0.69 by band (0–0.5 / 0.75–2 / 2.25–4 / 4.25–6 / 6.25+ kV), 90th percentile 0.7 / 0.8 / 1.9 / 2.6 / 1.8, maximum **11.8**. On the frames it moves most (`P3_5` rows 31–34 at 4.0–4.25 kV, +10.6 to +11.6; `DOT_P3_1` rows 63–75 at 8–9.5 kV, +8.5 to +11.8; 22–31% of the rays dropped) it is a modelling choice with a first-order effect, not an outlier rule: `P3_5`'s peak is 1.579 trimmed, 1.463 untrimmed, 1.595 by the independent series. Details in §2.1b | same replay, trimmed against untrimmed on the same rays |
+| The trim (a ray whose own ratio r_k/r_k(0) sits more than 2.5 robust sigmas from the median is dropped before the sum; `n_trimmed` and the trim share on the card; a share above 0.2 makes the candidate review only, never auto-accepted, since 2026-10-03) | **systematic, chosen by the rule**, per frame | trimmed minus untrimmed ratio on the 450 auto-accepted rows, in points of A/A₀: median abs 0.27 / 0.33 / 0.47 / 0.85 / 0.69 by band (0–0.5 / 0.75–2 / 2.25–4 / 4.25–6 / 6.25+ kV), 90th percentile 0.7 / 0.8 / 1.9 / 2.6 / 1.8, maximum **11.8**. On the frames it moves most (`P3_5` rows 31–34 at 4.0–4.25 kV, +10.6 to +11.6; `DOT_P3_1` rows 63–75 at 8–9.5 kV, +8.5 to +11.8; 22–31% of the rays dropped) it is a modelling choice with a first-order effect, not an outlier rule: `P3_5`'s peak is 1.579 trimmed, 1.463 untrimmed, 1.595 by the independent series. Details in §2.1b | same replay, trimmed against untrimmed on the same rays |
 | Hidden perimeter (the edge the rays cannot use is **assumed** to strain like the edge they can. On the campaign runs 32–55% of the perimeter has no measurable edge even at rest (foil, leads, faint ink), and a typical accepted frame's ratio uses about half of the perimeter) | systematic, cannot be checked from the image | not measured. Evidence of its size: agreement with an independent sector measurement within 1 point of A/A₀ per run up to 4 kV; over the whole ramp +0.4 to +1.4 points on four runs, −1.2 on P3_5, 0.0 on 104531; different shape models spread about ±2.5% at the peak. Its likely SIGN: the rays nearest the hidden sectors strain 1–4 points less than the top/bottom rays at 2.25–6 kV on four runs, so the term is probably an over-read of order 1 point at the peak (the note under table 1.1) | corpus replay + science review, 2026-10-02; sector split of the same replay |
-| Fixed ray centre (rays are cast from the BASELINE centre; a shifted disc biases the ratio when the visible rays are one-sided) | systematic, per frame | 0.22% of area per px of shift (median; 0.39% 90th percentile, 0.70% worst) → 0.04% at the ~0.2 px median rig drift. P3_5 is the exposed run (one-sidedness 0.53, 0.32%/px). Frames with one-sidedness > 0.6 are refused: there the ratio read +6.0% (median) over the independent measurement | re-cast from a moved centre, corpus replay 2026-10-02 |
+| Fixed ray centre (rays are cast from the BASELINE centre; a shifted disc biases the ratio when the visible rays are one-sided) | systematic, per frame | 0.22% of area per px of shift (median; 0.39% 90th percentile, 0.70% worst) → 0.04% at the ~0.2 px median rig drift. P3_5 is the exposed run (one-sidedness 0.53, 0.32%/px). Frames with one-sidedness > 0.6 are review only, never auto-accepted (refused outright through 2026-10-02): there the ratio read +6.0% (median) over the independent measurement | re-cast from a moved centre, corpus replay 2026-10-02 |
 | Operator trace precision (the validation floor) | random | **~1%** area (0.2–2.5%); IoU ceiling 0.973 | repeatability round, 9 repeat pairs |
 | Clean `resting` claims | bounded | ≤ ~2% (the 3 px audit-bias gate; the refit measures anything past it). Since 2026-10-02 only the baseline row and gated frames the tracker cannot measure are `resting`; of the 112 frames that used to auto-accept as exactly A₀, 111 are now measured (median +0.30%, 90th percentile +1.4%, max +2.6%) | audit + resting-refit; corpus replay 2026-10-02 |
 | Onset frames (audit-capped fits, interpolated arc) | systematic, local | ~1–2% excess understatement after decomposition | round 3, corrected by round 4 |
@@ -455,12 +459,23 @@ independent sector measurement, with the limit lifted:
 | 0.60 to 0.70 | 6 | +6.5% |
 | above 0.70 | 18 | +5.9% |
 
-The limit refuses 31 corpus frames, 26 already in review; the other 5
-are rows 29–33 of retired `SLDEA_20260723_233451` (3.0–3.4 kV, wrinkle
-onset), which used to auto-accept +2.0 to +2.7% over the independent
-value. The 60-ray and 120° limits never fired (accepted frames have
-at least 92 rays and 8 blocks). The limit's value was tuned on this
-corpus.
+In the offline ray statistics (every gate lifted) 31 corpus frames sit
+above the limit, 26 of them in review on every version and 5 (rows
+29–33 of retired `SLDEA_20260723_233451`, 3.0–3.4 kV, wrinkle onset)
+auto-accepted on `main` +2.0 to +2.7% over the independent value. In
+`candidates()` itself only 14 of the 31 ever reach the limit with a
+tracker candidate (the ellipse gates refuse the other 17 first): P3_2
+row 40, P3_3 rows 41–44, 233451 rows 29–33 and 47–50. **Since
+2026-10-03 (owner decision 2) the limit does not refuse**: the
+candidate keeps its number and its outline, is tagged
+`ray_one_sided`, is capped just below `accept_conf`, and the frame goes
+to a human whatever else is on it (13 of the 14 are tagged; row 47 of
+233451 reads 0.600 after rounding and is held in review by the
+no-step audit). All 31 are in review, none auto, none rejected. Through
+2026-10-02 the same 14 frames had no tracker outline at all. The
+60-ray and 120° limits never fired (accepted frames have at least 92
+rays and 8 blocks) and still refuse. The limit's value was tuned on
+this corpus.
 
 **Result on the six campaign runs** (old → new; A/A₀ against the
 run's own baseline row; the hand-over step is the landing-mean
@@ -533,12 +548,21 @@ one that series supports. On `DOT_P3_1` 8.5–9.5 kV the trimmed value
 sits +4.5 to +4.9 above the series and the untrimmed −6.3 to −7.3
 below it; neither reproduces it. The trim is therefore a modelling
 decision with a first-order effect at strain (the row in table 2.1),
-and the card's `n_trimmed` is the only place the operator sees it. A
-review-only tag for a trim share above about 0.2 would route 21 auto
-rows to a human, 18 of them among the 36 rows the trim moves by more
-than 2 points (the other 18 such rows sit at or below 0.2, among 429);
-that is an open owner decision (`SLDEA_HANDOFF.md`, 2026-10-02), not
-a refusal. **The fixed ray
+and the card shows `n_trimmed` with the trim share beside it. **Since
+2026-10-03 (owner decision 9) a trim share above 0.2 is a review-only
+limit**: the share is `n_trimmed / (n_common + n_trimmed)`, the
+fraction of the rays measured on both frames that the trim dropped;
+above 0.2 the candidate is tagged `ray_trim_share`, capped just below
+`accept_conf`, and the frame goes to a human (never a refusal). On the
+corpus replay this routes 21 formerly auto rows to review (`DOT_P3_1`
+rows 63–67 and 69–75 at 8–9.5 kV, `P3_5` rows 28–31, 33, 34 at
+3.5–4.25 kV, retired `152205` rows 1, 4, 6 at 0.25–0.75 kV), 18 of
+them among the 36 rows the trim moves by more than 2 points (the
+other 18 such rows sit at or below 0.2, among 429), plus 10 rows
+already in review. `P3_5`'s auto-accepted peak therefore drops from
+1.579 (row 34) to 1.281 (row 27, 3.5 kV): its top of ramp is a human's
+call. The share's median is 0.106, 90th percentile 0.164, maximum 0.31
+on the 450 auto rows of 2026-10-02. **The fixed ray
 centre:** re-casting every frame's rays from a centre moved one
 detector px changes the ratio by 0.22% of area per full-resolution px
 (median), 0.39% at the 90th percentile, 0.70% worst; P3_5 is the
@@ -625,8 +649,9 @@ the hidden-perimeter assumption), i.e. the ±1–2% of table 1.1.
   reach a tape edge the mask does not block) reads within 1.5 points
   of the independent series up to 4 kV (SD 3.0) but **+8 points above
   it at 4.25–6 kV** (n = 3), growing with voltage from +2 at 3.5 kV.
-  A trim-share refusal (n_trimmed over the common rays) was measured
-  and not adopted: the over-reading frames trim only 6–10% of their
+  A trim-share refusal was measured and not adopted (the review-only
+  tag of 2026-10-03 catches this fixture's quiet rows 1, 4 and 6, not
+  its over-reading ones): the over-reading frames trim only 6–10% of their
   rays (16–27 of about 260) against a corpus median of 11% (90th
   percentile 16%, maximum 31%), and the 12 auto rows above 25% are
   `DOT_P3_1` at 8–9.5 kV (post-washout, +3 to +5 points over the
@@ -720,8 +745,11 @@ The load-bearing choices:
    the outline, the sanity gates and the audit. The reported spread
    is the central 85% of a 20°-block bootstrap of that ratio; it is
    not a calibrated confidence interval (§2.1). The ratio refuses
-   under 60 common rays, under 120° of reach, or when the rays sit on
-   one side of the disc.
+   under 60 common rays or under 120° of reach; rays that sit on one
+   side of the disc (one-sidedness above 0.6), or a trim that dropped
+   more than a fifth of the rays measured on both frames, keep the
+   number and the outline but make the candidate review only, never
+   auto-accepted (2026-10-03).
 4. **Ranking rules with semantics.** Patches contained inside a valid
    boundary fit are supporting evidence and are capped below it. A
    per-ray self-audit (signed offset between the fitted boundary and
@@ -740,8 +768,9 @@ architecture**, held together by three invariants:
 1. **Refuse rather than fabricate.** The baseline tracer returns
    nothing unless arc coverage, fit residual, interior fill, and
    roundness all pass; the tracker's area ratio returns nothing when
-   too few rays, too little arc, or only one side of the disc is
-   measured on both frames; no-change frames are measured, or stated
+   too few rays or too little arc is measured on both frames, and
+   hands a one-sided or heavily trimmed reading to a human rather than
+   to the auto-accept; no-change frames are measured, or stated
    as the resting area where they cannot be, never given invented
    outlines; weak candidates are tagged so they can never
    auto-accept; wash-out frames route to a human rather than to the

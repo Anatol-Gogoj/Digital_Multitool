@@ -26,6 +26,110 @@ saved runs through Edge Review, which stamps the method into `setup.txt`
 and empties, never keeps, an old automatic area; until then the plot
 refuses an unstamped run from area axes, as it refuses the old scale era.
 
+### 2026-10-03: the owner's decisions 2, 9 and 29 applied (review-only tags, version stamps)
+
+**TL;DR:** a tracker reading whose rays sit on one side of the disc is no
+longer thrown away: it stays on the card as a candidate the reviewer can
+see and pick, but it can never auto-accept. The same review-only treatment
+now applies when the trim dropped more than a fifth of the rays. And every
+Save writes the OpenCV and numpy versions next to the estimator version, the
+tidy CSV carries them, and Edge Review says in one line when it runs off the
+pinned OpenCV. On the corpus 21 rows that used to auto-accept go to a human
+(DOT_P3_1 at 8 to 9.5 kV, P3_5 at 3.5 to 4.25 kV, three quiet frames of
+retired 152205), one retired-fixture row goes the other way, and no number
+moves.
+
+- *Observed (decision 2).* The one-sidedness limit of 2026-10-02 refused
+  outright, so on the 14 corpus frames where the tracker had reached a
+  candidate on `main` and was one-sided past 0.6 (P3_2 row 40, P3_3 rows
+  41 to 44, retired 233451 rows 29 to 33 and 47 to 50) the reviewer was left
+  with a patch tier or a texture blob and no tracker outline at all. (The
+  "31 frames" the 2026-10-02 entry counts came from the offline ray
+  statistics with every gate lifted; 17 of those 31 never get a tracker
+  candidate in `candidates()` on any version, because the ellipse gates
+  refuse them first, and they sit in review on `main`, on the branch as it
+  stood and now.)
+- *Decision 2: review only, never refused.* `_common_ray_ratio` no longer
+  refuses on one-sidedness. `_apply_ray_gates` (beside `_apply_audit_gates`)
+  tags the tracker candidate `ray_one_sided` with the value, caps its conf
+  just below `accept_conf` after every bonus (hysteresis, agreement), and
+  `needs_review` is True for any frame holding such a candidate among A to
+  C, wherever it ranks. `reconcile_pairs` keeps it capped when its pair
+  agrees (`REVIEW_ONLY_TAGS`, the audit tags' rule). On the gated path the
+  tagged measurement is capped like an audit-dirty one, the `resting` claim
+  keeps the top slot, and the frame still goes to a human. Measured: the 14
+  frames hold their tracker again, 13 tagged (one-sidedness 0.614 to 0.794;
+  233451 row 47 reads 0.600 after the candidate's 3-decimal rounding and is
+  not tagged, held in review by `audit_nostep`), all 14 in review, none
+  auto, none rejected; the harness overlay sheets draw the outline on every
+  one of them because the tagged tracker is candidate A there. The limit
+  itself (0.6) is unchanged.
+- *Decision 9: the trim share is a review-only limit too.* The share is
+  `n_trimmed / (n_common + n_trimmed)`, the fraction of the rays measured
+  on both frames that the trim dropped (the definition behind the 21-row
+  figure of 2026-10-02; the decision's wording `n_trimmed / n_common` at 0.2
+  would catch 40 auto rows, see the open question). It rides on every
+  tracker candidate as `trim_share` and on the card beside the trimmed
+  count ("33 more trimmed, 14% of the rays"); above `RAY_MAX_TRIM_SHARE =
+  0.2` the candidate is tagged `ray_trim_share` and treated exactly as
+  above. Measured: 31 frames carry the tag, 21 of them auto before (DOT_P3_1
+  rows 63 to 67 and 69 to 75, 8 to 9.5 kV; P3_5 rows 28 to 31, 33 and 34,
+  3.5 to 4.25 kV; 152205 rows 1, 4 and 6, 0.25 to 0.75 kV, where the
+  tagged measurement is candidate B under the `resting` claim) and 10
+  already in review (DOT_P3_1 rows 62, 68, 76, 77; P3_2 rows 39, 40, 45;
+  P3_5 rows 32, 35; 233451 row 64). P3_5's auto peak therefore moves from
+  1.579 (row 34, 4.25 kV) to 1.281 (row 27, 3.5 kV): the top of that ramp
+  is now a human's call, which is what the trim table asked for. DOT_P3_1's
+  auto peak (1.557 at 6.0 kV) is untouched.
+- *Decision 29: the versions that wrote the numbers.* `STAMP_KEYS` gained
+  `opencv_version` and `numpy_version` (`STAMP_TEXT_KEYS`, the one kind of
+  `key: text` line `_edge_block` reads, under those keys only);
+  `estimator_stamp` fills them from `library_versions()` so Edge Review's
+  Save writes them through the same path as `area_estimator`, a settings
+  save carries them over, `load_settings` never returns them, and a
+  trace-only Save keeps the recorded ones. The tidy CSV gained the two
+  columns right after `area_estimator`, filled on every machine-measured
+  row (`half-height` convention), blank on hand traces and on runs saved
+  before today; columns rather than a header line so the file stays a plain
+  CSV. Edge Review reads the pin from `requirements.txt` at import
+  (`OPENCV_PIN`, fallback `OPENCV_PIN_FALLBACK = '4.13.0'`) and shows one
+  amber line with a warning glyph at the bottom left when `cv2.__version__`
+  differs on its first three fields: "OpenCV 4.12.0 is running; the detector
+  was checked with 4.13.0 (requirements.txt). Areas may differ slightly;
+  nothing is blocked." It blocks nothing.
+- *Everything else that moved, and why.* Corpus 471 auto / 329 review / 99
+  reject → 451 / 349 / 99. Besides the 21 rows above, exactly one frame
+  changed status: retired 233451 row 34 (3.4 kV pre-ramp) went from review
+  to auto. Its own tracker is clean (one-sidedness 0.51, 1.159 × A0, conf
+  0.84 before any bonus); it was in review only as a pair mismatch against
+  row 33's patch tier (82467 px), and row 33's best candidate is now its
+  tagged tracker (118286 px), which agrees. The tagged member stays capped;
+  its clean partner is judged on its own, as with an audit-tagged partner.
+  No accepted area changed (450 frames auto on both sides, 0 moved). On the
+  20 other frames that differ only in which candidate is A (the 14 above,
+  plus hysteresis neighbours on P3_2 and 233451) the status is review on
+  both sides.
+- *Not changed.* `RAY_MAX_ONE_SIDED` stays 0.6; the trim rule (2.5 robust
+  sigma) is untouched; the numbers of every accepted frame are byte for byte
+  those of `eval/a1_final3`. The harness (`sldea_batch_eval.py`) does not
+  know the new tags, so its `reason` column reads `low_conf` for a tagged A
+  and is blank for the three 152205 frames whose tag sits on B; the per-frame
+  list with the tags is in the PR body.
+
+**Tests (2026-10-03).** `tests/test_sldea_edge.py` 97 (+4): one-sided rays
+return a number with its one-sidedness instead of refusing; the trim share is
+reported; a tagged tracker keeps its number and outline, is capped, is not
+lifted by hysteresis or pair agreement, and sends the frame to review from
+any slot; exactly at a limit is not over it; the gated path (claim on top,
+frame in review, the baseline frame never tagged); the pin, the fallback,
+the one-line warning, and the version stamps as text that never become
+settings. GUI 57 (+1): the card wording, the panel height for the longest
+text (`TRACKER_LINES` 8 → 10), and the version warning (absent on the pin,
+one footer line otherwise, Detect and Save unaffected). Plot 83 (+1): the
+two tidy columns. Diag 19 and tuner 26 follow the `PROVENANCE_KEYS` split;
+calibration 62, reanchor 22, trace 17, plot GUI 52 + 2 skipped + the known
+`test_resize_the_figure_follows_the_window`.
+
 **Observation → decision.** Measured on the 16 run folders of the review
 copy (899 frames), pinned OpenCV 4.13, replaying detection as Edge Review
 runs it; "old" is `main` at `1eb85b2`. The method tables (ellipse/circle
@@ -76,7 +180,9 @@ coverage) are in `SLDEA_MEASUREMENT.md` §2.1b, the sections they correct.
   measurement, below it +0.1 %. The 5 others are rows 29 to 33 of retired
   233451 (3.0 to 3.4 kV, wrinkle onset), which used to auto-accept +2.0 to
   +2.7 % high; a refused frame has no tracker candidate, as with any other
-  refusal. The limit's value was tuned on this corpus.
+  refusal. The limit's value was tuned on this corpus. (Superseded
+  2026-10-03, sub-entry above: the limit no longer refuses, it makes the
+  candidate review only; the 31 is the offline count, 14 in the pipeline.)
 - *Decision: a gated frame is measured, not asserted.* This reopens the
   2026-07-28 "state resting" decision on new evidence (S35, S50): the 112
   corpus frames that auto-accepted as exactly A0 hid real growth. The
@@ -235,9 +341,11 @@ per frame (DOT_P3_1 6.0 kV post-ramp: 354377 px against the saved
 its row 20 now auto-accepts at 1.022 × A0, so a plain Detect and Save
 replaces the hand trace unless the trace is staged again.
 
-**Open owner decisions.** Measuring gated frames instead of asserting A0;
-the one-sidedness limit 0.6 as a refusal versus a capped review-only
-tracker candidate (a2's `rest_ref_missing` shape); `pair_ci_pct = 0` for
+**Open owner decisions** (as of 2026-10-02; decisions 2 and 9 below were
+taken on 2026-10-03, see the sub-entry above). Measuring gated frames
+instead of asserting A0; the one-sidedness limit 0.6 as a refusal versus
+a capped review-only tracker candidate (a2's `rest_ref_missing` shape;
+taken: review only); `pair_ci_pct = 0` for
 tracked pairs; which sectors the hidden perimeter follows (a device
 statement that sets a systematic of order 1 point at peak); reprocessing
 DOT_P3_1's saved CSV and the staged hand trace on row 20; renaming
@@ -247,7 +355,7 @@ instead of the ellipse; a review-only tag (not a refusal) when the trim
 share `n_trimmed / (n_common + n_trimmed)` exceeds about 0.2, which
 would route 21 auto rows to a human, 18 of them among the 36 rows the
 trim moves by more than 2 points (the other 18 sit at or below 0.2,
-among 429).
+among 429) (taken 2026-10-03: the tag exists, 21 rows routed).
 
 **Tests.** `tests/test_sldea_edge.py` (93): the baseline measured against
 itself reads exactly 1.000 while the ellipse on that frame is off by more

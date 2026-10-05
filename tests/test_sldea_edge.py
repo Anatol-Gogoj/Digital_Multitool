@@ -11,6 +11,7 @@ import copy
 import csv
 import os
 import random
+import re
 import shutil
 import tempfile
 
@@ -1143,6 +1144,212 @@ def test_weak_gated_measurement_does_not_unseat_a_clean_resting_claim():
                for c in cands[1:])
 
 
+def _tracker_with(**fields):
+    """Context: every tracker candidate (_disc_fit_candidate) carries
+    `fields` on top of what it measured, so a scene the ray gates must
+    act on can be made without a one-sided or heavily trimmed image."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def cm():
+        orig = se._disc_fit_candidate
+
+        def patched(prep, settings, ref, assume_responding=False):
+            c = orig(prep, settings, ref, assume_responding)
+            if c is not None:
+                c.update(fields)
+            return c
+
+        se._disc_fit_candidate = patched
+        try:
+            yield
+        finally:
+            se._disc_fit_candidate = orig
+
+    return cm()
+
+
+def test_one_sided_rays_make_the_tracker_review_only_not_refused():
+    """Owner decision 2 (2026-10-03). Rays on one side of the disc past
+    RAY_MAX_ONE_SIDED used to refuse the ratio, which left the reviewer
+    with no tracker outline at all (five corpus frames then
+    auto-accepted on a patch tier instead). Now the candidate stays
+    with its number and its outline, carries `ray_one_sided`, is
+    capped just below accept_conf like an audit-tripped winner, and the
+    frame goes to review whatever else is on it. Hysteresis cannot lift
+    it (applied before the cap), and neither can pair agreement."""
+    base, img = _bridged_pair(r_active=112)
+    s = dict(se.DEFAULT_SETTINGS)
+    acc = float(s['accept_conf'])
+    control = se.candidates(base, img, s)
+    assert control[0]['method'] == 'disc-fit'
+    assert not se.needs_review(control, s)
+    assert not se.review_only(control[0])
+    assert 'ray_one_sided' not in control[0]
+    assert control[0]['one_sided'] <= se.RAY_MAX_ONE_SIDED
+    with _tracker_with(one_sided=0.71):
+        cands = se.candidates(base, img, s)
+        held = se.candidates(base, img, s, prev_method='disc-fit')
+    fit = next(c for c in cands if c['method'] == 'disc-fit')
+    assert fit['ray_one_sided'] == 0.71 and 'ray_trim_share' not in fit
+    assert fit['conf'] == round(acc - 0.01, 3), fit['conf']
+    # the number and the outline are what the untouched run measured
+    assert fit['area_px'] == control[0]['area_px']
+    assert len(fit['contour']) == len(control[0]['contour'])
+    assert se.review_only(fit)
+    assert se.needs_review(cands, s), 'a one-sided tracker auto-accepted'
+    # a patch contained in the capped fit is capped below it (the
+    # containment rule), so the frame cannot auto-accept on the patch
+    for c in cands:
+        if c.get('capped_by') == 'disc-fit':
+            assert c['conf'] < acc, c
+    hf = next(c for c in held if c['method'] == 'disc-fit')
+    assert hf.get('hyst_bonus') == 0.05 and hf['conf'] == round(acc - 0.01, 3)
+    assert se.needs_review(held, s)
+    # the tag outranks the top slot: a frame whose best candidate is
+    # something else still goes to a human while the tagged tracker is
+    # among A to C
+    other = {'method': 'diff-lo', 'area_px': 2.0 * fit['area_px'],
+             'conf': 0.9, 'spread_pct': 1.0}
+    assert se.needs_review([other, fit], s)
+    assert not se.needs_review([other], s)
+    # pair agreement keeps it capped (both snapshots see the same rays)
+    rows = [{'nominal_kV': '2'}, {'nominal_kV': '2'}]
+    pair = {0: [dict(fit)], 1: [dict(fit, conf=0.93)]}
+    pair[1][0].pop('ray_one_sided')
+    st = se.reconcile_pairs(rows, pair, s)
+    assert st['confirmed'] == 2, st
+    assert pair[0][0]['pair_confirmed'] and pair[0][0]['conf'] < acc
+    assert pair[1][0]['conf'] == 0.98
+    assert se.needs_review(pair[0], s) and not se.needs_review(pair[1], s)
+
+
+def test_large_trim_share_makes_the_tracker_review_only():
+    """Owner decision 9 (2026-10-03). The trim is a modelling choice
+    with a first-order effect at strain (SLDEA_MEASUREMENT.md 2.1b), so
+    a frame whose trim dropped more than RAY_MAX_TRIM_SHARE of the rays
+    measured on both frames is tagged `ray_trim_share` and goes to a
+    human, the same way as a one-sided frame; the share rides on every
+    tracker candidate. Both limits tripped: both tags, one cap."""
+    base, img = _bridged_pair(r_active=112)
+    s = dict(se.DEFAULT_SETTINGS)
+    acc = float(s['accept_conf'])
+    control = se.candidates(base, img, s)
+    assert 0.0 <= control[0]['trim_share'] <= se.RAY_MAX_TRIM_SHARE
+    assert abs(control[0]['trim_share'] - control[0]['n_trimmed']
+               / (control[0]['n_common'] + control[0]['n_trimmed'])) < 1e-3
+    with _tracker_with(trim_share=0.24):
+        cands = se.candidates(base, img, s)
+    fit = next(c for c in cands if c['method'] == 'disc-fit')
+    assert fit['ray_trim_share'] == 0.24 and 'ray_one_sided' not in fit
+    assert fit['conf'] == round(acc - 0.01, 3), fit['conf']
+    assert fit['area_px'] == control[0]['area_px']
+    assert se.review_only(fit) and se.needs_review(cands, s)
+    # exactly at the limit is not over it
+    with _tracker_with(trim_share=se.RAY_MAX_TRIM_SHARE):
+        at = se.candidates(base, img, s)
+    assert not se.review_only(at[0]) and not se.needs_review(at, s)
+    with _tracker_with(trim_share=0.31, one_sided=0.66):
+        both = se.candidates(base, img, s)
+    bf = next(c for c in both if c['method'] == 'disc-fit')
+    assert bf['ray_trim_share'] == 0.31 and bf['ray_one_sided'] == 0.66
+    assert bf['conf'] == round(acc - 0.01, 3)
+    # the gate helper itself: tracker candidates only, the cap is never
+    # raised, and a clean candidate is left exactly as it was
+    c = {'method': 'disc-fit', 'conf': 0.5, 'one_sided': 0.9,
+         'trim_share': 0.5}
+    assert se._apply_ray_gates(c, s) and c['conf'] == 0.5
+    c = {'method': 'diff-hi', 'conf': 0.95, 'one_sided': 0.9}
+    assert not se._apply_ray_gates(c, s) and c['conf'] == 0.95
+    c = {'method': 'disc-fit', 'conf': 0.95, 'one_sided': 0.2,
+         'trim_share': 0.1}
+    assert not se._apply_ray_gates(c, s) and c['conf'] == 0.95
+    assert not se.review_only(c)
+
+
+def test_gated_frame_with_a_review_only_measurement_goes_to_a_human():
+    """The gated path (the tracker measuring a no-change frame). A
+    measurement the ray ratio marks review only is capped like an
+    audit-dirty one, so the audit-clean 'resting' claim keeps the top
+    slot as before; but the tagged measurement is on the card, so the
+    frame goes to review instead of auto-accepting the claim. Before
+    2026-10-03 the tracker refused such a frame and the claim
+    auto-accepted with no outline to judge."""
+    rng = np.random.default_rng(11)
+    base = _bridged_scene(with_disc=True)
+    img = np.clip(base + rng.normal(0, 1.0, base.shape), 0,
+                  255).astype(np.float32)
+    s = dict(se.DEFAULT_SETTINGS)
+    acc = float(s['accept_conf'])
+    assert not se.needs_review(se.candidates(base, img, s), s)
+    with _tracker_with(one_sided=0.8):
+        cands = se.candidates(base, img, s)
+    assert cands[0]['method'] == 'resting', \
+        [(c['method'], c['conf']) for c in cands]
+    assert cands[0].get('capped_by') is None
+    assert cands[0]['conf'] >= acc
+    rf = next(c for c in cands if c.get('resting_refit'))
+    assert rf['ray_one_sided'] == 0.8
+    assert rf['conf'] == round(acc - 0.01, 3), rf['conf']
+    assert se.needs_review(cands, s), 'the claim auto-accepted over a ' \
+        'review-only measurement'
+    # the baseline frame itself is never measured against itself, so
+    # nothing there can be tagged
+    with _tracker_with(one_sided=0.8):
+        bl = se.candidates(base, base, s)
+    assert [c['method'] for c in bl] == ['resting']
+    assert not se.needs_review(bl, s)
+
+
+def test_opencv_pin_is_read_from_requirements_and_the_warning_is_one_line():
+    """Owner decision 29 (2026-10-03). The detector was validated under
+    one OpenCV (every corpus figure), so Edge Review says in one plain
+    line when another one is running. The pin is requirements.txt's
+    opencv line, read at import, with a constant fallback for a
+    checkout without the file; the comparison is on the first three
+    fields (the wheel's fourth field never reaches cv2.__version__).
+    The warning is text only: it blocks nothing."""
+    assert re.fullmatch(r'\d+\.\d+\.\d+', se.OPENCV_PIN), se.OPENCV_PIN
+    assert re.fullmatch(r'\d+\.\d+\.\d+', se.OPENCV_PIN_FALLBACK)
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    req = open(os.path.join(here, 'requirements.txt'), encoding='utf-8').read()
+    m = re.search(r'^opencv-python(?:-headless)?==(\d+\.\d+\.\d+)', req, re.M)
+    assert m and m.group(1) == se.OPENCV_PIN == se._read_opencv_pin(), \
+        (m and m.group(1), se.OPENCV_PIN)
+    d = tempfile.mkdtemp(prefix='edge_pin_')
+    try:
+        assert se._read_opencv_pin(os.path.join(d, 'none.txt')) \
+            == se.OPENCV_PIN_FALLBACK
+        p = os.path.join(d, 'requirements.txt')
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write("numpy==2.4.6\n")
+        assert se._read_opencv_pin(p) == se.OPENCV_PIN_FALLBACK
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write("# cv\nopencv-python-headless==4.12.0.88\nnumpy==2.4.6\n")
+        assert se._read_opencv_pin(p) == '4.12.0'
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write("opencv-python==5.0.1\n")
+        assert se._read_opencv_pin(p) == '5.0.1'
+    finally:
+        shutil.rmtree(d)
+    # the running version against the pin
+    assert se.opencv_version_warning('4.13.0', '4.13.0') == ''
+    assert se.opencv_version_warning('4.13.0', '4.13.0.92') == ''
+    w = se.opencv_version_warning('4.12.0', '4.13.0')
+    assert w and '\n' not in w and len(w) < 160, w
+    assert 'OpenCV 4.12.0' in w and '4.13.0' in w and 'requirements.txt' in w
+    assert 'nothing is blocked' in w.lower(), w
+    assert se.opencv_version_warning('5.0.0-dev', '4.13.0')
+    # the defaults are the running cv2 and the pin read at import
+    import cv2
+    want = se.opencv_version_warning(cv2.__version__, se.OPENCV_PIN)
+    assert se.opencv_version_warning() == want
+    # the library versions a Save stamps are the running ones
+    libs = se.library_versions()
+    assert libs['opencv_version'] == cv2.__version__
+    assert libs['numpy_version'] == np.__version__
+
+
 # ---------------------------------------------------------------------------
 # The common-ray area ratio (2026-10-02): A and A0 are one functional.
 # ---------------------------------------------------------------------------
@@ -1274,13 +1481,16 @@ def _rays(r, lo, hi):
 
 
 def test_common_ray_ratio_refuses_rather_than_fabricates():
-    """R3. Too few common rays, rays reaching under 120 degrees, rays on
-    one side of the disc, or no baseline rays at all: no number."""
+    """R3. Too few common rays, rays reaching under 120 degrees, or no
+    baseline rays at all: no number. Rays on one side of the disc are a
+    number WITH its one-sidedness on it (review only past the limit,
+    owner decision 2 of 2026-10-03; until then they refused)."""
     full = np.full(360, 100.0)
     res, why = se._common_ray_ratio(full, full * 1.1, 100.0)
     assert why is None and abs(res['ratio'] - 1.21) < 1e-9, (res, why)
     assert res['n_common'] == 360 and res['hidden_pct'] == 0.0
     assert res['one_sided'] < 1e-9
+    assert res['n_trimmed'] == 0 and res['trim_share'] == 0.0
     # no baseline rays
     res, why = se._common_ray_ratio(None, full, 100.0)
     assert res is None and 'baseline' in why, why
@@ -1294,9 +1504,12 @@ def test_common_ray_ratio_refuses_rather_than_fabricates():
     # 100 rays squeezed into 100 degrees: 5 blocks, under the 120 deg floor
     res, why = se._common_ray_ratio(full, _rays(110.0, 0, 100), 100.0)
     assert res is None and '100 deg' in why, why
-    # 150 degrees on one side: enough rays and blocks, but one-sided
+    # 150 degrees on one side: enough rays and blocks, so a number, but
+    # one-sided past the limit; the caller makes it review only
     res, why = se._common_ray_ratio(full, _rays(110.0, 0, 150), 100.0)
-    assert res is None and 'one side' in why, why
+    assert why is None and res['one_sided'] > se.RAY_MAX_ONE_SIDED, \
+        (res, why)
+    assert abs(res['ratio'] - 1.21) < 1e-9
     # two opposed 75-degree arcs (the campaign geometry): balanced, fine
     two = _rays(110.0, 50, 125)
     two[230:305] = 110.0
@@ -1319,6 +1532,10 @@ def test_common_ray_ratio_trims_jumped_rays_and_counts_them():
     res, why = se._common_ray_ratio(base, bad, 100.0)
     assert why is None
     assert res['n_trimmed'] >= 12, res
+    # the trim share is the dropped share of the rays measured on both
+    assert abs(res['trim_share'] - res['n_trimmed']
+               / (res['n_common'] + res['n_trimmed'])) < 1e-12, res
+    assert 0.03 <= res['trim_share'] <= se.RAY_MAX_TRIM_SHARE, res
     assert abs(res['ratio'] - clean['ratio']) < 0.003, (res, clean)
     untrimmed = float(np.sum(bad ** 2) / np.sum(base ** 2))
     assert abs(untrimmed - clean['ratio']) > 0.01     # it mattered
@@ -1389,7 +1606,13 @@ def test_estimator_stamps_roundtrip_and_never_become_settings():
     facts about data.csv, not knobs: load_settings must never return
     them, a settings save (tuner, settings dialog) must carry them over
     untouched, and a stamp-only save must not pin detection settings
-    nobody chose. No stamp = the old ellipse estimator."""
+    nobody chose. No stamp = the old ellipse estimator. Since 2026-10-03
+    (owner decision 29) the OpenCV and numpy versions of the saving
+    process ride on the same stamp as text lines, read back as text."""
+    libs = se.library_versions()
+    assert tuple(libs) == se.STAMP_TEXT_KEYS, libs
+    assert all(re.fullmatch(r'\d+\.\d+\.\d+\S*', v) for v in libs.values()), \
+        libs
     d = tempfile.mkdtemp(prefix='edge_est_')
     try:
         with open(os.path.join(d, 'setup.txt'), 'w', encoding='utf-8') as f:
@@ -1409,41 +1632,58 @@ def test_estimator_stamps_roundtrip_and_never_become_settings():
                 'base_one_sided': 0.008,
                 'base_ellipse_over_circle': 1.07418}
         stamp = se.estimator_stamp(prov)
-        assert stamp == dict(prov, area_estimator=2)
+        assert stamp == dict(prov, area_estimator=2, **libs)
         assert tuple(stamp) == se.STAMP_KEYS
         se.stamp_area_estimator(d, stamp)
         assert se.saved_area_estimator(d) == se.AREA_ESTIMATOR_VERSION == 2
-        assert se.load_stamp(d) == {k: float(v) for k, v in stamp.items()}
+        assert se.load_stamp(d) == {
+            k: (v if k in se.STAMP_TEXT_KEYS else float(v))
+            for k, v in stamp.items()}
         assert se.load_settings(d) == before, "a stamp leaked into settings"
         assert not any(k in se.load_settings(d) for k in se.STAMP_KEYS)
+        assert not se.has_saved_settings(os.path.join(d, 'nope'))
         text = open(os.path.join(d, 'setup.txt'), encoding='utf-8').read()
         assert text.count(se.EDGE_HDR) == 1
         assert text.count('area_estimator: 2\n') == 1
         assert 'base_ellipse_over_circle: 1.07418\n' in text
         assert 'base_rays: 246\n' in text and 'blur_px: 9' in text
+        assert f"opencv_version: {libs['opencv_version']}\n" in text, text
+        assert f"numpy_version: {libs['numpy_version']}\n" in text, text
         # a later settings save keeps every stamp line; the version-only
-        # stamp (no provenance) replaces them with the version alone
+        # stamp (no provenance) replaces them with the version and the
+        # library versions alone
         s['blur_px'] = 7
         se.save_settings(d, s)
         assert se.load_stamp(d)['base_rays'] == 246.0
+        assert se.load_stamp(d)['opencv_version'] == libs['opencv_version']
         assert se.load_settings(d)['blur_px'] == 7
         se.stamp_area_estimator(d)
         se.stamp_area_estimator(d)
-        assert se.load_stamp(d) == {'area_estimator': 2.0}
+        assert se.load_stamp(d) == dict({'area_estimator': 2.0}, **libs)
         text = open(os.path.join(d, 'setup.txt'), encoding='utf-8').read()
         assert text.count('area_estimator: 2') == 1 and 'blur_px: 7' in text
         assert text.count('blur_px') == 1
+        assert text.count('opencv_version') == 1
         # a provenance the tracker could not complete writes what it has
         se.stamp_area_estimator(d, se.estimator_stamp(
             {'base_rays': 100, 'base_hidden_pct': 72.2,
              'base_one_sided': 0.41, 'base_ellipse_over_circle': None}))
-        assert se.load_stamp(d) == {'area_estimator': 2.0, 'base_rays': 100.0,
-                                    'base_hidden_pct': 72.2,
-                                    'base_one_sided': 0.41}
-        # an explicit older version can be written (and read back)
-        se.save_settings(d, s, stamp=se.estimator_stamp(None, version=1))
+        assert se.load_stamp(d) == dict(
+            {'area_estimator': 2.0, 'base_rays': 100.0,
+             'base_hidden_pct': 72.2, 'base_one_sided': 0.41}, **libs)
+        # an explicit older version can be written (and read back); a
+        # stamp handed no library versions (libs={}) records none, and
+        # a version text _edge_block could not read back is not written
+        se.save_settings(d, s, stamp=se.estimator_stamp(None, version=1,
+                                                        libs={}))
         assert se.saved_area_estimator(d) == 1
         assert se.load_stamp(d) == {'area_estimator': 1.0}
+        se.save_settings(d, s, stamp=se.estimator_stamp(
+            None, libs={'opencv_version': '4.12.0-dev',
+                        'numpy_version': 'not a version'}))
+        assert se.load_stamp(d) == {'area_estimator': 2.0,
+                                    'opencv_version': '4.12.0-dev'}
+        assert se.load_settings(d)['blur_px'] == 7
     finally:
         shutil.rmtree(d)
     # a run nobody tuned: the stamp alone, no settings pinned, the scale
@@ -1458,7 +1698,8 @@ def test_estimator_stamps_roundtrip_and_never_become_settings():
         se.stamp_area_estimator(d)
         text = open(os.path.join(d, 'setup.txt'), encoding='utf-8').read()
         block = text.split(se.EDGE_HDR, 1)[1].strip().splitlines()
-        assert block == ['area_estimator: 2'], block
+        assert block == ['area_estimator: 2'] + [
+            f"{k}: {v}" for k, v in libs.items()], block
         assert not se.has_saved_settings(d)
         assert se.load_settings(d) == dict(se.DEFAULT_SETTINGS, diam_mm=12.0)
         assert se.load_scale_anchor(d)['diam_px'] == 577.1
@@ -1486,7 +1727,7 @@ def test_baseline_provenance_is_what_the_tracker_reads_at_rest():
     base = _flared_scene()
     prov = se.baseline_provenance(base, s)
     assert prov is not None
-    assert tuple(prov) == se.STAMP_KEYS[1:], prov
+    assert tuple(prov) == se.PROVENANCE_KEYS, prov
     assert 60 <= prov['base_rays'] <= 300, prov
     assert abs(prov['base_hidden_pct']
                - 100.0 * (1 - prov['base_rays'] / 360.0)) < 0.06
@@ -1495,8 +1736,10 @@ def test_baseline_provenance_is_what_the_tracker_reads_at_rest():
     c, _ratio = _track(base, base, s)
     assert prov['base_ellipse_over_circle'] == c['ellipse_over_circle']
     assert prov['base_ellipse_over_circle'] > 1.02
-    # the stamp carries exactly these facts beside the version
-    assert se.estimator_stamp(prov) == dict(prov, area_estimator=2)
+    # the stamp carries exactly these facts beside the version and the
+    # library versions
+    assert se.estimator_stamp(prov) == dict(prov, area_estimator=2,
+                                           **se.library_versions())
     # no resting disc, no provenance (and no baseline, none either)
     assert se.baseline_provenance(_bridged_scene(with_disc=False, seed=3),
                                   s) is None

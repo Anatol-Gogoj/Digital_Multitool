@@ -1489,18 +1489,20 @@ def hot_slot(entries, chosen, sel):
     return None
 
 
-TRACKER_LINES = 8       # tracker_card_text height (text lines), fixed so
+TRACKER_LINES = 10      # tracker_card_text height (text lines), fixed so
                         # a frame with no tracker candidate changes the
                         # content, not the layout (#179). Sized to the
                         # LONGEST text the function can produce at the
                         # panel's wraplength (3-digit ray counts, a 3-digit
-                        # trim, a 1.xxx ellipse figure): 7 lines at the
+                        # trim with its share, a 1.xxx ellipse figure, and
+                        # both review-only limits tripped): 9 lines at the
                         # 9 pt default font on Windows, measured
-                        # 2026-10-02, plus one line for the wider default
+                        # 2026-10-03, plus one line for the wider default
                         # font of the Linux bench PC. It was 4, and Tk
                         # clipped the outline sentence, the one thing the
-                        # panel exists to say (review 2026-10-02). The GUI
-                        # test probes the rendered height.
+                        # panel exists to say (review 2026-10-02); 8 until
+                        # the review-only sentence arrived. The GUI test
+                        # probes the rendered height.
 
 
 def tracker_card_text(cands):
@@ -1518,8 +1520,13 @@ def tracker_card_text(cands):
     it used (`n_common`), what share of the perimeter it did NOT use
     (`hidden_pct` = 1 - n_common/360: behind the leads or the foil, no
     ink step on the ray, or trimmed; all of it assumed to strain like
-    the rest), and whether the rays sit on one side of the disc
-    (`one_sided`; the ratio is refused above se.RAY_MAX_ONE_SIDED).
+    the rest), how much of the measured edge the trim dropped
+    (`trim_share`, beside the trimmed count), and whether the rays sit
+    on one side of the disc (`one_sided`). Past se.RAY_MAX_TRIM_SHARE
+    or se.RAY_MAX_ONE_SIDED the candidate is REVIEW ONLY (2026-10-03,
+    owner decisions 2 and 9: tagged `ray_trim_share` / `ray_one_sided`,
+    never auto-accepted), and the last sentence says so and names the
+    limit that tripped; otherwise it names both limits.
     The outline sentence comes second, right after the number, so it
     is on screen even if a future font pushes the tail off the panel.
     Pure, so it is a headless test."""
@@ -1528,18 +1535,33 @@ def tracker_card_text(cands):
             continue
         eoc = c.get('ellipse_over_circle')
         hidden = c.get('hidden_pct')
+        share = c.get('trim_share')
+        trim_pct = f"{100.0 * share:.0f}%" if share is not None else None
+        lim_pct = f"{100.0 * se.RAY_MAX_TRIM_SHARE:.0f}%"
+        tripped = []
+        if c.get('ray_trim_share') is not None:
+            tripped.append(f"{trim_pct} trimmed (limit {lim_pct})")
+        if c.get('ray_one_sided') is not None:
+            tripped.append(f"one-sided {c['ray_one_sided']:.2f} "
+                           f"(limit {se.RAY_MAX_ONE_SIDED:g})")
         return (f"{CAND_KEYS[k]} is the ray ratio: {c['area_ratio']:.4f} x A0 "
                 f"from {c.get('n_common', 0)} rays measured on both the "
                 f"baseline and this frame"
-                + (f" ({c.get('n_trimmed')} more trimmed)"
+                + (f" ({c.get('n_trimmed')} more trimmed"
+                   + (f", {trim_pct} of the rays" if trim_pct else '')
+                   + ")"
                    if c.get('n_trimmed') else '')
                 + f". The drawn outline is the ellipse, not the number: "
                   f"it encloses "
                 + (f"{eoc:.3f} x A0" if eoc is not None else "a different area")
                 + f". Not used: {hidden:.0f}% of the edge (behind leads or "
                   f"foil, no ink step, or trimmed), assumed to strain like "
-                  f"the rest. One-sidedness {c.get('one_sided', 0):.2f} "
-                  f"(refused above {se.RAY_MAX_ONE_SIDED:g}).")
+                  f"the rest. One-sidedness {c.get('one_sided', 0):.2f}."
+                + (" REVIEW ONLY, never auto-accepted: "
+                   + ", ".join(tripped) + "."
+                   if tripped else
+                   f" Review only above {lim_pct} trimmed or "
+                   f"{se.RAY_MAX_ONE_SIDED:g} one-sided."))
     return ''
 
 
@@ -1905,6 +1927,19 @@ class EdgeReviewApp:
         self.howto_btn = ttk.Button(foot, text=HOWTO_BTN_TEXT,
                                     command=self._howto)
         self.howto_btn.pack(side=tk.RIGHT)
+        # One plain line, bottom-left, when the OpenCV in this process is
+        # not the one requirements.txt pins (se.opencv_version_warning,
+        # 2026-10-03): every number in SLDEA_MEASUREMENT.md was measured
+        # under the pin. Advisory only: no button, dialog or measurement
+        # changes with it. The glyph carries the meaning beside the
+        # colour (the queue label's amber), never the colour alone. Empty
+        # text on the pinned version, so the row holds the button alone.
+        self.cv_warn = se.opencv_version_warning()
+        self.cv_warn_lbl = tk.Label(foot, fg='#8a5a00', anchor='w',
+                                    text=("⚠ " + self.cv_warn)
+                                    if self.cv_warn else '')
+        if self.cv_warn:
+            self.cv_warn_lbl.pack(side=tk.LEFT, fill='x', expand=True)
         self._attach_tooltips()
         self._size_to_layout()
         # Cancel pending work on <Destroy> rather than on WM_DELETE_WINDOW:

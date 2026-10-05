@@ -4837,19 +4837,23 @@ def test_tracker_card_says_what_the_number_is_and_what_the_outline_is():
     area (7 % more on DOT_P3_1 at rest). The panel under the candidate
     radios says so in plain words for the tracker candidate on the
     card, with the audit fields the number rests on (rays used, hidden
-    share, one-sidedness), and says nothing when there is no tracker
-    candidate."""
+    share, trim share, one-sidedness), and says nothing when there is
+    no tracker candidate. Since 2026-10-03 (owner decisions 2 and 9)
+    the trim share sits beside the trimmed count, the last sentence
+    names the two review-only limits, and on a candidate past one of
+    them it says REVIEW ONLY and which limit tripped."""
     import sldea_edge as se
     import sldea_edge_gui as gui
     disc = {'method': 'disc-fit', 'area_px': 217500.0, 'conf': 0.98,
             'area_ratio': 1.0003, 'n_common': 211, 'n_trimmed': 33,
-            'one_sided': 0.062, 'hidden_pct': 41.4,
+            'trim_share': 0.135, 'one_sided': 0.062, 'hidden_pct': 41.4,
             'ellipse_over_circle': 1.07418}
     rest = {'method': 'resting', 'area_px': 217438.0, 'conf': 0.95}
     patch = {'method': 'diff-hi', 'area_px': 63040.0, 'conf': 0.63}
     text = gui.tracker_card_text([rest, disc, patch])
     assert text.startswith('B is the ray ratio: 1.0003 x A0'), text
-    assert '211 rays' in text and '(33 more trimmed)' in text, text
+    assert '211 rays' in text, text
+    assert '(33 more trimmed, 14% of the rays)' in text, text
     # the share the number did not use is NOT all 'hidden': it counts
     # the trimmed rays and the rays with no ink step too (review
     # 2026-10-02), and the text says what it is made of
@@ -4857,8 +4861,11 @@ def test_tracker_card_says_what_the_number_is_and_what_the_outline_is():
     assert 'behind leads or foil, no ink step, or trimmed' in text, text
     assert 'hidden' not in text, text
     assert 'assumed to strain like the rest' in text, text
-    assert f'One-sidedness 0.06 (refused above {se.RAY_MAX_ONE_SIDED:g})' \
-        in text, text
+    assert 'One-sidedness 0.06.' in text, text
+    assert 'refused' not in text, text
+    assert text.endswith(f'Review only above 20% trimmed or '
+                         f'{se.RAY_MAX_ONE_SIDED:g} one-sided.'), text
+    assert 'REVIEW ONLY' not in text, text
     assert 'The drawn outline is the ellipse, not the number' in text, text
     assert 'encloses 1.074 x A0' in text, text
     # the outline sentence follows the number directly: it is the one
@@ -4868,10 +4875,27 @@ def test_tracker_card_says_what_the_number_is_and_what_the_outline_is():
     assert gui.tracker_card_text([rest, patch]) == ''
     assert gui.tracker_card_text([]) == ''
     # no trimmed rays: the clause is absent; no ellipse figure: said
-    d2 = dict(disc, n_trimmed=0, ellipse_over_circle=None)
+    d2 = dict(disc, n_trimmed=0, trim_share=0.0, ellipse_over_circle=None)
     t2 = gui.tracker_card_text([d2])
     assert t2.startswith('A is the ray ratio') and 'more trimmed' not in t2, t2
     assert 'encloses a different area' in t2, t2
+    # a candidate the ray ratio marked review only says so in words and
+    # names the limit that tripped (one, the other, both)
+    t3 = gui.tracker_card_text([dict(disc, trim_share=0.24,
+                                     ray_trim_share=0.24)])
+    assert t3.endswith('REVIEW ONLY, never auto-accepted: 24% trimmed '
+                       '(limit 20%).'), t3
+    assert '(33 more trimmed, 24% of the rays)' in t3, t3
+    assert 'Review only above' not in t3, t3
+    t4 = gui.tracker_card_text([dict(disc, one_sided=0.71,
+                                     ray_one_sided=0.71)])
+    assert t4.endswith('One-sidedness 0.71. REVIEW ONLY, never '
+                       'auto-accepted: one-sided 0.71 (limit 0.6).'), t4
+    t5 = gui.tracker_card_text([dict(disc, trim_share=0.31, one_sided=0.66,
+                                     ray_trim_share=0.31,
+                                     ray_one_sided=0.66)])
+    assert t5.endswith('REVIEW ONLY, never auto-accepted: 31% trimmed '
+                       '(limit 20%), one-sided 0.66 (limit 0.6).'), t5
     # the panel follows the frame on screen, and SHOWS the whole text:
     # the label has a fixed height in lines, and Tk clips a text that
     # wraps to more lines than that without a word of complaint. With
@@ -4922,15 +4946,83 @@ def test_tracker_card_says_what_the_number_is_and_what_the_outline_is():
                     f"the panel shows {shown_h}")
         assert seen_tracker, 'no tracker candidate on the fake run'
         # ...and the LONGEST text the function can produce (3-digit ray
-        # counts, a 3-digit trim, a 1.xxx ellipse figure) fits too, so
-        # a real run cannot find a longer one than the fake run did
+        # counts, a 3-digit trim with its share, a 1.xxx ellipse figure,
+        # both review-only limits tripped) fits too, so a real run
+        # cannot find a longer one than the fake run did
         worst = dict(disc, n_common=299, n_trimmed=103, hidden_pct=69.9,
-                     one_sided=0.55, ellipse_over_circle=1.14699,
-                     area_ratio=1.55665)
-        assert _needed(gui.tracker_card_text([worst, rest])) <= shown_h
+                     trim_share=0.256, one_sided=0.99,
+                     ray_trim_share=0.256, ray_one_sided=0.99,
+                     ellipse_over_circle=1.14699, area_ratio=1.55665)
+        need = _needed(gui.tracker_card_text([worst, rest]))
+        assert need <= shown_h, (f"the longest card text needs {need} px, "
+                                 f"the panel shows {shown_h}")
         assert _needed(gui.tracker_card_text([rest, disc])) <= shown_h
     finally:
         app._cancel_pending()
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_edge_review_warns_in_one_line_off_the_pinned_opencv():
+    """Owner decision 29 (2026-10-03): every corpus number is OpenCV
+    4.13, the version requirements.txt pins. When another cv2 is
+    running, Edge Review shows one plain line at the bottom left (the
+    footer row, beside the How to use button) and changes nothing
+    else: Detect, Save and the dialogs are untouched. On the pinned
+    version the row holds the button alone. The text comes from
+    se.opencv_version_warning, so the pin, the comparison and the
+    wording are tested headlessly in test_sldea_edge.py; this test
+    pins where it is shown and that it blocks nothing."""
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('edge-review cv2 warning')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_cv_')
+    orig = se.opencv_version_warning
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        # the pinned version: no line, nothing packed in the footer
+        se.opencv_version_warning = lambda running=None, pin=None: ''
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.cv_warn == ''
+        assert app.cv_warn_lbl.cget('text') == ''
+        assert not app.cv_warn_lbl.winfo_manager()
+        foot = app.howto_btn.master
+        assert app.cv_warn_lbl.master is foot
+        app._cancel_pending()
+        # another version: the one line, in the footer, with the glyph
+        # beside the colour, and the app still detects and saves
+        msg = orig('4.12.0', '4.13.0')
+        assert msg and '\n' not in msg
+        se.opencv_version_warning = lambda running=None, pin=None: msg
+        app2 = gui.EdgeReviewApp(root, path=run)
+        assert app2.cv_warn == msg
+        assert app2.cv_warn_lbl.cget('text') == '\u26a0 ' + msg
+        assert app2.cv_warn_lbl.winfo_manager() == 'pack'
+        assert app2.cv_warn_lbl.master is app2.howto_btn.master
+        assert app2.cv_warn_lbl.pack_info()['side'] == 'left'
+        assert app2.cv_warn_lbl.cget('fg') == app2.queue_lbl.cget('fg')
+        assert str(app2.detect_btn.cget('state')) == 'normal'
+        app2.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app2.detect_all_sync()
+        assert app2.cands_all, 'detection did not run under the warning'
+        real_mb = gui.messagebox
+        mb = _StubMB(yes=True)
+        gui.messagebox = mb
+        try:
+            app2.save()
+        finally:
+            gui.messagebox = real_mb
+        assert not mb.errors, mb.errors
+        assert se.saved_area_estimator(run) == se.AREA_ESTIMATOR_VERSION
+        # the stamp records the versions that really ran, not the pin
+        stamp = se.load_stamp(run)
+        assert stamp['opencv_version'] == se.library_versions()['opencv_version']
+        assert stamp['numpy_version'] == se.library_versions()['numpy_version']
+        app2._cancel_pending()
+    finally:
+        se.opencv_version_warning = orig
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)
 

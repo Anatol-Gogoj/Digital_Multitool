@@ -120,7 +120,10 @@ Rendering:
       per run. Re-review the run in Edge Review, or --allow-old-estimator
       draws it anyway, named in the caption, with the estimator in the
       tidy CSV's area_estimator column. In current/power modes the run
-      plots with its area columns blanked.
+      plots with its area columns blanked. Beside that column the tidy
+      CSV carries the OpenCV and numpy versions the Save recorded
+      (opencv_version, numpy_version; 2026-10-03) on every
+      machine-measured row.
 
 Panels (`#269` titles, `#270` selection):
     The panels a mode actually draws, in the order the flags name them:
@@ -419,6 +422,7 @@ def load_run(arg, warn):
                   if r['phase'] == 'baseline' and r['area_mm2']]
     a0 = _median(base_areas) if base_areas else None
     cadence_s, cadence_src = run_cadence(rundir, rows)
+    stamp = se.load_stamp(rundir)
     return {'dir': rundir, 'name': name, 'rows': rows, 'a0': a0,
             # how often this run measured current (`#264`) -- what the
             # breakdown mark's position is actually resolved to
@@ -431,6 +435,11 @@ def load_run(arg, warn):
             # (2026-10-02): the `area_estimator` stamp Edge Review's Save
             # puts in setup.txt; None = no stamp = the ellipse (version 1)
             'estimator': se.saved_area_estimator(rundir),
+            # the OpenCV and numpy that wrote the run's machine areas
+            # (2026-10-03): the library-version stamps beside it, '' for
+            # a run saved before they were recorded
+            'lib_versions': {k: str(stamp.get(k) or '')
+                             for k in se.STAMP_TEXT_KEYS},
             'saved_brand': saved_brand}
 
 
@@ -2286,7 +2295,8 @@ def save_figure(runs, opts, path, warn=lambda m: None):
 # ---------------------------------------------------------------------------
 
 TIDY_COLS = ['run', 'group', 'snapshot', 'nominal_kV', 'phase', 'tag',
-             'area_mm2', 'convention', 'area_estimator', 'expansion_A_A0',
+             'area_mm2', 'convention', 'area_estimator', 'opencv_version',
+             'numpy_version', 'expansion_A_A0',
              'measured_uA', 'power_mW', 'traced', 'method', 'conf',
              'user_reviewed', 'breakdown_confirmed', 'breakdown_advisory',
              'saved_breakdown_brand', 'notes']
@@ -2312,6 +2322,15 @@ def write_tidy(runs, path, groups=()):
     the same under both). It is the column a mixed figure drawn with
     --allow-old-estimator is separated by afterwards.
 
+    'opencv_version' / 'numpy_version' (2026-10-03) are the library
+    versions Edge Review's Save stamped beside the estimator (the
+    process that wrote the run's machine areas; every corpus figure is
+    OpenCV 4.13), on every machine-measured row ('half-height'
+    convention) and blank on a hand trace, a row without an area, and
+    a run saved before the versions were recorded. Columns rather than
+    a header line, so the file stays a plain CSV for csv.DictReader and
+    pandas without a comment option.
+
     'group' is the operator's grouping (`#313`), blank for a run in no
     group, and it sits SECOND -- beside 'run', because it is the other
     half of the same question. It is in the CSV for the reason the CSV
@@ -2328,6 +2347,7 @@ def write_tidy(runs, path, groups=()):
             group = run_group(run, groups) or ''
             med = run_ua_median(run)
             estimator = run.get('estimator') or 1
+            libs = run.get('lib_versions') or {}
             for r in run['rows']:
                 area = None if hide_areas else r['area_mm2']
                 conv = ('' if area is None
@@ -2335,6 +2355,9 @@ def write_tidy(runs, path, groups=()):
                         else 'half-height' if r['method'] else '')
                 est = (estimator if area is not None
                        and r['method'] == 'disc-fit' else '')
+                machine = conv == 'half-height'
+                cv_ver = libs.get('opencv_version', '') if machine else ''
+                np_ver = libs.get('numpy_version', '') if machine else ''
                 exp = (area / run['a0'] if area and run['a0'] else '')
                 pw = power_mw(r, med)
                 w.writerow([
@@ -2342,7 +2365,7 @@ def write_tidy(runs, path, groups=()):
                     '' if r['kv'] is None else r['kv'],
                     r['phase'], r['tag'],
                     '' if area is None else area,
-                    conv, est,
+                    conv, est, cv_ver, np_ver,
                     f"{exp:.4f}" if exp != '' else '',
                     '' if r['ua'] is None else r['ua'],
                     f"{pw:.3f}" if pw is not None else '',

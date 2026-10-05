@@ -323,7 +323,7 @@ def test_report_states_what_the_tracker_reads_at_rest():
     root = tempfile.mkdtemp(prefix='diag_rest_')
     d = sd.analyze(_ink_run(_os.path.join(root, 'SLDEA_k')))
     rest = d['tracker_rest']
-    assert rest and tuple(rest) == se.STAMP_KEYS[1:], rest
+    assert rest and tuple(rest) == se.PROVENANCE_KEYS, rest
     assert rest['base_rays'] >= 300, rest           # no leads: all round
     assert rest['base_hidden_pct'] < 20.0, rest
     assert rest['base_one_sided'] < 0.2, rest

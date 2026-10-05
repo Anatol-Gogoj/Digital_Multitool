@@ -670,6 +670,84 @@ def test_tidy_names_each_areas_edge_convention():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_tidy_carries_the_library_versions_the_save_recorded():
+    """Owner decision 29 (2026-10-03): the tidy CSV says which OpenCV
+    and numpy wrote each machine area, from the stamp Edge Review's
+    Save put in setup.txt beside `area_estimator`. Two columns after
+    that one (not a header line, so the file stays a plain CSV): filled
+    on every machine-measured row ('half-height'), blank on a hand
+    trace, on a row without an area, and throughout a run saved before
+    the versions were recorded; blanked with the areas when an old run
+    is kept in current mode."""
+    import sldea_edge as se
+    d = _mktmp()
+    d_old = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))          # stamped by this process
+        # a run stamped before the versions existed: the estimator alone
+        _fake_run(d_old, _healthy_rows(4), estimator=None)
+        se.save_settings(d_old, None,
+                         stamp=se.estimator_stamp(None, libs={}))
+        libs = se.library_versions()
+        assert se.load_stamp(d)['opencv_version'] == libs['opencv_version']
+        assert 'opencv_version' not in se.load_stamp(d_old)
+        run = sp.load_run(d, lambda m: None)
+        old = sp.load_run(d_old, lambda m: None)
+        assert run['lib_versions'] == libs
+        assert old['lib_versions'] == {'opencv_version': '',
+                                       'numpy_version': ''}
+        out = _mktmp()
+        try:
+            path = sp.write_tidy([dict(run, color='#4477AA'),
+                                  dict(old, color='#EE6677')],
+                                 os.path.join(out, 't.csv'))
+            with open(path, newline='', encoding='utf-8') as f:
+                rd = csv.DictReader(f)
+                cols = rd.fieldnames
+                tidy = list(rd)
+            assert cols == sp.TIDY_COLS
+            i = cols.index('area_estimator')
+            assert cols[i + 1:i + 3] == ['opencv_version', 'numpy_version']
+            mine = [t for t in tidy if t['run'] == run['name']]
+            theirs = [t for t in tidy if t['run'] == old['name']]
+            assert mine and theirs
+            for t in mine:
+                want = libs if t['convention'] == 'half-height' else None
+                assert t['opencv_version'] == (want or {}).get(
+                    'opencv_version', ''), t
+                assert t['numpy_version'] == (want or {}).get(
+                    'numpy_version', ''), t
+            assert any(t['convention'] == 'half-height' for t in mine)
+            assert any(t['convention'] == 'outer-toe' for t in mine)
+            assert all(t['opencv_version'] == '' and t['numpy_version'] == ''
+                       for t in theirs)
+            # the resting baseline row is a machine row too
+            base = next(t for t in mine if t['phase'] == 'baseline')
+            assert base['method'] == 'resting'
+            assert base['opencv_version'] == libs['opencv_version']
+            # current mode keeps an old-estimator run with its areas
+            # blanked, and the version columns go with them
+            d_v1 = _mktmp()
+            try:
+                _fake_run(d_v1, _healthy_rows(4), estimator=1)
+                assert sp.main([d_v1, '--out', out, '--mode', 'current',
+                                '--stem', 'cur']) == 0
+                with open(os.path.join(out, 'cur.csv'),
+                          encoding='utf-8') as f:
+                    cur = list(csv.DictReader(f))
+                assert cur and all(t['area_mm2'] == ''
+                                   and t['opencv_version'] == ''
+                                   and t['numpy_version'] == ''
+                                   for t in cur), cur[0]
+            finally:
+                shutil.rmtree(d_v1, ignore_errors=True)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(d_old, ignore_errors=True)
+
+
 # --------------------------------------------------------------------------
 # the shared front-end surface (`#223`): the window is a front end to these,
 # so anything that lets the two drift apart is the bug these tests hunt

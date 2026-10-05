@@ -27,13 +27,14 @@ import tkinter as tk  # noqa: E402
 from PIL import ImageGrab  # noqa: E402
 import gui as gui_mod  # noqa: E402
 
+from capture import pin_96dpi  # noqa: E402
+
 root = tk.Tk()
+pin_96dpi(root)                      # lay out as a 100 % display does
 root.withdraw()
 app = gui_mod.InstrumentControlGUI(root)
 root.deiconify()
-from capture import dpi_scale, scaled_geometry, unscale  # noqa: E402
-dpi_scale(root)
-root.geometry(scaled_geometry(1320, 900))
+root.geometry("1320x900+40+30")
 root.attributes("-topmost", True)
 root.update()
 
@@ -51,9 +52,8 @@ def probe():
             rect = wintypes.RECT()
             ctypes.windll.dwmapi.DwmGetWindowAttribute(
                 hwnd, 9, ctypes.byref(rect), ctypes.sizeof(rect))
-            shot = ImageGrab.grab(bbox=(rect.left, rect.top, rect.right,
-                                        rect.bottom), all_screens=True)
-            unscale(shot, []).save(
+            ImageGrab.grab(bbox=(rect.left, rect.top, rect.right,
+                                 rect.bottom), all_screens=True).save(
                 os.path.join(OUT, "41_tuner_warning.png"))
             w.destroy()          # same as Cancel
             state["cancelled"] = True

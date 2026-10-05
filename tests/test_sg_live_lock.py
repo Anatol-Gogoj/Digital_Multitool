@@ -476,7 +476,7 @@ SG_WRITERS = {
     'gui.InstrumentControlGUI.sg_fire_burst': (
         'locked', 'Fire', {'burst_trigger': 1}),
     'arb_editor.ArbWaveformEditor.upload': (
-        'locked', 'Upload && Select, on the Send-to channel',
+        'locked', 'Upload & Select, on the Send-to channel',
         {'upload_arb': 1, 'select_arb': 1, 'set_sample_rate': 1,
          'set_basic_wave': 1}),
     # Worker threads cannot show the note. PR #334

@@ -81,17 +81,11 @@ def main():
     print("run:", run)
 
     root = tk.Tk()
-    from capture import dpi_scale, scaled_geometry, unscale
-    dpi_scale(root)
-    root.geometry(scaled_geometry(1150, 760))
+    from capture import pin_96dpi
+    pin_96dpi(root)                  # lay out as a 100 % display does
+    root.geometry("1150x760+40+30")
     app = eg.EdgeReviewApp(root, path=run, auto=False)
     root.attributes("-topmost", True)
-    root.update_idletasks()
-    root.update()
-    # The app re-sizes itself to its own 96-dpi numbers after building the
-    # layout; on a scaled display that is too small, so set the scaled
-    # size again once it has settled.
-    root.geometry(scaled_geometry(1319, 760))
     root.update_idletasks()
     root.update()
 
@@ -120,11 +114,12 @@ def main():
     path = os.path.join(OUT, "40_edge_review.png")
     widgets = []
     _walk(root, l, t, widgets)
-    img = unscale(img, widgets)      # 96-dpi size on any display
     img.save(path)
     entry = {"name": "40_edge_review", "file": path,
              "img_w": img.size[0], "img_h": img.size[1],
-             "origin": [l, t], "client_offset": [0, 0],
+             "origin": [l, t],
+             # annotate.py places fixed rects and badges from here
+             "client_offset": [root.winfo_rootx() - l, root.winfo_rooty() - t],
              "widgets": widgets, "tab": "SLDEA Edge Review"}
 
     mpath = os.path.join(OUT, "widgets.json")

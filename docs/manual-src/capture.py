@@ -39,39 +39,32 @@ for _name in ("askopenfilename", "asksaveasfilename", "askdirectory"):
 
 manifest = {"images": []}
 
-# Display scaling (2026-10-05). The process is DPI-aware, so on a 175 %
-# display Tk lays the window out in physical pixels and a 1320 px window
-# is a 754 px window with its tab strip clipped. Open every window at
-# 96-dpi size times the scale, then bring the screenshot and the widget
-# boxes back to 96-dpi size, so the manual's images are the same size
-# whatever display captured them and annotate.py's capsule, arrow and
-# badge sizes stay right.
-_SCALE = [1.0]
+# Display scaling (2026-10-05). The process is DPI-aware so that the
+# screenshot and the widget boxes share one pixel grid. Left at that, Tk
+# reads the display's real dpi (168 on a 175 % display) and draws its
+# fonts 1.75 times larger while every size the app gives in pixels
+# (window geometry, panel widths, wraplengths) stays put, so windows come
+# out cramped and clipped. Resizing the window and shrinking the shot
+# afterwards (the first fix) only covers the windows the script sizes
+# itself: the Arb Editor, the splash and the dialogs size themselves and
+# still came out cramped, and the resample softened the text. Pinning Tk
+# to 96 dpi instead lays every window out exactly as a 100 % display (and
+# the DPI-unaware app on the lab PCs) does, with sharp text and no
+# resample. Only the window frame and the native menu bar are still drawn
+# by Windows at the display scale; chrome_scale() is for those.
+def pin_96dpi(root):
+    """Make Tk lay out at 96 dpi. Call right after tk.Tk(), before any
+    widget or font is built."""
+    root.tk.call("tk", "scaling", 96.0 / 72.0)
 
 
-def dpi_scale(root):
-    """Set and return the display scale factor (1.0 on a 100 % display)."""
-    _SCALE[0] = max(1.0, root.winfo_fpixels("1i") / 96.0)
-    return _SCALE[0]
-
-
-def scaled_geometry(w, h, x=40, y=30):
-    k = _SCALE[0]
-    return f"{int(round(w * k))}x{int(round(h * k))}+{x}+{y}"
-
-
-def unscale(img, widgets):
-    """The screenshot and its widget boxes at 96-dpi size."""
-    k = _SCALE[0]
-    if k == 1.0:
-        return img
-    from PIL import Image
-    img = img.resize((int(round(img.size[0] / k)),
-                      int(round(img.size[1] / k))), Image.LANCZOS)
-    for w in widgets:
-        for key in ("x", "y", "w", "h"):
-            w[key] = int(round(w[key] / k))
-    return img
+def chrome_scale():
+    """Display scale for what Windows draws itself (1.0 at 100 %)."""
+    try:
+        dpi = ctypes.windll.user32.GetDpiForSystem()
+    except Exception:
+        return 1.0
+    return max(1.0, dpi / 96.0)
 
 
 def _win_rect(widget):
@@ -124,14 +117,11 @@ def capture_window(widget, name, extra_widgets=None):
     _walk(top, l, t, widgets)
     if extra_widgets:
         widgets.extend(extra_widgets)
-    img = unscale(img, widgets)
     img.save(path)
-    k = _SCALE[0]
     entry = {"name": name, "file": path,
              "img_w": img.size[0], "img_h": img.size[1],
              "origin": [l, t],
-             "client_offset": [int(round((top.winfo_rootx() - l) / k)),
-                               int(round((top.winfo_rooty() - t) / k))],
+             "client_offset": [top.winfo_rootx() - l, top.winfo_rooty() - t],
              "widgets": widgets}
     manifest["images"].append(entry)
     import numpy as np
@@ -142,8 +132,9 @@ def capture_window(widget, name, extra_widgets=None):
 
 def main():
     root = tk.Tk()
+    pin_96dpi(root)
     root.withdraw()
-    k = dpi_scale(root)
+    k = chrome_scale()
 
     from ui_widgets import SplashScreen
     from version import version_string
@@ -161,8 +152,8 @@ def main():
     import gui as gui_mod
     app = gui_mod.InstrumentControlGUI(root)
     root.deiconify()
-    h = min(1000, int((root.winfo_screenheight() - 90 * k) / k))
-    root.geometry(scaled_geometry(1320, h))
+    h = min(1000, root.winfo_screenheight() - 90)
+    root.geometry(f"1320x{h}+40+30")
     root.attributes("-topmost", True)
     root.update_idletasks()
     root.update()
@@ -172,7 +163,8 @@ def main():
         l, t, _, _ = _win_rect(root)
         cx = root.winfo_rootx() - l
         cy = root.winfo_rooty() - t
-        # fixed sizes are 96-dpi numbers; capture_window unscales them
+        # Windows draws the menu bar at the display scale, so its box
+        # scales; the tab strip is Tk's and stays at 96 dpi.
         return [
             {"class": "Menu", "text": "Tools",
              "x": cx + int(4 * k), "y": cy - int(26 * k),
@@ -180,7 +172,7 @@ def main():
             {"class": "TabStrip", "text": "__tabstrip__",
              "x": app.notebook.winfo_rootx() - l,
              "y": app.notebook.winfo_rooty() - t,
-             "w": app.notebook.winfo_width(), "h": int(26 * k)},
+             "w": app.notebook.winfo_width(), "h": 26},
         ]
 
     # Shot names come from each tab's STABLE SLUG (gui.MANUAL_TABS), never

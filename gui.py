@@ -1071,7 +1071,7 @@ ARBITRARY WAVEFORMS:
 - The export pre-fills the channel (ARB + frequency/amplitude/offset);
   after recalling, click Apply to push those settings over USB (they
   are short commands and safe) - or dial them in on the front panel
-- "Upload && Select" (direct upload) works over LAN only (issue #20)
+- "Upload & Select" (direct upload) works over LAN only (issue #20)
 
 BURST & SYNC:
 - Burst emits exactly N cycles per trigger, then the output idles -

@@ -8380,6 +8380,9 @@ class TraceWindow(tk.Toplevel):
     -- zoom can never desynchronize clicks from image coordinates."""
 
     CV_W, CV_H = 900, 620
+    HELP_TEXT = ("click add · drag move · right-click delete · wheel zoom · "
+                 "middle/space drag pan · Enter/double-click/first-point "
+                 "close · F fit · Esc cancel")
     GRAB_PX = 8            # view-px radius: press on a point = drag it
     DEL_PX = 12            # view-px radius for right-click delete
 
@@ -8453,9 +8456,16 @@ class TraceWindow(tk.Toplevel):
                             bg='#111', highlightthickness=0,
                             cursor='crosshair')
         self.cv.pack(padx=4, pady=4)
+        # WRAPPED AT THE CANVAS WIDTH (2026-10-05). This line used to be
+        # one long unwrapped string whose area figure gains digits as
+        # points are placed; each time it outgrew the window, Tk widened
+        # the window and the centred, fixed-size canvas slid right under
+        # the pointer mid-trace (measured: 4 -> 19 -> 28 -> 31 px over
+        # four clicks). Wrapped, and with the changing numbers on their
+        # own short line above the fixed help text, it can no longer
+        # change the window's width, nor its height as the area grows.
         self.stat = tk.Label(self, anchor='w', justify='left',
-                             text="click to place points — they close "
-                                  "into the outer edge of the active area")
+                             wraplength=self.CV_W, text="")
         self.stat.pack(fill='x', padx=6, pady=(0, 4))
 
         self.cv.bind('<Button-1>', self._press)
@@ -8684,10 +8694,8 @@ class TraceWindow(tk.Toplevel):
         mm = (f"  =  {area * self.mm_per_px ** 2:.1f} mm²"
               if self.mm_per_px and area else "")
         self.stat.config(
-            text=f"{len(pts)} point(s) — area {area:.0f} px²{mm} — "
-                 f"click add · drag move · right-click delete · wheel "
-                 f"zoom · middle/space drag pan · Enter/double-click/"
-                 f"first-point close · F fit · Esc cancel")
+            text=f"{len(pts)} point(s) — area {area:.0f} px²{mm}\n"
+                 + self.HELP_TEXT)
 
     # -- finish ---------------------------------------------------------
     def _done(self):

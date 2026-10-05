@@ -7709,6 +7709,61 @@ def test_cal_choice_names_its_buttons_and_opens_over_the_dialog():
         root.destroy()
 
 
+def test_placing_trace_points_never_moves_the_canvas():
+    """Bug report 2026-10-05: clicking points in the trace window sometimes
+    jumped the picture to the right. The status line under the canvas was
+    one unwrapped string whose area figure gains digits as points are
+    placed; when it outgrew the window, Tk widened the window and the
+    centred 900 px canvas slid right (measured 4 -> 19 -> 28 -> 31 px).
+    The line is now wrapped at the canvas width with the numbers on their
+    own line, so neither the window's width nor the canvas's position may
+    change however large the area gets."""
+    import types
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    from PIL import Image
+    root = _tk_root_or_skip('trace window')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='trace_jump_')
+    try:
+        img = os.path.join(d, 'f.png')
+        Image.new('RGB', (1920, 1080), (150, 150, 150)).save(img)
+        app = types.SimpleNamespace(
+            root=root, base_ref=None, results={}, frame_rows=[],
+            run={'rows': [{'step': 3, 'tag': 'post-ramp',
+                           'nominal_kV': '1.0'}]},
+            trace_overlay_cands=lambda i: [])
+        # the window is transient to the root, and a transient of a
+        # withdrawn root is never mapped (it reads 1x1 and the case would
+        # pass without measuring anything), so the root is shown here
+        root.deiconify()
+        win = gui.TraceWindow(app, 0, img, mm_per_px=0.0396)
+        win.update()
+        w0, x0 = win.winfo_width(), win.cv.winfo_x()
+        assert w0 >= gui.TraceWindow.CV_W, ('trace window not mapped', w0)
+        h0 = win.winfo_height()
+        seen = []
+        # a growing square: the area runs from 0 through six digits, and
+        # the mm² figure appears once there are three points
+        for half in (0, 10, 60, 150, 260, 400):
+            win.model.add(960.0 - half, 540.0 - half)
+            win.model.add(960.0 + half, 540.0 - half)
+            win.model.add(960.0 + half, 540.0 + half)
+            win._vectors()
+            win.update()
+            seen.append((win.winfo_width(), win.cv.winfo_x(),
+                         win.winfo_height()))
+            win.model.restart()
+        assert all(s[:2] == (w0, x0) for s in seen), (w0, x0, seen)
+        assert all(s[2] == h0 for s in seen), (h0, seen)
+        assert 'mm²' in win.stat.cget('text'), win.stat.cget('text')
+        win.destroy()
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count

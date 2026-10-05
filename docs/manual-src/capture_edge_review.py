@@ -81,9 +81,17 @@ def main():
     print("run:", run)
 
     root = tk.Tk()
-    root.geometry("1150x760+40+30")
+    from capture import dpi_scale, scaled_geometry, unscale
+    dpi_scale(root)
+    root.geometry(scaled_geometry(1150, 760))
     app = eg.EdgeReviewApp(root, path=run, auto=False)
     root.attributes("-topmost", True)
+    root.update_idletasks()
+    root.update()
+    # The app re-sizes itself to its own 96-dpi numbers after building the
+    # layout; on a scaled display that is too small, so set the scaled
+    # size again once it has settled.
+    root.geometry(scaled_geometry(1319, 760))
     root.update_idletasks()
     root.update()
 
@@ -110,9 +118,10 @@ def main():
     l, t, r, b = _win_rect(root)
     img = ImageGrab.grab(bbox=(l, t, r, b), all_screens=True)
     path = os.path.join(OUT, "40_edge_review.png")
-    img.save(path)
     widgets = []
     _walk(root, l, t, widgets)
+    img = unscale(img, widgets)      # 96-dpi size on any display
+    img.save(path)
     entry = {"name": "40_edge_review", "file": path,
              "img_w": img.size[0], "img_h": img.size[1],
              "origin": [l, t], "client_offset": [0, 0],

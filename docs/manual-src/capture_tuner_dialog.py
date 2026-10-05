@@ -31,7 +31,9 @@ root = tk.Tk()
 root.withdraw()
 app = gui_mod.InstrumentControlGUI(root)
 root.deiconify()
-root.geometry("1320x900+40+30")
+from capture import dpi_scale, scaled_geometry, unscale  # noqa: E402
+dpi_scale(root)
+root.geometry(scaled_geometry(1320, 900))
 root.attributes("-topmost", True)
 root.update()
 
@@ -49,8 +51,9 @@ def probe():
             rect = wintypes.RECT()
             ctypes.windll.dwmapi.DwmGetWindowAttribute(
                 hwnd, 9, ctypes.byref(rect), ctypes.sizeof(rect))
-            ImageGrab.grab(bbox=(rect.left, rect.top, rect.right,
-                                 rect.bottom), all_screens=True).save(
+            shot = ImageGrab.grab(bbox=(rect.left, rect.top, rect.right,
+                                        rect.bottom), all_screens=True)
+            unscale(shot, []).save(
                 os.path.join(OUT, "41_tuner_warning.png"))
             w.destroy()          # same as Cancel
             state["cancelled"] = True

@@ -2,7 +2,7 @@
 
 `../digital-multitool-manual.html` is the illustrated user manual — a single
 self-contained file (all screenshots embedded as base64). It was last built
-from the **live app** at v1.4.0+1d9da20 on 2026-10-05 (59 pages incl. Part II; captured on a 175 % display with Tk pinned to 96 dpi, see the scaling note in capture.py): every
+from the **live app** at v1.4.0+c5b86f6 on 2026-10-05 (59 pages incl. Part II; captured on a 175 % display with Tk pinned to 96 dpi, see the scaling note in capture.py): every
 screenshot is a real capture and every red callout is anchored to the actual
 widget's on-screen coordinates. When the GUI changes visibly, regenerate
 rather than hand-edit. This line is easy to forget — check it against the

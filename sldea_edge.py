@@ -180,7 +180,10 @@ def load_stamp(rundir):
     library versions, STAMP_TEXT_KEYS), {} when there are none.
     No `area_estimator` key means the saved 'disc-fit' areas (if any)
     were written by version 1 (the ellipse, through 2026-10-01); see
-    AREA_ESTIMATOR_VERSION. Same tolerant read as load_settings."""
+    AREA_ESTIMATOR_VERSION. No `ray_win_hi` / `disc_fit_r_max` key
+    (TRACKER_LIMIT_KEYS) means the run was saved before the tracker's
+    window limits were recorded (2026-10-03). Same tolerant read as
+    load_settings."""
     out = {}
     for k, v in _edge_block(_setup_text(rundir)).items():
         if k in STAMP_TEXT_KEYS:
@@ -303,26 +306,47 @@ def save_settings(rundir, settings, stamp=None):
     return path
 
 
-def estimator_stamp(provenance=None, version=None, libs=None):
+def estimator_stamp(provenance=None, version=None, libs=None, limits=None):
     """The stamp lines a Save writes (STAMP_KEYS): the estimator version
     and, when the tracker could measure the baseline, its provenance
     (baseline_provenance): the baseline's own ray count, the share of
     its perimeter no ray could use, the one-sidedness of those rays, and
     the ellipse-over-circle offset the OLD estimator carried on this run
-    (the size of the correction, readable without a rerun). Last the
-    OpenCV and numpy versions of the process that pressed Save
-    (`libs`, default library_versions(); {} records none)."""
+    (the size of the correction, readable without a rerun). Then the
+    tracker's window limits of the code that measured the run
+    (`limits`, default tracker_limits(); {} records none; owner decision
+    6, 2026-10-03), and last the OpenCV and numpy versions of the
+    process that pressed Save (`libs`, default library_versions(); {}
+    records none)."""
     out = {AREA_ESTIMATOR_KEY: AREA_ESTIMATOR_VERSION if version is None
            else int(version)}
     for k in PROVENANCE_KEYS:
         if provenance and provenance.get(k) is not None:
             out[k] = provenance[k]
+    if limits is None:
+        limits = tracker_limits()
+    for k in TRACKER_LIMIT_KEYS:
+        if limits.get(k) is not None:
+            out[k] = float(limits[k])
     if libs is None:
         libs = library_versions()
     for k in STAMP_TEXT_KEYS:
         if libs.get(k):
             out[k] = str(libs[k])
     return out
+
+
+def tracker_limits():
+    """The boundary tracker's window limits of this code, as a Save
+    stamps them (TRACKER_LIMIT_KEYS): {'ray_win_hi': RAY_WIN_HI,
+    'disc_fit_r_max': DISC_FIT_R_MAX}, in units of the resting radius.
+    They are constants (owner decision 11, 2026-10-03), so a run's stamp
+    is the only record of which window measured its rows: the window
+    moved on 2026-10-03 under the same estimator version, and on the
+    wrinkled review-queue frames the two windows read +8 to +16 %
+    apart (SLDEA_HANDOFF.md 2026-10-03)."""
+    return {'ray_win_hi': float(RAY_WIN_HI),
+            'disc_fit_r_max': float(DISC_FIT_R_MAX)}
 
 
 def library_versions():
@@ -2402,14 +2426,26 @@ AREA_ESTIMATOR_KEY = 'area_estimator'
 # one-sidedness of the rays that did, and the ellipse-over-circle
 # offset the old estimator carried on this run at rest (1.074 on
 # DOT_P3_1: the size of the correction, on record without a rerun).
-# Last come the library versions of the process that pressed Save
-# (library_versions, 2026-10-03): the OpenCV and numpy that produced the
-# numbers, as text ('4.13.0'), because every corpus figure is OpenCV
-# 4.13 and another build may read a little differently.
+# Then the tracker's window limits of the code that pressed Save
+# (tracker_limits, 2026-10-03, owner decision 6): how far out along
+# each ray the ink step was searched (RAY_WIN_HI) and the largest
+# ellipse the fit believed (DISC_FIT_R_MAX), both in units of the
+# resting radius. They are fixed constants, not settings (decision 11),
+# and they moved on 2026-10-03 (1.38 -> 1.70 and 1.3 -> 1.75) under the
+# same estimator version: on the wrinkled review-queue frames the
+# tracker's number differs by +8 to +16 % between the two windows, so
+# a row a human accepts from the queue has to say which window it was
+# measured under. Last come the library versions of the process that
+# pressed Save (library_versions, 2026-10-03): the OpenCV and numpy
+# that produced the numbers, as text ('4.13.0'), because every corpus
+# figure is OpenCV 4.13 and another build may read a little
+# differently.
 PROVENANCE_KEYS = ('base_rays', 'base_hidden_pct', 'base_one_sided',
                    'base_ellipse_over_circle')
+TRACKER_LIMIT_KEYS = ('ray_win_hi', 'disc_fit_r_max')
 STAMP_TEXT_KEYS = ('opencv_version', 'numpy_version')
-STAMP_KEYS = (AREA_ESTIMATOR_KEY,) + PROVENANCE_KEYS + STAMP_TEXT_KEYS
+STAMP_KEYS = ((AREA_ESTIMATOR_KEY,) + PROVENANCE_KEYS + TRACKER_LIMIT_KEYS
+              + STAMP_TEXT_KEYS)
 # The note a row gets when a Save empties it because an older estimator
 # wrote its area (stale_estimator_rows). ASCII, for the CSV.
 AREA_ESTIMATOR_STALE_NOTE = ('not kept: measured with the old area method '
@@ -2488,6 +2524,10 @@ RAY_BOOT_N = 300         # bootstrap resamples (fixed seed: repeatable)
 #                tracking something other than the device (the halo,
 #                the vignetting, the holder) and is refused.
 # Measured on the corpus (OpenCV 4.13): see SLDEA_HANDOFF.md 2026-10-03.
+# RAY_WIN_HI and DISC_FIT_R_MAX are stamped into setup.txt by every
+# Save (tracker_limits, TRACKER_LIMIT_KEYS; owner decision 6), because
+# they are constants that have already moved once under the same
+# estimator version.
 RAY_REACH = 1.8
 RAY_WIN_LO = 0.80
 RAY_WIN_HI = 1.70
@@ -3770,11 +3810,15 @@ def reconcile_pairs(rows, cands_by_idx, settings):
     members stay capped and tagged as before, and a patch tier can
     never ride an exemption. A tracker with no audit verdict at all
     (audit_boundary returned None) is capped as before: the exemption
-    must not ride on the absence of a check. SquareStack-1 L6 pre (a
-    tex-ratio patch at 0.23 x A0 beside a bias-tripped tracker fit)
-    stays in review. Both-tracker pairs (a collapse both snapshots
-    track) and tracker-versus-resting pairs are capped exactly as
-    before."""
+    must not ride on the absence of a check. Nor is a tracker the ray
+    ratio marked review only (ray_one_sided / ray_trim_share, owner
+    decisions 2 and 9): it is capped and queued whatever its mate is,
+    so it is tagged with the mismatch like any other member
+    (REVIEW_ONLY_TAGS, the same list the agreement branch reads).
+    SquareStack-1 L6 pre (a tex-ratio patch at 0.23 x A0 beside a
+    bias-tripped tracker fit) stays in review. Both-tracker pairs (a
+    collapse both snapshots track) and tracker-versus-resting pairs
+    are capped exactly as before."""
     acc = float(settings.get('accept_conf', 0.75))
     by_landing = {}
     for i, pos in enumerate(sweep_landings(rows)):
@@ -3825,13 +3869,17 @@ def _is_patch_tier(cand):
 def _pair_mate_is_patch(cand, members):
     """reconcile_pairs' exemption (2026-10-03): `cand` is a tracker
     result with a RECORDED audit verdict (audit_boundary ran and
-    returned one) that tripped neither gate, and every other member of
-    its landing is a patch tier. See the docstring there."""
+    returned one) that tripped neither gate, carrying no review-only
+    tag at all (REVIEW_ONLY_TAGS: the audit's two and the ray ratio's
+    two, one-sided rays and a large trim share), and every other member
+    of its landing is a patch tier. A review-only tracker is capped
+    and queued whatever its mate is, so there is nothing for the
+    exemption to free. See the docstring there."""
     if cand.get('method') != 'disc-fit':
         return False
     if cand.get('audit') is None:
         return False                    # no verdict is not a clean one
-    if cand.get('audit_nostep') or cand.get('audit_bias'):
+    if any(cand.get(k) is not None for k in REVIEW_ONLY_TAGS):
         return False
     mates = [b for b in members if b is not cand]
     return bool(mates) and all(_is_patch_tier(b) for b in mates)

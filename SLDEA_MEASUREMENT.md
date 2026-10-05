@@ -99,6 +99,15 @@ number):
   wrote the areas; every number here is OpenCV 4.13), the tidy CSV
   carries them beside `area_estimator` on every machine row, and Edge
   Review shows one warning line when it runs off the pinned OpenCV.
+  The Save also stamps the tracker's window limits, `ray_win_hi` and
+  `disc_fit_r_max` (§3 level 4, item 3; owner decision 6, 2026-10-03):
+  they are constants that moved once under the same `area_estimator`
+  (1.38 -> 1.70 and 1.3 -> 1.75 r₀), and on the wrinkled review-queue
+  frames the two windows read +8 to +16% apart, so a row accepted from
+  the queue is only comparable with another once both say which window
+  measured them. The tidy CSV carries the two beside the versions on
+  every `disc-fit` row; a run saved before they were recorded has them
+  blank.
 - **DON'T** mix machine areas and hand-traced areas in one absolute
   comparison without the +5.5% definitional correction.
 - **DON'T** judge any machine boundary against a bar above IoU ~0.97 —
@@ -739,7 +748,10 @@ The load-bearing choices:
    1.3 r₀ gate on the fitted ellipse, now 1.75 r₀, refused the flat
    shoulder frames at 1.70–1.94× area although the campaign peaks are
    2.25–2.34×; a ray that meets foil or the frame border inside
-   1.8 r₀ is never read, so the window cannot reach the strips),
+   1.8 r₀ is never read, so the window cannot reach the strips; both
+   limits are constants, and Edge Review's Save stamps them into
+   `setup.txt` as `ray_win_hi` and `disc_fit_r_max` so a run says
+   which window measured it, owner decision 6, 2026-10-03),
    sub-pixel refined by parabolic interpolation,
    sectors through the electrodes excluded by azimuth. The same rays
    are measured on the baseline frame, and the area is the baseline
@@ -767,11 +779,12 @@ The load-bearing choices:
    what pair agreement cannot certify against). A pair
    *disagreement* caps both snapshots, with one exception since
    2026-10-03: a tracked boundary with a recorded, clean audit
-   verdict whose mate is a patch tier keeps its own confidence. The
-   exception relies only on that verdict (the ink step under the
-   outline was measured) and on the patch member staying capped, so
-   the landing is still queued; it does not know why the snapshots
-   disagree. On the review corpus it fired on one definition
+   verdict, and no review-only tag from the ray ratio (one-sided
+   rays, a large trim share), whose mate is a patch tier keeps its
+   own confidence. The exception relies only on that verdict (the ink
+   step under the outline was measured) and on the patch member
+   staying capped, so the landing is still queued; it does not know
+   why the snapshots disagree. On the review corpus it fired on one definition
    mismatch (a diff blob inside the tracked disc) and on two one-sided
    mid-hold collapses (a buckled post-ramp snapshot only a tex-ratio
    patch outlines, a collapsed pre-ramp disc the tracker reads): there

@@ -748,6 +748,111 @@ def test_tidy_carries_the_library_versions_the_save_recorded():
         shutil.rmtree(d_old, ignore_errors=True)
 
 
+def test_tidy_carries_the_tracker_limits_the_save_recorded():
+    """Owner decision 6 (2026-10-03): the tidy CSV says which tracker
+    window each 'disc-fit' area was measured under, from the two limit
+    stamps Edge Review's Save puts in setup.txt beside the versions
+    (ray_win_hi, the ink-step search top; disc_fit_r_max, the ellipse
+    gate; units of the resting radius). They are constants that moved
+    once under the same `area_estimator` (1.38 -> 1.70, 1.3 -> 1.75),
+    so two rows with the same estimator can differ by the window, and
+    the columns tell them apart. Filled exactly where area_estimator
+    is (a 'disc-fit' row with an area), blank on a hand trace, on a
+    'resting' row, and throughout a run saved before the limits were
+    recorded; blanked with the areas when an old run is kept in
+    current mode."""
+    import sldea_edge as se
+    d = _mktmp()
+    d_old = _mktmp()
+    d_win = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))          # stamped by this code
+        # a run stamped before the limits existed
+        _fake_run(d_old, _healthy_rows(4), estimator=None)
+        se.save_settings(d_old, None,
+                         stamp=se.estimator_stamp(None, limits={}))
+        # a run measured under the 2026-10-02 window
+        _fake_run(d_win, _healthy_rows(4), estimator=None)
+        se.save_settings(d_win, None, stamp=se.estimator_stamp(
+            None, limits={'ray_win_hi': 1.38, 'disc_fit_r_max': 1.3}))
+        lims = se.tracker_limits()
+        assert se.load_stamp(d)['ray_win_hi'] == lims['ray_win_hi']
+        assert 'ray_win_hi' not in se.load_stamp(d_old)
+        assert se.load_stamp(d_win)['disc_fit_r_max'] == 1.3
+        run = sp.load_run(d, lambda m: None)
+        old = sp.load_run(d_old, lambda m: None)
+        win = sp.load_run(d_win, lambda m: None)
+        assert run['tracker_limits'] == lims
+        assert old['tracker_limits'] == {'ray_win_hi': None,
+                                         'disc_fit_r_max': None}
+        assert win['tracker_limits'] == {'ray_win_hi': 1.38,
+                                         'disc_fit_r_max': 1.3}
+        assert run['estimator'] == old['estimator'] == win['estimator'] \
+            == se.AREA_ESTIMATOR_VERSION
+        out = _mktmp()
+        try:
+            path = sp.write_tidy([dict(run, color='#4477AA'),
+                                  dict(old, color='#EE6677'),
+                                  dict(win, color='#228833')],
+                                 os.path.join(out, 't.csv'))
+            with open(path, newline='', encoding='utf-8') as f:
+                rd = csv.DictReader(f)
+                cols = rd.fieldnames
+                tidy = list(rd)
+            assert cols == sp.TIDY_COLS
+            i = cols.index('area_estimator')
+            assert cols[i + 1:i + 5] == ['opencv_version', 'numpy_version',
+                                         'ray_win_hi', 'disc_fit_r_max']
+            mine = [t for t in tidy if t['run'] == run['name']]
+            theirs = [t for t in tidy if t['run'] == old['name']]
+            older = [t for t in tidy if t['run'] == win['name']]
+            assert mine and theirs and older
+            for t in mine:
+                if t['area_estimator'] != '':
+                    assert t['method'] == 'disc-fit', t
+                    assert t['ray_win_hi'] == f"{lims['ray_win_hi']:g}", t
+                    assert t['disc_fit_r_max'] \
+                        == f"{lims['disc_fit_r_max']:g}", t
+                else:
+                    assert t['ray_win_hi'] == '' and t['disc_fit_r_max'] == '', t
+            assert any(t['area_estimator'] != '' for t in mine)
+            assert any(t['convention'] == 'outer-toe' for t in mine)
+            # the resting baseline row carries the versions but no
+            # window: A0 is not a tracker reading
+            base = next(t for t in mine if t['phase'] == 'baseline')
+            assert base['method'] == 'resting'
+            assert base['opencv_version'] != '' and base['ray_win_hi'] == ''
+            assert all(t['ray_win_hi'] == '' and t['disc_fit_r_max'] == ''
+                       for t in theirs)
+            for t in older:
+                want = ('1.38', '1.3') if t['area_estimator'] != '' \
+                    else ('', '')
+                assert (t['ray_win_hi'], t['disc_fit_r_max']) == want, t
+            # current mode keeps an old-estimator run with its areas
+            # blanked, and the window columns go with them
+            d_v1 = _mktmp()
+            try:
+                _fake_run(d_v1, _healthy_rows(4), estimator=1)
+                assert se.load_stamp(d_v1)['ray_win_hi'] == lims['ray_win_hi']
+                assert sp.main([d_v1, '--out', out, '--mode', 'current',
+                                '--stem', 'cur']) == 0
+                with open(os.path.join(out, 'cur.csv'),
+                          encoding='utf-8') as f:
+                    cur = list(csv.DictReader(f))
+                assert cur and all(t['area_mm2'] == ''
+                                   and t['ray_win_hi'] == ''
+                                   and t['disc_fit_r_max'] == ''
+                                   for t in cur), cur[0]
+            finally:
+                shutil.rmtree(d_v1, ignore_errors=True)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(d_old, ignore_errors=True)
+        shutil.rmtree(d_win, ignore_errors=True)
+
+
 # --------------------------------------------------------------------------
 # the shared front-end surface (`#223`): the window is a front end to these,
 # so anything that lets the two drift apart is the bug these tests hunt

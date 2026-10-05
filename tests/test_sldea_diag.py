@@ -318,7 +318,10 @@ def test_report_states_what_the_tracker_reads_at_rest():
     rest' line with the facts a Save stamps into setup.txt: how many
     rays found the edge, the hidden share, their one-sidedness, and the
     ellipse/circle offset the old estimator read on the resting disc.
-    A run with no resting disc claims nothing."""
+    A run with no resting disc claims nothing. The Save's stamp is
+    these facts plus the version, the tracker's window limits (owner
+    decision 6, 2026-10-03) and the library versions; the report prints
+    the facts about the baseline only."""
     import sldea_edge as se
     root = tempfile.mkdtemp(prefix='diag_rest_')
     d = sd.analyze(_ink_run(_os.path.join(root, 'SLDEA_k')))
@@ -328,6 +331,12 @@ def test_report_states_what_the_tracker_reads_at_rest():
     assert rest['base_hidden_pct'] < 20.0, rest
     assert rest['base_one_sided'] < 0.2, rest
     assert abs(rest['base_ellipse_over_circle'] - 1.0) < 0.02, rest
+    stamp = se.estimator_stamp(rest)
+    assert tuple(stamp) == se.STAMP_KEYS, stamp
+    assert {k: stamp[k] for k in se.PROVENANCE_KEYS} == rest
+    assert {k: stamp[k] for k in se.TRACKER_LIMIT_KEYS} == se.tracker_limits()
+    assert stamp['ray_win_hi'] == se.RAY_WIN_HI
+    assert stamp['disc_fit_r_max'] == se.DISC_FIT_R_MAX
     a0 = d['baseline_disc']['area_px']
     by_kv = {}
     for p in d['frames']:

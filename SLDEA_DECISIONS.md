@@ -66,6 +66,23 @@ the new case opens the real box and checks the labels, the transient
 owner, Enter/Escape/close declining, and the grab hand-back. Not yet seen
 by an operator on the bench PC.
 
+### Same day, follow-up: the re-anchor confirmation gets named buttons too
+
+**TL;DR:** owner request after #355. The re-anchor question on a saved run
+now has "Write data.csv now" / "Keep for next Save" / "Cancel" instead of
+Yes / No / Cancel. Same three outcomes, same Cancel default, same evidence
+table.
+
+- It goes through `cal_choice`, owned by the main window (the calibration
+  window has closed by then). The labels live in one list,
+  `REANCHOR_BUTTONS`, which `_reanchor_msg` also quotes, so the scope
+  lines ("\"Write data.csv now\" WRITES data.csv NOW — SCALE ONLY: ...")
+  cannot drift from the buttons.
+- The evidence table (anchor before and after, multiplier, rows re-derived
+  and blanked, resting area against π·(d/2)²) is unchanged. It is shown in
+  TkFixedFont at a wider wrap, so its columns line up; the native box drew
+  it in a proportional font.
+
 ## "Trek inverts" negates the control only, and starts ticked (2026-10-05)
 
 **TL;DR:** owner decision. The box is ticked by default, and ticking it now

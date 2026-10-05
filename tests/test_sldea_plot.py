@@ -1991,6 +1991,273 @@ def test_the_strain_aggregate_is_the_ratio_aggregate_rescaled():
         shutil.rmtree(d, ignore_errors=True)
 
 
+# --------------------------------------------------------------------------
+# the budget band under --strain-pct (2026-10-02 plot review)
+#
+# The band is +-p of the AREA. In strain mode it was drawn as +-p of the
+# STRAIN VALUE: zero width at rest, 2.6 to 10.5 times too narrow on the
+# campaign runs. These tests read the band back off the axes, the way a
+# reader sees it, rather than trusting the function that drew it.
+# --------------------------------------------------------------------------
+
+def _band_polys(ax):
+    """The budget bands drawn on `ax`: one {x: (lo, hi)} per band.
+
+    Read from the PolyCollection vertices, so the numbers are what the
+    figure shows. fill_between writes a lo and a hi vertex at every x, so
+    the min and max of the y values at each x are the band's two edges."""
+    from matplotlib.collections import PolyCollection
+    out = []
+    for coll in ax.collections:
+        if not isinstance(coll, PolyCollection):
+            continue
+        for path in coll.get_paths():
+            by_x = {}
+            for x, y in path.vertices:
+                by_x.setdefault(round(float(x), 6), []).append(float(y))
+            out.append({x: (min(v), max(v)) for x, v in by_x.items()})
+    return out
+
+
+def _band_fixture(d, **kw):
+    """-> (run, Figure) for the standard synthetic run, drawn with `kw`.
+
+    The fixture has a 0 kV baseline level (A/A0 exactly 1), machine
+    levels, and hand-traced levels from 3.0 kV up, so one run covers the
+    rest level, the 2 % band and the 1 % band."""
+    _fake_run(d, _healthy_rows(8))
+    opts = sp.make_opts(**kw)[0]
+    runs = sp.prepare_runs([d], opts)
+    return runs[0], _drawn(runs, opts)
+
+
+def test_band_edges_map_the_area_band_into_the_displayed_unit():
+    """Hand-checked. A/A0 = 1.4 is 40 % strain; +-2 % of the AREA there is
+    A/A0 1.372 to 1.428, which is strain 37.2 to 42.8: +-2.8 points, not
+    the +-0.8 points that +-2 % of the number 40 gives."""
+    lo, hi = sp._band_edges(40.0, 2.0, pct=True)
+    assert abs(lo - 37.2) < 1e-9 and abs(hi - 42.8) < 1e-9, (lo, hi)
+    # at rest the band is +-2 points; the old rule gave zero
+    lo, hi = sp._band_edges(0.0, 2.0, pct=True)
+    assert abs(lo + 2.0) < 1e-9 and abs(hi - 2.0) < 1e-9, (lo, hi)
+    # the traced level is +-1 %
+    lo, hi = sp._band_edges(0.0, 1.0, pct=True)
+    assert abs(lo + 1.0) < 1e-9 and abs(hi - 1.0) < 1e-9, (lo, hi)
+    # a contraction (A/A0 0.8 is -20 % strain): the band is +-1.6 points
+    # and lo stays below hi. Scaling the strain value by (1 -/+ p) put lo
+    # ABOVE hi here, and only fill_between's tolerance hid it.
+    lo, hi = sp._band_edges(-20.0, 2.0, pct=True)
+    assert lo < hi, (lo, hi)
+    assert abs(lo + 21.6) < 1e-9 and abs(hi + 18.4) < 1e-9, (lo, hi)
+    # half-width = p * 100 * A/A0 at every ratio, whatever the sign
+    for r in (0.5, 0.8, 1.0, 1.4, 2.3):
+        lo, hi = sp._band_edges((r - 1.0) * 100.0, 2.0, pct=True)
+        assert abs((hi - lo) / 2.0 - 2.0 * r) < 1e-9, (r, lo, hi)
+    # the mm2 and A/A0 panels keep the plain scaling: +-p of the number
+    lo, hi = sp._band_edges(250.0, 2.0)
+    assert abs(lo - 245.0) < 1e-9 and abs(hi - 255.0) < 1e-9, (lo, hi)
+    lo, hi = sp._band_edges(1.4, 1.0)
+    assert abs(lo - 1.386) < 1e-9 and abs(hi - 1.414) < 1e-9, (lo, hi)
+
+
+def test_the_strain_band_is_the_ratio_band_in_strain_points():
+    """Reads the drawn band in both units and compares them.
+
+    Ratio mode: half-width p * A/A0. Strain mode: p * 100 * A/A0 points,
+    which is p * 100 at 0 kV where the old rule drew nothing. Both are the
+    SAME band: every strain edge is (ratio edge - 1) * 100. The mm2 panel
+    is not touched by the units switch."""
+    if not _has_mpl():
+        return
+    d, d2 = _mktmp(), _mktmp()
+    try:
+        run, rfig = _band_fixture(d)
+        _run2, sfig = _band_fixture(d2, strain_pct=True)
+        lvs = sp.levels(run)
+        assert any(l['all_traced'] for l in lvs), 'fixture has no traced level'
+        assert any(not l['all_traced'] for l in lvs), 'no machine level'
+        rband = _band_polys(rfig.axes[1])
+        sband = _band_polys(sfig.axes[1])
+        assert len(rband) == len(sband) == 1, (len(rband), len(sband))
+        rband, sband = rband[0], sband[0]
+        assert len(rband) == len(sband) == len(lvs)
+        saw_rest = False
+        for lv in lvs:
+            x = round(float(lv['kv']), 6)
+            p = (sp.TRACED_BAND_PCT if lv['all_traced']
+                 else sp.MACHINE_BAND_PCT) / 100.0
+            r = lv['mean'] / run['a0']
+            rlo, rhi = rband[x]
+            slo, shi = sband[x]
+            assert abs((rhi - rlo) / 2.0 - p * r) < 1e-9, (x, rlo, rhi)
+            assert abs((shi - slo) / 2.0 - 100.0 * p * r) < 1e-9, \
+                (x, slo, shi)
+            # centred on the plotted strain, so the band belongs to the line
+            assert abs((shi + slo) / 2.0
+                       - sp.norm_y(lv['mean'], run['a0'], True)) < 1e-9, x
+            # the same band in two units
+            assert abs(slo - (rlo - 1.0) * 100.0) < 1e-9, (x, slo, rlo)
+            assert abs(shi - (rhi - 1.0) * 100.0) < 1e-9, (x, shi, rhi)
+            if lv['kv'] == 0:
+                saw_rest = True
+                # the 0 kV level: p * 100 points, NOT zero
+                assert abs((shi - slo) / 2.0
+                           - 100.0 * sp.MACHINE_BAND_PCT / 100.0) < 1e-9
+                assert shi - slo > 3.9, 'zero-width band at rest'
+        assert saw_rest, 'fixture has no 0 kV level'
+        # percent describes the normalized panel only: the mm2 band is the
+        # same drawing in both figures
+        assert _band_polys(rfig.axes[0]) == _band_polys(sfig.axes[0])
+    finally:
+        for p in (d, d2):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_the_strain_band_holds_under_prepost_and_never_inverts():
+    """Under --prepost each line carries its own band (an old behaviour, see
+    the open question in SLDEA_HANDOFF.md); whichever of them are drawn,
+    each must be p * A/A0 points wide in strain mode. The test does not
+    say whether prepost SHOULD draw bands; that is the owner's call."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _run, fig = _band_fixture(d, strain_pct=True, prepost=True,
+                                  mean=True)
+        for poly in _band_polys(fig.axes[1]):
+            for x, (lo, hi) in poly.items():
+                assert lo < hi, (x, lo, hi)
+                mid = (lo + hi) / 2.0
+                # half-width / (100 + strain) is p, whatever the strain
+                p = (hi - lo) / 2.0 / (100.0 + mid)
+                assert min(abs(p - 0.02), abs(p - 0.01)) < 1e-9, (x, p)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_strain_caption_states_the_band_that_is_drawn():
+    """The caption's strain-points sentence is read back and compared with
+    the polygon: its numbers are the drawn half-widths at 0 % strain."""
+    if not _has_mpl():
+        return
+    import re
+    d, d2, d3, d4, d5 = (_mktmp() for _ in range(5))
+    try:
+        run, sfig = _band_fixture(d, strain_pct=True)
+        cap = _caption(sfig)
+        m = re.search(r"±([\d.]+) / ±([\d.]+) points at 0 % "
+                      r"strain, wider as strain grows", cap)
+        assert m, cap
+        machine_pts, traced_pts = float(m.group(1)), float(m.group(2))
+        assert machine_pts == sp.MACHINE_BAND_PCT
+        assert traced_pts == sp.TRACED_BAND_PCT
+        assert 'of the AREA' in cap, cap
+        band = _band_polys(sfig.axes[1])[0]
+        for lv in sp.levels(run):
+            x = round(float(lv['kv']), 6)
+            half = (band[x][1] - band[x][0]) / 2.0
+            r = lv['mean'] / run['a0']
+            stated = traced_pts if lv['all_traced'] else machine_pts
+            # the sentence says "at 0 % strain"; the band then grows as
+            # A/A0, so the drawn half-width is the stated points times r
+            assert abs(half - stated * r) < 1e-9, (x, half, stated, r)
+        # the sentence has to be on the figure, not cut off at its edge:
+        # the caption's first line is already wider than the frame, so the
+        # sentence rides on the second line, which fits the same budget
+        # the aggregate captions are held to
+        assert len(cap.split('\n')[1]) <= sp.CAPTION_LINE_MAX, \
+            len(cap.split('\n')[1])
+        # and measured in pixels, the way a reader meets it: a character
+        # count is only a proxy. The line must end inside the frame with
+        # a little room, because a font or kerning change moves it by
+        # about 0.2 %. The same line without the sentence is far shorter,
+        # so a failure here means the sentence was lengthened.
+        sfig.canvas.draw()
+        rend = sfig.canvas.get_renderer()
+        box = [t for t in sfig.texts if 'Points = per-level' in t.get_text()]
+        assert len(box) == 1, len(box)
+        probe = sfig.text(box[0].get_position()[0], 0.5,
+                          box[0].get_text().split('\n')[1],
+                          fontsize=box[0].get_fontsize())
+        right = probe.get_window_extent(rend).x1 / sfig.bbox.width
+        probe.remove()
+        assert right <= 0.99, 'caption line 2 ends at %.3f' % right
+        # ratio mode, no bands, a single mm2 panel and the aggregate each
+        # draw no strain band, so none of them may claim one
+        _r, rfig = _band_fixture(d2)
+        assert 'Strain bands' not in _caption(rfig)
+        _r, nofig = _band_fixture(d3, strain_pct=True, bands=False)
+        assert 'Strain bands' not in _caption(nofig)
+        assert _band_count(nofig) == 0
+        _r, firstfig = _band_fixture(d4, strain_pct=True, subplots='first')
+        assert 'Strain bands' not in _caption(firstfig)
+        _fake_run(d5, _healthy_rows(8))
+        aopts = sp.make_opts(strain_pct=True, aggregate=True)[0]
+        aggfig = _drawn(sp.prepare_runs([d5], aopts), aopts)
+        assert 'Strain bands' not in _caption(aggfig)
+    finally:
+        for p in (d, d2, d3, d4, d5):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_the_strain_pct_flag_is_accepted_by_the_command_line():
+    """`--strain-pct` was documented in the module text and refused by the
+    parser ('unknown flag'), so it worked from the window and from a
+    spec but not from the command line."""
+    parsed = sp._parse_argv(['RUN', '--strain-pct'])
+    assert parsed is not None, 'the parser rejected --strain-pct'
+    args, flags, vals = parsed
+    assert args == ['RUN'] and '--strain-pct' in flags and not vals
+    opts, err = sp._cli_opts(flags, vals)
+    assert err is None and opts['strain_pct'] is True, (opts, err)
+    # absent: off, as before; and a spec that says true is inherited
+    opts, err = sp._cli_opts(set(), {})
+    assert err is None and opts['strain_pct'] is False
+    opts, err = sp._cli_opts(set(), {}, {'strain_pct': True})
+    assert err is None and opts['strain_pct'] is True
+
+
+def test_every_flag_the_parser_takes_is_in_the_usage_block_and_back():
+    """The omission this suite missed: the usage text and the parser's two
+    flag tuples are typed by hand in two places. They must name the same
+    flags, so a flag added to one and not the other fails here."""
+    import contextlib
+    import io
+    import re
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        sp._usage()
+    shown = set(re.findall(r'--[a-z][a-z-]*', buf.getvalue()))
+    taken = set(sp._BOOL_FLAGS) | set(sp._VALUED_FLAGS)
+    assert '--strain-pct' in shown, 'usage block does not name --strain-pct'
+    assert shown == taken, (sorted(shown - taken), sorted(taken - shown))
+
+
+def test_strain_pct_from_the_command_line_draws_the_strain_figure():
+    """End to end through main(): the flag reaches the figure, is recorded
+    in the figspec, and --from-spec re-renders the same bytes."""
+    if not _has_mpl():
+        return
+    d, out, again, plain = _mktmp(), _mktmp(), _mktmp(), _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        assert sp.main([d, '--strain-pct', '--out', out,
+                        '--stem', 'sp']) == 0
+        spec = os.path.join(out, 'sp.figspec.json')
+        assert _read_json(spec)['opts']['strain_pct'] is True
+        assert sp.main(['--from-spec', spec, '--out', again]) == 0
+        assert sp.main([d, '--out', plain, '--stem', 'sp']) == 0
+
+        def read(folder):
+            with open(os.path.join(folder, 'sp.png'), 'rb') as f:
+                return f.read()
+        assert read(out) == read(again), 're-render is not the same figure'
+        assert read(out) != read(plain), '--strain-pct changed nothing'
+    finally:
+        for p in (d, out, again, plain):
+            shutil.rmtree(p, ignore_errors=True)
+
+
 def test_aggregate_never_extrapolates_past_a_runs_own_range():
     """Guardrail 1. A run that stops at 3 kV LEAVES the aggregate above
     3 kV; it is not extended into it on the strength of its last point."""

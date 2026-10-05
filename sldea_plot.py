@@ -12,7 +12,7 @@ Usage:
                          [--subplots both|first|second] [--cadence-guard]
                          [--aggregate] [--aggregate-exact]
                          [--group NAME=RUN[,RUN...]] [--aggregate-only]
-                         [--format png|svg] [--dpi N]
+                         [--format png|svg] [--dpi N] [--strain-pct]
     python sldea_plot.py --from-spec FILE.figspec.json [flags to override]
     python sldea_plot.py --gui [RUN ...]        # window (see below)
     python sldea_plot.py --selftest [OUT.png]
@@ -60,6 +60,10 @@ Rendering:
       hand-traced ones (--no-bands hides them). A level mixing traced and
       machine snapshots keeps the machine +-2% band. Open markers = the
       level (with --prepost: the snapshot) includes a hand-traced boundary.
+      The percentages are of the AREA. Under --strain-pct the band is built
+      from A/A0 and then converted, so it is +-2 strain points at 0 % strain
+      and +-2 x A/A0 points in general (+-2.8 at 40 % strain), not +-2% of
+      the strain value.
     - The open/closed marker meaning is a KEY on the figure (`#267`): two
       proxy handles in their own compact legend, lower right of the area
       panel, so the run legend upper left keeps its corner and does not
@@ -1654,11 +1658,34 @@ def _group_members_caption(drawn, limit=CAPTION_LINE_MAX):
     return '\n' + line
 
 
-def _series(ax, xs, ys, traced, color, ls, bands, band_traced=None):
+def _band_edges(y, p_pct, pct=False):
+    """The budget band's (lo, hi) around one plotted `y`.
+
+    The budget is +-p % of the AREA, so the band is built in RATIO space,
+    A/A0 * (1 -/+ p), and only then mapped into the unit the panel shows.
+    On the mm2 panel and the A/A0 panel that map is a plain scale, and
+    this is y * (1 -/+ p). Under strain percent `y` is (A/A0 - 1) * 100,
+    so scaling it by (1 -/+ p) would be +-p of the STRAIN: zero width at
+    rest and 2.6 to 10.5 times too narrow on the campaign runs. Instead
+    the ratio is recovered as r = 1 + y / 100 and mapped back through
+    norm_y, which gives a half-width of p * 100 * A/A0 points: +-2
+    points at rest, wider as the area grows."""
+    f = p_pct / 100.0
+    if not pct:
+        return y * (1 - f), y * (1 + f)
+    r = 1.0 + y / 100.0
+    return norm_y(r * (1 - f), 1.0, True), norm_y(r * (1 + f), 1.0, True)
+
+
+def _series(ax, xs, ys, traced, color, ls, bands, band_traced=None,
+            pct=False):
     """One curve: line + per-point open/closed markers + traced-aware band.
     `traced` drives the marker fill; `band_traced` (default: same) drives
     the band width -- the mean line passes the AND-aggregate there so a
-    mixed pre/post level keeps the machine +-2% band."""
+    mixed pre/post level keeps the machine +-2% band. `pct` says `ys` are
+    strain percent (the normalized panel under --strain-pct); every other
+    caller leaves it False, so the mm2 panel and the A/A0 panel keep the
+    band they always had."""
     if band_traced is None:
         band_traced = traced
     ax.plot(xs, ys, ls, color=color, linewidth=1.8, zorder=3)
@@ -1667,10 +1694,11 @@ def _series(ax, xs, ys, traced, color, ls, bands, band_traced=None):
                 markerfacecolor='white' if tr else color,
                 markeredgecolor=color, markeredgewidth=1.2)
     if bands and len(xs) > 1:
-        lo = [y * (1 - (TRACED_BAND_PCT if tr else MACHINE_BAND_PCT) / 100)
-              for y, tr in zip(ys, band_traced)]
-        hi = [y * (1 + (TRACED_BAND_PCT if tr else MACHINE_BAND_PCT) / 100)
-              for y, tr in zip(ys, band_traced)]
+        edges = [_band_edges(y, TRACED_BAND_PCT if tr else MACHINE_BAND_PCT,
+                             pct)
+                 for y, tr in zip(ys, band_traced)]
+        lo = [e[0] for e in edges]
+        hi = [e[1] for e in edges]
         ax.fill_between(xs, lo, hi, color=color, alpha=0.14, linewidth=0,
                         zorder=2)
 
@@ -1803,7 +1831,7 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                         _series(axl, px, py, pt, color, ls, budget_bands)
                     if axr is not None:
                         _series(axr, px, [norm_y(y, run['a0'], pct) for y in py], pt,
-                                color, ls, budget_bands)
+                                color, ls, budget_bands, pct=pct)
                     xs_all += list(px)
                     ysl_all += list(py)
                     ysr_all += [norm_y(y, run['a0'], pct) for y in py]
@@ -1820,7 +1848,7 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                 _series(axl, xs, ys, tr, color, '-', show_bands, band_tr)
             if axr is not None:
                 _series(axr, xs, [norm_y(y, run['a0'], pct) for y in ys], tr, color,
-                        '-', show_bands, band_tr)
+                        '-', show_bands, band_tr, pct=pct)
             xs_all += list(xs)
             ysl_all += list(ys)
             ysr_all += [norm_y(y, run['a0'], pct) for y in ys]
@@ -2019,6 +2047,22 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                "X axis: nominal kV (measured_kV telemetry incomplete on "
                "all runs).")
     else:
+        # The band is +-p of the AREA. Under strain percent the panel's
+        # numbers are strain points, so "+-2%" there could be read as
+        # "+-2 points everywhere", which is true only at rest. The note
+        # rides on the caption's SECOND line, not the first: the first is
+        # already wider than the figure (see CAPTION_LINE_MAX's comment)
+        # and a clause appended to it would be cut off. The wording is
+        # kept short on purpose: this line ends at about 98 % of the frame
+        # width, and the test measures it in pixels. Only when the strain
+        # panel is really drawn, with bands on.
+        strain_note = ''
+        if budget_bands and pct and axr is not None:
+            strain_note = (
+                f"  Strain bands = ±{MACHINE_BAND_PCT:g}% machine / "
+                f"±{TRACED_BAND_PCT:g}% traced of the AREA: "
+                f"±{MACHINE_BAND_PCT:g} / ±{TRACED_BAND_PCT:g} points at "
+                f"0 % strain, wider as strain grows.")
         cap = ("Points = per-level pre/post snapshot pair"
                + (" (post solid, pre dashed)" if opts['prepost']
                   else " mean") + ".  "
@@ -2030,7 +2074,7 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                   else "") + ".\n"
                "X = current-confirmed breakdown (recomputed, 2026-08-05 "
                "semantics).  X axis: nominal kV (measured_kV telemetry "
-               "incomplete on all runs).")
+               "incomplete on all runs)." + strain_note)
     cap = (cap
            + agg_caption
            + _estimator_caption(runs)
@@ -3057,7 +3101,7 @@ _BOOL_FLAGS = ('--vs-area', '--prepost', '--mean', '--no-bands',
                '--allow-old-estimator', '--selftest',
                '--gui', '--logx', '--logy', '--no-marker-key',
                '--cadence-guard', '--aggregate', '--aggregate-exact',
-               '--aggregate-only')
+               '--aggregate-only', '--strain-pct')
 _VALUED_FLAGS = ('--mode', '--out', '--stem', '--title',
                  '--title-first', '--title-second', '--subplots',
                  '--from-spec', '--format', '--dpi', '--group')

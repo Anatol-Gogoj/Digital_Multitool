@@ -29,6 +29,14 @@ What is pinned here:
   writes, and run.log says what the drive had been commanded to; a
   normal baseline changes nothing; a check that raises is logged and the
   run completes; a log call that raises at the stop still zeroes.
+* Owner decisions 12, 13 and 14 (2026-10-03): a deliberate "Start anyway
+  (no picture)" at the pre-flight is an override that the start path
+  hands to the worker, DRY or LIVE. With it a flat baseline is still
+  checked and logged but does not stop the run, and setup.txt and
+  run.log record the override. Without it, a baseline the camera gave
+  no frame for ends the run the way a flat one does, when the pre-flight
+  had a camera; a run started past "No camera frame available" goes on
+  as it always did. The no-frame stop zeroes exactly as Abort does.
 
 The dialog cases open one small window each and are skipped without a
 display.
@@ -53,14 +61,22 @@ import sldea_edge  # noqa: E402
 import sldea_profile  # noqa: E402
 import webcam  # noqa: E402
 from sldea_profile import (  # noqa: E402
-    SldeaProfile, baseline_picture_check, camera_line, camera_lock_mismatch,
-    exposure_verdict, flat_stop_words, preflight_report,
+    PREFLIGHT_OVERRIDE_NO_PICTURE, SldeaProfile, baseline_picture_check,
+    baseline_stop_reason, baseline_stop_words, camera_line,
+    camera_lock_mismatch, exposure_verdict, flat_stop_words,
+    no_baseline_frame_line, preflight_override_record, preflight_report,
     preflight_start_button)
 
 G = gui.InstrumentControlGUI
 FLAT_Q = 'No picture in this frame'
 CLIP_Q = 'Baseline is blown out'
 STOP_BOX = 'Run stopped: no picture'
+NOFRAME_BOX = 'Run stopped: no baseline frame'
+OVERRIDE = PREFLIGHT_OVERRIDE_NO_PICTURE
+# what the pre-flight leaves for the start path, by outcome
+SEEN_NONE = {'frame': False, 'override': ''}
+SEEN_FRAME = {'frame': True, 'override': ''}
+SEEN_OVERRIDE = {'frame': True, 'override': OVERRIDE}
 
 
 class _Skip(Exception):
@@ -747,10 +763,13 @@ def _profile(**kw):
     return SldeaProfile(**opts)
 
 
-def _run_worker(app, p, tmp, dry=True, timeout=60):
+def _run_worker(app, p, tmp, dry=True, timeout=60, **kw):
+    """The REAL worker on `app`, as the start path starts it. `kw` is
+    what the start path adds from the pre-flight (cam_expected,
+    picture_override); left out, the worker's defaults apply."""
     t = _threading.Thread(
         target=app._sldea_worker, args=(p, tmp, 'RUN', 1, 2, 3, dry),
-        kwargs=dict(cam_exp=3, cam_gain=0), daemon=True)
+        kwargs=dict(cam_exp=3, cam_gain=0, **kw), daemon=True)
     t.start()
     t.join(timeout)
     assert not t.is_alive(), ("the worker stalled", app.lines)
@@ -761,6 +780,11 @@ def _run_worker(app, p, tmp, dry=True, timeout=60):
 def _rows(rundir):
     with open(_os.path.join(rundir, 'data.csv'), newline='') as f:
         return list(_csv.DictReader(f))
+
+
+def _setup_lines(rundir):
+    with open(_os.path.join(rundir, 'setup.txt'), encoding='utf-8') as f:
+        return f.read().splitlines()
 
 
 FLAT, GOOD = _flat_frame(), _disc_frame(h=240, w=320, r=60)
@@ -919,51 +943,63 @@ def test_a_log_call_that_raises_at_the_stop_still_zeroes_the_drive():
     """The stop flag is set before the loud line is logged, and the whole
     block sits inside the worker's try: if logging itself fails (the Tk
     loop is gone), the run still ends and the finally block still writes
-    the zeroing pair. Nothing after the baseline but those two writes."""
-    class _DeafApp(_RunApp):
-        def _sldea_log(self, msg):
-            if 'NO PICTURE' in str(msg):
-                raise RuntimeError('main thread is not in main loop')
-            self.lines.append(str(msg))
+    the zeroing pair. Nothing after the baseline but those two writes.
+    Both stops: a flat baseline, and no baseline frame at all."""
+    for loud, frames, kw in (
+            ('NO PICTURE', lambda n: FLAT, {}),
+            ('NO BASELINE FRAME', lambda n: GOOD if n == 1 else None,
+             dict(cam_expected=True))):
+        class _DeafApp(_RunApp):
+            def _sldea_log(self, msg):
+                if loud in str(msg):
+                    raise RuntimeError('main thread is not in main loop')
+                self.lines.append(str(msg))
 
-    p = _profile(ramp_s=5.0)
-    sg = _FakeSG()
-    app = _DeafApp(sg)
-    mark = {}
-    with _tempfile.TemporaryDirectory() as tmp, \
-            _camera(lambda n: FLAT) as cam, _messagebox(_MB()):
-        cam['on_grab'] = lambda n: mark.__setitem__(n, len(sg.writes))
-        t = _threading.Thread(
-            target=app._sldea_worker, args=(p, tmp, 'RUN', 1, 2, 3, False),
-            kwargs=dict(cam_exp=3, cam_gain=0), daemon=True)
-        t.start()
-        t.join(60)
-        assert not t.is_alive(), ("the worker stalled", app.lines)
-        rows = _rows(_os.path.join(tmp, 'RUN'))
-        app.root.run_pending()
-    assert app._sldea_stop is True
-    assert [r['tag'] for r in rows] == ['warmup', 'baseline'], rows
-    assert sg.writes[mark[2]:] == ZEROING, sg.writes
-    assert any(ln.startswith('ERROR: main thread') for ln in app.lines)
-    assert not any('FAILED TO ZERO' in ln for ln in app.lines), app.lines
-    assert app.finished
+        p = _profile(ramp_s=5.0)
+        sg = _FakeSG()
+        app = _DeafApp(sg)
+        mark = {}
+        with _tempfile.TemporaryDirectory() as tmp, \
+                _camera(frames) as cam, _messagebox(_MB()):
+            cam['on_grab'] = lambda n: mark.__setitem__(n, len(sg.writes))
+            t = _threading.Thread(
+                target=app._sldea_worker,
+                args=(p, tmp, 'RUN', 1, 2, 3, False),
+                kwargs=dict(cam_exp=3, cam_gain=0, **kw), daemon=True)
+            t.start()
+            t.join(60)
+            assert not t.is_alive(), ("the worker stalled", app.lines)
+            rows = _rows(_os.path.join(tmp, 'RUN'))
+            app.root.run_pending()
+        assert app._sldea_stop is True, loud
+        assert [r['tag'] for r in rows] == ['warmup', 'baseline'], rows
+        assert sg.writes[mark[2]:] == ZEROING, (loud, sg.writes)
+        assert any(ln.startswith('ERROR: main thread') for ln in app.lines)
+        assert not any('FAILED TO ZERO' in ln for ln in app.lines), \
+            app.lines
+        assert app.finished, loud
 
 
-def _complete_run(frames, dry=False, patch=None):
-    """One whole run on `frames`; -> (app, sg, rows, profile)."""
+def _complete_run(frames, dry=False, patch=None, **kw):
+    """One whole run on `frames`; -> (app, sg, rows, profile). The run
+    folder's setup.txt lines are kept on the app as app.setup, read
+    before the folder goes away, and every box shown as app.boxes."""
     p = _profile()
     sg = None if dry else _FakeSG()
     app = _RunApp(sg)
+    mb = _MB()
     with _tempfile.TemporaryDirectory() as tmp, _camera(frames), \
-            _messagebox(_MB()):
+            _messagebox(mb):
         undo = patch() if patch is not None else None
         try:
-            rundir = _run_worker(app, p, tmp, dry=dry)
+            rundir = _run_worker(app, p, tmp, dry=dry, **kw)
         finally:
             if undo is not None:
                 undo()
         rows = _rows(rundir)
+        app.setup = _setup_lines(rundir)
         app.root.run_pending()      # inside the stub: no real box, ever
+    app.boxes = mb.calls
     return app, sg, rows, p
 
 
@@ -1030,10 +1066,227 @@ def test_a_flat_warm_up_frame_alone_stops_nothing():
 
 
 def test_no_baseline_frame_means_no_check_and_no_change():
+    """The "No camera frame available, continue anyway?" case: the
+    pre-flight had no camera (cam_expected stays False), so a run with
+    no frames goes on exactly as it always did (decision 13 keeps it)."""
     app, sg, rows, p = _complete_run(lambda n: None)
     _assert_ran_to_the_end(app, sg, rows, p)
     assert not any('baseline picture check' in ln for ln in app.lines)
+    assert not any('BASELINE FRAME' in ln for ln in app.lines), app.lines
     assert all(r['frame_file'] == '' for r in rows), rows
+    assert not any(ln.startswith('Pre-flight override') for ln in app.setup)
+
+
+# --------------------------------------------------------------------------
+# Decisions 12, 13 and 14 (2026-10-03): the pre-flight override carries
+# into the run; no baseline frame at all stops the run
+# --------------------------------------------------------------------------
+
+def test_the_baseline_stop_rule_as_a_table():
+    """(frame taken, flat, camera at the pre-flight, override) -> why."""
+    table = [
+        ((True, False, True, ''), ''),           # a normal baseline
+        ((True, True, True, ''), 'flat'),        # the 2026-10-01 picture
+        ((True, True, False, ''), 'flat'),       # flat is flat regardless
+        ((False, False, True, ''), 'no frame'),  # camera gave nothing
+        ((False, False, False, ''), ''),         # no camera to expect it
+        ((True, True, True, OVERRIDE), ''),      # the override: carry on
+        ((False, False, True, OVERRIDE), ''),    # ...also with no frame
+        ((True, False, True, OVERRIDE), ''),
+    ]
+    for args, why in table:
+        assert baseline_stop_reason(*args) == why, (args, why)
+
+
+def test_the_override_record_is_a_plain_key_value_line_and_a_log_line():
+    assert preflight_override_record('') == (None, None)
+    setup, log = preflight_override_record(OVERRIDE)
+    assert setup.startswith('Pre-flight override: no picture ('), setup
+    assert setup.isascii() and '\n' not in setup, setup
+    assert 'baseline picture stop is off for this run' in setup, setup
+    assert log.startswith('⚠⚠ pre-flight override: no picture.')
+    assert 'will NOT stop this run' in log, log
+    # the setup.txt reader is unmoved by the new line (it reads only its
+    # own section and the diameter line)
+    with _tempfile.TemporaryDirectory() as tmp:
+        with open(_os.path.join(tmp, 'setup.txt'), 'w') as f:
+            f.write("SLDEA Test  --  RUN\nDEA nominal diameter: 16 mm\n"
+                    + setup + "\n")
+        s = sldea_edge.load_settings(tmp)
+    assert s == dict(sldea_edge.DEFAULT_SETTINGS, diam_mm=16.0), s
+
+
+def test_the_check_names_the_override_instead_of_stopping():
+    """The verdict is the same; only the words after it change."""
+    flat, plain = baseline_picture_check(FLAT)
+    flat2, said = baseline_picture_check(FLAT, OVERRIDE)
+    assert flat and flat2
+    assert plain.endswith('STOPPING NOW.'), plain
+    assert said.endswith('so the run CARRIES ON. Review this run by hand.')
+    assert 'started anyway at the pre-flight (no picture)' in said, said
+    assert 'STOPPING' not in said, said
+    assert plain.split(' This is the run')[0] == \
+        said.split(' This is the run')[0]
+    assert 'contrast 2 gray levels' in said, said
+    ok, line = baseline_picture_check(GOOD, OVERRIDE)
+    assert not ok and line == baseline_picture_check(GOOD)[1]
+
+
+def test_the_no_frame_words_say_what_happened_and_what_to_do():
+    stop = no_baseline_frame_line()
+    assert stop.startswith('⚠⚠ NO BASELINE FRAME: the camera gave '
+                           'the pre-flight a picture'), stop
+    assert stop.endswith('STOPPING NOW.') and 'Webcam preview' in stop
+    on = no_baseline_frame_line(OVERRIDE)
+    assert on.endswith('so the run CARRIES ON. Review this run by hand.')
+    assert 'STOPPING' not in on and '(no picture)' in on, on
+    for reason in ('flat', 'no frame'):
+        w = baseline_stop_words(reason, True, None)
+        assert set(w) == {'stopped', 'status', 'title', 'box'}, w
+        assert w['stopped'] == ("run stopped at the baseline frame. This "
+                                "was a DRY run: no voltage was driven.")
+        assert w['status'].startswith('STOPPED: ') and \
+            w['status'].endswith('(see Run log)'), w
+        assert 'no voltage was driven' in w['box'], w
+        assert 'press Run again' in w['box'], w
+        live = baseline_stop_words(reason, False, 0.012)
+        assert 'commanded to 0.012 kV' in live['box'], live
+    assert baseline_stop_words('flat', True, None)['title'] == STOP_BOX
+    assert baseline_stop_words('no frame', True, None)['title'] == \
+        NOFRAME_BOX
+    assert 'NO BASELINE FRAME' in \
+        baseline_stop_words('no frame', True, None)['status']
+    assert 'NO PICTURE' in baseline_stop_words('flat', True, None)['status']
+
+
+def test_a_flat_baseline_with_the_override_runs_to_the_end():
+    """Decisions 12 and 14: the override carries into DRY and LIVE. The
+    check still runs and logs its verdict, setup.txt and run.log record
+    the override, nothing stops, and the LIVE run ends with the same
+    zeroing pair every complete run ends with."""
+    for dry in (True, False):
+        app, sg, rows, p = _complete_run(
+            lambda n: FLAT, dry=dry, cam_expected=True,
+            picture_override=OVERRIDE)
+        # _assert_ran_to_the_end forbids a NO PICTURE line, which this
+        # run must have, so its checks are spelled out here
+        assert f"run complete: {len(p.snapshots)}/{len(p.snapshots)} " \
+               f"frames" in app.lines, (dry, app.lines)
+        assert len(rows) == len(p.snapshots), rows
+        assert app.status[-1][0].startswith('complete'), app.status[-1]
+        assert app.boxes == [], app.boxes
+        assert app.finished
+        if sg is not None:
+            assert [w[0] for w in sg.writes[:3]] == SETUP, sg.writes
+            assert sg.writes[-2:] == ZEROING, sg.writes
+            assert max(sg.offsets()) > 0.499, sg.offsets()
+        # the verdict is logged, and it says the run goes on
+        loud = [ln for ln in app.lines if 'NO PICTURE' in ln]
+        assert len(loud) == 1, (dry, app.lines)
+        assert 'contrast 2 gray levels' in loud[0], loud
+        assert loud[0].endswith('so the run CARRIES ON. Review this run '
+                                'by hand.'), loud
+        assert not any('STOPPING' in ln or 'run stopped' in ln
+                       for ln in app.lines), app.lines
+        # the record: one plain Key: value line in setup.txt, and the
+        # override in run.log before the first frame
+        [key] = [ln for ln in app.setup if ln.startswith('Pre-flight ')]
+        assert key == preflight_override_record(OVERRIDE)[0], key
+        # on its own, after the Snapshots block the profile text ends with
+        at = app.setup.index(key)
+        assert at > app.setup.index('--- Snapshots ---'), app.setup
+        assert app.setup[at - 1] == '', app.setup[at - 2:at + 1]
+        over = [i for i, ln in enumerate(app.lines)
+                if 'pre-flight override: no picture' in ln]
+        first_snap = [i for i, ln in enumerate(app.lines)
+                      if 'snap s00' in ln]
+        assert len(over) == 1 and over[0] < first_snap[0], app.lines
+        assert 'will NOT stop this run' in app.lines[over[0]], app.lines
+
+
+def test_no_baseline_frame_stops_a_run_whose_preflight_had_a_camera():
+    """Decision 13: the pre-flight got a frame, the baseline grab gives
+    none. The run ends through the abort path, with the zeroing pair as
+    the only writes after the baseline grab, as the flat stop does."""
+    p = _profile(ramp_s=5.0)
+    frames = lambda n: GOOD if n == 1 else None     # noqa: E731
+    for dry in (True, False):
+        sg = None if dry else _FakeSG()
+        app = _RunApp(sg)
+        mb = _MB()
+        mark = {}
+        with _tempfile.TemporaryDirectory() as tmp, \
+                _camera(frames) as cam, _messagebox(mb):
+            cam['on_grab'] = lambda n: mark.setdefault(
+                n, len(sg.writes) if sg else 0)
+            rundir = _run_worker(app, p, tmp, dry=dry, cam_expected=True)
+            rows = _rows(rundir)
+            frame_files = sorted(_os.listdir(
+                _os.path.join(rundir, 'frames')))
+            setup = _setup_lines(rundir)
+            assert mb.calls == [], mb.calls
+            app.root.run_pending()
+        assert [r['tag'] for r in rows] == ['warmup', 'baseline'], rows
+        assert rows[1]['frame_file'] == '', rows
+        assert frame_files == ['SLDEA_s00_00.00kV_warmup.png'], frame_files
+        # the baseline grab and its one retry, then nothing
+        assert cam['grabs'] == 3, cam
+        loud = [ln for ln in app.lines if 'NO BASELINE FRAME' in ln]
+        assert len(loud) == 1 and loud[0].endswith('STOPPING NOW.'), \
+            app.lines
+        at = app.lines.index(loud[0])
+        assert app.lines[at + 1].startswith(
+            'run stopped at the baseline frame. '), app.lines
+        assert f"run aborted: 2/{len(p.snapshots)} frames" in app.lines
+        assert not any('NO PICTURE' in ln for ln in app.lines), app.lines
+        text, fg = app.status[-1]
+        assert text.startswith('STOPPED: NO BASELINE FRAME'), text
+        assert fg == '#c62828'
+        assert mb.titles('showwarning') == [NOFRAME_BOX], mb.calls
+        assert 'gave the pre-flight one' in mb.calls[0][2], mb.calls
+        assert not any(ln.startswith('Pre-flight') for ln in setup)
+        assert app.finished
+        if dry:
+            assert 'This was a DRY run' in app.lines[at + 1]
+            assert 'This was a DRY run' in mb.calls[0][2]
+        else:
+            assert sg.writes[mark[2]:] == ZEROING, sg.writes
+            assert sg.writes[-2:] == ZEROING, sg.writes
+            up = [v for v in sg.offsets() if v > 0]
+            assert len(up) <= 1 and all(v < 0.05 for v in up), up
+            assert not any('FAILED TO ZERO' in ln for ln in app.lines)
+            last = [v for v in sg.offsets()[:-1]][-1]
+            assert f"commanded to {last:.3f} kV" in app.lines[at + 1]
+
+
+def test_no_baseline_frame_with_the_override_carries_on():
+    """One mechanism: the override also covers a camera that gives the
+    run no baseline frame. Logged, and the run goes on."""
+    app, sg, rows, p = _complete_run(
+        lambda n: GOOD if n == 1 else None, cam_expected=True,
+        picture_override=OVERRIDE)
+    _assert_ran_to_the_end(app, sg, rows, p)
+    [said] = [ln for ln in app.lines if 'NO BASELINE FRAME' in ln]
+    assert said.endswith('so the run CARRIES ON. Review this run by hand.')
+    assert not any('run stopped' in ln for ln in app.lines), app.lines
+    assert app.boxes == [], app.boxes
+    assert any(ln.startswith('Pre-flight override: no picture')
+               for ln in app.setup), app.setup
+
+
+def test_a_good_baseline_with_the_override_is_only_a_recorded_run():
+    """The override changes nothing about a baseline that is fine: the
+    check passes as before, and only the record carries the override."""
+    app, sg, rows, p = _complete_run(
+        lambda n: GOOD, cam_expected=True, picture_override=OVERRIDE)
+    _assert_ran_to_the_end(app, sg, rows, p)
+    ok = [ln for ln in app.lines
+          if ln.startswith('baseline picture check: contrast')]
+    assert len(ok) == 1 and ok[0].endswith('- OK'), app.lines
+    assert any(ln.startswith('Pre-flight override: no picture')
+               for ln in app.setup), app.setup
+    assert any('pre-flight override: no picture' in ln
+               for ln in app.lines), app.lines
 
 
 # --------------------------------------------------------------------------
@@ -1065,6 +1318,7 @@ def test_a_preflight_with_no_frame_logs_the_question_and_the_answer():
     for answer in (False, True):
         mb = _MB({'Camera pre-flight': answer})
         app = _FlightApp()
+        app._sldea_preflight_seen = SEEN_OVERRIDE      # stale, from before
         with _camera(lambda n: None), _messagebox(mb):
             assert app._sldea_preflight(3, 0) is answer
         [(kind, _title, _msg, kw)] = mb.calls
@@ -1072,6 +1326,11 @@ def test_a_preflight_with_no_frame_logs_the_question_and_the_answer():
         assert app.lines[0] == 'camera pre-flight: NO FRAME from the camera'
         assert ('ANYWAY with no camera frame' in app.lines[-1]) is answer, \
             app.lines
+        # no camera at the pre-flight: not an override, and the run is
+        # not told to expect a baseline frame (decision 13 keeps this
+        # question's behaviour)
+        assert app._sldea_preflight_seen == SEEN_NONE, \
+            app._sldea_preflight_seen
 
 
 def test_a_report_that_raises_asks_default_no_and_never_starts_silently():
@@ -1094,6 +1353,10 @@ def test_a_report_that_raises_asks_default_no_and_never_starts_silently():
         assert 'report blew up' in msg and 'Start the run anyway?' in msg
         assert 'the picture check failed (report blew up)' in app.lines[0]
         assert ('picture unchecked' in app.lines[-1]) is answer, app.lines
+        # the camera gave a frame, so the run expects a baseline frame;
+        # an unchecked start is not the flat override
+        assert app._sldea_preflight_seen == SEEN_FRAME, \
+            app._sldea_preflight_seen
 
 
 # --------------------------------------------------------------------------
@@ -1222,8 +1485,13 @@ def test_dialog_a_flat_frame_cannot_be_started_by_return_or_by_one_click():
         assert (kind, title) == ('askyesno', FLAT_Q), mb.calls
         assert kw.get('default') == 'no', kw
         assert 'NO PICTURE' in msg and 'Start the run anyway?' in msg
-        assert 'the run stops itself right after that frame' in msg, msg
+        # the question says what Yes does since 2026-10-03: the run
+        # will not stop itself on a flat baseline
+        assert 'the run will NOT stop itself on a flat baseline' in msg
+        assert 'setup.txt records that you started anyway' in msg, msg
+        assert 'stops itself' not in msg, msg
         assert not any('ANYWAY' in ln for ln in app.lines), app.lines
+        assert app._sldea_preflight_seen == SEEN_FRAME, "No is no override"
         dlg.start.invoke()                   # second click: says Yes
         assert not dlg.alive()
 
@@ -1234,7 +1502,11 @@ def test_dialog_a_flat_frame_cannot_be_started_by_return_or_by_one_click():
     assert 'mean 66, saturated 0.0%, contrast 2 gray levels' in app.lines[0]
     assert app.lines[-1].endswith(
         'operator started the run ANYWAY on a flat pre-flight frame '
-        '(no picture)'), app.lines
+        '(no picture): the baseline picture stop is OFF for this run'), \
+        app.lines
+    # Yes IS the override, and it is left for the start path to pass on
+    assert app._sldea_preflight_seen == SEEN_OVERRIDE, \
+        app._sldea_preflight_seen
     # the camera was asked exactly what it always was, in the same order
     assert cam['controls'] == RUN_CONTROLS and cam['grabs'] == 1, cam
 
@@ -1254,6 +1526,7 @@ def test_dialog_a_normal_frame_keeps_start_as_the_default():
     assert app.lines[0].endswith('verdict OK'), app.lines
     assert not any('ANYWAY' in ln for ln in app.lines), app.lines
     assert not any('operator pressed' in ln for ln in app.lines), app.lines
+    assert app._sldea_preflight_seen == SEEN_FRAME, app._sldea_preflight_seen
 
 
 def test_dialog_starting_past_a_warning_is_one_click_and_one_log_line():
@@ -1364,6 +1637,9 @@ def test_dialog_a_clipped_frame_still_asks_its_own_question():
     assert go is True and mb.titles('askyesno') == [CLIP_Q], mb.calls
     assert app.lines[0].endswith('verdict CLIPPED'), app.lines
     assert app.lines[-1].endswith('ANYWAY on a blown-out baseline')
+    # a clipped start is not the flat override: the run still stops
+    # itself if its own baseline turns out flat
+    assert app._sldea_preflight_seen == SEEN_FRAME, app._sldea_preflight_seen
 
 
 def _run():

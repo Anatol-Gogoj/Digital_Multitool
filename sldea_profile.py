@@ -676,7 +676,7 @@ def preflight_report(frame, cam_exp, cam_gain, locked=None, focus=None,
             'stats_line': stats, 'log_lines': log}
 
 
-def baseline_picture_check(frame):
+def baseline_picture_check(frame, override=''):
     """Does the run's own 0 kV baseline frame hold a picture?
 
     -> (flat, run.log line). The warm-up and baseline frames are the
@@ -684,18 +684,30 @@ def baseline_picture_check(frame):
     staircase, so this is the last place a run on a flat picture can be
     stopped (the 2026-10-01 run went on to 3 kV for 209 s). Raises when
     the frame cannot be judged; the runner logs that and carries on
-    unchanged, because a check that cannot run must not end a run."""
+    unchanged, because a check that cannot run must not end a run.
+
+    `override` is the pre-flight override the run was started with
+    ('' for none, see preflight_override_record). The verdict is the
+    same either way; only the words after it change, because with the
+    override the runner does not stop (decisions 12 and 14,
+    2026-10-03), and the line must not say that it does."""
     import sldea_edge
     c = sldea_edge.image_content(frame)
     if c is None:
         raise ValueError("the baseline frame is empty")
     if c['flat']:
+        if override:
+            tail = (f" This is the run's own baseline frame. The operator "
+                    f"started anyway at the pre-flight ({override}), so "
+                    f"the run CARRIES ON. Review this run by hand.")
+        else:
+            tail = (" This is the run's own baseline frame, so nothing in "
+                    "this run could be measured. STOPPING NOW.")
         return True, (
             "⚠⚠ "
             + flat_message(c['contrast'], 0.5 * (c['p5'] + c['p95']))
             + f" (A usable picture spans {sldea_edge.FLAT_CONTRAST_GRAY:.0f}"
-            f" gray levels or more.) This is the run's own baseline frame, "
-            f"so nothing in this run could be measured. STOPPING NOW.")
+            f" gray levels or more.)" + tail)
     return False, (f"baseline picture check: contrast {c['contrast']:.0f} "
                    f"gray levels, saturated {c['sat_pct']:.1f}% - OK")
 
@@ -718,6 +730,104 @@ def flat_stop_words(dry, drive_kv):
                 "voltage at the stop is not known).")
     return (f"The first voltage ramp had only just begun: the drive had "
             f"been commanded to {kv:.3f} kV when the run stopped.")
+
+
+# ---- the pre-flight override, and what ends a run at its baseline -------
+# Owner decisions 12, 13 and 14 (2026-10-03), one mechanism. A deliberate
+# "Start anyway (no picture)" at the camera pre-flight, after its
+# default-No question, carries into the run, DRY or LIVE: the baseline
+# picture check still runs and logs its verdict, but it does not stop
+# that run. The override is written to run.log and to setup.txt, so the
+# record shows the baseline was flat and the operator chose to go on (a
+# faint device that will be reviewed by hand is what it exists for).
+# Without the override, a baseline with no frame at all ends the run the
+# way a flat one does, when the pre-flight had a camera to expect one
+# from. Tk-free, so the HV start path's rules are tested without a bench.
+
+PREFLIGHT_OVERRIDE_NO_PICTURE = 'no picture'
+PREFLIGHT_OVERRIDE_KEY = 'Pre-flight override'
+
+
+def preflight_override_record(override):
+    """What a run writes down about its pre-flight override.
+
+    -> (setup.txt line, run.log line), or (None, None) for no override.
+    The setup.txt line is plain `Key: value` text like every other line
+    in that file (decision 2026-08-08); nothing reads it back by machine
+    yet, it is there for the person reading the run folder."""
+    if not override:
+        return None, None
+    return (f"{PREFLIGHT_OVERRIDE_KEY}: {override} (the operator started "
+            f"anyway at the camera pre-flight; the baseline picture stop "
+            f"is off for this run)",
+            f"⚠⚠ pre-flight override: {override}. The baseline picture "
+            f"check still runs and its verdict goes to this log, but it "
+            f"will NOT stop this run. Review this run by hand.")
+
+
+def baseline_stop_reason(frame_taken, flat, cam_expected, override):
+    """Why the runner ends a run at its baseline frame, or '' to go on.
+
+    'flat'      the baseline holds no picture (2026-10-02).
+    'no frame'  the camera gave the pre-flight a frame but gave the run
+                none for its baseline (decision 13). A run started past
+                the "No camera frame available" question had no camera
+                to expect one from, and goes on as it always did.
+    The pre-flight override switches both off."""
+    if override:
+        return ''
+    if not frame_taken:
+        return 'no frame' if cam_expected else ''
+    return 'flat' if flat else ''
+
+
+def no_baseline_frame_line(override=''):
+    """The run.log line for a baseline the camera gave no frame for, in
+    a run whose pre-flight did get one."""
+    if override:
+        return (f"⚠⚠ NO BASELINE FRAME: the camera gave the pre-flight a "
+                f"picture but gave this run none for its baseline (camera "
+                f"busy? close the Webcam preview). The operator started "
+                f"anyway at the pre-flight ({override}), so the run CARRIES "
+                f"ON. Review this run by hand.")
+    return ("⚠⚠ NO BASELINE FRAME: the camera gave the pre-flight a picture "
+            "but gave this run none for its baseline (camera busy? close "
+            "the Webcam preview). Nothing in this run could be measured. "
+            "STOPPING NOW.")
+
+
+def baseline_stop_words(reason, dry, drive_kv):
+    """The words for a run that ends at its baseline frame.
+
+    -> dict(stopped, status, title, box): the run.log line after the
+    check's own line, the red status line, and the operator's box. The
+    drive sentence is flat_stop_words'. Never raises."""
+    drive = flat_stop_words(dry, drive_kv)
+    tail = "\n\nThe Run log has the numbers."
+    if reason == 'no frame':
+        return {
+            'stopped': f"run stopped at the baseline frame. {drive}",
+            'status': ("STOPPED: NO BASELINE FRAME from the camera, "
+                       "nothing was measured (see Run log)"),
+            'title': "Run stopped: no baseline frame",
+            'box': ("The run stopped itself at its baseline picture.\n\n"
+                    "The camera gave no frame for it, although it gave "
+                    "the pre-flight one, so nothing in this run could "
+                    "have been measured.\n\n" + drive
+                    + "\n\nClose the Webcam preview if it is running, "
+                    "check the camera, then press Run again." + tail)}
+    return {
+        'stopped': f"run stopped at the baseline frame. {drive}",
+        'status': ("STOPPED: NO PICTURE in the baseline frame, nothing "
+                   "was measured (see Run log)"),
+        'title': "Run stopped: no picture",
+        'box': ("The run stopped itself right after its baseline "
+                "picture.\n\nThat picture is flat: the disc is not "
+                "visible, so nothing in this run could have been "
+                "measured.\n\n" + drive
+                + "\n\nOpen the Webcam tab, change the exposure or the "
+                "light until you can see the disc, press Apply & Lock, "
+                "then press Run again." + tail)}
 
 
 def credible_baseline_ua(baseline_ua, trip_ua):

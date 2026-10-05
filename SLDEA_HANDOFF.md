@@ -22,6 +22,84 @@ flat frame read "exposure OK" and Return pressed a default "Looks good"
 button. Now a flat frame is refused like a blown-out one, Return starts a
 run only from a clean pre-flight, every pre-flight is logged, and the run
 stops itself right after its own baseline frame if that frame is flat.
+Update 2026-10-03: a deliberate "Start anyway (no picture)" at the
+pre-flight now carries into the run and switches that stop off, written
+to run.log and setup.txt; and a baseline the camera gives no frame for
+stops the run the way a flat one does.
+
+### Update 2026-10-03: the override carries into the run; no frame stops it (owner decisions 12, 13 and 14)
+
+**Observation.** Two gaps in the 2026-10-02 design, from the owner's
+review of the branch. (a) The flat gate had no way through for a faint
+device: Yes to "Start the run anyway?" bought nothing, because the run's
+own baseline was flat too and stopped the run three seconds later, so
+a low-contrast device (the section P fiducial-ring candidates, a dark
+electrode under weak light) could only be run with more light or a
+change to `FLAT_CONTRAST_GRAY`. (b) A run with no baseline frame at all
+(busy device, pulled plug; listed as a risk below) ran its whole
+staircase with `NO FRAME` on every snap line.
+
+**Decision.** One mechanism for 12 and 14, the same abort path for 13.
+
+- **Yes at the flat gate is the override, and nothing else is.** The
+  question now says what Yes does (the run will NOT stop itself on a
+  flat baseline; setup.txt records it; faint devices reviewed by hand
+  only). The clipped gate's Yes, an unchecked-picture start and a
+  warning start are not overrides. The pre-flight leaves
+  `_sldea_preflight_seen = {'frame', 'override'}`; `sldea_run` resets
+  it before the pre-flight and hands it to the worker as `cam_expected`
+  and `picture_override`, so nothing stale reaches a run and a skipped
+  pre-flight hands over the old behaviour.
+- **The record.** Before any frame, the worker writes one plain
+  `Key: value` line, `Pre-flight override: no picture (...)`, on its own
+  after the `--- Snapshots ---` block of setup.txt (ASCII;
+  `se.load_settings` is unmoved by it, pinned), and a `pre-flight
+  override` line in run.log. `baseline_picture_check(frame, override)`
+  still runs and returns the same verdict; a flat baseline then logs
+  `... so the run CARRIES ON. Review this run by hand.` instead of
+  `STOPPING NOW.`
+- **No frame stops the run when the pre-flight had a camera.**
+  `sldea_profile.baseline_stop_reason(frame_taken, flat, cam_expected,
+  override)` is the whole rule: `''` with the override; `'no frame'`
+  when the grab and its one retry gave nothing and `cam_expected`;
+  `'flat'` as before; `''` for no frame with no camera at the pre-flight
+  (the "No camera frame available" question keeps its behaviour). The
+  worker sets the stop flag first, logs, and breaks to the same
+  `finally` block; the words for both stops live in
+  `baseline_stop_words`, Tk-free.
+- **Nothing else moved.** No instrument or camera call was added, moved
+  or reordered; the baseline is still shot one loop tick into the first
+  ramp (decision 15 is the separate bench PR for that).
+
+**Risks.** The override is a way to run on no picture, on purpose, and
+a LIVE override run goes to full voltage on a picture nothing can
+measure automatically (decision 14); the record is what separates a
+faint-device run from a repeat of 10-01. Edge Review does not read the
+setup.txt line yet (a card note is a follow-up). The no-frame stop leans
+on `webcam.oneshot_rgb` returning None for a held or pulled camera,
+which is not bench-verified for a pulled plug; BENCH_TEST S7 asks for
+both ways. Nothing here is bench-verified: section S (S3, S4 and the
+new S7) is the merge gate.
+
+**Verification.** `tests/test_sldea_preflight.py` 43 to 51 tests (the
+stop rule as a table; the record; the words; a flat baseline with the
+override running to the end DRY and LIVE with the ordinary zeroing pair;
+a no-frame baseline stopping DRY and LIVE with the zeroing pair as the
+only writes after the grab; the override covering no frame; what each
+pre-flight path leaves; the deaf-log test for both stops).
+`tests/test_sldea_interlock.py` 26 to 28: the real `sldea_run` hands the
+two keywords to the worker with stale state reset, and end to end (real
+start path, real worker, DRY and LIVE) the override runs a flat camera
+to the end with the record written while no frame aborts with the
+zeroing pair last. 17 scratch-copy mutants of the rule, the worker, the
+pre-flight and the start path: 16 killed, 1 survived (the inner-loop
+`break` after the stop line; the stop flag and the outer `break` end
+the loop in the same tick, and no SG write sits in that loop, so it is
+equivalent for safety). Three in-memory mutants of the rule (no stop,
+override ignored, record not written) are each killed by the end-to-end
+test alone. 51 of 51 with the corpus (50 of 51 without); interlock 28
+of 28; the other 22 suites that import gui, sldea_profile or sldea_edge
+as before (the known plot_gui resize failure on this PC excepted).
 
 **Observation (measured 2026-10-02 on the code at `1eb85b2` and the 16
 runs held locally, 899 frames).**
@@ -143,7 +221,8 @@ runs held locally, 899 frames).**
   The stop cannot undo that tick. Shooting the baseline before the first
   ramp write would fix both, but it changes the order of the HV loop and
   is not part of this change. It is an open item.
-- **A pre-flight override does not carry into the run.** An operator who
+- **A pre-flight override does not carry into the run** (superseded
+  2026-10-03, see the update above: it now does). An operator who
   answers Yes to "Start the run anyway?" on a flat pre-flight still gets
   a run that stops itself if its own baseline is flat too, and the
   question says so. That is deliberate: the override exists for the case
@@ -188,7 +267,8 @@ runs held locally, 899 frames).**
   by a test instead.
 - The baseline check costs 43 ms (median of 30 on a 1920x1080 frame, max
   48 ms) on the runner thread, once per run, at the baseline tick.
-- A run with no baseline frame at all (camera busy or unplugged) is not
+- (Closed 2026-10-03, see the update above: it is stopped now when the
+  pre-flight had a camera.) A run with no baseline frame at all (camera busy or unplugged) is not
   stopped by this check. It carries on as it always did, with `NO FRAME`
   in the log.
 - Three `run.log` appends sit between a flat baseline and the zeroing
@@ -204,7 +284,8 @@ runs held locally, 899 frames).**
 - The baseline stop also ends DRY runs and electrical-only runs whose
   camera sees nothing (lamp off, lens cap on). BENCH_TEST §M, §O and §R
   now say what the camera must see. The only other way through is no
-  camera frame at all, behind the existing default-No question.
+  camera frame at all, behind the existing default-No question (and,
+  since 2026-10-03, the logged override, see the update above).
 
 **Verification.**
 

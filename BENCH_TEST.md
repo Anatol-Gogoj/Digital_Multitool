@@ -1,4 +1,4 @@
-# Bench test checklist — signal gen (§A–§L, historical) + SLDEA telemetry/watchdog (§M–§O) + fiducial-ring experiment (§P, current) + SLDEA Run start gate (§R) + SLDEA camera pre-flight image gate (§S, gates its PR)
+# Bench test checklist — signal gen (§A–§L, historical) + SLDEA telemetry/watchdog (§M–§O) + fiducial-ring experiment (§P, current) + SLDEA Run start gate (§R) + SLDEA camera pre-flight image gate and override (§S, gates its PR)
 
 **Setup:** BNC from sig gen **CH1 → scope CH1** (1 MΩ input). ~15 min total.
 Launch: `.venv/bin/python gui.py`
@@ -146,6 +146,10 @@ itself after two frames when its baseline picture is flat (§S), and a DRY
 run does the same. Either light the scene until the pre-flight's numbers
 line reads `contrast 20 gray levels` or more, or unplug the camera and
 answer **Yes** to the pre-flight's `No camera frame available` question.
+Since 2026-10-03 a third way is the override: **⚠ Start anyway (no
+picture)** then **Yes** at the pre-flight, which is written to `run.log`
+and `setup.txt` (§S). A camera that shows a picture at the pre-flight
+and then gives no baseline frame stops the run too (§S7).
 
 1. **Oscilloscope** tab shows **Connected** — [ ] if not, stop here; without a scope there is no telemetry to test
 2. **SLDEA Test** tab → find the **📈 Scope kV/µA log (telemetry.csv)** box
@@ -612,30 +616,49 @@ at a flat baseline picture (§S).
 **Send back:** anything that differed, the wording of any box that read
 badly, and the `run.log` from step 4.
 
-## S. SLDEA camera pre-flight image gate: flat frame, baseline stop, settings warning (2026-10-02)
+## S. SLDEA camera pre-flight image gate: flat frame, baseline stop, settings warning, pre-flight override (2026-10-02, override and no-frame stop 2026-10-03)
 
-> **Keep the Trek's HV output OFF for this whole section.** Step S4 is a
-> LIVE run: the signal generator really drives its output, and through an
-> enabled Trek 1 V of control is 1 kV at the DEA. With the Trek's HV
-> disabled the control voltage goes nowhere, and the run is expected to
-> stop itself about 3 s in. **Every box must be ticked before the PR
+> **Keep the Trek's HV output OFF for this whole section.** S4 and S7
+> hold LIVE runs: the signal generator really drives its output, and
+> through an enabled Trek 1 V of control is 1 kV at the DEA. With the
+> Trek's HV disabled the control voltage goes nowhere. One LIVE run in S4
+> is expected to stop itself about 3 s in; the other (the override) runs
+> the whole 1 V staircase. **Every box must be ticked before the PR
 > merges.** The logic is headless-tested in
-> `tests/test_sldea_preflight.py`; this section is the half only the real
-> camera, signal generator and dialogs can show.
+> `tests/test_sldea_preflight.py` and `tests/test_sldea_interlock.py`;
+> this section is the half only the real camera, signal generator and
+> dialogs can show.
 
 **Setup:** the Linux bench PC with the signal generator and camera
 connected, and the Trek's HV output off. A normal disc device under the
 camera, lit as for a real run. BNC from SG CH1 to scope CH1 (1 MΩ,
-20 mV/div, timebase as the bench has it) for step S4. ~15 min. SLDEA
-tab: **Start 0**, **End 1**, **Step 0.25**, **Ramp 2**, **Landing 10**,
-**SG CH: 1**, any value in the **Electrode** box, and **DRY RUN — HV
-OFF** ticked.
+20 mV/div for the stop, 0.5 V/div for the override staircase, timebase
+as the bench has it) for steps S4 and S7. ~25 min. SLDEA tab: **Start
+0**, **End 1**, **Step 0.25**, **Ramp 2**, **Landing 10**, **SG CH: 1**,
+any value in the **Electrode** box, and **DRY RUN — HV OFF** ticked.
+That profile has 10 frames (warm-up, baseline, two per landing) and
+takes about 50 s when it runs to the end.
 
 A **flat frame** below means the 2026-10-01 picture: on the Webcam tab
 set `exposure_time_absolute` to `3` and `gain` to `0`, then **Apply &
 Lock**. The preview goes to an even dark gray. A **good frame** is the
 exposure you would normally run at (the disc clearly darker than the
 paper), also with **Apply & Lock**.
+
+A **mismatch start** below is the route to a flat baseline WITHOUT the
+override: good frame locked, then type `3` into `exposure_time_absolute`
+and do **NOT** press Apply & Lock. The pre-flight picture is then the good
+one (taken with the lock), the run shoots at exposure 3, and the button
+reads **⚠ Start anyway (preview does not match the run)** (one click, no
+second question). S5 checks the words of that dialog.
+
+Since 2026-10-03 (owner decisions 12, 13 and 14) the **override** is one
+mechanism: **⚠ Start anyway (no picture)** followed by **Yes** at the
+pre-flight carries into the run, DRY or LIVE. The baseline picture is
+still checked and its verdict logged, but it does not stop that run,
+and `run.log` and `setup.txt` record the override. Without the override,
+a baseline the camera gives **no frame** for stops the run the way a flat
+one does, when the pre-flight had a camera (S7).
 
 **S1. A normal frame starts normally**
 
@@ -656,54 +679,88 @@ paper), also with **Apply & Lock**.
    - [ ] a `Disc not found: ...` line under it
    - [ ] the button reads **⚠ Start anyway (no picture)**, the focus ring is on **✎ Adjust**, and pressing **Enter** does nothing at all
 5. Click **⚠ Start anyway (no picture)**
-   - [ ] a question titled **No picture in this frame** opens, and **Enter** answers **No**: the pre-flight is still open and nothing started
+   - [ ] a question titled **No picture in this frame** opens, says `the run will NOT stop itself on a flat baseline` and that `setup.txt records that you started anyway`, and **Enter** answers **No**: the pre-flight is still open and nothing started
 6. **✖ Cancel**
    - [ ] the SLDEA log pane shows the pre-flight line ending `verdict FLAT` and then `run cancelled at camera pre-flight`
 
-**S3. A flat baseline stops a DRY run**
+**S3. A flat baseline stops a DRY run, unless the pre-flight was overridden**
 
-7. Same flat frame. **▶ Run (DRY)** → **⚠ Start anyway (no picture)** → **Yes**
+7. The stop. Mismatch start (good frame locked, `3` typed, not locked). **▶ Run (DRY)** → **⚠ Start anyway (preview does not match the run)**
    - [ ] within about 3 s the run stops by itself: the status line turns red and reads `STOPPED: NO PICTURE in the baseline frame, nothing was measured (see Run log)`, and a box titled **Run stopped: no picture** opens
-   - [ ] `run.log` holds, in this order: `operator started the run ANYWAY on a flat pre-flight frame (no picture)`, the `NO PICTURE ... STOPPING NOW.` line, `run stopped at the baseline frame. This was a DRY run: no voltage was driven.`, and `run aborted: 2/10 frames`
+   - [ ] `run.log` holds, in this order: `operator pressed: ⚠ Start anyway (preview does not match the run)`, the `NO PICTURE ... STOPPING NOW.` line, `run stopped at the baseline frame. This was a DRY run: no voltage was driven.`, and `run aborted: 2/10 frames`
    - [ ] the run's `frames/` folder holds exactly the warmup and the baseline frame
+   - [ ] the run's `setup.txt` has no `Pre-flight override:` line
+8. The override. Webcam tab: flat frame, **Apply & Lock**. **▶ Run (DRY)** → **⚠ Start anyway (no picture)** → **Yes**
+   - [ ] the run does NOT stop: it runs to the end (about 50 s), the status line ends green `complete — 10 frames`, and no **Run stopped** box opens
+   - [ ] `run.log` holds, in this order: `operator started the run ANYWAY on a flat pre-flight frame (no picture): the baseline picture stop is OFF for this run`, then `pre-flight override: no picture. The baseline picture check still runs and its verdict goes to this log, but it will NOT stop this run.`, then (after the baseline snap line) the `NO PICTURE ... so the run CARRIES ON. Review this run by hand.` line, and `run complete: 10/10 frames`; `STOPPING NOW` appears nowhere
+   - [ ] `setup.txt` holds exactly one line `Pre-flight override: no picture (the operator started anyway at the camera pre-flight; the baseline picture stop is off for this run)`, on its own right after the `--- Snapshots ---` block
+   - [ ] `frames/` holds all 10 frames
+9. Type the good exposure back in the box and **Apply & Lock**
 
-**S4. A flat baseline stops a LIVE run (Trek HV disabled)**
+**S4. A flat baseline stops a LIVE run, unless the pre-flight was overridden (Trek HV disabled)**
 
-8. Check the Trek's HV output is OFF. Untick DRY so the box reads **⚡ LIVE — HV WILL BE DRIVEN**. Scope CH1 on SG CH1, running
-9. **▶ Run — LIVE HV**, answer the questions (Energize HV: Yes), then **⚠ Start anyway (no picture)** → **Yes**
-   - [ ] the run stops within about 3 s exactly as in S3
-   - [ ] afterwards the signal generator's CH1 output is OFF and its offset reads 0 V on the front panel
-   - [ ] on the scope the control voltage never rose above 0.1 V (expected under 40 mV for well under a second: the first ramp is one loop tick old when the baseline is shot, and that tick is the same on every run)
-   - [ ] `run.log` holds `run stopped at the baseline frame. The first voltage ramp had only just begun: the drive had been commanded to 0.0NN kV when the run stopped.`, and 0.0NN kV agrees with the scope (1 V of control is 1 kV)
-   - [ ] `run.log` has no `FAILED TO ZERO` line
-10. Tick **DRY RUN — HV OFF** again
+10. Check the Trek's HV output is OFF. Untick DRY so the box reads **⚡ LIVE — HV WILL BE DRIVEN**. Scope CH1 on SG CH1 at 20 mV/div, running
+11. The stop. Mismatch start (good frame locked, `3` typed, not locked). **▶ Run — LIVE HV**, answer the questions (Energize HV: Yes), then **⚠ Start anyway (preview does not match the run)**
+    - [ ] the run stops within about 3 s exactly as in S3 step 7
+    - [ ] afterwards the signal generator's CH1 output is OFF and its offset reads 0 V on the front panel
+    - [ ] on the scope the control voltage never rose above 0.1 V (expected under 40 mV for well under a second: the first ramp is one loop tick old when the baseline is shot, and that tick is the same on every run)
+    - [ ] `run.log` holds `run stopped at the baseline frame. The first voltage ramp had only just begun: the drive had been commanded to 0.0NN kV when the run stopped.`, and 0.0NN kV agrees with the scope (1 V of control is 1 kV)
+    - [ ] `run.log` has no `FAILED TO ZERO` line
+12. The override. Scope CH1 to 0.5 V/div. Webcam tab: flat frame, **Apply & Lock**. **▶ Run — LIVE HV**, answer the questions, then **⚠ Start anyway (no picture)** → **Yes**
+    - [ ] the run does NOT stop: the scope shows the whole staircase (0.25, 0.5, 0.75 and 1.0 V of control, each held about 10 s) and the run ends `complete — 10 frames`
+    - [ ] afterwards the signal generator's CH1 output is OFF and its offset reads 0 V: the ordinary end-of-run zeroing
+    - [ ] `run.log` and `setup.txt` carry the same override lines as S3 step 8, `run.log` has no `STOPPING NOW` and no `FAILED TO ZERO`
+13. Tick **DRY RUN — HV OFF** again. Type the good exposure back in the box and **Apply & Lock**
 
 **S5. The settings warning appears when the Webcam entry differs from the lock**
 
-11. Webcam tab: good frame, **Apply & Lock**. Then type `3` in the `exposure_time_absolute` box and do **NOT** press Apply & Lock. Go to the SLDEA tab
+14. Webcam tab: good frame, **Apply & Lock**. Then type `3` in the `exposure_time_absolute` box and do **NOT** press Apply & Lock. Go to the SLDEA tab
     - [ ] the camera line reads `Camera for this run: exposure 3, gain G, set on the Webcam tab`, and under it, in amber, `⚠ The Webcam tab has LOCKED exposure N instead, ...`
-12. **▶ Run (DRY)**
+15. **▶ Run (DRY)**
     - [ ] the picture in the pre-flight looks GOOD (it was taken with the lock) and the verdict reads `exposure OK`
     - [ ] bold red text reads `⚠ This preview was NOT taken with the run's settings`, and under it `The preview used exposure N (what the Webcam tab has locked). The run will use exposure 3 (what the boxes on the Webcam tab say). ...`
     - [ ] the button reads **⚠ Start anyway (preview does not match the run)** and **Enter** does nothing
-13. Click **⚠ Start anyway (preview does not match the run)** (one click, no second question)
-    - [ ] the run stops itself about 3 s in, as in S3: its own baseline, shot at exposure 3, is flat. This is the 2026-10-01 route caught by the second net
+16. Click **⚠ Start anyway (preview does not match the run)** (one click, no second question)
+    - [ ] the run stops itself about 3 s in, as in S3 step 7: its own baseline, shot at exposure 3, is flat. This is the 2026-10-01 route caught by the second net, and a mismatch start is not the override
     - [ ] `run.log` holds `operator pressed: ⚠ Start anyway (preview does not match the run)` before the start line
-14. Webcam tab → **Start Preview**
+17. Webcam tab → **Start Preview**
     - [ ] the preview shows the GOOD picture again although the box still says `3`: the run handed the Webcam tab's lock back when it stopped
-15. Type the good exposure back in the box and **Apply & Lock**
+18. Type the good exposure back in the box and **Apply & Lock**
 
 **S6. Cancel leaves the camera as it was**
 
-16. Good frame locked, preview stopped. In a terminal: `v4l2-ctl -d /dev/video0 --list-ctrls > /tmp/cam_before.txt`
-17. SLDEA → **▶ Run (DRY)** → **✖ Cancel** at the pre-flight. Then `v4l2-ctl -d /dev/video0 --list-ctrls > /tmp/cam_after.txt; diff /tmp/cam_before.txt /tmp/cam_after.txt`
+19. Good frame locked, preview stopped. In a terminal: `v4l2-ctl -d /dev/video0 --list-ctrls > /tmp/cam_before.txt`
+20. SLDEA → **▶ Run (DRY)** → **✖ Cancel** at the pre-flight. Then `v4l2-ctl -d /dev/video0 --list-ctrls > /tmp/cam_after.txt; diff /tmp/cam_before.txt /tmp/cam_after.txt`
     - [ ] `diff` prints nothing (or only `gain`, if the firmware auto-gain moved it; note the two values)
-18. Repeat with **✎ Adjust** instead of Cancel
+21. Repeat with **✎ Adjust** instead of Cancel
     - [ ] the Webcam tab opens, its status still reads locked, and **Start Preview** shows the same picture as before the run
 
-**Send back:** the `run.log` from S1, S3, S4 and S5, a photo of the
-pre-flight in S2 and S5, the peak control voltage seen in S4, and the
-two `v4l2-ctl` listings from S6.
+**S7. No baseline frame stops the run (decision 13, 2026-10-03)**
+
+The pre-flight got a frame, then the camera gives the run none. The
+pre-flight dialog is modal, so take the camera away while it is open,
+from a terminal or by hand: `v4l2-ctl -d /dev/video0 --stream-mmap`
+holds the device and streams until Ctrl-C (`ffplay /dev/video0` does the
+same), or pull the camera's USB plug. Note which way was used.
+
+22. Good frame locked, DRY ticked. **▶ Run (DRY)**: the pre-flight shows the good picture. With the dialog still open, take the camera away. Then **✔ Looks good — start run**
+    - [ ] within about 3 s the run stops itself: the status line turns red and reads `STOPPED: NO BASELINE FRAME from the camera, nothing was measured (see Run log)`, and a box titled **Run stopped: no baseline frame** opens
+    - [ ] `run.log` holds, in this order: the two snap lines ending `→ NO FRAME (camera busy? close the Webcam preview)` (warmup and baseline; the warmup may still have a frame if the camera went away late), then `NO BASELINE FRAME: the camera gave the pre-flight a picture but gave this run none for its baseline ... STOPPING NOW.`, `run stopped at the baseline frame. This was a DRY run: no voltage was driven.`, and `run aborted: 2/10 frames`
+    - [ ] `data.csv` has two rows, `frame_file` empty on the baseline row; `frames/` holds at most the warmup
+23. Give the camera back (Ctrl-C, or plug it in). The "no camera at all" case keeps its old behaviour: take the camera away BEFORE pressing Run this time, then **▶ Run (DRY)**
+    - [ ] the pre-flight asks `No camera frame available ... Continue anyway?` (Enter = No). Answer **Yes**
+    - [ ] the run goes on to the end with `NO FRAME` on every snap line, `run complete: 10/10 frames`, and no `STOPPED` status: this is the existing question, not the new stop
+24. LIVE, Trek HV OFF, scope CH1 at 20 mV/div: untick DRY and repeat step 22 as **▶ Run — LIVE HV** (Energize HV: Yes)
+    - [ ] the run stops within about 3 s; afterwards SG CH1 output is OFF and its offset reads 0 V; the control voltage never rose above 0.1 V; `run.log` names the commanded kV in the `run stopped at the baseline frame.` line and has no `FAILED TO ZERO`
+25. Tick DRY again. The override covers this case too: flat frame locked, **▶ Run (DRY)** → **⚠ Start anyway (no picture)** → **Yes**, with the camera taken away while the question was open
+    - [ ] the run does NOT stop: `run.log` holds `NO BASELINE FRAME ... so the run CARRIES ON. Review this run by hand.` and `run complete: 10/10 frames`
+26. Give the camera back and restore the good frame (**Apply & Lock**)
+
+**Send back:** the `run.log` from S1, S3 (both runs), S4 (both runs), S5
+and S7 (steps 22 to 25), the `setup.txt` from S3 step 8, a photo of the
+pre-flight in S2 and S5, the peak control voltage seen in S4 step 11 and
+S7 step 24, the two `v4l2-ctl` listings from S6, and how the camera was
+taken away in S7.
 
 **Follow-up for this bench session, not in the PR (camera I/O):** make the
 pre-flight frame use the run's own control set, so the picture approved is

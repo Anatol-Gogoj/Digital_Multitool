@@ -3544,11 +3544,20 @@ LOGGING:
             except Exception:
                 pass
             # Camera pre-flight gate: check focus / exposure / centering on
-            # a live snapshot before anything runs.
+            # a live snapshot before anything runs. What it saw is reset
+            # here and read back after it, for the worker: whether the
+            # camera gave it a frame, and whether the operator started
+            # anyway on a flat one (decisions 12 to 14, 2026-10-03). A
+            # skipped pre-flight leaves both at their defaults, which is
+            # the behaviour before those decisions.
+            self._sldea_preflight_seen = {'frame': False, 'override': ''}
             if not getattr(self, '_sldea_skip_preflight', False):
                 if not self._sldea_preflight(cam_exp, cam_gain):
                     self._sldea_log("run cancelled at camera pre-flight")
                     return
+            seen = self._sldea_preflight_seen
+            cam_expected = bool(seen.get('frame'))
+            picture_override = str(seen.get('override') or '')
             # ...and again at the commit point, where it asks nothing: every
             # question above waits on the operator for as long as they take,
             # and nothing between this check and _sldea_live_ch claiming the
@@ -3585,6 +3594,8 @@ LOGGING:
                       sgch, vch, ich, dry, cam_exp, cam_gain, diam_mm,
                       autoproc, wd_on, wd_ua, wd_s, trek_sign, scope_setup,
                       tel_on, tel_hz, electrode, concentration_ml),
+                kwargs=dict(cam_expected=cam_expected,
+                            picture_override=picture_override),
                 daemon=True).start()
             self.root.after(100, self._sldea_animate_cursor)  # playhead
         finally:
@@ -3723,8 +3734,15 @@ LOGGING:
         settings. A flat frame is a gate like a clipped one, and every
         pre-flight reaches run.log. The rules live Tk-free in
         sldea_profile.preflight_report so they are tested without a
-        bench."""
+        bench.
+
+        What this pre-flight saw is left in self._sldea_preflight_seen
+        for the start path to hand to the worker (decisions 12 to 14,
+        2026-10-03): 'frame' is True when the camera gave a frame here,
+        and 'override' names a deliberate start past the flat gate ('',
+        or sldea_profile.PREFLIGHT_OVERRIDE_NO_PICTURE)."""
         frame = None
+        self._sldea_preflight_seen = {'frame': False, 'override': ''}
         # The lock as it stands for the grab below. oneshot_rgb re-stamps
         # it AFTER the four values written here, so the lock (not the
         # entry boxes) decides how this frame is exposed, while the run
@@ -3756,6 +3774,10 @@ LOGGING:
                 self._sldea_log("⚠⚠ operator started the run ANYWAY with "
                                 "no camera frame")
             return blind
+        # The camera is in use: a run that then gets no baseline frame
+        # at all is stopped by the worker (decision 13). Not an
+        # override: that word is kept for the flat gate below.
+        self._sldea_preflight_seen['frame'] = True
 
         from PIL import Image, ImageDraw, ImageTk
         try:
@@ -3856,7 +3878,10 @@ LOGGING:
                     default='no', parent=win):
                 return
             # A flat frame is the same kind of gate (2026-10-02): there
-            # is no disc in it for any later step to find.
+            # is no disc in it for any later step to find. Yes here is
+            # the pre-flight override (decisions 12 and 14, 2026-10-03):
+            # it carries into the run, which then does not stop itself
+            # on a flat baseline, and the question says so.
             if flat and not messagebox.askyesno(
                     "No picture in this frame",
                     f"{hint}\n\nA run started on a frame like this "
@@ -3866,18 +3891,25 @@ LOGGING:
                     f"of high voltage up to 3 kV, and 25 of its 26 frames "
                     f"were "
                     f"rejected.\n\nPress No, then Adjust, and fix the "
-                    f"picture on the Webcam tab.\n\nIf you start anyway "
-                    f"and the run's own baseline frame is flat as well, "
-                    f"the run stops itself right after that frame, as the "
-                    f"first ramp begins.\n\nStart the run anyway?",
+                    f"picture on the Webcam tab.\n\nIf you start anyway, "
+                    f"the run will NOT stop itself on a flat baseline: "
+                    f"its baseline picture is still checked and the "
+                    f"verdict goes to the Run log, and setup.txt records "
+                    f"that you started anyway. Do this only for a faint "
+                    f"device you will review by hand.\n\nStart the run "
+                    f"anyway?",
                     default='no', parent=win):
                 return
             if clipped:
                 self._sldea_log("⚠⚠ operator started the run ANYWAY "
                                 "on a blown-out baseline")
             if flat:
+                self._sldea_preflight_seen['override'] = \
+                    sldea_profile.PREFLIGHT_OVERRIDE_NO_PICTURE
                 self._sldea_log("⚠⚠ operator started the run ANYWAY "
-                                "on a flat pre-flight frame (no picture)")
+                                "on a flat pre-flight frame (no picture): "
+                                "the baseline picture stop is OFF for "
+                                "this run")
             if not gate and not rep['start_default']:
                 # a warning that is not a gate: one click starts, and
                 # run.log says which button that click was
@@ -4100,11 +4132,19 @@ LOGGING:
                       wd_on=False, wd_ua=100.0, wd_s=3.0, trek_sign=1.0,
                       scope_setup=None, tel_on=False,
                       tel_hz=sldea_profile.TELEMETRY_MAX_HZ, electrode='',
-                      concentration_ml=None):
+                      concentration_ml=None, cam_expected=False,
+                      picture_override=''):
         """Host-sequenced staircase runner (daemon thread; no Tk calls except
         via _sldea_log/_sldea_set_status/after). Drives the SG DC offset along
         p.kv_at(t), fires webcam+scope snapshots on schedule, writes the run
-        dir (setup.txt + data.csv + telemetry.csv + frames/)."""
+        dir (setup.txt + data.csv + telemetry.csv + frames/).
+
+        `cam_expected` is True when the pre-flight got a frame from the
+        camera, and `picture_override` names a deliberate start past the
+        pre-flight's flat gate ('' for none); both come from
+        _sldea_preflight_seen (decisions 12 to 14, 2026-10-03) and decide
+        what the baseline frame may do to the run, see
+        sldea_profile.baseline_stop_reason."""
         import os
         import csv as _csv
         started = datetime.now()
@@ -4135,6 +4175,16 @@ LOGGING:
                     sf.write("Trek control polarity: INVERTED (control = "
                              "-kV/gain; monitor readings sign-corrected "
                              "in log)\n")
+                # The pre-flight override, written where the run's record
+                # lives (plain Key: value, like the lines above, on its
+                # own after the Snapshots block) and into run.log, before
+                # any frame is shot. ASCII, so the locale-encoded open
+                # above cannot refuse it.
+                override_line, override_log = \
+                    sldea_profile.preflight_override_record(picture_override)
+                if override_line:
+                    sf.write("\n" + override_line + "\n")
+                    self._sldea_log(override_log)
                 if scope_setup:
                     sf.write("\n--- Scope vertical (read back at run "
                              "start) ---\n")
@@ -4295,8 +4345,8 @@ LOGGING:
             mon_dt = 0.5 if watchdog is not None else (
                 tel.period_s if tel is not None else 0.5)
             wd_bad_since, wd_blind = None, False
-            flat_stop = False         # baseline picture check ended the run
-            flat_words = ''           # ...and where the drive stood then
+            base_stop = False         # the baseline frame ended the run
+            stop_words = {}           # ...and the words for that, if so
             while not self._sldea_stop:
                 el = time.monotonic() - t0
                 self._sldea_elapsed = el          # feeds the preview playhead
@@ -4450,34 +4500,49 @@ LOGGING:
                     # it does on any abort. Nothing in this block talks to
                     # an instrument. Only the check itself sits in the try:
                     # one that cannot run is logged and the run carries on
-                    # unchanged, and a flat answer sets the stop flag before
+                    # unchanged, and a stop sets the stop flag before
                     # anything else is attempted.
+                    #
+                    # Since 2026-10-03 (decisions 12 to 14): no frame at
+                    # all for the baseline stops the run the same way when
+                    # the pre-flight had a camera, and the pre-flight
+                    # override switches both stops off for this run. The
+                    # check still runs and its verdict is still logged.
+                    # The rule is sldea_profile.baseline_stop_reason.
                     #
                     # The baseline is shot in the tick in which the first
                     # ramp begins (the SG write above comes first), so the
                     # drive is not at 0 here: last_kv is what was commanded,
                     # and it goes into run.log instead of being assumed.
-                    if snaps[si - 1]['tag'] == 'baseline' \
-                            and shot is not None:
-                        try:
-                            flat, line = \
-                                sldea_profile.baseline_picture_check(shot)
-                        except Exception as e:
-                            flat, line = False, (
-                                f"⚠ baseline picture check could not run "
-                                f"({e}): the run continues unchanged")
-                        if flat:
-                            flat_stop = True
+                    if snaps[si - 1]['tag'] == 'baseline':
+                        flat, line = False, None
+                        if shot is not None:
+                            try:
+                                flat, line = \
+                                    sldea_profile.baseline_picture_check(
+                                        shot, picture_override)
+                            except Exception as e:
+                                flat, line = False, (
+                                    f"⚠ baseline picture check could not "
+                                    f"run ({e}): the run continues "
+                                    f"unchanged")
+                        elif cam_expected:
+                            line = sldea_profile.no_baseline_frame_line(
+                                picture_override)
+                        why = sldea_profile.baseline_stop_reason(
+                            shot is not None, flat, cam_expected,
+                            picture_override)
+                        if why:
+                            base_stop = True
                             self._sldea_stop = True
-                        self._sldea_log(line)
-                        if flat_stop:
-                            flat_words = sldea_profile.flat_stop_words(
-                                sg is None, last_kv)
-                            self._sldea_log(
-                                f"run stopped at the baseline frame. "
-                                f"{flat_words}")
+                        if line:
+                            self._sldea_log(line)
+                        if base_stop:
+                            stop_words = sldea_profile.baseline_stop_words(
+                                why, sg is None, last_kv)
+                            self._sldea_log(stop_words['stopped'])
                             break
-                if flat_stop:
+                if base_stop:
                     # straight to the shutdown below, as the breakdown
                     # branch does: no status tick, no poll sleep first
                     break
@@ -4496,26 +4561,15 @@ LOGGING:
             else:
                 done = 'complete'
             self._sldea_log(f"run {done}: {si}/{len(snaps)} frames")
-            if flat_stop and done == 'aborted':
+            if base_stop and done == 'aborted':
                 # Say WHY in words where the operator looks: a green
                 # "aborted" would read as their own Abort. The box is
                 # queued on the Tk thread; this thread goes straight on to
                 # the finally block and zeroes the SG without waiting.
-                self._sldea_set_status(
-                    "STOPPED: NO PICTURE in the baseline frame, nothing "
-                    "was measured (see Run log)", fg='#c62828')
+                self._sldea_set_status(stop_words['status'], fg='#c62828')
                 try:
-                    box = ("The run stopped itself right after its "
-                           "baseline picture.\n\nThat picture is flat: "
-                           "the disc is not visible, so nothing in this "
-                           "run could have been measured.\n\n"
-                           + flat_words
-                           + "\n\nOpen the Webcam tab, change the "
-                           "exposure or the light until you can see the "
-                           "disc, press Apply & Lock, then press Run "
-                           "again.\n\nThe Run log has the numbers.")
                     self.root.after(0, lambda: messagebox.showwarning(
-                        "Run stopped: no picture", box))
+                        stop_words['title'], stop_words['box']))
                 except Exception:
                     pass
             else:

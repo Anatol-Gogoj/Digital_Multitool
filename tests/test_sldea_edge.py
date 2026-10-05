@@ -11,6 +11,7 @@ import copy
 import csv
 import os
 import random
+import re
 import shutil
 import tempfile
 
@@ -1037,26 +1038,1104 @@ def test_disc_fit_tracks_the_moving_ink_edge():
     assert best['conf'] >= 0.75, best['conf']
     assert best['spread_pct'] == best['ci85_pct'] < 4.0, best
     assert not se.needs_review(cands, s)
+    # 2026-10-02: the area is the baseline circle times the common-ray
+    # ratio, and its equivalent diameter hangs on the same circle
+    ref = se.baseline_disc(base, s)
+    assert abs(best['area_px'] - ref['area_px'] * best['area_ratio']) \
+        < 1e-3 * ref['area_px']
+    assert abs(best['area_px'] / ref['area_px'] / 1.12 ** 2 - 1.0) < 0.01
+    assert abs(np.pi * (best['diam_px'] / 2) ** 2 - best['area_px']) \
+        < 1e-6 * best['area_px']
+    # the contract Edge Review and the labels rely on is intact
+    for key in ('method', 'area_px', 'diam_px', 'cx', 'cy', 'conf',
+                'spread_pct', 'ci85_pct', 'contour', 'wrinkle', 'audit',
+                'circ', 'solidity', 'contrast', 'n_edge', 'arc_cov'):
+        assert key in best, key
 
 
-def test_resting_candidate_states_the_known_area_on_gated_frames():
-    """A gated frame with a known resting disc is not 'nothing': the
-    honest measurement is that the area equals the resting area. It must
-    auto-accept -- low-kV frames used to queue for review over frames
-    that show no change at all."""
+def _refuse_gated_tracker():
+    """Context: make the tracker refuse on gated frames only (the
+    assume_responding call), as a washed or blocked edge would."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def cm():
+        orig = se._disc_fit_candidate
+
+        def refuse(prep, settings, ref, assume_responding=False):
+            if assume_responding:
+                return None
+            return orig(prep, settings, ref, assume_responding)
+
+        se._disc_fit_candidate = refuse
+        try:
+            yield
+        finally:
+            se._disc_fit_candidate = orig
+
+    return cm()
+
+
+def test_gated_frame_is_measured_and_resting_is_the_fallback():
+    """A gated frame with a known resting disc is not 'nothing'. Until
+    2026-10-02 it was STATED as exactly the resting area ('resting');
+    that wrote up to ~2 % of real low-voltage growth as zero. Now the
+    tracker measures it (common-ray ratio), the measurement auto-accepts
+    and reads the resting area to within its noise on an unchanged
+    frame, and the asserted claim is the runner-up. (This test used to
+    pin `len(cands) == 1 and method == 'resting'` with area == A0.)"""
     rng = np.random.default_rng(11)
     base = _bridged_scene(with_disc=True)
     img = np.clip(base + rng.normal(0, 1.0, base.shape), 0,
                   255).astype(np.float32)
     s = dict(se.DEFAULT_SETTINGS)
-    cands = se.candidates(base, img, s)
-    assert len(cands) == 1 and cands[0]['method'] == 'resting', cands
     ref = se.baseline_disc(base, s)
-    assert abs(cands[0]['area_px'] - ref['area_px']) < 1e-6
-    assert cands[0]['conf'] >= 0.75
+    cands = se.candidates(base, img, s)
+    best = cands[0]
+    assert best['method'] == 'disc-fit' and best.get('resting_refit'), \
+        [(c['method'], c['conf']) for c in cands]
+    assert abs(best['area_px'] / ref['area_px'] - 1.0) < 0.005, \
+        best['area_px'] / ref['area_px']
+    assert best['conf'] >= 0.75
     assert not se.needs_review(cands, s)
+    rest = next(c for c in cands if c['method'] == 'resting')
+    assert abs(rest['area_px'] - ref['area_px']) < 1e-6
+    assert rest['conf'] < best['conf']
+    # where the tracker cannot measure, the claim stands as it always
+    # did: exactly the resting area, auto-accepted
+    with _refuse_gated_tracker():
+        fb = se.candidates(base, img, s)
+    assert len(fb) == 1 and fb[0]['method'] == 'resting', fb
+    assert abs(fb[0]['area_px'] - ref['area_px']) < 1e-6
+    assert fb[0]['conf'] >= 0.75
+    assert not se.needs_review(fb, s)
     # and with no baseline disc there is nothing to state: gated frames
     # stay empty exactly as before (the no-change-gate test pins that)
+
+
+def test_weak_gated_measurement_does_not_unseat_a_clean_resting_claim():
+    """The measurement takes a gated frame only when it is fit to
+    auto-accept on its own. A weak one (below accept_conf) must not turn
+    a frame that used to auto-accept into review work: the audit-clean
+    'resting' claim keeps the frame, the measurement is the runner-up."""
+    rng = np.random.default_rng(11)
+    base = _bridged_scene(with_disc=True)
+    img = np.clip(base + rng.normal(0, 1.0, base.shape), 0,
+                  255).astype(np.float32)
+    s = dict(se.DEFAULT_SETTINGS)
+    orig = se._disc_fit_candidate
+
+    def weak(prep, settings, ref, assume_responding=False):
+        c = orig(prep, settings, ref, assume_responding)
+        if c is not None and assume_responding:
+            c['conf_own'] = 0.60
+        return c
+
+    se._disc_fit_candidate = weak
+    try:
+        cands = se.candidates(base, img, s)
+    finally:
+        se._disc_fit_candidate = orig
+    assert cands[0]['method'] == 'resting', \
+        [(c['method'], c['conf']) for c in cands]
+    assert cands[0].get('capped_by') is None
+    assert not se.needs_review(cands, s)
+    assert any(c.get('resting_refit') and c['conf'] == 0.60
+               for c in cands[1:])
+
+
+def _tracker_with(**fields):
+    """Context: every tracker candidate (_disc_fit_candidate) carries
+    `fields` on top of what it measured, so a scene the ray gates must
+    act on can be made without a one-sided or heavily trimmed image."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def cm():
+        orig = se._disc_fit_candidate
+
+        def patched(prep, settings, ref, assume_responding=False):
+            c = orig(prep, settings, ref, assume_responding)
+            if c is not None:
+                c.update(fields)
+            return c
+
+        se._disc_fit_candidate = patched
+        try:
+            yield
+        finally:
+            se._disc_fit_candidate = orig
+
+    return cm()
+
+
+def test_one_sided_rays_make_the_tracker_review_only_not_refused():
+    """Owner decision 2 (2026-10-03). Rays on one side of the disc past
+    RAY_MAX_ONE_SIDED used to refuse the ratio, which left the reviewer
+    with no tracker outline at all (five corpus frames then
+    auto-accepted on a patch tier instead). Now the candidate stays
+    with its number and its outline, carries `ray_one_sided`, is
+    capped just below accept_conf like an audit-tripped winner, and the
+    frame goes to review whatever else is on it. Hysteresis cannot lift
+    it (applied before the cap), and neither can pair agreement."""
+    base, img = _bridged_pair(r_active=112)
+    s = dict(se.DEFAULT_SETTINGS)
+    acc = float(s['accept_conf'])
+    control = se.candidates(base, img, s)
+    assert control[0]['method'] == 'disc-fit'
+    assert not se.needs_review(control, s)
+    assert not se.review_only(control[0])
+    assert 'ray_one_sided' not in control[0]
+    assert control[0]['one_sided'] <= se.RAY_MAX_ONE_SIDED
+    with _tracker_with(one_sided=0.71):
+        cands = se.candidates(base, img, s)
+        held = se.candidates(base, img, s, prev_method='disc-fit')
+    fit = next(c for c in cands if c['method'] == 'disc-fit')
+    assert fit['ray_one_sided'] == 0.71 and 'ray_trim_share' not in fit
+    assert fit['conf'] == round(acc - 0.01, 3), fit['conf']
+    # the number and the outline are what the untouched run measured
+    assert fit['area_px'] == control[0]['area_px']
+    assert len(fit['contour']) == len(control[0]['contour'])
+    assert se.review_only(fit)
+    assert se.needs_review(cands, s), 'a one-sided tracker auto-accepted'
+    # a patch contained in the capped fit is capped below it (the
+    # containment rule), so the frame cannot auto-accept on the patch
+    for c in cands:
+        if c.get('capped_by') == 'disc-fit':
+            assert c['conf'] < acc, c
+    hf = next(c for c in held if c['method'] == 'disc-fit')
+    assert hf.get('hyst_bonus') == 0.05 and hf['conf'] == round(acc - 0.01, 3)
+    assert se.needs_review(held, s)
+    # the tag outranks the top slot: a frame whose best candidate is
+    # something else still goes to a human while the tagged tracker is
+    # among A to C
+    other = {'method': 'diff-lo', 'area_px': 2.0 * fit['area_px'],
+             'conf': 0.9, 'spread_pct': 1.0}
+    assert se.needs_review([other, fit], s)
+    assert not se.needs_review([other], s)
+    # pair agreement keeps it capped (both snapshots see the same rays)
+    rows = [{'nominal_kV': '2'}, {'nominal_kV': '2'}]
+    pair = {0: [dict(fit)], 1: [dict(fit, conf=0.93)]}
+    pair[1][0].pop('ray_one_sided')
+    st = se.reconcile_pairs(rows, pair, s)
+    assert st['confirmed'] == 2, st
+    assert pair[0][0]['pair_confirmed'] and pair[0][0]['conf'] < acc
+    assert pair[1][0]['conf'] == 0.98
+    assert se.needs_review(pair[0], s) and not se.needs_review(pair[1], s)
+
+
+def test_large_trim_share_makes_the_tracker_review_only():
+    """Owner decision 9 (2026-10-03). The trim is a modelling choice
+    with a first-order effect at strain (SLDEA_MEASUREMENT.md 2.1b), so
+    a frame whose trim dropped more than RAY_MAX_TRIM_SHARE of the rays
+    measured on both frames is tagged `ray_trim_share` and goes to a
+    human, the same way as a one-sided frame; the share rides on every
+    tracker candidate. Both limits tripped: both tags, one cap."""
+    base, img = _bridged_pair(r_active=112)
+    s = dict(se.DEFAULT_SETTINGS)
+    acc = float(s['accept_conf'])
+    control = se.candidates(base, img, s)
+    assert 0.0 <= control[0]['trim_share'] <= se.RAY_MAX_TRIM_SHARE
+    assert abs(control[0]['trim_share'] - control[0]['n_trimmed']
+               / (control[0]['n_common'] + control[0]['n_trimmed'])) < 1e-3
+    with _tracker_with(trim_share=0.24):
+        cands = se.candidates(base, img, s)
+    fit = next(c for c in cands if c['method'] == 'disc-fit')
+    assert fit['ray_trim_share'] == 0.24 and 'ray_one_sided' not in fit
+    assert fit['conf'] == round(acc - 0.01, 3), fit['conf']
+    assert fit['area_px'] == control[0]['area_px']
+    assert se.review_only(fit) and se.needs_review(cands, s)
+    # exactly at the limit is not over it
+    with _tracker_with(trim_share=se.RAY_MAX_TRIM_SHARE):
+        at = se.candidates(base, img, s)
+    assert not se.review_only(at[0]) and not se.needs_review(at, s)
+    with _tracker_with(trim_share=0.31, one_sided=0.66):
+        both = se.candidates(base, img, s)
+    bf = next(c for c in both if c['method'] == 'disc-fit')
+    assert bf['ray_trim_share'] == 0.31 and bf['ray_one_sided'] == 0.66
+    assert bf['conf'] == round(acc - 0.01, 3)
+    # the gate helper itself: tracker candidates only, the cap is never
+    # raised, and a clean candidate is left exactly as it was
+    c = {'method': 'disc-fit', 'conf': 0.5, 'one_sided': 0.9,
+         'trim_share': 0.5}
+    assert se._apply_ray_gates(c, s) and c['conf'] == 0.5
+    c = {'method': 'diff-hi', 'conf': 0.95, 'one_sided': 0.9}
+    assert not se._apply_ray_gates(c, s) and c['conf'] == 0.95
+    c = {'method': 'disc-fit', 'conf': 0.95, 'one_sided': 0.2,
+         'trim_share': 0.1}
+    assert not se._apply_ray_gates(c, s) and c['conf'] == 0.95
+    assert not se.review_only(c)
+
+
+def test_the_ray_gates_read_the_figures_unrounded():
+    """Review finding (2026-10-04). The candidate carried `one_sided`
+    and `trim_share` rounded to 3 decimals and the gate compared the
+    rounded figure, so the rule was 'at least 0.6005', not 'above
+    0.6': retired 233451 row 47 measures 0.60012, was stored as 0.600
+    and was not tagged (it sat in review only because the no-step
+    audit happened to cap it). Now the candidate carries both figures
+    as _common_ray_ratio measured them, and the gate reads those: a
+    candidate at 0.6001 is tagged, one at exactly 0.6 is not."""
+    base, img = _bridged_pair(r_active=112)
+    s = dict(se.DEFAULT_SETTINGS)
+    acc = float(s['accept_conf'])
+    orig = se._common_ray_ratio
+    raw = []
+
+    def wrapped(nudge):
+        def f(r_base, r_frame, r0):
+            res, why = orig(r_base, r_frame, r0)
+            if res is not None:
+                raw.append(dict(res))
+                if nudge:
+                    res['one_sided'] = 0.60012
+                    res['trim_share'] = 0.20004
+            return res, why
+        return f
+
+    try:
+        se._common_ray_ratio = wrapped(True)
+        cands = se.candidates(base, img, s)
+        raw.clear()
+        se._common_ray_ratio = wrapped(False)
+        control = se.candidates(base, img, s)
+    finally:
+        se._common_ray_ratio = orig
+    fit = next(c for c in cands if c['method'] == 'disc-fit')
+    assert fit['one_sided'] == 0.60012 and fit['trim_share'] == 0.20004, fit
+    assert fit['ray_one_sided'] == 0.60012, fit.get('ray_one_sided')
+    assert fit['ray_trim_share'] == 0.20004, fit.get('ray_trim_share')
+    assert fit['conf'] == round(acc - 0.01, 3), fit['conf']
+    assert se.review_only(fit) and se.needs_review(cands, s)
+    # the untouched run carries the measured figures exactly as the
+    # ratio returned them, not a rounded copy
+    assert control[0]['method'] == 'disc-fit' and raw
+    match = [r for r in raw if round(r['ratio'], 5) == control[0]['area_ratio']]
+    assert match, (control[0]['area_ratio'], [r['ratio'] for r in raw])
+    assert control[0]['one_sided'] in [r['one_sided'] for r in match]
+    assert control[0]['trim_share'] in [r['trim_share'] for r in match]
+    # (this scene's one-sidedness, 0.00953, is not a 3-decimal figure,
+    # so the check above would have failed on the rounded copy)
+    assert control[0]['one_sided'] != round(control[0]['one_sided'], 3)
+    # the helper on the boundary: just over trips, exactly at does not
+    for val, tagged in ((0.6001, True), (0.60012, True), (0.6, False),
+                        (0.5999, False)):
+        c = {'method': 'disc-fit', 'conf': 0.95, 'one_sided': val,
+             'trim_share': 0.0}
+        assert se._apply_ray_gates(c, s) is tagged, (val, c)
+        assert ('ray_one_sided' in c) is tagged, (val, c)
+    for val, tagged in ((0.2001, True), (0.2, False), (0.1999, False)):
+        c = {'method': 'disc-fit', 'conf': 0.95, 'one_sided': 0.1,
+             'trim_share': val}
+        assert se._apply_ray_gates(c, s) is tagged, (val, c)
+        assert ('ray_trim_share' in c) is tagged, (val, c)
+
+
+def test_gated_frame_with_a_review_only_measurement_goes_to_a_human():
+    """The gated path (the tracker measuring a no-change frame). A
+    measurement the ray ratio marks review only is capped like an
+    audit-dirty one, so the audit-clean 'resting' claim keeps the top
+    slot as before; but the tagged measurement is on the card, so the
+    frame goes to review instead of auto-accepting the claim. Before
+    2026-10-03 the tracker refused such a frame and the claim
+    auto-accepted with no outline to judge."""
+    rng = np.random.default_rng(11)
+    base = _bridged_scene(with_disc=True)
+    img = np.clip(base + rng.normal(0, 1.0, base.shape), 0,
+                  255).astype(np.float32)
+    s = dict(se.DEFAULT_SETTINGS)
+    acc = float(s['accept_conf'])
+    assert not se.needs_review(se.candidates(base, img, s), s)
+    with _tracker_with(one_sided=0.8):
+        cands = se.candidates(base, img, s)
+    assert cands[0]['method'] == 'resting', \
+        [(c['method'], c['conf']) for c in cands]
+    assert cands[0].get('capped_by') is None
+    assert cands[0]['conf'] >= acc
+    rf = next(c for c in cands if c.get('resting_refit'))
+    assert rf['ray_one_sided'] == 0.8
+    assert rf['conf'] == round(acc - 0.01, 3), rf['conf']
+    assert se.needs_review(cands, s), 'the claim auto-accepted over a ' \
+        'review-only measurement'
+    # the baseline frame itself is never measured against itself, so
+    # nothing there can be tagged
+    with _tracker_with(one_sided=0.8):
+        bl = se.candidates(base, base, s)
+    assert [c['method'] for c in bl] == ['resting']
+    assert not se.needs_review(bl, s)
+
+
+def test_opencv_pin_is_read_from_requirements_and_the_warning_is_one_line():
+    """Owner decision 29 (2026-10-03). The detector was validated under
+    one OpenCV (every corpus figure), so Edge Review says in one plain
+    line when another one is running. The pin is requirements.txt's
+    opencv line, read at import, with a constant fallback for a
+    checkout without the file; the comparison is on the first three
+    fields (the wheel's fourth field never reaches cv2.__version__).
+    The warning is text only: it blocks nothing."""
+    assert re.fullmatch(r'\d+\.\d+\.\d+', se.OPENCV_PIN), se.OPENCV_PIN
+    assert re.fullmatch(r'\d+\.\d+\.\d+', se.OPENCV_PIN_FALLBACK)
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    req = open(os.path.join(here, 'requirements.txt'), encoding='utf-8').read()
+    m = re.search(r'^opencv-python(?:-headless)?==(\d+\.\d+\.\d+)', req, re.M)
+    assert m and m.group(1) == se.OPENCV_PIN == se._read_opencv_pin(), \
+        (m and m.group(1), se.OPENCV_PIN)
+    d = tempfile.mkdtemp(prefix='edge_pin_')
+    try:
+        assert se._read_opencv_pin(os.path.join(d, 'none.txt')) \
+            == se.OPENCV_PIN_FALLBACK
+        p = os.path.join(d, 'requirements.txt')
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write("numpy==2.4.6\n")
+        assert se._read_opencv_pin(p) == se.OPENCV_PIN_FALLBACK
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write("# cv\nopencv-python-headless==4.12.0.88\nnumpy==2.4.6\n")
+        assert se._read_opencv_pin(p) == '4.12.0'
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write("opencv-python==5.0.1\n")
+        assert se._read_opencv_pin(p) == '5.0.1'
+    finally:
+        shutil.rmtree(d)
+    # the running version against the pin
+    assert se.opencv_version_warning('4.13.0', '4.13.0') == ''
+    assert se.opencv_version_warning('4.13.0', '4.13.0.92') == ''
+    w = se.opencv_version_warning('4.12.0', '4.13.0')
+    assert w and '\n' not in w and len(w) < 160, w
+    assert 'OpenCV 4.12.0' in w and '4.13.0' in w and 'requirements.txt' in w
+    assert 'nothing is blocked' in w.lower(), w
+    assert se.opencv_version_warning('5.0.0-dev', '4.13.0')
+    # the defaults are the running cv2 and the pin read at import
+    import cv2
+    want = se.opencv_version_warning(cv2.__version__, se.OPENCV_PIN)
+    assert se.opencv_version_warning() == want
+    # the library versions a Save stamps are the running ones
+    libs = se.library_versions()
+    assert libs['opencv_version'] == cv2.__version__
+    assert libs['numpy_version'] == np.__version__
+
+
+# ---------------------------------------------------------------------------
+# The common-ray area ratio (2026-10-02): A and A0 are one functional.
+# ---------------------------------------------------------------------------
+
+def _flared_scene(scale=1.0, bulge_px=0.0, noise_seed=7):
+    """A resting disc that is NOT a circle where it matters: the ink
+    flares outward beside the two lead sectors, as on the campaign
+    devices (measured edge points beside the leads sit 4-11 % outside
+    the circle radius). The flare runs on INTO the sectors the foil
+    hides, where no ray can follow it: the shape the free ellipse
+    over-stretches across. `scale` grows the whole outline about its
+    centre; `bulge_px` pushes the edge out only inside +-8 degrees of
+    the right-hand lead, i.e. entirely inside a blocked sector."""
+    rng = np.random.default_rng(7)
+    h, w = 540, 960
+    img = np.full((h, w), 190.0, np.float32)
+    yy, xx = np.mgrid[0:h, 0:w]
+    th = np.arctan2(yy - 270.0, xx - 480.0)
+    rr = np.hypot(xx - 480.0, yy - 270.0)
+    wr = np.radians(40.0)
+    d_right = np.abs(th)
+    d_left = np.pi - np.abs(th)
+    edge = 100.0 * scale * (1.0 + 0.10 * (np.exp(-(d_right / wr) ** 2)
+                                          + np.exp(-(d_left / wr) ** 2)))
+    if bulge_px:
+        edge = np.where(d_right <= np.radians(8.0), edge + bulge_px, edge)
+    img[rr <= edge] = 172.0
+    img[230:310, 0:330] = _crinkle((80, 330), rng)      # left strip
+    img[230:310, 630:960] = _crinkle((80, 330), rng)    # right strip
+    img[262:278, 330:392] = 174.0                       # leads
+    img[262:278, 568:630] = 174.0
+    img += np.random.default_rng(noise_seed).normal(
+        0, 1.5, img.shape).astype(np.float32)
+    return np.clip(img, 0, 255).astype(np.float32)
+
+
+def _track(base, img, s):
+    """The tracker forced on a frame (responding gates waived), with its
+    area as a multiple of the baseline circle. -> (candidate, A/A0)."""
+    ref = se.baseline_disc(base, s)
+    assert ref is not None, se.baseline_disc_refusal(base, s)
+    prep = se.prepared_diff(base, img, s)
+    c = se._disc_fit_candidate(prep, s, ref, assume_responding=True)
+    assert c is not None, "tracker refused"
+    f = prep['f']
+    return c, c['area_px'] / (f * f) / ref['area_px']
+
+
+def test_baseline_differenced_with_itself_reads_exactly_a0():
+    """R1, the defect of 2026-10-02: A0 was the baseline CIRCLE while
+    every measured row was pi*a*b of an ELLIPSE extrapolated across the
+    blocked lead sectors, and on the very same 0 kV frame the two
+    disagreed by -0.4 to +7.4 % (campaign runs). One functional top and
+    bottom means the baseline measured against itself is 1.000 (exactly,
+    not approximately), while the ellipse on that frame still shows the
+    old offset."""
+    s = dict(se.DEFAULT_SETTINGS)
+    base = _flared_scene()
+    ref = se.baseline_disc(base, s)
+    c, ratio = _track(base, base, s)
+    assert c['area_ratio'] == 1.0, c['area_ratio']
+    assert abs(ratio - 1.0) < 1e-9, ratio
+    assert c['ci85_pct'] == 0.0, c['ci85_pct']
+    # the scene really is the failing shape: the old estimator's number
+    # for this frame is several percent off the circle it was divided by
+    assert c['ellipse_over_circle'] > 1.02, c['ellipse_over_circle']
+    # the px->mm anchor still hangs on the circle: equivalent diameter
+    f = se.prepared_diff(base, base, s)['f']
+    assert abs(c['diam_px'] / f - ref['diam_px']) < 1e-6
+    # the baseline ROW stays the definition of A0: a 'resting' claim with
+    # the circle's area and diameter, not a measurement of itself
+    cands = se.candidates(base, base, s)
+    assert len(cands) == 1 and cands[0]['method'] == 'resting', cands
+    assert cands[0]['area_px'] == ref['area_px']
+    assert cands[0]['diam_px'] == ref['diam_px']
+    assert not cands[0].get('resting_refit')
+
+
+def test_uniformly_scaled_disc_reads_the_scale_squared_with_leads_blocked():
+    """R1: grow the whole outline by s and the reported A/A0 must be s^2,
+    although about a third of the perimeter is behind the leads and the
+    outline is not a circle. The ellipse's own area (what was reported
+    before) carries the baseline offset into every one of these."""
+    s = dict(se.DEFAULT_SETTINGS)
+    base = _flared_scene()
+    for scale in (1.0, 1.03, 1.06, 1.12):
+        img = _flared_scene(scale=scale, noise_seed=11)
+        c, ratio = _track(base, img, s)
+        assert c['hidden_pct'] > 20.0, c['hidden_pct']
+        assert abs(ratio / scale ** 2 - 1.0) < 0.005, (scale, ratio)
+        assert abs(c['ellipse_over_circle'] / scale ** 2 - 1.0) > 0.02, \
+            (scale, c['ellipse_over_circle'])
+        assert c['ci85_pct'] < 1.0, c['ci85_pct']
+    # and through candidates(): no step between a quiet frame and the
+    # first frame the change map notices
+    ref = se.baseline_disc(base, s)
+    quiet = se.candidates(base, _flared_scene(noise_seed=11), s)
+    moved = se.candidates(base, _flared_scene(scale=1.12, noise_seed=11), s)
+    assert quiet[0]['method'] == moved[0]['method'] == 'disc-fit'
+    assert abs(quiet[0]['area_px'] / ref['area_px'] - 1.0) < 0.005
+    assert abs(moved[0]['area_px'] / ref['area_px'] / 1.12 ** 2 - 1.0) \
+        < 0.005
+
+
+def test_bulge_inside_a_blocked_sector_is_not_seen_and_says_so():
+    """The stated assumption, pinned: the hidden part of the perimeter
+    is taken to strain like the visible part. A disc that bulges ONLY
+    behind a lead has no ray on the bulge, so the ratio does not move:
+    the estimator neither guesses the bulge nor extrapolates into it.
+    That blindness is not silent: every candidate says what share of the
+    perimeter it never measured (`hidden_pct`)."""
+    s = dict(se.DEFAULT_SETTINGS)
+    base = _flared_scene()
+    flat, r_flat = _track(base, _flared_scene(noise_seed=11), s)
+    bulged, r_bulged = _track(base, _flared_scene(bulge_px=30.0,
+                                                  noise_seed=11), s)
+    # 30 px over 16 degrees is ~3 % of the disc's true area
+    assert abs(r_bulged - 1.0) < 0.005, r_bulged
+    assert abs(r_bulged - r_flat) < 0.005, (r_flat, r_bulged)
+    assert bulged['hidden_pct'] > 20.0, bulged['hidden_pct']
+    assert bulged['n_common'] <= 360 * (1 - bulged['hidden_pct'] / 100) + 1
+
+
+def test_tracker_follows_the_disc_past_the_old_ceiling():
+    """2026-10-03: through 2026-10-02 the tracker refused any fit above
+    1.3 r0 (1.69x area) and searched only to 1.38 r0, under a comment
+    that called a 1.25x area expansion the full ramp; the campaign peaks
+    are 2.25 to 2.34x and the flat shoulder frames at 1.70 to 1.94x sat
+    in review with nothing but patch tiers to choose from. The same
+    rays must now read a disc grown to the shoulder (and to the
+    reviewed peaks) as scale squared, with the outline on the edge, and
+    the frame must auto-accept."""
+    s = dict(se.DEFAULT_SETTINGS)
+    base = _flared_scene()
+    ref = se.baseline_disc(base, s)
+    assert se.DISC_FIT_R_MAX == 1.75 and se.RAY_WIN_HI == 1.70
+    assert se.RAY_WIN_HI < se.RAY_REACH and se.DISC_FIT_R_MAX < se.RAY_REACH
+    for scale in (1.32, 1.38, 1.45, 1.53):
+        img = _flared_scene(scale=scale, noise_seed=11)
+        c, ratio = _track(base, img, s)
+        assert abs(ratio / scale ** 2 - 1.0) < 0.005, (scale, ratio)
+        r_eq = np.sqrt(c['ellipse_over_circle'])
+        assert 1.3 < r_eq <= se.DISC_FIT_R_MAX, (scale, r_eq)
+        assert c['conf_own'] >= 0.9, (scale, c['conf_own'])
+        cands = se.candidates(base, img, s)
+        assert cands[0]['method'] == 'disc-fit', (scale, cands[0]['method'])
+        assert abs(cands[0]['area_px'] / ref['area_px'] / scale ** 2
+                   - 1.0) < 0.005, scale
+        assert not se.needs_review(cands, s), (scale, cands[0]['conf'])
+    # the old limits really did refuse these: with them the shoulder
+    # disc gets no tracker candidate at all
+    old = (se.DISC_FIT_R_MAX, se.RAY_WIN_HI)
+    se.DISC_FIT_R_MAX, se.RAY_WIN_HI = 1.3, 1.38
+    try:
+        se._BASE_RAYS_CACHE.clear()
+        prep = se.prepared_diff(base, _flared_scene(scale=1.38,
+                                                    noise_seed=11), s)
+        assert se._disc_fit_candidate(prep, s, ref,
+                                      assume_responding=True) is None
+        # ...and a Save under those limits would have stamped THEM: the
+        # stamp records the window the tracker in this process reads,
+        # not a frozen copy (owner decision 6, 2026-10-03)
+        assert se.tracker_limits() == {'ray_win_hi': 1.38,
+                                       'disc_fit_r_max': 1.3}
+        st = se.estimator_stamp(None, libs={})
+        assert (st['ray_win_hi'], st['disc_fit_r_max']) == (1.38, 1.3), st
+    finally:
+        se.DISC_FIT_R_MAX, se.RAY_WIN_HI = old
+        se._BASE_RAYS_CACHE.clear()
+    assert se.tracker_limits() == {'ray_win_hi': 1.70,
+                                   'disc_fit_r_max': 1.75}
+
+
+def test_tracker_refuses_a_disc_beyond_its_reach():
+    """The limits are a ceiling, not a licence: an edge past the search
+    window has no ray on it. With no step inside the window the tracker
+    refuses (no candidate), which is what this synthetic scene shows;
+    a step that IS inside the window is still fitted (the lock-in
+    documented in SLDEA_DECISIONS.md 2026-10-03: +8 to +16 % on wrinkled
+    frames whose edge left the window), so the audit, not this gate, is
+    what catches a disc that has outgrown the window. A patch tier may
+    still outline the frame for the human."""
+    s = dict(se.DEFAULT_SETTINGS)
+    base = _flared_scene()
+    ref = se.baseline_disc(base, s)
+    for scale in (1.78, 1.95):
+        img = _flared_scene(scale=scale, noise_seed=11)
+        prep = se.prepared_diff(base, img, s)
+        assert se._disc_fit_candidate(prep, s, ref,
+                                      assume_responding=True) is None, scale
+        assert all(c['method'] != 'disc-fit'
+                   for c in se.candidates(base, img, s)), scale
+
+
+def test_rays_that_meet_foil_inside_the_reach_are_not_read():
+    """The hard ceiling under the wider window: a ray that meets the
+    foil strips anywhere out to RAY_REACH is dropped whole, on the
+    baseline and on every frame, although the ink edge at 1.0 r0 is
+    perfectly visible on it. So the tracker can never report the edge
+    of a strip as the ink edge, and a strip laid across an open sector
+    costs rays (hidden_pct) but never moves the ratio."""
+    s = dict(se.DEFAULT_SETTINGS)
+    rng = np.random.default_rng(3)
+
+    def with_strip(img, r_lo=145, r_hi=215):
+        # crinkled foil across the top sector, 1.45 to 2.15 r0 out: thick
+        # enough for foil_mask's depth gate (an inscribed 30 px), as the
+        # real strips are
+        out = img.copy()
+        out[270 - r_hi:270 - r_lo, 420:540] = _crinkle((r_hi - r_lo, 120),
+                                                       rng)
+        return out
+
+    plain = _flared_scene()
+    strip = with_strip(_flared_scene())
+    assert se.foil_mask(strip)[55:125, 420:540].all(), "the strip is foil"
+    ref_p = se.baseline_disc(plain, s)
+    ref_s = se.baseline_disc(strip, s)
+    assert ref_s is not None and abs(ref_s['diam_px'] - ref_p['diam_px']) < 3.0
+    r_plain = se._baseline_rays(plain, s, ref_p)
+    r_strip = se._baseline_rays(strip, s, ref_s)
+    top = slice(240, 300)              # rays through the strip (270 = up)
+    assert np.isfinite(r_plain[top]).all(), "the plain scene reads the top"
+    assert not np.isfinite(r_strip[top]).any(),         "a ray through foil inside the reach must not be read"
+    # elsewhere the same rays are read (to the px the recentred disc
+    # allows), and the ratio does not see the strip
+    side = np.r_[0:200, 340:360]
+    both = np.isfinite(r_plain[side]) & np.isfinite(r_strip[side])
+    assert both.sum() == np.isfinite(r_plain[side]).sum() > 120
+    assert np.abs(r_plain[side][both] - r_strip[side][both]).max() < 3.0
+    for scale in (1.0, 1.12, 1.32):
+        img = with_strip(_flared_scene(scale=scale, noise_seed=11))
+        c, ratio = _track(strip, img, s)
+        assert abs(ratio / scale ** 2 - 1.0) < 0.005, (scale, ratio)
+        assert c['hidden_pct'] > 40.0, c['hidden_pct']
+
+
+def _rays(r, lo, hi):
+    """360 rays at radius r, measured only where lo <= degree < hi."""
+    out = np.full(360, np.nan)
+    out[lo:hi] = r
+    return out
+
+
+def test_common_ray_ratio_refuses_rather_than_fabricates():
+    """R3. Too few common rays, rays reaching under 120 degrees, or no
+    baseline rays at all: no number. Rays on one side of the disc are a
+    number WITH its one-sidedness on it (review only past the limit,
+    owner decision 2 of 2026-10-03; until then they refused)."""
+    full = np.full(360, 100.0)
+    res, why = se._common_ray_ratio(full, full * 1.1, 100.0)
+    assert why is None and abs(res['ratio'] - 1.21) < 1e-9, (res, why)
+    assert res['n_common'] == 360 and res['hidden_pct'] == 0.0
+    assert res['one_sided'] < 1e-9
+    assert res['n_trimmed'] == 0 and res['trim_share'] == 0.0
+    # no baseline rays
+    res, why = se._common_ray_ratio(None, full, 100.0)
+    assert res is None and 'baseline' in why, why
+    # 59 common rays
+    res, why = se._common_ray_ratio(full, _rays(110.0, 0, 59), 100.0)
+    assert res is None and '59 rays' in why, why
+    # rays on BOTH frames are what counts, not on either
+    res, why = se._common_ray_ratio(_rays(100.0, 0, 200),
+                                    _rays(110.0, 150, 360), 100.0)
+    assert res is None and '50 rays' in why, why
+    # 100 rays squeezed into 100 degrees: 5 blocks, under the 120 deg floor
+    res, why = se._common_ray_ratio(full, _rays(110.0, 0, 100), 100.0)
+    assert res is None and '100 deg' in why, why
+    # 150 degrees on one side: enough rays and blocks, so a number, but
+    # one-sided past the limit; the caller makes it review only
+    res, why = se._common_ray_ratio(full, _rays(110.0, 0, 150), 100.0)
+    assert why is None and res['one_sided'] > se.RAY_MAX_ONE_SIDED, \
+        (res, why)
+    assert abs(res['ratio'] - 1.21) < 1e-9
+    # two opposed 75-degree arcs (the campaign geometry): balanced, fine
+    two = _rays(110.0, 50, 125)
+    two[230:305] = 110.0
+    res, why = se._common_ray_ratio(full, two, 100.0)
+    assert why is None and res['one_sided'] < 0.05, (res, why)
+    assert abs(res['ratio'] - 1.21) < 1e-9
+    assert abs(res['hidden_pct'] - 100.0 * 210 / 360) < 1e-6
+
+
+def test_common_ray_ratio_trims_jumped_rays_and_counts_them():
+    """A ray that lands on another feature on one of the two frames is
+    an outlier in r_k/r_k(0) and is dropped; the count is reported. A
+    smooth ellipse-like change of shape is NOT trimmed."""
+    rng = np.random.default_rng(3)
+    base = 100.0 + rng.normal(0, 0.3, 360)
+    frame = 1.05 * base + rng.normal(0, 0.3, 360)
+    clean, _ = se._common_ray_ratio(base, frame, 100.0)
+    bad = frame.copy()
+    bad[40:52] += 25.0                       # 12 rays jump to a wrinkle
+    res, why = se._common_ray_ratio(base, bad, 100.0)
+    assert why is None
+    assert res['n_trimmed'] >= 12, res
+    # the trim share is the dropped share of the rays measured on both
+    assert abs(res['trim_share'] - res['n_trimmed']
+               / (res['n_common'] + res['n_trimmed'])) < 1e-12, res
+    assert 0.03 <= res['trim_share'] <= se.RAY_MAX_TRIM_SHARE, res
+    assert abs(res['ratio'] - clean['ratio']) < 0.003, (res, clean)
+    untrimmed = float(np.sum(bad ** 2) / np.sum(base ** 2))
+    assert abs(untrimmed - clean['ratio']) > 0.01     # it mattered
+    # anisotropy: the disc goes oblong (radius +8 % one way, +2 % the
+    # other). Every ray is real and every ray stays in.
+    th = np.radians(np.arange(360.0))
+    obl = 100.0 * (1.05 + 0.03 * np.cos(2 * th))
+    res, why = se._common_ray_ratio(np.full(360, 100.0), obl, 100.0)
+    assert why is None and res['n_trimmed'] == 0, res
+    assert abs(res['ratio'] - float(np.mean(obl ** 2)) / 1e4) < 1e-9
+
+
+def test_common_ray_spread_is_a_repeatable_block_bootstrap():
+    """spread_pct: half-width of the central 85 % of a block bootstrap
+    over 20-degree blocks. Zero when the frames are identical, the same
+    number on every call (fixed seed: a Save must reproduce), small
+    when the blocks agree and large when they do not."""
+    rng = np.random.default_rng(5)
+    base = 100.0 + rng.normal(0, 0.3, 360)
+    same, _ = se._common_ray_ratio(base, base.copy(), 100.0)
+    assert same['ratio'] == 1.0 and same['spread_pct'] == 0.0
+    frame = 1.05 * base + rng.normal(0, 0.3, 360)
+    a, _ = se._common_ray_ratio(base, frame, 100.0)
+    b, _ = se._common_ray_ratio(base, frame, 100.0)
+    assert a['spread_pct'] == b['spread_pct'] and a['ratio'] == b['ratio']
+    assert 0.0 < a['spread_pct'] < 0.3, a['spread_pct']
+    # one half of the disc strains 4 % more than the other: the visible
+    # blocks disagree, so which blocks were visible matters, and the
+    # spread says so
+    th = np.radians(np.arange(360.0))
+    uneven = base * (1.05 + 0.02 * np.sign(np.cos(th)))
+    u, _ = se._common_ray_ratio(base, uneven, 100.0)
+    assert u['spread_pct'] > 5 * a['spread_pct'], (u, a)
+
+
+def test_fixed_centre_drift_sensitivity_matches_the_stated_formula():
+    """The rays are cast from the BASELINE centre. A disc that shifts by
+    d px without growing leaves the ratio alone when the rays balance
+    around it, and moves it by about 2 * one_sided * d / r0 when they do
+    not. That is the number the one-sidedness limit is built on."""
+    th = np.radians(np.arange(360.0))
+    r0, d = 100.0, 1.0
+    base = np.full(360, r0)
+    # exact radius of a circle of radius r0 centred d px to the right
+    shifted = d * np.cos(th) + np.sqrt(r0 ** 2 - (d * np.sin(th)) ** 2)
+    # the campaign geometry: two opposed lead gaps, rays balanced
+    bal = shifted.copy()
+    bal[:30] = bal[330:] = np.nan
+    bal[150:210] = np.nan
+    res, why = se._common_ray_ratio(base, bal, r0)
+    assert why is None and res['one_sided'] < 0.01
+    assert abs(res['ratio'] - 1.0) < 2e-4, res['ratio']
+    # a single 200-degree arc facing the shift: allowed, but exposed
+    arc = np.full(360, np.nan)
+    arc[:100] = shifted[:100]
+    arc[260:] = shifted[260:]
+    res, why = se._common_ray_ratio(base, arc, r0)
+    assert why is None and 0.5 < res['one_sided'] <= 0.6, (res, why)
+    predicted = 2.0 * res['one_sided'] * d / r0
+    assert abs((res['ratio'] - 1.0) - predicted) < 0.15 * predicted, \
+        (res['ratio'], predicted)
+
+
+def test_estimator_stamps_roundtrip_and_never_become_settings():
+    """R5. Edge Review's Save stamps `area_estimator: N` and the
+    baseline's provenance (STAMP_KEYS) into the run's edge-settings
+    section as plain Key: value lines, through save_settings. They are
+    facts about data.csv, not knobs: load_settings must never return
+    them, a settings save (tuner, settings dialog) must carry them over
+    untouched, and a stamp-only save must not pin detection settings
+    nobody chose. No stamp = the old ellipse estimator. Since 2026-10-03
+    (owner decision 29) the OpenCV and numpy versions of the saving
+    process ride on the same stamp as text lines, read back as text,
+    and (owner decision 6) so do the tracker's window limits, the
+    ink-step search top and the ellipse gate (TRACKER_LIMIT_KEYS), as
+    numbers: they are constants that moved once under the same
+    estimator version, so the stamp is the only record of the window a
+    run's last Detect-and-Save used (per run, not per row: the next
+    test)."""
+    libs = se.library_versions()
+    assert tuple(libs) == se.STAMP_TEXT_KEYS, libs
+    lims = se.tracker_limits()
+    assert tuple(lims) == se.TRACKER_LIMIT_KEYS, lims
+    assert lims == {'ray_win_hi': se.RAY_WIN_HI,
+                    'disc_fit_r_max': se.DISC_FIT_R_MAX}, lims
+    assert all(isinstance(v, float) for v in lims.values()), lims
+    assert not any(k in se.DEFAULT_SETTINGS for k in se.STAMP_KEYS)
+    assert se.STAMP_KEYS == ((se.AREA_ESTIMATOR_KEY,) + se.PROVENANCE_KEYS
+                             + se.TRACKER_LIMIT_KEYS + se.STAMP_TEXT_KEYS)
+    assert all(re.fullmatch(r'\d+\.\d+\.\d+\S*', v) for v in libs.values()), \
+        libs
+    d = tempfile.mkdtemp(prefix='edge_est_')
+    try:
+        with open(os.path.join(d, 'setup.txt'), 'w', encoding='utf-8') as f:
+            f.write("SLDEA run\nDEA nominal diameter: 16 mm\n")
+        assert se.load_stamp(d) == {}
+        assert se.saved_area_estimator(d) is None
+        assert not se.has_saved_settings(d)
+        # a settings save on an unstamped run does not invent a stamp
+        s = se.load_settings(d)
+        s['blur_px'] = 9
+        se.save_settings(d, s)
+        assert se.load_stamp(d) == {}
+        assert se.has_saved_settings(d)
+        # the Save stamp: settings lines untouched, stamp lines added
+        before = se.load_settings(d)
+        prov = {'base_rays': 246, 'base_hidden_pct': 31.7,
+                'base_one_sided': 0.008,
+                'base_ellipse_over_circle': 1.07418}
+        stamp = se.estimator_stamp(prov)
+        assert stamp == dict(prov, area_estimator=2, **lims, **libs)
+        assert tuple(stamp) == se.STAMP_KEYS
+        se.stamp_area_estimator(d, stamp)
+        assert se.saved_area_estimator(d) == se.AREA_ESTIMATOR_VERSION == 2
+        assert se.load_stamp(d) == {
+            k: (v if k in se.STAMP_TEXT_KEYS else float(v))
+            for k, v in stamp.items()}
+        assert se.load_settings(d) == before, "a stamp leaked into settings"
+        assert not any(k in se.load_settings(d) for k in se.STAMP_KEYS)
+        assert not se.has_saved_settings(os.path.join(d, 'nope'))
+        text = open(os.path.join(d, 'setup.txt'), encoding='utf-8').read()
+        assert text.count(se.EDGE_HDR) == 1
+        assert text.count('area_estimator: 2\n') == 1
+        assert 'base_ellipse_over_circle: 1.07418\n' in text
+        assert 'base_rays: 246\n' in text and 'blur_px: 9' in text
+        assert f"ray_win_hi: {se.RAY_WIN_HI:g}\n" in text, text
+        assert f"disc_fit_r_max: {se.DISC_FIT_R_MAX:g}\n" in text, text
+        assert f"opencv_version: {libs['opencv_version']}\n" in text, text
+        assert f"numpy_version: {libs['numpy_version']}\n" in text, text
+        # the stamp lines sit in STAMP_KEYS order after the settings
+        block = text.split(se.EDGE_HDR, 1)[1].strip().splitlines()
+        keys = [ln.split(':', 1)[0] for ln in block]
+        assert keys[-len(se.STAMP_KEYS):] == list(se.STAMP_KEYS), keys
+        # a later settings save keeps every stamp line; the version-only
+        # stamp (no provenance) replaces them with the version, the
+        # tracker limits and the library versions alone
+        s['blur_px'] = 7
+        se.save_settings(d, s)
+        assert se.load_stamp(d)['base_rays'] == 246.0
+        assert se.load_stamp(d)['ray_win_hi'] == se.RAY_WIN_HI
+        assert se.load_stamp(d)['opencv_version'] == libs['opencv_version']
+        assert se.load_settings(d)['blur_px'] == 7
+        se.stamp_area_estimator(d)
+        se.stamp_area_estimator(d)
+        assert se.load_stamp(d) == dict({'area_estimator': 2.0},
+                                        **lims, **libs)
+        text = open(os.path.join(d, 'setup.txt'), encoding='utf-8').read()
+        assert text.count('area_estimator: 2') == 1 and 'blur_px: 7' in text
+        assert text.count('blur_px') == 1
+        assert text.count('opencv_version') == 1
+        assert text.count('ray_win_hi') == 1
+        assert text.count('disc_fit_r_max') == 1
+        # a provenance the tracker could not complete writes what it has
+        se.stamp_area_estimator(d, se.estimator_stamp(
+            {'base_rays': 100, 'base_hidden_pct': 72.2,
+             'base_one_sided': 0.41, 'base_ellipse_over_circle': None}))
+        assert se.load_stamp(d) == dict(
+            {'area_estimator': 2.0, 'base_rays': 100.0,
+             'base_hidden_pct': 72.2, 'base_one_sided': 0.41},
+            **lims, **libs)
+        # an explicit older version can be written (and read back); a
+        # stamp handed no library versions (libs={}) or no tracker
+        # limits (limits={}) records none, and a version text
+        # _edge_block could not read back is not written
+        se.save_settings(d, s, stamp=se.estimator_stamp(None, version=1,
+                                                        libs={}, limits={}))
+        assert se.saved_area_estimator(d) == 1
+        assert se.load_stamp(d) == {'area_estimator': 1.0}
+        se.save_settings(d, s, stamp=se.estimator_stamp(
+            None, libs={'opencv_version': '4.12.0-dev',
+                        'numpy_version': 'not a version'}, limits={}))
+        assert se.load_stamp(d) == {'area_estimator': 2.0,
+                                    'opencv_version': '4.12.0-dev'}
+        assert se.load_settings(d)['blur_px'] == 7
+        # the limits another window measured under round-trip as the
+        # numbers they were (the 2026-10-02 window: 1.38 r0 and 1.3 r0),
+        # and a limit left out is simply not written
+        se.save_settings(d, s, stamp=se.estimator_stamp(
+            None, libs={}, limits={'ray_win_hi': 1.38,
+                                   'disc_fit_r_max': 1.3}))
+        assert se.load_stamp(d) == {'area_estimator': 2.0,
+                                    'ray_win_hi': 1.38,
+                                    'disc_fit_r_max': 1.3}
+        text = open(os.path.join(d, 'setup.txt'), encoding='utf-8').read()
+        assert 'ray_win_hi: 1.38\n' in text and 'disc_fit_r_max: 1.3\n' in text
+        se.save_settings(d, s, stamp=se.estimator_stamp(
+            None, libs={}, limits={'ray_win_hi': 1.38}))
+        assert se.load_stamp(d) == {'area_estimator': 2.0,
+                                    'ray_win_hi': 1.38}
+        assert se.load_settings(d)['blur_px'] == 7
+        assert not any(k in se.load_settings(d) for k in se.STAMP_KEYS)
+    finally:
+        shutil.rmtree(d)
+    # a run nobody tuned: the stamp alone, no settings pinned, the scale
+    # anchor block preserved
+    d = tempfile.mkdtemp(prefix='edge_est_')
+    try:
+        with open(os.path.join(d, 'setup.txt'), 'w', encoding='utf-8') as f:
+            f.write("SLDEA run\nDEA nominal diameter: 12 mm\n")
+        se.save_scale_anchor(d, {'method': 'auto-verified',
+                                 'diam_px': 577.1, 'diam_mm': 12.0,
+                                 'mm_per_px': 12.0 / 577.1})
+        se.stamp_area_estimator(d)
+        text = open(os.path.join(d, 'setup.txt'), encoding='utf-8').read()
+        block = text.split(se.EDGE_HDR, 1)[1].strip().splitlines()
+        assert block == ['area_estimator: 2'] + [
+            f"{k}: {v:g}" for k, v in lims.items()] + [
+            f"{k}: {v}" for k, v in libs.items()], block
+        assert not se.has_saved_settings(d)
+        assert se.load_settings(d) == dict(se.DEFAULT_SETTINGS, diam_mm=12.0)
+        assert se.load_scale_anchor(d)['diam_px'] == 577.1
+    finally:
+        shutil.rmtree(d)
+    # no setup.txt at all: nothing to read, and the stamp creates one
+    d = tempfile.mkdtemp(prefix='edge_est_')
+    try:
+        assert se.saved_area_estimator(d) is None
+        assert se.load_stamp(os.path.join(d, 'nope')) == {}
+        se.stamp_area_estimator(d)
+        assert se.saved_area_estimator(d) == 2
+        assert se.load_stamp(d)['disc_fit_r_max'] == se.DISC_FIT_R_MAX
+    finally:
+        shutil.rmtree(d)
+
+
+def test_stamp_is_the_window_of_the_last_detect_save_not_per_row():
+    """What the stamp cannot say (owner decision 6: per run, no per-row
+    tag; the point of the review). A run stamped `area_estimator: 2`
+    under the 2026-10-02 window (1.38 / 1.3 r0) holds a disc-fit row
+    still in the review queue. A Save under the current window
+    re-decides one other row only: stale_estimator_rows lists nothing
+    (the version did not move), the kept row keeps the earlier window's
+    px with its note untouched, and the run's stamp now reads the
+    current window. The kept row is therefore the earlier window's
+    number under the later stamp, which is why load_stamp's docstring
+    says the kept rows of a re-saved run must be re-reviewed after any
+    move of the window. And a version-2 stamp with no limit lines reads
+    back as no limits, never as the current constants: by the docstring
+    it is the 1.38 / 1.3 window, the only code that wrote version 2
+    without them."""
+    old_window = {'ray_win_hi': 1.38, 'disc_fit_r_max': 1.3}
+    assert old_window != se.tracker_limits()
+    rows = [
+        {'active_area_px': '217438', 'active_area_mm2': '201.062',
+         'active_diam_mm': '16.000', 'wrinkle_idx': '',
+         'notes': 'edge:resting conf 0.95'},
+        {'active_area_px': '238685', 'active_area_mm2': '220.700',
+         'active_diam_mm': '16.763', 'wrinkle_idx': '1.10',
+         'notes': 'edge:disc-fit conf 0.74'},
+        {'active_area_px': '250000', 'active_area_mm2': '231.163',
+         'active_diam_mm': '17.155', 'wrinkle_idx': '1.00',
+         'notes': 'edge:disc-fit conf 0.93'},
+    ]
+    results = {2: {'area_px': 251000.0, 'diam_px': 565.0, 'conf': 0.90,
+                   'method': 'disc-fit', 'wrinkle': 1.0}}
+    scale = 16.0 / (2 * np.sqrt(217438 / np.pi))
+    d = tempfile.mkdtemp(prefix='edge_win_')
+    try:
+        with open(os.path.join(d, 'setup.txt'), 'w', encoding='utf-8') as f:
+            f.write("SLDEA run\nDEA nominal diameter: 16 mm\n")
+        s = se.load_settings(d)
+        se.save_settings(d, s, stamp=se.estimator_stamp(
+            None, libs={}, limits=old_window))
+        assert se.load_stamp(d) == dict({'area_estimator': 2.0},
+                                        **old_window)
+        # the Save under the current window, as Edge Review runs it
+        saved = se.saved_area_estimator(d)
+        assert saved == se.AREA_ESTIMATOR_VERSION
+        stale = se.stale_estimator_rows(rows, results, saved)
+        assert stale == [], stale
+        se.apply_results(rows, results, scale, {}, stale=stale)
+        se.stamp_area_estimator(d, se.estimator_stamp(None, libs={}))
+        assert se.load_stamp(d) == dict({'area_estimator': 2.0},
+                                        **se.tracker_limits())
+        assert rows[2]['active_area_px'] == '251000'    # re-decided
+        assert rows[1]['active_area_px'] == '238685'    # kept as it was
+        assert rows[1]['notes'] == 'edge:disc-fit conf 0.74'
+        assert not any('1.38' in str(v) or 'win' in str(v)
+                       for v in rows[1].values()), rows[1]
+        # a version-2 stamp with no limit lines: no limits, not these
+        se.save_settings(d, s, stamp=se.estimator_stamp(
+            None, libs={}, limits={}))
+        assert se.load_stamp(d) == {'area_estimator': 2.0}
+        assert not any(k in se.load_stamp(d) for k in se.TRACKER_LIMIT_KEYS)
+    finally:
+        shutil.rmtree(d)
+
+
+def test_baseline_provenance_is_what_the_tracker_reads_at_rest():
+    """The stamped provenance comes from the tracker's own baseline
+    rays: how many of the 360 found an edge, the hidden share, their
+    one-sidedness, and the ellipse-over-circle offset the OLD estimator
+    carried on that scene. On the flared scene the leads hide about a
+    third of the perimeter on both sides, so the rays balance (low
+    one-sidedness) and the ellipse over-reads the circle."""
+    s = dict(se.DEFAULT_SETTINGS)
+    base = _flared_scene()
+    prov = se.baseline_provenance(base, s)
+    assert prov is not None
+    assert tuple(prov) == se.PROVENANCE_KEYS, prov
+    assert 60 <= prov['base_rays'] <= 300, prov
+    assert abs(prov['base_hidden_pct']
+               - 100.0 * (1 - prov['base_rays'] / 360.0)) < 0.06
+    assert 20.0 < prov['base_hidden_pct'] < 80.0, prov
+    assert prov['base_one_sided'] < 0.3, prov
+    c, _ratio = _track(base, base, s)
+    assert prov['base_ellipse_over_circle'] == c['ellipse_over_circle']
+    assert prov['base_ellipse_over_circle'] > 1.02
+    # the stamp carries exactly these facts beside the version, the
+    # tracker's window limits and the library versions
+    assert se.estimator_stamp(prov) == dict(prov, area_estimator=2,
+                                           **se.tracker_limits(),
+                                           **se.library_versions())
+    # no resting disc, no provenance (and no baseline, none either)
+    assert se.baseline_provenance(_bridged_scene(with_disc=False, seed=3),
+                                  s) is None
+    assert se.baseline_provenance(None, s) is None
+
+
+def test_outline_is_the_ellipse_and_the_number_is_the_ray_ratio():
+    """The split the operator must know about: the drawn outline
+    (`contour`) is still the robust ellipse through the frame's edge
+    points, enclosing `ellipse_over_circle` x A0, while `area_px` is A0
+    times the common-ray ratio (`area_ratio`). On the flared scene the
+    two differ by several percent, as on DOT_P3_1 (7 % at rest). The
+    card says so (sldea_edge_gui.tracker_card_text)."""
+    s = dict(se.DEFAULT_SETTINGS)
+    base = _flared_scene()
+    ref = se.baseline_disc(base, s)
+    for img in (base, _flared_scene(scale=1.06, noise_seed=11)):
+        c, ratio = _track(base, img, s)
+        f = se.prepared_diff(base, img, s)['f']
+        a0_det = ref['area_px'] * f * f
+        # the number: A0 times the ratio (area_ratio is rounded to 5 dp)
+        assert abs(c['area_px'] - a0_det * c['area_ratio']) < 1e-5 * a0_det
+        # the outline: a 72-gon of the ellipse, whose area is pi*a*b to
+        # 0.13 % (the inscribed-polygon factor), i.e. ellipse_over_circle
+        # x A0 and NOT the number
+        pts = np.asarray(c['contour'], float)
+        poly = 0.5 * abs(np.dot(pts[:, 0], np.roll(pts[:, 1], 1))
+                         - np.dot(pts[:, 1], np.roll(pts[:, 0], 1)))
+        assert abs(poly / (c['ellipse_over_circle'] * a0_det) - 1.0) < 0.003, \
+            (poly, c['ellipse_over_circle'], a0_det)
+        assert abs(poly / c['area_px'] - 1.0) > 0.02, (poly, c['area_px'])
+    # through candidates() (full-resolution contour): same split
+    best = se.candidates(base, _flared_scene(scale=1.06, noise_seed=11), s)[0]
+    assert best['method'] == 'disc-fit'
+    assert abs(best['area_px'] / ref['area_px'] - best['area_ratio']) < 1e-4
+    pts = np.asarray(best['contour'], float)
+    poly = 0.5 * abs(np.dot(pts[:, 0], np.roll(pts[:, 1], 1))
+                     - np.dot(pts[:, 1], np.roll(pts[:, 0], 1)))
+    assert abs(poly / (best['ellipse_over_circle'] * ref['area_px']) - 1.0) \
+        < 0.01, (poly, best['ellipse_over_circle'], ref['area_px'])
+
+
+def test_stale_estimator_rows_are_emptied_and_marked_never_kept():
+    """R5, on the plot axis as well as in the CSV. A Save keeps the
+    previous pass's px on rows still in the review queue; on a run last
+    saved by the ellipse estimator those would be old numbers drawn
+    beside new ones. stale_estimator_rows names them and
+    apply_results(stale=) empties them with the note in place of the
+    old one, so sldea_plot never sees them as 'edge:disc-fit' rows."""
+    def rows():
+        return [
+            {'active_area_px': '217438', 'active_area_mm2': '201.062',
+             'active_diam_mm': '16.000', 'wrinkle_idx': '',
+             'notes': 'edge:resting conf 0.95'},
+            {'active_area_px': '238685', 'active_area_mm2': '220.700',
+             'active_diam_mm': '16.763', 'wrinkle_idx': '1.10',
+             'notes': 'edge:disc-fit conf 0.99'},
+            {'active_area_px': '226645', 'active_area_mm2': '209.566',
+             'active_diam_mm': '16.335', 'wrinkle_idx': '1.20',
+             'notes': 'edge:manual-trace conf 1.00 (user)'},
+            {'active_area_px': '', 'notes': 'edge:disc-fit conf 0.70'},
+            {'active_area_px': '240000', 'active_area_mm2': '221.916',
+             'active_diam_mm': '16.809', 'wrinkle_idx': '1.30',
+             'notes': 'edge:disc-fit conf 0.74 (user); pair mismatch 9%'},
+            {'active_area_px': '99000', 'notes': 'edge:tex-ratio conf 0.80'},
+            {'active_area_px': '250000', 'notes': 'edge:disc-fit conf 0.93'},
+        ]
+    results = {6: {'area_px': 251000.0, 'diam_px': 565.0, 'conf': 0.9,
+                   'method': 'disc-fit', 'wrinkle': 1.0}}
+    r = rows()
+    assert se.stale_estimator_rows(r, results, None) == [1, 4]
+    assert se.stale_estimator_rows(r, results, 1) == [1, 4]
+    assert se.stale_estimator_rows(r, results,
+                                   se.AREA_ESTIMATOR_VERSION) == []
+    assert se.stale_estimator_rows(r, {}, None) == [1, 4, 6]
+    # the note is ASCII (it goes into the CSV)
+    se.AREA_ESTIMATOR_STALE_NOTE.encode('ascii')
+    scale = 16.0 / (2 * np.sqrt(217438 / np.pi))
+    stale = se.stale_estimator_rows(r, results, None)
+    se.apply_results(r, results, scale, {}, {4: 'wrinkle-mode'},
+                     stale=stale)
+    for i in (1, 4):
+        for col in ('active_area_px', 'active_area_mm2', 'active_diam_mm',
+                    'wrinkle_idx'):
+            assert r[i][col] == '', (i, col, r[i][col])
+        assert r[i]['notes'].startswith(se.AREA_ESTIMATOR_STALE_NOTE), r[i]
+        assert 'edge:disc-fit' not in r[i]['notes'], r[i]['notes']
+    assert r[4]['notes'] == se.AREA_ESTIMATOR_STALE_NOTE + '; wrinkle-mode'
+    assert r[6]['active_area_px'] == '251000'      # re-measured this pass
+    assert r[6]['notes'] == 'edge:disc-fit conf 0.90'
+    assert r[0]['active_area_px'] == '217438'      # resting: A0 either way
+    assert r[2]['active_area_px'] == '226645'      # a hand trace: kept
+    assert r[5]['active_area_px'] == '99000'       # a patch tier: kept
+    # an emptied row holds no px, so a second Save on the (now stamped)
+    # run lists nothing; had the stamp write failed, row 6 would be
+    # listed next time: the failure mode is 're-review', never two
+    # estimators in one column
+    assert se.stale_estimator_rows(r, {}, se.AREA_ESTIMATOR_VERSION) == []
+    assert se.stale_estimator_rows(r, {}, None) == [6]
+    se.apply_results(r, {}, scale, {})                 # a second Save
+    assert r[1]['notes'] == se.AREA_ESTIMATOR_STALE_NOTE
+    assert r[1]['active_area_px'] == ''
+    # a run stamped with the current estimator keeps everything
+    r = rows()
+    se.apply_results(r, results, scale, {},
+                     stale=se.stale_estimator_rows(
+                         r, results, se.AREA_ESTIMATOR_VERSION))
+    assert r[1]['active_area_px'] == '238685'
+    assert r[1]['notes'] == 'edge:disc-fit conf 0.99'
 
 
 def test_disc_fit_adaptive_cut_keeps_a_uniformly_faint_edge():
@@ -1167,19 +2246,131 @@ def test_reconcile_pairs_boosts_agreement_and_caps_contradiction():
         1: [{'method': 'disc-fit', 'area_px': 101000.0, 'conf': 0.78,
              'ci85_pct': 0.5}],
         2: [{'method': 'disc-fit', 'area_px': 140000.0, 'conf': 0.92,
-             'ci85_pct': 0.4}],
+             'ci85_pct': 0.4, 'audit': {'bias_px': 0.3, 'mad_px': 1.1,
+                                        'nostep_pct': 4.0, 'n_rays': 120}}],
         3: [{'method': 'diff-lo', 'area_px': 60000.0, 'conf': 0.88,
              'ci85_pct': None}],
     }
     stats = se.reconcile_pairs(rows, cands, dict(se.DEFAULT_SETTINGS))
-    assert stats == {'confirmed': 2, 'capped': 2}, stats
+    # 2026-10-03: the tracked member of landing 2 carries a clean audit
+    # verdict and its only mate is a patch tier, so it is no longer
+    # capped (see test_audit_clean_tracker_is_not_capped_by_a_patch_mate);
+    # the patch member still is
+    assert stats == {'confirmed': 2, 'capped': 1}, stats
     assert cands[0][0]['conf'] == 0.85 and cands[0][0]['pair_confirmed']
     assert cands[1][0]['conf'] == 0.83
-    # the contradiction can no longer auto-accept on either side
+    # the contradiction can no longer auto-accept on the PATCH side
     acc = se.DEFAULT_SETTINGS['accept_conf']
-    assert cands[2][0]['conf'] == round(acc - 0.01, 3)
+    assert cands[2][0]['conf'] == 0.92
+    assert cands[2][0]['pair_mate_patch'] == 80.0
+    assert 'pair_mismatch_pct' not in cands[2][0]
     assert cands[3][0]['conf'] == round(acc - 0.01, 3)
-    assert cands[2][0]['pair_mismatch_pct'] == cands[3][0]['pair_mismatch_pct'] == 80.0
+    assert cands[3][0]['pair_mismatch_pct'] == 80.0
+
+
+def test_audit_clean_tracker_is_not_capped_by_a_patch_mate():
+    """2026-10-03 (review findings S37/S40): tracker frames with a clean
+    audit sat in review only because the other snapshot of their landing
+    was won by a patch tier (tex-ratio or a diff region). The rule is
+    the narrowest one and relies on exactly two things: the tracked
+    member's own audit verdict vouches for its number (it measured the
+    ink step under the outline and tripped neither gate), and the patch
+    member stays capped, so the landing still reaches the queue through
+    it. It does not claim to know why the snapshots disagree: on the
+    corpus it fires twice, both on one-sided mid-hold collapses where
+    the buckled snapshot has no tracker (P3_3 L23, P3_5 L23). The
+    tracked member keeps its own confidence (no bonus) and is tagged.
+    Everything else -- both-tracker pairs (a collapse both snapshots
+    track), tracker versus resting, an audit-tripped tracker beside a
+    patch (the SquareStack-1 L6 shape: a 0.23 x A0 tex patch beside a
+    bias-tripped fit), and a tracker with NO recorded verdict
+    (audit_boundary returned None: the exemption must not ride on the
+    absence of a check) -- is capped exactly as before. So is a tracker
+    the ray ratio marked review only (owner decisions 2 and 9,
+    2026-10-03): one-sided rays or a large trim share cap and queue it
+    whatever its mate is, so it carries the mismatch tag like any other
+    member and REVIEW_ONLY_TAGS is the one list both pair branches
+    read."""
+    s = dict(se.DEFAULT_SETTINGS)
+    acc = s['accept_conf']
+    cap = round(acc - 0.01, 3)
+    rows = [{'nominal_kV': str(k)}
+            for k in (1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8)]
+    clean = {'bias_px': 0.2, 'mad_px': 1.4, 'nostep_pct': 3.5, 'n_rays': 130}
+
+    def best(method, area, conf, **tags):
+        c = {'method': method, 'area_px': area, 'conf': conf,
+             'ci85_pct': 0.5 if method in ('disc-fit', 'resting') else None}
+        c.update(tags)
+        return c
+
+    cands = {
+        # clean tracker beside a tex patch: the tracker is freed
+        0: [best('disc-fit', 356000.0, 0.90, audit=dict(clean))],
+        1: [best('tex-ratio', 65000.0, 0.93)],
+        # SquareStack-1 L6: the tracker's audit tripped, so BOTH stay capped
+        2: [best('disc-fit', 356000.0, 0.90, audit_bias=6.5,
+                 audit=dict(clean, bias_px=6.5))],
+        3: [best('tex-ratio', 65000.0, 0.93)],
+        # two trackers 20 % apart (a collapse during the hold): both capped
+        4: [best('disc-fit', 160000.0, 0.90, audit=dict(clean))],
+        5: [best('disc-fit', 130000.0, 0.90, audit=dict(clean))],
+        # tracker versus a resting claim: both capped
+        6: [best('disc-fit', 120000.0, 0.90, audit=dict(clean))],
+        7: [best('resting', 100000.0, 0.90, audit=dict(clean))],
+        # clean tracker beside a diff region, tracker below accept_conf
+        # on its own: freed from the cap, tagged, still not acceptable
+        8: [best('disc-fit', 150000.0, 0.70, audit=dict(clean))],
+        9: [best('diff-lo', 60000.0, 0.88)],
+        # a tracker with no verdict at all (too few open audit rays)
+        # beside a tex patch: nothing vouches for it, both capped
+        10: [best('disc-fit', 356000.0, 0.90)],
+        11: [best('tex-ratio', 65000.0, 0.93)],
+        # a tracker with a clean audit but review-only rays (one-sided,
+        # then a large trim share; _apply_ray_gates has already capped
+        # it) beside a tex patch: nothing to free, both capped
+        12: [best('disc-fit', 356000.0, cap, audit=dict(clean),
+                  one_sided=0.71, ray_one_sided=0.71, trim_share=0.1)],
+        13: [best('tex-ratio', 65000.0, 0.93)],
+        14: [best('disc-fit', 356000.0, cap, audit=dict(clean),
+                  one_sided=0.2, trim_share=0.24, ray_trim_share=0.24)],
+        15: [best('tex-ratio', 65000.0, 0.93)],
+    }
+    stats = se.reconcile_pairs(rows, cands, s)
+    assert stats == {'confirmed': 0, 'capped': 14}, stats
+    a, b = cands[0][0], cands[1][0]
+    assert a['conf'] == 0.90 and 'pair_mismatch_pct' not in a
+    assert a['pair_mate_patch'] == 138.2 and not a.get('pair_confirmed')
+    assert b['conf'] == cap and b['pair_mismatch_pct'] == 138.2
+    assert not se.needs_review([dict(a, spread_pct=2.0)], s)
+    assert se.needs_review([dict(b, spread_pct=10.1)], s)
+    for i in (2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15):
+        c = cands[i][0]
+        assert c['conf'] == cap and 'pair_mismatch_pct' in c, (i, c)
+        assert 'pair_mate_patch' not in c, (i, c)
+    assert cands[8][0]['conf'] == 0.70 and cands[8][0]['pair_mate_patch']
+    assert cands[9][0]['conf'] == cap and cands[9][0]['pair_mismatch_pct']
+    # the review-only trackers keep their tags and stay review
+    assert se.review_only(cands[12][0]) and se.review_only(cands[14][0])
+    assert se.needs_review([dict(cands[12][0], spread_pct=2.0)], s)
+    assert se.needs_review([dict(cands[14][0], spread_pct=2.0)], s)
+    # the no-verdict tracker is refused by the helper itself, with and
+    # without the gate tags, and so is a review-only one
+    assert not se._pair_mate_is_patch(cands[10][0], [cands[10][0],
+                                                     cands[11][0]])
+    assert not se._pair_mate_is_patch(cands[12][0], [cands[12][0],
+                                                     cands[13][0]])
+    assert not se._pair_mate_is_patch(cands[14][0], [cands[14][0],
+                                                     cands[15][0]])
+    assert se._pair_mate_is_patch(cands[0][0], [cands[0][0], cands[1][0]])
+    # the helper's own contract
+    assert se._is_patch_tier({'method': 'tex-ratio'})
+    assert se._is_patch_tier({'method': 'diff-hi'})
+    assert not se._is_patch_tier({'method': 'disc-fit'})
+    assert not se._is_patch_tier({'method': 'resting'})
+    assert not se._is_patch_tier({'method': 'trace'})
+    one = {'method': 'disc-fit'}
+    assert not se._pair_mate_is_patch(one, [one])      # alone: no mate
 
 
 def test_audit_boundary_measures_bias_and_circled_noise():
@@ -1317,16 +2508,32 @@ def test_bias_tripped_resting_is_refit_to_the_moved_edge():
     rest = next(c for c in cands if c['method'] == 'resting')
     assert rest.get('audit_bias') is not None and rest['audit_bias'] < -3.0
     assert rest['conf'] == round(s['accept_conf'] - 0.01, 3), rest['conf']
-    # with the bias gate off the stale claim auto-accepts unchallenged --
-    # the gate is what makes the refit possible at all
+    # the area is the like-for-like ratio: (106/100)^2 = 1.1236
+    assert abs(best['area_px'] / ref['area_px'] / 1.1236 - 1.0) < 0.01, \
+        best['area_px'] / ref['area_px']
+    # Since 2026-10-02 the measurement no longer waits for the bias gate:
+    # every gated frame is measured. With the gate OFF this used to pin
+    # the stale claim auto-accepting unchallenged (`c0[0]['method'] ==
+    # 'resting'`, no refit); now the tracker takes the frame anyway and
+    # the un-audited claim, which would have auto-accepted at exactly A0
+    # on a disc that grew 12 %, is only the runner-up.
     s0 = dict(s)
     s0['audit_bias_px'] = 0.0
     c0 = se.candidates(base, img, s0)
-    assert c0[0]['method'] == 'resting'
-    assert c0[0].get('audit_bias') is None
-    assert c0[0]['conf'] >= s0['accept_conf'], c0[0]['conf']
+    assert c0[0]['method'] == 'disc-fit' and c0[0].get('resting_refit')
+    assert abs(c0[0]['area_px'] - best['area_px']) < 1e-6
     assert not se.needs_review(c0, s0)
-    assert not any(c.get('resting_refit') for c in c0)
+    rest0 = next(c for c in c0 if c['method'] == 'resting')
+    assert rest0.get('audit_bias') is None
+    assert rest0['conf'] < c0[0]['conf']
+    # ...and where the tracker refuses, the gate-off claim stands alone,
+    # exactly as before
+    with _refuse_gated_tracker():
+        c1 = se.candidates(base, img, s0)
+    assert c1[0]['method'] == 'resting'
+    assert c1[0]['conf'] >= s0['accept_conf'], c1[0]['conf']
+    assert not se.needs_review(c1, s0)
+    assert not any(c.get('resting_refit') for c in c1)
 
 
 def test_refit_refusal_keeps_the_capped_resting_claim():
@@ -1377,6 +2584,48 @@ def test_pair_agreement_cannot_lift_an_audit_capped_boundary():
     # the audited member stays below accept; its clean partner still gains
     assert cands[0][0]['conf'] == capped, cands[0][0]['conf']
     assert cands[1][0]['conf'] == 0.98, cands[1][0]['conf']
+
+
+def test_tracker_spread_does_not_widen_the_pair_tolerance():
+    """2026-10-02: the tracker's ci85_pct became a block-bootstrap spread
+    that grows with uneven strain (2-4 % at high voltage). Fed into the
+    pair tolerance it let the two snapshots of one landing disagree by
+    10 % and both auto-accept (P3_3 at 10 kV in the corpus replay). The
+    tracker therefore hands the pair check `pair_ci_pct` = 0, and a
+    tracked pair meets the 4 % / 8 % rule it always met in practice."""
+    rows = [{'nominal_kV': '10'}, {'nominal_kV': '10'},
+            {'nominal_kV': '9'}, {'nominal_kV': '9'}]
+    acc = se.DEFAULT_SETTINGS['accept_conf']
+
+    def pair(extra):
+        return {
+            0: [dict({'method': 'disc-fit', 'area_px': 345960.0,
+                      'conf': 0.99, 'ci85_pct': 2.75}, **extra)],
+            1: [dict({'method': 'disc-fit', 'area_px': 312875.0,
+                      'conf': 0.92, 'ci85_pct': 1.55}, **extra)],
+            2: [dict({'method': 'disc-fit', 'area_px': 100000.0,
+                      'conf': 0.80, 'ci85_pct': 2.5}, **extra)],
+            3: [dict({'method': 'disc-fit', 'area_px': 105500.0,
+                      'conf': 0.80, 'ci85_pct': 2.5}, **extra)],
+        }
+
+    cands = pair({'pair_ci_pct': 0.0})
+    stats = se.reconcile_pairs(rows, cands, dict(se.DEFAULT_SETTINGS))
+    # 10.0 % apart: past 2 x 4 % -> both capped into review
+    assert cands[0][0]['conf'] == cands[1][0]['conf'] == round(acc - 0.01, 3)
+    assert cands[0][0]['pair_mismatch_pct'] == 10.0
+    # 5.4 % apart: neither confirmed nor capped
+    assert cands[2][0]['conf'] == cands[3][0]['conf'] == 0.80
+    assert stats == {'confirmed': 0, 'capped': 2}, stats
+    # what the spread would have done on its own: 6.45 % and 7.5 %
+    # tolerances, so nothing capped and the 5.4 % pair 'confirmed'
+    loose = pair({})
+    assert se.reconcile_pairs(rows, loose, dict(se.DEFAULT_SETTINGS)) == \
+        {'confirmed': 2, 'capped': 0}
+    # and the tracker really does hand the check that zero
+    base, img = _bridged_pair(r_active=112)
+    best = se.candidates(base, img, dict(se.DEFAULT_SETTINGS))[0]
+    assert best['method'] == 'disc-fit' and best['pair_ci_pct'] == 0.0
 
 
 def test_ramp_consistency_flags_pairs_and_dips():
@@ -1651,7 +2900,34 @@ def test_watchdog_trip_still_corroborates_the_landing_it_interrupted():
     s = se.DEFAULT_SETTINGS
     flags, advis = se.breakdown_flags(rows, areas, s)
     assert 'area collapsed' in flags.get(post, ''), (flags, advis)
-    assert (flags, advis) == _breakdown_flags_78315cc(rows, areas, s)
+    old = _breakdown_flags_78315cc(rows, areas, s)
+    # the trip row itself is confirmed by both; since decision 17
+    # (2026-10-03) its reason is the watchdog's own (see
+    # _same_but_for_the_trip_reason), everything else is as before
+    assert _same_but_for_the_trip_reason(rows, (flags, advis), old)
+
+
+def _same_but_for_the_trip_reason(rows, got, want):
+    """(flags, advis) pairs equal in keys, order and text, except for the
+    trip row (decision 17, 2026-10-03): with a number in its cell it is
+    confirmed with the reason 'breakdown? watchdog trip ...' where the
+    pre-decision function wrote the current rule's text, or where that
+    function left it alone (a short run whose median the excursions
+    pulled onto the trip's own level). In the second case the row is
+    set aside, with the advisory the flag superseded. Every other row
+    must match to the character."""
+    got_f, got_a = dict(got[0]), dict(got[1])
+    want_f, want_a = dict(want[0]), dict(want[1])
+    for i, r in enumerate(rows):
+        if se.is_trip_row(r) and i in got_f:
+            assert got_f[i].startswith('breakdown? watchdog trip'), got_f[i]
+            if i in want_f:
+                got_f[i] = want_f[i]
+            else:
+                del got_f[i]
+                want_a.pop(i, None)
+    return ([list(got_f.items()), list(got_a.items())]
+            == [list(want_f.items()), list(want_a.items())])
 
 
 def test_consistency_notes_pair_within_a_landing():
@@ -1748,6 +3024,12 @@ def _random_best(rng, row):
             'ci85_pct': rng.choice([None, round(rng.uniform(0.2, 3), 2)])}
     if rng.random() < 0.1:
         best['audit_nostep'] = 22.0
+    # candidates() records the audit verdict on a tracked or resting
+    # winner whenever audit_boundary can run; now and then it cannot
+    if best['method'] != 'diff-lo' and rng.random() < 0.85:
+        best['audit'] = {'bias_px': 0.5, 'mad_px': 1.5,
+                         'nostep_pct': 22.0 if 'audit_nostep' in best
+                         else 3.0, 'n_rays': 120}
     return best
 
 
@@ -1769,24 +3051,68 @@ def _random_ua(rng, n):
     return cells
 
 
+def _free_patch_mated_trackers(rows, cands):
+    """The one documented departure from the frozen oracle (2026-10-03,
+    SLDEA_DECISIONS.md of that date): in a landing the oracle capped, a
+    tracker member with a RECORDED audit verdict that tripped neither
+    gate and no review-only tag (REVIEW_ONLY_TAGS; _random_best sets
+    only the audit one), whose every mate is a patch tier, keeps its
+    original confidence and carries the mismatch as 'pair_mate_patch'
+    instead of 'pair_mismatch_pct', and is not counted as capped.
+    Applied to the oracle's OUTPUT, so the oracle itself stays
+    verbatim; -> the adjusted stats."""
+    freed = 0
+    by_landing = {}
+    for i, pos in enumerate(se.sweep_landings(rows)):
+        if pos is not None and cands.get(i):
+            by_landing.setdefault(pos['landing'], []).append(cands[i][0])
+    for members in by_landing.values():
+        if len(members) < 2 or not all('pair_mismatch_pct' in b
+                                       for b in members):
+            continue
+        for b in members:
+            if (b['method'] == 'disc-fit'
+                    and b.get('audit') is not None
+                    and not any(b.get(k) is not None
+                                for k in se.REVIEW_ONLY_TAGS)
+                    and all(se._is_patch_tier(m) for m in members
+                            if m is not b)):
+                b['pair_mate_patch'] = b.pop('pair_mismatch_pct')
+                b['conf'] = b['conf_before']
+                freed += 1
+    for cl in cands.values():
+        cl[0].pop('conf_before', None)
+    return freed
+
+
 def test_single_sweep_pairing_is_unchanged():
     """A single sweep never lands on a kV twice, so its landings ARE its
     kV groups and reconcile_pairs must do exactly what it did -- every
-    stat, every conf, every tag -- in every layout, trip row included."""
+    stat, every conf, every tag -- in every layout, trip row included.
+    The single exception since 2026-10-03 is the patch-mate exemption
+    (_free_patch_mated_trackers), applied to the oracle's output and
+    exercised here: the random bests put clean trackers beside diff
+    regions often enough that it fires in every layout."""
     rng = random.Random(20260923)
     s = dict(se.DEFAULT_SETTINGS)
-    seen = {'confirmed': 0, 'capped': 0}
+    seen = {'confirmed': 0, 'capped': 0, 'freed': 0}
     for name, rows in _single_sweeps():
         for _ in range(8):
             cands = {i: [_random_best(rng, r)] for i, r in enumerate(rows)
                      if rng.random() < 0.85}
             old = copy.deepcopy(cands)
+            for cl in old.values():
+                cl[0]['conf_before'] = cl[0]['conf']
             want = _reconcile_pairs_78315cc(rows, old, s)
+            freed = _free_patch_mated_trackers(rows, old)
+            want['capped'] -= freed
             assert se.reconcile_pairs(rows, cands, s) == want, name
             assert cands == old, name
-            for k in seen:
+            for k in ('confirmed', 'capped'):
                 seen[k] += want[k]
+            seen['freed'] += freed
     assert seen['confirmed'] and seen['capped'], seen   # both bands ran
+    assert seen['freed'], seen                          # and the exemption
 
 
 def test_single_sweep_breakdown_flags_are_unchanged():
@@ -1807,8 +3133,9 @@ def test_single_sweep_breakdown_flags_are_unchanged():
                      for i, r in enumerate(rows) if rng.random() < 0.8}
             want = _breakdown_flags_78315cc(rows, areas, s)
             got = se.breakdown_flags(rows, areas, s)
-            assert [list(d.items()) for d in got] \
-                == [list(d.items()) for d in want], name
+            # the trip row (a number in its cell here) is confirmed by
+            # both; only its reason text changed (decision 17)
+            assert _same_but_for_the_trip_reason(rows, got, want), name
             if sum(r['measured_uA'] != '' for r in rows) >= 5:
                 seen['corroborated'] += sum('area collapsed' in v
                                             for v in want[0].values())
@@ -2352,6 +3679,1171 @@ def test_write_back_extends_columns_for_era_rows():
         assert 'wrinkle_idx' in cols
         assert cols.index('wrinkle_idx') == cols.index('notes') - 1
         assert row['wrinkle_idx'] == '1.70'
+    finally:
+        shutil.rmtree(d)
+
+
+# ---------------------------------------------------------------------------
+# run health (2026-10-02): what a run's own files say went wrong at capture,
+# and the capture notes that Save used to erase.
+# ---------------------------------------------------------------------------
+
+def test_image_content_reads_contrast_without_the_pedestal():
+    """The 2026-10-01 frames sit on a 67-gray pedestal and span 2 levels:
+    contrast is p95 - p5, so the pedestal cannot make them look alive."""
+    rng = np.random.default_rng(3)
+    dead = 67.0 + rng.integers(0, 2, (240, 320)).astype(np.float32)
+    c = se.image_content(dead)
+    assert c['flat'] and c['contrast'] < 3, c
+    assert se.image_content(dead + 120.0)['contrast'] == c['contrast']
+    # a disc 25 levels under its paper is a picture, and only just: the
+    # dimmest real frame in the corpus reads 30
+    live = np.full((240, 320), 190.0, np.float32)
+    yy, xx = np.mgrid[0:240, 0:320]
+    live[(xx - 160) ** 2 + (yy - 120) ** 2 <= 80 * 80] = 165.0
+    c = se.image_content(live)
+    assert not c['flat'] and c['contrast'] == 25.0, c
+    assert c['sat_pct'] == 0.0
+    # saturation is the share of the WINDOW at or above 250
+    white = np.full((100, 100), 255.0, np.float32)
+    white[:50] = 100.0
+    c = se.image_content(white, roi_frac=1.0)
+    assert abs(c['sat_pct'] - 50.0) < 1e-6 and not c['flat'], c
+    # a colour frame is averaged, and nothing to look at is None
+    assert se.image_content(np.dstack([live] * 3))['contrast'] == 25.0
+    assert se.image_content(None) is None
+    assert se.image_content(np.zeros((0, 0), np.float32)) is None
+
+
+_HEALTH_SETUP = (
+    "SLDEA Test  --  synthetic\n"
+    "MODE: LIVE (HV energized)\n"
+    "\n"
+    "--- Drive ---\n"
+    "Total: 0:01:00  (2 landings, 5 frames)\n"
+    "\n"
+    "--- Camera ---\n"
+    "exposure 23, gain 0, WB off (manual)\n"
+    "\n"
+    "DEA nominal diameter: 16 mm\n")
+_HEALTH_LOG_OK = ("[10:00:00] run dir: /somewhere\n"
+                  "[10:01:00] run complete: 5/5 frames\n")
+
+
+def _health_frame(kind='disc'):
+    """A 240x320 baseline: 'disc' (the scene baseline_disc fits), 'flat'
+    (the 2026-10-01 picture), 'white' (the 2026-08-05 overexposure) or
+    'noise' (a picture with content and no disc)."""
+    yy, xx = np.mgrid[0:240, 0:320]
+    disc = (xx - 160) ** 2 + (yy - 120) ** 2 <= 80 * 80
+    if kind == 'flat':
+        return np.full((240, 320), 67, np.uint8)
+    if kind == 'white':
+        img = np.full((240, 320), 255.0, np.float32)
+        img[disc] = 150.0
+        return img.astype(np.uint8)
+    if kind == 'noise':
+        rng = np.random.default_rng(11)
+        return rng.integers(40, 220, (240, 320)).astype(np.uint8)
+    img = np.full((240, 320), 190.0, np.float32)
+    img[disc] = 165.0
+    return img.astype(np.uint8)
+
+
+def _health_run(d, rows=None, setup=_HEALTH_SETUP, runlog=_HEALTH_LOG_OK,
+                telemetry=None, baseline='disc', skip_files=()):
+    """A synthetic run folder for run_health. The default is a run with
+    nothing wrong: a baseline and two landings, every reading present and
+    positive, setup.txt and run.log agreeing that all 5 frames were
+    taken. Each test breaks one thing."""
+    import cv2
+    if rows is None:
+        rows = [('baseline', 0.0, '0.0', '-16.0'),
+                ('post-ramp', 2.0, '2.01', '-16.0'),
+                ('pre-ramp', 2.0, '2.02', '-15.8'),
+                ('post-ramp', 4.0, '4.01', '-16.2'),
+                ('pre-ramp', 4.0, '4.03', '-16.0')]
+    os.makedirs(os.path.join(d, 'frames'), exist_ok=True)
+    out = []
+    for k, row in enumerate(rows):
+        tag, kv, mkv, mua = row[:4]
+        extra = row[4] if len(row) > 4 else {}
+        fn = f'SLDEA_s{k:02d}_{kv:05.2f}kV_{tag}.png'
+        rec = {'snapshot': k + 1, 'step': k, 'tag': tag, 'nominal_kV': kv,
+               'measured_kV': mkv, 'measured_uA': mua, 'frame_file': fn}
+        rec.update(extra)
+        fn = rec['frame_file']
+        if fn and fn not in skip_files:
+            cv2.imwrite(os.path.join(d, 'frames', fn),
+                        _health_frame(baseline if tag == 'baseline'
+                                      else 'disc'))
+        out.append(rec)
+    _fake_run(d, out)
+    for name, text in (('setup.txt', setup), ('run.log', runlog),
+                       ('telemetry.csv', telemetry)):
+        if text is not None:
+            with open(os.path.join(d, name), 'w', encoding='utf-8',
+                      newline='') as f:
+                f.write(text)
+    return d
+
+
+def _codes(items, level=None):
+    return [it['code'] for it in items
+            if level is None or it['level'] == level]
+
+
+def _item(items, code):
+    hits = [it for it in items if it['code'] == code]
+    assert len(hits) == 1, (code, _codes(items))
+    return hits[0]
+
+
+def test_run_health_is_silent_on_a_run_with_nothing_wrong():
+    d = tempfile.mkdtemp(prefix='edge_health_ok_')
+    try:
+        _health_run(d)
+        assert se.run_health(d) == [], se.run_health(d)
+        # a run already loaded is not loaded twice, and is not touched
+        run = se.load_run(d)
+        before = copy.deepcopy(run['rows'])
+        assert se.run_health(d, run) == []
+        assert run['rows'] == before
+        # read-only on disk as well: advice writes nothing
+        names = sorted(os.listdir(d))
+        se.run_health(d)
+        assert sorted(os.listdir(d)) == names
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_stops_on_a_blank_baseline_and_says_what_to_do():
+    """The 2026-10-01 run: exposure 3, a picture spanning 2 gray levels,
+    calibrated by hand and reviewed to an empty queue."""
+    d = tempfile.mkdtemp(prefix='edge_health_flat_')
+    try:
+        _health_run(d, baseline='flat')
+        items = se.run_health(d)
+        assert items[0]['level'] == 'stop', items
+        it = _item(items, 'image_flat')
+        assert it['level'] == 'stop'
+        for words in ('blank', 'cannot be measured', 'repeat the run',
+                      'Do not calibrate by hand', 'exposure 23'):
+            assert words in it['text'], (words, it['text'])
+        # the refused disc fit is this picture's consequence, not a
+        # second finding: its gray-level jargon stays off the screen
+        assert 'disc_fit_refused' not in _codes(items)
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_baseline_missing_unreadable_or_untagged_is_a_stop():
+    d = tempfile.mkdtemp(prefix='edge_health_base_')
+    try:
+        # the CSV names the baseline, the disk does not hold it
+        _health_run(os.path.join(d, 'gone'),
+                    skip_files=('SLDEA_s00_00.00kV_baseline.png',))
+        items = se.run_health(os.path.join(d, 'gone'))
+        it = _item(items, 'baseline_missing')
+        assert it['level'] == 'stop' and 'not in the frames folder' \
+            in it['text'], it
+        # reported once: the stop covers it, the count of other missing
+        # pictures does not repeat it
+        assert 'frames_missing' not in _codes(items)
+        # a 0-byte baseline decodes to nothing
+        zero = _health_run(os.path.join(d, 'zero'))
+        open(os.path.join(zero, 'frames',
+                          'SLDEA_s00_00.00kV_baseline.png'), 'wb').close()
+        it = _item(se.run_health(zero), 'baseline_unreadable')
+        assert it['level'] == 'stop' and 'empty or damaged' in it['text']
+        # no row tagged 'baseline' at all
+        none = _health_run(os.path.join(d, 'none'), rows=[
+            ('warmup', 0.0, '0.0', '-16'), ('post-ramp', 2.0, '2.0', '-16'),
+            ('pre-ramp', 2.0, '2.0', '-16'), ('post-ramp', 4.0, '4.0', '-16'),
+            ('pre-ramp', 4.0, '4.0', '-16')])
+        it = _item(se.run_health(none), 'baseline_missing')
+        assert it['level'] == 'stop' and "tagged 'baseline'" in it['text']
+        assert 'has to be repeated' in it['text'], it['text']
+        # the same finding on a run that is STILL BEING CAPTURED (run.log
+        # has no end line yet): told to wait, not to repeat the run, so
+        # the STOP no longer contradicts the "not finished" warning
+        # beside it (review 2026-10-02)
+        live_log = "[10:00:00] run dir: /x\n"
+        for name, rows in (('live_warmup', [('warmup', 0.0, '0.0', '-16')]),
+                           ('live_header', [])):
+            live = _health_run(os.path.join(d, name), rows=rows,
+                               runlog=live_log)
+            items = se.run_health(live)
+            it = _item(items, 'baseline_missing')
+            assert it['level'] == 'stop', it
+            assert 'no baseline picture yet' in it['text'], it['text']
+            assert 'wait until it ends and pick it again' in it['text']
+            assert 'has to be repeated' not in it['text'], it['text']
+            assert _item(items, 'ended_early')['text'].startswith(
+                'The run is not finished'), items
+        # a log that records an ERROR is not a live run: the old sentence
+        err = _health_run(os.path.join(d, 'err'),
+                          rows=[('warmup', 0.0, '0.0', '-16')],
+                          runlog=live_log + "[10:00:09] ERROR: camera "
+                                            "unplugged\n")
+        assert 'has to be repeated' in _item(se.run_health(err),
+                                             'baseline_missing')['text']
+        # a folder that is not a run says so instead of raising
+        os.makedirs(os.path.join(d, 'empty'))
+        items = se.run_health(os.path.join(d, 'empty'))
+        assert _codes(items) == ['no_run_csv'] \
+            and items[0]['level'] == 'stop'
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_warns_on_overexposure_and_on_a_refused_disc_fit():
+    d = tempfile.mkdtemp(prefix='edge_health_img_')
+    try:
+        white = _health_run(os.path.join(d, 'white'), baseline='white')
+        items = se.run_health(white)
+        it = _item(items, 'image_saturated')
+        assert it['level'] == 'warn' and 'pure white' in it['text'], it
+        assert not _codes(items, 'stop'), items
+        # a picture with content and no disc: the fit refuses, and the
+        # sentence carries the fitter's OWN reason plus what it costs
+        noise = _health_run(os.path.join(d, 'noise'), baseline='noise')
+        items = se.run_health(noise)
+        it = _item(items, 'disc_fit_refused')
+        assert it['level'] == 'warn', it
+        gray = se.load_gray(os.path.join(
+            noise, 'frames', 'SLDEA_s00_00.00kV_baseline.png'))
+        why = se.baseline_disc_refusal(gray, se.load_settings(noise))
+        assert why and why in it['text'], (why, it['text'])
+        assert 'most frames will need a manual decision' in it['text']
+        assert 'measure the scale by hand' in it['text']
+        assert not _codes(items, 'stop'), "a refused fit is not a stop"
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_reports_missing_voltage_its_stop_point_and_its_sign():
+    """The campaign's shape: readings to 4.00 kV, blank above, and every
+    reading negative with no INVERTED line in setup.txt."""
+    rows = [('baseline', 0.0, '-0.0', '-16.0'),
+            ('post-ramp', 2.0, '-2.03', '-16.0'),
+            ('pre-ramp', 2.0, '-2.03', '-16.0'),
+            ('post-ramp', 4.0, '-4.08', '-16.0'),
+            ('pre-ramp', 4.0, '-4.07', '-16.0'),
+            ('post-ramp', 4.25, '', '-16.0'),
+            ('pre-ramp', 4.25, '', '-16.0'),
+            ('post-ramp', 4.5, '', '-16.0')]
+    setup = _HEALTH_SETUP.replace('5 frames', '8 frames')
+    log = _HEALTH_LOG_OK.replace('5/5', '8/8')
+    d = tempfile.mkdtemp(prefix='edge_health_kv_')
+    try:
+        run = _health_run(os.path.join(d, 'a'), rows=rows, setup=setup,
+                          runlog=log)
+        items = se.run_health(run)
+        it = _item(items, 'kv_missing')
+        assert it['level'] == 'warn'
+        assert '3 of 7 powered frames' in it['text'], it['text']
+        assert 'the readings stop above 4.00 kV' in it['text'], it['text']
+        it = _item(items, 'kv_sign')
+        assert it['level'] == 'info'
+        assert '4 of 4 readings' in it['text'], it['text']
+        assert '-4.08 kV measured at 4.00 kV commanded' in it['text']
+        # a student must never be told to flip an HV setting from here
+        assert 'Do not change any high-voltage setting' in it['text']
+        # the check is about the SIGN. It never compared the size with
+        # the commanded voltage, so it must not vouch for it: the 07-23
+        # runs read 14 to 48 % low under the sentence that said "usable"
+        assert 'usable' not in it['text'], it['text']
+        sign_only = 'looks only at the sign, not at the size'
+        assert sign_only in it['text'], it['text']
+        assert not _codes(items, 'stop')
+        # the runner's own line says the monitor sign was accounted for
+        inv = _health_run(os.path.join(d, 'b'), rows=rows, runlog=log,
+                          setup=setup + "Trek control polarity: INVERTED "
+                          "(control = -kV/gain; monitor readings "
+                          "sign-corrected in log)\n")
+        assert 'kv_sign' not in _codes(se.run_health(inv))
+        # one landing holding a reading AND a blank: 'at', not 'above'
+        at = _health_run(os.path.join(d, 'c'), setup=setup, runlog=log,
+                         rows=rows[:4] + [('pre-ramp', 4.0, '', '-16.0')]
+                         + rows[5:])
+        assert 'the readings stop at 4.00 kV' in \
+            _item(se.run_health(at), 'kv_missing')['text']
+        # no reading anywhere (the 2026-08-05 runs)
+        none = _health_run(os.path.join(d, 'e'), setup=setup, runlog=log,
+                           rows=[(t, kv, '', ua) for t, kv, _m, ua in rows])
+        it = _item(se.run_health(none), 'kv_missing')
+        assert 'None of the 7 powered frames' in it['text'], it['text']
+        assert 'kv_sign' not in _codes(se.run_health(none))
+        # without setup.txt the polarity is unknown: no sign verdict, and
+        # the missing file is itself said
+        bare = _health_run(os.path.join(d, 'f'), rows=rows, setup=None,
+                           runlog=log)
+        codes = _codes(se.run_health(bare))
+        assert 'kv_sign' not in codes and 'setup_missing' in codes, codes
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_counts_blank_current_cells():
+    d = tempfile.mkdtemp(prefix='edge_health_ua_')
+    try:
+        some = _health_run(os.path.join(d, 'some'), rows=[
+            ('baseline', 0.0, '0.0', '-16.0'),
+            ('post-ramp', 2.0, '2.0', '-16.0'),
+            ('pre-ramp', 2.0, '2.0', ''),
+            ('post-ramp', 4.0, '4.0', ''),
+            ('pre-ramp', 4.0, '4.0', '-16.0')])
+        it = _item(se.run_health(some), 'ua_missing')
+        assert it['level'] == 'warn'
+        assert '2 of 5 frames' in it['text'] and '2.00 kV' in it['text']
+        # 3 readings are too few for breakdown_flags' median rule
+        assert 'With only 3 current readings' in it['text'], it['text']
+        assert 'larger than 50 microamps' in it['text'], it['text']
+        assert 'area alone' in it['text'], it['text']
+        # enough readings for the median rule: the blanks are only blanks
+        many = _health_run(os.path.join(d, 'many'), rows=[
+            ('baseline', 0.0, '0.0', '-16.0'),
+            ('post-ramp', 2.0, '2.0', '-16.0'),
+            ('pre-ramp', 2.0, '2.0', ''),
+            ('post-ramp', 4.0, '4.0', '-16.0'),
+            ('pre-ramp', 4.0, '4.0', '-16.0'),
+            ('post-ramp', 6.0, '6.0', '-16.0'),
+            ('pre-ramp', 6.0, '6.0', '-16.0')])
+        it = _item(se.run_health(many), 'ua_missing')
+        assert '1 of 7 frames' in it['text'], it['text']
+        assert 'nothing to read on those frames' in it['text'], it['text']
+        assert 'area alone' not in it['text'], it['text']
+        allb = _health_run(os.path.join(d, 'all'), rows=[
+            ('baseline', 0.0, '0.0', ''), ('post-ramp', 2.0, '2.0', ''),
+            ('pre-ramp', 2.0, '2.0', ''), ('post-ramp', 4.0, '4.0', ''),
+            ('pre-ramp', 4.0, '4.0', '')])
+        it = _item(se.run_health(allb), 'ua_missing')
+        assert 'no current readings at all (5 frames)' in it['text']
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_current_sentences_say_what_breakdown_flags_will_do():
+    """Review 2026-10-02: the all-blank sentence read 'Edge Review
+    confirms a breakdown from the current, so on this run it cannot flag
+    one'. False: under HEALTH_MIN_UA_ROWS parseable readings
+    breakdown_flags takes its legacy rule, where an area collapse ALONE
+    confirms and Save renames frames on it. The sentence and the rule are
+    held together here, on both sides of the threshold."""
+    assert se.HEALTH_MIN_UA_ROWS == 5
+    tags = [('baseline', 0.0), ('post-ramp', 2.0), ('pre-ramp', 2.0),
+            ('post-ramp', 4.0), ('pre-ramp', 4.0), ('post-ramp', 6.0),
+            ('pre-ramp', 6.0)]
+    # a 50 % area collapse at row 3, where the voltage rose
+    areas = {0: 1000.0, 1: 1000.0, 2: 1000.0, 3: 500.0, 4: 500.0,
+             5: 500.0, 6: 500.0}
+    d = tempfile.mkdtemp(prefix='edge_health_rule_')
+    try:
+        for n_read in (0, se.HEALTH_MIN_UA_ROWS - 1, se.HEALTH_MIN_UA_ROWS):
+            rows = [(tag, kv, f'{kv:.1f}', '-16.0' if k < n_read else '')
+                    for k, (tag, kv) in enumerate(tags)]
+            rd = _health_run(os.path.join(d, f'n{n_read}'), rows=rows)
+            text = _item(se.run_health(rd), 'ua_missing')['text']
+            flags, advis = se.breakdown_flags(
+                se.load_run(rd)['rows'], areas, se.load_settings(rd))
+            if n_read < se.HEALTH_MIN_UA_ROWS:
+                # the legacy rule: the collapse is a CONFIRMED flag
+                assert flags == {3: 'breakdown? area collapsed 50%'}, \
+                    (n_read, flags)
+                assert advis == {}, (n_read, advis)
+                assert 'from a sudden drop in area alone' in text, text
+                assert 'less reliable' in text, text
+            else:
+                # the median rule: the same collapse is only an advisory
+                assert flags == {}, (n_read, flags)
+                assert list(advis) == [3], (n_read, advis)
+                assert 'area alone' not in text, text
+            # never again the claim that no flag can come
+            assert 'cannot flag' not in text, text
+        none = _item(se.run_health(os.path.join(d, 'n0')),
+                     'ua_missing')['text']
+        assert 'cannot check the current for a breakdown' in none, none
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_says_when_and_why_a_run_ended_early():
+    setup = _HEALTH_SETUP.replace('5 frames', '9 frames')
+    d = tempfile.mkdtemp(prefix='edge_health_end_')
+    try:
+        ab = _health_run(os.path.join(d, 'abort'), setup=setup,
+                         runlog="[10:00:00] run dir: /x\n"
+                                "[10:00:40] abort requested\n"
+                                "[10:00:41] run aborted: 5/9 frames\n")
+        it = _item(se.run_health(ab), 'ended_early')
+        assert it['level'] == 'warn'
+        assert it['text'].startswith('The run stopped early'), it['text']
+        assert '5 of 9 planned frames' in it['text'], it['text']
+        assert 'up to 4.00 kV' in it['text']
+        assert 'operator pressed Abort' in it['text']
+        assert 'still going' not in it['text'], it['text']
+        # an older run has no run.log: say that the reason is unknown
+        old = _health_run(os.path.join(d, 'old'), setup=setup, runlog=None)
+        assert 'no run.log' in _item(se.run_health(old),
+                                     'ended_early')['text']
+        # a log that just stops: the program or the PC died
+        cut = _health_run(os.path.join(d, 'cut'), setup=setup,
+                          runlog="[10:00:00] run dir: /x\n")
+        text = _item(se.run_health(cut), 'ended_early')['text']
+        assert 'no end-of-run line' in text, text
+        # ...or the run is being captured right now (Edge Review opens on
+        # the newest run folder): a live run is not called "stopped"
+        assert text.startswith('The run is not finished'), text
+        assert 'stopped early' not in text, text
+        assert 'If the run is still going, wait until it ends' in text, text
+        assert '5 of 9 planned frames' in text, text
+        err = _health_run(os.path.join(d, 'err'), setup=setup,
+                          runlog="[10:00:00] run dir: /x\n"
+                                 "[10:00:09] ERROR: camera unplugged\n")
+        assert 'camera unplugged' in _item(se.run_health(err),
+                                           'ended_early')['text']
+        # a reused run name APPENDS to run.log: only the last run counts
+        twice = _health_run(os.path.join(d, 'twice'),
+                            runlog="[09:00:00] run dir: /x\n"
+                                   "[09:00:30] run aborted: 2/5 frames\n"
+                                   + _HEALTH_LOG_OK)
+        assert 'ended_early' not in _codes(se.run_health(twice))
+        # ...and what the EARLIER run logged must not leak into this one:
+        # its watchdog trip is not this run's trip, and its error is not
+        # why this run stopped
+        first = ("[09:00:00] run dir: /x\n"
+                 "[09:00:20] ERROR: camera unplugged\n"
+                 "[09:00:28] BREAKDOWN CONFIRMED - I=OFF-SCREEN sustained "
+                 ">3s\n"
+                 "[09:00:30] run BREAKDOWN-ABORT: 2/5 frames\n")
+        clean = _health_run(os.path.join(d, 'twice_trip'),
+                            runlog=first + _HEALTH_LOG_OK)
+        assert se.run_health(clean) == [], se.run_health(clean)
+        cut2 = _health_run(os.path.join(d, 'twice_cut'), setup=setup,
+                           runlog=first + "[10:00:00] run dir: /x\n")
+        items = se.run_health(cut2)
+        assert 'watchdog_trip' not in _codes(items), items
+        early = _item(items, 'ended_early')['text']
+        assert 'no end-of-run line' in early, early
+        assert 'camera unplugged' not in early, early
+        assert 'watchdog' not in early, early
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_reports_a_watchdog_stop_and_says_what_the_flags_do():
+    """A trip is REPORTED as a 'warn' sentence that says what
+    breakdown_flags will do with it (decision 17, 2026-10-03), through
+    the same trip_verdict, and the rows it was read from are left
+    exactly as loaded. The sentinel case (this fixture's run.log says
+    I=OFF-SCREEN) reads 'does NOT mark'; a numeric trip reads 'marks';
+    and the two agree with breakdown_flags on the same folder."""
+    trip = ('breakdown', 4.4, '4.4', '', {
+        'step': 99, 'frame_file': 'SLDEA_s99_04.40kV_breakdown.png',
+        'notes': 'WATCHDOG: breakdown confirmed (dev >100uA for 3s)'})
+    rows = [('baseline', 0.0, '0.0', '-16.0'),
+            ('post-ramp', 2.0, '2.0', '-16.0'),
+            ('pre-ramp', 2.0, '2.0', '-16.0'),
+            ('post-ramp', 4.0, '4.0', '-16.0'), trip]
+    log = ("[10:00:00] run dir: /x\n"
+           "[10:00:50] BREAKDOWN CONFIRMED - I=OFF-SCREEN sustained >3s\n"
+           "[10:00:51] run BREAKDOWN-ABORT: 4/5 frames\n")
+    d = tempfile.mkdtemp(prefix='edge_health_wd_')
+    try:
+        run_dir = _health_run(os.path.join(d, 'trip'), rows=rows,
+                              runlog=log)
+        run = se.load_run(run_dir)
+        before = copy.deepcopy(run['rows'])
+        items = se.run_health(run_dir, run)
+        it = _item(items, 'watchdog_trip')
+        assert it['level'] == 'warn' and 'at 4.40 kV' in it['text'], it
+        # the sentinel case: says so, names the file, and does not
+        # pretend the row's own reading stops counting
+        assert 'does NOT mark a breakdown from this stop alone' in it['text']
+        assert 'off-screen sentinel, run.log' in it['text'], it['text']
+        assert 'own current reading still counts' in it['text']
+        assert run['rows'] == before, "advice must not touch the rows"
+        flags, advis = se.breakdown_flags(run['rows'], {}, se.load_settings(
+            run_dir), rundir=run_dir)
+        assert flags == {} and 'off-screen sentinel' in advis[4], (flags,
+                                                                     advis)
+        # the trip row is not one of the PLANNED frames: 4 of 5 taken
+        early = _item(items, 'ended_early')
+        assert '4 of 5 planned frames' in early['text'], early['text']
+        assert 'current watchdog stopped it' in early['text']
+        assert not _codes(items, 'stop')
+        # a numeric trip: the strip says it marks, and names the number
+        # and where it came from; the flags do mark
+        num = log.replace('I=OFF-SCREEN', 'I=-240 uA')
+        nd = _health_run(os.path.join(d, 'num'), rows=rows, runlog=num)
+        it = _item(se.run_health(nd), 'watchdog_trip')
+        assert 'marks that row as a confirmed breakdown' in it['text']
+        assert 'on record as -240 uA (run.log)' in it['text'], it['text']
+        assert 'renames its frame' in it['text']
+        nrun = se.load_run(nd)
+        flags, advis = se.breakdown_flags(nrun['rows'], {}, se.load_settings(
+            nd), rundir=nd)
+        assert list(flags) == [4] and advis == {}, (flags, advis)
+        assert flags[4] == 'breakdown? watchdog trip (I -240uA, run.log)'
+        # no record of the reading anywhere: says so
+        bare = ("[10:00:00] run dir: /x\n"
+                "[10:00:51] run BREAKDOWN-ABORT: 4/5 frames\n")
+        ud = _health_run(os.path.join(d, 'unknown'), rows=rows, runlog=bare)
+        it = _item(se.run_health(ud), 'watchdog_trip')
+        assert 'on record nowhere' in it['text'], it['text']
+        # the note alone is enough (a tag someone edited away) ...
+        note_only = [r for r in rows[:4]] + [
+            ('post-ramp', 4.4, '4.4', '-16.0',
+             {'notes': 'WATCHDOG: breakdown confirmed (dev >100uA for 3s)'})]
+        nd = _health_run(os.path.join(d, 'note'), rows=note_only)
+        assert 'watchdog_trip' in _codes(se.run_health(nd))
+        # ... and so is run.log, when the row itself was never written:
+        # then there is no row to mark, and the sentence says that
+        ld = _health_run(os.path.join(d, 'log'), runlog=log)
+        it = _item(se.run_health(ld), 'watchdog_trip')
+        assert 'trip row itself is not in data.csv' in it['text'], it
+        assert 'watchdog_trip' not in _codes(
+            se.run_health(_health_run(os.path.join(d, 'none'))))
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_counts_frames_missing_on_disk_and_never_taken():
+    d = tempfile.mkdtemp(prefix='edge_health_frames_')
+    try:
+        gone = _health_run(os.path.join(d, 'gone'), skip_files=(
+            'SLDEA_s02_02.00kV_pre-ramp.png',
+            'SLDEA_s03_04.00kV_post-ramp.png'))
+        it = _item(se.run_health(gone), 'frames_missing')
+        assert it['level'] == 'warn'
+        assert '2 of 5 pictures' in it['text'], it['text']
+        assert 'SLDEA_s02_02.00kV_pre-ramp.png' in it['text']
+        # a row that names no frame: the camera gave none at capture
+        rows = [('baseline', 0.0, '0.0', '-16.0'),
+                ('post-ramp', 2.0, '2.0', '-16.0', {'frame_file': ''}),
+                ('pre-ramp', 2.0, '2.0', '-16.0'),
+                ('post-ramp', 4.0, '4.0', '-16.0'),
+                ('pre-ramp', 4.0, '4.0', '-16.0')]
+        blank = _health_run(os.path.join(d, 'blank'), rows=rows)
+        items = se.run_health(blank)
+        it = _item(items, 'frames_not_taken')
+        assert '1 of 5 snapshots' in it['text'] and '2.00 kV' in it['text']
+        assert 'frames_missing' not in _codes(items)
+
+        # A picture that IS in the folder, under its _BREAKDOWN twin name
+        # (a rename that outlived a Save which did not finish), is not
+        # missing: "copy it back from the backup" was the wrong advice
+        # (review 2026-10-02). It is counted apart and Save repairs it.
+        plain = 'SLDEA_s04_04.00kV_pre-ramp.png'
+        branded = 'SLDEA_s04_04.00kV_pre-ramp_BREAKDOWN.png'
+        assert se._frame_twin(plain) == branded
+        assert se._frame_twin(branded) == plain
+        twin = _health_run(os.path.join(d, 'twin'))
+        fdir = os.path.join(twin, 'frames')
+        os.rename(os.path.join(fdir, plain), os.path.join(fdir, branded))
+        items = se.run_health(twin)
+        assert 'frames_missing' not in _codes(items), items
+        it = _item(items, 'frames_renamed')
+        assert it['level'] == 'warn'
+        assert '1 of 5 pictures' in it['text'], it['text']
+        assert plain in it['text'] and branded in it['text'], it['text']
+        assert 'Nothing is lost' in it['text'], it['text']
+        assert 'next Save' in it['text'], it['text']
+        assert 'backup' not in it['text'], it['text']
+        # ...and what the sentence promises is what Save's rename plan
+        # does: with no breakdown flag the file gets its plain name back
+        run = se.load_run(twin)
+        se.apply_rename_plan(se.plan_breakdown_marks(run, {}))
+        assert os.path.exists(os.path.join(fdir, plain))
+        assert se.run_health(twin) == [], se.run_health(twin)
+        # the other direction: data.csv holds the branded name, the disk
+        # holds the plain file
+        rows = [('baseline', 0.0, '0.0', '-16.0'),
+                ('post-ramp', 2.0, '2.01', '-16.0'),
+                ('pre-ramp', 2.0, '2.02', '-15.8'),
+                ('post-ramp', 4.0, '4.01', '-16.2'),
+                ('pre-ramp', 4.0, '4.03', '-16.0', {'frame_file': branded})]
+        rev = _health_run(os.path.join(d, 'rev'), rows=rows)
+        fdir = os.path.join(rev, 'frames')
+        os.rename(os.path.join(fdir, branded), os.path.join(fdir, plain))
+        items = se.run_health(rev)
+        assert 'frames_missing' not in _codes(items), items
+        text = _item(items, 'frames_renamed')['text']
+        assert f"the first is {branded}, found as {plain}" in text, text
+        # one picture really gone and one renamed are two findings
+        both = _health_run(os.path.join(d, 'both'), skip_files=(
+            'SLDEA_s02_02.00kV_pre-ramp.png',))
+        fdir = os.path.join(both, 'frames')
+        os.rename(os.path.join(fdir, plain), os.path.join(fdir, branded))
+        items = se.run_health(both)
+        assert '1 of 5 pictures' in _item(items, 'frames_missing')['text']
+        assert 'SLDEA_s02_02.00kV_pre-ramp.png' in \
+            _item(items, 'frames_missing')['text']
+        assert '1 of 5 pictures' in _item(items, 'frames_renamed')['text']
+        # the BASELINE under its twin name keeps its STOP: Edge Review
+        # opens it by the name data.csv gives
+        base = _health_run(os.path.join(d, 'base_twin'))
+        fdir = os.path.join(base, 'frames')
+        os.rename(os.path.join(fdir, 'SLDEA_s00_00.00kV_baseline.png'),
+                  os.path.join(fdir,
+                               'SLDEA_s00_00.00kV_baseline_BREAKDOWN.png'))
+        items = se.run_health(base)
+        assert _item(items, 'baseline_missing')['level'] == 'stop'
+        assert 'frames_renamed' not in _codes(items), items
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_counts_off_screen_telemetry_by_header_name():
+    """The status columns are found in the HEADER, not by position, and a
+    'skipped' V_Out row is not a voltage sample."""
+    head = ','.join(sldea_profile.TELEMETRY_COLUMNS) + '\n'
+    assert head.startswith('t_s,timestamp,nominal_kV,measured_kV,'), head
+    body = ("0.0,x,0.0,-0.0,-0.2,ok,ok,\n"
+            "0.5,x,0.5,,-0.3,skipped,ok,\n"
+            "1.0,x,2.15,,-0.1,offscreen,ok,\n"
+            "1.5,x,2.2,,,skipped,offscreen,\n"
+            "2.0,x,2.3,,,offscreen,offscreen,\n")
+    d = tempfile.mkdtemp(prefix='edge_health_tel_')
+    try:
+        run = _health_run(os.path.join(d, 'a'), telemetry=head + body)
+        items = se.run_health(run)
+        it = _item(items, 'telemetry_i_offscreen')
+        assert it['level'] == 'warn'
+        assert '2 of 5 samples' in it['text'], it['text']
+        assert 'first at 2 s into the run (2.20 kV commanded)' in it['text']
+        assert 'reads this log for notes only' in it['text'], it['text']
+        assert 'never marks a breakdown or renames a frame' in it['text']
+        it = _item(items, 'telemetry_v_offscreen')
+        assert it['level'] == 'info'
+        assert '2 of 3 voltage samples' in it['text'], it['text']
+        assert '2.15 kV commanded' in it['text']
+        # the same file with its columns in another order
+        cols = ['event', 'i_status', 'v_status', 'measured_uA',
+                'measured_kV', 'nominal_kV', 'timestamp', 't_s']
+        lines = [dict(zip(sldea_profile.TELEMETRY_COLUMNS, ln.split(',')))
+                 for ln in body.splitlines()]
+        moved = ','.join(cols) + '\n' + ''.join(
+            ','.join(ln[c] for c in cols) + '\n' for ln in lines)
+        run2 = _health_run(os.path.join(d, 'b'), telemetry=moved)
+        assert [(x['code'], x['text']) for x in se.run_health(run2)] == \
+            [(x['code'], x['text']) for x in items]
+        # nothing off-screen, a header without status columns, or no
+        # sidecar at all: nothing is said
+        quiet = _health_run(os.path.join(d, 'c'), telemetry=head
+                            + "0.0,x,0.0,-0.0,-0.2,ok,ok,\n")
+        old = _health_run(os.path.join(d, 'e'),
+                          telemetry="t_s,measured_uA\n0.0,-0.2\n")
+        for rd in (quiet, old, _health_run(os.path.join(d, 'f'))):
+            assert not [c for c in _codes(se.run_health(rd))
+                        if c.startswith('telemetry')], rd
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_skips_the_electrical_checks_on_a_dry_run():
+    rows = [('baseline', 0.0, '', ''), ('post-ramp', 2.0, '', ''),
+            ('pre-ramp', 2.0, '', ''), ('post-ramp', 4.0, '', ''),
+            ('pre-ramp', 4.0, '', '')]
+    d = tempfile.mkdtemp(prefix='edge_health_dry_')
+    try:
+        dry = _health_run(d, rows=rows, setup=_HEALTH_SETUP.replace(
+            'MODE: LIVE (HV energized)',
+            'MODE: *** DRY RUN (HV output OFF) ***'))
+        items = se.run_health(dry)
+        assert _codes(items) == ['dry_run'], items
+        assert items[0]['level'] == 'info'
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_puts_stop_first_and_every_item_is_a_sentence():
+    rows = [('baseline', 0.0, '-0.0', ''),
+            ('post-ramp', 2.0, '-2.03', '-16.0'),
+            ('pre-ramp', 2.0, '', '-16.0')]
+    d = tempfile.mkdtemp(prefix='edge_health_all_')
+    try:
+        run = _health_run(d, rows=rows, baseline='flat', runlog=(
+            "[10:00:00] run dir: /x\n[10:00:30] run aborted: 3/5 frames\n"))
+        items = se.run_health(run)
+        levels = [it['level'] for it in items]
+        assert levels[0] == 'stop' and 'warn' in levels and 'info' in levels
+        order = {lv: k for k, lv in enumerate(se.HEALTH_LEVELS)}
+        assert levels == sorted(levels, key=order.get), levels
+        assert len(set(_codes(items))) == len(items), "a code said twice"
+        for it in items:
+            assert set(it) == {'level', 'code', 'text'}, it
+            assert it['level'] in se.HEALTH_LEVELS
+            text = it['text']
+            assert text.endswith('.') and text[0].isupper(), text
+            assert '  ' not in text and '\n' not in text, text
+    finally:
+        shutil.rmtree(d)
+
+
+def test_runner_notes_survive_two_saves():
+    """S6 / U25: apply_results rebuilt the notes cell of every reviewed
+    row, so the first Save erased what the runner wrote at capture. The
+    WATCHDOG note and the V_Out note now ride through any number of
+    Saves, on accepted and rejected rows alike."""
+    wd = 'WATCHDOG: breakdown confirmed (dev >100µA for 3s)'
+    voff = 'V_Out off-screen (clipped)'
+    assert se.runner_note_tokens(f'{wd}; {voff}') == [wd, voff]
+    # analysis notes and brands are NOT capture notes
+    assert se.runner_note_tokens(
+        'edge:disc-fit conf 0.90; post-breakdown; breakdown? I dev 90uA '
+        '>= 20uA (baseline -16.0uA); area dip 12% vs previous step; '
+        'rejected (no reliable edge); typed by hand') == []
+    d = tempfile.mkdtemp(prefix='edge_notes_')
+    try:
+        _fake_run(d, [
+            {'tag': 'baseline', 'nominal_kV': '0', 'frame_file': 'a.png'},
+            {'tag': 'post-ramp', 'nominal_kV': '4.25',
+             'frame_file': 'b.png', 'notes': voff},
+            {'tag': 'breakdown', 'step': 99, 'nominal_kV': '4.4',
+             'frame_file': 'c.png', 'notes': ''}])
+        # the trip row's note carries a micro sign, and the bench
+        # writes data.csv as UTF-8: put it there the same way
+        run = se.load_run(d)
+        run['rows'][2]['notes'] = f'{wd}; {voff}'
+        se.write_back(d, run)
+        os.remove(os.path.join(d, 'data.csv.bak'))
+        assert se.load_run(d)['rows'][2]['notes'] == f'{wd}; {voff}'
+        cand = {'area_px': 100.0, 'diam_px': 11.3, 'conf': 0.9,
+                'method': 'disc-fit', 'wrinkle': 1.0}
+        for save in (1, 2):
+            run = se.load_run(d)                  # what a new session reads
+            se.apply_results(run['rows'], {0: cand, 1: None, 2: cand},
+                             None, {}, {2: 'area dip 12% vs previous step'})
+            se.plan_breakdown_marks(run, {})      # the un-brand pass too
+            se.write_back(d, run)
+            rows = se.load_run(d)['rows']
+            assert rows[0]['notes'] == 'edge:disc-fit conf 0.90', rows[0]
+            assert rows[1]['notes'] == \
+                f'{voff}; rejected (no reliable edge)', (save, rows[1])
+            assert rows[2]['notes'] == (
+                f'{wd}; {voff}; edge:disc-fit conf 0.90; '
+                f'area dip 12% vs previous step'), (save, rows[2])
+        # the second Save's .bak is the first Save's output, and the
+        # capture notes are in it: no Save leaves a copy without them
+        with open(os.path.join(d, 'data.csv.bak'), newline='',
+                  encoding='utf-8-sig') as f:
+            bak = list(csv.DictReader(f))
+        assert bak[2]['notes'].startswith(f'{wd}; {voff}'), bak[2]
+        # sldea_plot still finds the measurement behind the capture notes
+        import sldea_plot
+        m = sldea_plot._NOTE_RE.search(rows[2]['notes'])
+        assert m and m.group(1) == 'disc-fit', rows[2]['notes']
+    finally:
+        shutil.rmtree(d)
+
+
+def test_stale_analysis_notes_do_not_pile_up():
+    """The other half of the whitelist: everything that is NOT a capture
+    note is still regenerated at each Save, never accumulated."""
+    voff = 'V_Out off-screen (clipped)'
+    cand = {'area_px': 100.0, 'diam_px': 11.3, 'conf': 0.9,
+            'method': 'disc-fit', 'wrinkle': 1.0}
+    rows = [{'notes': f'{voff}; edge:diff-hi conf 0.71 (user); '
+                      f'pair mismatch 14% at 3 kV; wrinkle-mode (idx 2.1)'}]
+    # a reviewed row: the old measurement and the old annotations go, the
+    # capture note stays, this Save's annotations are written
+    se.apply_results(rows, {0: cand}, None, {},
+                     {0: 'area dip 12% vs previous step'})
+    assert rows[0]['notes'] == (f'{voff}; edge:disc-fit conf 0.90; '
+                                f'area dip 12% vs previous step'), rows[0]
+    se.apply_results(rows, {0: cand}, None, {},
+                     {0: 'area dip 15% vs previous step'})
+    assert rows[0]['notes'] == (f'{voff}; edge:disc-fit conf 0.90; '
+                                f'area dip 15% vs previous step'), rows[0]
+    se.apply_results(rows, {0: cand}, None, {}, None)
+    assert rows[0]['notes'] == f'{voff}; edge:disc-fit conf 0.90', rows[0]
+    # a Save that finds the same thing twice writes it once
+    for _ in range(3):
+        se.apply_results(rows, {0: cand}, None,
+                         {0: 'breakdown? I dev 90uA >= 20uA '
+                             '(baseline -16.0uA)'},
+                         {0: 'pair mismatch 14% at 3 kV; '
+                             'wrinkle-mode (idx 2.1)'})
+    assert rows[0]['notes'].count('breakdown?') == 1, rows[0]
+    assert rows[0]['notes'].count('pair mismatch') == 1, rows[0]
+    assert rows[0]['notes'].count(voff) == 1, rows[0]
+    assert rows[0]['notes'].count('edge:') == 1, rows[0]
+
+    # an UNREVIEWED row keeps its cell (it describes the kept px), and a
+    # flag or annotation re-computed with a new number replaces its older
+    # self instead of sitting beside it
+    kept = [{'active_area_px': '100',
+             'notes': f'{voff}; edge:disc-fit conf 0.91; '
+                      f'transient discharge? I dev 137uA; typed by hand'}]
+    se.apply_results(kept, {}, None, {},
+                     {0: 'transient discharge? I dev 140uA'})
+    assert kept[0]['notes'] == (f'{voff}; edge:disc-fit conf 0.91; '
+                                f'transient discharge? I dev 140uA; '
+                                f'typed by hand'), kept[0]
+    se.apply_results(kept, {}, None,
+                     {0: 'breakdown? I dev 90uA >= 20uA (baseline -16.0uA)'})
+    se.apply_results(kept, {}, None,
+                     {0: 'breakdown? I dev 90uA >= 30uA (baseline -16.0uA)'})
+    assert kept[0]['notes'].count('breakdown?') == 1, kept[0]
+    assert '>= 30uA' in kept[0]['notes'], kept[0]
+    assert kept[0]['notes'].count('transient discharge?') == 1, kept[0]
+    # only the cell's OLD token is replaced, and only once: two notes of
+    # one kind found by the same Save are two findings, and both are kept
+    two = [{'active_area_px': '100',
+            'notes': 'edge:disc-fit conf 0.91; '
+                     'transient discharge? I dev 120uA'}]
+    se.apply_results(two, {}, None, {},
+                     {0: 'transient discharge? I dev 137uA; '
+                         'transient discharge? I dev 140uA'})
+    assert two[0]['notes'] == ('edge:disc-fit conf 0.91; '
+                               'transient discharge? I dev 137uA; '
+                               'transient discharge? I dev 140uA'), two[0]
+    # nothing added: the cell is byte-identical, odd spacing and all (the
+    # scale-only re-anchor commits through this branch)
+    odd = [{'active_area_px': '100', 'notes': 'edge:disc-fit conf 0.91;x '}]
+    se.apply_results(odd, {}, None, {}, None)
+    assert odd[0]['notes'] == 'edge:disc-fit conf 0.91;x ', odd[0]
+
+
+# ---------------------------------------------------------------------------
+# decision 17 (2026-10-03): the watchdog's trip row and the monitor log
+# ---------------------------------------------------------------------------
+
+_TRIP_NOTE = 'WATCHDOG: breakdown confirmed (dev >100uA for 3s)'
+
+
+def _trip_rows(cell='', healthy=4):
+    """`healthy` quiet rows at -16 uA and then the trip row the runner
+    writes (gui.py, the trip branch of _sldea_worker): tag 'breakdown',
+    step 99, the WATCHDOG note. `cell` is its measured_uA: the LATER
+    read taken with the frame, blank when that read was off-screen."""
+    quiet = [('baseline', 0.0, '0.0', '-16.0'),
+             ('post-ramp', 2.0, '2.0', '-16.0'),
+             ('pre-ramp', 2.0, '2.0', '-16.0'),
+             ('post-ramp', 4.0, '4.0', '-16.0')][:healthy]
+    return quiet + [('breakdown', 4.4, '', cell, {
+        'step': 99, 'frame_file': 'SLDEA_s99_04.40kV_breakdown.png',
+        'notes': _TRIP_NOTE})]
+
+
+def _tel(lines):
+    """A telemetry.csv text from (t_s, nominal_kV, measured_uA, i_status,
+    event) tuples under the runner's own header (TELEMETRY_COLUMNS);
+    measured_kV is blank and v_status 'skipped' throughout."""
+    head = ','.join(sldea_profile.TELEMETRY_COLUMNS) + '\n'
+    return head + ''.join(f"{t},x,{kv},,{ua},skipped,{st},{ev}\n"
+                          for t, kv, ua, st, ev in lines)
+
+
+# the telemetry event row the runner writes off the very reading that
+# tripped the watchdog: a number with i_status 'ok', or a blank current
+# with i_status 'offscreen' for the sentinel
+_TEL_TRIP_NUM = _tel([(0.0, 0.0, -16.0, 'ok', 'snap s00 baseline x'),
+                      (50.0, 4.4, -240.0, 'ok', 'BREAKDOWN CONFIRMED')])
+_TEL_TRIP_OFF = _tel([(0.0, 0.0, -16.0, 'ok', 'snap s00 baseline x'),
+                      (50.0, 4.4, '', 'offscreen', 'BREAKDOWN CONFIRMED')])
+_LOG_TRIP_NUM = ("[10:00:00] run dir: /x\n"
+                 "[10:00:50] BREAKDOWN CONFIRMED - I=-240 uA sustained >3s\n"
+                 "[10:00:51] run BREAKDOWN-ABORT: 4/5 frames\n")
+_LOG_TRIP_OFF = ("[10:00:00] run dir: /x\n"
+                 "[10:00:50] BREAKDOWN CONFIRMED - I=OFF-SCREEN (clipping); "
+                 "last readable -16 uA sustained >3s\n"
+                 "[10:00:51] run BREAKDOWN-ABORT: 4/5 frames\n")
+_LOG_TRIP_BARE = ("[10:00:00] run dir: /x\n"
+                  "[10:00:51] run BREAKDOWN-ABORT: 4/5 frames\n")
+
+
+def _flags_in(d, rows, telemetry, runlog, areas=None, rundir=True):
+    """breakdown_flags on a synthetic run folder, with the folder handed
+    over (the GUI's and the plot's call) or withheld."""
+    rd = _health_run(d, rows=rows, telemetry=telemetry, runlog=runlog)
+    run = se.load_run(rd)
+    s = se.load_settings(rd)
+    got = se.breakdown_flags(run['rows'], areas or {}, s,
+                             rundir=rd if rundir else None)
+    return rd, run, got
+
+
+def test_watchdog_trip_confirms_unless_its_reading_was_the_sentinel():
+    """Decision 17 (2026-10-03). The trip row is a confirmed event with
+    the reason 'watchdog trip', read off the reading that tripped it:
+    telemetry.csv first, run.log second. The one exclusion is the
+    off-screen sentinel, which the scope also returns from a mis-ranged
+    channel: then the trip confirms nothing by itself, the row says so
+    in a note, and its own current still goes through the current rule
+    like any other row's. A trip with nothing on file confirms on the
+    watchdog's own note, and the reason says so (review 2026-10-04: the
+    decision names one exclusion, so the first pass's second one went).
+    The row's own cell is a later read and never decides. The rows
+    around it are flagged exactly as before."""
+    d = tempfile.mkdtemp(prefix='edge_trip_')
+    try:
+        # (a) telemetry holds the number, the later cell is blank (the
+        # Assctuator shape: current still off-screen at the frame)
+        rd, run, (flags, advis) = _flags_in(
+            os.path.join(d, 'a'), _trip_rows(''), _TEL_TRIP_NUM,
+            _LOG_TRIP_OFF)          # run.log disagreeing is never read
+        assert flags == {4: 'breakdown? watchdog trip (I -240uA, '
+                            'telemetry.csv)'}, flags
+        assert advis == {}, advis
+        plan = se.plan_breakdown_marks(run, flags)
+        assert [os.path.basename(dst) for _, dst in plan] == [
+            'SLDEA_s99_04.40kV_breakdown_BREAKDOWN.png'], plan
+        assert run['rows'][4]['notes'].startswith(_TRIP_NOTE), run['rows'][4]
+        # the strip says the same thing, through the same verdict
+        it = _item(se.run_health(rd), 'watchdog_trip')
+        assert 'marks that row as a confirmed breakdown' in it['text']
+        assert 'on record as -240 uA (telemetry.csv)' in it['text'], it
+        # (b) the sentinel, and a recovered later read: nothing confirms,
+        # the row's note says what was excluded and where it was read
+        rd, run, (flags, advis) = _flags_in(
+            os.path.join(d, 'b'), _trip_rows('-16.0'), _TEL_TRIP_OFF,
+            _LOG_TRIP_NUM)
+        assert flags == {}, flags
+        assert advis == {4: 'watchdog trip not confirmed: the reading that '
+                            'tripped it was the off-screen sentinel '
+                            '(telemetry.csv)'}, advis
+        assert se.plan_breakdown_marks(run, flags) == []
+        it = _item(se.run_health(rd), 'watchdog_trip')
+        assert 'does NOT mark a breakdown from this stop alone' in it['text']
+        assert 'off-screen sentinel, telemetry.csv' in it['text'], it
+        # (c) the sentinel, but the later cell holds a large current: the
+        # trip still confirms nothing, the CURRENT rule does (terminal
+        # event), with its own reason, and the trip note gives way
+        rd, run, (flags, advis) = _flags_in(
+            os.path.join(d, 'c'), _trip_rows('-240.0'), _TEL_TRIP_OFF,
+            _LOG_TRIP_OFF)
+        assert list(flags) == [4] and advis == {}, (flags, advis)
+        assert flags[4].startswith('breakdown? I dev 224uA'), flags
+        # (d) telemetry gave up before the trip: run.log is read
+        rd, run, (flags, advis) = _flags_in(
+            os.path.join(d, 'd'), _trip_rows(''),
+            _tel([(0.0, 0.0, -16.0, 'ok', 'snap s00 baseline x')]),
+            _LOG_TRIP_NUM)
+        assert flags == {4: 'breakdown? watchdog trip (I -240uA, run.log)'}
+        # (e) neither sidecar records the reading: the trip confirms on
+        # the watchdog's note, and the reason says that the number it
+        # prints is the row's later read, not the trip current
+        rd, run, (flags, advis) = _flags_in(
+            os.path.join(d, 'e'), _trip_rows('-16.0'), None,
+            _LOG_TRIP_BARE)
+        assert flags == {4: 'breakdown? watchdog trip (frame read -16uA, '
+                            'trip reading not on file)'}, flags
+        assert advis == {}, advis
+        # ... which is also what a caller without the folder gets
+        assert se.breakdown_flags(run['rows'], {}, se.DEFAULT_SETTINGS) \
+            == (flags, {})
+        it = _item(se.run_health(rd), 'watchdog_trip')
+        assert 'confirmed breakdown on the watchdog\'s own note' in it['text']
+        assert 'later read, -16 uA, taken with the picture' in it['text']
+        assert 'could not be checked against' in it['text'], it
+        # (f) no record anywhere and a blank cell: still confirmed (the
+        # decision names ONE exclusion), the reason says nothing is on
+        # file, the frame is renamed, and the strip says the same
+        rd, run, (flags, advis) = _flags_in(
+            os.path.join(d, 'f'), _trip_rows(''), None, _LOG_TRIP_BARE)
+        assert flags == {4: 'breakdown? watchdog trip (reading not on '
+                            'file)'}, flags
+        assert advis == {}, advis
+        assert [os.path.basename(dst) for _, dst
+                in se.plan_breakdown_marks(run, flags)] == [
+            'SLDEA_s99_04.40kV_breakdown_BREAKDOWN.png']
+        it = _item(se.run_health(rd), 'watchdog_trip')
+        assert 'confirmed breakdown on the watchdog\'s own note' in it['text']
+        assert 'on record nowhere' in it['text'], it
+        assert 'later read' not in it['text'], it
+        assert se.trip_verdict(run['rows'][4], None) == ('confirm', None, '')
+        # (g) decision 18: under 5 readings the legacy absolute rule is
+        # untouched beside the trip rule (one row at -60 uA, one trip)
+        rows = _trip_rows('', healthy=3)
+        rows[1] = ('post-ramp', 2.0, '2.0', '-60.0')
+        rd, run, (flags, advis) = _flags_in(
+            os.path.join(d, 'g'), rows, _TEL_TRIP_NUM, _LOG_TRIP_NUM)
+        assert flags == {1: 'breakdown? I=-60uA > 50uA',
+                         3: 'breakdown? watchdog trip (I -240uA, '
+                            'telemetry.csv)'}, flags
+        # (h) the trip row's own later read is a terminal event for the
+        # current rule too: the trip reason REPLACES the current rule's
+        # on that row (one token, the runner's stronger statement)
+        rd, run, (flags, advis) = _flags_in(
+            os.path.join(d, 'h'), _trip_rows('-240.0'), _TEL_TRIP_NUM,
+            _LOG_TRIP_NUM)
+        assert flags == {4: 'breakdown? watchdog trip (I -240uA, '
+                            'telemetry.csv)'}, flags
+        assert se.breakdown_flags(run['rows'], {}, se.DEFAULT_SETTINGS) == (
+            {4: 'breakdown? watchdog trip (frame read -240uA, trip '
+                'reading not on file)'}, {})
+        # the review's own 'breakdown?' token never makes a trip row
+        assert se.is_trip_row({'tag': 'breakdown', 'notes': ''})
+        assert se.is_trip_row({'tag': 'pre-ramp', 'notes': _TRIP_NOTE})
+        assert not se.is_trip_row({'tag': 'pre-ramp',
+                                   'notes': 'breakdown? I dev 30uA'})
+    finally:
+        shutil.rmtree(d)
+
+
+def test_telemetry_streaks_find_runs_of_samples_away_from_rest():
+    """The monitor-log reader (decision 17). rest = the median current
+    of the 0 kV samples; a sample is away when it is off-screen or at
+    least dev_lim from rest; a streak is at least TELEMETRY_STREAK_MIN
+    consecutive away samples; a row with neither a current nor an
+    off-screen status is skipped, as the watchdog skips it, and neither
+    breaks nor lengthens a streak."""
+    d = tempfile.mkdtemp(prefix='edge_tel_streak_')
+    try:
+        text = _tel([
+            (0.0, 0.0, -16.0, 'ok', 'snap s00 warmup F0'),
+            (0.5, 0.0, -15.0, 'ok', ''),
+            (1.0, 0.0, -17.0, 'ok', 'snap s00 baseline F1'),
+            (1.5, 0.5, -20.0, 'ok', ''),          # 4 uA off: quiet
+            (2.0, 1.0, -60.0, 'ok', ''),          # one sample: not a streak
+            (2.5, 1.0, -18.0, 'ok', ''),
+            (3.0, 1.5, -100.0, 'ok', ''),         # away
+            (3.5, 1.5, '', 'invalid', ''),        # no reading: skipped
+            (4.0, 1.5, -90.0, 'ok', ''),          # away
+            (4.3, 1.5, -36.0, 'ok', ''),          # exactly dev_lim from
+                                                  # rest: away ('at or
+                                                  # above'), a 3-sample
+                                                  # streak
+            (4.5, 2.0, -16.0, 'ok', 'snap s02 post-ramp F2'),
+            (5.0, 2.5, '', 'offscreen', ''),      # the sentinel, twice,
+            (5.5, 2.5, '', 'offscreen', '')])     # running off the end
+        rd = _health_run(os.path.join(d, 'a'), telemetry=text)
+        table = se._telemetry_table(rd)
+        assert table is not None and 'i_status' in table[0]
+        got = se.telemetry_streaks(table, 20.0)
+        assert got == [
+            {'t0': 3.0, 't1': 4.3, 'kv0': 1.5, 'kv1': 1.5, 'n': 3,
+             'n_off': 0, 'worst': 84.0, 'rest': -16.0, 'open': False},
+            {'t0': 5.0, 't1': 5.5, 'kv0': 2.5, 'kv1': 2.5, 'n': 2,
+             'n_off': 2, 'worst': None, 'rest': -16.0, 'open': True}], got
+        assert se.telemetry_note(got[0]) == (
+            'monitor log: current up to 84 uA from rest for 1.3 s from '
+            '3.0 s into the run (1.50 kV, 3 samples)')
+        assert se.telemetry_note(got[1]) == (
+            'monitor log: current off-screen for 0.5 s from 5.0 s into '
+            'the run (2.50 kV, 2 samples, to the end of the log)')
+        for note in map(se.telemetry_note, got):
+            assert ';' not in note, note            # one token each
+        # the card's short form of each: time, kV, what, counts
+        assert se.short_note(se.telemetry_note(got[0])) == (
+            'monitor log: from 3.0 s for 1.3 s, 1.50 kV, up to 84 uA, '
+            '3 samples')
+        assert se.short_note(se.telemetry_note(got[1])) == (
+            'monitor log: 5.0 s to the end (0.5 s), 2.50 kV, off-screen, '
+            '2 samples')
+        # a hair under the bar is quiet: the 3-sample streak becomes 2
+        assert [s['n'] for s in se.telemetry_streaks(table, 20.01)] \
+            == [2, 2]
+        # a higher bar drops the numeric streak, keeps the sentinel one
+        assert [s['n_off'] for s in se.telemetry_streaks(table, 100.0)] \
+            == [2]
+        # a lower bar on the length admits the single sample
+        assert [s['t0'] for s in se.telemetry_streaks(table, 20.0, 1)] \
+            == [2.0, 3.0, 5.0]
+        # a mixed streak says how many of its samples were off-screen,
+        # and a kV range is written as one
+        mixed = _tel([(0.0, 0.0, -16.0, 'ok', ''),
+                      (1.0, 1.0, -80.0, 'ok', ''),
+                      (1.5, 1.2, '', 'offscreen', ''),
+                      (2.0, 1.4, -70.0, 'ok', ''),
+                      (2.5, 1.4, -16.0, 'ok', '')])
+        rd = _health_run(os.path.join(d, 'b'), telemetry=mixed)
+        (s,) = se.telemetry_streaks(se._telemetry_table(rd), 20.0)
+        assert (s['n'], s['n_off'], s['worst'], s['open']) == (3, 1, 64.0,
+                                                               False)
+        assert se.telemetry_note(s) == (
+            'monitor log: current up to 64 uA from rest for 1.0 s from '
+            '1.0 s into the run (1.00 to 1.40 kV, 3 samples, 1 off-screen)')
+        assert se.short_note(se.telemetry_note(s)) == (
+            'monitor log: from 1.0 s for 1.0 s, 1.00 to 1.40 kV, up to '
+            '64 uA, 3 samples, 1 off-screen')
+        # no 0 kV sample on file: no rest, so only the sentinel counts
+        norest = _tel([(1.0, 1.0, -300.0, 'ok', ''),
+                       (1.5, 1.0, -300.0, 'ok', ''),
+                       (2.0, 1.0, '', 'offscreen', ''),
+                       (2.5, 1.0, '', 'offscreen', '')])
+        rd = _health_run(os.path.join(d, 'c'), telemetry=norest)
+        (s,) = se.telemetry_streaks(se._telemetry_table(rd), 20.0)
+        assert (s['t0'], s['n_off'], s['rest']) == (2.0, 2, None), s
+        # neither a current nor a status column: nothing to read
+        rd = _health_run(os.path.join(d, 'd'),
+                         telemetry="t_s,nominal_kV\n0.0,0.0\n1.0,2.0\n")
+        assert se.telemetry_streaks(se._telemetry_table(rd), 20.0) == []
+    finally:
+        shutil.rmtree(d)
+
+
+def test_telemetry_advisories_ride_the_next_snapshot_row_and_never_confirm():
+    """A streak becomes a note on the first data.csv row whose picture
+    was taken at or after it began (the telemetry 'snap' event naming
+    the frame gives the row's time), or on the last timed row when no
+    row follows. It confirms nothing, renames nothing, is silent when
+    the folder is withheld, and a second Save does not write it twice."""
+    d = tempfile.mkdtemp(prefix='edge_tel_adv_')
+    try:
+        fn = [f'SLDEA_s{k:02d}_{kv:05.2f}kV_{tag}.png' for k, (tag, kv) in
+              enumerate([('baseline', 0.0), ('post-ramp', 2.0),
+                         ('pre-ramp', 2.0), ('post-ramp', 4.0),
+                         ('pre-ramp', 4.0)])]
+        text = _tel([
+            (0.0, 0.0, -16.0, 'ok', f'snap s00 baseline {fn[0]}'),
+            (0.5, 0.0, -16.0, 'ok', ''),
+            (10.0, 2.0, -16.0, 'ok', f'snap s01 post-ramp {fn[1]}'),
+            # the picture of row 2 is taken ON the streak's first sample:
+            # 'at or after' puts the note on row 2, not on row 3
+            (12.0, 2.0, -90.0, 'ok', f'snap s02 pre-ramp {fn[2]}'),
+            (12.5, 2.0, -95.0, 'ok', ''),
+            (13.0, 2.0, -16.0, 'ok', ''),
+            (30.0, 4.0, -16.0, 'ok', f'snap s03 post-ramp {fn[3]}'),
+            (40.0, 4.0, -16.0, 'ok', f'snap s04 pre-ramp {fn[4]}'),
+            (41.0, 4.0, '', 'offscreen', ''),          # after the last row
+            (41.5, 4.0, '', 'offscreen', '')])
+        rd = _health_run(os.path.join(d, 'a'), telemetry=text)
+        run = se.load_run(rd)
+        s = se.load_settings(rd)
+        flags, advis = se.breakdown_flags(run['rows'], {}, s, rundir=rd)
+        assert flags == {}, flags
+        assert sorted(advis) == [2, 4], advis
+        assert advis[2] == ('monitor log: current up to 79 uA from rest '
+                            'for 0.5 s from 12.0 s into the run (2.00 kV, '
+                            '2 samples)'), advis
+        assert advis[4].startswith('monitor log: current off-screen for '
+                                   '0.5 s from 41.0 s'), advis
+        assert se.plan_breakdown_marks(run, flags) == []
+        # the folder withheld: the current rule alone, and silence
+        assert se.breakdown_flags(run['rows'], {}, s) == ({}, {})
+        # a frame on disk under its _BREAKDOWN twin name is still found
+        # by the plain name the telemetry wrote
+        run['rows'][2]['frame_file'] = fn[2].replace('.png',
+                                                     '_BREAKDOWN.png')
+        assert sorted(se.breakdown_flags(run['rows'], {}, s,
+                                         rundir=rd)[1]) == [2, 4]
+        run['rows'][2]['frame_file'] = fn[2]
+        # a snapshot the telemetry never named falls back to t_planned_s
+        run['rows'][2]['frame_file'] = ''
+        run['rows'][2]['t_planned_s'] = '20.0'
+        assert sorted(se.breakdown_flags(run['rows'], {}, s,
+                                         rundir=rd)[1]) == [2, 4]
+        # two Saves: the note is written once, as an annotation, and the
+        # runner's own cell text stays in front of it
+        run['rows'][2]['notes'] = 'V_Out off-screen (clipped)'
+        results = {2: {'area_px': 1000.0, 'diam_px': 35.7, 'method':
+                       'disc-fit', 'conf': 0.9}}
+        for _ in range(2):
+            se.apply_results(run['rows'], results, None, flags, advis)
+        assert run['rows'][2]['notes'] == (
+            'V_Out off-screen (clipped); edge:disc-fit conf 0.90; '
+            + advis[2]), run['rows'][2]['notes']
+        assert run['rows'][4]['notes'] == advis[4]
+        # no time column: no place to put a note, so none
+        rd = _health_run(os.path.join(d, 'b'), telemetry=(
+            "nominal_kV,measured_uA,i_status\n0.0,-16.0,ok\n"
+            "2.0,-90.0,ok\n2.0,-95.0,ok\n"))
+        run = se.load_run(rd)
+        assert se.breakdown_flags(run['rows'], {}, s, rundir=rd) == ({}, {})
     finally:
         shutil.rmtree(d)
 

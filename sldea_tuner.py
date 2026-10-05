@@ -335,14 +335,15 @@ def run_label(rundir):
     Edge Review flags '✓ processed' -- has this run got detected areas.
     The tuner's question is the other one, because its Save OVERWRITES a
     run's tuned block: has this run been tuned already. Found through
-    se.EDGE_HDR, the constant load_settings/save_settings key off, rather
-    than a second copy of the parsing."""
-    try:
-        with open(os.path.join(rundir, 'setup.txt'), encoding='utf-8',
-                  errors='replace') as f:
-            return '  ✓ tuned' if se.EDGE_HDR in f.read() else ''
-    except OSError:
-        return ''
+    se.has_saved_settings, which reads the block the way
+    load_settings/save_settings do, rather than a second copy of the
+    parsing.
+
+    'Tuned' means the block holds detection SETTINGS. Since 2026-10-02
+    Edge Review's Save stamps which area estimator wrote a run's areas
+    into the same block (`area_estimator: N`); a block holding only that
+    stamp is a saved run nobody tuned, and is not flagged."""
+    return '  ✓ tuned' if se.has_saved_settings(rundir) else ''
 
 
 def pick_index(names, target):

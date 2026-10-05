@@ -3,7 +3,7 @@
 Status: 2026-08-07 (§2.1a; the rest 2026-08-01); the `disc-fit` area
 estimator rows, the spread term and the Level 2–4 descriptions were
 corrected 2026-10-02, when the area became a common-ray ratio (dated
-entry in `SLDEA_HANDOFF.md`; the measurements behind it are §2.1b and
+entry in `SLDEA_DECISIONS.md`; the measurements behind it are §2.1b and
 the note under table 1.1). The other terms were NOT re-measured then.
 The 47 operator labels score the drawn ellipse outline, which did not
 change; they say nothing about the new area. Every number in this
@@ -54,7 +54,7 @@ number):
   at 4.25–6 kV** (`DOT_P3_1` +0.8, `P3_5` +1.8; `P3_6` +3.7 on its one
   auto row there), +0.1 to +1.3 at 2.25–4 kV. Which sectors the hidden
   perimeter follows is a statement about the device, not the code, and
-  is an open owner decision (`SLDEA_HANDOFF.md`, 2026-10-02).
+  is an open owner decision (`SLDEA_DECISIONS.md`, 2026-10-02).
 
 ### 1.2 How much do I trust each method?
 
@@ -406,7 +406,7 @@ with the pinned OpenCV 4.13, by replaying detection exactly as Edge
 Review runs it (`baseline_disc`, `candidates` per frame with
 `prev_method` chained, `reconcile_pairs`, `needs_review`); "old" is
 `main` at `1eb85b2`, the ellipse estimator. The decision they settled
-is the `SLDEA_HANDOFF.md` entry of that date.
+is the `SLDEA_DECISIONS.md` entry of that date.
 
 **The defect.** A0 (the baseline row and every `resting` row) was the
 `baseline_disc` circle; every `disc-fit` row was π·a·b of a robust

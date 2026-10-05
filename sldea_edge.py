@@ -2738,7 +2738,7 @@ def _common_ray_ratio(r_base, r_frame, r0):
     measured: ray noise plus real block-to-block differences in strain,
     so it grows as the disc deforms unevenly. It is NOT a total
     uncertainty and not a calibrated confidence interval. Measured
-    behaviour is in SLDEA_HANDOFF.md (2026-10-02). It knows nothing about
+    behaviour is in SLDEA_DECISIONS.md (2026-10-02). It knows nothing about
     the hidden sectors, the edge-definition offset or the scale."""
     if r_base is None or r_frame is None:
         return None, 'the baseline frame has no measurable ink edge'

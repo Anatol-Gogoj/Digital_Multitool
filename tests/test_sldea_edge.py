@@ -1592,7 +1592,7 @@ def test_tracker_refuses_a_disc_beyond_its_reach():
     window has no ray on it. With no step inside the window the tracker
     refuses (no candidate), which is what this synthetic scene shows;
     a step that IS inside the window is still fitted (the lock-in
-    documented in SLDEA_HANDOFF.md 2026-10-03: +8 to +16 % on wrinkled
+    documented in SLDEA_DECISIONS.md 2026-10-03: +8 to +16 % on wrinkled
     frames whose edge left the window), so the audit, not this gate, is
     what catches a disc that has outgrown the window. A patch tier may
     still outline the frame for the human."""
@@ -3027,7 +3027,7 @@ def _random_ua(rng, n):
 
 def _free_patch_mated_trackers(rows, cands):
     """The one documented departure from the frozen oracle (2026-10-03,
-    SLDEA_HANDOFF.md of that date): in a landing the oracle capped, a
+    SLDEA_DECISIONS.md of that date): in a landing the oracle capped, a
     tracker member with a RECORDED audit verdict that tripped neither
     gate and no review-only tag (REVIEW_ONLY_TAGS; _random_best sets
     only the audit one), whose every mate is a patch tier, keeps its

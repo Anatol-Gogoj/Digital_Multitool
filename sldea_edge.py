@@ -355,7 +355,7 @@ def tracker_limits():
     is the only record of the window its last Detect-and-Save used: the
     window moved on 2026-10-03 under the same estimator version, and on
     the wrinkled review-queue frames the two windows read +8 to +16 %
-    apart (SLDEA_HANDOFF.md 2026-10-03). The stamp is per run, not per
+    apart (SLDEA_DECISIONS.md 2026-10-03). The stamp is per run, not per
     row; load_stamp says what that leaves out."""
     return {'ray_win_hi': float(RAY_WIN_HI),
             'disc_fit_r_max': float(DISC_FIT_R_MAX)}
@@ -2538,7 +2538,7 @@ RAY_BOOT_N = 300         # bootstrap resamples (fixed seed: repeatable)
 #                equivalent radius sqrt(a*b)/r0: outside it the fit is
 #                tracking something other than the device (the halo,
 #                the vignetting, the holder) and is refused.
-# Measured on the corpus (OpenCV 4.13): see SLDEA_HANDOFF.md 2026-10-03.
+# Measured on the corpus (OpenCV 4.13): see SLDEA_DECISIONS.md 2026-10-03.
 # RAY_WIN_HI and DISC_FIT_R_MAX are stamped into setup.txt by every
 # Save (tracker_limits, TRACKER_LIMIT_KEYS; owner decision 6), because
 # they are constants that have already moved once under the same
@@ -2825,7 +2825,7 @@ def _common_ray_ratio(r_base, r_frame, r0):
     measured: ray noise plus real block-to-block differences in strain,
     so it grows as the disc deforms unevenly. It is NOT a total
     uncertainty and not a calibrated confidence interval. Measured
-    behaviour is in SLDEA_HANDOFF.md (2026-10-02). It knows nothing about
+    behaviour is in SLDEA_DECISIONS.md (2026-10-02). It knows nothing about
     the hidden sectors, the edge-definition offset or the scale."""
     if r_base is None or r_frame is None:
         return None, 'the baseline frame has no measurable ink edge'

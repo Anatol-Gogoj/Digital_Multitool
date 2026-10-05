@@ -182,8 +182,19 @@ def load_stamp(rundir):
     were written by version 1 (the ellipse, through 2026-10-01); see
     AREA_ESTIMATOR_VERSION. No `ray_win_hi` / `disc_fit_r_max` key
     (TRACKER_LIMIT_KEYS) means the run was saved before the tracker's
-    window limits were recorded (2026-10-03). Same tolerant read as
-    load_settings."""
+    window limits were recorded (2026-10-03): `area_estimator: 2` with
+    no limit lines is the 1.38 / 1.3 r0 window (the only code that
+    wrote version 2 without them), and version 1 ran that same window.
+
+    What the limit lines say (owner decision 6: per run, no per-row
+    tag): the window of the LAST Save that ran Detect. A Save re-writes
+    only the rows decided in that session; a review-queue row kept from
+    an earlier pass (absent from apply_results' `results`) keeps that
+    pass's px, and a window move under the same estimator version marks
+    nothing (stale_estimator_rows keys on the version alone). So after
+    any future move of the window, the kept rows of a re-saved run hold
+    the earlier window's numbers under the later stamp and must be
+    re-reviewed. Same tolerant read as load_settings."""
     out = {}
     for k, v in _edge_block(_setup_text(rundir)).items():
         if k in STAMP_TEXT_KEYS:
@@ -341,10 +352,11 @@ def tracker_limits():
     stamps them (TRACKER_LIMIT_KEYS): {'ray_win_hi': RAY_WIN_HI,
     'disc_fit_r_max': DISC_FIT_R_MAX}, in units of the resting radius.
     They are constants (owner decision 11, 2026-10-03), so a run's stamp
-    is the only record of which window measured its rows: the window
-    moved on 2026-10-03 under the same estimator version, and on the
-    wrinkled review-queue frames the two windows read +8 to +16 %
-    apart (SLDEA_HANDOFF.md 2026-10-03)."""
+    is the only record of the window its last Detect-and-Save used: the
+    window moved on 2026-10-03 under the same estimator version, and on
+    the wrinkled review-queue frames the two windows read +8 to +16 %
+    apart (SLDEA_HANDOFF.md 2026-10-03). The stamp is per run, not per
+    row; load_stamp says what that leaves out."""
     return {'ray_win_hi': float(RAY_WIN_HI),
             'disc_fit_r_max': float(DISC_FIT_R_MAX)}
 
@@ -2434,12 +2446,15 @@ AREA_ESTIMATOR_KEY = 'area_estimator'
 # and they moved on 2026-10-03 (1.38 -> 1.70 and 1.3 -> 1.75) under the
 # same estimator version: on the wrinkled review-queue frames the
 # tracker's number differs by +8 to +16 % between the two windows, so
-# a row a human accepts from the queue has to say which window it was
-# measured under. Last come the library versions of the process that
-# pressed Save (library_versions, 2026-10-03): the OpenCV and numpy
-# that produced the numbers, as text ('4.13.0'), because every corpus
-# figure is OpenCV 4.13 and another build may read a little
-# differently.
+# a run has to say which window its last Detect-and-Save used. The
+# stamp is per run, not per row (owner decision 6): a review-queue
+# row kept from an earlier pass keeps that pass's px under the later
+# stamp, and `area_estimator: 2` with no limit lines is the 1.38 / 1.3
+# window (load_stamp has both). Last come the library versions of the
+# process that pressed Save (library_versions, 2026-10-03): the OpenCV
+# and numpy that produced the numbers, as text ('4.13.0'), because
+# every corpus figure is OpenCV 4.13 and another build may read a
+# little differently.
 PROVENANCE_KEYS = ('base_rays', 'base_hidden_pct', 'base_one_sided',
                    'base_ellipse_over_circle')
 TRACKER_LIMIT_KEYS = ('ray_win_hi', 'disc_fit_r_max')

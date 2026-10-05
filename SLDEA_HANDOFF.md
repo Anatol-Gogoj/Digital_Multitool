@@ -31,9 +31,11 @@ into review because the other snapshot of its landing was won by a patch
 tier; the patch member stays capped, so the landing is still queued.
 Second pass (owner decision 6): every Save now stamps the window top and
 the ellipse gate into `setup.txt` (`ray_win_hi: 1.7`, `disc_fit_r_max:
-1.75`), so a run says which window measured its rows; the branch was
-rebased onto the estimator branch's review-only limits, and 23 frames
-this branch used to auto-accept go to a human on those limits.
+1.75`), so a run says which window its last Detect-and-Save used (per
+run, not per row: a queue row kept from an earlier pass keeps that
+pass's number under the later stamp); the branch was rebased onto the
+estimator branch's review-only limits, and 23 frames this branch used
+to auto-accept go to a human on those limits.
 
 ### 2026-10-03, second pass: the window limits are stamped per run (owner decision 6), and the branch sits on the estimator's decisions 2 and 9
 
@@ -43,7 +45,13 @@ the two windows read +8 to +16 % apart, so a row a human accepted from the
 queue could not say which window measured it. Now a Save writes
 `ray_win_hi` and `disc_fit_r_max` beside the estimator version and the
 library versions, the plot's tidy CSV carries them on every `disc-fit`
-row, and nothing about the measurement changed. The branch was rebased
+row, and nothing about the measurement changed. The stamp is the window
+of the last Save that ran Detect, per run and not per row (the owner's
+choice): a queue row kept from an earlier pass is not re-measured and
+keeps that pass's px under the later stamp, so after any future move of
+the window the kept rows of a re-saved run must be re-reviewed; and
+`area_estimator: 2` with no limit lines is the 1.38 / 1.3 window of
+`claude/sldea-area-common-ray`. The branch was rebased
 onto `claude/sldea-area-common-ray` at `59c0ec4` (decisions 2 and 9:
 one-sided or heavily trimmed tracker readings are review only); on the
 corpus that sends 23 frames this branch had auto-accepted to a human, 21
@@ -76,6 +84,23 @@ no accepted number moved.
   per-run fact the CSV is the place for. Edge Review's Save needed no
   change (it calls `estimator_stamp`); `sldea_diag` prints the baseline
   facts only, as before.
+- *What the stamp cannot say (the review's point).* It records the
+  window of the last Save that ran Detect, nothing per row. A Save
+  re-writes only the rows decided in that session: a review-queue row
+  kept from an earlier pass (absent from `apply_results`' `results`,
+  which includes a row a human accepted earlier and that lands in the
+  queue again) keeps that pass's px, and a window move under the same
+  estimator version marks nothing (`stale_estimator_rows` keys on the
+  version alone). So once the window moves again, the kept rows of a
+  re-saved run are the earlier window's numbers under the later stamp,
+  which is exactly the +8 to +16 % case, and the run must be re-reviewed
+  row by row. Decision 6 chose per run with no per-row tag, so this is
+  an accepted limit, written into `load_stamp`'s docstring and the tidy
+  CSV's; a per-row tag is the follow-up if a third window ever lands.
+  The other reading: `area_estimator: 2` with no limit lines is not an
+  unknown window, it is the 1.38 / 1.3 window (the estimator branch is
+  the only code that wrote version 2 without them; version 1 ran the
+  same window), so an older stamped run can still be placed.
 - *Rebase.* One textual conflict, the manual source's disc-fit sentence
   (`docs/manual-src/addendum_b_edge.json`), resolved by keeping this
   branch's window and gate text and the estimator branch's review-only
@@ -135,10 +160,15 @@ no accepted number moved.
   DOT_P3_1 1.557 -> 1.701, P3_2 1.575 -> 1.665 (r36 at 1.723 is review
   only), P3_3 1.584 -> 1.727, P3_5 1.281 unchanged (rows 28 to 35 are
   review only on both), P3_6 1.532 -> 1.510.
-- *Tests.* `tests/test_sldea_edge.py` 102 (the stamp round trip covers
+- *Tests.* `tests/test_sldea_edge.py` 103 (the stamp round trip covers
   the two limit lines in `STAMP_KEYS` order, `limits={}`, the old
   window's values round-tripping as the numbers they were, a partial
-  limits dict, and that the stamp follows swapped constants; the pair
+  limits dict, and that the stamp follows swapped constants; a new test
+  pins what the stamp cannot say: on a run stamped under the old window
+  a Save under the current one lists nothing stale, keeps the queue row's
+  px and note as they were, and re-stamps the run with the current
+  window, and a version-2 stamp with no limit lines reads back as no
+  limits, never as the current constants; the pair
   exemption test adds a one-sided and a trim-share tracker beside a
   patch, both capped; the frozen pairing oracle's exemption reads
   `REVIEW_ONLY_TAGS`), `tests/test_sldea_edge_gui.py` 57 (the Save stamp

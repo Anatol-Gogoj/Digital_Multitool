@@ -2348,10 +2348,14 @@ def write_tidy(runs, path, groups=()):
     once under the same estimator version (1.38 -> 1.70 and 1.3 ->
     1.75 on 2026-10-03), so two 'disc-fit' rows can carry the same
     `area_estimator` and still have been measured under different
-    windows; these columns tell them apart. Filled exactly where
-    'area_estimator' is (a 'disc-fit' row with an area), blank
-    elsewhere and throughout a run saved before the limits were
-    recorded.
+    windows; these columns say which window each RUN's last
+    Detect-and-Save used. They are the run's stamp copied onto its
+    rows, not a per-row record (owner decision 6): a review-queue row
+    kept from an earlier pass keeps that pass's number under the later
+    stamp (se.load_stamp). Filled exactly where 'area_estimator' is (a
+    'disc-fit' row with an area), blank elsewhere and throughout a run
+    saved before the limits were recorded (with `area_estimator` 2 that
+    was the 1.38 / 1.3 window).
 
     'group' is the operator's grouping (`#313`), blank for a run in no
     group, and it sits SECOND -- beside 'run', because it is the other

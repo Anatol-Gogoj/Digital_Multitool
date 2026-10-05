@@ -1790,8 +1790,9 @@ def test_estimator_stamps_roundtrip_and_never_become_settings():
     and (owner decision 6) so do the tracker's window limits, the
     ink-step search top and the ellipse gate (TRACKER_LIMIT_KEYS), as
     numbers: they are constants that moved once under the same
-    estimator version, so the stamp is the only record of which window
-    measured a run."""
+    estimator version, so the stamp is the only record of the window a
+    run's last Detect-and-Save used (per run, not per row: the next
+    test)."""
     libs = se.library_versions()
     assert tuple(libs) == se.STAMP_TEXT_KEYS, libs
     lims = se.tracker_limits()
@@ -1934,6 +1935,69 @@ def test_estimator_stamps_roundtrip_and_never_become_settings():
         se.stamp_area_estimator(d)
         assert se.saved_area_estimator(d) == 2
         assert se.load_stamp(d)['disc_fit_r_max'] == se.DISC_FIT_R_MAX
+    finally:
+        shutil.rmtree(d)
+
+
+def test_stamp_is_the_window_of_the_last_detect_save_not_per_row():
+    """What the stamp cannot say (owner decision 6: per run, no per-row
+    tag; the point of the review). A run stamped `area_estimator: 2`
+    under the 2026-10-02 window (1.38 / 1.3 r0) holds a disc-fit row
+    still in the review queue. A Save under the current window
+    re-decides one other row only: stale_estimator_rows lists nothing
+    (the version did not move), the kept row keeps the earlier window's
+    px with its note untouched, and the run's stamp now reads the
+    current window. The kept row is therefore the earlier window's
+    number under the later stamp, which is why load_stamp's docstring
+    says the kept rows of a re-saved run must be re-reviewed after any
+    move of the window. And a version-2 stamp with no limit lines reads
+    back as no limits, never as the current constants: by the docstring
+    it is the 1.38 / 1.3 window, the only code that wrote version 2
+    without them."""
+    old_window = {'ray_win_hi': 1.38, 'disc_fit_r_max': 1.3}
+    assert old_window != se.tracker_limits()
+    rows = [
+        {'active_area_px': '217438', 'active_area_mm2': '201.062',
+         'active_diam_mm': '16.000', 'wrinkle_idx': '',
+         'notes': 'edge:resting conf 0.95'},
+        {'active_area_px': '238685', 'active_area_mm2': '220.700',
+         'active_diam_mm': '16.763', 'wrinkle_idx': '1.10',
+         'notes': 'edge:disc-fit conf 0.74'},
+        {'active_area_px': '250000', 'active_area_mm2': '231.163',
+         'active_diam_mm': '17.155', 'wrinkle_idx': '1.00',
+         'notes': 'edge:disc-fit conf 0.93'},
+    ]
+    results = {2: {'area_px': 251000.0, 'diam_px': 565.0, 'conf': 0.90,
+                   'method': 'disc-fit', 'wrinkle': 1.0}}
+    scale = 16.0 / (2 * np.sqrt(217438 / np.pi))
+    d = tempfile.mkdtemp(prefix='edge_win_')
+    try:
+        with open(os.path.join(d, 'setup.txt'), 'w', encoding='utf-8') as f:
+            f.write("SLDEA run\nDEA nominal diameter: 16 mm\n")
+        s = se.load_settings(d)
+        se.save_settings(d, s, stamp=se.estimator_stamp(
+            None, libs={}, limits=old_window))
+        assert se.load_stamp(d) == dict({'area_estimator': 2.0},
+                                        **old_window)
+        # the Save under the current window, as Edge Review runs it
+        saved = se.saved_area_estimator(d)
+        assert saved == se.AREA_ESTIMATOR_VERSION
+        stale = se.stale_estimator_rows(rows, results, saved)
+        assert stale == [], stale
+        se.apply_results(rows, results, scale, {}, stale=stale)
+        se.stamp_area_estimator(d, se.estimator_stamp(None, libs={}))
+        assert se.load_stamp(d) == dict({'area_estimator': 2.0},
+                                        **se.tracker_limits())
+        assert rows[2]['active_area_px'] == '251000'    # re-decided
+        assert rows[1]['active_area_px'] == '238685'    # kept as it was
+        assert rows[1]['notes'] == 'edge:disc-fit conf 0.74'
+        assert not any('1.38' in str(v) or 'win' in str(v)
+                       for v in rows[1].values()), rows[1]
+        # a version-2 stamp with no limit lines: no limits, not these
+        se.save_settings(d, s, stamp=se.estimator_stamp(
+            None, libs={}, limits={}))
+        assert se.load_stamp(d) == {'area_estimator': 2.0}
+        assert not any(k in se.load_stamp(d) for k in se.TRACKER_LIMIT_KEYS)
     finally:
         shutil.rmtree(d)
 
@@ -2961,7 +3025,7 @@ def _random_ua(rng, n):
     return cells
 
 
-def _free_patch_mated_trackers(rows, cands, settings):
+def _free_patch_mated_trackers(rows, cands):
     """The one documented departure from the frozen oracle (2026-10-03,
     SLDEA_HANDOFF.md of that date): in a landing the oracle capped, a
     tracker member with a RECORDED audit verdict that tripped neither
@@ -2971,7 +3035,6 @@ def _free_patch_mated_trackers(rows, cands, settings):
     instead of 'pair_mismatch_pct', and is not counted as capped.
     Applied to the oracle's OUTPUT, so the oracle itself stays
     verbatim; -> the adjusted stats."""
-    acc = float(settings.get('accept_conf', 0.75))
     freed = 0
     by_landing = {}
     for i, pos in enumerate(se.sweep_landings(rows)):
@@ -3015,7 +3078,7 @@ def test_single_sweep_pairing_is_unchanged():
             for cl in old.values():
                 cl[0]['conf_before'] = cl[0]['conf']
             want = _reconcile_pairs_78315cc(rows, old, s)
-            freed = _free_patch_mated_trackers(rows, old, s)
+            freed = _free_patch_mated_trackers(rows, old)
             want['capped'] -= freed
             assert se.reconcile_pairs(rows, cands, s) == want, name
             assert cands == old, name

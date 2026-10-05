@@ -105,9 +105,13 @@ number):
   (1.38 -> 1.70 and 1.3 -> 1.75 r₀), and on the wrinkled review-queue
   frames the two windows read +8 to +16% apart, so a row accepted from
   the queue is only comparable with another once both say which window
-  measured them. The tidy CSV carries the two beside the versions on
-  every `disc-fit` row; a run saved before they were recorded has them
-  blank.
+  measured them. The stamp is per run (the window of the last Save that
+  ran Detect), not per row: a queue row kept from an earlier pass keeps
+  that pass's px under the later stamp, so after any further move of
+  the window re-review a re-saved run's kept rows. The tidy CSV carries
+  the two beside the versions on every `disc-fit` row; a run saved
+  before they were recorded has them blank (with `area_estimator` 2
+  that means the 1.38 / 1.3 window).
 - **DON'T** mix machine areas and hand-traced areas in one absolute
   comparison without the +5.5% definitional correction.
 - **DON'T** judge any machine boundary against a bar above IoU ~0.97 —
@@ -751,7 +755,8 @@ The load-bearing choices:
    1.8 r₀ is never read, so the window cannot reach the strips; both
    limits are constants, and Edge Review's Save stamps them into
    `setup.txt` as `ray_win_hi` and `disc_fit_r_max` so a run says
-   which window measured it, owner decision 6, 2026-10-03),
+   which window its last Detect-and-Save used, per run and not per
+   row, owner decision 6, 2026-10-03),
    sub-pixel refined by parabolic interpolation,
    sectors through the electrodes excluded by azimuth. The same rays
    are measured on the baseline frame, and the area is the baseline

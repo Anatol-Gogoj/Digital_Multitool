@@ -4908,14 +4908,14 @@ def test_run_health_strip_shows_on_pick_and_blocks_nothing():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_auto_presses_detect_on_a_stop_run_like_on_any_other():
-    """Run health is advice, and --auto is not an exception (review
-    2026-10-02: an earlier draft held the 300 ms Detect press back on a
-    STOP. That is a gate on the SLDEA tab's auto-process path, and
-    whether it should pause there is the owner's decision, not this
-    strip's). The press is made on a blank run and on a good one alike;
-    the STOP stays on the strip and on the canvas for whoever then closes
-    the scale dialog."""
+def test_auto_holds_its_detect_press_on_a_stop_run_and_says_why():
+    """Decision 16 (2026-10-03). The strip is advice and locks no button,
+    but the --auto launch's own 300 ms Detect press is held back when
+    Run health holds a STOP: the window opens, the STOP leads the strip
+    and the canvas, the canvas says that nothing was started and why,
+    and the Detect button is live for a hand press. A run without a
+    STOP is pressed exactly as before. (Review 2026-10-02 had kept the
+    press on a STOP run pending this decision.)"""
     import cv2
     import sldea_edge_gui as gui
     pressed = []
@@ -4941,17 +4941,49 @@ def test_auto_presses_detect_on_a_stop_run_like_on_any_other():
                 while time.time() < end:
                     root.update()
                     time.sleep(0.02)
-                assert pressed == [run], (run, pressed)
                 assert str(app.detect_btn['state']) == 'normal'
                 if run == blank:
-                    # the advice is still there to be read
+                    # held: no press, and the canvas says so, STOP first
+                    assert pressed == [], (run, pressed)
                     assert gui.HEALTH_MARKS['stop'] in _strip_text(app)
                     assert app._hint.startswith(gui.HEALTH_MARKS['stop'])
+                    assert gui.HINT_AUTO_HELD in app._hint, app._hint
+                    assert app._hint.endswith(gui.HINT_AFTER_STOP)
+                    assert app.status.cget('text') == gui.AUTO_HELD_TEXT
+                    # the words: what did not happen, why, what still can
+                    for words in ('NOT started', 'STOP', 'by hand',
+                                  'Detect Edges'):
+                        assert words in gui.HINT_AUTO_HELD, words
+                    # the button itself is live: a hand press goes through
+                    app.detect()
+                    assert pressed == [run], (run, pressed)
+                else:
+                    assert pressed == [run], (run, pressed)
+                    assert app._hint == gui.HINT_DETECT, app._hint
             finally:
                 if app is not None:
                     app._cancel_pending()
                 root.destroy()
             del pressed[:]
+        # the hold is the --auto launch's alone: the same STOP run opened
+        # by hand reads as it did (no 'NOT started' line), and without a
+        # STOP the auto flag changes nothing in the hint
+        root = _tk_root_or_skip('stop run by hand')
+        if root is None:
+            return
+        app = None
+        try:
+            app = gui.EdgeReviewApp(root, path=blank)
+            assert app._hint.startswith(gui.HEALTH_MARKS['stop'])
+            assert gui.HINT_AUTO_HELD not in app._hint, app._hint
+            assert pressed == []
+        finally:
+            if app is not None:
+                app._cancel_pending()
+            root.destroy()
+        assert gui.health_hint([], auto_held=True) == gui.HINT_DETECT
+        warn = [{'level': 'warn', 'code': 'x', 'text': 'y'}]
+        assert gui.health_hint(warn, auto_held=True) == gui.HINT_DETECT
     finally:
         gui.EdgeReviewApp.detect = real_detect
         shutil.rmtree(d, ignore_errors=True)

@@ -27,9 +27,11 @@ missing voltage or current readings, an early end, a watchdog stop,
 missing frames, off-screen samples in telemetry.csv. STOP items are
 repeated first on the empty canvas, and again at the top of the scale
 dialog, in its hand-measurement banner and in the verify mode (that
-dialog is modal and covers the strip). It is advice: it blocks nothing
-(--auto presses Detect on a STOP run as on any other), and it is not a
-breakdown verdict.
+dialog is modal and covers the strip). It is advice: no button is
+locked, and it is not a breakdown verdict. The one thing it holds is
+the --auto launch's own Detect press (decision 16, 2026-10-03): on a
+STOP run the window opens, shows the STOP, and the canvas says why
+nothing started and that Detect still works by hand.
 
 ONE 📏 BUTTON, TWO OUTCOMES (operator 2026-08-06 late, `#215`).
 📏 Calibrate… and 📏 Re-anchor scale… were folded into a single
@@ -175,7 +177,9 @@ out-of-tolerance anchor without a word being read (review 2026-08-06).
 
 With --auto (used by the SLDEA tab's "auto process"), the calibrate
 dialog opens on launch and detection chains automatically once
-calibration finishes. Keyboard: 1/2/3 pick a candidate, R reject,
+calibration finishes, unless Run health shows a STOP: then nothing is
+pressed, the canvas says why, and the Detect button is live for a hand
+press (decision 16, 2026-10-03). Keyboard: 1/2/3 pick a candidate, R reject,
 4/D/T open the manual tracer (#162/#172 -- its Done stages the polygon
 as candidate D; Accept commits it like any other candidate),
 Left/Right navigate, Enter accept + next.
@@ -373,7 +377,11 @@ HOWTO_SECTIONS = [
         "areas shows the ✓ processed mark. Read the Run health strip "
         "below the toolbar before you continue. It tells you what went "
         "wrong during the capture of the run. A line that starts with "
-        "✘ STOP tells you that the run cannot be measured.",
+        "✘ STOP tells you that the run cannot be measured. When the "
+        "SLDEA tab opened this window by itself after a run (auto "
+        "process), a ✘ STOP also means that detection was not started "
+        "for you: read the strip, then press ▶ Detect Edges yourself if "
+        "you still want to.",
 
         "2.   Press ▶ Detect Edges. NOTE: The camera zoom changes between "
         "runs. Thus each run must have its own pixel-to-millimetre "
@@ -745,6 +753,22 @@ HINT_AFTER_STOP = ("Nothing is locked. But  ▶ Detect Edges  cannot use "
                    "ask you to measure the scale by hand. To only look at "
                    "the pictures, open the frames folder inside the run "
                    "folder.")
+# The same place when --auto opened the window (decision 16, 2026-10-03).
+# --auto presses Detect 300 ms after launch, which opens the modal scale
+# dialog over the strip; on a STOP run that press is held back, so the
+# first thing read is the STOP and not a dialog asking for the hand
+# measurement it forbids. The hint says WHY nothing started and that
+# the button itself is live. HINT_AFTER_STOP follows, so the student
+# also knows what the button will do.
+HINT_AUTO_HELD = ("Automatic detection was NOT started: Run health shows "
+                  "a STOP for this run, so the auto-process stopped here "
+                  "for you to read it. You can still press  ▶ Detect "
+                  "Edges  by hand.")
+# The status line at the same moment; short, because the hint carries
+# the full sentence.
+AUTO_HELD_TEXT = ("--auto held: Run health shows a STOP for this run, so "
+                  "automatic detection was not started. ▶ Detect Edges "
+                  "still works by hand.")
 # Shown on the header line while the strip holds more lines than it
 # shows. Measured on the 16 corpus runs at the default width: seven fit
 # the five lines, nine need 7 to 11, and a student who never scrolls
@@ -775,15 +799,20 @@ def health_stops(items):
             for it in (items or []) if it.get('level') == 'stop']
 
 
-def health_hint(items):
+def health_hint(items, auto_held=False):
     """The empty canvas's text for a freshly picked run: its STOP items
     FIRST, each behind the same mark the strip uses. With no STOP item it
     is HINT_DETECT word for word, so a run with only warnings starts
-    exactly as every run did before."""
+    exactly as every run did before. `auto_held` is the --auto launch
+    whose Detect press was held back by a STOP (decision 16): the hint
+    then says so (HINT_AUTO_HELD) before what the button will do."""
     stops = health_stops(items)
     if not stops:
         return HINT_DETECT
-    return '\n\n'.join(stops) + '\n\n' + HINT_AFTER_STOP
+    tail = HINT_AFTER_STOP
+    if auto_held:
+        tail = HINT_AUTO_HELD + '\n\n' + HINT_AFTER_STOP
+    return '\n\n'.join(stops) + '\n\n' + tail
 
 
 # The scale dialog's banner when the automatic fit has nothing to offer.
@@ -1686,8 +1715,9 @@ class EdgeReviewApp:
         self._tips = {}          # control name -> live Tooltip (`#216`)
         self._hint = None        # the empty-canvas "press this" line (`#216`)
         self.health = None       # se.run_health items of the loaded run;
-        # None while no run is loaded. Shown, never consulted: no gate
-        # reads it, and --auto does not either (2026-10-02)
+        # None while no run is loaded. Shown, not gated on: no button
+        # reads it. The one reader is the --auto launch below, which
+        # holds its Detect press on a STOP (decision 16, 2026-10-03)
         self._primary_font = None   # kept alive by _install_styles (`#216`)
         self._build_ui()
         start = path or DEFAULT_PARENT
@@ -1699,7 +1729,14 @@ class EdgeReviewApp:
         if goto is not None:
             self.goto_row(goto)
         if auto and self.rundir:
-            root.after(300, self.detect)
+            if any(it.get('level') == 'stop' for it in self.health or ()):
+                # Decision 16 (2026-10-03): the press is held, not the
+                # button. The strip and the canvas carry the STOP, the
+                # canvas says why nothing started, and Detect is live.
+                self._canvas_hint(health_hint(self.health, auto_held=True))
+                self.status.config(text=AUTO_HELD_TEXT)
+            else:
+                root.after(300, self.detect)
 
     # ---------------- UI scaffolding ----------------
     def _install_styles(self):
@@ -2884,8 +2921,11 @@ class EdgeReviewApp:
 
     def _recount(self):
         areas = {i: r['area_px'] for i, r in self.results.items() if r}
+        # the run folder goes in too (decision 17, 2026-10-03): the
+        # watchdog's trip reading lives in run.log and telemetry.csv, and
+        # the monitor log's streaks become advisory notes
         self.flags, self.advisories = se.breakdown_flags(
-            self.run['rows'], areas, self.settings)
+            self.run['rows'], areas, self.settings, rundir=self.rundir)
 
     # ---------------- review ----------------
     def _current(self):

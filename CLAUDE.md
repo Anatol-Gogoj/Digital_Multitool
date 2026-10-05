@@ -6,19 +6,20 @@ infrastructure (per-instrument GUI tabs, drivers, presets, data logging,
 webcam capture, battery post-processing) and the SLDEA measurement chain
 (capture tab → Edge Review / tuner / diagnostic operating on run folders).
 
-This file is the durable context only. **Current state, open decisions and
-campaign status live in `PROJECT_HANDOFF.md`** — update that file at
-milestones, not this one.
+This file is the durable context only. **Session state is kept outside the
+repo:** no handoff docs, session logs or status banners here, in this file
+or anywhere else. `PROJECT_HANDOFF.md` and `RUN_SHEET.md` are frozen history
+as of 2026-08-12; read them for background, never update them.
 
 ## Doc map — read the one you need
 
 | Doc | What it answers |
 |---|---|
-| `PROJECT_HANDOFF.md` | where things stand right now; open decisions |
-| `RUN_SHEET.md` | the same docket as a tick-off list, split VM-or-any-checkout / lab-PC / bench-no-HV / bench-HV. A dated snapshot — regenerate it, never maintain it alongside the handoff |
+| `PROJECT_HANDOFF.md` | frozen 2026-08-12: the project state and open decisions at that date. Code comments cite its "open decision" numbers |
+| `RUN_SHEET.md` | frozen 2026-08-12: that date's docket as a tick-off list |
 | `README.md` | setup, transports, every bench-verified instrument quirk |
 | `docs/SLDEA_QUICKSTART.md` | the new student's bench procedure, unpowered rig to exported plot; it opens with a box the lab must fill in (HV authorization, discharge, emergency) |
-| `SLDEA_HANDOFF.md` | measurement-chain decision log (append-only, dated) |
+| `SLDEA_DECISIONS.md` | measurement-chain decision log (append-only, dated). Renamed from `SLDEA_HANDOFF.md` on 2026-10-05; older code comments and docs still cite the old name |
 | `SLDEA_MEASUREMENT.md` | the error budget — what uncertainty to quote and why |
 | `docs/manual-src/README.md` | user-manual pipeline + the release checklist |
 | `BENCH_TEST.md` | manual hardware-in-the-loop checklist — §A–§L signal gen (historical), **§M/§N/§O the current SLDEA telemetry + watchdog gate** |
@@ -28,7 +29,7 @@ milestones, not this one.
 
 - **Changelogs, release notes and PR bodies start with a dumb TL;DR** —
   two or three plain sentences a tired labmate can skim, before any wordy
-  sections. Same for new `SLDEA_HANDOFF.md` entries.
+  sections. Same for new `SLDEA_DECISIONS.md` entries.
 - **Never ship bench-unverified instrument I/O.** New SCPI paths need a
   bench session first; until then they are documented follow-ups, not
   code. Bench-verified claims cite their verification date.
@@ -41,12 +42,13 @@ milestones, not this one.
   their outputs; a PR that introduces a new capture artifact type extends
   `.gitignore` in the same PR.
 - **`setup.txt` is a lab-notebook document, not a config file — it stays
-  plain text** (decision 2026-08-08, dated entry in `SLDEA_HANDOFF.md`).
+  plain text** (decision 2026-08-08, dated entry in `SLDEA_DECISIONS.md`).
   New machine-read fields keep the `Key: value` convention through
   `se.load_settings`/`save_settings`; if typed or nested structure is
   ever needed, add a sidecar file beside the txt — never convert it.
 - **SLDEA measurement-chain behavior changes** land with a dated
-  observation → decision entry in `SLDEA_HANDOFF.md`.
+  observation → decision entry in `SLDEA_DECISIONS.md`. The log records
+  decisions and the evidence for them, not session progress.
 - **Breakdown semantics (since 2026-08-05):** only current-confirmed
   events (sustained deviation from the run's median baseline, or a
   terminal event) rename frames `*_BREAKDOWN`; area collapse alone is an

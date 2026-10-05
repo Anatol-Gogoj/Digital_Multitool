@@ -7,6 +7,10 @@ Never clicks Save — nothing in the run folder is modified except what the
 detector itself writes (setup.txt is untouched; picks are in-memory only).
 
 Usage: python capture_edge_review.py [run_dir]   (defaults to bench run 1)
+
+The figure caption in build_manual.py names the run and the frame this
+captured (v1.4.0: P3_6_2.5mL_20260729, frame 23 of 81). Capture another
+run and that caption must change with it.
 """
 import ctypes
 from ctypes import wintypes

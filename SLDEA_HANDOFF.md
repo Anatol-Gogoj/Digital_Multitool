@@ -358,6 +358,70 @@ for byte as they were. The batch harness over the 16-run corpus (899
 frames) matches main's baseline exactly, as it should: the cap lives in
 the dialog and the harness never opens it.
 
+## The strain-mode uncertainty band is ±2 % of the area, and --strain-pct works on the command line (2026-10-02)
+
+**TL;DR:** with strain percent on, the shaded uncertainty band was ±2 % of
+the strain number, so it had no width at rest and was 2.6 to 10.5 times too
+narrow on the campaign's DOT_P3_1 run. It is now the same ±2 % (±1 % on
+hand-traced levels) of the AREA, drawn in strain points: ±2 points at 0 %
+strain, wider as the disc grows. The command line takes `--strain-pct` now
+too; the usage text promised it and the parser refused it.
+
+**Observation (from the code at `1eb85b2`, and read-only on
+`DOT_P3_1_20260729`).** The budget is quoted on the expansion ratio, ±1–2 %
+of A/A₀ (`SLDEA_MEASUREMENT.md` §1.1), and the figure's caption says "bands
+±2% machine / ±1% traced". `_series` drew every band as `y × (1 ∓ p)`. On
+the mm² and A/A₀ panels that is the right band. With strain percent, `y` is
+(A/A₀ − 1) × 100, so the same line made the band ±p of the *strain value*.
+Reading the band polygon back off the axes, the half-width in strain points:
+
+| Level | A/A₀ | drawn | budget gives | too narrow by |
+|---|---|---|---|---|
+| 0 to 2.0 kV (9 levels) | 1.000 | 0.00 | 2.00 | no band at all |
+| 2.5 kV (traced, ±1 %) | 1.042 | 0.042 | 1.042 | 24.6× |
+| 2.75 kV | 1.106 | 0.211 | 2.211 | 10.5× |
+| 5.0 kV | 1.337 | 0.674 | 2.674 | 4.0× |
+| 6.0 kV (peak) | 1.623 | 1.246 | 3.246 | 2.6× |
+
+So the figure understated the uncertainty in the unit the lab quotes, under
+a caption that still said ±2 %. The tidy CSV, the mm² panel, the ratio-mode
+band and the aggregate's SEM band were never affected (the SEM map is
+affine and already had a test).
+
+**Decision (this PR; Anatol merges).**
+
+- The band is built in ratio space and then mapped to the displayed unit:
+  its edges are `norm_y` of `r(1 − p)` and `r(1 + p)`, with `r = 1 + y/100`.
+  The half-width is `p × 100 × A/A₀` points: ±2 at 0 % strain, ±2.8 at
+  40 %. A contraction no longer crosses its own edges.
+- Only the strain panel's band changes. Ten figure variants of a synthetic
+  run were rendered before and after. Nine are byte-identical: default,
+  `--prepost`, `--prepost --mean`, `--no-bands`, `--subplots first`, strain
+  with `--no-bands`, strain with `--subplots first`, current and power. Only
+  the strain figure with bands differs.
+- That figure's caption gets one sentence on its second line: "Strain bands
+  = ±2% machine / ±1% traced of the AREA: ±2 / ±1 points at 0 % strain,
+  wider as strain grows." It goes on the second line because the first is
+  already wider than the figure (see the note above `CAPTION_LINE_MAX` in
+  `sldea_plot.py`) and a clause added there would be cut off. It prints only
+  when the strain panel and the bands are both drawn, and it ends at about
+  98 % of the frame width; a test measures that in pixels.
+- `--strain-pct` joins the parser's flag list and the usage block, wired to
+  the option the window's tick box sets. A test now requires the usage block
+  and the parser to name the same flags.
+
+**Open (Anatol's call): bands under `--prepost`.** Not changed here. The
+2026-08-09 entry says "Pre/post drawn as separate lines keeps no band, which
+is what already ships", and the module text says the aggregate drops its
+band "exactly as --prepost suppresses it". The code draws a band on each of
+the post and pre lines, and has since the first commit of `sldea_plot.py`
+(`cb0715d`, 2026-08-05, before that entry). Only the mean line's band is
+dropped under `--prepost`. Either the log or the code is wrong. Dropping the
+bands would remove the only uncertainty display on that figure, and the
+budget includes pre/post pair scatter (`SLDEA_MEASUREMENT.md` §2.2), so it
+is a policy choice and not a bug fix. The bands drawn there are now the
+right width in both units.
+
 ## A LIVE run locks the scope channels it reads, and the settings they share (2026-09-24)
 
 **TL;DR:** during a LIVE run, the Oscilloscope tab or a bench-profile load

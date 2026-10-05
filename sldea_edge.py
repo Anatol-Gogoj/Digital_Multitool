@@ -8,11 +8,15 @@ directory the Digital Multitool's SLDEA tab wrote:
     SLDEA_<ts>/setup.txt + data.csv + frames/SLDEA_sNN_XX.XXkV_tag.png
 
 A live run also drops `telemetry.csv` there (the ~2 Hz monitor log, since
-2026-08-05). The MEASUREMENT never reads it: `data.csv` is still the run,
-`run_csv` cannot resolve to the sidecar, and a folder holding only
-telemetry is not a run. The one reader is `run_health` (2026-10-02),
-which counts its off-screen samples for an advisory sentence and feeds
-nothing back into detection, breakdown flags or Save.
+2026-08-05) and `run.log`. The MEASUREMENT never reads them: `data.csv`
+is still the run, `run_csv` cannot resolve to the sidecar, and a folder
+holding only telemetry is not a run. Two readers exist. `run_health`
+(2026-10-02) counts the off-screen samples for an advisory sentence.
+`breakdown_flags` (2026-10-03, decision 17) reads them when it is handed
+the run folder: the watchdog's trip row confirms a breakdown unless the
+sidecars say the reading that tripped it was the scope's off-screen
+sentinel, and streaks in the monitor log become ADVISORY notes on the
+next snapshot row, which never rename a frame and never confirm.
 
 Approach: difference-imaging against the 0 kV baseline frame at three
 threshold tiers, plus (2026-07-28) one candidate segmented from the
@@ -2895,10 +2899,42 @@ def sweep_landings(rows):
 # breakdown heuristics
 # ---------------------------------------------------------------------------
 
-def breakdown_flags(rows, accepted_areas, settings):
+def breakdown_flags(rows, accepted_areas, settings, rundir=None):
     """-> (confirmed, advisory), both {row_index: reason}. Only `confirmed`
     drives mark_breakdown_files / post-breakdown branding; `advisory` is
     notes-only and must never rename a frame.
+
+    `rundir` (2026-10-03, decision 17) is the run folder, for the two
+    sidecar files the rows cannot stand in for: run.log and
+    telemetry.csv. Without it the two rules below that read them fall
+    back to the rows alone (the trip rule) or stay silent (the monitor
+    log). Every caller that has the folder should pass it, so that Edge
+    Review and the plot reach the same verdict on one run.
+
+    Watchdog rule (decision 17): the live watchdog's trip row (tag
+    'breakdown', step 99, the WATCHDOG note; is_trip_row) is a CONFIRMED
+    event, reason 'watchdog trip', unless the reading that tripped it
+    was the scope's off-screen sentinel. The runner records that reading
+    in telemetry.csv (the 'BREAKDOWN CONFIRMED' event row, i_status
+    'offscreen' or a number) and in run.log ('I=OFF-SCREEN (clipping)'
+    or 'I=<number> uA'); the trip row's own measured_uA cell is a LATER
+    read, taken with the frame, so it is only the fallback when neither
+    file says (trip_reading). A sentinel trip, or a trip whose reading
+    is on record nowhere, confirms nothing by itself and the row gets an
+    advisory note that says why; the row's own current still goes
+    through the current rule like any other row. Why the sentinel is
+    excluded: both 2026-08-05 runs returned it at 0 kV, so by itself it
+    is not proof of a large current.
+
+    Monitor-log rule (decision 17, ADVISORY ONLY): with the sidecar
+    present, streaks of at least TELEMETRY_STREAK_MIN samples whose
+    current is off-screen or at least breakdown_dev_ua from rest (rest =
+    the median of the samples at 0 kV) are written as a note on the
+    nearest later snapshot row, with the time, the kV and the length
+    (telemetry_advisories). Those notes never rename a frame and never
+    confirm: the five telemetry runs of the corpus show the two
+    destroyed devices (Assctuator, Assctuator2) and SquareStack-1, and
+    nothing on the 3829 healthy samples of the other two.
 
     Current rule (rebuilt 2026-08-04, ground-truthed on the 13-run batch):
     baseline = per-run MEDIAN of every parseable measured_uA (robust even
@@ -2997,6 +3033,27 @@ def breakdown_flags(rows, accepted_areas, settings):
                 _adv(i, f"collapse? area -{pct:.0f}% (no current signature)")
         if area:
             prev_area, prev_kv = area, kv
+    # The watchdog's trip row (decision 17, 2026-10-03). Its reason
+    # replaces the current rule's on that one row: the runner's verdict is
+    # the stronger statement, and the flag stays ONE token (apply_results
+    # splits a note on ';', and _strip_brand would then leave half of it
+    # behind when a flag is retracted).
+    trips = [i for i, r in enumerate(rows) if is_trip_row(r)]
+    if trips:
+        said = trip_reading(rundir) if rundir else None
+        for i in trips:
+            kind, ua, src = trip_verdict(rows[i], said)
+            if kind == 'confirm':
+                flags[i] = f"breakdown? watchdog trip (I {ua:.0f}uA, {src})"
+            elif kind == 'sentinel':
+                _adv(i, f"watchdog trip not confirmed: the reading that "
+                        f"tripped it was the scope's off-screen sentinel, "
+                        f"not a number ({src})")
+            else:
+                _adv(i, "watchdog trip not confirmed: the current it "
+                        "tripped on is on record nowhere (blank "
+                        "measured_uA cell, and no run.log or "
+                        "telemetry.csv line says what the reading was)")
     # A confirmed row supersedes its own advisories: a single recovered
     # current event that corroborates an area collapse ON THE SAME ROW
     # landed in both dicts (the transient note is written before the
@@ -3005,6 +3062,13 @@ def breakdown_flags(rows, accepted_areas, settings):
     # (review 2026-08-04).
     for i in flags:
         advis.pop(i, None)
+    # The monitor log's streaks come LAST and stay on a confirmed row
+    # too: they are the time, kV and length of what the snapshots only
+    # sampled, not a second verdict on the row, so there is nothing to
+    # supersede. Advisory, never a flag (decision 17).
+    if rundir:
+        for i, note in telemetry_advisories(rundir, rows, settings).items():
+            _adv(i, note)
     return flags, advis
 
 
@@ -3550,11 +3614,13 @@ def _baseline_disc_uncached(base_gray, settings):
 # baseline frame, and says them in plain sentences.
 #
 # It is ADVICE. It changes no row, no flag and no file, and neither the
-# detector nor Save consults it. In particular it is not a breakdown
-# source: a watchdog trip row and an off-screen current in telemetry.csv
-# are REPORTED here, they do not confirm a breakdown, rename a frame or
-# cap a plot. Whether they should is an owner decision (SLDEA_HANDOFF.md,
-# 2026-10-02).
+# detector nor Save consults it. It is not a breakdown source either: it
+# only SAYS what breakdown_flags will do with the watchdog's trip row and
+# with the monitor log (decision 17, 2026-10-03: the trip confirms unless
+# its reading was the off-screen sentinel; telemetry streaks are advisory
+# notes). The readers of run.log and telemetry.csv below (_health_runlog,
+# _telemetry_table, trip_reading, telemetry_streaks) are shared with
+# breakdown_flags, so the strip and the flags read one file one way.
 # ---------------------------------------------------------------------------
 
 HEALTH_LEVELS = ('stop', 'warn', 'info')
@@ -3573,11 +3639,23 @@ HEALTH_SIGN_MIN_KV = 0.05
 # SAY which rule the run will get, so this mirrors breakdown_flags' own
 # `len(uas) >= 5`, and a test holds the two together.
 HEALTH_MIN_UA_ROWS = 5
+# A streak in the monitor log is reported only from this many samples in
+# a row (decision 17). One sample is one scope read; at the 2 Hz log two
+# are about a second. The watchdog's own trip needs its dwell (3 s by
+# default), so this is a looser, advisory bar on purpose.
+TELEMETRY_STREAK_MIN = 2
+# The telemetry event the runner writes off the very reading that tripped
+# the watchdog (gui.py, the trip branch of _sldea_worker), and the run.log
+# line of the same moment: 'I=OFF-SCREEN (clipping)' when that reading
+# was the sentinel, 'I=<number> uA' when it was a number.
+TELEMETRY_TRIP_EVENT = 'BREAKDOWN CONFIRMED'
 
 _SETUP_TOTAL = re.compile(
     r'^Total:.*\(\s*\d+\s+landings?,\s*(\d+)\s+frames?\)', re.M)
 _RUNLOG_END = re.compile(
     r'run (complete|aborted|BREAKDOWN-ABORT): (\d+)/(\d+) frames')
+_RUNLOG_TRIP = re.compile(
+    r'BREAKDOWN CONFIRMED[^\n]*?I=(OFF-SCREEN|[-+]?\d+(?:\.\d+)?)')
 
 
 def _read_text(path):
@@ -3614,7 +3692,7 @@ def _health_runlog(rundir):
     the part after the last 'run dir:' line is this run's."""
     text = _read_text(os.path.join(rundir, 'run.log'))
     out = {'found': text is not None, 'end': None, 'error': '',
-           'trip': False}
+           'trip': False, 'trip_sentinel': None, 'trip_ua': None}
     if text is None:
         return out
     at = text.rfind('run dir:')
@@ -3629,7 +3707,36 @@ def _health_runlog(rundir):
         out['error'] = errors[-1].strip()
     out['trip'] = ('BREAKDOWN CONFIRMED' in text
                    or 'BREAKDOWN-ABORT' in text)
+    # The reading the watchdog tripped on, as the trip line prints it:
+    # 'I=OFF-SCREEN (clipping)' for the sentinel, 'I=-240 uA' otherwise.
+    # A line without either (a hand-edited log) leaves both None.
+    hits = _RUNLOG_TRIP.findall(text)
+    if hits:
+        if hits[-1] == 'OFF-SCREEN':
+            out['trip_sentinel'] = True
+        else:
+            out['trip_sentinel'] = False
+            out['trip_ua'] = float(hits[-1])
     return out
+
+
+def _telemetry_table(rundir):
+    """telemetry.csv read whole -> (names, rows): `names` maps each header
+    name lower-cased to the file's own spelling, `rows` are the
+    csv.DictReader dicts in file order. None when the run has no
+    readable sidecar. Every reader of the sidecar goes through here, so
+    the columns are always found by NAME, never by position."""
+    path = os.path.join(rundir, 'telemetry.csv')
+    try:
+        with open(path, newline='', encoding='utf-8-sig',
+                  errors='replace') as f:
+            reader = csv.DictReader(f)
+            names = {(c or '').strip().lower(): c
+                     for c in (reader.fieldnames or [])}
+            rows = list(reader)
+    except (OSError, csv.Error):
+        return None
+    return names, rows
 
 
 def _health_telemetry(rundir):
@@ -3642,16 +3749,10 @@ def _health_telemetry(rundir):
     sample of it. -> {'i_n', 'i_off', 'i_first', 'v_n', 'v_off',
     'v_first'}; the *_first values are (t_s, nominal_kV) of the first
     off-screen sample, either of which may be None."""
-    path = os.path.join(rundir, 'telemetry.csv')
-    try:
-        with open(path, newline='', encoding='utf-8-sig',
-                  errors='replace') as f:
-            reader = csv.DictReader(f)
-            names = {(c or '').strip().lower(): c
-                     for c in (reader.fieldnames or [])}
-            rows = list(reader)
-    except (OSError, csv.Error):
+    table = _telemetry_table(rundir)
+    if table is None:
         return None
+    names, rows = table
     cols = {'i': names.get('i_status'), 'v': names.get('v_status')}
     if not cols['i'] and not cols['v']:
         return None
@@ -3687,6 +3788,236 @@ def _health_when(first):
     return f", first at {t:.0f} s into the run ({kv:.2f} kV commanded)"
 
 
+def is_trip_row(row):
+    """The live watchdog's trip row: tag 'breakdown' (step 99), or the
+    'WATCHDOG: breakdown confirmed' note it carries (gui.py, the trip
+    branch of _sldea_worker). One test for run_health and
+    breakdown_flags, so the strip and the flags agree on which row that
+    is. The 'breakdown?' token the review writes is not a trip."""
+    return (str(row.get('tag') or '').strip().startswith('breakdown')
+            or 'WATCHDOG' in (row.get('notes') or ''))
+
+
+def trip_reading(rundir):
+    """What the run's sidecar files say about the reading the watchdog
+    tripped on (decision 17, 2026-10-03). -> None when neither file
+    records a trip, else {'sentinel': True | False | None, 'ua': float
+    or None, 'source': 'telemetry.csv' | 'run.log'}.
+
+    The runner writes that reading twice, both times off the very
+    sample that tripped: the telemetry event row 'BREAKDOWN CONFIRMED'
+    (i_status 'offscreen' and a blank current for the sentinel, 'ok' and
+    the number otherwise) and the run.log line ('I=OFF-SCREEN
+    (clipping)' or 'I=<number> uA'). The trip row of data.csv is NOT that
+    reading: its measured_uA cell comes from the scope read taken with
+    the frame, hundreds of ms later, and the runner adds no current note
+    to it. telemetry.csv is read first (a telemetry-off run has none),
+    run.log second. 'sentinel' is None when a trip is recorded but its
+    reading is not (a hand-edited line, an 'invalid' status)."""
+    table = _telemetry_table(rundir)
+    if table is not None:
+        names, rows = table
+        ev_col = names.get('event')
+        i_col, ua_col = names.get('i_status'), names.get('measured_ua')
+        trips = [r for r in rows if ev_col and (r.get(ev_col) or '')
+                 .strip().upper().startswith(TELEMETRY_TRIP_EVENT)]
+        if trips:
+            row = trips[-1]
+            status = (row.get(i_col) or '').strip().lower() if i_col else ''
+            ua = _num(row.get(ua_col)) if ua_col else None
+            if status == 'offscreen':
+                return {'sentinel': True, 'ua': None,
+                        'source': 'telemetry.csv'}
+            if ua is not None:
+                return {'sentinel': False, 'ua': ua,
+                        'source': 'telemetry.csv'}
+            return {'sentinel': None, 'ua': None, 'source': 'telemetry.csv'}
+    log = _health_runlog(rundir)
+    if log['trip']:
+        return {'sentinel': log['trip_sentinel'], 'ua': log['trip_ua'],
+                'source': 'run.log'}
+    return None
+
+
+def trip_verdict(row, said):
+    """What breakdown_flags does with one trip row, given trip_reading's
+    answer `said` (None when the folder was not read or records no
+    trip). -> (kind, ua, source):
+
+      'confirm'   the reading is on record as a number: in `said`, or,
+                  when neither sidecar says, in the row's own
+                  measured_uA cell (a later read, the fallback)
+      'sentinel'  the reading was the off-screen sentinel: excluded
+      'unknown'   no record anywhere (blank cell, nothing on file)
+
+    run_health reports through the same function, so the strip says
+    exactly what the flags will do."""
+    if said is not None and said['sentinel'] is not None:
+        if said['sentinel']:
+            return 'sentinel', None, said['source']
+        return 'confirm', said['ua'], said['source']
+    cell = _num(row.get('measured_uA'))
+    if cell is not None:
+        return 'confirm', cell, 'measured_uA cell'
+    return 'unknown', None, ''
+
+
+def telemetry_streaks(table, dev_lim, min_samples=TELEMETRY_STREAK_MIN):
+    """Streaks of monitor samples away from rest, from a parsed
+    telemetry table (_telemetry_table). Pure. -> a list, in file order,
+    of {'t0', 't1', 'kv0', 'kv1', 'n', 'n_off', 'worst', 'rest',
+    'open'}; [] when the table has neither a current nor a status
+    column.
+
+    A sample is a row with a parseable measured_uA or i_status
+    'offscreen' (the 9.9E37 sentinel: a current beyond the window, so a
+    reading, not a gap). A row with neither is skipped, as the watchdog
+    skips a read the scope could not give: it neither lengthens nor
+    breaks a streak. rest = the median current of the samples at 0 kV
+    (the warm-up and baseline reads before the first ramp); with none
+    on file rest is None and only off-screen samples count as away. A
+    sample is away when it is off-screen or |I - rest| >= dev_lim.
+    A streak is a run of consecutive away samples at least min_samples
+    long. 'worst' is the largest |I - rest| in it over the readable
+    samples (None when all are off-screen or rest is None); 'open' says
+    the log ends inside it, so its length is a lower bound."""
+    names, rows = table
+    i_col, ua_col = names.get('i_status'), names.get('measured_ua')
+    t_col, kv_col = names.get('t_s'), names.get('nominal_kv')
+    if not i_col and not ua_col:
+        return []
+    samples = []
+    for row in rows:
+        ua = _num(row.get(ua_col)) if ua_col else None
+        off = bool(i_col) and (row.get(i_col) or '').strip().lower() \
+            == 'offscreen'
+        if ua is None and not off:
+            continue
+        samples.append({'ua': ua, 'off': off,
+                        't': _num(row.get(t_col)) if t_col else None,
+                        'kv': _num(row.get(kv_col)) if kv_col else None})
+    at_rest = sorted(s['ua'] for s in samples
+                     if s['ua'] is not None and s['kv'] is not None
+                     and abs(s['kv']) < 1e-9)
+    rest = None
+    if at_rest:
+        n = len(at_rest)
+        rest = (at_rest[n // 2] if n % 2
+                else 0.5 * (at_rest[n // 2 - 1] + at_rest[n // 2]))
+
+    def away(s):
+        if s['off']:
+            return True
+        return (rest is not None and s['ua'] is not None
+                and abs(s['ua'] - rest) >= float(dev_lim))
+
+    out, run = [], []
+    for k, s in enumerate(samples):
+        if away(s):
+            run.append(s)
+        if run and (not away(s) or k == len(samples) - 1):
+            if len(run) >= int(min_samples):
+                devs = [abs(x['ua'] - rest) for x in run
+                        if x['ua'] is not None and rest is not None]
+                out.append({
+                    't0': run[0]['t'], 't1': run[-1]['t'],
+                    'kv0': run[0]['kv'], 'kv1': run[-1]['kv'],
+                    'n': len(run), 'n_off': sum(1 for x in run if x['off']),
+                    'worst': max(devs) if devs else None, 'rest': rest,
+                    'open': away(s) and k == len(samples) - 1})
+            run = []
+    return out
+
+
+def telemetry_note(streak):
+    """One advisory note for a telemetry_streaks item: what the current
+    did, for how long, from when, at what kV, over how many samples.
+    'monitor log: current off-screen for 12.9 s from 36.6 s into the
+    run (0.66 to 1.00 kV, 24 samples, to the end of the log)'. One token
+    (no ';'), and its words before the first digit are fixed, so a
+    re-Save replaces the note on an unreviewed row instead of piling a
+    second copy beside it (apply_results, _note_kind)."""
+    s = streak
+    if s['n_off'] == s['n']:
+        lead = "current off-screen"
+    elif s['worst'] is not None:
+        lead = f"current up to {s['worst']:.0f} uA from rest"
+    else:
+        lead = "current away from rest"
+    when = ''
+    if s['t0'] is not None and s['t1'] is not None:
+        when = (f" for {s['t1'] - s['t0']:.1f} s from {s['t0']:.1f} s "
+                f"into the run")
+    parts = []
+    if s['kv0'] is not None and s['kv1'] is not None:
+        parts.append(f"{s['kv0']:.2f} to {s['kv1']:.2f} kV"
+                     if abs(s['kv1'] - s['kv0']) >= 0.005
+                     else f"{s['kv0']:.2f} kV")
+    parts.append(f"{s['n']} samples")
+    if 0 < s['n_off'] < s['n']:
+        parts.append(f"{s['n_off']} off-screen")
+    if s['open']:
+        parts.append("to the end of the log")
+    return f"monitor log: {lead}{when} ({', '.join(parts)})"
+
+
+def telemetry_advisories(rundir, rows, settings):
+    """ADVISORY notes from the monitor log, keyed by the data.csv row
+    they belong on (decision 17, 2026-10-03). -> {row_index: note}; {}
+    when the run has no readable telemetry.csv, no streak, or no t_s
+    column to place a streak by.
+
+    Each streak (telemetry_streaks, at breakdown_dev_ua) goes on the
+    NEAREST LATER snapshot row: the first row whose picture was taken at
+    or after the streak began. A row's time is the t_s of the telemetry
+    'snap ...' event row that names its frame (the runner writes one per
+    snapshot, off the same readings), or, when none names it, its
+    t_planned_s, which the runner keeps on the same clock. A streak that
+    no row follows goes on the last row that has a time. These notes
+    never confirm a breakdown and never rename a frame: they ride the
+    annotation channel at Save, like 'transient discharge?'."""
+    table = _telemetry_table(rundir)
+    if table is None:
+        return {}
+    names, tel = table
+    if not names.get('t_s'):
+        return {}
+    dev_lim = float(settings.get('breakdown_dev_ua',
+                                 DEFAULT_SETTINGS['breakdown_dev_ua']))
+    streaks = [s for s in telemetry_streaks(table, dev_lim)
+               if s['t0'] is not None]
+    if not streaks:
+        return {}
+    ev_col, t_col = names.get('event'), names['t_s']
+    snap_t = {}
+    for r in tel:
+        words = (r.get(ev_col) or '').split() if ev_col else []
+        if len(words) >= 4 and words[0] == 'snap':
+            snap_t.setdefault(words[-1], _num(r.get(t_col)))
+    timed = []
+    for i, row in enumerate(rows):
+        name = (row.get('frame_file') or '').strip()
+        t = None
+        if name:
+            t = snap_t.get(name)
+            if t is None:
+                t = snap_t.get(_frame_twin(name))
+        if t is None:
+            t = _num(row.get('t_planned_s'))
+        if t is not None:
+            timed.append((t, i))
+    if not timed:
+        return {}
+    timed.sort()
+    out = {}
+    for s in streaks:
+        later = [(t, i) for t, i in timed if t >= s['t0']]
+        i = later[0][1] if later else timed[-1][1]
+        note = telemetry_note(s)
+        out[i] = (out[i] + '; ' + note) if i in out else note
+    return out
+
+
 def _frame_twin(name):
     """The other name one frame can carry: the '_BREAKDOWN' name of a
     plain frame, the plain name of a branded one. plan_breakdown_marks
@@ -3710,7 +4041,9 @@ def run_health(rundir, run=None):
     picture); 'warn' means the review can go on but something recorded at
     capture needs a human look; 'info' explains. Every text is a plain
     sentence that says what to do. Advisory only: nothing here blocks
-    Detect or Save, and nothing here is a breakdown verdict.
+    Detect or Save, and nothing here is a breakdown verdict; the
+    watchdog_trip and telemetry sentences SAY what breakdown_flags will
+    do (through the same trip_verdict), they do not do it.
 
     Codes, in the order they are checked:
       no_run_csv            the folder has no readable data CSV       stop
@@ -3726,8 +4059,9 @@ def run_health(rundir, run=None):
       ua_missing            rows without measured_uA                  warn
       ended_early           fewer rows than setup.txt planned, or
                             run.log ends 'aborted' short of the plan  warn
-      watchdog_trip         a 'breakdown' tag, a WATCHDOG note, or
-                            run.log's BREAKDOWN lines                 warn
+      watchdog_trip         a trip row (is_trip_row) or run.log's
+                            BREAKDOWN lines; says whether the trip
+                            confirms (trip_verdict)                   warn
       frames_missing        frames named in the CSV, absent on disk   warn
       frames_renamed        frames on disk under their _BREAKDOWN twin
                             name (or the plain twin of a branded one) warn
@@ -3999,21 +4333,44 @@ def run_health(rundir, run=None):
             f"be reviewed, but the sweep is incomplete: say so wherever "
             f"you report this run.")
 
-    # The watchdog's trip: reported, never turned into a flag here.
-    trips = [i for i, r in enumerate(rows)
-             if str(r.get('tag') or '').startswith('breakdown')
-             or 'WATCHDOG' in (r.get('notes') or '')]
+    # The watchdog's trip: reported, with what breakdown_flags will do
+    # about it (trip_verdict, the same function it uses; decision 17).
+    trips = [i for i, r in enumerate(rows) if is_trip_row(r)]
     if trips or log['trip']:
         at = (f" at {kvs[trips[0]]:.2f} kV"
               if trips and kvs[trips[0]] is not None else '')
+        if trips:
+            kind, ua, src = trip_verdict(rows[trips[0]],
+                                         trip_reading(rundir))
+        else:
+            kind, ua, src = 'no_row', None, ''
+        if kind == 'confirm':
+            will = (f"Edge Review marks that row as a confirmed breakdown: "
+                    f"the current at the trip is on record as {ua:.0f} uA "
+                    f"({src}), and Save renames its frame and every later "
+                    f"one with _BREAKDOWN.")
+        elif kind == 'sentinel':
+            will = (f"Edge Review does NOT mark a breakdown from this stop "
+                    f"alone: the reading that tripped the watchdog was off "
+                    f"the scope screen (the off-screen sentinel, {src}), "
+                    f"which the scope also returns when its current "
+                    f"window is set wrong. That row gets a note saying so, "
+                    f"and its own current reading still counts like any "
+                    f"other row's.")
+        elif kind == 'unknown':
+            will = ("Edge Review does NOT mark a breakdown from this stop "
+                    "alone: the current it tripped on is on record "
+                    "nowhere (the trip row's current cell is blank, and "
+                    "no run.log or telemetry.csv line says what the "
+                    "reading was). That row gets a note saying so.")
+        else:
+            will = ("The trip row itself is not in data.csv, so Edge "
+                    "Review marks nothing from this stop.")
         say('warn', 'watchdog_trip',
             f"The current watchdog stopped this run{at}: the current "
             f"stayed too high, which usually means the device broke down "
-            f"there. Edge Review does not use this stop when it marks a "
-            f"breakdown: it decides from the current readings and the "
-            f"measured areas in data.csv, so this stop may not show up "
-            f"as a breakdown mark. Look at the last frames, and ask "
-            f"before you use the data near that voltage.")
+            f"there. {will} Look at the last frames, and ask before you "
+            f"use the data near that voltage.")
 
     # Pictures the CSV promises and the disk does not hold.
     lost = [i for i in missing if i != base_i]
@@ -4051,9 +4408,12 @@ def run_health(rundir, run=None):
             f"scope screen on {tel['i_off']} of {tel['i_n']} samples"
             f"{_health_when(tel['i_first'])}. A current that large can "
             f"mean the device broke down there, or that the scope's "
-            f"current window was too small. Edge Review does not read "
-            f"this log when it marks breakdowns: look at the frames near "
-            f"that voltage, and ask if the device looks damaged.")
+            f"current window was too small. Edge Review reads this log "
+            f"for notes only: a streak of such samples becomes a note on "
+            f"the next picture's row, with the time and the voltage, and "
+            f"never marks a breakdown or renames a frame by itself. Look "
+            f"at the frames near that voltage, and ask if the device "
+            f"looks damaged.")
     if tel and tel['v_off']:
         say('info', 'telemetry_v_offscreen',
             f"The monitor log (telemetry.csv) has the voltage off the "

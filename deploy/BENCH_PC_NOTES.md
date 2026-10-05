@@ -42,7 +42,8 @@ Software…` deploys to the share, not to anyone's cache, and only `launch_gui.s
 refreshes the cache. Restart now used to re-exec the app's own command line,
 which is the *cached* `gui.py` with the cached `PYTHONPATH`, so it came back as
 the version that was already running. This was reproduced against the reference
-copy on 2026-09-24. The bench check is pending: see `PROJECT_HANDOFF.md`.
+copy on 2026-09-24. The bench check is pending: see *Bench check for Restart
+now* at the end of this section.
 
 Now, when the app runs from `${SCPI_CACHE:-$HOME/.cache/scpi_control}/SCPI_Control`,
 Restart runs what a click on the icon runs, `bash /usr/local/bin/scpi-launch.sh`
@@ -115,6 +116,40 @@ GitHub fallback's runtime clone `~/.cache/scpi_control_git` stores its **own**
 URL in the scripts does nothing on a machine that already has that cache.
 Repoint it (`git -C ~/.cache/scpi_control_git remote set-url origin <url>`) or
 delete the directory and let it re-clone.
+
+### Bench check for Restart now (pending since 2026-09-24)
+
+The restart fix above was reproduced and tested only against the repo copies
+of the launchers. Neither check has been run on hc18kx2 yet, and the fix
+merges after them (owner's decision, 2026-09-24).
+
+**Check A: confirm the bug and the live launchers.** About 2 min; it deploys
+nothing.
+1. Run `grep -nE 'gui\.py|^CACHE=|^RUN_APP=' /mnt/shareDrive/_software/launch_gui.sh`.
+   It must show `RUN_APP="$CACHE/SCPI_Control"`, and `"$PY" "$RUN_APP/gui.py"`
+   as the command that starts the app.
+2. Run `grep -n 'launch_gui' /usr/local/bin/scpi-launch.sh`. The desktop
+   launcher must run `bash "$SHARE/launch_gui.sh"`.
+3. With the app open, `ps -o args= -C python3.11` must show
+   `~/.cache/scpi_control/SCPI_Control/gui.py`.
+4. If this PC's footer is behind `main`, run Update Software → Restart now.
+   On a version without the fix, the bug shows as a footer that did not change,
+   while `grep -m1 __version__ /mnt/shareDrive/_software/SCPI_Control/version.py`
+   shows the new stamp.
+
+**Check B: verify the fix.** About 5 min. Between steps 1 and 3, everyone who
+starts the app gets the fix branch, which is `main` plus the fix.
+1. Run `rm -rf /tmp/restart-fix && git clone -q --depth 1 -b claude/restart-through-launcher https://github.com/Anatol-Gogoj/Digital_Multitool /tmp/restart-fix && SCPI_SRC=/tmp/restart-fix bash /mnt/shareDrive/_software/update_software.sh`.
+2. Close the app and start it from the icon. The footer shows
+   `+<branch hash>`.
+3. Tools → Update Software…, which deploys `main` again, then Restart now.
+   The launcher's "updating" window appears, then the app comes back with
+   `main`'s hash in the footer, the same as the share's stamp.
+   `launch.log.prev` shows the restart.
+
+**The update that first installs the fix on a PC is restarted by the OLD
+code**, so that one restart still shows the old version. Start the app from
+the icon once after that update.
 
 ## Start-up time — where it actually goes
 

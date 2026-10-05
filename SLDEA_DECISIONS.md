@@ -1038,9 +1038,9 @@ failed at launch: the app then runs from the share, and a restart would
 load the new code. This was read from `deploy/launch_gui.sh.reference`;
 the live copy on the share was not checked. It is filed as a separate
 task. **Follow-up (2026-09-24): reproduced against the reference copy and
-fixed in #340** -- Restart now runs the desktop launcher again when the
-app runs from the cache. The bench check is pending; see
-`PROJECT_HANDOFF.md`.
+fixed in #340.** Restart now runs the desktop launcher again when the app
+runs from the cache. The bench check is pending; see
+`deploy/BENCH_PC_NOTES.md`.
 
 **Verification.**
 

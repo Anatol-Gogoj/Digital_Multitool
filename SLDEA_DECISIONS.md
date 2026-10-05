@@ -13,6 +13,352 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## Hand calibration: an untouched circle is not a fit, the hand view is contrast-stretched, and a frame with no picture says so first (2026-10-02)
+
+**TL;DR:** on run `SLDEA_20261001_151016` the automatic disc fit refused,
+the hand dialog showed a flat grey picture, and three circles the size of
+its random starting circle were accepted as the px→mm anchor, 1.61x too
+large. The hand modes now show a contrast-stretched view, refuse a circle
+that was never moved, and open a frame with no usable picture on a "repeat
+the test" notice with Cancel as the default. Since 2026-10-03 (owner
+decision 19, sub-entry below) hand rounds more than 5 percent apart are
+refused outright, with no override.
+
+**Observation (run `SLDEA_20261001_151016`, re-measured 2026-10-02).**
+
+- Capture was at exposure 3, gain 0 (`setup.txt`). The baseline spans
+  **2 gray levels** in the central search window (p5 66, p95 68), and all
+  26 frames of the run read 1 to 2. The other 873 frames in the corpus
+  (15 runs) read 30 or more; the lowest is P3_7 at 30.
+- The automatic fit refused: "no central dark region big enough to seed on
+  (the paper reads 67 gray and nothing below it covers 0.2% of the search
+  window)". So the dialog opened on the circle mode.
+- The circle mode showed the **raw** frame. The display stretch was
+  applied in the verify mode only, and its window rule refuses a step
+  under 6 gray levels anyway. The disc is a step of about 1 gray level, so
+  the picture was a flat grey field with a random circle on it.
+- The log line:
+  `mode=circle n=3 sigma=13.63% se=7.87% area_se=15.74% gate=0.40%
+  verdict=OVER-GATE range=23.07% mean=623.73px
+  diams=612.85,557.21,701.14px ... auto=none outcome=accepted-override`.
+- The dialog spawns each round's circle at a random radius of 0.30 to 0.40
+  of the search window's short side. At 1080p with `roi_frac` 0.85 that is
+  a diameter of **550.8 to 734.4 px**. All three logged diameters sit
+  inside that band. The disc is about 387 px (the science review's fit:
+  386.6 px, its refuter's: 386.8 px), which is outside it. This is what
+  three untouched spawns look like; it cannot be proved, because no centre
+  or gesture was logged.
+- Mean/true = 623.73 / 386.8 = 1.61, so every mm² would have been x0.385.
+  Nothing was saved from the run (no anchor block, no areas), and A/A0
+  would not have moved, since a scale cancels in a ratio.
+- Why nothing stopped it. The size gate accepts 0.06 to 0.85 of the short
+  side, and the spawn band is inside it by construction (the constants'
+  own comment said "a raw spawn is always an acceptable (if wrong) fit").
+  Enter banks rounds 1 to n-1. The SE gate and the missing cross-check
+  both asked, defaulting to decline, and both were answered with the
+  accept button. Nothing said "this picture is unusable".
+- After acceptance the status line said `OVER GATE` and `NOT
+  cross-checked`. The detection readout replaced it seconds later with a
+  bare warning sign after the SE, and Save's line ("saved in ... data.csv
+  updated") carried no warning at all. In `setup.txt` the anchor block
+  held `se_pct` and the `NOT CROSS-CHECKED` guard note; the words
+  OVER-GATE were only in `scale_calibration_log.txt`.
+
+**Decision.** Four changes, all in the Edge Review calibration dialog.
+
+1. **The hand modes show a contrast-stretched view.** With an automatic
+   fit on the frame, the window is the verify mode's own, so the picture
+   does not change when the operator switches method. With no fit (or a
+   fit whose step is under the verify rule's 6 gray levels) it comes from
+   the frame itself: p5 to p95 of the central search window, padded by
+   0.45 of that spread on each side (`cal_content_window`). On the 16
+   corpus baselines that is 9 fit windows and 7 percentile windows:
+
+   | Baseline | Contrast | Hand view window (gray) | From |
+   |---|---|---|---|
+   | P3_2 | 44 | 161.1 to 181.9 | fit |
+   | P3_6 | 33 | 123.8 to 137.2 | fit |
+   | DOT_P3_1 | 41 | 119.5 to 138.5 | fit |
+   | P3_5 | 44 | 126.2 to 209.8 | percentiles (fit step is 5 gray) |
+   | P3_7 | 30 | 100.5 to 157.5 | percentiles (fit refused) |
+   | 0806_151857 | 107 | 36.9 to 240.2 | percentiles (fit refused) |
+   | 1001_151016 | 2 | 65.1 to 68.9 | percentiles (fit refused) |
+
+   On the 2026-10-01 frame that window makes the disc visible: grainy, a
+   coarse edge, but there.
+2. **A circle round is refused while its circle is exactly where it was
+   spawned** (`cal_untouched`): "Move the circle onto the edge of the disc
+   first." By the button and by Enter. Exact equality, so one arrow nudge
+   clears it; it tells "did something" from "did nothing" and judges
+   nothing else. The two-point mode spawns nothing, so its untouched round
+   is the one with fewer than two clicks, which was already refused; its
+   message now reads "Click the two opposite edges of the disc first."
+3. **A flat frame opens on a statement, not on a circle.** When
+   `se.image_content` calls the frame flat (central-window p95 - p5 under
+   20 gray levels, the shared rule) and there is no fit to verify, a
+   notice comes first: "This frame shows no visible disc (contrast 2 gray
+   levels). Calibrating by hand here would be a guess. Check the camera
+   exposure and repeat the test." Cancel is the default; Enter, Esc and
+   the close box all cancel, and Enter cancels even with the focus on the
+   other button. "Look at the frame anyway" is a second, named button
+   (a click, or Space with the focus on it) that opens the hand tools,
+   with the statement kept on screen.
+   A frame that is one single gray level (a lens cap, a saturated frame)
+   has no window to stretch, so the hand tools show it as it is; the
+   notice and the dialog then say "the plain picture" and do not promise
+   a stretched view (`flat_view_text`).
+   Cancel changes nothing, and the status strip then says which scale
+   still stands (`flat_cancel_text`): `No new scale set; the earlier
+   anchor (N px) is still in use` when the session holds one, `... the
+   anchor recorded for this run (N px) is unchanged` when only `setup.txt`
+   does, and `No scale set` only when there is neither. A plain calibrate
+   never clears the session's anchor, so with the 623.73 px guess in place
+   "No scale set" would have been false: the next Save still applies it.
+   A re-anchor cancelled at the notice keeps the same sentence after its
+   own `re-anchor cancelled` line.
+4. **The record and the strip say what was accepted over.** The
+   `guard:` field in `setup.txt` now adds, in words, `OVER-GATE: SE x% of
+   diameter against the 0.4% gate - accepted anyway by operator`, `FLAT
+   FRAME: contrast N gray levels, no visible disc`, and the display window
+   the rounds were fitted on. The detection readout says `OVER GATE`
+   instead of a bare sign. Save's status line (also the one shown when
+   the plot or the overlays fail), the reuse line and the re-anchor line
+   carry a caveat rebuilt from the anchor's own record (`anchor_caveat`),
+   placed before the routine detail because the strip is one unwrapped
+   line. It has two leads:
+
+   | Lead | Said when | 2026-10-01 anchor |
+   |---|---|---|
+   | `SCALE NOT VERIFIED:` | nothing independent agreed with the anchor: `NOT cross-checked`, `cross-check OVERRIDDEN`, or a flat frame | yes: `hand rounds OVER GATE (SE 7.87% of diameter, limit 0.4%), NOT cross-checked (no automatic disc fit)` |
+   | `SCALE CAVEAT:` | the cross-check was clear and the only flag is the SE gate | no |
+
+   The quiet lead exists because three honest rounds are over the SE gate
+   about 7 times in 10 (28.9 % of 100 000 simulated sets pass at sigma
+   1.05 %, through `calibration_stats` and `se_ok`). "NOT VERIFIED" on an
+   anchor whose cross-check passed would be false, and saying it on most
+   honest anchors would wear the words out for the run that needs them.
+
+**What did not change.** The SE gate (0.4 %), the anchor guard (1 %),
+their order, their prompts, their defaults, and the override. The size
+gate. The spawn band. The verify mode and its window rule
+(`cal_stretch_window`). The blindness of the rounds: nothing about an
+earlier round or the fit's diameter is shown. `scale_calibration_log.txt`
+keeps its format. The stretch is a lookup table on the throwaway display
+crop; a diameter is circle geometry or two click positions in image px.
+
+**Limits.**
+
+- The stretch changes what a person sees, so it can change where they put
+  the mark. Every hand-repeatability number on record (sigma about 1.05 %
+  circle, 2.09 % two-point, 2026-08-06) was measured on the RAW view. No
+  person has been measured on the new one. The window is written into the
+  `guard:` note so the two eras can be told apart.
+- How far the picture's edge moves was measured by proxy: the half-height
+  of the median radial profile, on the raw luminance and on the displayed
+  one, for the 10 baselines that have a fit to take a centre from.
+  The **percentile window** keeps the half-height within 0.3 % of diameter
+  of the raw one on all 10. The **fit window** does not: it is narrow and
+  clips the paper, and on DOT_P3_1, P3_2, P3_6 and 0729_104531 the
+  displayed half-height sits 0.9, 1.7, 2.2 and 2.8 % of diameter INSIDE
+  the raw one (the other four discs: under 0.6 %). Against the automatic
+  fit neither view is closer: the mean offset over the 8 disc baselines is
+  0.64 % with the fit window, 0.85 % raw, 0.92 % with the percentile
+  window. The fit window is only used where a fit exists, so the
+  cross-check prompt still stands behind those rounds; the no-fit
+  fallback, which is the path this entry is about, gets the percentile
+  window.
+- The untouched check stops a round nobody fitted. It does not stop a
+  careless one: nudge each circle one px and the rounds bank. The SE gate
+  and the cross-check prompt are still what stands behind that.
+- A flat frame can still be calibrated through three deliberate steps
+  (the notice, then both prompts). That is on purpose: the owner has to be
+  able to inspect such a frame, and removing the override is not this
+  entry's decision (next section).
+- The percentile window is per channel, like the verify mode's, so a
+  colour cast is possible on a colour frame.
+
+**Owner decisions, not taken here.**
+
+- *Should an anchor that is both over the SE gate and not cross-checked be
+  refused outright?* It would have stopped 2026-10-01. But three honest
+  rounds at the measured hand sigma of 1.05 % have SE 0.61 %, which is
+  also over the 0.4 % gate, and a 3-round set passes that gate about 29 %
+  of the time (science review S42). On a refused-fit run there is no
+  cross-check either, so the rule would refuse about 7 in 10 honest
+  3-round anchors on exactly the runs that need a hand anchor.
+  *Answered 2026-10-03 (decision 19): refuse on the range, not on the
+  SE. See the sub-entry below.*
+- *Which window should the hand modes use when a fit exists?* Shipped:
+  the verify mode's, so the picture is the same in all three methods. The
+  percentile window would not move the half-height (previous section),
+  at the cost of a picture that changes when the method does.
+- The notice says "no visible disc". On the stretched view the 2026-10-01
+  disc is visible. The sentence is true of the raw frame and of the
+  recommendation (repeat the test); whether it should say "too dark to
+  measure" instead is a wording call.
+
+**Verification.** `tests/test_sldea_calibration.py` (69, 7 new, headless)
+pins the arithmetic: the flat rule, the percentile window, the untouched
+test against every gesture's smallest step, the statement and what it
+says the view is, the Cancel wording, the caveat and its two leads.
+`tests/test_sldea_edge_gui.py` (63, 9 new, needs a display) drives the
+dialog: the refusal by button, by Enter, on the last round's Finish and
+after Back, with a different scripted spawn for every round so that a
+dialog remembering only its first spawn fails; the two-point refusal;
+the notice with Enter cancelling from either button and with the window
+grab refused, then the second step through both prompts to a record that
+says OVER-GATE, FLAT FRAME and the window; a single-gray frame shown
+plain and said to be;
+Cancel at the notice with a session anchor, with only a recorded one and
+on the re-anchor route; no notice on a faint frame the fit still found a
+disc on (step 15 gray); the Save strip, with the plot failing and with an
+honest over-gate anchor; a committed re-anchor's strip; and the same
+gestures recording byte-identical diameters with the stretch on and off,
+in both hand modes. That last case runs on a frame with a bright band
+beside the disc, where the fit window (153.75 to 201.25) and the
+percentile window (133.5 to 255) are different numbers, so it also shows
+which of the two the hand modes take when a fit exists. Each new
+behaviour was also switched off in a scratch copy to confirm its case
+fails (31 of 31 mutations caught). On a copy of the real 2026-10-01 run
+the dialog opened on the notice, three Continue presses on the spawns
+banked nothing, and Cancel with the 623.73 px guess in the session left
+it in place and said so. Run on Windows (OpenCV 4.13) only; the
+Linux-Tk keyboard and messagebox behaviour is not bench-verified yet
+(follow-up checks in #347).
+
+### The range cap: hand rounds more than 5 percent apart are refused outright (2026-10-03, owner decision 19)
+
+**TL;DR:** the 2026-10-01 set (three circles 23 percent apart) could
+still be accepted through the two prompts. Hand rounds that differ by more
+than 5 percent of their mean are now refused outright: the only choices
+are "measure again" or cancel. Sets under the cap meet the same SE gate,
+anchor guard, prompts and overrides as before.
+
+**Observation.**
+
+- The 2026-10-01 rounds were 612.85, 557.21 and 701.14 px: range 143.93 px
+  on a mean of 623.73 px, 23.08 percent. The SE gate asked ("Rounds
+  disagree", SE 7.87 percent against 0.4) and was answered "accept as
+  measured"; the missing cross-check asked and was answered "use anyway".
+  Both are decisions the dialog lets the operator take, and the 2026-10-02
+  entry kept them on purpose.
+- What separates that set from an honest one is the range, not the SE.
+  Through `calibration_stats` and `se_ok` on 200,000 simulated sets per
+  cell (2026-10-03, not in the repo): at the circle mode's
+  measured per-fit sigma of 1.05 percent, an honest 3-round set has a
+  range over 5 percent 0.18 percent of the time (5 rounds 0.68, 8 rounds
+  1.76). Three untouched spawns at 1080p land under 5 percent only 8.3
+  percent of the time (five spawns, 0.4).
+- The SE gate never lets a range over 5 percent through on its own: the
+  largest range that passes it is 0.4 x d2(n) x sqrt(n), 1.17 percent at
+  n = 3 and 3.22 percent at n = 8. So every set the cap refuses was
+  already over the SE gate. The cap takes the override away from those
+  sets and touches nothing else.
+- The cost sits in the two-point mode. Its one measured sigma is 2.09
+  percent (SLDEA_MEASUREMENT 2.1a, one session), so the expected 5-round
+  range is d2(5) x 2.09 = 4.86 percent, just under the cap: 44 percent of
+  honest 5-round two-point sets at that sigma are refused (3 rounds 21, 8
+  rounds 69). In the circle mode the cost is under 2 percent of sets at
+  any round count in the table.
+
+**Decision (owner, 2026-10-03, decision 19).** One new constant,
+`se.CAL_RANGE_CAP_PCT = 5.0`, and one new step in `finish()`.
+
+1. Before the SE gate: when the recorded range (`spread_pct`, 100 x (max
+   - min) / mean, the number the log already writes as `range=`) is
+   strictly more than 5, the dialog says "The three rounds differ by 23.1
+   percent; more than 5 percent cannot be trusted. Measure again, or
+   cancel." Yes = measure again, which starts the set over blind, the
+   same as a mode change. No = cancel, the default; Enter cannot reach the
+   dialog underneath (the same `ask` helper as every prompt). No answer
+   accepts. The SE gate's "accept as measured" and the cross-check's "use
+   anyway" are never shown for such a set, because the set never reaches
+   them. The count is in words ("three", "five"); past ten it is digits.
+2. The prompt and the dialog behind it quote the range as a percentage
+   only, no diameter and no mean, so a refit stays blind. Same rule as the
+   SE gate's prompt.
+3. The log line records the verdict: `verdict=OVER-CAP
+   outcome=refused-cap`, in the same fields and order as every other
+   line, and the log header says what the word means. The verdict word
+   now comes from one function, `se.cal_verdict`, used by the dialog's log
+   line and by the re-anchor record, so the two cannot drift. A re-anchor
+   record built from a stored anchor whose range is over 5 percent reads
+   OVER-CAP too: that is what its rounds were, and `outcome=` says what
+   was done with it.
+4. After cancel the status strip says which scale still stands, in the
+   flat notice's own words (`scale_stands_text`, lifted out of
+   `flat_cancel_text` unchanged), then the refusal without its choices
+   (`cap_refused_text`). The Detect route does not overwrite it with the
+   generic "gated" line, and the re-anchor route keeps it after its own
+   "re-anchor cancelled" line.
+5. Strictly more than 5: a set at exactly 5.00 percent is not refused. A
+   range that would print as "5.0" is printed to two decimals so the
+   sentence can never read "5.0 percent; more than 5 percent".
+6. The cap needs no d2 factor, so a round count outside the table (nine
+   rounds, say) is still capped; such a set under the cap stays
+   UNJUDGEABLE, as before.
+7. The untouched-circle rule of the 2026-10-02 entry stays as it is (the
+   "plus" in decision 19).
+
+**What did not change.** For every set with a range of 5 percent or
+less: the SE gate (0.4 percent), the anchor guard (1 percent), the
+cross-check, their order, their prompts, their defaults and their
+overrides. A 4 percent set reaches "Rounds disagree" and then the guard
+exactly as before, with the same answers. The verify mode has no rounds
+and is not capped. The spawn band, the size gate, the hand view, the
+`setup.txt` fields and the log line format.
+
+**Limits.**
+
+- The cap judges plausibility, not precision. A careless set that stays
+  within 5 percent still reaches the SE gate and can still be accepted
+  over it, with the record saying so, as before.
+- The two-point cost above. Shipped as one number for both hand modes;
+  whether the two-point mode should get its own cap is an owner call.
+- Anchors recorded before 2026-10-03 with a range over 5 percent keep
+  their record and their `se_pct`; `sldea_diag` reads them as before. Only
+  a new re-anchor record on such a run will carry OVER-CAP.
+- No person has measured the two-point mode since 2026-08-06, so the 44
+  percent figure rests on one session's sigma.
+
+**Verification.** `tests/test_sldea_calibration.py` (73, 4 new,
+headless) pins: the cap verdict on the incident set and not on a 4
+percent set; the strict inequality at 5.00 and 5.01; nine rounds capped
+without a d2 factor; the proof that the SE gate's largest passing range
+is under the cap for every n in the d2 table; the wording, that it is
+ASCII and carries no diameter; the log line in the usual field order, the
+header, and the re-anchor record; and the strip's cancel sentence with a
+session anchor, with only a recorded one, and with neither.
+`tests/test_sldea_edge_gui.py` (64, 1 new, needs a display) drives the
+real dialog with the incident set scaled to the fixture (122.57, 111.44,
+140.23 px, range 23.08 percent): the old override script (No, Yes) in the
+circle mode with a fit, where only the refusal is asked and the log line
+says OVER-CAP; the circle mode with no fit, through "measure again" (the
+set restarts on round 1 with nothing banked), a second refusal and
+cancel; the two-point mode with five chords; a 4 percent set reaching
+"Rounds disagree" and the guard with the same answers; the Detect route;
+and the re-anchor route on a saved run, data.csv and the anchor block
+untouched. The existing dialog cases that used sets 14 to 35 percent
+apart to reach the SE gate now use sets 3.8 to 4.4 percent apart, so
+they still reach it. The two-point part runs at random rotations, so
+its range is pinned as "between 20 and 27 percent, and the same number
+the log line records", not as one value. Each behaviour was switched off
+in a scratch copy, 16 of 16 caught by a named test: no cap; cap at 25
+percent; inclusive at 5.00; verdict left OVER-GATE; the mean quoted on
+the prompt; Yes accepting the mean; default Yes; cap after the SE gate;
+refused set unlogged; strip not written; Detect overwriting the strip;
+re-anchor dropping the reason; measure again keeping the banked rounds;
+count in digits; two-point sets uncapped; re-anchor record ignoring the
+cap. The incident was replayed on a scratch copy of the real run with its
+three logged diameters scripted as the fits and the old answers (No, Yes)
+queued: the notice, then the dialog, then one question, no anchor, one
+`verdict=OVER-CAP outcome=refused-cap` line, setup.txt and data.csv byte
+for byte as they were. The batch harness over the 16-run corpus (899
+frames) matches main's baseline exactly, as it should: the cap lives in
+the dialog and the harness never opens it. Run on Windows (OpenCV 4.13)
+only; the Linux-Tk keyboard and messagebox behaviour is not
+bench-verified yet (follow-up checks in #347).
+
 ## Edge Review says what went wrong at capture before the review starts, and Save keeps the runner's notes (2026-10-02)
 
 **TL;DR:** picking a run in Edge Review now shows a "Run health" strip

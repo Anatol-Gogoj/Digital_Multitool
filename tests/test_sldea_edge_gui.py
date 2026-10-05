@@ -4763,13 +4763,20 @@ def test_save_empties_old_estimator_rows_and_stamps_the_provenance():
         assert se.AREA_ESTIMATOR_STALE_NOTE not in saved[0]['notes']
         assert os.path.exists(csv_path + '.bak')
         # the stamp: current version plus the baseline's provenance, in
-        # the edge-settings block, pinning no detection setting
+        # the edge-settings block, pinning no detection setting; since
+        # owner decision 6 (2026-10-03) the tracker's window limits the
+        # rows were measured under ride on it as the constants the
+        # tracker really read
         stamp = se.load_stamp(run)
         assert stamp['area_estimator'] == se.AREA_ESTIMATOR_VERSION, stamp
         assert stamp.get('base_rays', 0) >= se.RAY_MIN_COMMON, stamp
         assert 0.0 <= stamp['base_hidden_pct'] < 100.0, stamp
         assert 'base_one_sided' in stamp, stamp
+        assert stamp['ray_win_hi'] == se.RAY_WIN_HI, stamp
+        assert stamp['disc_fit_r_max'] == se.DISC_FIT_R_MAX, stamp
         assert not se.has_saved_settings(run)
+        assert not any(k in se.load_settings(run)
+                       for k in se.TRACKER_LIMIT_KEYS)
         assert se.load_scale_anchor(run)['diam_px'] == 160.0
         assert not mb.warnings, mb.warnings
         # a second Save: the stamp is current, so a kept tracker row is
@@ -4795,6 +4802,19 @@ def test_save_empties_old_estimator_rows_and_stamps_the_provenance():
         assert se.load_stamp(run) == stamp
         with open(csv_path, newline='', encoding='utf-8-sig') as f:
             assert list(csv.DictReader(f))[1]['active_area_px'] == '9100'
+        # ...the tracker limits included: a run whose rows were measured
+        # under another window (the 2026-10-02 one, 1.38 r0 and 1.3 r0)
+        # keeps that window on record through a Save with no Detect,
+        # because the rows on file are still that window's
+        old_win = dict(stamp, ray_win_hi=1.38, disc_fit_r_max=1.3)
+        se.save_settings(run, None, stamp=old_win)
+        app2b = gui.EdgeReviewApp(root, path=run)
+        app2b.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        assert not app2b.cands_all
+        app2b.save()
+        assert se.load_stamp(run) == old_win, se.load_stamp(run)
+        se.save_settings(run, None, stamp=stamp)
+        assert se.load_stamp(run) == stamp
         # a trace-only Save on an OLD run cannot convert it quietly: the
         # dialog says the rows are emptied and not re-measured
         se.save_settings(run, None, stamp=se.estimator_stamp(None, version=1))
@@ -5038,10 +5058,13 @@ def test_edge_review_warns_in_one_line_off_the_pinned_opencv():
             gui.messagebox = real_mb
         assert not mb.errors, mb.errors
         assert se.saved_area_estimator(run) == se.AREA_ESTIMATOR_VERSION
-        # the stamp records the versions that really ran, not the pin
+        # the stamp records the versions that really ran, not the pin,
+        # and the tracker limits that really measured the rows
         stamp = se.load_stamp(run)
         assert stamp['opencv_version'] == se.library_versions()['opencv_version']
         assert stamp['numpy_version'] == se.library_versions()['numpy_version']
+        assert {k: stamp[k] for k in se.TRACKER_LIMIT_KEYS} \
+            == se.tracker_limits(), stamp
         app2._cancel_pending()
     finally:
         se.opencv_version_warning = orig

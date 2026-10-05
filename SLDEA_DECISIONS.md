@@ -13,6 +13,129 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## The tracker follows the disc to the shoulder, a clean tracker beside a patch mate is spared, and a Save stamps the window (2026-10-03)
+
+**TL;DR:** the boundary tracker now searches out to 1.70 times the resting
+radius and accepts fits up to 1.75 (it was 1.38 and 1.3), so the flat
+shoulder frames just before buckling get a real edge instead of only patch
+tiers, and no already-accepted campaign value moves more than 0.21 %. A
+clean tracked frame is no longer sent to review only because the other
+snapshot of its landing is a patch; the patch stays queued. Every Save
+writes the two limits into `setup.txt` and the tidy CSV, once per run.
+
+**Observation.** The review copy's 16 run folders (899 frames), OpenCV
+4.13, detection replayed as Edge Review runs it on the 2026-10-02 estimator.
+
+- *The window* (science review finding S51). `_disc_fit_candidate` refused
+  an ellipse above 1.3 r0 (1.69x area) and `_disc_rays` searched only to
+  1.38 r0, under a comment that called 1.25x area the full ramp; the
+  campaign discs reach 2.25 to 2.34x. Thirteen shoulder frames on DOT_P3_1,
+  P3_2, P3_3 and P3_6 (4.5 to 6.5 kV) were refused by the gate alone and
+  sat in the queue with only patch tiers at 0.01 to 1.5x A0. On wrinkled
+  frames whose edge had left the window, the argmax took an inner step.
+- *The pair cap* (findings S37/S40). Tracked frames with a clean audit sat
+  in review only because the other snapshot of their landing was won by a
+  patch tier (`tex-ratio` or a `diff-*` region).
+- *The record.* The window and gate are constants, not settings (owner
+  decision 11), and they moved under the same `area_estimator: 2`. On the
+  wrinkled queue frames P3_2 r38, r39 and P3_6 r39 to r43 the two windows
+  read +8 to +16 % apart, so a row accepted from the queue could not say
+  which window measured it.
+
+**Decision.**
+
+- *`DISC_FIT_R_MAX = 1.75`, `RAY_WIN_HI = 1.70`, `RAY_REACH = 1.8`
+  (unchanged)*, module constants with the measured facts beside them. A ray
+  that meets foil or leaves the frame anywhere inside 1.8 r0 is not read at
+  all, so the window can never put a strip edge under the fit. Not taken: a
+  window anchored to the last accepted landing (the refuter measured it
+  shifting ten accepted DOT frames by +7 to +10 % with no ground truth).
+- *A pair mismatch spares a tracked member with a recorded audit verdict
+  that tripped neither gate and no review-only tag, when every mate is a
+  patch tier.* It keeps its own confidence (no bonus) and is tagged
+  `pair_mate_patch`; the patch member stays capped, so the landing still
+  reaches the queue. The rule relies on nothing else and does not know why
+  the snapshots disagree. A tracker with no verdict (fewer than 12 open
+  audit rays) or with a review-only tag (`ray_one_sided`, `ray_trim_share`,
+  owner decisions 2 and 9; the exemption reads `REVIEW_ONLY_TAGS`, as the
+  agreement branch does) is capped as before, as are both-tracker and
+  tracker-versus-resting pairs. Not taken: agreement within one method
+  family, which would let SquareStack-1 L6 pre (a 0.23x A0 tex patch beside
+  a bias-tripped tracker) auto-accept.
+- *Every Save stamps the two limits, per run (owner decision 6).*
+  `ray_win_hi: 1.7` and `disc_fit_r_max: 1.75` join `STAMP_KEYS`
+  (`TRACKER_LIMIT_KEYS`, from `tracker_limits()`, the constants the
+  tracker in this process reads) as plain `key: value` lines between the
+  baseline provenance and the library versions; `load_settings` never
+  returns them and a trace-only Save keeps the recorded ones. The tidy CSV
+  carries both after `numpy_version` wherever `area_estimator` is filled
+  (a `disc-fit` row with an area). No caption line. `area_estimator: 2`
+  with no limit lines means the 1.38 / 1.3 window: the 2026-10-02
+  estimator is the only code that wrote version 2 without them.
+
+**Evidence.** Corpus auto / review / reject: 472 / 328 / 99 on `main`,
+451 / 349 / 99 with the 2026-10-02 estimator, 458 / 342 / 99 with this
+entry. Against the estimator, 15 frames change status:
+
+- 11 review -> auto, each outline checked on the ink edge at 1:1 on six
+  azimuths: DOT_P3_1 r49 (6.25 kV post, 1.701x A0, conf 0.88); P3_2 r35
+  (1.665; its mate r36 is now tracked, so the pair confirms); P3_3 r37 to
+  r40 (4.75 and 5.0 kV, 1.659 to 1.727, conf 0.99); P3_6 r31, r50 and
+  233451 r37 (audit no-step now under its 15 % gate); P3_3 r46 and P3_5
+  r46 (the pair exemption).
+- 4 auto -> review: P3_6 r32 and r48 (audit no-step 16.1 % and 15.4 %);
+  233451 r43 (8 rays jump from 0.91 to 1.52 r0, ratio 1.248 -> 1.261,
+  audit no-step 21.3 %); SquareStack-1 r21 (a 0.17x A0 tex patch, now
+  beside a tracker at 1.305, a 154 % mismatch).
+- Already-accepted values, 447 frames auto on both sides: median move
+  0.00 %, 90th percentile 0.02 %, none above 1 %, maximum 0.21 % on a
+  campaign run (P3_6 r74) and 0.95 % on retired 152205 (r30). The baseline
+  rays are unchanged ray for ray on every campaign run and on 152205,
+  233451 and 104531 (360 rays, maximum difference 0.000 px); the movement
+  is on the frame side, where a stronger step beyond 1.38 r0 takes a few
+  rays that the sustained-step test or the 2.5 sigma trim then drops.
+- The pair exemption fires twice, both one-sided mid-hold collapses (P3_3
+  L23, P3_5 L23): the post-ramp r45 is a buckled membrane only a tex-ratio
+  patch outlines (1.84x and 1.55x A0), the pre-ramp r46 a smooth collapsed
+  disc the tracker reads at 1.217 (conf 0.80, no-step 2.1 %, bias 0.1 px)
+  and 1.242 (conf 0.91, 4.4 %, 1.3 px), consistent with the next landing's
+  1.204 and 1.229. The review-only condition reaches no corpus frame (the
+  replay is identical field for field with and without it).
+- Decision 9 still sends two shoulder frames this window reaches to a
+  human, the tracker as candidate A: P3_2 r36 (1.723x A0, trim share
+  0.2021) and P3_5 r32 (1.472, 0.2405).
+- Auto-accepted peaks, estimator -> this entry: DOT_P3_1 1.557 -> 1.701,
+  P3_2 1.575 -> 1.665, P3_3 1.584 -> 1.727, P3_5 1.281 unchanged, P3_6
+  1.532 -> 1.510.
+
+**Limits.**
+
+- The window stamp is per run and cannot say which window measured a kept
+  review-queue row. A Save rewrites only the rows decided in that session,
+  so a queue row kept from an earlier pass keeps that pass's px under the
+  later stamp, and `stale_estimator_rows` keys on the version alone. If
+  the window moves again, a re-saved run's kept rows must be re-reviewed;
+  a per-row tag is the follow-up if a third window lands.
+- The reviewed peaks (2.25 to 2.34x) are still not tracked: the buckled
+  frames above the shoulder audit no-step at 38 to 55 % and stay in review.
+- 1.75 and 1.70 were chosen on this corpus. The audit's 15 % no-step gate
+  decides four P3_6 frames either way, all within 1.1 points of it.
+- The pair exemption cannot tell a collapse from a definition mismatch (a
+  diff blob inside the tracked disc) and would fire on either; the capped
+  patch member is what keeps a human in the loop.
+- DOT_P3_1 r51 (6.5 kV post) is tracked at 1.882 (conf 0.70) but drops off
+  the three-candidate list behind three diff patches at 0.01 to 0.02x A0;
+  keeping a slot for the tracker is owner decision 10, a follow-up.
+- Numbers are OpenCV 4.13. Nothing on the lab share was reprocessed.
+
+**Verification.**
+
+- `tests/test_sldea_edge.py` 103 pass: constants, pair exemption, stamp.
+- `tests/test_sldea_edge_gui.py` 57 pass: the Save stamp and trace-only Save.
+- `tests/test_sldea_plot.py` 91 pass: the two tidy columns.
+- `tests/test_sldea_diag.py` 19 pass: the stamp built from the report.
+- Corpus replay of the 899 frames against `main` and the estimator: above.
+
 ## A and A0 become one measurement: the disc-fit area is a common-ray ratio, and gated frames are measured (2026-10-02)
 
 **TL;DR:** the resting area A0 was a circle, but every measured row was an

@@ -99,6 +99,19 @@ number):
   wrote the areas; every number here is OpenCV 4.13), the tidy CSV
   carries them beside `area_estimator` on every machine row, and Edge
   Review shows one warning line when it runs off the pinned OpenCV.
+  The Save also stamps the tracker's window limits, `ray_win_hi` and
+  `disc_fit_r_max` (§3 level 4, item 3; owner decision 6, 2026-10-03):
+  they are constants that moved once under the same `area_estimator`
+  (1.38 -> 1.70 and 1.3 -> 1.75 r₀), and on the wrinkled review-queue
+  frames the two windows read +8 to +16% apart, so a row accepted from
+  the queue is only comparable with another once both say which window
+  measured them. The stamp is per run (the window of the last Save that
+  ran Detect), not per row: a queue row kept from an earlier pass keeps
+  that pass's px under the later stamp, so after any further move of
+  the window re-review a re-saved run's kept rows. The tidy CSV carries
+  the two beside the versions on every `disc-fit` row; a run saved
+  before they were recorded has them blank (with `area_estimator` 2
+  that means the 1.38 / 1.3 window).
 - **DON'T** mix machine areas and hand-traced areas in one absolute
   comparison without the +5.5% definitional correction.
 - **DON'T** judge any machine boundary against a bar above IoU ~0.97 —
@@ -735,7 +748,16 @@ The load-bearing choices:
    follow the taut rim, which migrates inward with kV. Both were
    built, falsified against radial intensity profiles, and rejected.
    The fitter takes the strongest sustained dark→light step per ray
-   at 0.80–1.38 r₀, sub-pixel refined by parabolic interpolation,
+   at 0.80–1.70 r₀ (1.38 through 2026-10-02: that window and the
+   1.3 r₀ gate on the fitted ellipse, now 1.75 r₀, refused the flat
+   shoulder frames at 1.70–1.94× area although the campaign peaks are
+   2.25–2.34×; a ray that meets foil or the frame border inside
+   1.8 r₀ is never read, so the window cannot reach the strips; both
+   limits are constants, and Edge Review's Save stamps them into
+   `setup.txt` as `ray_win_hi` and `disc_fit_r_max` so a run says
+   which window its last Detect-and-Save used, per run and not per
+   row, owner decision 6, 2026-10-03),
+   sub-pixel refined by parabolic interpolation,
    sectors through the electrodes excluded by azimuth. The same rays
    are measured on the baseline frame, and the area is the baseline
    circle × Σr²/Σr₀² over the common rays after a 2.5σ (MAD) trim of
@@ -759,7 +781,19 @@ The load-bearing choices:
    keeps its rank and area but loses the right to auto-accept — and
    pair agreement can never lift it back, because two snapshots
    fooled the same way agree beautifully (correlated error is exactly
-   what pair agreement cannot certify against).
+   what pair agreement cannot certify against). A pair
+   *disagreement* caps both snapshots, with one exception since
+   2026-10-03: a tracked boundary with a recorded, clean audit
+   verdict, and no review-only tag from the ray ratio (one-sided
+   rays, a large trim share), whose mate is a patch tier keeps its
+   own confidence. The exception relies only on that verdict (the ink
+   step under the outline was measured) and on the patch member
+   staying capped, so the landing is still queued; it does not know
+   why the snapshots disagree. On the review corpus it fires twice,
+   both on a one-sided mid-hold collapse (a buckled post-ramp snapshot
+   only a tex-ratio patch outlines, a collapsed pre-ramp disc the
+   tracker reads): there the accepted number is the collapsed state's,
+   and the human sees the collapse through the capped member.
 
 ### Level 5 — referee / metrologist
 

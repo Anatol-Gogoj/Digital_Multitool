@@ -1537,6 +1537,120 @@ def test_bulge_inside_a_blocked_sector_is_not_seen_and_says_so():
     assert bulged['n_common'] <= 360 * (1 - bulged['hidden_pct'] / 100) + 1
 
 
+def test_tracker_follows_the_disc_past_the_old_ceiling():
+    """2026-10-03: through 2026-10-02 the tracker refused any fit above
+    1.3 r0 (1.69x area) and searched only to 1.38 r0, under a comment
+    that called a 1.25x area expansion the full ramp; the campaign peaks
+    are 2.25 to 2.34x and the flat shoulder frames at 1.70 to 1.94x sat
+    in review with nothing but patch tiers to choose from. The same
+    rays must now read a disc grown to the shoulder (and to the
+    reviewed peaks) as scale squared, with the outline on the edge, and
+    the frame must auto-accept."""
+    s = dict(se.DEFAULT_SETTINGS)
+    base = _flared_scene()
+    ref = se.baseline_disc(base, s)
+    assert se.DISC_FIT_R_MAX == 1.75 and se.RAY_WIN_HI == 1.70
+    assert se.RAY_WIN_HI < se.RAY_REACH and se.DISC_FIT_R_MAX < se.RAY_REACH
+    for scale in (1.32, 1.38, 1.45, 1.53):
+        img = _flared_scene(scale=scale, noise_seed=11)
+        c, ratio = _track(base, img, s)
+        assert abs(ratio / scale ** 2 - 1.0) < 0.005, (scale, ratio)
+        r_eq = np.sqrt(c['ellipse_over_circle'])
+        assert 1.3 < r_eq <= se.DISC_FIT_R_MAX, (scale, r_eq)
+        assert c['conf_own'] >= 0.9, (scale, c['conf_own'])
+        cands = se.candidates(base, img, s)
+        assert cands[0]['method'] == 'disc-fit', (scale, cands[0]['method'])
+        assert abs(cands[0]['area_px'] / ref['area_px'] / scale ** 2
+                   - 1.0) < 0.005, scale
+        assert not se.needs_review(cands, s), (scale, cands[0]['conf'])
+    # the old limits really did refuse these: with them the shoulder
+    # disc gets no tracker candidate at all
+    old = (se.DISC_FIT_R_MAX, se.RAY_WIN_HI)
+    se.DISC_FIT_R_MAX, se.RAY_WIN_HI = 1.3, 1.38
+    try:
+        se._BASE_RAYS_CACHE.clear()
+        prep = se.prepared_diff(base, _flared_scene(scale=1.38,
+                                                    noise_seed=11), s)
+        assert se._disc_fit_candidate(prep, s, ref,
+                                      assume_responding=True) is None
+        # ...and a Save under those limits would have stamped THEM: the
+        # stamp records the window the tracker in this process reads,
+        # not a frozen copy (owner decision 6, 2026-10-03)
+        assert se.tracker_limits() == {'ray_win_hi': 1.38,
+                                       'disc_fit_r_max': 1.3}
+        st = se.estimator_stamp(None, libs={})
+        assert (st['ray_win_hi'], st['disc_fit_r_max']) == (1.38, 1.3), st
+    finally:
+        se.DISC_FIT_R_MAX, se.RAY_WIN_HI = old
+        se._BASE_RAYS_CACHE.clear()
+    assert se.tracker_limits() == {'ray_win_hi': 1.70,
+                                   'disc_fit_r_max': 1.75}
+
+
+def test_tracker_refuses_a_disc_beyond_its_reach():
+    """The limits are a ceiling, not a licence: an edge past the search
+    window has no ray on it. With no step inside the window the tracker
+    refuses (no candidate), which is what this synthetic scene shows;
+    a step that IS inside the window is still fitted (the lock-in
+    documented in SLDEA_DECISIONS.md 2026-10-03: +8 to +16 % on wrinkled
+    frames whose edge left the window), so the audit, not this gate, is
+    what catches a disc that has outgrown the window. A patch tier may
+    still outline the frame for the human."""
+    s = dict(se.DEFAULT_SETTINGS)
+    base = _flared_scene()
+    ref = se.baseline_disc(base, s)
+    for scale in (1.78, 1.95):
+        img = _flared_scene(scale=scale, noise_seed=11)
+        prep = se.prepared_diff(base, img, s)
+        assert se._disc_fit_candidate(prep, s, ref,
+                                      assume_responding=True) is None, scale
+        assert all(c['method'] != 'disc-fit'
+                   for c in se.candidates(base, img, s)), scale
+
+
+def test_rays_that_meet_foil_inside_the_reach_are_not_read():
+    """The hard ceiling under the wider window: a ray that meets the
+    foil strips anywhere out to RAY_REACH is dropped whole, on the
+    baseline and on every frame, although the ink edge at 1.0 r0 is
+    perfectly visible on it. So the tracker can never report the edge
+    of a strip as the ink edge, and a strip laid across an open sector
+    costs rays (hidden_pct) but never moves the ratio."""
+    s = dict(se.DEFAULT_SETTINGS)
+    rng = np.random.default_rng(3)
+
+    def with_strip(img, r_lo=145, r_hi=215):
+        # crinkled foil across the top sector, 1.45 to 2.15 r0 out: thick
+        # enough for foil_mask's depth gate (an inscribed 30 px), as the
+        # real strips are
+        out = img.copy()
+        out[270 - r_hi:270 - r_lo, 420:540] = _crinkle((r_hi - r_lo, 120),
+                                                       rng)
+        return out
+
+    plain = _flared_scene()
+    strip = with_strip(_flared_scene())
+    assert se.foil_mask(strip)[55:125, 420:540].all(), "the strip is foil"
+    ref_p = se.baseline_disc(plain, s)
+    ref_s = se.baseline_disc(strip, s)
+    assert ref_s is not None and abs(ref_s['diam_px'] - ref_p['diam_px']) < 3.0
+    r_plain = se._baseline_rays(plain, s, ref_p)
+    r_strip = se._baseline_rays(strip, s, ref_s)
+    top = slice(240, 300)              # rays through the strip (270 = up)
+    assert np.isfinite(r_plain[top]).all(), "the plain scene reads the top"
+    assert not np.isfinite(r_strip[top]).any(),         "a ray through foil inside the reach must not be read"
+    # elsewhere the same rays are read (to the px the recentred disc
+    # allows), and the ratio does not see the strip
+    side = np.r_[0:200, 340:360]
+    both = np.isfinite(r_plain[side]) & np.isfinite(r_strip[side])
+    assert both.sum() == np.isfinite(r_plain[side]).sum() > 120
+    assert np.abs(r_plain[side][both] - r_strip[side][both]).max() < 3.0
+    for scale in (1.0, 1.12, 1.32):
+        img = with_strip(_flared_scene(scale=scale, noise_seed=11))
+        c, ratio = _track(strip, img, s)
+        assert abs(ratio / scale ** 2 - 1.0) < 0.005, (scale, ratio)
+        assert c['hidden_pct'] > 40.0, c['hidden_pct']
+
+
 def _rays(r, lo, hi):
     """360 rays at radius r, measured only where lo <= degree < hi."""
     out = np.full(360, np.nan)
@@ -1672,9 +1786,23 @@ def test_estimator_stamps_roundtrip_and_never_become_settings():
     untouched, and a stamp-only save must not pin detection settings
     nobody chose. No stamp = the old ellipse estimator. Since 2026-10-03
     (owner decision 29) the OpenCV and numpy versions of the saving
-    process ride on the same stamp as text lines, read back as text."""
+    process ride on the same stamp as text lines, read back as text,
+    and (owner decision 6) so do the tracker's window limits, the
+    ink-step search top and the ellipse gate (TRACKER_LIMIT_KEYS), as
+    numbers: they are constants that moved once under the same
+    estimator version, so the stamp is the only record of the window a
+    run's last Detect-and-Save used (per run, not per row: the next
+    test)."""
     libs = se.library_versions()
     assert tuple(libs) == se.STAMP_TEXT_KEYS, libs
+    lims = se.tracker_limits()
+    assert tuple(lims) == se.TRACKER_LIMIT_KEYS, lims
+    assert lims == {'ray_win_hi': se.RAY_WIN_HI,
+                    'disc_fit_r_max': se.DISC_FIT_R_MAX}, lims
+    assert all(isinstance(v, float) for v in lims.values()), lims
+    assert not any(k in se.DEFAULT_SETTINGS for k in se.STAMP_KEYS)
+    assert se.STAMP_KEYS == ((se.AREA_ESTIMATOR_KEY,) + se.PROVENANCE_KEYS
+                             + se.TRACKER_LIMIT_KEYS + se.STAMP_TEXT_KEYS)
     assert all(re.fullmatch(r'\d+\.\d+\.\d+\S*', v) for v in libs.values()), \
         libs
     d = tempfile.mkdtemp(prefix='edge_est_')
@@ -1696,7 +1824,7 @@ def test_estimator_stamps_roundtrip_and_never_become_settings():
                 'base_one_sided': 0.008,
                 'base_ellipse_over_circle': 1.07418}
         stamp = se.estimator_stamp(prov)
-        assert stamp == dict(prov, area_estimator=2, **libs)
+        assert stamp == dict(prov, area_estimator=2, **lims, **libs)
         assert tuple(stamp) == se.STAMP_KEYS
         se.stamp_area_estimator(d, stamp)
         assert se.saved_area_estimator(d) == se.AREA_ESTIMATOR_VERSION == 2
@@ -1711,43 +1839,72 @@ def test_estimator_stamps_roundtrip_and_never_become_settings():
         assert text.count('area_estimator: 2\n') == 1
         assert 'base_ellipse_over_circle: 1.07418\n' in text
         assert 'base_rays: 246\n' in text and 'blur_px: 9' in text
+        assert f"ray_win_hi: {se.RAY_WIN_HI:g}\n" in text, text
+        assert f"disc_fit_r_max: {se.DISC_FIT_R_MAX:g}\n" in text, text
         assert f"opencv_version: {libs['opencv_version']}\n" in text, text
         assert f"numpy_version: {libs['numpy_version']}\n" in text, text
+        # the stamp lines sit in STAMP_KEYS order after the settings
+        block = text.split(se.EDGE_HDR, 1)[1].strip().splitlines()
+        keys = [ln.split(':', 1)[0] for ln in block]
+        assert keys[-len(se.STAMP_KEYS):] == list(se.STAMP_KEYS), keys
         # a later settings save keeps every stamp line; the version-only
-        # stamp (no provenance) replaces them with the version and the
-        # library versions alone
+        # stamp (no provenance) replaces them with the version, the
+        # tracker limits and the library versions alone
         s['blur_px'] = 7
         se.save_settings(d, s)
         assert se.load_stamp(d)['base_rays'] == 246.0
+        assert se.load_stamp(d)['ray_win_hi'] == se.RAY_WIN_HI
         assert se.load_stamp(d)['opencv_version'] == libs['opencv_version']
         assert se.load_settings(d)['blur_px'] == 7
         se.stamp_area_estimator(d)
         se.stamp_area_estimator(d)
-        assert se.load_stamp(d) == dict({'area_estimator': 2.0}, **libs)
+        assert se.load_stamp(d) == dict({'area_estimator': 2.0},
+                                        **lims, **libs)
         text = open(os.path.join(d, 'setup.txt'), encoding='utf-8').read()
         assert text.count('area_estimator: 2') == 1 and 'blur_px: 7' in text
         assert text.count('blur_px') == 1
         assert text.count('opencv_version') == 1
+        assert text.count('ray_win_hi') == 1
+        assert text.count('disc_fit_r_max') == 1
         # a provenance the tracker could not complete writes what it has
         se.stamp_area_estimator(d, se.estimator_stamp(
             {'base_rays': 100, 'base_hidden_pct': 72.2,
              'base_one_sided': 0.41, 'base_ellipse_over_circle': None}))
         assert se.load_stamp(d) == dict(
             {'area_estimator': 2.0, 'base_rays': 100.0,
-             'base_hidden_pct': 72.2, 'base_one_sided': 0.41}, **libs)
+             'base_hidden_pct': 72.2, 'base_one_sided': 0.41},
+            **lims, **libs)
         # an explicit older version can be written (and read back); a
-        # stamp handed no library versions (libs={}) records none, and
-        # a version text _edge_block could not read back is not written
+        # stamp handed no library versions (libs={}) or no tracker
+        # limits (limits={}) records none, and a version text
+        # _edge_block could not read back is not written
         se.save_settings(d, s, stamp=se.estimator_stamp(None, version=1,
-                                                        libs={}))
+                                                        libs={}, limits={}))
         assert se.saved_area_estimator(d) == 1
         assert se.load_stamp(d) == {'area_estimator': 1.0}
         se.save_settings(d, s, stamp=se.estimator_stamp(
             None, libs={'opencv_version': '4.12.0-dev',
-                        'numpy_version': 'not a version'}))
+                        'numpy_version': 'not a version'}, limits={}))
         assert se.load_stamp(d) == {'area_estimator': 2.0,
                                     'opencv_version': '4.12.0-dev'}
         assert se.load_settings(d)['blur_px'] == 7
+        # the limits another window measured under round-trip as the
+        # numbers they were (the 2026-10-02 window: 1.38 r0 and 1.3 r0),
+        # and a limit left out is simply not written
+        se.save_settings(d, s, stamp=se.estimator_stamp(
+            None, libs={}, limits={'ray_win_hi': 1.38,
+                                   'disc_fit_r_max': 1.3}))
+        assert se.load_stamp(d) == {'area_estimator': 2.0,
+                                    'ray_win_hi': 1.38,
+                                    'disc_fit_r_max': 1.3}
+        text = open(os.path.join(d, 'setup.txt'), encoding='utf-8').read()
+        assert 'ray_win_hi: 1.38\n' in text and 'disc_fit_r_max: 1.3\n' in text
+        se.save_settings(d, s, stamp=se.estimator_stamp(
+            None, libs={}, limits={'ray_win_hi': 1.38}))
+        assert se.load_stamp(d) == {'area_estimator': 2.0,
+                                    'ray_win_hi': 1.38}
+        assert se.load_settings(d)['blur_px'] == 7
+        assert not any(k in se.load_settings(d) for k in se.STAMP_KEYS)
     finally:
         shutil.rmtree(d)
     # a run nobody tuned: the stamp alone, no settings pinned, the scale
@@ -1763,6 +1920,7 @@ def test_estimator_stamps_roundtrip_and_never_become_settings():
         text = open(os.path.join(d, 'setup.txt'), encoding='utf-8').read()
         block = text.split(se.EDGE_HDR, 1)[1].strip().splitlines()
         assert block == ['area_estimator: 2'] + [
+            f"{k}: {v:g}" for k, v in lims.items()] + [
             f"{k}: {v}" for k, v in libs.items()], block
         assert not se.has_saved_settings(d)
         assert se.load_settings(d) == dict(se.DEFAULT_SETTINGS, diam_mm=12.0)
@@ -1776,6 +1934,70 @@ def test_estimator_stamps_roundtrip_and_never_become_settings():
         assert se.load_stamp(os.path.join(d, 'nope')) == {}
         se.stamp_area_estimator(d)
         assert se.saved_area_estimator(d) == 2
+        assert se.load_stamp(d)['disc_fit_r_max'] == se.DISC_FIT_R_MAX
+    finally:
+        shutil.rmtree(d)
+
+
+def test_stamp_is_the_window_of_the_last_detect_save_not_per_row():
+    """What the stamp cannot say (owner decision 6: per run, no per-row
+    tag; the point of the review). A run stamped `area_estimator: 2`
+    under the 2026-10-02 window (1.38 / 1.3 r0) holds a disc-fit row
+    still in the review queue. A Save under the current window
+    re-decides one other row only: stale_estimator_rows lists nothing
+    (the version did not move), the kept row keeps the earlier window's
+    px with its note untouched, and the run's stamp now reads the
+    current window. The kept row is therefore the earlier window's
+    number under the later stamp, which is why load_stamp's docstring
+    says the kept rows of a re-saved run must be re-reviewed after any
+    move of the window. And a version-2 stamp with no limit lines reads
+    back as no limits, never as the current constants: by the docstring
+    it is the 1.38 / 1.3 window, the only code that wrote version 2
+    without them."""
+    old_window = {'ray_win_hi': 1.38, 'disc_fit_r_max': 1.3}
+    assert old_window != se.tracker_limits()
+    rows = [
+        {'active_area_px': '217438', 'active_area_mm2': '201.062',
+         'active_diam_mm': '16.000', 'wrinkle_idx': '',
+         'notes': 'edge:resting conf 0.95'},
+        {'active_area_px': '238685', 'active_area_mm2': '220.700',
+         'active_diam_mm': '16.763', 'wrinkle_idx': '1.10',
+         'notes': 'edge:disc-fit conf 0.74'},
+        {'active_area_px': '250000', 'active_area_mm2': '231.163',
+         'active_diam_mm': '17.155', 'wrinkle_idx': '1.00',
+         'notes': 'edge:disc-fit conf 0.93'},
+    ]
+    results = {2: {'area_px': 251000.0, 'diam_px': 565.0, 'conf': 0.90,
+                   'method': 'disc-fit', 'wrinkle': 1.0}}
+    scale = 16.0 / (2 * np.sqrt(217438 / np.pi))
+    d = tempfile.mkdtemp(prefix='edge_win_')
+    try:
+        with open(os.path.join(d, 'setup.txt'), 'w', encoding='utf-8') as f:
+            f.write("SLDEA run\nDEA nominal diameter: 16 mm\n")
+        s = se.load_settings(d)
+        se.save_settings(d, s, stamp=se.estimator_stamp(
+            None, libs={}, limits=old_window))
+        assert se.load_stamp(d) == dict({'area_estimator': 2.0},
+                                        **old_window)
+        # the Save under the current window, as Edge Review runs it
+        saved = se.saved_area_estimator(d)
+        assert saved == se.AREA_ESTIMATOR_VERSION
+        stale = se.stale_estimator_rows(rows, results, saved)
+        assert stale == [], stale
+        se.apply_results(rows, results, scale, {}, stale=stale)
+        se.stamp_area_estimator(d, se.estimator_stamp(None, libs={}))
+        assert se.load_stamp(d) == dict({'area_estimator': 2.0},
+                                        **se.tracker_limits())
+        assert rows[2]['active_area_px'] == '251000'    # re-decided
+        assert rows[1]['active_area_px'] == '238685'    # kept as it was
+        assert rows[1]['notes'] == 'edge:disc-fit conf 0.74'
+        assert not any('1.38' in str(v) or 'win' in str(v)
+                       for v in rows[1].values()), rows[1]
+        # a version-2 stamp with no limit lines: no limits, not these
+        se.save_settings(d, s, stamp=se.estimator_stamp(
+            None, libs={}, limits={}))
+        assert se.load_stamp(d) == {'area_estimator': 2.0}
+        assert not any(k in se.load_stamp(d) for k in se.TRACKER_LIMIT_KEYS)
     finally:
         shutil.rmtree(d)
 
@@ -1800,9 +2022,10 @@ def test_baseline_provenance_is_what_the_tracker_reads_at_rest():
     c, _ratio = _track(base, base, s)
     assert prov['base_ellipse_over_circle'] == c['ellipse_over_circle']
     assert prov['base_ellipse_over_circle'] > 1.02
-    # the stamp carries exactly these facts beside the version and the
-    # library versions
+    # the stamp carries exactly these facts beside the version, the
+    # tracker's window limits and the library versions
     assert se.estimator_stamp(prov) == dict(prov, area_estimator=2,
+                                           **se.tracker_limits(),
                                            **se.library_versions())
     # no resting disc, no provenance (and no baseline, none either)
     assert se.baseline_provenance(_bridged_scene(with_disc=False, seed=3),
@@ -2023,19 +2246,131 @@ def test_reconcile_pairs_boosts_agreement_and_caps_contradiction():
         1: [{'method': 'disc-fit', 'area_px': 101000.0, 'conf': 0.78,
              'ci85_pct': 0.5}],
         2: [{'method': 'disc-fit', 'area_px': 140000.0, 'conf': 0.92,
-             'ci85_pct': 0.4}],
+             'ci85_pct': 0.4, 'audit': {'bias_px': 0.3, 'mad_px': 1.1,
+                                        'nostep_pct': 4.0, 'n_rays': 120}}],
         3: [{'method': 'diff-lo', 'area_px': 60000.0, 'conf': 0.88,
              'ci85_pct': None}],
     }
     stats = se.reconcile_pairs(rows, cands, dict(se.DEFAULT_SETTINGS))
-    assert stats == {'confirmed': 2, 'capped': 2}, stats
+    # 2026-10-03: the tracked member of landing 2 carries a clean audit
+    # verdict and its only mate is a patch tier, so it is no longer
+    # capped (see test_audit_clean_tracker_is_not_capped_by_a_patch_mate);
+    # the patch member still is
+    assert stats == {'confirmed': 2, 'capped': 1}, stats
     assert cands[0][0]['conf'] == 0.85 and cands[0][0]['pair_confirmed']
     assert cands[1][0]['conf'] == 0.83
-    # the contradiction can no longer auto-accept on either side
+    # the contradiction can no longer auto-accept on the PATCH side
     acc = se.DEFAULT_SETTINGS['accept_conf']
-    assert cands[2][0]['conf'] == round(acc - 0.01, 3)
+    assert cands[2][0]['conf'] == 0.92
+    assert cands[2][0]['pair_mate_patch'] == 80.0
+    assert 'pair_mismatch_pct' not in cands[2][0]
     assert cands[3][0]['conf'] == round(acc - 0.01, 3)
-    assert cands[2][0]['pair_mismatch_pct'] == cands[3][0]['pair_mismatch_pct'] == 80.0
+    assert cands[3][0]['pair_mismatch_pct'] == 80.0
+
+
+def test_audit_clean_tracker_is_not_capped_by_a_patch_mate():
+    """2026-10-03 (review findings S37/S40): tracker frames with a clean
+    audit sat in review only because the other snapshot of their landing
+    was won by a patch tier (tex-ratio or a diff region). The rule is
+    the narrowest one and relies on exactly two things: the tracked
+    member's own audit verdict vouches for its number (it measured the
+    ink step under the outline and tripped neither gate), and the patch
+    member stays capped, so the landing still reaches the queue through
+    it. It does not claim to know why the snapshots disagree: on the
+    corpus it fires twice, both on one-sided mid-hold collapses where
+    the buckled snapshot has no tracker (P3_3 L23, P3_5 L23). The
+    tracked member keeps its own confidence (no bonus) and is tagged.
+    Everything else -- both-tracker pairs (a collapse both snapshots
+    track), tracker versus resting, an audit-tripped tracker beside a
+    patch (the SquareStack-1 L6 shape: a 0.23 x A0 tex patch beside a
+    bias-tripped fit), and a tracker with NO recorded verdict
+    (audit_boundary returned None: the exemption must not ride on the
+    absence of a check) -- is capped exactly as before. So is a tracker
+    the ray ratio marked review only (owner decisions 2 and 9,
+    2026-10-03): one-sided rays or a large trim share cap and queue it
+    whatever its mate is, so it carries the mismatch tag like any other
+    member and REVIEW_ONLY_TAGS is the one list both pair branches
+    read."""
+    s = dict(se.DEFAULT_SETTINGS)
+    acc = s['accept_conf']
+    cap = round(acc - 0.01, 3)
+    rows = [{'nominal_kV': str(k)}
+            for k in (1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8)]
+    clean = {'bias_px': 0.2, 'mad_px': 1.4, 'nostep_pct': 3.5, 'n_rays': 130}
+
+    def best(method, area, conf, **tags):
+        c = {'method': method, 'area_px': area, 'conf': conf,
+             'ci85_pct': 0.5 if method in ('disc-fit', 'resting') else None}
+        c.update(tags)
+        return c
+
+    cands = {
+        # clean tracker beside a tex patch: the tracker is freed
+        0: [best('disc-fit', 356000.0, 0.90, audit=dict(clean))],
+        1: [best('tex-ratio', 65000.0, 0.93)],
+        # SquareStack-1 L6: the tracker's audit tripped, so BOTH stay capped
+        2: [best('disc-fit', 356000.0, 0.90, audit_bias=6.5,
+                 audit=dict(clean, bias_px=6.5))],
+        3: [best('tex-ratio', 65000.0, 0.93)],
+        # two trackers 20 % apart (a collapse during the hold): both capped
+        4: [best('disc-fit', 160000.0, 0.90, audit=dict(clean))],
+        5: [best('disc-fit', 130000.0, 0.90, audit=dict(clean))],
+        # tracker versus a resting claim: both capped
+        6: [best('disc-fit', 120000.0, 0.90, audit=dict(clean))],
+        7: [best('resting', 100000.0, 0.90, audit=dict(clean))],
+        # clean tracker beside a diff region, tracker below accept_conf
+        # on its own: freed from the cap, tagged, still not acceptable
+        8: [best('disc-fit', 150000.0, 0.70, audit=dict(clean))],
+        9: [best('diff-lo', 60000.0, 0.88)],
+        # a tracker with no verdict at all (too few open audit rays)
+        # beside a tex patch: nothing vouches for it, both capped
+        10: [best('disc-fit', 356000.0, 0.90)],
+        11: [best('tex-ratio', 65000.0, 0.93)],
+        # a tracker with a clean audit but review-only rays (one-sided,
+        # then a large trim share; _apply_ray_gates has already capped
+        # it) beside a tex patch: nothing to free, both capped
+        12: [best('disc-fit', 356000.0, cap, audit=dict(clean),
+                  one_sided=0.71, ray_one_sided=0.71, trim_share=0.1)],
+        13: [best('tex-ratio', 65000.0, 0.93)],
+        14: [best('disc-fit', 356000.0, cap, audit=dict(clean),
+                  one_sided=0.2, trim_share=0.24, ray_trim_share=0.24)],
+        15: [best('tex-ratio', 65000.0, 0.93)],
+    }
+    stats = se.reconcile_pairs(rows, cands, s)
+    assert stats == {'confirmed': 0, 'capped': 14}, stats
+    a, b = cands[0][0], cands[1][0]
+    assert a['conf'] == 0.90 and 'pair_mismatch_pct' not in a
+    assert a['pair_mate_patch'] == 138.2 and not a.get('pair_confirmed')
+    assert b['conf'] == cap and b['pair_mismatch_pct'] == 138.2
+    assert not se.needs_review([dict(a, spread_pct=2.0)], s)
+    assert se.needs_review([dict(b, spread_pct=10.1)], s)
+    for i in (2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15):
+        c = cands[i][0]
+        assert c['conf'] == cap and 'pair_mismatch_pct' in c, (i, c)
+        assert 'pair_mate_patch' not in c, (i, c)
+    assert cands[8][0]['conf'] == 0.70 and cands[8][0]['pair_mate_patch']
+    assert cands[9][0]['conf'] == cap and cands[9][0]['pair_mismatch_pct']
+    # the review-only trackers keep their tags and stay review
+    assert se.review_only(cands[12][0]) and se.review_only(cands[14][0])
+    assert se.needs_review([dict(cands[12][0], spread_pct=2.0)], s)
+    assert se.needs_review([dict(cands[14][0], spread_pct=2.0)], s)
+    # the no-verdict tracker is refused by the helper itself, with and
+    # without the gate tags, and so is a review-only one
+    assert not se._pair_mate_is_patch(cands[10][0], [cands[10][0],
+                                                     cands[11][0]])
+    assert not se._pair_mate_is_patch(cands[12][0], [cands[12][0],
+                                                     cands[13][0]])
+    assert not se._pair_mate_is_patch(cands[14][0], [cands[14][0],
+                                                     cands[15][0]])
+    assert se._pair_mate_is_patch(cands[0][0], [cands[0][0], cands[1][0]])
+    # the helper's own contract
+    assert se._is_patch_tier({'method': 'tex-ratio'})
+    assert se._is_patch_tier({'method': 'diff-hi'})
+    assert not se._is_patch_tier({'method': 'disc-fit'})
+    assert not se._is_patch_tier({'method': 'resting'})
+    assert not se._is_patch_tier({'method': 'trace'})
+    one = {'method': 'disc-fit'}
+    assert not se._pair_mate_is_patch(one, [one])      # alone: no mate
 
 
 def test_audit_boundary_measures_bias_and_circled_noise():
@@ -2662,6 +2997,12 @@ def _random_best(rng, row):
             'ci85_pct': rng.choice([None, round(rng.uniform(0.2, 3), 2)])}
     if rng.random() < 0.1:
         best['audit_nostep'] = 22.0
+    # candidates() records the audit verdict on a tracked or resting
+    # winner whenever audit_boundary can run; now and then it cannot
+    if best['method'] != 'diff-lo' and rng.random() < 0.85:
+        best['audit'] = {'bias_px': 0.5, 'mad_px': 1.5,
+                         'nostep_pct': 22.0 if 'audit_nostep' in best
+                         else 3.0, 'n_rays': 120}
     return best
 
 
@@ -2683,24 +3024,68 @@ def _random_ua(rng, n):
     return cells
 
 
+def _free_patch_mated_trackers(rows, cands):
+    """The one documented departure from the frozen oracle (2026-10-03,
+    SLDEA_DECISIONS.md of that date): in a landing the oracle capped, a
+    tracker member with a RECORDED audit verdict that tripped neither
+    gate and no review-only tag (REVIEW_ONLY_TAGS; _random_best sets
+    only the audit one), whose every mate is a patch tier, keeps its
+    original confidence and carries the mismatch as 'pair_mate_patch'
+    instead of 'pair_mismatch_pct', and is not counted as capped.
+    Applied to the oracle's OUTPUT, so the oracle itself stays
+    verbatim; -> the adjusted stats."""
+    freed = 0
+    by_landing = {}
+    for i, pos in enumerate(se.sweep_landings(rows)):
+        if pos is not None and cands.get(i):
+            by_landing.setdefault(pos['landing'], []).append(cands[i][0])
+    for members in by_landing.values():
+        if len(members) < 2 or not all('pair_mismatch_pct' in b
+                                       for b in members):
+            continue
+        for b in members:
+            if (b['method'] == 'disc-fit'
+                    and b.get('audit') is not None
+                    and not any(b.get(k) is not None
+                                for k in se.REVIEW_ONLY_TAGS)
+                    and all(se._is_patch_tier(m) for m in members
+                            if m is not b)):
+                b['pair_mate_patch'] = b.pop('pair_mismatch_pct')
+                b['conf'] = b['conf_before']
+                freed += 1
+    for cl in cands.values():
+        cl[0].pop('conf_before', None)
+    return freed
+
+
 def test_single_sweep_pairing_is_unchanged():
     """A single sweep never lands on a kV twice, so its landings ARE its
     kV groups and reconcile_pairs must do exactly what it did -- every
-    stat, every conf, every tag -- in every layout, trip row included."""
+    stat, every conf, every tag -- in every layout, trip row included.
+    The single exception since 2026-10-03 is the patch-mate exemption
+    (_free_patch_mated_trackers), applied to the oracle's output and
+    exercised here: the random bests put clean trackers beside diff
+    regions often enough that it fires in every layout."""
     rng = random.Random(20260923)
     s = dict(se.DEFAULT_SETTINGS)
-    seen = {'confirmed': 0, 'capped': 0}
+    seen = {'confirmed': 0, 'capped': 0, 'freed': 0}
     for name, rows in _single_sweeps():
         for _ in range(8):
             cands = {i: [_random_best(rng, r)] for i, r in enumerate(rows)
                      if rng.random() < 0.85}
             old = copy.deepcopy(cands)
+            for cl in old.values():
+                cl[0]['conf_before'] = cl[0]['conf']
             want = _reconcile_pairs_78315cc(rows, old, s)
+            freed = _free_patch_mated_trackers(rows, old)
+            want['capped'] -= freed
             assert se.reconcile_pairs(rows, cands, s) == want, name
             assert cands == old, name
-            for k in seen:
+            for k in ('confirmed', 'capped'):
                 seen[k] += want[k]
+            seen['freed'] += freed
     assert seen['confirmed'] and seen['capped'], seen   # both bands ran
+    assert seen['freed'], seen                          # and the exemption
 
 
 def test_single_sweep_breakdown_flags_are_unchanged():

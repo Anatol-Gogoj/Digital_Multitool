@@ -180,7 +180,21 @@ def load_stamp(rundir):
     library versions, STAMP_TEXT_KEYS), {} when there are none.
     No `area_estimator` key means the saved 'disc-fit' areas (if any)
     were written by version 1 (the ellipse, through 2026-10-01); see
-    AREA_ESTIMATOR_VERSION. Same tolerant read as load_settings."""
+    AREA_ESTIMATOR_VERSION. No `ray_win_hi` / `disc_fit_r_max` key
+    (TRACKER_LIMIT_KEYS) means the run was saved before the tracker's
+    window limits were recorded (2026-10-03): `area_estimator: 2` with
+    no limit lines is the 1.38 / 1.3 r0 window (the only code that
+    wrote version 2 without them), and version 1 ran that same window.
+
+    What the limit lines say (owner decision 6: per run, no per-row
+    tag): the window of the LAST Save that ran Detect. A Save re-writes
+    only the rows decided in that session; a review-queue row kept from
+    an earlier pass (absent from apply_results' `results`) keeps that
+    pass's px, and a window move under the same estimator version marks
+    nothing (stale_estimator_rows keys on the version alone). So after
+    any future move of the window, the kept rows of a re-saved run hold
+    the earlier window's numbers under the later stamp and must be
+    re-reviewed. Same tolerant read as load_settings."""
     out = {}
     for k, v in _edge_block(_setup_text(rundir)).items():
         if k in STAMP_TEXT_KEYS:
@@ -303,26 +317,48 @@ def save_settings(rundir, settings, stamp=None):
     return path
 
 
-def estimator_stamp(provenance=None, version=None, libs=None):
+def estimator_stamp(provenance=None, version=None, libs=None, limits=None):
     """The stamp lines a Save writes (STAMP_KEYS): the estimator version
     and, when the tracker could measure the baseline, its provenance
     (baseline_provenance): the baseline's own ray count, the share of
     its perimeter no ray could use, the one-sidedness of those rays, and
     the ellipse-over-circle offset the OLD estimator carried on this run
-    (the size of the correction, readable without a rerun). Last the
-    OpenCV and numpy versions of the process that pressed Save
-    (`libs`, default library_versions(); {} records none)."""
+    (the size of the correction, readable without a rerun). Then the
+    tracker's window limits of the code that measured the run
+    (`limits`, default tracker_limits(); {} records none; owner decision
+    6, 2026-10-03), and last the OpenCV and numpy versions of the
+    process that pressed Save (`libs`, default library_versions(); {}
+    records none)."""
     out = {AREA_ESTIMATOR_KEY: AREA_ESTIMATOR_VERSION if version is None
            else int(version)}
     for k in PROVENANCE_KEYS:
         if provenance and provenance.get(k) is not None:
             out[k] = provenance[k]
+    if limits is None:
+        limits = tracker_limits()
+    for k in TRACKER_LIMIT_KEYS:
+        if limits.get(k) is not None:
+            out[k] = float(limits[k])
     if libs is None:
         libs = library_versions()
     for k in STAMP_TEXT_KEYS:
         if libs.get(k):
             out[k] = str(libs[k])
     return out
+
+
+def tracker_limits():
+    """The boundary tracker's window limits of this code, as a Save
+    stamps them (TRACKER_LIMIT_KEYS): {'ray_win_hi': RAY_WIN_HI,
+    'disc_fit_r_max': DISC_FIT_R_MAX}, in units of the resting radius.
+    They are constants (owner decision 11, 2026-10-03), so a run's stamp
+    is the only record of the window its last Detect-and-Save used: the
+    window moved on 2026-10-03 under the same estimator version, and on
+    the wrinkled review-queue frames the two windows read +8 to +16 %
+    apart (SLDEA_DECISIONS.md 2026-10-03). The stamp is per run, not per
+    row; load_stamp says what that leaves out."""
+    return {'ray_win_hi': float(RAY_WIN_HI),
+            'disc_fit_r_max': float(DISC_FIT_R_MAX)}
 
 
 def library_versions():
@@ -2402,14 +2438,29 @@ AREA_ESTIMATOR_KEY = 'area_estimator'
 # one-sidedness of the rays that did, and the ellipse-over-circle
 # offset the old estimator carried on this run at rest (1.074 on
 # DOT_P3_1: the size of the correction, on record without a rerun).
-# Last come the library versions of the process that pressed Save
-# (library_versions, 2026-10-03): the OpenCV and numpy that produced the
-# numbers, as text ('4.13.0'), because every corpus figure is OpenCV
-# 4.13 and another build may read a little differently.
+# Then the tracker's window limits of the code that pressed Save
+# (tracker_limits, 2026-10-03, owner decision 6): how far out along
+# each ray the ink step was searched (RAY_WIN_HI) and the largest
+# ellipse the fit believed (DISC_FIT_R_MAX), both in units of the
+# resting radius. They are fixed constants, not settings (decision 11),
+# and they moved on 2026-10-03 (1.38 -> 1.70 and 1.3 -> 1.75) under the
+# same estimator version: on the wrinkled review-queue frames the
+# tracker's number differs by +8 to +16 % between the two windows, so
+# a run has to say which window its last Detect-and-Save used. The
+# stamp is per run, not per row (owner decision 6): a review-queue
+# row kept from an earlier pass keeps that pass's px under the later
+# stamp, and `area_estimator: 2` with no limit lines is the 1.38 / 1.3
+# window (load_stamp has both). Last come the library versions of the
+# process that pressed Save (library_versions, 2026-10-03): the OpenCV
+# and numpy that produced the numbers, as text ('4.13.0'), because
+# every corpus figure is OpenCV 4.13 and another build may read a
+# little differently.
 PROVENANCE_KEYS = ('base_rays', 'base_hidden_pct', 'base_one_sided',
                    'base_ellipse_over_circle')
+TRACKER_LIMIT_KEYS = ('ray_win_hi', 'disc_fit_r_max')
 STAMP_TEXT_KEYS = ('opencv_version', 'numpy_version')
-STAMP_KEYS = (AREA_ESTIMATOR_KEY,) + PROVENANCE_KEYS + STAMP_TEXT_KEYS
+STAMP_KEYS = ((AREA_ESTIMATOR_KEY,) + PROVENANCE_KEYS + TRACKER_LIMIT_KEYS
+              + STAMP_TEXT_KEYS)
 # The note a row gets when a Save empties it because an older estimator
 # wrote its area (stale_estimator_rows). ASCII, for the CSV.
 AREA_ESTIMATOR_STALE_NOTE = ('not kept: measured with the old area method '
@@ -2466,6 +2517,37 @@ RAY_MAX_TRIM_SHARE = 0.2
 REVIEW_ONLY_TAGS = ('audit_nostep', 'audit_bias', 'ray_one_sided',
                     'ray_trim_share')
 RAY_BOOT_N = 300         # bootstrap resamples (fixed seed: repeatable)
+# How far out the tracker looks, in units of the resting radius r0
+# (2026-10-03; through 2026-10-02 the window ended at 1.38 r0 and the
+# gate at 1.3 r0, under a comment that called a 1.25x area expansion
+# the full ramp -- the campaign peaks are 2.25 to 2.34x, and the flat
+# shoulder frames just before the buckling, 1.70 to 1.94x, were refused
+# by the gate alone and sat in the review queue with nothing but patch
+# tiers to choose from).
+#   RAY_REACH    the rays are cast this far. A ray that meets foil or
+#                the frame border anywhere inside it is not used at all,
+#                so every ray the tracker reads is clear of the strips
+#                out to here: THIS is the ceiling where the disc would
+#                reach the foil strips, and the window and the gate sit
+#                under it.
+#   RAY_WIN_LO/HI  the ink step is searched between these radii on each
+#                ray (argmax of the dark->light step). Above the window
+#                an edge is not found, and the argmax locks onto an inner
+#                feature instead and reads low.
+#   DISC_FIT_R_MIN/MAX  plausibility gate on the fitted ellipse's
+#                equivalent radius sqrt(a*b)/r0: outside it the fit is
+#                tracking something other than the device (the halo,
+#                the vignetting, the holder) and is refused.
+# Measured on the corpus (OpenCV 4.13): see SLDEA_DECISIONS.md 2026-10-03.
+# RAY_WIN_HI and DISC_FIT_R_MAX are stamped into setup.txt by every
+# Save (tracker_limits, TRACKER_LIMIT_KEYS; owner decision 6), because
+# they are constants that have already moved once under the same
+# estimator version.
+RAY_REACH = 1.8
+RAY_WIN_LO = 0.80
+RAY_WIN_HI = 1.70
+DISC_FIT_R_MIN = 0.9
+DISC_FIT_R_MAX = 1.75
 
 
 def _disc_rays(prep, settings, ref, assume_responding=False):
@@ -2527,7 +2609,7 @@ def _disc_rays(prep, settings, ref, assume_responding=False):
     change_raw = np.maximum(dn, tn)
     change = np.minimum(change_raw, 1.0)
 
-    rs = np.arange(max(4.0, 0.45 * r0), 1.8 * r0, 1.0)
+    rs = np.arange(max(4.0, 0.45 * r0), RAY_REACH * r0, 1.0)
     nray = 360
     th = np.linspace(0, 2 * np.pi, nray, endpoint=False)
     xs = (cx0 + np.outer(np.cos(th), rs)).astype(np.float32)
@@ -2536,7 +2618,12 @@ def _disc_rays(prep, settings, ref, assume_responding=False):
                      borderMode=cv2.BORDER_CONSTANT, borderValue=0)
     fop = cv2.remap(fo.astype(np.uint8), xs, ys, cv2.INTER_NEAREST,
                     borderMode=cv2.BORDER_CONSTANT, borderValue=1)
-    # strips (and the leads that feed them) block whole SECTORS, +-10 deg
+    # strips (and the leads that feed them) block whole SECTORS, +-10 deg.
+    # A ray is blocked when it meets foil, or leaves the frame (the
+    # border counts as foil), ANYWHERE out to RAY_REACH: the rays that
+    # are read are clear of the strips over the whole search window, so
+    # the tracker can never report the edge of a strip as the ink edge.
+    # That is the hard ceiling the wider window (RAY_WIN_HI) sits under.
     blocked = fop.any(axis=1)
     bi = np.where(blocked)[0]
     for k in bi:
@@ -2577,8 +2664,8 @@ def _disc_rays(prep, settings, ref, assume_responding=False):
     nr = len(rs)
     in_lo = int(np.searchsorted(rs, 0.55 * r0))
     in_hi = int(np.searchsorted(rs, 0.80 * r0))
-    w_lo = int(np.searchsorted(rs, 0.80 * r0))
-    w_hi = min(int(np.searchsorted(rs, 1.38 * r0)), nr - 6)
+    w_lo = int(np.searchsorted(rs, RAY_WIN_LO * r0))
+    w_hi = min(int(np.searchsorted(rs, RAY_WIN_HI * r0)), nr - 6)
     if in_hi <= in_lo or w_hi <= w_lo + 4:
         return None
     # Two passes over the rays: measure every sustained step first, then
@@ -2833,11 +2920,14 @@ def _disc_fit_candidate(prep, settings, ref, assume_responding=False):
     pin = pts[keep]
     a, b = A / 2.0, B / 2.0
     r_eq = float(np.sqrt(a * b))
-    # gates: the responding disc is the resting disc, slightly deformed.
-    # The observed full-ramp expansion is ~1.25x AREA (1.12x radius); a
-    # fit claiming more than 1.3x radius is tracking something else --
-    # the halo, the vignetting, the annulus -- not the device.
-    if not 0.9 <= r_eq / r0 <= 1.3:
+    # gates: the responding disc is the resting disc, deformed. The
+    # campaign discs reach 2.25 to 2.34x the resting AREA (1.50 to 1.53x
+    # radius, owner-reviewed peaks) and the flat shoulder just before
+    # buckling sits at 1.70 to 1.94x; a fit claiming more than
+    # DISC_FIT_R_MAX times the radius is tracking something else -- the
+    # halo, the vignetting, the holder -- not the device (see the
+    # constants above _disc_rays for the measured range).
+    if not DISC_FIT_R_MIN <= r_eq / r0 <= DISC_FIT_R_MAX:
         return None
     if np.hypot(exc - cx0, eyc - cy0) > 0.15 * r0:
         return None
@@ -3710,7 +3800,39 @@ def reconcile_pairs(rows, cands_by_idx, settings):
     'pair_confirmed' boosts no pair had earned, a step toward
     auto-accept; genuine hysteresis between legs read as detection
     disagreement and was capped into review. On a single sweep each kV
-    is one landing, so the pairs -- and every result -- are unchanged."""
+    is one landing, so the pairs -- and every result -- are unchanged.
+
+    One member is NOT capped by a mismatch (2026-10-03): a tracker
+    result ('disc-fit') carrying a recorded audit verdict that tripped
+    neither gate, whose every mate is a patch tier ('tex-ratio' or a
+    'diff-*' region). What the exemption relies on is only this: the
+    tracked member's own audit has measured the ink step under its
+    outline and vouches for its number, and the patch member stays
+    capped, so the landing is still queued for a human. It does NOT
+    claim to know why the two snapshots disagree, and it cannot: a
+    definition mismatch (a diff blob inside a disc the size of the
+    tracked mate's) would fire it just the same. On the review corpus
+    (OpenCV 4.13, with the wider tracker window of the same date) it
+    fires twice, both on a one-sided mid-hold collapse (P3_3 L23 and
+    P3_5 L23: the post-ramp snapshot is a buckled membrane that only a
+    tex-ratio patch outlines, the pre-ramp snapshot a smooth collapsed
+    disc the tracker reads). In the collapse case the accepted number is
+    the collapsed state's, consistent with the next landing, and the
+    human still sees the collapse through the capped patch member. The
+    tracked member keeps its own confidence (no confirmation bonus
+    either: nothing confirmed it) and is tagged 'pair_mate_patch' with
+    the mismatch; the patch members stay capped and tagged as before,
+    and a patch tier can never ride an exemption. A tracker with no
+    audit verdict at all (audit_boundary returned None) is capped as
+    before: the exemption must not ride on the absence of a check. Nor
+    is a tracker the ray ratio marked review only (ray_one_sided /
+    ray_trim_share, owner decisions 2 and 9): it is capped and queued
+    whatever its mate is, so it is tagged with the mismatch like any
+    other member (REVIEW_ONLY_TAGS, the same list the agreement branch
+    reads). SquareStack-1 L6 pre (a tex-ratio patch at 0.23 x A0 beside
+    a bias-tripped tracker fit) stays in review. Both-tracker pairs (a
+    collapse both snapshots track) and tracker-versus-resting pairs are
+    capped exactly as before."""
     acc = float(settings.get('accept_conf', 0.75))
     by_landing = {}
     for i, pos in enumerate(sweep_landings(rows)):
@@ -3740,11 +3862,41 @@ def reconcile_pairs(rows, cands_by_idx, settings):
             stats['confirmed'] += len(members)
         elif rel > 2.0 * tol:
             for b in members:
+                if _pair_mate_is_patch(b, members):
+                    b['pair_mate_patch'] = round(100 * rel, 1)
+                    continue
                 b['pair_mismatch_pct'] = round(100 * rel, 1)
                 if b['conf'] > acc - 0.01:
                     b['conf'] = round(acc - 0.01, 3)
-            stats['capped'] += len(members)
+                stats['capped'] += 1
     return stats
+
+
+def _is_patch_tier(cand):
+    """A candidate that outlines a changed REGION (the diff tiers) or
+    the wrinkled INTERIOR (tex-ratio) rather than the boundary of the
+    disc. Hand traces, 'resting' claims and the tracker are not."""
+    m = str(cand.get('method') or '')
+    return m == 'tex-ratio' or m.startswith('diff')
+
+
+def _pair_mate_is_patch(cand, members):
+    """reconcile_pairs' exemption (2026-10-03): `cand` is a tracker
+    result with a RECORDED audit verdict (audit_boundary ran and
+    returned one) that tripped neither gate, carrying no review-only
+    tag at all (REVIEW_ONLY_TAGS: the audit's two and the ray ratio's
+    two, one-sided rays and a large trim share), and every other member
+    of its landing is a patch tier. A review-only tracker is capped
+    and queued whatever its mate is, so there is nothing for the
+    exemption to free. See the docstring there."""
+    if cand.get('method') != 'disc-fit':
+        return False
+    if cand.get('audit') is None:
+        return False                    # no verdict is not a clean one
+    if any(cand.get(k) is not None for k in REVIEW_ONLY_TAGS):
+        return False
+    mates = [b for b in members if b is not cand]
+    return bool(mates) and all(_is_patch_tier(b) for b in mates)
 
 
 def audit_boundary(prep, cand, settings):

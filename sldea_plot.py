@@ -127,7 +127,9 @@ Rendering:
       plots with its area columns blanked. Beside that column the tidy
       CSV carries the OpenCV and numpy versions the Save recorded
       (opencv_version, numpy_version; 2026-10-03) on every
-      machine-measured row.
+      machine-measured row, and the boundary tracker's window limits
+      the Save recorded (ray_win_hi, disc_fit_r_max; 2026-10-03) on
+      every disc-fit row.
 
 Panels (`#269` titles, `#270` selection):
     The panels a mode actually draws, in the order the flags name them:
@@ -444,6 +446,12 @@ def load_run(arg, warn):
             # a run saved before they were recorded
             'lib_versions': {k: str(stamp.get(k) or '')
                              for k in se.STAMP_TEXT_KEYS},
+            # the tracker's window limits the run's 'disc-fit' rows were
+            # measured under (2026-10-03, owner decision 6): the ink-step
+            # search top and the ellipse gate in units of the resting
+            # radius, None for a run saved before they were recorded
+            'tracker_limits': {k: stamp.get(k)
+                               for k in se.TRACKER_LIMIT_KEYS},
             'saved_brand': saved_brand}
 
 
@@ -2340,7 +2348,8 @@ def save_figure(runs, opts, path, warn=lambda m: None):
 
 TIDY_COLS = ['run', 'group', 'snapshot', 'nominal_kV', 'phase', 'tag',
              'area_mm2', 'convention', 'area_estimator', 'opencv_version',
-             'numpy_version', 'expansion_A_A0',
+             'numpy_version', 'ray_win_hi', 'disc_fit_r_max',
+             'expansion_A_A0',
              'measured_uA', 'power_mW', 'traced', 'method', 'conf',
              'user_reviewed', 'breakdown_confirmed', 'breakdown_advisory',
              'saved_breakdown_brand', 'notes']
@@ -2375,6 +2384,23 @@ def write_tidy(runs, path, groups=()):
     a header line, so the file stays a plain CSV for csv.DictReader and
     pandas without a comment option.
 
+    'ray_win_hi' / 'disc_fit_r_max' (2026-10-03, owner decision 6) are
+    the boundary tracker's window limits the Save stamped beside the
+    estimator (se.TRACKER_LIMIT_KEYS): how far out along each ray the
+    ink step was searched and the largest ellipse the fit believed, in
+    units of the resting radius. The limits are constants that moved
+    once under the same estimator version (1.38 -> 1.70 and 1.3 ->
+    1.75 on 2026-10-03), so two 'disc-fit' rows can carry the same
+    `area_estimator` and still have been measured under different
+    windows; these columns say which window each RUN's last
+    Detect-and-Save used. They are the run's stamp copied onto its
+    rows, not a per-row record (owner decision 6): a review-queue row
+    kept from an earlier pass keeps that pass's number under the later
+    stamp (se.load_stamp). Filled exactly where 'area_estimator' is (a
+    'disc-fit' row with an area), blank elsewhere and throughout a run
+    saved before the limits were recorded (with `area_estimator` 2 that
+    was the 1.38 / 1.3 window).
+
     'group' is the operator's grouping (`#313`), blank for a run in no
     group, and it sits SECOND -- beside 'run', because it is the other
     half of the same question. It is in the CSV for the reason the CSV
@@ -2392,6 +2418,7 @@ def write_tidy(runs, path, groups=()):
             med = run_ua_median(run)
             estimator = run.get('estimator') or 1
             libs = run.get('lib_versions') or {}
+            limits = run.get('tracker_limits') or {}
             for r in run['rows']:
                 area = None if hide_areas else r['area_mm2']
                 conv = ('' if area is None
@@ -2402,6 +2429,13 @@ def write_tidy(runs, path, groups=()):
                 machine = conv == 'half-height'
                 cv_ver = libs.get('opencv_version', '') if machine else ''
                 np_ver = libs.get('numpy_version', '') if machine else ''
+                # the tracker's window limits ride exactly where the
+                # estimator does: a 'disc-fit' row with an area
+                win_hi, r_max = ('', '')
+                if est != '':
+                    win_hi, r_max = (
+                        '' if limits.get(k) is None else f"{limits[k]:g}"
+                        for k in se.TRACKER_LIMIT_KEYS)
                 exp = (area / run['a0'] if area and run['a0'] else '')
                 pw = power_mw(r, med)
                 w.writerow([
@@ -2409,7 +2443,7 @@ def write_tidy(runs, path, groups=()):
                     '' if r['kv'] is None else r['kv'],
                     r['phase'], r['tag'],
                     '' if area is None else area,
-                    conv, est, cv_ver, np_ver,
+                    conv, est, cv_ver, np_ver, win_hi, r_max,
                     f"{exp:.4f}" if exp != '' else '',
                     '' if r['ua'] is None else r['ua'],
                     f"{pw:.3f}" if pw is not None else '',

@@ -3519,6 +3519,22 @@ LOGGING:
                        "the staircase moves, so a wrong level could hold "
                        "for a whole landing. Stop it first: Webcam tab → "
                        "Stop sweep.")))
+            elif kind == 'sweep' and self._sldea_video_wanted():
+                # RECORD IS TICKED (2026-10-05, owed since #334 met the
+                # video branch). The question below exists because a
+                # snapshot that loses the camera costs one frame. A
+                # recording holds the camera for the whole run, so beside
+                # a sweep photographing every level it is the recording
+                # that fails, from the first level on. Refused, not asked.
+                reasons.append((
+                    f"a stepped sweep on SG CH{ch} needs the camera this "
+                    f"run's video records with",
+                    f"A stepped sweep on the Webcam tab (SG CH{ch}) "
+                    f"photographs every level with the camera. This run is "
+                    f"set to record video, which holds the camera for the "
+                    f"whole run, so the two cannot share it. Stop the sweep "
+                    f"first (Webcam tab → Stop sweep), or untick Record "
+                    f"video to be asked about running beside it."))
             elif kind == 'sweep':
                 job = getattr(self, '_cam_seq_gen', None)
                 ask = (
@@ -3545,6 +3561,20 @@ LOGGING:
                       "snapshots for the camera. Stop it first"
                     + (": Webcam tab → Stop." if timed
                        else " on the Webcam tab.")))
+        rec = getattr(self, '_sldea_recorder', None)
+        if rec is not None and rec.reader_alive():
+            # THE PREVIOUS RUN'S RECORDER (2026-10-05, owed since #334 met
+            # the video branch). It keeps reading the camera until its
+            # stop() returns, which can outlast the run by seconds; the
+            # Webcam tab already counts it as holding the camera
+            # (_cam_owned_by_sldea), and a new run's pre-flight and
+            # snapshots need the same device.
+            reasons.append((
+                "the previous run's video recorder is still releasing the "
+                "camera",
+                "The previous run's video recorder is still closing and "
+                "holds the camera until it has. That usually takes a few "
+                "seconds."))
         if 'camera-ctrl' in self._bg_busy:
             reasons.append((
                 "a camera adjustment is running",
@@ -3832,6 +3862,17 @@ LOGGING:
             if not started:
                 with self._sldea_loglock:
                     self._sldea_prelog = None
+
+    def _sldea_video_wanted(self):
+        """True when the operator has ticked Record video. Read by the start
+        gate, which runs before the video pre-flight: a run whose
+        recording the pre-flight later drops still counts here, and the
+        refusal it causes says to untick Record instead."""
+        var = getattr(self, 'sldea_vid_on', None)
+        try:
+            return bool(var is not None and var.get())
+        except Exception:
+            return False
 
     def _sldea_video_preflight(self, p):
         """-> (record?, fps), or (None, None) when the operator cancelled.

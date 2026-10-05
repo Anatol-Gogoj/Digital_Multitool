@@ -23,6 +23,23 @@ reads it are unchanged. Afterwards, `sldea_video.py RUN` (or the tab's
 checkbox) runs Edge Review's own detector on every frame. **Desk-tested
 only; it must pass BENCH_TEST §Q before it merges.**
 
+**Rebased onto main 2026-10-05** (written 2026-09-23, never pushed until
+then, so it sits above newer entries). Three things changed in the
+merge, none of them in the recording itself:
+
+- `#354` made readings logged as read, with "Trek inverts" flipping the
+  control only, and removed `_sldea_capture`'s `vsign`. The branch passed
+  `vsign=trek_sign`; that argument is gone, so the video run logs kV and
+  µA the way every other run now does.
+- `#334`'s start gate runs before the video pre-flight; both still come
+  before any HV question.
+- The two items `#334` left owed for this merge are now in the gate: with
+  Record ticked, an other-channel Webcam sweep is **refused** rather than
+  asked about (the recording holds the camera for the whole run, so it
+  would be the recording that fails), and a previous run's recorder that
+  is still closing holds off the next ▶ Run, as it already held off the
+  Webcam tab. Both pinned in `tests/test_sldea_interlock.py`.
+
 **Observation → decision.**
 
 - *Asked for* (operator): video instead of, or beside, the snapshots, and

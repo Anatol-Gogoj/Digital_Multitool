@@ -73,9 +73,11 @@ What it measures, and the failure each one pins down:
   Since 2026-07-29 the report also carries LOCALIZATION (foil% of each
   detection -- statistics looked fine while every outline sat on the
   electrodes), the BASELINE anchor (resting-disc trace and the mm/px it
-  implies, with its own gates), per-frame ci% (the disc-fit's 85% CI on
-  area -- a statistical statement, unlike conf, which is a
-  review-ordering score), and CONSISTENCY (each landing's snapshot pair
+  implies, with its own gates), per-frame ci% (the disc-fit's spread on
+  area: since 2026-10-02 the block-bootstrap spread of its common-ray
+  ratio, not a calibrated confidence interval; still a statement about
+  the measurement, unlike conf, which is a review-ordering score), and
+  CONSISTENCY (each landing's snapshot pair
   agreeing, and monotonicity, with pair reconciliation applied exactly as
   the GUI applies it before auto-accept).
 
@@ -524,11 +526,20 @@ def analyze(rundir, max_frames=24):
         'annos': {str(k): v for k, v in sorted(cons_annos.items())},
     }
     ref_out = None
+    tracker_rest = None
     if disc_ref is not None:
         ref_out = {kk: vv for kk, vv in disc_ref.items() if kk != 'contour'}
         ref_out['mm_per_px'] = round(float(settings['diam_mm'])
                                      / float(disc_ref['diam_px']), 5)
+        # what the boundary tracker reads on the baseline frame itself
+        # (2026-10-02): every disc-fit area of the run is a ratio to
+        # these rays, so the report says how many there are, what share
+        # of the perimeter they leave unmeasured, how one-sided they
+        # are, and what the old estimator's ellipse made of the resting
+        # disc (the same facts Edge Review's Save stamps into setup.txt)
+        tracker_rest = se.baseline_provenance(base, settings)
     return {'rundir': os.path.abspath(rundir),
+            'tracker_rest': tracker_rest,
             'repeats': repeats,
             'frames_analyzed': len(per), 'baseline_row': base_i,
             'frame_shape': list(base.shape), 'sigma': round(sigma, 2),
@@ -1175,6 +1186,25 @@ def report(d):
         else:
             A("resting disc    : NOT FOUND (baseline_disc refused -- mm "
               "figures fall back to an activated frame)")
+    if d.get('baseline_disc'):
+        # the tracker's own reading of the baseline (2026-10-02): the
+        # denominator of every disc-fit area in this run
+        rest = d.get('tracker_rest')
+        if rest:
+            eoc = rest.get('base_ellipse_over_circle')
+            # base_hidden_pct is 1 - base_rays/360: the leads and the
+            # foil, and every ray with no usable ink step (faint ink)
+            A(f"tracker at rest : {rest['base_rays']} of 360 rays find the "
+              f"ink edge on the baseline, {rest['base_hidden_pct']:.0f}% "
+              f"of the perimeter not usable (behind leads or foil, or no "
+              f"ink step), one-sidedness "
+              f"{rest.get('base_one_sided') or 0:.2f}; ellipse/circle "
+              + (f"{eoc:.4f}" if eoc is not None else "not fitted")
+              + " (what the old area method read on the resting disc)")
+        else:
+            A("tracker at rest : NO READING (the tracker finds no ink edge "
+              "on the baseline frame): no frame of this run gets a "
+              "disc-fit area")
     anchor = d.get('scale_anchor')
     if anchor:
         # #215 fields are all optional: a pre-2026-08-06 anchor prints
@@ -1334,10 +1364,16 @@ def report(d):
     A("         strips -- the localization number; method is the winning")
     A("         candidate tier ('disc-fit' = the ink-edge boundary")
     A("         tracker, 'tex-ratio' = the texture channel, 'resting' =")
-    A("         gated frame stated at the known resting area)")
-    A("  ci%    the disc-fit's own 85% confidence interval on area, from")
-    A("         the edge-point scatter -- a statistical statement, unlike")
-    A("         conf, which is a quality score")
+    A("         frame stated at the known resting area: the baseline")
+    A("         frame, or a gated frame the tracker could not measure)")
+    A("  ci%    the disc-fit's spread on area, in percent: how far the")
+    A("         area moves when different 20-degree blocks of the visible")
+    A("         edge are resampled (central 85 % of a block bootstrap of")
+    A("         the common-ray ratio). NOT a calibrated confidence")
+    A("         interval and not a total uncertainty: it covers the edge")
+    A("         it could see, not the part behind the leads. A statement")
+    A("         about the measurement, unlike conf, which is a quality")
+    A("         score")
     A("  area   what candidates() detects with the run's own settings;")
     A("         the A/B verdict above compares that against the other")
     A("         normalization mode, on the same frames")

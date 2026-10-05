@@ -409,6 +409,30 @@ def test_run_label_flags_a_run_that_already_carries_tuned_settings():
         shutil.rmtree(parent, ignore_errors=True)
 
 
+def test_run_label_ignores_a_block_that_only_carries_the_estimator_stamp():
+    """2026-10-02: Edge Review's Save stamps `area_estimator: N` into the
+    same setup.txt block the tuner writes. A run that was saved but never
+    tuned must not be flagged as tuned in the picker; a tuned run keeps
+    its flag AND its stamp when the tuner saves over it."""
+    import shutil
+    import tempfile
+    import sldea_edge as se
+    parent = tempfile.mkdtemp(prefix='tuner_label_')
+    try:
+        d = _run_dir(parent, 'SLDEA_20260801_101010')
+        se.stamp_area_estimator(d)
+        with open(_os.path.join(d, 'setup.txt'), encoding='utf-8') as f:
+            assert se.EDGE_HDR in f.read()        # the block exists...
+        assert st.run_label(d) == '', st.run_label(d)   # ...not tuned
+        # the tuner's own Save path: settings written, stamp preserved
+        se.save_settings(d, dict(se.DEFAULT_SETTINGS, blur_px=9))
+        assert st.run_label(d).strip() == '✓ tuned', st.run_label(d)
+        assert se.saved_area_estimator(d) == se.AREA_ESTIMATOR_VERSION
+        assert se.load_settings(d)['blur_px'] == 9
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+
+
 def test_runs_parent_descends_into_an_upload_wrapper():
     """The campaign layout: SCPI_SLDEA_DIR points at 'Upload 20260804' and
     the runs live in 'SLDEA_data (1)' inside it, where se.newest_run

@@ -670,7 +670,8 @@ BANDS_TIP = (
     f"here fits them to your data.\n\n"
     f"±{sp.MACHINE_BAND_PCT:g}%  machine-measured levels (the "
     f"half-height ink step): the per-run scale anchor (~0.8% area) over "
-    f"the disc-fit's own CI (0.2–0.7%).\n"
+    f"the disc-fit's own spread (median 0.6%, growing with voltage; a "
+    f"block-bootstrap figure, not a confidence interval).\n"
     f"±{sp.TRACED_BAND_PCT:g}%  hand-traced levels (the outer toe): "
     f"operator repeatability, measured over 9 repeat pairs.\n\n"
     f"A level that MIXES the two keeps the machine "
@@ -2294,9 +2295,14 @@ class PlotWindow:
         # pre-2026-07-28 areas (the 2.3-2.7x scale-bug era) are refused
         # outright in the window: the campaign dataset is reprocessed, so
         # the override checkbox was dropped (operator call 2026-08-07).
-        # The CLI keeps --allow-suspect-scale for archaeology.
+        # The CLI keeps --allow-suspect-scale for archaeology. The
+        # pre-2026-10-02 area-estimator era (the ellipse; no
+        # `area_estimator: 2` stamp in setup.txt) is refused the same way:
+        # the message names the run and says to re-review it, and the CLI
+        # keeps --allow-old-estimator for a figure that must mix them.
         runs = sp.prepare_runs(dirs, opts, warns.append,
                                allow_suspect=False,
+                               allow_old_estimator=False,
                                load=self._load)
         self._prepared = runs
         if not runs:

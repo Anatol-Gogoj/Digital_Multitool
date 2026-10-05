@@ -370,6 +370,17 @@ def test_uncertainty_band_tooltip_refuses_conf_as_an_uncertainty():
     assert 'Never quote it as an uncertainty.' in tip
 
 
+def test_uncertainty_band_tooltip_does_not_call_the_spread_a_ci():
+    """2026-10-02: the disc-fit spread is the block-bootstrap spread of
+    the common-ray ratio and nothing user-facing may call it a
+    confidence interval (its predecessor held 21-49 % where it claimed
+    85 %). The tooltip used to quote "the disc-fit's own CI (0.2-0.7%)"."""
+    tip = g.BANDS_TIP
+    assert 'own CI' not in tip and '0.2–0.7%' not in tip, tip
+    assert "disc-fit's own spread" in tip, tip
+    assert 'not a confidence interval' in tip, tip
+
+
 def test_the_band_percentages_are_never_typed_twice():
     """The `#224` scar: a number hand-kept in several places drifts. Both
     the checkbox label and the tooltip interpolate sldea_plot's

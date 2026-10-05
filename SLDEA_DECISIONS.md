@@ -23,6 +23,16 @@ direction of travel), and a new x axis, elapsed time, unrolls any run.
 Single-sweep figures are byte-identical to before; `--merge-legs
 --no-arrows` restores the old up/down figure exactly.
 
+**Rebased onto main 2026-10-05** (written 2026-09-23, never pushed until
+then, so it sits above newer entries). Main had since fixed the strain-%
+band (2026-10-02 entry): `_series` takes the panel's units. The leg and
+time-axis paths written here now pass them too; without that, a strain-%
+up/down plot drew a zero-width band at rest, which
+`test_updown_legs_and_the_time_axis_draw_the_strain_band_in_strain_points`
+pins. The `--strain-pct` flag registration in this branch's first commit
+had already reached main another way, so only its double-click fix and its
+flag source-scan test remain.
+
 **Observation → decision.**
 
 - *Observed* (operator report, then read in the code): `levels()` keyed

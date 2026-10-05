@@ -3591,6 +3591,33 @@ def _marked(ax, marker):
     return out
 
 
+def test_updown_legs_and_the_time_axis_draw_the_strain_band_in_strain_points():
+    """The leg and time-axis paths (2026-09-23) were written before the
+    strain-band fix (2026-10-02) and met it at the 2026-10-05 rebase. Both
+    must pass the panel's units to the band: under --strain-pct a machine
+    point at A/A0 = r gets a half-width of 2 * r points, never 2 % of the
+    strain value (which is zero at rest). Read off the drawn bands."""
+    if not _has_mpl():
+        return
+    d, run = _loaded(_updown_rows())
+    try:
+        for kw in (dict(strain_pct=True), dict(strain_pct=True, x='time')):
+            fig = _drawn([run], sp.make_opts(**kw)[0])
+            bands = _band_polys(fig.axes[1])
+            assert bands, (kw, 'no band on the strain panel')
+            n = 0
+            for band in bands:
+                for x, (lo, hi) in band.items():
+                    r = 1.0 + (lo + hi) / 200.0
+                    half = (hi - lo) / 2.0
+                    assert abs(half - sp.MACHINE_BAND_PCT * r) < 1e-6, \
+                        (kw, x, lo, hi)
+                    n += 1
+            assert n >= 4, (kw, n)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_an_updown_run_draws_both_legs_with_their_arrows():
     if not _has_mpl():
         return

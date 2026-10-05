@@ -2900,7 +2900,34 @@ def test_watchdog_trip_still_corroborates_the_landing_it_interrupted():
     s = se.DEFAULT_SETTINGS
     flags, advis = se.breakdown_flags(rows, areas, s)
     assert 'area collapsed' in flags.get(post, ''), (flags, advis)
-    assert (flags, advis) == _breakdown_flags_78315cc(rows, areas, s)
+    old = _breakdown_flags_78315cc(rows, areas, s)
+    # the trip row itself is confirmed by both; since decision 17
+    # (2026-10-03) its reason is the watchdog's own (see
+    # _same_but_for_the_trip_reason), everything else is as before
+    assert _same_but_for_the_trip_reason(rows, (flags, advis), old)
+
+
+def _same_but_for_the_trip_reason(rows, got, want):
+    """(flags, advis) pairs equal in keys, order and text, except for the
+    trip row (decision 17, 2026-10-03): with a number in its cell it is
+    confirmed with the reason 'breakdown? watchdog trip ...' where the
+    pre-decision function wrote the current rule's text, or where that
+    function left it alone (a short run whose median the excursions
+    pulled onto the trip's own level). In the second case the row is
+    set aside, with the advisory the flag superseded. Every other row
+    must match to the character."""
+    got_f, got_a = dict(got[0]), dict(got[1])
+    want_f, want_a = dict(want[0]), dict(want[1])
+    for i, r in enumerate(rows):
+        if se.is_trip_row(r) and i in got_f:
+            assert got_f[i].startswith('breakdown? watchdog trip'), got_f[i]
+            if i in want_f:
+                got_f[i] = want_f[i]
+            else:
+                del got_f[i]
+                want_a.pop(i, None)
+    return ([list(got_f.items()), list(got_a.items())]
+            == [list(want_f.items()), list(want_a.items())])
 
 
 def test_consistency_notes_pair_within_a_landing():
@@ -3106,8 +3133,9 @@ def test_single_sweep_breakdown_flags_are_unchanged():
                      for i, r in enumerate(rows) if rng.random() < 0.8}
             want = _breakdown_flags_78315cc(rows, areas, s)
             got = se.breakdown_flags(rows, areas, s)
-            assert [list(d.items()) for d in got] \
-                == [list(d.items()) for d in want], name
+            # the trip row (a number in its cell here) is confirmed by
+            # both; only its reason text changed (decision 17)
+            assert _same_but_for_the_trip_reason(rows, got, want), name
             if sum(r['measured_uA'] != '' for r in rows) >= 5:
                 seen['corroborated'] += sum('area collapsed' in v
                                             for v in want[0].values())
@@ -3651,6 +3679,1171 @@ def test_write_back_extends_columns_for_era_rows():
         assert 'wrinkle_idx' in cols
         assert cols.index('wrinkle_idx') == cols.index('notes') - 1
         assert row['wrinkle_idx'] == '1.70'
+    finally:
+        shutil.rmtree(d)
+
+
+# ---------------------------------------------------------------------------
+# run health (2026-10-02): what a run's own files say went wrong at capture,
+# and the capture notes that Save used to erase.
+# ---------------------------------------------------------------------------
+
+def test_image_content_reads_contrast_without_the_pedestal():
+    """The 2026-10-01 frames sit on a 67-gray pedestal and span 2 levels:
+    contrast is p95 - p5, so the pedestal cannot make them look alive."""
+    rng = np.random.default_rng(3)
+    dead = 67.0 + rng.integers(0, 2, (240, 320)).astype(np.float32)
+    c = se.image_content(dead)
+    assert c['flat'] and c['contrast'] < 3, c
+    assert se.image_content(dead + 120.0)['contrast'] == c['contrast']
+    # a disc 25 levels under its paper is a picture, and only just: the
+    # dimmest real frame in the corpus reads 30
+    live = np.full((240, 320), 190.0, np.float32)
+    yy, xx = np.mgrid[0:240, 0:320]
+    live[(xx - 160) ** 2 + (yy - 120) ** 2 <= 80 * 80] = 165.0
+    c = se.image_content(live)
+    assert not c['flat'] and c['contrast'] == 25.0, c
+    assert c['sat_pct'] == 0.0
+    # saturation is the share of the WINDOW at or above 250
+    white = np.full((100, 100), 255.0, np.float32)
+    white[:50] = 100.0
+    c = se.image_content(white, roi_frac=1.0)
+    assert abs(c['sat_pct'] - 50.0) < 1e-6 and not c['flat'], c
+    # a colour frame is averaged, and nothing to look at is None
+    assert se.image_content(np.dstack([live] * 3))['contrast'] == 25.0
+    assert se.image_content(None) is None
+    assert se.image_content(np.zeros((0, 0), np.float32)) is None
+
+
+_HEALTH_SETUP = (
+    "SLDEA Test  --  synthetic\n"
+    "MODE: LIVE (HV energized)\n"
+    "\n"
+    "--- Drive ---\n"
+    "Total: 0:01:00  (2 landings, 5 frames)\n"
+    "\n"
+    "--- Camera ---\n"
+    "exposure 23, gain 0, WB off (manual)\n"
+    "\n"
+    "DEA nominal diameter: 16 mm\n")
+_HEALTH_LOG_OK = ("[10:00:00] run dir: /somewhere\n"
+                  "[10:01:00] run complete: 5/5 frames\n")
+
+
+def _health_frame(kind='disc'):
+    """A 240x320 baseline: 'disc' (the scene baseline_disc fits), 'flat'
+    (the 2026-10-01 picture), 'white' (the 2026-08-05 overexposure) or
+    'noise' (a picture with content and no disc)."""
+    yy, xx = np.mgrid[0:240, 0:320]
+    disc = (xx - 160) ** 2 + (yy - 120) ** 2 <= 80 * 80
+    if kind == 'flat':
+        return np.full((240, 320), 67, np.uint8)
+    if kind == 'white':
+        img = np.full((240, 320), 255.0, np.float32)
+        img[disc] = 150.0
+        return img.astype(np.uint8)
+    if kind == 'noise':
+        rng = np.random.default_rng(11)
+        return rng.integers(40, 220, (240, 320)).astype(np.uint8)
+    img = np.full((240, 320), 190.0, np.float32)
+    img[disc] = 165.0
+    return img.astype(np.uint8)
+
+
+def _health_run(d, rows=None, setup=_HEALTH_SETUP, runlog=_HEALTH_LOG_OK,
+                telemetry=None, baseline='disc', skip_files=()):
+    """A synthetic run folder for run_health. The default is a run with
+    nothing wrong: a baseline and two landings, every reading present and
+    positive, setup.txt and run.log agreeing that all 5 frames were
+    taken. Each test breaks one thing."""
+    import cv2
+    if rows is None:
+        rows = [('baseline', 0.0, '0.0', '-16.0'),
+                ('post-ramp', 2.0, '2.01', '-16.0'),
+                ('pre-ramp', 2.0, '2.02', '-15.8'),
+                ('post-ramp', 4.0, '4.01', '-16.2'),
+                ('pre-ramp', 4.0, '4.03', '-16.0')]
+    os.makedirs(os.path.join(d, 'frames'), exist_ok=True)
+    out = []
+    for k, row in enumerate(rows):
+        tag, kv, mkv, mua = row[:4]
+        extra = row[4] if len(row) > 4 else {}
+        fn = f'SLDEA_s{k:02d}_{kv:05.2f}kV_{tag}.png'
+        rec = {'snapshot': k + 1, 'step': k, 'tag': tag, 'nominal_kV': kv,
+               'measured_kV': mkv, 'measured_uA': mua, 'frame_file': fn}
+        rec.update(extra)
+        fn = rec['frame_file']
+        if fn and fn not in skip_files:
+            cv2.imwrite(os.path.join(d, 'frames', fn),
+                        _health_frame(baseline if tag == 'baseline'
+                                      else 'disc'))
+        out.append(rec)
+    _fake_run(d, out)
+    for name, text in (('setup.txt', setup), ('run.log', runlog),
+                       ('telemetry.csv', telemetry)):
+        if text is not None:
+            with open(os.path.join(d, name), 'w', encoding='utf-8',
+                      newline='') as f:
+                f.write(text)
+    return d
+
+
+def _codes(items, level=None):
+    return [it['code'] for it in items
+            if level is None or it['level'] == level]
+
+
+def _item(items, code):
+    hits = [it for it in items if it['code'] == code]
+    assert len(hits) == 1, (code, _codes(items))
+    return hits[0]
+
+
+def test_run_health_is_silent_on_a_run_with_nothing_wrong():
+    d = tempfile.mkdtemp(prefix='edge_health_ok_')
+    try:
+        _health_run(d)
+        assert se.run_health(d) == [], se.run_health(d)
+        # a run already loaded is not loaded twice, and is not touched
+        run = se.load_run(d)
+        before = copy.deepcopy(run['rows'])
+        assert se.run_health(d, run) == []
+        assert run['rows'] == before
+        # read-only on disk as well: advice writes nothing
+        names = sorted(os.listdir(d))
+        se.run_health(d)
+        assert sorted(os.listdir(d)) == names
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_stops_on_a_blank_baseline_and_says_what_to_do():
+    """The 2026-10-01 run: exposure 3, a picture spanning 2 gray levels,
+    calibrated by hand and reviewed to an empty queue."""
+    d = tempfile.mkdtemp(prefix='edge_health_flat_')
+    try:
+        _health_run(d, baseline='flat')
+        items = se.run_health(d)
+        assert items[0]['level'] == 'stop', items
+        it = _item(items, 'image_flat')
+        assert it['level'] == 'stop'
+        for words in ('blank', 'cannot be measured', 'repeat the run',
+                      'Do not calibrate by hand', 'exposure 23'):
+            assert words in it['text'], (words, it['text'])
+        # the refused disc fit is this picture's consequence, not a
+        # second finding: its gray-level jargon stays off the screen
+        assert 'disc_fit_refused' not in _codes(items)
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_baseline_missing_unreadable_or_untagged_is_a_stop():
+    d = tempfile.mkdtemp(prefix='edge_health_base_')
+    try:
+        # the CSV names the baseline, the disk does not hold it
+        _health_run(os.path.join(d, 'gone'),
+                    skip_files=('SLDEA_s00_00.00kV_baseline.png',))
+        items = se.run_health(os.path.join(d, 'gone'))
+        it = _item(items, 'baseline_missing')
+        assert it['level'] == 'stop' and 'not in the frames folder' \
+            in it['text'], it
+        # reported once: the stop covers it, the count of other missing
+        # pictures does not repeat it
+        assert 'frames_missing' not in _codes(items)
+        # a 0-byte baseline decodes to nothing
+        zero = _health_run(os.path.join(d, 'zero'))
+        open(os.path.join(zero, 'frames',
+                          'SLDEA_s00_00.00kV_baseline.png'), 'wb').close()
+        it = _item(se.run_health(zero), 'baseline_unreadable')
+        assert it['level'] == 'stop' and 'empty or damaged' in it['text']
+        # no row tagged 'baseline' at all
+        none = _health_run(os.path.join(d, 'none'), rows=[
+            ('warmup', 0.0, '0.0', '-16'), ('post-ramp', 2.0, '2.0', '-16'),
+            ('pre-ramp', 2.0, '2.0', '-16'), ('post-ramp', 4.0, '4.0', '-16'),
+            ('pre-ramp', 4.0, '4.0', '-16')])
+        it = _item(se.run_health(none), 'baseline_missing')
+        assert it['level'] == 'stop' and "tagged 'baseline'" in it['text']
+        assert 'has to be repeated' in it['text'], it['text']
+        # the same finding on a run that is STILL BEING CAPTURED (run.log
+        # has no end line yet): told to wait, not to repeat the run, so
+        # the STOP no longer contradicts the "not finished" warning
+        # beside it (review 2026-10-02)
+        live_log = "[10:00:00] run dir: /x\n"
+        for name, rows in (('live_warmup', [('warmup', 0.0, '0.0', '-16')]),
+                           ('live_header', [])):
+            live = _health_run(os.path.join(d, name), rows=rows,
+                               runlog=live_log)
+            items = se.run_health(live)
+            it = _item(items, 'baseline_missing')
+            assert it['level'] == 'stop', it
+            assert 'no baseline picture yet' in it['text'], it['text']
+            assert 'wait until it ends and pick it again' in it['text']
+            assert 'has to be repeated' not in it['text'], it['text']
+            assert _item(items, 'ended_early')['text'].startswith(
+                'The run is not finished'), items
+        # a log that records an ERROR is not a live run: the old sentence
+        err = _health_run(os.path.join(d, 'err'),
+                          rows=[('warmup', 0.0, '0.0', '-16')],
+                          runlog=live_log + "[10:00:09] ERROR: camera "
+                                            "unplugged\n")
+        assert 'has to be repeated' in _item(se.run_health(err),
+                                             'baseline_missing')['text']
+        # a folder that is not a run says so instead of raising
+        os.makedirs(os.path.join(d, 'empty'))
+        items = se.run_health(os.path.join(d, 'empty'))
+        assert _codes(items) == ['no_run_csv'] \
+            and items[0]['level'] == 'stop'
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_warns_on_overexposure_and_on_a_refused_disc_fit():
+    d = tempfile.mkdtemp(prefix='edge_health_img_')
+    try:
+        white = _health_run(os.path.join(d, 'white'), baseline='white')
+        items = se.run_health(white)
+        it = _item(items, 'image_saturated')
+        assert it['level'] == 'warn' and 'pure white' in it['text'], it
+        assert not _codes(items, 'stop'), items
+        # a picture with content and no disc: the fit refuses, and the
+        # sentence carries the fitter's OWN reason plus what it costs
+        noise = _health_run(os.path.join(d, 'noise'), baseline='noise')
+        items = se.run_health(noise)
+        it = _item(items, 'disc_fit_refused')
+        assert it['level'] == 'warn', it
+        gray = se.load_gray(os.path.join(
+            noise, 'frames', 'SLDEA_s00_00.00kV_baseline.png'))
+        why = se.baseline_disc_refusal(gray, se.load_settings(noise))
+        assert why and why in it['text'], (why, it['text'])
+        assert 'most frames will need a manual decision' in it['text']
+        assert 'measure the scale by hand' in it['text']
+        assert not _codes(items, 'stop'), "a refused fit is not a stop"
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_reports_missing_voltage_its_stop_point_and_its_sign():
+    """The campaign's shape: readings to 4.00 kV, blank above, and every
+    reading negative with no INVERTED line in setup.txt."""
+    rows = [('baseline', 0.0, '-0.0', '-16.0'),
+            ('post-ramp', 2.0, '-2.03', '-16.0'),
+            ('pre-ramp', 2.0, '-2.03', '-16.0'),
+            ('post-ramp', 4.0, '-4.08', '-16.0'),
+            ('pre-ramp', 4.0, '-4.07', '-16.0'),
+            ('post-ramp', 4.25, '', '-16.0'),
+            ('pre-ramp', 4.25, '', '-16.0'),
+            ('post-ramp', 4.5, '', '-16.0')]
+    setup = _HEALTH_SETUP.replace('5 frames', '8 frames')
+    log = _HEALTH_LOG_OK.replace('5/5', '8/8')
+    d = tempfile.mkdtemp(prefix='edge_health_kv_')
+    try:
+        run = _health_run(os.path.join(d, 'a'), rows=rows, setup=setup,
+                          runlog=log)
+        items = se.run_health(run)
+        it = _item(items, 'kv_missing')
+        assert it['level'] == 'warn'
+        assert '3 of 7 powered frames' in it['text'], it['text']
+        assert 'the readings stop above 4.00 kV' in it['text'], it['text']
+        it = _item(items, 'kv_sign')
+        assert it['level'] == 'info'
+        assert '4 of 4 readings' in it['text'], it['text']
+        assert '-4.08 kV measured at 4.00 kV commanded' in it['text']
+        # a student must never be told to flip an HV setting from here
+        assert 'Do not change any high-voltage setting' in it['text']
+        # the check is about the SIGN. It never compared the size with
+        # the commanded voltage, so it must not vouch for it: the 07-23
+        # runs read 14 to 48 % low under the sentence that said "usable"
+        assert 'usable' not in it['text'], it['text']
+        sign_only = 'looks only at the sign, not at the size'
+        assert sign_only in it['text'], it['text']
+        assert not _codes(items, 'stop')
+        # the runner's own line says the monitor sign was accounted for
+        inv = _health_run(os.path.join(d, 'b'), rows=rows, runlog=log,
+                          setup=setup + "Trek control polarity: INVERTED "
+                          "(control = -kV/gain; monitor readings "
+                          "sign-corrected in log)\n")
+        assert 'kv_sign' not in _codes(se.run_health(inv))
+        # one landing holding a reading AND a blank: 'at', not 'above'
+        at = _health_run(os.path.join(d, 'c'), setup=setup, runlog=log,
+                         rows=rows[:4] + [('pre-ramp', 4.0, '', '-16.0')]
+                         + rows[5:])
+        assert 'the readings stop at 4.00 kV' in \
+            _item(se.run_health(at), 'kv_missing')['text']
+        # no reading anywhere (the 2026-08-05 runs)
+        none = _health_run(os.path.join(d, 'e'), setup=setup, runlog=log,
+                           rows=[(t, kv, '', ua) for t, kv, _m, ua in rows])
+        it = _item(se.run_health(none), 'kv_missing')
+        assert 'None of the 7 powered frames' in it['text'], it['text']
+        assert 'kv_sign' not in _codes(se.run_health(none))
+        # without setup.txt the polarity is unknown: no sign verdict, and
+        # the missing file is itself said
+        bare = _health_run(os.path.join(d, 'f'), rows=rows, setup=None,
+                           runlog=log)
+        codes = _codes(se.run_health(bare))
+        assert 'kv_sign' not in codes and 'setup_missing' in codes, codes
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_counts_blank_current_cells():
+    d = tempfile.mkdtemp(prefix='edge_health_ua_')
+    try:
+        some = _health_run(os.path.join(d, 'some'), rows=[
+            ('baseline', 0.0, '0.0', '-16.0'),
+            ('post-ramp', 2.0, '2.0', '-16.0'),
+            ('pre-ramp', 2.0, '2.0', ''),
+            ('post-ramp', 4.0, '4.0', ''),
+            ('pre-ramp', 4.0, '4.0', '-16.0')])
+        it = _item(se.run_health(some), 'ua_missing')
+        assert it['level'] == 'warn'
+        assert '2 of 5 frames' in it['text'] and '2.00 kV' in it['text']
+        # 3 readings are too few for breakdown_flags' median rule
+        assert 'With only 3 current readings' in it['text'], it['text']
+        assert 'larger than 50 microamps' in it['text'], it['text']
+        assert 'area alone' in it['text'], it['text']
+        # enough readings for the median rule: the blanks are only blanks
+        many = _health_run(os.path.join(d, 'many'), rows=[
+            ('baseline', 0.0, '0.0', '-16.0'),
+            ('post-ramp', 2.0, '2.0', '-16.0'),
+            ('pre-ramp', 2.0, '2.0', ''),
+            ('post-ramp', 4.0, '4.0', '-16.0'),
+            ('pre-ramp', 4.0, '4.0', '-16.0'),
+            ('post-ramp', 6.0, '6.0', '-16.0'),
+            ('pre-ramp', 6.0, '6.0', '-16.0')])
+        it = _item(se.run_health(many), 'ua_missing')
+        assert '1 of 7 frames' in it['text'], it['text']
+        assert 'nothing to read on those frames' in it['text'], it['text']
+        assert 'area alone' not in it['text'], it['text']
+        allb = _health_run(os.path.join(d, 'all'), rows=[
+            ('baseline', 0.0, '0.0', ''), ('post-ramp', 2.0, '2.0', ''),
+            ('pre-ramp', 2.0, '2.0', ''), ('post-ramp', 4.0, '4.0', ''),
+            ('pre-ramp', 4.0, '4.0', '')])
+        it = _item(se.run_health(allb), 'ua_missing')
+        assert 'no current readings at all (5 frames)' in it['text']
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_current_sentences_say_what_breakdown_flags_will_do():
+    """Review 2026-10-02: the all-blank sentence read 'Edge Review
+    confirms a breakdown from the current, so on this run it cannot flag
+    one'. False: under HEALTH_MIN_UA_ROWS parseable readings
+    breakdown_flags takes its legacy rule, where an area collapse ALONE
+    confirms and Save renames frames on it. The sentence and the rule are
+    held together here, on both sides of the threshold."""
+    assert se.HEALTH_MIN_UA_ROWS == 5
+    tags = [('baseline', 0.0), ('post-ramp', 2.0), ('pre-ramp', 2.0),
+            ('post-ramp', 4.0), ('pre-ramp', 4.0), ('post-ramp', 6.0),
+            ('pre-ramp', 6.0)]
+    # a 50 % area collapse at row 3, where the voltage rose
+    areas = {0: 1000.0, 1: 1000.0, 2: 1000.0, 3: 500.0, 4: 500.0,
+             5: 500.0, 6: 500.0}
+    d = tempfile.mkdtemp(prefix='edge_health_rule_')
+    try:
+        for n_read in (0, se.HEALTH_MIN_UA_ROWS - 1, se.HEALTH_MIN_UA_ROWS):
+            rows = [(tag, kv, f'{kv:.1f}', '-16.0' if k < n_read else '')
+                    for k, (tag, kv) in enumerate(tags)]
+            rd = _health_run(os.path.join(d, f'n{n_read}'), rows=rows)
+            text = _item(se.run_health(rd), 'ua_missing')['text']
+            flags, advis = se.breakdown_flags(
+                se.load_run(rd)['rows'], areas, se.load_settings(rd))
+            if n_read < se.HEALTH_MIN_UA_ROWS:
+                # the legacy rule: the collapse is a CONFIRMED flag
+                assert flags == {3: 'breakdown? area collapsed 50%'}, \
+                    (n_read, flags)
+                assert advis == {}, (n_read, advis)
+                assert 'from a sudden drop in area alone' in text, text
+                assert 'less reliable' in text, text
+            else:
+                # the median rule: the same collapse is only an advisory
+                assert flags == {}, (n_read, flags)
+                assert list(advis) == [3], (n_read, advis)
+                assert 'area alone' not in text, text
+            # never again the claim that no flag can come
+            assert 'cannot flag' not in text, text
+        none = _item(se.run_health(os.path.join(d, 'n0')),
+                     'ua_missing')['text']
+        assert 'cannot check the current for a breakdown' in none, none
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_says_when_and_why_a_run_ended_early():
+    setup = _HEALTH_SETUP.replace('5 frames', '9 frames')
+    d = tempfile.mkdtemp(prefix='edge_health_end_')
+    try:
+        ab = _health_run(os.path.join(d, 'abort'), setup=setup,
+                         runlog="[10:00:00] run dir: /x\n"
+                                "[10:00:40] abort requested\n"
+                                "[10:00:41] run aborted: 5/9 frames\n")
+        it = _item(se.run_health(ab), 'ended_early')
+        assert it['level'] == 'warn'
+        assert it['text'].startswith('The run stopped early'), it['text']
+        assert '5 of 9 planned frames' in it['text'], it['text']
+        assert 'up to 4.00 kV' in it['text']
+        assert 'operator pressed Abort' in it['text']
+        assert 'still going' not in it['text'], it['text']
+        # an older run has no run.log: say that the reason is unknown
+        old = _health_run(os.path.join(d, 'old'), setup=setup, runlog=None)
+        assert 'no run.log' in _item(se.run_health(old),
+                                     'ended_early')['text']
+        # a log that just stops: the program or the PC died
+        cut = _health_run(os.path.join(d, 'cut'), setup=setup,
+                          runlog="[10:00:00] run dir: /x\n")
+        text = _item(se.run_health(cut), 'ended_early')['text']
+        assert 'no end-of-run line' in text, text
+        # ...or the run is being captured right now (Edge Review opens on
+        # the newest run folder): a live run is not called "stopped"
+        assert text.startswith('The run is not finished'), text
+        assert 'stopped early' not in text, text
+        assert 'If the run is still going, wait until it ends' in text, text
+        assert '5 of 9 planned frames' in text, text
+        err = _health_run(os.path.join(d, 'err'), setup=setup,
+                          runlog="[10:00:00] run dir: /x\n"
+                                 "[10:00:09] ERROR: camera unplugged\n")
+        assert 'camera unplugged' in _item(se.run_health(err),
+                                           'ended_early')['text']
+        # a reused run name APPENDS to run.log: only the last run counts
+        twice = _health_run(os.path.join(d, 'twice'),
+                            runlog="[09:00:00] run dir: /x\n"
+                                   "[09:00:30] run aborted: 2/5 frames\n"
+                                   + _HEALTH_LOG_OK)
+        assert 'ended_early' not in _codes(se.run_health(twice))
+        # ...and what the EARLIER run logged must not leak into this one:
+        # its watchdog trip is not this run's trip, and its error is not
+        # why this run stopped
+        first = ("[09:00:00] run dir: /x\n"
+                 "[09:00:20] ERROR: camera unplugged\n"
+                 "[09:00:28] BREAKDOWN CONFIRMED - I=OFF-SCREEN sustained "
+                 ">3s\n"
+                 "[09:00:30] run BREAKDOWN-ABORT: 2/5 frames\n")
+        clean = _health_run(os.path.join(d, 'twice_trip'),
+                            runlog=first + _HEALTH_LOG_OK)
+        assert se.run_health(clean) == [], se.run_health(clean)
+        cut2 = _health_run(os.path.join(d, 'twice_cut'), setup=setup,
+                           runlog=first + "[10:00:00] run dir: /x\n")
+        items = se.run_health(cut2)
+        assert 'watchdog_trip' not in _codes(items), items
+        early = _item(items, 'ended_early')['text']
+        assert 'no end-of-run line' in early, early
+        assert 'camera unplugged' not in early, early
+        assert 'watchdog' not in early, early
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_reports_a_watchdog_stop_and_says_what_the_flags_do():
+    """A trip is REPORTED as a 'warn' sentence that says what
+    breakdown_flags will do with it (decision 17, 2026-10-03), through
+    the same trip_verdict, and the rows it was read from are left
+    exactly as loaded. The sentinel case (this fixture's run.log says
+    I=OFF-SCREEN) reads 'does NOT mark'; a numeric trip reads 'marks';
+    and the two agree with breakdown_flags on the same folder."""
+    trip = ('breakdown', 4.4, '4.4', '', {
+        'step': 99, 'frame_file': 'SLDEA_s99_04.40kV_breakdown.png',
+        'notes': 'WATCHDOG: breakdown confirmed (dev >100uA for 3s)'})
+    rows = [('baseline', 0.0, '0.0', '-16.0'),
+            ('post-ramp', 2.0, '2.0', '-16.0'),
+            ('pre-ramp', 2.0, '2.0', '-16.0'),
+            ('post-ramp', 4.0, '4.0', '-16.0'), trip]
+    log = ("[10:00:00] run dir: /x\n"
+           "[10:00:50] BREAKDOWN CONFIRMED - I=OFF-SCREEN sustained >3s\n"
+           "[10:00:51] run BREAKDOWN-ABORT: 4/5 frames\n")
+    d = tempfile.mkdtemp(prefix='edge_health_wd_')
+    try:
+        run_dir = _health_run(os.path.join(d, 'trip'), rows=rows,
+                              runlog=log)
+        run = se.load_run(run_dir)
+        before = copy.deepcopy(run['rows'])
+        items = se.run_health(run_dir, run)
+        it = _item(items, 'watchdog_trip')
+        assert it['level'] == 'warn' and 'at 4.40 kV' in it['text'], it
+        # the sentinel case: says so, names the file, and does not
+        # pretend the row's own reading stops counting
+        assert 'does NOT mark a breakdown from this stop alone' in it['text']
+        assert 'off-screen sentinel, run.log' in it['text'], it['text']
+        assert 'own current reading still counts' in it['text']
+        assert run['rows'] == before, "advice must not touch the rows"
+        flags, advis = se.breakdown_flags(run['rows'], {}, se.load_settings(
+            run_dir), rundir=run_dir)
+        assert flags == {} and 'off-screen sentinel' in advis[4], (flags,
+                                                                     advis)
+        # the trip row is not one of the PLANNED frames: 4 of 5 taken
+        early = _item(items, 'ended_early')
+        assert '4 of 5 planned frames' in early['text'], early['text']
+        assert 'current watchdog stopped it' in early['text']
+        assert not _codes(items, 'stop')
+        # a numeric trip: the strip says it marks, and names the number
+        # and where it came from; the flags do mark
+        num = log.replace('I=OFF-SCREEN', 'I=-240 uA')
+        nd = _health_run(os.path.join(d, 'num'), rows=rows, runlog=num)
+        it = _item(se.run_health(nd), 'watchdog_trip')
+        assert 'marks that row as a confirmed breakdown' in it['text']
+        assert 'on record as -240 uA (run.log)' in it['text'], it['text']
+        assert 'renames its frame' in it['text']
+        nrun = se.load_run(nd)
+        flags, advis = se.breakdown_flags(nrun['rows'], {}, se.load_settings(
+            nd), rundir=nd)
+        assert list(flags) == [4] and advis == {}, (flags, advis)
+        assert flags[4] == 'breakdown? watchdog trip (I -240uA, run.log)'
+        # no record of the reading anywhere: says so
+        bare = ("[10:00:00] run dir: /x\n"
+                "[10:00:51] run BREAKDOWN-ABORT: 4/5 frames\n")
+        ud = _health_run(os.path.join(d, 'unknown'), rows=rows, runlog=bare)
+        it = _item(se.run_health(ud), 'watchdog_trip')
+        assert 'on record nowhere' in it['text'], it['text']
+        # the note alone is enough (a tag someone edited away) ...
+        note_only = [r for r in rows[:4]] + [
+            ('post-ramp', 4.4, '4.4', '-16.0',
+             {'notes': 'WATCHDOG: breakdown confirmed (dev >100uA for 3s)'})]
+        nd = _health_run(os.path.join(d, 'note'), rows=note_only)
+        assert 'watchdog_trip' in _codes(se.run_health(nd))
+        # ... and so is run.log, when the row itself was never written:
+        # then there is no row to mark, and the sentence says that
+        ld = _health_run(os.path.join(d, 'log'), runlog=log)
+        it = _item(se.run_health(ld), 'watchdog_trip')
+        assert 'trip row itself is not in data.csv' in it['text'], it
+        assert 'watchdog_trip' not in _codes(
+            se.run_health(_health_run(os.path.join(d, 'none'))))
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_counts_frames_missing_on_disk_and_never_taken():
+    d = tempfile.mkdtemp(prefix='edge_health_frames_')
+    try:
+        gone = _health_run(os.path.join(d, 'gone'), skip_files=(
+            'SLDEA_s02_02.00kV_pre-ramp.png',
+            'SLDEA_s03_04.00kV_post-ramp.png'))
+        it = _item(se.run_health(gone), 'frames_missing')
+        assert it['level'] == 'warn'
+        assert '2 of 5 pictures' in it['text'], it['text']
+        assert 'SLDEA_s02_02.00kV_pre-ramp.png' in it['text']
+        # a row that names no frame: the camera gave none at capture
+        rows = [('baseline', 0.0, '0.0', '-16.0'),
+                ('post-ramp', 2.0, '2.0', '-16.0', {'frame_file': ''}),
+                ('pre-ramp', 2.0, '2.0', '-16.0'),
+                ('post-ramp', 4.0, '4.0', '-16.0'),
+                ('pre-ramp', 4.0, '4.0', '-16.0')]
+        blank = _health_run(os.path.join(d, 'blank'), rows=rows)
+        items = se.run_health(blank)
+        it = _item(items, 'frames_not_taken')
+        assert '1 of 5 snapshots' in it['text'] and '2.00 kV' in it['text']
+        assert 'frames_missing' not in _codes(items)
+
+        # A picture that IS in the folder, under its _BREAKDOWN twin name
+        # (a rename that outlived a Save which did not finish), is not
+        # missing: "copy it back from the backup" was the wrong advice
+        # (review 2026-10-02). It is counted apart and Save repairs it.
+        plain = 'SLDEA_s04_04.00kV_pre-ramp.png'
+        branded = 'SLDEA_s04_04.00kV_pre-ramp_BREAKDOWN.png'
+        assert se._frame_twin(plain) == branded
+        assert se._frame_twin(branded) == plain
+        twin = _health_run(os.path.join(d, 'twin'))
+        fdir = os.path.join(twin, 'frames')
+        os.rename(os.path.join(fdir, plain), os.path.join(fdir, branded))
+        items = se.run_health(twin)
+        assert 'frames_missing' not in _codes(items), items
+        it = _item(items, 'frames_renamed')
+        assert it['level'] == 'warn'
+        assert '1 of 5 pictures' in it['text'], it['text']
+        assert plain in it['text'] and branded in it['text'], it['text']
+        assert 'Nothing is lost' in it['text'], it['text']
+        assert 'next Save' in it['text'], it['text']
+        assert 'backup' not in it['text'], it['text']
+        # ...and what the sentence promises is what Save's rename plan
+        # does: with no breakdown flag the file gets its plain name back
+        run = se.load_run(twin)
+        se.apply_rename_plan(se.plan_breakdown_marks(run, {}))
+        assert os.path.exists(os.path.join(fdir, plain))
+        assert se.run_health(twin) == [], se.run_health(twin)
+        # the other direction: data.csv holds the branded name, the disk
+        # holds the plain file
+        rows = [('baseline', 0.0, '0.0', '-16.0'),
+                ('post-ramp', 2.0, '2.01', '-16.0'),
+                ('pre-ramp', 2.0, '2.02', '-15.8'),
+                ('post-ramp', 4.0, '4.01', '-16.2'),
+                ('pre-ramp', 4.0, '4.03', '-16.0', {'frame_file': branded})]
+        rev = _health_run(os.path.join(d, 'rev'), rows=rows)
+        fdir = os.path.join(rev, 'frames')
+        os.rename(os.path.join(fdir, branded), os.path.join(fdir, plain))
+        items = se.run_health(rev)
+        assert 'frames_missing' not in _codes(items), items
+        text = _item(items, 'frames_renamed')['text']
+        assert f"the first is {branded}, found as {plain}" in text, text
+        # one picture really gone and one renamed are two findings
+        both = _health_run(os.path.join(d, 'both'), skip_files=(
+            'SLDEA_s02_02.00kV_pre-ramp.png',))
+        fdir = os.path.join(both, 'frames')
+        os.rename(os.path.join(fdir, plain), os.path.join(fdir, branded))
+        items = se.run_health(both)
+        assert '1 of 5 pictures' in _item(items, 'frames_missing')['text']
+        assert 'SLDEA_s02_02.00kV_pre-ramp.png' in \
+            _item(items, 'frames_missing')['text']
+        assert '1 of 5 pictures' in _item(items, 'frames_renamed')['text']
+        # the BASELINE under its twin name keeps its STOP: Edge Review
+        # opens it by the name data.csv gives
+        base = _health_run(os.path.join(d, 'base_twin'))
+        fdir = os.path.join(base, 'frames')
+        os.rename(os.path.join(fdir, 'SLDEA_s00_00.00kV_baseline.png'),
+                  os.path.join(fdir,
+                               'SLDEA_s00_00.00kV_baseline_BREAKDOWN.png'))
+        items = se.run_health(base)
+        assert _item(items, 'baseline_missing')['level'] == 'stop'
+        assert 'frames_renamed' not in _codes(items), items
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_counts_off_screen_telemetry_by_header_name():
+    """The status columns are found in the HEADER, not by position, and a
+    'skipped' V_Out row is not a voltage sample."""
+    head = ','.join(sldea_profile.TELEMETRY_COLUMNS) + '\n'
+    assert head.startswith('t_s,timestamp,nominal_kV,measured_kV,'), head
+    body = ("0.0,x,0.0,-0.0,-0.2,ok,ok,\n"
+            "0.5,x,0.5,,-0.3,skipped,ok,\n"
+            "1.0,x,2.15,,-0.1,offscreen,ok,\n"
+            "1.5,x,2.2,,,skipped,offscreen,\n"
+            "2.0,x,2.3,,,offscreen,offscreen,\n")
+    d = tempfile.mkdtemp(prefix='edge_health_tel_')
+    try:
+        run = _health_run(os.path.join(d, 'a'), telemetry=head + body)
+        items = se.run_health(run)
+        it = _item(items, 'telemetry_i_offscreen')
+        assert it['level'] == 'warn'
+        assert '2 of 5 samples' in it['text'], it['text']
+        assert 'first at 2 s into the run (2.20 kV commanded)' in it['text']
+        assert 'reads this log for notes only' in it['text'], it['text']
+        assert 'never marks a breakdown or renames a frame' in it['text']
+        it = _item(items, 'telemetry_v_offscreen')
+        assert it['level'] == 'info'
+        assert '2 of 3 voltage samples' in it['text'], it['text']
+        assert '2.15 kV commanded' in it['text']
+        # the same file with its columns in another order
+        cols = ['event', 'i_status', 'v_status', 'measured_uA',
+                'measured_kV', 'nominal_kV', 'timestamp', 't_s']
+        lines = [dict(zip(sldea_profile.TELEMETRY_COLUMNS, ln.split(',')))
+                 for ln in body.splitlines()]
+        moved = ','.join(cols) + '\n' + ''.join(
+            ','.join(ln[c] for c in cols) + '\n' for ln in lines)
+        run2 = _health_run(os.path.join(d, 'b'), telemetry=moved)
+        assert [(x['code'], x['text']) for x in se.run_health(run2)] == \
+            [(x['code'], x['text']) for x in items]
+        # nothing off-screen, a header without status columns, or no
+        # sidecar at all: nothing is said
+        quiet = _health_run(os.path.join(d, 'c'), telemetry=head
+                            + "0.0,x,0.0,-0.0,-0.2,ok,ok,\n")
+        old = _health_run(os.path.join(d, 'e'),
+                          telemetry="t_s,measured_uA\n0.0,-0.2\n")
+        for rd in (quiet, old, _health_run(os.path.join(d, 'f'))):
+            assert not [c for c in _codes(se.run_health(rd))
+                        if c.startswith('telemetry')], rd
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_skips_the_electrical_checks_on_a_dry_run():
+    rows = [('baseline', 0.0, '', ''), ('post-ramp', 2.0, '', ''),
+            ('pre-ramp', 2.0, '', ''), ('post-ramp', 4.0, '', ''),
+            ('pre-ramp', 4.0, '', '')]
+    d = tempfile.mkdtemp(prefix='edge_health_dry_')
+    try:
+        dry = _health_run(d, rows=rows, setup=_HEALTH_SETUP.replace(
+            'MODE: LIVE (HV energized)',
+            'MODE: *** DRY RUN (HV output OFF) ***'))
+        items = se.run_health(dry)
+        assert _codes(items) == ['dry_run'], items
+        assert items[0]['level'] == 'info'
+    finally:
+        shutil.rmtree(d)
+
+
+def test_run_health_puts_stop_first_and_every_item_is_a_sentence():
+    rows = [('baseline', 0.0, '-0.0', ''),
+            ('post-ramp', 2.0, '-2.03', '-16.0'),
+            ('pre-ramp', 2.0, '', '-16.0')]
+    d = tempfile.mkdtemp(prefix='edge_health_all_')
+    try:
+        run = _health_run(d, rows=rows, baseline='flat', runlog=(
+            "[10:00:00] run dir: /x\n[10:00:30] run aborted: 3/5 frames\n"))
+        items = se.run_health(run)
+        levels = [it['level'] for it in items]
+        assert levels[0] == 'stop' and 'warn' in levels and 'info' in levels
+        order = {lv: k for k, lv in enumerate(se.HEALTH_LEVELS)}
+        assert levels == sorted(levels, key=order.get), levels
+        assert len(set(_codes(items))) == len(items), "a code said twice"
+        for it in items:
+            assert set(it) == {'level', 'code', 'text'}, it
+            assert it['level'] in se.HEALTH_LEVELS
+            text = it['text']
+            assert text.endswith('.') and text[0].isupper(), text
+            assert '  ' not in text and '\n' not in text, text
+    finally:
+        shutil.rmtree(d)
+
+
+def test_runner_notes_survive_two_saves():
+    """S6 / U25: apply_results rebuilt the notes cell of every reviewed
+    row, so the first Save erased what the runner wrote at capture. The
+    WATCHDOG note and the V_Out note now ride through any number of
+    Saves, on accepted and rejected rows alike."""
+    wd = 'WATCHDOG: breakdown confirmed (dev >100µA for 3s)'
+    voff = 'V_Out off-screen (clipped)'
+    assert se.runner_note_tokens(f'{wd}; {voff}') == [wd, voff]
+    # analysis notes and brands are NOT capture notes
+    assert se.runner_note_tokens(
+        'edge:disc-fit conf 0.90; post-breakdown; breakdown? I dev 90uA '
+        '>= 20uA (baseline -16.0uA); area dip 12% vs previous step; '
+        'rejected (no reliable edge); typed by hand') == []
+    d = tempfile.mkdtemp(prefix='edge_notes_')
+    try:
+        _fake_run(d, [
+            {'tag': 'baseline', 'nominal_kV': '0', 'frame_file': 'a.png'},
+            {'tag': 'post-ramp', 'nominal_kV': '4.25',
+             'frame_file': 'b.png', 'notes': voff},
+            {'tag': 'breakdown', 'step': 99, 'nominal_kV': '4.4',
+             'frame_file': 'c.png', 'notes': ''}])
+        # the trip row's note carries a micro sign, and the bench
+        # writes data.csv as UTF-8: put it there the same way
+        run = se.load_run(d)
+        run['rows'][2]['notes'] = f'{wd}; {voff}'
+        se.write_back(d, run)
+        os.remove(os.path.join(d, 'data.csv.bak'))
+        assert se.load_run(d)['rows'][2]['notes'] == f'{wd}; {voff}'
+        cand = {'area_px': 100.0, 'diam_px': 11.3, 'conf': 0.9,
+                'method': 'disc-fit', 'wrinkle': 1.0}
+        for save in (1, 2):
+            run = se.load_run(d)                  # what a new session reads
+            se.apply_results(run['rows'], {0: cand, 1: None, 2: cand},
+                             None, {}, {2: 'area dip 12% vs previous step'})
+            se.plan_breakdown_marks(run, {})      # the un-brand pass too
+            se.write_back(d, run)
+            rows = se.load_run(d)['rows']
+            assert rows[0]['notes'] == 'edge:disc-fit conf 0.90', rows[0]
+            assert rows[1]['notes'] == \
+                f'{voff}; rejected (no reliable edge)', (save, rows[1])
+            assert rows[2]['notes'] == (
+                f'{wd}; {voff}; edge:disc-fit conf 0.90; '
+                f'area dip 12% vs previous step'), (save, rows[2])
+        # the second Save's .bak is the first Save's output, and the
+        # capture notes are in it: no Save leaves a copy without them
+        with open(os.path.join(d, 'data.csv.bak'), newline='',
+                  encoding='utf-8-sig') as f:
+            bak = list(csv.DictReader(f))
+        assert bak[2]['notes'].startswith(f'{wd}; {voff}'), bak[2]
+        # sldea_plot still finds the measurement behind the capture notes
+        import sldea_plot
+        m = sldea_plot._NOTE_RE.search(rows[2]['notes'])
+        assert m and m.group(1) == 'disc-fit', rows[2]['notes']
+    finally:
+        shutil.rmtree(d)
+
+
+def test_stale_analysis_notes_do_not_pile_up():
+    """The other half of the whitelist: everything that is NOT a capture
+    note is still regenerated at each Save, never accumulated."""
+    voff = 'V_Out off-screen (clipped)'
+    cand = {'area_px': 100.0, 'diam_px': 11.3, 'conf': 0.9,
+            'method': 'disc-fit', 'wrinkle': 1.0}
+    rows = [{'notes': f'{voff}; edge:diff-hi conf 0.71 (user); '
+                      f'pair mismatch 14% at 3 kV; wrinkle-mode (idx 2.1)'}]
+    # a reviewed row: the old measurement and the old annotations go, the
+    # capture note stays, this Save's annotations are written
+    se.apply_results(rows, {0: cand}, None, {},
+                     {0: 'area dip 12% vs previous step'})
+    assert rows[0]['notes'] == (f'{voff}; edge:disc-fit conf 0.90; '
+                                f'area dip 12% vs previous step'), rows[0]
+    se.apply_results(rows, {0: cand}, None, {},
+                     {0: 'area dip 15% vs previous step'})
+    assert rows[0]['notes'] == (f'{voff}; edge:disc-fit conf 0.90; '
+                                f'area dip 15% vs previous step'), rows[0]
+    se.apply_results(rows, {0: cand}, None, {}, None)
+    assert rows[0]['notes'] == f'{voff}; edge:disc-fit conf 0.90', rows[0]
+    # a Save that finds the same thing twice writes it once
+    for _ in range(3):
+        se.apply_results(rows, {0: cand}, None,
+                         {0: 'breakdown? I dev 90uA >= 20uA '
+                             '(baseline -16.0uA)'},
+                         {0: 'pair mismatch 14% at 3 kV; '
+                             'wrinkle-mode (idx 2.1)'})
+    assert rows[0]['notes'].count('breakdown?') == 1, rows[0]
+    assert rows[0]['notes'].count('pair mismatch') == 1, rows[0]
+    assert rows[0]['notes'].count(voff) == 1, rows[0]
+    assert rows[0]['notes'].count('edge:') == 1, rows[0]
+
+    # an UNREVIEWED row keeps its cell (it describes the kept px), and a
+    # flag or annotation re-computed with a new number replaces its older
+    # self instead of sitting beside it
+    kept = [{'active_area_px': '100',
+             'notes': f'{voff}; edge:disc-fit conf 0.91; '
+                      f'transient discharge? I dev 137uA; typed by hand'}]
+    se.apply_results(kept, {}, None, {},
+                     {0: 'transient discharge? I dev 140uA'})
+    assert kept[0]['notes'] == (f'{voff}; edge:disc-fit conf 0.91; '
+                                f'transient discharge? I dev 140uA; '
+                                f'typed by hand'), kept[0]
+    se.apply_results(kept, {}, None,
+                     {0: 'breakdown? I dev 90uA >= 20uA (baseline -16.0uA)'})
+    se.apply_results(kept, {}, None,
+                     {0: 'breakdown? I dev 90uA >= 30uA (baseline -16.0uA)'})
+    assert kept[0]['notes'].count('breakdown?') == 1, kept[0]
+    assert '>= 30uA' in kept[0]['notes'], kept[0]
+    assert kept[0]['notes'].count('transient discharge?') == 1, kept[0]
+    # only the cell's OLD token is replaced, and only once: two notes of
+    # one kind found by the same Save are two findings, and both are kept
+    two = [{'active_area_px': '100',
+            'notes': 'edge:disc-fit conf 0.91; '
+                     'transient discharge? I dev 120uA'}]
+    se.apply_results(two, {}, None, {},
+                     {0: 'transient discharge? I dev 137uA; '
+                         'transient discharge? I dev 140uA'})
+    assert two[0]['notes'] == ('edge:disc-fit conf 0.91; '
+                               'transient discharge? I dev 137uA; '
+                               'transient discharge? I dev 140uA'), two[0]
+    # nothing added: the cell is byte-identical, odd spacing and all (the
+    # scale-only re-anchor commits through this branch)
+    odd = [{'active_area_px': '100', 'notes': 'edge:disc-fit conf 0.91;x '}]
+    se.apply_results(odd, {}, None, {}, None)
+    assert odd[0]['notes'] == 'edge:disc-fit conf 0.91;x ', odd[0]
+
+
+# ---------------------------------------------------------------------------
+# decision 17 (2026-10-03): the watchdog's trip row and the monitor log
+# ---------------------------------------------------------------------------
+
+_TRIP_NOTE = 'WATCHDOG: breakdown confirmed (dev >100uA for 3s)'
+
+
+def _trip_rows(cell='', healthy=4):
+    """`healthy` quiet rows at -16 uA and then the trip row the runner
+    writes (gui.py, the trip branch of _sldea_worker): tag 'breakdown',
+    step 99, the WATCHDOG note. `cell` is its measured_uA: the LATER
+    read taken with the frame, blank when that read was off-screen."""
+    quiet = [('baseline', 0.0, '0.0', '-16.0'),
+             ('post-ramp', 2.0, '2.0', '-16.0'),
+             ('pre-ramp', 2.0, '2.0', '-16.0'),
+             ('post-ramp', 4.0, '4.0', '-16.0')][:healthy]
+    return quiet + [('breakdown', 4.4, '', cell, {
+        'step': 99, 'frame_file': 'SLDEA_s99_04.40kV_breakdown.png',
+        'notes': _TRIP_NOTE})]
+
+
+def _tel(lines):
+    """A telemetry.csv text from (t_s, nominal_kV, measured_uA, i_status,
+    event) tuples under the runner's own header (TELEMETRY_COLUMNS);
+    measured_kV is blank and v_status 'skipped' throughout."""
+    head = ','.join(sldea_profile.TELEMETRY_COLUMNS) + '\n'
+    return head + ''.join(f"{t},x,{kv},,{ua},skipped,{st},{ev}\n"
+                          for t, kv, ua, st, ev in lines)
+
+
+# the telemetry event row the runner writes off the very reading that
+# tripped the watchdog: a number with i_status 'ok', or a blank current
+# with i_status 'offscreen' for the sentinel
+_TEL_TRIP_NUM = _tel([(0.0, 0.0, -16.0, 'ok', 'snap s00 baseline x'),
+                      (50.0, 4.4, -240.0, 'ok', 'BREAKDOWN CONFIRMED')])
+_TEL_TRIP_OFF = _tel([(0.0, 0.0, -16.0, 'ok', 'snap s00 baseline x'),
+                      (50.0, 4.4, '', 'offscreen', 'BREAKDOWN CONFIRMED')])
+_LOG_TRIP_NUM = ("[10:00:00] run dir: /x\n"
+                 "[10:00:50] BREAKDOWN CONFIRMED - I=-240 uA sustained >3s\n"
+                 "[10:00:51] run BREAKDOWN-ABORT: 4/5 frames\n")
+_LOG_TRIP_OFF = ("[10:00:00] run dir: /x\n"
+                 "[10:00:50] BREAKDOWN CONFIRMED - I=OFF-SCREEN (clipping); "
+                 "last readable -16 uA sustained >3s\n"
+                 "[10:00:51] run BREAKDOWN-ABORT: 4/5 frames\n")
+_LOG_TRIP_BARE = ("[10:00:00] run dir: /x\n"
+                  "[10:00:51] run BREAKDOWN-ABORT: 4/5 frames\n")
+
+
+def _flags_in(d, rows, telemetry, runlog, areas=None, rundir=True):
+    """breakdown_flags on a synthetic run folder, with the folder handed
+    over (the GUI's and the plot's call) or withheld."""
+    rd = _health_run(d, rows=rows, telemetry=telemetry, runlog=runlog)
+    run = se.load_run(rd)
+    s = se.load_settings(rd)
+    got = se.breakdown_flags(run['rows'], areas or {}, s,
+                             rundir=rd if rundir else None)
+    return rd, run, got
+
+
+def test_watchdog_trip_confirms_unless_its_reading_was_the_sentinel():
+    """Decision 17 (2026-10-03). The trip row is a confirmed event with
+    the reason 'watchdog trip', read off the reading that tripped it:
+    telemetry.csv first, run.log second. The one exclusion is the
+    off-screen sentinel, which the scope also returns from a mis-ranged
+    channel: then the trip confirms nothing by itself, the row says so
+    in a note, and its own current still goes through the current rule
+    like any other row's. A trip with nothing on file confirms on the
+    watchdog's own note, and the reason says so (review 2026-10-04: the
+    decision names one exclusion, so the first pass's second one went).
+    The row's own cell is a later read and never decides. The rows
+    around it are flagged exactly as before."""
+    d = tempfile.mkdtemp(prefix='edge_trip_')
+    try:
+        # (a) telemetry holds the number, the later cell is blank (the
+        # Assctuator shape: current still off-screen at the frame)
+        rd, run, (flags, advis) = _flags_in(
+            os.path.join(d, 'a'), _trip_rows(''), _TEL_TRIP_NUM,
+            _LOG_TRIP_OFF)          # run.log disagreeing is never read
+        assert flags == {4: 'breakdown? watchdog trip (I -240uA, '
+                            'telemetry.csv)'}, flags
+        assert advis == {}, advis
+        plan = se.plan_breakdown_marks(run, flags)
+        assert [os.path.basename(dst) for _, dst in plan] == [
+            'SLDEA_s99_04.40kV_breakdown_BREAKDOWN.png'], plan
+        assert run['rows'][4]['notes'].startswith(_TRIP_NOTE), run['rows'][4]
+        # the strip says the same thing, through the same verdict
+        it = _item(se.run_health(rd), 'watchdog_trip')
+        assert 'marks that row as a confirmed breakdown' in it['text']
+        assert 'on record as -240 uA (telemetry.csv)' in it['text'], it
+        # (b) the sentinel, and a recovered later read: nothing confirms,
+        # the row's note says what was excluded and where it was read
+        rd, run, (flags, advis) = _flags_in(
+            os.path.join(d, 'b'), _trip_rows('-16.0'), _TEL_TRIP_OFF,
+            _LOG_TRIP_NUM)
+        assert flags == {}, flags
+        assert advis == {4: 'watchdog trip not confirmed: the reading that '
+                            'tripped it was the off-screen sentinel '
+                            '(telemetry.csv)'}, advis
+        assert se.plan_breakdown_marks(run, flags) == []
+        it = _item(se.run_health(rd), 'watchdog_trip')
+        assert 'does NOT mark a breakdown from this stop alone' in it['text']
+        assert 'off-screen sentinel, telemetry.csv' in it['text'], it
+        # (c) the sentinel, but the later cell holds a large current: the
+        # trip still confirms nothing, the CURRENT rule does (terminal
+        # event), with its own reason, and the trip note gives way
+        rd, run, (flags, advis) = _flags_in(
+            os.path.join(d, 'c'), _trip_rows('-240.0'), _TEL_TRIP_OFF,
+            _LOG_TRIP_OFF)
+        assert list(flags) == [4] and advis == {}, (flags, advis)
+        assert flags[4].startswith('breakdown? I dev 224uA'), flags
+        # (d) telemetry gave up before the trip: run.log is read
+        rd, run, (flags, advis) = _flags_in(
+            os.path.join(d, 'd'), _trip_rows(''),
+            _tel([(0.0, 0.0, -16.0, 'ok', 'snap s00 baseline x')]),
+            _LOG_TRIP_NUM)
+        assert flags == {4: 'breakdown? watchdog trip (I -240uA, run.log)'}
+        # (e) neither sidecar records the reading: the trip confirms on
+        # the watchdog's note, and the reason says that the number it
+        # prints is the row's later read, not the trip current
+        rd, run, (flags, advis) = _flags_in(
+            os.path.join(d, 'e'), _trip_rows('-16.0'), None,
+            _LOG_TRIP_BARE)
+        assert flags == {4: 'breakdown? watchdog trip (frame read -16uA, '
+                            'trip reading not on file)'}, flags
+        assert advis == {}, advis
+        # ... which is also what a caller without the folder gets
+        assert se.breakdown_flags(run['rows'], {}, se.DEFAULT_SETTINGS) \
+            == (flags, {})
+        it = _item(se.run_health(rd), 'watchdog_trip')
+        assert 'confirmed breakdown on the watchdog\'s own note' in it['text']
+        assert 'later read, -16 uA, taken with the picture' in it['text']
+        assert 'could not be checked against' in it['text'], it
+        # (f) no record anywhere and a blank cell: still confirmed (the
+        # decision names ONE exclusion), the reason says nothing is on
+        # file, the frame is renamed, and the strip says the same
+        rd, run, (flags, advis) = _flags_in(
+            os.path.join(d, 'f'), _trip_rows(''), None, _LOG_TRIP_BARE)
+        assert flags == {4: 'breakdown? watchdog trip (reading not on '
+                            'file)'}, flags
+        assert advis == {}, advis
+        assert [os.path.basename(dst) for _, dst
+                in se.plan_breakdown_marks(run, flags)] == [
+            'SLDEA_s99_04.40kV_breakdown_BREAKDOWN.png']
+        it = _item(se.run_health(rd), 'watchdog_trip')
+        assert 'confirmed breakdown on the watchdog\'s own note' in it['text']
+        assert 'on record nowhere' in it['text'], it
+        assert 'later read' not in it['text'], it
+        assert se.trip_verdict(run['rows'][4], None) == ('confirm', None, '')
+        # (g) decision 18: under 5 readings the legacy absolute rule is
+        # untouched beside the trip rule (one row at -60 uA, one trip)
+        rows = _trip_rows('', healthy=3)
+        rows[1] = ('post-ramp', 2.0, '2.0', '-60.0')
+        rd, run, (flags, advis) = _flags_in(
+            os.path.join(d, 'g'), rows, _TEL_TRIP_NUM, _LOG_TRIP_NUM)
+        assert flags == {1: 'breakdown? I=-60uA > 50uA',
+                         3: 'breakdown? watchdog trip (I -240uA, '
+                            'telemetry.csv)'}, flags
+        # (h) the trip row's own later read is a terminal event for the
+        # current rule too: the trip reason REPLACES the current rule's
+        # on that row (one token, the runner's stronger statement)
+        rd, run, (flags, advis) = _flags_in(
+            os.path.join(d, 'h'), _trip_rows('-240.0'), _TEL_TRIP_NUM,
+            _LOG_TRIP_NUM)
+        assert flags == {4: 'breakdown? watchdog trip (I -240uA, '
+                            'telemetry.csv)'}, flags
+        assert se.breakdown_flags(run['rows'], {}, se.DEFAULT_SETTINGS) == (
+            {4: 'breakdown? watchdog trip (frame read -240uA, trip '
+                'reading not on file)'}, {})
+        # the review's own 'breakdown?' token never makes a trip row
+        assert se.is_trip_row({'tag': 'breakdown', 'notes': ''})
+        assert se.is_trip_row({'tag': 'pre-ramp', 'notes': _TRIP_NOTE})
+        assert not se.is_trip_row({'tag': 'pre-ramp',
+                                   'notes': 'breakdown? I dev 30uA'})
+    finally:
+        shutil.rmtree(d)
+
+
+def test_telemetry_streaks_find_runs_of_samples_away_from_rest():
+    """The monitor-log reader (decision 17). rest = the median current
+    of the 0 kV samples; a sample is away when it is off-screen or at
+    least dev_lim from rest; a streak is at least TELEMETRY_STREAK_MIN
+    consecutive away samples; a row with neither a current nor an
+    off-screen status is skipped, as the watchdog skips it, and neither
+    breaks nor lengthens a streak."""
+    d = tempfile.mkdtemp(prefix='edge_tel_streak_')
+    try:
+        text = _tel([
+            (0.0, 0.0, -16.0, 'ok', 'snap s00 warmup F0'),
+            (0.5, 0.0, -15.0, 'ok', ''),
+            (1.0, 0.0, -17.0, 'ok', 'snap s00 baseline F1'),
+            (1.5, 0.5, -20.0, 'ok', ''),          # 4 uA off: quiet
+            (2.0, 1.0, -60.0, 'ok', ''),          # one sample: not a streak
+            (2.5, 1.0, -18.0, 'ok', ''),
+            (3.0, 1.5, -100.0, 'ok', ''),         # away
+            (3.5, 1.5, '', 'invalid', ''),        # no reading: skipped
+            (4.0, 1.5, -90.0, 'ok', ''),          # away
+            (4.3, 1.5, -36.0, 'ok', ''),          # exactly dev_lim from
+                                                  # rest: away ('at or
+                                                  # above'), a 3-sample
+                                                  # streak
+            (4.5, 2.0, -16.0, 'ok', 'snap s02 post-ramp F2'),
+            (5.0, 2.5, '', 'offscreen', ''),      # the sentinel, twice,
+            (5.5, 2.5, '', 'offscreen', '')])     # running off the end
+        rd = _health_run(os.path.join(d, 'a'), telemetry=text)
+        table = se._telemetry_table(rd)
+        assert table is not None and 'i_status' in table[0]
+        got = se.telemetry_streaks(table, 20.0)
+        assert got == [
+            {'t0': 3.0, 't1': 4.3, 'kv0': 1.5, 'kv1': 1.5, 'n': 3,
+             'n_off': 0, 'worst': 84.0, 'rest': -16.0, 'open': False},
+            {'t0': 5.0, 't1': 5.5, 'kv0': 2.5, 'kv1': 2.5, 'n': 2,
+             'n_off': 2, 'worst': None, 'rest': -16.0, 'open': True}], got
+        assert se.telemetry_note(got[0]) == (
+            'monitor log: current up to 84 uA from rest for 1.3 s from '
+            '3.0 s into the run (1.50 kV, 3 samples)')
+        assert se.telemetry_note(got[1]) == (
+            'monitor log: current off-screen for 0.5 s from 5.0 s into '
+            'the run (2.50 kV, 2 samples, to the end of the log)')
+        for note in map(se.telemetry_note, got):
+            assert ';' not in note, note            # one token each
+        # the card's short form of each: time, kV, what, counts
+        assert se.short_note(se.telemetry_note(got[0])) == (
+            'monitor log: from 3.0 s for 1.3 s, 1.50 kV, up to 84 uA, '
+            '3 samples')
+        assert se.short_note(se.telemetry_note(got[1])) == (
+            'monitor log: 5.0 s to the end (0.5 s), 2.50 kV, off-screen, '
+            '2 samples')
+        # a hair under the bar is quiet: the 3-sample streak becomes 2
+        assert [s['n'] for s in se.telemetry_streaks(table, 20.01)] \
+            == [2, 2]
+        # a higher bar drops the numeric streak, keeps the sentinel one
+        assert [s['n_off'] for s in se.telemetry_streaks(table, 100.0)] \
+            == [2]
+        # a lower bar on the length admits the single sample
+        assert [s['t0'] for s in se.telemetry_streaks(table, 20.0, 1)] \
+            == [2.0, 3.0, 5.0]
+        # a mixed streak says how many of its samples were off-screen,
+        # and a kV range is written as one
+        mixed = _tel([(0.0, 0.0, -16.0, 'ok', ''),
+                      (1.0, 1.0, -80.0, 'ok', ''),
+                      (1.5, 1.2, '', 'offscreen', ''),
+                      (2.0, 1.4, -70.0, 'ok', ''),
+                      (2.5, 1.4, -16.0, 'ok', '')])
+        rd = _health_run(os.path.join(d, 'b'), telemetry=mixed)
+        (s,) = se.telemetry_streaks(se._telemetry_table(rd), 20.0)
+        assert (s['n'], s['n_off'], s['worst'], s['open']) == (3, 1, 64.0,
+                                                               False)
+        assert se.telemetry_note(s) == (
+            'monitor log: current up to 64 uA from rest for 1.0 s from '
+            '1.0 s into the run (1.00 to 1.40 kV, 3 samples, 1 off-screen)')
+        assert se.short_note(se.telemetry_note(s)) == (
+            'monitor log: from 1.0 s for 1.0 s, 1.00 to 1.40 kV, up to '
+            '64 uA, 3 samples, 1 off-screen')
+        # no 0 kV sample on file: no rest, so only the sentinel counts
+        norest = _tel([(1.0, 1.0, -300.0, 'ok', ''),
+                       (1.5, 1.0, -300.0, 'ok', ''),
+                       (2.0, 1.0, '', 'offscreen', ''),
+                       (2.5, 1.0, '', 'offscreen', '')])
+        rd = _health_run(os.path.join(d, 'c'), telemetry=norest)
+        (s,) = se.telemetry_streaks(se._telemetry_table(rd), 20.0)
+        assert (s['t0'], s['n_off'], s['rest']) == (2.0, 2, None), s
+        # neither a current nor a status column: nothing to read
+        rd = _health_run(os.path.join(d, 'd'),
+                         telemetry="t_s,nominal_kV\n0.0,0.0\n1.0,2.0\n")
+        assert se.telemetry_streaks(se._telemetry_table(rd), 20.0) == []
+    finally:
+        shutil.rmtree(d)
+
+
+def test_telemetry_advisories_ride_the_next_snapshot_row_and_never_confirm():
+    """A streak becomes a note on the first data.csv row whose picture
+    was taken at or after it began (the telemetry 'snap' event naming
+    the frame gives the row's time), or on the last timed row when no
+    row follows. It confirms nothing, renames nothing, is silent when
+    the folder is withheld, and a second Save does not write it twice."""
+    d = tempfile.mkdtemp(prefix='edge_tel_adv_')
+    try:
+        fn = [f'SLDEA_s{k:02d}_{kv:05.2f}kV_{tag}.png' for k, (tag, kv) in
+              enumerate([('baseline', 0.0), ('post-ramp', 2.0),
+                         ('pre-ramp', 2.0), ('post-ramp', 4.0),
+                         ('pre-ramp', 4.0)])]
+        text = _tel([
+            (0.0, 0.0, -16.0, 'ok', f'snap s00 baseline {fn[0]}'),
+            (0.5, 0.0, -16.0, 'ok', ''),
+            (10.0, 2.0, -16.0, 'ok', f'snap s01 post-ramp {fn[1]}'),
+            # the picture of row 2 is taken ON the streak's first sample:
+            # 'at or after' puts the note on row 2, not on row 3
+            (12.0, 2.0, -90.0, 'ok', f'snap s02 pre-ramp {fn[2]}'),
+            (12.5, 2.0, -95.0, 'ok', ''),
+            (13.0, 2.0, -16.0, 'ok', ''),
+            (30.0, 4.0, -16.0, 'ok', f'snap s03 post-ramp {fn[3]}'),
+            (40.0, 4.0, -16.0, 'ok', f'snap s04 pre-ramp {fn[4]}'),
+            (41.0, 4.0, '', 'offscreen', ''),          # after the last row
+            (41.5, 4.0, '', 'offscreen', '')])
+        rd = _health_run(os.path.join(d, 'a'), telemetry=text)
+        run = se.load_run(rd)
+        s = se.load_settings(rd)
+        flags, advis = se.breakdown_flags(run['rows'], {}, s, rundir=rd)
+        assert flags == {}, flags
+        assert sorted(advis) == [2, 4], advis
+        assert advis[2] == ('monitor log: current up to 79 uA from rest '
+                            'for 0.5 s from 12.0 s into the run (2.00 kV, '
+                            '2 samples)'), advis
+        assert advis[4].startswith('monitor log: current off-screen for '
+                                   '0.5 s from 41.0 s'), advis
+        assert se.plan_breakdown_marks(run, flags) == []
+        # the folder withheld: the current rule alone, and silence
+        assert se.breakdown_flags(run['rows'], {}, s) == ({}, {})
+        # a frame on disk under its _BREAKDOWN twin name is still found
+        # by the plain name the telemetry wrote
+        run['rows'][2]['frame_file'] = fn[2].replace('.png',
+                                                     '_BREAKDOWN.png')
+        assert sorted(se.breakdown_flags(run['rows'], {}, s,
+                                         rundir=rd)[1]) == [2, 4]
+        run['rows'][2]['frame_file'] = fn[2]
+        # a snapshot the telemetry never named falls back to t_planned_s
+        run['rows'][2]['frame_file'] = ''
+        run['rows'][2]['t_planned_s'] = '20.0'
+        assert sorted(se.breakdown_flags(run['rows'], {}, s,
+                                         rundir=rd)[1]) == [2, 4]
+        # two Saves: the note is written once, as an annotation, and the
+        # runner's own cell text stays in front of it
+        run['rows'][2]['notes'] = 'V_Out off-screen (clipped)'
+        results = {2: {'area_px': 1000.0, 'diam_px': 35.7, 'method':
+                       'disc-fit', 'conf': 0.9}}
+        for _ in range(2):
+            se.apply_results(run['rows'], results, None, flags, advis)
+        assert run['rows'][2]['notes'] == (
+            'V_Out off-screen (clipped); edge:disc-fit conf 0.90; '
+            + advis[2]), run['rows'][2]['notes']
+        assert run['rows'][4]['notes'] == advis[4]
+        # no time column: no place to put a note, so none
+        rd = _health_run(os.path.join(d, 'b'), telemetry=(
+            "nominal_kV,measured_uA,i_status\n0.0,-16.0,ok\n"
+            "2.0,-90.0,ok\n2.0,-95.0,ok\n"))
+        run = se.load_run(rd)
+        assert se.breakdown_flags(run['rows'], {}, s, rundir=rd) == ({}, {})
     finally:
         shutil.rmtree(d)
 

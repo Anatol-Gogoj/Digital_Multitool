@@ -8,9 +8,15 @@ directory the Digital Multitool's SLDEA tab wrote:
     SLDEA_<ts>/setup.txt + data.csv + frames/SLDEA_sNN_XX.XXkV_tag.png
 
 A live run also drops `telemetry.csv` there (the ~2 Hz monitor log, since
-2026-08-05). NOTHING in this module reads it: `data.csv` is still the run,
-`run_csv` cannot resolve to the sidecar, and a folder holding only
-telemetry is not a run.
+2026-08-05) and `run.log`. The MEASUREMENT never reads them: `data.csv`
+is still the run, `run_csv` cannot resolve to the sidecar, and a folder
+holding only telemetry is not a run. Two readers exist. `run_health`
+(2026-10-02) counts the off-screen samples for an advisory sentence.
+`breakdown_flags` (2026-10-03, decision 17) reads them when it is handed
+the run folder: the watchdog's trip row confirms a breakdown unless the
+sidecars say the reading that tripped it was the scope's off-screen
+sentinel, and streaks in the monitor log become ADVISORY notes on the
+next snapshot row, which never rename a frame and never confirm.
 
 Approach: difference-imaging against the 0 kV baseline frame at three
 threshold tiers, plus (2026-07-28) one candidate segmented from the
@@ -1906,6 +1912,37 @@ def load_gray(path):
     return None if img is None else img.astype(np.float32)
 
 
+# Pedestal-free image-content check (2026-10-02). A frame whose central
+# window spans fewer gray levels than this holds no usable picture: the
+# 2026-10-01 run (exposure 3) spans 2, every other frame in the corpus
+# spans 30 or more.
+FLAT_CONTRAST_GRAY = 20.0
+
+
+def image_content(gray, roi_frac=0.85):
+    """Spread of gray levels in the central search window of a frame.
+
+    -> {'p5', 'p95', 'contrast', 'sat_pct', 'flat'}: contrast is
+    p95 - p5 (independent of the camera's black pedestal), sat_pct the
+    percent of window pixels at or above 250, flat is contrast below
+    FLAT_CONTRAST_GRAY. None when gray is None or empty."""
+    if gray is None or getattr(gray, 'size', 0) == 0:
+        return None
+    g = np.asarray(gray, dtype=np.float32)
+    if g.ndim == 3:
+        g = g.mean(axis=2)
+    h, w = g.shape[:2]
+    f = min(max(float(roi_frac), 0.05), 1.0)
+    dy = int(round(h * (1.0 - f) / 2.0))
+    dx = int(round(w * (1.0 - f) / 2.0))
+    win = g[dy:h - dy, dx:w - dx]
+    p5, p95 = (float(v) for v in np.percentile(win, (5, 95)))
+    contrast = p95 - p5
+    return {'p5': p5, 'p95': p95, 'contrast': contrast,
+            'sat_pct': 100.0 * float((win >= 250).mean()),
+            'flat': contrast < FLAT_CONTRAST_GRAY}
+
+
 # ---------------------------------------------------------------------------
 # texture: wrinkle energy and the electrode-strip footprint
 # ---------------------------------------------------------------------------
@@ -3613,10 +3650,47 @@ def sweep_landings(rows):
 # breakdown heuristics
 # ---------------------------------------------------------------------------
 
-def breakdown_flags(rows, accepted_areas, settings):
+def breakdown_flags(rows, accepted_areas, settings, rundir=None):
     """-> (confirmed, advisory), both {row_index: reason}. Only `confirmed`
     drives mark_breakdown_files / post-breakdown branding; `advisory` is
     notes-only and must never rename a frame.
+
+    `rundir` (2026-10-03, decision 17) is the run folder, for the two
+    sidecar files the rows cannot stand in for: run.log and
+    telemetry.csv. Without it the two rules below that read them fall
+    back to the rows alone (the trip rule) or stay silent (the monitor
+    log). Every caller that has the folder should pass it, so that Edge
+    Review and the plot reach the same verdict on one run.
+
+    Watchdog rule (decision 17): the live watchdog's trip row (tag
+    'breakdown', step 99, the WATCHDOG note; is_trip_row) is a CONFIRMED
+    event, reason 'watchdog trip', unless the reading that tripped it
+    was the scope's off-screen sentinel. The runner records that reading
+    in telemetry.csv (the 'BREAKDOWN CONFIRMED' event row, i_status
+    'offscreen' or a number) and in run.log ('I=OFF-SCREEN (clipping)'
+    or 'I=<number> uA'); the trip row's own measured_uA cell is a LATER
+    read, taken with the frame, and never decides (trip_reading,
+    trip_verdict). The sentinel is the ONE exclusion, as the decision
+    is worded: a sentinel trip confirms nothing by itself and the row
+    gets an advisory note that says why. A trip whose reading is on
+    record nowhere (a 2026-07-24 to 2026-08-03 run, before run.log and
+    telemetry.csv existed, or a damaged folder) CONFIRMS on the
+    watchdog's own note, with a reason that says the reading is not on
+    file (review 2026-10-04 sent the first pass, which did not confirm
+    it, back to the decision's wording). In every case the row's own
+    current still goes through the current rule like any other row.
+    Why the sentinel is excluded: both 2026-08-05 runs returned it at
+    0 kV, so by itself it is not proof of a large current.
+
+    Monitor-log rule (decision 17, ADVISORY ONLY): with the sidecar
+    present, streaks of at least TELEMETRY_STREAK_MIN samples whose
+    current is off-screen or at least breakdown_dev_ua from rest (rest =
+    the median of the samples at 0 kV) are written as a note on the
+    nearest later snapshot row, with the time, the kV and the length
+    (telemetry_advisories). Those notes never rename a frame and never
+    confirm: the five telemetry runs of the corpus show the two
+    destroyed devices (Assctuator, Assctuator2) and SquareStack-1, and
+    nothing on the 3829 healthy samples of the other two.
 
     Current rule (rebuilt 2026-08-04, ground-truthed on the 13-run batch):
     baseline = per-run MEDIAN of every parseable measured_uA (robust even
@@ -3715,6 +3789,30 @@ def breakdown_flags(rows, accepted_areas, settings):
                 _adv(i, f"collapse? area -{pct:.0f}% (no current signature)")
         if area:
             prev_area, prev_kv = area, kv
+    # The watchdog's trip row (decision 17, 2026-10-03). Its reason
+    # replaces the current rule's on that one row: the runner's verdict is
+    # the stronger statement, and the flag stays ONE token (apply_results
+    # splits a note on ';', and _strip_brand would then leave half of it
+    # behind when a flag is retracted).
+    trips = [i for i, r in enumerate(rows) if is_trip_row(r)]
+    if trips:
+        said = trip_reading(rundir) if rundir else None
+        for i in trips:
+            kind, ua, src = trip_verdict(rows[i], said)
+            if kind == 'sentinel':
+                # the text is kept under two lines of the review card
+                # (sldea_edge_gui INFO_LINES, measured 2026-10-04)
+                _adv(i, f"watchdog trip not confirmed: the reading that "
+                        f"tripped it was the off-screen sentinel ({src})")
+            elif src == 'measured_uA cell':
+                # the number is the row's LATER read, not the trip
+                # current, and the reason says which it is
+                flags[i] = (f"breakdown? watchdog trip (frame read "
+                            f"{ua:.0f}uA, trip reading not on file)")
+            elif src:
+                flags[i] = f"breakdown? watchdog trip (I {ua:.0f}uA, {src})"
+            else:
+                flags[i] = "breakdown? watchdog trip (reading not on file)"
     # A confirmed row supersedes its own advisories: a single recovered
     # current event that corroborates an area collapse ON THE SAME ROW
     # landed in both dicts (the transient note is written before the
@@ -3723,6 +3821,13 @@ def breakdown_flags(rows, accepted_areas, settings):
     # (review 2026-08-04).
     for i in flags:
         advis.pop(i, None)
+    # The monitor log's streaks come LAST and stay on a confirmed row
+    # too: they are the time, kV and length of what the snapshots only
+    # sampled, not a second verdict on the row, so there is nothing to
+    # supersede. Advisory, never a flag (decision 17).
+    if rundir:
+        for i, note in telemetry_advisories(rundir, rows, settings).items():
+            _adv(i, note)
     return flags, advis
 
 
@@ -4334,6 +4439,903 @@ def _baseline_disc_uncached(base_gray, settings):
             'n_edge': int(len(pin)), 'paper_lum': round(paper, 1)}, None
 
 
+# ---------------------------------------------------------------------------
+# run health: what went wrong at capture, said BEFORE the review starts
+#
+# (2026-10-02) Edge Review opened every run the same way: an empty canvas
+# and "press Detect". The 2026-10-01 run (exposure 3, a picture spanning 2
+# gray levels, V_Out off-screen from 2.25 kV, aborted at 26 of 34 frames)
+# was calibrated by hand on a blank frame and reviewed to an empty queue,
+# although every one of those facts was already on disk. run_health reads
+# them back from data.csv, setup.txt, run.log, telemetry.csv and the
+# baseline frame, and says them in plain sentences.
+#
+# It is ADVICE. It changes no row, no flag and no file, and neither the
+# detector nor Save consults it. It is not a breakdown source either: it
+# only SAYS what breakdown_flags will do with the watchdog's trip row and
+# with the monitor log (decision 17, 2026-10-03: the trip confirms unless
+# its reading was the off-screen sentinel; telemetry streaks are advisory
+# notes). The readers of run.log and telemetry.csv below (_health_runlog,
+# _telemetry_table, trip_reading, telemetry_streaks) are shared with
+# breakdown_flags, so the strip and the flags read one file one way.
+# ---------------------------------------------------------------------------
+
+HEALTH_LEVELS = ('stop', 'warn', 'info')
+# Percent of the baseline's search window at or above 250 gray from which
+# the picture is called heavily saturated. Not tuned: the corpus has two
+# clusters and nothing between them (the two 2026-08-05 runs read 77.0 and
+# 72.8 %, the other fourteen baselines 4.0 % or less).
+HEALTH_SAT_PCT = 25.0
+# A voltage reading smaller than this (kV) carries no sign worth judging:
+# the 0.25 kV landing reads about 0.26 kV, the 0 kV noise about 0.01.
+HEALTH_SIGN_MIN_KV = 0.05
+# breakdown_flags compares the current with the run's median only when at
+# least this many rows hold a parseable measured_uA. With fewer it falls
+# back to its legacy rule, where an area collapse ALONE confirms (and
+# renames frames). run_health changes nothing about that: it only has to
+# SAY which rule the run will get, so this mirrors breakdown_flags' own
+# `len(uas) >= 5`, and a test holds the two together.
+HEALTH_MIN_UA_ROWS = 5
+# A streak in the monitor log is reported only from this many samples in
+# a row (decision 17). One sample is one scope read; at the 2 Hz log two
+# are about a second. The watchdog's own trip needs its dwell (3 s by
+# default), so this is a looser, advisory bar on purpose.
+TELEMETRY_STREAK_MIN = 2
+# The telemetry event the runner writes off the very reading that tripped
+# the watchdog (gui.py, the trip branch of _sldea_worker), and the run.log
+# line of the same moment: 'I=OFF-SCREEN (clipping)' when that reading
+# was the sentinel, 'I=<number> uA' when it was a number.
+TELEMETRY_TRIP_EVENT = 'BREAKDOWN CONFIRMED'
+
+_SETUP_TOTAL = re.compile(
+    r'^Total:.*\(\s*\d+\s+landings?,\s*(\d+)\s+frames?\)', re.M)
+_RUNLOG_END = re.compile(
+    r'run (complete|aborted|BREAKDOWN-ABORT): (\d+)/(\d+) frames')
+_RUNLOG_TRIP = re.compile(
+    r'BREAKDOWN CONFIRMED[^\n]*?I=(OFF-SCREEN|[-+]?\d+(?:\.\d+)?)')
+
+
+def _read_text(path):
+    """A run's text file as one string, or None when it cannot be read."""
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _health_setup(rundir):
+    """What run_health needs from setup.txt. Read-only, and tolerant of a
+    missing file or a missing line: every field then keeps its default."""
+    text = _read_text(os.path.join(rundir, 'setup.txt'))
+    out = {'found': text is not None, 'planned': None, 'dry': False,
+           'inverted': False, 'camera': ''}
+    if text is None:
+        return out
+    m = _SETUP_TOTAL.search(text)
+    if m:
+        out['planned'] = int(m.group(1))
+    out['dry'] = bool(re.search(r'^MODE:.*DRY RUN', text, re.M))
+    out['inverted'] = 'Trek control polarity: INVERTED' in text
+    m = re.search(r'^--- Camera ---[ \t]*\n([^\n]+)', text, re.M)
+    if m:
+        out['camera'] = m.group(1).strip()
+    return out
+
+
+def _health_runlog(rundir):
+    """How the run ended, from run.log (written since 2026-08-04; older
+    runs have none). A reused run name appends to the same file, so only
+    the part after the last 'run dir:' line is this run's."""
+    text = _read_text(os.path.join(rundir, 'run.log'))
+    out = {'found': text is not None, 'end': None, 'error': '',
+           'trip': False, 'trip_sentinel': None, 'trip_ua': None}
+    if text is None:
+        return out
+    at = text.rfind('run dir:')
+    if at >= 0:
+        text = text[at:]
+    ends = _RUNLOG_END.findall(text)
+    if ends:
+        kind, done, total = ends[-1]
+        out['end'] = (kind, int(done), int(total))
+    errors = re.findall(r'\] ERROR: ([^\n]*)', text)
+    if errors:
+        out['error'] = errors[-1].strip()
+    out['trip'] = ('BREAKDOWN CONFIRMED' in text
+                   or 'BREAKDOWN-ABORT' in text)
+    # The reading the watchdog tripped on, as the trip line prints it:
+    # 'I=OFF-SCREEN (clipping)' for the sentinel, 'I=-240 uA' otherwise.
+    # A line without either (a hand-edited log) leaves both None.
+    hits = _RUNLOG_TRIP.findall(text)
+    if hits:
+        if hits[-1] == 'OFF-SCREEN':
+            out['trip_sentinel'] = True
+        else:
+            out['trip_sentinel'] = False
+            out['trip_ua'] = float(hits[-1])
+    return out
+
+
+def _telemetry_table(rundir):
+    """telemetry.csv read whole -> (names, rows): `names` maps each header
+    name lower-cased to the file's own spelling, `rows` are the
+    csv.DictReader dicts in file order. None when the run has no
+    readable sidecar. Every reader of the sidecar goes through here, so
+    the columns are always found by NAME, never by position."""
+    path = os.path.join(rundir, 'telemetry.csv')
+    try:
+        with open(path, newline='', encoding='utf-8-sig',
+                  errors='replace') as f:
+            reader = csv.DictReader(f)
+            names = {(c or '').strip().lower(): c
+                     for c in (reader.fieldnames or [])}
+            rows = list(reader)
+    except (OSError, csv.Error):
+        return None
+    return names, rows
+
+
+def _health_telemetry(rundir):
+    """Off-screen sample counts from telemetry.csv, or None when the run
+    has no readable sidecar or its header names neither status column.
+
+    The status columns are found by NAME in the header (v_status,
+    i_status), never by position. A row whose status is blank or
+    'skipped' was not sampled on that channel and is not counted as a
+    sample of it. -> {'i_n', 'i_off', 'i_first', 'v_n', 'v_off',
+    'v_first'}; the *_first values are (t_s, nominal_kV) of the first
+    off-screen sample, either of which may be None."""
+    table = _telemetry_table(rundir)
+    if table is None:
+        return None
+    names, rows = table
+    cols = {'i': names.get('i_status'), 'v': names.get('v_status')}
+    if not cols['i'] and not cols['v']:
+        return None
+    out = {'i_n': 0, 'i_off': 0, 'i_first': None,
+           'v_n': 0, 'v_off': 0, 'v_first': None}
+    t_col, kv_col = names.get('t_s'), names.get('nominal_kv')
+    for row in rows:
+        for ch in ('i', 'v'):
+            if not cols[ch]:
+                continue
+            status = (row.get(cols[ch]) or '').strip().lower()
+            if status in ('', 'skipped'):
+                continue
+            out[ch + '_n'] += 1
+            if status == 'offscreen':
+                out[ch + '_off'] += 1
+                if out[ch + '_first'] is None:
+                    out[ch + '_first'] = (_num(row.get(t_col)),
+                                          _num(row.get(kv_col)))
+    return out
+
+
+def _health_when(first):
+    """', first at 37 s into the run (0.66 kV commanded)' for a telemetry
+    (t_s, nominal_kV) pair, leaving out whatever is not known."""
+    t, kv = first or (None, None)
+    if t is None and kv is None:
+        return ''
+    if t is None:
+        return f", first at {kv:.2f} kV commanded"
+    if kv is None:
+        return f", first at {t:.0f} s into the run"
+    return f", first at {t:.0f} s into the run ({kv:.2f} kV commanded)"
+
+
+def is_trip_row(row):
+    """The live watchdog's trip row: tag 'breakdown' (step 99), or the
+    'WATCHDOG: breakdown confirmed' note it carries (gui.py, the trip
+    branch of _sldea_worker). One test for run_health and
+    breakdown_flags, so the strip and the flags agree on which row that
+    is. The 'breakdown?' token the review writes is not a trip."""
+    return (str(row.get('tag') or '').strip().startswith('breakdown')
+            or 'WATCHDOG' in (row.get('notes') or ''))
+
+
+def trip_reading(rundir):
+    """What the run's sidecar files say about the reading the watchdog
+    tripped on (decision 17, 2026-10-03). -> None when neither file
+    records a trip, else {'sentinel': True | False | None, 'ua': float
+    or None, 'source': 'telemetry.csv' | 'run.log'}.
+
+    The runner writes that reading twice, both times off the very
+    sample that tripped: the telemetry event row 'BREAKDOWN CONFIRMED'
+    (i_status 'offscreen' and a blank current for the sentinel, 'ok' and
+    the number otherwise) and the run.log line ('I=OFF-SCREEN
+    (clipping)' or 'I=<number> uA'). The trip row of data.csv is NOT that
+    reading: its measured_uA cell comes from the scope read taken with
+    the frame, hundreds of ms later, and the runner adds no current note
+    to it. telemetry.csv is read first (a telemetry-off run has none),
+    run.log second. 'sentinel' is None when a trip is recorded but its
+    reading is not (a hand-edited line, an 'invalid' status)."""
+    table = _telemetry_table(rundir)
+    if table is not None:
+        names, rows = table
+        ev_col = names.get('event')
+        i_col, ua_col = names.get('i_status'), names.get('measured_ua')
+        trips = [r for r in rows if ev_col and (r.get(ev_col) or '')
+                 .strip().upper().startswith(TELEMETRY_TRIP_EVENT)]
+        if trips:
+            row = trips[-1]
+            status = (row.get(i_col) or '').strip().lower() if i_col else ''
+            ua = _num(row.get(ua_col)) if ua_col else None
+            if status == 'offscreen':
+                return {'sentinel': True, 'ua': None,
+                        'source': 'telemetry.csv'}
+            if ua is not None:
+                return {'sentinel': False, 'ua': ua,
+                        'source': 'telemetry.csv'}
+            return {'sentinel': None, 'ua': None, 'source': 'telemetry.csv'}
+    log = _health_runlog(rundir)
+    if log['trip']:
+        return {'sentinel': log['trip_sentinel'], 'ua': log['trip_ua'],
+                'source': 'run.log'}
+    return None
+
+
+def trip_verdict(row, said):
+    """What breakdown_flags does with one trip row, given trip_reading's
+    answer `said` (None when the folder was not read or records no
+    trip). -> (kind, ua, source):
+
+      'sentinel'  the reading was the off-screen sentinel: excluded,
+                  source 'telemetry.csv' or 'run.log'
+      'confirm'   everything else (decision 17 names the sentinel as
+                  the one exclusion). `ua` and `source` say what is
+                  on file: the trip reading itself ('telemetry.csv',
+                  'run.log'); or, when neither sidecar records it,
+                  the row's own measured_uA cell ('measured_uA cell':
+                  a LATER read taken with the frame, reported for
+                  information, not the trip current); or nothing
+                  (None, '').
+
+    A first pass (2026-10-03) did not confirm a trip with nothing on
+    file; review 2026-10-04 sent that back to the decision's wording.
+    run_health reports through the same function, so the strip says
+    exactly what the flags will do."""
+    if said is not None and said['sentinel'] is not None:
+        if said['sentinel']:
+            return 'sentinel', None, said['source']
+        return 'confirm', said['ua'], said['source']
+    cell = _num(row.get('measured_uA'))
+    if cell is not None:
+        return 'confirm', cell, 'measured_uA cell'
+    return 'confirm', None, ''
+
+
+def telemetry_streaks(table, dev_lim, min_samples=TELEMETRY_STREAK_MIN):
+    """Streaks of monitor samples away from rest, from a parsed
+    telemetry table (_telemetry_table). Pure. -> a list, in file order,
+    of {'t0', 't1', 'kv0', 'kv1', 'n', 'n_off', 'worst', 'rest',
+    'open'}; [] when the table has neither a current nor a status
+    column.
+
+    A sample is a row with a parseable measured_uA or i_status
+    'offscreen' (the 9.9E37 sentinel: a current beyond the window, so a
+    reading, not a gap). A row with neither is skipped, as the watchdog
+    skips a read the scope could not give: it neither lengthens nor
+    breaks a streak. rest = the median current of the samples at 0 kV
+    (the warm-up and baseline reads before the first ramp); with none
+    on file rest is None and only off-screen samples count as away. A
+    sample is away when it is off-screen or |I - rest| >= dev_lim.
+    A streak is a run of consecutive away samples at least min_samples
+    long. 'worst' is the largest |I - rest| in it over the readable
+    samples (None when all are off-screen or rest is None); 'open' says
+    the log ends inside it, so its length is a lower bound."""
+    names, rows = table
+    i_col, ua_col = names.get('i_status'), names.get('measured_ua')
+    t_col, kv_col = names.get('t_s'), names.get('nominal_kv')
+    if not i_col and not ua_col:
+        return []
+    samples = []
+    for row in rows:
+        ua = _num(row.get(ua_col)) if ua_col else None
+        off = bool(i_col) and (row.get(i_col) or '').strip().lower() \
+            == 'offscreen'
+        if ua is None and not off:
+            continue
+        samples.append({'ua': ua, 'off': off,
+                        't': _num(row.get(t_col)) if t_col else None,
+                        'kv': _num(row.get(kv_col)) if kv_col else None})
+    at_rest = sorted(s['ua'] for s in samples
+                     if s['ua'] is not None and s['kv'] is not None
+                     and abs(s['kv']) < 1e-9)
+    rest = None
+    if at_rest:
+        n = len(at_rest)
+        rest = (at_rest[n // 2] if n % 2
+                else 0.5 * (at_rest[n // 2 - 1] + at_rest[n // 2]))
+
+    def away(s):
+        if s['off']:
+            return True
+        return (rest is not None and s['ua'] is not None
+                and abs(s['ua'] - rest) >= float(dev_lim))
+
+    out, run = [], []
+    for k, s in enumerate(samples):
+        if away(s):
+            run.append(s)
+        if run and (not away(s) or k == len(samples) - 1):
+            if len(run) >= int(min_samples):
+                devs = [abs(x['ua'] - rest) for x in run
+                        if x['ua'] is not None and rest is not None]
+                out.append({
+                    't0': run[0]['t'], 't1': run[-1]['t'],
+                    'kv0': run[0]['kv'], 'kv1': run[-1]['kv'],
+                    'n': len(run), 'n_off': sum(1 for x in run if x['off']),
+                    'worst': max(devs) if devs else None, 'rest': rest,
+                    'open': away(s) and k == len(samples) - 1})
+            run = []
+    return out
+
+
+def telemetry_note(streak):
+    """One advisory note for a telemetry_streaks item: what the current
+    did, for how long, from when, at what kV, over how many samples.
+    'monitor log: current off-screen for 12.9 s from 36.6 s into the
+    run (0.66 to 1.00 kV, 24 samples, to the end of the log)'. One token
+    (no ';'), and its words before the first digit are fixed, so a
+    re-Save replaces the note on an unreviewed row instead of piling a
+    second copy beside it (apply_results, _note_kind)."""
+    s = streak
+    if s['n_off'] == s['n']:
+        lead = "current off-screen"
+    elif s['worst'] is not None:
+        lead = f"current up to {s['worst']:.0f} uA from rest"
+    else:
+        lead = "current away from rest"
+    when = ''
+    if s['t0'] is not None and s['t1'] is not None:
+        when = (f" for {s['t1'] - s['t0']:.1f} s from {s['t0']:.1f} s "
+                f"into the run")
+    parts = []
+    if s['kv0'] is not None and s['kv1'] is not None:
+        parts.append(f"{s['kv0']:.2f} to {s['kv1']:.2f} kV"
+                     if abs(s['kv1'] - s['kv0']) >= 0.005
+                     else f"{s['kv0']:.2f} kV")
+    parts.append(f"{s['n']} samples")
+    if 0 < s['n_off'] < s['n']:
+        parts.append(f"{s['n_off']} off-screen")
+    if s['open']:
+        parts.append("to the end of the log")
+    return f"monitor log: {lead}{when} ({', '.join(parts)})"
+
+
+# telemetry_note's grammar, read back by short_note. The two are kept
+# together on purpose: a word changed in one must change in the other.
+_TEL_NOTE = re.compile(
+    r"^monitor log: current (?P<what>off-screen|up to \d+ uA from rest|"
+    r"away from rest)(?: for (?P<dur>\d+\.\d) s from (?P<t0>\d+\.\d) s "
+    r"into the run)? \((?P<parts>[^()]*)\)$")
+
+
+def short_note(note):
+    """The review card's form of a breakdown_flags note: the same facts
+    in fewer words. The card's info panel is a fixed box of INFO_LINES
+    text lines (sldea_edge_gui, #179) with room for two lines of note,
+    and the long form of a monitor-log note needs three (measured
+    2026-10-04: the four corpus notes are 596 to 836 px wide at the
+    card's font, which wraps at 306 px). The long form is what Save
+    writes to data.csv and stays as it is. A note this function does
+    not know comes back unchanged; a cell of several tokens ('; ') is
+    shortened token by token.
+
+    'monitor log: current off-screen for 12.9 s from 36.6 s into the
+    run (0.66 to 1.00 kV, 24 samples, to the end of the log)' becomes
+    'monitor log: 36.6 s to the end (12.9 s), 0.66 to 1.00 kV,
+    off-screen, 24 samples': the time first, then the kV, then what the
+    current did, then the counts, so that a card too narrow for the
+    whole line still shows when and at what voltage."""
+    if '; ' in note:
+        return '; '.join(short_note(tok) for tok in note.split('; '))
+    m = _TEL_NOTE.match(note)
+    if m is None:
+        return note
+    what = m['what']
+    if what.startswith('up to'):
+        what = what[:-len(' from rest')]
+    parts = [p.strip() for p in m['parts'].split(',') if p.strip()]
+    open_end = 'to the end of the log' in parts
+    if open_end:
+        parts.remove('to the end of the log')
+    kv = [p for p in parts if p.endswith('kV')]
+    counts = [p for p in parts if not p.endswith('kV')]
+    out = []
+    if m['dur'] is not None:
+        out.append(f"{m['t0']} s to the end ({m['dur']} s)" if open_end
+                   else f"from {m['t0']} s for {m['dur']} s")
+    elif open_end:
+        counts.append('to the end')
+    out += kv + [what] + counts
+    return 'monitor log: ' + ', '.join(out)
+
+
+def telemetry_advisories(rundir, rows, settings):
+    """ADVISORY notes from the monitor log, keyed by the data.csv row
+    they belong on (decision 17, 2026-10-03). -> {row_index: note}; {}
+    when the run has no readable telemetry.csv, no streak, or no t_s
+    column to place a streak by.
+
+    Each streak (telemetry_streaks, at breakdown_dev_ua) goes on the
+    NEAREST LATER snapshot row: the first row whose picture was taken at
+    or after the streak began. A row's time is the t_s of the telemetry
+    'snap ...' event row that names its frame (the runner writes one per
+    snapshot, off the same readings), or, when none names it, its
+    t_planned_s, which the runner keeps on the same clock. A streak that
+    no row follows goes on the last row that has a time. These notes
+    never confirm a breakdown and never rename a frame: they ride the
+    annotation channel at Save, like 'transient discharge?'."""
+    table = _telemetry_table(rundir)
+    if table is None:
+        return {}
+    names, tel = table
+    if not names.get('t_s'):
+        return {}
+    dev_lim = float(settings.get('breakdown_dev_ua',
+                                 DEFAULT_SETTINGS['breakdown_dev_ua']))
+    streaks = [s for s in telemetry_streaks(table, dev_lim)
+               if s['t0'] is not None]
+    if not streaks:
+        return {}
+    ev_col, t_col = names.get('event'), names['t_s']
+    snap_t = {}
+    for r in tel:
+        words = (r.get(ev_col) or '').split() if ev_col else []
+        if len(words) >= 4 and words[0] == 'snap':
+            snap_t.setdefault(words[-1], _num(r.get(t_col)))
+    timed = []
+    for i, row in enumerate(rows):
+        name = (row.get('frame_file') or '').strip()
+        t = None
+        if name:
+            t = snap_t.get(name)
+            if t is None:
+                t = snap_t.get(_frame_twin(name))
+        if t is None:
+            t = _num(row.get('t_planned_s'))
+        if t is not None:
+            timed.append((t, i))
+    if not timed:
+        return {}
+    timed.sort()
+    out = {}
+    for s in streaks:
+        later = [(t, i) for t, i in timed if t >= s['t0']]
+        i = later[0][1] if later else timed[-1][1]
+        note = telemetry_note(s)
+        out[i] = (out[i] + '; ' + note) if i in out else note
+    return out
+
+
+def _frame_twin(name):
+    """The other name one frame can carry: the '_BREAKDOWN' name of a
+    plain frame, the plain name of a branded one. plan_breakdown_marks
+    renames between the two, and a Save that failed half way can leave
+    data.csv on one name and the file on the other."""
+    if '_BREAKDOWN' in name:
+        return name.replace('_BREAKDOWN', '')
+    base, ext = os.path.splitext(name)
+    return base + '_BREAKDOWN' + ext
+
+
+def run_health(rundir, run=None):
+    """What the run's own files say went wrong at capture.
+
+    -> a list of {'level': 'stop' | 'warn' | 'info', 'code': str,
+    'text': str}, 'stop' items first. An empty list means none of the
+    checks below found anything. `run` is a load_run() result for
+    `rundir`; it is loaded here when left out.
+
+    'stop' means the run cannot be measured as it is (no usable baseline
+    picture); 'warn' means the review can go on but something recorded at
+    capture needs a human look; 'info' explains. Every text is a plain
+    sentence that says what to do. Advisory only: nothing here blocks
+    Detect or Save, and nothing here is a breakdown verdict; the
+    watchdog_trip and telemetry sentences SAY what breakdown_flags will
+    do (through the same trip_verdict), they do not do it.
+
+    Codes, in the order they are checked:
+      no_run_csv            the folder has no readable data CSV       stop
+      baseline_missing      no baseline row, or its file is absent    stop
+      baseline_unreadable   the baseline file does not decode         stop
+      image_flat            image_content calls the baseline flat     stop
+      image_saturated       HEALTH_SAT_PCT of it is at or above 250   warn
+      disc_fit_refused      baseline_disc refuses (its own sentence)  warn
+      dry_run               setup.txt says the HV was off             info
+      kv_missing            powered rows without measured_kV          warn
+      kv_sign               measured kV opposes the commanded sign,
+                            and setup.txt has no INVERTED line        info
+      ua_missing            rows without measured_uA                  warn
+      ended_early           fewer rows than setup.txt planned, or
+                            run.log ends 'aborted' short of the plan  warn
+      watchdog_trip         a trip row (is_trip_row) or run.log's
+                            BREAKDOWN lines; says whether the trip
+                            confirms (trip_verdict)                   warn
+      frames_missing        frames named in the CSV, absent on disk   warn
+      frames_renamed        frames on disk under their _BREAKDOWN twin
+                            name (or the plain twin of a branded one) warn
+      frames_not_taken      rows that name no frame at all            warn
+      telemetry_i_offscreen I_Out off-screen samples in telemetry.csv warn
+      telemetry_v_offscreen V_Out off-screen samples in telemetry.csv info
+      setup_missing         no setup.txt in the folder                info
+
+    The voltage and current checks are skipped on a dry run: with the HV
+    off there is nothing for them to say."""
+    items = []
+
+    def say(level, code, text):
+        items.append({'level': level, 'code': code, 'text': text})
+
+    if run is None:
+        try:
+            run = load_run(rundir)
+        except (OSError, csv.Error) as e:
+            say('stop', 'no_run_csv',
+                f"This folder cannot be read as a run ({e}). Pick the "
+                f"folder that holds data.csv, setup.txt and the frames "
+                f"folder.")
+            return items
+    rows = run['rows']
+    settings = load_settings(rundir)
+    setup = _health_setup(rundir)
+    log = _health_runlog(rundir)
+    kvs = [_row_kv(r) for r in rows]
+
+    # The pictures: which rows name one, and is it on disk.
+    names = [(r.get('frame_file') or '').strip() for r in rows]
+    listed = [i for i, n in enumerate(names) if n]
+    no_pic = [i for i, n in enumerate(names) if not n]
+    absent = [i for i in listed
+              if not os.path.exists(os.path.join(run['frames_dir'],
+                                                 names[i]))]
+
+    # The baseline frame: the same row Edge Review differences against.
+    base_i = next((i for i in listed
+                   if rows[i].get('tag') == 'baseline'), None)
+    # A picture that sits in the folder under its twin name is not lost
+    # (review 2026-10-02): "copy it back from the backup" was the wrong
+    # advice for a file that is there. The baseline keeps its STOP either
+    # way, because Edge Review opens it by the name data.csv gives.
+    renamed = [i for i in absent if i != base_i
+               and os.path.exists(os.path.join(run['frames_dir'],
+                                               _frame_twin(names[i])))]
+    missing = [i for i in absent if i not in renamed]
+    gray = None
+    if base_i is None and log['found'] and not log['end'] \
+            and not log['error']:
+        # run.log has no end line: this is also what a run looks like in
+        # its first seconds, before the baseline is taken. "The run has
+        # to be repeated" beside "wait until it ends" contradicted itself
+        # (review 2026-10-02).
+        say('stop', 'baseline_missing',
+            "This run has no baseline picture yet: no row of data.csv is "
+            "tagged 'baseline' and names a frame, and run.log shows no "
+            "end of the run. If the run is still going, wait until it "
+            "ends and pick it again. If the program or the PC stopped "
+            "before the baseline was taken, automatic detection cannot "
+            "run: you can only trace frames by hand (key D).")
+    elif base_i is None:
+        say('stop', 'baseline_missing',
+            "This run has no baseline picture: no row of data.csv is "
+            "tagged 'baseline' and names a frame. Edge Review compares "
+            "every frame with the 0 kV baseline, so automatic detection "
+            "cannot run. You can still trace frames by hand (key D); "
+            "otherwise the run has to be repeated.")
+    elif base_i in missing:
+        say('stop', 'baseline_missing',
+            f"The baseline picture {names[base_i]} is listed in data.csv "
+            f"but is not in the frames folder. Without it automatic "
+            f"detection cannot run. Copy the file back from the backup or "
+            f"the lab share and pick the run again; until then you can "
+            f"only trace frames by hand (key D).")
+    else:
+        gray = load_gray(os.path.join(run['frames_dir'], names[base_i]))
+        if gray is None:
+            say('stop', 'baseline_unreadable',
+                f"The baseline picture {names[base_i]} cannot be opened: "
+                f"the file is empty or damaged. Without it automatic "
+                f"detection cannot run. Copy a good file back from the "
+                f"backup or the lab share and pick the run again; until "
+                f"then you can only trace frames by hand (key D).")
+    if gray is not None:
+        content = image_content(gray, settings.get('roi_frac', 0.85))
+        if content is not None and content['flat']:
+            cam = (f" (setup.txt: {setup['camera']})" if setup['camera']
+                   else '')
+            say('stop', 'image_flat',
+                f"The baseline picture is blank: its gray levels span "
+                f"only {content['contrast']:.0f} of 255, and a usable "
+                f"picture spans {FLAT_CONTRAST_GRAY:.0f} or more. No disc "
+                f"can be seen, so this run cannot be measured. The camera "
+                f"exposure or the lighting was wrong at capture{cam}. Do "
+                f"not calibrate by hand and do not Save: repeat the run "
+                f"after the camera is set up.")
+        else:
+            if content is not None and content['sat_pct'] >= HEALTH_SAT_PCT:
+                say('warn', 'image_saturated',
+                    f"{content['sat_pct']:.0f} % of the baseline picture "
+                    f"is pure white (overexposed). The disc edge may be "
+                    f"washed out there, so the automatic fit and the "
+                    f"detection can fail. Look at the baseline picture "
+                    f"before you trust any outline; for the next run, "
+                    f"lower the camera exposure.")
+            # The fit is cached (_DISC_CACHE), so the calibration dialog
+            # that follows on this run reuses it instead of fitting again.
+            try:
+                ref = baseline_disc(gray, settings)
+                why = None if ref is not None else (
+                    baseline_disc_refusal(gray, settings)
+                    or 'the fit gave no reason')
+            except Exception as e:      # advice must never stop a pick
+                why = f"the fit failed with an error ({e})"
+            if why:
+                say('warn', 'disc_fit_refused',
+                    f"The automatic fit of the resting disc refused this "
+                    f"run: {why}. This means you will have to measure the "
+                    f"scale by hand, and most frames will need a manual "
+                    f"decision. First look at the baseline picture: if "
+                    f"you cannot see the edge of the disc yourself, stop "
+                    f"and ask before you continue.")
+
+    # Voltage and current readings (a dry run has none to judge).
+    if setup['dry']:
+        say('info', 'dry_run',
+            "This was a DRY RUN: the high voltage was off (setup.txt). "
+            "The device was never powered, so no expansion is expected "
+            "and the voltage and current checks are skipped. Use it to "
+            "check the camera and the setup, not as data.")
+    else:
+        powered = [i for i, kv in enumerate(kvs)
+                   if kv is not None and kv > 0]
+        mkv = {i: _num(rows[i].get('measured_kV')) for i in powered}
+        read = [i for i in powered if mkv[i] is not None]
+        blank = [i for i in powered if mkv[i] is None]
+        if blank and not read:
+            say('warn', 'kv_missing',
+                f"None of the {len(powered)} powered frames has a "
+                f"measured voltage. Only the commanded voltage is known "
+                f"for this run, and nothing checked that the device "
+                f"really received it. You cannot repair this in the "
+                f"review: report it, and have the scope's voltage channel "
+                f"checked before the next run.")
+        elif blank:
+            hi_read = max(kvs[i] for i in read)
+            lo_blank = min(kvs[i] for i in blank)
+            # 'above' when every blank sits over the last reading (the
+            # campaign: 4.00 / 4.25 kV), 'at' when one landing holds
+            # both (the 07-23 runs: 1.00 kV), else they are scattered
+            where = (f"the readings stop above {hi_read:.2f} kV"
+                     if lo_blank > hi_read else
+                     f"the readings stop at {hi_read:.2f} kV"
+                     if lo_blank == hi_read else
+                     f"readings are missing from {lo_blank:.2f} kV on, "
+                     f"although some higher voltages have one")
+            say('warn', 'kv_missing',
+                f"No measured voltage on {len(blank)} of {len(powered)} "
+                f"powered frames: {where}. For those frames only the "
+                f"commanded voltage is known, and plots use the commanded "
+                f"voltage. You cannot repair this in the review: report "
+                f"it, so the scope's voltage window is set to cover the "
+                f"whole sweep next time.")
+        signed = [i for i in read if abs(mkv[i]) >= HEALTH_SIGN_MIN_KV]
+        opposite = [i for i in signed if mkv[i] * kvs[i] < 0]
+        if (opposite and 2 * len(opposite) > len(signed)
+                and setup['found'] and not setup['inverted']):
+            j = max(opposite, key=lambda i: abs(mkv[i]))
+            say('info', 'kv_sign',
+                f"The measured voltage has the opposite sign to the "
+                f"commanded voltage on {len(opposite)} of {len(signed)} "
+                f"readings (for example {mkv[j]:+.2f} kV measured at "
+                f"{kvs[j]:.2f} kV commanded), and setup.txt does not "
+                f"record an inverted Trek. This check looks only at the "
+                f"sign, not at the size of a reading."
+                + (" A scope window framed for the other sign can be why "
+                   "the readings stop early." if blank else "")
+                + " Do not change any high-voltage setting yourself: tell "
+                  "your supervisor before the next run.")
+        with_kv = [i for i, kv in enumerate(kvs) if kv is not None]
+        no_ua = [i for i in with_kv
+                 if _num(rows[i].get('measured_uA')) is None]
+        # Which rule breakdown_flags will apply, counted its own way
+        # (every row, float()). Below HEALTH_MIN_UA_ROWS it is the legacy
+        # rule: a large area drop confirms a breakdown with no current
+        # behind it, and Save renames frames on it. The sentence must not
+        # promise the opposite (review 2026-10-02).
+        n_ua = 0
+        for r in rows:
+            try:
+                float(r.get('measured_uA') or '')
+                n_ua += 1
+            except (TypeError, ValueError):
+                pass
+        area_alone = n_ua < HEALTH_MIN_UA_ROWS
+        if no_ua and len(no_ua) == len(with_kv) and area_alone:
+            say('warn', 'ua_missing',
+                f"This run has no current readings at all ({len(with_kv)} "
+                f"frames), so Edge Review cannot check the current for a "
+                f"breakdown. It can still mark one from a sudden drop in "
+                f"area alone, which is less reliable. Judge from the "
+                f"pictures whether the device survived, and ask before "
+                f"you use the top voltages.")
+        elif no_ua:
+            blank_txt = (
+                f"No current reading on {len(no_ua)} of {len(with_kv)} "
+                f"frames (the first one is at {kvs[no_ua[0]]:.2f} kV). A "
+                f"blank can mean the current was too large for the scope "
+                f"window, which is what a breakdown looks like, or that "
+                f"the scope did not answer.")
+            if area_alone:
+                lim = float(settings.get('breakdown_ua',
+                                         DEFAULT_SETTINGS['breakdown_ua']))
+                say('warn', 'ua_missing',
+                    f"{blank_txt} With only {n_ua} current "
+                    f"reading{'' if n_ua == 1 else 's'} in the run, Edge "
+                    f"Review cannot compare the current with its usual "
+                    f"level. It marks a breakdown from a reading larger "
+                    f"than {lim:g} microamps, or from a sudden drop in "
+                    f"area alone, which is less reliable. Look at the "
+                    f"frames without a reading yourself, and ask if the "
+                    f"device looks damaged.")
+            else:
+                say('warn', 'ua_missing',
+                    f"{blank_txt} The current check for a breakdown has "
+                    f"nothing to read on those frames: look at them "
+                    f"yourself, and ask if the device looks damaged.")
+
+    # Did the run reach its end.
+    n_rows = sum(1 for r in rows
+                 if not str(r.get('tag') or '').startswith('breakdown'))
+    end = log['end']
+    planned = setup['planned']
+    early = bool(planned and n_rows < planned)
+    if end and end[0] != 'complete' and end[1] < end[2]:
+        early = True
+    if early:
+        total = planned or end[2]
+        top = max((kv for kv in kvs if kv is not None), default=None)
+        top_txt = f", up to {top:.2f} kV" if top is not None else ''
+        lead, wait = "The run stopped early", ""
+        if end and end[0] == 'aborted':
+            why = "run.log says the operator pressed Abort"
+        elif end and end[0] == 'BREAKDOWN-ABORT':
+            why = "run.log says the current watchdog stopped it"
+        elif end:
+            why = ("run.log says the run completed, so rows may have "
+                   "been removed from data.csv afterwards")
+        elif log['error']:
+            why = f"run.log records an error: {log['error']}"
+        elif log['found']:
+            # No end line is also what a run looks like WHILE it is
+            # being captured, and Edge Review opens on the newest run
+            # folder: do not call a live run "stopped".
+            lead = "The run is not finished"
+            why = ("run.log has no end-of-run line: the run is still "
+                   "going, or the program or the PC stopped in the middle")
+            wait = (" If the run is still going, wait until it ends and "
+                    "pick it again.")
+        else:
+            why = ("this folder has no run.log, so the reason was not "
+                   "recorded")
+        say('warn', 'ended_early',
+            f"{lead}: {n_rows} of {total} planned frames were taken"
+            f"{top_txt} ({why}).{wait} The frames that exist can still "
+            f"be reviewed, but the sweep is incomplete: say so wherever "
+            f"you report this run.")
+
+    # The watchdog's trip: reported, with what breakdown_flags will do
+    # about it (trip_verdict, the same function it uses; decision 17).
+    trips = [i for i, r in enumerate(rows) if is_trip_row(r)]
+    if trips or log['trip']:
+        at = (f" at {kvs[trips[0]]:.2f} kV"
+              if trips and kvs[trips[0]] is not None else '')
+        if trips:
+            kind, ua, src = trip_verdict(rows[trips[0]],
+                                         trip_reading(rundir))
+        else:
+            kind, ua, src = 'no_row', None, ''
+        if kind == 'confirm' and src in ('telemetry.csv', 'run.log'):
+            will = (f"Edge Review marks that row as a confirmed breakdown: "
+                    f"the current at the trip is on record as {ua:.0f} uA "
+                    f"({src}), and Save renames its frame and every later "
+                    f"one with _BREAKDOWN.")
+        elif kind == 'confirm':
+            # nothing on file but the watchdog's own note: the decision's
+            # default (confirm) applies, and the sentence says that the
+            # sentinel check could not be made
+            later = (f" The row's own current cell holds a later read, "
+                     f"{ua:.0f} uA, taken with the picture, not the "
+                     f"reading that tripped the watchdog."
+                     if src == 'measured_uA cell' else '')
+            will = (f"Edge Review marks that row as a confirmed breakdown "
+                    f"on the watchdog's own note: the current it tripped "
+                    f"on is on record nowhere (no run.log or telemetry.csv "
+                    f"line says what it was), so it could not be checked "
+                    f"against the scope's off-screen sentinel.{later} Save "
+                    f"renames its frame and every later one with "
+                    f"_BREAKDOWN.")
+        elif kind == 'sentinel':
+            will = (f"Edge Review does NOT mark a breakdown from this stop "
+                    f"alone: the reading that tripped the watchdog was off "
+                    f"the scope screen (the off-screen sentinel, {src}), "
+                    f"which the scope also returns when its current "
+                    f"window is set wrong. That row gets a note saying so, "
+                    f"and its own current reading still counts like any "
+                    f"other row's.")
+        else:
+            will = ("The trip row itself is not in data.csv, so Edge "
+                    "Review marks nothing from this stop.")
+        say('warn', 'watchdog_trip',
+            f"The current watchdog stopped this run{at}: the current "
+            f"stayed too high, which usually means the device broke down "
+            f"there. {will} Look at the last frames, and ask before you "
+            f"use the data near that voltage.")
+
+    # Pictures the CSV promises and the disk does not hold.
+    lost = [i for i in missing if i != base_i]
+    if lost:
+        say('warn', 'frames_missing',
+            f"{len(lost)} of {len(listed)} pictures listed in data.csv "
+            f"are not in the frames folder (the first is "
+            f"{names[lost[0]]}). Those frames cannot be measured and "
+            f"stay as they are. Copy the files back from the backup or "
+            f"the lab share, then pick the run again.")
+    if renamed:
+        j = renamed[0]
+        say('warn', 'frames_renamed',
+            f"{len(renamed)} of {len(listed)} pictures are in the frames "
+            f"folder under a different name than data.csv lists (the "
+            f"first is {names[j]}, found as {_frame_twin(names[j])}). "
+            f"Nothing is lost: this is left over from a breakdown mark "
+            f"that a Save did not finish. Edge Review cannot open those "
+            f"frames in this pass. The next Save puts the names right; "
+            f"pick the run again after it to review them.")
+    if no_pic:
+        at = (f" (the first is at {kvs[no_pic[0]]:.2f} kV)"
+              if kvs[no_pic[0]] is not None else '')
+        say('warn', 'frames_not_taken',
+            f"{len(no_pic)} of {len(rows)} snapshots have no picture: "
+            f"the camera gave no frame at capture{at}. Nothing can be "
+            f"measured for those rows, so they stay blank. Check the "
+            f"camera before the next run.")
+
+    # The dense monitor log, when the run has one.
+    tel = _health_telemetry(rundir)
+    if tel and tel['i_off']:
+        say('warn', 'telemetry_i_offscreen',
+            f"The monitor log (telemetry.csv) has the current off the "
+            f"scope screen on {tel['i_off']} of {tel['i_n']} samples"
+            f"{_health_when(tel['i_first'])}. A current that large can "
+            f"mean the device broke down there, or that the scope's "
+            f"current window was too small. Edge Review reads this log "
+            f"for notes only: a streak of such samples becomes a note on "
+            f"the next picture's row, with the time and the voltage, and "
+            f"never marks a breakdown or renames a frame by itself. Look "
+            f"at the frames near that voltage, and ask if the device "
+            f"looks damaged.")
+    if tel and tel['v_off']:
+        say('info', 'telemetry_v_offscreen',
+            f"The monitor log (telemetry.csv) has the voltage off the "
+            f"scope screen on {tel['v_off']} of {tel['v_n']} voltage "
+            f"samples{_health_when(tel['v_first'])}. The voltage was not "
+            f"being measured during those samples. There is nothing to "
+            f"repair in the review: report it with the run.")
+
+    if not setup['found']:
+        say('info', 'setup_missing',
+            "setup.txt is missing from this run folder, so the planned "
+            "number of frames, the camera settings and the voltage "
+            "polarity are not known and those checks were skipped. Look "
+            "for the file in the backup or on the lab share.")
+
+    order = {level: k for k, level in enumerate(HEALTH_LEVELS)}
+    items.sort(key=lambda it: order[it['level']])
+    return items
+
+
 def _is_manual_cal(baseline_ref):
     """Is this anchor one a HUMAN put their name to — and therefore the
     one that overrides every automatic reference at Save?
@@ -4420,6 +5422,44 @@ def _num(v):
     return f if np.isfinite(f) else None
 
 
+# Note tokens the RUNNER writes into data.csv at capture, by their leading
+# text (2026-10-02). apply_results used to build a reviewed row's notes
+# cell from scratch, so the first Save erased them: 117 rows in six corpus
+# runs carry 'V_Out off-screen (clipped)', and the watchdog's trip row
+# carries 'WATCHDOG: breakdown confirmed (...)' (gui.py: _sldea_capture
+# and the trip branch of _sldea_worker). They are facts about the capture
+# that no later pass can recompute, so every row keeps them.
+#
+# A WHITELIST, not "keep whatever is not an edge token": the analysis
+# notes (area dip, pair mismatch, transient discharge, wrinkle-mode,
+# breakdown?) are recomputed at each Save, and a keep-everything rule
+# would pile the stale ones up beside the fresh ones. 'I_Out ' is listed
+# ahead of need: the runner writes no current note today, but its run.log
+# wording is 'I_Out off-screen' and a capture note would be spelled so.
+RUNNER_NOTE_PREFIXES = ('WATCHDOG', 'V_Out ', 'I_Out ')
+
+
+def _note_tokens(note):
+    """The tokens of a notes cell (joined with '; '), blanks dropped."""
+    return [t for t in (p.strip() for p in (note or '').split(';')) if t]
+
+
+def runner_note_tokens(note):
+    """The capture-time tokens of a notes cell, in order, each once: the
+    ones apply_results carries through a Save (RUNNER_NOTE_PREFIXES)."""
+    out = []
+    for tok in _note_tokens(note):
+        if tok.startswith(RUNNER_NOTE_PREFIXES) and tok not in out:
+            out.append(tok)
+    return out
+
+
+def _note_kind(token):
+    """A note token up to its first digit: 'area dip 12% vs previous step'
+    and 'area dip 15% vs previous step' are one annotation, two values."""
+    return re.match(r'[^0-9]*', token).group(0)
+
+
 def apply_results(rows, results, scale, flags, annos=None, stale=()):
     """Fill the active_area_* / wrinkle_idx / notes columns in `rows`
     (in place). `annos` are informational notes (e.g. wrinkle-mode) appended
@@ -4446,17 +5486,36 @@ def apply_results(rows, results, scale, flags, annos=None, stale=()):
     active_area_mm2 column with nothing marking the boundary — a 56.1%
     artificial area step on the real-data repro, larger than the 35%
     collapse threshold. A stale mm² whose px is missing (pre-2026-07-25
-    bug era) is blanked rather than left on a foreign scale."""
+    bug era) is blanked rather than left on a foreign scale.
+
+    THE RUNNER'S NOTES SURVIVE (2026-10-02). A reviewed row's notes cell
+    is still rebuilt at every Save, so analysis annotations are
+    regenerated and never accumulate. But the tokens the runner wrote
+    at capture (RUNNER_NOTE_PREFIXES: the WATCHDOG note, 'V_Out
+    off-screen (clipped)') are carried over in front of the rebuilt
+    part. They used to be erased by the first Save. A stale-emptied row
+    keeps them the same way, in front of AREA_ESTIMATOR_STALE_NOTE: they
+    are facts about the capture, not the old estimator's output. An
+    unreviewed row keeps its whole cell as before; a flag or annotation
+    added to it replaces an older token of the same kind (the same words
+    with a different number) instead of sitting beside it."""
     annos = annos or {}
     stale = set(stale or ())
     for i, row in enumerate(rows):
         r = results.get(i)
-        if i in stale and i not in results:
+        old_note = row.get('notes') or ''
+        reviewed = i in results
+        emptied = i in stale and not reviewed
+        # a reviewed or emptied row gets its notes cell written anew;
+        # only an unreviewed, kept row carries its old cell forward
+        rebuilt = reviewed or emptied
+        if emptied:
             for col in ('active_area_px', 'active_area_mm2',
                         'active_diam_mm', 'wrinkle_idx'):
                 if col in row or col == 'active_area_px':
                     row[col] = ''
-            note = AREA_ESTIMATOR_STALE_NOTE
+            tokens = runner_note_tokens(old_note) + [
+                AREA_ESTIMATOR_STALE_NOTE]
         elif r:
             row['active_area_px'] = f"{r['area_px']:.0f}"
             if scale:
@@ -4473,17 +5532,19 @@ def apply_results(rows, results, scale, flags, annos=None, stale=()):
                 # 'resting'): a previous pass's value must not survive
                 # next to the new area (audit 2026-08-05)
                 row['wrinkle_idx'] = ''
-            note = f"edge:{r['method']} conf {r['conf']:.2f}"
+            edge = f"edge:{r['method']} conf {r['conf']:.2f}"
             if r.get('chosen_by'):
-                note += f" ({r['chosen_by']})"
-        elif i in results:                 # explicitly reviewed + rejected
+                edge += f" ({r['chosen_by']})"
+            tokens = runner_note_tokens(old_note) + [edge]
+        elif reviewed:                     # explicitly reviewed + rejected
             for col in ('active_area_px', 'active_area_mm2',
                         'active_diam_mm', 'wrinkle_idx'):
                 if col in row or col == 'active_area_px':
                     row[col] = ''
-            note = 'rejected (no reliable edge)'
+            tokens = runner_note_tokens(old_note) + [
+                'rejected (no reliable edge)']
         else:
-            note = row.get('notes') or ''
+            tokens = _note_tokens(old_note)
             if scale:
                 px = _num(row.get('active_area_px'))
                 old_mm2 = _num(row.get('active_area_mm2'))
@@ -4506,10 +5567,33 @@ def apply_results(rows, results, scale, flags, annos=None, stale=()):
                     for col in ('active_area_mm2', 'active_diam_mm'):
                         if col in row:
                             row[col] = ''
+        before = list(tokens)
+        fresh = set()       # positions this pass has already rewritten
         for extra in (flags.get(i), annos.get(i)):
-            if extra and extra not in note:
-                note = (note + '; ' if note else '') + extra
-        row['notes'] = note
+            for tok in _note_tokens(extra):
+                if tok in tokens:
+                    continue
+                if not rebuilt:
+                    # the kept cell may already hold this annotation
+                    # with an older number: replace it, do not pile up.
+                    # Only a token that was in the cell BEFORE this pass
+                    # is replaced, and only once: two notes of one kind
+                    # found by the same Save are two findings.
+                    kind = _note_kind(tok)
+                    same = [k for k in range(len(before))
+                            if k not in fresh and kind.strip()
+                            and _note_kind(tokens[k]) == kind
+                            and not tokens[k].startswith(
+                                RUNNER_NOTE_PREFIXES)]
+                    if same:
+                        tokens[same[0]] = tok
+                        fresh.add(same[0])
+                        continue
+                tokens.append(tok)
+        # an unreviewed row nothing was added to keeps its cell
+        # byte-for-byte (the scale-only re-anchor relies on that)
+        row['notes'] = (old_note if not rebuilt and tokens == before
+                        else '; '.join(tokens))
     return rows
 
 

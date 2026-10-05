@@ -4685,6 +4685,1021 @@ def test_goto_a_row_with_no_frame_lands_next_door_and_says_so():
         shutil.rmtree(d, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# run health strip (2026-10-02) and the capture notes Save used to erase
+# ---------------------------------------------------------------------------
+
+def test_run_health_words_put_stop_first_and_never_lean_on_colour():
+    """The strip's wording is pure, so it is pinned without a display:
+    STOP leads the canvas hint, a run with no STOP starts exactly as it
+    always did, and every level is a symbol AND a word (the colour behind
+    the mark only repeats them)."""
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    import sldea_plot
+    stop = {'level': 'stop', 'code': 'image_flat',
+            'text': 'The baseline picture is blank.'}
+    warn = {'level': 'warn', 'code': 'kv_missing',
+            'text': 'No measured voltage on 3 of 7 powered frames.'}
+    note = {'level': 'info', 'code': 'kv_sign', 'text': 'A note.'}
+    assert gui.health_counts([]) == 'nothing found'
+    assert gui.health_counts([warn]) == '1 warning'
+    assert gui.health_counts([stop, warn, warn, note]) == \
+        '1 STOP, 2 warnings, 1 note'
+    # no STOP: the hint is HINT_DETECT word for word
+    assert gui.health_hint([]) == gui.HINT_DETECT
+    assert gui.health_hint([warn, note]) == gui.HINT_DETECT
+    assert gui.health_hint(None) == gui.HINT_DETECT
+    # a STOP: it is the FIRST thing on the canvas, behind its mark, and
+    # 'press Detect to start' is not printed under 'cannot be measured'
+    hint = gui.health_hint([stop, warn])
+    assert hint.startswith(gui.HEALTH_MARKS['stop'] + ': ' + stop['text'])
+    assert warn['text'] not in hint and gui.HINT_DETECT not in hint
+    assert hint.endswith(gui.HINT_AFTER_STOP)
+    assert 'Detect Edges' in gui.HINT_AFTER_STOP     # advice, not a lock
+    # ...and it says what the button will DO on such a run, not that it
+    # "still works": the scale gate opens on the hand measurement the
+    # STOP has just told the student not to make
+    assert 'measure the scale by hand' in gui.HINT_AFTER_STOP
+    assert 'frames folder' in gui.HINT_AFTER_STOP
+    assert 'still works' not in gui.HINT_AFTER_STOP
+    # the same STOP lines lead the scale dialog's banner
+    assert gui.health_stops(None) == []
+    assert gui.health_stops([warn, note]) == []
+    assert gui.health_stops([stop, warn]) == [
+        gui.HEALTH_MARKS['stop'] + ': ' + stop['text']]
+    assert hint.startswith(gui.health_stops([stop, warn])[0])
+    # ...and under a STOP that banner does not ORDER a hand measurement:
+    # it says what the window can do, points at the STOP and names the
+    # way out. Without a STOP the sentence is the one it always was.
+    assert gui.GATE_NO_FIT.endswith('measure the disc BY HAND.')
+    assert gui.GATE_NO_FIT not in gui.GATE_NO_FIT_STOP
+    for words in ('NO automatic fit on this run', 'nothing to verify',
+                  'BY HAND', 'Read the STOP above first', 'Cancel (Esc)'):
+        assert words in gui.GATE_NO_FIT_STOP, words
+    # a short screen may shorten the strip, never to less than a header
+    # and something under it
+    assert 2 <= gui.HEALTH_MIN_LINES < gui.HEALTH_LINES
+    assert 300 <= gui.VIEW_MIN_H < gui.VIEW_H
+    # the help panel names the strip, and its STOP mark as it is drawn
+    assert f"{gui.HEALTH_TITLE} strip" in gui.howto_text()
+    assert gui.HEALTH_MARKS['stop'] in gui.howto_text()
+    # one mark per level, each a symbol plus a word, all different
+    assert set(gui.HEALTH_MARKS) == set(se.HEALTH_LEVELS)
+    marks = list(gui.HEALTH_MARKS.values()) + [gui.HEALTH_OK_MARK]
+    assert len(set(marks)) == len(marks)
+    for mark in marks:
+        symbol, word = mark.split(' ', 1)
+        assert symbol and word.isalpha() and not symbol.isalpha(), mark
+    # colours come from the Paul Tol bright scheme the plots use
+    assert set(gui.HEALTH_COLORS) == set(se.HEALTH_LEVELS) | {'ok'}
+    tol = {c.lower() for c in sldea_plot.TOL_BRIGHT}
+    for level, colour in gui.HEALTH_COLORS.items():
+        assert colour.lower() in tol, (level, colour)
+    assert len(set(gui.HEALTH_COLORS.values())) == len(gui.HEALTH_COLORS)
+
+
+def _strip_text(app):
+    # without the 'more below' cue: whether it is on the header depends
+    # on the strip's width, which is not what these tests are about
+    return app.health_txt.get('1.0', 'end-1c').replace(
+        f"   {gui_more()}", '')
+
+
+def gui_more():
+    import sldea_edge_gui as gui
+    return gui.HEALTH_MORE
+
+
+def test_run_health_strip_shows_on_pick_and_blocks_nothing():
+    """U20 / U51: the 2026-10-01 run was calibrated by hand on a blank
+    picture because nothing on screen said the picture was blank. Picking
+    a run now says so at once, STOP first, in the strip and on the empty
+    canvas, and it stays ADVICE: Detect and Save work as before."""
+    import cv2
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('run health strip')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_health_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    app = None
+    try:
+        good = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        blank = _fake_run(os.path.join(d, 'SLDEA_20260102_000000'))
+        cv2.imwrite(os.path.join(blank, 'frames',
+                                 'SLDEA_s00_00.00kV_baseline.png'),
+                    np.full((240, 320), 67, np.uint8))
+        app = gui.EdgeReviewApp(root, path=blank)
+        assert app.run is not None, "synthetic run failed to load"
+        root.update_idletasks()
+        # the strip is a real, packed part of the window under the toolbar
+        assert app.health_txt.winfo_manager() == 'pack'
+        assert int(app.health_txt.cget('height')) == gui.HEALTH_LINES
+        assert str(app.health_txt.cget('state')) == 'disabled'
+        codes = [(it['level'], it['code']) for it in app.health]
+        assert codes[0] == ('stop', 'image_flat'), codes
+        text = _strip_text(app)
+        assert text.startswith(f"{gui.HEALTH_TITLE}: 1 STOP"), text
+        assert gui.HEALTH_ADVICE in text
+        # STOP is stated before any warning, each behind its text mark
+        at_stop = text.index(gui.HEALTH_MARKS['stop'])
+        at_warn = text.index(gui.HEALTH_MARKS['warn'])
+        assert 0 < at_stop < at_warn, (at_stop, at_warn)
+        assert 'The baseline picture is blank' in text
+        # ...and the mark, not only the sentence, carries the level tag
+        ranges = app.health_txt.tag_ranges('stop')
+        assert ranges and gui.HEALTH_MARKS['stop'] in \
+            app.health_txt.get(ranges[0], ranges[1])
+        # the empty canvas leads with the STOP sentence
+        assert app._hint.startswith(gui.HEALTH_MARKS['stop']), app._hint
+        assert 'The baseline picture is blank' in app._hint
+        assert app.canvas.find_withtag('hint'), "the hint was never drawn"
+        assert 'run health: 1 STOP' in app.info.cget('text')
+        # ADVISORY ONLY: Detect is armed, detection runs, Save arms
+        assert str(app.detect_btn['state']) == 'normal'
+        # WHAT THE HINT PROMISES IS WHAT DETECT DOES (review 2026-10-02):
+        # with no anchor the press goes to the scale gate, and on this
+        # picture the gate has no automatic fit to verify, so it opens on
+        # a hand measurement
+        assert app._hint.endswith(gui.HINT_AFTER_STOP), app._hint
+        gate = []
+        app._calibrate_scale = lambda **kw: gate.append(kw)
+        try:
+            app.detect()
+        finally:
+            del app._calibrate_scale
+        assert gate == [{'then_detect': True}], gate
+        assert app._auto_disc() is None
+        assert se.cal_open_mode(app._auto_disc()) != se.CAL_MODE_VERIFY
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect_all_sync()
+        assert str(app.save_btn['state']) == 'normal'
+        assert app.health and _strip_text(app) == text, \
+            "the strip belongs to the run, not to the pass"
+        app.save()
+        assert 'saved' in app.status.cget('text'), app.status.cget('text')
+        assert not mb.errors, mb.errors
+
+        # a run with a usable picture: no STOP, the usual hint, and the
+        # strip is the SAME HEIGHT (content changes, layout does not)
+        app._populate_runs(good)
+        root.update_idletasks()
+        assert app.rundir == good
+        assert not [it for it in app.health if it['level'] == 'stop']
+        assert gui.HEALTH_MARKS['stop'] not in _strip_text(app)
+        assert app._hint == gui.HINT_DETECT, app._hint
+        assert int(app.health_txt.cget('height')) == gui.HEALTH_LINES
+        # the fixture has no electrical readings, and the strip says so
+        assert gui.HEALTH_MARKS['warn'] in _strip_text(app)
+
+        # nothing wrong at all -> the OK line, with its own mark
+        app._show_health([])
+        assert gui.HEALTH_OK_MARK in _strip_text(app)
+        assert 'nothing found' in _strip_text(app)
+        # no run loaded -> the strip says that, and holds no verdict
+        app._show_health(None)
+        assert app.health is None
+        assert _strip_text(app) == \
+            f"{gui.HEALTH_TITLE}: {gui.HEALTH_NO_RUN}"
+
+        # the check itself failing costs the advice, never the pick
+        real = se.run_health
+
+        def boom(*a, **k):
+            raise RuntimeError('health exploded')
+
+        se.run_health = boom
+        try:
+            app._populate_runs(good)
+        finally:
+            se.run_health = real
+        assert app.run is not None and app.rundir == good
+        assert [it['code'] for it in app.health] == ['health_failed']
+        assert str(app.detect_btn['state']) == 'normal'
+        assert app._hint == gui.HINT_DETECT
+
+        # a run that fails to LOAD leaves no verdict behind: the strip
+        # held the previous run's items a moment ago, and they must not
+        # stay on screen under the new run's name
+        assert app.health and gui.HEALTH_MARKS['info'] in _strip_text(app)
+        real_load = se.load_run
+
+        def no_load(*a, **k):
+            raise OSError('disk gone')
+
+        se.load_run = no_load
+        try:
+            app._populate_runs(blank)
+        finally:
+            se.load_run = real_load
+        assert app.run is None and app.health is None
+        assert _strip_text(app) == \
+            f"{gui.HEALTH_TITLE}: {gui.HEALTH_NO_RUN}"
+        assert app._hint == gui.HINT_PICK_RUN, app._hint
+    finally:
+        gui.messagebox = real_mb
+        if app is not None:
+            app._cancel_pending()
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_auto_holds_its_detect_press_on_a_stop_run_and_says_why():
+    """Decision 16 (2026-10-03). The strip is advice and locks no button,
+    but the --auto launch's own 300 ms Detect press is held back when
+    Run health holds a STOP: the window opens, the STOP leads the strip
+    and the canvas, the canvas says that nothing was started and why,
+    and the Detect button is live for a hand press. A run without a
+    STOP is pressed exactly as before. (Review 2026-10-02 had kept the
+    press on a STOP run pending this decision.)"""
+    import cv2
+    import sldea_edge_gui as gui
+    pressed = []
+    real_detect = gui.EdgeReviewApp.detect
+    gui.EdgeReviewApp.detect = lambda self: pressed.append(self.rundir)
+    d = tempfile.mkdtemp(prefix='edge_gui_auto_')
+    try:
+        good = _fake_run(os.path.join(d, 'good', 'SLDEA_20260101_000000'))
+        blank = _fake_run(os.path.join(d, 'blank', 'SLDEA_20260102_000000'))
+        cv2.imwrite(os.path.join(blank, 'frames',
+                                 'SLDEA_s00_00.00kV_baseline.png'),
+                    np.full((240, 320), 67, np.uint8))
+        for run in (blank, good):
+            root = _tk_root_or_skip('auto over a stop')
+            if root is None:
+                return
+            app = None
+            try:
+                app = gui.EdgeReviewApp(root, path=run, auto=True)
+                stops = [it for it in app.health if it['level'] == 'stop']
+                assert bool(stops) == (run == blank), (run, app.health)
+                end = time.time() + 0.7          # past the 300 ms timer
+                while time.time() < end:
+                    root.update()
+                    time.sleep(0.02)
+                assert str(app.detect_btn['state']) == 'normal'
+                if run == blank:
+                    # held: no press, and the canvas says so, STOP first
+                    assert pressed == [], (run, pressed)
+                    assert gui.HEALTH_MARKS['stop'] in _strip_text(app)
+                    assert app._hint.startswith(gui.HEALTH_MARKS['stop'])
+                    assert gui.HINT_AUTO_HELD in app._hint, app._hint
+                    assert app._hint.endswith(gui.HINT_AFTER_STOP)
+                    assert app.status.cget('text') == gui.AUTO_HELD_TEXT
+                    # the words: what did not happen, why, what still can
+                    for words in ('NOT started', 'STOP', 'by hand',
+                                  'Detect Edges'):
+                        assert words in gui.HINT_AUTO_HELD, words
+                    # the button itself is live: a press on the WIDGET
+                    # goes through its own command (not a direct call,
+                    # which the patch above could not fail)
+                    app.detect_btn.invoke()
+                    assert pressed == [run], (run, pressed)
+                    # the status line names the auto-process, not the
+                    # command-line flag (review 2026-10-04)
+                    assert gui.AUTO_HELD_TEXT.startswith('Auto-process')
+                    assert '--auto' not in gui.AUTO_HELD_TEXT
+                else:
+                    assert pressed == [run], (run, pressed)
+                    assert app._hint == gui.HINT_DETECT, app._hint
+            finally:
+                if app is not None:
+                    app._cancel_pending()
+                root.destroy()
+            del pressed[:]
+        # the hold is the --auto launch's alone: the same STOP run opened
+        # by hand reads as it did (no 'NOT started' line), and without a
+        # STOP the auto flag changes nothing in the hint
+        root = _tk_root_or_skip('stop run by hand')
+        if root is None:
+            return
+        app = None
+        try:
+            app = gui.EdgeReviewApp(root, path=blank)
+            assert app._hint.startswith(gui.HEALTH_MARKS['stop'])
+            assert gui.HINT_AUTO_HELD not in app._hint, app._hint
+            assert pressed == []
+        finally:
+            if app is not None:
+                app._cancel_pending()
+            root.destroy()
+        assert gui.health_hint([], auto_held=True) == gui.HINT_DETECT
+        warn = [{'level': 'warn', 'code': 'x', 'text': 'y'}]
+        assert gui.health_hint(warn, auto_held=True) == gui.HINT_DETECT
+    finally:
+        gui.EdgeReviewApp.detect = real_detect
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# The notes decision 17 writes (the four the corpus produces, measured
+# 2026-10-03, and the trip texts), as the review card receives them.
+_CARD_NOTES = {
+    'Assctuator row 1': (
+        'monitor log: current up to 112 uA from rest for 0.5 s from 1.5 s '
+        'into the run (0.15 to 0.20 kV, 2 samples)'),
+    'Assctuator row 3': (
+        'monitor log: current off-screen for 12.9 s from 36.6 s into the '
+        'run (0.66 to 1.00 kV, 24 samples, to the end of the log)'),
+    'Assctuator2 row 17': (
+        'monitor log: current off-screen for 1.7 s from 248.4 s into the '
+        'run (4.42 to 4.50 kV, 4 samples)'),
+    'SquareStack-1 row 1': (
+        'monitor log: current up to 800 uA from rest for 352.7 s from '
+        '7.2 s into the run (0.36 to 6.00 kV, 636 samples, 267 off-screen, '
+        'to the end of the log)'),
+    'sentinel advisory': (
+        "watchdog trip not confirmed: the reading that tripped it was the "
+        "off-screen sentinel (telemetry.csv)"),
+    'two notes on one row': (
+        'collapse? area -36% (no current signature); monitor log: current '
+        'off-screen for 12.9 s from 36.6 s into the run (0.66 to 1.00 kV, '
+        '24 samples, to the end of the log)'),
+    'flag: trip': 'breakdown? watchdog trip (I -240uA, telemetry.csv)',
+    'flag: trip, cell': ('breakdown? watchdog trip (frame read -16uA, trip '
+                         'reading not on file)'),
+    'flag: trip, nothing': 'breakdown? watchdog trip (reading not on file)',
+}
+_CARD_SHORT = {
+    'Assctuator row 1': ('monitor log: from 1.5 s for 0.5 s, 0.15 to 0.20 '
+                         'kV, up to 112 uA, 2 samples'),
+    'Assctuator row 3': ('monitor log: 36.6 s to the end (12.9 s), 0.66 to '
+                         '1.00 kV, off-screen, 24 samples'),
+    'Assctuator2 row 17': ('monitor log: from 248.4 s for 1.7 s, 4.42 to '
+                           '4.50 kV, off-screen, 4 samples'),
+    'SquareStack-1 row 1': ('monitor log: 7.2 s to the end (352.7 s), 0.36 '
+                            'to 6.00 kV, up to 800 uA, 636 samples, 267 '
+                            'off-screen'),
+    'two notes on one row': ('collapse? area -36% (no current signature); '
+                             'monitor log: 36.6 s to the end (12.9 s), '
+                             '0.66 to 1.00 kV, off-screen, 24 samples'),
+}
+
+
+def test_the_card_cuts_a_long_note_to_its_box_and_tips_the_full_text():
+    """Review 2026-10-04 of decision 17. The info panel is a fixed box of
+    INFO_LINES text lines (#179: a flag changes content, never layout),
+    and every monitor-log note of the corpus needed six, so the card
+    showed half a sentence and never the kV or the counts. Measured
+    here on the real label at its own font: the long forms do not fit;
+    wrap_lines counts lines exactly as Tk lays them out; the card's
+    line for every note fits the box, in the short words of
+    se.short_note (time, kV, what the current did, counts) and cut
+    with an ellipsis only past that; whatever the card does not carry
+    whole is the info panel's tooltip, which a frame without a note
+    clears; and the label never changes height."""
+    import random
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    root = _tk_root_or_skip('card note fit')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_card_note_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None, "synthetic run failed to load"
+        app.detect_all_sync()
+        meas = app._info_font.measure
+        assert str(app.info.cget('font')) == str(app._info_font)
+        # a probe drawn with the info label's font and wrap says how many
+        # lines a text really takes
+        probe = tk.Label(root, font=app._info_font, justify='left',
+                         anchor='nw', wraplength=gui.INFO_WRAP)
+        one = tk.Label(root, font=app._info_font, text='x')
+        one.update_idletasks()
+        lsp = app._info_font.metrics('linespace')
+        pad = one.winfo_reqheight() - lsp
+
+        def tk_lines(text):
+            probe.config(text=text)
+            probe.update_idletasks()
+            return round((probe.winfo_reqheight() - pad) / lsp)
+
+        fixed = ("frame 4/4   step 2 [post-ramp]\n"
+                 "nominal 1.0 kV   measured 0.1695 kV   — µA\n"
+                 "state: needs review")
+        assert tk_lines(fixed) == 3
+        # the review's finding: the long forms overflow the box
+        for name in ('Assctuator row 3', 'SquareStack-1 row 1'):
+            assert tk_lines(fixed + '\nⓘ ' + _CARD_NOTES[name]) \
+                > gui.INFO_LINES, name
+        # wrap_lines is Tk's count, on these texts and on word soups
+        soup = (fixed + ' ' + ' '.join(_CARD_NOTES.values())).split(' ')
+        rng = random.Random(7)
+        texts = [fixed + '\nⓘ ' + n for n in _CARD_NOTES.values()]
+        texts += [' '.join(rng.choice(soup) for _ in range(rng.randint(1, 30)))
+                  for _ in range(120)]
+        for text in texts:
+            assert gui.wrap_lines(text, gui.INFO_WRAP, meas) == tk_lines(text), \
+                text
+        # the short grammar on the corpus notes, token by token
+        for name, want in _CARD_SHORT.items():
+            assert se.short_note(_CARD_NOTES[name]) == want, name
+        for name in ('sentinel advisory', 'flag: trip'):
+            assert se.short_note(_CARD_NOTES[name]) == _CARD_NOTES[name]
+        # on the card: every note fits the box, the label keeps its
+        # height, and the tip holds the full text exactly when the card
+        # does not
+        j = app.frame_rows[2]
+        app.pos = app.frame_rows.index(j)
+        app._show()
+        root.update_idletasks()
+        info_h = app.info.winfo_reqheight()
+        assert 'info' in app._tips and app._tips['info'].text == ''
+        for name, note in _CARD_NOTES.items():
+            app.flags.pop(j, None)
+            app.advisories.pop(j, None)
+            if name.startswith('flag'):
+                app.flags[j] = note
+            else:
+                app.advisories[j] = note
+            app._show()
+            root.update_idletasks()
+            text = app.info.cget('text')
+            assert tk_lines(text) <= gui.INFO_LINES, (name, text)
+            assert app.info.winfo_reqheight() == info_h, name
+            line = text.split('\n')[-1]
+            mark = '⚠' if name.startswith('flag') else 'ⓘ'
+            assert line.startswith(mark + ' '), (name, line)
+            tip = app._tips['info'].text
+            if line == f"{mark} {note}":
+                assert tip == '', (name, tip)
+            else:
+                assert tip == note, (name, tip)
+                assert line.endswith('…') or line[2:] == se.short_note(note)
+            if name in ('Assctuator row 1', 'Assctuator row 3',
+                        'Assctuator2 row 17', 'SquareStack-1 row 1'):
+                # the time and the kV lead the short form, so they are
+                # on the card whatever the font cuts off the tail
+                when, kv = _CARD_SHORT[name].split(', ')[:2]
+                assert kv.endswith('kV') and kv in line, (name, line)
+                assert when in line, (name, line)
+        # the state line wrapping (a staged D) takes a line from the note:
+        # the note yields and the box still holds
+        tri = np.array([[10, 10], [100, 10], [100, 100]], np.int32)
+        app.traces[j] = {
+            'method': 'manual-trace', 'conf': 1.0, 'chosen_by': 'user',
+            'area_px': 1000.0, 'diam_px': 35.7, 'cx': 50.0, 'cy': 50.0,
+            'contour': tri, 'solidity': 1.0, 'spread_pct': 0.0,
+            'ci85_pct': None, 'wrinkle': None, 'n_points': 3,
+            'trace_points': [(10.0, 10.0), (100.0, 10.0), (100.0, 100.0)],
+            'snapped': False}
+        app.flags.pop(j, None)
+        app.advisories[j] = _CARD_NOTES['SquareStack-1 row 1']
+        app._show()
+        root.update_idletasks()
+        text = app.info.cget('text')
+        assert 'staged D NOT committed' in text
+        assert tk_lines(text) <= gui.INFO_LINES, text
+        assert app.info.winfo_reqheight() == info_h
+        assert app._tips['info'].text == _CARD_NOTES['SquareStack-1 row 1']
+        del app.traces[j]
+        # a frame without a note clears the tip
+        app.advisories.pop(j, None)
+        app._show()
+        assert app.info.cget('text').count('\n') == 2
+        assert app._tips['info'].text == ''
+        # fit_lines on its own: whole when it fits, cut by words past that
+        assert gui.fit_lines('a b c', 1000, 1, meas) == 'a b c'
+        long = ' '.join(['word'] * 60)
+        cut = gui.fit_lines(long, gui.INFO_WRAP, 2, meas)
+        assert cut.endswith('…') and cut != long
+        assert gui.wrap_lines(cut, gui.INFO_WRAP, meas) == 2
+        assert gui.wrap_lines(cut[:-1] + ' word' + '…', gui.INFO_WRAP,
+                              meas) == 3
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_health_strip_adds_its_height_to_the_window_not_to_the_image():
+    """Review 2026-10-02: on the old 760 px floor the strip's 85 px came
+    straight out of the review canvas (563 px tall against 648 before the
+    strip existed), on every run and for the whole review. The floor now
+    grows by the strip, so the image keeps its height; what the strip
+    SAYS never moves the image, however many lines it holds; and when it
+    holds more than it shows, the header says so."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_strip_h_')
+    app = None
+
+    def settle():
+        for _ in range(3):
+            root.update_idletasks()
+            root.update()
+
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        settle()
+        strip_h = app._health_box.winfo_reqheight()
+        body_h = app._scroll.body.winfo_reqheight()
+        assert strip_h >= 40, strip_h         # HEALTH_LINES lines of text
+        want_h = max(body_h, 760 + strip_h)
+        cap_h = max(480, root.winfo_screenheight() - 120)
+        if want_h > cap_h:
+            print(f"   (screen too small to check the uncapped case: "
+                  f"wants {want_h}, cap {cap_h})")
+        else:
+            # a window manager may round the request by a pixel or two;
+            # the strip this is about is some 80 px
+            assert abs(root.winfo_height() - want_h) <= 4, (
+                f"opened {root.winfo_height()} px tall for a layout "
+                f"wanting {want_h}")
+            # what the image had to spare under the 760 floor before the
+            # strip existed is still the image's
+            slack = max(0, 760 - (body_h - strip_h))
+            assert app.canvas.winfo_height() >= gui.VIEW_H + slack - 2, (
+                app.canvas.winfo_height(), gui.VIEW_H, slack)
+
+        def header():
+            return app.health_txt.get('1.0', '1.end')
+
+        # the content changes, the image does not move
+        h0 = app.canvas.winfo_height()
+        many = [{'level': 'warn', 'code': f'c{k}',
+                 'text': 'A sentence long enough to fill a line. ' * 4}
+                for k in range(8)]
+        app._show_health(many)
+        settle()
+        assert app.canvas.winfo_height() == h0
+        assert int(app.health_txt.cget('height')) == gui.HEALTH_LINES
+        # more lines than the strip shows: the header says to scroll
+        assert header().endswith(gui.HEALTH_MORE), header()
+        ranges = app.health_txt.tag_ranges('more')
+        assert ranges and gui.HEALTH_MORE in \
+            app.health_txt.get(ranges[0], ranges[1])
+        assert str(app.health_txt.cget('state')) == 'disabled'
+        # everything fits: no cue, and still the same image
+        app._show_health([])
+        settle()
+        assert app.canvas.winfo_height() == h0
+        assert gui.HEALTH_MORE not in app.health_txt.get('1.0', 'end-1c')
+        assert not app.health_txt.tag_ranges('more')
+        # the cue is painted once, not once per repaint
+        app._show_health(many)
+        app._health_more_cue()
+        app._health_more_cue()
+        settle()
+        assert app.health_txt.get('1.0', 'end-1c').count(
+            gui.HEALTH_MORE) == 1
+    finally:
+        if app is not None:
+            app._cancel_pending()
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_short_screen_gets_a_shorter_strip_and_the_whole_image():
+    """Review 2026-10-02: with the screen height forced to 768 the window
+    is capped at 648 px, the page with the five-line strip asked 757, and
+    the review canvas ended 55 px under the window's bottom edge (main
+    shows it whole). Frames are drawn to fit the canvas, so a tenth of
+    every picture was hidden unless the page was scrolled, which scrolls
+    the strip and the toolbar away.
+
+    On such a screen the strip now gives lines back (never fewer than
+    HEALTH_MIN_LINES) and the canvas asks for a little less, so the whole
+    image is inside the window and above the page's own horizontal bar,
+    and the page is no taller than it was before the strip existed.
+    Decided once per window: the strip still does not change height with
+    what it says.
+
+    Three forced heights, because on the analysis PC they take three
+    different paths (the assertions do not assume which):
+      864 (1080p at 125 % scaling)  the strip alone gives enough back
+                                    and the whole page fits, status line
+                                    included, as it does on main
+      768                           the strip and the canvas both give
+      720                           the page is still taller than the
+                                    window (it is on main too), so the
+                                    image must also clear the page's
+                                    horizontal bar"""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    try:
+        probe = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    real_h = probe.winfo_screenheight()
+    probe.destroy()
+    real_sh = tk.Misc.winfo_screenheight
+    d = tempfile.mkdtemp(prefix='edge_gui_short_')
+    run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+
+    def case(forced, full):
+        """Open the window with the screen height forced. `full` is the
+        (page, strip) height of a window with room for everything, or
+        None to measure exactly that and return it."""
+        root = tk.Tk()
+        app = None
+
+        def settle():
+            for _ in range(3):
+                root.update_idletasks()
+                root.update()
+
+        try:
+            tk.Misc.winfo_screenheight = lambda self: forced
+            app = gui.EdgeReviewApp(root, path=run)
+            settle()
+            body_h = app._scroll.body.winfo_reqheight()
+            lines = int(app.health_txt.cget('height'))
+            asked = int(app.canvas.cget('height'))
+            if full is None:
+                assert lines == gui.HEALTH_LINES, lines
+                assert asked == gui.VIEW_H, asked
+                return body_h, app._health_box.winfo_reqheight()
+            cap_h = forced - 120
+            if full[0] <= cap_h:
+                print(f"   (skipped {forced}: the page fits this screen "
+                      f"with the whole strip)")
+                return None
+            assert abs(root.winfo_height() - cap_h) <= 4, (
+                forced, root.winfo_height())
+            assert gui.HEALTH_MIN_LINES <= lines < gui.HEALTH_LINES, (
+                forced, lines)
+            # THE STRIP COSTS THE PAGE NOTHING HERE: the page is no
+            # taller than the window, or than it was without the strip
+            old_page = full[0] - full[1]
+            assert body_h <= max(cap_h, old_page), (
+                forced, body_h, cap_h, full)
+            # THE WHOLE IMAGE CANVAS IS ON SCREEN: inside the page's
+            # viewport, which ends above the scroller's horizontal bar,
+            # and so inside the window
+            view = app._scroll._canvas
+            view_top = view.winfo_rooty()
+            view_bottom = view_top + view.winfo_height()
+            top = app.canvas.winfo_rooty()
+            bottom = top + app.canvas.winfo_height()
+            assert view_top <= top and bottom <= view_bottom, (
+                f"screen {forced}: canvas y {top}..{bottom}, viewport "
+                f"{view_top}..{view_bottom}")
+            assert bottom <= root.winfo_rooty() + root.winfo_height()
+            assert app.canvas.winfo_height() >= gui.VIEW_MIN_H, (
+                forced, app.canvas.winfo_height())
+            # the strip is whole too, and sits above the image
+            s_top = app.health_txt.winfo_rooty()
+            s_bottom = s_top + app.health_txt.winfo_height()
+            assert view_top <= s_top and s_bottom <= top, (
+                forced, s_top, s_bottom, top)
+            # no control was dropped to make the room
+            for name in ('run_box', 'detect_btn', 'save_btn', 'accept_btn',
+                         'reject_btn', 'howto_btn', 'status', 'canvas'):
+                assert getattr(app, name).winfo_ismapped(), (forced, name)
+            if old_page <= cap_h:
+                # where the page fitted before the strip, it fits now,
+                # status line included
+                st_bottom = (app.status.winfo_rooty()
+                             + app.status.winfo_height())
+                assert body_h <= cap_h, (forced, body_h, cap_h)
+                assert st_bottom <= view_bottom, (
+                    forced, st_bottom, view_bottom)
+            # THE IMAGE GAVE BACK NO MORE THAN WAS OWED. The strip pays
+            # first; a canvas that asks for less than VIEW_H paid the
+            # rest, and then the page is exactly as tall as the window
+            # or as it was before the strip, or the image ends at the
+            # bottom of the view (its own 4 px of padding above it)
+            if gui.VIEW_MIN_H < asked < gui.VIEW_H:
+                assert (abs(body_h - max(cap_h, old_page)) <= 2
+                        or 0 <= view_bottom - bottom <= 6), (
+                    forced, body_h, cap_h, full, bottom, view_bottom)
+            else:
+                assert asked == gui.VIEW_H or asked == gui.VIEW_MIN_H, asked
+
+            # the shorter strip still does not change height with its
+            # text, and its 'more below' cue counts against the lines it
+            # SHOWS: one item per shown line is one display line too many
+            h0 = app.canvas.winfo_height()
+            few = [{'level': 'warn', 'code': f'c{k}', 'text': 'Short.'}
+                   for k in range(lines)]
+            assert 1 + len(few) <= gui.HEALTH_LINES
+            app._show_health(few)
+            settle()
+            assert int(app.health_txt.cget('height')) == lines
+            assert app.canvas.winfo_height() == h0
+            assert app.health_txt.get('1.0', '1.end').endswith(
+                gui.HEALTH_MORE), app.health_txt.get('1.0', '1.end')
+            app._show_health(few[:lines - 1])
+            settle()
+            assert gui.HEALTH_MORE not in app.health_txt.get('1.0',
+                                                             'end-1c')
+            # a run switch does not give the lines back either
+            app._populate_runs(run)
+            settle()
+            assert int(app.health_txt.cget('height')) == lines
+            assert app.canvas.winfo_height() == h0
+            return None
+        finally:
+            tk.Misc.winfo_screenheight = real_sh
+            if app is not None:
+                app._cancel_pending()
+            root.destroy()
+
+    try:
+        full = case(4000, None)
+        for forced in (864, 768, 720):
+            if real_h < forced:
+                print(f"   (skipped {forced}: this display is only "
+                      f"{real_h} px tall)")
+                continue
+            case(forced, full)
+    finally:
+        tk.Misc.winfo_screenheight = real_sh
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_scale_dialog_leads_with_the_runs_stop():
+    """Review 2026-10-02: on a STOP run the scale dialog is what the
+    student actually reads. It is modal, it opens over the Run health
+    strip, and with --auto it is up 300 ms after the window. Its banner
+    said 'measure the disc BY HAND' with the fitter's gray-level reason
+    and not one word of the STOP behind it.
+
+    The STOP sentence now leads that banner, the hand line points at it
+    and names Cancel, and what the banner gained in height comes off the
+    picture so the window is no taller than before. Advice still: the
+    dialog opens, in a hand mode, with every button. A refused fit on a
+    picture that is NOT blank (P3_7) keeps the sentence it always had.
+
+    The verify mode hides that banner, so a STOP run that still has a fit
+    to verify shows the STOP there as the banner's only line."""
+    import cv2
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    root = _tk_root_or_skip('scale dialog STOP')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_cal_stop_')
+    mb = _StubMB(yes=True)
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    gui.messagebox = mb
+    gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
+    app = None
+    saw = {}
+
+    def poke(win):
+        p = app._cal_probe
+        win.update_idletasks()
+        saw['gate'] = p['gate_lbl'].cget('text')
+        saw['shown'] = _cal_rendered(p['gate_lbl'], win)
+        saw['lines'] = _cal_visible_lines(win)
+        saw['stop_px'] = p['stop_px']
+        saw['canvas_h'] = int(p['canvas'].cget('height'))
+        saw['reqh'] = win.winfo_reqheight()
+        saw['mode'] = p['mode_var'].get()
+        saw['buttons'] = [b.cget('text') for b in _widgets(win, 'button')]
+        saw['stop_vfy_px'] = p['stop_vfy_px']
+        if todo['switch_to']:
+            # the same dialog after a switch to another method
+            for rb in _widgets_of(win, tk.Radiobutton):
+                if rb.cget('value') == todo['switch_to']:
+                    rb.invoke()
+            win.update_idletasks()
+            saw['gate2'] = p['gate_lbl'].cget('text')
+            saw['shown2'] = _cal_rendered(p['gate_lbl'], win)
+            saw['lines2'] = _cal_visible_lines(win)
+            saw['canvas_h2'] = int(p['canvas'].cget('height'))
+            saw['mode2'] = p['mode_var'].get()
+        win.destroy()
+
+    todo = {'switch_to': None}
+    try:
+        base = os.path.join('frames', 'SLDEA_s00_00.00kV_baseline.png')
+        blank = _fake_run(os.path.join(d, 'SLDEA_20260102_000000'))
+        cv2.imwrite(os.path.join(blank, base),
+                    np.full((240, 320), 67, np.uint8))
+        app = gui.EdgeReviewApp(root, path=blank)
+        app.root.wait_window = poke
+        stops = [it for it in app.health if it['level'] == 'stop']
+        assert [it['code'] for it in stops] == ['image_flat'], app.health
+
+        # through Detect, which is the press --auto makes after 300 ms
+        app.detect()
+        assert saw, "Detect did not open the scale dialog"
+        with_stop = dict(saw)
+        gate = with_stop['gate']
+        first = f"{gui.HEALTH_MARKS['stop']}: {stops[0]['text']}"
+        assert gate.startswith(first + '\n'), gate[:300]
+        assert with_stop['shown'], "the banner is not on screen"
+        assert first in with_stop['lines'], with_stop['lines']
+        for words in ('The baseline picture is blank',
+                      'cannot be measured', 'Do not calibrate by hand'):
+            assert words in gate, (words, gate)
+        # the STOP is ahead of the fit's refusal and of its reason, and
+        # the refusal no longer orders the hand measurement
+        assert gate.index('The baseline picture is blank') \
+            < gate.index('NO automatic fit on this run') \
+            < gate.index('Reason:'), gate
+        assert gui.GATE_NO_FIT_STOP in gate and gui.GATE_NO_FIT not in gate
+        assert any(b.startswith('Cancel (Esc)')
+                   for b in with_stop['buttons']), with_stop['buttons']
+        # ADVICE: the dialog opened, on a hand mode, and closing it left
+        # Detect gated on the scale exactly as on any run
+        assert with_stop['mode'] == gui.se.CAL_DEFAULT_MODE, with_stop
+        assert 'gated' in app.status.cget('text'), app.status.cget('text')
+        assert str(app.detect_btn['state']) == 'normal'
+        assert not mb.errors and not mb.infos, (mb.errors, mb.infos)
+        # the banner's extra height came off the picture
+        sh = root.winfo_screenheight()
+        assert with_stop['stop_px'] > 0, with_stop
+        assert with_stop['canvas_h'] == max(
+            300, min(760, sh - 400 - with_stop['stop_px'])), (with_stop, sh)
+
+        # the SAME run with nothing on the strip: the dialog is the one
+        # it always was, and no taller or shorter than the one above
+        saw.clear()
+        app._show_health([])
+        app._calibrate_scale()
+        plain = dict(saw)
+        assert gui.HEALTH_MARKS['stop'] not in plain['gate'], plain['gate']
+        assert plain['gate'].startswith(gui.GATE_NO_FIT + ' Reason:'), \
+            plain['gate']
+        assert plain['stop_px'] == 0
+        assert plain['canvas_h'] == max(300, min(760, sh - 400)), plain
+        if min(plain['canvas_h'], with_stop['canvas_h']) > 300:
+            assert abs(with_stop['reqh'] - plain['reqh']) <= 2, (
+                with_stop['reqh'], plain['reqh'])
+        else:
+            print("   (screen too short to compare the two window "
+                  "heights: the picture is at its 300 px floor)")
+
+        # a refused fit on a picture that is not blank is a WARNING on
+        # the strip, and its dialog carries no STOP
+        faint = _fake_run(os.path.join(d, 'SLDEA_20260103_000000'))
+        img = np.full((240, 320), 150, np.uint8)
+        img[:, :110] = 200
+        cv2.imwrite(os.path.join(faint, base), img)
+        app._populate_runs(faint)
+        assert app.rundir == faint
+        codes = [(it['level'], it['code']) for it in app.health]
+        assert ('warn', 'disc_fit_refused') in codes, codes
+        assert not [c for c in codes if c[0] == 'stop'], codes
+        saw.clear()
+        app.detect()
+        assert saw, "Detect did not open the scale dialog"
+        assert gui.HEALTH_MARKS['stop'] not in saw['gate'], saw['gate']
+        assert saw['gate'].startswith(gui.GATE_NO_FIT + ' Reason:'), \
+            saw['gate']
+        assert 'seed' in saw['gate'] and saw['stop_px'] == 0, saw
+
+        # A STOP WITH A FIT TO VERIFY. A disc only 15 gray levels darker
+        # than its paper is 'blank' to image_content (under 20) and the
+        # automatic fit still finds it, so the dialog opens in the verify
+        # mode, whose screen hides the warnings banner. The STOP is the
+        # one line that stays there, alone, and its height comes off the
+        # picture in that mode too.
+        dim = _fake_run(os.path.join(d, 'SLDEA_20260104_000000'))
+        yy, xx = np.mgrid[0:240, 0:320]
+        img = np.full((240, 320), 190, np.uint8)
+        img[(xx - 160) ** 2 + (yy - 120) ** 2 <= 80 * 80] = 175
+        cv2.imwrite(os.path.join(dim, base), img)
+        # no diameter line in setup.txt: the banner of the hand modes
+        # then holds a second warning, which the verify mode must leave
+        # to its own evidence block
+        with open(os.path.join(dim, 'setup.txt'), 'w') as f:
+            f.write("SLDEA Test -- synthetic\n")
+        app._populate_runs(dim)
+        assert app.rundir == dim
+        stops = [it for it in app.health if it['level'] == 'stop']
+        assert [it['code'] for it in stops] == ['image_flat'], app.health
+        first = f"{gui.HEALTH_MARKS['stop']}: {stops[0]['text']}"
+        saw.clear()
+        todo['switch_to'] = gui.se.CAL_MODE_CIRCLE
+        app.detect()
+        assert saw, "Detect did not open the scale dialog"
+        assert saw['mode'] == gui.se.CAL_MODE_VERIFY, saw['mode']
+        assert saw['shown'], "the verify mode hid the run's STOP"
+        assert saw['gate'] == first, saw['gate']
+        assert first in saw['lines'], saw['lines']
+        assert 'NO automatic fit' not in ' '.join(saw['lines']), saw['lines']
+        assert saw['stop_vfy_px'] > 0, saw
+        assert saw['canvas_h'] == max(
+            300, min(760, sh - 300 - saw['stop_vfy_px'])), (saw, sh)
+        # ...and a switch to a hand method keeps it on screen, with the
+        # measuring modes' height
+        assert saw['mode2'] == gui.se.CAL_MODE_CIRCLE, saw['mode2']
+        assert saw['shown2'], "the hand mode lost the banner"
+        assert saw['gate2'].startswith(first + '\n'), saw['gate2']
+        assert 'settings DEFAULT' in saw['gate2'], saw['gate2']
+        assert 'settings DEFAULT' not in saw['gate'], saw['gate']
+        assert first in saw['lines2'], saw['lines2']
+        assert saw['canvas_h2'] == max(
+            300, min(760, sh - 400 - saw['stop_px'])), (saw, sh)
+        # the same picture with nothing on the strip: the verify screen
+        # carries no banner at all, as on every ordinary run, and the
+        # window is as tall as the one with the STOP in it
+        vfy_stop = dict(saw)
+        saw.clear()
+        todo['switch_to'] = None
+        app._show_health([])
+        app._calibrate_scale()
+        assert saw['mode'] == gui.se.CAL_MODE_VERIFY, saw['mode']
+        assert not saw['shown'], saw['gate']
+        assert gui.HEALTH_MARKS['stop'] not in ' '.join(saw['lines'])
+        assert saw['stop_vfy_px'] == 0
+        assert saw['canvas_h'] == max(300, min(760, sh - 300)), (saw, sh)
+        if 300 < vfy_stop['canvas_h'] and saw['canvas_h'] < 760:
+            assert abs(vfy_stop['reqh'] - saw['reqh']) <= 2, (
+                vfy_stop['reqh'], saw['reqh'])
+        else:
+            print("   (this screen pins the verify picture at its 300 or "
+                  "760 px limit: the two window heights are not compared)")
+    finally:
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        if app is not None:
+            app._cancel_pending()
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_save_keeps_the_runners_capture_notes():
+    """S6 / U25: Save rebuilt every reviewed row's notes cell, so the
+    first Save erased the runner's 'V_Out off-screen (clipped)' and the
+    watchdog's WATCHDOG note. Two Saves through the real window: both
+    tokens are still there, once each, in front of the fresh edge note."""
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('save keeps capture notes')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_notes_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    app = None
+    wd = 'WATCHDOG: breakdown confirmed (dev >100µA for 3s)'
+    voff = 'V_Out off-screen (clipped)'
+    try:
+        rundir = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        # what the runner leaves behind: capture notes, written UTF-8
+        run = se.load_run(rundir)
+        run['rows'][1]['notes'] = voff
+        run['rows'][2]['notes'] = f'{wd}; {voff}'
+        se.write_back(rundir, run)
+        os.remove(os.path.join(rundir, 'data.csv.bak'))
+
+        def saved_notes():
+            with open(os.path.join(rundir, 'data.csv'), newline='',
+                      encoding='utf-8-sig') as f:
+                return [r['notes'] for r in csv.DictReader(f)]
+
+        assert saved_notes()[1:] == [voff, f'{wd}; {voff}']
+        for n_save in (1, 2):
+            if app is None:
+                app = gui.EdgeReviewApp(root, path=rundir)
+            else:
+                app._populate_runs(rundir)       # a fresh look at the disk
+            # the strip already reports the trip the note records
+            assert 'watchdog_trip' in [it['code'] for it in app.health]
+            app.manual_ref = {'method': 'manual-calibration',
+                              'diam_px': 160.0}
+            app.detect_all_sync()
+            # decide every frame, so each row takes the REBUILT-notes path
+            for i in app.frame_rows:
+                if i not in app.results:
+                    cands = app.cands_all.get(i) or []
+                    app.results[i] = cands[0] if cands else None
+            assert set(app.frame_rows) <= set(app.results)
+            app.save()
+            assert not mb.errors, mb.errors
+            notes = saved_notes()
+            assert notes[1].startswith(f'{voff}; '), (n_save, notes[1])
+            assert notes[2].startswith(f'{wd}; {voff}; '), (n_save, notes[2])
+            for note in notes[1:]:
+                assert note.count(voff) == 1, (n_save, note)
+                assert note.count('WATCHDOG') <= 1, (n_save, note)
+                # exactly one measurement verdict, never a pile of them
+                assert note.count('edge:') + note.count('rejected (') == 1, \
+                    (n_save, note)
+            assert notes[2].count('WATCHDOG') == 1, (n_save, notes[2])
+            assert 'WATCHDOG' not in notes[0] and voff not in notes[0]
+        # the second Save's backup is the first Save's output: the
+        # capture notes are in that copy too
+        with open(os.path.join(rundir, 'data.csv.bak'), newline='',
+                  encoding='utf-8-sig') as f:
+            bak = [r['notes'] for r in csv.DictReader(f)]
+        assert bak[2].startswith(f'{wd}; {voff}'), bak[2]
+    finally:
+        gui.messagebox = real_mb
+        if app is not None:
+            app._cancel_pending()
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_save_empties_old_estimator_rows_and_stamps_the_provenance():
     """2026-10-02: the disc-fit area changed from the fitted ellipse to
     the common-ray ratio. A Save keeps the previous pass's px on rows

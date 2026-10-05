@@ -401,8 +401,11 @@ def load_run(arg, warn):
     area_key = ('area_px' if any(r['area_px'] for r in rows)
                 else 'area_mm2')
     areas = {r['index']: r[area_key] for r in rows if r[area_key]}
+    # the run folder goes in too (decision 17, 2026-10-03), so the plot
+    # and Edge Review reach one verdict on the watchdog's trip row and
+    # draw the same monitor-log advisories
     flags, advis = se.breakdown_flags([r['raw'] for r in rows],
-                                      areas, settings)
+                                      areas, settings, rundir=rundir)
     saved_brand = [r['index'] for r in rows
                    if '_BREAKDOWN' in r['frame_file']
                    or 'breakdown?' in r['notes']

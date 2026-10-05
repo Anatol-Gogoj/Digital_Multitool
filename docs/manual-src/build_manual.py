@@ -496,8 +496,9 @@ body.append(f"""
   </div>
   <h3 class="subh">Edge Review — reviewing a run</h3>
   {fig('40_edge_review', 'SLDEA Edge Review on a real bench run — annotated')}
-  <p class="cap">A real review frame (bench run P3_1 at 2.25 kV, pre-ramp): A = disc-fit
-  (green), B/C = difference outlines. The machine's best pick is preselected — Enter agrees
+  <p class="cap">A real review frame (run P3_6_2.5mL_20260729, frame 23 of 81, 2.75 kV
+  pre-ramp; the run health strip above it flags missing and sign-flipped voltage
+  readings): A = disc-fit (green), B/C = difference outlines. The machine's best pick is preselected — Enter agrees
   and moves on.</p>
   {legend_grid('40_edge_review')}
   <div class="use"><h4>Reviewing a run</h4><ol>

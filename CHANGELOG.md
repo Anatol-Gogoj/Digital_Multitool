@@ -6,6 +6,18 @@ manual PDF. Older releases are summarized here and link to their full notes.
 The measurement-chain decision log (`SLDEA_DECISIONS.md`) is the record of
 *why*; this file is the record of *what shipped*.
 
+## Unreleased
+
+- **"Trek inverts (negate control)" starts ticked.** Every run on file read
+  negative kV with it unticked. A preset still sets it either way, and
+  setup.txt records INVERTED when it is ticked. At the first landing of a
+  LIVE run the "meas" line should now read positive.
+- **Manual screenshots fixed.** The v1.4.0 manual was captured on a 175
+  percent display with a scaling workaround that left the Arb Editor and the
+  dialogs cramped and several callouts off target. The capture now pins Tk to
+  96 dpi; both manuals are regenerated.
+- The Arb Editor's "Upload && Select" button now reads "Upload & Select".
+
 ## v1.4.0 (2026-10-05)
 
 **TL;DR:** The area measurement is fixed. Until now the resting area was a

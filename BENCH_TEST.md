@@ -85,7 +85,7 @@ Launch: `.venv/bin/python gui.py`
 > rework and the 52-byte USB cap discovery: the button labels below no
 > longer exist ("Save CSV Template…" → "Save Template...", "Load CSV…" →
 > "Import CSV...", "Save Current" → "Save to Library", "Upload & Select
-> on CH1" → "Send to CH:" + "Upload && Select"), direct upload is now
+> on CH1" → "Send to CH:" + "Upload & Select"), direct upload is now
 > LAN-only (refused over USB), and the K.8 max-length probe is exactly
 > the experiment that wedges the 4055B. Use the current arb workflow in
 > README §"BK 4055B arbitrary waveforms" and section L instead.
@@ -124,7 +124,7 @@ Launch: `.venv/bin/python gui.py`
 6. **View** — **Fit All**, **Zoom +/-** (zoom in far enough to grab a single point), **Periods: 2** shows the repeating output, **Time unit** (µs/ms/s) rescales the X axis; the header shows "period = \<span\>\<unit\> = \<freq\> Hz" and updates as you move the last point
 7. **Save to Library** as `bench_edit` → [ ] `presets/arb/bench_edit.csv` **and** `bench_edit.recipe.json` exist
 8. Close + reopen the editor (or **Load** `bench_edit`) → [ ] the **segment list repopulates** (re-editable, not just a flat curve)
-9. **Send to CH 1**, **Upload && Select** → the editor DERIVES the channel frequency from the X span (e.g. a 1 ms span → 1 kHz) and sets amplitude from full-scale; channel panel shows ARB + name + the derived freq/amp; on the **scope** the output period = the X span, shape matches the editor (use Periods=2 as the expected repeating view). Also try **Send to CH 2**.
+9. **Send to CH 1**, **Upload & Select** → the editor DERIVES the channel frequency from the X span (e.g. a 1 ms span → 1 kHz) and sets amplitude from full-scale; channel panel shows ARB + name + the derived freq/amp; on the **scope** the output period = the X span, shape matches the editor (use Periods=2 as the expected repeating view). Also try **Send to CH 2**.
 10. **Import CSV** (a value-column file) → [ ] becomes an editable LINE-anchored approximation you can tweak
 11. Save a **channel preset** referencing `bench_edit`, reload → [ ] select-only loads the named arb
 

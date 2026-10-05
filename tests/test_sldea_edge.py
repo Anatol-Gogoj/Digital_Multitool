@@ -3958,11 +3958,24 @@ def test_run_health_reports_missing_voltage_its_stop_point_and_its_sign():
         assert sign_only in it['text'], it['text']
         assert not _codes(items, 'stop')
         # the runner's own line says the monitor sign was accounted for
+        # (runs before 2026-10-05 multiplied the readings by -1)
         inv = _health_run(os.path.join(d, 'b'), rows=rows, runlog=log,
                           setup=setup + "Trek control polarity: INVERTED "
                           "(control = -kV/gain; monitor readings "
                           "sign-corrected in log)\n")
         assert 'kv_sign' not in _codes(se.run_health(inv))
+        # since 2026-10-05 a ticked box logs the readings as read, and a
+        # box set right reads POSITIVE: negative readings under it mean
+        # this Trek does not invert, so the note stays and says the box
+        # was ticked rather than that nothing recorded an inversion
+        raw = _health_run(os.path.join(d, 'g'), rows=rows, runlog=log,
+                          setup=setup + "Trek control polarity: INVERTED "
+                          "(control = -kV/gain; monitor readings logged "
+                          "as read)\n")
+        it = _item(se.run_health(raw), 'kv_sign')
+        assert 'records the "Trek inverts" box as ticked' in it['text']
+        assert 'does not record an inverted Trek' not in it['text']
+        assert 'Do not change any high-voltage setting' in it['text']
         # one landing holding a reading AND a blank: 'at', not 'above'
         at = _health_run(os.path.join(d, 'c'), setup=setup, runlog=log,
                          rows=rows[:4] + [('pre-ramp', 4.0, '', '-16.0')]

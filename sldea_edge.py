@@ -2918,13 +2918,18 @@ def breakdown_flags(rows, accepted_areas, settings, rundir=None):
     in telemetry.csv (the 'BREAKDOWN CONFIRMED' event row, i_status
     'offscreen' or a number) and in run.log ('I=OFF-SCREEN (clipping)'
     or 'I=<number> uA'); the trip row's own measured_uA cell is a LATER
-    read, taken with the frame, so it is only the fallback when neither
-    file says (trip_reading). A sentinel trip, or a trip whose reading
-    is on record nowhere, confirms nothing by itself and the row gets an
-    advisory note that says why; the row's own current still goes
-    through the current rule like any other row. Why the sentinel is
-    excluded: both 2026-08-05 runs returned it at 0 kV, so by itself it
-    is not proof of a large current.
+    read, taken with the frame, and never decides (trip_reading,
+    trip_verdict). The sentinel is the ONE exclusion, as the decision
+    is worded: a sentinel trip confirms nothing by itself and the row
+    gets an advisory note that says why. A trip whose reading is on
+    record nowhere (a 2026-07-24 to 2026-08-03 run, before run.log and
+    telemetry.csv existed, or a damaged folder) CONFIRMS on the
+    watchdog's own note, with a reason that says the reading is not on
+    file (review 2026-10-04 sent the first pass, which did not confirm
+    it, back to the decision's wording). In every case the row's own
+    current still goes through the current rule like any other row.
+    Why the sentinel is excluded: both 2026-08-05 runs returned it at
+    0 kV, so by itself it is not proof of a large current.
 
     Monitor-log rule (decision 17, ADVISORY ONLY): with the sidecar
     present, streaks of at least TELEMETRY_STREAK_MIN samples whose
@@ -3043,17 +3048,20 @@ def breakdown_flags(rows, accepted_areas, settings, rundir=None):
         said = trip_reading(rundir) if rundir else None
         for i in trips:
             kind, ua, src = trip_verdict(rows[i], said)
-            if kind == 'confirm':
-                flags[i] = f"breakdown? watchdog trip (I {ua:.0f}uA, {src})"
-            elif kind == 'sentinel':
+            if kind == 'sentinel':
+                # the text is kept under two lines of the review card
+                # (sldea_edge_gui INFO_LINES, measured 2026-10-04)
                 _adv(i, f"watchdog trip not confirmed: the reading that "
-                        f"tripped it was the scope's off-screen sentinel, "
-                        f"not a number ({src})")
+                        f"tripped it was the off-screen sentinel ({src})")
+            elif src == 'measured_uA cell':
+                # the number is the row's LATER read, not the trip
+                # current, and the reason says which it is
+                flags[i] = (f"breakdown? watchdog trip (frame read "
+                            f"{ua:.0f}uA, trip reading not on file)")
+            elif src:
+                flags[i] = f"breakdown? watchdog trip (I {ua:.0f}uA, {src})"
             else:
-                _adv(i, "watchdog trip not confirmed: the current it "
-                        "tripped on is on record nowhere (blank "
-                        "measured_uA cell, and no run.log or "
-                        "telemetry.csv line says what the reading was)")
+                flags[i] = "breakdown? watchdog trip (reading not on file)"
     # A confirmed row supersedes its own advisories: a single recovered
     # current event that corroborates an area collapse ON THE SAME ROW
     # landed in both dicts (the transient note is written before the
@@ -3844,12 +3852,19 @@ def trip_verdict(row, said):
     answer `said` (None when the folder was not read or records no
     trip). -> (kind, ua, source):
 
-      'confirm'   the reading is on record as a number: in `said`, or,
-                  when neither sidecar says, in the row's own
-                  measured_uA cell (a later read, the fallback)
-      'sentinel'  the reading was the off-screen sentinel: excluded
-      'unknown'   no record anywhere (blank cell, nothing on file)
+      'sentinel'  the reading was the off-screen sentinel: excluded,
+                  source 'telemetry.csv' or 'run.log'
+      'confirm'   everything else (decision 17 names the sentinel as
+                  the one exclusion). `ua` and `source` say what is
+                  on file: the trip reading itself ('telemetry.csv',
+                  'run.log'); or, when neither sidecar records it,
+                  the row's own measured_uA cell ('measured_uA cell':
+                  a LATER read taken with the frame, reported for
+                  information, not the trip current); or nothing
+                  (None, '').
 
+    A first pass (2026-10-03) did not confirm a trip with nothing on
+    file; review 2026-10-04 sent that back to the decision's wording.
     run_health reports through the same function, so the strip says
     exactly what the flags will do."""
     if said is not None and said['sentinel'] is not None:
@@ -3859,7 +3874,7 @@ def trip_verdict(row, said):
     cell = _num(row.get('measured_uA'))
     if cell is not None:
         return 'confirm', cell, 'measured_uA cell'
-    return 'unknown', None, ''
+    return 'confirm', None, ''
 
 
 def telemetry_streaks(table, dev_lim, min_samples=TELEMETRY_STREAK_MIN):
@@ -3959,6 +3974,55 @@ def telemetry_note(streak):
     if s['open']:
         parts.append("to the end of the log")
     return f"monitor log: {lead}{when} ({', '.join(parts)})"
+
+
+# telemetry_note's grammar, read back by short_note. The two are kept
+# together on purpose: a word changed in one must change in the other.
+_TEL_NOTE = re.compile(
+    r"^monitor log: current (?P<what>off-screen|up to \d+ uA from rest|"
+    r"away from rest)(?: for (?P<dur>\d+\.\d) s from (?P<t0>\d+\.\d) s "
+    r"into the run)? \((?P<parts>[^()]*)\)$")
+
+
+def short_note(note):
+    """The review card's form of a breakdown_flags note: the same facts
+    in fewer words. The card's info panel is a fixed box of INFO_LINES
+    text lines (sldea_edge_gui, #179) with room for two lines of note,
+    and the long form of a monitor-log note needs three (measured
+    2026-10-04: the four corpus notes are 596 to 836 px wide at the
+    card's font, which wraps at 306 px). The long form is what Save
+    writes to data.csv and stays as it is. A note this function does
+    not know comes back unchanged; a cell of several tokens ('; ') is
+    shortened token by token.
+
+    'monitor log: current off-screen for 12.9 s from 36.6 s into the
+    run (0.66 to 1.00 kV, 24 samples, to the end of the log)' becomes
+    'monitor log: 36.6 s to the end (12.9 s), 0.66 to 1.00 kV,
+    off-screen, 24 samples': the time first, then the kV, then what the
+    current did, then the counts, so that a card too narrow for the
+    whole line still shows when and at what voltage."""
+    if '; ' in note:
+        return '; '.join(short_note(tok) for tok in note.split('; '))
+    m = _TEL_NOTE.match(note)
+    if m is None:
+        return note
+    what = m['what']
+    if what.startswith('up to'):
+        what = what[:-len(' from rest')]
+    parts = [p.strip() for p in m['parts'].split(',') if p.strip()]
+    open_end = 'to the end of the log' in parts
+    if open_end:
+        parts.remove('to the end of the log')
+    kv = [p for p in parts if p.endswith('kV')]
+    counts = [p for p in parts if not p.endswith('kV')]
+    out = []
+    if m['dur'] is not None:
+        out.append(f"{m['t0']} s to the end ({m['dur']} s)" if open_end
+                   else f"from {m['t0']} s for {m['dur']} s")
+    elif open_end:
+        counts.append('to the end')
+    out += kv + [what] + counts
+    return 'monitor log: ' + ', '.join(out)
 
 
 def telemetry_advisories(rundir, rows, settings):
@@ -4344,11 +4408,26 @@ def run_health(rundir, run=None):
                                          trip_reading(rundir))
         else:
             kind, ua, src = 'no_row', None, ''
-        if kind == 'confirm':
+        if kind == 'confirm' and src in ('telemetry.csv', 'run.log'):
             will = (f"Edge Review marks that row as a confirmed breakdown: "
                     f"the current at the trip is on record as {ua:.0f} uA "
                     f"({src}), and Save renames its frame and every later "
                     f"one with _BREAKDOWN.")
+        elif kind == 'confirm':
+            # nothing on file but the watchdog's own note: the decision's
+            # default (confirm) applies, and the sentence says that the
+            # sentinel check could not be made
+            later = (f" The row's own current cell holds a later read, "
+                     f"{ua:.0f} uA, taken with the picture, not the "
+                     f"reading that tripped the watchdog."
+                     if src == 'measured_uA cell' else '')
+            will = (f"Edge Review marks that row as a confirmed breakdown "
+                    f"on the watchdog's own note: the current it tripped "
+                    f"on is on record nowhere (no run.log or telemetry.csv "
+                    f"line says what it was), so it could not be checked "
+                    f"against the scope's off-screen sentinel.{later} Save "
+                    f"renames its frame and every later one with "
+                    f"_BREAKDOWN.")
         elif kind == 'sentinel':
             will = (f"Edge Review does NOT mark a breakdown from this stop "
                     f"alone: the reading that tripped the watchdog was off "
@@ -4357,12 +4436,6 @@ def run_health(rundir, run=None):
                     f"window is set wrong. That row gets a note saying so, "
                     f"and its own current reading still counts like any "
                     f"other row's.")
-        elif kind == 'unknown':
-            will = ("Edge Review does NOT mark a breakdown from this stop "
-                    "alone: the current it tripped on is on record "
-                    "nowhere (the trip row's current cell is blank, and "
-                    "no run.log or telemetry.csv line says what the "
-                    "reading was). That row gets a note saying so.")
         else:
             will = ("The trip row itself is not in data.csv, so Edge "
                     "Review marks nothing from this stop.")

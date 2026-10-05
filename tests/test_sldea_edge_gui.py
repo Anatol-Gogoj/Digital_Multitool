@@ -4954,9 +4954,15 @@ def test_auto_holds_its_detect_press_on_a_stop_run_and_says_why():
                     for words in ('NOT started', 'STOP', 'by hand',
                                   'Detect Edges'):
                         assert words in gui.HINT_AUTO_HELD, words
-                    # the button itself is live: a hand press goes through
-                    app.detect()
+                    # the button itself is live: a press on the WIDGET
+                    # goes through its own command (not a direct call,
+                    # which the patch above could not fail)
+                    app.detect_btn.invoke()
                     assert pressed == [run], (run, pressed)
+                    # the status line names the auto-process, not the
+                    # command-line flag (review 2026-10-04)
+                    assert gui.AUTO_HELD_TEXT.startswith('Auto-process')
+                    assert '--auto' not in gui.AUTO_HELD_TEXT
                 else:
                     assert pressed == [run], (run, pressed)
                     assert app._hint == gui.HINT_DETECT, app._hint
@@ -4986,6 +4992,188 @@ def test_auto_holds_its_detect_press_on_a_stop_run_and_says_why():
         assert gui.health_hint(warn, auto_held=True) == gui.HINT_DETECT
     finally:
         gui.EdgeReviewApp.detect = real_detect
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# The notes decision 17 writes (the four the corpus produces, measured
+# 2026-10-03, and the trip texts), as the review card receives them.
+_CARD_NOTES = {
+    'Assctuator row 1': (
+        'monitor log: current up to 112 uA from rest for 0.5 s from 1.5 s '
+        'into the run (0.15 to 0.20 kV, 2 samples)'),
+    'Assctuator row 3': (
+        'monitor log: current off-screen for 12.9 s from 36.6 s into the '
+        'run (0.66 to 1.00 kV, 24 samples, to the end of the log)'),
+    'Assctuator2 row 17': (
+        'monitor log: current off-screen for 1.7 s from 248.4 s into the '
+        'run (4.42 to 4.50 kV, 4 samples)'),
+    'SquareStack-1 row 1': (
+        'monitor log: current up to 800 uA from rest for 352.7 s from '
+        '7.2 s into the run (0.36 to 6.00 kV, 636 samples, 267 off-screen, '
+        'to the end of the log)'),
+    'sentinel advisory': (
+        "watchdog trip not confirmed: the reading that tripped it was the "
+        "off-screen sentinel (telemetry.csv)"),
+    'two notes on one row': (
+        'collapse? area -36% (no current signature); monitor log: current '
+        'off-screen for 12.9 s from 36.6 s into the run (0.66 to 1.00 kV, '
+        '24 samples, to the end of the log)'),
+    'flag: trip': 'breakdown? watchdog trip (I -240uA, telemetry.csv)',
+    'flag: trip, cell': ('breakdown? watchdog trip (frame read -16uA, trip '
+                         'reading not on file)'),
+    'flag: trip, nothing': 'breakdown? watchdog trip (reading not on file)',
+}
+_CARD_SHORT = {
+    'Assctuator row 1': ('monitor log: from 1.5 s for 0.5 s, 0.15 to 0.20 '
+                         'kV, up to 112 uA, 2 samples'),
+    'Assctuator row 3': ('monitor log: 36.6 s to the end (12.9 s), 0.66 to '
+                         '1.00 kV, off-screen, 24 samples'),
+    'Assctuator2 row 17': ('monitor log: from 248.4 s for 1.7 s, 4.42 to '
+                           '4.50 kV, off-screen, 4 samples'),
+    'SquareStack-1 row 1': ('monitor log: 7.2 s to the end (352.7 s), 0.36 '
+                            'to 6.00 kV, up to 800 uA, 636 samples, 267 '
+                            'off-screen'),
+    'two notes on one row': ('collapse? area -36% (no current signature); '
+                             'monitor log: 36.6 s to the end (12.9 s), '
+                             '0.66 to 1.00 kV, off-screen, 24 samples'),
+}
+
+
+def test_the_card_cuts_a_long_note_to_its_box_and_tips_the_full_text():
+    """Review 2026-10-04 of decision 17. The info panel is a fixed box of
+    INFO_LINES text lines (#179: a flag changes content, never layout),
+    and every monitor-log note of the corpus needed six, so the card
+    showed half a sentence and never the kV or the counts. Measured
+    here on the real label at its own font: the long forms do not fit;
+    wrap_lines counts lines exactly as Tk lays them out; the card's
+    line for every note fits the box, in the short words of
+    se.short_note (time, kV, what the current did, counts) and cut
+    with an ellipsis only past that; whatever the card does not carry
+    whole is the info panel's tooltip, which a frame without a note
+    clears; and the label never changes height."""
+    import random
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    root = _tk_root_or_skip('card note fit')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_card_note_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app.run is not None, "synthetic run failed to load"
+        app.detect_all_sync()
+        meas = app._info_font.measure
+        assert str(app.info.cget('font')) == str(app._info_font)
+        # a probe drawn with the info label's font and wrap says how many
+        # lines a text really takes
+        probe = tk.Label(root, font=app._info_font, justify='left',
+                         anchor='nw', wraplength=gui.INFO_WRAP)
+        one = tk.Label(root, font=app._info_font, text='x')
+        one.update_idletasks()
+        lsp = app._info_font.metrics('linespace')
+        pad = one.winfo_reqheight() - lsp
+
+        def tk_lines(text):
+            probe.config(text=text)
+            probe.update_idletasks()
+            return round((probe.winfo_reqheight() - pad) / lsp)
+
+        fixed = ("frame 4/4   step 2 [post-ramp]\n"
+                 "nominal 1.0 kV   measured 0.1695 kV   — µA\n"
+                 "state: needs review")
+        assert tk_lines(fixed) == 3
+        # the review's finding: the long forms overflow the box
+        for name in ('Assctuator row 3', 'SquareStack-1 row 1'):
+            assert tk_lines(fixed + '\nⓘ ' + _CARD_NOTES[name]) \
+                > gui.INFO_LINES, name
+        # wrap_lines is Tk's count, on these texts and on word soups
+        soup = (fixed + ' ' + ' '.join(_CARD_NOTES.values())).split(' ')
+        rng = random.Random(7)
+        texts = [fixed + '\nⓘ ' + n for n in _CARD_NOTES.values()]
+        texts += [' '.join(rng.choice(soup) for _ in range(rng.randint(1, 30)))
+                  for _ in range(120)]
+        for text in texts:
+            assert gui.wrap_lines(text, gui.INFO_WRAP, meas) == tk_lines(text), \
+                text
+        # the short grammar on the corpus notes, token by token
+        for name, want in _CARD_SHORT.items():
+            assert se.short_note(_CARD_NOTES[name]) == want, name
+        for name in ('sentinel advisory', 'flag: trip'):
+            assert se.short_note(_CARD_NOTES[name]) == _CARD_NOTES[name]
+        # on the card: every note fits the box, the label keeps its
+        # height, and the tip holds the full text exactly when the card
+        # does not
+        j = app.frame_rows[2]
+        app.pos = app.frame_rows.index(j)
+        app._show()
+        root.update_idletasks()
+        info_h = app.info.winfo_reqheight()
+        assert 'info' in app._tips and app._tips['info'].text == ''
+        for name, note in _CARD_NOTES.items():
+            app.flags.pop(j, None)
+            app.advisories.pop(j, None)
+            if name.startswith('flag'):
+                app.flags[j] = note
+            else:
+                app.advisories[j] = note
+            app._show()
+            root.update_idletasks()
+            text = app.info.cget('text')
+            assert tk_lines(text) <= gui.INFO_LINES, (name, text)
+            assert app.info.winfo_reqheight() == info_h, name
+            line = text.split('\n')[-1]
+            mark = '⚠' if name.startswith('flag') else 'ⓘ'
+            assert line.startswith(mark + ' '), (name, line)
+            tip = app._tips['info'].text
+            if line == f"{mark} {note}":
+                assert tip == '', (name, tip)
+            else:
+                assert tip == note, (name, tip)
+                assert line.endswith('…') or line[2:] == se.short_note(note)
+            if name in ('Assctuator row 1', 'Assctuator row 3',
+                        'Assctuator2 row 17', 'SquareStack-1 row 1'):
+                # the time and the kV lead the short form, so they are
+                # on the card whatever the font cuts off the tail
+                when, kv = _CARD_SHORT[name].split(', ')[:2]
+                assert kv.endswith('kV') and kv in line, (name, line)
+                assert when in line, (name, line)
+        # the state line wrapping (a staged D) takes a line from the note:
+        # the note yields and the box still holds
+        tri = np.array([[10, 10], [100, 10], [100, 100]], np.int32)
+        app.traces[j] = {
+            'method': 'manual-trace', 'conf': 1.0, 'chosen_by': 'user',
+            'area_px': 1000.0, 'diam_px': 35.7, 'cx': 50.0, 'cy': 50.0,
+            'contour': tri, 'solidity': 1.0, 'spread_pct': 0.0,
+            'ci85_pct': None, 'wrinkle': None, 'n_points': 3,
+            'trace_points': [(10.0, 10.0), (100.0, 10.0), (100.0, 100.0)],
+            'snapped': False}
+        app.flags.pop(j, None)
+        app.advisories[j] = _CARD_NOTES['SquareStack-1 row 1']
+        app._show()
+        root.update_idletasks()
+        text = app.info.cget('text')
+        assert 'staged D NOT committed' in text
+        assert tk_lines(text) <= gui.INFO_LINES, text
+        assert app.info.winfo_reqheight() == info_h
+        assert app._tips['info'].text == _CARD_NOTES['SquareStack-1 row 1']
+        del app.traces[j]
+        # a frame without a note clears the tip
+        app.advisories.pop(j, None)
+        app._show()
+        assert app.info.cget('text').count('\n') == 2
+        assert app._tips['info'].text == ''
+        # fit_lines on its own: whole when it fits, cut by words past that
+        assert gui.fit_lines('a b c', 1000, 1, meas) == 'a b c'
+        long = ' '.join(['word'] * 60)
+        cut = gui.fit_lines(long, gui.INFO_WRAP, 2, meas)
+        assert cut.endswith('…') and cut != long
+        assert gui.wrap_lines(cut, gui.INFO_WRAP, meas) == 2
+        assert gui.wrap_lines(cut[:-1] + ' word' + '…', gui.INFO_WRAP,
+                              meas) == 3
+    finally:
+        root.destroy()
         shutil.rmtree(d, ignore_errors=True)
 
 

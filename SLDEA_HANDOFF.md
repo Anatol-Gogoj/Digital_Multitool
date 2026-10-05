@@ -91,24 +91,29 @@ never renames a frame.
    settings, rundir=None)` takes the run folder; `_recount` in the GUI
    and `sldea_plot.load_run` pass it, so Edge Review and the plot reach
    one verdict. A trip row (`is_trip_row`: tag `breakdown` or the
-   `WATCHDOG` note) is CONFIRMED with the reason `breakdown? watchdog
-   trip (I -240uA, telemetry.csv)` when the reading that tripped it is
-   on record as a number: the `BREAKDOWN CONFIRMED` event row of
-   `telemetry.csv` first, the `run.log` line second (`trip_reading`), the
-   row's own cell last (`trip_verdict`; also what a caller without the
-   folder gets). The sentinel is the one exclusion: the row gets the
-   advisory `watchdog trip not confirmed: the reading that tripped it
-   was the scope's off-screen sentinel, not a number (telemetry.csv)`
-   and nothing is marked from the trip alone. A trip whose reading is
-   on record nowhere (blank cell, no sidecar line: a hand-edited or
-   failed log) is not confirmed either, with a note that says so; that
-   is a judgement call listed under open questions. The trip row's own
-   current still goes through the current rule like any other row's: a
-   -240 µA cell on the last row is a terminal event and confirms with
-   the current rule's reason. Every other row keeps the
-   current-confirmed semantics unchanged, and the legacy area-only
-   fallback under 5 readings stays (decision 18). The flag is one token,
-   because `apply_results` splits a notes cell on `;`.
+   `WATCHDOG` note) is CONFIRMED, reason `breakdown? watchdog trip (I
+   -240uA, telemetry.csv)`, unless the reading that tripped it was the
+   off-screen sentinel. That reading is read from the `BREAKDOWN
+   CONFIRMED` event row of `telemetry.csv` first and the `run.log` line
+   second (`trip_reading`, `trip_verdict`). The sentinel is the ONE
+   exclusion: the row gets the advisory `watchdog trip not confirmed:
+   the reading that tripped it was the off-screen sentinel
+   (telemetry.csv)` and nothing is marked from the trip alone. A trip
+   whose reading is on record nowhere (a run from 2026-07-24 to
+   2026-08-03, when the trip row existed but `run.log` and
+   `telemetry.csv` did not; or a damaged folder) CONFIRMS on the
+   watchdog's own note, reason `breakdown? watchdog trip (reading not
+   on file)`, or `(frame read -16uA, trip reading not on file)` when the
+   row's own cell holds its later read, which is named for what it is
+   and never decides (review 2026-10-04: the first pass did not confirm
+   that case; the decision names one exclusion, so it went). The trip
+   row's own current still goes through the current rule like any
+   other row's: a -240 µA cell on the last row is a terminal event, and
+   the trip reason replaces the current rule's on that one row. Every
+   other row keeps the current-confirmed semantics unchanged, and the
+   legacy area-only fallback under 5 readings stays (decision 18). The
+   flag is one token, because `apply_results` splits a notes cell on
+   `;`.
 3. **Decision 17, the monitor log, advisory only.**
    `telemetry_streaks(table, dev_lim, min_samples=TELEMETRY_STREAK_MIN)`:
    a sample is a row with a parseable `measured_uA` or `i_status`
@@ -136,36 +141,73 @@ never renames a frame.
    this stop alone: the reading that tripped the watchdog was off the
    scope screen (the off-screen sentinel, run.log) ... That row gets a
    note saying so, and its own current reading still counts like any
-   other row's". `telemetry_i_offscreen` says the log is read for notes
-   only. `_health_runlog` and `_telemetry_table` are shared by the strip
-   and the flags, so one file is read one way.
+   other row's", or, with nothing on file, "marks that row as a
+   confirmed breakdown on the watchdog's own note: the current it
+   tripped on is on record nowhere ... so it could not be checked
+   against the scope's off-screen sentinel". `telemetry_i_offscreen`
+   says the log is read for notes only. `_health_runlog` and
+   `_telemetry_table` are shared by the strip and the flags, so one
+   file is read one way.
 5. **The plot follows.** With the folder passed, `sldea_plot` draws the
    trip row as confirmed and the monitor-log streaks as open advisory
    diamonds. On the corpus that adds diamonds to Assctuator (rows 1 and
    3), Assctuator2 (row 17) and SquareStack-1 (row 1), and nothing to
    any campaign run.
+6. **The review card shows a note whole or says it is cut (review
+   2026-10-04).** The card's info panel is a fixed box of `INFO_LINES`
+   = 5 text lines (#179: a flag changes content, never layout) with
+   room for two lines of note, and measured on the real label at its
+   font every monitor-log note of the corpus needed six (596 to 836 px
+   at a 306 px wrap), so the card showed "monitor log: current
+   off-screen for 12.9 s from 36.6 s into the run (0.66 to" and never
+   the kV or the counts. Now `se.short_note` puts an advisory in the
+   card's words, the same facts in the order time, kV, what the current
+   did, counts (`monitor log: 36.6 s to the end (12.9 s), 0.66 to 1.00
+   kV, off-screen, 24 samples`), `fit_lines` cuts any flag or note to
+   the lines the box has left (an ellipsis says so; `wrap_lines` counts
+   lines exactly as Tk lays them out, checked on 400 random strings),
+   and whatever the card does not carry whole is the info panel's
+   tooltip. The long form is unchanged and is what Save writes to
+   `data.csv`. On this PC's font all four corpus notes now fit whole;
+   on a wider font the tail is cut and the tooltip holds it. The
+   sentinel advisory was shortened to fit (`watchdog trip not
+   confirmed: the reading that tripped it was the off-screen sentinel
+   (telemetry.csv)`), and the `--auto` status line says "Auto-process
+   held", the name the SLDEA tab and the manual use, not the flag.
 
 **Tests.** `tests/test_sldea_edge.py` gains 3 cases (99 pass): the trip
 row read through `telemetry.csv`, `run.log` and the cell (a number, the
-sentinel, nothing on record, a log that gave up before the trip, the
-sentinel beside a terminal cell, under 5 readings beside the legacy
-rule, the rename plan and the strip sentence in each case); the streak
-reader on a synthetic telemetry file (the single sample, the skipped
-row, the open streak, the mixed streak, no rest, no columns); the
-advisories' placement, silence without the folder, the `_BREAKDOWN`
-twin name, the `t_planned_s` fallback, two Saves, no time column.
-`tests/test_sldea_edge_gui.py` rewrites the `--auto` case (61 pass):
-held on a STOP run with the words on the canvas and the status line, a
-hand press going through, pressed on a good run, the hold absent when
-the run is opened by hand.
+sentinel, nothing on file with and without a later cell read, a log
+that gave up before the trip, the sentinel beside a terminal cell, the
+trip reason replacing the current rule's on its row, under 5 readings
+beside the legacy rule, the rename plan and the strip sentence in each
+case); the streak reader on a synthetic telemetry file (the single
+sample, the skipped row, a sample exactly `breakdown_dev_ua` from rest
+inside a streak, the open streak, the mixed streak, no rest, no
+columns, the short form of each note); the advisories' placement with
+a picture taken exactly on a streak's first sample, silence without the
+folder, the `_BREAKDOWN` twin name, the `t_planned_s` fallback, two
+Saves, no time column. `tests/test_sldea_edge_gui.py` rewrites the
+`--auto` case and adds the card case (62 pass): held on a STOP run with
+the words on the canvas and the status line, a press on the Detect
+widget going through, pressed on a good run, the hold absent when the
+run is opened by hand; the four corpus notes, the trip texts and two
+notes on one row drawn on the real card, each fitting `INFO_LINES` at
+the label's own font, the label's height unchanged, the tooltip holding
+the full text exactly when the card does not, a wrapped state line
+taking its line from the note, `wrap_lines` against the real label on
+120 random strings. Mutants of the decision-17 code (2026-10-04): the
+two the review found alive (`>=` to `>` on the deviation bar and on
+the placement) and seven more, all nine killed.
 
-**Open.** The "on record nowhere" trip is not confirmed; the decision
-names only the sentinel as the exclusion, so this is a reading of it.
-`TELEMETRY_STREAK_MIN = 2` is a chosen bar, not a measured one.
-Assctuator's first streak (2 samples at 0.15 to 0.20 kV, 1.5 s in)
+**Open.** `TELEMETRY_STREAK_MIN = 2` is a chosen bar, not a measured
+one. Assctuator's first streak (2 samples at 0.15 to 0.20 kV, 1.5 s in)
 becomes a note on its 0.5 kV row; the rule is applied as written, with
 no judgement on whether that was a real event. The plot's new diamonds
-on the three non-campaign runs were not looked at in a figure.
+on the three non-campaign runs were not looked at in a figure. A trip
+with nothing on file confirms, as decision 17 is worded; the owner may
+still prefer the first pass's conservative reading (not confirmed, with
+a note), which is one branch in `trip_verdict`.
 
 **No bench gate.** Analysis side only, no instrument I/O. One look on
 the Linux bench PC, HV off: open a copy of `SLDEA_20261001_151016`

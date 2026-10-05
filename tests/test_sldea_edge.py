@@ -3270,11 +3270,14 @@ def _flags_in(d, rows, telemetry, runlog, areas=None, rundir=True):
 def test_watchdog_trip_confirms_unless_its_reading_was_the_sentinel():
     """Decision 17 (2026-10-03). The trip row is a confirmed event with
     the reason 'watchdog trip', read off the reading that tripped it:
-    telemetry.csv first, run.log second, the row's own (later) cell
-    last. The one exclusion is the off-screen sentinel, which the scope
-    also returns from a mis-ranged channel: then the trip confirms
-    nothing by itself, the row says so in a note, and its own current
-    still goes through the current rule like any other row's. The rows
+    telemetry.csv first, run.log second. The one exclusion is the
+    off-screen sentinel, which the scope also returns from a mis-ranged
+    channel: then the trip confirms nothing by itself, the row says so
+    in a note, and its own current still goes through the current rule
+    like any other row's. A trip with nothing on file confirms on the
+    watchdog's own note, and the reason says so (review 2026-10-04: the
+    decision names one exclusion, so the first pass's second one went).
+    The row's own cell is a later read and never decides. The rows
     around it are flagged exactly as before."""
     d = tempfile.mkdtemp(prefix='edge_trip_')
     try:
@@ -3300,8 +3303,9 @@ def test_watchdog_trip_confirms_unless_its_reading_was_the_sentinel():
             os.path.join(d, 'b'), _trip_rows('-16.0'), _TEL_TRIP_OFF,
             _LOG_TRIP_NUM)
         assert flags == {}, flags
-        assert list(advis) == [4] and 'off-screen sentinel' in advis[4]
-        assert '(telemetry.csv)' in advis[4], advis
+        assert advis == {4: 'watchdog trip not confirmed: the reading that '
+                            'tripped it was the off-screen sentinel '
+                            '(telemetry.csv)'}, advis
         assert se.plan_breakdown_marks(run, flags) == []
         it = _item(se.run_health(rd), 'watchdog_trip')
         assert 'does NOT mark a breakdown from this stop alone' in it['text']
@@ -3320,23 +3324,38 @@ def test_watchdog_trip_confirms_unless_its_reading_was_the_sentinel():
             _tel([(0.0, 0.0, -16.0, 'ok', 'snap s00 baseline x')]),
             _LOG_TRIP_NUM)
         assert flags == {4: 'breakdown? watchdog trip (I -240uA, run.log)'}
-        # (e) neither sidecar records the reading: the row's own cell is
-        # the fallback, and the reason names it
+        # (e) neither sidecar records the reading: the trip confirms on
+        # the watchdog's note, and the reason says that the number it
+        # prints is the row's later read, not the trip current
         rd, run, (flags, advis) = _flags_in(
-            os.path.join(d, 'e'), _trip_rows('-240.0'), None,
+            os.path.join(d, 'e'), _trip_rows('-16.0'), None,
             _LOG_TRIP_BARE)
-        assert flags == {4: 'breakdown? watchdog trip (I -240uA, '
-                            'measured_uA cell)'}, flags
+        assert flags == {4: 'breakdown? watchdog trip (frame read -16uA, '
+                            'trip reading not on file)'}, flags
+        assert advis == {}, advis
         # ... which is also what a caller without the folder gets
         assert se.breakdown_flags(run['rows'], {}, se.DEFAULT_SETTINGS) \
             == (flags, {})
-        # (f) no record anywhere and a blank cell: not confirmed, said so
+        it = _item(se.run_health(rd), 'watchdog_trip')
+        assert 'confirmed breakdown on the watchdog\'s own note' in it['text']
+        assert 'later read, -16 uA, taken with the picture' in it['text']
+        assert 'could not be checked against' in it['text'], it
+        # (f) no record anywhere and a blank cell: still confirmed (the
+        # decision names ONE exclusion), the reason says nothing is on
+        # file, the frame is renamed, and the strip says the same
         rd, run, (flags, advis) = _flags_in(
             os.path.join(d, 'f'), _trip_rows(''), None, _LOG_TRIP_BARE)
-        assert flags == {} and 'on record nowhere' in advis[4], (flags,
-                                                                   advis)
-        assert 'on record nowhere' in _item(se.run_health(rd),
-                                            'watchdog_trip')['text']
+        assert flags == {4: 'breakdown? watchdog trip (reading not on '
+                            'file)'}, flags
+        assert advis == {}, advis
+        assert [os.path.basename(dst) for _, dst
+                in se.plan_breakdown_marks(run, flags)] == [
+            'SLDEA_s99_04.40kV_breakdown_BREAKDOWN.png']
+        it = _item(se.run_health(rd), 'watchdog_trip')
+        assert 'confirmed breakdown on the watchdog\'s own note' in it['text']
+        assert 'on record nowhere' in it['text'], it
+        assert 'later read' not in it['text'], it
+        assert se.trip_verdict(run['rows'][4], None) == ('confirm', None, '')
         # (g) decision 18: under 5 readings the legacy absolute rule is
         # untouched beside the trip rule (one row at -60 uA, one trip)
         rows = _trip_rows('', healthy=3)
@@ -3346,6 +3365,17 @@ def test_watchdog_trip_confirms_unless_its_reading_was_the_sentinel():
         assert flags == {1: 'breakdown? I=-60uA > 50uA',
                          3: 'breakdown? watchdog trip (I -240uA, '
                             'telemetry.csv)'}, flags
+        # (h) the trip row's own later read is a terminal event for the
+        # current rule too: the trip reason REPLACES the current rule's
+        # on that row (one token, the runner's stronger statement)
+        rd, run, (flags, advis) = _flags_in(
+            os.path.join(d, 'h'), _trip_rows('-240.0'), _TEL_TRIP_NUM,
+            _LOG_TRIP_NUM)
+        assert flags == {4: 'breakdown? watchdog trip (I -240uA, '
+                            'telemetry.csv)'}, flags
+        assert se.breakdown_flags(run['rows'], {}, se.DEFAULT_SETTINGS) == (
+            {4: 'breakdown? watchdog trip (frame read -240uA, trip '
+                'reading not on file)'}, {})
         # the review's own 'breakdown?' token never makes a trip row
         assert se.is_trip_row({'tag': 'breakdown', 'notes': ''})
         assert se.is_trip_row({'tag': 'pre-ramp', 'notes': _TRIP_NOTE})
@@ -3373,7 +3403,11 @@ def test_telemetry_streaks_find_runs_of_samples_away_from_rest():
             (2.5, 1.0, -18.0, 'ok', ''),
             (3.0, 1.5, -100.0, 'ok', ''),         # away
             (3.5, 1.5, '', 'invalid', ''),        # no reading: skipped
-            (4.0, 1.5, -90.0, 'ok', ''),          # away: a 2-sample streak
+            (4.0, 1.5, -90.0, 'ok', ''),          # away
+            (4.3, 1.5, -36.0, 'ok', ''),          # exactly dev_lim from
+                                                  # rest: away ('at or
+                                                  # above'), a 3-sample
+                                                  # streak
             (4.5, 2.0, -16.0, 'ok', 'snap s02 post-ramp F2'),
             (5.0, 2.5, '', 'offscreen', ''),      # the sentinel, twice,
             (5.5, 2.5, '', 'offscreen', '')])     # running off the end
@@ -3382,18 +3416,28 @@ def test_telemetry_streaks_find_runs_of_samples_away_from_rest():
         assert table is not None and 'i_status' in table[0]
         got = se.telemetry_streaks(table, 20.0)
         assert got == [
-            {'t0': 3.0, 't1': 4.0, 'kv0': 1.5, 'kv1': 1.5, 'n': 2,
+            {'t0': 3.0, 't1': 4.3, 'kv0': 1.5, 'kv1': 1.5, 'n': 3,
              'n_off': 0, 'worst': 84.0, 'rest': -16.0, 'open': False},
             {'t0': 5.0, 't1': 5.5, 'kv0': 2.5, 'kv1': 2.5, 'n': 2,
              'n_off': 2, 'worst': None, 'rest': -16.0, 'open': True}], got
         assert se.telemetry_note(got[0]) == (
-            'monitor log: current up to 84 uA from rest for 1.0 s from '
-            '3.0 s into the run (1.50 kV, 2 samples)')
+            'monitor log: current up to 84 uA from rest for 1.3 s from '
+            '3.0 s into the run (1.50 kV, 3 samples)')
         assert se.telemetry_note(got[1]) == (
             'monitor log: current off-screen for 0.5 s from 5.0 s into '
             'the run (2.50 kV, 2 samples, to the end of the log)')
         for note in map(se.telemetry_note, got):
             assert ';' not in note, note            # one token each
+        # the card's short form of each: time, kV, what, counts
+        assert se.short_note(se.telemetry_note(got[0])) == (
+            'monitor log: from 3.0 s for 1.3 s, 1.50 kV, up to 84 uA, '
+            '3 samples')
+        assert se.short_note(se.telemetry_note(got[1])) == (
+            'monitor log: 5.0 s to the end (0.5 s), 2.50 kV, off-screen, '
+            '2 samples')
+        # a hair under the bar is quiet: the 3-sample streak becomes 2
+        assert [s['n'] for s in se.telemetry_streaks(table, 20.01)] \
+            == [2, 2]
         # a higher bar drops the numeric streak, keeps the sentinel one
         assert [s['n_off'] for s in se.telemetry_streaks(table, 100.0)] \
             == [2]
@@ -3414,6 +3458,9 @@ def test_telemetry_streaks_find_runs_of_samples_away_from_rest():
         assert se.telemetry_note(s) == (
             'monitor log: current up to 64 uA from rest for 1.0 s from '
             '1.0 s into the run (1.00 to 1.40 kV, 3 samples, 1 off-screen)')
+        assert se.short_note(se.telemetry_note(s)) == (
+            'monitor log: from 1.0 s for 1.0 s, 1.00 to 1.40 kV, up to '
+            '64 uA, 3 samples, 1 off-screen')
         # no 0 kV sample on file: no rest, so only the sentinel counts
         norest = _tel([(1.0, 1.0, -300.0, 'ok', ''),
                        (1.5, 1.0, -300.0, 'ok', ''),
@@ -3446,10 +3493,11 @@ def test_telemetry_advisories_ride_the_next_snapshot_row_and_never_confirm():
             (0.0, 0.0, -16.0, 'ok', f'snap s00 baseline {fn[0]}'),
             (0.5, 0.0, -16.0, 'ok', ''),
             (10.0, 2.0, -16.0, 'ok', f'snap s01 post-ramp {fn[1]}'),
-            (12.0, 2.0, -90.0, 'ok', ''),             # between rows 1 and 2
+            # the picture of row 2 is taken ON the streak's first sample:
+            # 'at or after' puts the note on row 2, not on row 3
+            (12.0, 2.0, -90.0, 'ok', f'snap s02 pre-ramp {fn[2]}'),
             (12.5, 2.0, -95.0, 'ok', ''),
             (13.0, 2.0, -16.0, 'ok', ''),
-            (20.0, 2.0, -16.0, 'ok', f'snap s02 pre-ramp {fn[2]}'),
             (30.0, 4.0, -16.0, 'ok', f'snap s03 post-ramp {fn[3]}'),
             (40.0, 4.0, -16.0, 'ok', f'snap s04 pre-ramp {fn[4]}'),
             (41.0, 4.0, '', 'offscreen', ''),          # after the last row

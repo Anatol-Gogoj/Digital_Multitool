@@ -242,6 +242,11 @@ PRIMARY_FG = '#1f3a5f'  # the app's existing accent blue (splash, clock) —
 INFO_LINES = 5          # info label height (text lines): 3 fixed lines +
                         # room for a flag line and its wrap -- a flag must
                         # change content, not layout (#179)
+INFO_FONT = ('TkDefaultFont', 10)   # the info label's font; the card
+                        # measures its note line with the same font, so
+                        # what it says is cut to what the box holds
+                        # (fit_lines, review 2026-10-04)
+INFO_WRAP = SIDE_W - 24  # the info label's wraplength
 
 _TAG_FONT = None
 
@@ -291,6 +296,55 @@ def elide(text, width_px, measure):
         if measure(s) <= width_px:
             return s
     return '…'
+
+
+def wrap_lines(text, width_px, measure):
+    """How many text lines a Tk Label with wraplength=width_px lays
+    `text` out in, counted the way Tk breaks lines: at spaces, a line
+    holding as many words as fit, a word wider than the line broken by
+    character. Pure. Measured against the real Label on 400 random
+    word soups at the card's font (2026-10-04): the same count every
+    time, never fewer. A line's words are measured with the space that
+    follows them, which is what keeps the count from running under."""
+    total = 0
+    for para in text.split('\n'):
+        lines, cur = 1, ''
+        words = para.split(' ')
+        for k, word in enumerate(words):
+            trial = word if not cur else cur + ' ' + word
+            tail = ' ' if k < len(words) - 1 else ''
+            if measure(trial + tail) <= width_px:
+                cur = trial
+                continue
+            if cur:
+                lines += 1
+            cur = word
+            while measure(cur + tail) > width_px and len(cur) > 1:
+                n = len(cur)
+                while n > 1 and measure(cur[:n]) > width_px:
+                    n -= 1
+                lines += 1
+                cur = cur[n:]
+        total += lines
+    return total
+
+
+def fit_lines(text, width_px, lines, measure):
+    """`text` cut to what word-wraps into at most `lines` lines of
+    width_px, with an ellipsis when it was cut; the whole text when it
+    fits. Words go from the end, so the head of the sentence survives.
+    The info panel is a fixed box of INFO_LINES lines (#179): a note
+    must fit the box, never grow it, and the full text goes into a
+    tooltip instead (review 2026-10-04: the monitor-log notes of
+    decision 17 ran to six lines and were clipped mid-sentence)."""
+    if wrap_lines(text, width_px, measure) <= lines:
+        return text
+    words = text.split(' ')
+    for n in range(len(words) - 1, 0, -1):
+        s = ' '.join(words[:n]).rstrip() + '…'
+        if wrap_lines(s, width_px, measure) <= lines:
+            return s
+    return elide(words[0], width_px, measure)
 
 
 # ---------------------------------------------------------------------------
@@ -765,10 +819,11 @@ HINT_AUTO_HELD = ("Automatic detection was NOT started: Run health shows "
                   "for you to read it. You can still press  ▶ Detect "
                   "Edges  by hand.")
 # The status line at the same moment; short, because the hint carries
-# the full sentence.
-AUTO_HELD_TEXT = ("--auto held: Run health shows a STOP for this run, so "
-                  "automatic detection was not started. ▶ Detect Edges "
-                  "still works by hand.")
+# the full sentence. It says "auto-process", the name the SLDEA tab and
+# the manual use, not the command-line flag (review 2026-10-04).
+AUTO_HELD_TEXT = ("Auto-process held: Run health shows a STOP for this "
+                  "run, so automatic detection was not started. ▶ Detect "
+                  "Edges still works by hand.")
 # Shown on the header line while the strip holds more lines than it
 # shows. Measured on the 16 corpus runs at the default width: seven fit
 # the five lines, nine need 7 to 11, and a student who never scrolls
@@ -2059,10 +2114,13 @@ class EdgeReviewApp:
         side.pack_propagate(False)
         self._side = side
         self._side_font = tkfont.nametofont('TkDefaultFont')
+        # the same font object the label draws with, kept so the card
+        # can count its lines before it writes them (fit_lines)
+        self._info_font = tkfont.Font(font=INFO_FONT)
         self.info = tk.Label(side, text="pick a run and Detect",
                              justify='left', anchor='nw',
-                             font=('TkDefaultFont', 10),
-                             height=INFO_LINES, wraplength=SIDE_W - 24)
+                             font=self._info_font,
+                             height=INFO_LINES, wraplength=INFO_WRAP)
         self.info.pack(fill='x', pady=(0, 6))
         self.cand_var = tk.IntVar(value=0)
         self.cand_frame = ttk.LabelFrame(side, text="Candidates", padding=6)
@@ -2183,11 +2241,25 @@ class EdgeReviewApp:
                 TIPS['cand'].format(k=CAND_KEYS[k], n=k + 1))
         self._tips['trace'] = add_tooltip(self.cand_radios[TRACE_SLOT],
                                           TIPS['trace'])
+        # The info panel's tip is not in TIPS: it is the full text of the
+        # flag or advisory the card had to shorten or cut to its fixed
+        # box (_set_info; review 2026-10-04), and empty, so silent, when
+        # the card carries the whole line.
+        self._tips['info'] = add_tooltip(self.info, '')
         # ▶ Detect Edges is the one tip that MOVES: a greyed-out button
         # whose tooltip describes what it would do, without saying why it
         # is grey, leaves the state the affordance was meant to explain
         # unexplained.
         self._sync_detect_btn()
+
+    def _set_info(self, text, tip=''):
+        """The info panel's text, and the full flag or advisory behind
+        its tooltip when the card could not carry it (`tip`); '' clears
+        the tip, so a note never outlives the frame it belongs to."""
+        self.info.config(text=text)
+        info_tip = self._tips.get('info')
+        if info_tip is not None:
+            info_tip.text = tip
 
     def _sync_detect_btn(self):
         """▶ Detect Edges is live exactly when there is a run to detect
@@ -2482,8 +2554,8 @@ class EdgeReviewApp:
         self._show_health(health)
         self._canvas_hint(health_hint(health))
         self._sync_detect_btn()
-        self.info.config(text=f"{name}\n{n} frames ready\n"
-                              f"run health: {health_counts(health)}")
+        self._set_info(f"{name}\n{n} frames ready\n"
+                       f"run health: {health_counts(health)}")
 
     # ---------------- detection ----------------
     def _tick_clock(self):
@@ -2965,11 +3037,26 @@ class EdgeReviewApp:
                f"measured {row.get('measured_kV') or '—'} kV   "
                f"{row.get('measured_uA') or '—'} µA\n"
                f"state: {state}")
+        # The flag or advisory line (elif keeps the fixed info height).
+        # It is cut to the lines the box has left (fit_lines, #179): an
+        # advisory is first put in the card's short words (se.short_note,
+        # same facts), and whenever the card does not carry the full
+        # text the info label's tooltip holds it (review 2026-10-04).
+        mark = full = shown = tip = ''
         if i in self.flags:
-            txt += f"\n⚠ {self.flags[i]}"
-        elif i in self.advisories:      # elif keeps the fixed info height
-            txt += f"\nⓘ {self.advisories[i]}"
-        self.info.config(text=txt)
+            mark, full = '⚠', self.flags[i]
+            shown = full
+        elif i in self.advisories:
+            mark, full = 'ⓘ', self.advisories[i]
+            shown = se.short_note(full)
+        if mark:
+            imeas = self._info_font.measure
+            left = max(1, INFO_LINES - wrap_lines(txt, INFO_WRAP, imeas))
+            line = fit_lines(f"{mark} {shown}", INFO_WRAP, left, imeas)
+            txt += '\n' + line
+            if line != f"{mark} {full}":
+                tip = full
+        self._set_info(txt, tip)
         # radio text is elided to the FIXED panel (#179): the tail (the
         # wrinkle term first) yields before the panel ever resizes
         meas = self._side_font.measure

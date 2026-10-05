@@ -832,7 +832,8 @@ class _ModalSpy:
     def askyesno(self, title, msg='', **kw):
         return self._record(title, kw, False, msg)
 
-    def __call__(self, parent, title, headline, detail, buttons, default):
+    def __call__(self, parent, title, headline, detail, buttons, default,
+                 **_layout):
         """Stands in for gui.cal_choice, the calibration gates' question
         box since 2026-10-05: buttons that NAME the action. Recorded like
         a yes/no question, with the button LABELS in kwargs['buttons'],
@@ -844,7 +845,9 @@ class _ModalSpy:
         the main window could open behind the (transient, grabbed)
         calibration window, which is the bug this box was made to fix, so
         every question the spy sees while that window is up must name it
-        as its parent."""
+        as its parent. With the window closed (the re-anchor confirmation,
+        2026-10-05) the owner is the main window. `_layout` takes the
+        box's font and wrap options, which a spy has no use for."""
         keys = [k for k, _lbl in buttons]
         assert default in keys, (title, default, keys)
         cal_win = getattr(self._app, '_cal_win', None)
@@ -852,6 +855,10 @@ class _ModalSpy:
             assert parent is cal_win, (f"{title}: asked with parent "
                                        f"{parent!r}, not the calibration "
                                        f"window")
+        elif self._app is not None:
+            assert parent is self._app.root, (f"{title}: asked with parent "
+                                              f"{parent!r}, not the main "
+                                              f"window")
         kw = {'default': default,
               'buttons': [lbl for _k, lbl in buttons]}
         ans = self._record(title, kw, 'cancel' in keys,
@@ -4354,6 +4361,11 @@ def test_a_committed_re_anchor_repeats_the_caveat_on_the_status_strip():
                        'mode': CIRCLE}, saw
         assert [t for t, _kw in spy.asked] == \
             ['Rounds disagree', 'Re-anchor scale — SCALE ONLY'], spy.asked
+        # named buttons since 2026-10-05, declining to Cancel as before
+        assert spy.asked[1][1]['buttons'] == [
+            'Write data.csv now', 'Keep for next Save', 'Cancel'], spy.asked
+        assert spy.asked[1][1]['default'] == 'cancel', spy.asked
+        assert '"Write data.csv now" WRITES data.csv NOW' in spy.msgs[1]
         ref = app2.manual_ref
         assert ref is not None and ref['rounds_px'] == [158.0, 160.0,
                                                         162.0], ref
@@ -7675,6 +7687,24 @@ def test_cal_choice_names_its_buttons_and_opens_over_the_dialog():
         assert ask(three, 'cancel') == 'no', seen
         g = parent.grab_current()
         assert g is not None and str(g) == str(parent), g
+
+        # the re-anchor confirmation's table: fixed-width and wider
+        def read_detail(box, b):
+            lbls = [w for w in _widgets(box, 'label')
+                    if w.cget('text') == 'col1   col2']
+            seen['font'] = str(lbls[0].cget('font')) if lbls else None
+            seen['wrap'] = int(str(lbls[0].cget('wraplength'))) \
+                if lbls else None
+            b['Cancel'].invoke()
+        drive(read_detail)
+        seen.clear()
+        assert gui.cal_choice(parent, 'Re-anchor scale — SCALE ONLY', 'H',
+                              'col1   col2', gui.REANCHOR_BUTTONS, 'cancel',
+                              detail_font='TkFixedFont',
+                              wraplength=760) == 'cancel', seen
+        assert seen['font'] == 'TkFixedFont' and seen['wrap'] == 760, seen
+        assert seen['labels'] == ['Write data.csv now', 'Keep for next Save',
+                                  'Cancel'], seen
     finally:
         root.destroy()
 

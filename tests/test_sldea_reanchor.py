@@ -888,10 +888,13 @@ def test_confirmation_carries_every_number_an_operator_needs():
     # re-anchor re-detects would decline it for the wrong reason
     assert 'no detection runs' in m and 'nothing is re-reviewed' in m
     assert 'frame names' in m and 'not touched' in m
-    # the three-way choice is untouched: two of the three do not write
-    assert 'YES WRITES data.csv NOW' in m
-    assert 'NO = keep this anchor for the session' in m
-    assert 'CANCEL = discard the measurement' in m
+    # the three-way choice is untouched: two of the three do not write.
+    # Since 2026-10-05 the lines name the BUTTONS rather than Yes/No/Cancel
+    assert '"Write data.csv now" WRITES data.csv NOW' in m
+    assert '"Keep for next Save" keeps this anchor for the session' in m
+    assert '"Cancel" discards the measurement' in m
+    for gone in ('YES WRITES', 'NO = ', 'CANCEL = '):
+        assert gone not in m, gone
     # both anchors and the multiplier
     assert '590.26 px' in m and '577.08 px' in m
     assert '× 1.046202' in m and '+4.62%' in m

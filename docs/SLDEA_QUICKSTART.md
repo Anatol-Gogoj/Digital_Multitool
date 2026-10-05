@@ -295,7 +295,8 @@ data.csv until you press Save. Closing the window first loses your accept and re
    "breakdown?" line on a frame is a confirmed event, and Save then renames every later frame file
    (a "collapse?" or "transient discharge?" note renames nothing). A second Save overwrites the
    first .bak. With no scale you get "Scale gate:". Leave "Advanced..." alone, and use "Calibrate /
-   re-anchor..." only if the lab says: on a saved run it rewrites data.csv at once.
+   re-anchor..." only if the lab says: on a saved run its "Write data.csv now" button rewrites
+   data.csv at once.
 
 ## 9. Plot
 

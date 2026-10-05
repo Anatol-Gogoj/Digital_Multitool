@@ -1272,8 +1272,23 @@ CAL_NO_POINTS_MSG = "Click the two opposite edges of the disc first."
 # boxes. The KEYS stay; only what the operator reads on the buttons changed.
 CAL_CHOICE_RESULT = {'yes': True, 'no': False, 'cancel': None}
 
+# The re-anchor confirmation's three buttons (2026-10-05). The keys keep
+# the Yes/No/Cancel contract _reanchor_scale branches on; the labels are
+# what each one DOES, and _reanchor_msg names them in its scope lines, so
+# the two read from this one list and cannot drift.
+REANCHOR_WRITE = "Write data.csv now"
+REANCHOR_KEEP = "Keep for next Save"
+REANCHOR_CANCEL = "Cancel"
+REANCHOR_BUTTONS = [('yes', REANCHOR_WRITE), ('no', REANCHOR_KEEP),
+                    ('cancel', REANCHOR_CANCEL)]
+# The widest aligned row of _reanchor_msg's table is about 65 characters
+# ("  resting area (baseline row), against π·(16/2)² = 201.06 mm²:"), so
+# 84 keeps every aligned row on one line; only the warning sentences wrap.
+REANCHOR_WRAP_CHARS = 84
 
-def cal_choice(parent, title, headline, detail, buttons, default):
+
+def cal_choice(parent, title, headline, detail, buttons, default,
+               detail_font=None, wraplength=460):
     """One calibration gate question, answered with buttons that NAME the
     action. -> the key of the button pressed ('yes', 'no' or 'cancel').
 
@@ -1301,8 +1316,11 @@ def cal_choice(parent, title, headline, detail, buttons, default):
     back when this closes: a Tk grab is not a stack, so without that the
     calibration window would stop being modal after the first question.
 
-    `buttons` is [(key, label), ...] left to right. Monkeypatched by the
-    GUI tests, which answer it without a display."""
+    `buttons` is [(key, label), ...] left to right. `detail_font` and
+    `wraplength` exist for the re-anchor confirmation (2026-10-05), whose
+    detail is a column-aligned evidence table: it is shown in TkFixedFont
+    and wider, so its columns line up. Monkeypatched by the GUI tests,
+    which answer it without a display."""
     out = {'key': default}
     prev_grab = None
     dlg = tk.Toplevel(parent)
@@ -1312,13 +1330,15 @@ def cal_choice(parent, title, headline, detail, buttons, default):
         dlg.transient(parent)
         dlg.resizable(False, False)
         # the warning sign and the bold weight are the cue; no colour
-        tk.Label(dlg, text="⚠ " + headline, justify='left', wraplength=460,
+        tk.Label(dlg, text="⚠ " + headline, justify='left',
+                 wraplength=wraplength,
                  font=('TkDefaultFont', 11, 'bold')).pack(
                      anchor='w', padx=14, pady=(14, 6))
         if detail:
+            kw = {'font': detail_font} if detail_font else {}
             tk.Label(dlg, text=detail, justify='left',
-                     wraplength=460).pack(anchor='w', padx=14,
-                                          pady=(0, 10))
+                     wraplength=wraplength, **kw).pack(anchor='w', padx=14,
+                                                       pady=(0, 10))
         row = tk.Frame(dlg)
         row.pack(fill='x', padx=14, pady=(2, 12))
 
@@ -7692,10 +7712,27 @@ class EdgeReviewApp:
         #   CANCEL throw the measurement away; the run is untouched
         # default='cancel', the option that changes nothing, keeping this
         # branch's rule that a warning gate's Enter must not act.
-        ans = messagebox.askyesnocancel(
-            "Re-anchor scale — SCALE ONLY",
+        # NAMED BUTTONS since 2026-10-05 (operator), through the same box
+        # as the calibration gates: "Write data.csv now" / "Keep for next
+        # Save" / "Cancel" instead of Yes / No / Cancel with a legend to
+        # decode. The evidence table is unchanged, shown in a fixed-width
+        # font so its columns line up, and wrapped at REANCHOR_WRAP_CHARS
+        # characters of that font rather than at a pixel count: a fixed
+        # 760 px wrapped the table's rows mid-column once Tk scaled its
+        # fonts for a 175 % display (seen by rendering it). The
+        # calibration window is closed by now, so the box is owned by the
+        # main window.
+        try:
+            wrap = tkfont.nametofont('TkFixedFont').measure(
+                '0' * REANCHOR_WRAP_CHARS)
+        except tk.TclError:
+            wrap = 760
+        ans = CAL_CHOICE_RESULT[cal_choice(
+            self.root, "Re-anchor scale — SCALE ONLY",
+            "Re-derive this run's areas at the new scale?",
             self._reanchor_msg(plan, prev, new_ref),
-            default='cancel', icon='warning')
+            REANCHOR_BUTTONS, 'cancel',
+            detail_font='TkFixedFont', wraplength=wrap)]
         if ans is None:
             self.manual_ref = was
             self.status.config(text="re-anchor cancelled — the measured "
@@ -7825,7 +7862,8 @@ class EdgeReviewApp:
         rather than kept on an unknowable anchor, and that is a deletion the
         operator has to agree to in advance.
 
-        The three-way choice is unchanged and so are its glosses: they are
+        The three-way choice is unchanged. Its glosses now name the buttons
+        (REANCHOR_BUTTONS, 2026-10-05) instead of Yes/No/Cancel: they are
         not prose about a consequence, they are what the three buttons DO,
         and two of the three do not write."""
         nom = plan['nominal_mm2']
@@ -7861,13 +7899,18 @@ class EdgeReviewApp:
         # "only the mm² and diameter columns" says in six words.
         L = [head,
              "",
-             "⚠ YES WRITES data.csv NOW — SCALE ONLY: no detection runs, "
-             "nothing is re-reviewed, and only the mm² and diameter columns "
-             "change (frame names, notes and tags are not touched).",
-             "NO = keep this anchor for the session and apply it at the next "
-             "💾 Save instead — nothing is written now.",
-             "CANCEL = discard the measurement; the run stays exactly as it "
-             "is.",
+             # NAMED FOR THE BUTTONS since 2026-10-05: these were "YES
+             # WRITES ... / NO = ... / CANCEL = ..." glosses on a native
+             # Yes/No/Cancel box; the buttons now carry the action, and
+             # these lines say what each one does beyond its name.
+             f"⚠ \"{REANCHOR_WRITE}\" WRITES data.csv NOW — SCALE ONLY: no "
+             f"detection runs, nothing is re-reviewed, and only the mm² and "
+             f"diameter columns change (frame names, notes and tags are not "
+             f"touched).",
+             f"\"{REANCHOR_KEEP}\" keeps this anchor for the session and "
+             f"applies it at the next 💾 Save — nothing is written now.",
+             f"\"{REANCHOR_CANCEL}\" discards the measurement; the run stays "
+             f"exactly as it is.",
              ""]
         L.append(f"  anchor       {(f'{old_px:.2f} px' if old_px else '?')}"
                  f"  →  {new_px:.2f} px          ({dmm:g} mm disc)")

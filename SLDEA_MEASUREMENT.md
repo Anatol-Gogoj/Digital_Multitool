@@ -184,7 +184,7 @@ removes an override, not a pass. Its cost is in the two-point mode: at
 that mode's one measured sigma of 2.09 % the expected 5-round range is
 4.86 %, and about 44 % of honest 5-round sets are refused (200,000
 simulated sets); at the circle mode's 1.05 % the figure is under 2 % at
-every n in the table. Details and the refusal wording: `SLDEA_HANDOFF.md`
+every n in the table. Details and the refusal wording: `SLDEA_DECISIONS.md`
 2026-10-03 sub-entry.
 
 #### First real data: the circle mode's per-fit σ ≈ 1.05% (2026-08-06)

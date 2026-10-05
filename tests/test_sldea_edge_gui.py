@@ -4529,7 +4529,7 @@ def test_hand_modes_show_a_stretched_view_and_record_the_same_diameters():
                                                        saw['verify'])
             # ... and NOT the frame's percentiles, which are a different
             # window here. Which of the two a fitted frame gets is the one
-            # measurement-chain choice in this dialog (SLDEA_HANDOFF
+            # measurement-chain choice in this dialog (SLDEA_DECISIONS
             # 2026-10-02: the fit window moves the displayed edge by up to
             # 2.8 % of diameter, the percentile window by under 0.3 %), so
             # a silent flip between them has to fail here.

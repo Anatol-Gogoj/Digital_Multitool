@@ -1040,7 +1040,7 @@ def cal_stretch_lut(lo, hi):
 # Every diameter comes from circle geometry or click coordinates in image
 # px, never from a pixel value, so no measured number can change with it.
 # What it CAN change is where a person puts the mark, which is why this is
-# a measurement-chain change with its own SLDEA_HANDOFF entry.
+# a measurement-chain change with its own SLDEA_DECISIONS entry.
 #
 # THE RANGE CAP (owner decision 2026-10-03) is the one threshold added
 # since: a hand round-set whose rounds differ by more than

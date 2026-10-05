@@ -2277,21 +2277,20 @@ def test_audit_clean_tracker_is_not_capped_by_a_patch_mate():
     ink step under the outline and tripped neither gate), and the patch
     member stays capped, so the landing still reaches the queue through
     it. It does not claim to know why the snapshots disagree: on the
-    corpus it fired on a definition mismatch (233451 L17) and on
-    one-sided mid-hold collapses where the buckled snapshot has no
-    tracker (P3_3 L23, P3_5 L23). The tracked member keeps its own
-    confidence (no bonus) and is tagged. Everything else -- both-tracker
-    pairs (a collapse both snapshots track), tracker versus resting, an
-    audit-tripped tracker beside a patch (the SquareStack-1 L6 shape: a
-    0.23 x A0 tex patch beside a bias-tripped fit), and a tracker with
-    NO recorded verdict (audit_boundary returned None: the exemption
-    must not ride on the absence of a check) -- is capped exactly as
-    before. So is a tracker the ray ratio marked review only (owner
-    decisions 2 and 9, 2026-10-03; folded in when this branch was
-    rebased onto the estimator branch): one-sided rays or a large trim
-    share cap and queue it whatever its mate is, so it carries the
-    mismatch tag like any other member and REVIEW_ONLY_TAGS is the one
-    list both pair branches read."""
+    corpus it fires twice, both on one-sided mid-hold collapses where
+    the buckled snapshot has no tracker (P3_3 L23, P3_5 L23). The
+    tracked member keeps its own confidence (no bonus) and is tagged.
+    Everything else -- both-tracker pairs (a collapse both snapshots
+    track), tracker versus resting, an audit-tripped tracker beside a
+    patch (the SquareStack-1 L6 shape: a 0.23 x A0 tex patch beside a
+    bias-tripped fit), and a tracker with NO recorded verdict
+    (audit_boundary returned None: the exemption must not ride on the
+    absence of a check) -- is capped exactly as before. So is a tracker
+    the ray ratio marked review only (owner decisions 2 and 9,
+    2026-10-03): one-sided rays or a large trim share cap and queue it
+    whatever its mate is, so it carries the mismatch tag like any other
+    member and REVIEW_ONLY_TAGS is the one list both pair branches
+    read."""
     s = dict(se.DEFAULT_SETTINGS)
     acc = s['accept_conf']
     cap = round(acc - 0.01, 3)

@@ -789,12 +789,11 @@ The load-bearing choices:
    own confidence. The exception relies only on that verdict (the ink
    step under the outline was measured) and on the patch member
    staying capped, so the landing is still queued; it does not know
-   why the snapshots disagree. On the review corpus it fired on one definition
-   mismatch (a diff blob inside the tracked disc) and on two one-sided
-   mid-hold collapses (a buckled post-ramp snapshot only a tex-ratio
-   patch outlines, a collapsed pre-ramp disc the tracker reads): there
-   the accepted number is the collapsed state's, and the human sees the
-   collapse through the capped member.
+   why the snapshots disagree. On the review corpus it fires twice,
+   both on a one-sided mid-hold collapse (a buckled post-ramp snapshot
+   only a tex-ratio patch outlines, a collapsed pre-ramp disc the
+   tracker reads): there the accepted number is the collapsed state's,
+   and the human sees the collapse through the capped member.
 
 ### Level 5 — referee / metrologist
 

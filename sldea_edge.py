@@ -3809,31 +3809,30 @@ def reconcile_pairs(rows, cands_by_idx, settings):
     tracked member's own audit has measured the ink step under its
     outline and vouches for its number, and the patch member stays
     capped, so the landing is still queued for a human. It does NOT
-    claim to know why the two snapshots disagree, and it cannot: on
-    the review corpus (OpenCV 4.13, with the wider tracker window of
-    the same date) it fired three times, once on a disagreement of
-    definition (SLDEA_20260723_233451 L17: a diff-lo blob inside a disc
-    the same size as the tracked mate's) and twice on a one-sided
-    mid-hold collapse (P3_3 L23 and P3_5 L23: the post-ramp snapshot is
-    a buckled membrane that only a tex-ratio patch outlines, the
-    pre-ramp snapshot a smooth collapsed disc the tracker reads). In
-    the collapse case the accepted number is the collapsed state's,
-    consistent with the next landing, and the human still sees the
-    collapse through the capped patch member. The tracked member keeps
-    its own confidence (no confirmation bonus either: nothing confirmed
-    it) and is tagged 'pair_mate_patch' with the mismatch; the patch
-    members stay capped and tagged as before, and a patch tier can
-    never ride an exemption. A tracker with no audit verdict at all
-    (audit_boundary returned None) is capped as before: the exemption
-    must not ride on the absence of a check. Nor is a tracker the ray
-    ratio marked review only (ray_one_sided / ray_trim_share, owner
-    decisions 2 and 9): it is capped and queued whatever its mate is,
-    so it is tagged with the mismatch like any other member
-    (REVIEW_ONLY_TAGS, the same list the agreement branch reads).
-    SquareStack-1 L6 pre (a tex-ratio patch at 0.23 x A0 beside a
-    bias-tripped tracker fit) stays in review. Both-tracker pairs (a
-    collapse both snapshots track) and tracker-versus-resting pairs
-    are capped exactly as before."""
+    claim to know why the two snapshots disagree, and it cannot: a
+    definition mismatch (a diff blob inside a disc the size of the
+    tracked mate's) would fire it just the same. On the review corpus
+    (OpenCV 4.13, with the wider tracker window of the same date) it
+    fires twice, both on a one-sided mid-hold collapse (P3_3 L23 and
+    P3_5 L23: the post-ramp snapshot is a buckled membrane that only a
+    tex-ratio patch outlines, the pre-ramp snapshot a smooth collapsed
+    disc the tracker reads). In the collapse case the accepted number is
+    the collapsed state's, consistent with the next landing, and the
+    human still sees the collapse through the capped patch member. The
+    tracked member keeps its own confidence (no confirmation bonus
+    either: nothing confirmed it) and is tagged 'pair_mate_patch' with
+    the mismatch; the patch members stay capped and tagged as before,
+    and a patch tier can never ride an exemption. A tracker with no
+    audit verdict at all (audit_boundary returned None) is capped as
+    before: the exemption must not ride on the absence of a check. Nor
+    is a tracker the ray ratio marked review only (ray_one_sided /
+    ray_trim_share, owner decisions 2 and 9): it is capped and queued
+    whatever its mate is, so it is tagged with the mismatch like any
+    other member (REVIEW_ONLY_TAGS, the same list the agreement branch
+    reads). SquareStack-1 L6 pre (a tex-ratio patch at 0.23 x A0 beside
+    a bias-tripped tracker fit) stays in review. Both-tracker pairs (a
+    collapse both snapshots track) and tracker-versus-resting pairs are
+    capped exactly as before."""
     acc = float(settings.get('accept_conf', 0.75))
     by_landing = {}
     for i, pos in enumerate(sweep_landings(rows)):

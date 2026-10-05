@@ -4741,7 +4741,7 @@ def _health_setup(rundir):
     missing file or a missing line: every field then keeps its default."""
     text = _read_text(os.path.join(rundir, 'setup.txt'))
     out = {'found': text is not None, 'planned': None, 'dry': False,
-           'inverted': False, 'camera': ''}
+           'inverted': False, 'sign_corrected': False, 'camera': ''}
     if text is None:
         return out
     m = _SETUP_TOTAL.search(text)
@@ -4749,6 +4749,10 @@ def _health_setup(rundir):
         out['planned'] = int(m.group(1))
     out['dry'] = bool(re.search(r'^MODE:.*DRY RUN', text, re.M))
     out['inverted'] = 'Trek control polarity: INVERTED' in text
+    # Runs before 2026-10-05 multiplied both monitors by -1 when the box
+    # was ticked and said so on this line; newer runs log them as read.
+    out['sign_corrected'] = (out['inverted']
+                             and 'sign-corrected in log' in text)
     m = re.search(r'^--- Camera ---[ \t]*\n([^\n]+)', text, re.M)
     if m:
         out['camera'] = m.group(1).strip()
@@ -5180,7 +5184,8 @@ def run_health(rundir, run=None):
       dry_run               setup.txt says the HV was off             info
       kv_missing            powered rows without measured_kV          warn
       kv_sign               measured kV opposes the commanded sign,
-                            and setup.txt has no INVERTED line        info
+                            and setup.txt has no pre-2026-10-05
+                            "sign-corrected" INVERTED line            info
       ua_missing            rows without measured_uA                  warn
       ended_early           fewer rows than setup.txt planned, or
                             run.log ends 'aborted' short of the plan  warn
@@ -5355,16 +5360,22 @@ def run_health(rundir, run=None):
                 f"whole sweep next time.")
         signed = [i for i in read if abs(mkv[i]) >= HEALTH_SIGN_MIN_KV]
         opposite = [i for i in signed if mkv[i] * kvs[i] < 0]
+        # A ticked 'Trek inverts' box no longer excuses an opposite sign:
+        # since 2026-10-05 the readings are logged as read, and a box set
+        # right reads positive. Only the older sign-corrected runs are
+        # left alone, as before.
         if (opposite and 2 * len(opposite) > len(signed)
-                and setup['found'] and not setup['inverted']):
+                and setup['found'] and not setup['sign_corrected']):
             j = max(opposite, key=lambda i: abs(mkv[i]))
+            box = ("setup.txt records the \"Trek inverts\" box as ticked"
+                   if setup['inverted'] else
+                   "setup.txt does not record an inverted Trek")
             say('info', 'kv_sign',
                 f"The measured voltage has the opposite sign to the "
                 f"commanded voltage on {len(opposite)} of {len(signed)} "
                 f"readings (for example {mkv[j]:+.2f} kV measured at "
-                f"{kvs[j]:.2f} kV commanded), and setup.txt does not "
-                f"record an inverted Trek. This check looks only at the "
-                f"sign, not at the size of a reading."
+                f"{kvs[j]:.2f} kV commanded), and {box}. This check "
+                f"looks only at the sign, not at the size of a reading."
                 + (" A scope window framed for the other sign can be why "
                    "the readings stop early." if blank else "")
                 + " Do not change any high-voltage setting yourself: tell "

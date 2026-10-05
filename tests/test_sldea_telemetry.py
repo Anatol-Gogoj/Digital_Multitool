@@ -531,15 +531,17 @@ def test_worker_telemetry_off_leaves_no_sidecar():
 
 
 def test_worker_records_the_trek_inverted_sign_like_data_csv():
-    """Telemetry must be directly comparable to data.csv, which applies
-    the Trek polarity to BOTH monitors (D5 2026-08-04)."""
+    """Telemetry must be directly comparable to data.csv. Since 2026-10-05
+    both log the monitors AS READ whatever 'Trek inverts' says (the box
+    negates the control only; tests/test_trek_polarity.py). Until then
+    both multiplied the readings by -1 (D5 2026-08-04)."""
     with _tempfile.TemporaryDirectory() as tmp:
         app = _StubApp(_FakeScope({2: [0.5], 3: [0.05]}))
         rundir = _drive(app, _short_profile(), tmp, trek_sign=-1.0)
         rows = _read(_os.path.join(rundir, TELEMETRY_FILENAME))
-        assert all(r['measured_uA'] == '-10.0' for r in rows
+        assert all(r['measured_uA'] == '10.0' for r in rows
                    if r['measured_uA']), rows
-        assert all(float(r['measured_kV']) == -0.5 for r in rows
+        assert all(float(r['measured_kV']) == 0.5 for r in rows
                    if r['measured_kV'])
 
 

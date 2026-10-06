@@ -158,6 +158,54 @@ def test_the_codec_is_lossless_here_and_the_probe_never_raises():
     assert ok is False and why, "an unwritable probe dir must be an answer"
 
 
+def test_the_probe_runs_at_the_frame_size_and_refuses_an_odd_one():
+    """2026-10-06: the 64 x 48 probe passed sizes FFV1 cannot record.
+    Handed a frame, the probe writes and reads back THAT size. OpenCV's
+    FFmpeg writer truncates an odd width or height to even (its
+    cap_ffmpeg_impl.hpp, "we truncate the rightmost column/the bottom
+    row"), so an odd frame comes back a column short: not lossless."""
+    _need_cv()
+    import numpy as np
+    rng = np.random.default_rng(5)
+    even = rng.integers(0, 256, (48, 64, 3), dtype=np.uint8)   # BGR
+    assert sv.codec_available(frame=even) == (True, '')
+    ok, why = sv.codec_available(frame=rng.integers(
+        0, 256, (48, 65), dtype=np.uint8))
+    assert ok is False, "an odd width must not pass as lossless"
+    assert '65 x 48' in why and 'read back as 64 x 48' in why, why
+
+
+def test_a_writer_that_throws_fails_the_probe_and_names_the_size():
+    """The other 2026-10-06 failure: at some sizes write() threw "Unknown
+    C++ exception" on the first frame. The probe turns that into an
+    answer naming the size, and releases the writer it opened."""
+    _need_cv()
+    import cv2
+    import numpy as np
+    real = cv2.VideoWriter
+    released = []
+
+    class Throws:
+        def __init__(self, *a, **k):
+            pass
+
+        def isOpened(self):
+            return True
+
+        def write(self, img):
+            raise cv2.error("Unknown C++ exception from OpenCV code")
+
+        def release(self):
+            released.append(True)
+    cv2.VideoWriter = Throws
+    try:
+        ok, why = sv.codec_available(frame=np.zeros((918, 1632), np.uint8))
+    finally:
+        cv2.VideoWriter = real
+    assert ok is False and released == [True], (ok, released)
+    assert '1632 x 918' in why and 'Unknown C++ exception' in why, why
+
+
 # ---------------------------------------------------------------- recorder
 
 def test_the_recorder_writes_a_lossless_file_on_the_run_clock():
@@ -192,6 +240,72 @@ def test_the_recorder_writes_a_lossless_file_on_the_run_clock():
         assert rec.dropped == 0 and rec.error is None
         s = rec.summary()
         assert 'frames recorded' in s and 'stream' in s, s
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_check_codec_probes_with_the_streams_own_frame():
+    """VideoRecorder.check_codec: no camera I/O of its own. It hands the
+    codec probe the frame the reader already holds, gray as recorded,
+    and remembers the size that passed; with no frame yet it refuses."""
+    _need_cv()
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    real = sv.codec_available
+    seen = []
+
+    def spy(tmpdir=None, frame=None):
+        seen.append(None if frame is None else frame.shape)
+        return real(tmpdir=tmpdir, frame=frame)
+    try:
+        idle = sv.VideoRecorder(lambda: _FakeCam(), d, log=lambda m: None)
+        ok, why = idle.check_codec()
+        assert ok is False and 'no frame' in why, why
+        sv.codec_available = spy
+        rec = sv.VideoRecorder(lambda: _FakeCam(shape=(96, 128)), d,
+                               log=lambda m: None).start()
+        assert rec.wait_first_frame(3.0)
+        assert rec.check_codec() == (True, '')
+        assert seen == [(96, 128)], seen
+        assert rec.probed_size == (128, 96)
+        rec.stop(timeout=5.0)
+        assert not os.path.exists(os.path.join(d, 'probe.mkv'))
+    finally:
+        sv.codec_available = real
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_stream_of_an_odd_size_fails_check_codec():
+    _need_cv()
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    try:
+        rec = sv.VideoRecorder(lambda: _FakeCam(shape=(96, 129)), d,
+                               log=lambda m: None).start()
+        assert rec.wait_first_frame(3.0)
+        ok, why = rec.check_codec()
+        rec.stop(timeout=5.0)
+        assert ok is False and '129 x 96' in why, why
+        assert rec.probed_size is None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_recording_a_size_other_than_the_checked_one_is_logged():
+    """A stream reopened at another size between the check and the
+    first recorded frame: the recording goes ahead, and says so."""
+    _need_cv()
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    logs = []
+    try:
+        rec = sv.VideoRecorder(lambda: _FakeCam(), d, fps=5,
+                               log=logs.append).start()
+        assert rec.wait_first_frame(3.0)
+        assert rec.check_codec() == (True, '')
+        rec.probed_size = (64, 48)       # as if checked on another stream
+        rec.set_t0(time.monotonic())
+        assert _wait(lambda: rec.written >= 1, 3.0)
+        rec.stop(timeout=5.0)
+        assert any('recording 128 x 96' in m and 'never checked' in m
+                   for m in logs), logs
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -939,6 +1053,7 @@ class _StubApp:
         self._sldea_recorder = None
         self._sldea_video_jobs = []
         self.lines = []
+        self.statuses = []
         self.finished = 0
         self.root = types.SimpleNamespace(after=self._after)
 
@@ -952,7 +1067,7 @@ class _StubApp:
         self.lines.append(str(msg))
 
     def _sldea_set_status(self, *a, **k):
-        pass
+        self.statuses.append(a[0] if a else '')
 
     def _sldea_finished(self):
         self.finished += 1
@@ -1267,6 +1382,55 @@ def test_an_abort_during_camera_startup_never_switches_the_sg_on():
         assert not [e for e in events if e[1] == 'sg.set_output'
                     and e[2][1] is True], [e[1:3] for e in events]
         assert app.finished == 1
+
+
+def test_a_stream_size_the_codec_cannot_record_stops_the_run_before_hv():
+    """2026-10-06: the codec is checked at the stream's OWN size, with its
+    own frame, before the SG output is switched on. A LIVE run whose
+    camera delivers a size FFV1 cannot record losslessly (odd, here)
+    stops there: the SG output is never switched on, the SG is still
+    zeroed and switched off on the way out, nothing is recorded or
+    shot, and setup.txt, run.log and the status line say why."""
+    _need_cv()
+    events = []
+    with tempfile.TemporaryDirectory() as tmp:
+        app = _StubApp(sg=_FakeSG(events))
+        rundir = _drive(app, tmp,
+                        lambda spec, fps=10: _FakeCam(shape=(96, 129)),
+                        _no_oneshot, dry=False)
+        assert app.finished == 1
+        assert app._sldea_stop, app.lines
+        assert not [e for e in events if e[1] == 'sg.set_output'
+                    and e[2][1] is True], [e[1:3] for e in events]
+        offs = [e for e in events if e[1] == 'sg.set_output']
+        assert offs and offs[-1][2][1] is False, [e[1:3] for e in events]
+        assert any('run stopped before any HV' in ln and '129 x 96' in ln
+                   and 'never switched on' in ln for ln in app.lines), \
+            app.lines
+        assert any(ln.startswith('run aborted: 0/') for ln in app.lines), \
+            app.lines
+        assert any(s.startswith('STOPPED before HV') for s in app.statuses), \
+            app.statuses
+        assert _read_csv(os.path.join(rundir, 'data.csv')) == []
+        assert not os.path.exists(os.path.join(rundir, sv.VIDEO_FILENAME))
+        with open(os.path.join(rundir, 'setup.txt')) as f:
+            setup = f.read()
+        assert ('Video outcome: NOT recorded -- the codec check at the '
+                "camera's frame size failed") in setup, setup
+        assert 'stopped before any HV' in setup
+        assert not os.listdir(os.path.join(tmp, 'staging')), \
+            "an empty staging dir was left behind"
+
+
+def test_a_video_run_logs_the_size_its_codec_was_checked_at():
+    _need_cv()
+    with tempfile.TemporaryDirectory() as tmp:
+        app = _StubApp()
+        _drive(app, tmp, lambda spec, fps=10: _FakeCam(), _no_oneshot)
+        assert app.finished == 1 and not app._sldea_stop, app.lines
+        assert any(ln == f"video: {sv.VIDEO_FOURCC} checked at 128 x 96, "
+                   f"the stream's own size: lossless" for ln in app.lines), \
+            app.lines
 
 
 def _run():

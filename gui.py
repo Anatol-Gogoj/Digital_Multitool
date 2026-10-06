@@ -4615,6 +4615,7 @@ LOGGING:
         tel = None                    # telemetry sidecar (opened below)
         rec = None                    # video recorder (started below)
         vid_staging = None
+        vid_stop = None               # words, when its codec check stopped it
         completed = False
         cam_lock_saved = None         # Webcam-tab lock, restored at the end
         rundir = os.path.join(outdir, runname or p.run_dirname(started))
@@ -4804,6 +4805,33 @@ LOGGING:
                         os.rmdir(vid_staging)        # empty: nothing written
                     except OSError:
                         pass
+                # The codec at the size this stream ACTUALLY delivers, with
+                # its own frame, still at 0 V (2026-10-06). The Run
+                # pre-flight probes 64 x 48 only, and FFV1 on Windows
+                # OpenCV 4.13 silently crops an odd size to even and has
+                # thrown on the first write at some even ones. A failure
+                # stops the run HERE, through the stop flag Abort uses, so
+                # the SG output below is never switched on: the operator
+                # asked for a lossless video, and this thread cannot ask
+                # whether to go on without one (the pre-flight's own
+                # codec question defaults to No for the same reason).
+                if rec is not None and not self._sldea_stop:
+                    ok, codec_why = rec.check_codec()
+                    if ok:
+                        self._sldea_log(
+                            f"video: {sldea_video.VIDEO_FOURCC} checked at "
+                            f"{rec.probed_size[0]} x {rec.probed_size[1]}, "
+                            f"the stream's own size: lossless")
+                    else:
+                        vid_stop = sldea_video.codec_stop_words(codec_why, dry)
+                        self._sldea_stop = True
+                        self._sldea_log(vid_stop['stopped'])
+                        rec.stop(timeout=5.0)
+                        rec = None
+                        try:
+                            os.rmdir(vid_staging)    # empty: nothing written
+                        except OSError:
+                            pass
                 if rec is not None:
                     self._sldea_recorder = rec    # the Webcam-tab guard
                     self._sldea_log(
@@ -4813,14 +4841,22 @@ LOGGING:
                 # setup.txt promised a video before any of this ran; say
                 # what actually happened, so a fallback run does not claim
                 # a recording (and stream-taken stills) it never had
+                if rec is not None:
+                    outcome = ("recording started; snapshots taken off the "
+                               "stream")
+                elif vid_stop:
+                    # ASCII, so the locale-encoded open cannot refuse it
+                    outcome = ("NOT recorded -- the codec check at the "
+                               "camera's frame size failed ("
+                               + codec_why.encode('ascii', 'replace').decode()
+                               + "); the run was stopped before any HV")
+                else:
+                    outcome = ("NOT recorded -- the camera stream did not "
+                               "start; snapshots were one-shot grabs as "
+                               "without video")
                 try:
                     with open(os.path.join(rundir, 'setup.txt'), 'a') as sf:
-                        sf.write("Video outcome: "
-                                 + ("recording started; snapshots taken "
-                                    "off the stream" if rec is not None else
-                                    "NOT recorded -- the camera stream did "
-                                    "not start; snapshots were one-shot "
-                                    "grabs as without video") + "\n")
+                        sf.write("Video outcome: " + outcome + "\n")
                 except OSError:
                     pass
             # Abort pressed during the camera/video startup above (up to
@@ -5181,15 +5217,18 @@ LOGGING:
                 done = 'complete'
                 completed = True
             self._sldea_log(f"run {done}: {si}/{len(snaps)} frames")
-            if base_stop and done == 'aborted':
+            stop_box = None
+            if done == 'aborted':
+                stop_box = stop_words if base_stop else vid_stop
+            if stop_box:
                 # Say WHY in words where the operator looks: a green
                 # "aborted" would read as their own Abort. The box is
                 # queued on the Tk thread; this thread goes straight on to
                 # the finally block and zeroes the SG without waiting.
-                self._sldea_set_status(stop_words['status'], fg='#c62828')
+                self._sldea_set_status(stop_box['status'], fg='#c62828')
                 try:
                     self.root.after(0, lambda: messagebox.showwarning(
-                        stop_words['title'], stop_words['box']))
+                        stop_box['title'], stop_box['box']))
                 except Exception:
                     pass
             else:

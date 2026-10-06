@@ -199,11 +199,29 @@ def staging_root():
                         'sldea_video')
 
 
-def codec_available(tmpdir=None):
+def _gray(frame):
+    """The recorded picture of a stream frame: 8-bit gray, as the reader
+    queues it for the encoder."""
+    if frame.ndim == 2:
+        return frame
+    import cv2
+    return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+
+def codec_available(tmpdir=None, frame=None):
     """-> (True, '') when this OpenCV can write AND read back an FFV1 gray
     file bit-exactly, else (False, why). Never raises. Checked before a
     run starts -- before any HV -- because a build without the encoder
-    would otherwise fail at the first frame, halfway into an hour."""
+    would otherwise fail at the first frame, halfway into an hour.
+
+    Without `frame` the probe is 64 x 48: it shows only that there is an
+    encoder. With `frame` (gray or BGR) it runs at THAT frame's size and
+    writes the frame itself, then a noise frame of the same size. The
+    recorder passes its stream's own frame (VideoRecorder.check_codec)
+    because the size matters. Measured 2026-10-06 on Windows OpenCV 4.13:
+    OpenCV silently crops an odd width or height to even, so 1081 x 1080
+    reads back as 1080 x 1080, and at some even sizes (1632 x 918) the
+    first write throws "Unknown C++ exception"."""
     import tempfile
     try:
         import cv2
@@ -212,34 +230,50 @@ def codec_available(tmpdir=None):
         return False, f"OpenCV/numpy not importable ({e})"
     own = tmpdir is None
     d = path = None
+    size = "64 x 48"
     try:
+        if frame is None:
+            frames = [np.full((48, 64), 40 * i, np.uint8)
+                      for i in range(1, 4)]
+            frames[1][10:20, 10:30] = 200
+        else:
+            g0 = _gray(frame)
+            frames = [g0, np.random.default_rng(0).integers(
+                0, 256, g0.shape, dtype=np.uint8)]
+        h, wd = frames[0].shape
+        size = f"{wd} x {h}"
         d = tempfile.mkdtemp(prefix='sldea_codec_') if own else tmpdir
         path = os.path.join(d, 'probe.mkv')
-        frames = [np.full((48, 64), 40 * i, np.uint8) for i in range(1, 4)]
-        frames[1][10:20, 10:30] = 200
         w = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*VIDEO_FOURCC),
-                            1.0, (64, 48), isColor=False)
+                            1.0, (wd, h), isColor=False)
         if not w.isOpened():
             return False, (f"this OpenCV build has no {VIDEO_FOURCC} "
-                           f"encoder")
-        for f in frames:
-            w.write(f)
-        w.release()
+                           f"encoder for {size}")
+        try:
+            for f in frames:
+                w.write(f)
+        finally:
+            w.release()
         cap = cv2.VideoCapture(path)
         try:
             for f in frames:
                 ok, g = cap.read()
                 if not ok:
-                    return False, f"{VIDEO_FOURCC} file did not read back"
+                    return False, (f"{VIDEO_FOURCC} file at {size} did not "
+                                   f"read back")
                 g = g if g.ndim == 2 else g[:, :, 0]
-                if not np.array_equal(g, f):
-                    return False, (f"{VIDEO_FOURCC} round trip was NOT "
+                if g.shape != f.shape:
+                    return False, (f"{VIDEO_FOURCC} at {size} read back as "
+                                   f"{g.shape[1]} x {g.shape[0]}: NOT "
                                    f"lossless")
+                if not np.array_equal(g, f):
+                    return False, (f"{VIDEO_FOURCC} round trip at {size} "
+                                   f"was NOT lossless")
         finally:
             cap.release()
         return True, ''
     except Exception as e:
-        return False, f"{VIDEO_FOURCC} probe failed: {e}"
+        return False, f"{VIDEO_FOURCC} probe at {size} failed: {e}"
     finally:
         if path:
             try:
@@ -251,6 +285,29 @@ def codec_available(tmpdir=None):
                 os.rmdir(d)
             except OSError:
                 pass
+
+
+def codec_stop_words(why, dry):
+    """The words for a video run that stops itself before any HV because
+    the codec failed at the stream's own size (VideoRecorder.check_codec).
+
+    -> dict(stopped, status, title, box), as
+    sldea_profile.baseline_stop_words: the run.log line, the red status
+    line and the operator's box. Never raises."""
+    drive = ("This was a DRY run: no voltage was driven." if dry else
+             "The signal generator output was never switched on by this "
+             "run.")
+    return {
+        'stopped': (f"⛔ run stopped before any HV: the video cannot be "
+                    f"recorded at the camera's frame size ({why}). {drive}"),
+        'status': ("STOPPED before HV: the video cannot be recorded at "
+                   "this frame size (see Run log)"),
+        'title': "Run stopped: video cannot be recorded",
+        'box': ("The run stopped itself before any high voltage.\n\n"
+                f"The lossless video could not be written at the size the "
+                f"camera delivers: {why}.\n\n{drive}\n\nUntick Record to "
+                f"run with snapshots only, then press Run again.\n\nThe "
+                f"Run log has the details.")}
 
 
 def open_stream(spec, fps=STREAM_FPS):
@@ -329,6 +386,7 @@ class VideoRecorder:
         self.restamp_done = None               # clock time of the last one
         self.error = None
         self.size = None                       # (w, h) of the recording
+        self.probed_size = None                # (w, h) check_codec passed
         self._reader_t = threading.Thread(target=self._reader, daemon=True,
                                           name='sldea-video-reader')
         self._writer_t = threading.Thread(target=self._writer, daemon=True,
@@ -385,6 +443,27 @@ class VideoRecorder:
             time.sleep(0.05)
         with self._lock:
             return self._latest is not None
+
+    def check_codec(self):
+        """-> (True, '') when the codec writes AND reads back, bit-exactly,
+        a frame of the size this stream ACTUALLY delivers, else (False,
+        why). Never raises. It probes with the newest frame the reader
+        already holds (codec_available(frame=...)), so it adds no camera
+        I/O. Meant for after wait_first_frame(), at 0 V: a size the codec
+        cannot record must stop the run before any HV, not turn up at the
+        first recorded frame (2026-10-06)."""
+        with self._lock:
+            got = self._latest
+        if got is None:
+            return False, "the stream gave no frame to check the codec with"
+        try:
+            gray = _gray(got[0])
+        except Exception as e:
+            return False, f"the stream's frame could not be made gray ({e})"
+        ok, why = codec_available(frame=gray)
+        if ok:
+            self.probed_size = (gray.shape[1], gray.shape[0])
+        return ok, why
 
     def latest(self, max_age_s=STILL_MAX_AGE_S, not_before=None):
         """-> (a COPY of the newest BGR frame, its run time t_s), or
@@ -540,7 +619,6 @@ class VideoRecorder:
             return
         if cam is None:
             return
-        import cv2
         next_t = None
         last_refresh = self._clock()
         fails = 0
@@ -604,8 +682,7 @@ class VideoRecorder:
             next_t += 1.0 / self.fps
             if next_t < t:                   # fell behind: never burst
                 next_t = t + 1.0 / self.fps
-            gray = frame if frame.ndim == 2 else cv2.cvtColor(
-                frame, cv2.COLOR_BGR2GRAY)
+            gray = _gray(frame)
             item = (gray, t, datetime.datetime.now().isoformat(
                 timespec='milliseconds'), self.seen)
             try:
@@ -660,6 +737,14 @@ class VideoRecorder:
                 if vw is None:
                     h, wd = gray.shape[:2]
                     self.size = (wd, h)
+                    if self.probed_size not in (None, self.size):
+                        # a stream reopened at another size between the
+                        # check and the first recorded frame
+                        self._log(f"⚠ video: recording {wd} x {h}, but the "
+                                  f"codec was checked at "
+                                  f"{self.probed_size[0]} x "
+                                  f"{self.probed_size[1]}: this size was "
+                                  f"never checked")
                     vw = cv2.VideoWriter(
                         self.video_path,
                         cv2.VideoWriter_fourcc(*VIDEO_FOURCC), self.fps,

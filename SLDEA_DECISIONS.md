@@ -13,6 +13,99 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## The baseline disc fit retries from the window centre when it refuses, and judges that retry against the ring around the disc (2026-10-05)
+
+**TL;DR:** on backlit run `13_backlight_2` the automatic baseline fit
+refused, so no other frame of the run could be measured: the tracker needs
+that fit, and the hand anchor only supplies the scale and the baseline's
+A0. When the original fit refuses, a second trace now starts at the centre
+of the search window and compares the disc with the ring just outside it
+instead of the frame-wide median. Every fit the original trace made is
+unchanged.
+
+**Observation (13_backlight_2 baseline, measured 2026-10-05, OpenCV 4.13).**
+
+- Rim step, outside minus inside: median 5.8 gray (2.7 %); 2.9-4.6 on the
+  right half, about 10 on the left. Rise 10-90 % in 17 px: sharp, but
+  shallow. Sensor noise about 2 gray, so noise is not the limit.
+- Backlight across the search window: about 212 (dim right side) to 226
+  (upper left). Frame-wide median 216; disc interior 213-215; the ring just
+  outside the disc 219-220. The median sits between the disc and its own
+  surround.
+- The seed class (paper - 5 = 211) took 0 % of the disc, so the seed
+  landed on the dim right side and 11 of 360 rays were usable (needs 40).
+- Seeded on the disc instead, the ray stage traces it: 160 edge points,
+  260° of arc, residual 1.5 % of r, circularity 0.96. The fill gate then
+  fails at 6 % against paper - 4, and passes at 59 % against the ring's
+  median - 4.
+- Flat-fielding the frame first (subtracting a 488-648 px closing) does not
+  rescue it: the disc stays about 4 levels below its surround, and 18 % of
+  it reaches the seed class.
+- Consequence: all 59 other rows were rejected "no reliable edge" (the
+  diff and texture channels see nothing; the disc moves about 1 px in
+  radius below 3 kV), and all 438 video frames were flagged.
+
+**Decision.**
+
+- `_baseline_disc_uncached` runs the original trace unchanged. Only when it
+  refuses does a retry run, seeded at the window centre, with the fill
+  judged against the median of the ring from 1.15 r to 1.5 r around the
+  fitted circle (foil and glint excluded). Every other gate is shared.
+- The result's `seed` key says which trace produced it
+  (`DISC_SEED_DARK` / `DISC_SEED_CENTRE`); `paper_lum` is the level the
+  fill was judged against, so the calibration display stretches between
+  the disc and the surround the fit used.
+- A refusal always states the original trace's reason. The retry starts at
+  a fixed point whatever the frame holds, so its own refusal describes
+  that point: on a blank frame it read "covers only 40° of arc" where the
+  original's "nothing dark enough to seed on" is the useful sentence.
+- Not seeded from the hand anchor's centre: the calibration dialog runs the
+  fit before any anchor exists, and threading the anchor through every
+  caller of the cached fit would let two callers see different reference
+  discs.
+- The arc gate's sentence now states the 130° it applies (13 of 36
+  ten-degree sectors), not 120°. On `SLDEA_20260806_151857` it read
+  "covers only 120° (needs ≥ 120°)". The gate itself is unchanged.
+
+**Evidence (local corpus copy on Gogojster: 14 runs, plus `13_backlight`,
+`13_backlight_2` and Wonjin's run 13; Edge Review's pipeline replayed before
+and after by `sldea_batch_eval.py`).**
+
+- The 10 baselines the original trace fits are identical: diameter, centre,
+  conf, fill, arc, residual, edge count and paper level.
+- Two new fits, both checked by eye on the frame: `13_backlight_2` at
+  407 px, and `P3_7_2.3mL_20260729` at 541 px (refused before, 18 rays).
+- The other 7 still refuse, including the blank 2026-10-01 frame and the
+  saturated 2026-08-05 frames: the retry does not invent a disc on them.
+- Frame by frame, 17 runs replay identically (status, method, area, conf).
+  `13_backlight_2`: 60 rejected became 60 auto-accepted (tracker conf
+  0.81-0.86). `P3_7`: 48 rejected and 33 review became 31 auto and 50
+  review. Its outlines follow the visible edge on the frames checked; its
+  3.0 kV landing loses 8 % of area between the two snapshots, about 57 s
+  apart at constant voltage, which is visible in the frames rather than a
+  tracking artefact. The local copy holds no reviewed P3_7 areas: compare
+  against the campaign scorecard on big-electronic-box before using them.
+- Synthetic backlit scene (`_backlit_scene` in the tests): the original
+  trace refuses (1-4 rays usable on origin/main), the retry fits 199.3 px
+  against a true 200 px, and the same scene with no disc still refuses.
+- `test_electrode_mask_255_only_costs_a_flat_synthetic_strip` documented
+  the bright painted strip as a refusal. The retry now fits it at 199.8 px
+  against a true 200 px. Its invariant, never a wrong diameter, is kept and
+  is now asserted as the correct diameter.
+
+**Open.**
+
+- On `13_backlight_2` the automatic fit (407 px) is 4.3 % smaller than the
+  hand anchor (425 px): the hand circle sits at the outer foot of the
+  17 px rim ramp, the fit at its steepest point. The anchor guard will
+  flag it. Recalibrating in verify mode puts the scale, A0 and every frame
+  on one edge definition.
+- The margin on that frame is thin (fill 59 % against 55 %, conf 0.65). A
+  more uniform backlight is the capture-side fix.
+- The video pass runs before calibration and never re-runs, so
+  `13_backlight_2`'s `video_edges.csv` stays empty until
+  `sldea_video.py` is run on it again with this change.
+
 ## The camera pre-flight shoots under the run's own lock, and says when the Webcam tab's fields and lock disagree (2026-10-05)
 
 **TL;DR:** on run `13_backlight` the pre-flight picture looked fine and

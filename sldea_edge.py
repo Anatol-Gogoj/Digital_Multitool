@@ -4310,6 +4310,11 @@ def _fit_circle(pts):
 
 
 _DISC_CACHE = {}
+# Which trace produced a baseline_disc result (its 'seed' key): the
+# original dark-region seed with the frame-wide paper level, or the retry
+# from the window centre with the local surround (2026-10-05).
+DISC_SEED_DARK = 'dark-region'
+DISC_SEED_CENTRE = 'window-centre'
 # Why the fit refused, keyed exactly like _DISC_CACHE and evicted with it.
 # A parallel dict rather than a tuple in _DISC_CACHE so the cached VALUE
 # keeps its old shape: several readers do `dict(hit)` on it.
@@ -4338,13 +4343,21 @@ def baseline_disc(base_gray, settings):
     the strongest dark->light step on each ray whose edge neighborhood is
     clear of foil and glint (rays measuring through the strips are
     excluded, not repaired), and fit a circle robustly to the edge points
-    -- twice, because an off-centre seed truncates the far side. Refuses (None) unless the accepted edge
-    covers >= ~120 degrees of arc, the fit residual stays under 6% of the
+    -- twice, because an off-centre seed truncates the far side. Refuses
+    (None) unless the accepted edge covers 13 of 36 ten-degree sectors
+    (130 degrees), the fit residual stays under 6% of the
     radius, the circle is actually filled with the dark class, and the
     diameter is a plausible fraction of the ROI; conf is built from those
     same three quantities, so a shape that barely passes cannot read as
     certainty. Verified against the by-eye measurement on the three P3
     baselines (579/578/586 px): agreement within ~1%.
+
+    When that trace refuses, a second one runs from the centre of the
+    search window and judges the fill against the ring around the fitted
+    circle rather than the frame-wide paper level (2026-10-05, for backlit
+    frames whose illumination gradient exceeds the disc's own contrast;
+    see _baseline_disc_uncached). The result's 'seed' key says which
+    trace produced it (DISC_SEED_DARK or DISC_SEED_CENTRE).
 
     Returns a candidate-like dict (method 'baseline-disc') or None. When
     it refuses, WHICH gate refused is recorded and readable through
@@ -4495,7 +4508,26 @@ def _baseline_disc_uncached(base_gray, settings):
     they are not interchangeable: 'the disc is off the size range' sends
     the operator to check diam_mm and the camera zoom, while 'the arc is
     only 22% covered' sends them to look at what is lying across the
-    frame. A single 'refused' would send them to guess."""
+    frame. A single 'refused' would send them to guess.
+
+    Two traces, in order. The first seeds on the biggest central region
+    darker than the frame-wide paper level and judges fill against that
+    same level; it is the original fit, unchanged, and wherever it
+    succeeds its result stands. Only when it refuses does a second trace
+    run (2026-10-05): seeded at the centre of the search window, with the
+    fill judged against the ring just outside the fitted circle instead
+    of the frame-wide level. Every other gate is shared.
+
+    Why the second trace exists: a backlit membrane (13_backlight_2,
+    2026-10-05) puts the disc only ~6 gray levels below its own surround,
+    while the backlight falls off by ~15 across the window. The frame-wide
+    median then sits BETWEEN the disc and its surround, so no pixel of the
+    disc is darker than paper - 5 (the seed lands on the dim side of the
+    backlight) and 6% of its interior is darker than paper - 4 (the fill
+    gate). Seeded on the disc, the ray stage itself traces it cleanly
+    (260 deg of arc, residual 1.5% of r, circularity 0.96). The window
+    centre needs no dark class to find, and the operator frames the disc
+    there; a frame with no disc at the centre refuses as before."""
     import cv2
     if base_gray is None:
         return None, 'there is no readable baseline frame to fit'
@@ -4546,10 +4578,6 @@ def _baseline_disc_uncached(base_gray, settings):
         s = a * max(0.05, 1.0 - 4.0 * d2)
         if s > score:
             seed, score = (float(cx), float(cy)), s
-    if seed is None:
-        return None, (f"no central dark region big enough to seed on "
-                      f"(the paper reads {paper:.0f} gray and nothing "
-                      f"below it covers 0.2% of the search window)")
 
     r_hi = 0.55 * min(hs, ws)
     rs = np.arange(6.0, r_hi, 1.0)
@@ -4591,84 +4619,145 @@ def _baseline_disc_uncached(base_gray, settings):
                         cy0 + redge * np.sin(th[k])))
         return np.asarray(pts, np.float64)
 
-    pts = cast(*seed)
-    if len(pts) < 40:
-        return None, (f"only {len(pts)} of 360 radial rays found a clean "
-                      f"dark→light ink step (need 40) — the disc edge is "
-                      f"too faint, or the electrodes cover too much of it")
-    cx1, cy1, _r1, _k1 = _fit_circle(pts)
-    if not (0 <= cx1 <= ws and 0 <= cy1 <= hs):
-        return None, ("the first circle fit put the centre outside the "
-                      "search window — the edge points are not a disc")
-    pts = cast(cx1, cy1)                # re-cast from the fitted centre
-    if len(pts) < 40:
-        return None, (f"only {len(pts)} of 360 rays found a clean ink step "
-                      f"on the re-cast from the fitted centre (need 40)")
-    cx, cy, r, keep = _fit_circle(pts)
-    pin = pts[keep]
-    if len(pin) < 40 or not (0 <= cx <= ws and 0 <= cy <= hs):
-        return None, (f"{len(pin)} edge points survived the robust fit's "
-                      f"outlier trim (need 40), or its centre fell outside "
-                      f"the search window")
-    resid = float(np.median(np.abs(
-        np.hypot(pin[:, 0] - cx, pin[:, 1] - cy) - r)))
-    ang = np.degrees(np.arctan2(pin[:, 1] - cy, pin[:, 0] - cx)) % 360.0
-    cov = len(np.unique((ang // 10).astype(int))) / 36.0
     yy, xx = np.ogrid[0:hs, 0:ws]
-    inside = ((xx - cx) ** 2 + (yy - cy) ** 2 <= (0.9 * r) ** 2) & free
-    if int(inside.sum()) < 200:
-        return None, (f"only {int(inside.sum())} px inside the fitted "
-                      f"circle are free of foil and glint (need 200), so "
-                      f"the fill test could not be applied")
-    fill = float(((sm < paper - 4) & inside).sum()) / float(inside.sum())
     dmin = float(min(hs, ws))
-    # The four documented gates, named individually: 'refused' sends the
-    # operator to guess, while 'the arc is only 22% covered' sends them to
-    # look at what is lying across the frame (`#215` verify mode, 2026-08-06).
-    if cov < 0.34:
-        return None, (f"the accepted edge covers only {360 * cov:.0f}° of "
-                      f"arc (needs ≥ 120°) — something is lying across the "
-                      f"disc, or most of its boundary has no ink step")
-    if resid > 0.06 * r:
-        return None, (f"the fit residual is {resid * 100.0 / r:.1f}% of the "
-                      f"radius (limit 6%) — the surviving edge points are "
-                      f"not on one circle")
-    if fill < 0.55:
-        return None, (f"only {100 * fill:.0f}% of the fitted circle's "
-                      f"interior reads as the dark class (needs ≥ 55%) — "
-                      f"the circle is not sitting on the disc")
-    if not 0.06 * dmin <= 2 * r <= 0.85 * dmin:
-        return None, (f"the fitted diameter {2 * r / f:.0f} px is outside "
-                      f"the plausible range {0.06 * dmin / f:.0f}–"
-                      f"{0.85 * dmin / f:.0f} px for this search window — "
-                      f"check the camera zoom and roi_frac")
-    try:
-        ell = cv2.fitEllipse(pin.astype(np.float32))
-        circ = round(min(ell[1]) / max(max(ell[1]), 1e-6), 3)
-    except cv2.error:
-        circ = 0.0
-    # The one gate the old code lacked: a resting disc is ROUND. The blob
-    # it used to return read circ 0.32; a shadow rectangle's trimmed fit
-    # still only reaches ~0.7. The P3 discs measure 0.966-0.999.
-    if circ < 0.85:
-        return None, (f"the fitted shape's circularity is {circ:.2f} "
-                      f"(needs ≥ 0.85) — a resting disc is round, and this "
-                      f"is not; the P3 discs measure 0.966–0.999")
-    conf = min(0.99, 0.4 * fill + 0.35 * cov
-               + 0.25 * (1.0 - min(1.0, resid / (0.06 * r))))
-    inv = 1.0 / f
-    ccx = (cx + x0) * inv
-    ccy = (cy + y0) * inv
-    rr = r * inv
-    th2 = np.linspace(0, 2 * np.pi, 90, endpoint=False)
-    contour = np.stack([ccx + rr * np.cos(th2),
-                        ccy + rr * np.sin(th2)], axis=1)
-    return {'method': 'baseline-disc', 'area_px': float(np.pi * rr * rr),
-            'diam_px': float(2 * rr), 'cx': ccx, 'cy': ccy,
-            'circ': circ, 'solidity': round(fill, 3), 'contour': contour,
-            'conf': round(conf, 3), 'wrinkle': None, 'spread_pct': 0.0,
-            'arc_cov': round(cov, 2), 'fit_resid_px': round(resid * inv, 1),
-            'n_edge': int(len(pin)), 'paper_lum': round(paper, 1)}, None
+
+    def trace(seed_xy, local_fill):
+        """One seeded trace: cast, fit, re-cast from the fitted centre,
+        fit again, then the gates. -> (result or None, refusal or
+        None)."""
+        pts = cast(*seed_xy)
+        if len(pts) < 40:
+            return None, (f"only {len(pts)} of 360 radial rays found a "
+                          f"clean dark→light ink step (need 40) — the disc "
+                          f"edge is too faint, or the electrodes cover too "
+                          f"much of it")
+        cx1, cy1, _r1, _k1 = _fit_circle(pts)
+        if not (0 <= cx1 <= ws and 0 <= cy1 <= hs):
+            return None, ("the first circle fit put the centre outside the "
+                          "search window — the edge points are not a "
+                          "disc")
+        pts = cast(cx1, cy1)            # re-cast from the fitted centre
+        if len(pts) < 40:
+            return None, (f"only {len(pts)} of 360 rays found a clean ink "
+                          f"step on the re-cast from the fitted centre "
+                          f"(need 40)")
+        cx, cy, r, keep = _fit_circle(pts)
+        pin = pts[keep]
+        if len(pin) < 40 or not (0 <= cx <= ws and 0 <= cy <= hs):
+            return None, (f"{len(pin)} edge points survived the robust "
+                          f"fit's outlier trim (need 40), or its centre fell "
+                          f"outside the search window")
+        resid = float(np.median(np.abs(
+            np.hypot(pin[:, 0] - cx, pin[:, 1] - cy) - r)))
+        ang = np.degrees(np.arctan2(pin[:, 1] - cy, pin[:, 0] - cx)) % 360.0
+        cov = len(np.unique((ang // 10).astype(int))) / 36.0
+        d2c = (xx - cx) ** 2 + (yy - cy) ** 2
+        inside = (d2c <= (0.9 * r) ** 2) & free
+        if int(inside.sum()) < 200:
+            return None, (f"only {int(inside.sum())} px inside the fitted "
+                          f"circle are free of foil and glint (need 200), "
+                          f"so the fill test could not be applied")
+        level = paper
+        if local_fill:
+            # the surround the disc must be darker than: the ring just
+            # outside it, clear of the ramp (which ends near 1.1 r) and
+            # of foil and glint; a median, because the strips' dark
+            # interiors cross it
+            ring = (d2c >= (1.15 * r) ** 2) & (d2c <= (1.5 * r) ** 2) & free
+            if int(ring.sum()) < 200:
+                return None, (f"only {int(ring.sum())} px of the ring "
+                              f"around the fitted circle are free of foil "
+                              f"and glint (need 200), so its surround "
+                              f"level could not be measured")
+            level = float(np.median(sm[ring]))
+        fill = float(((sm < level - 4) & inside).sum()) / float(inside.sum())
+        # The four documented gates, named individually: 'refused' sends
+        # the operator to guess, while 'the arc is only 22% covered' sends
+        # them to look at what is lying across the frame (`#215` verify
+        # mode, 2026-08-06).
+        #
+        # Coverage counts occupied 10-degree sectors, so cov >= 0.34 takes
+        # 13 of 36 sectors: 130 deg. The sentence used to say 120, which
+        # read 'covers only 120 deg (needs >= 120 deg)' on a 12-sector
+        # refusal (SLDEA_20260806_151857, 2026-10-05). The gate is
+        # unchanged; only the number it states is now the one it applies.
+        if cov < 0.34:
+            need = 10 * int(math.ceil(0.34 * 36))
+            return None, (f"the accepted edge covers only {360 * cov:.0f}° "
+                          f"of arc (needs ≥ {need}°) — something is lying "
+                          f"across the disc, or most of its boundary has no "
+                          f"ink step")
+        if resid > 0.06 * r:
+            return None, (f"the fit residual is {resid * 100.0 / r:.1f}% of "
+                          f"the radius (limit 6%) — the surviving edge "
+                          f"points are not on one circle")
+        if fill < 0.55:
+            what = ('reads darker than the ring around it' if local_fill
+                    else 'reads as the dark class')
+            return None, (f"only {100 * fill:.0f}% of the fitted circle's "
+                          f"interior {what} (needs ≥ 55%) — the circle is "
+                          f"not sitting on the disc")
+        if not 0.06 * dmin <= 2 * r <= 0.85 * dmin:
+            return None, (f"the fitted diameter {2 * r / f:.0f} px is "
+                          f"outside the plausible range "
+                          f"{0.06 * dmin / f:.0f}–{0.85 * dmin / f:.0f} px "
+                          f"for this search window — check the camera zoom "
+                          f"and roi_frac")
+        try:
+            ell = cv2.fitEllipse(pin.astype(np.float32))
+            circ = round(min(ell[1]) / max(max(ell[1]), 1e-6), 3)
+        except cv2.error:
+            circ = 0.0
+        # The one gate the old code lacked: a resting disc is ROUND. The
+        # blob it used to return read circ 0.32; a shadow rectangle's
+        # trimmed fit still only reaches ~0.7. The P3 discs measure
+        # 0.966-0.999.
+        if circ < 0.85:
+            return None, (f"the fitted shape's circularity is {circ:.2f} "
+                          f"(needs ≥ 0.85) — a resting disc is round, and "
+                          f"this is not; the P3 discs measure "
+                          f"0.966–0.999")
+        conf = min(0.99, 0.4 * fill + 0.35 * cov
+                   + 0.25 * (1.0 - min(1.0, resid / (0.06 * r))))
+        inv = 1.0 / f
+        ccx = (cx + x0) * inv
+        ccy = (cy + y0) * inv
+        rr = r * inv
+        th2 = np.linspace(0, 2 * np.pi, 90, endpoint=False)
+        contour = np.stack([ccx + rr * np.cos(th2),
+                            ccy + rr * np.sin(th2)], axis=1)
+        # paper_lum is the level the fill was judged against, so the
+        # calibration display stretches between the disc and the surround
+        # this fit actually used
+        return {'method': 'baseline-disc', 'area_px': float(np.pi * rr * rr),
+                'diam_px': float(2 * rr), 'cx': ccx, 'cy': ccy,
+                'circ': circ, 'solidity': round(fill, 3),
+                'contour': contour, 'conf': round(conf, 3), 'wrinkle': None,
+                'spread_pct': 0.0, 'arc_cov': round(cov, 2),
+                'fit_resid_px': round(resid * inv, 1),
+                'n_edge': int(len(pin)), 'paper_lum': round(level, 1),
+                'seed': (DISC_SEED_CENTRE if local_fill
+                         else DISC_SEED_DARK)}, None
+
+    if seed is not None:
+        ref, why = trace(seed, False)
+        if ref is not None:
+            return ref, None
+    else:
+        why = (f"no central dark region big enough to seed on (the paper "
+               f"reads {paper:.0f} gray and nothing below it covers 0.2% of "
+               f"the search window)")
+    ref, _why2 = trace((ws / 2.0, hs / 2.0), True)
+    if ref is not None:
+        return ref, None
+    # A refusal always says the FIRST trace's reason. The retry starts at
+    # a fixed point whatever the frame holds, so its refusal describes
+    # that point, not the picture: on a blank frame or a bare step edge it
+    # reads 'covers only 40 deg of arc', where the first trace's 'nothing
+    # dark enough to seed on' is the sentence that sends the operator to
+    # the exposure.
+    return None, why
 
 
 # ---------------------------------------------------------------------------

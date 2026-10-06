@@ -85,6 +85,9 @@ unticked on important runs until it has.
   175 percent display with a scaling workaround that left the Arb Editor and
   the dialogs cramped and several callouts off target. The capture now pins
   Tk to 96 dpi; both manuals are regenerated.
+- The manual's SLDEA chapter shows the tab in two annotated screenshots:
+  the new video row made it taller than one, and the run buttons had fallen
+  off the first.
 - The Arb Editor's "Upload && Select" button now reads "Upload & Select".
 - The plot's byte-identity test was failing on every machine since the
   provenance columns were added to the tidy CSV; it now drops them by name

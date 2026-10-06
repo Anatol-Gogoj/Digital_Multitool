@@ -199,6 +199,48 @@ def staging_root():
                         'sldea_video')
 
 
+# FFmpeg READS PAST THE END OF A GRAY FRAME (measured 2026-10-06 on
+# Windows OpenCV 4.13, whose bundled FFmpeg is 4.4). FFmpeg 4.x treats
+# 8-bit gray as "pseudo-paletted". OpenCV hands it the frame in place,
+# and FFmpeg's copy of that frame then reads a 1024 B palette that starts
+# at the byte after the last pixel. When unmapped memory begins inside
+# those 1024 B, write() throws "Unknown C++ exception". That is the
+# 1632 x 918 failure, where the allocator ends the frame at the same place
+# in every process, and the test suite's flake (64 x 48 and 320 x 240
+# frames, one process in five). OpenCV's own guard looks only 32 B past
+# the end, and the copy it makes when that guard trips keeps only 32 B
+# spare. ffmpeg_safe lays every frame out so that the read lands inside a
+# buffer this module owns. FFmpeg 5.0 dropped the pseudo-palette. Which
+# FFmpeg the bench's Linux wheel bundles has not been checked (#369).
+FFMPEG_OVERREAD = 1024
+_PAGE = 4096
+
+
+def ffmpeg_safe(gray, buf=None):
+    """-> (`gray` copied into `buf` where FFmpeg cannot read past it, the
+    buffer). Pass the buffer back in for the next frame.
+
+    The copy's row stride is a multiple of 32, and its last row ends in
+    the middle of a 4 KB page, so OpenCV hands it to FFmpeg in place
+    without its own copy, because its 32 B guard is satisfied. The buffer
+    runs on for more than a page past that end, so FFmpeg's
+    FFMPEG_OVERREAD bytes stay inside it. The pixels are unchanged, and
+    the decode is still bit-exact. Anything but a 2-D uint8 frame is
+    returned as it came: copyto would silently narrow a 16-bit one."""
+    import numpy as np
+    if gray.ndim != 2 or gray.dtype != np.uint8:
+        return gray, buf
+    h, w = gray.shape
+    step = (w + 31) & ~31
+    need = step * h + 3 * _PAGE
+    if buf is None or buf.size < need:
+        buf = np.empty(need, np.uint8)
+    off = (_PAGE // 2 - (buf.ctypes.data + step * h)) % _PAGE
+    view = buf[off:off + step * h].reshape(h, step)[:, :w]
+    np.copyto(view, gray)
+    return view, buf
+
+
 def _gray(frame):
     """The recorded picture of a stream frame: 8-bit gray, as the reader
     queues it for the encoder."""
@@ -221,7 +263,8 @@ def codec_available(tmpdir=None, frame=None):
     because the size matters. Measured 2026-10-06 on Windows OpenCV 4.13:
     OpenCV silently crops an odd width or height to even, so 1081 x 1080
     reads back as 1080 x 1080, and at some even sizes (1632 x 918) the
-    first write throws "Unknown C++ exception"."""
+    first write threw "Unknown C++ exception" until frames went through
+    ffmpeg_safe. The probe writes through it too, as the recorder does."""
     import tempfile
     try:
         import cv2
@@ -249,9 +292,11 @@ def codec_available(tmpdir=None, frame=None):
         if not w.isOpened():
             return False, (f"this OpenCV build has no {VIDEO_FOURCC} "
                            f"encoder for {size}")
+        buf = None
         try:
             for f in frames:
-                w.write(f)
+                safe, buf = ffmpeg_safe(f, buf)
+                w.write(safe)
         finally:
             w.release()
         cap = cv2.VideoCapture(path)
@@ -298,7 +343,7 @@ def codec_stop_words(why, dry):
              "The signal generator output was never switched on by this "
              "run.")
     return {
-        'stopped': (f"⛔ run stopped before any HV: the video cannot be "
+        'stopped': (f"run stopped before any HV: the video cannot be "
                     f"recorded at the camera's frame size ({why}). {drive}"),
         'status': ("STOPPED before HV: the video cannot be recorded at "
                    "this frame size (see Run log)"),
@@ -718,6 +763,7 @@ class VideoRecorder:
     def _writer(self):
         import cv2
         vw, fh, w = None, None, None
+        buf = None                           # ffmpeg_safe's, reused per frame
         try:
             while True:
                 try:
@@ -762,7 +808,8 @@ class VideoRecorder:
                 if gray.shape[:2] != (self.size[1], self.size[0]):
                     self._count('dropped')   # a size change cannot encode
                     continue
-                vw.write(gray)
+                safe, buf = ffmpeg_safe(gray, buf)
+                vw.write(safe)
                 kv = ''
                 if self._kv_at is not None:
                     try:
@@ -1679,9 +1726,32 @@ def finalize_and_detect(staging, rundir, detect=False):
     return 0 if moved.get(VIDEO_FILENAME) else 1
 
 
+def _ffmpeg_version():
+    """'OpenCV x, avcodec y' for the record: FFmpeg 4.x reads past a gray
+    frame (see FFMPEG_OVERREAD), 5.0 and later do not. '' when unknown."""
+    try:
+        import cv2
+        avc = re.search(r'avcodec:\s*YES\s*\(([^)]*)\)',
+                        cv2.getBuildInformation())
+        return (f"OpenCV {cv2.__version__}, avcodec "
+                f"{avc.group(1) if avc else 'not found'}")
+    except Exception:
+        return ''
+
+
 def _selftest():
+    """The encoder at all (64 x 48), then at the camera's 1920 x 1080, as
+    a run's check_codec would see it (BENCH_TEST Q1)."""
+    print(_ffmpeg_version())
     ok, why = codec_available()
     print(f"{VIDEO_FOURCC} lossless round trip: "
+          + ("OK" if ok else f"FAILED -- {why}"))
+    if not ok:
+        return 1
+    import numpy as np                  # importable: the probe just used it
+    ok, why = codec_available(frame=np.random.default_rng(1).integers(
+        0, 256, (1080, 1920), dtype=np.uint8))
+    print(f"{VIDEO_FOURCC} lossless round trip at 1920 x 1080: "
           + ("OK" if ok else f"FAILED -- {why}"))
     return 0 if ok else 1
 

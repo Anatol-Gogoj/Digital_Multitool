@@ -20,11 +20,16 @@ What these pin down:
   * detect_video runs the stills' own detector on every frame, from the
     run folder or from the staging copy; the detached --finalize job
     detects first and moves second;
+  * the codec is checked at the stream's OWN size, with its own frame,
+    and frames reach FFmpeg laid out so that its read past the last pixel
+    stays in memory the recorder owns (2026-10-06: the cause of this
+    suite's one-process-in-five FFV1 failure on Windows);
   * the REAL run worker: stills come off the stream (no one-shot grab),
     setup.txt says what happened, a dead stream falls back to one-shot
     stills, the SG is zeroed BEFORE the recorder is stopped, the tab is
-    released even when the video shutdown throws, and an abort during
-    the camera startup never switches the SG output on.
+    released even when the video shutdown throws, an abort during the
+    camera startup never switches the SG output on, and neither does a
+    stream size the codec cannot record.
 
 Run: .venv/bin/python tests/test_sldea_video.py
 """
@@ -204,6 +209,141 @@ def test_a_writer_that_throws_fails_the_probe_and_names_the_size():
         cv2.VideoWriter = real
     assert ok is False and released == [True], (ok, released)
     assert '1632 x 918' in why and 'Unknown C++ exception' in why, why
+
+
+def test_ffmpeg_safe_keeps_the_pixels_and_room_past_the_last_one():
+    """The layout ffmpeg_safe promises: the same pixels; a row stride that
+    is a multiple of 32 and a last row ending mid-page, so OpenCV passes
+    the frame in place (its own copy keeps only 32 B spare); and more
+    than FFMPEG_OVERREAD bytes of the buffer past that end. The buffer is
+    reused for the next frame of the same size."""
+    import numpy as np
+    rng = np.random.default_rng(9)
+    for h, w in ((48, 64), (96, 128), (240, 320), (918, 1632),
+                 (1080, 1920), (96, 129), (1080, 1081)):
+        gray = rng.integers(0, 256, (h, w), dtype=np.uint8)
+        view, buf = sv.ffmpeg_safe(gray)
+        assert np.array_equal(view, gray), (h, w)
+        step = view.strides[0]
+        assert view.strides[1] == 1 and step % 32 == 0 and step >= w, \
+            (h, w, view.strides)
+        end = view.ctypes.data + step * h
+        assert end % sv._PAGE == sv._PAGE // 2, (h, w, end % sv._PAGE)
+        room = buf.ctypes.data + buf.size - end
+        assert room > sv.FFMPEG_OVERREAD, (h, w, room)
+        again, buf2 = sv.ffmpeg_safe(gray[::-1].copy(), buf)
+        assert buf2 is buf and np.array_equal(again, gray[::-1])
+    # not an 8-bit gray frame: handed back untouched, never narrowed
+    deep = np.full((4, 64), 1000, np.uint16)
+    same, nobuf = sv.ffmpeg_safe(deep)
+    assert same is deep and nobuf is None
+
+
+# Run in a child process, so the deliberate fault cannot touch the suite:
+# on Windows it is a C++ exception, on Linux a SIGSEGV that kills the
+# process. The child maps memory with an inaccessible page right after
+# it and writes one 1920 x 1080 frame. 'raw' is a contiguous frame ending
+# 100 B before that page, as a cv2-allocated frame sits when it fails.
+# 'safe' is the same picture through ffmpeg_safe, whose buffer is handed
+# in ending exactly at that page.
+_GUARD_CHILD = r'''
+import ctypes, json, os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+mode = sys.argv[2]
+import numpy as np, cv2
+import sldea_video as sv
+PAGE = 4096
+
+def guarded(nbytes):
+    pages = (nbytes + PAGE - 1) // PAGE
+    total = (pages + 1) * PAGE
+    if os.name == 'nt':
+        k32 = ctypes.windll.kernel32
+        k32.VirtualAlloc.restype = ctypes.c_void_p
+        k32.VirtualAlloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                                     ctypes.c_uint32, ctypes.c_uint32]
+        k32.VirtualProtect.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                                       ctypes.c_uint32,
+                                       ctypes.POINTER(ctypes.c_uint32)]
+        base = k32.VirtualAlloc(None, total, 0x3000, 0x04)
+        old = ctypes.c_uint32()
+        assert k32.VirtualProtect(base + pages * PAGE, PAGE, 0x01,
+                                  ctypes.byref(old))
+        keep = None
+    else:
+        import mmap
+        keep = mmap.mmap(-1, total)
+        base = ctypes.addressof(ctypes.c_char.from_buffer(keep))
+        libc = ctypes.CDLL(None)
+        libc.mprotect.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                                  ctypes.c_int]
+        assert libc.mprotect(base + pages * PAGE, PAGE, 0) == 0
+    start = base + pages * PAGE - nbytes
+    arr = np.frombuffer((ctypes.c_uint8 * nbytes).from_address(start),
+                        np.uint8)
+    return arr, keep
+
+def write_one(img, want, d, name):
+    path = os.path.join(d, name)
+    h, w = want.shape
+    vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*sv.VIDEO_FOURCC),
+                         1.0, (w, h), isColor=False)
+    try:
+        vw.write(img)
+        out = 'ok'
+    except Exception as e:
+        out = 'threw: %s' % e
+    vw.release()
+    cap = cv2.VideoCapture(path)
+    ok, g = cap.read()
+    cap.release()
+    exact = bool(ok) and np.array_equal(g[:, :, 0] if g.ndim == 3 else g,
+                                        want)
+    return out, exact
+
+h, w = 1080, 1920
+gray = np.random.default_rng(4).integers(0, 256, (h, w), dtype=np.uint8)
+with tempfile.TemporaryDirectory() as d:
+    if mode == 'raw':
+        img, keep = guarded(h * w + 100)
+        img = img[:h * w].reshape(h, w)
+        img[:] = gray
+    else:
+        buf, keep = guarded(((w + 31) & ~31) * h + 3 * PAGE)
+        img, _ = sv.ffmpeg_safe(gray, buf)
+    print(json.dumps(write_one(img, gray, d, mode + '.mkv')))
+'''
+
+
+def _guard_child(mode):
+    """-> (returncode, [write outcome, decoded bit-exactly] or None when
+    the child died before it could say, its stderr)."""
+    import json
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    p = subprocess.run([_sys.executable, '-c', _GUARD_CHILD, root, mode],
+                       capture_output=True, text=True, timeout=120)
+    out = p.stdout.strip().splitlines()
+    return p.returncode, (json.loads(out[-1]) if out else None), p.stderr
+
+
+def test_a_frame_through_ffmpeg_safe_survives_where_a_raw_one_faults():
+    """The fix measured, in a child process each: with unmapped memory
+    right behind the buffer, the raw frame faults on this OpenCV/FFmpeg
+    (an exception on Windows, a crash on Linux), and the ffmpeg_safe one
+    writes and decodes bit-exactly. An FFmpeg that does not read past the
+    frame (5.0 and later) passes both, and the test says it showed
+    nothing."""
+    _need_cv()
+    rc, res, err = _guard_child('safe')
+    assert rc == 0 and res == ['ok', True], (rc, res, err[-800:])
+    rc, res, err = _guard_child('raw')
+    if rc == 0 and res and res[0] == 'ok':
+        print("  note: this FFmpeg did not read past a raw frame; the "
+              "test could not tell the layouts apart here")
+    else:
+        assert rc != 0 or (res and 'Unknown C++ exception' in res[0]), \
+            (rc, res, err[-800:])
 
 
 # ---------------------------------------------------------------- recorder
@@ -622,16 +762,19 @@ def _write_video(folder, n, rng):
               newline='') as f:
         w = csv.writer(f)
         w.writerow(sv.INDEX_COLUMNS)
+        buf = None
         try:
             for i in range(n):
-                vw.write(_scene(30 + 6 * i, rng))
+                # through ffmpeg_safe, as the recorder writes: a raw
+                # 320 x 240 frame is in place for FFmpeg's read past its
+                # end, which threw in about one process in five here
+                # (Windows, OpenCV 4.13, measured 2026-10-06)
+                safe, buf = sv.ffmpeg_safe(_scene(30 + 6 * i, rng), buf)
+                vw.write(safe)
                 w.writerow([i, 2.0 + i, 0.5 * i, '', i + 1])
         except cv2.error as e:
-            # The same failure _need_cv's probe catches, arriving one write
-            # later: on Gogojster (Windows, OpenCV 4.13) about one process
-            # in five sees the FFV1 writer throw, and every write after it
-            # in that process too (2026-10-06). Not this suite's code:
-            # reported as could-not-run, never as a pass or a failure.
+            # still reported as could-not-run, never as a pass or a
+            # failure, should an OpenCV fail here for another reason
             vw.release()
             raise _Skip(f"this OpenCV's {sv.VIDEO_FOURCC} writer failed "
                         f"mid-file: {e}")

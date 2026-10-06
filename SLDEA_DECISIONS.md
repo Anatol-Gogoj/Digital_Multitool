@@ -92,13 +92,204 @@ re-run above the new strip, matches the new PNG byte for byte, and the old
 caption equals the new one's text before wrapping. So the words did not
 change, only where the rows break and how much room they get.
 
-**Not changed.** The caption's wording. `CAPTION_LINE_MAX` still cuts the
-grouped lines built from operator text at 248 characters; the wrap keeps
-what survives the cut inside the frame. The `#373` branch replaces that
-cut with the same `_wrap`. When the two meet: keep one `_wrap` (the code is
-identical), keep 0.88, and fold `_place_group_caption` into
-`_place_caption`, because on that branch a grouped figure's first caption
-lines are still not wrapped.
+**Not changed.** The caption's wording.
+
+**Merged with `#373`'s grouping (#382), 2026-10-06.** That branch wrapped
+the grouped lines with the same `_wrap` instead of cutting them at
+`CAPTION_LINE_MAX`. The merge keeps one `_wrap` (the code was identical),
+keeps 0.88, and folds `_place_group_caption` into `_place_caption`: a
+grouped caption is held as a function of the width test, composes itself
+for the width it finds, and always measures its strip. So a grouped
+figure's first caption lines, which that branch left unwrapped, now wrap
+too. `CAPTION_LINE_MAX` now cuts only a grouped line composed without a
+width test.
+
+## Group by material: setup.txt seeds the plot groups, and a group mean's line style is its electrode material (2026-10-06)
+
+**TL;DR:** the plot window can now fill its groups from each selected
+run's `Compliant electrode:` line in one click, and split them further by
+`Ink concentration:` with a second, indented button. Each group mean draws
+in its material's line style, so the subgroups of one material share a
+dash pattern and differ by color. The group palette grows from four Tol
+colors to seven, and no two means on a figure ever share both color and
+style. Figures with no recorded materials and four groups or fewer keep
+the colors and styles they had (`#373`).
+
+**Observation.**
+
+- With the aggregate on, the window drew one mean over every selected run
+  unless the operator typed each group by hand (`#313`). Comparing P3
+  against Invisicon 3900 against Invisicon 3500 took one Assign per
+  material.
+- `Electrode family:` cannot be the key: `electrode_family()` puts
+  P3-SWNT and both Invisicon inks in `cnt`, which is the one series this
+  request asked to split. The material string is the key.
+- `GROUP_COLORS` held four colors and the six-group concentration split
+  (P3 at 2.5, 2.3 and 1.5 mL, Invisicon 3900, Invisicon 3500, carbon
+  black) needs six. Past four, the old rule repeated a color with another
+  line style, which would have put two P3 volumes in one color and given
+  line style no meaning.
+- Two group-caption lines and the Members line ran off the right edge
+  once the group names became whole material names. Rendered at 100 dpi,
+  a 248-character Members line ended at 1.04 of the figure width and lost
+  its pointer to the tidy CSV. Group-caption text runs about 4 % wider
+  per character than the anchor line `CAPTION_LINE_MAX` was measured on.
+  Cutting the lines to fit was tried first and dropped real content: on
+  the six-group concentration split the "AGGREGATE BY GROUP" and
+  "Support" lines ended in "Carbon Solutions P3-S…" and lost the later
+  groups.
+- Hinting makes 7 pt caption text wider on screen than its font metrics,
+  by an amount that depends on the dpi. Measured on the grouped lines at
+  every dpi from 50 to 1200: drawn / measured = 0.987 at 300 dpi, 1.03 at
+  96, 1.07 at 110, and 1.096 at worst (90 dpi).
+
+**Decision** (owner, 2026-10-06, for the scope; the measurements are this
+entry's).
+
+- **The key** is the `Compliant electrode:` value, compared
+  case-insensitively with whitespace collapsed. A group is named by the
+  spelling most of its runs recorded; on a tie the dropdown spelling wins,
+  then the first in sorted order. Free text stays free text. Two spellings
+  of one material (`Invisicon 3900` against `nano-c Invisicon 3900`) stay
+  apart until the operator moves runs between groups.
+- **No material is kept, not dropped.** A run with no such line goes to
+  `(no electrode recorded)`, a recorded `(not specified)` (or a blank
+  value) to `(not specified)`. The two stay separate, per the 2026-08-12
+  comment on `#268`.
+- **The concentration split is a child button, and concentration is not
+  part of the plain material key.** Each material splits by its
+  normalized `Ink concentration:` value (`2.5 mL`, `2.5mL` and `2.50 mL`
+  are one, labeled `<material>, 2.5 mL`). Materials whose line the runner
+  omits by design (`concentration_applies()`: carbon black, eGaIn, the
+  sprayed Invisicon inks) stay one group. An ink run with no line becomes
+  `<material>, (no concentration recorded)`. Runs with no material,
+  `(no electrode recorded)` and `(not specified)`, are never split by
+  concentration, whatever volumes they carry (owner, 2026-10-06; pinned
+  by a test).
+- **A seed, not a mode.** Both buttons act on the selection only and
+  produce ordinary groups. Assign, Ungroup selected and Clear all work on
+  top, and the `#313` rule holds: the operator's grouping wins.
+- **The material is fixed when a group is formed** (a seed, an Assign
+  that creates the group, or a `--group` on the command line) and stored
+  as `group_materials` in the options and the figspec. Nothing reads
+  setup.txt at draw time, so `--from-spec` reproduces a figure byte for
+  byte even after a run's setup.txt is edited (tested). Runs moved into an
+  existing group take that group's material. That is what lets a move
+  merge two spellings into one series (`#374`) instead of turning the
+  group "mixed".
+- **Line styles.** Every group whose runs share one material draws that
+  material's style: solid, dashed, dash-dot, dotted, dash-dot-dot, then a
+  long dash (`GROUP_STYLES`). A group with no single material takes a
+  style no other group has. Colors go one per group in drawing order. A
+  repeated color is moved to the next color still free on that style, so
+  no two groups share both color and style. Each case past the palette
+  prints a console note. With no materials, groups get styles in order,
+  so four groups or fewer draw exactly the `#313` figure.
+- **Palette.** `GROUP_COLORS` keeps the four Tol high-contrast colors in
+  place and adds `#6699CC` (Tol medium-contrast), `#117733` and `#882255`
+  (Tol muted). They were the best extension a search found over Tol's
+  other qualitative schemes. No candidate was a `TOL_BRIGHT` run color,
+  and each had at least 3:1 contrast on white (WCAG 2.1 SC 1.4.11). Worst
+  pairwise CIEDE2000 over normal and Machado-2009 deutan / protan /
+  tritan, measured with the repo's simulator (linear RGB,
+  `tests/test_sldea_preview.py`), over the first N colors:
+
+  | N | floor | worst pair |
+  |---|---|---|
+  | 2 | 31.54 | `#000000` / `#BB5566`, protan |
+  | 3 | 26.02 | `#BB5566` / `#004488`, protan |
+  | 4 | 21.22 | `#BB5566` / `#DDAA33`, tritan |
+  | 5 | 21.22 | (unchanged) |
+  | 6 | 11.61 | `#BB5566` / `#117733`, deutan |
+  | 7 | 11.36 | `#004488` / `#882255`, protan |
+
+  For comparison, `TOL_BRIGHT`'s own worst pair over its seven colors is
+  8.62 by the same method. On a seeded figure the pairs near 11 are also
+  two different dash patterns. The group-to-run separation stays a shape
+  argument, as `#313` decided.
+- **Legend.** On a grouped figure the handles are 5.5 em (44 pt) long and
+  drawn at the mean's 2.2 pt width. The longest pattern period is 29.0 pt
+  (dash-dot-dot), and a 16 pt default handle could not tell dash-dot from
+  dash-dot-dot. An ungrouped figure keeps the default layout.
+- **The band edge carries no dash.** The SEM band stays a borderless fill.
+  The band rule is unchanged: SEM at n ≥ 2; at n = 1, no band and a
+  caption. A dashed edge would add two thin patterned curves per group
+  (twelve on the six-group figure), and an edge at band width reads as a
+  run curve.
+- **Captions are wrapped, never cut** (owner, 2026-10-06). The grouped
+  caption gains one line saying what line style means whenever a drawn
+  group carries a material. Every grouped line is wrapped at its measured
+  width and keeps every word: rows end by `CAPTION_FIT_FRAC` = 0.90 of
+  the figure by font metrics, so the worst measured dpi still ends by
+  0.99, and continuation rows are indented. (0.88 since the caption-wrap
+  entry above, which found a row fitted to 0.90 ending at 1.002 of the
+  width at 88 dpi.) The caption strip grows to
+  hold the rows, measured rather than capped at the old 0.30, so no row
+  sits under the axes. The six-group campaign figure (twelve runs) wraps
+  to 11 caption rows and takes 0.30 of the height; longer names or more
+  groups now grow the strip instead of running under the axes. A resize
+  in the window re-wraps and re-measures it (`relayout`). Members
+  is the one line that may stop short: past three rows it ends with "…
+  (full membership in the tidy CSV's group column)", and otherwise it
+  ends by pointing at the same column. Tested at 90, 96, 110, 150 and
+  300 dpi: no grouped text lost, nothing past the right edge, nothing
+  over an axes. Ungrouped figures are untouched. `GROUP_NAME_MAX` goes
+  from 40 to 64, because
+  `Carbon Solutions P3-SWNT, (no concentration recorded)` is 55
+  characters.
+- **The CVD standard is linear RGB** (owner, 2026-10-06, on this source).
+  The Machado matrices are applied to linear RGB, after decoding sRGB:
+  - The model is built that way. Machado, Oliveira & Fernandes, "A
+    Physiologically-based Model for Simulation of Color Vision
+    Deficiency", IEEE TVCG 15(6):1291-1298, 2009, sec. 4.1, Eq. 8,
+    obtains the RGB-to-opponent matrix by "projecting the spectral power
+    distributions" of the RGB primaries onto the opponent-channel basis
+    functions. That is linear in light. The paper does not name an
+    encoding in words.
+  - The reference implementations do it. colorspacious,
+    `colorspacious/conversion.py`: `_CVD_forward` is registered on the
+    edge `"sRGB1-linear+CVD"` ↔ `"sRGB1-linear"`, reached from
+    `"sRGB1+CVD"` through `sRGB1_to_sRGB1_linear`. DaltonLens-Python,
+    `daltonlens/simulate.py`: `Simulator.simulate_cvd` calls
+    `convert.linearRGB_from_sRGB` before
+    `Simulator_Machado2009._simulate_cvd_linear_rgb`.
+  - The DaltonLens review (daltonlens.org, "Review of Open Source Color
+    Blindness Simulations") notes the authors' own code may not have
+    decoded sRGB when they tuned the model. That is about their
+    implementation, not the model, and changes nothing here.
+
+  `tests/test_sldea_preview.py` already measures this way. The `#313`
+  palette table (29.23 / 22.05 / 18.70, and `TOL_BRIGHT`'s adjacent-pair
+  floor of 18.00) was measured in gamma-encoded sRGB, which reproduces it
+  to the last digit. The two disagree by up to about 19 % on one pair
+  (26.02 linear against 22.05 gamma for `#BB5566` / `#004488`). By the
+  linear standard `TOL_BRIGHT`'s adjacent-pair floor is 15.35. So
+  `test_sldea_preview.py`'s asserted floor of 18 is stricter than its
+  stated rationale. The threshold is kept, and only its docstring's
+  citation is corrected.
+
+**Found while measuring, not changed.** The first line of the ungrouped
+caption ("Points = per-level pre/post snapshot pair…") runs off the right
+edge on origin/main exactly as on this branch, measured on the same
+runs. The 280-character default line ends at 1.12 to 1.24 of the figure
+width (300 to 90 dpi). The 248-character line under the aggregate ends
+at 0.98 to 1.09, inside only at 300 dpi. This is the defect the `#313`
+entry recorded, now measured across dpi. It is left alone, because
+ungrouped figures are out of scope here and a byte-identity test guards
+them. (Fixed by the caption-wrap entry above, #380.)
+`sldea_preview.py`'s module docstring said `sldea_plot.py` measures
+`TOL_BRIGHT`'s adjacent-pair floor "the same way at 18.0", which is
+false under the linear standard. #381 corrected it.
+
+**Not verified.** Whether the NanoC (Invisicon) runs carry
+`Compliant electrode:`. Checked read-only on 2026-10-06 from the analysis
+PC, `Z:\robot_incubator\SLDEA_data` holds 21 run folders. None is an
+Invisicon run. Only `13_backlight`, `13_backlight_2` (P3-SWNT, 0.5 mL) and
+`SLDEA_20261001_151016` (`Meijo 1`) carry the line. That copy is **not**
+the 2026-08-12 backfilled corpus: `P3_2_2.5mL_20260728` has no electrode
+line and no `.bak-20260812-pre-electrode-backfill` sidecar. The seed was
+exercised on synthetic runs and on scratch copies only. A bench check on
+the real corpus is owed.
 
 ## The video is reviewed by exception: Save re-runs stale video edges, the accepted stills flag the frames, and a window walks them (2026-10-06)
 

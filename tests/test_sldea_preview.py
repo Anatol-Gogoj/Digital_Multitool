@@ -7,10 +7,13 @@ What these pin down (2026-09-23):
   * the markers differ in shape, so colour is never the only cue;
   * every colour is from Paul Tol's schemes, and the pairs that share the
     staircase stay apart under simulated colour blindness: worst-case
-    CIEDE2000 over Machado-2009 deutan/protan/tritan >= 18, the floor
-    sldea_plot.py measures TOL_BRIGHT's own adjacent pairs at. The old
-    green/red pair is held to the same bar and must FAIL it, so the check
-    is one that can fail;
+    CIEDE2000 over Machado-2009 deutan/protan/tritan >= 18. (18.00 is
+    TOL_BRIGHT's adjacent-pair floor as the `#313` script measured it,
+    with the matrices applied to gamma-encoded sRGB. This file applies
+    them in LINEAR RGB, the standard since 2026-10-06 (sourced in
+    SLDEA_DECISIONS.md), where that same floor is 15.35, so 18 is the
+    stricter of the two bars.) The old green/red pair is held to the same
+    bar and must FAIL it, so the check is one that can fail;
   * marker size follows the room between landings, within its limits;
   * the hover text names each snapshot in the tab's own words;
   * on the real tab: the two timing fields sit together under their tags'

@@ -5508,6 +5508,120 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_re_anchor_setup_txt_refused_stays_on_the_status_strip():
+    """setup.txt refusing the re-anchor record must still be on the strip
+    when _reanchor_scale returns (2026-10-06). The failure used to be
+    written to the strip and then overwritten by the RE-ANCHORED line, so
+    the operator never learned that data.csv had just been re-derived at
+    the new scale while setup.txt kept the old anchor and no `reanchor`
+    marker. Driven through the real _reanchor_scale; only the re-anchor's
+    own write fails, the fixture's Save does not. Then the remedy the
+    strip names: a second re-anchor, once setup.txt is writable, records
+    the anchor as scale-only and says nothing of the failure."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    root = _tk_root_or_skip('re-anchor record failure')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_reanchor_record_fail_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    real_choice = gui.cal_choice
+    se_mod = gui.se
+    real_anchor = se_mod.save_scale_anchor
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        # ---- a SAVED run, on a 150 px anchor the re-anchor corrects ------
+        gui.messagebox = _StubMB(yes=True)
+        app = gui.EdgeReviewApp(root, path=run)
+        app.manual_ref = {'method': se_mod.ANCHOR_METHOD_MANUAL,
+                          'diam_px': 150.0}
+        app.detect_all_sync()
+        app.save()
+        assert app.status.cget('text').startswith('saved in '), \
+            app.status.cget('text')
+        prev = se_mod.load_scale_anchor(run)
+        assert prev and float(prev['diam_px']) == 150.0, prev
+        assert 'reanchor' not in prev, prev
+        app2 = gui.EdgeReviewApp(root, path=run)
+
+        def measure(win):
+            for rb in _widgets_of(win, tk.Radiobutton):
+                if rb.cget('value') == CIRCLE:
+                    rb.invoke()
+            for _ in range(8):
+                if not win.winfo_exists():
+                    return
+                _hand_fit(app2)
+                _cal_step_button(win).invoke()
+
+        def reanchor():
+            # the route the scale button takes on this run
+            assert (app2._scale_intent()['intent']
+                    == gui.SCALE_INTENT_REANCHOR), app2._scale_intent()
+            # the SE gate: No = accept as measured (158/160/162 px on the
+            # 160 px fit, so the cross-check asks nothing). Then the
+            # three-way question: Yes = write data.csv now.
+            spy = _ModalSpy(real_mb, app2, answers=[False, True])
+            gui.messagebox = gui.cal_choice = spy
+            _fixed_spawn(gui, [(160.0, 120.0, 79.0), (160.0, 120.0, 80.0),
+                               (160.0, 120.0, 81.0)])
+            app2.root.wait_window = measure
+            app2._reanchor_scale()
+            assert [t for t, _kw in spy.asked] == \
+                ['Rounds disagree', 'Re-anchor scale — SCALE ONLY'], \
+                spy.asked
+            return app2.status.cget('text')
+
+        def no_space(*_a, **_k):
+            raise OSError(28, 'No space left on device')
+
+        # ---- data.csv commits, then setup.txt refuses the record ---------
+        se_mod.save_scale_anchor = no_space
+        try:
+            stat = reanchor()
+        finally:
+            se_mod.save_scale_anchor = real_anchor
+        assert app2.manual_ref['diam_px'] == 160.0, app2.manual_ref
+        assert stat.startswith('RE-ANCHORED (scale only, no re-review) — ⚠ '
+                               'new anchor NOT recorded in setup.txt, 📏 '
+                               're-anchor again once the folder is '
+                               'writable ('), stat
+        assert 'No space left on device' in stat, stat
+        # ahead of the numbers, because a narrow window cuts the tail
+        assert stat.index('NOT recorded') < stat.index('160.0 px'), stat
+        # and the caveat is still said, at the end as before
+        cav = gui.anchor_caveat(app2.manual_ref)
+        assert cav and stat.endswith('. ' + cav), (cav, stat)
+        # THE MISMATCH IT WARNS OF: data.csv holds the new scale ...
+        k2 = (app2.settings['diam_mm'] / 160.0) ** 2
+        with open(os.path.join(run, 'data.csv'), newline='') as f:
+            got = [(float(r['active_area_px']), float(r['active_area_mm2']))
+                   for r in csv.DictReader(f)
+                   if r['active_area_px'].strip()]
+        assert got, "the fixture Save measured no px"
+        for px, mm2 in got:
+            assert abs(mm2 / (px * k2) - 1.0) < 1e-3, (px, mm2, k2)
+        # ... while setup.txt still holds the old anchor, no marker
+        assert se_mod.load_scale_anchor(run) == prev
+        # ---- THE REMEDY: re-anchor again, the folder writable ------------
+        stat = reanchor()
+        assert stat.startswith('RE-ANCHORED (scale only, no re-review): '), \
+            stat
+        assert 'NOT recorded' not in stat, stat
+        back = se_mod.load_scale_anchor(run)
+        assert back['reanchor'] == se_mod.REANCHOR_SCALE_ONLY, back
+        assert float(back['diam_px']) == 160.0, back
+        # it names the anchor the run was reviewed at, read from the block
+        # the failed write left alone
+        assert float(back['prev_diam_px']) == 150.0, back
+    finally:
+        se_mod.save_scale_anchor = real_anchor
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        gui.cal_choice = real_choice
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_switching_into_mode_C_gives_it_the_same_room_as_opening_in_it():
     """The canvas height must follow the MODE, not the mode the dialog
     happened to open in -- a canvas sized once and then re-used across a

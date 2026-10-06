@@ -1077,13 +1077,15 @@ def concentration_label(text):
     same field with the unit dropped. Anything else that is not a number
     in mL keeps its recorded text (whitespace collapsed) and compares
     case-insensitively, so free text is never guessed into a number.
-    '(not specified)' sorts after every value, as its own group."""
+    '(not specified)' sorts after every value, as its own group, and a
+    blank value counts as '(not specified)', as a blank electrode does
+    (is_material); labelled '' it named a group '<material>, '."""
     t = ' '.join(str(text or '').split())
     m = _ML_RE.fullmatch(t)
     if m:
         value = float(m.group(1))
         return (0, value, ''), f"{value:g} mL"
-    if material_key(t) == material_key(NOT_SPECIFIED):
+    if not t or material_key(t) == material_key(NOT_SPECIFIED):
         return (2, 0.0, ''), NOT_SPECIFIED
     return (1, 0.0, t.casefold()), t
 
@@ -2382,7 +2384,9 @@ def _wrap(line, fits, indent=CAPTION_WRAP_INDENT):
             if not word:
                 continue
             lead = indent
-        while not fits(lead + word):
+        # a single character that still does not fit is a row of its own:
+        # it cannot be broken, and breaking it again would never end
+        while len(word) > 1 and not fits(lead + word):
             k = len(word) - 1
             while k > 1 and not fits(lead + word[:k]):
                 k -= 1
@@ -4649,9 +4653,18 @@ def main(argv):
             return 2
         if '--group' in vals:
             # `#373`: a group formed on this command line gets its
-            # material now, the way the window's Assign gives one
+            # material now, the way the window's Assign gives one. A
+            # member named by bare folder name is matched against the
+            # run arguments, as the headless path matches it against the
+            # prepared runs, so both give one command one set of styles.
+            named = []
+            for a in run_args:
+                d = se.resolve_run(a)
+                if d:
+                    named.append({'dir': d, 'name': os.path.basename(
+                        os.path.abspath(d))})
             opts = dict(opts, group_materials=derive_group_materials(
-                opts['groups']))
+                opts['groups'], named))
         import sldea_plot_gui
         return sldea_plot_gui.launch(
             run_args, opts=opts, out_dir=vals.get('--out'),

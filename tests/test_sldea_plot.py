@@ -3372,6 +3372,9 @@ def test_concentration_strings_normalize_to_one_key():
     assert ns[1] == sp.NOT_SPECIFIED
     # every value sorts before free text, and free text before a refusal
     assert sp.concentration_label('9 mL')[0] < free[0] < ns[0]
+    # a blank value is a refusal too, never a group named '<material>, '
+    for blank in ('', '   ', None):
+        assert sp.concentration_label(blank) == ns, blank
 
 
 def test_seeding_by_material_keeps_absent_and_not_specified_apart():
@@ -3704,6 +3707,18 @@ def test_wrapping_keeps_every_word_and_breaks_only_a_word_too_wide():
     assert all(fits(r) for r in long), long
     assert ''.join(''.join(long).split()) == 'a' + 'x' * 50 + 'b'
     assert sp._wrap('', fits) == ['']
+    # a row too narrow for one character with its indent: the character
+    # is a row of its own rather than a loop that never ends (it used to
+    # append '' for ever), and nothing is dropped
+    calls = []
+
+    def tight(s):
+        calls.append(s)
+        assert len(calls) < 10000, 'the wrap does not terminate'
+        return len(s) <= 4
+    rows = sp._wrap('aaaa bbbb', tight, indent='    ')
+    assert ''.join(''.join(rows).split()) == 'aaaabbbb', rows
+    assert sp._wrap('W', lambda s: False) == ['W']
     # no width test: the character budget, exactly as before `#373`
     assert sp._fit_or_wrap('x' * 300, None) == sp._fit('x' * 300)
 
@@ -3869,6 +3884,20 @@ def test_command_line_groups_read_their_material_when_formed():
         pairs = sp.assign_group_styles(keys)[0]
         assert pairs[0][1] == pairs[1][1] and pairs[0][0] != pairs[1][0]
         assert pairs[2][1] != pairs[0][1]
+        # the same command with --gui hands the window the same materials:
+        # the bare 'P3_y' is matched against the run arguments there too
+        import sldea_plot_gui
+        seen = {}
+        real = sldea_plot_gui.launch
+        sldea_plot_gui.launch = lambda args, **kw: (
+            seen.update(args=list(args), **kw), 0)[1]
+        try:
+            assert sp.main(['--gui', a, b, c, '--aggregate',
+                            '--group', f"hi={a}", '--group', 'lo=P3_y',
+                            '--group', f"cb={c}"]) == 0
+        finally:
+            sldea_plot_gui.launch = real
+        assert seen['opts']['group_materials'] == mats, seen['opts']
         # a --group over a spec REPLACES the grouping, so its materials
         # are read for the new groups rather than inherited
         o, err = sp._cli_opts(set(), {'--group': [f"all={a},{c}"]},

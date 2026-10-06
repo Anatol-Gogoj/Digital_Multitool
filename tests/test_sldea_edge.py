@@ -996,6 +996,28 @@ def test_baseline_disc_retries_from_the_centre_on_a_backlit_gradient():
             (ref['paper_lum'], float(np.median(img)))
 
 
+def test_the_retry_does_not_flip_on_a_one_level_decode_difference():
+    """2026-10-06: the retry's fill used to count interior pixels 4 gray
+    levels under the ring's median. On 13_backlight_2 the PNG decode read
+    59 % and the video pass's cvtColor decode of the same file 51 %, either
+    side of the 55 % gate. Its cut is now the ring's own 25th percentile,
+    which moves with the picture: rounding the scene down or up by up to
+    one gray level, as the two decodes do, changes neither the verdict
+    nor the diameter by more than a pixel."""
+    s = dict(se.DEFAULT_SETTINGS)
+    img = _backlit_scene(with_disc=True, seed=11)
+    fits = []
+    for variant in (img, np.floor(img), np.ceil(img),
+                    np.clip(img + 0.5, 0, 255), np.clip(img - 0.5, 0, 255)):
+        ref = se.baseline_disc(variant.astype(np.float32), s)
+        assert ref is not None, se.baseline_disc_refusal(
+            variant.astype(np.float32), s)
+        assert ref['seed'] == se.DISC_SEED_CENTRE
+        assert ref['solidity'] > 0.75, ref['solidity']
+        fits.append(ref['diam_px'])
+    assert max(fits) - min(fits) < 2.0, fits
+
+
 def test_backlight_without_a_disc_still_refuses():
     """The retry must not turn a bare backlight into a disc: the same
     plateau and fall-off with nothing on it refuses, and the reason is

@@ -4516,7 +4516,8 @@ def _baseline_disc_uncached(base_gray, settings):
     succeeds its result stands. Only when it refuses does a second trace
     run (2026-10-05): seeded at the centre of the search window, with the
     fill judged against the ring just outside the fitted circle instead
-    of the frame-wide level. Every other gate is shared.
+    of the frame-wide level (the share of the interior darker than that
+    ring's darker quarter; 2026-10-06). Every other gate is shared.
 
     Why the second trace exists: a backlit membrane (13_backlight_2,
     2026-10-05) puts the disc only ~6 gray levels below its own surround,
@@ -4659,11 +4660,12 @@ def _baseline_disc_uncached(base_gray, settings):
                           f"circle are free of foil and glint (need 200), "
                           f"so the fill test could not be applied")
         level = paper
+        cut = paper - 4
         if local_fill:
             # the surround the disc must be darker than: the ring just
             # outside it, clear of the ramp (which ends near 1.1 r) and
-            # of foil and glint; a median, because the strips' dark
-            # interiors cross it
+            # of foil and glint. Its median is the level reported as
+            # paper_lum (the strips' dark interiors cross the ring).
             ring = (d2c >= (1.15 * r) ** 2) & (d2c <= (1.5 * r) ** 2) & free
             if int(ring.sum()) < 200:
                 return None, (f"only {int(ring.sum())} px of the ring "
@@ -4671,7 +4673,19 @@ def _baseline_disc_uncached(base_gray, settings):
                               f"and glint (need 200), so its surround "
                               f"level could not be measured")
             level = float(np.median(sm[ring]))
-        fill = float(((sm < level - 4) & inside).sum()) / float(inside.sum())
+            # The fill counts interior pixels darker than the DARKER
+            # QUARTER of that ring, not a fixed 4 gray levels under its
+            # median. With a disc only ~6 levels below its surround the
+            # fixed margin sits inside the disc's own spread: on
+            # 13_backlight_2 the fill read 59 % on the PNG decode and 51 %
+            # on the video pass's cvtColor decode of the same file (the
+            # two differ by at most 1 gray level, 0.5 on average), either
+            # side of the 55 % gate (2026-10-06). A percentile of the
+            # ring moves with the picture, so no conversion can flip it:
+            # 0.90-0.96 on both decodes of both 0 kV frames. A circle with
+            # no darker disc under it reads ~25 % by construction.
+            cut = float(np.percentile(sm[ring], 25))
+        fill = float(((sm < cut) & inside).sum()) / float(inside.sum())
         # The four documented gates, named individually: 'refused' sends
         # the operator to guess, while 'the arc is only 22% covered' sends
         # them to look at what is lying across the frame (`#215` verify

@@ -49,12 +49,22 @@ unchanged.
 
 - `_baseline_disc_uncached` runs the original trace unchanged. Only when it
   refuses does a retry run, seeded at the window centre, with the fill
-  judged against the median of the ring from 1.15 r to 1.5 r around the
-  fitted circle (foil and glint excluded). Every other gate is shared.
+  judged against the ring from 1.15 r to 1.5 r around the fitted circle
+  (foil and glint excluded): the share of the interior darker than that
+  ring's 25th percentile. Every other gate is shared.
+- Why a percentile and not a margin under the ring's median (2026-10-06,
+  found by the video review's end-to-end check): with a fixed 4-level
+  margin the fill read 59 % on the baseline PNG and 51 % on the video
+  pass's cvtColor decode of the same file, which differ by at most one gray
+  level (0.5 on average). That is either side of the 55 % gate, so the
+  video pass refused the baseline the stills fitted. The ring's own
+  percentile moves with the picture: 0.90-0.96 on both decodes of both
+  0 kV frames. A circle with no darker disc under it reads about 25 % by
+  construction.
 - The result's `seed` key says which trace produced it
-  (`DISC_SEED_DARK` / `DISC_SEED_CENTRE`); `paper_lum` is the level the
-  fill was judged against, so the calibration display stretches between
-  the disc and the surround the fit used.
+  (`DISC_SEED_DARK` / `DISC_SEED_CENTRE`); `paper_lum` is the surround
+  level (the ring's median on the retry), so the calibration display
+  stretches between the disc and the surround the fit used.
 - A refusal always states the original trace's reason. The retry starts at
   a fixed point whatever the frame holds, so its own refusal describes
   that point: on a blank frame it read "covers only 40° of arc" where the
@@ -88,6 +98,12 @@ and after by `sldea_batch_eval.py`).**
 - Synthetic backlit scene (`_backlit_scene` in the tests): the original
   trace refuses (1-4 rays usable on origin/main), the retry fits 199.3 px
   against a true 200 px, and the same scene with no disc still refuses.
+  Rounded down, up, or shifted half a level either way (the two decodes'
+  difference), it still fits within a pixel; the fixed-margin rule fails
+  that test at fill 0.65.
+- The percentile rule changes no corpus decision: the 10 original fits
+  are bit-identical, the same two runs newly fit at the same diameters,
+  and the per-frame replay of both is identical frame for frame.
 - `test_electrode_mask_255_only_costs_a_flat_synthetic_strip` documented
   the bright painted strip as a refusal. The retry now fits it at 199.8 px
   against a true 200 px. Its invariant, never a wrong diameter, is kept and
@@ -100,8 +116,9 @@ and after by `sldea_batch_eval.py`).**
   17 px rim ramp, the fit at its steepest point. The anchor guard will
   flag it. Recalibrating in verify mode puts the scale, A0 and every frame
   on one edge definition.
-- The margin on that frame is thin (fill 59 % against 55 %, conf 0.65). A
-  more uniform backlight is the capture-side fix.
+- The disc's contrast on that frame is still small (about 6 gray levels,
+  3-5 on its right half). The fit now passes with room (fill 0.92, conf
+  0.78), but a more uniform backlight is the capture-side fix.
 - The video pass runs before calibration and never re-runs, so
   `13_backlight_2`'s `video_edges.csv` stays empty until
   `sldea_video.py` is run on it again with this change.

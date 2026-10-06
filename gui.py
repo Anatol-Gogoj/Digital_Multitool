@@ -178,6 +178,42 @@ SG_ARB_ENABLED = True
 MUTED = '#555555'   # readable muted text (X11 'gray'=#bebebe is 1.3:1)
 PREVIEW_MAX_HEIGHT = 520   # webcam preview height budget (px)
 
+# ---- Webcam preview: when it runs, and what the view says when not (#375) --
+# Opening the Webcam tab starts the preview by itself, through a start path
+# that never opens a dialog (InstrumentControlGUI._cam_start_preview_quiet).
+# The Start Preview button keeps its own path, dialogs included. False brings
+# back click-to-start; the manual's screenshot run and the full-app test
+# harnesses set it False, so neither ever opens the camera of the PC they
+# run on (the manual would otherwise ship a photo of whatever it sees).
+CAM_AUTOSTART_ON_TAB = True
+# OPEN OWNER QUESTION (#375): should leaving the Webcam tab stop the preview?
+# True is the issue's recommendation: leaving stops it, unless interval
+# capture is running (it saves frames from the preview, so it needs it).
+# The stop is the Stop Preview button's: the tick ends and the device stays
+# open, so coming back resumes the stream instead of reopening it. False
+# leaves the preview reading frames on the Tk thread every 50 ms while you
+# work on other tabs.
+CAM_STOP_PREVIEW_ON_TAB_LEAVE = True
+CAM_AUTOSTART_DELAY_MS = 50   # lets the tab paint its splash before the open
+CAM_SPLASH_POLL_MS = 500      # keeps the reason current while it is on show
+CAM_NO_FRAME_S = 2.0          # preview on, no frame for this long: NO FRAME
+CAM_SPLASH_DIM = 0.35         # brightness of the last frame under the splash
+# Splash size with no frame yet: 4:3 at the preview's height budget, so the
+# tab does not jump when the first frame arrives (the label is black around).
+CAM_SPLASH_W = PREVIEW_MAX_HEIGHT * 4 // 3
+# The splash's words. The state is carried by these words, never by color,
+# so the splash is drawn white on black (or on the dimmed last frame).
+CAM_SPLASH_OFF = "PREVIEW OFF"
+CAM_SPLASH_NO_FRAME = "NO FRAME"
+CAM_OFF_CLICK = "Click Start Preview"
+CAM_OFF_OPENING = "Opening the camera..."
+CAM_OFF_SLDEA = "SLDEA run owns the camera"
+CAM_OFF_TIMED = "Timed capture is using the camera"
+CAM_OFF_SWEEP = "Stepped capture is using the camera"
+CAM_OFF_ADJUSTING = "A camera adjustment is running"
+CAM_OFF_NOT_FOUND = "Camera not found: {}"
+CAM_NO_FRAME_REASON = "The camera is not sending frames"
+
 SG_LOAD_HIGHZ = 'High-Z'   # UI label for the SCPI 'HZ' (high impedance) token
 
 # Signal generator over LAN. Arb upload works only over the wire (USB's
@@ -238,6 +274,86 @@ def _lan_reachable(resource, timeout=2.0):
         return True
     except OSError:
         return False
+
+
+_SPLASH_FONTS = {}
+
+
+def _splash_font(px):
+    """A bold font `px` pixels tall for the preview splash, cached.
+
+    DejaVu is the Linux bench's usual bold face and Arial Bold the Windows
+    one. Pillow's own font comes next (sizable since Pillow 10.1), and its
+    fixed-size bitmap font last, so the splash still draws, small, on any
+    Pillow at all."""
+    font = _SPLASH_FONTS.get(px)
+    if font is not None:
+        return font
+    from PIL import ImageFont
+    for name in ('DejaVuSans-Bold.ttf', 'arialbd.ttf',
+                 'LiberationSans-Bold.ttf'):
+        try:
+            font = ImageFont.truetype(name, px)
+            break
+        except OSError:
+            continue
+    if font is None:
+        try:
+            font = ImageFont.load_default(size=px)
+        except TypeError:
+            font = ImageFont.load_default()
+    _SPLASH_FONTS[px] = font
+    return font
+
+
+def draw_preview_splash(img, headline, reason, stamp=None):
+    """`img` (an RGB PIL image) with a large centered `headline`, the
+    `reason` line under it and an optional `stamp` line, in white on a dark
+    band across the image. Returns a new image; `img` is not modified.
+
+    The words carry the state, so nothing here depends on color (#375). A
+    reason too long for the width is cut short with '...'; the headline
+    shrinks to fit instead, because it is the part that must be read."""
+    from PIL import Image, ImageDraw
+    w, h = img.size
+    max_w = max(1, int(w * 0.94))
+    measure = ImageDraw.Draw(img)
+
+    def fitted(text, px, shrink):
+        font = _splash_font(px)
+        if shrink:
+            while px > 10 and measure.textlength(text, font=font) > max_w:
+                px -= 2
+                font = _splash_font(px)
+            return text, font
+        if measure.textlength(text, font=font) > max_w:
+            while len(text) > 1 and measure.textlength(
+                    text + '...', font=font) > max_w:
+                text = text[:-1]
+            text = text.rstrip() + '...'
+        return text, font
+
+    head_px = max(16, min(w // 8, h // 4, 96))
+    sub_px = max(12, head_px // 3)
+    lines = [fitted(headline, head_px, True), fitted(reason, sub_px, False)]
+    if stamp:
+        lines.append(fitted(stamp, max(11, sub_px * 4 // 5), False))
+    boxes = [measure.textbbox((0, 0), t, font=f) for t, f in lines]
+    gap = max(6, head_px // 4)
+    total = sum(b[3] - b[1] for b in boxes) + gap * (len(lines) - 1)
+    top = (h - total) // 2
+    band = Image.new('RGBA', img.size, (0, 0, 0, 0))
+    ImageDraw.Draw(band).rectangle(
+        [0, max(0, top - gap), w, min(h, top + total + gap)],
+        fill=(0, 0, 0, 160))
+    out = Image.alpha_composite(img.convert('RGBA'), band).convert('RGB')
+    draw = ImageDraw.Draw(out)
+    y = top
+    for (text, font), box in zip(lines, boxes):
+        x = (w - (box[2] - box[0])) // 2 - box[0]
+        draw.text((x, y - box[1]), text, font=font, fill=(255, 255, 255))
+        y += (box[3] - box[1]) + gap
+    return out
 
 # Instrument I/O works only on the Linux bench box (pyvisa-py drives the
 # USB-TMC boxes via libusb with a udev/blacklist setup that exists only
@@ -352,7 +468,19 @@ class InstrumentControlGUI:
         self.cam_previewing = False
         self.cam_preview_job = None
         self.cam_last_frame = None        # last RGB frame (numpy) for snapshots
+        self.cam_last_frame_at = None     # when it was read (splash stamp)
         self.cam_photo = None             # keep a ref so Tk doesn't GC the image
+        # The PREVIEW OFF splash (#375): what it says now, as (headline,
+        # reason, stamp), or None while live frames show; the image drawn;
+        # the key it was drawn for; why the last open failed; and the jobs
+        # behind the tab-click start and the reason watch.
+        self.cam_splash = None
+        self.cam_splash_img = None
+        self._cam_splash_key = None
+        self._cam_open_error = None
+        self._cam_autostart_job = None
+        self._cam_splash_idle = None
+        self._cam_watch_job = None
         self.cam_interval_job = None
         self.cam_capture_index = 0
         self.cam_seq_running = False
@@ -7110,6 +7238,7 @@ LOGGING:
         """USB webcam: live preview, snapshot, interval + stepped capture."""
         _tab = ScrollableTab(self.notebook)
         self.notebook.add(_tab, text="Webcam")
+        self._cam_tab = _tab
         tab = _tab.body
 
         ok, reason = webcam.deps_available()
@@ -7208,6 +7337,13 @@ LOGGING:
                                  anchor='center',
                                  text="(preview off)", fg=MUTED)
         self.cam_view.pack(fill='both', expand=True, padx=8, pady=4)
+        # The view never shows a stopped preview as if it were live: the
+        # PREVIEW OFF splash replaces the placeholder text at once, and
+        # opening the tab starts the preview (#375). add='+' because the
+        # SLDEA tab binds this event too, for its camera line.
+        self._cam_refresh_splash()
+        self.notebook.bind('<<NotebookTabChanged>>', self._cam_on_tab_changed,
+                           add='+')
 
         # --- output folder ---
         out = ttk.Frame(tab, padding=(8, 0))
@@ -7395,6 +7531,11 @@ LOGGING:
         self.cam_combo['values'] = vals
         if vals and not self.cam_index_var.get():
             self.cam_index_var.set(vals[0])
+        if vals and getattr(self, '_cam_open_error', None):
+            # the splash's "Camera not found" was about the last open;
+            # with cameras found again it no longer says what to do
+            self._cam_open_error = None
+            self._cam_refresh_splash()
         self.cam_sync_controls()
         # The footer now packs before the tabs build, so status_bar exists
         # here in the app; the hasattr tolerates footer-less harnesses.
@@ -7661,8 +7802,7 @@ LOGGING:
                     text=f"gain 0 / exposure {exp} (mean {mean:.0f}) — "
                          "now Apply & Lock", foreground='#2e7d32')
             finally:
-                if was_previewing:
-                    self.cam_start_preview()
+                self._cam_after_adjustment(was_previewing)
 
         self._run_bg(work, done, busy='camera-ctrl')
 
@@ -7730,8 +7870,7 @@ LOGGING:
                          f"(err {err:.2f}) — now Apply & Lock",
                     foreground='#2e7d32')
             finally:
-                if was_previewing:
-                    self.cam_start_preview()
+                self._cam_after_adjustment(was_previewing)
 
         self._run_bg(work, done, busy='camera-ctrl')
 
@@ -7792,8 +7931,7 @@ LOGGING:
                         text=f"exposure {exp} (mean level {mean:.0f})",
                         foreground=MUTED)
             finally:
-                if was_previewing:
-                    self.cam_start_preview()
+                self._cam_after_adjustment(was_previewing)
 
         self._run_bg(work, done, busy='camera-ctrl')
 
@@ -7804,13 +7942,52 @@ LOGGING:
             self.cam_start_preview()
 
     def cam_start_preview(self):
+        """Start Preview: the button's path, and the one other code uses to
+        restart a preview it paused. It explains a refusal or a failed open
+        in a dialog; the tab-click start is _cam_start_preview_quiet."""
         if self._cam_owned_by_sldea():
+            self._cam_refresh_splash()
             return
         try:
             self._cam_open_selected()
         except Exception as e:
+            self._cam_open_error = str(e) or type(e).__name__
+            self._cam_refresh_splash()
             messagebox.showerror("Webcam", f"Could not open camera:\n{e}")
             return
+        self._cam_begin_preview()
+
+    def _cam_start_preview_quiet(self):
+        """Start the preview without ever opening a dialog (#375); True if
+        it started. Used when the Webcam tab is opened, which happens far
+        too often for a refusal box. What would have refused it (an SLDEA
+        run, a timed or stepped capture, a camera adjustment) or why the
+        camera did not open goes into the PREVIEW OFF splash instead."""
+        if self.cam_previewing:
+            return True
+        if self._cam_autostart_blocker() is not None:
+            self._cam_refresh_splash()
+            return False
+        try:
+            self._cam_open_selected()
+        except Exception as e:
+            self._cam_open_error = str(e) or type(e).__name__
+            self._cam_refresh_splash()
+            return False
+        self._cam_begin_preview()
+        return True
+
+    def _cam_begin_preview(self):
+        """The camera is open: start the preview tick (both start paths)."""
+        if self.cam_preview_job is not None:
+            # never two tick chains on one camera
+            try:
+                self.root.after_cancel(self.cam_preview_job)
+            except Exception:
+                pass
+            self.cam_preview_job = None
+        self._cam_open_error = None
+        self._cam_good_at = time.monotonic()
         self.cam_previewing = True
         self.cam_preview_btn.config(text="Stop Preview")
         self._cam_preview_tick()
@@ -7825,6 +8002,12 @@ LOGGING:
             self.cam_preview_job = None
         if hasattr(self, 'cam_preview_btn'):
             self.cam_preview_btn.config(text="Start Preview")
+        # A stopped preview must not look live (#375): the splash goes over
+        # the last frame. Queued rather than drawn here, because every
+        # caller that stops the preview to take the camera (a capture, an
+        # adjustment, an SLDEA run) records that it has it only after this
+        # returns, and the splash should name it.
+        self._cam_queue_splash()
 
     def _cam_preview_tick(self):
         if not self.cam_previewing or self.cam is None:
@@ -7832,7 +8015,16 @@ LOGGING:
         frame = self.cam.read_rgb()
         if frame is not None:
             self.cam_last_frame = frame
+            self.cam_last_frame_at = datetime.now()
+            self._cam_good_at = time.monotonic()
             self._cam_show(frame)
+        elif (time.monotonic() - getattr(self, '_cam_good_at',
+                                         time.monotonic())
+              >= CAM_NO_FRAME_S):
+            # #48's dead camera: an unplugged camera returns no frames, and
+            # the view kept its last image as if it were live. Drawn once
+            # (the splash key matches after that); the next frame clears it.
+            self._cam_render_splash(CAM_SPLASH_NO_FRAME, CAM_NO_FRAME_REASON)
         # Re-assert the lock a few times a second: the DFK's residual
         # gain-auto creeps DURING a stream (bench: gain 44->36 over 45 s),
         # and stamping only on stream-open can't catch that. ~1 Hz is cheap
@@ -7887,6 +8079,201 @@ LOGGING:
         # "size to the image".
         self.cam_view.config(image=photo, text='', width=0, height=0)
         self.cam_photo = photo            # keep a ref
+        self.cam_splash = None            # live frames: no splash on screen
+        self._cam_splash_key = None
+
+    # ---- tab-click start + the PREVIEW OFF splash (#375) -----------------
+    def _cam_tab_selected(self):
+        """True while the Webcam tab is the one on screen."""
+        tab = getattr(self, '_cam_tab', None)
+        if tab is None:
+            return False
+        try:
+            return self.notebook.select() == str(tab)
+        except tk.TclError:
+            return False
+
+    def _cam_on_tab_changed(self, _event=None):
+        """<<NotebookTabChanged>>: opening the Webcam tab starts the
+        preview (quietly, after the tab has painted its splash); leaving it
+        stops the preview when CAM_STOP_PREVIEW_ON_TAB_LEAVE says so."""
+        if self._cam_tab_selected():
+            if self.cam_previewing:
+                return
+            if (CAM_AUTOSTART_ON_TAB
+                    and getattr(self, '_cam_autostart_job', None) is None
+                    and self._cam_autostart_blocker() is None):
+                self._cam_autostart_job = self.root.after(
+                    CAM_AUTOSTART_DELAY_MS, self._cam_autostart)
+            self._cam_refresh_splash()
+            return
+        job = getattr(self, '_cam_autostart_job', None)
+        if job is not None:
+            self._cam_autostart_job = None
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+        # Interval capture saves frames from the preview, so it keeps it.
+        if (CAM_STOP_PREVIEW_ON_TAB_LEAVE and self.cam_previewing
+                and self.cam_interval_job is None):
+            self.cam_stop_preview()
+
+    def _cam_autostart(self):
+        self._cam_autostart_job = None
+        if self.cam_previewing or not self._cam_tab_selected():
+            return
+        self._cam_start_preview_quiet()
+
+    def _cam_after_adjustment(self, was_previewing):
+        """After Stabilize, Auto-WB once or Auto-expose: restart the
+        preview the adjustment paused, as before, unless the operator has
+        left the tab meanwhile. There the leave-tab rule would have stopped
+        it, and opening the tab starts it again."""
+        if was_previewing and not (CAM_STOP_PREVIEW_ON_TAB_LEAVE
+                                   and not self._cam_tab_selected()):
+            self.cam_start_preview()
+        else:
+            self._cam_refresh_splash()
+
+    def _cam_sldea_holds_camera(self):
+        """_cam_owned_by_sldea's test, without its dialog: an SLDEA run is
+        going, or its video recorder is still letting go of the camera.
+        Keep the two in step (tests/test_webcam_autostart.py checks)."""
+        if getattr(self, '_sldea_running', False):
+            return True
+        rec = getattr(self, '_sldea_recorder', None)
+        return rec is not None and rec.reader_alive()
+
+    def _cam_autostart_blocker(self):
+        """Why opening the tab must not start the preview now, or None.
+        Reads flags only: no dialog, no camera I/O."""
+        if self._cam_sldea_holds_camera():
+            return CAM_OFF_SLDEA
+        # A timed or stepped capture's one-shot grabs need the device free;
+        # its worker can still be finishing a step after Stop.
+        if self.cam_seq_running or self._cam_worker_alive():
+            return (CAM_OFF_SWEEP if self._cam_seq_kind == 'sweep'
+                    else CAM_OFF_TIMED)
+        # Stabilize, Auto-WB once and Auto-expose grab one-shot frames too
+        if 'camera-ctrl' in getattr(self, '_bg_busy', ()):
+            return CAM_OFF_ADJUSTING
+        return None
+
+    def _cam_off_reason(self):
+        """The splash's reason line for a stopped preview, from state."""
+        blocker = self._cam_autostart_blocker()
+        if blocker is not None:
+            return blocker
+        if getattr(self, '_cam_autostart_job', None) is not None:
+            return CAM_OFF_OPENING
+        err = getattr(self, '_cam_open_error', None)
+        if err:
+            return CAM_OFF_NOT_FOUND.format(err)
+        return CAM_OFF_CLICK
+
+    def _cam_queue_splash(self):
+        """Draw the splash once the current Tk callback has finished."""
+        if (not hasattr(self, 'cam_view')
+                or getattr(self, '_cam_splash_idle', None) is not None):
+            return
+        try:
+            self._cam_splash_idle = self.root.after_idle(
+                self._cam_refresh_splash)
+        except tk.TclError:
+            self._cam_splash_idle = None      # the window is closing
+
+    def _cam_refresh_splash(self):
+        """While the preview is off, show PREVIEW OFF with the reason that
+        holds now. Redraws only when something it shows has changed."""
+        self._cam_splash_idle = None
+        if not hasattr(self, 'cam_view') or self.cam_previewing:
+            return
+        self._cam_render_splash(CAM_SPLASH_OFF, self._cam_off_reason())
+        self._cam_arm_splash_watch()
+
+    def _cam_arm_splash_watch(self):
+        """Keep the reason current while the tab shows it: an SLDEA run, a
+        capture or an adjustment that ends changes it, with no event here."""
+        if (getattr(self, '_cam_watch_job', None) is not None
+                or not self._cam_tab_selected()):
+            return
+        try:
+            self._cam_watch_job = self.root.after(CAM_SPLASH_POLL_MS,
+                                                  self._cam_splash_watch)
+        except tk.TclError:
+            self._cam_watch_job = None
+
+    def _cam_splash_watch(self):
+        self._cam_watch_job = None
+        if self.cam_previewing or not self._cam_tab_selected():
+            return
+        self._cam_refresh_splash()            # re-arms the watch
+
+    def _cam_view_avail(self):
+        """Pixels an image may take in cam_view without the label asking
+        for more room: its width less border, highlight and padding. The
+        tab's body widens to whatever its children ask for (#225), so a
+        splash drawn wider would grow the label on every redraw, and the
+        watch redraws whenever this width changes."""
+        v = self.cam_view
+        w = v.winfo_width()
+        if w <= 1:
+            return CAM_SPLASH_W                 # not laid out yet
+        inset = 0
+        for opt in ('borderwidth', 'highlightthickness', 'padx'):
+            try:
+                inset += 2 * int(v.winfo_pixels(v.cget(opt)))
+            except (tk.TclError, ValueError):
+                pass
+        return max(160, w - inset)
+
+    def _cam_render_splash(self, headline, reason):
+        """Draw `headline` and `reason` into cam_view the way _cam_show draws
+        a frame, so its label-sizing fix holds: over the last frame, dimmed
+        and stamped with the time it was taken, or on black with no frame
+        yet. Skipped when the same splash is already on screen."""
+        frame = self.cam_last_frame
+        at = getattr(self, 'cam_last_frame_at', None)
+        try:
+            avail = self._cam_view_avail()
+        except tk.TclError:
+            return                              # the window is closing
+        key = (headline, reason, id(frame) if frame is not None else None,
+               at, avail)
+        if key == getattr(self, '_cam_splash_key', None):
+            return
+        stamp = None
+        try:
+            from PIL import Image, ImageEnhance, ImageTk
+            if frame is not None:
+                img = Image.fromarray(frame).convert('RGB')
+                img.thumbnail((avail, PREVIEW_MAX_HEIGHT))
+                img = ImageEnhance.Brightness(img).enhance(CAM_SPLASH_DIM)
+                stamp = ("Last frame taken " + at.strftime('%H:%M:%S')
+                         if at is not None else "Last frame")
+            else:
+                w = min(CAM_SPLASH_W, avail)
+                img = Image.new('RGB', (w, min(PREVIEW_MAX_HEIGHT,
+                                               (w * 3 + 2) // 4)))
+            img = draw_preview_splash(img, headline, reason, stamp)
+            photo = ImageTk.PhotoImage(img)
+            self.cam_view.config(image=photo, text='', width=0, height=0)
+            self.cam_photo = photo
+            self.cam_splash_img = img
+        except tk.TclError:
+            return                              # the window is closing
+        except Exception:
+            # PIL could not draw it: say the same in the label's own text
+            try:
+                self.cam_view.config(image='', text=f"{headline}\n{reason}",
+                                     fg='white', width=0, height=0,
+                                     font=('TkDefaultFont', 16, 'bold'))
+            except tk.TclError:
+                return
+            self.cam_photo = self.cam_splash_img = None
+        self.cam_splash = (headline, reason, stamp)
+        self._cam_splash_key = key
 
     def _cam_save_frame(self, frame, value=None, unit='V',
                         folder=None, prefix=None):
@@ -8100,6 +8487,12 @@ LOGGING:
             self.cam_interval_job = None
         if hasattr(self, 'cam_interval_btn'):
             self.cam_interval_btn.config(text="Start interval")
+        # Interval capture was the one thing keeping the preview running
+        # off the tab (#375): once it ends there, apply the leave-tab rule.
+        if (CAM_STOP_PREVIEW_ON_TAB_LEAVE and self.cam_previewing
+                and hasattr(self, 'cam_view')
+                and not self._cam_tab_selected()):
+            self.cam_stop_preview()
 
     def _cam_interval_tick(self, period_ms):
         # Stop when the preview is gone: SLDEA runs / stepped captures stop

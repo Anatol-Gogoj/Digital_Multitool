@@ -2227,7 +2227,7 @@ def test_a_grouping_survives_a_round_trip_through_the_options_file():
 
 
 # ---------------------------------------------------------------------------
-# "Group by material" and its "…and by concentration" child (`#373`)
+# "Group by material" and its "...and by concentration" child (`#373`)
 # ---------------------------------------------------------------------------
 
 _ABSENT = object()

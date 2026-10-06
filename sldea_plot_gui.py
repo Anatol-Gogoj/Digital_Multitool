@@ -1439,9 +1439,9 @@ class PlotWindow:
         them ordinary groups. -> an error message, or None.
 
         A SEED, not a mode. Each selected run moves into its material's
-        group exactly as if it had been Assigned there; runs that are not
-        selected keep whatever group they are in, and nothing re-reads
-        setup.txt later. A seeded group's material is the one the seed
+        group, out of any group it was in, as an Assign would move it;
+        runs that are not selected keep whatever group they are in, and
+        nothing re-reads setup.txt later. A seeded group's material is the one the seed
         read, including when the name matches a group that already
         exists, which the seed then extends rather than duplicating.
 
@@ -1584,7 +1584,7 @@ class PlotWindow:
         add_tooltip(self.btn_clear_groups, GROUP_CLEAR_TIP)
         # the setup.txt seeds (`#373`). A row of their own under the hand
         # controls, and the concentration split as the CHILD of the
-        # material seed, indented under it the way '…and flag coarse
+        # material seed, indented under it the way '...and flag coarse
         # current sampling' sits under the breakdown marks, because it
         # IS the material seed, one step further. Buttons rather than
         # ticks: each is an action that fills the groups once, not a mode

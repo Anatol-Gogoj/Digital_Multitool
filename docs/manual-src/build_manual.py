@@ -146,8 +146,25 @@ def cautions(area, keep=None):
     return f'<div class="cautions"><h4>Watch out</h4>{lis}</div>'
 
 
+# The label cell never wraps (td.cl), so one long label widens its whole
+# column. On screen the table scrolls sideways; in the PDF the description
+# column ran off the page and was cut off. The SLDEA table shipped that way
+# in v1.4.1 and v1.4.2 behind an 88-character video label. The longest label
+# that printed whole is 67 characters.
+CONTROL_LABEL_MAX = 70
+
+
 def controls_details(area, label="Every control on this tab"):
     USED_CONTENT.add(area)
+    long_labels = [c["label"] for c in content[area]["controls"]
+                   if len(c["label"]) > CONTROL_LABEL_MAX]
+    if long_labels:
+        sys.exit(
+            f"build_manual.py FAILED -- {area!r} control label(s) longer "
+            f"than {CONTROL_LABEL_MAX} characters: {long_labels}.\n"
+            "  The label column does not wrap, so the PDF would cut off the "
+            "description column. Shorten the label and say the rest in "
+            "its 'what'.")
     rows = "".join(
         f'<tr><td class="cl">{esc(c["label"])}</td>'
         f'<td>{esc(c["what"])}</td></tr>'
@@ -470,7 +487,10 @@ body.append(section("dmm", "Digital Multimeter — BK 5493C",
 body.append(section("logging", "Data Logging", caution_keep=[0, 1, 2]))
 body.append(section("battery", "Battery Data", caution_keep=[0, 2, 4]))
 body.append(section("webcam", "Webcam", caution_keep=[1, 2, 4]))
-body.append(section("sldea", "SLDEA Test", caution_keep=[0, 1, 2, 4],
+# Index 9 is the flat or missing baseline stop (#348, v1.4.3). It was
+# appended rather than inserted: these keep lists are indexes, and an insert
+# at 2 silently swapped which cautions this box shows.
+body.append(section("sldea", "SLDEA Test", caution_keep=[0, 1, 2, 4, 9],
                     more_imgs=("tab_sldea_bottom",)))
 
 ct = content["tools"]

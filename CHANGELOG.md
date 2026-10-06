@@ -70,6 +70,10 @@ are listed in #369, section 4.
 - Both manuals are regenerated at v1.4.3. The Tools chapter says what
   Restart now does after an update, and the SLDEA chapter covers the camera
   line, when Return starts a run, and the baseline stop with its override.
+- The PDF's SLDEA control table prints whole again. In v1.4.1 and v1.4.2 one
+  long label pushed its description column off the page, so those
+  descriptions were cut off; the build now refuses a label that long. The
+  PDF is 63 pages instead of 66.
 
 ## v1.4.2 (2026-10-06, pre-release)
 

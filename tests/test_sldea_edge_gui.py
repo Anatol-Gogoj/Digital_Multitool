@@ -2447,6 +2447,92 @@ def test_save_commits_csv_before_renames():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_video_review_button_and_the_save_hook_follow_the_run():
+    """2026-10-06. 🎞 Video review… is live only when the run folder holds a
+    recording; Save hands the run to sldea_video.after_save and says what
+    it answered on the strip; a hook that raises never costs the Save; a
+    run with no video says nothing about video; the window is one at a
+    time, raised rather than reopened for the same run."""
+    import sldea_edge_gui as gui
+    import sldea_video as sv
+    import sldea_video_review as vr
+    root = _tk_root_or_skip('video review button')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_video_')
+    mb = _StubMB(yes=True)
+    real_mb, real_after, real_win = gui.messagebox, sv.after_save, \
+        vr.VideoReviewWindow
+    gui.messagebox = mb
+    calls, opened = [], []
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert str(app.video_btn.cget('state')) == 'disabled'
+        assert app._tips['video_btn'].text == gui.TIPS['video_btn_disabled']
+        for name in (sv.VIDEO_FILENAME, sv.VIDEO_INDEX_FILENAME):
+            open(os.path.join(run, name), 'w').close()
+        app._sync_detect_btn()
+        assert str(app.video_btn.cget('state')) == 'normal'
+        assert app._tips['video_btn'].text == gui.TIPS['video_btn']
+
+        def after(rundir, popen=None):
+            calls.append(rundir)
+            return "video edges re-running in the background (stub)"
+        sv.after_save = after
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect_all_sync()
+        app.save()
+        assert calls == [app.rundir], calls
+        text = app.status.cget('text')
+        assert text.startswith('saved') and \
+            'video edges re-running in the background (stub)' in text, text
+
+        def boom(rundir, popen=None):
+            raise OSError("share went away")
+        sv.after_save = boom
+        app.save()
+        text = app.status.cget('text')
+        assert text.startswith('saved') and \
+            'video edges not re-run (share went away)' in text, text
+
+        sv.after_save = real_after
+        for name in (sv.VIDEO_FILENAME, sv.VIDEO_INDEX_FILENAME):
+            os.remove(os.path.join(run, name))
+        app.save()
+        assert 'video' not in app.status.cget('text'), \
+            app.status.cget('text')
+
+        class _Win:
+            def __init__(self, master, rundir, on_close=None):
+                self.rundir, self.on_close = rundir, on_close
+                self._closed = False
+                self.lifted = 0
+                self.win = self
+                opened.append(self)
+
+            def lift(self):
+                self.lifted += 1
+
+            def close(self):
+                self._closed = True
+                self.on_close(self)
+        vr.VideoReviewWindow = _Win
+        app._open_video_review()
+        app._open_video_review()
+        assert len(opened) == 1 and opened[0].lifted == 1
+        opened[0].close()
+        assert app._video_win is None
+        app._open_video_review()
+        assert len(opened) == 2
+    finally:
+        sv.after_save = real_after
+        vr.VideoReviewWindow = real_win
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_0723_era_run_saves_end_to_end():
     """audit 2026-08-05 (mutation finding): the 14-column-era compat
     branch in save() never executed under any test, and without it a

@@ -39,10 +39,22 @@ Files, beside data.csv in the run folder:
   video_frames.csv     one row per recorded frame: its time on the run's
                        own clock (telemetry.csv's), the commanded kV then
   video_edges.csv      written by detect_video: one row per analysed frame
-  video_edges.png      area against elapsed time, with the kV staircase
+  video_edges.json     what that pass ran with (settings, baseline fit,
+                       area method, scale anchor): edges_stale reads it
+  video_edges.png      area against elapsed time, with the kV staircase,
+                       the frames flagged for review and the accepted
+                       stills they were checked against
+  video_review.csv     the operator's accept/reject decisions from the
+                       video review window (sldea_video_review.py)
+
+REVIEW BY EXCEPTION (2026-10-06): Edge Review's Save re-runs the video
+pass when its edges are stale (after_save), and review_flags sends to a
+human only the frames the detector doubts or that disagree with the run's
+accepted stills.
 
 Usage:
     python sldea_video.py RUN [--stride N] [--limit N] [--no-plot]
+    python sldea_video.py RUN --after-save       (what Save starts)
     python sldea_video.py --finalize STAGING RUN [--detect]
     python sldea_video.py --selftest
 
@@ -50,8 +62,11 @@ Headless tests: .venv/bin/python tests/test_sldea_video.py
 """
 import csv
 import datetime
+import json
 import os
 import queue
+import re
+import subprocess
 import sys
 import threading
 import time
@@ -60,6 +75,15 @@ VIDEO_FILENAME = 'video.mkv'
 VIDEO_INDEX_FILENAME = 'video_frames.csv'
 VIDEO_EDGES_FILENAME = 'video_edges.csv'
 VIDEO_PLOT_FILENAME = 'video_edges.png'
+# What the video pass was run WITH (2026-10-06): the anchor, settings,
+# baseline fit and area method behind video_edges.csv, so a reader can
+# tell edges written before the operator calibrated from current ones.
+VIDEO_STAMP_FILENAME = 'video_edges.json'
+# The operator's per-frame decisions from the video review window. Kept
+# apart from video_edges.csv so a re-run of the detector never overwrites
+# a human decision, and a decision about an area the detector no longer
+# reports is recognisably stale (read_decisions drops it).
+VIDEO_REVIEW_FILENAME = 'video_review.csv'
 VIDEO_FOURCC = 'FFV1'
 
 # Frames per second RECORDED. The operator's choice (2026-09-23) was
@@ -98,6 +122,31 @@ INDEX_COLUMNS = ['frame', 't_s', 'nominal_kV', 'timestamp', 'stream_seq']
 EDGE_COLUMNS = ['frame', 't_s', 'nominal_kV', 'area_px', 'area_mm2',
                 'conf', 'method', 'wrinkle', 'needs_review',
                 'scale_source']
+REVIEW_COLUMNS = ['frame', 't_s', 'decision', 'area_px', 'reasons',
+                  'user', 'when']
+REVIEW_DECISIONS = ('accept', 'reject')
+
+# REVIEW BY EXCEPTION (2026-10-06). A video is hundreds to thousands of
+# frames; nobody reviews them one by one. The stills ARE frames of the
+# same stream, and Edge Review's Save writes their accepted areas into
+# data.csv, so each still is a checkpoint: a known area at a known time.
+# A video frame needs a human only when it disagrees with them, or when
+# the detector itself doubts it (review_flags).
+#
+# REVIEW_BAND_PCT: how far a frame may sit outside the range of the
+# accepted stills of its own landing. SLDEA_MEASUREMENT.md 1.1 quotes the
+# expansion ratio at +-1-2 %, and same-landing pre/post stills scatter
+# 0.3-0.4 % (robust SD, up to 4 kV); 2 % is the top of the quoted budget.
+REVIEW_BAND_PCT = 2.0
+# REVIEW_JUMP_PCT: outside a landing (on a ramp, or where no still was
+# accepted) a frame is compared with the median of its two neighbours on
+# each side. Per-frame repeatability is 0.08-0.26 % SD (SLDEA_MEASUREMENT
+# 2.1), so a 2 % step between neighbours a second apart is many times the
+# noise: a real event or a tracking error, either worth a look.
+REVIEW_JUMP_PCT = 2.0
+# A still and the recorded frame it is matched to may differ by up to half
+# the recorded frame spacing; with no spacing to measure, this.
+REVIEW_MATCH_S = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -786,9 +835,18 @@ def detect_video(rundir, stride=1, limit=None, log=print, plot=True,
     staging copy, before it is moved) instead of the run folder; the
     results are always written into the run folder.
 
-    No human review queue: a video is thousands of frames. Every row
-    carries the detector's own conf and needs_review verdict instead, so
-    the doubtful stretches can be found and checked against the stills.
+    No human review queue here: a video is thousands of frames. Every row
+    carries the detector's own conf and needs_review verdict, and the
+    summary counts the frames review_flags sends to a human (the detector's
+    doubt, or disagreement with the run's accepted stills); the video
+    review window (sldea_video_review.py) walks exactly those.
+
+    WRITTEN WHOLE OR NOT AT ALL (2026-10-06): the rows go to a .part file
+    that replaces video_edges.csv only when the pass is complete, and the
+    inputs it ran with go to video_edges.json beside it (edges_stamp). A
+    pass re-run after Save can then never leave a reader, or the window,
+    with half a new file over half an old one, and two passes that overlap
+    leave whichever finished last, whose stamp says what it measured with.
     -> summary dict."""
     import sldea_edge as se
     stride = max(1, int(stride))
@@ -803,115 +861,688 @@ def detect_video(rundir, stride=1, limit=None, log=print, plot=True,
     base = video_gray(se.frame_path(run, base_row))
     if base is None:
         raise RuntimeError("the baseline still does not read")
-    ref = se.load_scale_anchor(rundir) or se.baseline_disc(base, settings)
+    anchor = se.load_scale_anchor(rundir)
+    base_ref = se.baseline_disc(base, settings)
+    ref = anchor or base_ref
     scale = se.mm_per_px({}, run['rows'], settings, baseline_ref=ref)
     src = se.scale_source({}, run['rows'], baseline_ref=ref)
     index = read_index(src_dir)
     out_path = os.path.join(rundir, VIDEO_EDGES_FILENAME)
+    part = f"{out_path}.{os.getpid()}.part"
     t_start = time.monotonic()
     rows, prev, done, decoded = [], None, 0, 0
-    with open(out_path, 'w', newline='', encoding='utf-8') as fh:
-        w = csv.DictWriter(fh, fieldnames=EDGE_COLUMNS)
-        w.writeheader()
-        for i, gray in iter_frames(os.path.join(src_dir, VIDEO_FILENAME)):
-            decoded = i + 1
-            if i % stride:
-                continue
-            if limit is not None and done >= limit:
-                break
-            meta = index[i] if i < len(index) else {}
-            row = {'frame': i, 't_s': meta.get('t_s', ''),
-                   'nominal_kV': meta.get('nominal_kV', ''),
-                   'area_px': '', 'area_mm2': '', 'conf': '', 'method': '',
-                   'wrinkle': '', 'needs_review': True,
-                   # on every row, so the CSV carries its own provenance
-                   # and no reader has to skip a comment line to get it
-                   'scale_source': src}
-            if gray.shape != base.shape:
-                row['method'] = 'size-mismatch'
-            else:
-                try:
-                    # float32, exactly as se.load_gray hands the stills
-                    # to the detector (it raises on mixed types)
-                    cands = se.candidates(base, gray.astype('float32'),
-                                          settings, prev_method=prev)
-                except Exception as e:
-                    cands = []
-                    row['method'] = f'failed: {e}'
-                if cands:
-                    best = cands[0]
-                    prev = best['method']
-                    a = float(best['area_px'])
-                    row.update(area_px=round(a, 1),
-                               area_mm2=(round(a * scale * scale, 4)
-                                         if scale else ''),
-                               conf=round(float(best['conf']), 3),
-                               method=best['method'],
-                               wrinkle=round(float(best.get('wrinkle', 1.0)),
-                                             3),
-                               needs_review=bool(
-                                   se.needs_review(cands, settings)))
-            w.writerow(row)
-            fh.flush()
-            rows.append(row)
-            done += 1
-            if done % 50 == 0:
-                el = time.monotonic() - t_start
-                log(f"video edges: {done} frames, {el / done:.2f} s each")
+    # whole or not at all: a pass that dies leaves no .part behind and
+    # the previous video_edges.csv untouched
+    try:
+        with open(part, 'w', newline='', encoding='utf-8') as fh:
+            w = csv.DictWriter(fh, fieldnames=EDGE_COLUMNS)
+            w.writeheader()
+            for i, gray in iter_frames(os.path.join(src_dir, VIDEO_FILENAME)):
+                decoded = i + 1
+                if i % stride:
+                    continue
+                if limit is not None and done >= limit:
+                    break
+                meta = index[i] if i < len(index) else {}
+                row = {'frame': i, 't_s': meta.get('t_s', ''),
+                       'nominal_kV': meta.get('nominal_kV', ''),
+                       'area_px': '', 'area_mm2': '', 'conf': '', 'method': '',
+                       'wrinkle': '', 'needs_review': True,
+                       # on every row, so the CSV carries its own provenance
+                       # and no reader has to skip a comment line to get it
+                       'scale_source': src}
+                if gray.shape != base.shape:
+                    row['method'] = 'size-mismatch'
+                else:
+                    try:
+                        # float32, exactly as se.load_gray hands the stills
+                        # to the detector (it raises on mixed types)
+                        cands = se.candidates(base, gray.astype('float32'),
+                                              settings, prev_method=prev)
+                    except Exception as e:
+                        cands = []
+                        row['method'] = f'failed: {e}'
+                    if cands:
+                        best = cands[0]
+                        prev = best['method']
+                        a = float(best['area_px'])
+                        row.update(area_px=round(a, 1),
+                                   area_mm2=(round(a * scale * scale, 4)
+                                             if scale else ''),
+                                   conf=round(float(best['conf']), 3),
+                                   method=best['method'],
+                                   wrinkle=round(float(best.get('wrinkle', 1.0)),
+                                                 3),
+                                   needs_review=bool(
+                                       se.needs_review(cands, settings)))
+                w.writerow(row)
+                fh.flush()
+                rows.append(row)
+                done += 1
+                if done % 50 == 0:
+                    el = time.monotonic() - t_start
+                    log(f"video edges: {done} frames, {el / done:.2f} s each")
+    except BaseException:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
+    os.replace(part, out_path)
+    stamp = edges_stamp(settings, anchor, base_ref, scale, src, stride,
+                        limit)
+    _write_json_atomic(os.path.join(rundir, VIDEO_STAMP_FILENAME), stamp)
     if limit is None and decoded != len(index):
         log(f"⚠ video edges: the video decoded {decoded} frames but its "
             f"index lists {len(index)} -- rows past the shorter one have "
             f"no time or kV")
+    edges = read_edges(rundir)
+    try:
+        checkpoints = still_checkpoints(rundir, run=run)
+    except Exception as e:             # a malformed data.csv row or run.log
+        log(f"video edges: the stills could not be read as checkpoints "
+            f"({e}); flagging on the detector alone")
+        checkpoints = []
+    offset = still_offset(edges, checkpoints)
+    flags = review_flags(edges, checkpoints, offset=offset)
     summary = {'frames': done, 'scale_mm_per_px': scale, 'scale_source': src,
                'needs_review': sum(1 for r in rows if r['needs_review']),
+               'flagged': sum(1 for f in flags if f['reasons']),
+               'checkpoints': len(checkpoints), 'still_offset': offset,
                'csv': out_path, 'seconds': time.monotonic() - t_start}
     if plot and rows:
         try:
-            summary['png'] = plot_edges(rundir, rows, scale, src)
+            summary['png'] = plot_edges(rundir, edges, scale, src,
+                                        flags=flags, checkpoints=checkpoints)
         except Exception as e:
             log(f"video edges: figure failed ({e}); the CSV is complete")
     return summary
 
 
-def plot_edges(rundir, rows, scale, src):
-    """Area against elapsed time, the kV staircase on a second axis. Open
-    markers = the detector's own needs-review verdict. Paul Tol bright
-    (CLAUDE.md): the measurement in blue, the drive in grey."""
-    from matplotlib.backends.backend_agg import FigureCanvasAgg
-    from matplotlib.figure import Figure
-    pts = [r for r in rows if r['area_px'] != '' and r['t_s'] != '']
-    fig = Figure(figsize=(12, 5))
-    FigureCanvasAgg(fig)
-    ax = fig.add_subplot(111)
-    key = 'area_mm2' if scale else 'area_px'
-    for review, face in ((False, '#4477AA'), (True, 'white')):
-        sel = [r for r in pts if bool(r['needs_review']) == review]
-        if sel:
-            ax.plot([r['t_s'] / 60.0 for r in sel], [r[key] for r in sel],
-                    'o', markersize=3, color='#4477AA',
-                    markerfacecolor=face, markeredgewidth=0.8,
-                    label='needs review' if review else 'confident',
-                    linestyle='')
+# Paul Tol bright (CLAUDE.md), and every series also has its own MARKER
+# SHAPE, so nothing on the figure or in the review window depends on
+# colour alone: circles = frames nobody needs to look at, open triangles =
+# frames sent to a human, filled diamonds = accepted by a human, crosses =
+# rejected by a human, squares = the accepted stills (checkpoints).
+TOL_BLUE, TOL_RED, TOL_GREEN = '#4477AA', '#EE6677', '#228833'
+TOL_YELLOW, TOL_PURPLE, TOL_GREY = '#CCBB44', '#AA3377', '#BBBBBB'
+
+
+def plot_series(edges, flags=None, checkpoints=None, decisions=None):
+    """The points of the area-against-time figure, split by what a reader
+    must do with them. Shared by plot_edges and the review window, so the
+    PNG and the window can never disagree about which frame is which.
+
+    -> {'clear' | 'flagged' | 'accepted' | 'rejected': [(t_s, area_px,
+    frame)], 'stills': [(t_s, area_px, frame_file)], 'kv': [(t_s, kV)]}.
+    A human decision outranks a flag; frames with no area or no time are
+    left out (there is nothing to draw)."""
+    flagged = {f['frame'] for f in (flags or []) if f['reasons']}
+    decisions = decisions or {}
+    out = {'clear': [], 'flagged': [], 'accepted': [], 'rejected': [],
+           'stills': [], 'kv': []}
+    for e in edges:
+        if e['t_s'] is None:
+            continue
+        if e['nominal_kV'] is not None:
+            out['kv'].append((e['t_s'], e['nominal_kV']))
+        if e['area_px'] is None:
+            continue
+        d = decisions.get(e['frame'], {}).get('decision')
+        key = ('accepted' if d == 'accept' else
+               'rejected' if d == 'reject' else
+               'flagged' if e['frame'] in flagged else 'clear')
+        out[key].append((e['t_s'], e['area_px'], e['frame']))
+    for c in checkpoints or []:
+        out['stills'].append((c['t_s'], c['area_px'], c['frame_file']))
+    return out
+
+
+SERIES_STYLE = (
+    # key, label, marker, face, edge, size
+    ('clear', 'confident, agrees with the stills', 'o', TOL_BLUE, TOL_BLUE,
+     3),
+    ('flagged', 'flagged for review', '^', 'white', TOL_RED, 5),
+    ('accepted', 'accepted in review', 'D', TOL_GREEN, TOL_GREEN, 4),
+    ('rejected', 'rejected in review', 'x', TOL_PURPLE, TOL_PURPLE, 5),
+    ('stills', 'accepted still (checkpoint)', 's', TOL_YELLOW, 'black', 6),
+)
+
+
+def draw_series(ax, series, scale=None):
+    """Draw plot_series' output on a matplotlib axis, in mm^2 when `scale`
+    (mm per px) is given, else px^2. -> the twin kV axis or None."""
+    k = (scale * scale) if scale else 1.0
+    for key, label, marker, face, edge, size in SERIES_STYLE:
+        pts = series[key]
+        if not pts:
+            continue
+        ax.plot([p[0] / 60.0 for p in pts], [p[1] * k for p in pts],
+                linestyle='', marker=marker, markersize=size,
+                markerfacecolor=face, markeredgecolor=edge,
+                markeredgewidth=0.9, color=edge, label=label,
+                zorder=4 if key == 'stills' else 3)
     ax.set_xlabel('Elapsed time (min)')
     ax.set_ylabel('Active area (mm²)' if scale else 'Active area (px²)')
     ax.grid(alpha=0.3)
-    kv = [(r['t_s'] / 60.0, r['nominal_kV']) for r in rows
-          if r['t_s'] != '' and r['nominal_kV'] not in ('', None)]
-    if kv:
+    tw = None
+    if series['kv']:
         tw = ax.twinx()
-        tw.step([k[0] for k in kv], [k[1] for k in kv], where='post',
-                color='#BBBBBB', linewidth=1.0, zorder=0)
+        tw.step([p[0] / 60.0 for p in series['kv']],
+                [p[1] for p in series['kv']], where='post', color=TOL_GREY,
+                linewidth=1.0, zorder=0)
         tw.set_ylabel('Nominal kV', color='#777777')
-    ax.legend(loc='upper left', fontsize=8)
+    return tw
+
+
+def plot_edges(rundir, edges, scale, src, flags=None, checkpoints=None,
+               decisions=None):
+    """Area against elapsed time, the kV staircase on a second axis: every
+    recorded frame (read_edges rows), sorted into what a reader must do
+    with it (plot_series), the accepted stills over them as checkpoints.
+    -> the PNG's path."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    fig = Figure(figsize=(12, 5))
+    FigureCanvasAgg(fig)
+    ax = fig.add_subplot(111)
+    draw_series(ax, plot_series(edges, flags, checkpoints, decisions),
+                scale)
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(loc='upper left', fontsize=8)
     ax.set_title(f"{os.path.basename(os.path.abspath(rundir))} — every "
                  f"recorded frame", loc='left', fontweight='bold')
-    fig.text(0.01, 0.01, f"Scale: {src}.  Open markers: the detector's own "
-                         f"needs-review verdict (conf / spread / fallback).",
+    n_flag = sum(1 for f in (flags or []) if f['reasons'])
+    fig.text(0.01, 0.01,
+             f"Scale: {src}.  Triangles: {n_flag} frame(s) flagged for "
+             f"review (the detector's own doubt, more than "
+             f"{REVIEW_BAND_PCT:g} % outside the accepted stills of their "
+             f"landing, or a jump of more than {REVIEW_JUMP_PCT:g} % from "
+             f"their neighbours).",
              fontsize=7, color='#555555')
     fig.tight_layout(rect=(0, 0.04, 1, 1))
     path = os.path.join(rundir, VIDEO_PLOT_FILENAME)
     fig.savefig(path, dpi=150)
     return path
+
+
+# ---------------------------------------------------------------------------
+# what the video pass ran with, and whether that is still current
+# ---------------------------------------------------------------------------
+
+def _num(v):
+    """float, or None for blank / unparseable / non-finite."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f and f not in (float('inf'), float('-inf')) else None
+
+
+def _write_json_atomic(path, obj):
+    part = f"{path}.{os.getpid()}.part"
+    with open(part, 'w', encoding='utf-8') as f:
+        json.dump(obj, f, indent=1, sort_keys=True)
+    os.replace(part, path)
+
+
+def edges_stamp(settings, anchor, base_ref, scale, src, stride=1,
+                limit=None):
+    """The inputs a video pass ran with, as written to video_edges.json.
+
+    Everything that changes a row of video_edges.csv: the detection
+    settings, the baseline fit the tracker measures from, the area method,
+    and the scale anchor (it sets area_mm2 and the scale named on every
+    row). The OpenCV version is recorded for the reader, not compared:
+    the review is often done on another machine than the bench."""
+    import sldea_edge as se
+    fit = base_ref.get('diam_px') if base_ref else None
+    return {
+        'written': datetime.datetime.now().isoformat(timespec='seconds'),
+        'stride': int(stride), 'limit': limit,
+        'scale_source': src, 'mm_per_px': scale,
+        'anchor_diam_px': (round(float(anchor['diam_px']), 3)
+                           if anchor and anchor.get('diam_px') else None),
+        'anchor_saved': (anchor or {}).get('saved'),
+        'baseline_fit_diam_px': round(float(fit), 1) if fit else None,
+        'area_estimator': se.AREA_ESTIMATOR_VERSION,
+        'settings': {k: settings.get(k)
+                     for k in sorted(se.DEFAULT_SETTINGS)},
+        'opencv_version': se.library_versions().get('opencv_version'),
+    }
+
+
+def read_stamp(rundir):
+    """video_edges.json as a dict, or None (absent or unreadable)."""
+    try:
+        with open(os.path.join(rundir, VIDEO_STAMP_FILENAME),
+                  encoding='utf-8') as f:
+            out = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return out if isinstance(out, dict) else None
+
+
+# The automatic baseline fit is recomputed by the reader, possibly on
+# another machine and OpenCV; it moves by at most one pixel across the
+# settings and optics on record (test_electrode_mask_255_only_costs_...),
+# so two pixels is a change of fit, not of machine.
+STAMP_FIT_TOL_PX = 2.0
+
+
+def edges_stale(rundir):
+    """None when video_edges.csv measured every frame with this run's
+    CURRENT settings, baseline fit, area method and scale anchor; else
+    one sentence naming each input that changed since.
+
+    The usual reason is the order of a run's day: the post-run job
+    measures the video minutes after the last still, before the operator
+    has calibrated or reviewed anything, so its rows carry no scale and
+    whatever baseline fit the uncalibrated run had."""
+    import sldea_edge as se
+    if not os.path.exists(os.path.join(rundir, VIDEO_EDGES_FILENAME)):
+        return "there are no video edges yet"
+    stamp = read_stamp(rundir)
+    if stamp is None:
+        return ("they were written before the video pass recorded what it "
+                "ran with")
+    why = []
+    if stamp.get('stride', 1) != 1:
+        why.append(f"only every {stamp['stride']}th frame was measured")
+    if stamp.get('limit') is not None:
+        why.append(f"only the first {stamp['limit']} frames were measured")
+    if stamp.get('area_estimator') != se.AREA_ESTIMATOR_VERSION:
+        why.append(f"the area method changed (estimator "
+                   f"{stamp.get('area_estimator')} -> "
+                   f"{se.AREA_ESTIMATOR_VERSION})")
+    settings = se.load_settings(rundir)
+    old = stamp.get('settings') or {}
+    moved = []
+    for k in sorted(se.DEFAULT_SETTINGS):
+        a, b = old.get(k), settings.get(k)
+        na, nb = _num(a), _num(b)
+        same = (abs(na - nb) <= 1e-9 * max(1.0, abs(nb))
+                if na is not None and nb is not None else a == b)
+        if not same:
+            moved.append(f"{k} {a} -> {b}")
+    if moved:
+        why.append("detection settings changed (" + ", ".join(moved) + ")")
+    run = se.load_run(rundir)
+    base_row = next((r for r in run['rows'] if r.get('tag') == 'baseline'
+                     and (r.get('frame_file') or '').strip()), None)
+    base = (video_gray(se.frame_path(run, base_row))
+            if base_row is not None else None)
+    ref = se.baseline_disc(base, settings) if base is not None else None
+    fit_now = round(float(ref['diam_px']), 1) if ref else None
+    fit_then = stamp.get('baseline_fit_diam_px')
+    if (fit_now is None) != (fit_then is None) or (
+            fit_now is not None
+            and abs(fit_now - float(fit_then)) > STAMP_FIT_TOL_PX):
+        why.append(f"the automatic baseline fit changed "
+                   f"({_fit_text(fit_then)} -> {_fit_text(fit_now)})")
+    anchor = se.load_scale_anchor(rundir)
+    a_now = (round(float(anchor['diam_px']), 3)
+             if anchor and anchor.get('diam_px') else None)
+    a_then = stamp.get('anchor_diam_px')
+    if (a_now is None) != (a_then is None) or (
+            a_now is not None and abs(a_now - float(a_then)) > 1e-3):
+        why.append(f"the scale anchor changed ({_fit_text(a_then)} -> "
+                   f"{_fit_text(a_now)})")
+    return "; ".join(why) if why else None
+
+
+def _fit_text(d):
+    return 'none' if d is None else f"{float(d):.1f} px"
+
+
+# ---------------------------------------------------------------------------
+# re-running the video pass after Edge Review's Save
+# ---------------------------------------------------------------------------
+
+def has_video(rundir):
+    return all(os.path.exists(os.path.join(rundir, n))
+               for n in (VIDEO_FILENAME, VIDEO_INDEX_FILENAME))
+
+
+def launch_rerun(rundir, popen=None):
+    """Start `sldea_video.py RUN --after-save` as a DETACHED, low-priority
+    process (it logs into the run's run.log), so closing Edge Review, which
+    a clean Save may now do by itself, cannot cut it off. -> the Popen.
+    `popen` is for tests."""
+    cmd = [sys.executable, os.path.abspath(__file__), rundir, '--after-save']
+    # UTF-8 output: run.log lines carry warning signs, and a Windows
+    # child writing to DEVNULL would otherwise encode them as cp1252
+    kw = {'stdin': subprocess.DEVNULL, 'stdout': subprocess.DEVNULL,
+          'stderr': subprocess.DEVNULL,
+          'env': dict(os.environ, PYTHONIOENCODING='utf-8')}
+    if os.name == 'nt':
+        kw['creationflags'] = (getattr(subprocess, 'DETACHED_PROCESS', 0)
+                               | getattr(subprocess,
+                                         'CREATE_NEW_PROCESS_GROUP', 0)
+                               | getattr(subprocess,
+                                         'BELOW_NORMAL_PRIORITY_CLASS', 0))
+    else:
+        kw['start_new_session'] = True
+    return (popen or subprocess.Popen)(cmd, **kw)
+
+
+def after_save(rundir, popen=None):
+    """Edge Review's Save hook: re-run the video pass when its edges are
+    out of date. -> one plain sentence for the status strip, or None when
+    the run has no video in its folder (most runs; then nothing is said).
+
+    No video in the folder also covers a run whose recording is still in
+    local staging: the post-run job detects there first and moves the
+    files in only afterwards, so a video in the folder means that job's
+    detection is over and a re-run cannot race it."""
+    if not has_video(rundir):
+        return None
+    try:
+        why = edges_stale(rundir)
+    except Exception as e:             # a staleness check must not cost a Save
+        why = f"their inputs could not be checked ({e})"
+    if why is None:
+        return "video edges are current"
+    try:
+        launch_rerun(rundir, popen=popen)
+    except Exception as e:
+        return (f"video edges are out of date ({why}) and the re-run could "
+                f"not start ({e}): run `python sldea_video.py \"{rundir}\"`")
+    return f"video edges re-running in the background ({why})"
+
+
+# ---------------------------------------------------------------------------
+# reviewing the video by exception: the accepted stills as checkpoints
+# ---------------------------------------------------------------------------
+
+def read_edges(rundir):
+    """video_edges.csv as typed dicts, frame order: numbers are floats or
+    None, needs_review a bool. [] when there is no file."""
+    path = os.path.join(rundir, VIDEO_EDGES_FILENAME)
+    if not os.path.exists(path):
+        return []
+    out = []
+    with open(path, newline='', encoding='utf-8') as f:
+        for r in csv.DictReader(f):
+            out.append({'frame': int(r['frame']), 't_s': _num(r['t_s']),
+                        'nominal_kV': _num(r['nominal_kV']),
+                        'area_px': _num(r['area_px']),
+                        'area_mm2': _num(r['area_mm2']),
+                        'conf': _num(r['conf']),
+                        'method': r.get('method') or '',
+                        'wrinkle': _num(r.get('wrinkle')),
+                        'needs_review': (r.get('needs_review') or '')
+                        .strip().lower() in ('true', '1', 'yes'),
+                        'scale_source': r.get('scale_source') or ''})
+    return out
+
+
+# run.log's snapshot line names the still and the run-clock time of the
+# stream frame it was taken from: "... -> NAME.png  (frame t=2.12s)".
+_SNAP_FRAME_T = re.compile(r"(\S+\.png)\s+\(frame t=([0-9]+(?:\.[0-9]+)?)s\)")
+
+
+def still_times(rundir):
+    """{still file name: run-clock time of its stream frame} from run.log.
+    {} when there is no run.log or no video-era snapshot lines."""
+    out = {}
+    try:
+        with open(os.path.join(rundir, 'run.log'), encoding='utf-8',
+                  errors='replace') as f:
+            for line in f:
+                m = _SNAP_FRAME_T.search(line)
+                if m:
+                    out[m.group(1)] = float(m.group(2))
+    except OSError:
+        pass
+    return out
+
+
+def _unbranded(name):
+    """A still's name before a breakdown mark renamed it (the mark adds
+    `_BREAKDOWN` before the extension; run.log keeps the original)."""
+    return re.sub(r'_BREAKDOWN(?=\.png$)', '', name or '')
+
+
+def still_checkpoints(rundir, run=None):
+    """The run's ACCEPTED stills, as checkpoints on the video's clock.
+
+    -> [{'frame_file', 'tag', 'step', 'nominal_kV', 't_s', 'area_px'}],
+    time order. Accepted = data.csv holds an area for it (what Edge
+    Review's Save wrote, machine-accepted or reviewed). The time is that
+    of the stream frame the still was taken from (run.log); a run whose
+    log lacks the line falls back to the planned time, which the scheduler
+    keeps to within the grab latency. A still with neither is skipped."""
+    import sldea_edge as se
+    run = run or se.load_run(rundir)
+    times = still_times(rundir)
+    out = []
+    for row in run['rows']:
+        a = _num(row.get('active_area_px'))
+        if a is None or a <= 0:
+            continue
+        name = (row.get('frame_file') or '').strip()
+        t = times.get(name)
+        if t is None:
+            t = times.get(_unbranded(name))
+        if t is None:
+            t = _num(row.get('t_planned_s'))
+        if t is None:
+            continue
+        out.append({'frame_file': name, 'tag': row.get('tag') or '',
+                    'step': (row.get('step') or '').strip()
+                    or f"kV {row.get('nominal_kV')}",
+                    'nominal_kV': _num(row.get('nominal_kV')),
+                    't_s': t, 'area_px': a})
+    out.sort(key=lambda c: c['t_s'])
+    return out
+
+
+def landing_bands(checkpoints, band_pct=REVIEW_BAND_PCT):
+    """[(t_first, t_last, area_lo, area_hi, stills)] per landing: the
+    stills of one step bracket a stretch of constant drive, and a frame
+    inside it should read within `band_pct` of their range."""
+    by_step = {}
+    for c in checkpoints:
+        by_step.setdefault(c['step'], []).append(c)
+    out = []
+    for cs in by_step.values():
+        areas = [c['area_px'] for c in cs]
+        out.append((min(c['t_s'] for c in cs), max(c['t_s'] for c in cs),
+                    min(areas) * (1.0 - band_pct / 100.0),
+                    max(areas) * (1.0 + band_pct / 100.0), cs))
+    out.sort(key=lambda b: b[0])
+    return out
+
+
+def still_offset(edges, checkpoints, min_n=3):
+    """The run-wide ratio of the video's area to the stills' at the stills'
+    own times (median over the stills that land on a recorded frame), or
+    None with fewer than `min_n` of them.
+
+    It is not 1.0 even when nothing is wrong: the video pass fits the
+    baseline on the recorder's cvtColor decode and the stills on the PNG
+    decode, and on a low-contrast disc the two fits differ. On
+    13_backlight_2 (end-to-end check, 2026-10-06) the video read -1.19 %
+    against the stills (p10 -1.54, p90 -0.80) from a 405.2 vs 407.2 px
+    baseline fit. review_flags divides this out, so the band judges each
+    frame against the stills, not the decode against the decode."""
+    if not checkpoints or not edges:
+        return None
+    ts = [(e['t_s'], e['area_px']) for e in edges
+          if e['t_s'] is not None and e['area_px']]
+    if not ts:
+        return None
+    t_all = sorted(t for t, _a in ts)
+    gaps = sorted(b - a for a, b in zip(t_all, t_all[1:]) if b > a)
+    half = 0.5 * gaps[len(gaps) // 2] if gaps else REVIEW_MATCH_S
+    ratios = []
+    for c in checkpoints:
+        t, a = min(ts, key=lambda p: abs(p[0] - c['t_s']))
+        if abs(t - c['t_s']) <= half:
+            ratios.append(a / c['area_px'])
+    if len(ratios) < min_n:
+        return None
+    ratios.sort()
+    k = len(ratios)
+    return (ratios[k // 2] if k % 2
+            else 0.5 * (ratios[k // 2 - 1] + ratios[k // 2]))
+
+
+def review_flags(edges, checkpoints, band_pct=REVIEW_BAND_PCT,
+                 jump_pct=REVIEW_JUMP_PCT, offset='auto'):
+    """Which recorded frames a human should look at, and why.
+
+    -> one dict per read_edges row, same order: {'frame', 't_s',
+    'nominal_kV', 'area_px', 'reasons': [...], 'band': (lo, hi) or None}.
+    An empty `reasons` means nobody needs to look. Reasons:
+
+      'no edge' / 'failed: ...' / 'size-mismatch'
+                     the detector produced no area for the frame;
+      'detector'     its own needs_review verdict (conf, spread, fallback);
+      'off-stills'   the frame lies in a landing bracketed by accepted
+                     stills and reads more than band_pct outside their
+                     range;
+      'jump'         outside any landing: a one-frame spike (more than
+                     jump_pct off both measured neighbours, the same way),
+                     or the frame a step lands on (more than jump_pct off
+                     the last measured frame that was not a spike). Only
+                     the frame the step lands on is flagged, not the
+                     neighbours on either side of it.
+
+    The detector's doubt and the stills' agreement are BOTH required to
+    pass a frame: the stills vouch for an area, not for an outline the
+    detector itself would not accept.
+
+    `offset`: the run-wide video/still ratio the bands are scaled by;
+    'auto' measures it (still_offset), None or 1.0 compares raw areas."""
+    if offset == 'auto':
+        offset = still_offset(edges, checkpoints)
+    k_off = float(offset) if offset else 1.0
+    bands = [(t0, t1, lo * k_off, hi * k_off, cs)
+             for t0, t1, lo, hi, cs in landing_bands(checkpoints, band_pct)]
+    ts = sorted(e['t_s'] for e in edges if e['t_s'] is not None)
+    gaps = sorted(b - a for a, b in zip(ts, ts[1:]) if b > a)
+    half = 0.5 * gaps[len(gaps) // 2] if gaps else REVIEW_MATCH_S
+    jumps = _jump_frames(edges, jump_pct)
+    out = []
+    for i, e in enumerate(edges):
+        reasons = []
+        a, t = e['area_px'], e['t_s']
+        if a is None:
+            m = e.get('method') or ''
+            reasons.append(m if (m.startswith('failed')
+                                 or m == 'size-mismatch') else 'no edge')
+        elif e.get('needs_review'):
+            reasons.append('detector')
+        band = None
+        if t is not None:
+            for t0, t1, lo, hi, _cs in bands:
+                if t0 - half <= t <= t1 + half:
+                    band = (lo, hi)
+                    break
+        if a is not None:
+            if band is not None:
+                if not band[0] <= a <= band[1]:
+                    reasons.append('off-stills')
+            elif i in jumps:
+                reasons.append('jump')
+        out.append({'frame': e['frame'], 't_s': t,
+                    'nominal_kV': e['nominal_kV'], 'area_px': a,
+                    'reasons': reasons, 'band': band})
+    return out
+
+
+def _jump_frames(edges, jump_pct):
+    """Indices of the frames that are a one-frame spike or the frame a
+    step lands on (review_flags' 'jump'), over the whole series in frame
+    order, so a landing in between still carries the reference across."""
+    lim = jump_pct / 100.0
+    meas = [i for i, e in enumerate(edges) if e['area_px'] is not None]
+    out = set()
+    ref = None
+    for k, i in enumerate(meas):
+        a = edges[i]['area_px']
+        prev = edges[meas[k - 1]]['area_px'] if k > 0 else None
+        nxt = edges[meas[k + 1]]['area_px'] if k + 1 < len(meas) else None
+        if prev and nxt:
+            dp, dn = a / prev - 1.0, a / nxt - 1.0
+            if abs(dp) > lim and abs(dn) > lim and (dp > 0) == (dn > 0):
+                out.add(i)              # a spike: the reference stays put
+                continue
+        if ref and abs(a / ref - 1.0) > lim:
+            out.add(i)
+        ref = a
+    return out
+
+
+def read_decisions(rundir, edges=None):
+    """The review window's decisions -> ({frame: record}, dropped).
+
+    A decision is about the AREA the detector reported when it was made;
+    with `edges` given, a decision whose recorded area no longer matches
+    the frame's current one (a re-run since) is dropped and counted, never
+    silently carried onto a different measurement."""
+    path = os.path.join(rundir, VIDEO_REVIEW_FILENAME)
+    if not os.path.exists(path):
+        return {}, 0
+    now = ({e['frame']: e['area_px'] for e in edges}
+           if edges is not None else None)
+    out, dropped = {}, 0
+    with open(path, newline='', encoding='utf-8') as f:
+        for r in csv.DictReader(f):
+            try:
+                frame = int(r['frame'])
+            except (KeyError, ValueError):
+                continue
+            if r.get('decision') not in REVIEW_DECISIONS:
+                continue
+            a = _num(r.get('area_px'))
+            if now is not None:
+                cur = now.get(frame)
+                if frame not in now or (a is None) != (cur is None) or (
+                        a is not None and abs(a - cur) > 0.5):
+                    dropped += 1
+                    continue
+            out[frame] = {'frame': frame, 't_s': _num(r.get('t_s')),
+                          'decision': r['decision'], 'area_px': a,
+                          'reasons': r.get('reasons') or '',
+                          'user': r.get('user') or '',
+                          'when': r.get('when') or ''}
+    return out, dropped
+
+
+def write_decisions(rundir, decisions):
+    """Write {frame: record} to video_review.csv, frame order, whole or
+    not at all (a .part renamed into place)."""
+    path = os.path.join(rundir, VIDEO_REVIEW_FILENAME)
+    part = f"{path}.{os.getpid()}.part"
+    with open(part, 'w', newline='', encoding='utf-8') as f:
+        w = csv.DictWriter(f, fieldnames=REVIEW_COLUMNS)
+        w.writeheader()
+        for frame in sorted(decisions):
+            r = decisions[frame]
+            w.writerow({'frame': frame,
+                        't_s': '' if r.get('t_s') is None else r['t_s'],
+                        'decision': r['decision'],
+                        'area_px': ('' if r.get('area_px') is None
+                                    else r['area_px']),
+                        'reasons': r.get('reasons') or '',
+                        'user': r.get('user') or '',
+                        'when': r.get('when') or ''})
+    os.replace(part, path)
+
+
+def read_frame(cap, frame):
+    """Frame `frame` of an open cv2.VideoCapture as 8-bit grey, or None.
+    FFV1 is intra-only, so a seek lands exactly (measured 2026-10-06 with
+    OpenCV 4.13: 45 of 45 random seeks returned the frame asked for)."""
+    import cv2
+    cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame))
+    ok, img = cap.read()
+    if not ok or img is None:
+        return None
+    return img if img.ndim == 2 else img[:, :, 0]
 
 
 # ---------------------------------------------------------------------------
@@ -924,7 +1555,10 @@ def _run_log(rundir):
 
     def log(msg):
         line = f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}"
-        print(line)
+        try:
+            print(line)
+        except UnicodeEncodeError:       # a cp1252 console (Windows)
+            print(line.encode('ascii', 'backslashreplace').decode())
         try:
             with open(path, 'a', encoding='utf-8') as f:
                 f.write(line + '\n')
@@ -948,8 +1582,7 @@ def finalize_and_detect(staging, rundir, detect=False):
                 pass
             s = detect_video(rundir, log=log, video_dir=staging)
             log(f"video edges: {s['frames']} frames in {s['seconds']:.0f} "
-                f"s, {s['needs_review']} flagged for review -> "
-                f"{VIDEO_EDGES_FILENAME}"
+                f"s, {_flag_text(s)} -> {VIDEO_EDGES_FILENAME}"
                 + (f", {VIDEO_PLOT_FILENAME}" if s.get('png') else ''))
         except Exception as e:
             log(f"⚠ video edges: detection failed ({e}) -- run `python "
@@ -981,7 +1614,7 @@ def main(argv):
             return 2
         return finalize_and_detect(rest[0], rest[1],
                                    detect='--detect' in argv)
-    run, stride, limit, plot = None, 1, None, True
+    run, stride, limit, plot, after = None, 1, None, True, False
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -999,6 +1632,8 @@ def main(argv):
             continue
         if a == '--no-plot':
             plot = False
+        elif a == '--after-save':
+            after = True
         elif a.startswith('--'):
             print(f"unknown flag: {a}")
             return 2
@@ -1017,10 +1652,42 @@ def main(argv):
         os.nice(10)
     except (AttributeError, OSError):
         pass
+    if after:
+        return rerun_after_save(rundir, plot=plot)
     s = detect_video(rundir, stride=stride, limit=limit, plot=plot)
     print(f"video edges: {s['frames']} frames in {s['seconds']:.0f} s, "
-          f"{s['needs_review']} flagged for review -> {s['csv']}"
+          f"{_flag_text(s)} -> {s['csv']}"
           + (f", {s['png']}" if s.get('png') else ''))
+    return 0
+
+
+def _flag_text(s):
+    off = s.get('still_offset')
+    return (f"{s['flagged']} flagged for review against "
+            f"{s['checkpoints']} accepted still(s) "
+            f"({s['needs_review']} by the detector's own verdict"
+            + (f"; the video reads {100.0 * (off - 1.0):+.2f} % against the "
+               f"stills overall" if off else "") + ")")
+
+
+def rerun_after_save(rundir, plot=True):
+    """The detached job Edge Review's Save starts (launch_rerun): say why
+    in run.log, measure every frame again, say what came of it. -> 0."""
+    log = _run_log(rundir)
+    try:
+        why = edges_stale(rundir)
+    except Exception as e:
+        why = f"inputs not checked ({e})"
+    log(f"video edges: re-running after Save ({why or 'current'})")
+    try:
+        s = detect_video(rundir, log=log, plot=plot)
+    except Exception as e:
+        log(f"⚠ video edges: the re-run after Save failed ({e}) -- run "
+            f"`python sldea_video.py \"{rundir}\"`")
+        return 1
+    log(f"video edges: {s['frames']} frames in {s['seconds']:.0f} s, "
+        f"{_flag_text(s)} -> {VIDEO_EDGES_FILENAME}"
+        + (f", {VIDEO_PLOT_FILENAME}" if s.get('png') else ''))
     return 0
 
 

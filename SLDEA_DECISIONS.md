@@ -13,6 +13,136 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## The video is reviewed by exception: Save re-runs stale video edges, the accepted stills flag the frames, and a window walks them (2026-10-06)
+
+**TL;DR:** the video pass used to run once, minutes after the run, before
+anyone calibrated, and nothing ever read its output again. Now Edge
+Review's Save re-runs it whenever its edges are out of date. Each frame is
+checked against the run's accepted stills, which are frames of the same
+stream. A new 🎞 **Video review…** window walks only the frames the
+detector doubts or that disagree with the stills, and records accept /
+reject decisions in `video_review.csv`. `data.csv` is never touched by it.
+
+**Observation (13_backlight_2, 2026-10-05).**
+
+- The post-run job finished the video pass at 20:47:29 and the operator
+  saved the scale anchor at 20:51:20. The pass therefore ran with no scale
+  and the baseline fit as it was then (refused): `video_edges.csv` has 438
+  rows, every one flagged for review, none with an area.
+- Nothing re-ran it, and no tool read `video_edges.csv`. The only way to
+  look at a frame was `ffplay` and a guess at which ones mattered.
+
+**Decision.**
+
+- **Provenance.** The pass writes `video_edges.json` beside the CSV: the
+  detection settings, the baseline fit, the area method, the scale anchor,
+  stride and limit. `edges_stale` compares that record with the run as it
+  is now and names each input that changed. The CSV is written to a
+  `.part` file and renamed into place, so a failed pass leaves the old one
+  whole.
+- **Re-run after Save.** `save()` calls `sldea_video.after_save` after
+  data.csv, the anchor and the stamp are written, since all three are
+  inputs. When the edges are stale, a detached, low-priority
+  `sldea_video.py RUN --after-save` measures every frame again and logs
+  into `run.log`. A video still in local staging is not in the folder yet,
+  and the post-run job detects before it moves the files, so the re-run
+  cannot race it. Closing Edge Review does not stop the re-run.
+- **Checkpoints.** Every data.csv row with an area is an accepted still.
+  Its time is that of the stream frame it came from, read from `run.log`
+  ("(frame t=…s)"), with the planned time as the fallback.
+- **Flags** (`review_flags`). A frame is sent to a human when:
+  - the detector doubts it (`needs_review`), or found no edge;
+  - inside a landing bracketed by accepted stills, it reads more than
+    `REVIEW_BAND_PCT` = 2 % outside their range. That is the top of the
+    ±1–2 % budget in SLDEA_MEASUREMENT.md §1.1;
+  - outside any landing, it is a one-frame spike, or the frame where a step
+    of more than `REVIEW_JUMP_PCT` = 2 % lands. Per-frame repeatability is
+    0.08–0.26 % SD (§2.1).
+
+  Both the detector's confidence and agreement with the stills are needed
+  to pass a frame.
+- **Run-wide offset.** The video pass fits the baseline on the recorder's
+  cvtColor decode, the stills on the PNG decode. On a low-contrast disc the
+  two fits differ. `still_offset` measures the median video/still ratio at
+  the stills' own times. The bands are scaled by it, and it is said in
+  `run.log` and in the window. When it exceeds the band itself, the window
+  warns to check the anchor and the baseline.
+- **The window** (`sldea_video_review.py`, also runnable as
+  `python sldea_video_review.py RUN`):
+  - **Figure:** the area-against-time figure, with every series given its
+    own marker shape as well as a Tol colour.
+  - **Frame view:** the frame from `video.mkv`, cropped to the tracker's
+    search window, with the detector's outline re-detected on demand. The
+    re-detection uses the previous frame's method, so it reproduces the
+    pass's own choice. It runs on a worker thread that holds no Tk object.
+  - **Keys:** A / R / C, stretches with Shift, N / P between flagged
+    frames.
+  - **Decisions** go to `video_review.csv` with the area they judged. A
+    decision about an area the detector no longer reports is dropped, and
+    the drop is counted.
+  - **On close,** `video_edges.png` is redrawn with the decisions.
+- **Format unchanged: FFV1, lossless, full frame, 1 fps default.**
+  Measured on real frames (decoded the way the recorder decodes them,
+  OpenCV 4.13, this machine):
+
+  | format | MB/frame, 13_backlight_2 | MB/frame, P3_2 | worst area error vs lossless (13_bl_2 / P3_2) |
+  |---|---|---|---|
+  | FFV1 (today) | 0.641 | 0.516 | 0 / 0 (bit-exact) |
+  | FFV1, cropped to the search window, baseline outside | 0.459 | 0.380 | 0 % / **93 %** (the seam reads as edges) |
+  | VP9 | 0.175 | 0.119 | 0.8 % / **11.8 %** |
+  | MJPG | 0.067 | 0.055 | 0.8 % / **27.7 %** |
+  | MPEG-4 part 2 | 0.025 | 0.020 | 1.3 % / **40.6 %** |
+
+  - The real 13_backlight_2 recording is 280.4 MB for 438 frames, i.e.
+    0.64 MB/frame, or about 2.3 GB an hour at 1 fps.
+  - The zeroth-order entropy of the LOCO-I residual (sensor noise 1.7–2.1
+    gray) is 0.58–0.69 MB/frame. FFV1's context model already beats it, so
+    no lossless coder will do much better.
+  - FFV1's `coder`/`context` options changed nothing through OpenCV.
+  - This build has no H.264 (OpenH264 missing). AV1 took about 90 s for
+    two frames.
+  - The lossy formats look harmless at the median (0.13–0.52 %), but their
+    worst frames on the wrinkle-mode P3 run are 12–41 % wrong. That
+    confirms the 2026-09-23 reason for lossless.
+
+**Evidence.**
+
+- **Tests:**
+  - `tests/test_sldea_video.py`: flags, checkpoints, the offset, the stamp
+    and staleness, whole-or-nothing writes, the after-Save launcher and
+    job, decisions, and the figure's series.
+  - `tests/test_sldea_video_review.py` (new): navigation, decisions and
+    reopen, stretches, the off-thread outline, a clean close, and the
+    stale banner with its re-run.
+  - `tests/test_sldea_edge_gui.py`: the button and the Save hook.
+- **End to end** on a copy of 13_backlight_2:
+  - **Setup:** a 438-frame FFV1 video built from its stills on the real
+    `video_frames.csv` timing (281 MB, the original is 280.4 MB). The 60
+    stills were detected and accepted as a Save would write them, with the
+    baseline-fit retry of #365 merged locally.
+  - **Staleness:** `edges_stale` said "the automatic baseline fit changed
+    (none -> 405.2 px)".
+  - **Re-run:** `--after-save` measured all 438 frames in 72–77 s, with
+    2 frames flagged (frames 0 and 1, the detector's own doubt at 0 kV).
+    The video read −1.19 % against the stills (p10 −1.54, p90 −0.80).
+  - **Window:** opens in 0.9 s; outlines arrive in 0.4–0.6 s per frame.
+- **Found on the way and fixed in #365:** the retry's fill rule read 59 %
+  on the PNG and 51 % on the video decode of the same baseline. The
+  retry's fill is now the ring's 25th percentile.
+
+**Open.**
+
+- On a backlit run like 13_backlight_2, the video pass measures only with
+  #365 merged. Without it the baseline fit refuses, and every frame is
+  flagged by the detector, as before.
+- `test_sldea_video`'s FFV1 writer fails intermittently on Gogojster
+  (Windows, OpenCV 4.13). About one process in five sees "Unknown C++
+  exception" from `VideoWriter.write`, after which every write in that
+  process fails, so a suite skips or fails in a cascade. It is the same on
+  origin/main and has not been seen on the bench.
+- BENCH_TEST §Q16 (re-run after Save) and §Q17 (the window) are owed, with
+  §Q itself.
+
 ## The baseline disc fit retries from the window centre when it refuses, and judges that retry against the ring around the disc (2026-10-05)
 
 **TL;DR:** on backlit run `13_backlight_2` the automatic baseline fit
@@ -119,9 +249,9 @@ and after by `sldea_batch_eval.py`).**
 - The disc's contrast on that frame is still small (about 6 gray levels,
   3-5 on its right half). The fit now passes with room (fill 0.92, conf
   0.78), but a more uniform backlight is the capture-side fix.
-- The video pass runs before calibration and never re-runs, so
-  `13_backlight_2`'s `video_edges.csv` stays empty until
-  `sldea_video.py` is run on it again with this change.
+- The video pass ran before calibration, so `13_backlight_2`'s
+  `video_edges.csv` is empty. Since the video review entry above, the
+  next Save of that run in Edge Review re-runs it with this fit.
 
 ## The camera pre-flight shoots under the run's own lock, and says when the Webcam tab's fields and lock disagree (2026-10-05)
 

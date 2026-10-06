@@ -41,6 +41,9 @@ def _app():
     import gui
     # No instrument hunt: it is irrelevant here and starts threads.
     gui.InstrumentControlGUI.auto_connect = lambda self: None
+    # Nor a camera: these tests select every tab, and opening the Webcam
+    # tab would start the preview on whatever camera this PC has (#375).
+    gui.CAM_AUTOSTART_ON_TAB = False
     app = gui.InstrumentControlGUI(root)
     root.geometry(f'{NARROW}x{SHORT}')
     root.deiconify()

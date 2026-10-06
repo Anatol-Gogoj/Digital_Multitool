@@ -1297,7 +1297,7 @@
    },
    {
     "label": "Start Preview",
-    "what": "Live view of the selected camera; the same button stops it."
+    "what": "Live view of the selected camera. It starts by itself when you open this tab and stops when you leave it, unless interval capture is running; this button stops and restarts it. While it is off, the view says PREVIEW OFF and why, over the last frame dimmed."
    },
    {
     "label": "Snapshot",
@@ -1353,7 +1353,7 @@
    }
   ],
   "workflow": [
-   "Pick the camera number and click Start Preview.",
+   "Open the tab; the preview starts by itself. If the view says PREVIEW OFF, read the reason under it, then pick the camera number and click Start Preview.",
    "Tick Show focus score; turn the lens until the number peaks.",
    "Set exposure/colour (or use Stabilize), then 🔒 Apply & Lock.",
    "Set the save folder and filename prefix.",

@@ -1111,6 +1111,11 @@ def test_remembered_options_round_trip_per_parent_folder():
                        # a stale one is inert rather than wrong. Re-typing
                        # 'these six are P3' every session is not.
                        'groups': [], 'aggregate_only': False,
+                       # `#373`: the material each group was formed with
+                       # travels WITH the grouping; re-reading setup.txt
+                       # on reopening would let an edit made in between
+                       # restyle groups the operator already looked at
+                       'group_materials': [],
                        # the normalized panel's units joins as an ordinary
                        # drawing answer: a lab that quotes strain quotes it
                        # every session, and re-ticking it each time is the
@@ -2219,6 +2224,292 @@ def test_a_grouping_survives_a_round_trip_through_the_options_file():
             _shut(root)
     finally:
         shutil.rmtree(p, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# "Group by material" and its "…and by concentration" child (`#373`)
+# ---------------------------------------------------------------------------
+
+_ABSENT = object()
+P3 = 'Carbon Solutions P3-SWNT'
+N3900 = 'nano-c Invisicon 3900'
+CB = 'carbon black'
+
+
+def _label(rundir, electrode=_ABSENT, conc=_ABSENT):
+    """Give a run a setup.txt carrying these lines; _ABSENT leaves one out,
+    which is not the same as recording '(not specified)'."""
+    lines = [f"SLDEA Test  --  {os.path.basename(rundir)}", '']
+    if electrode is not _ABSENT:
+        lines.append(f"Compliant electrode: {electrode}")
+    if conc is not _ABSENT:
+        lines.append(f"Ink concentration: {conc}")
+    with open(os.path.join(rundir, 'setup.txt'), 'w',
+              encoding='utf-8') as f:
+        f.write('\n'.join(lines) + '\n')
+    return rundir
+
+
+def _select(win, *names):
+    """Select exactly the runs with these folder names. ONE place that
+    touches the run widget's own API, so the next change of widget
+    (`#374`) changes one helper rather than every case below."""
+    import tkinter as tk
+    win.run_box.selection_clear(0, tk.END)
+    for i, (rundir, _text) in enumerate(win.runs):
+        if os.path.basename(rundir) in names:
+            win.run_box.selection_set(i)
+
+
+def _campaign(b):
+    """The fixture runs beside _Bare's R1 (which has no setup.txt)."""
+    for name, electrode, conc in (('P3a', P3, '2.5 mL'),
+                                  ('P3b', P3, '2.50 mL'),
+                                  ('P3c', 'carbon solutions p3-swnt',
+                                   '1.5mL'),
+                                  ('N39', N3900, _ABSENT),
+                                  ('CB1', CB, _ABSENT),
+                                  ('NS', '(not specified)', _ABSENT)):
+        _label(_fake_run(b.tmp, name), electrode, conc)
+    b.win.populate()
+
+
+def test_group_by_material_seeds_ordinary_groups_from_the_selection():
+    """One click: the SELECTED runs land in one group per recorded
+    material, the two kinds of 'no material' apart. Then they are
+    ordinary groups: Assign, Ungroup and Clear all work on top, an
+    unselected run's group is left alone, and current_opts carries the
+    grouping and each group's material to the figure."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        _campaign(b)
+        _select(win, 'NS')
+        assert win.assign_group('mine', win.selected_dirs()) is None
+        _select(win, 'R1', 'P3a', 'P3b', 'P3c', 'N39', 'CB1')
+        assert win.seed_groups('material') is None
+        rows = {n: sorted(os.path.basename(p) for p in m)
+                for n, m in win.group_list()}
+        assert list(rows) == ['mine', CB, P3, N3900,
+                              sp.NO_ELECTRODE_GROUP], list(rows)
+        assert rows[P3] == ['P3a', 'P3b', 'P3c'], rows
+        assert rows['mine'] == ['NS'], 'the seed touched an unselected run'
+        assert dict(win.group_material_list()) == {CB: CB, P3: P3,
+                                                   N3900: N3900}
+        opts, err = win.current_opts()
+        assert err is None, err
+        assert opts['groups'] == win.group_list()
+        assert opts['group_materials'] == win.group_material_list()
+        # ORDINARY groups: a run moved by hand goes where it is put, and
+        # the group it joins keeps its own material (`#313`: the
+        # operator's grouping wins)
+        _select(win, 'P3c')
+        assert win.assign_group(CB, win.selected_dirs()) is None
+        assert dict(win.group_material_list())[CB] == CB
+        _select(win, 'R1')
+        assert win.assign_group('', win.selected_dirs()) is None
+        assert sp.NO_ELECTRODE_GROUP not in dict(win.group_list())
+        # nothing selected: refused in words, and nothing moves
+        before = win.group_list()
+        _select(win)
+        assert win.seed_groups('material')
+        assert win.group_list() == before
+        win._clear_groups()
+        assert win.group_list() == [] and win.group_material_list() == []
+        assert 'No groups' in win.group_summary()
+
+
+def test_by_concentration_is_the_material_seeds_child_and_splits_volumes():
+    """The owner asked for it as a SUB-button: indented under 'Group by
+    material' the way the cadence guard sits under the breakdown marks,
+    right after it in the same box. Pressed, it splits each material by
+    its normalized ink volume, and the subgroups keep their material."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        parent, child = win.btn_seed_material, win.btn_seed_concentration
+        assert parent.winfo_parent() == child.winfo_parent()
+        slaves = parent.master.pack_slaves()
+        assert slaves.index(child) == slaves.index(parent) + 1
+
+        def left_pad(widget):
+            pad = widget.pack_info().get('padx', 0)
+            if isinstance(pad, (tuple, list)):
+                return int(pad[0])
+            return int(str(pad).split()[0])
+        assert left_pad(child) > left_pad(parent), 'child is not indented'
+        assert str(child.cget('text')).startswith('…')
+        assert str(win.cb_cadence.cget('text')).startswith('…')
+        _campaign(b)
+        _select(win, 'P3a', 'P3b', 'P3c', 'N39', 'CB1', 'NS')
+        child.invoke()
+        rows = {n: sorted(os.path.basename(p) for p in m)
+                for n, m in win.group_list()}
+        assert list(rows) == [CB, f"{P3}, 1.5 mL", f"{P3}, 2.5 mL", N3900,
+                              sp.NOT_SPECIFIED], list(rows)
+        assert rows[f"{P3}, 2.5 mL"] == ['P3a', 'P3b'], rows
+        mats = dict(win.group_material_list())
+        assert mats[f"{P3}, 1.5 mL"] == mats[f"{P3}, 2.5 mL"] == P3
+        assert sp.NOT_SPECIFIED not in mats
+        assert win.lbl_groups.cget('text') == win.group_summary()
+        # ...and the plain seed over the same selection merges them back
+        parent.invoke()
+        assert [n for n, _m in win.group_list()] == [CB, P3, N3900,
+                                                     sp.NOT_SPECIFIED]
+
+
+def test_a_new_group_takes_its_material_and_moved_runs_take_the_groups():
+    """When the material is decided: at the moment a group is FORMED.
+    A new group of one material gets it; a mixed one gets none (a style
+    of its own); a run moved into an existing group takes that group's
+    material, so moving a hand-typed 'Invisicon 3900' into the dropdown
+    spelling's group merges the two into one series (`#374`)."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        _campaign(b)
+        _label(_fake_run(b.tmp, 'N39hand'), 'Invisicon 3900')
+        win.populate()
+        _select(win, 'P3a', 'P3c')
+        assert win.assign_group('ink', win.selected_dirs()) is None
+        assert win.group_material_list() == [['ink', P3]]
+        _select(win, 'P3b', 'CB1')
+        assert win.assign_group('mixed', win.selected_dirs()) is None
+        assert 'mixed' not in dict(win.group_material_list())
+        _select(win, 'N39')
+        assert win.assign_group('3900', win.selected_dirs()) is None
+        _select(win, 'N39hand')
+        assert win.assign_group('3900', win.selected_dirs()) is None
+        assert dict(win.group_material_list())['3900'] == N3900
+        # a name differing only in case lands in the existing group
+        # instead of being refused as a second group of the same name
+        _select(win, 'NS')
+        assert win.assign_group('INK', win.selected_dirs()) is None
+        assert [n for n, _m in win.group_list()] == ['ink', 'mixed', '3900']
+        assert dict(win.group_material_list())['ink'] == P3
+        # emptied, the group and its material go; formed again, it is
+        # read afresh from its new runs
+        _select(win, 'P3a', 'P3c', 'NS')
+        assert win.assign_group('', win.selected_dirs()) is None
+        assert 'ink' not in dict(win.group_list())
+        _select(win, 'CB1')
+        assert win.assign_group('ink', win.selected_dirs()) is None
+        assert dict(win.group_material_list())['ink'] == CB
+
+
+def test_a_seeded_grouping_round_trips_through_the_figspec_and_tidy_csv():
+    """Seeded in the window, exported, read back: the tidy CSV's group
+    column names each run's seeded group, the figspec holds the grouping
+    and the materials verbatim, and a window opened on that spec shows
+    the same groups with the same materials, whatever setup.txt says
+    by then."""
+    out = _mktmp()
+    try:
+        with _Bare() as b:
+            if not b.ok:
+                return
+            win = b.win
+            _campaign(b)
+            _select(win, 'R1', 'P3a', 'P3b', 'N39', 'CB1', 'NS')
+            assert win.seed_groups('concentration') is None
+            # current mode: the fixtures carry no estimator stamp, and the
+            # grouping rides in opts in every mode
+            win.v_mode.set('current')
+            win._mode_changed()
+            opts, err = win.current_opts()
+            assert err is None, err
+            runs = sp.prepare_runs(win.selected_dirs(), opts)
+            img, tidy = sp.export(runs, opts, out, 'w')
+            with open(tidy, newline='', encoding='utf-8') as f:
+                got = {r['run']: r['group'] for r in csv.DictReader(f)}
+            assert got == {'R1': sp.NO_ELECTRODE_GROUP,
+                           'P3a': f"{P3}, 2.5 mL", 'P3b': f"{P3}, 2.5 mL",
+                           'N39': N3900, 'CB1': CB,
+                           'NS': sp.NOT_SPECIFIED}, got
+            spec, err = sp.load_figspec(sp.figspec_path(img))
+            assert err is None, err
+            assert spec['opts']['groups'] == opts['groups']
+            assert spec['opts']['group_materials'] == opts['group_materials']
+            # relabel a run AFTER the export: the spec must not care
+            _label(os.path.join(b.tmp, 'N39'), CB)
+            again = g.PlotWindow(b.root, b.tmp, preselect=['N39'],
+                                 opts=spec['opts'], remember=False)
+            assert again.group_list() == win.group_list()
+            assert again.group_material_list() == win.group_material_list()
+            _select(again)
+            assert again.current_opts()[0]['group_materials'] == \
+                opts['group_materials']
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_remembered_materials_travel_with_their_groups_only():
+    """group_materials is remembered beside the grouping, and only
+    beside it: groups given explicitly (a spec, a command line) never
+    borrow a remembered material for a group that happens to share a
+    name, or a figure would be styled by a file it never named."""
+    import tkinter as tk
+    p = _mktmp()
+    try:
+        cfg = os.path.join(p, 'opts.json')
+        a = _label(_fake_run(p, 'A_run'), P3)
+        opts, err = sp.make_opts(aggregate=True, groups=[['P3', [a]]],
+                                 group_materials=[['P3', P3]])
+        assert err is None, err
+        assert g.save_options(p, opts, path=cfg) == cfg
+        back = g.load_options(p, path=cfg)
+        assert back['group_materials'] == [['P3', P3]], back
+        assert 'group_materials' in g.STRUCTURED_OPTIONS
+        for bad in ({'group_materials': 'P3'},
+                    {'group_materials': [['P3']]},
+                    {'group_materials': [['P3', P3], ['p3', CB]]}):
+            assert 'group_materials' not in g._clean_options(bad), bad
+        try:
+            root = tk.Tk()
+        except tk.TclError as e:
+            print(f"   (skipped: no display for Tk: {e})")
+            return
+        try:
+            root.withdraw()
+            real = g.OPTIONS_PATH
+            g.OPTIONS_PATH = cfg
+            try:
+                win = g.PlotWindow(root, p, preselect=['A_run'])
+                spec_opts = sp.make_opts(aggregate=True,
+                                         groups=[['P3', [a]]])[0]
+                bare = g.PlotWindow(root, p, preselect=['A_run'],
+                                    opts=spec_opts)
+            finally:
+                g.OPTIONS_PATH = real
+            assert win.group_material_list() == [['P3', P3]]
+            assert bare.group_list() == spec_opts['groups']
+            assert bare.group_material_list() == [], \
+                'explicit groups borrowed a remembered material'
+        finally:
+            _shut(root)
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_the_group_tips_say_what_is_read_from_setup_txt():
+    """`#373` made two sentences of GROUP_ASSIGN_TIP false: the backfill
+    put 'Electrode family:' in the corpus on 2026-08-12, and the seed now
+    reads setup.txt. The tips must say what the window really does."""
+    tip = g.GROUP_ASSIGN_TIP
+    assert 'no run in the corpus carries it' not in tip
+    assert 'nothing is read from setup.txt' not in tip
+    assert 'Group by material' in tip
+    assert 'existing group' in tip
+    for phrase in ('SELECTED', 'Compliant electrode:',
+                   sp.NO_ELECTRODE_GROUP, sp.NOT_SPECIFIED,
+                   'not a mode', 'line style'):
+        assert phrase in g.GROUP_SEED_TIP, phrase
+    for phrase in ('Ink concentration:', '2.5mL', sp.NO_CONCENTRATION,
+                   'line style'):
+        assert phrase in g.GROUP_SEED_CONC_TIP, phrase
 
 
 def test_the_taller_draw_column_still_measures_and_still_scrolls():

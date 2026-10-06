@@ -48,9 +48,15 @@ Two things the window remembers or reaches for, both additive:
     then draws one mean per group -- carbon black against P3, two lines
     on one panel -- with a tick box that hides the contributing runs so
     the panel carries the comparison and not the thicket. The grouping is
-    the operator's; nothing is read from setup.txt, which is why it works
-    on every run in the corpus and the parked `Electrode family:` half of
-    `#268` does not.
+    the operator's, and it works on runs that record nothing;
+  * "Group by material" SEEDS that grouping from each selected run's
+    `Compliant electrode:` line in setup.txt, and its "...and by
+    concentration" child splits each material by `Ink concentration:`
+    (`#373`). A seed is an action, not a mode: what it makes are ordinary
+    groups that Assign / Ungroup / Clear all edit on top, and the figspec
+    stores them verbatim. Keyed on the MATERIAL string, never on the
+    derived `Electrode family:`, which puts all three CNT inks in one
+    family, the very series `#373` asked to split.
 """
 import math
 import os
@@ -321,10 +327,17 @@ OPTIONS_FALLBACK = os.path.join(os.path.expanduser('~'), '.cache',
 # re-typing 'these six are P3' every session is a real cost paid every
 # session. Remembered under the FIRST parent, like everything else here
 # (`#323` made 'the parent' a list; see options_key).
+#
+# `group_materials` (`#373`) is remembered WITH `groups`, never apart from
+# them: it is the material each group's runs recorded when the group was
+# formed, and it picks the group's line style. Re-reading setup.txt on
+# reopening instead would let an edit made in between restyle a grouping
+# the operator already looked at.
 REMEMBERED = ('mode', 'prepost', 'mean', 'bands', 'breakdown', 'vs_area',
               'logx', 'logy', 'marker_key', 'subplots', 'cadence_guard',
-              'aggregate', 'aggregate_exact', 'groups', 'aggregate_only',
-              'strain_pct', 'x', 'split_legs', 'arrows', 'fmt', 'dpi')
+              'aggregate', 'aggregate_exact', 'groups', 'group_materials',
+              'aggregate_only', 'strain_pct', 'x', 'split_legs', 'arrows',
+              'fmt', 'dpi')
 
 # The remembered options that are NAMES rather than flags, each with the
 # vocabulary sldea_plot validates it against -- read from sldea_plot so a
@@ -347,7 +360,8 @@ NUMERIC_OPTIONS = {'dpi': sp.check_dpi}
 # reached make_opts and been refused there, which in the window means an
 # error message where the figure goes, from a file the operator never
 # opened.
-STRUCTURED_OPTIONS = {'groups': sp.check_groups}
+STRUCTURED_OPTIONS = {'groups': sp.check_groups,
+                      'group_materials': sp.check_group_materials}
 
 
 def options_key(parent):
@@ -858,13 +872,42 @@ GROUP_ASSIGN_TIP = (
     "become that group, and the cross-run aggregate then draws ONE MEAN "
     "PER GROUP instead of one mean over everything (`#313`). Two groups "
     "give the CB-against-P3 comparison the campaign is for.\n\n"
-    "The grouping is YOURS — nothing is read from setup.txt. The "
-    "'Electrode family:' field exists but no run in the corpus carries "
-    "it, so grouping by hand is what works on the runs that exist.\n\n"
+    "The grouping is YOURS. 'Group by material' below fills it from "
+    "setup.txt in one click, and Assign still overrides it: a run goes "
+    "wherever you put it, whatever its setup.txt says. A NEW group takes "
+    "the line style of the electrode material its runs recorded, when "
+    "they all recorded the same one; runs moved into an existing group "
+    "take that group's style.\n\n"
     "Each group's band follows the same decided rule as the ungrouped "
     "aggregate, computed from that group's own runs: SEM for two runs or "
     "more, and for a single run NO band plus a caption saying an "
     "aggregate needs at least two. A run belongs to at most one group.")
+
+GROUP_SEED_TIP = (
+    "Fills the groups from setup.txt for the SELECTED runs: one group per "
+    "'Compliant electrode:' value, named as recorded and compared "
+    "case-insensitively (`#373`). A run with no such line goes to "
+    f"'{sp.NO_ELECTRODE_GROUP}'; one recorded as "
+    f"'{sp.NOT_SPECIFIED}' goes to '{sp.NOT_SPECIFIED}'. They stay "
+    "apart: one predates the field, the other declined to answer.\n\n"
+    "A seed, not a mode: what it makes are ordinary groups. Assign, "
+    "Ungroup selected and Clear all work on top, and nothing re-reads "
+    "setup.txt afterwards, so an exported figure keeps its grouping. "
+    "Spellings are compared as written, so 'Invisicon 3900' and "
+    "'nano-c Invisicon 3900' are two groups until you Assign one into "
+    "the other.\n\n"
+    "Each material draws its mean in a line style of its own, and on "
+    "this button's figure in a color of its own too.")
+
+GROUP_SEED_CONC_TIP = (
+    "Group by material, then split each material by its "
+    "'Ink concentration:' line: 'Carbon Solutions P3-SWNT, 2.5 mL'. "
+    "'2.5mL', '2.50 mL' and '2.5 mL' are one value. Carbon black, eGaIn "
+    "and the sprayed Invisicon inks record no concentration by design "
+    "and stay one group each; an ink run missing the line becomes "
+    f"'<material>, {sp.NO_CONCENTRATION}'.\n\n"
+    "The groups of one material share its line style and differ by "
+    "color, so the dash pattern still says which material a curve is.")
 
 GROUP_UNGROUP_TIP = (
     "Takes the selected runs out of whatever group they are in, leaving "
@@ -1204,6 +1247,12 @@ class PlotWindow:
             for k in ('title', 'title_first', 'title_second'):
                 if opts.get(k):
                     o[k] = opts[k]
+            # `#373`: the materials describe THESE groups, so they come
+            # from wherever the groups came from. Explicit groups with no
+            # materials (a pre-`#373` spec, or none of them had one) must
+            # not pick up a remembered entry that happens to share a name.
+            if 'groups' in named:
+                o['group_materials'] = opts.get('group_materials') or []
         self.v_mode = tk.StringVar(value=o['mode'])
         self.v_prepost = tk.BooleanVar(value=o['prepost'])
         self.v_mean = tk.BooleanVar(value=o['mean'])
@@ -1233,11 +1282,16 @@ class PlotWindow:
         # directory to group name, which no Tk variable type can hold, so
         # it lives here and current_opts renders it into opts' canonical
         # form. `_group_order` keeps the operator's group order, because
-        # that order picks the colours (sp.group_style) and a set would
+        # that order picks the colors (sp.assign_group_styles) and a set would
         # repaint the figure on every reload.
         self.groups = {}               # run key -> group name
         self._group_order = []         # group names, creation order
-        self._set_groups(o['groups'])
+        # `#373`: group name -> the one electrode material its runs
+        # recorded when the group was FORMED (a seed, or an Assign that
+        # created it). Set at those moments and never re-read from
+        # setup.txt, so a group's line style cannot move under it.
+        self.group_materials = {}
+        self._set_groups(o['groups'], o.get('group_materials'))
         self.v_group_name = tk.StringVar(value='')
         self.v_subplots = tk.StringVar(value=o['subplots'])
         self.v_title_first = tk.StringVar(value=o['title_first'] or '')
@@ -1278,8 +1332,9 @@ class PlotWindow:
         one is code that has not noticed."""
         return self.parents[0]
 
-    def _set_groups(self, groups):
-        """Replace the whole grouping from opts' canonical form."""
+    def _set_groups(self, groups, materials=()):
+        """Replace the whole grouping from opts' canonical form, with the
+        materials that travel with it (`#373`)."""
         self.groups = {}
         self._group_order = []
         for name, members in (groups or ()):
@@ -1287,6 +1342,10 @@ class PlotWindow:
                 self._group_order.append(name)
             for path in members:
                 self.groups[path] = name
+        names = {n.casefold(): n for n in self._group_order}
+        self.group_materials = {names[n.casefold()]: m
+                                for n, m in (materials or ())
+                                if n.casefold() in names}
 
     def group_list(self):
         """-> the grouping in sp.check_groups' canonical form, in the
@@ -1303,6 +1362,14 @@ class PlotWindow:
                 out.append([name, members])
         return out
 
+    def group_material_list(self):
+        """-> the groups' recorded materials in sp.check_group_materials'
+        canonical form, in group order, for the groups that have one and
+        still have runs (`#373`)."""
+        return [[name, self.group_materials[name]]
+                for name, _members in self.group_list()
+                if name in self.group_materials]
+
     def assign_group(self, name, rundirs):
         """Put `rundirs` in the group `name`, taking them out of whatever
         group they were in. Empty `name` UNGROUPS them, which is the one
@@ -1310,7 +1377,20 @@ class PlotWindow:
 
         -> an error message, or None. The engine's own checker has the
         last word (sp.check_groups), so the window cannot create a
-        grouping the CLI would refuse."""
+        grouping the CLI would refuse. A refused change is UNDONE,
+        so the window is never left holding a grouping the next redraw
+        would turn into an error where the figure goes.
+
+        The group's MATERIAL (`#373`, it picks the line style) is set
+        when the group is CREATED: the one material every run in it
+        recorded in setup.txt, or none. Runs moved into a group that
+        already exists take that group's material. The operator's
+        grouping wins (`#313`), so moving a hand-typed 'Invisicon 3900'
+        run into the 'nano-c Invisicon 3900' group merges two spellings
+        into one series (`#374`) instead of turning the group 'mixed'.
+        A name is matched case-insensitively, as check_groups does, so
+        'p3' lands in an existing 'P3' rather than being refused as a
+        second group of the same name."""
         name = (name or '').strip()
         # STORED AS SPELLED, matched case-insensitively -- the engine's
         # own rule (sp.group_key's docstring): a normcased store puts a
@@ -1319,20 +1399,82 @@ class PlotWindow:
         paths = [os.path.abspath(d) for d in rundirs]
         if not paths:
             return 'Pick the runs to group on the left first.'
+        before = (dict(self.groups), list(self._group_order),
+                  dict(self.group_materials))
+        existing = {n.casefold(): n for n in self._group_order}
+        name = existing.get(name.casefold(), name)
+        created = bool(name) and name not in self._group_order
         drop = {sp.group_key(p) for p in paths}
         self.groups = {k: v for k, v in self.groups.items()
                        if sp.group_key(k) not in drop}
         if name:
             for path in paths:
                 self.groups[path] = name
-            if name not in self._group_order:
+            if created:
                 self._group_order.append(name)
-        # drop names nothing is in any more, so the order list cannot
-        # grow forever and a re-used name keeps its original colour slot
-        self._group_order = [n for n in self._group_order
-                             if n in set(self.groups.values())]
+                material = sp.shared_material(paths)
+                self.group_materials.pop(name, None)
+                if material:
+                    self.group_materials[name] = material
+        self._forget_empty_groups()
         _clean, err = sp.check_groups(self.group_list())
         if err:
+            self.groups, self._group_order, self.group_materials = before
+            return err
+        return None
+
+    def _forget_empty_groups(self):
+        """Drop names nothing is in any more, so the order list cannot grow
+        forever and a re-used name keeps its original color slot, and
+        drop their materials with them, so a later group of the same name
+        is formed afresh rather than inheriting a material it never had."""
+        live = set(self.groups.values())
+        self._group_order = [n for n in self._group_order if n in live]
+        self.group_materials = {n: m for n, m in self.group_materials.items()
+                                if n in live}
+
+    def seed_groups(self, by='material'):
+        """Fill the groups from setup.txt for the SELECTED runs (`#373`):
+        sp.seed_groups decides the groups and their names, and this makes
+        them ordinary groups. -> an error message, or None.
+
+        A SEED, not a mode. Each selected run moves into its material's
+        group exactly as if it had been Assigned there; runs that are not
+        selected keep whatever group they are in, and nothing re-reads
+        setup.txt later. A seeded group's material is the one the seed
+        read, including when the name matches a group that already
+        exists, which the seed then extends rather than duplicating.
+
+        All or nothing: the whole seed is checked by sp.check_groups
+        before any of it lands, so a refusal leaves the grouping as it
+        was rather than half-seeded."""
+        dirs = [os.path.abspath(d) for d in self.selected_dirs()]
+        if not dirs:
+            return 'Pick the runs to group on the left first.'
+        before = (dict(self.groups), list(self._group_order),
+                  dict(self.group_materials))
+        drop = {sp.group_key(d) for d in dirs}
+        self.groups = {k: v for k, v in self.groups.items()
+                       if sp.group_key(k) not in drop}
+        existing = {n.casefold(): n for n in self._group_order}
+        seeded = []
+        for label, material, members in sp.seed_groups(dirs, by=by):
+            name = existing.get(label.casefold(), label)
+            seeded.append(name)
+            for path in members:
+                self.groups[path] = name
+            self.group_materials.pop(name, None)
+            if material:
+                self.group_materials[name] = material
+        # the groups the seed filled go AFTER the ones it did not touch,
+        # in the seed's own order, so a seed over the same runs paints
+        # the same colors whatever was grouped before it
+        self._group_order = ([n for n in self._group_order
+                              if n not in seeded] + seeded)
+        self._forget_empty_groups()
+        _clean, err = sp.check_groups(self.group_list())
+        if err:
+            self.groups, self._group_order, self.group_materials = before
             return err
         return None
 
@@ -1440,6 +1582,24 @@ class PlotWindow:
                                            command=self._clear_groups)
         self.btn_clear_groups.pack(side=tk.LEFT, padx=6)
         add_tooltip(self.btn_clear_groups, GROUP_CLEAR_TIP)
+        # the setup.txt seeds (`#373`). A row of their own under the hand
+        # controls, and the concentration split as the CHILD of the
+        # material seed, indented under it the way '…and flag coarse
+        # current sampling' sits under the breakdown marks, because it
+        # IS the material seed, one step further. Buttons rather than
+        # ticks: each is an action that fills the groups once, not a mode
+        # the figure keeps following.
+        self.btn_seed_material = ttk.Button(
+            gf, text="Group by material",
+            command=lambda: self._seed_groups('material'))
+        self.btn_seed_material.pack(anchor=tk.W, pady=(4, 0))
+        add_tooltip(self.btn_seed_material, GROUP_SEED_TIP)
+        self.btn_seed_concentration = ttk.Button(
+            gf, text="…and by concentration",
+            command=lambda: self._seed_groups('concentration'))
+        self.btn_seed_concentration.pack(anchor=tk.W, padx=(18, 0),
+                                         pady=(2, 0))
+        add_tooltip(self.btn_seed_concentration, GROUP_SEED_CONC_TIP)
         self.lbl_groups = ttk.Label(gf, foreground='#666', wraplength=260,
                                     justify=tk.LEFT)
         self.lbl_groups.pack(fill=tk.X, pady=(4, 0))
@@ -1960,9 +2120,19 @@ class PlotWindow:
             return
         self._groups_changed()
 
+    def _seed_groups(self, by):
+        """The two seed buttons (`#373`): 'material', or its child
+        'concentration'."""
+        err = self.seed_groups(by)
+        if err:
+            messagebox.showwarning("Groups", err)
+            return
+        self._groups_changed()
+
     def _clear_groups(self):
         self.groups = {}
         self._group_order = []
+        self.group_materials = {}
         self._groups_changed()
 
     def _groups_changed(self):
@@ -2188,6 +2358,10 @@ class PlotWindow:
             # exported from current mode forgot a grouping the window is
             # still showing.
             groups=self.group_list(),
+            # `#373`: the material each group was formed with, which picks
+            # its line style, carried beside the grouping so the figspec
+            # and the options file store the pair together
+            group_materials=self.group_material_list(),
             # 'second' outside area mode is the one combination make_opts
             # refuses. Neutralised to the default exactly as vs_area is
             # above: an error message where the figure goes is not what a

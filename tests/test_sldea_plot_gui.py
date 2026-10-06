@@ -1248,6 +1248,53 @@ def test_the_run_picker_scrolls_sideways_and_never_widens_the_window():
         assert win.selected_dirs() == everything
 
 
+def test_the_window_opens_wide_enough_for_a_seeded_group_name():
+    """Owner decision 2026-10-06 (`#374`): the window keeps its `#271`
+    floor but OPENS wider, so the Group column shows a `#373`-seeded
+    name like RUN_GROUP_SAMPLE whole beside the other two columns. The
+    room has to reach Group, not the figure and not Run; the opening is
+    clamped to the work area; and the window still shrinks to its floor,
+    where the column hands the room back and the figure keeps
+    MIN_FIG_W."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        win, tree = w.win, w.win.run_box
+        for name in ('P3a', 'P3b'):
+            _label(_fake_run(w.tmp, name), P3, '2.5 mL')
+        win.populate()
+        _select(win, 'P3a', 'P3b')
+        win.btn_seed_concentration.invoke()
+        seeded = f'{P3}, 2.5 mL'
+        assert seeded == g.RUN_GROUP_SAMPLE
+        assert seeded in dict(win.group_list()), win.group_list()
+        floor = win.apply_minsize()
+        assert floor[0] == win.column.natural_width() + g.MIN_FIG_W
+        left, top, right, bottom = g.work_area(win.root)
+        if right - left < floor[0] + win.column.extra:
+            raise _Skip(f'desktop too narrow: the opening wants '
+                        f'{floor[0] + win.column.extra}px and the work '
+                        f'area is {right - left}px')
+        width, height, x, y = win.apply_opening_size()
+        assert left <= x and x + width <= right, (x, width, left, right)
+        assert top <= y and y + height <= bottom, (y, height, top, bottom)
+        assert w.settle(), 'the redraw never landed after opening'
+        assert win.root.winfo_width() == width
+        # the room reached GROUP: the seeded name shows whole...
+        assert tree.column('group', 'width') >= \
+            win._run_font.measure(seeded), tree.column('group', 'width')
+        assert tree.column('group', 'width') >= win._text_w(seeded)
+        # ...the figure still has more than its floor, and the floor
+        # itself did not move
+        assert win.canvas.get_tk_widget().winfo_width() > g.MIN_FIG_W
+        assert win.apply_minsize() == floor
+        # shrunk to the floor, the column hands the room back and the
+        # figure keeps MIN_FIG_W
+        w.resize(f'{floor[0]}x{max(floor[1], 600)}')
+        assert win.column.winfo_width() == win.column.natural_width()
+        assert win.canvas.get_tk_widget().winfo_width() >= g.MIN_FIG_W - 2
+
+
 def test_moving_the_window_does_not_cost_a_redraw():
     """`#271`: <Configure> also fires when the canvas merely MOVES -- and
     it does move, by the scrollbar's width, every time the bar appears. A

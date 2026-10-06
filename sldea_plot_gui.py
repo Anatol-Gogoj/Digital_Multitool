@@ -296,6 +296,27 @@ def fit_widths(natural, floor, avail, order):
     return out
 
 
+def work_area(widget):
+    """-> (left, top, right, bottom) of the desktop's usable area, in
+    Tk's own pixels: on Windows the work area (the screen less the
+    taskbar), asked of the system, which answers in the same scaled
+    pixels Tk uses in a DPI-unaware process (1646 x 1029 for both on the
+    175 % analysis PC, measured 2026-10-06); elsewhere, or if the
+    question fails, the whole screen. Never raises."""
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            from ctypes import wintypes
+            rect = wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(
+                    0x0030, 0, ctypes.byref(rect), 0):   # SPI_GETWORKAREA
+                if rect.right > rect.left and rect.bottom > rect.top:
+                    return rect.left, rect.top, rect.right, rect.bottom
+        except Exception:
+            pass
+    return 0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight()
+
+
 def split_target(path):
     """-> (parent to list, run name to preselect or None).
 
@@ -1029,6 +1050,16 @@ RUN_COL_FLOOR = {'run': RUN_MARK + 'SLDEA_20261001_151016',
 # is shorter than its floor.
 RUN_COL_GIVE = ('run', 'material', 'group')
 
+# ...which is why the window OPENS wider than its floor (owner decision,
+# 2026-10-06): the controls column asks for room beyond its natural
+# width, enough for Group to show a seeded name like this one whole
+# beside the other two columns at their floors. 186 px of text at 96
+# dpi, so 140 px over Group's floor. The room is taken only while the
+# window can spare it with the figure at MIN_FIG_W or wider, so the
+# floor itself does not move (PlotWindow.opening_size, ScrollColumn.
+# set_room).
+RUN_GROUP_SAMPLE = 'Carbon Solutions P3-SWNT, 2.5 mL'
+
 # THE LIST ASKS FOR EXACTLY ITS FLOORS SIDE BY SIDE (PlotWindow.
 # _list_width), and that is the one width here that moves the window:
 # `#271`'s floor is measured off the controls column, and this list is
@@ -1326,6 +1357,13 @@ class ScrollColumn(ttk.Frame):
                                            anchor='nw')
         self.bar_shown = False
         self._geom = None
+        # ROOM BEYOND THE NATURAL WIDTH (`#374`): `extra` px the column
+        # would like on top of what its controls ask for, and `limit`,
+        # the widest the owner can spare right now (None = no limit). The
+        # natural width stays the FLOOR (natural_width), so the room is
+        # taken only when the window has it and handed back as it shrinks.
+        self.extra = 0
+        self.limit = None
         self.body.bind('<Configure>', self._refit)
         self._cv.bind('<Configure>', self._refit)
         # The wheel is grabbed only while the pointer is over the column
@@ -1348,14 +1386,33 @@ class ScrollColumn(ttk.Frame):
         want = self.body.winfo_reqwidth()
         need = self.body.winfo_reqheight()
         have = self._cv.winfo_height()
-        geom = (want, need, have)
+        width = self.width_for(want)
+        geom = (want, need, have, width)
         if geom == self._geom:
             return
         self._geom = geom
-        self._cv.config(width=want)
-        self._cv.itemconfigure(self._win, width=want, height=max(need, have))
-        self._cv.configure(scrollregion=(0, 0, want, max(need, have)))
+        self._cv.config(width=width)
+        self._cv.itemconfigure(self._win, width=width,
+                               height=max(need, have))
+        self._cv.configure(scrollregion=(0, 0, width, max(need, have)))
         self.show_bar(need > have + self.SLACK)
+
+    def width_for(self, want):
+        """The body's width: its natural `want`, plus as much of `extra`
+        as `limit` leaves room for beside the bar. Never under `want`."""
+        width = want + self.extra
+        if self.limit is not None:
+            bar = self.bar.winfo_reqwidth() if self.bar_shown else 0
+            width = min(width, self.limit - bar)
+        return max(want, width)
+
+    def set_room(self, extra=None, limit=None):
+        """Set `extra` and/or `limit` (see __init__) and re-fit."""
+        if extra is not None:
+            self.extra = max(0, int(extra))
+        if limit is not None:
+            self.limit = int(limit)
+        self._refit()
 
     def natural_width(self):
         """The width the column needs: what the controls ask for PLUS the
@@ -1812,6 +1869,11 @@ class PlotWindow:
             self.run_box.bind('<Button-2>', self._run_menu)
             self.run_box.bind('<Control-Button-1>', self._run_menu)
         PointerTip(self.run_box, self._picker_tip)
+        # the room Group wants beyond the floors (RUN_GROUP_SAMPLE), asked
+        # of the controls column, and the window's width, which decides
+        # how much of it the column may take
+        self.column.set_room(extra=self._group_room())
+        root.bind('<Configure>', self._root_configured, add='+')
         brow = ttk.Frame(rf)
         brow.pack(fill=tk.X)
         # ADDS a folder, never replaces the list (`#323`). The old
@@ -2462,6 +2524,48 @@ class PlotWindow:
         """What the list asks for: its column floors side by side."""
         return (sum(self._col_floor(c) for c, _h in RUN_COLUMNS)
                 + self._FIELD_BORDERS)
+
+    def _group_room(self):
+        """px the controls column asks for beyond its natural width: what
+        Group needs over its floor to show RUN_GROUP_SAMPLE whole."""
+        return max(0, self._text_w(RUN_GROUP_SAMPLE)
+                   - self._col_floor('group'))
+
+    def _root_configured(self, event):
+        """The window changed size: the controls column may be as wide as
+        leaves the figure MIN_FIG_W, and no wider. A binding on the root
+        is inherited by every widget in it, so only the root's own event
+        counts."""
+        if event.widget is self.root:
+            self.column.set_room(limit=event.width - MIN_FIG_W)
+
+    def opening_size(self):
+        """-> (width, height, x, y) the window opens at (`#374`).
+
+        As wide as the window asks to be, which now includes the room the
+        controls column wants for Group (_group_room), CLAMPED to the
+        desktop's work area so a small screen still opens the whole
+        window on screen, and never under the `#271` floor. Centered in
+        the work area: the old opening, at the window manager's default
+        corner, already ran 47 px off the right of a 1646 px screen."""
+        self.root.update_idletasks()
+        left, top, right, bottom = work_area(self.root)
+        w = min(self.root.winfo_reqwidth(), right - left)
+        h = min(self.root.winfo_reqheight(), bottom - top)
+        w, h = max(w, self.min_size[0]), max(h, self.min_size[1])
+        return (w, h, left + max(0, (right - left - w) // 2),
+                top + max(0, (bottom - top - h) // 2))
+
+    def apply_opening_size(self):
+        """Open the window at opening_size(). launch() calls this; a
+        caller that sets its own geometry (the tests) simply does not.
+        -> what it set."""
+        w, h, x, y = self.opening_size()
+        try:
+            self.root.geometry(f'{w}x{h}+{x}+{y}')
+        except tk.TclError:                # not a toplevel to size
+            pass
+        return w, h, x, y
 
     def _refresh_group_column(self):
         """Fill the Group cells from the window's grouping, then re-fit
@@ -3396,8 +3500,9 @@ def launch(args=(), opts=None, out_dir=None, stem=None, explicit=None,
     explicit_opts for what that can and cannot tell apart."""
     parents, preselect = initial_state(args)
     root = tk.Tk()
-    PlotWindow(root, parents, preselect, opts=opts, out_dir=out_dir,
-               stem=stem, explicit=explicit, remember=remember)
+    win = PlotWindow(root, parents, preselect, opts=opts, out_dir=out_dir,
+                     stem=stem, explicit=explicit, remember=remember)
+    win.apply_opening_size()             # wide enough for Group (`#374`)
     root.mainloop()
     return 0
 

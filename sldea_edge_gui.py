@@ -260,22 +260,13 @@ _TAG_FONT = None
 def _tag_font():
     """Bold letter-tag font for the review card (#173: the default PIL
     font was unreadably small on 1080p frames downscaled to the card).
-    Cached; falls back to PIL's builtin when no TrueType font resolves."""
+    Cached; falls back to PIL's builtin when no TrueType font resolves.
+    The fallback chain is pil_fonts.bold_font's, shared with the SLDEA
+    live view (#376)."""
     global _TAG_FONT
     if _TAG_FONT is None:
-        from PIL import ImageFont
-        for name in ('arialbd.ttf', 'DejaVuSans-Bold.ttf', 'arial.ttf',
-                     'DejaVuSans.ttf'):
-            try:
-                _TAG_FONT = ImageFont.truetype(name, TAG_PX)
-                break
-            except OSError:
-                continue
-        else:
-            try:
-                _TAG_FONT = ImageFont.load_default(TAG_PX)
-            except TypeError:              # Pillow < 10.1: no size arg
-                _TAG_FONT = ImageFont.load_default()
+        import pil_fonts
+        _TAG_FONT = pil_fonts.bold_font(TAG_PX)
     return _TAG_FONT
 
 

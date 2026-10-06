@@ -4689,6 +4689,66 @@ def test_a_committed_re_anchor_repeats_the_caveat_on_the_status_strip():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_failed_anchor_write_stays_on_the_status_strip_after_save():
+    """setup.txt refusing the scale anchor must still be on the strip when
+    Save returns (2026-10-06). The failure used to be written to the strip
+    and then overwritten by "saved in ...", so the operator never learned
+    that setup.txt lacks the anchor data.csv was just written at. Both
+    final strips are checked: the normal one and the plot-failure one."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('anchor write failure')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_save_anchor_fail_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    se_mod = gui.se
+    real_anchor = se_mod.save_scale_anchor
+    gui.messagebox = mb
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect_all_sync()
+
+        def boom(*a, **k):
+            raise OSError(28, 'No space left on device')
+
+        se_mod.save_scale_anchor = boom
+        app.save()
+        txt = app.status.cget('text')
+        assert txt.startswith('saved in '), txt
+        assert '⚠ scale anchor NOT recorded in setup.txt' in txt, txt
+        assert 'No space left on device' in txt, txt
+        # ahead of the routine tail, which a narrow window cuts first
+        assert txt.index('NOT recorded') < txt.index('data.csv updated'), txt
+        assert se_mod.load_scale_anchor(run) is None
+        # THE PLOT OR THE OVERLAYS FAILING as well: that strip keeps it too,
+        # and still ends on the error text
+        def plot_boom(_scale):
+            raise RuntimeError('disk full')
+        app._save_plot = plot_boom
+        app.save()
+        del app._save_plot
+        txt = app.status.cget('text')
+        assert txt.startswith('saved CSV; '), txt
+        assert '⚠ scale anchor NOT recorded in setup.txt' in txt, txt
+        assert txt.endswith('plot/overlays failed: disk full'), txt
+        # a Save whose anchor write succeeds says nothing of the old failure
+        se_mod.save_scale_anchor = real_anchor
+        app.save()
+        txt = app.status.cget('text')
+        assert txt.startswith('saved in '), txt
+        assert 'NOT recorded' not in txt, txt
+        back = se_mod.load_scale_anchor(run)
+        assert back and float(back['diam_px']) == 160.0, back
+    finally:
+        se_mod.save_scale_anchor = real_anchor
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_the_status_strip_after_save_still_says_what_was_accepted_over():
     """The dialog's "OVER GATE / NOT cross-checked" status line is replaced
     by the detection readout within seconds and by "saved in ..." at Save.

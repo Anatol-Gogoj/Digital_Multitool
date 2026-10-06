@@ -4665,14 +4665,20 @@ class EdgeReviewApp:
         # can never be silently missing from the other. A Save deliberately
         # writes NO `reanchor` marker — this run WAS reviewed, and the
         # marker's whole job is to distinguish the two.
+        anchor_fail_txt = ''
         try:
             se.save_scale_anchor(self.rundir,
                                  self._anchor_record(self.manual_ref, scale))
         except OSError as e:
             quiet = False
-            self.status.config(
-                text=f"saved, but recording the scale anchor in "
-                     f"setup.txt failed: {e}")
+            # SAID ON THE LAST STRIP (2026-10-06). This used to be set on
+            # the strip and then overwritten by "saved in ..." a few lines
+            # down, so nobody saw that setup.txt lacks the anchor data.csv
+            # was just written at. Both final strips carry it now, after
+            # the caveat and ahead of the routine tail.
+            anchor_fail_txt = (f"⚠ scale anchor NOT recorded in setup.txt, "
+                               f"Save again once the folder is writable "
+                               f"({e}). ")
         # ... and which area estimator wrote the areas (2026-10-02), with
         # the baseline's provenance beside it (what the tracker read on
         # the resting disc: rays, hidden share, one-sidedness, and the
@@ -4741,6 +4747,7 @@ class EdgeReviewApp:
             cav = anchor_caveat(self.manual_ref)
             self.status.config(text="saved CSV; "
                                     + (f"{cav}. " if cav else '')
+                                    + anchor_fail_txt
                                     + f"plot/overlays failed: {e}{vid_txt}")
             return
         scale_txt = (f"scale {scale:.5f} mm/px [{src}]" if scale
@@ -4758,6 +4765,7 @@ class EdgeReviewApp:
         self.status.config(
             text=f"saved in {took} — "
                  + (f"{cav}. " if cav else '')
+                 + anchor_fail_txt
                  + f"data.csv updated ({scale_txt}){bd_txt}{vid_txt}")
         # CLOSE AFTER A CLEAN SAVE (#363, 2026-10-05), in an --auto window
         # on its own run only. Clean means `quiet` held to the end, the

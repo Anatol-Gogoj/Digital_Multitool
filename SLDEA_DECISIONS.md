@@ -302,6 +302,153 @@ reject decisions in `video_review.csv`. `data.csv` is never touched by it.
 - BENCH_TEST §Q16 (re-run after Save) and §Q17 (the window) are owed, with
   §Q itself.
 
+## The run video stays full-frame: a geometric crop changes what the edge detector measures (2026-10-06)
+
+**TL;DR:** #377 proposed cropping the recorded video to one fixed box
+around the device to cut storage. It is not adopted. The detector's
+working scale, search window, foil mask and tracker reach are all defined
+relative to the frame, so a cropped video is measured by a different
+detector: on the real 13_backlight_2 recording the default 1080 x 1080 box
+makes the baseline fit refuse, and every frame loses its area. A crop that
+keeps detection exact would need a detector rework first and would save
+at most 12-28 %.
+
+**Observation (13_backlight_2 and P3_2, measured 2026-10-06, OpenCV 4.13,
+Gogojster).**
+
+- **Data.** 13_backlight_2: the real `video.mkv`, 438 frames. P3_2 has no
+  video, so its 81 real stills stand in for one, decoded the way the
+  recorder decodes video frames (`video_gray`, cvtColor). Detection
+  follows `detect_video`: `candidates` against the run's own baseline
+  still, the previous frame's method carried, `needs_review` per frame.
+  A "true crop" cuts the baseline and the frame to the same box.
+- **What the detector reads relative to the frame** (`sldea_edge.py` at
+  0ffd1da):
+  - Working scale: `DETECT_MAX_W` = 640, so detection runs at 1/3 on a
+    1920-wide frame and at 0.593 on a 1080-wide crop. Every kernel fixed
+    in working pixels changes physical size with it (the 3/7/21 px
+    morphology and the area-under-80 cut in `_region_candidate`, the
+    15 px rings, the texture erosion).
+  - `roi_frac`: the central fraction of the frame. At 0.85 the window is
+    x 144-1776, y 81-999 in full-frame pixels, 276 px wider on each side
+    than a centered 1080 x 1080 box. It is a per-run setting, and the
+    tuner can raise it to 1.0 (the whole frame) after the run.
+  - `foil_mask`: thresholds texture energy at its 92nd percentile over
+    the frame (floor 2.0) and keeps only components covering 0.5 % of the
+    frame with at least 30 px of inscribed depth.
+  - `_ratio_small`: its regularizer `c0` is the median baseline texture
+    energy over the whole frame.
+  - `baseline_disc`: the paper level is the window's median, the rays run
+    0.55 x the window, the size gate is 0.06-0.85 x the window, and the
+    retry seeds at the window center.
+  - `_disc_rays`: rays run to `RAY_REACH` = 1.8 r0, and a ray that leaves
+    the frame counts as blocked. On P3_2 (r0 = 289 px, center at y 567)
+    that reach spans y 47-1087, the whole frame height.
+- **Size and encode time** (13_backlight_2's real video re-encoded FFV1
+  8-bit gray; the full re-encode matches the original's 0.64 MB/frame).
+  Bytes per pixel are 0.305-0.309 in every box, so the file shrinks in
+  proportion to the pixels kept: the background compresses like the
+  device. The cropped files decode as bit-exact crops of the original.
+
+  | box | pixels kept | MB/frame | of full | encode, ms/frame median (p90) |
+  |---|---|---|---|---|
+  | full 1920 x 1080 | 100 % | 0.641 | 100 % | 27.1 (30.5) |
+  | 1080 x 1080, centered | 56.2 % | 0.356 | 55.4 % | 15.5 (17.5) |
+  | 1632 x 920, the `roi_frac` 0.85 window (920, not 918: see the side observation) | 72.4 % | 0.459 | 71.6 % | 19.7 (22.1) |
+  | 800 x 800 around the disc | 30.9 % | 0.196 | 30.6 % | 8.2 (9.7) |
+
+  `BYTES_PER_PIXEL_EST` (0.47, from synthetic sigma 2.5 noise on
+  2026-09-23) is 1.5 times the 0.31 this real scene needs.
+- **Detection, 13_backlight_2** (full frame: baseline fit 405.2 px by the
+  center-seeded retry, 156 ms/frame):
+  - 1080 x 1080 true crop, at `roi_frac` 0.85 or 1.0: the baseline fit
+    refuses (residual 7.6 % and 8.6 % of r, limit 6 %). All 438 frames
+    lose their area and go to review; on the full frame 432 of them are
+    confident.
+  - Cause, verified: the foil mask. In the full frame the two strips form
+    components 118 and 53 px deep. Inside the box their pieces are 27-28
+    px deep, under the 30 px gate, so the crop's foil mask is empty (the
+    full frame's covers 10.7 % of the frame). The threshold is at the 2.0
+    floor in both, so the percentile is not the cause. Handed the
+    full-frame mask, the crop fit succeeds at 408.0 px.
+  - The same box gives the photometric fit no paper mask at all: with
+    neither foil nor disc found, `_paper_mask` returns None and the fit
+    runs on the plain window with the disc inside it, the condition the
+    2026-07-28 Q1 restriction removed. The full frame has 1.199 Mpx of
+    paper.
+  - 1632 x 918 true crop (the window itself, `roi_frac` 1.0 on the crop):
+    0 of 438 frames bit-exact, median +1.05 %, worst 1.83 %, 7 review
+    verdicts flipped.
+- **Detection, P3_2** (full frame: baseline fit 577.9 px, 167 ms/frame):
+  - 1080 x 1080 true crop, `roi_frac` 0.85: 0 of 81 frames bit-exact,
+    median |d| 0.22 %, p90 1.13 %, worst -54.75 % (5.00 kV post-ramp).
+    4 frames are more than 2 % off and 14 review verdicts flip. Among the
+    58 frames both passes call confident the worst is +3.30 % (4.50 kV
+    post-ramp), outside `REVIEW_BAND_PCT`.
+  - The same box at `roi_frac` 1.0: worst -68.5 %; 1632 x 918 at 1.0:
+    worst -91.9 %; 1680 x 1080: worst 2.13 %, median |d| 0.50 %, still
+    0 of 81 exact.
+  - Paper for the photometric fit drops from 0.950 Mpx to 0.451 Mpx in
+    the 1080 box at `roi_frac` 0.85 (0.734 Mpx at 1.0).
+- **Proxy for a detector that keeps the full frame's geometry:** the box
+  pasted into the baseline at full size, so the working scale, the window
+  and every baseline statistic are the full frame's, and only the frame's
+  pixels outside the box differ. This is the #366 reconstruction:
+  - 1080 x 1080 box: worst -92.9 % on P3_2 (51 of 81 frames over 2 %),
+    which reproduces #366's 93 %; worst 0.88 % on 13_backlight_2.
+  - 1680 x 966 (the window plus 24 px): 438 of 438 exact on
+    13_backlight_2, but only 6 of 81 on P3_2 (4 over 2 %, worst
+    -41.5 %), because the tracker's rays reach past it.
+  - 1680 x 1080: 81 of 81 exact on P3_2.
+
+  So at default settings a box must hold at least the window, 72 % of
+  the frame; on P3_2 it must also span the full height the rays reach,
+  87.5 % of the frame. The region grows with the device and with
+  `roi_frac`, and neither is known before the run.
+
+**Decision.**
+
+- Full-frame FFV1 stays: lossless, 8-bit gray, 1 fps default. The
+  recorder, the stills and every reader are unchanged. #377 is closed as
+  measured.
+- A crop is a measurement-chain change, not a storage setting. A future
+  one needs the detector reworked first, so it keeps the full frame's
+  geometry on a cropped picture: working scale from the full width, the
+  window in full-frame pixels, the foil mask and `c0` from the
+  full-frame baseline still, rays stopped by the box instead of the
+  frame. Even then the box must hold the window and the tracker's reach,
+  at least 72 % of the frame and 87.5 % on P3_2, so it saves at most
+  28 %, and 12.5 % on P3_2. It is chosen before the run, while
+  `roi_frac` can be raised after it.
+- The pasted-baseline reconstruction is exact only while everything the
+  detector reads lies inside the box. A larger device or a later
+  `roi_frac` change brings back #366's seam failure without warning. Not
+  adopted either.
+- Sensor-side windowing (v4l2 selection on the DFK) was out of scope and
+  is unmeasured. It too would hand the detector a smaller frame.
+
+**Side observation: FFV1 frame sizes on Windows (OpenCV 4.13, Gogojster).
+NOT verified on the bench's Linux OpenCV.**
+
+- At some even sizes, `VideoWriter.write` throws "Unknown C++ exception"
+  on the first frame, every time: 1632 x 918 (3 of 3 processes),
+  1632 x 916 and 1664 x 918. Nearby sizes work: 1632 x 920, 1630 x 918,
+  1600 x 918, 1536 x 918, 1080 x 918, 1680 x 966.
+- Odd sizes (1081 x 1080, 1083 x 1080, 1080 x 1081) write without error
+  but do not read back lossless.
+- `codec_available` probes 64 x 48 only, so it would catch neither. Today
+  the recorder writes the camera's 1920 x 1080, which works on both
+  counts. Any change of the recorded size needs the probe run at that
+  exact size before HV starts.
+- Whether this is related to the intermittent writer failure in
+  `test_sldea_video` (#366, Open) is not known.
+
+**Evidence.** Scratch scripts on copies of the two run folders, not kept:
+run data never enters the repo. The re-encode wrote all four boxes from
+one decode of `video.mkv` and timed each `write`. The detection loop
+called `candidates` and `needs_review` exactly as `detect_video` does, on
+the full frame and on each box in the same pass.
+
 ## The baseline disc fit retries from the window centre when it refuses, and judges that retry against the ring around the disc (2026-10-05)
 
 **TL;DR:** on backlit run `13_backlight_2` the automatic baseline fit

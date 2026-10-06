@@ -876,6 +876,9 @@ def test_make_opts_maps_choices_and_refuses_bad_combinations():
                  # contributing runs are drawn -- both defaults reproduce
                  # the figure that existed before the option
                  'groups': [], 'aggregate_only': False,
+                 # `#373`: no group has a recorded material, which is
+                 # the `#313` figure: every group its own line style
+                 'group_materials': [],
                  # the normalized panel's UNITS. Defaults to the ratio,
                  # so an options dict built with no arguments still
                  # describes the figure that existed before the option
@@ -3073,14 +3076,22 @@ def test_a_group_that_names_a_run_nobody_plotted_says_so():
 def test_the_group_palette_is_separable_and_never_wears_a_run_colour():
     """The `#313` colour question, answered as a property rather than as
     a list of hexes: no group colour may BE a run colour, no two groups
-    may share a (colour, style) pair inside one wrap, and the first group
-    must still be the black solid curve the ungrouped aggregate draws --
-    so turning one group on does not restyle a figure that had none.
+    may share a (color, style) pair, and the first group must still be
+    the black solid curve the ungrouped aggregate draws, so turning one
+    group on does not restyle a figure that had none.
 
-    The perceptual measurement behind the CHOICE of palette lives in the
-    GROUP_COLORS comment; what a test can hold is the invariant."""
+    `#373` grew the palette to seven and made the style mean the
+    material; with no materials recorded the hand-made groups keep the
+    `#313` figure exactly (black solid, red dashed, blue dash-dot, yellow
+    dotted), so an old figspec of four groups or fewer re-renders in the
+    same colors and styles."""
     assert not set(sp.GROUP_COLORS) & set(sp.TOL_BRIGHT)
+    assert sp.GROUP_COLORS[:4] == ('#000000', '#BB5566', '#004488',
+                                   '#DDAA33'), 'the `#313` four moved'
     assert sp.group_style(0) == (sp.AGGREGATE_COLOR, '-')
+    assert [sp.group_style(i) for i in range(4)] == [
+        ('#000000', '-'), ('#BB5566', '--'), ('#004488', '-.'),
+        ('#DDAA33', ':')]
     n = len(sp.GROUP_COLORS) * len(sp.GROUP_STYLES)
     pairs = [sp.group_style(i) for i in range(n)]
     assert len(set(pairs)) == n, 'a (colour, style) pair repeats early'
@@ -3090,6 +3101,44 @@ def test_the_group_palette_is_separable_and_never_wears_a_run_colour():
         len(sp.GROUP_COLORS)
     assert len({s for _c, s in pairs[:len(sp.GROUP_STYLES)]}) == \
         len(sp.GROUP_STYLES)
+    assert len(sp.GROUP_STYLE_NAMES) == len(sp.GROUP_STYLES)
+
+
+def test_the_seven_group_colors_survive_color_blindness():
+    """`#373`'s palette, MEASURED rather than asserted as a list: worst
+    pairwise CIEDE2000 over normal + Machado-2009 deutan/protan/tritan,
+    with the repo's own simulator (tests/test_sldea_preview.py), over the
+    first N colors: the numbers in the GROUP_COLORS comment, rounded
+    down so a palette edit that makes any prefix worse fails here.
+
+    And the two hard limits the extension was chosen under: no run color
+    (above), and >= 3:1 contrast on white for the three added, because a
+    2.2 pt line has to be visible before it can be told apart."""
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import test_sldea_preview as cvd
+    floors = {2: 31.5, 3: 26.0, 4: 21.2, 5: 21.2, 6: 11.6, 7: 11.3}
+    for n, floor in floors.items():
+        cols = sp.GROUP_COLORS[:n]
+        worst = min(cvd._worst_de(a, b) for i, a in enumerate(cols)
+                    for b in cols[i + 1:])
+        assert worst >= floor, (n, round(worst, 2), floor)
+    # the floor of all seven still beats the run palette's own worst pair,
+    # which is the honest yardstick for 'a Tol palette this size'
+    bright = sp.TOL_BRIGHT
+    bright_worst = min(cvd._worst_de(a, b) for i, a in enumerate(bright)
+                       for b in bright[i + 1:])
+    assert 8.0 < bright_worst < 9.0, bright_worst
+    assert floors[7] > bright_worst
+
+    def contrast_on_white(hex_color):
+        h = hex_color.lstrip('#')
+        r, g, b = (cvd._lin(int(h[i:i + 2], 16) / 255) for i in (0, 2, 4))
+        y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        return 1.05 / (y + 0.05)
+    for c in sp.GROUP_COLORS[4:]:
+        assert contrast_on_white(c) >= 3.0, (c, contrast_on_white(c))
+    # ...a check that can fail: Tol bright's own yellow is far under it
+    assert contrast_on_white('#CCBB44') < 3.0
 
 
 def test_grouping_changes_nothing_when_nobody_asked_for_it():
@@ -3121,6 +3170,592 @@ def test_grouping_changes_nothing_when_nobody_asked_for_it():
     finally:
         for p in (d, out):
             shutil.rmtree(p, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# grouping by the recorded electrode material (`#373`): the setup.txt
+# readers, the seed, a line style per material, and the figspec that keeps
+# a re-render from being restyled by a later setup.txt edit
+# ---------------------------------------------------------------------------
+
+_ABSENT = object()
+
+P3 = 'Carbon Solutions P3-SWNT'
+N3900 = 'nano-c Invisicon 3900'
+N3500 = 'nano-c Invisicon 3500'
+CB = 'carbon black'
+
+
+def _label_run(rundir, electrode=_ABSENT, conc=_ABSENT, crlf=False):
+    """Write the `Compliant electrode:` / `Ink concentration:` lines into
+    a run's setup.txt, AHEAD of whatever is already there, where the
+    runner puts them, before Edge Review's own section. _ABSENT leaves a
+    line out entirely, which is the point: an absent line and a recorded
+    '(not specified)' are different facts."""
+    path = os.path.join(rundir, 'setup.txt')
+    try:
+        with open(path, encoding='utf-8') as f:
+            old = f.read()
+    except OSError:
+        old = ''
+    lines = [f"SLDEA Test  --  {os.path.basename(rundir)}", '',
+             'DEA nominal diameter: 16 mm']
+    if electrode is not _ABSENT:
+        lines.append(f"Compliant electrode: {electrode}")
+    if conc is not _ABSENT:
+        lines.append(f"Ink concentration: {conc}")
+    with open(path, 'w', encoding='utf-8',
+              newline='\r\n' if crlf else '\n') as f:
+        f.write('\n'.join(lines) + '\n\n' + old)
+
+
+def _dash(line):
+    """A drawn line's dash pattern, which is what tells two styles apart.
+
+    Not get_linestyle(): matplotlib reports EVERY dash tuple as '--', so
+    dash-dot-dot and the long dash would read as the same style as
+    dashed. The unscaled pattern is the style as it was asked for."""
+    pat = getattr(line, '_unscaled_dash_pattern', None)
+    if pat is None:
+        return (line.get_linestyle(),)
+    offset, seq = pat
+    return (offset, tuple(seq) if seq else None)
+
+
+def _labeled(d, spec):
+    """[(name, electrode, conc, offset)] -> loaded aggregate runs, each
+    with that setup.txt, on one shared staircase."""
+    runs = []
+    for name, electrode, conc, off in spec:
+        run = _agg_run(d, name, [1.0, 2.0, 3.0],
+                       lambda kv, o=off: 100.0 + o + 10 * kv)
+        _label_run(run['dir'], electrode, conc)
+        runs.append(run)
+    return runs
+
+
+def _seeded_opts(runs, by, **kw):
+    """-> opts with the groups `seed_groups` makes from these runs, the way
+    the window turns a seed into ordinary groups."""
+    seeded = sp.seed_groups([r['dir'] for r in runs], by=by)
+    groups = [[name, dirs] for name, _m, dirs in seeded]
+    mats = [[name, m] for name, m, _d in seeded if m]
+    opts, err = sp.make_opts(aggregate=True, groups=groups,
+                             group_materials=mats, **kw)
+    assert err is None, err
+    return opts
+
+
+def test_the_setup_readers_keep_absent_and_not_specified_apart():
+    """The shared reader contract (`#373`/`#374`): the value as recorded,
+    stripped; None when the LINE is absent; '(not specified)' as-is. The
+    corpus relies on that difference (`#268`, 2026-08-12)."""
+    import sldea_edge as se
+    d = _mktmp()
+    try:
+        a, b, c, e = (os.path.join(d, n) for n in 'abce')
+        for p in (a, b, c, e):
+            os.makedirs(p)
+        _label_run(a, f"  {P3}  ", ' 2.5 mL ')
+        _label_run(b, '(not specified)', '(not specified)')
+        _label_run(c)                               # neither line
+        _label_run(e, CB, crlf=True)                # a CRLF file
+        assert se.electrode_of(a) == P3
+        assert se.ink_concentration_of(a) == '2.5 mL'
+        assert se.electrode_of(b) == '(not specified)'
+        assert se.ink_concentration_of(b) == '(not specified)'
+        assert se.electrode_of(c) is None
+        assert se.ink_concentration_of(c) is None
+        assert se.electrode_of(e) == CB, repr(se.electrode_of(e))
+        assert se.ink_concentration_of(e) is None
+        # no setup.txt at all reads as absent, never raises
+        assert se.electrode_of(os.path.join(d, 'nowhere')) is None
+        # the DERIVED family line is not the material
+        f = os.path.join(d, 'f')
+        os.makedirs(f)
+        with open(os.path.join(f, 'setup.txt'), 'w', encoding='utf-8') as fh:
+            fh.write('Electrode family: cnt\n')
+        assert se.electrode_of(f) is None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_concentration_strings_normalize_to_one_key():
+    """'2.5 mL', '2.5mL' and '2.50 mL' are one ink volume; the label is
+    the normalized one. Free text is kept as recorded rather than being
+    guessed into a number."""
+    same = ('2.5 mL', '2.5mL', '2.50 mL', ' 2.5  ML ', '2.5', '2.500ml')
+    got = {sp.concentration_label(t) for t in same}
+    assert got == {((0, 2.5, ''), '2.5 mL')}, got
+    assert sp.concentration_label('1.5 mL')[1] == '1.5 mL'
+    assert sp.concentration_label('0.5 mL')[1] == '0.5 mL'
+    assert sp.concentration_label('1.5 mL')[0] < \
+        sp.concentration_label('2.5 mL')[0]
+    free = sp.concentration_label('two  coats')
+    assert free[1] == 'two coats' and free[0][0] == 1, free
+    ns = sp.concentration_label('(Not Specified)')
+    assert ns[1] == sp.NOT_SPECIFIED
+    # every value sorts before free text, and free text before a refusal
+    assert sp.concentration_label('9 mL')[0] < free[0] < ns[0]
+
+
+def test_seeding_by_material_keeps_absent_and_not_specified_apart():
+    """One group per material, compared case-insensitively with the
+    whitespace collapsed and NAMED as first recorded; the two kinds of
+    'no material' are kept, apart, and last."""
+    d = _mktmp()
+    try:
+        runs = _labeled(d, [('R1', P3, '2.5 mL', 0),
+                             ('R2', 'carbon  SOLUTIONS p3-swnt', '1.5 mL',
+                              1),
+                             ('R3', N3900, _ABSENT, 2),
+                             ('R4', CB, _ABSENT, 3),
+                             ('R5', '(not specified)', _ABSENT, 4),
+                             ('R6', _ABSENT, _ABSENT, 5),
+                             ('R7', '', _ABSENT, 6)])
+        dirs = [r['dir'] for r in runs]
+        seeded = sp.seed_groups(dirs, by='material')
+        names = [n for n, _m, _d in seeded]
+        assert names == [CB, P3, N3900, sp.NOT_SPECIFIED,
+                         sp.NO_ELECTRODE_GROUP], names
+        by = {n: (m, [os.path.basename(x) for x in ds])
+              for n, m, ds in seeded}
+        assert by[P3] == (P3, ['R1', 'R2']), by[P3]
+        # a blank value is a declined answer, not an absent line
+        assert by[sp.NOT_SPECIFIED] == (None, ['R5', 'R7'])
+        assert by[sp.NO_ELECTRODE_GROUP] == (None, ['R6'])
+        # the SELECTION is what is seeded: two runs, two groups
+        assert [n for n, _m, _d in sp.seed_groups(dirs[2:4])] == [CB, N3900]
+        # ...named as recorded: on a one-each tie the app's own dropdown
+        # spelling wins, whichever run is listed first; alone, a spelling
+        # names its group as typed
+        assert sp.seed_groups(dirs[1::-1])[0][0] == P3
+        assert sp.seed_groups(dirs[1:2])[0][0] == 'carbon  SOLUTIONS p3-swnt'
+        # ...and with more runs, the spelling most of them used
+        extra = _labeled(d, [('R8', 'P3 ink', _ABSENT, 7),
+                              ('R9', 'p3 INK', _ABSENT, 8),
+                              ('R10', 'P3 ink', _ABSENT, 9)])
+        assert sp.seed_groups([r['dir'] for r in extra])[0][0] == 'P3 ink'
+        assert sp.shared_material([r['dir'] for r in extra]) == 'P3 ink'
+        # a refusal, not a guess, for a mode that does not exist
+        try:
+            sp.seed_groups(dirs, by='family')
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('an unknown seed mode was accepted')
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_seeding_by_concentration_splits_only_the_inks():
+    """The owner's six-group campaign figure, plus the two edge cases:
+    a CNT run missing its concentration line, and a carbon-black run that
+    carries one anyway (hand-edited). Carbon black takes no
+    concentration by design, so it stays one group."""
+    d = _mktmp()
+    try:
+        runs = _labeled(d, [('A', P3, '2.5 mL', 0), ('B', P3, '2.50 mL', 1),
+                             ('C', P3, '2.3mL', 2), ('D', P3, '1.5 mL', 3),
+                             ('E', P3, _ABSENT, 4), ('F', N3900, _ABSENT, 5),
+                             ('G', N3500, _ABSENT, 6), ('H', CB, '2.5 mL', 7),
+                             ('I', 'eGaIn', _ABSENT, 8)])
+        seeded = sp.seed_groups([r['dir'] for r in runs], by='concentration')
+        names = [n for n, _m, _d in seeded]
+        assert names == [CB, f"{P3}, 1.5 mL", f"{P3}, 2.3 mL",
+                         f"{P3}, 2.5 mL",
+                         f"{P3}, {sp.NO_CONCENTRATION}",
+                         'eGaIn', N3500, N3900], names
+        by = {n: (m, [os.path.basename(x) for x in ds])
+              for n, m, ds in seeded}
+        assert by[f"{P3}, 2.5 mL"] == (P3, ['A', 'B'])
+        # the material of every P3 subgroup is P3, which is what gives
+        # them one line style
+        assert {m for n, m, _d in seeded if n.startswith(P3)} == {P3}
+        assert all(len(n) <= sp.GROUP_NAME_MAX for n in names)
+        assert sp.check_groups([[n, ds] for n, _m, ds in seeded])[1] is None
+        # material mode over the same runs: one group per material
+        assert [n for n, _m, _d in sp.seed_groups(
+            [r['dir'] for r in runs])] == [CB, P3, 'eGaIn', N3500, N3900]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_long_material_name_is_cut_to_fit_and_never_merged():
+    d = _mktmp()
+    try:
+        long_a = 'A' * 70 + ' ink one'
+        long_b = 'A' * 70 + ' ink two'
+        runs = _labeled(d, [('L1', long_a, '1 mL', 0),
+                             ('L2', long_b, '1 mL', 1)])
+        seeded = sp.seed_groups([r['dir'] for r in runs], by='concentration')
+        names = [n for n, _m, _d in seeded]
+        assert len(names) == 2 and len({n.casefold() for n in names}) == 2
+        assert all(len(n) <= sp.GROUP_NAME_MAX for n in names), names
+        assert all(n.endswith(', 1 mL') or '#2' in n for n in names), names
+        assert sp.check_groups([[n, ds] for n, _m, ds in seeded])[1] is None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_three_materials_draw_three_means():
+    """`#373`'s own acceptance case: P3, Invisicon 3900 and carbon black
+    selected, one click, three means, each its own color AND its own
+    line style, the P3 mean made of the P3 runs only."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        runs = _labeled(d, [('P3_a', P3, '2.5 mL', 0),
+                             ('P3_b', 'carbon  solutions p3-swnt', '2.5 mL',
+                              5),
+                             ('N39', N3900, _ABSENT, 20),
+                             ('CB1', CB, _ABSENT, 40)])
+        opts = _seeded_opts(runs, 'material')
+        assert [n for n, _m in opts['groups']] == [CB, P3, N3900]
+        assert opts['group_materials'] == [[CB, CB], [P3, P3],
+                                           [N3900, N3900]]
+        warns = []
+        fig = _drawn(runs, opts, warns.append)
+        for panel in (0, 1):
+            thick = _thick(fig, panel)
+            assert len(thick) == 3, thick
+            assert len({ln.get_color() for ln in thick}) == 3
+            assert len({_dash(ln) for ln in thick}) == 3
+        labels = _agg_lines(fig)
+        assert f"{P3} — mean of 2 runs (±SEM)" in labels, labels
+        assert f"{CB} — mean of 1 run (no band)" in labels, labels
+        assert f"{N3900} — mean of 1 run (no band)" in labels, labels
+        # the P3 mean is its own two runs at 3 kV: (130 + 135) / 2
+        p3 = [ln for ln in _thick(fig, 0)
+              if ln.get_color() == sp.GROUP_COLORS[1]][0]
+        assert list(p3.get_ydata())[-1] == 132.5, p3.get_ydata()
+        # the band rule is untouched: one SEM band per panel, P3's
+        assert _band_count(fig) == 2
+        cap = _caption(fig)
+        assert 'Line style = the electrode material' in cap, cap
+        assert f"{P3} (dashed, 2 runs)" in cap, cap
+        assert not any('line styles wanted' in w for w in warns), warns
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_concentration_split_draws_one_mean_per_material_and_volume():
+    """The six-group figure the palette was grown for (P3 at three
+    volumes, Invisicon 3900 and 3500, carbon black): one mean per
+    (material, concentration); P3's three share a dash pattern and differ
+    by color; the other materials each have a pattern of their own."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        runs = _labeled(d, [('A', P3, '2.5 mL', 0), ('B', P3, '2.5mL', 2),
+                             ('C', P3, '2.3 mL', 4), ('D', P3, '1.5 mL', 6),
+                             ('F', N3900, _ABSENT, 8),
+                             ('G', N3500, _ABSENT, 10),
+                             ('H', CB, _ABSENT, 12)])
+        opts = _seeded_opts(runs, 'concentration')
+        assert len(opts['groups']) == 6, opts['groups']
+        warns = []
+        fig = _drawn(runs, opts, warns.append)
+        labels = _agg_lines(fig)
+        by_label = {}
+        for text, handle in labels.items():
+            if ' — mean of ' in text:
+                by_label[text.split(' — ')[0]] = handle
+        assert len(by_label) == 6, list(labels)
+        thick = _thick(fig, 0)
+        assert len(thick) == 6
+        pairs = {(ln.get_color(), _dash(ln)) for ln in thick}
+        assert len(pairs) == 6, 'two means share color AND style'
+        # every group its own color: six groups fit the seven-color
+        # palette, which is why it was grown
+        assert len({c for c, _s in pairs}) == 6
+        p3 = [by_label[n] for n in by_label if n.startswith(P3)]
+        assert len(p3) == 3
+        assert len({_dash(h) for h in p3}) == 1, 'P3 subgroups differ'
+        assert len({h.get_color() for h in p3}) == 3
+        others = [_dash(by_label[n]) for n in (N3900, N3500, CB)]
+        assert len(set(others) | {_dash(p3[0])}) == 4, others
+        # the legend handles carry the curve's own pattern AND width, so
+        # the key shows what the panel shows
+        for h in by_label.values():
+            assert abs(h.get_linewidth() - sp.AGGREGATE_LW) < 1e-9
+        assert not any('color comes round' in w for w in warns), warns
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_seeded_caption_fits_the_frame_and_keeps_its_csv_pointer():
+    """Seeded names are whole material names, and the 248-character
+    budget let the grouped caption run off the right edge (measured
+    2026-10-06: the Members line ended at 1.04 of the figure width and
+    lost its pointer to the tidy CSV). Every grouped line is now cut to
+    its rendered width, checked here in rendered pixels, which is the
+    only measurement the reader's eye agrees with."""
+    if not _has_mpl():
+        return
+    from matplotlib.text import Text
+    d = _mktmp()
+    try:
+        spec = [(f"{tag}_run_with_a_long_folder_name_{i}", mat, conc, i)
+                for i, (tag, mat, conc) in enumerate(
+                    [('A', P3, '2.5 mL'), ('B', P3, '2.5 mL'),
+                     ('C', P3, '2.3 mL'), ('D', P3, '1.5 mL'),
+                     ('E', N3900, _ABSENT), ('F', N3500, _ABSENT),
+                     ('G', CB, _ABSENT), ('H', CB, _ABSENT)])]
+        runs = _labeled(d, spec)
+        fig = _drawn(runs, _seeded_opts(runs, 'concentration',
+                                        aggregate_only=True))
+        lines = _caption(fig).split('\n')
+        grouped = lines[lines.index(next(l for l in lines if l.startswith(
+            'AGGREGATE BY GROUP'))):]
+        # at the dpi where hinting widens 7 pt text the most (90, 110),
+        # the window's screen dpi, and the export default
+        for dpi in (90, 96, 110, 150, 300):
+            fig.set_dpi(dpi)
+            renderer = fig.canvas.get_renderer()
+            width = fig.bbox.width
+            for line in grouped:
+                probe = Text(0, 0, line, fontsize=7)
+                probe.set_figure(fig)
+                right = (0.01 + probe.get_window_extent(renderer).width
+                         / width)
+                assert right <= 0.99, (dpi, round(right, 3), line[:80])
+        members = [l for l in grouped if l.startswith('Members: ')][0]
+        assert members.endswith("(full membership in the tidy CSV's "
+                                "group column)"), members[-80:]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_no_two_groups_ever_share_color_and_style():
+    """The invariant, over shapes a seed and a hand can make: many
+    subgroups of one material (more than there are colors), more
+    materials than styles, material-less groups mixed in. Plus one drawn
+    figure past the palette, counted off the artists."""
+    nc, ns = len(sp.GROUP_COLORS), len(sp.GROUP_STYLES)
+    shapes = {
+        'one material, 10 groups': ['p3'] * 10,
+        'eight materials': [f"m{i}" for i in range(8)],
+        'hand-made only': [None] * 20,
+        'mixed': ['cb', None, 'p3', 'p3', None, 'n39', 'p3', 'n35', None,
+                  'cb', 'p3', 'eg'],
+        'seeded six': ['cb', 'p3', 'p3', 'p3', 'n35', 'n39'],
+        'a few by hand': ['p3', None, 'p3', None, 'cb'],
+    }
+    for label, keys in shapes.items():
+        pairs, notes = sp.assign_group_styles(keys)
+        assert len(pairs) == len(keys)
+        assert len(set(pairs)) == len(pairs), (label, pairs)
+        # a material keeps ONE style for as long as colors last
+        for key in {k for k in keys if k is not None}:
+            idx = [i for i, k in enumerate(keys) if k == key][:nc]
+            assert len({pairs[i][1] for i in idx}) == 1, (label, key)
+        # a material-less group shares its style with nobody, whenever
+        # there are styles enough to go round
+        slots = (len({k for k in keys if k is not None})
+                 + sum(1 for k in keys if k is None))
+        if slots <= ns:
+            for i, k in enumerate(keys):
+                if k is None:
+                    assert [p[1] for p in pairs].count(pairs[i][1]) == 1, \
+                        (label, i, pairs)
+    assert any('round again' in n
+               for n in sp.assign_group_styles(['p3'] * 10)[1])
+    assert any('leave that material' in n
+               for n in sp.assign_group_styles(['p3'] * 10)[1])
+    assert any('line styles wanted' in n
+               for n in sp.assign_group_styles(
+                   [f"m{i}" for i in range(8)])[1])
+    assert sp.assign_group_styles(['cb', 'p3'])[1] == []
+    # different materials get different styles; one material, one style
+    seeded = sp.assign_group_styles(['cb', 'p3', 'p3', 'p3', 'n35', 'n39'])[0]
+    assert [s for _c, s in seeded] == ['-', '--', '--', '--', '-.', ':']
+    assert len({c for c, _s in seeded}) == 6
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        spec = [(f"R{i}", (P3 if i < 3 else CB if i < 5 else _ABSENT),
+                 _ABSENT, i) for i in range(9)]
+        runs = _labeled(d, spec)
+        groups = [[r['name'], [r['dir']]] for r in runs]
+        mats = sp.derive_group_materials(groups, runs)
+        assert len(mats) == 5, mats
+        opts, err = sp.make_opts(aggregate=True, groups=groups,
+                                 group_materials=mats)
+        assert err is None, err
+        warns = []
+        fig = _drawn(runs, opts, warns.append)
+        thick = _thick(fig, 0)
+        assert len(thick) == 9
+        assert len({(ln.get_color(), _dash(ln)) for ln in thick}) == 9
+        assert any('round again' in w for w in warns), warns
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_style_assignment_is_deterministic_and_a_re_render_ignores_setup_txt():
+    """The figspec stores the grouping AND each group's material, so
+    --from-spec reproduces the figure byte for byte, and keeps doing so
+    after a run's setup.txt is edited, because nothing at draw time reads
+    it. That is the 'seed, not a live mode' promise, measured."""
+    if not _has_mpl():
+        return
+    d, out, again, third = _mktmp(), _mktmp(), _mktmp(), _mktmp()
+    try:
+        runs = _labeled(d, [('A', P3, '2.5 mL', 0), ('B', P3, '1.5 mL', 3),
+                             ('C', N3900, _ABSENT, 9),
+                             ('E', CB, _ABSENT, 12)])
+        opts = _seeded_opts(runs, 'concentration')
+        keys = [sp.material_key(m) for _n, m in opts['group_materials']]
+        assert sp.assign_group_styles(keys) == \
+            sp.assign_group_styles(list(keys))
+        # through prepare_runs, as --from-spec will: it is what assigns
+        # the run colors, and the fixture's own color is not one of them
+        prepared = sp.prepare_runs([r['dir'] for r in runs], opts)
+        img, _tidy = sp.export(prepared, opts, out, 'seed')
+        spec = sp.figspec_path(img)
+        stored = _read_json(spec)['opts']
+        assert stored['groups'] == opts['groups']
+        assert stored['group_materials'] == opts['group_materials']
+        assert sp.main(['--from-spec', spec, '--out', again]) == 0
+        with open(img, 'rb') as a, \
+                open(os.path.join(again, 'seed.png'), 'rb') as b:
+            assert a.read() == b.read(), 're-render is not the same figure'
+        # now relabel a run: a later setup.txt edit must not restyle the
+        # figure the spec describes
+        _label_run(runs[2]['dir'], CB)
+        assert sp.main(['--from-spec', spec, '--out', third]) == 0
+        with open(img, 'rb') as a, \
+                open(os.path.join(third, 'seed.png'), 'rb') as b:
+            assert a.read() == b.read(), 'a setup.txt edit restyled it'
+    finally:
+        for p in (d, out, again, third):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_a_seeded_grouping_round_trips_through_the_tidy_csv_and_figspec():
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        runs = _labeled(d, [('A', P3, '2.5 mL', 0), ('B', N3900, _ABSENT, 3),
+                             ('C', _ABSENT, _ABSENT, 6),
+                             ('D', '(not specified)', _ABSENT, 9)])
+        opts = _seeded_opts(runs, 'material')
+        _img, tidy = sp.export(runs, opts, out, 'g')
+        with open(tidy, newline='', encoding='utf-8') as f:
+            got = {r['run']: r['group'] for r in csv.DictReader(f)}
+        assert got == {'A': P3, 'B': N3900, 'C': sp.NO_ELECTRODE_GROUP,
+                       'D': sp.NOT_SPECIFIED}, got
+        spec, err = sp.load_figspec(sp.figspec_path(_img))
+        assert err is None, err
+        assert spec['opts']['groups'] == opts['groups']
+        # the two no-material groups carry NO material, so they draw in
+        # styles of their own rather than borrowing one
+        assert spec['opts']['group_materials'] == [[P3, P3],
+                                                   [N3900, N3900]]
+        back, err = sp._cli_opts(set(), {}, dict(spec['opts']))
+        assert err is None and back == opts, (err, back)
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_command_line_groups_read_their_material_when_formed():
+    """Parity with the window: a --group is the CLI's moment of forming a
+    group, so its material is read then and stored in the figspec. A bare
+    folder name resolves to the plotted run it names. A spec's groups keep
+    the spec's materials; a --group that replaces them reads afresh."""
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        runs = _labeled(d, [('P3_x', P3, '2.5 mL', 0),
+                             ('P3_y', 'carbon solutions P3-SWNT', '1.5 mL',
+                              3),
+                             ('CB_z', CB, _ABSENT, 6)])
+        a, b, c = (r['dir'] for r in runs)
+        assert sp.main([a, b, c, '--out', out, '--stem', 'cli',
+                        '--aggregate', '--group', f"hi={a}",
+                        '--group', 'lo=P3_y', '--group', f"cb={c}"]) == 0
+        spec = os.path.join(out, 'cli.figspec.json')
+        mats = _read_json(spec)['opts']['group_materials']
+        assert mats == [['hi', P3], ['lo', 'carbon solutions P3-SWNT'],
+                        ['cb', CB]], mats
+        # hi and lo are one material: one style, two colors
+        keys = [sp.material_key(m) for _n, m in mats]
+        pairs = sp.assign_group_styles(keys)[0]
+        assert pairs[0][1] == pairs[1][1] and pairs[0][0] != pairs[1][0]
+        assert pairs[2][1] != pairs[0][1]
+        # a --group over a spec REPLACES the grouping, so its materials
+        # are read for the new groups rather than inherited
+        o, err = sp._cli_opts(set(), {'--group': [f"all={a},{c}"]},
+                              _read_json(spec)['opts'])
+        assert err is None and o['group_materials'] == [], o
+        assert sp.derive_group_materials(o['groups']) == [], \
+            'a mixed group was given a material'
+        # ...and without one the spec's materials are inherited verbatim
+        o2, _e = sp._cli_opts(set(), {}, _read_json(spec)['opts'])
+        assert o2['group_materials'] == mats
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_group_materials_are_checked_and_follow_their_groups():
+    ok, err = sp.check_group_materials([['P3', P3], ('CB', CB)])
+    assert err is None and ok == [['P3', P3], ['CB', CB]], ok
+    for bad in ('P3', [['P3']], [['P3', '']], [['', P3]],
+                [['P3', P3], ['p3', CB]], [[1, 2]]):
+        assert sp.check_group_materials(bad)[0] is None, bad
+    # make_opts keeps only entries naming a group, in the GROUPS' order
+    # and spelling, so a stale entry is inert and a round trip is equal
+    o, err = sp.make_opts(groups=[['B', ['r1']], ['A', ['r2']]],
+                          group_materials=[['a', CB], ['gone', P3],
+                                           ['b', P3]])
+    assert err is None, err
+    assert o['group_materials'] == [['B', P3], ['A', CB]], o
+    bad, err = sp.make_opts(groups=[['A', ['r']]],
+                            group_materials='nonsense')
+    assert bad is None and err, err
+
+
+def test_a_grouped_legend_is_long_enough_to_show_its_dash_patterns():
+    """`#373`: the legend has to show the pattern it stands for. The
+    default 16 pt handle showed a dash and a gap, so dash-dot and
+    dash-dot-dot looked identical in the key. Grouped figures get
+    GROUP_HANDLE_EM, which must cover one whole period of the longest
+    pattern at the mean's width plus the next dash; an ungrouped figure
+    keeps the default, so its layout does not move."""
+    if not _has_mpl():
+        return
+    import matplotlib as mpl
+    from matplotlib.lines import Line2D
+
+    def period(ls):
+        pat = Line2D([], [], linestyle=ls)._unscaled_dash_pattern[1]
+        return (sum(pat), pat[0]) if pat else (0.0, 0.0)
+    need = max(p + first for p, first in map(period, sp.GROUP_STYLES))
+    assert sp.GROUP_HANDLE_EM * 8 >= need * sp.AGGREGATE_LW, (
+        sp.GROUP_HANDLE_EM * 8, need * sp.AGGREGATE_LW)
+    d = _mktmp()
+    try:
+        runs = _labeled(d, [('A', P3, _ABSENT, 0), ('B', CB, _ABSENT, 3)])
+        fig = _drawn(runs, _seeded_opts(runs, 'material'))
+        leg = [c for c in fig.axes[0].get_children()
+               if isinstance(c, mpl.legend.Legend)
+               and c.get_title().get_text() != 'marker fill'][0]
+        assert leg.handlelength == sp.GROUP_HANDLE_EM
+        plain = _drawn(runs, sp.make_opts(aggregate=True)[0])
+        leg2 = [c for c in plain.axes[0].get_children()
+                if isinstance(c, mpl.legend.Legend)
+                and c.get_title().get_text() != 'marker fill'][0]
+        assert leg2.handlelength == mpl.rcParams['legend.handlelength']
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_no_caption_line_runs_off_the_right_edge_of_the_figure():

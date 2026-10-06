@@ -120,6 +120,16 @@ Rendering:
       its directory (absolute is safest -- two runs in different parents
       can share a name) or by its bare folder name when that is
       unambiguous among the plotted runs.
+    - Each group mean's LINE STYLE marks its electrode MATERIAL (`#373`):
+      the groups whose runs all recorded one `Compliant electrode:` in
+      setup.txt share that material's style and differ by color, and a
+      group of no single material gets a style no other group has. No
+      two group means on a figure share both color and style. The
+      material is read when the group is FORMED: here, from each
+      --group's runs at this invocation; in the window, by its "Group by
+      material" seed or an Assign. It is stored in the figspec as
+      `group_materials`, so --from-spec restyles nothing even if a
+      setup.txt changed since.
     - --aggregate-only hides the contributing per-run curves so the panel
       carries the group means alone -- two lines and not fifteen, which
       is the state the comparison is actually read in. The runs are still
@@ -127,7 +137,8 @@ Rendering:
       is the DRAWING that stops, and the caption says so.
     - Colors are the Paul Tol bright family (colorblind-safe, house
       convention), assigned to runs in argument order. Group means take
-      the Paul Tol HIGH-CONTRAST palette instead, plus a line style each,
+      the Paul Tol HIGH-CONTRAST palette instead (extended to seven from
+      Tol's muted and medium-contrast schemes, `#373`), plus a line style,
       because a statistic must not look like one more measurement -- see
       GROUP_COLORS for what that separation measures.
     - Areas predating the 2026-07-28 scale fix (2.3-2.7x blob bug) are
@@ -905,21 +916,51 @@ AGGREGATE_COLOR = '#000000'
 # the same black: one group draws the figure the ungrouped aggregate
 # already drew.
 #
-# Paul Tol HIGH-CONTRAST, not bright -- bright is the run palette, and the
-# whole point is that these curves are statistics. The order is MEASURED
-# rather than Tol's own, worst-case CIEDE2000 under normal + deuteranopic
-# + protanopic + tritanopic simulation (Machado 2009 matrices, script in
-# the `#313` session scratch), against every TOL_BRIGHT entry:
+# Paul Tol HIGH-CONTRAST first, not bright: bright is the run palette,
+# and the whole point is that these curves are statistics. `#313` chose
+# the four and their order by worst-case CIEDE2000 under normal +
+# deuteranopic + protanopic + tritanopic simulation (Machado 2009
+# severity-1.0 matrices) against every TOL_BRIGHT entry:
 #
 #     groups   nearest OTHER GROUP     nearest RUN colour
 #     2        29.23                    8.24  (#BB5566 vs #AA3377, tritan)
 #     3        22.05                    3.98  (#004488 vs #AA3377, protan)
 #     4        18.70                    2.22  (#DDAA33 vs #CCBB44, deutan)
 #
-# Read the two columns separately, because they are two different claims.
-# GROUP-VS-GROUP is the requirement -- two means on one panel have to be
-# told apart -- and it clears TOL_BRIGHT's own adjacent-pair floor (18.00,
-# measured the same way) at every size.
+# GROWN TO SEVEN by `#373` (2026-10-06): the concentration split draws six
+# means for one campaign (P3 at three volumes, Invisicon 3900 and 3500,
+# carbon black), and four colors made two of them share one. The first
+# four are untouched, in the same order, so every figure of four groups or
+# fewer keeps its colors. The three added are the best extension a search
+# found over Tol's other qualitative schemes (muted, vibrant, medium-
+# contrast), held to two hard limits: no TOL_BRIGHT color (a statistic
+# must not wear a run color), and at least 3:1 luminance contrast on the
+# white panel (WCAG 2.1 SC 1.4.11's floor for graphical objects; a 2.2 pt
+# line has to be seen before it can be told apart). #6699CC is Tol
+# medium-contrast; #117733 and #882255 are Tol muted.
+#
+# MEASURED 2026-10-06 with the repo's own simulator
+# (tests/test_sldea_preview.py: Machado applied in LINEAR RGB), worst pair
+# over the first N colors, and the same in brackets with the matrices
+# applied to gamma-encoded sRGB, which is the variant that reproduces the
+# `#313` table above to the last digit:
+#
+#     N   floor           worst pair
+#     2   31.54 (29.23)   #000000 / #BB5566   protan
+#     3   26.02 (22.05)   #BB5566 / #004488   protan
+#     4   21.22 (18.70)   #BB5566 / #DDAA33   tritan
+#     5   21.22 (18.70)   (#6699CC is >= 21.22 from all four)
+#     6   11.61 (12.44)   #BB5566 / #117733   deutan
+#     7   11.36 ( 9.56)   #004488 / #882255   protan
+#
+# For scale: TOL_BRIGHT's own worst pair over all seven is 8.62 (#4477AA /
+# #228833, tritan, linear), so seven group colors are still further
+# apart than the run palette's members are. And past four groups color is
+# no longer the cue that separates materials: assign_group_styles gives
+# each material its own LINE STYLE, so the pairs that sit near 11 are, on
+# a seeded figure, also two different dash patterns. Nearest run color
+# for the three added (linear): #6699CC 11.78, #882255 8.39, #117733 5.77
+# (vs #228833, tritan). The GROUP-VS-RUN point below stands unchanged.
 #
 # GROUP-VS-RUN cannot be solved by hue at all, and that is a finding
 # rather than a compromise: TOL_BRIGHT already spans the wheel, so an
@@ -931,16 +972,240 @@ AGGREGATE_COLOR = '#000000'
 # order above simply puts the two colours that do collide as far down the
 # list as possible: at two groups (the campaign's CB-vs-P3 case) nothing
 # is nearer a run colour than 8.24.
-GROUP_COLORS = ('#000000', '#BB5566', '#004488', '#DDAA33')
+GROUP_COLORS = ('#000000', '#BB5566', '#004488', '#DDAA33',
+                '#6699CC', '#117733', '#882255')
 
 # The other half of the separation, and the half that survives greyscale
-# printing and a palette wrap. Paired with GROUP_COLORS by index, so a
-# fifth group repeats the colour with a different style rather than being
-# indistinguishable from the first.
-GROUP_STYLES = ('-', '--', '-.', ':')
+# printing and a palette wrap (`#373`): a line style per MATERIAL. Every
+# group whose runs share one recorded electrode material draws its mean in
+# that material's style, so the concentration subgroups of one material
+# share a style and differ by color, while different materials differ by
+# style, and on a material-only figure by color as well. A group with
+# no single material takes a style of its own (assign_group_styles).
+#
+# The first four are matplotlib's named styles, exactly as before, so a
+# figure of four hand-made groups draws what it always drew. The two added
+# are dash tuples, in units of the line width like the named ones:
+# dash-dot-dot (the owner's example) and a long dash, which the eye
+# separates from '--' by length at 2.2 pt (17.6 pt on against 8.1 pt).
+# Six rather than more: past six, dash patterns stop being something a
+# reader tells apart at a glance, and color carries the rest.
+GROUP_STYLES = ('-', '--', '-.', ':',
+                (0, (6.4, 1.6, 1.0, 1.6, 1.0, 1.6)),
+                (0, (8.0, 3.0)))
+GROUP_STYLE_NAMES = ('solid', 'dashed', 'dash-dot', 'dotted',
+                     'dash-dot-dot', 'long dash')
+
+# The aggregate's mean line width. Named because the legend handle has to
+# draw at the same width: matplotlib scales a dash pattern by the line
+# width, so a handle at the default 1.5 pt shows a different pattern than
+# the curve it stands for.
+AGGREGATE_LW = 2.2
+
+# How long the legend handles are on a GROUPED figure, in units of the
+# legend's font size (8 pt). The default 2.0 is 16 pt, and the longest
+# pattern above repeats every 13.2 x 2.2 = 29.0 pt (dash-dot-dot; the long
+# dash is 24.2), so a default handle showed a dash and a gap and could not
+# tell dash-dot from dash-dot-dot. 5.5 em = 44 pt holds one whole period
+# of every style plus the first dash of the next (43.1 pt at worst, the
+# dash-dot-dot). An ungrouped figure keeps the default, so it lays out as
+# it always did.
+GROUP_HANDLE_EM = 5.5
 
 # A group name has to fit a legend entry beside 'mean of N runs (±SEM)'.
-GROUP_NAME_MAX = 40
+# 64 since `#373` (was 40): the seeded names are the recorded material,
+# and 'Carbon Solutions P3-SWNT, (no concentration recorded)' is 55.
+GROUP_NAME_MAX = 64
+
+# The seeded group names for runs with no material (`#373`). Kept apart
+# because they mean different things (`#268`, 2026-08-12): an absent line
+# predates the field, a recorded '(not specified)' declined to answer.
+NO_ELECTRODE_GROUP = '(no electrode recorded)'
+NOT_SPECIFIED = '(not specified)'
+NO_CONCENTRATION = '(no concentration recorded)'
+
+# The two ways the window can seed groups from setup.txt (`#373`).
+SEED_MODES = ('material', 'concentration')
+
+
+def material_key(text):
+    """The identity two recorded electrode strings are COMPARED on:
+    case-insensitive, whitespace collapsed (`#373`). 'Carbon Solutions
+    P3-SWNT' and 'carbon  solutions p3-swnt' are one material; 'Invisicon
+    3900' and 'nano-c Invisicon 3900' are not. Merging spellings is the
+    operator's call, made by moving runs between groups (`#374`)."""
+    return ' '.join(str(text or '').split()).casefold()
+
+
+def is_material(text):
+    """Does this recorded electrode NAME a material? Not when the line is
+    absent (None), blank, or '(not specified)'."""
+    return (text is not None
+            and material_key(text) not in ('', material_key(NOT_SPECIFIED)))
+
+
+_ML_RE = re.compile(r'([0-9]*\.?[0-9]+)\s*(?:ml)?', re.IGNORECASE)
+
+
+def concentration_label(text):
+    """A recorded `Ink concentration:` value -> (sort key, group label).
+
+    '2.5 mL', '2.5mL', '2.50 mL' and a bare '2.5' are one value and label
+    as '2.5 mL'. The runner writes '<value> mL', so a bare number is the
+    same field with the unit dropped. Anything else that is not a number
+    in mL keeps its recorded text (whitespace collapsed) and compares
+    case-insensitively, so free text is never guessed into a number.
+    '(not specified)' sorts after every value, as its own group."""
+    t = ' '.join(str(text or '').split())
+    m = _ML_RE.fullmatch(t)
+    if m:
+        value = float(m.group(1))
+        return (0, value, ''), f"{value:g} mL"
+    if material_key(t) == material_key(NOT_SPECIFIED):
+        return (2, 0.0, ''), NOT_SPECIFIED
+    return (1, 0.0, t.casefold()), t
+
+
+def _fit_name(text, limit=GROUP_NAME_MAX):
+    """`text` cut to fit a group name, with an ellipsis."""
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + '…'
+
+
+def _spelling(counts):
+    """Which recorded spelling names a material, from {spelling: runs}:
+    the one most of its runs used; on a tie the app's own dropdown
+    spelling (sldea_profile.ELECTRODE_CHOICES), then the first in sorted
+    order. Never the accident of which run happened to be listed first,
+    so the same runs always give the same name."""
+    choices = set(sprof.ELECTRODE_CHOICES)
+    return max(sorted(counts), key=lambda s: (counts[s], s in choices))
+
+
+def seed_groups(rundirs, by='material'):
+    """Groups for `rundirs` from what each run recorded in setup.txt
+    (`#373`) -> [(group name, material or None, [rundir, ...])], sorted.
+
+    A SEED, not a mode: the window turns this into ordinary groups the
+    operator can edit, and the figspec stores those verbatim, so a later
+    setup.txt edit cannot repaint an exported figure.
+
+    by='material': one group per `Compliant electrode:` value, compared
+    with material_key and named as recorded (_spelling picks which
+    spelling when runs differ). by='concentration': each material splits
+    further, one group per `Ink concentration:` value
+    (concentration_label), named '<material>, 2.5 mL'. A material the
+    runner omits that line for
+    by design (sldea_profile.concentration_applies: carbon black, eGaIn,
+    the sprayed Invisicon inks) stays one group; a material it applies to
+    whose run has no line becomes '<material>, (no concentration
+    recorded)'.
+
+    Runs with no material are KEPT, in two separate groups and never
+    split by concentration: NO_ELECTRODE_GROUP when the line is absent,
+    NOT_SPECIFIED when the operator declined (a blank value counts as
+    declining). Their 'material' is None, so their means take a line
+    style of their own.
+
+    Sorted by material (case-insensitive), then NOT_SPECIFIED, then
+    NO_ELECTRODE_GROUP; within a material by concentration value, then
+    free text, then '(not specified)', then the missing line. The order
+    picks the colors, so it is fixed rather than left to the selection."""
+    if by not in SEED_MODES:
+        raise ValueError(f"seed_groups: by must be one of {SEED_MODES}")
+    spelled = {}           # material key -> {recorded spelling: runs}
+    found = {}             # group key -> [sort key, mat key, suffix, dirs]
+    for d in rundirs:
+        recorded = se.electrode_of(d)
+        if recorded is None:
+            gkey, sort, mkey, suffix = ('-',), (2,), None, NO_ELECTRODE_GROUP
+        elif not is_material(recorded):
+            gkey, sort, mkey, suffix = ('?',), (1,), None, NOT_SPECIFIED
+        else:
+            mkey = material_key(recorded)
+            counts = spelled.setdefault(mkey, {})
+            counts[recorded.strip()] = counts.get(recorded.strip(), 0) + 1
+            gkey, sort, suffix = (mkey,), (0, mkey), None
+            # asked of the COLLAPSED spelling, so two spellings of one
+            # material cannot get two answers ('carbon  black' would miss
+            # the 'carbon black' needle and split where the other did not)
+            if by == 'concentration' and sprof.concentration_applies(
+                    ' '.join(recorded.split())):
+                conc = se.ink_concentration_of(d)
+                if conc is None:
+                    csort, clabel = (3, 0.0, ''), NO_CONCENTRATION
+                else:
+                    csort, clabel = concentration_label(conc)
+                # free text can be any length; the tail never takes more
+                # room than the longest fixed one, so a material name
+                # always keeps 35 characters of the 64
+                gkey, sort, suffix = ((mkey, clabel.casefold()),
+                                      (0, mkey) + csort,
+                                      _fit_name(clabel,
+                                                len(NO_CONCENTRATION)))
+        found.setdefault(gkey, [sort, mkey, suffix, []])[3].append(d)
+    ordered = sorted(found.values(), key=lambda v: v[0])
+    # ONE display form per material, cut to leave room for its longest
+    # ', <concentration>' tail, so every subgroup of a long material reads
+    # the same before the comma. Two materials cut to one prefix are
+    # numbered rather than merged, and neither may take the name of a
+    # no-material group.
+    spelled = {mkey: _spelling(counts) for mkey, counts in spelled.items()}
+    longest = {}
+    for _sort, mkey, suffix, _dirs in ordered:
+        if mkey is not None:
+            tail = 0 if suffix is None else len(suffix) + 2
+            longest[mkey] = max(longest.get(mkey, 0), tail)
+    shown, used = {}, {NO_ELECTRODE_GROUP.casefold(), NOT_SPECIFIED.casefold()}
+    for mkey in sorted(longest):
+        n = 1
+        while True:
+            mark = '' if n == 1 else f" #{n}"
+            disp = _fit_name(spelled[mkey], GROUP_NAME_MAX - longest[mkey]
+                             - len(mark)) + mark
+            if disp.casefold() not in used:
+                break
+            n += 1
+        used.add(disp.casefold())
+        shown[mkey] = disp
+    out, taken = [], set()
+    for _sort, mkey, suffix, dirs in ordered:
+        if mkey is None:
+            name, material = suffix, None
+        else:
+            material = spelled[mkey]
+            name = shown[mkey] + ('' if suffix is None else f", {suffix}")
+        # last resort: a material whose own name contains ', 2.5 mL' can
+        # still meet another's subgroup; number it rather than merge them
+        base, n = name, 2
+        while name.casefold() in taken:
+            sfx = f" #{n}"
+            name = _fit_name(base, GROUP_NAME_MAX - len(sfx)) + sfx
+            n += 1
+        taken.add(name.casefold())
+        out.append((name, material, list(dirs)))
+    return out
+
+
+def shared_material(rundirs):
+    """The one material every run in `rundirs` recorded -> its spelling
+    (chosen as seed_groups chooses it, _spelling), or None (`#373`).
+
+    None as soon as a run records no material (absent, blank or
+    '(not specified)') or a different one, and for an empty list: a group
+    with no single material takes a line style of its own rather than
+    borrowing one it cannot claim."""
+    key, counts = None, {}
+    for d in rundirs:
+        recorded = se.electrode_of(d)
+        if not is_material(recorded):
+            return None
+        k = material_key(recorded)
+        if key is None:
+            key = k
+        elif k != key:
+            return None
+        counts[recorded.strip()] = counts.get(recorded.strip(), 0) + 1
+    return _spelling(counts) if counts else None
 
 
 def group_key(path):
@@ -985,7 +1250,7 @@ def check_groups(value):
     so the canonical form does not either.
 
     IN THE OPERATOR'S ORDER, never sorted: that order picks the colours
-    (group_style), so sorting here would quietly repaint a figure on
+    (assign_group_styles), so sorting here would quietly repaint a figure on
     reload.
 
     Empty groups are DROPPED, not refused: the window can hold a name
@@ -1039,6 +1304,74 @@ def check_groups(value):
         if keys:
             out.append([name, keys])
     return out, None
+
+
+def check_group_materials(value):
+    """-> (the canonical group_materials value, None) or (None, an error).
+
+    `group_materials` (`#373`) records, per group, the ONE electrode
+    material its runs shared when the group was formed: [[group name,
+    material as recorded], ...]. Only groups that had one appear; a group
+    with no single material is simply absent. It is what picks a group's
+    LINE STYLE (assign_group_styles), and it lives in opts (and so in
+    the figspec, verbatim) for the reason the grouping itself does: the
+    style of an exported figure must not move because somebody edited a
+    setup.txt afterwards. Nothing at draw time reads setup.txt.
+
+    Lists, not tuples, and in the order given, for check_groups' JSON
+    reason. The SHAPE is checked here; make_opts then keeps only the
+    entries that name a group that exists, in the groups' order, so a
+    stale entry is inert the way a stale group is."""
+    if value is None:
+        return [], None
+    if isinstance(value, (str, bytes)) or not hasattr(value, '__iter__'):
+        return None, ('group materials must be a list of '
+                      '(group, material) pairs')
+    out, seen = [], set()
+    for entry in value:
+        if (isinstance(entry, (str, bytes))
+                or not hasattr(entry, '__iter__')):
+            return None, (f"group material entry {entry!r} is not a "
+                          f"(group, material) pair")
+        pair = list(entry)
+        if len(pair) != 2 or not all(isinstance(p, str) and p.strip()
+                                     for p in pair):
+            return None, (f"group material entry {entry!r} must be two "
+                          f"non-empty strings")
+        name, material = pair[0].strip(), pair[1].strip()
+        if name.casefold() in seen:
+            return None, (f"group {name!r} is given two materials")
+        seen.add(name.casefold())
+        out.append([name, material])
+    return out, None
+
+
+def derive_group_materials(groups, runs=()):
+    """For a grouping made on the COMMAND LINE: -> group_materials, from
+    what each group's runs recorded in setup.txt (`#373`).
+
+    The window does the same thing at the moment a group is formed
+    (sldea_plot_gui.PlotWindow.assign_group); a --group invocation is
+    that moment for the CLI, so both front ends give one grouping one
+    set of line styles. A member that is not a directory is matched to a
+    plotted run by folder name, the way run_group matches it; a member
+    that resolves to nothing is left out rather than read as a material."""
+    by_name = {os.path.normcase(r.get('name') or ''): r['dir']
+               for r in runs if r.get('dir')}
+    out = []
+    for name, members in (groups or ()):
+        dirs = []
+        for m in members:
+            if os.path.isdir(m):
+                dirs.append(m)
+                continue
+            d = by_name.get(os.path.normcase(os.path.basename(m)))
+            if d:
+                dirs.append(d)
+        material = shared_material(dirs) if dirs else None
+        if material:
+            out.append([name, material])
+    return out
 
 
 def parse_group_flag(text):
@@ -1101,19 +1434,98 @@ def group_sets(runs, groups):
              if members[name]], loose)
 
 
-def group_style(index):
-    """-> (color, linestyle) for the index'th group drawn.
+def assign_group_styles(keys):
+    """-> ([(color, linestyle)] one per group, [notes]) for the groups
+    drawn, in drawing order, given each one's material KEY (material_key)
+    or None for a group with no single material (`#373`).
 
-    A LATIN SQUARE over the two lists rather than two independent cycles.
-    Both are four long, so `colors[i % 4], styles[i % 4]` would repeat the
-    whole pair every four groups and the fifth curve would be the first
-    one again; the `i // 4` shift makes the pair unique for sixteen. The
-    first four are still (black solid, red dashed, blue dash-dot, yellow
-    dotted), so one group draws exactly the black solid curve the
-    ungrouped aggregate has always drawn."""
-    n = len(GROUP_COLORS)
-    return (GROUP_COLORS[index % n],
-            GROUP_STYLES[(index + index // n) % len(GROUP_STYLES)])
+    THE RULES, in the owner's words turned into code:
+
+      * every group of one material draws that material's line style, so
+        the concentration subgroups of one material share a style and
+        differ by color, and different materials differ by style;
+      * a group with no single material (hand-made and mixed, or no
+        electrode recorded) takes a style no other group on the figure
+        has: it is not any material, so it must not look like one;
+      * styles are handed out in drawing order, one per new material or
+        material-less group; colors go one per group, the i'th group
+        the i'th color. So a material-only figure separates materials by
+        color AND style, and up to len(GROUP_COLORS) groups never share
+        a color at all;
+      * THE INVARIANT: no two groups on one figure share both color and
+        style. Past the palette a color comes round again, and it is
+        moved on to the next color that is still free on that style; if
+        a material has more groups than there are colors, the extra
+        ones step to the next free style, and a note says so.
+
+    Deterministic in its input: the same keys in the same order give the
+    same pairs, and both come from the figspec (groups, group_materials),
+    so a re-render cannot restyle a figure. With no materials at all every
+    group is its own style, and the first four come out (black solid, red
+    dashed, blue dash-dot, yellow dotted): the `#313` figure, unchanged.
+    One group is the black solid curve the ungrouped aggregate draws.
+
+    `notes` are sentences for the console, empty on an ordinary figure."""
+    nc, ns = len(GROUP_COLORS), len(GROUP_STYLES)
+    slot_of, next_slot = {}, 0
+    pairs, used, notes = [], set(), []
+    stepped = []
+    for i, key in enumerate(keys):
+        if key is not None and key in slot_of:
+            slot = slot_of[key]
+        else:
+            slot = next_slot
+            next_slot += 1
+            if key is not None:
+                slot_of[key] = slot
+        want = slot % ns
+        pick = None
+        for s in [want] + [(want + t) % ns for t in range(1, ns)]:
+            for c in [(i + t) % nc for t in range(nc)]:
+                if (c, s) not in used:
+                    pick = (c, s)
+                    break
+            if pick is not None:
+                break
+        if pick is None:                  # more groups than pairs exist
+            pick = (i % nc, want)
+        elif pick[1] != want:
+            stepped.append(i)
+        used.add(pick)
+        pairs.append((GROUP_COLORS[pick[0]], GROUP_STYLES[pick[1]]))
+    n = len(keys)
+    if n > nc:
+        notes.append(f"{n} groups > {nc} group colors: a color comes "
+                     f"round again, never on a line style it already has, "
+                     f"so no two means look alike; the legend names each")
+    if next_slot > ns:
+        notes.append(f"{next_slot} line styles wanted (one per material, "
+                     f"one per group with no single material) > {ns}: "
+                     f"some materials share a style and differ by color "
+                     f"alone")
+    if stepped:
+        notes.append(f"{len(stepped)} group(s) of a material with more "
+                     f"than {nc} groups had to leave that material's line "
+                     f"style; consider fewer groups per figure")
+    if n > nc * ns:
+        notes.append(f"{n} groups > {nc * ns} color/style pairs: some "
+                     f"group means now look identical; draw fewer groups")
+    return pairs, notes
+
+
+def group_style(index):
+    """-> (color, linestyle) for the index'th of `index + 1` groups with no
+    recorded material: the hand-made case, and the whole story before
+    `#373`. See assign_group_styles."""
+    return assign_group_styles([None] * (index + 1))[0][index]
+
+
+def group_style_name(ls):
+    """'solid', 'dashed', ... for a GROUP_STYLES entry, for the caption."""
+    for style, name in zip(GROUP_STYLES, GROUP_STYLE_NAMES):
+        if style == ls:
+            return name
+    return str(ls)
 
 
 def first_breakdown_kv(run):
@@ -1623,13 +2035,25 @@ def _aggregate_series(ax, ag, band=True, labels=True,
 
     `color`/`ls` default to the ungrouped aggregate's black solid, so a
     figure without groups draws exactly what it drew before `#313`. A
-    GROUP mean passes its own pair from group_style() -- the colours are
-    a different Tol palette on purpose (see GROUP_COLORS), and the style
-    is what still separates the curves in greyscale and past a wrap."""
+    GROUP mean passes its own pair from assign_group_styles(). The
+    colors are a different Tol palette on purpose (see GROUP_COLORS),
+    and the style is what still separates the curves in grayscale and
+    past a wrap. `ls` goes in as linestyle=, never as a format string: a
+    GROUP_STYLES dash tuple is not one.
+
+    THE BAND HAS NO EDGE, dashed or otherwise (`#373`, decided with the
+    line styles). The dash pattern is carried by the 2.2 pt mean line on
+    top, which is what a reader follows; edging each band in its group's
+    pattern would put two more thin dashed curves beside every mean
+    (twelve on the six-group concentration figure), and an edge at band
+    width reads as a run curve, which is the confusion the square
+    markers exist to prevent. Where bands overlap the means still say
+    whose band is whose, and the band rule itself is untouched."""
     xs = [l['kv'] for l in ag]
     ys = [l['mean'] for l in ag]
     pts = list(zip(xs, ys))
-    ax.plot(xs, ys, ls, color=color, linewidth=2.2, zorder=5)
+    ax.plot(xs, ys, linestyle=ls, color=color, linewidth=AGGREGATE_LW,
+            zorder=5)
     ax.plot(xs, ys, 's', markersize=4.0, linestyle='', zorder=6,
             color=color, markerfacecolor=color, markeredgecolor=color)
     if band and len(ag) > 1:
@@ -1806,17 +2230,70 @@ def _warn_aggregate(runs, ag, opts, cap, warn, what='aggregate',
 CAPTION_LINE_MAX = 248
 
 
-def _fit(line, limit=CAPTION_LINE_MAX):
+def _fit(line, limit=CAPTION_LINE_MAX, fits=None):
     """`line` truncated to the caption's width, with an ellipsis.
 
     A caption a reader cannot finish is not a caption -- but a caption
     that runs off the page is worse, because nothing on the figure says
     it did. Every line the group caption builds from operator-supplied
-    text goes through here."""
-    return line if len(line) <= limit else line[:limit - 1].rstrip() + '…'
+    text goes through here.
+
+    `fits` (`#373`) is _caption_fitter's measured-width test. Given, the
+    line is cut further until it really renders inside the frame, which
+    the character budget alone does not promise: group-caption text runs
+    about 4 % wider per character than the anchor line the budget was
+    measured on, and the seeded material names made that visible (a
+    248-character Members line ended at 1.04 of the figure width,
+    cutting off its pointer to the tidy CSV). Absent, the behavior is
+    the character budget exactly as before."""
+    if len(line) > limit:
+        line = line[:limit - 1].rstrip() + '…'
+    if fits is None or fits(line):
+        return line
+    lo, hi = 0, len(line) - 1
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if fits(line[:mid].rstrip() + '…'):
+            lo = mid
+        else:
+            hi = mid - 1
+    return line[:lo].rstrip() + '…'
 
 
-def _group_caption(drawn, opts, hidden):
+# How much of the figure width a fitted caption line may reach, by the
+# font's own metrics (`#373`). Not 0.99: the raster is HINTED, and at a
+# 7 pt size hinting rounds glyph advances to whole pixels, so the drawn
+# line is wider than its metrics by an amount that depends on the dpi.
+# Measured 2026-10-06 on the grouped caption lines, every dpi from 50 to
+# 1200: drawn / measured = 0.987 at 300 dpi (the export default), 1.03 at
+# 96, 1.07 at 110 and at worst 1.096 at 90. The caption starts at 0.01,
+# so a line fitted to 0.90 ends by 0.99 at the worst dpi and near 0.90 in
+# a 300 dpi export: inside the frame on the window's canvas and in
+# every file.
+CAPTION_FIT_FRAC = 0.90
+
+
+def _caption_fitter(fig, fontsize=7, left=0.01, frac=CAPTION_FIT_FRAC):
+    """-> fits(text): does `text` render, at the caption's size, inside
+    `frac` of `fig`'s width from the caption's own left edge?
+
+    Measured from the font itself (matplotlib's TextToPath, in points),
+    not from a renderer, so the answer is the same on the window's Tk
+    canvas, in a PNG and in an SVG, and needs nothing drawn first."""
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.textpath import TextToPath
+    prop = FontProperties(size=fontsize)
+    ttp = TextToPath()
+    room = fig.get_figwidth() * 72.0 * (frac - left)
+
+    def fits(text):
+        width = ttp.get_text_width_height_descent(text, prop,
+                                                  ismath=False)[0]
+        return width <= room
+    return fits
+
+
+def _group_caption(drawn, opts, hidden, materials=False, fits=None):
     """What a GROUPED aggregate's curves, bands and caps mean (`#313`).
 
     `drawn` is [(name, runs, ag, cap, color, style)], one per group that
@@ -1835,12 +2312,19 @@ def _group_caption(drawn, opts, hidden):
     the same strip, at the same x positions, in 6 pt type, and nothing on
     the figure would say which row belonged to which curve. So each
     group's support is stated here in words, and the console names the
-    thinnest level of each."""
-    names = {'-': 'solid', '--': 'dashed', '-.': 'dash-dot', ':': 'dotted'}
+    thinnest level of each.
+
+    `materials` (`#373`): at least one group carries a recorded material,
+    so its line style MEANS something (the material), and the caption
+    says what, on a line of its own. Without it the styles are only
+    there to tell the curves apart, as before, and nothing is added.
+
+    `fits` (`#373`): _caption_fitter's width test, so every line is cut
+    to what really renders inside the frame (see _fit)."""
     heads = []
     for name, runs, ag, _cap, _color, style in drawn:
         n = len(runs)
-        heads.append(f"{name} ({names.get(style, style)}, {n} run"
+        heads.append(f"{name} ({group_style_name(style)}, {n} run"
                      f"{'' if n == 1 else 's'}"
                      f"{'' if n >= 2 else ' — NO BAND'})")
     head = ("AGGREGATE BY GROUP (squares): " + '; '.join(heads)
@@ -1850,6 +2334,13 @@ def _group_caption(drawn, opts, hidden):
     if lone:
         head += (f" {', '.join(lone)} has one run: an aggregate needs ≥ 2 "
                  f"runs to earn a band.")
+    styles = ''
+    if materials:
+        styles = '\n' + _fit(
+            "Line style = the electrode material the group's runs recorded "
+            "in setup.txt when the group was formed: groups of one "
+            "material share it and differ by color; a group of no single "
+            "material has a style of its own.", fits=fits)
     grid = ('Grid: exact-key pooling — only levels a run really measured.'
             if opts.get('aggregate_exact') else
             'Grid: runs interpolated onto the common levels, never '
@@ -1876,11 +2367,12 @@ def _group_caption(drawn, opts, hidden):
                                  'breakdown, so no cap fired.'))
     counts = ("Per-level support counts are not printed when groups share "
               "a panel; the console names each group's thinnest level.")
-    return ('\n' + _fit(head) + '\n' + _fit(grid) + '\n' + _fit(support)
+    return ('\n' + _fit(head, fits=fits) + styles + '\n'
+            + _fit(grid, fits=fits) + '\n' + _fit(support, fits=fits)
             + '\n' + counts)
 
 
-def _group_members_caption(drawn, limit=CAPTION_LINE_MAX):
+def _group_members_caption(drawn, limit=CAPTION_LINE_MAX, fits=None):
     """Which runs each group's mean is made of, as one caption line.
 
     Load-bearing under --aggregate-only above all: with the contributing
@@ -1888,16 +2380,30 @@ def _group_members_caption(drawn, limit=CAPTION_LINE_MAX):
     members a reader cannot recover is not a citable figure. Truncated
     to `limit` characters with the count kept, because the tidy CSV's new
     'group' column is the complete answer and this line only has to be
-    enough to recognise the figure."""
+    enough to recognize the figure. With `fits` (`#373`) it is also cut
+    to its measured width, keeping the pointer to the CSV on the figure:
+    the pointer is the one part of this line that must never be the bit
+    that runs off the edge."""
     bits = [f"{name} = " + ', '.join(r['name'] for r in runs)
             for name, runs, _ag, _cap, _col, _st in drawn]
     line = 'Members: ' + '; '.join(bits) + '.'
-    if len(line) > limit:
+    if len(line) > limit or (fits is not None and not fits(line)):
         # the pointer to the full answer is part of the budget, not an
         # addition to it -- truncating to `limit` and THEN appending is
         # how a truncator produces a line longer than the one it cut
         tail = "… (full membership in the tidy CSV's group column)"
-        line = line[:max(0, limit - len(tail))].rstrip(' ,;') + tail
+
+        def ok(k):
+            cand = line[:k].rstrip(' ,;') + tail
+            return len(cand) <= limit and (fits is None or fits(cand))
+        lo, hi = 0, max(0, limit - len(tail))
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if ok(mid):
+                lo = mid
+            else:
+                hi = mid - 1
+        line = line[:lo].rstrip(' ,;') + tail
     return '\n' + line
 
 
@@ -1972,18 +2478,23 @@ def _cross_marks(ax, pts, color, coarse=False):
                 markeredgewidth=1.4 if coarse else 0.6)
 
 
-def _legend(ax, run_handles, style_rows):
+def _legend(ax, run_handles, style_rows, handlelength=None):
     """The run legend (+ the style rows this figure earned) -> the Legend.
 
     Returned rather than dropped: matplotlib keeps ONE ax.legend_, so the
     marker key has to re-add this one as a standalone artist before it
-    creates its own or the run legend silently disappears (`#267`)."""
+    creates its own or the run legend silently disappears (`#267`).
+
+    `handlelength` (font-size units) is GROUP_HANDLE_EM on a grouped
+    figure, so a dash pattern is long enough to read in the key (`#373`);
+    None keeps matplotlib's default and every other figure's layout."""
     from matplotlib.lines import Line2D
     handles = list(run_handles)
     for label, kw in style_rows:
         handles.append(Line2D([], [], color='#666666', label=label, **kw))
+    extra = {} if handlelength is None else {'handlelength': handlelength}
     return ax.legend(handles=handles, fontsize=8, loc='upper left',
-                     framealpha=0.9)
+                     framealpha=0.9, **extra)
 
 
 # the two marker fills `_series` draws, as the figure's own key (`#267`).
@@ -2363,6 +2874,11 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     # then does the marker key give up the bottom of its corner (`#312`) --
     # a figure with nothing to mark keeps the layout it always had.
     agg_support_row = False
+    # the legend's handle length, and whether any drawn group mean stands
+    # for a recorded material (`#373`). Both stay at their pre-`#373`
+    # answers unless a GROUP mean is actually drawn
+    handle_em = None
+    materials_drawn = False
     if opts.get('aggregate'):
         # ONE mean, or one per operator-assigned group (`#313`). The two
         # paths are the same code with a different list of run sets: a
@@ -2385,15 +2901,24 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
             warn(f"aggregate by group: {len(loose)} selected run(s) are in "
                  f"no group ({', '.join(r['name'] for r in loose)}) -- "
                  f"{fate}; assign them or deselect them")
-        if len(sets) > len(GROUP_COLORS):
-            warn(f"{len(sets)} groups > {len(GROUP_COLORS)} group colours "
-                 f"-- colours repeat (line styles still differ); consider "
-                 f"fewer groups per figure")
+        # A line style per MATERIAL (`#373`), from the material each group
+        # recorded when it was formed: opts' group_materials, i.e. the
+        # figspec, and never a setup.txt read at draw time, so a later
+        # edit to a run cannot restyle an exported figure. A group with
+        # no entry has no single material and gets a style of its own.
+        mats = {n.casefold(): m
+                for n, m in (opts.get('group_materials') or ())}
+        keys = [material_key(mats[name.casefold()])
+                if name.casefold() in mats else None
+                for name, _subset in sets]
+        styles, style_notes = assign_group_styles(keys)
+        for note in style_notes:
+            warn(f"aggregate by group: {note}")
         label_ax = axl if axl is not None else axr
         drawn_groups = []
         for i, (name, subset) in enumerate(
                 sets if grouped else [(None, runs)]):
-            color, ls = group_style(i) if grouped else (AGGREGATE_COLOR, '-')
+            color, ls = styles[i] if grouped else (AGGREGATE_COLOR, '-')
             cap_kv = aggregate_cap_kv(subset)
             # n = 1 is a REFUSAL, not a fallback (`#268`, decided
             # 2026-08-09): the band drops out entirely and the caption
@@ -2437,16 +2962,30 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
             else:
                 label = (f"aggregate mean of {n} runs (±SEM)" if band
                          else 'aggregate mean (1 run — no band)')
+            # a GROUP handle draws at the curve's own width, so its dash
+            # pattern is the curve's (matplotlib scales dashes by the
+            # width); the ungrouped handle keeps the default it always had
             run_handles.append(Line2D(
                 [], [], color=color, linestyle=ls, marker='s',
-                markersize=4.0, label=label))
+                markersize=4.0, label=label,
+                **({'linewidth': AGGREGATE_LW} if grouped else {})))
+            if grouped:
+                handle_em = GROUP_HANDLE_EM
+                materials_drawn = materials_drawn or keys[i] is not None
             _warn_aggregate(subset, ag, opts, cap_kv, warn,
                             what=(f"group {name!r}" if grouped
                                   else 'aggregate'),
                             labels=not grouped)
         if drawn_groups and grouped:
-            agg_caption = (_group_caption(drawn_groups, opts, hide_runs)
-                           + _group_members_caption(drawn_groups))
+            # cut to the width it really renders at (`#373`): seeded group
+            # names are whole material names, and a character budget let
+            # the Members line's pointer to the tidy CSV run off the edge
+            fits = _caption_fitter(fig)
+            agg_caption = (_group_caption(drawn_groups, opts, hide_runs,
+                                          materials=materials_drawn,
+                                          fits=fits)
+                           + _group_members_caption(drawn_groups,
+                                                    fits=fits))
         elif drawn_groups:
             name, subset, ag, cap_kv, _c, _s = drawn_groups[0]
             agg_caption = _aggregate_caption(subset, ag, opts, cap_kv)
@@ -2500,7 +3039,8 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     if had_fallback:
         style_rows.append(('breakdown, no reviewed area',
                            {'linestyle': '--'}))
-    main_legend = _legend(legend_ax, run_handles, style_rows)
+    main_legend = _legend(legend_ax, run_handles, style_rows,
+                          handlelength=handle_em)
     # the open/closed key explains the RUN markers, and with the runs
     # hidden there are none on the figure to explain -- the same rule that
     # keeps it out of current/power mode (`#267`), reached from the other
@@ -3107,6 +3647,19 @@ def write_tidy(runs, path, groups=()):
 # and for the same underlying reason (the CSV records the DATA, not the
 # drawing).
 #
+# `group_materials` (`#373`) has been through, and it is the first option
+# that is DERIVED rather than chosen: nobody types it, it is what the runs
+# of a group recorded in setup.txt at the moment the group was formed. So
+# its weight is in WHEN it is computed, not where: at a grouping ACTION
+# (the window's seed buttons and Assign, the CLI's --group in main()) and
+# never in site 5's drawing code, or a setup.txt edit would restyle a
+# figure on its next --from-spec. It rides site 2 without a flag of its
+# own (_cli_opts inherits it from a spec with the groups and drops it
+# when --group replaces them), reaches site 4 as a STRUCTURED option with
+# its own checker, and stays out of the tidy CSV (site 9): the group
+# column already says which run is in which line, and a line style is
+# drawing, not data.
+#
 #   1. make_opts() below -- the keyword, its default, any validation.
 #      MISSING THIS IS LOUD: every other site raises TypeError.
 #
@@ -3179,7 +3732,7 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
               cadence_guard=False, aggregate=False,
               aggregate_exact=False, groups=(), aggregate_only=False,
               fmt=DEFAULT_FORMAT, dpi=None, strain_pct=False,
-              x='kv', split_legs=True, arrows=True):
+              x='kv', split_legs=True, arrows=True, group_materials=()):
     """-> (opts dict, error message or None).
 
     The CLI builds this from its flags and the window from its tick boxes,
@@ -3208,6 +3761,12 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
     because nothing outside the aggregate reads it. `aggregate_only` is
     refused with the aggregate off, though, because there it would empty
     the figure rather than tidy it.
+
+    `group_materials` (`#373`) travels with `groups`: the one material
+    each group's runs recorded when it was formed, which picks its line
+    style (check_group_materials, assign_group_styles). Entries naming no
+    group are dropped and the rest are put in the groups' order, so the
+    stored value is canonical and a JSON round trip compares equal.
 
     `x`, `split_legs` and `arrows` (2026-09-23): the x axis (X_AXES), and
     how a run whose voltage also FELL is drawn -- leg by leg with
@@ -3250,6 +3809,12 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
     groups, groups_err = check_groups(groups)
     if groups_err:
         return None, groups_err
+    group_materials, mats_err = check_group_materials(group_materials)
+    if mats_err:
+        return None, mats_err
+    mats = {n.casefold(): m for n, m in group_materials}
+    group_materials = [[n, mats[n.casefold()]] for n, _m in groups
+                       if n.casefold() in mats]
     if aggregate_only and not aggregate:
         # REFUSED, not ignored, and this is the one combination where the
         # difference matters: "hide the runs" with nothing to replace
@@ -3289,6 +3854,7 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
             'aggregate': bool(aggregate),
             'aggregate_exact': bool(aggregate_exact),
             'groups': groups,
+            'group_materials': group_materials,
             'aggregate_only': bool(aggregate_only),
             'strain_pct': bool(strain_pct),
             'x': x, 'split_legs': bool(split_legs), 'arrows': bool(arrows),
@@ -3787,8 +4353,16 @@ def _cli_opts(flags, vals, base=None):
     # and this table is what rebuilds it, so a key missing HERE is a
     # re-render that silently draws a different figure (site 2).
     groups = base.get('groups', ())
+    # `#373`: the materials TRAVEL WITH the grouping they describe. A
+    # spec's are inherited verbatim alongside its groups, which is what
+    # keeps a re-render's line styles from moving, and a --group that
+    # replaces the grouping drops them, because they described groups
+    # that no longer exist. main() then reads the new groups' materials
+    # (derive_group_materials), the CLI's moment of forming a group.
+    group_materials = base.get('group_materials', ())
     if '--group' in vals:
         groups = []
+        group_materials = ()
         for text in vals['--group']:
             pair, err = parse_group_flag(text)
             if err:
@@ -3814,6 +4388,7 @@ def _cli_opts(flags, vals, base=None):
                      aggregate_exact=on('--aggregate-exact',
                                         'aggregate_exact'),
                      groups=groups,
+                     group_materials=group_materials,
                      aggregate_only=on('--aggregate-only',
                                        'aggregate_only'),
                      # `#314`. Both go through val() like any other named
@@ -3859,6 +4434,11 @@ def main(argv):
         if err:
             print(err)
             return 2
+        if '--group' in vals:
+            # `#373`: a group formed on this command line gets its
+            # material now, the way the window's Assign gives one
+            opts = dict(opts, group_materials=derive_group_materials(
+                opts['groups']))
         import sldea_plot_gui
         return sldea_plot_gui.launch(
             run_args, opts=opts, out_dir=vals.get('--out'),
@@ -3890,6 +4470,14 @@ def main(argv):
             print('warning:', w)
         print('nothing to plot')
         return 2
+    if '--group' in vals:
+        # `#373`: the groups were formed by THIS invocation, so their
+        # materials are read now (after prepare_runs, so a member named
+        # by bare folder name resolves to the run it means) and stored
+        # in the figspec export writes. Without --group the grouping (and
+        # its materials) came from a spec and is used verbatim.
+        opts = dict(opts, group_materials=derive_group_materials(
+            opts['groups'], runs))
 
     img, tidy = export(runs, opts, out_dir, stem, warns.append)
 

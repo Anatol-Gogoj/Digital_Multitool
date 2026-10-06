@@ -13,7 +13,8 @@ tab has a Reconnect button):
     the wire is LAN-only -- see issue #20.
   - DC Supply (BK 9174B): dual-output V / current-limit with protection,
     live V/A/W readout, and an explicit output toggle. Serial (CP2102).
-  - Data Logging (CSV)
+  - Continuous Logging (CSV at a cadence set in seconds or Hz, with a live
+    current / min / max per logged quantity)
   - Webcam (live preview + capture; fully functional on Windows)
   - Battery Data (CSV post-processing and plots)
   - SLDEA Test (HV staircase runs -> run folders; launches the Edge
@@ -37,6 +38,7 @@ import time
 from datetime import datetime
 import bench_profiles
 from bench_profiles import BenchProfileStore
+import continuous_log
 import presets_path
 import relaunch
 from instruments import BK894, TekMSO24, BK4055B, BK9174B, BK5493C
@@ -72,8 +74,8 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # (set inside each builder) and the position in this tuple are both free to
 # change without breaking anything. Everything outside the GUI that has to
 # name a tab -- the manual pipeline's screenshots, its callout specs and
-# `content.json` -- keys off the slug, so renaming "Data Logging" to
-# "Continuous Logging" (`#30`) is now the one-string change it looks like.
+# `content.json` -- keys off the slug, which is how "Data Logging" became
+# "Continuous Logging" (`#30`) without its slug, `logging`, moving.
 # The slug vocabulary is shared with `docs/manual-src/build_manual.py`'s
 # NAV/SECTIONS ids; tests/test_gui_tabs.py pins the two together.
 #
@@ -87,7 +89,7 @@ MANUAL_TABS = (
     ('siggen', 'signal generator', 'create_sg_tab'),
     ('psu', 'DC supply', 'create_psu_tab'),
     ('dmm', 'DMM', 'create_dmm_tab'),
-    ('logging', 'data logging', 'create_logging_tab'),
+    ('logging', 'continuous logging', 'create_logging_tab'),
     ('battery', 'battery data', 'create_battery_tab'),
     ('webcam', 'webcam', 'create_webcam_tab'),
     ('sldea', 'SLDEA test', 'create_sldea_tab'),
@@ -1136,18 +1138,31 @@ BEST PRACTICES:
         messagebox.showinfo("Signal Generator Tips", tips)
 
     def show_logging_tips(self):
-        """Show data logging tips"""
-        tips = """Data Logging - Usage Tips
+        """Show continuous logging tips"""
+        tips = """Continuous Logging - Usage Tips
 
 CONFIGURATION:
 - Log Directory: Where CSV files will be saved
   - Creates directory automatically if it doesn't exist
   - Default is ./logs in current working directory
-- Sample Interval: Time between measurements (seconds)
-  - 1.0s is good for slow processes
-  - 0.1s for faster dynamics
+- Sample cadence: type seconds between samples (s) or samples per
+  second (Hz); the hint beside the box shows the other unit, and
+  switching the unit converts the number so the cadence stays the same
+  - 1 s (1 Hz) is good for slow processes
+  - 0.1 s (10 Hz) for faster dynamics
   - Consider instrument settling time
+  - Samples start on a fixed grid. If reading every ticked source takes
+    longer than the cadence, the missed slots are skipped (counted under
+    the live table), never made up in a burst
 - Log Instruments: Select which instruments to record
+
+LIVE VALUES:
+- During a run the table shows each logged number: its latest value and
+  the min and max since you pressed Start
+- A failed or empty read (no signal, overload, an LCR status error) shows
+  as -- and never becomes a min or max
+- Start clears the table; after Stop it keeps the last run's values
+- Display only: the CSV files hold every sample
 
 FILE FORMAT:
 - Separate CSV file for each instrument
@@ -1180,8 +1195,8 @@ ANALYSIS:
 - Use pandas in Python: df = pd.read_csv('lcr_xxx.csv')
 - Plot in Excel: Insert > Chart > Scatter
 - For frequency sweeps: log at each frequency step"""
-        
-        messagebox.showinfo("Data Logging Tips", tips)
+
+        messagebox.showinfo("Continuous Logging Tips", tips)
     
     def create_lcr_tab(self):
         """Create LCR meter control tab"""
@@ -2479,7 +2494,8 @@ PROTECTION:
 
 READOUT & LOGGING:
 - Tick "Live readout" for a 0.5 s measured V / I / power display.
-- To record over time, use the Data Logging tab: tick DC Supply CH1/CH2.
+- To record over time, use the Continuous Logging tab: tick DC Supply
+  CH1/CH2.
   Each channel writes psu_chN_<timestamp>.csv with columns
   Timestamp, Set V, Meas V, Meas A, Power (W) -- power is V*I.
 
@@ -2621,8 +2637,8 @@ USE:
 - Overload / non-numeric replies show as OVLD.
 
 LOGGING:
-- Tick "DMM" on the Data Logging tab to record the selected function to CSV
-  alongside the other instruments."""
+- Tick "DMM" on the Continuous Logging tab to record the selected function
+  to CSV alongside the other instruments."""
         messagebox.showinfo("DMM Tips", tips)
 
     # ==================== SLDEA test tab ====================
@@ -5543,32 +5559,63 @@ LOGGING:
         return frame
 
     def create_logging_tab(self):
-        """Create data logging tab"""
+        """Create the Continuous Logging tab (slug `logging`; it was "Data
+        Logging" until #30)."""
         _tab = ScrollableTab(self.notebook)
-        self.notebook.add(_tab, text="Data Logging")
+        self.notebook.add(_tab, text="Continuous Logging")
         log_frame = _tab.body
-        
+
+        # Configuration on the left, the live table (#30) beside it in the
+        # space the configuration never used, so the tab is no taller than
+        # it was and the manual's capture window still holds all of it.
+        top_row = ttk.Frame(log_frame)
+        top_row.pack(fill='x', padx=10, pady=10)
+
         # Logging configuration
-        config_frame = ttk.LabelFrame(log_frame, text="Logging Configuration", padding=10)
-        config_frame.pack(fill='x', padx=10, pady=10)
-        
+        config_frame = ttk.LabelFrame(top_row, text="Logging Configuration", padding=10)
+        config_frame.pack(side=tk.LEFT, fill='y')
+
         # Log file selection
         ttk.Label(config_frame, text="Log Directory:").grid(row=0, column=0, sticky='w', pady=5)
         self.log_dir = tk.StringVar(value="./logs")
         ttk.Entry(config_frame, textvariable=self.log_dir, width=40).grid(row=0, column=1, padx=10, pady=5)
         ttk.Button(config_frame, text="Browse", 
                    command=self.select_log_dir).grid(row=0, column=2, padx=5)
-        
-        # Sample rate
-        ttk.Label(config_frame, text="Sample Interval (s):").grid(row=1, column=0, sticky='w', pady=5)
-        self.log_interval = ttk.Entry(config_frame, width=15)
+
+        # Sample cadence (#30): ONE box plus a unit choice. The number is
+        # read in the selected unit and stored in seconds
+        # (continuous_log.parse_cadence); switching the unit converts the
+        # box so the cadence itself never changes under the user. The hint
+        # beside it echoes the same cadence in the other unit.
+        ttk.Label(config_frame, text="Sample cadence:").grid(row=1, column=0, sticky='w', pady=5)
+        cadence_row = ttk.Frame(config_frame)
+        # pady 3, not 5: the radio buttons stand a few px taller than the
+        # old Entry, and this keeps the row (and so everything under it,
+        # including the manual's callout boxes) where it was
+        cadence_row.grid(row=1, column=1, columnspan=2, sticky='w', padx=10, pady=3)
+        self.log_interval = ttk.Entry(cadence_row, width=12)
         add_tooltip(self.log_interval,
-                    "Seconds between samples. All ticked sources are "
-                    "sampled once per interval; each gets its own "
-                    "timestamped CSV.")
-        self.log_interval.grid(row=1, column=1, sticky='w', padx=10, pady=5)
+                    "How often to sample, in the unit picked beside the "
+                    "box: seconds between samples, or samples per second "
+                    "(Hz). Every ticked source is read once per sample; "
+                    "each gets its own timestamped CSV.")
+        self.log_interval.pack(side=tk.LEFT)
         self.log_interval.insert(0, "1.0")
-        
+        self.log_cadence_unit = tk.StringVar(value=continuous_log.UNIT_S)
+        self._log_cadence_unit_was = continuous_log.UNIT_S
+        for unit, text in ((continuous_log.UNIT_S, "s"),
+                           (continuous_log.UNIT_HZ, "Hz")):
+            ttk.Radiobutton(cadence_row, text=text, value=unit,
+                            variable=self.log_cadence_unit,
+                            command=self._log_cadence_unit_changed
+                            ).pack(side=tk.LEFT, padx=(6, 0))
+        # fixed width so the row does not reflow on every keystroke
+        self.log_cadence_echo = ttk.Label(cadence_row, width=26)
+        self.log_cadence_echo.pack(side=tk.LEFT, padx=(10, 0))
+        self.log_interval.bind('<KeyRelease>',
+                               lambda _e: self._log_cadence_echo_update())
+        self._log_cadence_echo_update()
+
         # Instrument selection
         ttk.Label(config_frame, text="Log Instruments:").grid(row=2, column=0, sticky='nw', pady=5)
         instr_frame = ttk.Frame(config_frame)
@@ -5626,7 +5673,50 @@ LOGGING:
         self.log_stop_btn = ttk.Button(button_frame, text="Stop Logging", 
                                         command=self.stop_logging, state='disabled')
         self.log_stop_btn.pack(side=tk.LEFT, padx=5)
-        
+
+        # Live values (#30): the latest value, min and max of every logged
+        # number since this run's Start. Fed by the logging worker through
+        # a continuous_log.LiveStats and redrawn by a main-thread poll
+        # (_log_live_poll); the worker never touches this widget. Display
+        # only -- the CSVs hold every sample.
+        live_frame = ttk.LabelFrame(top_row, text="Live Values (since Start)",
+                                    padding=10)
+        live_frame.pack(side=tk.LEFT, fill='both', expand=True, padx=(10, 0))
+        cols = ('source', 'quantity', 'current', 'min', 'max')
+        self.log_live_tree = ttk.Treeview(live_frame, columns=cols,
+                                          show='headings', height=8,
+                                          selectmode='none')
+        for col, head, width, anchor in (
+                ('source', 'Source', 95, 'w'),
+                ('quantity', 'Quantity', 105, 'w'),
+                ('current', 'Current', 100, 'e'),
+                ('min', 'Min', 100, 'e'),
+                ('max', 'Max', 100, 'e')):
+            self.log_live_tree.heading(col, text=head, anchor=anchor)
+            self.log_live_tree.column(col, width=width, minwidth=width,
+                                      anchor=anchor, stretch=True)
+        live_scroll = ttk.Scrollbar(live_frame, orient='vertical',
+                                    command=self.log_live_tree.yview)
+        self.log_live_tree.configure(yscrollcommand=live_scroll.set)
+        self.log_live_tree.grid(row=0, column=0, sticky='nsew')
+        live_scroll.grid(row=0, column=1, sticky='ns')
+        # the table takes the configuration's full height and the width
+        # beside it
+        live_frame.rowconfigure(0, weight=1)
+        live_frame.columnconfigure(0, weight=1)
+        add_tooltip(self.log_live_tree,
+                    "Latest value, and the min and max since Start, of "
+                    "every number being logged. -- means the latest read "
+                    "had no value (no signal, overload, LCR status error "
+                    "or a failed read); such reads never count toward min "
+                    "or max.")
+        self.log_live_summary = ttk.Label(
+            live_frame, text="No run yet: press Start Logging.")
+        self.log_live_summary.grid(row=1, column=0, columnspan=2,
+                                   sticky='w', pady=(5, 0))
+        self._log_live_items = {}      # LiveStats row key -> Treeview iid
+        self._log_stats = None         # the LiveStats on show
+
         # Log display
         display_frame = ttk.LabelFrame(log_frame, text="Log Status", padding=10)
         display_frame.pack(fill='both', expand=True, padx=10, pady=10)
@@ -6838,24 +6928,44 @@ LOGGING:
         directory = filedialog.askdirectory()
         if directory:
             self.log_dir.set(directory)
-    
+
+    def _log_cadence_echo_update(self):
+        """The hint beside the cadence box: the same cadence in the other
+        unit, or 'not a valid cadence' while the text is not one."""
+        self.log_cadence_echo.config(text=continuous_log.echo_text(
+            self.log_interval.get(), self.log_cadence_unit.get()))
+
+    def _log_cadence_unit_changed(self):
+        """s <-> Hz: re-express the box in the new unit so the cadence
+        stays what it was (0.5 s becomes 2 Hz, not 0.5 Hz). Text that does
+        not parse is left for Start to explain."""
+        new = self.log_cadence_unit.get()
+        old = self._log_cadence_unit_was
+        self._log_cadence_unit_was = new
+        text = continuous_log.convert_text(self.log_interval.get(), old, new)
+        if text != self.log_interval.get():
+            self._set_entry(self.log_interval, text)
+        self._log_cadence_echo_update()
+
+    def _log_read_cadence(self):
+        """The cadence box -> seconds between samples, or None after
+        telling the user what is wrong with it. Main thread only."""
+        try:
+            return continuous_log.parse_cadence(
+                self.log_interval.get(), self.log_cadence_unit.get())
+        except ValueError as e:
+            messagebox.showerror("Logging", f"Invalid sample cadence:\n{e}")
+            return None
+
     def start_logging(self):
         import os
 
         # Validate BEFORE latching the buttons: a bad interval or an empty
         # source list used to kill the worker thread silently while the UI
-        # stayed stuck in the "logging" state (issue #39).
-        raw = self.log_interval.get()
-        try:
-            interval = float(raw)
-        except (TypeError, ValueError):
-            messagebox.showerror(
-                "Logging", f"Invalid interval: {raw!r} -- enter seconds "
-                "(e.g. 1.0)")
-            return
-        if interval <= 0:
-            messagebox.showerror("Logging",
-                                 "Interval must be greater than 0 seconds")
+        # stayed stuck in the "logging" state (issue #39). The cadence is
+        # typed in s or Hz (#30) and comes back in seconds either way.
+        interval = self._log_read_cadence()
+        if interval is None:
             return
 
         selected, missing = [], []
@@ -6907,6 +7017,10 @@ LOGGING:
                     for ch in (1, 2)},
             'dmm': bool(self.log_dmm.get()),
             'dmm_fn': self._log_dmm_fn,
+            # This run's live current / min / max (#30). A fresh object
+            # per Start IS the reset: a worker left over from the previous
+            # run keeps writing to its own, never to the one on show.
+            'stats': continuous_log.LiveStats(interval),
         }
         self.recording = True
         # Per-run generation token (audit 2026-07-25): Stop→Start within one
@@ -6920,10 +7034,55 @@ LOGGING:
         self.record_thread = threading.Thread(
             target=self._logging_worker, args=(interval, cfg, tok),
             daemon=True)
+        self._log_live_show(cfg['stats'])
         self.record_thread.start()
+        self._log_live_poll(cfg['stats'], self.record_thread)
 
         self.log_message(f"Logging started ({', '.join(selected)} "
-                         f"every {interval:g} s)")
+                         f"{continuous_log.describe_cadence(interval)})")
+
+    # How often the live table is redrawn while a run is going. A redraw
+    # only reads LiveStats; it never touches an instrument.
+    _LOG_LIVE_MS = 500
+
+    def _log_live_show(self, stats):
+        """Put `stats` on show and clear the table (each Start)."""
+        self._log_stats = stats
+        for iid in self.log_live_tree.get_children():
+            self.log_live_tree.delete(iid)
+        self._log_live_items = {}
+        self.log_live_summary.config(text="Running: waiting for the first "
+                                          "sample...")
+
+    def _log_live_render(self, stats, running):
+        """Redraw the live table from `stats` (main thread)."""
+        rows, ticks, skipped = stats.snapshot()
+        for row in rows:
+            key = (row['source'], row['quantity'], row['unit'])
+            values = (row['source'], row['quantity'],
+                      continuous_log.fmt_value(row['current'], row['unit']),
+                      continuous_log.fmt_value(row['min'], row['unit']),
+                      continuous_log.fmt_value(row['max'], row['unit']))
+            iid = self._log_live_items.get(key)
+            if iid is None:
+                self._log_live_items[key] = self.log_live_tree.insert(
+                    '', 'end', values=values)
+            else:
+                self.log_live_tree.item(iid, values=values)
+        self.log_live_summary.config(text=continuous_log.summary_line(
+            ticks, skipped, stats.interval_s, running))
+
+    def _log_live_poll(self, stats, thread):
+        """Redraw while this run's worker is alive, then once more, so the
+        table ends on the run's last sample. Stops by itself when a newer
+        run has taken the table over."""
+        if stats is not self._log_stats:
+            return
+        alive = thread.is_alive()
+        self._log_live_render(stats, running=alive and self.recording)
+        if alive:
+            self.root.after(self._LOG_LIVE_MS, self._log_live_poll, stats,
+                            thread)
 
     def _logging_worker(self, interval, cfg, tok):
         """Run logging_loop and never die silently: a fatal error reports to
@@ -6957,12 +7116,25 @@ LOGGING:
         after _LOG_MAX_FAILS misses in a row it is dropped from the run
         with a single notice instead of spamming one error per tick
         forever; when the last source dies, logging stops itself.
+
+        Each sample also feeds cfg['stats'], this run's
+        continuous_log.LiveStats (#30): the live current / min / max. A
+        source whose read raises is recorded as a failure there, so it
+        shows no current value and leaves min and max alone.
+
+        Ticks sit on a fixed grid, `interval` seconds apart from the first
+        one (#30), so a cadence typed as 2 Hz means two samples a second.
+        Before #30 the loop slept a whole interval AFTER the reads, so the
+        real spacing was the reads plus the interval. A tick whose reads
+        overrun the interval skips the slots it missed rather than firing
+        them back to back (continuous_log.next_tick).
         """
         import os
 
         log_path = cfg['dir']
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         files, writers, fails = {}, {}, {}
+        stats = cfg.get('stats') or continuous_log.LiveStats(interval)
 
         def _open(key, filename, header):
             path = os.path.join(log_path, filename)
@@ -7007,6 +7179,7 @@ LOGGING:
                 files[key].flush()
                 fails[key] = 0
             except Exception as e:
+                stats.record_failure(key)
                 fails[key] += 1
                 if fails[key] >= self._LOG_MAX_FAILS:
                     self.log_message(
@@ -7022,7 +7195,13 @@ LOGGING:
             primary, secondary, status = self.lcr.measure()
             writer.writerow([now, config['mode'], config['frequency'],
                              primary, secondary, status])
+            stats.record('LCR', continuous_log.lcr_quantities(
+                config['mode'], config['frequency'], primary, secondary,
+                status))
 
+        t_first = time.monotonic()
+        slot = 0
+        overrun_noted = False
         while self.recording and self._log_gen is tok:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             _sample('LCR', _lcr_row)
@@ -7033,6 +7212,8 @@ LOGGING:
                                      meas.get('period'), meas.get('mean'),
                                      meas.get('pk2pk'), meas.get('rms'),
                                      meas.get('amplitude')])
+                    stats.record(f'Scope CH{c}',
+                                 continuous_log.scope_quantities(meas))
                 _sample(f'Scope CH{ch}', _scope_row)
             for ch in (1, 2):
                 def _sg_row(writer, c=ch):
@@ -7042,6 +7223,8 @@ LOGGING:
                                      bswv.get('AMP'), bswv.get('OFST'),
                                      bswv.get('STDEV'), bswv.get('MEAN'),
                                      'ON' if outp['state'] else 'OFF'])
+                    stats.record(f'SigGen CH{c}',
+                                 continuous_log.sg_quantities(bswv))
                 _sample(f'SigGen CH{ch}', _sg_row)
             for ch in (1, 2):
                 def _psu_row(writer, c=ch):
@@ -7050,21 +7233,37 @@ LOGGING:
                     writer.writerow([now, r['set_voltage_v'],
                                      r['meas_voltage_v'], r['meas_current_a'],
                                      r['power_w']])
+                    stats.record(f'DC Supply CH{c}',
+                                 continuous_log.psu_quantities(r))
                 _sample(f'DC Supply CH{ch}', _psu_row)
 
             def _dmm_row(writer):
                 fn = cfg['dmm_fn']
                 val = self.dmm.measure(fn)
-                writer.writerow([now, fn, '' if val is None else val,
-                                 self.dmm.unit(fn)])
+                unit = self.dmm.unit(fn)
+                writer.writerow([now, fn, '' if val is None else val, unit])
+                stats.record('DMM', continuous_log.dmm_quantities(
+                    fn, val, unit))
             _sample('DMM', _dmm_row)
             if not writers:
+                stats.tick()
                 self.log_message("All logging sources failed -- stopping")
                 self.root.after(0, self._logging_failed)
                 break
+            # The next tick's slot on the run's grid; slots this tick's
+            # reads overran are skipped and counted, never made up.
+            slot, t_end, skipped = continuous_log.next_tick(
+                t_first, interval, slot, time.monotonic())
+            stats.tick(skipped)
+            if skipped and not overrun_noted:
+                overrun_noted = True
+                self.log_message(
+                    "Reading the ticked sources took longer than the "
+                    f"cadence ({continuous_log.describe_cadence(interval)})"
+                    ": missed sample slots are skipped, not made up. The "
+                    "live table counts them.")
             # chunked so Stop retires this thread within ~0.3 s instead of
             # sleeping through a whole interval (the revival race window)
-            t_end = time.monotonic() + interval
             while (self.recording and self._log_gen is tok
                    and time.monotonic() < t_end):
                 time.sleep(min(0.3, max(0.0, t_end - time.monotonic())))

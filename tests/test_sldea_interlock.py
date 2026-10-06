@@ -189,6 +189,8 @@ class _App:
         _sldea_video_preflight = G._sldea_video_preflight
     if hasattr(G, '_cam_owned_by_sldea'):
         _cam_owned_by_sldea = G._cam_owned_by_sldea
+    if hasattr(G, '_sldea_video_unsettled'):
+        _sldea_video_unsettled = G._sldea_video_unsettled
 
     def __init__(self, tmp, dry=True, sgch=1, real_worker=False):
         self.real_worker = real_worker
@@ -217,6 +219,8 @@ class _App:
         # what the video branch's hooks read (see the class body)
         self.sldea_vid_on = self.sldea_vid_detect = _var(False)
         self._sldea_video_jobs, self._sldea_recorder = [], None
+        self._sldea_video_handoffs = {}
+        self._sldea_video_lock = _threading.Lock()
         # Webcam tab
         self._bg_busy = set()
         self.cam_seq_running = False
@@ -807,15 +811,115 @@ def test_the_live_claim_lasts_until_the_trek_is_zeroed_abort_included():
                                               'at output off'], probes
             for where, events in probes:
                 assert [e[0] for e in events] == ['error'], (where, events)
-            # only the run's own set-up ever wrote a waveform
+            # only the run's own set-up ever wrote a waveform: the 0 V its
+            # worker puts the claimed channel at first (2026-10-01), and
+            # the same DC 0 V again just before the output is switched on
             assert [w[3] for w in app.sg.writes
                     if w[1] == 'set_basic_wave'] == [
-                ({'WVTP': 'DC', 'OFST': 0.0},)], app.sg.writes
+                ({'WVTP': 'DC', 'OFST': 0.0},)] * 2, app.sg.writes
             # the claim is released by _sldea_finished on the Tk side
             assert app._sldea_live_ch == 1
             app.root.run_pending()
             assert app._sldea_live_ch is None and not app._sldea_running
             assert _sweep(app, ch=1)[-1][0] == 'done'
+
+
+# --------------------------------------------------------------------------
+# Video runs: where their questions sit (merge of #334 with the video
+# branch, adversarial review 2026-10-01). Every test above runs with
+# Record unticked, so none of them could see this order.
+# --------------------------------------------------------------------------
+
+VIDEO_Q = 'Video unavailable'
+COPY_Q = 'A video is still being copied'
+
+
+@_contextlib.contextmanager
+def _codec(ok, probes):
+    """This PC's FFV1 probe, answered, and counted in `probes`."""
+    real = gui.sldea_video.codec_available
+
+    def probe(*a, **k):
+        probes.append(1)
+        return (True, '') if ok else (False, 'no FFV1 encoder (test)')
+    gui.sldea_video.codec_available = probe
+    try:
+        yield
+    finally:
+        gui.sldea_video.codec_available = real
+
+
+def _record(app):
+    """Tick 🎥 Record the way the tab would."""
+    app.sldea_vid_on = _var(True)
+    app.sldea_vid_detect = _var(False)
+    app.sldea_vars['vid_fps'] = _var('1')
+
+
+def test_a_run_the_gate_refuses_never_asks_about_its_video():
+    """The gate first: a refused run is not probed or asked about video."""
+    mb = _MB()                            # any question at all fails
+    probes = []
+    with _tempfile.TemporaryDirectory() as tmp, _patched(mb), \
+            _codec(False, probes):
+        app = _App(tmp, dry=False, sgch=1)
+        _record(app)
+        _busy(app, 'sweep', ch=1)
+        app.sldea_run()
+        _assert_refused(app, mb)
+        assert probes == [], "the video was probed for a refused run"
+
+
+def test_the_video_question_comes_before_any_hv_question():
+    """An operator who asked for a recording learns it is impossible
+    BEFORE agreeing to energize the Trek."""
+    mb = _MB(dict(LIVE_OK, **{VIDEO_Q: True}))      # Yes: snapshots only
+    with _tempfile.TemporaryDirectory() as tmp, _patched(mb), \
+            _codec(False, []):
+        app = _App(tmp, dry=False, sgch=1)
+        _record(app)
+        app.sldea_run()
+        assert app.worker_done.wait(5), app.lines
+        asked = mb.titles('askyesno')
+        assert asked[0] == VIDEO_Q, asked
+        assert asked.index(VIDEO_Q) < asked.index('Energize HV?'), asked
+
+
+def test_a_live_start_asks_while_a_previous_video_is_still_copying():
+    """A copy to the share mid-run delays the watchdog thread's writes.
+    Asked while a finalize job runs, and while a recording has not yet
+    been handed to one (its copy would start mid-run)."""
+    still = _types.SimpleNamespace(poll=lambda: None)
+    for pending in ('job', 'handoff'):
+        for answer in (False, True):
+            mb = _MB(dict(LIVE_OK, **{COPY_Q: answer}))
+            with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+                app = _App(tmp, dry=False, sgch=1)
+                if pending == 'job':
+                    app._sldea_video_jobs.append(still)
+                else:
+                    app._sldea_video_handoffs[object()] = ('stg', 'run')
+                app.sldea_run()
+                asked = mb.titles('askyesno')
+                assert COPY_Q in asked, (pending, asked)
+                if answer:
+                    assert app.worker_done.wait(5), app.lines
+                    assert asked.index(COPY_Q) < asked.index('Energize HV?')
+                else:
+                    assert not app._sldea_running, pending
+                    assert 'Energize HV?' not in asked, asked
+                    assert not app.worker_done.is_set()
+
+
+def test_a_finished_copy_is_not_asked_about():
+    done = _types.SimpleNamespace(poll=lambda: 0)
+    mb = _MB(LIVE_OK)                     # the copy question would fail
+    with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+        app = _App(tmp, dry=False, sgch=1)
+        app._sldea_video_jobs.append(done)
+        app.sldea_run()
+        assert app.worker_done.wait(5), app.lines
+        assert app._sldea_video_jobs == [], "a finished job was kept"
 
 
 def _run():

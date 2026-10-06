@@ -640,11 +640,17 @@ class _StubApp:
     _sldea_worker = _G._sldea_worker
     _sldea_capture = _G._sldea_capture
     _sldea_video_postrun = _G._sldea_video_postrun
+    _sldea_video_postrun_steps = _G._sldea_video_postrun_steps
     _sldea_run_logger = _G._sldea_run_logger
+    _sldea_video_hold = _G._sldea_video_hold
+    _sldea_video_release = _G._sldea_video_release
+    _sldea_video_unsettled = _G._sldea_video_unsettled
+    _sldea_close_wait_video = _G._sldea_close_wait_video
+    SLDEA_CLOSE_VIDEO_WAIT_S = _G.SLDEA_CLOSE_VIDEO_WAIT_S
 
-    def __init__(self, sg=None):
+    def __init__(self, sg=None, scope=None):
         import types
-        self.scope, self.sg = None, sg
+        self.scope, self.sg = scope, sg
         self._sldea_stop = False
         self._sldea_bd_tripped = False
         self._sldea_elapsed = 0.0
@@ -652,9 +658,15 @@ class _StubApp:
         self._sldea_loglock = threading.Lock()
         self._sldea_recorder = None
         self._sldea_video_jobs = []
+        self._sldea_video_handoffs = {}
+        self._sldea_video_lock = threading.Lock()
         self.lines = []
+        self.stamped = []                    # (monotonic, line)
         self.finished = 0
-        self.root = types.SimpleNamespace(after=self._after)
+        self.withdrawn = False
+        self.root = types.SimpleNamespace(after=self._after,
+                                          update=lambda: None,
+                                          withdraw=self._withdraw)
 
     def _after(self, _ms, fn=None, *a):
         # run _sldea_finished for real (it is what releases the tab);
@@ -662,8 +674,12 @@ class _StubApp:
         if getattr(fn, '__name__', '') == '_sldea_finished':
             fn()
 
+    def _withdraw(self):
+        self.withdrawn = True
+
     def _sldea_log(self, msg):
         self.lines.append(str(msg))
+        self.stamped.append((time.monotonic(), str(msg)))
 
     def _sldea_set_status(self, *a, **k):
         pass
@@ -836,6 +852,274 @@ def test_an_abort_during_camera_startup_never_switches_the_sg_on():
         assert not [e for e in events if e[1] == 'sg.set_output'
                     and e[2][1] is True], [e[1:3] for e in events]
         assert app.finished == 1
+
+
+# ---------------- adversarial review of the rebased branch (2026-10-01)
+
+class _ScriptedScope:
+    """measure_raw stand-in: I_Out (CH3 in _drive) follows `i_volts`, the
+    last value repeating forever (0.6 V reads as 120 uA); V_Out is 0.5 V."""
+
+    def __init__(self, i_volts):
+        self.i_volts = list(i_volts)
+
+    def measure_raw(self, meas_type, channel):
+        if channel != 3:
+            return 0.5, 'ok'
+        seq = self.i_volts
+        return (seq[0] if len(seq) == 1 else seq.pop(0)), 'ok'
+
+
+def _long_profile():
+    from sldea_profile import SldeaProfile
+    return SldeaProfile(start_kv=0.0, end_kv=1.0, step_kv=1.0, ramp_s=0.4,
+                        landing_s=6.0, settle_s=0.4, snap_lead_s=0.4)
+
+
+def _live_watchdog_run(app, tmp, stream, oneshot):
+    with _Patched(tmp, stream, oneshot):
+        app._sldea_worker(_long_profile(), tmp, 'RUN', 1, 2, 3, False,
+                          tel_on=False, wd_on=True, wd_ua=100.0, wd_s=1.0,
+                          vid_on=True, vid_fps=5.0)
+    return os.path.join(tmp, 'RUN')
+
+
+def test_a_live_run_sets_its_channel_to_0_v_before_anything_can_stall():
+    """A channel a stopped sweep left at a level must not hold the Trek
+    there while the run writes the share and starts the camera."""
+    _need_cv()
+    events = []
+    with tempfile.TemporaryDirectory() as tmp:
+        app = _StubApp(sg=_FakeSG(events))
+
+        def stream(spec, fps=10):
+            events.append((time.monotonic(), 'stream.open', (), {}))
+            return _FakeCam()
+        _drive(app, tmp, stream, _no_oneshot, dry=False)
+        names = [e[1] for e in events]
+        first = events[0]
+        assert first[1] == 'sg.set_basic_wave' and first[2] == (1,) \
+            and first[3].get('OFST') == 0.0, names
+        on = [i for i, e in enumerate(events)
+              if e[1] == 'sg.set_output' and e[2][1] is True]
+        assert on and names.index('stream.open') < on[0], names
+
+
+def test_an_abort_while_the_stream_starts_reaches_the_zero_at_once():
+    """Abort used to wait out the first-frame timeout and the recorder's
+    stop (~10 s) before the worker reached its zeroing."""
+    _need_cv()
+    events, pressed = [], []
+    with tempfile.TemporaryDirectory() as tmp:
+        app = _StubApp(sg=_FakeSG(events))
+
+        def silent(spec, fps=10):
+            def abort():
+                pressed.append(time.monotonic())
+                app._sldea_stop = True
+            threading.Timer(0.3, abort).start()
+            return _FakeCam(block=True)      # opens, never delivers a frame
+        rundir = _drive(app, tmp, silent, _no_oneshot, dry=False)
+        assert pressed
+        offs = [e[0] for e in events
+                if e[1] == 'sg.set_output' and e[2][1] is False]
+        assert offs, [e[1:3] for e in events]
+        delay = offs[0] - pressed[0]
+        assert delay < 1.0, f"Abort reached the SG zero after {delay:.2f} s"
+        assert not [e for e in events if e[1] == 'sg.set_output'
+                    and e[2][1] is True], [e[1:3] for e in events]
+        assert not any('delivered nothing' in l for l in app.lines), \
+            app.lines
+        with open(os.path.join(rundir, 'setup.txt')) as f:
+            assert 'aborted while the camera stream was starting' in f.read()
+        assert app.finished == 1
+
+
+def test_the_watchdog_is_armed_while_a_reconnect_has_the_scope():
+    """#339's Reconnect clears self.scope until its new session opens. A
+    run that reached its arming in that window ran with NO watchdog."""
+    _need_cv()
+    events = []
+    scope = _ScriptedScope([0.6])                # 120 uA, over the trip
+    with tempfile.TemporaryDirectory() as tmp:
+        app = _StubApp(sg=_FakeSG(events), scope=scope)
+
+        def stream(spec, fps=10):
+            app.scope = None                         # the Reconnect...
+            threading.Timer(2.0, lambda: setattr(app, 'scope', scope)) \
+                .start()                             # ...and its new session
+            return _FakeCam()
+        _live_watchdog_run(app, tmp, stream, _no_oneshot)
+        assert any('watchdog armed while the scope is reconnecting' in l
+                   for l in app.lines), app.lines
+        assert app._sldea_bd_tripped, \
+            "the LIVE run went unwatched: " + repr(app.lines[-8:])
+
+
+def test_a_breakdown_frame_comes_off_the_stream_and_the_zero_follows():
+    """The trip's frame is the stream's newest -- no one-shot grab between
+    the trip and the SG zero."""
+    _need_cv()
+    events, grabs = [], []
+
+    def oneshot(*a, **k):
+        grabs.append(a)
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        app = _StubApp(sg=_FakeSG(events),
+                       scope=_ScriptedScope([0.0] * 12 + [0.6]))
+        rundir = _live_watchdog_run(app, tmp,
+                                    lambda spec, fps=10: _FakeCam(), oneshot)
+        assert app._sldea_bd_tripped, app.lines
+        assert grabs == [], "a one-shot grab on the way to the zero"
+        rows = [r for r in _read_csv(os.path.join(rundir, 'data.csv'))
+                if r['tag'] == 'breakdown']
+        assert len(rows) == 1 and rows[0]['frame_file'] \
+            and 'video frame t=' in rows[0]['notes'], rows
+        [t_trip] = [t for t, l in app.stamped if 'BREAKDOWN CONFIRMED' in l]
+        offs = [e[0] for e in events if e[1] == 'sg.set_output'
+                and e[2][1] is False and e[0] >= t_trip]
+        assert offs and offs[0] - t_trip < 1.0, \
+            f"trip to SG zero took {offs[0] - t_trip if offs else None}"
+
+
+class _StallingCam(_FakeCam):
+    """Delivers frames until `stall_at` (monotonic), then read() hangs
+    until close(): a stream that stops just before the last still."""
+
+    def __init__(self, stall_at, **kw):
+        super().__init__(**kw)
+        self.stall_at = stall_at
+
+    def read(self):
+        if time.monotonic() >= self.stall_at:
+            self.closed.wait()
+            return None
+        return super().read()
+
+
+def test_the_last_still_is_filed_even_when_no_frame_came_in_time():
+    """It used to vanish: no data.csv row, no NO FRAME line, and the run
+    reported complete one frame short."""
+    _need_cv()
+    p = _short_profile()
+    last_t = max(s['t'] for s in p.snapshots)
+    with tempfile.TemporaryDirectory() as tmp:
+        app = _StubApp()
+
+        def stream(spec, fps=10):
+            return _StallingCam(time.monotonic() + last_t - 0.3)
+        rundir = _drive(app, tmp, stream, _no_oneshot)
+        data = _read_csv(os.path.join(rundir, 'data.csv'))
+        n = len(p.snapshots)
+        assert len(data) == n, f"{len(data)} rows for {n} stills"
+        assert data[-1]['frame_file'] == '', data[-1]
+        assert any('NO FRAME (no stream frame' in l for l in app.lines), \
+            app.lines
+        assert f"run complete: {n}/{n} frames" in app.lines, app.lines
+
+
+def test_closing_the_window_waits_until_the_video_is_handed_on():
+    """The threads that start the detached move die with the window. The
+    close used to give the run ~3 s, the recorder's stop alone up to 10."""
+    _need_cv()
+    real_wait = sv.VideoRecorder.wait_finished
+
+    def slow(self, timeout):
+        time.sleep(1.5)                           # the encoder still flushing
+        return real_wait(self, timeout)
+    sv.VideoRecorder.wait_finished = slow
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _StubApp()
+            rundir = _drive(app, tmp, lambda spec, fps=10: _FakeCam(),
+                            _no_oneshot)
+            assert app._sldea_video_unsettled(), "the video was not held"
+            t = time.monotonic()
+            app._sldea_close_wait_video()
+            waited = time.monotonic() - t
+            assert app.withdrawn, "the window stayed usable while closing"
+            assert not app._sldea_video_unsettled()
+            assert app._sldea_video_jobs, "closed before the move started"
+            assert waited >= 1.0, waited
+            assert _wait(lambda: os.path.exists(
+                os.path.join(rundir, sv.VIDEO_FILENAME)), 30), \
+                os.listdir(rundir)
+    finally:
+        sv.VideoRecorder.wait_finished = real_wait
+
+
+def test_a_close_that_cannot_wait_says_where_the_video_was_left():
+    with tempfile.TemporaryDirectory() as tmp:
+        app = _StubApp()
+        app.SLDEA_CLOSE_VIDEO_WAIT_S = 0.3
+        rundir = os.path.join(tmp, 'RUN')
+        os.makedirs(rundir)
+        staging = os.path.join(tmp, 'staging', 'RUN_x')
+        app._sldea_video_hold(staging, rundir)      # never handed on
+        t = time.monotonic()
+        app._sldea_close_wait_video()
+        assert time.monotonic() - t < 2.0
+        with open(os.path.join(rundir, 'run.log'), encoding='utf-8') as f:
+            log = f.read()
+        assert staging in log and '--finalize' in log, log
+
+
+class _Rec:
+    def __init__(self, alive):
+        self.alive = alive
+
+    def reader_alive(self):
+        return self.alive
+
+
+class _CamApp:
+    """Just the camera guard. Everything a guarded method would touch past
+    the guard is missing on purpose, so a method that gets past it fails."""
+    import gui as _gui
+    _cam_owned_by_sldea = _gui.InstrumentControlGUI._cam_owned_by_sldea
+
+    def __init__(self, running, rec=None):
+        self._sldea_running = running
+        self._sldea_recorder = rec
+
+
+_CAM_GUARDED = ('cam_read_controls', 'cam_apply_controls', 'cam_stabilize',
+                'cam_grey_world', 'cam_auto_expose', 'cam_start_preview',
+                '_cam_start_interval', '_cam_start_timed',
+                '_cam_start_sequence')
+
+
+def test_no_webcam_control_can_take_the_camera_during_a_run():
+    """Preview, every capture starter and every control writer refuse
+    while a run -- or its recorder, still shutting down -- holds the
+    camera."""
+    import types
+    import gui
+    notes = []
+
+    def asked(*a, **k):
+        raise AssertionError(f"unexpected question {a[:1]}")
+    saved = gui.messagebox
+    gui.messagebox = types.SimpleNamespace(
+        showwarning=lambda t, m, **k: notes.append(t),
+        showinfo=lambda t, m, **k: notes.append(t),
+        showerror=lambda t, m, **k: notes.append(t), askyesno=asked)
+    try:
+        for running, alive in ((True, False), (False, True)):
+            for name in _CAM_GUARDED:
+                notes.clear()
+                getattr(gui.InstrumentControlGUI, name)(
+                    _CamApp(running, _Rec(alive)))
+                assert notes == ['Camera in use — SLDEA run'], \
+                    (name, running, alive, notes)
+    finally:
+        gui.messagebox = saved
+
+
+def test_the_camera_is_free_once_the_run_and_its_reader_are_gone():
+    assert _CamApp(False, None)._cam_owned_by_sldea() is False
+    assert _CamApp(False, _Rec(False))._cam_owned_by_sldea() is False
 
 
 def _run():

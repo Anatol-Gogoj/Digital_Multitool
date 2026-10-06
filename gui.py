@@ -293,6 +293,14 @@ class InstrumentControlGUI:
         # start asks first while one is copying to the share)
         self._sldea_recorder = None
         self._sldea_video_jobs = []
+        # ...and every recording not yet handed to its detached job (from
+        # the moment its recorder starts until that job is launched): the
+        # window close waits for these, and Restart/Update refuse, because
+        # the threads that hand them on die with this process (adversarial
+        # review 2026-10-01). One lock for both, since the post-run threads
+        # change them while the Tk thread reads them.
+        self._sldea_video_handoffs = {}
+        self._sldea_video_lock = threading.Lock()
         self.recording = False
         self.record_thread = None
         # Keys of background instrument operations in flight (issue #40) --
@@ -454,6 +462,14 @@ class InstrumentControlGUI:
                 self.lcr.set_bias_enabled(False)
             except Exception:
                 pass
+        # A video run's recording reaches its detached job only after the
+        # recorder has stopped, and the ~3 s wait above can end first; the
+        # threads that hand it on die with the window. The outputs are off,
+        # so this wait costs no safety (adversarial review 2026-10-01).
+        try:
+            self._sldea_close_wait_video()
+        except Exception:
+            pass
         # Hand each instrument back to LOCAL and close its link so the front
         # panels work again without a power cycle (pyvisa-py asserts remote on
         # connect). Best-effort -- a dead/wedged link must never block exit.
@@ -1856,9 +1872,27 @@ ANALYSIS:
         HV NOT ZEROED alarm goes up and the flag still clears.) Both
         orderings are pinned in tests/test_update_restart_guard.py. A DRY
         run is refused as well: a restart would cut it off before it
-        closes its run folder."""
+        closes its run folder.
+
+        After the run, its VIDEO may not yet be with the detached job that
+        finishes it (_sldea_video_unsettled: the recorder still stopping,
+        the encoder still flushing). The threads that hand it on die with
+        this process, so both actions wait for that too (adversarial
+        review 2026-10-01)."""
         if not getattr(self, '_sldea_running', False):
-            return False
+            if not self._sldea_video_unsettled():
+                return False
+            kw = {} if parent is None else {'parent': parent}
+            verb = 'Restart' if action == 'restart' else 'Update'
+            messagebox.showwarning(
+                f"{verb} refused — a run's video is still being finished",
+                "The last SLDEA run has ended, but its video is not yet "
+                "with the program that moves it into the run folder (the "
+                "recorder is still stopping, or the encoder is still "
+                f"writing). {verb} now would leave it half-written in "
+                "local staging.\n\nThis takes seconds; the SLDEA log says "
+                "when the move has started. Then try again.", **kw)
+            return True
         ch = getattr(self, '_sldea_live_ch', None)     # None: a DRY run
         if getattr(self, '_sldea_stop', False):
             state = (f"The LIVE HV run on SG CH{ch} is still stopping."
@@ -3512,16 +3546,24 @@ LOGGING:
                 # thread that runs the watchdog (share stalls of seconds are
                 # measured). Asked, not refused: the copy is throttled, and
                 # the operator may know the output dir is elsewhere.
-                self._sldea_video_jobs = [
-                    j for j in self._sldea_video_jobs if j.poll() is None]
-                if self._sldea_video_jobs and not messagebox.askyesno(
+                # ...or is about to be: a recording not yet handed to its
+                # job starts that copy later, in the middle of this run
+                # (adversarial review 2026-10-01). Pruned in place, under
+                # the lock the post-run threads append under.
+                with self._sldea_video_lock:
+                    self._sldea_video_jobs[:] = [
+                        j for j in self._sldea_video_jobs if j.poll() is None]
+                    copying = bool(self._sldea_video_jobs)
+                copying = copying or bool(self._sldea_video_unsettled())
+                if copying and not messagebox.askyesno(
                         "A video is still being copied",
                         "A previous run's video is still being moved into "
                         "its run folder (and perhaps analysed) by a "
-                        "separate program. That copy writes to the same "
-                        "share this run will, and a stalled share delays "
-                        "the writes made by the thread that runs the "
-                        "breakdown watchdog.\n\nStart the LIVE run anyway?",
+                        "separate program, or is about to be. That copy "
+                        "writes to the same share this run will, and a "
+                        "stalled share delays the writes made by the "
+                        "thread that runs the breakdown watchdog.\n\n"
+                        "Start the LIVE run anyway?",
                         default='no'):
                     return
                 if not messagebox.askyesno(
@@ -4203,7 +4245,19 @@ LOGGING:
         # run actually drove (audit 2026-07-25, critical C1/C3 — HV could be
         # left energized while the UI reported 'complete').
         sg = self.sg if not dry else None
+        video_hold = None             # this run's entry in _sldea_video_handoffs
         try:
+            # LIVE: the run's FIRST act puts the channel it just claimed at
+            # 0 V. Everything before the output is switched on below can
+            # stall for seconds -- setup.txt and run.log on the share, the
+            # camera lock, a video stream's first frame -- and a channel
+            # that a stopped sweep or a Signal Gen Apply left at a level
+            # held the Trek there all that time, with its controls locked
+            # and ■ Abort waiting on the camera (adversarial review
+            # 2026-10-01). Only the level is set here; the output stays as
+            # it was until it is switched on below.
+            if sg is not None:
+                sg.set_basic_wave(sgch, WVTP='DC', OFST=0.0)
             os.makedirs(framedir, exist_ok=True)
             # Write run metadata FIRST -- before any (possibly slow) camera
             # setup -- so even an interrupted run leaves setup.txt + the header.
@@ -4322,13 +4376,14 @@ LOGGING:
                 self._sldea_log(f"camera setup failed ({e}) — frames skipped")
                 spec = None
             # --- video: the recorder takes the camera BEFORE the SG output
-            # is switched on, so everything it could stall on happens at
-            # 0 V. From here the stills come off its stream (latest_rgb, a
-            # lock and a copy) instead of one-shot grabs that could hold
-            # this thread -- the one running the watchdog and the ramp --
-            # for minutes on a wedged camera. If the stream delivers
-            # nothing, the run falls back to one-shot stills: a video
-            # nobody got is no reason to lose the snapshots too. ---
+            # is switched on, and after the channel was set to 0 V at the
+            # top, so everything it could stall on happens at 0 V. From
+            # here the stills come off its stream (latest_rgb, a lock and a
+            # copy) instead of one-shot grabs that could hold this thread
+            # -- the one running the watchdog and the ramp -- for minutes
+            # on a wedged camera. If the stream delivers nothing, the run
+            # falls back to one-shot stills: a video nobody got is no
+            # reason to lose the snapshots too. ---
             if vid_on and spec is None:
                 self._sldea_log("⚠ video requested but there is no camera "
                                 "— no recording")
@@ -4362,7 +4417,16 @@ LOGGING:
                     rec = None
                     self._sldea_log(f"⚠ video recorder did not start ({e}) "
                                     f"— snapshots only")
-                if rec is not None and not rec.wait_first_frame(5.0):
+                if rec is not None:
+                    # from here until its detached job is launched, the
+                    # recording must outlive nothing this process does
+                    video_hold = self._sldea_video_hold(vid_staging, rundir)
+                # ■ Abort ends the wait at once. The recorder is then left
+                # to the finally below, which zeroes the SG FIRST and stops
+                # the recorder after -- no 5 s stop in front of the zero.
+                if rec is not None and not rec.wait_first_frame(
+                        5.0, cancel=lambda: self._sldea_stop) \
+                        and not self._sldea_stop:
                     self._sldea_log(
                         "⚠ video: the camera stream delivered nothing in "
                         "5 s — NO recording; snapshots fall back to "
@@ -4370,27 +4434,33 @@ LOGGING:
                                             else ""))
                     rec.stop(timeout=5.0)
                     rec = None
+                    self._sldea_video_release(video_hold)
+                    video_hold = None
                     try:
                         os.rmdir(vid_staging)        # empty: nothing written
                     except OSError:
                         pass
                 if rec is not None:
                     self._sldea_recorder = rec    # the Webcam-tab guard
-                    self._sldea_log(
-                        f"video: recording {rec.fps:g} fps to local disk "
-                        f"({vid_staging}); moved into the run folder when "
-                        f"the run ends")
+                    if not self._sldea_stop:
+                        self._sldea_log(
+                            f"video: recording {rec.fps:g} fps to local disk "
+                            f"({vid_staging}); moved into the run folder "
+                            f"when the run ends")
                 # setup.txt promised a video before any of this ran; say
                 # what actually happened, so a fallback run does not claim
                 # a recording (and stream-taken stills) it never had
+                outcome = ("NOT recorded -- the run was aborted while the "
+                           "camera stream was starting"
+                           if self._sldea_stop else
+                           "recording started; snapshots taken off the "
+                           "stream" if rec is not None else
+                           "NOT recorded -- the camera stream did not "
+                           "start; snapshots were one-shot grabs as "
+                           "without video")
                 try:
                     with open(os.path.join(rundir, 'setup.txt'), 'a') as sf:
-                        sf.write("Video outcome: "
-                                 + ("recording started; snapshots taken "
-                                    "off the stream" if rec is not None else
-                                    "NOT recorded -- the camera stream did "
-                                    "not start; snapshots were one-shot "
-                                    "grabs as without video") + "\n")
+                        sf.write(f"Video outcome: {outcome}\n")
                 except OSError:
                     pass
             # Abort pressed during the camera/video startup above (up to
@@ -4402,8 +4472,22 @@ LOGGING:
                 self.sg.set_basic_wave(sgch, WVTP='DC', OFST=0.0)
                 self.sg.set_output(sgch, True)
 
+            # Armed from the run's REQUEST (wd_on: a LIVE run that had a
+            # scope when ▶ Run was pressed), never from self.scope at this
+            # instant. A scope Reconnect confirmed during the startup above
+            # (#339) clears that handle until its new session opens, and
+            # gating on it left the WHOLE run without a watchdog while the
+            # start banner said it was armed (adversarial review
+            # 2026-10-01). A missing handle is monitoring loss: the loop
+            # below already reports it and picks the readings up again.
             watchdog = (sldea_profile.BreakdownWatchdog(wd_ua, wd_s)
-                        if (wd_on and not dry and self.scope) else None)
+                        if (wd_on and not dry) else None)
+            if watchdog is not None and self.scope is None \
+                    and not self._sldea_stop:
+                self._sldea_log(
+                    "⚠ watchdog armed while the scope is reconnecting — no "
+                    "current readings until its new session is open (CURRENT "
+                    "MONITORING LOST after 10 s without them)")
             if watchdog is not None and not self._sldea_stop:
                 # Learn the I_Out rest level at 0 kV (SG is at 0 V here) so
                 # the trip is |I − baseline|, not |I|: the whole 07-29
@@ -4460,6 +4544,19 @@ LOGGING:
                 rec.set_t0(t0)            # frames join the staircase clock
             # which still the last full restamp was requested for, and when
             stamp_for, stamp_req_t = None, None
+
+            def stream_still(i):
+                """(frame, t) off the stream that may serve still `i`: one
+                captured after its scheduled moment and, when a restamp
+                was requested for it, after that restamp -- else (None,
+                None)."""
+                nb = snaps[i]['t']
+                if stamp_for == i and rec.can_restamp:
+                    rt = rec.restamp_done_t()
+                    nb = (max(nb, rt) if rt is not None
+                          and rt >= stamp_req_t else None)
+                return (rec.latest_rgb(not_before=nb) if nb is not None
+                        else (None, None))
             last_status = -1.0
             last_kv = None
             last_mon = -1.0
@@ -4490,8 +4587,13 @@ LOGGING:
                         or (tel is not None and not tel.failed)) \
                         and el - last_mon >= mon_dt:
                     last_mon = el
+                    # one read of the handle: a Reconnect on the Tk thread
+                    # may clear it between a check and the call
+                    scope = self.scope
                     try:
-                        mi, wst = self.scope.measure_raw('MEAN', ich)
+                        if scope is None:
+                            raise IOError("scope reconnecting (no session)")
+                        mi, wst = scope.measure_raw('MEAN', ich)
                     except Exception as e:
                         mi, wst = None, 'error'
                         if wd_bad_since is None:
@@ -4630,13 +4732,7 @@ LOGGING:
                 while si < len(snaps) and el >= snaps[si]['t']:
                     got = (None, None)
                     if rec is not None:
-                        nb = snaps[si]['t']
-                        if stamp_for == si and rec.can_restamp:
-                            rt = rec.restamp_done_t()
-                            nb = (max(nb, rt) if rt is not None
-                                  and rt >= stamp_req_t else None)
-                        if nb is not None:
-                            got = rec.latest_rgb(not_before=nb)
+                        got = stream_still(si)
                         if got[0] is None and \
                                 el - snaps[si]['t'] < self.SLDEA_STILL_WAIT_S:
                             break              # try again next tick
@@ -4654,6 +4750,24 @@ LOGGING:
                         fg='#8a5a00' if dry else '#a01010')
                     last_status = el
                 time.sleep(self.SLDEA_POLL_S)
+            # A still that was still waiting for its frame when the
+            # staircase ended (the loop stops 0.3 s after it, a still may
+            # wait SLDEA_STILL_WAIT_S) was never filed: no data.csv row, no
+            # NO FRAME line, and a run one frame short reported complete
+            # (adversarial review 2026-10-01). Without video a still never
+            # waits, so it cannot happen there. File every still that fell
+            # due with what the stream has NOW -- NO FRAME if nothing
+            # qualifies. Only on a normal end: after a trip or ■ Abort the
+            # SG zero comes first, and nothing may wait in front of it.
+            if rec is not None and not self._sldea_stop:
+                el = time.monotonic() - t0
+                while si < len(snaps) and el >= snaps[si]['t']:
+                    self._sldea_capture(p, snaps[si], si + 1, spec, framedir,
+                                        writer, fh, vch, ich, dry,
+                                        vsign=trek_sign, tel=tel, t0=t0,
+                                        stream=True,
+                                        stream_frame=stream_still(si))
+                    si += 1
             if getattr(self, '_sldea_bd_tripped', False):
                 done = 'BREAKDOWN-ABORT'
             elif self._sldea_stop:
@@ -4748,10 +4862,13 @@ LOGGING:
                 # Video after that, the same kind of record: stop() gives up
                 # after its timeout, and moving the file into the run folder
                 # (gigabytes, usually to the share) plus the optional
-                # all-frames
-                # detection run in a DETACHED program started from a thread,
-                # so the tab is free the moment this block ends and closing the
-                # app cannot cut them off.
+                # all-frames detection run in a DETACHED program started from
+                # a thread, so the tab is free the moment this block ends.
+                # That program survives closing the app; the threads that
+                # start it do not, so this run's hold (video_hold) passes to
+                # the post-run thread, which drops it once the program is
+                # launched -- the window close waits for that, and Restart
+                # and Update refuse until then.
                 if rec is not None:
                     try:
                         rec.stop(timeout=10.0)
@@ -4761,8 +4878,10 @@ LOGGING:
                         threading.Thread(
                             target=self._sldea_video_postrun,
                             args=(rec, vid_staging, rundir,
-                                  bool(vid_detect and completed)),
+                                  bool(vid_detect and completed),
+                                  video_hold),
                             daemon=True).start()
+                        video_hold = None    # the post-run thread's now
                     except Exception as e:
                         self._sldea_log(f"⚠ video shutdown failed ({e}) — the "
                                         f"recording is in {vid_staging}")
@@ -4773,6 +4892,14 @@ LOGGING:
                         pass
             finally:
                 self.root.after(0, self._sldea_finished)
+                # not handed on (the video shutdown failed, and its log
+                # line says where the files are): nothing will move them,
+                # so nothing should wait for them either
+                if video_hold is not None:
+                    try:
+                        self._sldea_video_release(video_hold)
+                    except Exception:
+                        pass
 
     def _sldea_run_logger(self, rundir):
         """A log function for ONE run, used after that run has ended: it
@@ -4804,14 +4931,21 @@ LOGGING:
                 pass
         return log
 
-    def _sldea_video_postrun(self, rec, staging, rundir, detect):
+    def _sldea_video_postrun(self, rec, staging, rundir, detect, hold=None):
         """After a video run, on its own thread: wait for the ENCODER to
         finish (the files are closed), then hand the rest to a DETACHED
         `sldea_video.py --finalize` -- the all-frames detection on the local
         copy for a COMPLETED run when asked, then a throttled, .part-safe
         move into the run folder. Detached, so closing this app cannot cut
         a multi-gigabyte copy off half way; it logs into that run's
-        run.log itself."""
+        run.log itself. `hold` (the run's _sldea_video_hold) is dropped on
+        every way out, once nothing more will happen here."""
+        try:
+            self._sldea_video_postrun_steps(rec, staging, rundir, detect)
+        finally:
+            self._sldea_video_release(hold)
+
+    def _sldea_video_postrun_steps(self, rec, staging, rundir, detect):
         log = self._sldea_run_logger(rundir)
         if not rec.wait_finished(600.0):
             log(f"⚠ video: the encoder was still writing after 10 min — "
@@ -4834,7 +4968,8 @@ LOGGING:
             proc = subprocess.Popen(cmd, start_new_session=True,
                                     stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL)
-            self._sldea_video_jobs.append(proc)
+            with self._sldea_video_lock:
+                self._sldea_video_jobs.append(proc)
             log("video: moving the recording into the run folder"
                 + (", after edge detection on every frame" if detect
                    else "")
@@ -4844,6 +4979,64 @@ LOGGING:
             log(f"⚠ video: could not start the move ({e}) — the recording "
                 f"is in {staging}; run `python sldea_video.py --finalize "
                 f"\"{staging}\" \"{rundir}\"` by hand")
+
+    # ---- video handoffs: recordings that must not die with this process --
+    # A recording is held from the moment its recorder starts until its
+    # detached --finalize job is launched. Everything in between -- the
+    # encoder, the recorder's stop (up to ~13 s), the post-run thread --
+    # runs on daemon threads that die with this process, and then the
+    # video stays half-written in local staging with nothing saying so
+    # (adversarial review 2026-10-01).
+
+    SLDEA_CLOSE_VIDEO_WAIT_S = 20.0
+
+    def _sldea_video_hold(self, staging, rundir):
+        """Hold the recording staged in `staging` for `rundir`. -> the
+        token _sldea_video_release takes."""
+        token = object()
+        with self._sldea_video_lock:
+            self._sldea_video_handoffs[token] = (staging, rundir)
+        return token
+
+    def _sldea_video_release(self, token):
+        if token is None:
+            return
+        with self._sldea_video_lock:
+            self._sldea_video_handoffs.pop(token, None)
+
+    def _sldea_video_unsettled(self):
+        """[(staging, rundir)] for every recording not yet handed to its
+        detached job: a video run still going, its recorder stopping, or
+        its encoder still flushing."""
+        with self._sldea_video_lock:
+            return list(self._sldea_video_handoffs.values())
+
+    def _sldea_close_wait_video(self):
+        """Window close, after the outputs are off: wait (bounded) until
+        every recording has reached its detached job. The window is hidden
+        meanwhile, so nothing new can be started from it, and Tk keeps
+        running so the run's own last steps (they post to it) can finish.
+        Whatever is still held at the end is written into its run's
+        run.log, with the command that finishes it by hand."""
+        if not self._sldea_video_unsettled():
+            return
+        try:
+            self.root.withdraw()
+        except Exception:
+            pass
+        end = time.monotonic() + self.SLDEA_CLOSE_VIDEO_WAIT_S
+        while self._sldea_video_unsettled() and time.monotonic() < end:
+            try:
+                self.root.update()
+            except Exception:
+                break
+            time.sleep(0.1)
+        for staging, rundir in self._sldea_video_unsettled():
+            self._sldea_run_logger(rundir)(
+                f"⚠ video: the app was closed before the recording was "
+                f"handed on — it is in {staging}. Once the file has stopped "
+                f"growing, run `python sldea_video.py --finalize "
+                f"\"{staging}\" \"{rundir}\"`.")
 
     def _sldea_cam_value(self, attr, default):
         try:

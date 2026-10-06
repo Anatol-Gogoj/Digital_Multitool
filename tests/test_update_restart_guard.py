@@ -162,6 +162,10 @@ class _App:
     # getattr so that, against code without the gate, the suite still
     # imports and fails test by test instead of not running at all
     _sldea_run_blocks = getattr(G, '_sldea_run_blocks', None)
+    # the gate also waits for a run's video to reach its detached job
+    _sldea_video_unsettled = getattr(G, '_sldea_video_unsettled', None)
+    _sldea_video_hold = getattr(G, '_sldea_video_hold', None)
+    _sldea_video_release = getattr(G, '_sldea_video_release', None)
     _sldea_finished = G._sldea_finished
     sldea_abort = G.sldea_abort
     # Never called by the code under test. Bound so that a restart turned
@@ -181,6 +185,8 @@ class _App:
         # what _sldea_finished tidies up when a run ends
         self._sldea_loglock = _threading.Lock()
         self._sldea_runlog = self._sldea_prelog = None
+        self._sldea_video_handoffs = {}
+        self._sldea_video_lock = _threading.Lock()
         self.sldea_run_btn, self.sldea_abort_btn = _Widget(), _Widget()
         self.status_bar = _Widget()
         self.lookups = 0
@@ -386,6 +392,33 @@ def test_update_is_refused_during_a_run():
         assert 'shared drive the run may be saving to' in msg, msg
         assert 'Tools → Update Software… again' in msg, msg
         assert kw == {}, kw
+
+
+def test_restart_and_update_wait_for_a_finished_runs_video_handoff():
+    """A video run's recording reaches the detached job that moves it in
+    only through threads that die with this process (adversarial review
+    2026-10-01). After the run, both refuse until that handoff -- and the
+    gate opens again the moment it has happened."""
+    for action in ('restart', 'update'):
+        app = _App(run=None)
+        hold = app._sldea_video_hold('staging', 'rundir')
+        mb = _MB()
+        with _patched(mb, app.events) as fake_os:
+            if action == 'restart':
+                app._restart_app()
+            else:
+                app.open_update_software()
+        _refused(app, fake_os)
+        verb = 'Restart' if action == 'restart' else 'Update'
+        msg, kw = _one_warning(
+            mb, f"{verb} refused — a run's video is still being finished")
+        assert 'half-written in local staging' in msg, msg
+        assert kw == {}, kw
+        app._sldea_video_release(hold)
+        mb = _MB()
+        with _patched(mb, app.events):
+            assert app._sldea_run_blocks(action) is False
+        assert mb.calls == [], mb.calls
 
 
 def test_update_with_no_run_asks_as_before():

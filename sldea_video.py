@@ -321,10 +321,12 @@ class VideoRecorder:
         run's recorder at THAT run's log, not whichever run is next)."""
         self._log = log
 
-    def wait_first_frame(self, timeout):
-        """True once the stream has delivered a frame, False at `timeout`
-        or when the camera failed to open. Meant for the moment before the
-        staircase starts, at 0 V."""
+    def wait_first_frame(self, timeout, cancel=None):
+        """True once the stream has delivered a frame, False at `timeout`,
+        when the camera failed to open, or as soon as `cancel()` is true --
+        ■ Abort must not sit out the rest of the timeout (adversarial
+        review 2026-10-01). Meant for the moment before the staircase
+        starts, at 0 V."""
         end = self._clock() + timeout
         while self._clock() < end:
             with self._lock:
@@ -332,6 +334,8 @@ class VideoRecorder:
                     return True
             if self.error or (self._started
                               and not self._reader_t.is_alive()):
+                return False
+            if cancel is not None and cancel():
                 return False
             time.sleep(0.05)
         with self._lock:

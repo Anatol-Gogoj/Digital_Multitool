@@ -321,6 +321,8 @@ class _App:
         _cam_worker_alive = G._cam_worker_alive
     if hasattr(G, '_sldea_video_preflight'):
         _sldea_video_preflight = G._sldea_video_preflight
+    if hasattr(G, '_sldea_video_unsettled'):
+        _sldea_video_unsettled = G._sldea_video_unsettled
     if hasattr(G, '_cam_owned_by_sldea'):
         _cam_owned_by_sldea = G._cam_owned_by_sldea
 
@@ -366,6 +368,8 @@ class _App:
         self._cam_seq_kind = self._cam_seq_ch = None
         self.sldea_vid_on = self.sldea_vid_detect = _Field(False)
         self._sldea_video_jobs, self._sldea_recorder = [], None
+        self._sldea_video_handoffs = {}
+        self._sldea_video_lock = _threading.Lock()
 
     def _run_bg(self, work, done, busy=None, quiet=False):
         self.bg.append(busy)

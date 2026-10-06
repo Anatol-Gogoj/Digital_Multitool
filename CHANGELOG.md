@@ -49,7 +49,9 @@ advice.
   open, and so does an auto-opened window you switched to another run.
 - **The session clock stops when detection ends** (#368, for #364), so
   nothing on the toolbar is still counting once the machine is done. The next
-  ▶ Detect Edges starts it again.
+  ▶ Detect Edges starts it again. The value it keeps is the time at the stop;
+  it could be a second old, and a pass run without the event loop (the manual
+  capture) left it at 0 s.
 - **A failed write to setup.txt is shown instead of overwritten** (#370,
   #371). When Save or a scale-only re-anchor could not record the scale
   anchor in setup.txt, its warning was replaced a moment later by the "saved"

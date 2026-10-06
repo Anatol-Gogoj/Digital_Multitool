@@ -2075,15 +2075,50 @@ def test_scale_gate_rearms_on_every_run_switch():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_detection_clock_freezes_while_the_session_clock_runs_on():
+def _pending_ticks(root):
+    """The after() ids whose callback is the session tick (`#364`).
+
+    tkinter registers an after() callback under a Tcl command named after
+    the function, so `after info <id>` names `..._tick_clock` for exactly
+    these. Counting them, rather than trusting `_clock_job`, is what
+    catches a second tick chain that nothing tracks any more."""
+    out = []
+    for jid in root.tk.splitlist(root.tk.call('after', 'info')):
+        script = root.tk.splitlist(root.tk.call('after', 'info', jid))[0]
+        if str(script).endswith('_tick_clock'):
+            out.append(jid)
+    return out
+
+
+def _pump(root, secs):
+    """Run the Tk event loop for `secs` of wall time, so any timer that is
+    still scheduled gets its chance to fire."""
+    t0 = time.time()
+    while time.time() - t0 < secs:
+        root.update()
+        time.sleep(0.02)
+
+
+def _new_threads(before):
+    """Threads started since `before` (a set from threading.enumerate())."""
+    import threading
+    return [t for t in threading.enumerate() if t not in before]
+
+
+def test_detection_clock_freezes_and_the_session_clock_stops_with_the_pass():
     """`#237`: ONE clock ran from ▶ Detect Edges until 💾 Save, so the
     detection time was overwritten a second after it was produced and the
-    readout became a session stopwatch. Now: the detection line freezes
-    when the pass ends and is repainted by nothing else; the session line
-    keeps counting through Save and across a run switch; and the
-    detection line resets per run, because a saved run re-opened for a
+    readout became a session stopwatch. That split the readout in two: the
+    detection line freezes when the pass ends and is repainted by nothing
+    else, and it resets per run, because a saved run re-opened for a
     scale-only re-anchor (`#215`) runs NO detection and the absence of a
-    fresh detection time is the signal that says so."""
+    fresh detection time is the signal that says so.
+
+    `#364` (2026-10-06): the session line below it then ticked on for the
+    life of the window, which read as work still running after the
+    auto-detections were done. It now stops when the pass ends and holds
+    its last value; Save does not restart it and neither does a run switch
+    (only a new Detect does, pinned in the next case)."""
     import sldea_edge_gui as gui
     root = _tk_root_or_skip('two clocks')
     if root is None:
@@ -2105,9 +2140,12 @@ def test_detection_clock_freezes_while_the_session_clock_runs_on():
             return app.clock_lbl.cget('text')
 
         # BEFORE any pass: the absence is stated, not left blank, and the
-        # session clock is already running (the window is open)
+        # session clock is already running (the window is open), as ONE
+        # chain of ticks
         assert detect_txt() == 'detect: not run', detect_txt()
         assert session_txt().startswith('session '), session_txt()
+        assert app._clock_on and len(_pending_ticks(root)) == 1, \
+            _pending_ticks(root)
 
         # THE BOX HOLDS BOTH LINES AND THE WIDEST TEXT. Found by measuring
         # the real window: the toolbar row is one button tall, so the
@@ -2137,34 +2175,54 @@ def test_detection_clock_freezes_while_the_session_clock_runs_on():
         first_t0 = app._t0
         assert first_t0 is not None
 
-        # THE BUG'S OWN SHAPE: let the clock tick as if five minutes of
-        # review had passed. The session line must move; the detection
-        # line must be byte-identical -- it is an answer, not a stopwatch.
+        # THE PASS IS OVER, SO THE SESSION LINE STOPS (`#364`): the flag is
+        # down AND no tick is left queued -- not merely one that would find
+        # the flag down when it fired
+        assert not app._clock_on, "the session clock ran on after the pass"
+        assert app._clock_job is None, app._clock_job
+        assert _pending_ticks(root) == [], _pending_ticks(root)
+        held = session_txt()
+        assert held.startswith('session '), held
+
+        # THE BUG'S OWN SHAPE: five minutes of review go by after the pass.
+        # Neither line may move: the detection line is an answer, and the
+        # session line holds the value it had when the machine was done.
+        # Asked of a stray tick, and of the real event loop given more than
+        # a tick period to fire anything that is still scheduled.
         app._t_session -= 300
         app._tick_clock()
-        moved = session_txt()
-        assert moved == 'session 5m00s', moved
+        assert session_txt() == held, \
+            f"a stray tick repainted the stopped clock: {session_txt()}"
+        _pump(root, 1.3)
+        assert session_txt() == held, \
+            f"the session line kept counting after the pass: {session_txt()}"
         assert detect_txt() == frozen, "detection time kept counting"
+        assert _pending_ticks(root) == [], _pending_ticks(root)
 
-        # SAVE does not stop the session clock any more: a session
-        # outlives a Save (the batch cockpit saves one run and moves on)
+        # SAVE neither stops nor restarts it. Under `#237` that was because
+        # a session outlives a Save; now there is simply nothing running
+        # left to stop, and Save is no reason to start counting again.
         app.save()
-        assert app._clock_on, "Save stopped the session clock"
+        assert not app._clock_on, "Save restarted the session clock"
+        assert _pending_ticks(root) == [], _pending_ticks(root)
         app._t_session -= 60
         app._tick_clock()
-        assert session_txt() == 'session 6m00s', session_txt()
+        assert session_txt() == held, session_txt()
         assert detect_txt() == frozen, "Save rewrote the detection time"
 
         # A RUN SWITCH re-arms the detection line (it belonged to run B's
-        # pass) and leaves the session line alone (one session, many runs)
+        # pass) and leaves the session line alone (one session, many runs):
+        # still held, and NOT restarted -- picking a run is not machine work
         other = [i for i, v in enumerate(app.run_box['values'])
                  if 'SLDEA_A' in v][0]
         app.run_box.current(other)
         app._pick_run()
         assert detect_txt() == 'detect: not run', detect_txt()
         assert app._t0 is None
+        assert not app._clock_on, "a run switch restarted the session clock"
+        assert _pending_ticks(root) == [], _pending_ticks(root)
         app._tick_clock()
-        assert session_txt() == 'session 6m00s', session_txt()
+        assert session_txt() == held, session_txt()
 
         # THE SCALE-ONLY RE-ANCHOR PATH: run B is saved and carries px, so
         # re-opening it routes to re-anchor rather than calibrate -- and
@@ -2175,16 +2233,173 @@ def test_detection_clock_freezes_while_the_session_clock_runs_on():
         app._pick_run()
         assert app._scale_intent()['intent'] == gui.SCALE_INTENT_REANCHOR
         assert detect_txt() == 'detect: not run', detect_txt()
+        assert not app._clock_on and _pending_ticks(root) == []
 
         # A SECOND PASS IS TIMED ON ITS OWN: `_t0 = _t0 or now` made every
-        # later pass report the time since the FIRST one of the session
+        # later pass report the time since the FIRST one of the session.
+        # It ends stopped like the first.
         app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
         time.sleep(0.01)
         app.detect_all_sync()
         assert app._t0 > first_t0, "the second pass reused the first's t0"
+        assert not app._clock_on and _pending_ticks(root) == []
     finally:
         gui.messagebox = real_mb
         root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_detect_restarts_the_session_clock_and_the_pass_end_stops_it():
+    """`#364` (2026-10-06), the threaded path an operator actually uses.
+
+    Detect Edges starts the session line again (a batch session still
+    gets a session time) from the SAME origin, the window opening, so it is
+    neither reset to zero nor resumed from the value it held. Restarting a
+    clock that is already running (the first Detect of a window) leaves one
+    chain of ticks, not two. The end of the pass stops it again, and so
+    does a run switch that abandons a pass mid-flight: that pass never
+    reaches _finish_detect, and without the stop the line would count on
+    with no machine work left."""
+    import threading
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('session clock restart')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_clock_restart_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    workers = []
+    try:
+        _fake_run(os.path.join(d, 'SLDEA_A'))
+        run_b = _fake_run(os.path.join(d, 'SLDEA_B'))
+        app = gui.EdgeReviewApp(root, path=run_b)
+        assert app.run is not None
+
+        def session_txt():
+            return app.clock_lbl.cget('text')
+
+        def finish_pass():
+            t0 = time.time()
+            while app._detect_busy and time.time() - t0 < 15.0:
+                root.update()
+                time.sleep(0.02)
+            assert not app._detect_busy, "the detection pass never finished"
+
+        # the FIRST Detect, on a clock still running since the window
+        # opened: one chain before, one chain after, repainted at once
+        assert app._clock_on and len(_pending_ticks(root)) == 1
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app._t_session -= 300
+        before = set(threading.enumerate())
+        app.detect()
+        workers += _new_threads(before)
+        assert app._detect_busy
+        assert app._clock_on, "Detect did not run the session clock"
+        assert len(_pending_ticks(root)) == 1, \
+            f"a restart left {len(_pending_ticks(root))} tick chains"
+        assert session_txt() == 'session 5m00s', session_txt()
+
+        # the pass ends: stopped, nothing of it queued, value held
+        finish_pass()
+        assert not app._clock_on, "the session clock ran on after the pass"
+        assert app._clock_job is None and _pending_ticks(root) == []
+        held = session_txt()
+        assert held.startswith('session 5m'), held
+        app._t_session -= 60
+        _pump(root, 1.3)
+        assert session_txt() == held, \
+            f"the session line kept counting after the pass: {session_txt()}"
+
+        # A NEW DETECT RESTARTS IT, from the window-open origin: six
+        # minutes and change, not 0s (reset) and not the held 5m (resumed)
+        before = set(threading.enumerate())
+        app.detect()
+        workers += _new_threads(before)
+        assert app._clock_on, "a new Detect did not restart the session clock"
+        assert app._clock_job is not None
+        assert len(_pending_ticks(root)) == 1, _pending_ticks(root)
+        assert session_txt().startswith('session 6m'), session_txt()
+
+        # ...and a run switch that ABANDONS that pass stops it: forced
+        # past the disabled Run box, as the mid-detect switch case does
+        app.run_box.config(state='readonly')
+        other = [i for i, v in enumerate(app.run_box['values'])
+                 if 'SLDEA_A' in v][0]
+        app.run_box.current(other)
+        app._pick_run()
+        assert not app._detect_busy
+        assert not app._clock_on, \
+            "an abandoned pass left the session clock running"
+        assert app._clock_job is None and _pending_ticks(root) == []
+        held = session_txt()
+        # the stale worker finishes and its poll chain is dropped; neither
+        # may set the clock going again
+        for t in workers:
+            t.join(15.0)
+        app._t_session -= 60
+        _pump(root, 1.3)
+        assert not app._clock_on and _pending_ticks(root) == []
+        assert session_txt() == held, session_txt()
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        for t in workers:
+            t.join(15.0)
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_closing_mid_pass_leaves_nothing_scheduled():
+    """`#364` restarts the session tick on every Detect, so the busiest
+    moment to close the window is during a pass: the tick and the poll
+    loop are both queued. Measured AT THE MOMENT OF DESTROY, as the plot
+    window's `#283` case does, by a <Destroy> handler bound after the
+    app's own: a pending id there names a command Tk is about to delete,
+    which is the Tcl error one step early."""
+    import threading
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('close mid-pass')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_close_mid_pass_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    workers = []
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_A'))
+        app = gui.EdgeReviewApp(root, path=run)
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        before = set(threading.enumerate())
+        app.detect()
+        workers += _new_threads(before)
+        assert app._detect_busy and app._clock_on
+        queued = set(root.tk.splitlist(root.tk.call('after', 'info')))
+        assert app._clock_job in queued, 'the restarted tick is not queued'
+        assert len(queued) >= 2, f'the poll loop is not queued: {queued}'
+        seen = {}
+
+        def spy(ev):
+            if str(ev.widget) != str(root):
+                return
+            seen['queued'] = list(root.tk.splitlist(
+                root.tk.call('after', 'info')))
+            seen['clock_on'] = app._clock_on
+            seen['clock_job'] = app._clock_job
+
+        root.bind('<Destroy>', spy, add='+')
+        root.destroy()
+        root = None
+        assert seen, "the window's own <Destroy> never reached the spy"
+        assert seen['queued'] == [], \
+            f"closing left {seen['queued']} scheduled"
+        assert not seen['clock_on'] and seen['clock_job'] is None, seen
+    finally:
+        gui.messagebox = real_mb
+        if root is not None:
+            root.destroy()
+        for t in workers:
+            t.join(15.0)
         shutil.rmtree(d, ignore_errors=True)
 
 
@@ -4634,6 +4849,275 @@ def test_the_status_strip_after_save_still_says_what_was_accepted_over():
     finally:
         gui.messagebox = real_mb
         root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _root_gone(root):
+    """True once `root` has been destroyed (#363): the application's Tk
+    commands go with it, so even asking whether it exists raises."""
+    import tkinter as tk
+    try:
+        root.winfo_exists()
+    except tk.TclError:
+        return True
+    return False
+
+
+def _anchors_363(se_mod, fit):
+    """(clean, caveat) hand anchors on the fixture's automatic fit, the
+    last two of test_the_status_strip_after_save_still_says_what_was_
+    accepted_over. `clean` is inside the SE gate with the cross-check
+    clear, so anchor_caveat says nothing; `caveat` is the honest anchor
+    over the SE gate, which gets the quiet SCALE CAVEAT lead. Fresh dicts
+    on every call, because Save may annotate the one it is handed."""
+    clear = se_mod.anchor_guard(fit['diam_px'], fit, 16.0)
+    assert not clear['warn'], clear
+    clean = {'method': se_mod.ANCHOR_METHOD_MANUAL,
+             'diam_px': float(fit['diam_px']), 'cal_mode': TWOPOINT,
+             'n_rounds': 5, 'spread_pct': 0.5, 'se_pct': 0.1,
+             'guard': se_mod.anchor_guard_note(clear, False)}
+    caveat = {'method': se_mod.ANCHOR_METHOD_MANUAL,
+              'diam_px': float(fit['diam_px']), 'cal_mode': CIRCLE,
+              'n_rounds': 3, 'se_pct': 1.05 / 3 ** 0.5,
+              'guard': se_mod.anchor_guard_note(clear, False)}
+    return clean, caveat
+
+
+def test_an_auto_window_closes_after_a_clean_save_and_only_then():
+    """#363 (2026-10-05). The SLDEA tab's auto-process opens Edge Review
+    with --auto on the run that just finished, and that window's job ends
+    with a clean Save of that run: data.csv, the anchor, the area-method
+    stamp, the plot and the overlays all written, no rename failed, no
+    anchor caveat. Then it closes, through root.destroy(), so the
+    <Destroy> path cancels every pending `after` callback.
+
+    Every Save with something to report keeps it open, its message where
+    it was said before: an anchor caveat or a failed plot or overlay on
+    the strip, a failed stamp or rename in its warning box, a failed
+    anchor write. So does a clean Save after the operator switched the
+    window to another run: it is the batch cockpit by then."""
+    import sldea_edge_gui as gui
+    se_mod = gui.se
+    real_detect = gui.EdgeReviewApp.detect
+    real_mb = gui.messagebox
+    real_anchor = se_mod.save_scale_anchor
+    real_stamp = se_mod.stamp_area_estimator
+    real_rename = se_mod.apply_rename_plan
+    # the --auto launch presses Detect 300 ms after opening, which would
+    # open the modal scale dialog; these cases measure through
+    # detect_all_sync instead, so the press is made a no-op
+    gui.EdgeReviewApp.detect = lambda self: None
+    mb = _StubMB(yes=True)
+    gui.messagebox = mb
+    d = tempfile.mkdtemp(prefix='edge_auto_close_')
+    root = None
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        _fake_run(os.path.join(d, 'SLDEA_20260102_000000'))
+        root = _tk_root_or_skip('auto close after save')
+        if root is None:
+            return
+        app = gui.EdgeReviewApp(root, path=run, auto=True)
+        assert app._closes_after_save(), (app._auto_run, app.rundir)
+        fit = app._auto_disc()
+        assert fit and fit.get('diam_px'), "fixture has no automatic fit"
+        clean, caveat = _anchors_363(se_mod, fit)
+        assert gui.anchor_caveat(clean) == ''
+        cav = gui.anchor_caveat(caveat)
+        assert 'SCALE CAVEAT' in cav, cav
+
+        def save_with(ref):
+            app.manual_ref = dict(ref)
+            app.detect_all_sync()
+            app.save()
+            assert not _root_gone(root), "an --auto Save with news closed"
+            return app.status.cget('text')
+
+        def no_disk(*_a, **_k):
+            raise OSError('share down')
+
+        def boom(*_a):
+            raise RuntimeError('disk full')
+
+        # AN ANCHOR CAVEAT: the strip after Save is where it is said
+        txt = save_with(caveat)
+        assert txt.startswith('saved in ') and cav in txt, txt
+        # THE PLOT OR THE OVERLAYS FAILED, on a clean anchor
+        for name in ('_save_plot', '_save_overlays'):
+            setattr(app, name, boom)
+            try:
+                txt = save_with(clean)
+            finally:
+                delattr(app, name)
+            assert txt.startswith('saved CSV; '), (name, txt)
+            assert txt.endswith('plot/overlays failed: disk full'), txt
+        # THE ANCHOR WAS NOT RECORDED in setup.txt
+        se_mod.save_scale_anchor = no_disk
+        try:
+            save_with(clean)
+        finally:
+            se_mod.save_scale_anchor = real_anchor
+        # THE AREA-METHOD STAMP WAS NOT WRITTEN (its own warning box)
+        del mb.warnings[:]
+        se_mod.stamp_area_estimator = no_disk
+        try:
+            save_with(clean)
+        finally:
+            se_mod.stamp_area_estimator = real_stamp
+        assert [w[0] for w in mb.warnings] == [
+            'Save: area-method stamp not written'], mb.warnings
+        # A FRAME RENAME FAILED (its own warning box, "Save again")
+        del mb.warnings[:]
+        se_mod.apply_rename_plan = lambda plan: (
+            0, ['SLDEA_s02_06.00kV_post-ramp.png: access denied'])
+        try:
+            save_with(clean)
+        finally:
+            se_mod.apply_rename_plan = real_rename
+        assert [w[0] for w in mb.warnings] == [
+            'Save: renames incomplete'], mb.warnings
+        # ANOTHER RUN in the same window: the operator made it a cockpit,
+        # so a clean Save of that run leaves it open
+        names = list(app.run_box['values'])
+        app.run_box.current([i for i, v in enumerate(names)
+                             if 'SLDEA_20260102_000000' in v][0])
+        app._pick_run()
+        assert not app._closes_after_save(), (app._auto_run, app.rundir)
+        txt = save_with(clean)
+        assert txt.startswith('saved in ') and 'data.csv updated' in txt, txt
+        # ...and back on its own run, a clean Save closes it
+        app.run_box.current([i for i, v in enumerate(names)
+                             if 'SLDEA_20260101_000000' in v][0])
+        app._pick_run()
+        assert app._closes_after_save(), (app._auto_run, app.rundir)
+        assert mb.errors == [], mb.errors
+        del mb.warnings[:]
+        app.manual_ref = dict(clean)
+        app.detect_all_sync()
+        # a callback that must not outlive the window, and a spy on the
+        # one shutdown path that cancels it
+        root.after(60000, lambda: None)
+        left = []
+        real_cancel = app._cancel_pending
+
+        def spy():
+            real_cancel()
+            left.append(root.tk.call('after', 'info'))
+        app._cancel_pending = spy
+        app.save()
+        assert _root_gone(root), "a clean --auto Save left the window open"
+        assert len(left) == 1 and not left[0], left
+        assert mb.errors == [] and mb.warnings == [], (mb.errors,
+                                                       mb.warnings)
+        # and it closed AFTER everything was written, not before
+        back = se_mod.load_scale_anchor(run)
+        assert back and abs(float(back['diam_px'])
+                            - clean['diam_px']) < 0.01, back
+        assert (se_mod.load_stamp(run).get('area_estimator')
+                == se_mod.AREA_ESTIMATOR_VERSION), se_mod.load_stamp(run)
+        assert os.path.isdir(os.path.join(run, 'overlays'))
+        with open(os.path.join(run, 'data.csv'), newline='') as f:
+            mm2 = [r['active_area_mm2'] for r in csv.DictReader(f)]
+        assert any(v.strip() for v in mm2), mm2
+    finally:
+        gui.EdgeReviewApp.detect = real_detect
+        gui.messagebox = real_mb
+        se_mod.save_scale_anchor = real_anchor
+        se_mod.stamp_area_estimator = real_stamp
+        se_mod.apply_rename_plan = real_rename
+        if root is not None and not _root_gone(root):
+            root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_an_auto_window_stays_open_when_the_video_rerun_did_not_start():
+    """#363 meets the video review (2026-10-06). Save hands a run with a
+    video to sldea_video.after_save; when that re-run could not start, the
+    only place it is said is the strip, so the Save is not clean and an
+    --auto window stays open. A re-run that did start is routine, and the
+    window closes as on any clean Save."""
+    import sldea_edge_gui as gui
+    import sldea_video as sv
+    se_mod = gui.se
+    real_detect = gui.EdgeReviewApp.detect
+    real_mb, real_after = gui.messagebox, sv.after_save
+    gui.EdgeReviewApp.detect = lambda self: None
+    gui.messagebox = _StubMB(yes=True)
+    d = tempfile.mkdtemp(prefix='edge_auto_video_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        for said, closes in (
+                ("video edges are out of date (x) and the re-run could not "
+                 "start (y): run `python sldea_video.py \"r\"`", False),
+                ("video edges re-running in the background (x)", True)):
+            root = _tk_root_or_skip('auto window and the video hook')
+            if root is None:
+                return
+            app = None
+            try:
+                sv.after_save = lambda rundir, popen=None, _s=said: _s
+                app = gui.EdgeReviewApp(root, path=run, auto=True)
+                fit = app._auto_disc()
+                clean, _caveat = _anchors_363(se_mod, fit)
+                app.manual_ref = dict(clean)
+                app.detect_all_sync()
+                app.save()
+                assert _root_gone(root) == closes, (said, closes)
+                if not closes:
+                    assert 'could not start' in app.status.cget('text')
+            finally:
+                if app is not None and not _root_gone(root):
+                    app._cancel_pending()
+                    root.destroy()
+    finally:
+        gui.EdgeReviewApp.detect = real_detect
+        gui.messagebox = real_mb
+        sv.after_save = real_after
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_window_opened_by_hand_stays_open_after_a_clean_save():
+    """#363 (2026-10-05). Opened by hand (the SLDEA tab's Edge Review...
+    button) or by the plot window's click-through (--goto), Edge Review
+    is the batch cockpit: it saves one run and moves to the next. A clean
+    Save leaves it open with "saved in ..." on the strip, as before."""
+    import sldea_edge_gui as gui
+    se_mod = gui.se
+    real_mb = gui.messagebox
+    mb = _StubMB(yes=True)
+    gui.messagebox = mb
+    d = tempfile.mkdtemp(prefix='edge_hand_open_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        for how in ({}, {'goto': 1}):
+            root = _tk_root_or_skip('hand-opened window stays open')
+            if root is None:
+                return
+            app = None
+            try:
+                app = gui.EdgeReviewApp(root, path=run, **how)
+                assert app._auto_run is None, (how, app._auto_run)
+                assert not app._closes_after_save(), how
+                fit = app._auto_disc()
+                assert fit and fit.get('diam_px'), "no automatic fit"
+                clean, _caveat = _anchors_363(se_mod, fit)
+                app.manual_ref = dict(clean)
+                app.detect_all_sync()
+                app.save()
+                assert not _root_gone(root), (how, "a cockpit closed")
+                txt = app.status.cget('text')
+                assert txt.startswith('saved in '), (how, txt)
+                assert 'data.csv updated' in txt, (how, txt)
+                assert 'SCALE' not in txt, (how, txt)
+                assert mb.errors == [] and mb.warnings == [], (
+                    how, mb.errors, mb.warnings)
+            finally:
+                if app is not None:
+                    app._cancel_pending()
+                if not _root_gone(root):
+                    root.destroy()
+    finally:
+        gui.messagebox = real_mb
         shutil.rmtree(d, ignore_errors=True)
 
 

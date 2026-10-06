@@ -179,10 +179,16 @@ With --auto (used by the SLDEA tab's "auto process"), the calibrate
 dialog opens on launch and detection chains automatically once
 calibration finishes, unless Run health shows a STOP: then nothing is
 pressed, the canvas says why, and the Detect button is live for a hand
-press (decision 16, 2026-10-03). Keyboard: 1/2/3 pick a candidate, R reject,
-4/D/T open the manual tracer (#162/#172 -- its Done stages the polygon
-as candidate D; Accept commits it like any other candidate),
-Left/Right navigate, Enter accept + next.
+press (decision 16, 2026-10-03). An --auto window is opened for ONE run,
+so a Save of that run with nothing to report closes it (#363,
+2026-10-05): data.csv, the scale anchor, the area-method stamp, the plot
+and the overlays all written, no rename failed and no anchor caveat.
+Anything else keeps it open with its message where it is said today (the
+status strip, or a warning box). A window opened by hand is the batch
+cockpit and stays open after every Save. Keyboard: 1/2/3 pick a
+candidate, R reject, 4/D/T open the manual tracer (#162/#172 -- its Done
+stages the polygon as candidate D; Accept commits it like any other
+candidate), Left/Right navigate, Enter accept + next.
 """
 import math
 import os
@@ -547,7 +553,12 @@ def howto_text():
 # destroyed as soon as it was produced. Two readouts instead, because
 # both are wanted: the detection pass's own time, FROZEN when the pass
 # ends and carrying its frame count so it reads as a rate, above a
-# session total that never stops.
+# session total.
+#
+# The session total used to run for the life of the window. Since `#364`
+# (2026-10-06) it stops when a detection pass ends too, and holds its last
+# value: a line that went on ticking after the auto-detections were done
+# read as work still running. The next Detect starts it again.
 # ---------------------------------------------------------------------------
 
 
@@ -593,12 +604,24 @@ def detect_readout(n_frames=None, secs=None, total=None):
 
 
 def session_readout(secs):
-    """The SESSION line of the toolbar clock (`#237`) — how long this
-    window has been open. Runs from the moment Edge Review opens to the
-    moment it closes: it is not reset by a run switch (the batch cockpit
-    is one session across many runs) and not stopped by Save (reviewing
-    continues after one)."""
+    """The SESSION line of the toolbar clock (`#237`): time since this
+    window opened. It is never reset (the batch cockpit is one session
+    across many runs), but since `#364` (2026-10-06) it does not run for
+    the life of the window: it stops when a detection pass ends and keeps
+    its last value, so nothing on the toolbar counts once the machine is
+    done, and the next Detect Edges starts it again from the same origin.
+    Save and a run switch neither stop nor restart it. An --auto window
+    closes after a clean Save of its own run (#363), and the session with
+    it."""
     return f"session {fmt_dur(secs)}"
+
+
+# How the Save hook's video sentence (sldea_video.after_save, or
+# _video_after_save's own catch) begins when the re-run did NOT start.
+# Such a Save is not clean: an --auto window stays open so the sentence is
+# read (#363 meets the video review, 2026-10-06).
+VIDEO_SAVE_PROBLEMS = ('video edges not re-run',
+                       'video edges are out of date')
 # ---------------------------------------------------------------------------
 # hover tooltips (`#216`)
 #
@@ -2309,6 +2332,9 @@ class EdgeReviewApp:
         # None while no run is loaded. Shown, not gated on: no button
         # reads it. The one reader is the --auto launch below, which
         # holds its Detect press on a STOP (decision 16, 2026-10-03)
+        self._auto_run = None    # the run an --auto launch opened, else
+        # None; set below once the run is picked. Save closes the window
+        # after a clean Save of THIS run only (#363, 2026-10-05)
         self._primary_font = None   # kept alive by _install_styles (`#216`)
         self._build_ui()
         start = path or DEFAULT_PARENT
@@ -2319,7 +2345,15 @@ class EdgeReviewApp:
         # means; the plot window never sends both.
         if goto is not None:
             self.goto_row(goto)
+        # THE --auto WINDOW SERVES ONE RUN (#363, 2026-10-05). The SLDEA
+        # tab's auto-process opens it on the run that just finished, so a
+        # clean Save of that run is the end of its job and closes it (see
+        # _closes_after_save). Recorded as the run, not as a bare flag: an
+        # operator who switches runs in this window is using it as the
+        # batch cockpit, and a cockpit stays open. None when the target
+        # was not found (no run is loaded, nothing to save).
         if auto and self.rundir:
+            self._auto_run = self.rundir
             if any(it.get('level') == 'stop' for it in self.health or ()):
                 # Decision 16 (2026-10-03): the press is held, not the
                 # button. The strip and the canvas carry the STOP, the
@@ -2601,6 +2635,8 @@ class EdgeReviewApp:
         self.prog.pack(side=tk.RIGHT, padx=6)
         self._t0 = None             # start of the CURRENT detection pass
         self._t_session = time.time()   # window open — never reset
+        # the session tick runs from here until a detection pass ends, then
+        # holds; each Detect starts it again (`#364`, 2026-10-06)
         self._clock_on = True
         self._clock_job = None          # the in-flight tick, for cancelling
         self._tick_clock()
@@ -3090,6 +3126,15 @@ class EdgeReviewApp:
         # the generation bump makes every queued item stale, and
         # _base_ref_pending can never carry a previous run's disc into
         # _finish_detect (audit 2026-08-05).
+        #
+        # ...which means the pass it abandons never reaches _finish_detect,
+        # where the session tick stops (`#364`, 2026-10-06). Stop it here
+        # instead, or it would count on with no machine work left. A switch
+        # with no pass in flight leaves the session line alone: still
+        # running before the first pass, still held after one, and never
+        # restarted by the switch.
+        if self._detect_busy:
+            self._stop_session_clock()
         self._detect_gen += 1
         self._detect_busy = False
         self._base_ref_pending = None
@@ -3164,10 +3209,19 @@ class EdgeReviewApp:
 
     # ---------------- detection ----------------
     def _tick_clock(self):
-        """The SESSION clock, once a second for the life of the window
-        (`#237`). It is not stopped by Save and not reset by a run switch;
-        the detection readout beside it is the one that belongs to a pass
-        and is repainted by `_set_detect_clock`."""
+        """The SESSION clock, once a second while `_clock_on` (`#237`).
+
+        It used to tick for the life of the window. Since `#364`
+        (2026-10-06) it runs from window open until a detection pass ends
+        (`_finish_detect` stops it, see `_stop_session_clock`) and holds its
+        last value; the next Detect starts it again
+        (`_start_session_clock`). It is never reset, so after a restart it
+        again reads the time since the window opened. Save and a run switch
+        neither stop nor restart it. The detection readout beside it is the
+        one that belongs to a pass and is repainted by `_set_detect_clock`.
+
+        Call `_start_session_clock` to (re)start it, not this: a direct
+        call while a tick is pending schedules a second chain."""
         self._clock_job = None
         if not self._clock_on:
             return
@@ -3181,6 +3235,38 @@ class EdgeReviewApp:
         # scheduled still fires into a destroyed interpreter unless it is
         # cancelled outright (see _cancel_pending)
         self._clock_job = self.root.after(1000, self._tick_clock)
+
+    def _drop_clock_job(self):
+        """Cancel the pending session tick, if any. Never raises."""
+        job, self._clock_job = self._clock_job, None
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+
+    def _start_session_clock(self):
+        """(Re)start the SESSION tick when a detection pass starts (`#364`).
+
+        Repaints at once and then every second. Any pending tick is
+        cancelled first, so starting a clock that is already running (the
+        first Detect of a window, before any pass has stopped it) leaves
+        exactly one chain, not two. `_t_session` is not touched: the line
+        goes on reading the time since the window opened."""
+        self._drop_clock_job()
+        self._clock_on = True
+        self._tick_clock()
+
+    def _stop_session_clock(self):
+        """Stop the SESSION tick and leave its last value on screen
+        (`#364`, 2026-10-06): once the machine is done nothing on the
+        toolbar may still be counting, or the line reads as work still
+        running. The flag alone would stop the repainting, but the tick
+        already scheduled would stay queued until it fired and read the
+        flag; it is cancelled outright, so nothing of the clock is left
+        pending once it is stopped."""
+        self._clock_on = False
+        self._drop_clock_job()
 
     def _set_detect_clock(self, n_frames=None, secs=None, total=None):
         """Repaint the DETECTION readout — see `detect_readout` for the
@@ -3273,6 +3359,13 @@ class EdgeReviewApp:
         # running now (`#237`)
         self._t0 = time.time()
         self._set_detect_clock(0, 0.0, len(self.frame_rows))
+        # ...and the session line, held since the last pass ended, counts
+        # again while the machine works (`#364`, 2026-10-06). Started HERE,
+        # after the gate and the baseline check, so a Detect that diverts
+        # to calibration or is refused never sets it going: only a pass
+        # that will reach _finish_detect (or be abandoned by _pick_run,
+        # which stops it too) does.
+        self._start_session_clock()
         self.prog.config(maximum=len(self.frame_rows), value=0)
         self._canvas_hint(None)        # the hint's job is done (`#216`)
         self.canvas.delete('all')
@@ -3427,6 +3520,15 @@ class EdgeReviewApp:
         self._finish_detect()
 
     def _finish_detect(self):
+        # THE SESSION LINE STOPS HERE (`#364`, 2026-10-06): the machine is
+        # done, so nothing on the toolbar may go on counting -- a line that
+        # ticked on after the auto-detections finished read as work still
+        # running. It keeps its last value, and the next Detect starts it
+        # again. First thing in the method rather than beside the frozen
+        # detection readout below, so neither an exception further down nor
+        # the scale cross-check's modal (a nested event loop, in which the
+        # tick would fire) can leave it counting.
+        self._stop_session_clock()
         self.auto_rej = set()
         self._detect_busy = False
         self._detect_ui(busy=False)
@@ -3462,7 +3564,8 @@ class EdgeReviewApp:
         q = self._queue_list()
         # THE DETECTION READOUT FREEZES HERE (`#237`) — the pass is over,
         # and everything after this point is the human's time, not the
-        # machine's. The session clock beside it carries on.
+        # machine's. The session line beside it no longer carries on: it
+        # was stopped at the top of this method (`#364`).
         dt = (time.time() - self._t0) if self._t0 else None
         took = fmt_dur(dt) if dt is not None else '?'
         self._set_detect_clock(len(self.frame_rows), dt)
@@ -4539,6 +4642,12 @@ class EdgeReviewApp:
                    if has_bak else ""))
             return
         renamed, rn_errors = se.apply_rename_plan(plan)
+        # NOTHING TO REPORT (#363, 2026-10-05). A failed rename, anchor
+        # write or stamp write clears it. A failed plot or overlay returns
+        # before the close is reached, and the anchor caveat is checked at
+        # the close itself. Only a Save that ends with it still set may
+        # close an --auto window; any other ending keeps the window open.
+        quiet = not rn_errors
         if rn_errors:
             messagebox.showwarning(
                 "Save: renames incomplete",
@@ -4561,6 +4670,7 @@ class EdgeReviewApp:
             se.save_scale_anchor(self.rundir,
                                  self._anchor_record(self.manual_ref, scale))
         except OSError as e:
+            quiet = False
             # SAID ON THE LAST STRIP (2026-10-06). This used to be set on
             # the strip and then overwritten by "saved in ..." a few lines
             # down, so nobody saw that setup.txt lacks the anchor data.csv
@@ -4596,6 +4706,7 @@ class EdgeReviewApp:
         try:
             se.stamp_area_estimator(self.rundir, stamp)
         except OSError as e:
+            quiet = False
             messagebox.showwarning(
                 "Save: area-method stamp not written",
                 f"data.csv is saved, but setup.txt could not be updated:"
@@ -4604,12 +4715,16 @@ class EdgeReviewApp:
                 f"its unreviewed automatic (disc-fit) rows for re-review. "
                 f"Save again once the folder is writable.")
         # detect→Save, the whole round trip, said in the status line where
-        # it always was. Save no longer STOPS the toolbar clock (`#237`):
-        # that clock is now the session, a session outlives a Save (the
-        # batch cockpit saves one run and moves to the next), and the
-        # frozen `detect:` readout above it is the number that used to be
-        # destroyed. The old `done in …` said detect→Save in a widget that
-        # then sat stale through every following run.
+        # it always was. Save does not touch the toolbar clock. `#237` made
+        # it the session, which outlives a Save (the batch cockpit saves one
+        # run and moves to the next), and put the frozen `detect:` readout
+        # above it. Since `#364` (2026-10-06) the session line stops by
+        # itself when the detection pass ends, and that pass is what arms
+        # Save, so nothing on the toolbar is counting by now. The one
+        # exception is the hand-trace escape hatch after a baseline refusal,
+        # which ran no pass and leaves the session line as it was. The old
+        # `done in ...` said detect->Save in a widget that then sat stale
+        # through every following run.
         took = fmt_dur(time.time() - self._t0) if self._t0 else '?'
         # THE VIDEO PASS RE-RUNS WHEN ITS EDGES ARE STALE (2026-10-06).
         # Here, after data.csv, the anchor and the stamp, because all three
@@ -4618,6 +4733,10 @@ class EdgeReviewApp:
         # a run with no video in its folder says nothing.
         vid = self._video_after_save()
         vid_txt = f"; {vid}" if vid else ""
+        if vid and vid.startswith(VIDEO_SAVE_PROBLEMS):
+            # a re-run that could not start is said only on the strip;
+            # an --auto window must stay open for it (#363)
+            quiet = False
         try:
             self._save_plot(scale)
             self._save_overlays()
@@ -4648,6 +4767,33 @@ class EdgeReviewApp:
                  + (f"{cav}. " if cav else '')
                  + anchor_fail_txt
                  + f"data.csv updated ({scale_txt}){bd_txt}{vid_txt}")
+        # CLOSE AFTER A CLEAN SAVE (#363, 2026-10-05), in an --auto window
+        # on its own run only. Clean means `quiet` held to the end, the
+        # strip names a real mm scale (not "no mm scale -- use Calibrate"),
+        # and there is no anchor caveat: the strip above is then routine
+        # and nobody needs to read it, so it is allowed to go unseen. Any
+        # other Save leaves the window open exactly as before. Closed by
+        # root.destroy(), the same path as the title-bar close button
+        # (there is no WM_DELETE_WINDOW handler): its <Destroy> binding
+        # runs _cancel_pending, so no `after` callback outlives the window.
+        if quiet and scale and not cav and self._closes_after_save():
+            self.root.destroy()
+
+    def _closes_after_save(self):
+        """True when this window is an --auto launch AND the run loaded now
+        is the run it was launched for (#363, 2026-10-05).
+
+        A window opened by hand is the batch cockpit (see session_readout)
+        and never closes on Save. Nor does an --auto window after the
+        operator switched it to another run: it is a cockpit by then.
+        Compared as normalized absolute paths, because Browse... can reach
+        the same folder by a differently spelled path."""
+        if not self._auto_run or not self.rundir:
+            return False
+
+        def norm(p):
+            return os.path.normcase(os.path.abspath(p))
+        return norm(self.rundir) == norm(self._auto_run)
 
     def _video_after_save(self):
         """sldea_video.after_save for the loaded run: one sentence for the

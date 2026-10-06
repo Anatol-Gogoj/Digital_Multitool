@@ -24,6 +24,10 @@ landing. What is pinned here:
   (■ Abort included), so a sweep aimed at the run's channel never lands a
   write in between. The timed capture's burst trigger follows the same
   rule.
+* What the pre-flight saw (a camera frame; a deliberate start on a flat
+  one) reaches the worker through sldea_run with nothing stale, and end
+  to end decides whether a flat or missing baseline frame ends the run
+  (owner decisions 12 to 14, 2026-10-03).
 
 Everything below drives the REAL methods -- sldea_run, the gate, the
 Webcam starters, both capture workers, sldea_abort, _sldea_finished and,
@@ -195,9 +199,10 @@ class _App:
     def __init__(self, tmp, dry=True, sgch=1, real_worker=False):
         self.real_worker = real_worker
         self.worker_done = _threading.Event()
-        self.worker_args = self.worker_error = None
+        self.worker_args = self.worker_kw = self.worker_error = None
         self.lines, self.events = [], []
         self.on_preflight = self.on_cam_stop = None
+        self.preflight_seen = None       # the stub leaves nothing by default
         self.root = _Root()
         self.sg, self.scope, self.cam = _FakeSG(), None, None
         # SLDEA tab
@@ -261,10 +266,13 @@ class _App:
         self.events.append('preflight')
         if self.on_preflight is not None:
             self.on_preflight()          # "meanwhile, on the Webcam tab..."
+        if self.preflight_seen is not None:
+            # what the real pre-flight leaves for the start path
+            self._sldea_preflight_seen = dict(self.preflight_seen)
         return True
 
     def _sldea_worker(self, *args, **kw):
-        self.worker_args = args
+        self.worker_args, self.worker_kw = args, kw
         try:
             if self.real_worker:
                 G._sldea_worker(self, *args, **kw)
@@ -616,6 +624,114 @@ def test_nothing_running_starts_exactly_as_before():
             assert app._sldea_running
             assert app._sldea_live_ch == (None if dry else 2)
             assert app.worker_args[3] == 2 and app.worker_args[6] is dry
+
+
+def test_the_start_path_hands_what_the_preflight_saw_to_the_worker():
+    """Decisions 12 to 14 (2026-10-03): the pre-flight leaves whether
+    the camera gave it a frame and whether the operator started anyway
+    on a flat one in _sldea_preflight_seen; the start path resets that
+    before the pre-flight and passes it to the worker by keyword. A
+    pre-flight that leaves nothing, or a skipped one, hands over the
+    defaults, which are the behaviour before those decisions."""
+    cases = [
+        (None, False, dict(cam_expected=False, picture_override='')),
+        ({'frame': True, 'override': ''}, False,
+         dict(cam_expected=True, picture_override='')),
+        ({'frame': True, 'override': 'no picture'}, False,
+         dict(cam_expected=True, picture_override='no picture')),
+        ({'frame': True, 'override': 'no picture'}, True,      # skipped
+         dict(cam_expected=False, picture_override='')),
+    ]
+    for seen, skip, expect in cases:
+        for dry in (True, False):
+            mb = _MB(LIVE_OK)
+            with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+                app = _App(tmp, dry=dry, sgch=1)
+                # stale from an earlier run: must not leak into this one
+                app._sldea_preflight_seen = {'frame': True,
+                                             'override': 'stale'}
+                app.preflight_seen = seen
+                if skip:
+                    app._sldea_skip_preflight = True
+                app.sldea_run()
+                assert app.worker_done.wait(5), app.lines
+                assert app._sldea_running
+                # the pre-flight's findings exactly; the video recorder's
+                # keywords (#359) ride along since the 2026-10-06 merge
+                got = {k: app.worker_kw.get(k) for k in expect}
+                assert got == expect, (seen, skip, app.worker_kw)
+                assert {'vid_on', 'vid_fps', 'vid_detect'} \
+                    <= set(app.worker_kw), app.worker_kw
+                # positional arguments are untouched
+                assert app.worker_args[3] == 1 and app.worker_args[6] is dry
+
+
+def test_what_the_preflight_saw_decides_the_real_run_end_to_end():
+    """Decisions 12 to 14 through the real start path AND the real
+    worker, DRY and LIVE. With the override left by the pre-flight, a
+    camera that gives only flat frames does not stop the run: it runs
+    to the end, setup.txt carries the override line and run.log the
+    override and the check's verdict. Without it, a camera that gave
+    the pre-flight a frame and gives the run none for its baseline ends
+    the run through the abort path, and on LIVE the zeroing pair is the
+    last thing the signal generator hears."""
+    import numpy as _np
+    flat = _np.full((240, 320, 3), 66, _np.uint8)
+    cases = [
+        ('override', {'frame': True, 'override': 'no picture'},
+         lambda spec, count=2: flat, 'run complete'),
+        ('no frame', {'frame': True, 'override': ''},
+         lambda spec, count=2: None, 'run aborted'),
+    ]
+    for name, seen, grab, end in cases:
+        for dry in (True, False):
+            mb = _MB(LIVE_OK)
+            with _tempfile.TemporaryDirectory() as tmp, _patched(mb):
+                gui.webcam.oneshot_rgb = grab        # _patched restores it
+                app = _App(tmp, dry=dry, sgch=1, real_worker=True)
+                app.preflight_seen = seen
+                app.sldea_run()
+                assert app.worker_done.wait(30), (name, dry, app.lines)
+                _assert_clean_run(app)
+                rundir = _os.path.join(tmp, 'RUN')
+                with open(_os.path.join(rundir, 'setup.txt'),
+                          encoding='utf-8') as f:
+                    setup = f.read().splitlines()
+                with open(_os.path.join(rundir, 'run.log'),
+                          encoding='utf-8') as f:
+                    log = f.read()
+                app.root.run_pending()
+            assert any(l.startswith(end) for l in app.lines), \
+                (name, dry, app.lines)
+            key = [l for l in setup if l.startswith('Pre-flight override:')]
+            if name == 'override':
+                assert key == ['Pre-flight override: no picture (the '
+                               'operator started anyway at the camera '
+                               'pre-flight; the baseline picture stop is '
+                               'off for this run)'], setup
+                assert 'pre-flight override: no picture' in log, log
+                assert 'so the run CARRIES ON' in log, log
+                assert 'STOPPING' not in log and 'run stopped' not in log
+                assert mb.titles('showwarning') == [], mb.calls
+            else:
+                assert key == [], setup
+                assert 'NO BASELINE FRAME' in log and 'STOPPING NOW' in log
+                assert 'run stopped at the baseline frame.' in log, log
+                assert mb.titles('showwarning') == [
+                    'Run stopped: no baseline frame'], mb.calls
+            if not dry:
+                writes = [w[1:] for w in app.sg.writes]
+                assert writes[-2:] == [('set_offset', 1, (0.0,)),
+                                       ('set_output', 1, (False,))], writes
+                ups = [w[2][0] for w in writes
+                       if w[0] == 'set_offset' and w[2][0] > 0]
+                if name == 'override':
+                    assert max(ups) > 0.499, ups    # the staircase ran
+                else:
+                    # at most the first ramp tick before the stop
+                    assert len(ups) <= 1 and all(v < 0.05 for v in ups), \
+                        ups
+                assert 'FAILED TO ZERO' not in log, log
 
 
 def test_the_gate_judges_a_sweep_by_the_channel_it_started_on():

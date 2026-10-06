@@ -252,6 +252,28 @@ def test_baseline_disc_traces_resting_dea():
     assert se.baseline_disc(flat, bright) is None
 
 
+def test_image_content_flags_a_flat_frame_whatever_the_black_level():
+    # Pedestal-free content check (2026-10-02): the 2026-10-01 run spans
+    # 2 gray levels on a black level near 64 gray, which the mean-based
+    # dark tier (mean < 40) could never see. The gate built on this is
+    # pinned in tests/test_sldea_preflight.py; here, the helper itself.
+    rng = np.random.default_rng(3)
+    flat = 66.0 + rng.integers(-1, 2, size=(240, 320)).astype(np.float32)
+    c = se.image_content(flat)
+    assert c['flat'] and c['contrast'] == 2.0 and c['sat_pct'] == 0.0, c
+    disc = np.full((480, 640), 170.0, np.float32)
+    yy, xx = np.mgrid[0:480, 0:640]
+    disc[(xx - 320) ** 2 + (yy - 240) ** 2 <= 120 * 120] = 110.0
+    d = se.image_content(disc)
+    assert not d['flat'] and d['contrast'] == 60.0, d
+    # the same picture on another black level reads the same contrast
+    assert se.image_content(disc - 64.0)['contrast'] == d['contrast']
+    # an RGB frame is averaged to gray; no frame, no answer
+    assert se.image_content(np.stack([disc] * 3, axis=2)) == d
+    assert se.image_content(None) is None
+    assert se.FLAT_CONTRAST_GRAY == 20.0
+
+
 def test_electrode_mask_255_only_costs_a_flat_synthetic_strip():
     """What the 220 -> 255 default change does and does NOT cost.
 

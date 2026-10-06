@@ -354,8 +354,37 @@ BASELINE_CLIP_MEAN = 225.0
 BASELINE_CLIP_SAT_PCT = 20.0
 
 
-def exposure_verdict(mean, sat_pct):
-    """Baseline exposure -> ('ok'|'dark'|'bright'|'clipped', message).
+# Which way to send the operator when a frame is flat. Below this mean
+# the frame is darker than any usable baseline in the corpus (the lowest
+# of the 15 usable baselines reads mean 116, the flat 2026-10-01 run 67;
+# measured 2026-10-02), so more exposure or light is the fix.
+FLAT_DARK_MEAN = 100.0
+
+
+def flat_message(contrast, mean):
+    """Operator wording for a frame that holds no picture."""
+    m = float(mean)
+    if m > BASELINE_BRIGHT_MEAN:
+        advice = "Lower the exposure or the light on the Webcam tab."
+    elif m < FLAT_DARK_MEAN:
+        advice = "Raise the exposure or the light on the Webcam tab."
+    else:
+        # A dark disc that covers under 5 % of the central window does
+        # not move p5, so on an even background it reads flat although
+        # it is in the picture (measured 2026-10-02 at 1920x1080: a
+        # 308 px disc reads contrast 10, a 310 px one 63). A third of
+        # the picture's height clears that limit with room; the
+        # smallest fitted disc in the corpus is 361 px of 1080.
+        advice = ("Check that the device is under the camera and that "
+                  "the disc is at least a third of the picture's height "
+                  "across, then the exposure and the light on the Webcam "
+                  "tab.")
+    return (f"NO PICTURE: the frame is flat (contrast {float(contrast):.0f} "
+            f"gray levels). The disc is not visible. {advice}")
+
+
+def exposure_verdict(mean, sat_pct, content=None):
+    """Baseline exposure -> ('ok'|'dark'|'bright'|'clipped'|'flat', message).
 
     'clipped' is a GATE, but be precise about WHY, because the obvious
     reason turned out to be wrong when it was measured (2026-08-05, the
@@ -376,6 +405,20 @@ def exposure_verdict(mean, sat_pct):
     Both are reasons to fix the exposure. Neither is a reason to claim
     the measurement is worthless, so this no longer says that.
 
+    'flat' is the second GATE (2026-10-02). `content` is
+    sldea_edge.image_content's dict for the same frame; without it the
+    older tiers answer exactly as before. The 'dark' tier cannot do
+    this job on the bench camera: its black pedestal sits near 64 gray,
+    so the 2026-10-01 run (exposure 3, every frame a flat dark gray, 25
+    of 26 frames rejected) read mean 67 and came out 'exposure OK'.
+    Contrast is pedestal-free: that run spans 2 gray levels, every
+    other frame in the corpus 30 or more. Judged after 'clipped'
+    because a fully white frame is flat too, and "lower the exposure"
+    is the advice that fixes that one. Judged BEFORE 'dark' because a
+    black frame on a camera with a low black level (the 07-23 setup,
+    35 gray or less) is flat as well, and it has to meet this gate and
+    its default-No question, not the one-click 'dark' warning.
+
     Kept here, clock-free and Tk-free, so the thresholds can be tested
     against the measured corpus instead of eyeballed in a dialog."""
     m, s = float(mean), float(sat_pct)
@@ -386,11 +429,448 @@ def exposure_verdict(mean, sat_pct):
                 f"the gain/offset normalisation can recover, and a "
                 f"baseline exposed differently from the ramp frames is "
                 f"not a comparable reference. Lower the exposure.")
+    if content and content.get('flat'):
+        return ('flat', flat_message(content.get('contrast', 0.0), m))
     if m < BASELINE_DARK_MEAN:
         return ('dark', "⚠ looks DARK - raise exposure/lighting")
     if m > BASELINE_BRIGHT_MEAN or s > BASELINE_BRIGHT_SAT_PCT:
         return ('bright', "⚠ looks BRIGHT/clipped - lower exposure")
     return ('ok', "exposure OK")
+
+
+# ---- camera settings of a run, and the pre-flight report ----------------
+# Tk-free and camera-free on purpose: the HV start path reads these, so
+# every rule in them has to be testable without a bench.
+
+PREVIEW_MISMATCH_HEADLINE = ("This preview was NOT taken with the run's "
+                             "settings")
+
+
+def run_camera_controls(cam_exp, cam_gain):
+    """The four controls a run stamps on the camera before every grab
+    (gui._sldea_worker), in the order it writes them."""
+    return (('auto_exposure', 1), ('white_balance_automatic', 0),
+            ('exposure_time_absolute', cam_exp), ('gain', cam_gain))
+
+
+def camera_lock_mismatch(cam_exp, cam_gain, locked):
+    """Where the Webcam-tab lock disagrees with what a run will use.
+
+    -> [(control, run_value, locked_value), ...]; empty when the lock
+    holds none of the run's four controls or agrees on all it holds.
+
+    Why it matters (2026-10-02): the pre-flight frame is grabbed by
+    webcam.oneshot_rgb, which re-stamps webcam.LOCKED_CONTROLS just
+    before the shutter, while the run overlays the Webcam-tab exposure
+    and gain ENTRY values on that lock. Whenever the two disagree, the
+    picture the operator approves is not the picture the run takes.
+
+    Since #361 (merged with this 2026-10-06) the pre-flight sets the
+    run's own lock (gui.sldea_run_lock) for its grab, and the dialog
+    hands THAT lock here. It is built from the run's own values, so from
+    the dialog this can no longer find a mismatch; it stays for a caller
+    that hands it another lock. The SLDEA tab's camera line
+    (camera_line) still compares the Webcam tab's lock: its live
+    preview runs on it, and the dialog says so through `tab_mismatch`."""
+    held = locked or {}
+    out = []
+    for name, want in run_camera_controls(cam_exp, cam_gain):
+        if name not in held:
+            continue
+        try:
+            same = int(float(held[name])) == int(float(want))
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            out.append((name, want, held[name]))
+    return out
+
+
+def _camera_words(name, value):
+    """One camera control as an operator would say it."""
+    if name == 'exposure_time_absolute':
+        return f"exposure {value}"
+    if name == 'gain':
+        return f"gain {value}"
+    try:
+        v = int(float(value))
+    except (TypeError, ValueError):
+        v = None
+    if name == 'auto_exposure':            # UVC menu: 1 = manual
+        return "automatic exposure " + ("off" if v == 1 else "ON")
+    if name == 'white_balance_automatic':
+        return "automatic white balance " + ("off" if v == 0 else "ON")
+    return f"{name} {value}"
+
+
+def camera_mismatch_words(mismatch):
+    """-> (what the preview used, what the run will use), plain words."""
+    preview = ", ".join(_camera_words(n, lock) for n, _run, lock in mismatch)
+    run = ", ".join(_camera_words(n, want) for n, want, _lock in mismatch)
+    return preview, run
+
+
+def camera_for_run(cam_exp, cam_gain, defaults=()):
+    """'Camera for this run: ...' -> (text, any value is a fallback).
+
+    `defaults` names the values ('exposure', 'gain') the Webcam tab had
+    no readable box for, where the run falls back on a built-in number.
+    The line then says so instead of "set on the Webcam tab"."""
+    names = tuple(defaults or ())
+    if not names:
+        return (f"Camera for this run: exposure {cam_exp}, gain {cam_gain}, "
+                f"set on the Webcam tab", False)
+    what = (f"The {names[0]} is a built-in default, because the Webcam "
+            f"tab has no readable box for it." if len(names) == 1 else
+            f"The {' and '.join(names)} are built-in defaults, because "
+            f"the Webcam tab has no readable boxes for them.")
+    return (f"⚠ Camera for this run: exposure {cam_exp}, gain "
+            f"{cam_gain}. {what} Open the Webcam tab and press Read "
+            f"camera.", True)
+
+
+def camera_line(cam_exp, cam_gain, locked=None, defaults=()):
+    """The SLDEA tab's 'Camera for this run' line -> (text, warn).
+
+    `warn` asks the caller for its warning colour; the text carries the
+    same fact in words, so colour is never the only cue."""
+    text, fallback = camera_for_run(cam_exp, cam_gain, defaults)
+    if fallback:
+        return text, True
+    mismatch = camera_lock_mismatch(cam_exp, cam_gain, locked)
+    if not mismatch:
+        return text, False
+    preview, _run = camera_mismatch_words(mismatch)
+    return (f"{text}\n⚠ The Webcam tab has LOCKED {preview} instead, so "
+            f"its live preview will NOT show what the run records (the "
+            f"pre-flight does). Check the boxes on the Webcam tab, then "
+            f"press Apply & Lock.",
+            True)
+
+
+def preflight_start_button(level, mismatch=False, checked=True,
+                           fallback=False, tab_mismatch=False):
+    """The pre-flight's start button -> (label, is_default).
+
+    The default button is the one that holds the focus and that Return
+    presses. It may be the start button only when the verdict is 'ok',
+    the picture check really ran, and the preview was taken with the
+    run's own camera settings. The 2026-10-01 run recorded a flat
+    picture for 209 s of HV; its pre-flight was confirmed within 4 s,
+    and whatever that preview showed, "Looks good" was one Return away.
+
+    Two more warnings cost the default (2026-10-06, the #348/#361 merge
+    review): `fallback`, a camera value that is a built-in default because
+    the Webcam tab has no readable box for it (the dialog already said so
+    with a warning sign, but Return still started the run), and
+    `tab_mismatch`, the Webcam tab's lock disagreeing with the run's
+    fields, so its live preview is not what the run records (#361)."""
+    if level == 'clipped':
+        return "⚠ Start anyway (baseline blown out)", False
+    if level == 'flat':
+        return "⚠ Start anyway (no picture)", False
+    if not checked:
+        return "⚠ Start anyway (picture not checked)", False
+    if level != 'ok':
+        return "⚠ Start anyway (exposure warning)", False
+    if mismatch:
+        return "⚠ Start anyway (preview does not match the run)", False
+    if fallback:
+        return "⚠ Start anyway (built-in camera values)", False
+    if tab_mismatch:
+        return PREFLIGHT_START_LOCK_DIFFERS, False
+    return "✔ Looks good — start run", True
+
+
+def preflight_disc_line(frame):
+    """Advice: can Edge Review's resting-disc fit see a disc in this frame?
+
+    Runs sldea_edge.baseline_disc (about 0.06 s) on the grayscale Edge
+    Review itself would load from the saved PNG. This is ADVICE, never a
+    gate: a non-disc device refuses by design, and a dark-disc run has
+    been reviewed by hand after a refusal. None when the fit cannot be
+    run at all (OpenCV missing, or the fit raised)."""
+    try:
+        import cv2
+        import numpy as np
+        import sldea_edge
+        g = np.asarray(frame)
+        if g.ndim == 3:
+            g = cv2.cvtColor(np.ascontiguousarray(g, dtype=np.uint8),
+                             cv2.COLOR_RGB2GRAY)
+        g = g.astype(np.float32)
+        settings = dict(sldea_edge.DEFAULT_SETTINGS)
+        ref = sldea_edge.baseline_disc(g, settings)
+        if ref is not None:
+            return (f"Disc found: {ref['diam_px']:.0f} px across, fit "
+                    f"quality {ref['conf']:.2f} (0 to 1, higher is better)")
+        why = sldea_edge.baseline_disc_refusal(g, settings)
+        if not why:
+            return None
+        return (f"Disc not found: {why}. Edge Review will not be able to "
+                f"measure this run automatically.")
+    except Exception:
+        return None
+
+
+def preflight_report(frame, cam_exp, cam_gain, locked=None, focus=None,
+                     defaults=(), tab_mismatch=False):
+    """Everything the camera pre-flight says about one frame.
+
+    `frame` is the RGB pre-flight frame, `locked` a copy of
+    webcam.LOCKED_CONTROLS as it stood for the grab (empty when the
+    camera has no device path to stamp it on), `focus` the focus score
+    or None, `defaults` as in camera_for_run. Returns a dict:
+
+      mean, sat_pct   whole-frame statistics (as before 2026-10-02)
+      content         sldea_edge.image_content's dict, or None when that
+                      check could not run (content_error says why)
+      level, hint     exposure_verdict's answer, 'flat' tier included
+      gate            True for 'clipped' and 'flat': a second, default-No
+                      confirmation stands between them and a run
+      disc_line       preflight_disc_line's advice, or None
+      camera_line     'Camera for this run: ...'
+      mismatch        camera_lock_mismatch's list
+      mismatch_line   the plain-words detail under the bold headline
+      start_label, start_default   preflight_start_button's answer
+      stats_line      the one-line numbers shown under the picture
+      log_lines       what run.log gets, for EVERY pre-flight, where
+                      it used to be clipped ones only"""
+    import numpy as np
+    arr = np.asarray(frame)
+    gray = arr.mean(axis=2) if arr.ndim == 3 else arr.astype(np.float64)
+    mean = float(gray.mean())
+    sat = float((gray >= 250).mean() * 100)
+    content, content_error = None, None
+    try:
+        import sldea_edge
+        content = sldea_edge.image_content(gray)
+        if content is None:
+            content_error = "the frame is empty"
+    except Exception as e:
+        content, content_error = None, str(e) or type(e).__name__
+    level, hint = exposure_verdict(mean, sat, content)
+    mismatch = camera_lock_mismatch(cam_exp, cam_gain, locked)
+    cam_text, cam_fallback = camera_for_run(cam_exp, cam_gain, defaults)
+    label, is_default = preflight_start_button(
+        level, bool(mismatch), content is not None, fallback=cam_fallback,
+        tab_mismatch=tab_mismatch)
+    disc = preflight_disc_line(frame)
+    mismatch_line = ''
+    if mismatch:
+        preview, run = camera_mismatch_words(mismatch)
+        mismatch_line = (f"The preview used {preview} (what the Webcam tab "
+                         f"has locked). The run will use {run} (what the "
+                         f"boxes on the Webcam tab say). Press Adjust, make "
+                         f"the boxes say what you want, press Apply & Lock, "
+                         f"and run again.")
+    ctxt = (f"contrast {content['contrast']:.0f} gray levels" if content
+            else "contrast not checked")
+    stats = ((f"focus {focus:.0f}   " if focus is not None else "")
+             + f"mean {mean:.0f}   saturated {sat:.1f}%   {ctxt}")
+    log = [f"camera pre-flight: mean {mean:.0f}, saturated {sat:.1f}%, "
+           + ctxt
+           + (f", focus {focus:.2f}" if focus is not None
+              else ", focus not scored")
+           + f", verdict {level.upper()}"]
+    if content_error:
+        log.append(f"⚠ camera pre-flight: the picture check could not "
+                   f"run ({content_error})")
+    if level in ('clipped', 'flat'):
+        log.append(f"⚠⚠ camera pre-flight: {hint}")
+    if disc:
+        log.append(f"camera pre-flight: {disc}")
+    if mismatch:
+        log.append(f"⚠ camera pre-flight: run camera exposure {cam_exp}, "
+                   f"gain {cam_gain}, but the preview was NOT taken with "
+                   f"them (it used {preview})")
+    elif locked:
+        log.append(f"camera pre-flight: run camera exposure {cam_exp}, gain "
+                   f"{cam_gain}; the lock this frame was taken under "
+                   f"agrees with them")
+    else:
+        log.append(f"camera pre-flight: run camera exposure {cam_exp}, gain "
+                   f"{cam_gain}; this camera has no device path, so neither "
+                   f"the pre-flight nor the run stamps them on it")
+    return {'mean': mean, 'sat_pct': sat, 'focus': focus,
+            'content': content, 'content_error': content_error,
+            'level': level, 'hint': hint,
+            'gate': level in ('clipped', 'flat'),
+            'disc_line': disc, 'camera_line': cam_text,
+            'mismatch': mismatch, 'mismatch_line': mismatch_line,
+            'start_label': label, 'start_default': is_default,
+            'stats_line': stats, 'log_lines': log}
+
+
+def baseline_picture_check(frame, override=''):
+    """Does the run's own 0 kV baseline frame hold a picture?
+
+    -> (flat, run.log line). The warm-up and baseline frames are the
+    only ones shot with the run's real camera settings before the
+    staircase, so this is the last place a run on a flat picture can be
+    stopped (the 2026-10-01 run went on to 3 kV for 209 s). Raises when
+    the frame cannot be judged; the runner logs that and carries on
+    unchanged, because a check that cannot run must not end a run.
+
+    `override` is the pre-flight override the run was started with
+    ('' for none, see preflight_override_record). The verdict is the
+    same either way; only the words after it change, because with the
+    override the runner does not stop (decisions 12 and 14,
+    2026-10-03), and the line must not say that it does."""
+    import sldea_edge
+    c = sldea_edge.image_content(frame)
+    if c is None:
+        raise ValueError("the baseline frame is empty")
+    if c['flat']:
+        if override:
+            tail = (f" This is the run's own baseline frame. The operator "
+                    f"started anyway at the pre-flight ({override}), so "
+                    f"the run CARRIES ON. Review this run by hand.")
+        else:
+            tail = (" This is the run's own baseline frame, so nothing in "
+                    "this run could be measured. STOPPING NOW.")
+        return True, (
+            "⚠⚠ "
+            + flat_message(c['contrast'], 0.5 * (c['p5'] + c['p95']))
+            + f" (A usable picture spans {sldea_edge.FLAT_CONTRAST_GRAY:.0f}"
+            f" gray levels or more.)" + tail)
+    return False, (f"baseline picture check: contrast {c['contrast']:.0f} "
+                   f"gray levels, saturated {c['sat_pct']:.1f}% - OK")
+
+
+def flat_stop_words(dry, drive_kv):
+    """Where the drive stood when a flat baseline ended the run: one
+    plain sentence, for run.log and for the operator's box.
+
+    `drive_kv` is the last voltage the runner commanded. It is printed
+    so that nobody has to assume it was zero: the baseline is shot in
+    the loop tick in which the first ramp begins, so the drive stands a
+    few volts up on an ordinary profile, and at the whole first level
+    when the ramp time is 0. Never raises."""
+    if dry:
+        return "This was a DRY run: no voltage was driven."
+    try:
+        kv = float(drive_kv)
+    except (TypeError, ValueError):
+        return ("The first voltage ramp had only just begun (the drive "
+                "voltage at the stop is not known).")
+    return (f"The first voltage ramp had only just begun: the drive had "
+            f"been commanded to {kv:.3f} kV when the run stopped.")
+
+
+# ---- the pre-flight override, and what ends a run at its baseline -------
+# Owner decisions 12, 13 and 14 (2026-10-03), one mechanism. A deliberate
+# "Start anyway (no picture)" at the camera pre-flight, after its
+# default-No question, carries into the run, DRY or LIVE: the baseline
+# picture check still runs and logs its verdict, but it does not stop
+# that run. The override is written to run.log and to setup.txt, so the
+# record shows the baseline was flat and the operator chose to go on (a
+# faint device that will be reviewed by hand is what it exists for).
+# Without the override, a baseline with no frame at all ends the run the
+# way a flat one does, when the pre-flight had a camera to expect one
+# from. Tk-free, so the HV start path's rules are tested without a bench.
+
+PREFLIGHT_OVERRIDE_NO_PICTURE = 'no picture'
+
+# The start button's label when the only thing wrong is that the Webcam
+# tab's lock disagrees with the run's fields (#361's sentence): its live
+# preview is not what the run records. A warning, so not the default
+# button, as every warning in preflight_start_button (merged 2026-10-06).
+PREFLIGHT_START_LOCK_DIFFERS = ("\u26a0 Start anyway (the Webcam preview "
+                                "differs from the run)")
+PREFLIGHT_OVERRIDE_KEY = 'Pre-flight override'
+
+
+def preflight_override_record(override):
+    """What a run writes down about its pre-flight override.
+
+    -> (setup.txt line, run.log line), or (None, None) for no override.
+    The setup.txt line is plain `Key: value` text like every other line
+    in that file (decision 2026-08-08); nothing reads it back by machine
+    yet, it is there for the person reading the run folder."""
+    if not override:
+        return None, None
+    return (f"{PREFLIGHT_OVERRIDE_KEY}: {override} (the operator started "
+            f"anyway at the camera pre-flight; the baseline picture stop "
+            f"is off for this run)",
+            f"⚠⚠ pre-flight override: {override}. The baseline picture "
+            f"check still runs and its verdict goes to this log, but it "
+            f"will NOT stop this run. Review this run by hand.")
+
+
+def baseline_stop_reason(frame_taken, flat, cam_expected, override):
+    """Why the runner ends a run at its baseline frame, or '' to go on.
+
+    'flat'      the baseline holds no picture (2026-10-02).
+    'no frame'  the camera gave the pre-flight a frame but gave the run
+                none for its baseline (decision 13). A run started past
+                the "No camera frame available" question had no camera
+                to expect one from, and goes on as it always did.
+    The pre-flight override switches both off."""
+    if override:
+        return ''
+    if not frame_taken:
+        return 'no frame' if cam_expected else ''
+    return 'flat' if flat else ''
+
+
+def _no_frame_cause(video):
+    return ("the video stream gave no frame in time: check the camera and "
+            "its cable" if video else
+            "camera busy? close the Webcam preview")
+
+
+def no_baseline_frame_line(override='', video=False):
+    """The run.log line for a baseline the camera gave no frame for, in
+    a run whose pre-flight did get one. `video`: the run takes its stills
+    off the recorder's stream (2026-10-06), where the Webcam tab cannot be
+    the reason, since a video run holds the camera."""
+    cause = _no_frame_cause(video)
+    if override:
+        return (f"⚠⚠ NO BASELINE FRAME: the camera gave the pre-flight a "
+                f"picture but gave this run none for its baseline ({cause}). "
+                f"The operator started anyway at the pre-flight "
+                f"({override}), so the run CARRIES ON. Review this run by "
+                f"hand.")
+    return (f"⚠⚠ NO BASELINE FRAME: the camera gave the pre-flight a "
+            f"picture but gave this run none for its baseline ({cause}). "
+            f"Nothing in this run could be measured. STOPPING NOW.")
+
+
+def baseline_stop_words(reason, dry, drive_kv, video=False):
+    """The words for a run that ends at its baseline frame.
+
+    -> dict(stopped, status, title, box): the run.log line after the
+    check's own line, the red status line, and the operator's box. The
+    drive sentence is flat_stop_words'. Never raises."""
+    drive = flat_stop_words(dry, drive_kv)
+    tail = "\n\nThe Run log has the numbers."
+    if reason == 'no frame':
+        return {
+            'stopped': f"run stopped at the baseline frame. {drive}",
+            'status': ("STOPPED: NO BASELINE FRAME from the camera, "
+                       "nothing was measured (see Run log)"),
+            'title': "Run stopped: no baseline frame",
+            'box': ("The run stopped itself at its baseline picture.\n\n"
+                    "The camera gave no frame for it, although it gave "
+                    "the pre-flight one, so nothing in this run could "
+                    "have been measured.\n\n" + drive
+                    + ("\n\nCheck the camera and its cable, then press "
+                       "Run again." if video else
+                       "\n\nClose the Webcam preview if it is running, "
+                       "check the camera, then press Run again.") + tail)}
+    return {
+        'stopped': f"run stopped at the baseline frame. {drive}",
+        'status': ("STOPPED: NO PICTURE in the baseline frame, nothing "
+                   "was measured (see Run log)"),
+        'title': "Run stopped: no picture",
+        'box': ("The run stopped itself right after its baseline "
+                "picture.\n\nThat picture is flat: the disc is not "
+                "visible, so nothing in this run could have been "
+                "measured.\n\n" + drive
+                + "\n\nOpen the Webcam tab, change the exposure or the "
+                "light until you can see the disc, press Apply & Lock, "
+                "then press Run again." + tail)}
 
 
 def credible_baseline_ua(baseline_ua, trip_ua):

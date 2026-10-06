@@ -3101,6 +3101,19 @@ LOGGING:
         self.sldea_status = tk.Label(runf, text="idle", anchor='w', fg='#555')
         self.sldea_status.pack(side=tk.LEFT, padx=12)
 
+        # The camera settings a run started now would use (2026-10-02). A
+        # run takes its exposure and gain from the Webcam tab's entry
+        # boxes, and nothing on this tab said so: the 2026-10-01 run went
+        # out at exposure 3 with no screen showing that number. Refreshed
+        # whenever a tab is selected and whenever the pointer comes onto
+        # this tab (the Webcam tab fills its boxes from the camera in a
+        # background job at startup, possibly after this tab is showing);
+        # it reads two entry boxes and the lock dict, never the camera.
+        self.sldea_cam_line = tk.Label(f, text="", anchor='w',
+                                       justify='left', fg='#555',
+                                       wraplength=1100)
+        self.sldea_cam_line.pack(fill='x', padx=14, pady=(0, 2))
+
         logf = ttk.LabelFrame(f, text="Run log", padding=6)
         logf.pack(fill='both', expand=True, padx=10, pady=8)
         self.sldea_log = tk.Text(logf, height=8, state='disabled')
@@ -3108,6 +3121,12 @@ LOGGING:
 
         self._sldea_dry_toggle()
         self._sldea_refresh()
+        self.notebook.bind('<<NotebookTabChanged>>',
+                           lambda _ev: self._sldea_cam_line_refresh(),
+                           add='+')
+        f.bind('<Enter>', lambda _ev: self._sldea_cam_line_refresh(),
+               add='+')
+        self._sldea_cam_line_refresh()
 
     def _sldea_build_profile(self):
         try:
@@ -3858,11 +3877,20 @@ LOGGING:
             except Exception:
                 pass
             # Camera pre-flight gate: check focus / exposure / centering on
-            # a live snapshot before anything runs.
+            # a live snapshot before anything runs. What it saw is reset
+            # here and read back after it, for the worker: whether the
+            # camera gave it a frame, and whether the operator started
+            # anyway on a flat one (decisions 12 to 14, 2026-10-03). A
+            # skipped pre-flight leaves both at their defaults, which is
+            # the behaviour before those decisions.
+            self._sldea_preflight_seen = {'frame': False, 'override': ''}
             if not getattr(self, '_sldea_skip_preflight', False):
                 if not self._sldea_preflight(cam_exp, cam_gain):
                     self._sldea_log("run cancelled at camera pre-flight")
                     return
+            seen = self._sldea_preflight_seen
+            cam_expected = bool(seen.get('frame'))
+            picture_override = str(seen.get('override') or '')
             # ...and again at the commit point, where it asks nothing: every
             # question above waits on the operator for as long as they take,
             # and nothing between this check and _sldea_live_ch claiming the
@@ -3903,8 +3931,10 @@ LOGGING:
                       sgch, vch, ich, dry, cam_exp, cam_gain, diam_mm,
                       autoproc, wd_on, wd_ua, wd_s, trek_sign, scope_setup,
                       tel_on, tel_hz, electrode, concentration_ml),
-                kwargs={'vid_on': vid_on, 'vid_fps': vid_fps or 1.0,
-                        'vid_detect': vid_detect},
+                kwargs=dict(cam_expected=cam_expected,
+                            picture_override=picture_override,
+                            vid_on=vid_on, vid_fps=vid_fps or 1.0,
+                            vid_detect=vid_detect),
                 daemon=True).start()
             self.root.after(100, self._sldea_animate_cursor)  # playhead
         finally:
@@ -4094,6 +4124,20 @@ LOGGING:
         """Modal camera pre-flight: one fresh snapshot with a centering
         reticle + focus/exposure stats. Returns True to proceed.
 
+        Since 2026-10-02 the start button is the default (focused, and
+        pressed by Return) only when the verdict is OK, the picture check
+        really ran, and the preview was taken with the run's own camera
+        settings. A flat frame is a gate like a clipped one, and every
+        pre-flight reaches run.log. The rules live Tk-free in
+        sldea_profile.preflight_report so they are tested without a
+        bench.
+
+        What this pre-flight saw is left in self._sldea_preflight_seen
+        for the start path to hand to the worker (decisions 12 to 14,
+        2026-10-03): 'frame' is True when the camera gave a frame here,
+        and 'override' names a deliberate start past the flat gate ('',
+        or sldea_profile.PREFLIGHT_OVERRIDE_NO_PICTURE).
+
         THE PRE-FLIGHT SHOWS WHAT THE RUN WILL SHOOT (2026-10-05, run
         13_backlight). It used to write `cam_exp`/`cam_gain` and then grab
         through oneshot_rgb, which re-stamps the Webcam tab's LOCK just
@@ -4106,49 +4150,103 @@ LOGGING:
         hold (the tab's lock with the run's four controls on top), and
         the tab's own lock is put back afterwards. When the panel fields
         and the tab's lock disagree, the dialog says so: the preview the
-        operator tuned on runs on the lock, the run on the fields."""
+        operator tuned on runs on the lock, the run on the fields.
+
+        Merged 2026-10-06 (#348 with #361): the frame the picture check
+        judges is now taken under the run's own lock, so the check is
+        handed that lock, and its 'preview NOT taken with the run's
+        settings' gate can no longer fire from here. The Webcam tab's live
+        preview running on a different lock is #361's sentence below, and
+        like every warning it costs the start button its default
+        (sldea_profile.preflight_start_button's `tab_mismatch`: Return
+        only starts a clean pre-flight)."""
         frame = None
+        self._sldea_preflight_seen = {'frame': False, 'override': ''}
         lock_before = dict(webcam.LOCKED_CONTROLS)
-        mismatch = sldea_lock_mismatch(lock_before, cam_exp, cam_gain)
-        if mismatch:
-            self._sldea_log(f"⚠ camera pre-flight: {mismatch}")
+        # The lock the frame below is taken under, for the picture check:
+        # the run's own (sldea_run_lock), set before the grab and the
+        # Webcam tab's put back after it. A camera with no device path is
+        # stamped by neither the pre-flight nor the run, so it has no lock
+        # to disagree with and `lock` stays empty.
+        lock = {}
         try:
             spec = webcam.resolve_camera(0)
             if spec.get('device'):
                 dev = spec['device']
+                lock = sldea_run_lock(lock_before, cam_exp, cam_gain)
                 for ctrl, val in (('auto_exposure', 1),
                                   ('white_balance_automatic', 0),
                                   ('exposure_time_absolute', cam_exp),
                                   ('gain', cam_gain)):
                     webcam.set_control(dev, ctrl, val)
-                webcam.set_locked(sldea_run_lock(lock_before, cam_exp,
-                                                 cam_gain))
+                webcam.set_locked(lock)
             frame = webcam.oneshot_rgb(spec, count=3)
         except Exception:
             frame = None
         finally:
             webcam.set_locked(lock_before)
+        # #361's sentence, for a camera the lock applies to: one with a
+        # device path (`lock` is set only then). Neither the pre-flight
+        # nor the run stamps any other camera, so it has no lock to
+        # disagree with (#348's rule; merged 2026-10-06).
+        mismatch = (sldea_lock_mismatch(lock_before, cam_exp, cam_gain)
+                    if lock else '')
+        if mismatch:
+            self._sldea_log(f"⚠ camera pre-flight: {mismatch}")
         if frame is None:
-            return messagebox.askyesno(
+            self._sldea_log("camera pre-flight: NO FRAME from the camera")
+            blind = messagebox.askyesno(
                 "Camera pre-flight",
                 "No camera frame available — the run would capture no "
                 "images.\n\nContinue anyway?", default='no')
+            if blind:
+                self._sldea_log("⚠⚠ operator started the run ANYWAY with "
+                                "no camera frame")
+            return blind
+        # The camera is in use: a run that then gets no baseline frame
+        # at all is stopped by the worker (decision 13). Not an
+        # override: that word is kept for the flat gate below.
+        self._sldea_preflight_seen['frame'] = True
 
-        import numpy as np
         from PIL import Image, ImageDraw, ImageTk
-        gray = frame.mean(axis=2)
-        mean = float(gray.mean())
-        sat = float((gray >= 250).mean() * 100)
         try:
             focus = webcam.focus_score(frame)
         except Exception:
             focus = None
-        level, hint = sldea_profile.exposure_verdict(mean, sat)
-        clipped = level == 'clipped'
-        if clipped:
-            # into run.log via the prelog buffer, so the run carries the
-            # fact that it started from a blown-out baseline
-            self._sldea_log(f"⚠⚠ camera pre-flight: {hint}")
+        # A value with no readable box on the Webcam tab is a built-in
+        # fallback; the dialog must not call it "set on the Webcam tab".
+        try:
+            defaults = self._sldea_cam_defaults()
+        except Exception:
+            defaults = []
+        try:
+            rep = sldea_profile.preflight_report(
+                frame, cam_exp, cam_gain, lock, focus, defaults,
+                tab_mismatch=bool(mismatch))
+        except Exception as e:
+            # A check that cannot run must not wave a run through, and
+            # must not be the reason the bench cannot run at all: ask,
+            # default No, and write the answer down.
+            self._sldea_log(f"⚠ camera pre-flight: the picture check "
+                            f"failed ({e})")
+            unchecked = messagebox.askyesno(
+                "Camera pre-flight",
+                f"The picture check could not run ({e}), so nothing has "
+                f"checked this camera frame.\n\nStart the run anyway?",
+                default='no')
+            if unchecked:
+                self._sldea_log("⚠⚠ operator started the run ANYWAY with "
+                                "the camera picture unchecked")
+            return unchecked
+        # Into run.log via the prelog buffer, for EVERY pre-flight, so a
+        # run carries the numbers it was started on (it used to be
+        # clipped ones only, and the 2026-10-01 run left no trace).
+        for ln in rep['log_lines']:
+            self._sldea_log(ln)
+        hint = rep['hint']
+        clipped = rep['level'] == 'clipped'
+        flat = rep['level'] == 'flat'
+        gate = rep['gate']
 
         win = tk.Toplevel(self.root)
         win.title("Camera pre-flight — SLDEA run")
@@ -4168,19 +4266,31 @@ LOGGING:
         lbl = tk.Label(win, image=photo)
         lbl.image = photo               # keep a reference
         lbl.pack(padx=8, pady=8)
-        stats = (f"focus {focus:.0f}   " if focus is not None else "") + \
-            f"mean {mean:.0f}   saturated {sat:.1f}%"
-        tk.Label(win, text=stats, fg='#1f3a5f').pack()
-        tk.Label(win, text=hint, fg='#c62828' if clipped else '#1f3a5f',
+        tk.Label(win, text=rep['stats_line'], fg='#1f3a5f').pack()
+        tk.Label(win, text=hint, fg='#c62828' if gate else '#1f3a5f',
                  wraplength=520,
-                 font=('TkDefaultFont', 9, 'bold' if clipped else 'normal')
+                 font=('TkDefaultFont', 9, 'bold' if gate else 'normal')
                  ).pack(pady=(2, 0))
+        # Advice, never a gate: a device that is not a disc refuses the
+        # fit by design, and such runs are reviewed by hand.
+        if rep['disc_line']:
+            tk.Label(win, text=rep['disc_line'], fg='#555',
+                     wraplength=520).pack(pady=(2, 0))
+        tk.Label(win, text=rep['camera_line'], fg='#1f3a5f',
+                 wraplength=520).pack(pady=(4, 0))
         if mismatch:
             # the warning sign and the bold weight are the cue; the colour
-            # only repeats it
+            # only repeats it (#361)
             tk.Label(win, text="⚠ " + mismatch, fg='#c62828', wraplength=520,
                      justify='left', font=('TkDefaultFont', 9, 'bold')
                      ).pack(pady=(2, 0))
+        if rep['mismatch']:
+            tk.Label(win,
+                     text="⚠ " + sldea_profile.PREVIEW_MISMATCH_HEADLINE,
+                     fg='#c62828', wraplength=520,
+                     font=('TkDefaultFont', 9, 'bold')).pack(pady=(2, 0))
+            tk.Label(win, text=rep['mismatch_line'], fg='#c62828',
+                     wraplength=520).pack()
         tk.Label(win, text="Check: DEA centred in the circle · in focus · "
                            "no glare / clipping", fg='#555').pack(pady=(0, 6))
         bf = ttk.Frame(win)
@@ -4203,9 +4313,43 @@ LOGGING:
                     f"stops being a question.\n\nStart the run anyway?",
                     default='no', parent=win):
                 return
+            # A flat frame is the same kind of gate (2026-10-02): there
+            # is no disc in it for any later step to find. Yes here is
+            # the pre-flight override (decisions 12 and 14, 2026-10-03):
+            # it carries into the run, which then does not stop itself
+            # on a flat baseline, and the question says so.
+            if flat and not messagebox.askyesno(
+                    "No picture in this frame",
+                    f"{hint}\n\nA run started on a frame like this "
+                    f"cannot be measured: Edge Review finds the disc by "
+                    f"its darker colour, and this frame has none. The "
+                    f"2026-10-01 run recorded a picture like this: 209 s "
+                    f"of high voltage up to 3 kV, and 25 of its 26 frames "
+                    f"were "
+                    f"rejected.\n\nPress No, then Adjust, and fix the "
+                    f"picture on the Webcam tab.\n\nIf you start anyway, "
+                    f"the run will NOT stop itself on a flat baseline: "
+                    f"its baseline picture is still checked and the "
+                    f"verdict goes to the Run log, and setup.txt records "
+                    f"that you started anyway. Do this only for a faint "
+                    f"device you will review by hand.\n\nStart the run "
+                    f"anyway?",
+                    default='no', parent=win):
+                return
             if clipped:
                 self._sldea_log("⚠⚠ operator started the run ANYWAY "
                                 "on a blown-out baseline")
+            if flat:
+                self._sldea_preflight_seen['override'] = \
+                    sldea_profile.PREFLIGHT_OVERRIDE_NO_PICTURE
+                self._sldea_log("⚠⚠ operator started the run ANYWAY "
+                                "on a flat pre-flight frame (no picture): "
+                                "the baseline picture stop is OFF for "
+                                "this run")
+            if not gate and not rep['start_default']:
+                # a warning that is not a gate: one click starts, and
+                # run.log says which button that click was
+                self._sldea_log(f"operator pressed: {rep['start_label']}")
             result['go'] = True
             win.destroy()
 
@@ -4213,20 +4357,27 @@ LOGGING:
             win.destroy()
             self.select_manual_tab('webcam')
 
-        gob = ttk.Button(bf, text="✔ Looks good — start run" if not clipped
-                         else "⚠ Start anyway (baseline blown out)",
-                         command=go)
+        gob = ttk.Button(bf, text=rep['start_label'], command=go)
         gob.pack(side=tk.LEFT, padx=6)
-        ttk.Button(bf, text="✎ Adjust (open Webcam tab)",
-                   command=adjust).pack(side=tk.LEFT, padx=6)
+        adjb = ttk.Button(bf, text="✎ Adjust (open Webcam tab)",
+                          command=adjust)
+        adjb.pack(side=tk.LEFT, padx=6)
         ttk.Button(bf, text="✖ Cancel",
                    command=win.destroy).pack(side=tk.LEFT, padx=6)
         # keyboard path + stacking: a Tk grab blocks only the pointer, and a
         # non-transient dialog could sink behind the main window leaving the
         # app apparently frozen (audit 2026-07-25)
         win.transient(self.root)
-        gob.focus_set()
-        win.bind('<Return>', lambda e: go())
+        # Return starts the run ONLY from a clean pre-flight. On anything
+        # else the start button is not the default and Return is not
+        # bound at all, so a reflex Enter cannot energize HV on a picture
+        # nobody looked at (2026-10-01: this dialog was confirmed within
+        # 4 s, and the run recorded a flat picture).
+        if rep['start_default']:
+            gob.focus_set()
+            win.bind('<Return>', lambda e: go())
+        else:
+            adjb.focus_set()
         win.bind('<Escape>', lambda e: win.destroy())
         self.root.wait_window(win)
         return result['go']
@@ -4442,13 +4593,21 @@ LOGGING:
                       wd_on=False, wd_ua=100.0, wd_s=3.0, trek_sign=1.0,
                       scope_setup=None, tel_on=False,
                       tel_hz=sldea_profile.TELEMETRY_MAX_HZ, electrode='',
-                      concentration_ml=None, vid_on=False, vid_fps=1.0,
+                      concentration_ml=None, cam_expected=False,
+                      picture_override='', vid_on=False, vid_fps=1.0,
                       vid_detect=False):
         """Host-sequenced staircase runner (daemon thread; no Tk calls except
         via _sldea_log/_sldea_set_status/after). Drives the SG DC offset along
         p.kv_at(t), fires webcam+scope snapshots on schedule, writes the run
         dir (setup.txt + data.csv + telemetry.csv + frames/, and with
-        `vid_on` video.mkv + video_frames.csv once the HV is off)."""
+        `vid_on` video.mkv + video_frames.csv once the HV is off).
+
+        `cam_expected` is True when the pre-flight got a frame from the
+        camera, and `picture_override` names a deliberate start past the
+        pre-flight's flat gate ('' for none); both come from
+        _sldea_preflight_seen (decisions 12 to 14, 2026-10-03) and decide
+        what the baseline frame may do to the run, see
+        sldea_profile.baseline_stop_reason."""
         import os
         import csv as _csv
         started = datetime.now()
@@ -4481,6 +4640,16 @@ LOGGING:
                 if trek_sign < 0:
                     sf.write("Trek control polarity: INVERTED (control = "
                              "-kV/gain; monitor readings logged as read)\n")
+                # The pre-flight override, written where the run's record
+                # lives (plain Key: value, like the lines above, on its
+                # own after the Snapshots block) and into run.log, before
+                # any frame is shot. ASCII, so the locale-encoded open
+                # above cannot refuse it.
+                override_line, override_log = \
+                    sldea_profile.preflight_override_record(picture_override)
+                if override_line:
+                    sf.write("\n" + override_line + "\n")
+                    self._sldea_log(override_log)
                 if scope_setup:
                     sf.write("\n--- Scope vertical (read back at run "
                              "start) ---\n")
@@ -4749,6 +4918,8 @@ LOGGING:
             mon_dt = 0.5 if watchdog is not None else (
                 tel.period_s if tel is not None else 0.5)
             wd_bad_since, wd_blind = None, False
+            base_stop = False         # the baseline frame ended the run
+            stop_words = {}           # ...and the words for that, if so
             while not self._sldea_stop:
                 el = time.monotonic() - t0
                 self._sldea_elapsed = el          # feeds the preview playhead
@@ -4910,12 +5081,71 @@ LOGGING:
                         if got[0] is None and \
                                 el - snaps[si]['t'] < self.SLDEA_STILL_WAIT_S:
                             break              # try again next tick
-                    self._sldea_capture(p, snaps[si], si + 1, spec, framedir,
-                                        writer, fh, vch, ich, dry,
-                                        tel=tel, t0=t0,
-                                        stream=rec is not None,
-                                        stream_frame=got)
+                    shot = self._sldea_capture(
+                        p, snaps[si], si + 1, spec, framedir, writer, fh,
+                        vch, ich, dry, tel=tel, t0=t0,
+                        stream=rec is not None, stream_frame=got)
                     si += 1
+                    # Baseline picture check (2026-10-02). The warm-up and
+                    # baseline frames are the only ones shot with the run's
+                    # real camera settings before the staircase, so a flat
+                    # baseline (the 2026-10-01 run: contrast 2 gray levels,
+                    # then 209 s of HV up to 3 kV for nothing) ends the run
+                    # HERE, through the same stop flag Abort sets: the loop
+                    # exits and the finally block zeroes the SG exactly as
+                    # it does on any abort. Nothing in this block talks to
+                    # an instrument. Only the check itself sits in the try:
+                    # one that cannot run is logged and the run carries on
+                    # unchanged, and a stop sets the stop flag before
+                    # anything else is attempted.
+                    #
+                    # Since 2026-10-03 (decisions 12 to 14): no frame at
+                    # all for the baseline stops the run the same way when
+                    # the pre-flight had a camera, and the pre-flight
+                    # override switches both stops off for this run. The
+                    # check still runs and its verdict is still logged.
+                    # The rule is sldea_profile.baseline_stop_reason.
+                    #
+                    # The baseline is shot in the tick in which the first
+                    # ramp begins (the SG write above comes first), so the
+                    # drive is not at 0 here: last_kv is what was commanded,
+                    # and it goes into run.log instead of being assumed. In
+                    # a video run the still is the first stream frame after
+                    # its moment, up to SLDEA_STILL_WAIT_S later, so the
+                    # drive can be further up the ramp by then.
+                    if snaps[si - 1]['tag'] == 'baseline':
+                        flat, line = False, None
+                        if shot is not None:
+                            try:
+                                flat, line = \
+                                    sldea_profile.baseline_picture_check(
+                                        shot, picture_override)
+                            except Exception as e:
+                                flat, line = False, (
+                                    f"⚠ baseline picture check could not "
+                                    f"run ({e}): the run continues "
+                                    f"unchanged")
+                        elif cam_expected:
+                            line = sldea_profile.no_baseline_frame_line(
+                                picture_override, video=rec is not None)
+                        why = sldea_profile.baseline_stop_reason(
+                            shot is not None, flat, cam_expected,
+                            picture_override)
+                        if why:
+                            base_stop = True
+                            self._sldea_stop = True
+                        if line:
+                            self._sldea_log(line)
+                        if base_stop:
+                            stop_words = sldea_profile.baseline_stop_words(
+                                why, sg is None, last_kv,
+                                video=rec is not None)
+                            self._sldea_log(stop_words['stopped'])
+                            break
+                if base_stop:
+                    # straight to the shutdown below, as the breakdown
+                    # branch does: no status tick, no poll sleep first
+                    break
                 if el - last_status >= 1.0:
                     self._sldea_set_status(
                         f"{'DRY' if dry else 'LIVE'}  t={el:.0f}/"
@@ -4951,9 +5181,21 @@ LOGGING:
                 done = 'complete'
                 completed = True
             self._sldea_log(f"run {done}: {si}/{len(snaps)} frames")
-            self._sldea_set_status(
-                f"{done} — {si} frames",
-                fg='#c62828' if done == 'BREAKDOWN-ABORT' else '#2e7d32')
+            if base_stop and done == 'aborted':
+                # Say WHY in words where the operator looks: a green
+                # "aborted" would read as their own Abort. The box is
+                # queued on the Tk thread; this thread goes straight on to
+                # the finally block and zeroes the SG without waiting.
+                self._sldea_set_status(stop_words['status'], fg='#c62828')
+                try:
+                    self.root.after(0, lambda: messagebox.showwarning(
+                        stop_words['title'], stop_words['box']))
+                except Exception:
+                    pass
+            else:
+                self._sldea_set_status(
+                    f"{done} — {si} frames",
+                    fg='#c62828' if done == 'BREAKDOWN-ABORT' else '#2e7d32')
             if done == 'complete' and autoproc and si > 0:
                 self._sldea_log("auto-opening Edge Review…")
                 self.root.after(
@@ -5140,6 +5382,34 @@ LOGGING:
         except Exception:
             return default
 
+    def _sldea_cam_line_refresh(self):
+        """Say on the SLDEA tab which exposure and gain a run started now
+        would use, and whether the Webcam tab has locked something else
+        (2026-10-02). Reads the two Webcam-tab entry boxes and the lock
+        dict, makes no camera call, and never raises: it is a label."""
+        try:
+            # 6 and 60 are the fallbacks sldea_run itself uses when a box
+            # is missing or unreadable (pinned in tests/
+            # test_sldea_preflight.py so the two cannot drift apart).
+            text, warn = sldea_profile.camera_line(
+                self._sldea_cam_value('cam_exposure', 6),
+                self._sldea_cam_value('cam_gain', 60),
+                dict(webcam.LOCKED_CONTROLS),
+                defaults=self._sldea_cam_defaults())
+            self.sldea_cam_line.config(text=text,
+                                       fg='#8a5a00' if warn else '#555')
+        except Exception:
+            pass
+
+    def _sldea_cam_defaults(self):
+        """Which of the run's two camera values have no readable box on
+        the Webcam tab, so that the run falls back on a built-in number:
+        a list out of 'exposure' and 'gain'. Reads Tk entries, so call
+        it on the main thread only."""
+        return [word for word, attr in (('exposure', 'cam_exposure'),
+                                        ('gain', 'cam_gain'))
+                if self._sldea_cam_value(attr, None) is None]
+
     def _sldea_capture(self, p, snap, index, spec, framedir, writer, fh,
                        vch, ich, dry, note='', tel=None, t0=None,
                        stream=False, stream_frame=(None, None)):
@@ -5268,6 +5538,9 @@ LOGGING:
             # the capture time in run.log too: Edge Review's Save rewrites
             # the notes column of every row it reviews
             + (f"  (frame t={frame_t:.2f}s)" if frame_t is not None else ""))
+        # The frame as grabbed (None when the camera gave none): the
+        # runner's baseline picture check reads it.
+        return frame
 
     def create_logging_tab(self):
         """Create data logging tab"""

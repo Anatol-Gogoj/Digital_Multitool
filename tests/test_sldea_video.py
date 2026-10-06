@@ -994,11 +994,117 @@ class _Patched:
         return False
 
 
-def _drive(app, tmp, stream, oneshot, dry=True):
+def _drive(app, tmp, stream, oneshot, dry=True, override=True,
+           cam_expected=False):
+    # _FakeCam's frames are flat by construction (uniform planes and one
+    # moving line), and since #348 a flat baseline stops the run. The
+    # plumbing tests start as an operator would on a faint device: with
+    # the pre-flight override, which keeps the baseline check and its log
+    # line but not its stop (merged 2026-10-06). The baseline-stop tests
+    # below pass override=False.
+    import sldea_profile
+    pov = sldea_profile.PREFLIGHT_OVERRIDE_NO_PICTURE if override else ''
     with _Patched(tmp, stream, oneshot):
-        app._sldea_worker(_short_profile(), tmp, 'RUN', 1, 2, 3, dry,
-                          tel_on=False, vid_on=True, vid_fps=5.0)
+        app._sldea_worker(
+            _short_profile(), tmp, 'RUN', 1, 2, 3, dry, tel_on=False,
+            vid_on=True, vid_fps=5.0, picture_override=pov,
+            cam_expected=cam_expected)
     return os.path.join(tmp, 'RUN')
+
+
+class _FlatCam(_FakeCam):
+    """A stream whose every frame is one gray level: no picture at all."""
+
+    def read(self):
+        f = super().read()
+        return None if f is None else f * 0 + 120
+
+
+class _DiscCam(_FakeCam):
+    """A stream showing a dark disc on a bright field: a real picture."""
+
+    def read(self):
+        import numpy as np
+        f = super().read()
+        if f is None:
+            return None
+        h, w = f.shape[:2]
+        img = np.full((h, w, 3), 200, np.uint8)
+        yy, xx = np.mgrid[0:h, 0:w]
+        img[(yy - h // 2) ** 2 + (xx - w // 2) ** 2 < (h // 3) ** 2] = 60
+        return img
+
+
+def _stop_recorder_spy(events):
+    real_stop = sv.VideoRecorder.stop
+
+    def stop(self, timeout=10.0):
+        events.append((time.monotonic(), 'rec.stop', (), {}))
+        return real_stop(self, timeout)
+    sv.VideoRecorder.stop = stop
+    return real_stop
+
+
+def test_a_flat_video_baseline_stops_a_live_run_with_the_sg_zeroed():
+    """#348 meets #359 (merged 2026-10-06). In a video run the baseline
+    still comes off the recorder's stream; a flat one stops a LIVE run at
+    the baseline, through the stop flag Abort uses: the SG is zeroed and
+    switched off before the recorder stops, and only the warm-up and the
+    baseline rows are written."""
+    _need_cv()
+    events = []
+    real_stop = _stop_recorder_spy(events)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _StubApp(sg=_FakeSG(events))
+            rundir = _drive(app, tmp, lambda spec, fps=10: _FlatCam(),
+                            _no_oneshot, dry=False, override=False,
+                            cam_expected=True)
+            # the recording is moved into the run folder by a thread of
+            # its own; wait for it before the folder is deleted
+            assert _wait(lambda: os.path.exists(os.path.join(
+                rundir, sv.VIDEO_INDEX_FILENAME)) and os.path.exists(
+                os.path.join(rundir, sv.VIDEO_FILENAME)), 30), \
+                os.listdir(rundir)
+            assert app._sldea_stop, app.lines
+            assert any('STOPPING NOW' in ln for ln in app.lines), app.lines
+            rows = _read_csv(os.path.join(rundir, 'data.csv'))
+            assert [r['tag'] for r in rows] == ['warmup', 'baseline'], rows
+            names = [e[1] for e in events]
+            offs = [e for e in events if e[1] == 'sg.set_offset']
+            assert offs and float(offs[-1][2][1]) == 0.0, offs[-3:]
+            last_off = max(i for i, e in enumerate(events)
+                           if e[1] == 'sg.set_output' and e[2][1] is False)
+            assert last_off < names.index('rec.stop'), names
+            assert app.finished == 1
+    finally:
+        sv.VideoRecorder.stop = real_stop
+
+
+def test_a_video_baseline_with_a_picture_runs_to_the_end():
+    """The same LIVE video run on a stream that shows a disc: the
+    baseline check passes and every still gets its row."""
+    _need_cv()
+    events = []
+    real_stop = _stop_recorder_spy(events)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _StubApp(sg=_FakeSG(events))
+            rundir = _drive(app, tmp, lambda spec, fps=10: _DiscCam(),
+                            _no_oneshot, dry=False, override=False,
+                            cam_expected=True)
+            # the recording is moved into the run folder by a thread of
+            # its own; wait for it before the folder is deleted
+            assert _wait(lambda: os.path.exists(os.path.join(
+                rundir, sv.VIDEO_INDEX_FILENAME)) and os.path.exists(
+                os.path.join(rundir, sv.VIDEO_FILENAME)), 30), \
+                os.listdir(rundir)
+            assert not app._sldea_stop, app.lines
+            rows = _read_csv(os.path.join(rundir, 'data.csv'))
+            assert len(rows) == len(_short_profile().snapshots), rows
+            assert app.finished == 1
+    finally:
+        sv.VideoRecorder.stop = real_stop
 
 
 def _no_oneshot(*a, **k):

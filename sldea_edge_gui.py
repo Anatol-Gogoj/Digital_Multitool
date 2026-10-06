@@ -711,6 +711,12 @@ TIPS = {
     'scale_btn': "Set this run's px→mm anchor from the resting disc; on an "
                  "already-saved run with no review pass open it re-derives "
                  "every mm² in data.csv instead.",
+    'video_btn': "Walk the recorded video frames that need a human: the "
+                 "ones the detector doubts, or that disagree with this "
+                 "run's accepted stills. Accept / reject decisions go to "
+                 "video_review.csv, never to data.csv.",
+    'video_btn_disabled': "This run has no video in its folder (Record was "
+                          "off, or the recording is still being moved in).",
     'save_btn': "Writes the accepted areas into data.csv (a .bak is kept) "
                 "and saves the plot and outline overlays — greyed out until "
                 "▶ Detect Edges has run, and it still refuses without the "
@@ -2544,6 +2550,15 @@ class EdgeReviewApp:
                                     command=self._scale_action,
                                     style='Secondary.TButton')
         self.scale_btn.pack(side=tk.LEFT, padx=(6, 0))
+        # The video review window (2026-10-06): live when the run folder
+        # holds a recording; _sync_detect_btn keeps it in step with the
+        # run, since every run change already goes through there.
+        self.video_btn = ttk.Button(top, text="🎞 Video review…",
+                                    command=self._open_video_review,
+                                    style='Secondary.TButton',
+                                    state='disabled')
+        self.video_btn.pack(side=tk.LEFT, padx=(6, 0))
+        self._video_win = None
         # Save stays on the far RIGHT — the end of the job, and out of the
         # left-to-right flow (`#216`). It is NOT accented: two accents is
         # no accent, and its own affordance is the disabled state, which
@@ -2778,6 +2793,7 @@ class EdgeReviewApp:
                              ('detect_btn', self.detect_btn),
                              ('adv_btn', self.adv_btn),
                              ('scale_btn', self.scale_btn),
+                             ('video_btn', self.video_btn),
                              ('save_btn', self.save_btn),
                              ('accept_btn', self.accept_btn),
                              ('reject_btn', self.reject_btn),
@@ -2834,6 +2850,42 @@ class EdgeReviewApp:
             tip.text = (TIPS['detect_btn_busy'] if busy else
                         TIPS['detect_btn'] if self.run is not None else
                         TIPS['detect_btn_disabled'])
+        self._sync_video_btn()
+
+    def _sync_video_btn(self):
+        """🎞 Video review… is live when the loaded run's folder holds a
+        recording and its index (sldea_video.has_video). Called from
+        _sync_detect_btn, which every run change already goes through."""
+        btn = getattr(self, 'video_btn', None)
+        if btn is None:
+            return
+        import sldea_video as sv
+        have = bool(self.run is not None and self.rundir
+                    and sv.has_video(self.rundir))
+        btn.config(state='normal' if have else 'disabled')
+        tip = self._tips.get('video_btn') if hasattr(self, '_tips') else None
+        if tip is not None:
+            tip.text = TIPS['video_btn' if have else 'video_btn_disabled']
+
+    def _open_video_review(self):
+        """Open the video review window for the loaded run: one at a time
+        (the singleton rule of the aux windows, #176). Another run's window
+        is closed first; the same run's is raised."""
+        import sldea_video_review as vr
+        cur = self._video_win
+        if cur is not None and not cur._closed:
+            if os.path.normcase(os.path.abspath(cur.rundir)) == \
+                    os.path.normcase(os.path.abspath(self.rundir or '')):
+                cur.win.lift()
+                return
+            cur.close()
+        try:
+            self._video_win = vr.VideoReviewWindow(
+                self.root, self.rundir,
+                on_close=lambda w: setattr(self, '_video_win', None))
+        except Exception as e:
+            messagebox.showerror("Video review",
+                                 f"The video review could not open:\n\n{e}")
 
     def _canvas_hint(self, text=None):
         """The empty card area SAYS what to press (`#216`).
@@ -4553,6 +4605,13 @@ class EdgeReviewApp:
         # destroyed. The old `done in …` said detect→Save in a widget that
         # then sat stale through every following run.
         took = fmt_dur(time.time() - self._t0) if self._t0 else '?'
+        # THE VIDEO PASS RE-RUNS WHEN ITS EDGES ARE STALE (2026-10-06).
+        # Here, after data.csv, the anchor and the stamp, because all three
+        # are its inputs: the accepted stills are its checkpoints, the
+        # anchor its scale. It starts a detached job and returns at once;
+        # a run with no video in its folder says nothing.
+        vid = self._video_after_save()
+        vid_txt = f"; {vid}" if vid else ""
         try:
             self._save_plot(scale)
             self._save_overlays()
@@ -4563,7 +4622,7 @@ class EdgeReviewApp:
             cav = anchor_caveat(self.manual_ref)
             self.status.config(text="saved CSV; "
                                     + (f"{cav}. " if cav else '')
-                                    + f"plot/overlays failed: {e}")
+                                    + f"plot/overlays failed: {e}{vid_txt}")
             return
         scale_txt = (f"scale {scale:.5f} mm/px [{src}]" if scale
                      else "no mm scale — use 📏 Calibrate / "
@@ -4580,7 +4639,17 @@ class EdgeReviewApp:
         self.status.config(
             text=f"saved in {took} — "
                  + (f"{cav}. " if cav else '')
-                 + f"data.csv updated ({scale_txt}){bd_txt}")
+                 + f"data.csv updated ({scale_txt}){bd_txt}{vid_txt}")
+
+    def _video_after_save(self):
+        """sldea_video.after_save for the loaded run: one sentence for the
+        status strip, or None. Never raises: the video is a side product
+        of the run, and its re-run must never cost the operator a Save."""
+        try:
+            import sldea_video as sv
+            return sv.after_save(self.rundir)
+        except Exception as e:
+            return f"video edges not re-run ({e})"
 
     def _save_plot(self, scale):
         import matplotlib

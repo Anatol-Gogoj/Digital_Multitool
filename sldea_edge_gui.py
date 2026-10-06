@@ -8017,12 +8017,31 @@ class EdgeReviewApp:
             # cross-check number must not cost the correction.
             anchor['auto_diam_px'] = (self._auto_disc() or {}).get('diam_px')
         anchor.update(se.reanchor_anchor_fields(prev, plan))
+        unrecorded_txt = ''
         try:
             se.save_scale_anchor(self.rundir, anchor)
         except OSError as e:
-            self.status.config(
-                text=f"areas re-derived, but recording the re-anchor in "
-                     f"setup.txt failed: {e}")
+            # SAID ON THE LAST STRIP (2026-10-06). This used to be set on
+            # the strip and then overwritten by the RE-ANCHORED line below,
+            # so nobody saw that data.csv now holds areas at the new scale
+            # while setup.txt keeps the old anchor (or none) and no
+            # `reanchor` marker: the run reads as reviewed at a scale its
+            # column no longer uses. It goes right AFTER THE LEAD, not
+            # beside the caveat at the end: the strip is one unwrapped
+            # line, a narrow window cuts its tail, and this line's head
+            # (old -> new px, rows, multiplier, resting area) is long,
+            # while those numbers were all in the confirmation just
+            # answered.
+            # THE REMEDY IS A SECOND RE-ANCHOR, NOT A SAVE. A Save writes
+            # the anchor too (manual_ref still holds it), but as a plain
+            # anchor with no `reanchor` marker and no prev_* fields, i.e.
+            # as if the run had been reviewed at it. This commit leaves no
+            # review pass open, so the scale button routes here again; the
+            # anchor must be measured or verified afresh there, because
+            # Reuse (P) offers setup.txt's anchor, which is the old one.
+            unrecorded_txt = (f" — ⚠ new anchor NOT recorded in setup.txt, "
+                              f"📏 re-anchor again once the folder is "
+                              f"writable ({e})")
         try:
             _p, line = se.append_calibration_log(
                 self.rundir, se.reanchor_log_record(anchor, plan))
@@ -8043,7 +8062,9 @@ class EdgeReviewApp:
                     f"({plan['rest_dev_after']:+.2f}% from "
                     f"{plan['nominal_mm2']:.2f})")
         self.status.config(
-            text=f"RE-ANCHORED (scale only, no re-review): {old_txt} → "
+            text="RE-ANCHORED (scale only, no re-review)"
+                 + unrecorded_txt
+                 + f": {old_txt} → "
                  f"{new_ref['diam_px']:.1f} px, {plan['n_derive']} row(s) "
                  f"re-derived"
                  + (f", {plan['n_blank']} blanked" if plan['n_blank'] else '')

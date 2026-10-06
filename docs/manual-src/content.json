@@ -938,7 +938,7 @@
    },
    {
     "label": "Auto-open Edge Review",
-    "what": "When a run finishes with frames, launches Edge Review on it and starts a default detection pass."
+    "what": "When a run finishes with frames, launches Edge Review on it and starts a default detection pass. That window closes by itself after a Save of that run with nothing to report: no warning, no scale caveat, and a real mm scale. Any message keeps it open, and so does switching it to another run."
    },
    {
     "label": "🔍 Edge Review… / 🎚 Tune params…",
@@ -1455,7 +1455,11 @@
    },
    {
     "label": "💾 Save to data.csv… (Edge Review)",
-    "what": "Writes accepted areas into the run's data.csv after a confirm prompt; keeps data.csv.bak and saves an area-vs-voltage plot plus outline overlays."
+    "what": "Writes accepted areas into the run's data.csv after a confirm prompt; keeps data.csv.bak and saves an area-vs-voltage plot plus outline overlays. When the run folder holds a video, Save then re-runs the video edge pass in the background if its edges are out of date, and the status line says so; run.log records the result. If the scale anchor could not be recorded in setup.txt, the status line says so and what to do."
+   },
+   {
+    "label": "🎞 Video review… (Edge Review)",
+    "what": "Live when the run folder holds a video recorded with the SLDEA tab's Record box. It shows only the video frames that need a person: the ones the detector doubts or finds no edge on, the ones that read more than 2 % off the run's accepted stills for their landing, and, between landings, a spike or the frame a 2 % step lands on. The run-wide offset between the video and the stills is measured and divided out first. Each frame comes with the detector's outline and its place on the area-against-time figure. Left / Right step one frame, N / P jump to the next or previous undecided flagged frame, A accepts, R rejects, C clears, Shift+A / Shift+R decide a whole flagged stretch, Esc closes. Decisions go to video_review.csv, never to data.csv, and video_edges.png is redrawn with them on close. The same window opens from the command line with python sldea_video_review.py RUN. Not bench-checked yet (BENCH_TEST Q16 and Q17)."
    },
    {
     "label": "❓ How to use… (Edge Review)",
@@ -1471,7 +1475,7 @@
    },
    {
     "label": "sldea_video.py (headless)",
-    "what": "Runs Edge Review's edge detector on every frame of a run's video.mkv (recorded with the SLDEA tab's Record box) and writes video_edges.csv plus video_edges.png, area against elapsed time with the kV staircase, into the run. --stride N analyses every Nth frame, --limit N stops after N; about 0.2 s per frame. --selftest checks that this PC can write the lossless video at all. --finalize STAGING RUN moves a staged recording into its run folder by hand, when the run log says a move did not complete (the copy goes to a .part file first, so an interrupted one never leaves a truncated video). Changes nothing else in the run."
+    "what": "Runs Edge Review's edge detector on every frame of a run's video.mkv (recorded with the SLDEA tab's Record box) and writes video_edges.csv plus video_edges.png, area against elapsed time with the kV staircase, into the run. --stride N analyses every Nth frame, --limit N stops after N; about 0.2 s per frame. --selftest checks that this PC can write the lossless video at all. --finalize STAGING RUN moves a staged recording into its run folder by hand, when the run log says a move did not complete (the copy goes to a .part file first, so an interrupted one never leaves a truncated video). video_edges.json records what each pass ran with (settings, baseline fit, area method, scale anchor), so a later pass can tell when the edges are out of date; Edge Review's Save starts one by itself (--after-save) in that case. Changes nothing else in the run."
    },
    {
     "label": "--mode area | current | power",

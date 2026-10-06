@@ -2349,6 +2349,44 @@ def test_detect_restarts_the_session_clock_and_the_pass_end_stops_it():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_the_stopped_session_line_shows_the_time_at_the_stop():
+    """The session line a pass leaves behind is the time AT the stop
+    (2026-10-06). `#364` cancelled the tick and kept the last painted
+    value, which a pass run without the event loop (detect_all_sync: the
+    manual capture) never repainted: the v1.4.2 capture showed
+    "session 0s" beside "detect: 81 frames in 14s"."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('session clock value at stop')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_clock_stop_value_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_A'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app._clock_on
+        assert app.clock_lbl.cget('text') == 'session 0s', \
+            app.clock_lbl.cget('text')
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        # five minutes since the window opened, and no tick in between:
+        # the event loop is never pumped
+        app._t_session -= 300
+        app.detect_all_sync()
+        assert not app._clock_on, "the pass did not stop the session clock"
+        held = app.clock_lbl.cget('text')
+        assert held.startswith('session 5m'), held
+        # a stop of a clock that is already stopped repaints nothing
+        app._t_session -= 60
+        app._stop_session_clock()
+        assert app.clock_lbl.cget('text') == held, app.clock_lbl.cget('text')
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_closing_mid_pass_leaves_nothing_scheduled():
     """`#364` restarts the session tick on every Detect, so the busiest
     moment to close the window is during a pass: the tick and the poll

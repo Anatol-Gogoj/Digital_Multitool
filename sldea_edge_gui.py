@@ -3264,7 +3264,20 @@ class EdgeReviewApp:
         running. The flag alone would stop the repainting, but the tick
         already scheduled would stay queued until it fired and read the
         flag; it is cancelled outright, so nothing of the clock is left
-        pending once it is stopped."""
+        pending once it is stopped.
+
+        THE VALUE LEFT IS THE ONE AT THE STOP (2026-10-06). The last tick
+        can be up to a second old, and a pass run without the event loop
+        (detect_all_sync: the manual capture, the tests) never ticked at
+        all, so the v1.4.2 manual capture froze "session 0s" beside
+        "detect: 81 frames in 14s". A running clock is painted once more
+        here; a stopped one is left alone."""
+        if self._clock_on:
+            try:
+                self.clock_lbl.config(
+                    text=session_readout(time.time() - self._t_session))
+            except tk.TclError:
+                pass                    # the window closed under the stop
         self._clock_on = False
         self._drop_clock_job()
 

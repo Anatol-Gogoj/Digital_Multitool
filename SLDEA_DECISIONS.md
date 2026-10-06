@@ -13,6 +13,246 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## The video is reviewed by exception: Save re-runs stale video edges, the accepted stills flag the frames, and a window walks them (2026-10-06)
+
+**TL;DR:** the video pass used to run once, minutes after the run, before
+anyone calibrated, and nothing ever read its output again. Now Edge
+Review's Save re-runs it whenever its edges are out of date. Each frame is
+checked against the run's accepted stills, which are frames of the same
+stream. A new 🎞 **Video review…** window walks only the frames the
+detector doubts or that disagree with the stills, and records accept /
+reject decisions in `video_review.csv`. `data.csv` is never touched by it.
+
+**Observation (13_backlight_2, 2026-10-05).**
+
+- The post-run job finished the video pass at 20:47:29 and the operator
+  saved the scale anchor at 20:51:20. The pass therefore ran with no scale
+  and the baseline fit as it was then (refused): `video_edges.csv` has 438
+  rows, every one flagged for review, none with an area.
+- Nothing re-ran it, and no tool read `video_edges.csv`. The only way to
+  look at a frame was `ffplay` and a guess at which ones mattered.
+
+**Decision.**
+
+- **Provenance.** The pass writes `video_edges.json` beside the CSV: the
+  detection settings, the baseline fit, the area method, the scale anchor,
+  stride and limit. `edges_stale` compares that record with the run as it
+  is now and names each input that changed. The CSV is written to a
+  `.part` file and renamed into place, so a failed pass leaves the old one
+  whole.
+- **Re-run after Save.** `save()` calls `sldea_video.after_save` after
+  data.csv, the anchor and the stamp are written, since all three are
+  inputs. When the edges are stale, a detached, low-priority
+  `sldea_video.py RUN --after-save` measures every frame again and logs
+  into `run.log`. A video still in local staging is not in the folder yet,
+  and the post-run job detects before it moves the files, so the re-run
+  cannot race it. Closing Edge Review does not stop the re-run.
+- **Checkpoints.** Every data.csv row with an area is an accepted still.
+  Its time is that of the stream frame it came from, read from `run.log`
+  ("(frame t=…s)"), with the planned time as the fallback.
+- **Flags** (`review_flags`). A frame is sent to a human when:
+  - the detector doubts it (`needs_review`), or found no edge;
+  - inside a landing bracketed by accepted stills, it reads more than
+    `REVIEW_BAND_PCT` = 2 % outside their range. That is the top of the
+    ±1–2 % budget in SLDEA_MEASUREMENT.md §1.1;
+  - outside any landing, it is a one-frame spike, or the frame where a step
+    of more than `REVIEW_JUMP_PCT` = 2 % lands. Per-frame repeatability is
+    0.08–0.26 % SD (§2.1).
+
+  Both the detector's confidence and agreement with the stills are needed
+  to pass a frame.
+- **Run-wide offset.** The video pass fits the baseline on the recorder's
+  cvtColor decode, the stills on the PNG decode. On a low-contrast disc the
+  two fits differ. `still_offset` measures the median video/still ratio at
+  the stills' own times. The bands are scaled by it, and it is said in
+  `run.log` and in the window. When it exceeds the band itself, the window
+  warns to check the anchor and the baseline.
+- **The window** (`sldea_video_review.py`, also runnable as
+  `python sldea_video_review.py RUN`):
+  - **Figure:** the area-against-time figure, with every series given its
+    own marker shape as well as a Tol colour.
+  - **Frame view:** the frame from `video.mkv`, cropped to the tracker's
+    search window, with the detector's outline re-detected on demand. The
+    re-detection uses the previous frame's method, so it reproduces the
+    pass's own choice. It runs on a worker thread that holds no Tk object.
+  - **Keys:** A / R / C, stretches with Shift, N / P between flagged
+    frames.
+  - **Decisions** go to `video_review.csv` with the area they judged. A
+    decision about an area the detector no longer reports is dropped, and
+    the drop is counted.
+  - **On close,** `video_edges.png` is redrawn with the decisions.
+- **Format unchanged: FFV1, lossless, full frame, 1 fps default.**
+  Measured on real frames (decoded the way the recorder decodes them,
+  OpenCV 4.13, this machine):
+
+  | format | MB/frame, 13_backlight_2 | MB/frame, P3_2 | worst area error vs lossless (13_bl_2 / P3_2) |
+  |---|---|---|---|
+  | FFV1 (today) | 0.641 | 0.516 | 0 / 0 (bit-exact) |
+  | FFV1, cropped to the search window, baseline outside | 0.459 | 0.380 | 0 % / **93 %** (the seam reads as edges) |
+  | VP9 | 0.175 | 0.119 | 0.8 % / **11.8 %** |
+  | MJPG | 0.067 | 0.055 | 0.8 % / **27.7 %** |
+  | MPEG-4 part 2 | 0.025 | 0.020 | 1.3 % / **40.6 %** |
+
+  - The real 13_backlight_2 recording is 280.4 MB for 438 frames, i.e.
+    0.64 MB/frame, or about 2.3 GB an hour at 1 fps.
+  - The zeroth-order entropy of the LOCO-I residual (sensor noise 1.7–2.1
+    gray) is 0.58–0.69 MB/frame. FFV1's context model already beats it, so
+    no lossless coder will do much better.
+  - FFV1's `coder`/`context` options changed nothing through OpenCV.
+  - This build has no H.264 (OpenH264 missing). AV1 took about 90 s for
+    two frames.
+  - The lossy formats look harmless at the median (0.13–0.52 %), but their
+    worst frames on the wrinkle-mode P3 run are 12–41 % wrong. That
+    confirms the 2026-09-23 reason for lossless.
+
+**Evidence.**
+
+- **Tests:**
+  - `tests/test_sldea_video.py`: flags, checkpoints, the offset, the stamp
+    and staleness, whole-or-nothing writes, the after-Save launcher and
+    job, decisions, and the figure's series.
+  - `tests/test_sldea_video_review.py` (new): navigation, decisions and
+    reopen, stretches, the off-thread outline, a clean close, and the
+    stale banner with its re-run.
+  - `tests/test_sldea_edge_gui.py`: the button and the Save hook.
+- **End to end** on a copy of 13_backlight_2:
+  - **Setup:** a 438-frame FFV1 video built from its stills on the real
+    `video_frames.csv` timing (281 MB, the original is 280.4 MB). The 60
+    stills were detected and accepted as a Save would write them, with the
+    baseline-fit retry of #365 merged locally.
+  - **Staleness:** `edges_stale` said "the automatic baseline fit changed
+    (none -> 405.2 px)".
+  - **Re-run:** `--after-save` measured all 438 frames in 72–77 s, with
+    2 frames flagged (frames 0 and 1, the detector's own doubt at 0 kV).
+    The video read −1.19 % against the stills (p10 −1.54, p90 −0.80).
+  - **Window:** opens in 0.9 s; outlines arrive in 0.4–0.6 s per frame.
+- **Found on the way and fixed in #365:** the retry's fill rule read 59 %
+  on the PNG and 51 % on the video decode of the same baseline. The
+  retry's fill is now the ring's 25th percentile.
+
+**Open.**
+
+- On a backlit run like 13_backlight_2, the video pass measures only with
+  #365 merged. Without it the baseline fit refuses, and every frame is
+  flagged by the detector, as before.
+- `test_sldea_video`'s FFV1 writer fails intermittently on Gogojster
+  (Windows, OpenCV 4.13). About one process in five sees "Unknown C++
+  exception" from `VideoWriter.write`, after which every write in that
+  process fails, so a suite skips or fails in a cascade. It is the same on
+  origin/main and has not been seen on the bench.
+- BENCH_TEST §Q16 (re-run after Save) and §Q17 (the window) are owed, with
+  §Q itself.
+
+## The baseline disc fit retries from the window centre when it refuses, and judges that retry against the ring around the disc (2026-10-05)
+
+**TL;DR:** on backlit run `13_backlight_2` the automatic baseline fit
+refused, so no other frame of the run could be measured: the tracker needs
+that fit, and the hand anchor only supplies the scale and the baseline's
+A0. When the original fit refuses, a second trace now starts at the centre
+of the search window and compares the disc with the ring just outside it
+instead of the frame-wide median. Every fit the original trace made is
+unchanged.
+
+**Observation (13_backlight_2 baseline, measured 2026-10-05, OpenCV 4.13).**
+
+- Rim step, outside minus inside: median 5.8 gray (2.7 %); 2.9-4.6 on the
+  right half, about 10 on the left. Rise 10-90 % in 17 px: sharp, but
+  shallow. Sensor noise about 2 gray, so noise is not the limit.
+- Backlight across the search window: about 212 (dim right side) to 226
+  (upper left). Frame-wide median 216; disc interior 213-215; the ring just
+  outside the disc 219-220. The median sits between the disc and its own
+  surround.
+- The seed class (paper - 5 = 211) took 0 % of the disc, so the seed
+  landed on the dim right side and 11 of 360 rays were usable (needs 40).
+- Seeded on the disc instead, the ray stage traces it: 160 edge points,
+  260° of arc, residual 1.5 % of r, circularity 0.96. The fill gate then
+  fails at 6 % against paper - 4, and passes at 59 % against the ring's
+  median - 4.
+- Flat-fielding the frame first (subtracting a 488-648 px closing) does not
+  rescue it: the disc stays about 4 levels below its surround, and 18 % of
+  it reaches the seed class.
+- Consequence: all 59 other rows were rejected "no reliable edge" (the
+  diff and texture channels see nothing; the disc moves about 1 px in
+  radius below 3 kV), and all 438 video frames were flagged.
+
+**Decision.**
+
+- `_baseline_disc_uncached` runs the original trace unchanged. Only when it
+  refuses does a retry run, seeded at the window centre, with the fill
+  judged against the ring from 1.15 r to 1.5 r around the fitted circle
+  (foil and glint excluded): the share of the interior darker than that
+  ring's 25th percentile. Every other gate is shared.
+- Why a percentile and not a margin under the ring's median (2026-10-06,
+  found by the video review's end-to-end check): with a fixed 4-level
+  margin the fill read 59 % on the baseline PNG and 51 % on the video
+  pass's cvtColor decode of the same file, which differ by at most one gray
+  level (0.5 on average). That is either side of the 55 % gate, so the
+  video pass refused the baseline the stills fitted. The ring's own
+  percentile moves with the picture: 0.90-0.96 on both decodes of both
+  0 kV frames. A circle with no darker disc under it reads about 25 % by
+  construction.
+- The result's `seed` key says which trace produced it
+  (`DISC_SEED_DARK` / `DISC_SEED_CENTRE`); `paper_lum` is the surround
+  level (the ring's median on the retry), so the calibration display
+  stretches between the disc and the surround the fit used.
+- A refusal always states the original trace's reason. The retry starts at
+  a fixed point whatever the frame holds, so its own refusal describes
+  that point: on a blank frame it read "covers only 40° of arc" where the
+  original's "nothing dark enough to seed on" is the useful sentence.
+- Not seeded from the hand anchor's centre: the calibration dialog runs the
+  fit before any anchor exists, and threading the anchor through every
+  caller of the cached fit would let two callers see different reference
+  discs.
+- The arc gate's sentence now states the 130° it applies (13 of 36
+  ten-degree sectors), not 120°. On `SLDEA_20260806_151857` it read
+  "covers only 120° (needs ≥ 120°)". The gate itself is unchanged.
+
+**Evidence (local corpus copy on Gogojster: 14 runs, plus `13_backlight`,
+`13_backlight_2` and Wonjin's run 13; Edge Review's pipeline replayed before
+and after by `sldea_batch_eval.py`).**
+
+- The 10 baselines the original trace fits are identical: diameter, centre,
+  conf, fill, arc, residual, edge count and paper level.
+- Two new fits, both checked by eye on the frame: `13_backlight_2` at
+  407 px, and `P3_7_2.3mL_20260729` at 541 px (refused before, 18 rays).
+- The other 7 still refuse, including the blank 2026-10-01 frame and the
+  saturated 2026-08-05 frames: the retry does not invent a disc on them.
+- Frame by frame, 17 runs replay identically (status, method, area, conf).
+  `13_backlight_2`: 60 rejected became 60 auto-accepted (tracker conf
+  0.81-0.86). `P3_7`: 48 rejected and 33 review became 31 auto and 50
+  review. Its outlines follow the visible edge on the frames checked; its
+  3.0 kV landing loses 8 % of area between the two snapshots, about 57 s
+  apart at constant voltage, which is visible in the frames rather than a
+  tracking artefact. The local copy holds no reviewed P3_7 areas: compare
+  against the campaign scorecard on big-electronic-box before using them.
+- Synthetic backlit scene (`_backlit_scene` in the tests): the original
+  trace refuses (1-4 rays usable on origin/main), the retry fits 199.3 px
+  against a true 200 px, and the same scene with no disc still refuses.
+  Rounded down, up, or shifted half a level either way (the two decodes'
+  difference), it still fits within a pixel; the fixed-margin rule fails
+  that test at fill 0.65.
+- The percentile rule changes no corpus decision: the 10 original fits
+  are bit-identical, the same two runs newly fit at the same diameters,
+  and the per-frame replay of both is identical frame for frame.
+- `test_electrode_mask_255_only_costs_a_flat_synthetic_strip` documented
+  the bright painted strip as a refusal. The retry now fits it at 199.8 px
+  against a true 200 px. Its invariant, never a wrong diameter, is kept and
+  is now asserted as the correct diameter.
+
+**Open.**
+
+- On `13_backlight_2` the automatic fit (407 px) is 4.3 % smaller than the
+  hand anchor (425 px): the hand circle sits at the outer foot of the
+  17 px rim ramp, the fit at its steepest point. The anchor guard will
+  flag it. Recalibrating in verify mode puts the scale, A0 and every frame
+  on one edge definition.
+- The disc's contrast on that frame is still small (about 6 gray levels,
+  3-5 on its right half). The fit now passes with room (fill 0.92, conf
+  0.78), but a more uniform backlight is the capture-side fix.
+- The video pass ran before calibration, so `13_backlight_2`'s
+  `video_edges.csv` is empty. Since the video review entry above, the
+  next Save of that run in Edge Review re-runs it with this fit.
+
 ## The camera pre-flight shoots under the run's own lock, and says when the Webcam tab's fields and lock disagree (2026-10-05)
 
 **TL;DR:** on run `13_backlight` the pre-flight picture looked fine and

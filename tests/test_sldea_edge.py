@@ -259,8 +259,15 @@ def test_electrode_mask_255_only_costs_a_flat_synthetic_strip():
     case where the change bites: `foil_mask` is texture-derived, so it
     does not recognise a painted rectangle as foil, leaving the
     brightness cut as the only thing rejecting it. Remove that and the
-    strip's own edge becomes a strong dark->light step, so the fit
-    refuses rather than returning a wrong diameter.
+    strip's own edge becomes a strong dark->light step, so the first
+    trace refuses rather than returning a wrong diameter.
+
+    Since the window-centre retry (2026-10-05) that refusal is no longer
+    the end: the retry starts inside the disc, the strip's edges are not
+    the strongest step on most of its rays, and it recovers the disc at
+    the right diameter. The invariant this test has always guarded is
+    unchanged -- never a WRONG diameter -- and is asserted below as
+    such: the retry's circle, or nothing.
 
     On REAL data it costs nothing, which is the point of this test's
     name. Measured across all 12 readable runs of the 2026-08-05 batch
@@ -276,9 +283,16 @@ def test_electrode_mask_255_only_costs_a_flat_synthetic_strip():
     yy, xx = np.mgrid[0:480, 0:640]
     img[(xx - 320) ** 2 + (yy - 240) ** 2 <= 100 * 100] = 165.0
     img[:, 312:326] = 250.0                               # BRIGHT strip
-    assert se.baseline_disc(img, dict(se.DEFAULT_SETTINGS)) is None
-    assert se.baseline_disc(
-        img, dict(se.DEFAULT_SETTINGS, electrode_lum=220.0)) is not None
+    ref = se.baseline_disc(img, dict(se.DEFAULT_SETTINGS))
+    assert ref is not None, se.baseline_disc_refusal(
+        img, dict(se.DEFAULT_SETTINGS))
+    assert ref['seed'] == se.DISC_SEED_CENTRE, ref['seed']
+    assert abs(ref['diam_px'] - 200) / 200 < 0.02, ref['diam_px']
+    assert abs(ref['cx'] - 320) < 3 and abs(ref['cy'] - 240) < 3, \
+        (ref['cx'], ref['cy'])
+    cut = se.baseline_disc(
+        img, dict(se.DEFAULT_SETTINGS, electrode_lum=220.0))
+    assert cut is not None and cut['seed'] == se.DISC_SEED_DARK, cut
     # The gain side — that 255 lets edge detection work on a dark
     # carbon-black electrode — is a BENCH observation (2026-08-05) and is
     # deliberately NOT asserted here: it has not been reproduced on
@@ -937,6 +951,92 @@ def test_baseline_disc_refuses_when_there_is_no_disc():
     Refusal is the contract -- mm falls back loudly, not wrongly."""
     base = _bridged_scene(with_disc=False)
     assert se.baseline_disc(base, dict(se.DEFAULT_SETTINGS)) is None
+
+
+def _backlit_scene(with_disc=True, seed=11):
+    """The 13_backlight_2 failure shape (2026-10-05): a backlit membrane
+    whose disc is only 6 gray levels darker than its own surround, under
+    a backlight that falls off by ~16 levels from a plateau around the
+    disc to the window's edge. The frame-wide median then sits BELOW the
+    disc's surround (real frame: disc 214, ring 220, median 216), so no
+    pixel of the disc is darker than paper - 5 and the first trace seeds
+    on the dim edge of the backlight. Soft rim (sigma 2.5 px) and sensor
+    grain (sigma 1.5) as on the bench."""
+    import cv2
+    rng = np.random.default_rng(seed)
+    h, w = 540, 960
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    rd = np.hypot(xx - 480, yy - 270)
+    img = 208.0 + 16.0 * np.exp(-(rd / 240.0) ** 4) - 4.0 * (xx / w)
+    if with_disc:
+        disc = (rd <= 100).astype(np.float32)
+        img -= 6.0 * cv2.GaussianBlur(disc, (0, 0), 2.5)
+    img += rng.normal(0, 1.5, img.shape).astype(np.float32)
+    return np.clip(img, 0, 255).astype(np.float32)
+
+
+def test_baseline_disc_retries_from_the_centre_on_a_backlit_gradient():
+    """The first trace refuses this scene (2-4 of 360 rays from a seed on
+    the dim edge, measured 2026-10-05); the retry from the window centre,
+    with the fill judged against the ring around the circle, traces the
+    disc at its true size and centre, and says it was the retry."""
+    s = dict(se.DEFAULT_SETTINGS)
+    for seed in (11, 12, 13):
+        img = _backlit_scene(with_disc=True, seed=seed)
+        ref = se.baseline_disc(img, s)
+        assert ref is not None, se.baseline_disc_refusal(img, s)
+        assert ref['seed'] == se.DISC_SEED_CENTRE, ref['seed']
+        assert abs(ref['diam_px'] - 200) / 200 < 0.03, ref['diam_px']
+        assert abs(ref['cx'] - 480) < 5 and abs(ref['cy'] - 270) < 5, \
+            (ref['cx'], ref['cy'])
+        assert ref['circ'] > 0.9, ref['circ']
+        # paper_lum is the level the fill was judged against: the ring,
+        # which sits ABOVE the frame-wide median on this scene
+        assert ref['paper_lum'] > float(np.median(img)) + 2, \
+            (ref['paper_lum'], float(np.median(img)))
+
+
+def test_the_retry_does_not_flip_on_a_one_level_decode_difference():
+    """2026-10-06: the retry's fill used to count interior pixels 4 gray
+    levels under the ring's median. On 13_backlight_2 the PNG decode read
+    59 % and the video pass's cvtColor decode of the same file 51 %, either
+    side of the 55 % gate. Its cut is now the ring's own 25th percentile,
+    which moves with the picture: rounding the scene down or up by up to
+    one gray level, as the two decodes do, changes neither the verdict
+    nor the diameter by more than a pixel."""
+    s = dict(se.DEFAULT_SETTINGS)
+    img = _backlit_scene(with_disc=True, seed=11)
+    fits = []
+    for variant in (img, np.floor(img), np.ceil(img),
+                    np.clip(img + 0.5, 0, 255), np.clip(img - 0.5, 0, 255)):
+        ref = se.baseline_disc(variant.astype(np.float32), s)
+        assert ref is not None, se.baseline_disc_refusal(
+            variant.astype(np.float32), s)
+        assert ref['seed'] == se.DISC_SEED_CENTRE
+        assert ref['solidity'] > 0.75, ref['solidity']
+        fits.append(ref['diam_px'])
+    assert max(fits) - min(fits) < 2.0, fits
+
+
+def test_backlight_without_a_disc_still_refuses():
+    """The retry must not turn a bare backlight into a disc: the same
+    plateau and fall-off with nothing on it refuses, and the reason is
+    the first trace's (the retry's own refusal describes the point it
+    started from, not the picture)."""
+    s = dict(se.DEFAULT_SETTINGS)
+    for seed in (11, 12, 13):
+        img = _backlit_scene(with_disc=False, seed=seed)
+        assert se.baseline_disc(img, s) is None
+        why = se.baseline_disc_refusal(img, s)
+        assert why and not why.startswith('traced from'), why
+
+
+def test_the_first_trace_still_owns_every_frame_it_fits():
+    """The retry runs only after a refusal: a scene the original trace
+    fits is reported exactly as before, tagged as the dark-region seed."""
+    ref = se.baseline_disc(_bridged_scene(with_disc=True),
+                           dict(se.DEFAULT_SETTINGS))
+    assert ref is not None and ref['seed'] == se.DISC_SEED_DARK, ref
 
 
 def test_photometric_fit_mask_excludes_a_large_changed_region():

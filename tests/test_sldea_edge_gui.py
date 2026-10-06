@@ -2662,6 +2662,92 @@ def test_save_commits_csv_before_renames():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_video_review_button_and_the_save_hook_follow_the_run():
+    """2026-10-06. 🎞 Video review… is live only when the run folder holds a
+    recording; Save hands the run to sldea_video.after_save and says what
+    it answered on the strip; a hook that raises never costs the Save; a
+    run with no video says nothing about video; the window is one at a
+    time, raised rather than reopened for the same run."""
+    import sldea_edge_gui as gui
+    import sldea_video as sv
+    import sldea_video_review as vr
+    root = _tk_root_or_skip('video review button')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_video_')
+    mb = _StubMB(yes=True)
+    real_mb, real_after, real_win = gui.messagebox, sv.after_save, \
+        vr.VideoReviewWindow
+    gui.messagebox = mb
+    calls, opened = [], []
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert str(app.video_btn.cget('state')) == 'disabled'
+        assert app._tips['video_btn'].text == gui.TIPS['video_btn_disabled']
+        for name in (sv.VIDEO_FILENAME, sv.VIDEO_INDEX_FILENAME):
+            open(os.path.join(run, name), 'w').close()
+        app._sync_detect_btn()
+        assert str(app.video_btn.cget('state')) == 'normal'
+        assert app._tips['video_btn'].text == gui.TIPS['video_btn']
+
+        def after(rundir, popen=None):
+            calls.append(rundir)
+            return "video edges re-running in the background (stub)"
+        sv.after_save = after
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect_all_sync()
+        app.save()
+        assert calls == [app.rundir], calls
+        text = app.status.cget('text')
+        assert text.startswith('saved') and \
+            'video edges re-running in the background (stub)' in text, text
+
+        def boom(rundir, popen=None):
+            raise OSError("share went away")
+        sv.after_save = boom
+        app.save()
+        text = app.status.cget('text')
+        assert text.startswith('saved') and \
+            'video edges not re-run (share went away)' in text, text
+
+        sv.after_save = real_after
+        for name in (sv.VIDEO_FILENAME, sv.VIDEO_INDEX_FILENAME):
+            os.remove(os.path.join(run, name))
+        app.save()
+        assert 'video' not in app.status.cget('text'), \
+            app.status.cget('text')
+
+        class _Win:
+            def __init__(self, master, rundir, on_close=None):
+                self.rundir, self.on_close = rundir, on_close
+                self._closed = False
+                self.lifted = 0
+                self.win = self
+                opened.append(self)
+
+            def lift(self):
+                self.lifted += 1
+
+            def close(self):
+                self._closed = True
+                self.on_close(self)
+        vr.VideoReviewWindow = _Win
+        app._open_video_review()
+        app._open_video_review()
+        assert len(opened) == 1 and opened[0].lifted == 1
+        opened[0].close()
+        assert app._video_win is None
+        app._open_video_review()
+        assert len(opened) == 2
+    finally:
+        sv.after_save = real_after
+        vr.VideoReviewWindow = real_win
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_0723_era_run_saves_end_to_end():
     """audit 2026-08-05 (mutation finding): the 14-column-era compat
     branch in save() never executed under any test, and without it a
@@ -4703,6 +4789,275 @@ def test_the_status_strip_after_save_still_says_what_was_accepted_over():
     finally:
         gui.messagebox = real_mb
         root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _root_gone(root):
+    """True once `root` has been destroyed (#363): the application's Tk
+    commands go with it, so even asking whether it exists raises."""
+    import tkinter as tk
+    try:
+        root.winfo_exists()
+    except tk.TclError:
+        return True
+    return False
+
+
+def _anchors_363(se_mod, fit):
+    """(clean, caveat) hand anchors on the fixture's automatic fit, the
+    last two of test_the_status_strip_after_save_still_says_what_was_
+    accepted_over. `clean` is inside the SE gate with the cross-check
+    clear, so anchor_caveat says nothing; `caveat` is the honest anchor
+    over the SE gate, which gets the quiet SCALE CAVEAT lead. Fresh dicts
+    on every call, because Save may annotate the one it is handed."""
+    clear = se_mod.anchor_guard(fit['diam_px'], fit, 16.0)
+    assert not clear['warn'], clear
+    clean = {'method': se_mod.ANCHOR_METHOD_MANUAL,
+             'diam_px': float(fit['diam_px']), 'cal_mode': TWOPOINT,
+             'n_rounds': 5, 'spread_pct': 0.5, 'se_pct': 0.1,
+             'guard': se_mod.anchor_guard_note(clear, False)}
+    caveat = {'method': se_mod.ANCHOR_METHOD_MANUAL,
+              'diam_px': float(fit['diam_px']), 'cal_mode': CIRCLE,
+              'n_rounds': 3, 'se_pct': 1.05 / 3 ** 0.5,
+              'guard': se_mod.anchor_guard_note(clear, False)}
+    return clean, caveat
+
+
+def test_an_auto_window_closes_after_a_clean_save_and_only_then():
+    """#363 (2026-10-05). The SLDEA tab's auto-process opens Edge Review
+    with --auto on the run that just finished, and that window's job ends
+    with a clean Save of that run: data.csv, the anchor, the area-method
+    stamp, the plot and the overlays all written, no rename failed, no
+    anchor caveat. Then it closes, through root.destroy(), so the
+    <Destroy> path cancels every pending `after` callback.
+
+    Every Save with something to report keeps it open, its message where
+    it was said before: an anchor caveat or a failed plot or overlay on
+    the strip, a failed stamp or rename in its warning box, a failed
+    anchor write. So does a clean Save after the operator switched the
+    window to another run: it is the batch cockpit by then."""
+    import sldea_edge_gui as gui
+    se_mod = gui.se
+    real_detect = gui.EdgeReviewApp.detect
+    real_mb = gui.messagebox
+    real_anchor = se_mod.save_scale_anchor
+    real_stamp = se_mod.stamp_area_estimator
+    real_rename = se_mod.apply_rename_plan
+    # the --auto launch presses Detect 300 ms after opening, which would
+    # open the modal scale dialog; these cases measure through
+    # detect_all_sync instead, so the press is made a no-op
+    gui.EdgeReviewApp.detect = lambda self: None
+    mb = _StubMB(yes=True)
+    gui.messagebox = mb
+    d = tempfile.mkdtemp(prefix='edge_auto_close_')
+    root = None
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        _fake_run(os.path.join(d, 'SLDEA_20260102_000000'))
+        root = _tk_root_or_skip('auto close after save')
+        if root is None:
+            return
+        app = gui.EdgeReviewApp(root, path=run, auto=True)
+        assert app._closes_after_save(), (app._auto_run, app.rundir)
+        fit = app._auto_disc()
+        assert fit and fit.get('diam_px'), "fixture has no automatic fit"
+        clean, caveat = _anchors_363(se_mod, fit)
+        assert gui.anchor_caveat(clean) == ''
+        cav = gui.anchor_caveat(caveat)
+        assert 'SCALE CAVEAT' in cav, cav
+
+        def save_with(ref):
+            app.manual_ref = dict(ref)
+            app.detect_all_sync()
+            app.save()
+            assert not _root_gone(root), "an --auto Save with news closed"
+            return app.status.cget('text')
+
+        def no_disk(*_a, **_k):
+            raise OSError('share down')
+
+        def boom(*_a):
+            raise RuntimeError('disk full')
+
+        # AN ANCHOR CAVEAT: the strip after Save is where it is said
+        txt = save_with(caveat)
+        assert txt.startswith('saved in ') and cav in txt, txt
+        # THE PLOT OR THE OVERLAYS FAILED, on a clean anchor
+        for name in ('_save_plot', '_save_overlays'):
+            setattr(app, name, boom)
+            try:
+                txt = save_with(clean)
+            finally:
+                delattr(app, name)
+            assert txt.startswith('saved CSV; '), (name, txt)
+            assert txt.endswith('plot/overlays failed: disk full'), txt
+        # THE ANCHOR WAS NOT RECORDED in setup.txt
+        se_mod.save_scale_anchor = no_disk
+        try:
+            save_with(clean)
+        finally:
+            se_mod.save_scale_anchor = real_anchor
+        # THE AREA-METHOD STAMP WAS NOT WRITTEN (its own warning box)
+        del mb.warnings[:]
+        se_mod.stamp_area_estimator = no_disk
+        try:
+            save_with(clean)
+        finally:
+            se_mod.stamp_area_estimator = real_stamp
+        assert [w[0] for w in mb.warnings] == [
+            'Save: area-method stamp not written'], mb.warnings
+        # A FRAME RENAME FAILED (its own warning box, "Save again")
+        del mb.warnings[:]
+        se_mod.apply_rename_plan = lambda plan: (
+            0, ['SLDEA_s02_06.00kV_post-ramp.png: access denied'])
+        try:
+            save_with(clean)
+        finally:
+            se_mod.apply_rename_plan = real_rename
+        assert [w[0] for w in mb.warnings] == [
+            'Save: renames incomplete'], mb.warnings
+        # ANOTHER RUN in the same window: the operator made it a cockpit,
+        # so a clean Save of that run leaves it open
+        names = list(app.run_box['values'])
+        app.run_box.current([i for i, v in enumerate(names)
+                             if 'SLDEA_20260102_000000' in v][0])
+        app._pick_run()
+        assert not app._closes_after_save(), (app._auto_run, app.rundir)
+        txt = save_with(clean)
+        assert txt.startswith('saved in ') and 'data.csv updated' in txt, txt
+        # ...and back on its own run, a clean Save closes it
+        app.run_box.current([i for i, v in enumerate(names)
+                             if 'SLDEA_20260101_000000' in v][0])
+        app._pick_run()
+        assert app._closes_after_save(), (app._auto_run, app.rundir)
+        assert mb.errors == [], mb.errors
+        del mb.warnings[:]
+        app.manual_ref = dict(clean)
+        app.detect_all_sync()
+        # a callback that must not outlive the window, and a spy on the
+        # one shutdown path that cancels it
+        root.after(60000, lambda: None)
+        left = []
+        real_cancel = app._cancel_pending
+
+        def spy():
+            real_cancel()
+            left.append(root.tk.call('after', 'info'))
+        app._cancel_pending = spy
+        app.save()
+        assert _root_gone(root), "a clean --auto Save left the window open"
+        assert len(left) == 1 and not left[0], left
+        assert mb.errors == [] and mb.warnings == [], (mb.errors,
+                                                       mb.warnings)
+        # and it closed AFTER everything was written, not before
+        back = se_mod.load_scale_anchor(run)
+        assert back and abs(float(back['diam_px'])
+                            - clean['diam_px']) < 0.01, back
+        assert (se_mod.load_stamp(run).get('area_estimator')
+                == se_mod.AREA_ESTIMATOR_VERSION), se_mod.load_stamp(run)
+        assert os.path.isdir(os.path.join(run, 'overlays'))
+        with open(os.path.join(run, 'data.csv'), newline='') as f:
+            mm2 = [r['active_area_mm2'] for r in csv.DictReader(f)]
+        assert any(v.strip() for v in mm2), mm2
+    finally:
+        gui.EdgeReviewApp.detect = real_detect
+        gui.messagebox = real_mb
+        se_mod.save_scale_anchor = real_anchor
+        se_mod.stamp_area_estimator = real_stamp
+        se_mod.apply_rename_plan = real_rename
+        if root is not None and not _root_gone(root):
+            root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_an_auto_window_stays_open_when_the_video_rerun_did_not_start():
+    """#363 meets the video review (2026-10-06). Save hands a run with a
+    video to sldea_video.after_save; when that re-run could not start, the
+    only place it is said is the strip, so the Save is not clean and an
+    --auto window stays open. A re-run that did start is routine, and the
+    window closes as on any clean Save."""
+    import sldea_edge_gui as gui
+    import sldea_video as sv
+    se_mod = gui.se
+    real_detect = gui.EdgeReviewApp.detect
+    real_mb, real_after = gui.messagebox, sv.after_save
+    gui.EdgeReviewApp.detect = lambda self: None
+    gui.messagebox = _StubMB(yes=True)
+    d = tempfile.mkdtemp(prefix='edge_auto_video_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        for said, closes in (
+                ("video edges are out of date (x) and the re-run could not "
+                 "start (y): run `python sldea_video.py \"r\"`", False),
+                ("video edges re-running in the background (x)", True)):
+            root = _tk_root_or_skip('auto window and the video hook')
+            if root is None:
+                return
+            app = None
+            try:
+                sv.after_save = lambda rundir, popen=None, _s=said: _s
+                app = gui.EdgeReviewApp(root, path=run, auto=True)
+                fit = app._auto_disc()
+                clean, _caveat = _anchors_363(se_mod, fit)
+                app.manual_ref = dict(clean)
+                app.detect_all_sync()
+                app.save()
+                assert _root_gone(root) == closes, (said, closes)
+                if not closes:
+                    assert 'could not start' in app.status.cget('text')
+            finally:
+                if app is not None and not _root_gone(root):
+                    app._cancel_pending()
+                    root.destroy()
+    finally:
+        gui.EdgeReviewApp.detect = real_detect
+        gui.messagebox = real_mb
+        sv.after_save = real_after
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_window_opened_by_hand_stays_open_after_a_clean_save():
+    """#363 (2026-10-05). Opened by hand (the SLDEA tab's Edge Review...
+    button) or by the plot window's click-through (--goto), Edge Review
+    is the batch cockpit: it saves one run and moves to the next. A clean
+    Save leaves it open with "saved in ..." on the strip, as before."""
+    import sldea_edge_gui as gui
+    se_mod = gui.se
+    real_mb = gui.messagebox
+    mb = _StubMB(yes=True)
+    gui.messagebox = mb
+    d = tempfile.mkdtemp(prefix='edge_hand_open_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        for how in ({}, {'goto': 1}):
+            root = _tk_root_or_skip('hand-opened window stays open')
+            if root is None:
+                return
+            app = None
+            try:
+                app = gui.EdgeReviewApp(root, path=run, **how)
+                assert app._auto_run is None, (how, app._auto_run)
+                assert not app._closes_after_save(), how
+                fit = app._auto_disc()
+                assert fit and fit.get('diam_px'), "no automatic fit"
+                clean, _caveat = _anchors_363(se_mod, fit)
+                app.manual_ref = dict(clean)
+                app.detect_all_sync()
+                app.save()
+                assert not _root_gone(root), (how, "a cockpit closed")
+                txt = app.status.cget('text')
+                assert txt.startswith('saved in '), (how, txt)
+                assert 'data.csv updated' in txt, (how, txt)
+                assert 'SCALE' not in txt, (how, txt)
+                assert mb.errors == [] and mb.warnings == [], (
+                    how, mb.errors, mb.warnings)
+            finally:
+                if app is not None:
+                    app._cancel_pending()
+                if not _root_gone(root):
+                    root.destroy()
+    finally:
+        gui.messagebox = real_mb
         shutil.rmtree(d, ignore_errors=True)
 
 

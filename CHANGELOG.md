@@ -6,6 +6,71 @@ manual PDF. Older releases are summarized here and link to their full notes.
 The measurement-chain decision log (`SLDEA_DECISIONS.md`) is the record of
 *why*; this file is the record of *what shipped*.
 
+## v1.4.3 (2026-10-06, pre-release)
+
+**TL;DR:** Two fixes that reached `main` after v1.4.2. Neither has been
+checked on the bench yet. Update Software → Restart now reopens the app on
+the new version instead of the old cached copy. The camera pre-flight refuses
+a flat picture, and a run stops itself if its baseline photo is flat or
+missing, unless you chose to start anyway at the pre-flight. The bench checks
+are listed in #369, section 4.
+
+### Tools
+
+- **Restart now loads the new version** (#340). Update Software deploys to
+  the shared drive, but Restart now re-ran this PC's cached copy of the app,
+  so the old version came back. Restart now runs what the desktop icon runs,
+  which refreshes the cached copy first: the app is gone for about half a
+  minute, then opens on the new version. Restart is still not a shutdown:
+  signal generator outputs and LCR bias stay as they are during the gap, and
+  if the new version fails to start the app does not come back by itself, so
+  switch outputs off first if they must not be left unattended. Close Edge
+  Review, tuner and plot windows first, because the refresh replaces the
+  files they run from. Restart is still refused during any SLDEA run. The
+  update that first installs this fix on a PC is restarted by the old code,
+  so start the app from the icon once after it. **Not bench-checked**
+  (checks A and B in `deploy/BENCH_PC_NOTES.md`).
+
+### SLDEA test tab
+
+- **The camera pre-flight refuses a flat picture** (#348). On 2026-10-01 a
+  LIVE run went to 3 kV for 209 s on a flat dark gray picture, after a
+  pre-flight that said "exposure OK" and started on Return. A frame whose
+  central window spans less than 20 gray levels (5th to 95th percentile) is
+  now treated like a blown-out one: the dialog says NO PICTURE in bold red,
+  the start button reads ⚠ Start anyway (no picture), and pressing it asks
+  again, with No as the default. Return now starts a run only from a clean
+  pre-flight. Any warning, a picture check that could not run, a preview not
+  taken with the run's settings, a built-in camera value, or a Webcam-tab
+  lock that differs from the run's boxes leaves the focus on ✎ Adjust
+  instead. Every pre-flight is logged with its verdict.
+- **A run stops itself at a flat or missing baseline photo** (#348). The
+  0 kV baseline photo is checked as the run takes it. If it is flat, or the
+  camera gives no frame for it after giving the pre-flight one, the run
+  stops through the same path as ■ Abort (SG offset 0 V, output off) and
+  says why in a box. The baseline is shot as the first ramp begins, so on
+  the default ramp the stop comes about half a second in, at about 12 V
+  commanded; `run.log` prints the number. A run whose pre-flight got no
+  frame at all, and that you continued past the existing "No camera frame
+  available" question, is unchanged.
+- **⚠ Start anyway (no picture), then Yes, is a deliberate override**
+  (#348), for a faint device you will review by hand. It carries into the
+  run, DRY or LIVE: the baseline is still checked and logged, but the run
+  carries on, and `run.log` and setup.txt (a `Pre-flight override:` line)
+  record it. No other "start anyway" is an override. Edge Review does not
+  read the setup.txt line yet.
+- **The tab says which camera settings a run would use** (#348). A line
+  under ▶ Run gives the exposure and gain the run takes from the Webcam
+  tab's boxes. It turns amber, with the reason in words, when a value is a
+  built-in default or when the Webcam tab has locked different values.
+- All four are **not bench-checked** (BENCH_TEST section S).
+
+### Manual
+
+- Both manuals are regenerated at v1.4.3. The Tools chapter says what
+  Restart now does after an update, and the SLDEA chapter covers the camera
+  line, when Return starts a run, and the baseline stop with its override.
+
 ## v1.4.2 (2026-10-06, pre-release)
 
 **TL;DR:** Analysis only: nothing that drives an instrument or records a run

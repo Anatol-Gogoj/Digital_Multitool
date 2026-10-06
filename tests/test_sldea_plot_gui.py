@@ -599,6 +599,43 @@ def test_the_move_to_group_menu_goes_through_assign_group():
                   for i in range(sub.index('end') + 1)]
         assert labels == ['P3', '-', 'New group…', 'No group'], labels
 
+        def checks(m):
+            """{entry label: is its check shown} for a built menu, and
+            every checkable entry must still be LIVE: a check, never a
+            grayed entry."""
+            s = win.root.nametowidget(m.entrycget(0, 'menu'))
+            out = {}
+            for i in range(s.index('end') + 1):
+                if s.type(i) == 'checkbutton':
+                    assert str(s.entrycget(i, 'state')) == 'normal', i
+                    var = str(s.entrycget(i, 'variable'))
+                    out[s.entrycget(i, 'label')] = \
+                        win.root.getboolean(win.root.getvar(var))
+            return out
+        # the CURRENT group carries the check. None of the selection is
+        # grouped: No group is checked
+        assert win.selection_group() == ''
+        assert checks(menu) == {'P3': False, 'No group': True}
+        # every selected run in one group: that group is checked
+        win.set_selected_dirs([by['S2']])
+        assert win.selection_group() == 'P3'
+        assert checks(win.group_menu()) == {'P3': True, 'No group': False}
+        # a mixed selection: no check anywhere
+        win.set_selected_dirs([by['R1'], by['S2']])
+        assert win.selection_group() is None
+        assert checks(win.group_menu()) == {'P3': False, 'No group': False}
+        # choosing the checked entry is allowed, and changes nothing
+        win.set_selected_dirs([by['S2']])
+        before = win.group_list()
+        m = win.group_menu()
+        s = win.root.nametowidget(m.entrycget(0, 'menu'))
+        s.invoke(0)
+        assert win.group_list() == before
+        # back to the case the menu above was built for
+        win.set_selected_dirs([by['R1'], by['S3']])
+        menu = win.group_menu()
+        sub = win.root.nametowidget(menu.entrycget(0, 'menu'))
+
         def groups():
             return {n: c['group'] for n, c in _cells_by_name(win).items()}
         # an existing group: this is also how two spellings of one
@@ -619,6 +656,14 @@ def test_the_move_to_group_menu_goes_through_assign_group():
         sub.invoke(labels.index('New group…'))
         assert groups() == {'R1': 'Invisicon', 'S2': 'P3',
                             'S3': 'Invisicon'}, groups()
+        # with two groups: the shared one is checked, and runs from two
+        # different groups are a mixed selection like any other
+        win.set_selected_dirs([by['R1'], by['S3']])
+        assert checks(win.group_menu()) == {'P3': False, 'Invisicon': True,
+                                            'No group': False}
+        win.set_selected_dirs([by['R1'], by['S2']])
+        assert checks(win.group_menu()) == {'P3': False, 'Invisicon': False,
+                                            'No group': False}
         assert boxes.said == [], boxes.said
         # a name typed in another case JOINS the group of that name,
         # since assign_group matches names case-insensitively (`#373`),

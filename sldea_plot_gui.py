@@ -1432,6 +1432,7 @@ class PlotWindow:
         self._run_meta = []            # [{'tag', 'name', 'processed'}]
         self._sort = None              # (column id, descending) or None
         self._menu = None              # the open right-click menu, if any
+        self._menu_vars = []           # its check indicators' variables
         self._loaded = {}              # rundir -> loaded run dict (cache)
         self._prepared = []            # what the canvas is currently showing
         self._drawn_key = None         # ...and what it was derived from
@@ -2573,10 +2574,23 @@ class PlotWindow:
             return None, ''
         return ('row', row), self.row_tip(row)
 
+    def selection_group(self):
+        """-> the group EVERY selected run is in; '' when none of them is
+        in a group; None when they differ, or nothing is selected."""
+        where = {sp.group_key(k): n for k, n in self.groups.items()}
+        found = {where.get(sp.group_key(d), '') for d in self.selected_dirs()}
+        return found.pop() if len(found) == 1 else None
+
     def group_menu(self):
         """-> the right-click menu for the selected runs: one cascade,
         Move to group, holding every existing group, then New group...
         and No group. Built fresh per click, because the groups change.
+
+        The group the selection is ALREADY in carries a check: a group's
+        entry when every selected run is in it, No group when none of
+        them is grouped, and nothing for a mixed selection. A check, not
+        a grayed entry: every entry stays live, and choosing the checked
+        one simply changes nothing.
 
         Every entry goes through assign_group, the same path as the
         Groups box's Assign and Ungroup, so sp.check_groups has the last
@@ -2589,15 +2603,24 @@ class PlotWindow:
                 pass
         menu = tk.Menu(self.run_box, tearoff=0)
         sub = tk.Menu(menu, tearoff=0)
+        current = self.selection_group()
+        # a Tk variable per indicator, kept for the menu's lifetime: one
+        # that Python collects is unset in Tcl, and its check vanishes
+        self._menu_vars = []
+
+        def check(on):
+            var = tk.BooleanVar(master=menu, value=on)
+            self._menu_vars.append(var)
+            return var
         names = [name for name, _m in self.group_list()]
         for name in names:
-            sub.add_command(label=name,
-                            command=lambda n=name: self.move_to_group(n))
+            sub.add_checkbutton(label=name, variable=check(current == name),
+                                command=lambda n=name: self.move_to_group(n))
         if names:
             sub.add_separator()
         sub.add_command(label='New group…', command=self._move_to_new_group)
-        sub.add_command(label='No group',
-                        command=lambda: self.move_to_group(''))
+        sub.add_checkbutton(label='No group', variable=check(current == ''),
+                            command=lambda: self.move_to_group(''))
         menu.add_cascade(label='Move to group', menu=sub)
         self._menu = menu
         return menu

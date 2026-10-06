@@ -6,6 +6,64 @@ manual PDF. Older releases are summarized here and link to their full notes.
 The measurement-chain decision log (`SLDEA_DECISIONS.md`) is the record of
 *why*; this file is the record of *what shipped*.
 
+## v1.4.2 (2026-10-06, pre-release)
+
+**TL;DR:** Analysis only: nothing that drives an instrument or records a run
+changed. Backlit runs whose disc fit used to refuse now fit, and a new
+🎞 Video review… window in Edge Review shows only the video frames that
+disagree with your accepted stills. The video parts are **not** bench-checked
+yet (BENCH_TEST section Q, now with Q16 and Q17), so treat their flags as
+advice.
+
+### Edge Review
+
+- **A disc fit that refuses now retries from the center of the window**
+  (#365). On backlit run 13_backlight_2 the disc is only about 6 gray levels
+  darker than its surround while the backlight falls off by about 15 across
+  the window. The fit seeded on the dim side of the backlight and refused, and
+  without it Edge Review rejected all the other frames. When the first fit
+  refuses, it now retries from the center of the search window and judges the
+  disc against the ring just outside it instead of the frame-wide median. Fits
+  that already succeeded are unchanged (the ten original corpus fits are
+  bit-identical). 13_backlight_2 now fits at 407 px and P3_7 at 541 px; open
+  such a run again, ▶ Detect Edges and Save. On 13_backlight_2 the hand anchor
+  (425 px) sits at the outer foot of the disc edge, so re-check its scale in
+  verify mode (#369).
+- **Save re-runs the video pass, and 🎞 Video review… shows the frames worth a
+  look** (#366). The video edge pass used to run once, right after the run and
+  before anyone calibrated, and nothing read it again: on 13_backlight_2 all
+  438 frames came out flagged with no area. Save now re-runs it in the
+  background whenever its edges are out of date (the status line says so, and
+  `run.log` records the result), and `video_edges.json` records what each pass
+  ran with. Each video frame is checked against the run's accepted stills,
+  after the run-wide offset between the two is divided out (-1.19 % on
+  13_backlight_2). A frame goes to a person only when the detector doubts it,
+  when it reads more than 2 % off the stills of its landing, or when, between
+  landings, it spikes or a 2 % step lands on it. The new button (or
+  `python sldea_video_review.py RUN`) steps through those frames with the
+  detector's outline and records accept or reject in `video_review.csv`;
+  `data.csv` is never touched. **Not bench-checked** (BENCH_TEST Q16, Q17).
+- **A window the SLDEA tab opened for one run closes after a clean Save**
+  (#367, for #363). Any warning or scale caveat keeps it open with its
+  message. A window you opened yourself (the multi-run batch cockpit) stays
+  open, and so does an auto-opened window you switched to another run.
+- **The session clock stops when detection ends** (#368, for #364), so
+  nothing on the toolbar is still counting once the machine is done. The next
+  ▶ Detect Edges starts it again.
+- **A failed write to setup.txt is shown instead of overwritten** (#370,
+  #371). When Save or a scale-only re-anchor could not record the scale
+  anchor in setup.txt, its warning was replaced a moment later by the "saved"
+  or "RE-ANCHORED" line, although `data.csv` had already been written at that
+  anchor. The warning now stays on the final status line with what to do:
+  after a Save, Save again once the folder is writable; after a re-anchor,
+  re-anchor again and measure afresh, since Reuse offers the old anchor.
+
+### Manual
+
+- Both manuals are regenerated at v1.4.2. The companion tools chapter now
+  covers 🎞 Video review… and the video re-run at Save, and the SLDEA tab's
+  Auto-open entry says when that window closes itself.
+
 ## v1.4.1 (2026-10-05, pre-release)
 
 **TL;DR:** A bugfix release. "Trek inverts" is ticked by default and only

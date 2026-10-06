@@ -3966,8 +3966,10 @@ LOGGING:
                             vid_detect=vid_detect),
                 daemon=True).start()
             self.root.after(100, self._sldea_animate_cursor)  # playhead
-            # ...and opens with the run, once the worker is on its way
-            sldea_liveview.notify(self, 'open')
+            # ...and opens with the run, once the worker is on its way:
+            # beside this window when there is room, otherwise behind it,
+            # and the keyboard focus comes back here either way
+            sldea_liveview.notify(self, 'open_with_run')
         finally:
             if not started:
                 with self._sldea_loglock:

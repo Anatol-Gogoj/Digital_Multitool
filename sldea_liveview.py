@@ -10,9 +10,12 @@ pre-flight snapshot, and run 13_backlight (2026-10-05) shot all 60 frames
 frames the run ALREADY holds in memory:
 
 * a video run: the recorder's newest stream frame, through
-  VideoRecorder.latest_rgb() (a lock held for one reference read, and a
-  copy made outside it). (None, None) from it is shown as
-  "NO FRAME (stream stalled)", the dead-camera signal #48 asks for;
+  VideoRecorder.latest() (a lock held for one reference read, and a BGR
+  copy made outside it; only the thumbnail is converted to RGB).
+  (None, None) from it is shown as "NO FRAME (stream stalled)", the
+  dead-camera signal #48 asks for, unless the run is already finishing,
+  when a closing stream is expected and is shown in grey as "RECORDING
+  ENDED";
 * a stills-only run: the newest still, which the run thread hands over in
   ONE attribute, app._sldea_live_still, as a LiveStill. That is a plain
   reference swap: no copy, no lock the view could hold, no Tk call. The
@@ -85,6 +88,9 @@ BANNERS = {
     'closed': ("NO FRAME (stream closed)", TOL_RED),
     'ended': ("RUN ENDED, NOT LIVE", TOL_GREY),
     'error': ("LIVE VIEW ERROR, NOT LIVE", TOL_RED),
+    # the stream closing once the staircase is over or the run was
+    # stopped: expected, so grey and in words, never the red NO FRAME
+    'finishing': ("RECORDING ENDED, NOT LIVE", TOL_GREY),
 }
 
 # exposure_verdict's levels, in words and in colour
@@ -145,9 +151,11 @@ def fmt_run_time(seconds):
     return sldea_profile.fmt_duration(max(0.0, float(seconds)))
 
 
-def thumbnail(frame, width=THUMB_W):
+def thumbnail(frame, width=THUMB_W, bgr=False):
     """A NEW RGB uint8 array `width` wide with the frame's aspect ratio.
-    The input is only read, never written."""
+    The input is only read, never written. With `bgr` the input is in
+    OpenCV's BGR order (VideoRecorder.latest()) and only the small result
+    is reordered, so a 1080p frame is never converted whole."""
     import numpy as np
     arr = np.asarray(frame)
     if arr.ndim == 2:
@@ -168,6 +176,8 @@ def thumbnail(frame, width=THUMB_W):
         from PIL import Image
         out = np.asarray(Image.fromarray(np.ascontiguousarray(arr))
                          .resize((int(width), th)))
+    if bgr and out.ndim == 3 and out.shape[2] == 3:
+        out = out[:, :, ::-1]
     # always a fresh array the caller owns, whatever the path above did
     return np.array(out, dtype=np.uint8, copy=True)
 
@@ -179,7 +189,9 @@ def exposure_readout(frame, max_w=STATS_MAX_W):
     of the colour channels, 'saturated' is gray >= 250, the verdict is
     sldea_profile.exposure_verdict with sldea_edge.image_content's flat
     check. Taken on a strided sample (STATS_MAX_W), so on a frame wider
-    than that the numbers are estimates of the full frame's.
+    than that the numbers are estimates of the full frame's. Every number
+    is a mean over the colour channels, so RGB and BGR frames read the
+    same.
 
       mean, sat_pct   the numbers
       contrast        image_content's p95 - p5, or None if not checked
@@ -222,12 +234,10 @@ def exposure_words(readout):
 
 
 def _font(size):
-    """PIL's built-in font at `size` where this Pillow can scale it."""
-    from PIL import ImageFont
-    try:
-        return ImageFont.load_default(size=size)
-    except TypeError:                     # Pillow < 10.1: one fixed size
-        return ImageFont.load_default()
+    """The shared bold font at `size` px: TrueType first, cached per size
+    (pil_fonts.bold_font, the chain Edge Review's letter tags use)."""
+    import pil_fonts
+    return pil_fonts.bold_font(size)
 
 
 def _text_w(draw, text, font):
@@ -247,7 +257,9 @@ def render(thumb, kind, size=None):
     crosshair through the centre and a circle of 0.32 x the height), in
     Tol cyan over a black under-stroke so it shows on light and dark
     backgrounds. Every state gets a banner naming it; the NO FRAME states
-    also get the words large in the middle, on black."""
+    also get the words large in the middle, on black. RECORDING ENDED
+    keeps the last frame under its grey banner (words on black only when
+    there is no frame)."""
     import numpy as np
     from PIL import Image, ImageDraw
     banner, color = BANNERS.get(kind, (str(kind).upper(), TOL_GREY))
@@ -266,10 +278,12 @@ def render(thumb, kind, size=None):
             dr.line([(0, cy), (w, cy)], fill=fill, width=lw)
             dr.ellipse([cx - r, cy - r, cx + r, cy + r], outline=fill,
                        width=cw)
-    if kind in ('stalled', 'closed', 'waiting', 'idle', 'error'):
+    if kind in ('stalled', 'closed', 'waiting', 'idle', 'error',
+                'finishing'):
         big = {'stalled': ("NO FRAME", "(stream stalled)"),
                'closed': ("NO FRAME", "(stream closed)"),
                'error': ("VIEW ERROR", "nothing shown here is current"),
+               'finishing': ("RECORDING ENDED", "the run is finishing"),
                'waiting': ("WAITING", "for this run's first frame"),
                'idle': ("NO RUN YET", "")}[kind]
         if thumb is None or kind in ('stalled', 'closed', 'error'):
@@ -287,14 +301,85 @@ def render(thumb, kind, size=None):
 
 
 def _ref(obj):
-    """A callable returning `obj` without keeping it alive (a weakref),
-    or a plain closure for an object that takes no weak reference."""
+    """A callable returning `obj`. For an object that takes weak
+    references it is a weakref, which does not keep `obj` alive. For one
+    that does not (an int, or a class with __slots__) it is a closure,
+    which DOES keep it alive: identity must still be answerable. The GUI
+    only hands this a VideoRecorder or None, and a VideoRecorder takes
+    weak references, so the GUI never holds a recorder through it."""
     if obj is None:
         return lambda: None
     try:
         return weakref.ref(obj)
     except TypeError:
         return lambda: obj
+
+
+def choose_place(root, area, size, gap=16, bottom_margin=48, slack=16):
+    """Where the live view opens -> (x, y, covers_root).
+
+    `root` is the main window's (x, y, width, height), `area` the
+    (x0, y0, x1, y1) of the monitor it is on (LiveView._monitor_area),
+    `size` the view's (width, height). Beside the main window, right then
+    left, only where the whole view fits on that monitor: then it covers
+    nothing. With no free room there (a maximised main window, a narrow
+    screen), or when the main window is not on `area` at all, it goes
+    INSIDE the main window's own rectangle, at its right edge, so it is
+    on the main window's own monitor whatever the layout, and
+    `covers_root` is True: the caller then keeps the main window above
+    it, so an automatic open never covers the SLDEA tab or its status
+    line, which carries the run's alarms."""
+    rx, ry, rw, rh = (int(v) for v in root)
+    x0, y0, x1, y1 = (int(v) for v in area)
+    w, h = (int(v) for v in size)
+    on_area = (x0 - slack <= rx and rx + rw <= x1 + slack
+               and y0 - slack <= ry <= y1)
+    y = max(y0, min(ry, y1 - bottom_margin - h))
+    if on_area and rx + rw + gap + w <= x1:
+        return rx + rw + gap, y, False
+    if on_area and rx - gap - w >= x0:
+        return rx - gap - w, y, False
+    return max(rx, rx + rw - w), ry, True
+
+
+def win32_work_area(root):
+    """(x0, y0, x1, y1) of the work area (the monitor less its taskbar)
+    of the monitor that holds most of the Tk window `root`, in Tk's own
+    coordinates; None off Windows or on any failure. A window-manager
+    query only. In this DPI-unaware process user32 and Tk report the same
+    virtualised coordinates (checked 2026-10-06 against four monitors at
+    175 % on the development PC)."""
+    import sys
+    if sys.platform != 'win32':
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [('cbSize', wintypes.DWORD),
+                        ('rcMonitor', wintypes.RECT),
+                        ('rcWork', wintypes.RECT),
+                        ('dwFlags', wintypes.DWORD)]
+        user32 = ctypes.windll.user32
+        user32.MonitorFromWindow.restype = wintypes.HMONITOR
+        user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR,
+                                           ctypes.POINTER(MONITORINFO)]
+        hwnd = int(root.wm_frame(), 16)
+        hmon = user32.MonitorFromWindow(hwnd, 2)    # MONITOR_DEFAULTTONEAREST
+        if not hmon:
+            return None
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        if not user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+            return None
+        r = mi.rcWork
+        if r.right <= r.left or r.bottom <= r.top:
+            return None
+        return (r.left, r.top, r.right, r.bottom)
+    except Exception:
+        return None
 
 
 def notify(app, action, *args):
@@ -330,11 +415,13 @@ class LiveView:
     ended. Every method runs on the Tk thread.
 
     Per run: begin_run(p, dry) BEFORE the worker thread starts (state
-    only, no widgets), open() after it (the window opens with the run),
-    end_run() from the tab's _sldea_finished (the window keeps its last
-    frame, labelled RUN ENDED). open() and close() are also the
-    operator's: closing stops the loop, and a closed or never-opened
-    window costs the run nothing.
+    only, no widgets), open_with_run() after it (the window opens with the
+    run, beside the main window when there is room and otherwise BEHIND
+    it, and the keyboard focus goes back to the main window), end_run()
+    from the tab's _sldea_finished (the window keeps its last frame,
+    labelled RUN ENDED). open() and close() are the operator's: open()
+    brings the window to the front, closing stops the loop, and a closed
+    or never-opened window costs the run nothing.
 
     `state` is the last thing shown (a dict), for tests and for reading
     what the operator was looking at."""
@@ -353,6 +440,7 @@ class LiveView:
         self._good = None            # the last real frame shown this run
         self._still_key = None       # LiveStill.mono of the one in _good
         self._ended_wall = None
+        self._covers_root = False    # placed inside the main window's area
         self.state = None
 
     # per run
@@ -397,14 +485,19 @@ class LiveView:
     def is_open(self):
         return self._alive()
 
-    def open(self):
+    def open(self, front=True):
         """Show the window (create it if needed), draw now, and run the
-        loop while a run is going."""
+        loop while a run is going. `front` is the operator asking (the
+        button): the window comes to the front. Without it (the run start)
+        an existing window keeps its place in the stacking order, and a
+        new one gives the keyboard back to the main window and stays
+        behind it when it had to be put over it (_after_map)."""
+        built = False
         if not self._alive():
             self._build()
-        else:
-            # brought back if it was minimised or behind another window;
-            # stacking only, no focus is taken
+            built = True
+        elif front:
+            # brought back if it was minimised or behind another window
             try:
                 self.win.deiconify()
                 self.win.lift()
@@ -413,6 +506,39 @@ class LiveView:
         self._img_key = None
         self._refresh()
         self._schedule()
+        if built and not front:
+            self._after_map()
+
+    def open_with_run(self):
+        """The run start's open (gui.sldea_run): never in front of the
+        main window's tab, never holding the keyboard."""
+        self.open(front=False)
+
+    def _after_map(self):
+        """Once the new window is on screen (that is when the window
+        manager activates it): give the keyboard focus back to the main
+        window, and raise the main window above the view if the view had
+        to be placed over it. One-shot."""
+        win = self.win
+        done = {'once': False}
+
+        def settle(ev=None):
+            if done['once'] or (ev is not None and ev.widget is not win):
+                return
+            done['once'] = True
+            root = self.app.root
+            try:
+                if self._covers_root:
+                    root.lift()
+                root.focus_force()
+            except Exception:
+                pass
+        try:
+            win.bind('<Map>', settle, add='+')
+            if win.winfo_ismapped():
+                settle()
+        except Exception:
+            pass
 
     def close(self):
         """Stop the loop and destroy the window. The run goes on as it
@@ -467,23 +593,36 @@ class LiveView:
         self._level_bg = self._level_lbl.cget('bg')
         self._place()
 
+    # the window's size, roughly: the picture plus four text rows
+    VIEW_SIZE = (THUMB_W + 40, 600)
+
+    def _monitor_area(self):
+        """(x0, y0, x1, y1) of the MAIN WINDOW'S OWN monitor: on Windows
+        its work area from user32 (win32_work_area); elsewhere the X
+        screen. winfo_screenwidth alone is the primary monitor only, so a
+        main window on a second monitor used to send the view to the
+        first; and the virtual root (winfo_vroot*) is the bounding box of
+        all monitors, which has holes where no monitor is (measured
+        2026-10-06 on a four-monitor PC), so it is no help either."""
+        root = self.app.root
+        area = win32_work_area(root)
+        if area is None:
+            area = (0, 0, int(root.winfo_screenwidth()),
+                    int(root.winfo_screenheight()))
+        return area
+
     def _place(self):
-        """Beside the main window when the screen has room, else at the
-        screen's top right, so it does not open over the SLDEA tab's run
-        controls (Run and Abort sit at the left). No event processing."""
+        """choose_place for the main window as it stands. No event
+        processing; a failure leaves the window manager's choice."""
+        self._covers_root = False
         try:
             root = self.app.root
-            sw = int(root.winfo_screenwidth())
-            sh = int(root.winfo_screenheight())
-            # the window's size, roughly: the picture plus four text rows
-            w, h = THUMB_W + 40, 600
-            x = int(root.winfo_rootx()) + int(root.winfo_width()) + 8
-            if x + w > sw:
-                x = max(0, sw - w - 8)
-            # ...and never below the bottom of the screen (48 px for a
-            # taskbar)
-            y = max(0, min(int(root.winfo_rooty()), sh - h - 48))
+            rect = (root.winfo_rootx(), root.winfo_rooty(),
+                    root.winfo_width(), root.winfo_height())
+            x, y, covers = choose_place(rect, self._monitor_area(),
+                                        self.VIEW_SIZE)
             self.win.geometry(f"+{x}+{y}")
+            self._covers_root = covers
         except Exception:
             pass
 
@@ -564,10 +703,31 @@ class LiveView:
             kind = self._poll_stream(rec, now_mono, now_wall)
         else:
             kind = self._poll_still(now_mono)
+        if kind in ('stalled', 'closed') and self._run_over():
+            # rec.stop() runs after the staircase (up to 10 s) before
+            # _sldea_finished: a stream closing then is the run ending,
+            # not a camera fault, and is not shown in red
+            kind = 'finishing'
         return self._state(kind, now_mono, now_wall)
 
+    def _run_over(self):
+        """True once the run is on its way out: stopped (Abort, a
+        breakdown, a baseline stop) or past the end of its staircase."""
+        app = self.app
+        if getattr(app, '_sldea_stop', False):
+            return True
+        try:
+            return float(getattr(app, '_sldea_elapsed', 0.0) or 0.0) >= \
+                float(self._p.total_duration_s)
+        except Exception:
+            return False
+
     def _poll_stream(self, rec, now_mono, now_wall):
-        frame, t = rec.latest_rgb()
+        # latest(): the BGR copy. latest_rgb() would convert the whole
+        # frame to RGB on this thread before it is shrunk; only the
+        # thumbnail needs converting, and the exposure numbers are channel
+        # means, which do not care about the order.
+        frame, t = rec.latest()
         if frame is None:
             try:
                 alive = rec.reader_alive()
@@ -578,7 +738,7 @@ class LiveView:
         t0 = getattr(rec, 't0', None)
         if t is not None and t0 is not None:
             age = max(0.0, (now_mono - t0) - t)
-        self._good = {'src': 'stream', 'thumb': thumbnail(frame),
+        self._good = {'src': 'stream', 'thumb': thumbnail(frame, bgr=True),
                       'exposure': exposure_readout(frame),
                       'age_at_poll': age, 'mono': now_mono - (age or 0.0),
                       'wall': now_wall - (age or 0.0), 't_run': t,
@@ -590,8 +750,13 @@ class LiveView:
         still = getattr(self.app, '_sldea_live_still', None)
         if still is None:
             # a still from earlier in THIS run stays: begin_run cleared
-            # the previous run's
-            return 'still' if self._good is not None else 'waiting'
+            # the previous run's. A frame from this run's STREAM is not a
+            # still: the recorder it came from is no longer readable, so
+            # the stream has closed for this view.
+            g = self._good
+            if g is None:
+                return 'waiting'
+            return 'still' if g.get('src') == 'still' else 'closed'
         if still.mono != self._still_key:
             self._good = {'src': 'still', 'thumb': thumbnail(still.frame),
                           'exposure': exposure_readout(still.frame),
@@ -605,6 +770,8 @@ class LiveView:
 
     def _state(self, kind, now_mono, now_wall):
         g = self._good
+        if kind == 'still' and (g is None or g.get('src') != 'still'):
+            kind = 'waiting' if g is None else 'closed'
         st = {'kind': kind, 'banner': BANNERS[kind][0]}
         if kind == 'idle':
             st['text'] = ("No SLDEA run yet. This window opens by itself "
@@ -633,6 +800,13 @@ class LiveView:
             last = ("" if g is None else
                     f" Last frame shown was taken {fmt_clock(g['wall'])}.")
             st['text'] = f"NO FRAME: {why}.{last}"
+        elif kind == 'finishing':
+            last = ("" if g is None else
+                    f" Last frame shown was taken {fmt_clock(g['wall'])}.")
+            st['text'] = ("RECORDING ENDED, not live: the run is finishing "
+                          "(its staircase is over or it was stopped), so "
+                          "its camera stream is closing. This is expected."
+                          + last)
         else:                                           # 'ended'
             if g is None:
                 what = "No camera frame was shown during this run."
@@ -646,7 +820,8 @@ class LiveView:
             st['text'] = (f"RUN ENDED at {fmt_clock(self._ended_wall)}, "
                           f"not live. {what}")
         st['run'] = self._run_words(kind)
-        shows_frame = g is not None and kind in ('live', 'still', 'ended')
+        shows_frame = g is not None and kind in ('live', 'still', 'ended',
+                                                 'finishing')
         st['exposure'] = exposure_words(g['exposure'] if shows_frame
                                         else None)
         st['thumb'] = g['thumb'] if shows_frame else None

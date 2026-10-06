@@ -430,7 +430,7 @@ def test_the_start_path_forgets_the_last_run_before_the_worker_exists():
     begin = src.index("sldea_liveview.notify(self, 'begin_run', p, dry)")
     thread = src.index('threading.Thread(')
     start = src.index('daemon=True).start()')
-    opened = src.index("sldea_liveview.notify(self, 'open')")
+    opened = src.index("sldea_liveview.notify(self, 'open_with_run')")
     assert clear < begin < thread < start < opened, \
         (clear, begin, thread, start, opened)
     fin = _inspect.getsource(G._sldea_finished)
@@ -477,20 +477,26 @@ class _App:
 
 
 class _Rec:
-    """A recorder stand-in: latest_rgb() hands out a COPY of `frame` aged
-    `age` s on the run clock, or (None, None)."""
+    """A recorder stand-in: latest() hands out a COPY of `frame` (BGR, as
+    VideoRecorder.latest does) aged `age` s on the run clock, or
+    (None, None). latest_rgb() is the whole-frame conversion the view must
+    not use (review finding 6): it fails the test."""
 
     def __init__(self, frame=None, age=0.2, alive=True, t0=None):
         self.frame, self.age, self.alive = frame, age, alive
         self.t0 = _time.monotonic() - 30.0 if t0 is None else t0
         self.calls = 0
 
-    def latest_rgb(self, max_age_s=sldea_video.STILL_MAX_AGE_S,
-                   not_before=None):
+    def latest(self, max_age_s=sldea_video.STILL_MAX_AGE_S,
+               not_before=None):
         self.calls += 1
         if self.frame is None:
             return None, None
         return self.frame.copy(), (_time.monotonic() - self.age - self.t0)
+
+    def latest_rgb(self, *a, **k):
+        raise AssertionError("the view converted a whole frame "
+                             "(latest_rgb); it must use latest()")
 
     def reader_alive(self):
         return self.alive
@@ -517,13 +523,13 @@ def _view(period_ms=100):
 
 
 def _start(app, view, p=None, dry=True):
-    """What sldea_run does: clear, begin, (worker), open."""
+    """What sldea_run does: clear, begin, (worker), open with the run."""
     app._sldea_running = True
     app._sldea_stop = False
     app._sldea_elapsed = 0.0
     app._sldea_live_still = None
     assert lv.notify(app, 'begin_run', p or _profile(), dry)
-    assert lv.notify(app, 'open')
+    assert lv.notify(app, 'open_with_run')
 
 
 def _finish(app):
@@ -618,7 +624,7 @@ def test_a_tick_that_fails_after_a_live_frame_blanks_the_picture():
 
         def broken(*a, **k):
             raise RuntimeError("decoder hiccup")
-        rec.latest_rgb = broken
+        rec.latest = broken
         _pump(root, 0.3)
         assert view.state['kind'] == 'error', view.state
         assert view.state['thumb'] is None
@@ -627,7 +633,7 @@ def test_a_tick_that_fails_after_a_live_frame_blanks_the_picture():
         assert 'not live' in text and 'decoder hiccup' in text, text
         assert view._img_key == ('error', None)
         assert view._job is not None, "the loop died with the error"
-        del rec.latest_rgb                         # it recovers
+        del rec.latest                             # it recovers
         _pump(root, 0.3)
         assert view.state['kind'] == 'live', view.state
 
@@ -876,6 +882,327 @@ def test_the_sldea_tab_has_a_button_that_opens_the_view():
         view.close()
     finally:
         root.destroy()
+
+
+# --------------------------------------------------------------------------
+# review findings (2026-10-06)
+# --------------------------------------------------------------------------
+
+def test_placement_opens_beside_only_with_room_on_the_main_windows_monitor():
+    """Findings 1 and 2. Beside the main window when the whole view fits
+    on the main window's own monitor; otherwise inside the main window's
+    own rectangle, flagged so the caller keeps the main window above."""
+    size = (520, 600)
+    primary = (0, 0, 1646, 1029)
+    # room on the right
+    assert lv.choose_place((100, 100, 700, 500), primary, size) == \
+        (816, 100, False)
+    # no room right, room left
+    assert lv.choose_place((900, 50, 700, 500), primary, size) == \
+        (364, 50, False)
+    # a maximised main window: no room anywhere -> inside it, covering
+    x, y, covers = lv.choose_place((0, 0, 1646, 1000), primary, size)
+    assert covers and (x, y) == (1126, 0), (x, y, covers)
+    # never below the monitor's bottom (48 px for a taskbar)
+    assert lv.choose_place((100, 700, 700, 300), primary, size)[1] == 381
+    # Finding 2: the main window on a second monitor right of the
+    # primary. The old rule clamped to the primary's width and opened
+    # the view on the FIRST monitor, at x = 1118.
+    second = (1646, 0, 3566, 1050)
+    x, y, covers = lv.choose_place((1700, 100, 900, 600), second, size)
+    assert (x, covers) == (2616, False) and x >= 1646, (x, covers)
+    # ...and maximised there: inside it, on the second monitor
+    x, y, covers = lv.choose_place((1646, 0, 1920, 1010), second, size)
+    assert covers and 1646 <= x <= 3566 - 520, (x, covers)
+    # a main window that is not on the area handed in is never placed
+    # "beside" on that area: the area is some other monitor
+    x, y, covers = lv.choose_place((2000, 100, 700, 500), primary, size)
+    assert covers and x >= 2000, (x, covers)
+
+
+def test_the_main_windows_monitor_is_its_own_on_windows():
+    """Finding 2: user32's work area of the monitor that holds the main
+    window, in Tk's coordinates."""
+    if _sys.platform != 'win32':
+        raise _Skip("Windows only: elsewhere the X screen is used")
+    root = _tk()
+    try:
+        root.geometry('300x200+120+140')
+        root.update()
+        area = lv.win32_work_area(root)
+        assert area is not None, "no work area from user32"
+        x0, y0, x1, y1 = area
+        rx, ry = root.winfo_rootx(), root.winfo_rooty()
+        assert x0 <= rx < x1 and y0 <= ry < y1, (area, rx, ry)
+        # ...and it is what the view places itself against, not the
+        # primary screen's width
+        view = lv.LiveView(_types.SimpleNamespace(root=root))
+        assert view._monitor_area() == area, (view._monitor_area(), area)
+        # (here the primary's work area may equal the screen, so prove it
+        # with a monitor that is clearly not the primary)
+        saved = lv.win32_work_area
+        lv.win32_work_area = lambda _root: (1646, -1080, 3566, 0)
+        try:
+            assert view._monitor_area() == (1646, -1080, 3566, 0)
+        finally:
+            lv.win32_work_area = saved
+    finally:
+        root.destroy()
+    assert lv.win32_work_area(_types.SimpleNamespace(
+        wm_frame=lambda: 'not a handle')) is None
+
+
+class _Spy:
+    """Wraps a root method, recording calls and passing them through."""
+
+    def __init__(self, root, name, calls):
+        self.real = getattr(root, name)
+        self.name, self.calls = name, calls
+
+    def __call__(self, *a, **k):
+        self.calls.append(self.name)
+        return self.real(*a, **k)
+
+
+def _spy(root):
+    calls = []
+    root.focus_force = _Spy(root, 'focus_force', calls)
+    root.lift = _Spy(root, 'lift', calls)
+    return calls
+
+
+def _stack(root):
+    return root.tk.eval('wm stackorder .').split()
+
+
+def test_the_run_start_open_gives_the_keyboard_back_to_the_main_window():
+    """Finding 3: the window built at a run start hands the focus back to
+    the main window once it is mapped, and with room beside the main
+    window it opens there, covering nothing."""
+    with _view() as (root, app, view):
+        root.geometry('240x60+30+30')
+        root.update()
+        calls = _spy(root)
+        view._monitor_area = lambda: (0, 0, 3000, 2000)
+        _start(app, view)
+        _pump(root, 0.4)
+        assert calls.count('focus_force') == 1, calls
+        assert 'lift' not in calls, calls
+        assert not view._covers_root
+        assert view.win.winfo_rootx() > root.winfo_rootx() + 240, \
+            view.win.winfo_geometry()
+
+
+def test_with_no_room_the_run_start_open_stays_behind_the_main_window():
+    """Finding 1: no free room (here: the monitor is exactly the main
+    window) puts the view inside the main window's rectangle, and the
+    main window is raised above it once it is mapped. The button still
+    brings it to the front."""
+    with _view() as (root, app, view):
+        root.geometry('700x620+30+30')
+        root.update()
+        calls = _spy(root)
+        rx, ry = root.winfo_rootx(), root.winfo_rooty()
+        view._monitor_area = lambda: (rx, ry, rx + root.winfo_width(),
+                                      ry + root.winfo_height())
+        _start(app, view)
+        _pump(root, 0.5)
+        assert view._covers_root
+        assert calls == ['lift', 'focus_force'], calls
+        order = _stack(root)
+        assert order[-1] == '.', ("the view opened over the main window",
+                                  order)
+        vx = view.win.winfo_rootx()
+        assert rx <= vx <= rx + root.winfo_width(), (vx, rx)
+        # the operator's button: in front, and no focus taken back
+        del calls[:]
+        assert lv.notify(app, 'open')
+        _pump(root, 0.3)
+        assert _stack(root)[-1] == str(view.win), _stack(root)
+        assert calls == [], calls
+        # a later run start leaves an existing window where it is
+        _finish(app)
+        _start(app, view)
+        _pump(root, 0.3)
+        assert calls == [], calls
+
+
+def test_a_stream_frame_is_never_shown_as_a_still():
+    """Finding 4: a recorder that stops being readable (a natural cleanup
+    of _sldea_recorder would do it) leaves a STREAM frame in hand. That
+    is not a still: no 'still' state, no VIEW ERROR, and the run end
+    still shows the stream frame."""
+    with _view() as (root, app, view):
+        _start(app, view)
+        app._sldea_recorder = _Rec(frame=_disc_frame(), age=0.1)
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live'
+        app._sldea_recorder = None                       # cleaned up
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'closed', view.state
+        assert 'error' not in view.state['kind']
+        app._sldea_elapsed = 99.0                        # staircase over
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'finishing', view.state
+        _finish(app)
+        text = view._state_lbl.cget('text')
+        assert view.state['kind'] == 'ended'
+        assert 'video stream frame taken' in text, text
+    # and the state builder refuses a still state on a stream frame
+    view = lv.LiveView(_types.SimpleNamespace(root=None))
+    view._good = {'src': 'stream', 'wall': _time.time(), 'thumb': None,
+                  'exposure': None, 'seq': 1.0}
+    view._p = _profile()
+    st = view._state('still', _time.monotonic(), _time.time())
+    assert st['kind'] == 'closed', st
+
+
+def test_a_stream_closing_as_the_run_finishes_is_grey_not_a_fault():
+    """Finding 5: between rec.stop() and _sldea_finished the stream
+    closes at every normal video-run end. Once the staircase is over or
+    the run was stopped, that is RECORDING ENDED in grey, with the last
+    frame kept; a stream that dies mid-run is still red NO FRAME."""
+    with _view() as (root, app, view):
+        p = _profile()
+        _start(app, view, p)
+        rec = _Rec(frame=_disc_frame(), age=0.1)
+        app._sldea_recorder = rec
+        app._sldea_elapsed = 1.0
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live'
+        # mid-run death: red
+        rec.frame, rec.alive = None, False
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'closed'
+        assert lv.BANNERS['closed'][1] == lv.TOL_RED
+        # the staircase is over: grey, in words, with the last frame
+        app._sldea_elapsed = p.total_duration_s + 0.1
+        _pump(root, 0.3)
+        st = view.state
+        assert st['kind'] == 'finishing', st
+        assert st['banner'] == "RECORDING ENDED, NOT LIVE"
+        assert lv.BANNERS['finishing'][1] == lv.TOL_GREY
+        assert 'expected' in st['text'] and 'NO FRAME' not in st['text']
+        assert st['thumb'] is not None
+        # a stall after an Abort is the run ending too
+        app._sldea_elapsed = 1.0
+        rec.alive = True                                 # stalled
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'stalled'
+        app._sldea_stop = True
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'finishing', view.state
+
+
+def test_only_the_thumbnail_is_converted_from_bgr():
+    """Finding 6: the view reads latest() (BGR) and converts the small
+    thumbnail alone. A pure-blue BGR frame must come out blue."""
+    bgr = _np.zeros((1080, 1920, 3), _np.uint8)
+    bgr[:, :, 0] = 255                                  # B in BGR
+    th = lv.thumbnail(bgr, bgr=True)
+    assert th.shape == (270, 480, 3)
+    assert tuple(th[100, 100]) == (0, 0, 255), th[100, 100]
+    assert tuple(lv.thumbnail(bgr)[100, 100]) == (255, 0, 0)
+    # the exposure numbers do not depend on the channel order (a frame
+    # with real colour, so the check is not trivially true)
+    rng = _np.random.default_rng(5)
+    rgb = rng.integers(0, 256, size=(240, 320, 3), dtype=_np.uint8)
+    a = lv.exposure_readout(rgb)
+    b = lv.exposure_readout(rgb[:, :, ::-1].copy())
+    assert a == b, (a, b)
+    with _view() as (root, app, view):
+        _start(app, view)
+        rec = _Rec(frame=bgr[:240, :320].copy(), age=0.1)
+        app._sldea_recorder = rec
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live', view.state  # latest_rgb fails
+        assert rec.calls >= 1
+        assert tuple(view.state['thumb'][50, 50]) == (0, 0, 255)
+
+
+def test_fonts_are_truetype_first_cached_and_shared_with_edge_review():
+    """Finding 7: one fallback chain (pil_fonts.bold_font), cached per
+    size; Edge Review's letter tags use the same font object."""
+    import pil_fonts
+    from PIL import ImageFont
+    f40 = pil_fonts.bold_font(40)
+    assert pil_fonts.bold_font(40) is f40
+    assert pil_fonts.bold_font(18) is not f40
+    if isinstance(f40, ImageFont.FreeTypeFont):
+        assert f40.size == 40
+    import sldea_edge_gui
+    saved = sldea_edge_gui._TAG_FONT
+    sldea_edge_gui._TAG_FONT = None
+    try:
+        assert sldea_edge_gui._tag_font() is \
+            pil_fonts.bold_font(sldea_edge_gui.TAG_PX)
+        assert sldea_edge_gui._tag_font() is sldea_edge_gui._tag_font()
+    finally:
+        sldea_edge_gui._TAG_FONT = saved
+    # rendering builds no font once the sizes are cached
+    lv.render(None, 'stalled')
+    real = ImageFont.truetype
+    built = []
+
+    def counting(*a, **k):
+        built.append(a)
+        return real(*a, **k)
+    ImageFont.truetype = counting
+    try:
+        for kind in ('stalled', 'finishing', 'live'):
+            lv.render(lv.thumbnail(_disc_frame()), kind)
+    finally:
+        ImageFont.truetype = real
+    assert built == [], built
+
+
+def test_the_font_chain_falls_back_to_the_bitmap_on_an_old_pillow():
+    """Finding 7: with no TrueType face and a Pillow whose load_default
+    takes no size, the chain still returns a font, and caches it."""
+    import pil_fonts
+    from PIL import ImageFont
+    saved = (ImageFont.truetype, ImageFont.load_default,
+             dict(pil_fonts._CACHE))
+    tried = []
+
+    def no_ttf(name, size):
+        tried.append(name)
+        raise OSError("cannot open resource")
+    bitmap = object()                      # stands for the bitmap font
+
+    def old_default(*a, **k):
+        if a or k:
+            raise TypeError("load_default() takes no arguments")
+        return bitmap
+    ImageFont.truetype, ImageFont.load_default = no_ttf, old_default
+    pil_fonts._CACHE.clear()
+    try:
+        f = pil_fonts.bold_font(77)
+        assert f is bitmap
+        assert tuple(tried) == pil_fonts.BOLD_CHAIN, tried
+        assert pil_fonts.bold_font(77) is f
+        assert len(tried) == len(pil_fonts.BOLD_CHAIN)   # cached
+    finally:
+        ImageFont.truetype, ImageFont.load_default = saved[:2]
+        pil_fonts._CACHE.clear()
+        pil_fonts._CACHE.update(saved[2])
+
+
+def test_ref_keeps_no_recorder_alive_and_says_when_it_must():
+    """Finding 8: a weakref for what takes one (a VideoRecorder does), a
+    documented strong reference only for what cannot."""
+    import gc
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        rec = sldea_video.VideoRecorder(lambda: None, tmp)
+        r = lv._ref(rec)
+        assert r() is rec
+        del rec
+        gc.collect()
+        assert r() is None, "the recorder was kept alive"
+    assert lv._ref(None)() is None
+    assert lv._ref(5)() == 5                 # no weakref: strong, as said
+    assert 'DOES keep it alive' in lv._ref.__doc__
 
 
 def _run():

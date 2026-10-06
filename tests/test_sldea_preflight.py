@@ -347,6 +347,48 @@ def test_only_a_clean_preflight_may_have_start_as_its_default_button():
     assert 'blown out' in preflight_start_button('clipped')[0]
 
 
+def test_a_builtin_camera_value_or_a_differing_tab_lock_costs_the_default():
+    """2026-10-06 (the #348/#361 merge review). A camera value that is a
+    built-in default, and the Webcam tab's lock disagreeing with the run
+    (#361), are warnings the dialog shows with a warning sign: each costs
+    the start button its default, and the report hands both through."""
+    for fallback in (False, True):
+        for tab in (False, True):
+            label, default = preflight_start_button(
+                'ok', False, True, fallback=fallback, tab_mismatch=tab)
+            assert default == (not fallback and not tab), (fallback, tab)
+            assert ('Looks good' in label) == default, label
+    assert 'built-in camera values' in preflight_start_button(
+        'ok', fallback=True)[0]
+    assert preflight_start_button('ok', tab_mismatch=True)[0] == \
+        sldea_profile.PREFLIGHT_START_LOCK_DIFFERS
+    # a gate still names the gate, whatever else is also wrong
+    assert 'no picture' in preflight_start_button(
+        'flat', fallback=True, tab_mismatch=True)[0]
+    rep = preflight_report(_disc_frame(), 6, 60, {}, 1.0,
+                           defaults=('exposure', 'gain'))
+    assert not rep['start_default'], rep['start_label']
+    rep = preflight_report(_disc_frame(), 6, 60, {}, 1.0, tab_mismatch=True)
+    assert not rep['start_default'] and \
+        rep['start_label'] == sldea_profile.PREFLIGHT_START_LOCK_DIFFERS
+    assert preflight_report(_disc_frame(), 6, 60, {}, 1.0)['start_default']
+
+
+def test_a_video_runs_missing_baseline_is_not_blamed_on_the_preview():
+    """A video run holds the camera, so the Webcam preview cannot be why
+    its baseline frame never came: the stream stalled (2026-10-06)."""
+    for override in ('', sldea_profile.PREFLIGHT_OVERRIDE_NO_PICTURE):
+        still = sldea_profile.no_baseline_frame_line(override)
+        video = sldea_profile.no_baseline_frame_line(override, video=True)
+        assert 'Webcam preview' in still and 'Webcam preview' not in video
+        assert 'video stream' in video, video
+    box = sldea_profile.baseline_stop_words('no frame', False, 0.2,
+                                            video=True)['box']
+    assert 'Webcam preview' not in box and 'cable' in box, box
+    assert 'Webcam preview' in sldea_profile.baseline_stop_words(
+        'no frame', False, 0.2)['box']
+
+
 def test_the_report_gates_a_flat_frame_and_logs_it():
     rep = preflight_report(_flat_frame(), 3, 0, {}, 0.19)
     assert rep['level'] == 'flat' and rep['gate'], rep
@@ -375,8 +417,9 @@ def test_the_report_passes_a_normal_frame_and_still_logs_it():
         and first.endswith('focus 12.30, verdict OK'), first
     assert 'contrast 6' in first and 'saturated 0.0%' in first, first
     assert rep['log_lines'][-1] == (
-        "camera pre-flight: run camera exposure 23, gain 0; nothing locked "
-        "on the Webcam tab disagrees with them"), rep['log_lines']
+        "camera pre-flight: run camera exposure 23, gain 0; this camera "
+        "has no device path, so neither the pre-flight nor the run stamps "
+        "them on it"), rep['log_lines']
     # an unscored focus is said, not printed as a number
     assert 'focus not scored' in preflight_report(
         _disc_frame(), 23, 0, {}, None)['log_lines'][0]
@@ -1550,14 +1593,22 @@ def test_dialog_starting_past_a_warning_is_one_click_and_one_log_line():
         'operator pressed: \u26a0 Start anyway (exposure warning)'), app.lines
 
 
-def test_dialog_a_preview_that_is_not_the_runs_is_said_in_bold():
+def test_dialog_a_webcam_lock_that_is_not_the_runs_is_said_in_bold():
+    """Merged with #361 (2026-10-06). The pre-flight frame is now taken
+    under the run's own lock, so it IS the run's picture: #348's bold
+    'This preview was NOT taken with the run's settings' stays away. What
+    differs is the Webcam tab's LIVE preview, which runs on its lock:
+    #361's sentence says so in bold, and as a warning it costs the start
+    button its default, so Return cannot start the run (#348's rule)."""
     lock = {'exposure_time_absolute': 30, 'gain': 0, 'brightness': 240}
 
     def probe(dlg, app, mb):
-        assert dlg.is_bold(sldea_profile.PREVIEW_MISMATCH_HEADLINE)
-        detail = dlg.label('The preview used exposure 30').cget('text')
-        assert 'The run will use exposure 3 (' in detail, detail
-        assert 'preview does not match the run' in dlg.start.cget('text')
+        assert not any('NOT taken' in t for t in dlg.texts()), dlg.texts()
+        assert dlg.is_bold("The Webcam tab's fields differ from its lock")
+        sentence = dlg.label("fields differ from its lock").cget('text')
+        assert 'exposure 3 (locked: 30)' in sentence, sentence
+        assert dlg.start.cget('text') == \
+            sldea_profile.PREFLIGHT_START_LOCK_DIFFERS, dlg.start.cget('text')
         assert not dlg.return_starts()
         assert dlg.focused() == dlg.adjust, dlg.focused()
         dlg.press_return()
@@ -1567,10 +1618,32 @@ def test_dialog_a_preview_that_is_not_the_runs_is_said_in_bold():
 
     go, app, mb, cam, lock_after = _dialog(GOOD, lock, probe)
     assert go is False and mb.calls == [] and app.tabs == []
-    assert any('NOT taken' in ln for ln in app.lines), app.lines
+    assert any('fields differ from its lock' in ln for ln in app.lines), \
+        app.lines
+    assert not any('NOT taken' in ln for ln in app.lines), app.lines
+    # the frame the check judged was taken under the run's lock
+    assert any('the lock this frame was taken under agrees' in ln
+               for ln in app.lines), app.lines
     # Cancel leaves the camera as the pre-flight always left it: the same
-    # four writes, one grab, and the Webcam-tab lock untouched
+    # four writes, one grab, and the Webcam-tab lock put back as it was
     assert cam['controls'] == RUN_CONTROLS and cam['grabs'] == 1, cam
+    assert lock_after == lock, lock_after
+
+
+def test_dialog_a_clean_picture_with_a_differing_lock_starts_by_click():
+    """The same differing lock on a clean picture: one click starts the
+    run (a warning, not a gate), and run.log says which button it was."""
+    lock = {'exposure_time_absolute': 30, 'gain': 0}
+
+    def probe(dlg, app, mb):
+        dlg.start.invoke()
+        assert not dlg.alive()
+
+    go, app, mb, cam, lock_after = _dialog(GOOD, lock, probe)
+    assert go is True and mb.calls == [], mb.calls
+    assert app.lines[-1].endswith(
+        'operator pressed: ' + sldea_profile.PREFLIGHT_START_LOCK_DIFFERS), \
+        app.lines
     assert lock_after == lock, lock_after
 
 

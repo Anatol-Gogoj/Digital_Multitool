@@ -50,6 +50,7 @@ SAMPLE = {
     'wd_on': True, 'wd_ua': '100', 'wd_s': '3',
     'tel_on': False, 'tel_hz': '2',
     'autoproc': True,
+    'vid_on': True, 'vid_fps': '1.5', 'vid_detect': False,
 }
 
 

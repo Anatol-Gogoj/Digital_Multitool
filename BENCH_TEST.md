@@ -85,7 +85,7 @@ Launch: `.venv/bin/python gui.py`
 > rework and the 52-byte USB cap discovery: the button labels below no
 > longer exist ("Save CSV Template…" → "Save Template...", "Load CSV…" →
 > "Import CSV...", "Save Current" → "Save to Library", "Upload & Select
-> on CH1" → "Send to CH:" + "Upload && Select"), direct upload is now
+> on CH1" → "Send to CH:" + "Upload & Select"), direct upload is now
 > LAN-only (refused over USB), and the K.8 max-length probe is exactly
 > the experiment that wedges the 4055B. Use the current arb workflow in
 > README §"BK 4055B arbitrary waveforms" and section L instead.
@@ -124,7 +124,7 @@ Launch: `.venv/bin/python gui.py`
 6. **View** — **Fit All**, **Zoom +/-** (zoom in far enough to grab a single point), **Periods: 2** shows the repeating output, **Time unit** (µs/ms/s) rescales the X axis; the header shows "period = \<span\>\<unit\> = \<freq\> Hz" and updates as you move the last point
 7. **Save to Library** as `bench_edit` → [ ] `presets/arb/bench_edit.csv` **and** `bench_edit.recipe.json` exist
 8. Close + reopen the editor (or **Load** `bench_edit`) → [ ] the **segment list repopulates** (re-editable, not just a flat curve)
-9. **Send to CH 1**, **Upload && Select** → the editor DERIVES the channel frequency from the X span (e.g. a 1 ms span → 1 kHz) and sets amplitude from full-scale; channel panel shows ARB + name + the derived freq/amp; on the **scope** the output period = the X span, shape matches the editor (use Periods=2 as the expected repeating view). Also try **Send to CH 2**.
+9. **Send to CH 1**, **Upload & Select** → the editor DERIVES the channel frequency from the X span (e.g. a 1 ms span → 1 kHz) and sets amplitude from full-scale; channel panel shows ARB + name + the derived freq/amp; on the **scope** the output period = the X span, shape matches the editor (use Periods=2 as the expected repeating view). Also try **Send to CH 2**.
 10. **Import CSV** (a value-column file) → [ ] becomes an editable LINE-anchored approximation you can tweak
 11. Save a **channel preset** referencing `bench_edit`, reload → [ ] select-only loads the named arb
 
@@ -583,6 +583,99 @@ Also send, once:
   and `#198` is unblocked immediately at full scope. This is why P1–P3
   are cheap and come first.
 
+## Q. SLDEA video beside the snapshots — DRY-RUN smoke, no HV (2026-09-23)
+
+> **DRY RUN only** — the camera path is what is under test, not the Trek.
+> Linux bench PC with the DFK attached, ~20 min. **The video branch must
+> not merge until this section passes** (CLAUDE.md: never ship
+> bench-unverified instrument I/O).
+
+**What this gates.** A video run holds the DFK's `v4l2-ctl` Bayer stream
+open for the WHOLE run on the recorder's own threads, where the stills
+path only ever opened it for one grab at a time. The stills then come off
+that stream instead of one-shot grabs, and the file is encoded with FFV1,
+which must exist in the bench's OpenCV wheel. None of that could be tried
+at a desk: the desk tests use a fake camera, and FFV1 was measured on a
+Windows OpenCV 5.0 build, not the bench's 4.13.
+
+- [ ] **Q1.** `python sldea_video.py --selftest` on the bench PC prints
+  `FFV1 lossless round trip: OK`. If not, stop: the bench wheel has no
+  encoder, and the tab will offer "Run WITHOUT video" instead.
+- [ ] **Q2.** SLDEA tab → 🎥 **Record**, fps **1**. The size line shows
+  roughly 2.5 GB for the default 0→10 kV profile. Set a short profile
+  (0→2 kV, 1 kV steps, 20 s landings) and press **▶ Run (DRY)**.
+- [ ] **Q3.** Within ~5 s the run log says `video: recording 1 fps to
+  local disk (…)` — **not** `delivered nothing … NO recording`.
+- [ ] **Q4.** Every `data.csv` row has a frame file. Open the baseline PNG
+  next to one from a **stills-only** dry run of the same scene and
+  settings: the same exposure, the same colour, no magenta checkerboard
+  (the Bayer-phase trap, README), mean grey within ±2 levels.
+- [ ] **Q5.** The end of the log: `video: N frames recorded at ~1.00 fps`
+  with **no** `DROPPED`, then `video.mkv and video_frames.csv are in the
+  run folder`. `video.mkv` is ~1 MB per frame.
+- [ ] **Q6.** `video.mkv` plays (VLC or `ffplay`): grey, the right way up,
+  the same field of view as the PNGs, and no frozen stretch.
+- [ ] **Q7.** During a run, Webcam tab → **Start Preview** is refused with
+  *"Camera in use — SLDEA run"* (as are Apply & Lock, Stabilize,
+  Auto-expose, grey-world and the timed/interval/stepped captures).
+- [ ] **Q8.** Start another dry video run and **■ Abort** it mid-landing:
+  the tab frees at once, and the log still ends with the video lines
+  (the move runs after the run, on its own thread).
+- [ ] **Q9.** Tick **then detect edges on every frame** and let a run
+  complete: `video_edges.csv` and `video_edges.png` appear. Where a video
+  frame and a still share a moment, their `area_px` agree within the ±2 %
+  band (open Edge Review on the stills to compare).
+- [ ] **Q10.** Loop health: in `telemetry.csv` (scope connected) the row
+  spacing is still ~0.5 s, as in a stills-only dry run — the stream must
+  not starve the loop that runs the watchdog. `top`: the app under ~50 %
+  of one core.
+- [ ] **Q11.** The real stream rate: during a video run,
+  `v4l2-ctl -d /dev/video0 --get-parm` reports ~10 fps (and the log's
+  `stream N fps` agrees); **after** the run, check it again and note
+  whether the setting persisted. A UVC format call can reset the rate,
+  and a rate that persists would slow later one-shot grabs.
+- [ ] **Q12.** Camera unplugged mid-run (dry): the log says `reopening
+  (attempt n)`, and once replugged, `camera stream reopened`. The stills
+  in between log NO FRAME; the ones after are filed normally.
+- [ ] **Q13.** Gain over a long stream: a **≥ 40-minute** dry video run
+  of an unchanging scene. Compare the baseline still with the **last**
+  still (mean grey within ±2 levels), and look for any `gain` drift in
+  the log. Every still re-stamps the full lock, gain included, as a
+  one-shot grab does; this checks that it holds.
+- [ ] **Q14.** ⚡ **LIVE, but with the Trek's HV output disabled** (HV
+  enable off / interlock open; SG CH output on the scope instead):
+  - Run a short profile with **Record on**, and **■ Abort** mid-ramp.
+    On the scope, the SG output reaches 0 V as fast as in the same
+    abort with Record **off**. The shutdown order puts the SG first;
+    this checks it.
+  - Force a watchdog trip (§N's probe, or a low trip level with a
+    resistor on I_Out). Time-to-0 V is no worse with Record on, and the
+    breakdown frame is filed.
+- [ ] **Q15.** Back to back: straight after a video run whose output dir
+  is the **share**, start a LIVE-mode run (Trek HV still disabled). The
+  tab asks *"A video is still being copied"*. Answer yes, and check the
+  telemetry spacing stays ~0.5 s while the copy runs (throttled to
+  40 MB/s).
+- [ ] **Q16.** Review by exception (2026-10-06): after the Q9 run's video
+  is in its folder, open it in Edge Review, calibrate, ▶ Detect Edges and
+  💾 Save. The strip ends with *"video edges re-running in the background
+  (…)"*, and within a minute or two `run.log` gains *"video edges:
+  re-running after Save (…)"* then *"… N flagged for review against M
+  accepted still(s) …; the video reads ±x % against the stills
+  overall"*. Note N, M and x. Save again at once: the strip now says
+  *"video edges are current"* once the first re-run has finished.
+- [ ] **Q17.** 🎞 **Video review…** opens on the first flagged frame (or
+  frame 0 when none is flagged). ← → step frames; N / P jump between
+  flagged frames; the blue outline appears within about a second; A / R
+  record a decision and move on, and `video_review.csv` gains a row.
+  Close: `video_edges.png` is redrawn with the decision (diamond or
+  cross). Note how long the outline takes to appear on this PC.
+
+Record the date and the Q1/Q5/Q10/Q11/Q13/Q14/Q16/Q17 numbers in
+`SLDEA_DECISIONS.md`.
+
+---
+
 ## R. SLDEA Run start gate — a DRY look at the dialogs, Trek HV off (2026-09-23)
 
 > **Keep the Trek's HV output OFF for this whole section.** The runs are
@@ -623,8 +716,9 @@ badly, and the `run.log` from step 4.
 > through an enabled Trek 1 V of control is 1 kV at the DEA. With the
 > Trek's HV disabled the control voltage goes nowhere. One LIVE run in S4
 > is expected to stop itself about 3 s in; the other (the override) runs
-> the whole 1 V staircase. **Every box must be ticked before the PR
-> merges.** The logic is headless-tested in
+> the whole 1 V staircase. **#348 merged on 2026-10-06 by the owner's
+> decision, before this section ran: its boxes are tracked in issue
+> #369.** The logic is headless-tested in
 > `tests/test_sldea_preflight.py` and `tests/test_sldea_interlock.py`;
 > this section is the half only the real camera, signal generator and
 > dialogs can show.
@@ -645,12 +739,16 @@ Lock**. The preview goes to an even dark gray. A **good frame** is the
 exposure you would normally run at (the disc clearly darker than the
 paper), also with **Apply & Lock**.
 
-A **mismatch start** below is the route to a flat baseline WITHOUT the
-override: good frame locked, then type `3` into `exposure_time_absolute`
-and do **NOT** press Apply & Lock. The pre-flight picture is then the good
-one (taken with the lock), the run shoots at exposure 3, and the button
-reads **⚠ Start anyway (preview does not match the run)** (one click, no
-second question). S5 checks the words of that dialog.
+A **covered start** below is the route to a flat baseline WITHOUT the
+override: good frame locked, the pre-flight shows the good picture, press
+**✔ Looks good — start run**, and at once cover the lens with a dark
+card or its cap. The warm-up is shot about 0.7 s in and the baseline about
+2 s in, so the baseline is flat. (Since #361, merged with #348 on
+2026-10-06, the pre-flight shoots at the run's own settings, so the old
+route, a typed but unlocked exposure of 3, now makes the PRE-FLIGHT frame
+flat and lands on its gate instead. S5 checks what that dialog says now.)
+Keep 🎥 **Record** unticked for S3 and S4: in a video run the baseline is
+the first stream frame after its moment, up to 1.5 s later.
 
 Since 2026-10-03 (owner decisions 12, 13 and 14) the **override** is one
 mechanism: **⚠ Start anyway (no picture)** followed by **Yes** at the
@@ -685,10 +783,10 @@ one does, when the pre-flight had a camera (S7).
 
 **S3. A flat baseline stops a DRY run, unless the pre-flight was overridden**
 
-7. The stop. Mismatch start (good frame locked, `3` typed, not locked). **▶ Run (DRY)** → **⚠ Start anyway (preview does not match the run)**
+7. The stop. Covered start: **▶ Run (DRY)** → **✔ Looks good — start run**, then cover the lens at once
    - [ ] within about 3 s the run stops by itself: the status line turns red and reads `STOPPED: NO PICTURE in the baseline frame, nothing was measured (see Run log)`, and a box titled **Run stopped: no picture** opens
-   - [ ] `run.log` holds, in this order: `operator pressed: ⚠ Start anyway (preview does not match the run)`, the `NO PICTURE ... STOPPING NOW.` line, `run stopped at the baseline frame. This was a DRY run: no voltage was driven.`, and `run aborted: 2/10 frames`
-   - [ ] the run's `frames/` folder holds exactly the warmup and the baseline frame
+   - [ ] `run.log` holds, in this order: the pre-flight's `verdict OK` line, the `NO PICTURE ... STOPPING NOW.` line, `run stopped at the baseline frame. This was a DRY run: no voltage was driven.`, and `run aborted: 2/10 frames`
+   - [ ] the run's `frames/` folder holds exactly the warmup and the baseline frame (the warmup may still show the disc if the card came late; the baseline must be dark)
    - [ ] the run's `setup.txt` has no `Pre-flight override:` line
 8. The override. Webcam tab: flat frame, **Apply & Lock**. **▶ Run (DRY)** → **⚠ Start anyway (no picture)** → **Yes**
    - [ ] the run does NOT stop: it runs to the end (about 50 s), the status line ends green `complete — 10 frames`, and no **Run stopped** box opens
@@ -700,7 +798,7 @@ one does, when the pre-flight had a camera (S7).
 **S4. A flat baseline stops a LIVE run, unless the pre-flight was overridden (Trek HV disabled)**
 
 10. Check the Trek's HV output is OFF. Untick DRY so the box reads **⚡ LIVE — HV WILL BE DRIVEN**. Scope CH1 on SG CH1 at 20 mV/div, running
-11. The stop. Mismatch start (good frame locked, `3` typed, not locked). **▶ Run — LIVE HV**, answer the questions (Energize HV: Yes), then **⚠ Start anyway (preview does not match the run)**
+11. The stop. Covered start, 🎥 Record unticked: **▶ Run — LIVE HV**, answer the questions (Energize HV: Yes), then **✔ Looks good — start run** and cover the lens at once
     - [ ] the run stops within about 3 s exactly as in S3 step 7
     - [ ] afterwards the signal generator's CH1 output is OFF and its offset reads 0 V on the front panel
     - [ ] on the scope the control voltage never rose above 0.1 V (expected under 40 mV for well under a second: the first ramp is one loop tick old when the baseline is shot, and that tick is the same on every run)
@@ -712,20 +810,20 @@ one does, when the pre-flight had a camera (S7).
     - [ ] `run.log` and `setup.txt` carry the same override lines as S3 step 8, `run.log` has no `STOPPING NOW` and no `FAILED TO ZERO`
 13. Tick **DRY RUN — HV OFF** again. Type the good exposure back in the box and **Apply & Lock**
 
-**S5. The settings warning appears when the Webcam entry differs from the lock**
+**S5. The settings warning appears when the Webcam entry differs from the lock** (rewritten 2026-10-06 for the #361 merge)
 
-14. Webcam tab: good frame, **Apply & Lock**. Then type `3` in the `exposure_time_absolute` box and do **NOT** press Apply & Lock. Go to the SLDEA tab
-    - [ ] the camera line reads `Camera for this run: exposure 3, gain G, set on the Webcam tab`, and under it, in amber, `⚠ The Webcam tab has LOCKED exposure N instead, ...`
+14. Webcam tab: good frame, **Apply & Lock**. Then type a DIFFERENT exposure that still gives a good picture (the good value plus about a third) and do **NOT** press Apply & Lock. Go to the SLDEA tab
+    - [ ] the camera line reads `Camera for this run: exposure E, gain G, set on the Webcam tab` with your typed E, and under it, in amber, `⚠ The Webcam tab has LOCKED exposure N instead, so its live preview will NOT show what the run records (the pre-flight does). ...`
 15. **▶ Run (DRY)**
-    - [ ] the picture in the pre-flight looks GOOD (it was taken with the lock) and the verdict reads `exposure OK`
-    - [ ] bold red text reads `⚠ This preview was NOT taken with the run's settings`, and under it `The preview used exposure N (what the Webcam tab has locked). The run will use exposure 3 (what the boxes on the Webcam tab say). ...`
-    - [ ] the button reads **⚠ Start anyway (preview does not match the run)** and **Enter** does nothing
-16. Click **⚠ Start anyway (preview does not match the run)** (one click, no second question)
-    - [ ] the run stops itself about 3 s in, as in S3 step 7: its own baseline, shot at exposure 3, is flat. This is the 2026-10-01 route caught by the second net, and a mismatch start is not the override
-    - [ ] `run.log` holds `operator pressed: ⚠ Start anyway (preview does not match the run)` before the start line
+    - [ ] the pre-flight picture is taken at the typed exposure (a little brighter than the Webcam preview was) and the verdict reads `exposure OK`
+    - [ ] bold red text reads `⚠ The Webcam tab's fields differ from its lock: exposure E (locked: N). The Webcam preview uses the lock; this run uses the fields, as this picture does. ...`, and NO line says `This preview was NOT taken with the run's settings`
+    - [ ] the button reads **⚠ Start anyway (the Webcam preview differs from the run)** and **Enter** does nothing
+16. Click **⚠ Start anyway (the Webcam preview differs from the run)** (one click, no second question)
+    - [ ] the run starts and runs to the end; `run.log` holds the `⚠ camera pre-flight: The Webcam tab's fields differ from its lock ...` line and `operator pressed: ⚠ Start anyway (the Webcam preview differs from the run)` before the start line
 17. Webcam tab → **Start Preview**
-    - [ ] the preview shows the GOOD picture again although the box still says `3`: the run handed the Webcam tab's lock back when it stopped
-18. Type the good exposure back in the box and **Apply & Lock**
+    - [ ] the preview shows the LOCKED picture again although the box still holds E: the pre-flight and the run handed the Webcam tab's lock back
+18. The old route lands on the flat gate now: type `3` (not locked) and **▶ Run (DRY)**
+    - [ ] the pre-flight picture is FLAT (it is taken at exposure 3) and the dialog is S2's: **⚠ Start anyway (no picture)**, plus the fields-vs-lock sentence. **✖ Cancel**, then type the good exposure back in the box and **Apply & Lock**
 
 **S6. Cancel leaves the camera as it was**
 

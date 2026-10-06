@@ -179,10 +179,16 @@ With --auto (used by the SLDEA tab's "auto process"), the calibrate
 dialog opens on launch and detection chains automatically once
 calibration finishes, unless Run health shows a STOP: then nothing is
 pressed, the canvas says why, and the Detect button is live for a hand
-press (decision 16, 2026-10-03). Keyboard: 1/2/3 pick a candidate, R reject,
-4/D/T open the manual tracer (#162/#172 -- its Done stages the polygon
-as candidate D; Accept commits it like any other candidate),
-Left/Right navigate, Enter accept + next.
+press (decision 16, 2026-10-03). An --auto window is opened for ONE run,
+so a Save of that run with nothing to report closes it (#363,
+2026-10-05): data.csv, the scale anchor, the area-method stamp, the plot
+and the overlays all written, no rename failed and no anchor caveat.
+Anything else keeps it open with its message where it is said today (the
+status strip, or a warning box). A window opened by hand is the batch
+cockpit and stays open after every Save. Keyboard: 1/2/3 pick a
+candidate, R reject, 4/D/T open the manual tracer (#162/#172 -- its Done
+stages the polygon as candidate D; Accept commits it like any other
+candidate), Left/Right navigate, Enter accept + next.
 """
 import math
 import os
@@ -547,7 +553,12 @@ def howto_text():
 # destroyed as soon as it was produced. Two readouts instead, because
 # both are wanted: the detection pass's own time, FROZEN when the pass
 # ends and carrying its frame count so it reads as a rate, above a
-# session total that never stops.
+# session total.
+#
+# The session total used to run for the life of the window. Since `#364`
+# (2026-10-06) it stops when a detection pass ends too, and holds its last
+# value: a line that went on ticking after the auto-detections were done
+# read as work still running. The next Detect starts it again.
 # ---------------------------------------------------------------------------
 
 
@@ -593,12 +604,24 @@ def detect_readout(n_frames=None, secs=None, total=None):
 
 
 def session_readout(secs):
-    """The SESSION line of the toolbar clock (`#237`) — how long this
-    window has been open. Runs from the moment Edge Review opens to the
-    moment it closes: it is not reset by a run switch (the batch cockpit
-    is one session across many runs) and not stopped by Save (reviewing
-    continues after one)."""
+    """The SESSION line of the toolbar clock (`#237`): time since this
+    window opened. It is never reset (the batch cockpit is one session
+    across many runs), but since `#364` (2026-10-06) it does not run for
+    the life of the window: it stops when a detection pass ends and keeps
+    its last value, so nothing on the toolbar counts once the machine is
+    done, and the next Detect Edges starts it again from the same origin.
+    Save and a run switch neither stop nor restart it. An --auto window
+    closes after a clean Save of its own run (#363), and the session with
+    it."""
     return f"session {fmt_dur(secs)}"
+
+
+# How the Save hook's video sentence (sldea_video.after_save, or
+# _video_after_save's own catch) begins when the re-run did NOT start.
+# Such a Save is not clean: an --auto window stays open so the sentence is
+# read (#363 meets the video review, 2026-10-06).
+VIDEO_SAVE_PROBLEMS = ('video edges not re-run',
+                       'video edges are out of date')
 # ---------------------------------------------------------------------------
 # hover tooltips (`#216`)
 #
@@ -711,6 +734,12 @@ TIPS = {
     'scale_btn': "Set this run's px→mm anchor from the resting disc; on an "
                  "already-saved run with no review pass open it re-derives "
                  "every mm² in data.csv instead.",
+    'video_btn': "Walk the recorded video frames that need a human: the "
+                 "ones the detector doubts, or that disagree with this "
+                 "run's accepted stills. Accept / reject decisions go to "
+                 "video_review.csv, never to data.csv.",
+    'video_btn_disabled': "This run has no video in its folder (Record was "
+                          "off, or the recording is still being moved in).",
     'save_btn': "Writes the accepted areas into data.csv (a .bak is kept) "
                 "and saves the plot and outline overlays — greyed out until "
                 "▶ Detect Edges has run, and it still refuses without the "
@@ -1266,6 +1295,149 @@ def cal_stretch_lut(lo, hi):
 # ---------------------------------------------------------------------------
 CAL_UNTOUCHED_MSG = "Move the circle onto the edge of the disc first."
 CAL_NO_POINTS_MSG = "Click the two opposite edges of the disc first."
+
+# What each answer key returns from the dialog's ask(): the yes/no/cancel
+# contract the gates were written against when they were native message
+# boxes. The KEYS stay; only what the operator reads on the buttons changed.
+CAL_CHOICE_RESULT = {'yes': True, 'no': False, 'cancel': None}
+
+# The re-anchor confirmation's three buttons (2026-10-05). The keys keep
+# the Yes/No/Cancel contract _reanchor_scale branches on; the labels are
+# what each one DOES, and _reanchor_msg names them in its scope lines, so
+# the two read from this one list and cannot drift.
+REANCHOR_WRITE = "Write data.csv now"
+REANCHOR_KEEP = "Keep for next Save"
+REANCHOR_CANCEL = "Cancel"
+REANCHOR_BUTTONS = [('yes', REANCHOR_WRITE), ('no', REANCHOR_KEEP),
+                    ('cancel', REANCHOR_CANCEL)]
+# The widest aligned row of _reanchor_msg's table is about 65 characters
+# ("  resting area (baseline row), against π·(16/2)² = 201.06 mm²:"), so
+# 84 keeps every aligned row on one line; only the warning sentences wrap.
+REANCHOR_WRAP_CHARS = 84
+
+
+def cal_choice(parent, title, headline, detail, buttons, default,
+               detail_font=None, wraplength=460):
+    """One calibration gate question, answered with buttons that NAME the
+    action. -> the key of the button pressed ('yes', 'no' or 'cancel').
+
+    WHY NOT messagebox (operator 2026-10-05). Two problems with the native
+    yes/no boxes on a poor baseline frame:
+
+    - the question was a paragraph ending "Use this UNCHECKED anchor
+      anyway?" followed by "No = cancel (...)", so the operator had to
+      read the whole box to learn which of Yes/No did what. The buttons
+      now say "Use unchecked scale" and "Cancel", and the text is a bold
+      one-line headline plus at most a few short lines of detail.
+    - the boxes were created with no parent, so Windows owned them to the
+      main window, and the calibration window (transient to the main
+      window, holding the grab) could sit on top of them. The operator had
+      to drag the calibration window aside to find the question. This
+      dialog is transient to `parent`, centred over it, lifted and
+      focused, so it opens on top of the window that asked.
+
+    The safety rules of the old prompts are kept: Enter, Escape and the
+    window's close box all answer `default`, which every caller sets to
+    the declining button, so no key press can accept a scale. A click (or
+    Space on a focused button) is the only way to pick anything else.
+
+    The grab that was held before (the calibration window's) is handed
+    back when this closes: a Tk grab is not a stack, so without that the
+    calibration window would stop being modal after the first question.
+
+    `buttons` is [(key, label), ...] left to right. `detail_font` and
+    `wraplength` exist for the re-anchor confirmation (2026-10-05), whose
+    detail is a column-aligned evidence table: it is shown in TkFixedFont
+    and wider, so its columns line up. Monkeypatched by the GUI tests,
+    which answer it without a display."""
+    out = {'key': default}
+    prev_grab = None
+    dlg = tk.Toplevel(parent)
+    try:
+        dlg.withdraw()               # placed before it is shown, no jump
+        dlg.title(title)
+        dlg.transient(parent)
+        dlg.resizable(False, False)
+        # the warning sign and the bold weight are the cue; no colour
+        tk.Label(dlg, text="⚠ " + headline, justify='left',
+                 wraplength=wraplength,
+                 font=('TkDefaultFont', 11, 'bold')).pack(
+                     anchor='w', padx=14, pady=(14, 6))
+        if detail:
+            kw = {'font': detail_font} if detail_font else {}
+            tk.Label(dlg, text=detail, justify='left',
+                     wraplength=wraplength, **kw).pack(anchor='w', padx=14,
+                                                       pady=(0, 10))
+        row = tk.Frame(dlg)
+        row.pack(fill='x', padx=14, pady=(2, 12))
+
+        def pick(key):
+            out['key'] = key
+            dlg.destroy()
+
+        def decline(_ev=None):
+            pick(default)
+            return 'break'
+
+        btns = []
+        for key, label in buttons:
+            b = tk.Button(row, text=label, command=lambda k=key: pick(k),
+                          default=('active' if key == default
+                                   else 'normal'))
+            b.pack(side=tk.LEFT, padx=(0, 8))
+            btns.append((key, b))
+        # Enter answers the default wherever the focus is. Bound on each
+        # button as well as on the window because a widget's own binding
+        # runs first: with the focus tabbed onto an accepting button, this
+        # is what answers Enter (the same rule as the flat-frame notice).
+        for w in [dlg] + [b for _k, b in btns]:
+            w.bind('<Return>', decline)
+        dlg.bind('<Escape>', decline)
+        dlg.protocol('WM_DELETE_WINDOW', decline)
+        # centred over the window that asked, kept on the screen
+        dlg.update_idletasks()
+        w_, h_ = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+        try:
+            px, py = parent.winfo_rootx(), parent.winfo_rooty()
+            pw, ph = parent.winfo_width(), parent.winfo_height()
+        except tk.TclError:
+            px = py = 0
+            pw, ph = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
+        x = px + max(0, (pw - w_) // 2)
+        y = py + max(0, (ph - h_) // 3)
+        x = max(0, min(x, dlg.winfo_screenwidth() - w_))
+        y = max(0, min(y, dlg.winfo_screenheight() - h_))
+        dlg.geometry(f"+{x}+{y}")
+        dlg.deiconify()
+        dlg.lift()
+        for key, b in btns:
+            if key == default:
+                b.focus_set()
+        try:
+            dlg.focus_force()
+        except tk.TclError:
+            pass
+        prev_grab = dlg.grab_current()
+        try:
+            dlg.grab_set()
+        except tk.TclError as e:
+            # "grab failed: window not viewable" must cost the modality,
+            # not the question: wait_window still holds the caller
+            print(f"calibrate: question box has no grab: {e}")
+        dlg.wait_window(dlg)
+    finally:
+        try:
+            if dlg.winfo_exists():
+                dlg.destroy()
+        except tk.TclError:
+            pass
+        try:
+            if prev_grab is not None and prev_grab.winfo_exists():
+                prev_grab.grab_set()
+                prev_grab.focus_set()
+        except tk.TclError:
+            pass
+    return out['key']
 
 
 def cal_content_window(content, pad_frac=CAL_STRETCH_PAD_FRAC):
@@ -2029,6 +2201,8 @@ def tracker_card_text(cands):
     limit that tripped; otherwise it names both limits.
     The outline sentence comes second, right after the number, so it
     is on screen even if a future font pushes the tail off the panel.
+    With no tracker result, a 'resting' claim built from the scale
+    anchor (se.anchor_disc, 2026-10-05) gets one sentence saying so.
     Pure, so it is a headless test."""
     for k, c in enumerate(cands[:3]):
         if c.get('method') != 'disc-fit' or c.get('area_ratio') is None:
@@ -2069,6 +2243,16 @@ def tracker_card_text(cands):
                    if tripped else
                    f" Review only above {lim_pct} trimmed or "
                    f"{se.RAY_MAX_ONE_SIDED:g} one-sided."))
+    # no tracker result: on a baseline frame whose automatic fit refused,
+    # say where the resting claim's A0 came from (2026-10-05)
+    for k, c in enumerate(cands[:3]):
+        if c.get('a0_from') != se.ANCHOR_A0_FROM:
+            continue
+        return (f"{CAND_KEYS[k]} is A0 from the scale anchor: the automatic "
+                f"disc fit refused this baseline frame, so the resting area "
+                f"is the circle measured with 📏 "
+                f"({float(c['diam_px']):.0f} px across). In mm² it is "
+                f"π·(diam_mm/2)² by construction of the scale.")
     return ''
 
 
@@ -2148,6 +2332,9 @@ class EdgeReviewApp:
         # None while no run is loaded. Shown, not gated on: no button
         # reads it. The one reader is the --auto launch below, which
         # holds its Detect press on a STOP (decision 16, 2026-10-03)
+        self._auto_run = None    # the run an --auto launch opened, else
+        # None; set below once the run is picked. Save closes the window
+        # after a clean Save of THIS run only (#363, 2026-10-05)
         self._primary_font = None   # kept alive by _install_styles (`#216`)
         self._build_ui()
         start = path or DEFAULT_PARENT
@@ -2158,7 +2345,15 @@ class EdgeReviewApp:
         # means; the plot window never sends both.
         if goto is not None:
             self.goto_row(goto)
+        # THE --auto WINDOW SERVES ONE RUN (#363, 2026-10-05). The SLDEA
+        # tab's auto-process opens it on the run that just finished, so a
+        # clean Save of that run is the end of its job and closes it (see
+        # _closes_after_save). Recorded as the run, not as a bare flag: an
+        # operator who switches runs in this window is using it as the
+        # batch cockpit, and a cockpit stays open. None when the target
+        # was not found (no run is loaded, nothing to save).
         if auto and self.rundir:
+            self._auto_run = self.rundir
             if any(it.get('level') == 'stop' for it in self.health or ()):
                 # Decision 16 (2026-10-03): the press is held, not the
                 # button. The strip and the canvas carry the STOP, the
@@ -2389,6 +2584,15 @@ class EdgeReviewApp:
                                     command=self._scale_action,
                                     style='Secondary.TButton')
         self.scale_btn.pack(side=tk.LEFT, padx=(6, 0))
+        # The video review window (2026-10-06): live when the run folder
+        # holds a recording; _sync_detect_btn keeps it in step with the
+        # run, since every run change already goes through there.
+        self.video_btn = ttk.Button(top, text="🎞 Video review…",
+                                    command=self._open_video_review,
+                                    style='Secondary.TButton',
+                                    state='disabled')
+        self.video_btn.pack(side=tk.LEFT, padx=(6, 0))
+        self._video_win = None
         # Save stays on the far RIGHT — the end of the job, and out of the
         # left-to-right flow (`#216`). It is NOT accented: two accents is
         # no accent, and its own affordance is the disabled state, which
@@ -2431,6 +2635,8 @@ class EdgeReviewApp:
         self.prog.pack(side=tk.RIGHT, padx=6)
         self._t0 = None             # start of the CURRENT detection pass
         self._t_session = time.time()   # window open — never reset
+        # the session tick runs from here until a detection pass ends, then
+        # holds; each Detect starts it again (`#364`, 2026-10-06)
         self._clock_on = True
         self._clock_job = None          # the in-flight tick, for cancelling
         self._tick_clock()
@@ -2623,6 +2829,7 @@ class EdgeReviewApp:
                              ('detect_btn', self.detect_btn),
                              ('adv_btn', self.adv_btn),
                              ('scale_btn', self.scale_btn),
+                             ('video_btn', self.video_btn),
                              ('save_btn', self.save_btn),
                              ('accept_btn', self.accept_btn),
                              ('reject_btn', self.reject_btn),
@@ -2679,6 +2886,42 @@ class EdgeReviewApp:
             tip.text = (TIPS['detect_btn_busy'] if busy else
                         TIPS['detect_btn'] if self.run is not None else
                         TIPS['detect_btn_disabled'])
+        self._sync_video_btn()
+
+    def _sync_video_btn(self):
+        """🎞 Video review… is live when the loaded run's folder holds a
+        recording and its index (sldea_video.has_video). Called from
+        _sync_detect_btn, which every run change already goes through."""
+        btn = getattr(self, 'video_btn', None)
+        if btn is None:
+            return
+        import sldea_video as sv
+        have = bool(self.run is not None and self.rundir
+                    and sv.has_video(self.rundir))
+        btn.config(state='normal' if have else 'disabled')
+        tip = self._tips.get('video_btn') if hasattr(self, '_tips') else None
+        if tip is not None:
+            tip.text = TIPS['video_btn' if have else 'video_btn_disabled']
+
+    def _open_video_review(self):
+        """Open the video review window for the loaded run: one at a time
+        (the singleton rule of the aux windows, #176). Another run's window
+        is closed first; the same run's is raised."""
+        import sldea_video_review as vr
+        cur = self._video_win
+        if cur is not None and not cur._closed:
+            if os.path.normcase(os.path.abspath(cur.rundir)) == \
+                    os.path.normcase(os.path.abspath(self.rundir or '')):
+                cur.win.lift()
+                return
+            cur.close()
+        try:
+            self._video_win = vr.VideoReviewWindow(
+                self.root, self.rundir,
+                on_close=lambda w: setattr(self, '_video_win', None))
+        except Exception as e:
+            messagebox.showerror("Video review",
+                                 f"The video review could not open:\n\n{e}")
 
     def _canvas_hint(self, text=None):
         """The empty card area SAYS what to press (`#216`).
@@ -2883,6 +3126,15 @@ class EdgeReviewApp:
         # the generation bump makes every queued item stale, and
         # _base_ref_pending can never carry a previous run's disc into
         # _finish_detect (audit 2026-08-05).
+        #
+        # ...which means the pass it abandons never reaches _finish_detect,
+        # where the session tick stops (`#364`, 2026-10-06). Stop it here
+        # instead, or it would count on with no machine work left. A switch
+        # with no pass in flight leaves the session line alone: still
+        # running before the first pass, still held after one, and never
+        # restarted by the switch.
+        if self._detect_busy:
+            self._stop_session_clock()
         self._detect_gen += 1
         self._detect_busy = False
         self._base_ref_pending = None
@@ -2957,10 +3209,19 @@ class EdgeReviewApp:
 
     # ---------------- detection ----------------
     def _tick_clock(self):
-        """The SESSION clock, once a second for the life of the window
-        (`#237`). It is not stopped by Save and not reset by a run switch;
-        the detection readout beside it is the one that belongs to a pass
-        and is repainted by `_set_detect_clock`."""
+        """The SESSION clock, once a second while `_clock_on` (`#237`).
+
+        It used to tick for the life of the window. Since `#364`
+        (2026-10-06) it runs from window open until a detection pass ends
+        (`_finish_detect` stops it, see `_stop_session_clock`) and holds its
+        last value; the next Detect starts it again
+        (`_start_session_clock`). It is never reset, so after a restart it
+        again reads the time since the window opened. Save and a run switch
+        neither stop nor restart it. The detection readout beside it is the
+        one that belongs to a pass and is repainted by `_set_detect_clock`.
+
+        Call `_start_session_clock` to (re)start it, not this: a direct
+        call while a tick is pending schedules a second chain."""
         self._clock_job = None
         if not self._clock_on:
             return
@@ -2974,6 +3235,51 @@ class EdgeReviewApp:
         # scheduled still fires into a destroyed interpreter unless it is
         # cancelled outright (see _cancel_pending)
         self._clock_job = self.root.after(1000, self._tick_clock)
+
+    def _drop_clock_job(self):
+        """Cancel the pending session tick, if any. Never raises."""
+        job, self._clock_job = self._clock_job, None
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+
+    def _start_session_clock(self):
+        """(Re)start the SESSION tick when a detection pass starts (`#364`).
+
+        Repaints at once and then every second. Any pending tick is
+        cancelled first, so starting a clock that is already running (the
+        first Detect of a window, before any pass has stopped it) leaves
+        exactly one chain, not two. `_t_session` is not touched: the line
+        goes on reading the time since the window opened."""
+        self._drop_clock_job()
+        self._clock_on = True
+        self._tick_clock()
+
+    def _stop_session_clock(self):
+        """Stop the SESSION tick and leave its last value on screen
+        (`#364`, 2026-10-06): once the machine is done nothing on the
+        toolbar may still be counting, or the line reads as work still
+        running. The flag alone would stop the repainting, but the tick
+        already scheduled would stay queued until it fired and read the
+        flag; it is cancelled outright, so nothing of the clock is left
+        pending once it is stopped.
+
+        THE VALUE LEFT IS THE ONE AT THE STOP (2026-10-06). The last tick
+        can be up to a second old, and a pass run without the event loop
+        (detect_all_sync: the manual capture, the tests) never ticked at
+        all, so the v1.4.2 manual capture froze "session 0s" beside
+        "detect: 81 frames in 14s". A running clock is painted once more
+        here; a stopped one is left alone."""
+        if self._clock_on:
+            try:
+                self.clock_lbl.config(
+                    text=session_readout(time.time() - self._t_session))
+            except tk.TclError:
+                pass                    # the window closed under the stop
+        self._clock_on = False
+        self._drop_clock_job()
 
     def _set_detect_clock(self, n_frames=None, secs=None, total=None):
         """Repaint the DETECTION readout — see `detect_readout` for the
@@ -3066,6 +3372,13 @@ class EdgeReviewApp:
         # running now (`#237`)
         self._t0 = time.time()
         self._set_detect_clock(0, 0.0, len(self.frame_rows))
+        # ...and the session line, held since the last pass ended, counts
+        # again while the machine works (`#364`, 2026-10-06). Started HERE,
+        # after the gate and the baseline check, so a Detect that diverts
+        # to calibration or is refused never sets it going: only a pass
+        # that will reach _finish_detect (or be abandoned by _pick_run,
+        # which stops it too) does.
+        self._start_session_clock()
         self.prog.config(maximum=len(self.frame_rows), value=0)
         self._canvas_hint(None)        # the hint's job is done (`#216`)
         self.canvas.delete('all')
@@ -3075,7 +3388,7 @@ class EdgeReviewApp:
         threading.Thread(
             target=self._detect_worker,
             args=(gen, self.run, list(self.frame_rows),
-                  dict(self.settings), base),
+                  dict(self.settings), base, dict(self.manual_ref)),
             daemon=True).start()
         self.root.after(100, lambda: self._poll_detect(gen))
 
@@ -3101,7 +3414,8 @@ class EdgeReviewApp:
                 return os.path.basename(p) if p else ''
         return ''
 
-    def _detect_worker(self, gen, run, frame_rows, settings, base):
+    def _detect_worker(self, gen, run, frame_rows, settings, base,
+                       anchor=None):
         # Per-frame try + sentinel in finally: one bad frame (shape
         # mismatch, decode error) used to kill the thread silently and
         # leave 'DETECTING…' stuck forever (audit 2026-07-25). The
@@ -3125,7 +3439,8 @@ class EdgeReviewApp:
                         cands = []
                     else:
                         cands = se.candidates(base, img, settings,
-                                              prev_method=prev)
+                                              prev_method=prev,
+                                              anchor_ref=anchor)
                 except Exception as e:
                     # a readable frame whose DETECTION raised is not a
                     # disk problem — record the true cause, or the
@@ -3203,7 +3518,8 @@ class EdgeReviewApp:
                     self.cands_all[i] = []
                     continue
                 self.cands_all[i] = se.candidates(
-                    base, img, self.settings, prev_method=prev)
+                    base, img, self.settings, prev_method=prev,
+                    anchor_ref=self.manual_ref)
             except Exception as e:
                 # same per-frame containment as the threaded worker —
                 # one bad frame must not abort the whole sync pass
@@ -3217,6 +3533,15 @@ class EdgeReviewApp:
         self._finish_detect()
 
     def _finish_detect(self):
+        # THE SESSION LINE STOPS HERE (`#364`, 2026-10-06): the machine is
+        # done, so nothing on the toolbar may go on counting -- a line that
+        # ticked on after the auto-detections finished read as work still
+        # running. It keeps its last value, and the next Detect starts it
+        # again. First thing in the method rather than beside the frozen
+        # detection readout below, so neither an exception further down nor
+        # the scale cross-check's modal (a nested event loop, in which the
+        # tick would fire) can leave it counting.
+        self._stop_session_clock()
         self.auto_rej = set()
         self._detect_busy = False
         self._detect_ui(busy=False)
@@ -3252,7 +3577,8 @@ class EdgeReviewApp:
         q = self._queue_list()
         # THE DETECTION READOUT FREEZES HERE (`#237`) — the pass is over,
         # and everything after this point is the human's time, not the
-        # machine's. The session clock beside it carries on.
+        # machine's. The session line beside it no longer carries on: it
+        # was stopped at the top of this method (`#364`).
         dt = (time.time() - self._t0) if self._t0 else None
         took = fmt_dur(dt) if dt is not None else '?'
         self._set_detect_clock(len(self.frame_rows), dt)
@@ -3810,7 +4136,8 @@ class EdgeReviewApp:
                                 "(so the trace can be paired)…")
         self.root.update_idletasks()
         try:
-            cands = se.candidates(base, img, self.settings)
+            cands = se.candidates(base, img, self.settings,
+                                  anchor_ref=self.manual_ref)
         except Exception as e:
             # same containment as the detect worker: a failed frame must
             # not block the recovery trace -- but the status line must not
@@ -4268,6 +4595,33 @@ class EdgeReviewApp:
                         if self.load_fail[i] == 'unreadable' else
                         'frame processing failed - kept, not re-measured')
                 annos[i] = (annos[i] + '; ' + note) if i in annos else note
+        # A0 STATED FROM THE SCALE ANCHOR (2026-10-05). When the automatic
+        # fit refused the baseline, the baseline row's 'resting' claim
+        # came from the operator's anchor (se.anchor_disc). It must match
+        # the anchor THIS save scales by, so a scale calibration made after
+        # Detect rebuilds it, and the row's notes say where A0 came from.
+        if any(r and r.get('a0_from') == se.ANCHOR_A0_FROM
+               for r in self.results.values()):
+            try:
+                g = self._base_gray()
+                shape = np.shape(g) if g is not None else None
+            except Exception as e:      # a truncated baseline can raise
+                print(f"save: baseline did not load for the A0 check: {e}")
+                shape = None
+            for i, what in se.refresh_anchor_a0(self.results,
+                                                self.manual_ref,
+                                                shape).items():
+                if what == 'dropped':
+                    note = ('A0 not written: the scale anchor changed after '
+                            'Detect and carries no disc centre - '
+                            'recalibrate, then Detect again')
+                    annos[i] = (annos[i] + '; ' + note) if i in annos \
+                        else note
+            for i, r in self.results.items():
+                if r and r.get('a0_from') == se.ANCHOR_A0_FROM:
+                    note = se.ANCHOR_A0_NOTE
+                    annos[i] = (annos[i] + '; ' + note) if i in annos \
+                        else note
         if 'wrinkle_idx' not in self.run['columns']:
             # older runs predate the column; slot it in before notes
             cols = self.run['columns']
@@ -4301,6 +4655,12 @@ class EdgeReviewApp:
                    if has_bak else ""))
             return
         renamed, rn_errors = se.apply_rename_plan(plan)
+        # NOTHING TO REPORT (#363, 2026-10-05). A failed rename, anchor
+        # write or stamp write clears it. A failed plot or overlay returns
+        # before the close is reached, and the anchor caveat is checked at
+        # the close itself. Only a Save that ends with it still set may
+        # close an --auto window; any other ending keeps the window open.
+        quiet = not rn_errors
         if rn_errors:
             messagebox.showwarning(
                 "Save: renames incomplete",
@@ -4318,13 +4678,20 @@ class EdgeReviewApp:
         # can never be silently missing from the other. A Save deliberately
         # writes NO `reanchor` marker — this run WAS reviewed, and the
         # marker's whole job is to distinguish the two.
+        anchor_fail_txt = ''
         try:
             se.save_scale_anchor(self.rundir,
                                  self._anchor_record(self.manual_ref, scale))
         except OSError as e:
-            self.status.config(
-                text=f"saved, but recording the scale anchor in "
-                     f"setup.txt failed: {e}")
+            quiet = False
+            # SAID ON THE LAST STRIP (2026-10-06). This used to be set on
+            # the strip and then overwritten by "saved in ..." a few lines
+            # down, so nobody saw that setup.txt lacks the anchor data.csv
+            # was just written at. Both final strips carry it now, after
+            # the caveat and ahead of the routine tail.
+            anchor_fail_txt = (f"⚠ scale anchor NOT recorded in setup.txt, "
+                               f"Save again once the folder is writable "
+                               f"({e}). ")
         # ... and which area estimator wrote the areas (2026-10-02), with
         # the baseline's provenance beside it (what the tracker read on
         # the resting disc: rays, hidden share, one-sidedness, and the
@@ -4352,6 +4719,7 @@ class EdgeReviewApp:
         try:
             se.stamp_area_estimator(self.rundir, stamp)
         except OSError as e:
+            quiet = False
             messagebox.showwarning(
                 "Save: area-method stamp not written",
                 f"data.csv is saved, but setup.txt could not be updated:"
@@ -4360,13 +4728,28 @@ class EdgeReviewApp:
                 f"its unreviewed automatic (disc-fit) rows for re-review. "
                 f"Save again once the folder is writable.")
         # detect→Save, the whole round trip, said in the status line where
-        # it always was. Save no longer STOPS the toolbar clock (`#237`):
-        # that clock is now the session, a session outlives a Save (the
-        # batch cockpit saves one run and moves to the next), and the
-        # frozen `detect:` readout above it is the number that used to be
-        # destroyed. The old `done in …` said detect→Save in a widget that
-        # then sat stale through every following run.
+        # it always was. Save does not touch the toolbar clock. `#237` made
+        # it the session, which outlives a Save (the batch cockpit saves one
+        # run and moves to the next), and put the frozen `detect:` readout
+        # above it. Since `#364` (2026-10-06) the session line stops by
+        # itself when the detection pass ends, and that pass is what arms
+        # Save, so nothing on the toolbar is counting by now. The one
+        # exception is the hand-trace escape hatch after a baseline refusal,
+        # which ran no pass and leaves the session line as it was. The old
+        # `done in ...` said detect->Save in a widget that then sat stale
+        # through every following run.
         took = fmt_dur(time.time() - self._t0) if self._t0 else '?'
+        # THE VIDEO PASS RE-RUNS WHEN ITS EDGES ARE STALE (2026-10-06).
+        # Here, after data.csv, the anchor and the stamp, because all three
+        # are its inputs: the accepted stills are its checkpoints, the
+        # anchor its scale. It starts a detached job and returns at once;
+        # a run with no video in its folder says nothing.
+        vid = self._video_after_save()
+        vid_txt = f"; {vid}" if vid else ""
+        if vid and vid.startswith(VIDEO_SAVE_PROBLEMS):
+            # a re-run that could not start is said only on the strip;
+            # an --auto window must stay open for it (#363)
+            quiet = False
         try:
             self._save_plot(scale)
             self._save_overlays()
@@ -4377,7 +4760,8 @@ class EdgeReviewApp:
             cav = anchor_caveat(self.manual_ref)
             self.status.config(text="saved CSV; "
                                     + (f"{cav}. " if cav else '')
-                                    + f"plot/overlays failed: {e}")
+                                    + anchor_fail_txt
+                                    + f"plot/overlays failed: {e}{vid_txt}")
             return
         scale_txt = (f"scale {scale:.5f} mm/px [{src}]" if scale
                      else "no mm scale — use 📏 Calibrate / "
@@ -4394,7 +4778,45 @@ class EdgeReviewApp:
         self.status.config(
             text=f"saved in {took} — "
                  + (f"{cav}. " if cav else '')
-                 + f"data.csv updated ({scale_txt}){bd_txt}")
+                 + anchor_fail_txt
+                 + f"data.csv updated ({scale_txt}){bd_txt}{vid_txt}")
+        # CLOSE AFTER A CLEAN SAVE (#363, 2026-10-05), in an --auto window
+        # on its own run only. Clean means `quiet` held to the end, the
+        # strip names a real mm scale (not "no mm scale -- use Calibrate"),
+        # and there is no anchor caveat: the strip above is then routine
+        # and nobody needs to read it, so it is allowed to go unseen. Any
+        # other Save leaves the window open exactly as before. Closed by
+        # root.destroy(), the same path as the title-bar close button
+        # (there is no WM_DELETE_WINDOW handler): its <Destroy> binding
+        # runs _cancel_pending, so no `after` callback outlives the window.
+        if quiet and scale and not cav and self._closes_after_save():
+            self.root.destroy()
+
+    def _closes_after_save(self):
+        """True when this window is an --auto launch AND the run loaded now
+        is the run it was launched for (#363, 2026-10-05).
+
+        A window opened by hand is the batch cockpit (see session_readout)
+        and never closes on Save. Nor does an --auto window after the
+        operator switched it to another run: it is a cockpit by then.
+        Compared as normalized absolute paths, because Browse... can reach
+        the same folder by a differently spelled path."""
+        if not self._auto_run or not self.rundir:
+            return False
+
+        def norm(p):
+            return os.path.normcase(os.path.abspath(p))
+        return norm(self.rundir) == norm(self._auto_run)
+
+    def _video_after_save(self):
+        """sldea_video.after_save for the loaded run: one sentence for the
+        status strip, or None. Never raises: the video is a side product
+        of the run, and its re-run must never cost the operator a Save."""
+        try:
+            import sldea_video as sv
+            return sv.after_save(self.rundir)
+        except Exception as e:
+            return f"video edges not re-run ({e})"
 
     def _save_plot(self, scale):
         import matplotlib
@@ -4711,6 +5133,13 @@ class EdgeReviewApp:
             dlg.bind('<Escape>', cancel)
             dlg.protocol('WM_DELETE_WINDOW', dlg.destroy)
             cancel_btn.focus_set()
+            # in front of the window that opened it (2026-10-05: the
+            # calibration questions could open behind other windows)
+            dlg.lift()
+            try:
+                dlg.focus_force()
+            except tk.TclError:
+                pass
             self._cal_win = dlg
             # TEST SEAM, alive only while the notice is (like the dialog's
             # own probe). Nothing in the app reads it.
@@ -5380,6 +5809,11 @@ class EdgeReviewApp:
                               self.settings.get('roi_frac', 0.85))
             st = {'photo': None, 'pan': None, 'grab': None,
                   'round': 1, 'diams': [], 'circle': None,
+                  # each banked round's disc centre (original image px),
+                  # kept in step with 'diams': the anchor carries their
+                  # mean so the baseline row can still state A0 when the
+                  # automatic fit refuses (se.anchor_disc, 2026-10-05)
+                  'centers': [],
                   # twopoint: the rotated display image, the angle it is
                   # rotated by, the angles still to come in this set, the
                   # angles already used, and the current round's two
@@ -5831,7 +6265,7 @@ class EdgeReviewApp:
 
             def accept(dpx_full, source_frame, src_is_baseline=None,
                        stats=None, guard=None, overridden=False,
-                       verified=None, who=None, when=None):
+                       verified=None, who=None, when=None, center=None):
                 # PROVENANCE (`#215` the verify mode, 2026-08-06 evening). The
                 # method string is how an audit tells "a human MEASURED this"
                 # from "a human APPROVED the machine's measurement" — two
@@ -5850,6 +6284,17 @@ class EdgeReviewApp:
                                                    if src_is_baseline
                                                    is None
                                                    else src_is_baseline)}
+                # the disc's centre (2026-10-05): the mean of the rounds'
+                # centres, or the approved fit's. With it, se.anchor_disc
+                # can state the baseline row's A0 when the automatic fit
+                # refuses that frame. Omitted when it is not known.
+                try:
+                    ccx, ccy = (float(center[0]), float(center[1]))
+                except (TypeError, ValueError, IndexError):
+                    ccx = ccy = None
+                if (ccx is not None and np.isfinite(ccx)
+                        and np.isfinite(ccy)):
+                    self.manual_ref.update({'cx': ccx, 'cy': ccy})
                 if verified:
                     # what quantifies an approved fit is the FIT's quality,
                     # not a spread across rounds there were none of
@@ -6006,10 +6451,16 @@ class EdgeReviewApp:
                          f"at Save")
                 win.destroy()
 
-            def ask(title, msg, default, three=False, **kw):
-                """askyesno / askyesnocancel with an EXPLICIT default, and
-                with <Return> taken off the window underneath while the
-                question is up.
+            def ask(title, headline, detail, buttons, default):
+                """One gate question through cal_choice, with an EXPLICIT
+                default, and with <Return> taken off the window underneath
+                while the question is up. -> True / False / None for the
+                'yes' / 'no' / 'cancel' button (CAL_CHOICE_RESULT), the
+                contract these gates had as native message boxes.
+
+                Since 2026-10-05 the buttons NAME their action and the box
+                is owned by this window (cal_choice says why); before that
+                these were askyesno / askyesnocancel.
 
                 Review 2026-08-06, demonstrated not speculated: tkinter's
                 askyesno defaults to YES and was passed no default=, while
@@ -6025,10 +6476,9 @@ class EdgeReviewApp:
                     win.unbind('<Return>')
                 except tk.TclError:
                     pass
-                fn = (messagebox.askyesnocancel if three
-                      else messagebox.askyesno)
                 try:
-                    return fn(title, msg, default=default, **kw)
+                    return CAL_CHOICE_RESULT[cal_choice(
+                        win, title, headline, detail, buttons, default)]
                 finally:
                     st['modal'] = False
                     try:
@@ -6050,31 +6500,27 @@ class EdgeReviewApp:
                 anchor for the first time (review 2026-08-06, minor 6).
                 With neither reference, say plainly that there is no
                 percentage rather than showing None."""
+                # ONE SENTENCE since 2026-10-05 (operator: the gate boxes
+                # were too wordy to tell which button did what). The
+                # number is kept; the reference it is measured against is
+                # said in a clause, not a paragraph.
                 if not n_px_rows:
                     return ''
                 if recorded:
                     pct = se.rescale_pct(recorded['diam_px'], mean_px)
                     if pct is not None:
-                        return (f"\n\nAccepting also moves the "
-                                f"{n_px_rows} already-measured row(s) by "
-                                f"{pct:+.2f}% in mm² at the next Save "
-                                f"(re-derived from px at this anchor, "
-                                f"against the recorded "
-                                f"{recorded['diam_px']:.1f} px).")
+                        return (f"\n\nUsing it changes the {n_px_rows} "
+                                f"measured row(s) by {pct:+.2f}% in mm² "
+                                f"at the next Save.")
                 pct = se.rescale_pct(auto_px, mean_px)
                 if pct is not None:
-                    return (f"\n\nNo anchor is on record for this run, so "
-                            f"those {n_px_rows} mm² were derived at the "
-                            f"AUTOMATIC fit's scale ({auto_px:.1f} px): "
-                            f"accepting moves every one of them "
-                            f"{pct:+.2f}% at the next Save, and it is the "
-                            f"first time the column hangs on a hand-fitted "
-                            f"anchor.")
-                return (f"\n\nNo anchor is on record for this run AND "
-                        f"there is no automatic fit, so there is no "
-                        f"percentage to quote: all {n_px_rows} mm² are "
-                        f"re-derived from px at this anchor, sight unseen, "
-                        f"including rows you do not re-review.")
+                    return (f"\n\nUsing it changes the {n_px_rows} "
+                            f"measured row(s) by {pct:+.2f}% in mm² at "
+                            f"the next Save (they were at the automatic "
+                            f"fit's scale).")
+                return (f"\n\nUsing it re-derives all {n_px_rows} measured "
+                        f"row(s) at this scale at the next Save, with no "
+                        f"earlier scale to compare against.")
 
             def log_set(stats, outcome, guard=None):
                 """Append this completed round-set to the run's calibration
@@ -6164,7 +6610,7 @@ class EdgeReviewApp:
                         "Calibrate",
                         "The automatic fit is no longer available, so there "
                         "is nothing to verify. Measure the disc by hand "
-                        "instead.")
+                        "instead.", parent=win)
                     mode_var.set(se.CAL_DEFAULT_MODE)
                     switch_mode()
                     return
@@ -6177,7 +6623,8 @@ class EdgeReviewApp:
                 when = time.strftime('%Y-%m-%dT%H:%M:%S')
                 log_set(stats, 'accepted-verified')
                 accept(float(ref['diam_px']), frame_name, stats=stats,
-                       verified=ref, who=who, when=when)
+                       verified=ref, who=who, when=when,
+                       center=(ref.get('cx'), ref.get('cy')))
 
             # `hand_instead` and its ✎ Measure by hand instead button are GONE
             # (operator 2026-08-06 late): the radio row already switches
@@ -6234,9 +6681,11 @@ class EdgeReviewApp:
                         + " Refused.")
                     log_set(stats, 'refused-cap')
                     if ask("Rounds cannot be trusted",
-                           se.range_cap_text(stats)
-                           + "\n\nYes = measure again · No = cancel",
-                           default='no', icon='warning'):
+                           se.range_cap_text(stats, choices=False),
+                           "Measure the disc again from round 1, or "
+                           "cancel and keep the scale you had.",
+                           [('yes', "Measure again"), ('no', "Cancel")],
+                           'no'):
                         restart_all()
                         return
                     # Cancel: say on the strip which scale still stands,
@@ -6262,22 +6711,19 @@ class EdgeReviewApp:
                         "error term")
                     if not ask(
                             "Precision cannot be judged",
-                            f"You fitted {stats['n']} round(s), and there "
-                            f"is no d₂ range-to-sigma factor for that "
-                            f"count (the table covers n = "
-                            f"{min(se.D2_RANGE_FACTORS)}–"
-                            f"{max(se.D2_RANGE_FACTORS)}).\n\nSo this "
-                            f"anchor's per-fit precision and its mean "
-                            f"standard error were NOT computed, and the "
-                            f"acceptance gate could not be applied. "
-                            f"Nothing here has been checked against "
-                            f"SLDEA_MEASUREMENT §2.1's ~0.4% diameter "
-                            f"budget."
-                            + rescale_note(stats['mean'], None)
-                            + f"\n\nUse this UNJUDGED anchor anyway?\n\n"
-                              f"No = cancel and calibrate again with a "
-                              f"round count in the table.",
-                            default='no', icon='warning'):
+                            f"{stats['n']} round(s) cannot be checked for "
+                            f"precision.",
+                            f"The precision check covers "
+                            f"{min(se.D2_RANGE_FACTORS)} to "
+                            f"{max(se.D2_RANGE_FACTORS)} rounds (d₂ table, "
+                            f"SLDEA_MEASUREMENT §2.1a), so this scale was "
+                            f"not checked against the ~0.4% diameter "
+                            f"budget. Cancel and calibrate again with a "
+                            f"round count in that range."
+                            + rescale_note(stats['mean'], None),
+                            [('yes', "Use it unchecked"),
+                             ('no', "Cancel")],
+                            'no'):
                         log_set(stats, 'declined-unjudgeable')
                         win.destroy()
                         return
@@ -6341,24 +6787,22 @@ class EdgeReviewApp:
                                   f"is the other method, not more rounds.")
                     else:
                         remedy = ''
+                    # The three choices are the BUTTONS since 2026-10-05,
+                    # so the "Yes = refit · No = accept as measured ·
+                    # Cancel" legend that had to fit one native-box line
+                    # is gone: the operator reads the answer on the button
+                    # they press. The σ line and the remedy are unchanged.
                     ans = ask(
                         "Rounds disagree",
+                        "Your rounds disagree more than the budget allows.",
                         f"σ = {stats['sigma_pct']:.2f} % of diameter  →  "
                         f"±{stats['area_se_pct']:.2f} % in area "
-                        f"(budget ±{2 * se.CAL_SE_PCT:g} %).\n"
-                        f"{remedy}\n\n"
-                        # ONE LINE, and it has to STAY one line: the native
-                        # message box wraps at about 70 characters whatever
-                        # its longest line is, and a choice list that breaks
-                        # mid-choice ("Cancel / = calibrate later") is exactly
-                        # what a glanceable prompt cannot afford. Measured by
-                        # rendering it, not guessed. Cancel carries no gloss
-                        # for the same reason the operator's own sketch gave
-                        # it none — the word is not ambiguous, and what the
-                        # run is left in is on the status line afterwards.
-                        f"Yes = refit all {stats['n']} rounds · "
-                        f"No = accept as measured · Cancel",
-                        default='cancel', three=True, icon='warning')
+                        f"(budget ±{2 * se.CAL_SE_PCT:g} %)."
+                        + (f"\n{remedy}" if remedy else ''),
+                        [('yes', f"Refit all {stats['n']} rounds"),
+                         ('no', "Accept as measured"),
+                         ('cancel', "Cancel")],
+                        'cancel')
                     if ans is None:
                         log_set(stats, 'declined-cancel')
                         win.destroy()
@@ -6385,28 +6829,29 @@ class EdgeReviewApp:
                     # gap in setup.txt (se.anchor_guard_note).
                     say("⚠ NO automatic cross-check was possible — this "
                         "anchor is UNCHECKED")
+                    # THE POOR-BASELINE CASE, and the prompt the operator
+                    # found hardest to answer (2026-10-05): a paragraph
+                    # ending "Use this UNCHECKED anchor anyway?" and a
+                    # gloss on No. The facts it must still carry: nothing
+                    # checked this scale, why, and that agreeing fits are
+                    # not evidence of being right. The P3_2 list of
+                    # systematic errors is in the record and in
+                    # SLDEA_MEASUREMENT, not on the box.
                     if not ask(
                             "Anchor NOT cross-checked",
-                            f"The mean of your {stats['n']} fits is "
-                            f"{stats['mean']:.1f} px, and NOTHING checked "
-                            f"it.\n\nThe automatic baseline disc fit is "
-                            f"unavailable on this run (the baseline frame "
-                            f"will not load, or the fit refused it), so "
-                            f"neither reference could be applied: not the "
-                            f"independent disc fit, and not the "
-                            f"{self.settings['diam_mm']:g} mm mask's "
-                            f"π·(d/2)² resting area. A P3_2-style "
-                            f"systematic error — the stroke on the outer "
-                            f"toe, the wrong feature encircled, the wrong "
-                            f"diam_mm — would pass unnoticed here.\n\n"
-                            f"Your fits agreeing says only that you "
-                            f"are REPEATABLE, not that you are right."
-                            + rescale_note(stats['mean'], None)
-                            + f"\n\nUse this UNCHECKED anchor anyway?\n\n"
-                              f"No = cancel (restore the baseline frame, "
-                              f"or verify the anchor by eye on the "
-                              f"contact sheet first).",
-                            default='no', icon='warning'):
+                            "Nothing can check this scale.",
+                            f"The automatic disc fit refused this baseline "
+                            f"frame (or the frame will not load), so your "
+                            f"{stats['n']} fits (mean "
+                            f"{stats['mean']:.1f} px) have nothing "
+                            f"independent to compare against. Fits that "
+                            f"agree show you are repeatable, not that you "
+                            f"are right.\n\nUse it only if you could see "
+                            f"the disc edge clearly."
+                            + rescale_note(stats['mean'], None),
+                            [('yes', "Use unchecked scale"),
+                             ('no', "Cancel")],
+                            'no'):
                         log_set(stats, 'declined-uncrosschecked', guard)
                         win.destroy()
                         return
@@ -6419,21 +6864,19 @@ class EdgeReviewApp:
                     lines = '\n'.join('• ' + w for w in guard['warn'])
                     if not ask(
                             "Anchor sanity check",
-                            f"The accepted average ({stats['mean']:.1f} px) "
-                            f"disagrees with a reference the app "
-                            f"measured independently:\n\n{lines}\n\n"
-                            f"The scale-anchor budget is ~0.4% diameter "
-                            f"/ ~0.8% area (SLDEA_MEASUREMENT §2.1), so "
-                            f"this is outside it. Common causes: the mark "
-                            f"sat on the outer toe instead of the "
-                            f"half-height, the wrong feature was "
-                            f"measured, or diam_mm does not match this "
-                            f"device's mask."
+                            "Your scale disagrees with the app's own "
+                            "measurement.",
+                            f"Your average is {stats['mean']:.1f} px.\n"
+                            f"{lines}\n\n"
+                            f"Usual causes: the circle sat on the outer "
+                            f"toe instead of half on the edge, the wrong "
+                            f"feature was measured, or diam_mm is wrong "
+                            f"for this mask."
                             + rescale_note(stats['mean'],
-                                           guard['auto_diam_px'])
-                            + f"\n\nUse this anchor ANYWAY?\n\n"
-                              f"No = recalibrate from round 1.",
-                            default='no', icon='warning'):
+                                           guard['auto_diam_px']),
+                            [('yes', "Use it anyway"),
+                             ('no', "Measure again")],
+                            'no'):
                         st['disclosed'] = True
                         log_set(stats, 'declined-guard', guard)
                         restart_all()
@@ -6442,7 +6885,8 @@ class EdgeReviewApp:
                 log_set(stats, ('accepted-override' if overridden
                                 else 'accepted'), guard)
                 accept(stats['mean'], frame_name, stats=stats,
-                       guard=guard, overridden=overridden)
+                       guard=guard, overridden=overridden,
+                       center=mean_center())
 
             def continue_key(_ev=None):
                 """What <Return> does — and what it must NOT.
@@ -6503,6 +6947,26 @@ class EdgeReviewApp:
                     return two_point_diameter(st['pts'][0], st['pts'][1])
                 return 2.0 * st['circle'][2]
 
+            def round_center():
+                """The current round's disc centre in ORIGINAL image px:
+                the midpoint of the two clicks (two-point, already mapped
+                back through the rotation) or the fitted circle's centre.
+                Read only once round_diameter() has accepted the round."""
+                if two_point():
+                    (xa, ya), (xb, yb) = st['pts'][0], st['pts'][1]
+                    return (0.5 * (float(xa) + float(xb)),
+                            0.5 * (float(ya) + float(yb)))
+                return (float(st['circle'][0]), float(st['circle'][1]))
+
+            def mean_center():
+                """Mean of the banked rounds' centres, or None when they do
+                not match the banked diameters one for one."""
+                cs = st['centers']
+                if not cs or len(cs) != len(st['diams']):
+                    return None
+                return (sum(c[0] for c in cs) / len(cs),
+                        sum(c[1] for c in cs) / len(cs))
+
             def step(_ev=None):
                 """What the PRIMARY button does — one command, dispatched on
                 the mode, so the button cannot be wired to the wrong action
@@ -6534,7 +6998,7 @@ class EdgeReviewApp:
                     # calls this for an intermediate round), so neither
                     # can bank one. Not a threshold: one nudge clears it.
                     say_live("⚠ " + CAL_UNTOUCHED_MSG)
-                    messagebox.showwarning("Calibrate", CAL_UNTOUCHED_MSG)
+                    messagebox.showwarning("Calibrate", CAL_UNTOUCHED_MSG, parent=win)
                     return
                 if not cal_diam_plausible(dpx, img.width, img.height,
                                           self.settings.get('roi_frac',
@@ -6556,7 +7020,7 @@ class EdgeReviewApp:
                             "are outside the size range the automatic fit "
                             "accepts. Click the two OPPOSITE edges of the "
                             "shaded disc; a third click starts the pair "
-                            "over.")
+                            "over.", parent=win)
                     else:
                         messagebox.showwarning(
                             "Calibrate",
@@ -6564,9 +7028,10 @@ class EdgeReviewApp:
                             f"disc — it is outside the size range the "
                             f"automatic fit accepts too. Resize the circle "
                             f"onto the disc edge (drag a handle, or the "
-                            f"wheel) before continuing.")
+                            f"wheel) before continuing.", parent=win)
                     return
                 st['diams'].append(dpx)
+                st['centers'].append(round_center())
                 if two_point():
                     # the angle this round was judged at, kept for the log:
                     # a round-set whose rotations turned out to cluster is
@@ -6633,6 +7098,8 @@ class EdgeReviewApp:
                     return 'break'      # no rounds here to go back through
                 if st['diams']:
                     st['diams'].pop()
+                    if st['centers']:
+                        st['centers'].pop()
                     if st['rots']:
                         st['rots'].pop()
                     st['round'] = len(st['diams']) + 1
@@ -6701,6 +7168,7 @@ class EdgeReviewApp:
                 st['mode'] = mode_var.get()
                 st['n'] = rounds_wanted()
                 st['round'], st['diams'] = 1, []
+                st['centers'] = []
                 st['rots'] = []
                 if verify():
                     prepare_verify()
@@ -6769,6 +7237,12 @@ class EdgeReviewApp:
                               'verified_by', 'verified_at', 'guard'):
                         if recorded.get(k) is not None:
                             self.manual_ref[k] = recorded[k]
+                    # its recorded disc centre too (2026-10-05), under the
+                    # names se.anchor_disc reads; absent on older anchors
+                    if (recorded.get('disc_cx_px') is not None
+                            and recorded.get('disc_cy_px') is not None):
+                        self.manual_ref['cx'] = recorded['disc_cx_px']
+                        self.manual_ref['cy'] = recorded['disc_cy_px']
                     dpx = float(recorded['diam_px'])
                     # a reused anchor brings its own record with it, so
                     # what was accepted over when it was made is said
@@ -7263,6 +7737,11 @@ class EdgeReviewApp:
                                # modes and in the verify mode (2026-10-02)
                                'gate_lbl': gate_lbl, 'stop_px': stop_px,
                                'stop_vfy_px': stop_vfy_px}
+            win.lift()
+            try:
+                win.focus_force()
+            except tk.TclError:
+                pass
             win.grab_set()
             self.root.wait_window(win)
         finally:
@@ -7469,10 +7948,27 @@ class EdgeReviewApp:
         #   CANCEL throw the measurement away; the run is untouched
         # default='cancel', the option that changes nothing, keeping this
         # branch's rule that a warning gate's Enter must not act.
-        ans = messagebox.askyesnocancel(
-            "Re-anchor scale — SCALE ONLY",
+        # NAMED BUTTONS since 2026-10-05 (operator), through the same box
+        # as the calibration gates: "Write data.csv now" / "Keep for next
+        # Save" / "Cancel" instead of Yes / No / Cancel with a legend to
+        # decode. The evidence table is unchanged, shown in a fixed-width
+        # font so its columns line up, and wrapped at REANCHOR_WRAP_CHARS
+        # characters of that font rather than at a pixel count: a fixed
+        # 760 px wrapped the table's rows mid-column once Tk scaled its
+        # fonts for a 175 % display (seen by rendering it). The
+        # calibration window is closed by now, so the box is owned by the
+        # main window.
+        try:
+            wrap = tkfont.nametofont('TkFixedFont').measure(
+                '0' * REANCHOR_WRAP_CHARS)
+        except tk.TclError:
+            wrap = 760
+        ans = CAL_CHOICE_RESULT[cal_choice(
+            self.root, "Re-anchor scale — SCALE ONLY",
+            "Re-derive this run's areas at the new scale?",
             self._reanchor_msg(plan, prev, new_ref),
-            default='cancel', icon='warning')
+            REANCHOR_BUTTONS, 'cancel',
+            detail_font='TkFixedFont', wraplength=wrap)]
         if ans is None:
             self.manual_ref = was
             self.status.config(text="re-anchor cancelled — the measured "
@@ -7534,12 +8030,31 @@ class EdgeReviewApp:
             # cross-check number must not cost the correction.
             anchor['auto_diam_px'] = (self._auto_disc() or {}).get('diam_px')
         anchor.update(se.reanchor_anchor_fields(prev, plan))
+        unrecorded_txt = ''
         try:
             se.save_scale_anchor(self.rundir, anchor)
         except OSError as e:
-            self.status.config(
-                text=f"areas re-derived, but recording the re-anchor in "
-                     f"setup.txt failed: {e}")
+            # SAID ON THE LAST STRIP (2026-10-06). This used to be set on
+            # the strip and then overwritten by the RE-ANCHORED line below,
+            # so nobody saw that data.csv now holds areas at the new scale
+            # while setup.txt keeps the old anchor (or none) and no
+            # `reanchor` marker: the run reads as reviewed at a scale its
+            # column no longer uses. It goes right AFTER THE LEAD, not
+            # beside the caveat at the end: the strip is one unwrapped
+            # line, a narrow window cuts its tail, and this line's head
+            # (old -> new px, rows, multiplier, resting area) is long,
+            # while those numbers were all in the confirmation just
+            # answered.
+            # THE REMEDY IS A SECOND RE-ANCHOR, NOT A SAVE. A Save writes
+            # the anchor too (manual_ref still holds it), but as a plain
+            # anchor with no `reanchor` marker and no prev_* fields, i.e.
+            # as if the run had been reviewed at it. This commit leaves no
+            # review pass open, so the scale button routes here again; the
+            # anchor must be measured or verified afresh there, because
+            # Reuse (P) offers setup.txt's anchor, which is the old one.
+            unrecorded_txt = (f" — ⚠ new anchor NOT recorded in setup.txt, "
+                              f"📏 re-anchor again once the folder is "
+                              f"writable ({e})")
         try:
             _p, line = se.append_calibration_log(
                 self.rundir, se.reanchor_log_record(anchor, plan))
@@ -7560,7 +8075,9 @@ class EdgeReviewApp:
                     f"({plan['rest_dev_after']:+.2f}% from "
                     f"{plan['nominal_mm2']:.2f})")
         self.status.config(
-            text=f"RE-ANCHORED (scale only, no re-review): {old_txt} → "
+            text="RE-ANCHORED (scale only, no re-review)"
+                 + unrecorded_txt
+                 + f": {old_txt} → "
                  f"{new_ref['diam_px']:.1f} px, {plan['n_derive']} row(s) "
                  f"re-derived"
                  + (f", {plan['n_blank']} blanked" if plan['n_blank'] else '')
@@ -7602,7 +8119,8 @@ class EdgeReviewApp:
         rather than kept on an unknowable anchor, and that is a deletion the
         operator has to agree to in advance.
 
-        The three-way choice is unchanged and so are its glosses: they are
+        The three-way choice is unchanged. Its glosses now name the buttons
+        (REANCHOR_BUTTONS, 2026-10-05) instead of Yes/No/Cancel: they are
         not prose about a consequence, they are what the three buttons DO,
         and two of the three do not write."""
         nom = plan['nominal_mm2']
@@ -7638,13 +8156,18 @@ class EdgeReviewApp:
         # "only the mm² and diameter columns" says in six words.
         L = [head,
              "",
-             "⚠ YES WRITES data.csv NOW — SCALE ONLY: no detection runs, "
-             "nothing is re-reviewed, and only the mm² and diameter columns "
-             "change (frame names, notes and tags are not touched).",
-             "NO = keep this anchor for the session and apply it at the next "
-             "💾 Save instead — nothing is written now.",
-             "CANCEL = discard the measurement; the run stays exactly as it "
-             "is.",
+             # NAMED FOR THE BUTTONS since 2026-10-05: these were "YES
+             # WRITES ... / NO = ... / CANCEL = ..." glosses on a native
+             # Yes/No/Cancel box; the buttons now carry the action, and
+             # these lines say what each one does beyond its name.
+             f"⚠ \"{REANCHOR_WRITE}\" WRITES data.csv NOW — SCALE ONLY: no "
+             f"detection runs, nothing is re-reviewed, and only the mm² and "
+             f"diameter columns change (frame names, notes and tags are not "
+             f"touched).",
+             f"\"{REANCHOR_KEEP}\" keeps this anchor for the session and "
+             f"applies it at the next 💾 Save — nothing is written now.",
+             f"\"{REANCHOR_CANCEL}\" discards the measurement; the run stays "
+             f"exactly as it is.",
              ""]
         L.append(f"  anchor       {(f'{old_px:.2f} px' if old_px else '?')}"
                  f"  →  {new_px:.2f} px          ({dmm:g} mm disc)")
@@ -7776,6 +8299,10 @@ class EdgeReviewApp:
             'mm_per_px': scale,
             'anchor_frame': ref.get('frame', ''),
             'anchor_is_baseline': ref.get('is_baseline'),
+            # the measured disc's centre (2026-10-05), so a reused anchor
+            # can still state A0 when the automatic fit refuses
+            'disc_cx_px': ref.get('cx'),
+            'disc_cy_px': ref.get('cy'),
             'auto_diam_px': (self.base_ref or {}).get('diam_px'),
             # #215: the three (or more) fitted diameters, their spread and
             # what the anchor guard said. The spread is the ONLY per-run
@@ -8110,6 +8637,9 @@ class TraceWindow(tk.Toplevel):
     -- zoom can never desynchronize clicks from image coordinates."""
 
     CV_W, CV_H = 900, 620
+    HELP_TEXT = ("click add · drag move · right-click delete · wheel zoom · "
+                 "middle/space drag pan · Enter/double-click/first-point "
+                 "close · F fit · Esc cancel")
     GRAB_PX = 8            # view-px radius: press on a point = drag it
     DEL_PX = 12            # view-px radius for right-click delete
 
@@ -8183,9 +8713,16 @@ class TraceWindow(tk.Toplevel):
                             bg='#111', highlightthickness=0,
                             cursor='crosshair')
         self.cv.pack(padx=4, pady=4)
+        # WRAPPED AT THE CANVAS WIDTH (2026-10-05). This line used to be
+        # one long unwrapped string whose area figure gains digits as
+        # points are placed; each time it outgrew the window, Tk widened
+        # the window and the centred, fixed-size canvas slid right under
+        # the pointer mid-trace (measured: 4 -> 19 -> 28 -> 31 px over
+        # four clicks). Wrapped, and with the changing numbers on their
+        # own short line above the fixed help text, it can no longer
+        # change the window's width, nor its height as the area grows.
         self.stat = tk.Label(self, anchor='w', justify='left',
-                             text="click to place points — they close "
-                                  "into the outer edge of the active area")
+                             wraplength=self.CV_W, text="")
         self.stat.pack(fill='x', padx=6, pady=(0, 4))
 
         self.cv.bind('<Button-1>', self._press)
@@ -8414,10 +8951,8 @@ class TraceWindow(tk.Toplevel):
         mm = (f"  =  {area * self.mm_per_px ** 2:.1f} mm²"
               if self.mm_per_px and area else "")
         self.stat.config(
-            text=f"{len(pts)} point(s) — area {area:.0f} px²{mm} — "
-                 f"click add · drag move · right-click delete · wheel "
-                 f"zoom · middle/space drag pan · Enter/double-click/"
-                 f"first-point close · F fit · Esc cancel")
+            text=f"{len(pts)} point(s) — area {area:.0f} px²{mm}\n"
+                 + self.HELP_TEXT)
 
     # -- finish ---------------------------------------------------------
     def _done(self):

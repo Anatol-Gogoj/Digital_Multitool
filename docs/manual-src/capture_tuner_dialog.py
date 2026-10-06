@@ -27,7 +27,10 @@ import tkinter as tk  # noqa: E402
 from PIL import ImageGrab  # noqa: E402
 import gui as gui_mod  # noqa: E402
 
+from capture import pin_96dpi  # noqa: E402
+
 root = tk.Tk()
+pin_96dpi(root)                      # lay out as a 100 % display does
 root.withdraw()
 app = gui_mod.InstrumentControlGUI(root)
 root.deiconify()

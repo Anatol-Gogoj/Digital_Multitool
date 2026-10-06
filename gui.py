@@ -26,6 +26,7 @@ import tk_fontfix                      # must precede tkinter:
 tk_fontfix.apply()                     # colour emoji crash Tk
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
+from tkinter import font as tkfont
 import csv
 import os
 import queue
@@ -37,6 +38,7 @@ from datetime import datetime
 import bench_profiles
 from bench_profiles import BenchProfileStore
 import presets_path
+import relaunch
 from instruments import BK894, TekMSO24, BK4055B, BK9174B, BK5493C
 import lcr_format
 import scope_trace
@@ -44,7 +46,9 @@ import siggen_presets
 from siggen_presets import SignalGenPresetStore
 import sldea_presets
 from sldea_presets import SldeaPresetStore
+import sldea_preview
 import sldea_profile
+import sldea_video
 from sldea_profile import (SldeaProfile, control_v_for_kv, measured_kv,
                            measured_ua, fmt_duration)
 import sweep_plan
@@ -54,6 +58,11 @@ from waveform_render import unit_waveform, scale_waveform
 from version import version_string
 import webcam
 import threading
+
+# The folder this gui.py runs from. On the bench that is the share
+# launcher's local cache, which decides what Restart now runs (see
+# relaunch.py). Module-level so tests can pretend to run from there.
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ---- The tabs, and their STABLE slugs -------------------------------------
 # (slug, progress noun, builder method name), in the order the tabs are
@@ -179,6 +188,36 @@ SG_LAN_RESOURCE = os.environ.get('SCPI_SG_LAN',
                                  'TCPIP0::192.168.71.230::INSTR')
 
 
+def sldea_run_lock(lock, cam_exp, cam_gain):
+    """The camera lock an SLDEA run holds: the Webcam tab's lock `lock`
+    with manual exposure, WB off, and the run's exposure and gain on top.
+    One definition for the pre-flight and the run (2026-10-05), so the
+    pre-flight's snapshot is shot under exactly the controls the run's
+    snapshots will be."""
+    return dict(lock or {}, auto_exposure=1, white_balance_automatic=0,
+                exposure_time_absolute=int(cam_exp), gain=int(cam_gain))
+
+
+def sldea_lock_mismatch(lock, cam_exp, cam_gain):
+    """One sentence when the Webcam tab's LOCK holds a different exposure
+    or gain from the panel fields an SLDEA run takes (`cam_exp`,
+    `cam_gain`), else ''. The preview runs on the lock and the run on the
+    fields, so this is the one case where the two pictures differ (run
+    13_backlight, 2026-10-05). Nothing locked = nothing to disagree with."""
+    lock = lock or {}
+    diffs = []
+    for name, label, val in (('exposure_time_absolute', 'exposure', cam_exp),
+                             ('gain', 'gain', cam_gain)):
+        if name in lock and int(lock[name]) != int(val):
+            diffs.append(f"{label} {int(val)} (locked: {int(lock[name])})")
+    if not diffs:
+        return ''
+    return ("The Webcam tab's fields differ from its lock: "
+            + ", ".join(diffs) + ". The Webcam preview uses the lock; this "
+            "run uses the fields, as this picture does. Press Apply & Lock "
+            "on the Webcam tab to make them agree.")
+
+
 def _lan_reachable(resource, timeout=2.0):
     """Quick TCP liveness probe of a TCPIP VISA resource's host, so a missing
     box/cable falls back to USB fast instead of waiting out a long VISA open
@@ -286,6 +325,12 @@ class InstrumentControlGUI:
         # drop lines. One lock around buffer access + the flush/swap
         # (writes stay best-effort inside it). Review 2026-08-04.
         self._sldea_loglock = threading.Lock()
+        # video runs (2026-09-23): the last run's recorder (the Webcam tab
+        # stays locked while its reader still holds the camera), and the
+        # detached post-run jobs moving recordings into run folders (a LIVE
+        # start asks first while one is copying to the share)
+        self._sldea_recorder = None
+        self._sldea_video_jobs = []
         self.recording = False
         self.record_thread = None
         # Keys of background instrument operations in flight (issue #40) --
@@ -1071,7 +1116,7 @@ ARBITRARY WAVEFORMS:
 - The export pre-fills the channel (ARB + frequency/amplitude/offset);
   after recalling, click Apply to push those settings over USB (they
   are short commands and safe) - or dial them in on the front panel
-- "Upload && Select" (direct upload) works over LAN only (issue #20)
+- "Upload & Select" (direct upload) works over LAN only (issue #20)
 
 BURST & SYNC:
 - Burst emits exactly N cycles per trigger, then the output idles -
@@ -1806,7 +1851,11 @@ ANALYSIS:
         close_btn.config(state='normal')
         if rc == 0:
             self._append_update_text(
-                txt, "\n✓ Update complete. Restart to load the new version.\n")
+                txt, "\n✓ Update complete. Restart now to load the new "
+                     "version: this PC's copy is refreshed first, so the "
+                     "app is gone for about half a minute. Close any Edge "
+                     "Review, tuner or plot window before you restart. "
+                     "Instrument outputs stay as they are.\n")
             self.status_bar.config(text="Update complete — restart to apply")
             restart_btn.config(state='normal')
         else:
@@ -1819,14 +1868,23 @@ ANALYSIS:
 
         Never while an SLDEA run is going (2026-09-24, see
         _sldea_run_blocks). With no run going it is NOT the window-close
-        shutdown: instrument outputs stay exactly as they are."""
+        shutdown: instrument outputs stay exactly as they are.
+
+        When the app runs from the share launcher's local cache, it runs
+        the launch chain again -- the desktop launcher, as a click on the
+        icon does, or else the share launcher -- which refreshes the cache
+        first (relaunch.py, 2026-09-24). Re-running the app's own command
+        line from there reloaded the OLD cached code: the update deploys
+        to the share."""
         if self._sldea_run_blocks('restart', parent=parent):
             return
+        prog, argv = relaunch.restart_command(
+            APP_DIR, os.environ, sys.argv, sys.executable)
         try:
             self.root.destroy()
         except Exception:
             pass
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        os.execv(prog, argv)
 
     def _sldea_run_blocks(self, action, parent=None):
         """True (+ a warning saying why) while an SLDEA run is going, so
@@ -2576,6 +2634,14 @@ LOGGING:
     # unrelated to this. Profile math lives in sldea_profile.py.
 
     SLDEA_POLL_S = 0.1
+    SLDEA_PREVIEW_FONT = ('TkDefaultFont', 8)
+
+    # Video runs (2026-09-23): the full camera restamp is requested this
+    # long before each still, and a still waits at most this long past its
+    # scheduled moment for a frame captured after both, before it is
+    # logged NO FRAME. Neither ever blocks the loop.
+    SLDEA_STAMP_LEAD_S = 0.6
+    SLDEA_STILL_WAIT_S = 1.5
 
     def create_sldea_tab(self):
         _tab = ScrollableTab(self.notebook)
@@ -2586,16 +2652,20 @@ LOGGING:
                              "1 V control = 1 kV, Trek max 10 kV)", padding=10)
         inp.pack(fill='x', padx=10, pady=8)
 
-        def field(r, c, label, key, default, tip=None):
-            ttk.Label(inp, text=label).grid(row=r, column=c*2, sticky='e',
-                                            pady=3, padx=(8, 2))
-            e = ttk.Entry(inp, width=8)
+        def entry(parent, key, default, tip=None, width=8):
+            e = ttk.Entry(parent, width=width)
             e.insert(0, str(default))
-            e.grid(row=r, column=c*2+1, sticky='w', padx=(0, 10))
             e.bind('<KeyRelease>', lambda _ev: self._sldea_refresh())
             if tip:
                 add_tooltip(e, tip)
             self.sldea_vars[key] = e
+            return e
+
+        def field(r, c, label, key, default, tip=None):
+            ttk.Label(inp, text=label).grid(row=r, column=c*2, sticky='e',
+                                            pady=3, padx=(8, 2))
+            entry(inp, key, default, tip).grid(row=r, column=c*2+1,
+                                               sticky='w', padx=(0, 10))
 
         field(0, 0, "Start (kV):", 'start_kv', 0,
               "First voltage. 0 kV is captured as the baseline, not held.")
@@ -2603,34 +2673,69 @@ LOGGING:
         field(0, 2, "Step (kV):", 'step_kv', 0.25, "Voltage increment per step.")
         field(1, 0, "Ramp (s):", 'ramp_s', 5, "Transition time between levels.")
         field(1, 1, "Landing (s):", 'landing_s', 60, "Hold time at each level.")
-        field(1, 2, "Settle (s):", 'settle_s', 2,
-              "Wait after the ramp before the post-ramp snapshot.")
-        field(2, 0, "Snap lead (s):", 'snap_lead_s', 1,
-              "How long before the next step to take the pre-step snapshot.")
-        field(2, 1, "Repeat:", 'repeat', 1, "Repeat the whole sweep N times.")
+        field(1, 2, "Repeat:", 'repeat', 1, "Repeat the whole sweep N times.")
 
         self.sldea_updown = tk.BooleanVar(value=False)
         ttk.Checkbutton(inp, text="Up/down (hysteresis)",
                         variable=self.sldea_updown,
-                        command=self._sldea_refresh).grid(row=2, column=4,
+                        command=self._sldea_refresh).grid(row=1, column=6,
                                                           columnspan=2,
                                                           sticky='w')
+
+        # The two per-landing snapshot timings, side by side and named after
+        # the tags they time (2026-09-23). They were "Settle" and "Snap lead"
+        # on two different rows, which never said which snapshot either one
+        # moved; each now carries the glyph its snapshot gets on the preview.
+        snap_head = ttk.Label(inp, text="Snapshots each landing:")
+        snap_head.grid(row=2, column=0, columnspan=8, sticky='w',
+                       padx=(8, 0), pady=(6, 0))
+        add_tooltip(snap_head, "Two snapshots are taken at every voltage "
+                               "landing, one near each end of the hold. The "
+                               "preview below marks each with the same "
+                               "symbol.")
+        snap = ttk.Frame(inp)
+        snap.grid(row=3, column=0, columnspan=8, sticky='w', padx=(22, 0),
+                  pady=(2, 0))
+        for tag, name, key, default, after, tip in (
+                ('post-ramp', "Post-ramp", 'settle_s', 2,
+                 "s after the ramp ends",
+                 "Seconds after each ramp ends (the landing voltage is "
+                 "reached) before the post-ramp snapshot, so the DEA "
+                 "settles at the new voltage first."),
+                ('pre-ramp', "Pre-ramp", 'snap_lead_s', 1,
+                 "s before the next ramp",
+                 "Seconds before each landing ends (the next ramp starts) "
+                 "that the pre-ramp snapshot is taken, after the DEA has "
+                 "held the voltage for the whole landing.")):
+            self._sldea_glyph(snap, tag).pack(side=tk.LEFT, padx=(0, 3))
+            ttk.Label(snap, text=name).pack(side=tk.LEFT, padx=(0, 4))
+            entry(snap, key, default, tip, width=6).pack(side=tk.LEFT)
+            ttk.Label(snap, text=after).pack(side=tk.LEFT, padx=(4, 22))
         # The 0 kV baseline frame is always captured (checkbox removed
         # 2026-08-02): Edge Review measures every area against it, and an
         # unticked baseline silently made the first mid-run frame the
         # reference — every outline wrong with no error anywhere.
         self.sldea_summary = tk.Label(inp, text="", fg='#1f3a5f', anchor='w',
                                       justify='left')
-        self.sldea_summary.grid(row=4, column=0, columnspan=6, sticky='w',
+        self.sldea_summary.grid(row=4, column=0, columnspan=8, sticky='w',
                                 pady=(6, 0))
 
-        prev = ttk.LabelFrame(f, text="Preview — kV vs time  "
-                              "(dots: gray=baseline  green=post-ramp  red=pre-ramp)", padding=6)
+        # The legend is drawn ON the canvas with the markers' own drawing
+        # code, so it cannot drift from them; the title used to carry it as
+        # colour words ("green=post-ramp red=pre-ramp") -- colour was the
+        # only cue, and green/red is the commonest colour-blind confusion.
+        prev = ttk.LabelFrame(f, text="Preview — kV vs time  (hover a marker "
+                                      "for its landing, kV and time)",
+                              padding=6)
         prev.pack(fill='x', padx=10, pady=8)
-        self.sldea_canvas = tk.Canvas(prev, height=210, bg='white',
+        self.sldea_canvas = tk.Canvas(prev, height=240, bg='white',
                                       highlightthickness=0)
         self.sldea_canvas.pack(fill='x')
         self.sldea_canvas.bind('<Configure>', lambda _ev: self._sldea_redraw())
+        self.sldea_canvas.bind('<Motion>', self._sldea_hover)
+        self.sldea_canvas.bind('<Leave>',
+                               lambda _ev: self.sldea_canvas.delete('hover'))
+        self._sldea_marks = []
 
         outf = ttk.LabelFrame(f, text="Output & Measurement", padding=10)
         outf.pack(fill='x', padx=10, pady=8)
@@ -2723,15 +2828,23 @@ LOGGING:
                        lambda _ev: self._sldea_conc_sync())
         electrode.bind('<KeyRelease>', lambda _ev: self._sldea_conc_sync())
         self._sldea_conc_sync()
-        self.sldea_trek_inv = tk.BooleanVar(value=False)
+        # Ticked by default (owner decision 2026-10-05): every run on file
+        # with monitor readings read NEGATIVE kV with the box unticked and
+        # no INVERTED line in setup.txt, i.e. the lab's Trek inverts. Ticked,
+        # the run negates the CONTROL voltage only: the HV output and both
+        # monitors (which measure the output) then read positive, inside the
+        # 0..+kV window the monitor check frames. A preset still sets the
+        # box either way; setup.txt records INVERTED.
+        self.sldea_trek_inv = tk.BooleanVar(value=True)
         add_tooltip(ttk.Checkbutton(outf, text="Trek inverts (negate "
                                                 "control)",
                                     variable=self.sldea_trek_inv),
                     "Tick when the Trek outputs NEGATIVE kV for a positive "
                     "control voltage (inverting amp config/input). The run "
-                    "then drives a negative control so the HV output is "
-                    "positive, and the V_Out monitor reading is sign-"
-                    "corrected in the log.").grid(row=5, column=0,
+                    "then drives a negative control so the HV output, and "
+                    "the V_Out and I_Out monitors, read positive. Ticked by "
+                    "default: the lab's Trek inverts. Untick it for an "
+                    "amplifier wired non-inverting.").grid(row=5, column=0,
                                                   columnspan=3, sticky='w',
                                                   pady=(4, 0))
         # row=5, BELOW the electrode+concentration pair: those two define
@@ -2839,6 +2952,56 @@ LOGGING:
                     f"locked round-trip); nominal_kV is on every row. The "
                     f"rate ACHIEVED is reported in the run log at the end.")
         self.sldea_vars['tel_hz'] = tel_hz
+
+        # Video beside the snapshots (2026-09-23). Off by default: it costs
+        # gigabytes. The snapshots keep coming at their scheduled times --
+        # taken off the same stream -- so data.csv and every tool reading
+        # it are untouched; the video is an addition, never a replacement.
+        vidf = ttk.LabelFrame(f, text="🎥 Video beside the snapshots "
+                                      "(lossless)", padding=8)
+        vidf.pack(fill='x', padx=10, pady=(0, 8))
+        self.sldea_vid_on = tk.BooleanVar(value=False)
+        add_tooltip(ttk.Checkbutton(vidf, text="Record",
+                                    variable=self.sldea_vid_on,
+                                    command=self._sldea_refresh),
+                    f"Record the whole run as a lossless video "
+                    f"({sldea_video.VIDEO_FILENAME}, FFV1, 8-bit grey) "
+                    f"beside the snapshots, with every frame's time and "
+                    f"commanded kV in {sldea_video.VIDEO_INDEX_FILENAME}. "
+                    f"Lossless because compression smears the fine texture "
+                    f"edge detection measures. Written to this PC's local "
+                    f"disk during the run and moved into the run folder "
+                    f"once the HV is off. The snapshots are still taken on "
+                    f"schedule, from the same stream.").pack(side=tk.LEFT)
+        ttk.Label(vidf, text="fps:").pack(side=tk.LEFT, padx=(14, 2))
+        vid_fps = ttk.Entry(vidf, width=5)
+        vid_fps.insert(0, f"{sldea_video.VIDEO_FPS_DEFAULT:g}")
+        vid_fps.pack(side=tk.LEFT)
+        vid_fps.bind('<KeyRelease>', lambda _ev: self._sldea_refresh())
+        mb_frame = sldea_video.BYTES_PER_PIXEL_EST * 1920 * 1080 / 1e6
+        add_tooltip(vid_fps,
+                    f"Frames per second RECORDED, "
+                    f"{sldea_video.VIDEO_FPS_MIN:g}–"
+                    f"{sldea_video.VIDEO_FPS_MAX:g}. About "
+                    f"{mb_frame:.1f} MB per 1080p frame, so 1 fps is "
+                    f"~2.5 GB for a "
+                    f"40-minute run. The size estimate beside this box "
+                    f"follows the staircase above.")
+        self.sldea_vars['vid_fps'] = vid_fps
+        self.sldea_vid_detect = tk.BooleanVar(value=False)
+        add_tooltip(ttk.Checkbutton(
+            vidf, text="then detect edges on every frame",
+            variable=self.sldea_vid_detect),
+            f"When a completed run's video is in place, run the same edge "
+            f"detector Edge Review uses on EVERY recorded frame, in a "
+            f"separate background program (a long run takes ~0.2 s per "
+            f"frame). Writes {sldea_video.VIDEO_EDGES_FILENAME} and "
+            f"{sldea_video.VIDEO_PLOT_FILENAME} into the run folder; "
+            f"data.csv is not touched. No review queue: every row carries "
+            f"the detector's own confidence and needs-review verdict.").pack(
+            side=tk.LEFT, padx=(14, 0))
+        self.sldea_vid_info = tk.Label(vidf, text='', fg='#555')
+        self.sldea_vid_info.pack(side=tk.LEFT, padx=12)
 
         # Named run-configuration presets (`#265`) -- everything above this
         # frame, saved under a name in the shared presets/ library so a
@@ -2989,17 +3152,83 @@ LOGGING:
                 f"{control_v_for_kv(max(p.levels)):g} V", fg='#1f3a5f')
         else:
             self.sldea_summary.config(text=f"⚠ {err}", fg='red')
+        self._sldea_video_info(p)
         self._sldea_redraw()
+
+    def _sldea_draw_marker(self, c, tag, x, y, r, tags=()):
+        """One snapshot marker (shape + Tol fill + black edge) on canvas `c`.
+        The preview, its legend and the field-row glyphs all draw through
+        here, so the three can never disagree."""
+        shape, fill, _label = sldea_preview.MARKERS[tag]
+        kind, coords = sldea_preview.marker_coords(shape, x, y, r)
+        make = c.create_oval if kind == 'oval' else c.create_polygon
+        return make(*coords, fill=fill, outline=sldea_preview.OUTLINE,
+                    width=1, tags=tags)
+
+    def _sldea_ui_scale(self):
+        """Screen px per 96-dpi px (1.0 on a standard display). Tk scales
+        FONTS with the display's dpi but not raw pixel sizes, so the
+        preview's markers and margins are multiplied by this to stay in
+        proportion to its text."""
+        try:
+            f = float(self.root.tk.call('tk', 'scaling')) / (96 / 72)
+        except (tk.TclError, ValueError):
+            return 1.0
+        return min(3.0, max(1.0, f))
+
+    def _sldea_glyph(self, parent, tag, r=5):
+        """A small canvas showing `tag`'s preview marker, to sit beside the
+        field that times that snapshot."""
+        r *= self._sldea_ui_scale()
+        size = int(2 * 1.35 * r) + 4
+        try:
+            bg = ttk.Style().lookup('TFrame', 'background') or None
+        except tk.TclError:
+            bg = None
+        g = tk.Canvas(parent, width=size, height=size, highlightthickness=0,
+                      **({'bg': bg} if bg else {}))
+        self._sldea_draw_marker(g, tag, size / 2, size / 2, r)
+        return g
+
+    def _sldea_video_info(self, p):
+        """The video frame's size line: what this staircase will cost on
+        disk at the typed rate, so gigabytes are never a surprise."""
+        lbl = getattr(self, 'sldea_vid_info', None)
+        if lbl is None:
+            return
+        if not self.sldea_vid_on.get():
+            lbl.config(text="off — snapshots only")
+            return
+        fps = sldea_video.clamp_fps(self.sldea_vars['vid_fps'].get())
+        if p is None:
+            lbl.config(text=f"{fps:g} fps")
+            return
+        size = sldea_video.fmt_bytes(
+            sldea_video.estimate_bytes(p.total_duration_s, fps))
+        lbl.config(text=f"{fps:g} fps · ≈ {size} for this "
+                        f"{fmt_duration(p.total_duration_s)} run")
 
     def _sldea_redraw(self):
         c = self.sldea_canvas
         c.delete('all')
+        self._sldea_marks = []
         p = self._sldea_profile
         w = c.winfo_width()
         h = c.winfo_height()
         w = w if w > 50 else 700           # guard an unrealized canvas (width 1)
-        h = h if h > 50 else 210
-        mL, mR, mT, mB = 52, 14, 26, 26
+        h = h if h > 50 else 240
+        font = self.SLDEA_PREVIEW_FONT
+        fnt = getattr(self, '_sldea_fnt', None)
+        if fnt is None:                        # measured once, not per redraw
+            fnt = self._sldea_fnt = tkfont.Font(root=c, font=font)
+        lh = fnt.metrics('linespace')
+        k = self._sldea_ui_scale()
+        vtop = (max([p.end_kv] + p.levels) or 1.0) if p else 1.0
+        # margins from the font, not constants: Tk grows text with the
+        # display dpi, and fixed pixels crowded the rows on a scaled screen.
+        # mT holds two rows: the legend on top, the playhead's clock below.
+        mL = max(52, fnt.measure(f"{vtop:g} kV") + 14)
+        mR, mT, mB = 14, 2 * lh + 10, lh + 10
         x0, y0, x1, y1 = mL, mT, w - mR, h - mB
         c.create_line(x0, y1, x1, y1)
         c.create_line(x0, y0, x0, y1)
@@ -3011,37 +3240,83 @@ LOGGING:
         self._sldea_plot = {'x0': x0, 'x1': x1, 'y0': y0, 'y1': y1,
                             'total': total}
         vmax = max([p.end_kv] + p.levels) or 1.0
-
-        def X(t):
-            return x0 + (x1 - x0) * t / total
-
-        def Y(v):
-            return y1 - (y1 - y0) * v / vmax
-        pts = []
-        for kind, t0, t1, a, b in p.segments:
-            pts += [X(t0), Y(a), X(t1), Y(b)]
+        pts = sldea_preview.staircase(p, x0, y0, x1, y1)
         if pts:
-            c.create_line(*pts, fill='#1565c0', width=2)
-        colour = {'baseline': '#888888', 'post-ramp': '#2e7d32',
-                  'pre-ramp': '#c62828'}
-        for s in p.snapshots:
-            x, y = X(s['t']), Y(s['nominal_kv'])
-            c.create_oval(x - 3, y - 3, x + 3, y + 3,
-                          fill=colour.get(s['tag'], '#000'), outline='')
-        c.create_text(x0 - 6, Y(vmax), text=f"{vmax:g} kV", anchor='e',
-                      font=('TkDefaultFont', 7))
-        c.create_text(x0 - 6, y1, text="0", anchor='e',
-                      font=('TkDefaultFont', 7))
-        c.create_text(x1, y1 + 12, text=fmt_duration(total), anchor='e',
-                      font=('TkDefaultFont', 7), fill='#555')
-        c.create_text(x0 + 4, y0 - 14, anchor='w', font=('TkDefaultFont', 7),
-                      fill='#555', text=f"{p.n_frames} frames")
+            c.create_line(*pts, fill=sldea_preview.LINE, width=2)
+        marks = sldea_preview.snapshot_points(p, x0, y0, x1, y1)
+        r = sldea_preview.marker_radius(
+            [(x, y) for x, y, s in marks if s['step'] > 0],
+            r_min=sldea_preview.R_MIN * k, r_max=sldea_preview.R_MAX * k)
+        # time order: the baseline lands on top of the warm-up ring it
+        # shares 0 kV with, and each landing's markers over the one before
+        for x, y, s in marks:
+            self._sldea_draw_marker(c, s['tag'], x, y, r,
+                                    tags=('marker', f"marker-{s['tag']}"))
+            self._sldea_marks.append((x, y, r, s))
+        c.create_text(x0 - 6, y0, text=f"{vmax:g} kV", anchor='e',
+                      font=font)
+        # clear of the baseline diamond, which sits on the origin
+        c.create_text(x0 - 6 - 1.25 * r, y1, text="0", anchor='e', font=font)
+        c.create_text(x1, y1 + 4, text=fmt_duration(total), anchor='ne',
+                      font=font, fill='#555')
+        ly = 4 + lh / 2                          # legend row, top margin
+        frames = c.create_text(x0, ly, anchor='w', font=font, fill='#555',
+                               text=f"{p.n_frames} frames")
+        self._sldea_draw_legend(c, sldea_preview.legend_tags(p),
+                                c.bbox(frames)[2] + 22, ly, k)
         if self._sldea_running:                # keep the playhead through a redraw
             self._sldea_draw_cursor(self._sldea_elapsed)
 
+    def _sldea_draw_legend(self, c, tags, left, y, k=1.0):
+        """Marker legend from x=`left`, left to right, glyphs scaled by the
+        display factor `k`. Anchored LEFT on purpose: the tab scrolls
+        sideways when the window is narrower than its widest row, and a
+        right-aligned legend went off-screen."""
+        r = 4.5 * k
+        x = left
+        for tag in tags:
+            self._sldea_draw_marker(c, tag, x + 1.4 * r, y, r, tags='legend')
+            item = c.create_text(x + 2.8 * r + 5, y, anchor='w',
+                                 text=sldea_preview.MARKERS[tag][2],
+                                 font=self.SLDEA_PREVIEW_FONT, fill='#222',
+                                 tags='legend')
+            x = c.bbox(item)[2] + 16 * k
+
+    def _sldea_hover(self, ev):
+        """Describe the snapshot(s) under the pointer in a box by the cursor.
+        Every marker within reach is listed, because the warm-up frame and
+        the baseline share 0 kV and overlap by design."""
+        c = self.sldea_canvas
+        c.delete('hover')
+        p = self._sldea_profile
+        if not p or not self._sldea_marks:
+            return
+        near = [(abs(x - ev.x) + abs(y - ev.y), s)
+                for x, y, r, s in self._sldea_marks
+                if abs(x - ev.x) <= r + 3 and abs(y - ev.y) <= r + 3]
+        if not near:
+            return
+        near.sort(key=lambda d: (d[0], -d[1]['t']))
+        text = "\n".join(sldea_preview.describe(s, p)
+                         for _d, s in near[:3])
+        item = c.create_text(ev.x + 14, ev.y + 12, anchor='nw', text=text,
+                             font=self.SLDEA_PREVIEW_FONT, fill='#000',
+                             justify='left', tags='hover')
+        bx0, by0, bx1, by1 = c.bbox(item)
+        # keep the box on the canvas: flip left/up at the far edges
+        dx = -(bx1 - bx0) - 28 if bx1 + 4 > c.winfo_width() else 0
+        dy = -(by1 - by0) - 24 if by1 + 4 > c.winfo_height() else 0
+        c.move(item, dx, dy)
+        bx0, by0, bx1, by1 = c.bbox(item)
+        box = c.create_rectangle(bx0 - 4, by0 - 3, bx1 + 4, by1 + 3,
+                                 fill='#FFFFFF', outline='#000000',
+                                 tags='hover')
+        c.tag_lower(box, item)
+
     def _sldea_draw_cursor(self, elapsed):
         """Draw/move the run playhead -- a scrolling vertical line at the
-        current test time -- on the preview (tagged so only it is redrawn)."""
+        current test time -- on the preview (tagged so only it is redrawn).
+        Dashed black: it used to be the pre-ramp dots' red."""
         c = self.sldea_canvas
         c.delete('cursor')
         pl = self._sldea_plot
@@ -3049,10 +3324,11 @@ LOGGING:
             return
         frac = min(1.0, max(0.0, elapsed / pl['total']))
         x = pl['x0'] + (pl['x1'] - pl['x0']) * frac
-        c.create_line(x, pl['y0'], x, pl['y1'], fill='#c62828', width=1,
-                      tags='cursor')
-        c.create_text(x, pl['y0'] - 2, text=fmt_duration(elapsed), anchor='s',
-                      fill='#c62828', font=('TkDefaultFont', 7), tags='cursor')
+        c.create_line(x, pl['y0'], x, pl['y1'], fill=sldea_preview.PLAYHEAD,
+                      width=1, dash=(4, 3), tags='cursor')
+        c.create_text(x, pl['y0'] - 3, text=fmt_duration(elapsed), anchor='s',
+                      fill=sldea_preview.PLAYHEAD,
+                      font=self.SLDEA_PREVIEW_FONT, tags='cursor')
 
     def _sldea_animate_cursor(self):
         """Main-thread ~10 Hz loop scrolling the cursor while a run is on."""
@@ -3135,6 +3411,8 @@ LOGGING:
             'wd_on': self.sldea_wd_on,
             'tel_on': self.sldea_tel_on,
             'autoproc': self.sldea_autoproc,
+            'vid_on': self.sldea_vid_on,
+            'vid_detect': self.sldea_vid_detect,
         })
         return targets
 
@@ -3309,6 +3587,22 @@ LOGGING:
                        "the staircase moves, so a wrong level could hold "
                        "for a whole landing. Stop it first: Webcam tab → "
                        "Stop sweep.")))
+            elif kind == 'sweep' and self._sldea_video_wanted():
+                # RECORD IS TICKED (2026-10-05, owed since #334 met the
+                # video branch). The question below exists because a
+                # snapshot that loses the camera costs one frame. A
+                # recording holds the camera for the whole run, so beside
+                # a sweep photographing every level it is the recording
+                # that fails, from the first level on. Refused, not asked.
+                reasons.append((
+                    f"a stepped sweep on SG CH{ch} needs the camera this "
+                    f"run's video records with",
+                    f"A stepped sweep on the Webcam tab (SG CH{ch}) "
+                    f"photographs every level with the camera. This run is "
+                    f"set to record video, which holds the camera for the "
+                    f"whole run, so the two cannot share it. Stop the sweep "
+                    f"first (Webcam tab → Stop sweep), or untick Record "
+                    f"video to be asked about running beside it."))
             elif kind == 'sweep':
                 job = getattr(self, '_cam_seq_gen', None)
                 ask = (
@@ -3335,6 +3629,20 @@ LOGGING:
                       "snapshots for the camera. Stop it first"
                     + (": Webcam tab → Stop." if timed
                        else " on the Webcam tab.")))
+        rec = getattr(self, '_sldea_recorder', None)
+        if rec is not None and rec.reader_alive():
+            # THE PREVIOUS RUN'S RECORDER (2026-10-05, owed since #334 met
+            # the video branch). It keeps reading the camera until its
+            # stop() returns, which can outlast the run by seconds; the
+            # Webcam tab already counts it as holding the camera
+            # (_cam_owned_by_sldea), and a new run's pre-flight and
+            # snapshots need the same device.
+            reasons.append((
+                "the previous run's video recorder is still releasing the "
+                "camera",
+                "The previous run's video recorder is still closing and "
+                "holds the camera until it has. That usually takes a few "
+                "seconds."))
         if 'camera-ctrl' in self._bg_busy:
             reasons.append((
                 "a camera adjustment is running",
@@ -3415,6 +3723,14 @@ LOGGING:
             go, allowed_sweep = self._sldea_start_gate(sgch, dry)
             if not go:
                 return
+            # Video (2026-09-23) is settled next, still before any HV
+            # question (the start gate above asks nothing):
+            # an operator who asked for a recording must not learn it is
+            # impossible after agreeing to energize the Trek.
+            vid_on, vid_fps = self._sldea_video_preflight(p)
+            if vid_on is None:
+                return
+            vid_detect = bool(vid_on and self.sldea_vid_detect.get())
             if not dry:
                 if not INSTRUMENTS_SUPPORTED:
                     messagebox.showinfo("Linux only", NOT_LINUX_NOTE)
@@ -3433,6 +3749,23 @@ LOGGING:
                         "Proceed without monitoring?", default='no'):
                     return
                 if self.scope and not self._sldea_check_monitors(p):
+                    return
+                # A previous run's video still copying to the share competes
+                # with this run's own writes there, which happen on the
+                # thread that runs the watchdog (share stalls of seconds are
+                # measured). Asked, not refused: the copy is throttled, and
+                # the operator may know the output dir is elsewhere.
+                self._sldea_video_jobs = [
+                    j for j in self._sldea_video_jobs if j.poll() is None]
+                if self._sldea_video_jobs and not messagebox.askyesno(
+                        "A video is still being copied",
+                        "A previous run's video is still being moved into "
+                        "its run folder (and perhaps analysed) by a "
+                        "separate program. That copy writes to the same "
+                        "share this run will, and a stalled share delays "
+                        "the writes made by the thread that runs the "
+                        "breakdown watchdog.\n\nStart the LIVE run anyway?",
+                        default='no'):
                     return
                 if not messagebox.askyesno(
                         "Energize HV?",
@@ -3585,7 +3918,11 @@ LOGGING:
                 + (f"  [watchdog: dev ≥{wd_ua:g} µA for {wd_s:g}s, "
                    f"baseline learned at 0 kV]" if wd_on else "")
                 + (f"  [telemetry: {tel_hz:g} Hz → "
-                   f"{sldea_profile.TELEMETRY_FILENAME}]" if tel_on else ""))
+                   f"{sldea_profile.TELEMETRY_FILENAME}]" if tel_on else "")
+                + (f"  [video: {vid_fps:g} fps → "
+                   f"{sldea_video.VIDEO_FILENAME}"
+                   + (", edges after" if vid_detect else "") + "]"
+                   if vid_on else ""))
             started = True
             threading.Thread(
                 target=self._sldea_worker,
@@ -3595,13 +3932,72 @@ LOGGING:
                       autoproc, wd_on, wd_ua, wd_s, trek_sign, scope_setup,
                       tel_on, tel_hz, electrode, concentration_ml),
                 kwargs=dict(cam_expected=cam_expected,
-                            picture_override=picture_override),
+                            picture_override=picture_override,
+                            vid_on=vid_on, vid_fps=vid_fps or 1.0,
+                            vid_detect=vid_detect),
                 daemon=True).start()
             self.root.after(100, self._sldea_animate_cursor)  # playhead
         finally:
             if not started:
                 with self._sldea_loglock:
                     self._sldea_prelog = None
+
+    def _sldea_video_wanted(self):
+        """True when the operator has ticked Record video. Read by the start
+        gate, which runs before the video pre-flight: a run whose
+        recording the pre-flight later drops still counts here, and the
+        refusal it causes says to untick Record instead."""
+        var = getattr(self, 'sldea_vid_on', None)
+        try:
+            return bool(var is not None and var.get())
+        except Exception:
+            return False
+
+    def _sldea_video_preflight(self, p):
+        """-> (record?, fps), or (None, None) when the operator cancelled.
+
+        Checks the two things that would otherwise fail an hour into a run
+        -- that this PC's OpenCV can write lossless FFV1 at all (a build
+        without the encoder fails at the first frame), and that the LOCAL
+        staging disk has room for the estimate -- and offers a
+        snapshots-only run instead of refusing outright."""
+        if not self.sldea_vid_on.get():
+            return False, None
+        import shutil
+        fps = sldea_video.clamp_fps(self.sldea_vars['vid_fps'].get())
+        ok, why = sldea_video.codec_available()
+        if not ok:
+            if messagebox.askyesno(
+                    "Video unavailable",
+                    f"This PC cannot record the lossless video: {why}.\n\n"
+                    f"Run WITHOUT video (snapshots only)?", default='no'):
+                self._sldea_log(f"⚠ video requested but unavailable "
+                                f"({why}) — snapshots only")
+                return False, None
+            return None, None
+        need = sldea_video.estimate_bytes(p.total_duration_s, fps)
+        probe = sldea_video.staging_root()
+        while probe and not os.path.exists(probe):
+            parent = os.path.dirname(probe)
+            if parent == probe:
+                break
+            probe = parent
+        try:
+            free = shutil.disk_usage(probe).free
+        except OSError:
+            free = None
+        if free is not None and free < 1.3 * need:
+            if messagebox.askyesno(
+                    "Not enough disk for the video",
+                    f"The video needs about "
+                    f"{sldea_video.fmt_bytes(need)}, and the local disk it "
+                    f"is written to during the run ({probe}) has "
+                    f"{sldea_video.fmt_bytes(free)} free.\n\nRun WITHOUT "
+                    f"video (snapshots only)?", default='no'):
+                self._sldea_log("⚠ video skipped — not enough local disk")
+                return False, None
+            return None, None
+        return True, fps
 
     def _sldea_scope_readback(self, vch, ich):
         """Read back SCALE/POSITION/OFFSET/EXTATTEN for both monitor
@@ -3667,24 +4063,25 @@ LOGGING:
                 self._sldea_log(f"⚠ monitor check: CH{ch} ({lbl}) "
                                 f"{'/'.join(missing)} query failed — those "
                                 f"checks were SKIPPED, not passed")
-        # Polarity-aware window (review 2026-08-04): with 'Trek inverts'
-        # the drive is negative and V_Out swings 0..−need, so the check
-        # and the fix plan must frame the window on the OTHER side of 0.
-        v_sign = -1.0 if self.sldea_trek_inv.get() else 1.0
+        # V_Out is framed 0..+need whatever 'Trek inverts' says. The
+        # monitors measure the Trek OUTPUT, and the box exists to make that
+        # output positive by negating the control (2026-10-05). The
+        # 2026-08-04 polarity-aware window framed it 0..-need instead,
+        # which put a correctly ticked run's readings off-screen: on this
+        # bench V_Out reads the opposite sign to the control, so a
+        # negative control gives a POSITIVE V_Out.
         probs = sldea_profile.monitor_problems(
             max(p.levels), v_scale=qs['v_scale'], v_atten=qs['v_atten'],
             i_scale=qs['i_scale'], i_atten=qs['i_atten'], breakdown_ua=wd_ua,
             v_position=qs['v_position'], v_offset=qs['v_offset'],
             i_position=qs['i_position'], i_offset=qs['i_offset'],
-            v_sign=v_sign)
+            v_sign=1.0)
         if not probs:
             self._sldea_log("monitor check: OK")
             return True
         plan = sldea_profile.monitor_fix_plan(max(p.levels), wd_ua,
-                                              v_sign=v_sign)
-        pol = ("Trek INVERTED: V_Out swings 0 to −{:g} V".format(
-                   max(p.levels)) if v_sign < 0
-               else "V_Out swings 0 to +{:g} V".format(max(p.levels)))
+                                              v_sign=1.0)
+        pol = "V_Out swings 0 to +{:g} V".format(max(p.levels))
         msg = ("The oscilloscope cannot correctly record this run:\n\n• "
                + "\n\n• ".join(probs)
                + f"\n\nFix it automatically?  ({pol})\n"
@@ -3714,8 +4111,7 @@ LOGGING:
                                 f"{plan['v_position']:g} div, CH{ich} "
                                 f"{plan['i_scale']:g} V/div position "
                                 f"{plan['i_position']:g} div, 1x "
-                                f"attenuation, offset 0"
-                                + (" (Trek inverted)" if v_sign < 0 else ""))
+                                f"attenuation, offset 0")
             except Exception as e:
                 messagebox.showerror("Scope", f"Could not rescale: {e}")
                 return False
@@ -3740,30 +4136,63 @@ LOGGING:
         for the start path to hand to the worker (decisions 12 to 14,
         2026-10-03): 'frame' is True when the camera gave a frame here,
         and 'override' names a deliberate start past the flat gate ('',
-        or sldea_profile.PREFLIGHT_OVERRIDE_NO_PICTURE)."""
+        or sldea_profile.PREFLIGHT_OVERRIDE_NO_PICTURE).
+
+        THE PRE-FLIGHT SHOWS WHAT THE RUN WILL SHOOT (2026-10-05, run
+        13_backlight). It used to write `cam_exp`/`cam_gain` and then grab
+        through oneshot_rgb, which re-stamps the Webcam tab's LOCK just
+        before the shutter -- so the dialog showed the lock's exposure,
+        while the run (`_sldea_worker`) overrides the lock with
+        `cam_exp`/`cam_gain` for every grab. With the panel fields at
+        exposure 20 and a different value locked, the pre-flight looked
+        reasonable and every one of the run's 60 frames came out 57-66 %
+        saturated. The grab now goes through the very lock the run will
+        hold (the tab's lock with the run's four controls on top), and
+        the tab's own lock is put back afterwards. When the panel fields
+        and the tab's lock disagree, the dialog says so: the preview the
+        operator tuned on runs on the lock, the run on the fields.
+
+        Merged 2026-10-06 (#348 with #361): the frame the picture check
+        judges is now taken under the run's own lock, so the check is
+        handed that lock, and its 'preview NOT taken with the run's
+        settings' gate can no longer fire from here. The Webcam tab's live
+        preview running on a different lock is #361's sentence below, and
+        like every warning it costs the start button its default
+        (sldea_profile.preflight_start_button's `tab_mismatch`: Return
+        only starts a clean pre-flight)."""
         frame = None
         self._sldea_preflight_seen = {'frame': False, 'override': ''}
-        # The lock as it stands for the grab below. oneshot_rgb re-stamps
-        # it AFTER the four values written here, so the lock (not the
-        # entry boxes) decides how this frame is exposed, while the run
-        # overlays the entry values on it. Copied, never written: this
-        # method adds no camera call and reorders none. A camera with no
-        # device path is stamped by neither the pre-flight nor the run,
-        # so it has no lock to disagree with and `lock` stays empty.
+        lock_before = dict(webcam.LOCKED_CONTROLS)
+        # The lock the frame below is taken under, for the picture check:
+        # the run's own (sldea_run_lock), set before the grab and the
+        # Webcam tab's put back after it. A camera with no device path is
+        # stamped by neither the pre-flight nor the run, so it has no lock
+        # to disagree with and `lock` stays empty.
         lock = {}
         try:
             spec = webcam.resolve_camera(0)
             if spec.get('device'):
                 dev = spec['device']
-                lock = dict(webcam.LOCKED_CONTROLS)
+                lock = sldea_run_lock(lock_before, cam_exp, cam_gain)
                 for ctrl, val in (('auto_exposure', 1),
                                   ('white_balance_automatic', 0),
                                   ('exposure_time_absolute', cam_exp),
                                   ('gain', cam_gain)):
                     webcam.set_control(dev, ctrl, val)
+                webcam.set_locked(lock)
             frame = webcam.oneshot_rgb(spec, count=3)
         except Exception:
             frame = None
+        finally:
+            webcam.set_locked(lock_before)
+        # #361's sentence, for a camera the lock applies to: one with a
+        # device path (`lock` is set only then). Neither the pre-flight
+        # nor the run stamps any other camera, so it has no lock to
+        # disagree with (#348's rule; merged 2026-10-06).
+        mismatch = (sldea_lock_mismatch(lock_before, cam_exp, cam_gain)
+                    if lock else '')
+        if mismatch:
+            self._sldea_log(f"⚠ camera pre-flight: {mismatch}")
         if frame is None:
             self._sldea_log("camera pre-flight: NO FRAME from the camera")
             blind = messagebox.askyesno(
@@ -3791,8 +4220,9 @@ LOGGING:
         except Exception:
             defaults = []
         try:
-            rep = sldea_profile.preflight_report(frame, cam_exp, cam_gain,
-                                                 lock, focus, defaults)
+            rep = sldea_profile.preflight_report(
+                frame, cam_exp, cam_gain, lock, focus, defaults,
+                tab_mismatch=bool(mismatch))
         except Exception as e:
             # A check that cannot run must not wave a run through, and
             # must not be the reason the bench cannot run at all: ask,
@@ -3848,6 +4278,12 @@ LOGGING:
                      wraplength=520).pack(pady=(2, 0))
         tk.Label(win, text=rep['camera_line'], fg='#1f3a5f',
                  wraplength=520).pack(pady=(4, 0))
+        if mismatch:
+            # the warning sign and the bold weight are the cue; the colour
+            # only repeats it (#361)
+            tk.Label(win, text="⚠ " + mismatch, fg='#c62828', wraplength=520,
+                     justify='left', font=('TkDefaultFont', 9, 'bold')
+                     ).pack(pady=(2, 0))
         if rep['mismatch']:
             tk.Label(win,
                      text="⚠ " + sldea_profile.PREVIEW_MISMATCH_HEADLINE,
@@ -4098,6 +4534,31 @@ LOGGING:
             **({} if parent is None else {'parent': parent}))
         return True
 
+    def _cam_owned_by_sldea(self):
+        """True (+ a note) while an SLDEA run owns the camera.
+
+        Found 2026-09-23 while adding video: NOTHING stopped the Webcam tab
+        from opening the camera, or rewriting its controls, in the middle
+        of a run. A preview grabbed the device the run's stills needed
+        (they logged NO FRAME); Apply & Lock replaced the exposure the run
+        had locked, so frames on either side of the click were exposed
+        differently -- and a video run holds the camera for the whole
+        hour. Refused, with the reason, like a LIVE-owned SG channel."""
+        rec = getattr(self, '_sldea_recorder', None)
+        if not getattr(self, '_sldea_running', False) and not (
+                rec is not None and rec.reader_alive()):
+            # ...a run's recorder that is still shutting down holds the
+            # camera too, even though the run itself has ended
+            return False
+        messagebox.showwarning(
+            "Camera in use — SLDEA run",
+            "An SLDEA run is using the camera until it ends: its snapshots"
+            " (and its video, when recording) need the device, and its "
+            "exposure is locked for the whole run so every frame is "
+            "comparable.\n\nAbort the run on the SLDEA tab first if you "
+            "must take the camera over.")
+        return True
+
     def _sldea_log(self, msg):
         line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n"
         # Best-effort persistence to <run>/run.log: the messages that
@@ -4133,11 +4594,13 @@ LOGGING:
                       scope_setup=None, tel_on=False,
                       tel_hz=sldea_profile.TELEMETRY_MAX_HZ, electrode='',
                       concentration_ml=None, cam_expected=False,
-                      picture_override=''):
+                      picture_override='', vid_on=False, vid_fps=1.0,
+                      vid_detect=False):
         """Host-sequenced staircase runner (daemon thread; no Tk calls except
         via _sldea_log/_sldea_set_status/after). Drives the SG DC offset along
         p.kv_at(t), fires webcam+scope snapshots on schedule, writes the run
-        dir (setup.txt + data.csv + telemetry.csv + frames/).
+        dir (setup.txt + data.csv + telemetry.csv + frames/, and with
+        `vid_on` video.mkv + video_frames.csv once the HV is off).
 
         `cam_expected` is True when the pre-flight got a frame from the
         camera, and `picture_override` names a deliberate start past the
@@ -4150,6 +4613,9 @@ LOGGING:
         started = datetime.now()
         tel_hz = sldea_profile.clamp_telemetry_hz(tel_hz)
         tel = None                    # telemetry sidecar (opened below)
+        rec = None                    # video recorder (started below)
+        vid_staging = None
+        completed = False
         cam_lock_saved = None         # Webcam-tab lock, restored at the end
         rundir = os.path.join(outdir, runname or p.run_dirname(started))
         framedir = os.path.join(rundir, 'frames')
@@ -4173,8 +4639,7 @@ LOGGING:
                     concentration_ml=concentration_ml))
                 if trek_sign < 0:
                     sf.write("Trek control polarity: INVERTED (control = "
-                             "-kV/gain; monitor readings sign-corrected "
-                             "in log)\n")
+                             "-kV/gain; monitor readings logged as read)\n")
                 # The pre-flight override, written where the run's record
                 # lives (plain Key: value, like the lines above, on its
                 # own after the Snapshots block) and into run.log, before
@@ -4198,6 +4663,19 @@ LOGGING:
                         f"(I_Out every sample, V_Out at most every "
                         f"{max(sldea_profile.TELEMETRY_KV_MIN_PERIOD_S, 1.0 / tel_hz):g} s); "
                         f"same sign convention and units as data.csv\n")
+                if vid_on:
+                    sf.write(
+                        f"\n--- Video ---\n"
+                        f"{sldea_video.VIDEO_FILENAME}: lossless "
+                        f"{sldea_video.VIDEO_FOURCC}, 8-bit grey, "
+                        f"{sldea_video.clamp_fps(vid_fps):g} fps target; "
+                        f"frame times and commanded kV in "
+                        f"{sldea_video.VIDEO_INDEX_FILENAME} (the run's own "
+                        f"clock, as telemetry.csv). Snapshots are taken on "
+                        f"schedule from the same stream. Written to local "
+                        f"disk during the run and moved here once the HV "
+                        f"was off; the run log says whether that "
+                        f"succeeded.\n")
             # run.log goes live: flush everything logged since Run was
             # pressed (monitor-check outcome included), then append-through.
             # Flush AND swap inside one locked section: a Tk-thread log
@@ -4266,23 +4744,97 @@ LOGGING:
                     # set is saved and restored in the finally block; a
                     # run must not silently redefine the operator's lock.
                     cam_lock_saved = dict(webcam.LOCKED_CONTROLS)
-                    webcam.set_locked(dict(cam_lock_saved,
-                                           auto_exposure=1,
-                                           white_balance_automatic=0,
-                                           exposure_time_absolute=cam_exp,
-                                           gain=cam_gain))
+                    # one definition, shared with the pre-flight, so the
+                    # dialog shows what this lock shoots (2026-10-05)
+                    webcam.set_locked(sldea_run_lock(cam_lock_saved,
+                                                     cam_exp, cam_gain))
             except Exception as e:
                 self._sldea_log(f"camera setup failed ({e}) — frames skipped")
                 spec = None
+            # --- video: the recorder takes the camera BEFORE the SG output
+            # is switched on, so everything it could stall on happens at
+            # 0 V. From here the stills come off its stream (latest_rgb, a
+            # lock and a copy) instead of one-shot grabs that could hold
+            # this thread -- the one running the watchdog and the ramp --
+            # for minutes on a wedged camera. If the stream delivers
+            # nothing, the run falls back to one-shot stills: a video
+            # nobody got is no reason to lose the snapshots too. ---
+            if vid_on and spec is None:
+                self._sldea_log("⚠ video requested but there is no camera "
+                                "— no recording")
+            elif vid_on:
+                dev = spec.get('device')
+                # unique per RUN, not per run name: a reused name while the
+                # last run's video is still being moved must not hand that
+                # move this run's half-written file
+                vid_staging = os.path.join(
+                    sldea_video.staging_root(),
+                    f"{os.path.basename(rundir)}_"
+                    f"{started.strftime('%Y%m%d_%H%M%S_%f')}")
+                try:
+                    rec = sldea_video.VideoRecorder(
+                        lambda: sldea_video.open_stream(spec),
+                        vid_staging, fps=vid_fps, kv_at=p.kv_at,
+                        log=self._sldea_log,
+                        # the preview's own periodic re-stamp: gain
+                        # excluded, since the DFK's auto-gain rewrites it
+                        # within ~0.5 s and re-writing it only flickers
+                        # (bench 2026-07-24)...
+                        refresh=((lambda: webcam.apply_locked(
+                            dev, exclude={'gain'})) if dev else None),
+                        # ...and before EVERY still, the full lock, gain
+                        # included -- what a one-shot grab stamps, so a
+                        # still off the stream is exposed like one
+                        restamp=((lambda: webcam.apply_locked(dev))
+                                 if dev else None)
+                    ).start()
+                except Exception as e:
+                    rec = None
+                    self._sldea_log(f"⚠ video recorder did not start ({e}) "
+                                    f"— snapshots only")
+                if rec is not None and not rec.wait_first_frame(5.0):
+                    self._sldea_log(
+                        "⚠ video: the camera stream delivered nothing in "
+                        "5 s — NO recording; snapshots fall back to "
+                        "one-shot grabs" + (f" ({rec.error})" if rec.error
+                                            else ""))
+                    rec.stop(timeout=5.0)
+                    rec = None
+                    try:
+                        os.rmdir(vid_staging)        # empty: nothing written
+                    except OSError:
+                        pass
+                if rec is not None:
+                    self._sldea_recorder = rec    # the Webcam-tab guard
+                    self._sldea_log(
+                        f"video: recording {rec.fps:g} fps to local disk "
+                        f"({vid_staging}); moved into the run folder when "
+                        f"the run ends")
+                # setup.txt promised a video before any of this ran; say
+                # what actually happened, so a fallback run does not claim
+                # a recording (and stream-taken stills) it never had
+                try:
+                    with open(os.path.join(rundir, 'setup.txt'), 'a') as sf:
+                        sf.write("Video outcome: "
+                                 + ("recording started; snapshots taken "
+                                    "off the stream" if rec is not None else
+                                    "NOT recorded -- the camera stream did "
+                                    "not start; snapshots were one-shot "
+                                    "grabs as without video") + "\n")
+                except OSError:
+                    pass
+            # Abort pressed during the camera/video startup above (up to
+            # ~10 s when a stream will not start): do not switch the SG on
+            # or learn a baseline for a run that is already over.
             # --- SG: DC control voltage, output ON (live only) ---
-            if not dry and self.sg:
+            if not dry and self.sg and not self._sldea_stop:
                 self.sg.set_load_polarity(sgch, load='HZ', polarity='NOR')
                 self.sg.set_basic_wave(sgch, WVTP='DC', OFST=0.0)
                 self.sg.set_output(sgch, True)
 
             watchdog = (sldea_profile.BreakdownWatchdog(wd_ua, wd_s)
                         if (wd_on and not dry and self.scope) else None)
-            if watchdog is not None:
+            if watchdog is not None and not self._sldea_stop:
                 # Learn the I_Out rest level at 0 kV (SG is at 0 V here) so
                 # the trip is |I − baseline|, not |I|: the whole 07-29
                 # campaign sat on a stiff −16 µA instrument offset that
@@ -4334,6 +4886,27 @@ LOGGING:
             snaps = sorted(p.snapshots, key=lambda s: s['t'])
             si = 0
             t0 = time.monotonic()
+            if rec is not None:
+                rec.set_t0(t0)            # frames join the staircase clock
+            # which still the last full restamp was requested for, and when
+            stamp_for, stamp_req_t = None, None
+
+            def stream_frame_for(i):
+                """(frame, t) off the recorder for still `i`, or (None,
+                None) when no acceptable frame has arrived yet: one
+                captured no earlier than the still's scheduled moment and,
+                when a full restamp was requested for it, no earlier than
+                that restamp. One rule for the run loop and for the stills
+                still pending when the staircase ends (2026-10-05)."""
+                nb = snaps[i]['t']
+                if stamp_for == i and rec.can_restamp:
+                    rt = rec.restamp_done_t()
+                    nb = (max(nb, rt) if rt is not None
+                          and rt >= stamp_req_t else None)
+                if nb is None:
+                    return (None, None)
+                return rec.latest_rgb(not_before=nb)
+
             last_status = -1.0
             last_kv = None
             last_mon = -1.0
@@ -4443,17 +5016,22 @@ LOGGING:
                                 el, datetime.now().isoformat(
                                     timespec='milliseconds'),
                                 p.kv_at(el), 'BREAKDOWN CONFIRMED',
-                                ua=None if ua is None else trek_sign * ua,
-                                i_status=wst)
+                                ua=ua, i_status=wst)
                         self._sldea_capture(
                             p, {'t': el, 'step': 99,
                                 'nominal_kv': p.kv_at(el),
                                 'tag': 'breakdown'},
                             si + 1, spec, framedir, writer, fh, vch, ich,
-                            dry, vsign=trek_sign,
+                            dry,
                             note=f"WATCHDOG: breakdown confirmed "
                                       f"(dev >{wd_ua:g}µA for {wd_s:g}s)",
-                            tel=tel, t0=t0)
+                            tel=tel, t0=t0,
+                            # the newest frame as it is: speed matters
+                            # more than a restamp on the way to zero
+                            stream=rec is not None,
+                            stream_frame=(rec.latest_rgb()
+                                          if rec is not None
+                                          else (None, None)))
                         self._sldea_stop = True
                         break
                     # Periodic telemetry row, off the current already read.
@@ -4466,15 +5044,14 @@ LOGGING:
                             try:
                                 mv, vst_t = self.scope.measure_raw('MEAN',
                                                                    vch)
-                                kv_t = (trek_sign * measured_kv(mv)
+                                kv_t = (measured_kv(mv)
                                         if mv is not None else None)
                             except Exception:
                                 kv_t, vst_t = None, 'error'
                         tel.sample(
                             el,
                             datetime.now().isoformat(timespec='milliseconds'),
-                            p.kv_at(el),
-                            ua=None if ua is None else trek_sign * ua,
+                            p.kv_at(el), ua=ua,
                             i_status=wst, kv=kv_t, v_status=vst_t or '')
                 if sg is not None:
                     kv = p.kv_at(el)
@@ -4485,10 +5062,29 @@ LOGGING:
                         except Exception as e:
                             self._sldea_log(f"SG set_offset error: {e}")
                         last_kv = kv
+                # A video run's stills come off the stream, and must be
+                # exposed like one-shot stills and taken no EARLIER than
+                # scheduled (adversarial review 2026-09-23). So: ask the
+                # reader for a full restamp a little ahead of each still,
+                # then take only a frame captured after BOTH the restamp
+                # and the scheduled moment. Until one arrives the still
+                # simply waits for the next 0.1 s tick -- this loop never
+                # blocks -- and after STILL_WAIT_S it is logged NO FRAME.
+                if rec is not None and si < len(snaps) and stamp_for != si \
+                        and el >= snaps[si]['t'] - self.SLDEA_STAMP_LEAD_S:
+                    stamp_for, stamp_req_t = si, el
+                    rec.request_restamp()
                 while si < len(snaps) and el >= snaps[si]['t']:
+                    got = (None, None)
+                    if rec is not None:
+                        got = stream_frame_for(si)
+                        if got[0] is None and \
+                                el - snaps[si]['t'] < self.SLDEA_STILL_WAIT_S:
+                            break              # try again next tick
                     shot = self._sldea_capture(
                         p, snaps[si], si + 1, spec, framedir, writer, fh,
-                        vch, ich, dry, vsign=trek_sign, tel=tel, t0=t0)
+                        vch, ich, dry, tel=tel, t0=t0,
+                        stream=rec is not None, stream_frame=got)
                     si += 1
                     # Baseline picture check (2026-10-02). The warm-up and
                     # baseline frames are the only ones shot with the run's
@@ -4513,7 +5109,10 @@ LOGGING:
                     # The baseline is shot in the tick in which the first
                     # ramp begins (the SG write above comes first), so the
                     # drive is not at 0 here: last_kv is what was commanded,
-                    # and it goes into run.log instead of being assumed.
+                    # and it goes into run.log instead of being assumed. In
+                    # a video run the still is the first stream frame after
+                    # its moment, up to SLDEA_STILL_WAIT_S later, so the
+                    # drive can be further up the ramp by then.
                     if snaps[si - 1]['tag'] == 'baseline':
                         flat, line = False, None
                         if shot is not None:
@@ -4528,7 +5127,7 @@ LOGGING:
                                     f"unchanged")
                         elif cam_expected:
                             line = sldea_profile.no_baseline_frame_line(
-                                picture_override)
+                                picture_override, video=rec is not None)
                         why = sldea_profile.baseline_stop_reason(
                             shot is not None, flat, cam_expected,
                             picture_override)
@@ -4539,7 +5138,8 @@ LOGGING:
                             self._sldea_log(line)
                         if base_stop:
                             stop_words = sldea_profile.baseline_stop_words(
-                                why, sg is None, last_kv)
+                                why, sg is None, last_kv,
+                                video=rec is not None)
                             self._sldea_log(stop_words['stopped'])
                             break
                 if base_stop:
@@ -4554,12 +5154,32 @@ LOGGING:
                         fg='#8a5a00' if dry else '#a01010')
                     last_status = el
                 time.sleep(self.SLDEA_POLL_S)
+            # THE LAST STILL OF A VIDEO RUN (adversarial review 2026-10-05).
+            # The loop above ends 0.3 s after the staircase, but a stream
+            # still may wait up to STILL_WAIT_S (1.5 s) for its frame, and
+            # the final pre-ramp is scheduled snap_lead_s (1 s by default)
+            # before the end. A still still waiting when the loop ended
+            # was dropped: no data.csv row, no NO FRAME note, and only
+            # "N-1/N frames" in run.log to show it. Waiting longer would
+            # hold the Trek at its last level longer, so instead every
+            # still left pending on a run that reached its end gets one
+            # last look at the stream and then its row, with the frame or
+            # as NO FRAME, exactly as a still that timed out mid-run does.
+            # An aborted or tripped run writes no extra rows, as before.
+            if rec is not None and not self._sldea_stop:
+                while si < len(snaps):
+                    self._sldea_capture(p, snaps[si], si + 1, spec, framedir,
+                                        writer, fh, vch, ich, dry,
+                                        tel=tel, t0=t0, stream=True,
+                                        stream_frame=stream_frame_for(si))
+                    si += 1
             if getattr(self, '_sldea_bd_tripped', False):
                 done = 'BREAKDOWN-ABORT'
             elif self._sldea_stop:
                 done = 'aborted'
             else:
                 done = 'complete'
+                completed = True
             self._sldea_log(f"run {done}: {si}/{len(snaps)} frames")
             if base_stop and done == 'aborted':
                 # Say WHY in words where the operator looks: a green
@@ -4584,69 +5204,177 @@ LOGGING:
             self._sldea_log(f"ERROR: {e}")
             self._sldea_set_status("error", fg='red')
         finally:
-            # GUARANTEED HV shutdown: always ramp the SG this run drove
-            # (captured handle — survives a mid-run Reconnect), and NEVER
-            # swallow a failure silently: the old bare `except: pass` let a
-            # dead link end a run green while the Trek stayed energized
-            # (audit 2026-07-25, criticals C1-C3).
-            if sg is not None:
-                zeroed = False
-                for target in ([sg, self.sg] if self.sg is not sg
-                               else [sg]):
-                    if target is None or zeroed:
-                        continue
+            # the tab is released whatever happens in here (outer finally):
+            # an exception anywhere below used to be able to leave it
+            # 'running' for the rest of the session (review 2026-09-23)
+            try:
+                # Recording ends before anything else -- a flag, it cannot
+                # block: frames after the staircase would be filed under its
+                # planned kV while the SG below is already at 0.
+                if rec is not None:
                     try:
-                        target.set_offset(sgch, 0.0)
-                        target.set_output(sgch, False)
-                        zeroed = True
+                        rec.end_recording()
+                    except Exception:
+                        pass
+                # GUARANTEED HV shutdown: always ramp the SG this run drove
+                # (captured handle — survives a mid-run Reconnect), and NEVER
+                # swallow a failure silently: the old bare `except: pass` let a
+                # dead link end a run green while the Trek stayed energized
+                # (audit 2026-07-25, criticals C1-C3).
+                if sg is not None:
+                    zeroed = False
+                    for target in ([sg, self.sg] if self.sg is not sg
+                                   else [sg]):
+                        if target is None or zeroed:
+                            continue
+                        try:
+                            target.set_offset(sgch, 0.0)
+                            target.set_output(sgch, False)
+                            zeroed = True
+                        except Exception as e:
+                            self._sldea_log(f"SG zeroing attempt failed: {e}")
+                    if not zeroed:
+                        self._sldea_log(
+                            "⚡⚡ FAILED TO ZERO THE SG OUTPUT — the Trek may "
+                            "still be energized. TURN OFF THE SG/TREK AT THE "
+                            "FRONT PANEL NOW.")
+                        self._sldea_set_status(
+                            "⚡ NOT ZEROED — turn off SG/Trek manually!",
+                            fg='#c62828')
+                        self.root.after(0, lambda: messagebox.showerror(
+                            "HV NOT ZEROED",
+                            "The run ended but the signal generator could not "
+                            "be zeroed (link error).\n\nThe Trek may still be "
+                            "outputting high voltage.\n\n→ Turn the SG output "
+                            "OFF on its front panel (or power it off) NOW, "
+                            "then check the Trek."))
+                if fh is not None:
+                    try:
+                        fh.close()
+                    except Exception:
+                        pass
+                # Telemetry next: it is a record, not a safety device, so it
+                # closes AFTER the SG is zeroed and data.csv is safe -- and
+                # BEFORE the video, whose stop can take seconds: closing the
+                # window gives this thread ~3 s, and a trip's held rows
+                # (hold_flush) must reach the disk. #157 asks for the ACHIEVED
+                # rate to be visible — a run the hardware could not keep up
+                # with says so here instead of quietly leaving a sparse file.
+                if tel is not None:
+                    try:
+                        self._sldea_log(tel.summary())
+                        if tel.rate_shortfall():
+                            self._sldea_log(
+                                f"⚠ telemetry ran below its "
+                                f"{tel.target_hz:g} Hz target — the "
+                                f"scope/loop could not keep up; treat gaps "
+                                f"in {sldea_profile.TELEMETRY_FILENAME} as "
+                                f"unsampled, not as quiet current.")
+                        if tel.failed:
+                            self._sldea_log(
+                                f"⚠ telemetry stopped early: {tel.last_error}")
+                    except Exception:
+                        pass
+                    tel.close()
+                # Video after that, the same kind of record: stop() gives up
+                # after its timeout, and moving the file into the run folder
+                # (gigabytes, usually to the share) plus the optional
+                # all-frames
+                # detection run in a DETACHED program started from a thread,
+                # so the tab is free the moment this block ends and closing the
+                # app cannot cut them off.
+                if rec is not None:
+                    try:
+                        rec.stop(timeout=10.0)
+                        self._sldea_log(rec.summary())
+                        # anything the recorder still says belongs to THIS run
+                        rec.set_log(self._sldea_run_logger(rundir))
+                        threading.Thread(
+                            target=self._sldea_video_postrun,
+                            args=(rec, vid_staging, rundir,
+                                  bool(vid_detect and completed)),
+                            daemon=True).start()
                     except Exception as e:
-                        self._sldea_log(f"SG zeroing attempt failed: {e}")
-                if not zeroed:
-                    self._sldea_log(
-                        "⚡⚡ FAILED TO ZERO THE SG OUTPUT — the Trek may "
-                        "still be energized. TURN OFF THE SG/TREK AT THE "
-                        "FRONT PANEL NOW.")
-                    self._sldea_set_status(
-                        "⚡ NOT ZEROED — turn off SG/Trek manually!",
-                        fg='#c62828')
-                    self.root.after(0, lambda: messagebox.showerror(
-                        "HV NOT ZEROED",
-                        "The run ended but the signal generator could not "
-                        "be zeroed (link error).\n\nThe Trek may still be "
-                        "outputting high voltage.\n\n→ Turn the SG output "
-                        "OFF on its front panel (or power it off) NOW, "
-                        "then check the Trek."))
-            if fh is not None:
+                        self._sldea_log(f"⚠ video shutdown failed ({e}) — the "
+                                        f"recording is in {vid_staging}")
+                if cam_lock_saved is not None:
+                    try:
+                        webcam.set_locked(cam_lock_saved)
+                    except Exception:
+                        pass
+            finally:
+                self.root.after(0, self._sldea_finished)
+
+    def _sldea_run_logger(self, rundir):
+        """A log function for ONE run, used after that run has ended: it
+        shows the line on the tab and appends it to that run's run.log.
+        Never _sldea_log, which by then may be filing lines into the NEXT
+        run's log. The tab first: a hung share must not hide the message
+        from the operator as well."""
+        runlog = os.path.join(rundir, 'run.log')
+
+        def log(msg):
+            line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n"
+
+            def up():
                 try:
-                    fh.close()
+                    self.sldea_log.config(state='normal')
+                    self.sldea_log.insert(tk.END, line)
+                    self.sldea_log.see(tk.END)
+                    self.sldea_log.config(state='disabled')
                 except Exception:
                     pass
-            # Telemetry last: it is a record, not a safety device, so it
-            # closes AFTER the SG is zeroed and data.csv is safe. #157 asks
-            # for the ACHIEVED rate to be visible — a run the hardware
-            # could not keep up with says so here instead of quietly
-            # leaving a sparse file.
-            if cam_lock_saved is not None:
-                try:
-                    webcam.set_locked(cam_lock_saved)
-                except Exception:
-                    pass
-            if tel is not None:
-                try:
-                    self._sldea_log(tel.summary())
-                    if tel.rate_shortfall():
-                        self._sldea_log(
-                            f"⚠ telemetry ran below its {tel.target_hz:g} Hz "
-                            f"target — the scope/loop could not keep up; "
-                            f"treat gaps in {sldea_profile.TELEMETRY_FILENAME}"
-                            f" as unsampled, not as quiet current.")
-                    if tel.failed:
-                        self._sldea_log(
-                            f"⚠ telemetry stopped early: {tel.last_error}")
-                except Exception:
-                    pass
-                tel.close()
-            self.root.after(0, self._sldea_finished)
+            try:
+                self.root.after(0, up)
+            except Exception:
+                pass
+            try:
+                with open(runlog, 'a', encoding='utf-8') as f:
+                    f.write(line)
+            except Exception:
+                pass
+        return log
+
+    def _sldea_video_postrun(self, rec, staging, rundir, detect):
+        """After a video run, on its own thread: wait for the ENCODER to
+        finish (the files are closed), then hand the rest to a DETACHED
+        `sldea_video.py --finalize` -- the all-frames detection on the local
+        copy for a COMPLETED run when asked, then a throttled, .part-safe
+        move into the run folder. Detached, so closing this app cannot cut
+        a multi-gigabyte copy off half way; it logs into that run's
+        run.log itself."""
+        log = self._sldea_run_logger(rundir)
+        if not rec.wait_finished(600.0):
+            log(f"⚠ video: the encoder was still writing after 10 min — "
+                f"left in {staging}. Once it has stopped growing, run "
+                f"`python sldea_video.py --finalize \"{staging}\" "
+                f"\"{rundir}\"`.")
+            return
+        if not rec.written:
+            log("video: no frames were recorded")
+            try:
+                os.rmdir(staging)
+            except OSError:
+                pass
+            return
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              'sldea_video.py')
+        cmd = ([sys.executable, script, '--finalize', staging, rundir]
+               + (['--detect'] if detect else []))
+        try:
+            proc = subprocess.Popen(cmd, start_new_session=True,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+            self._sldea_video_jobs.append(proc)
+            log("video: moving the recording into the run folder"
+                + (", after edge detection on every frame" if detect
+                   else "")
+                + " — in a separate program that survives closing this "
+                  "app; its progress is in this run's run.log")
+        except Exception as e:
+            log(f"⚠ video: could not start the move ({e}) — the recording "
+                f"is in {staging}; run `python sldea_video.py --finalize "
+                f"\"{staging}\" \"{rundir}\"` by hand")
 
     def _sldea_cam_value(self, attr, default):
         try:
@@ -4683,10 +5411,11 @@ LOGGING:
                 if self._sldea_cam_value(attr, None) is None]
 
     def _sldea_capture(self, p, snap, index, spec, framedir, writer, fh,
-                       vch, ich, dry, note='', vsign=1.0, tel=None,
-                       t0=None):
+                       vch, ich, dry, note='', tel=None, t0=None,
+                       stream=False, stream_frame=(None, None)):
         import os
-        frame = None
+        frame = frame_t = None
+        save_failed = False
         vst = ist = ''
         # Telemetry timestamp for this capture, measured at the scope read
         # below -- NOT the tick that scheduled it. The webcam grab above
@@ -4694,7 +5423,17 @@ LOGGING:
         # dense trace joined on the tick time would be skewed by exactly
         # the capture duration.
         tel_t = snap['t']
-        if spec is not None:
+        if stream:
+            # a video run: the frame the loop already took off the
+            # recorder's stream (a copy -- no camera round trip on this
+            # thread), and the run time it was CAPTURED at, which goes into
+            # the notes and the telemetry event so it can always be told
+            # from the moment the row was written
+            frame, frame_t = stream_frame
+            if frame_t is not None:
+                note = (note + '; ' if note else '') + \
+                    f"video frame t={frame_t:.2f}s"
+        elif spec is not None:
             for _attempt in range(2):                 # one retry
                 try:
                     frame = webcam.oneshot_rgb(spec, count=3)
@@ -4708,10 +5447,13 @@ LOGGING:
             try:
                 if t0 is not None:
                     tel_t = time.monotonic() - t0
-                # vsign applies to BOTH monitors — the Trek inverts V_Out
-                # and I_Out alike (D5 2026-08-04). Detection is deviation/
-                # abs-based, so the old kV-only correction never changed a
-                # verdict; this is provenance hygiene.
+                # Both monitors are logged AS READ (2026-10-05). They measure
+                # the Trek output, and 'Trek inverts' makes that output
+                # positive by negating the control, so a correctly set box
+                # reads positive with no correction. The 2026-08-04 rule
+                # (D5) multiplied both by -1 when the box was ticked, which
+                # turned a correct run's readings negative. Detection is
+                # deviation/abs-based, so neither rule changes a verdict.
                 #
                 # Each reading is converted straight after its OWN read,
                 # not after both: the two measure_raw calls are separate
@@ -4721,9 +5463,9 @@ LOGGING:
                 # the exact ambiguity the status column exists to remove
                 # (#159, review 2026-08-05).
                 mv, vst = self.scope.measure_raw('MEAN', vch)
-                mkv = vsign * measured_kv(mv) if mv is not None else None
+                mkv = measured_kv(mv) if mv is not None else None
                 mi, ist = self.scope.measure_raw('MEAN', ich)
-                mua = vsign * measured_ua(mi) if mi is not None else None
+                mua = measured_ua(mi) if mi is not None else None
                 if vst == 'offscreen':
                     # numeric columns stay numeric: blank cell + a note,
                     # never text in the kV column
@@ -4752,6 +5494,7 @@ LOGGING:
             except Exception as e:
                 self._sldea_log(f"frame save error: {e}")
                 fname = ''
+                save_failed = True
         writer.writerow({
             'snapshot': index, 'step': snap['step'], 'tag': snap['tag'],
             'nominal_kV': round(snap['nominal_kv'], 3),
@@ -4774,7 +5517,9 @@ LOGGING:
                       datetime.now().isoformat(timespec='milliseconds'),
                       snap['nominal_kv'],
                       f"snap s{int(snap['step']):02d} {snap['tag']}"
-                      + (f" {fname}" if fname else ""),
+                      + (f" {fname}" if fname else "")
+                      + (f" frame_t={frame_t:.3f}" if frame_t is not None
+                         else ""),
                       ua=mua, i_status=ist, kv=mkv, v_status=vst)
         # Each value formats independently ('?' for None): an off-screen
         # I_Out beside a fine V_Out is expected-by-design since the window
@@ -4782,10 +5527,17 @@ LOGGING:
         # the LIVE run's snapshot loop (review 2026-08-04).
         meas = sldea_profile.fmt_meas(mkv, mua)
         tail = (f"→ {fname}" if fname
+                else "→ NO FRAME (it could not be saved — see above)"
+                if save_failed
+                else "→ NO FRAME (no stream frame after its scheduled "
+                     "moment)" if stream
                 else "→ NO FRAME (camera busy? close the Webcam preview)")
         self._sldea_log(
             f"snap s{snap['step']:02d} {snap['nominal_kv']:.2f} kV "
-            f"[{snap['tag']}]{meas}  {tail}")
+            f"[{snap['tag']}]{meas}  {tail}"
+            # the capture time in run.log too: Edge Review's Save rewrites
+            # the notes column of every row it reviews
+            + (f"  (frame t={frame_t:.2f}s)" if frame_t is not None else ""))
         # The frame as grabbed (None when the camera gave none): the
         # runner's baseline picture check reads it.
         return frame
@@ -6774,6 +7526,11 @@ LOGGING:
         return out
 
     def cam_read_controls(self):
+        # guarded too: despite its name it rewrites the LOCK from what it
+        # reads, and a run's recorder stamps the lock onto the camera
+        # (adversarial review 2026-09-23)
+        if self._cam_owned_by_sldea():
+            return
         self._cam_build_control_rows()
         device = self._cam_device() or '/dev/video0'
         ctrls = webcam.list_controls(device)
@@ -6797,6 +7554,8 @@ LOGGING:
     def cam_apply_controls(self):
         """Write EVERY panel value to the camera, lock them for all capture
         paths, and persist them for the next start."""
+        if self._cam_owned_by_sldea():
+            return
         device = self._cam_device()
         if not device:
             messagebox.showerror("Camera", "Select a camera first.")
@@ -6849,6 +7608,8 @@ LOGGING:
     def cam_stabilize(self):
         """Pin gain at its floor (defeats the firmware auto-gain) and search
         exposure for a mid-grey image -- the only combo that holds still."""
+        if self._cam_owned_by_sldea():
+            return
         device = self._cam_device()
         if not device or not webcam.v4l2_available():
             messagebox.showerror("Camera", "No camera / v4l2-ctl available.")
@@ -6908,6 +7669,8 @@ LOGGING:
     def cam_grey_world(self):
         """One-shot grey-world WB: tune red/blue_balance on the CURRENT
         scene until the channel means match, then fill + lock."""
+        if self._cam_owned_by_sldea():
+            return
         device = self._cam_device()
         if not device or not webcam.v4l2_available():
             messagebox.showerror("Camera", "No camera / v4l2-ctl available.")
@@ -6974,6 +7737,8 @@ LOGGING:
 
     def cam_auto_expose(self):
         """Search for a usable exposure (the camera's own AE stays black)."""
+        if self._cam_owned_by_sldea():
+            return
         device = self._cam_device()
         if not device or not webcam.v4l2_available():
             messagebox.showerror("Camera", "No camera / v4l2-ctl available.")
@@ -7039,6 +7804,8 @@ LOGGING:
             self.cam_start_preview()
 
     def cam_start_preview(self):
+        if self._cam_owned_by_sldea():
+            return
         try:
             self._cam_open_selected()
         except Exception as e:
@@ -7163,6 +7930,8 @@ LOGGING:
             self._cam_start_interval()
 
     def _cam_start_interval(self):
+        if self._cam_owned_by_sldea():
+            return
         try:
             interval = float(self.cam_interval_var.get())
             count = int(self.cam_count_var.get())
@@ -7187,6 +7956,8 @@ LOGGING:
             self._cam_start_timed()
 
     def _cam_start_timed(self):
+        if self._cam_owned_by_sldea():
+            return
         if self.cam_seq_running:
             messagebox.showinfo("Timed capture",
                                 "A capture is already running -- stop it first.")
@@ -7363,6 +8134,8 @@ LOGGING:
             self._cam_start_sequence()
 
     def _cam_start_sequence(self):
+        if self._cam_owned_by_sldea():
+            return
         if not self.sg:
             messagebox.showerror("Stepped capture", "Signal generator not connected")
             return

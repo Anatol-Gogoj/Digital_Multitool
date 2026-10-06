@@ -218,7 +218,7 @@ class ArbWaveformEditor(tk.Toplevel):
         self.target_var = tk.StringVar(value=str(self.channel))
         ttk.Combobox(lib, width=4, state='readonly', textvariable=self.target_var,
                      values=['1', '2']).grid(row=3, column=1, sticky='w', pady=6)
-        ttk.Button(lib, text="Upload && Select",
+        ttk.Button(lib, text="Upload & Select",
                    command=self.upload).grid(row=3, column=2, columnspan=2,
                                              pady=6, padx=4, sticky='w')
 

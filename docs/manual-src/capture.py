@@ -39,6 +39,33 @@ for _name in ("askopenfilename", "asksaveasfilename", "askdirectory"):
 
 manifest = {"images": []}
 
+# Display scaling (2026-10-05). The process is DPI-aware so that the
+# screenshot and the widget boxes share one pixel grid. Left at that, Tk
+# reads the display's real dpi (168 on a 175 % display) and draws its
+# fonts 1.75 times larger while every size the app gives in pixels
+# (window geometry, panel widths, wraplengths) stays put, so windows come
+# out cramped and clipped. Resizing the window and shrinking the shot
+# afterwards (the first fix) only covers the windows the script sizes
+# itself: the Arb Editor, the splash and the dialogs size themselves and
+# still came out cramped, and the resample softened the text. Pinning Tk
+# to 96 dpi instead lays every window out exactly as a 100 % display (and
+# the DPI-unaware app on the lab PCs) does, with sharp text and no
+# resample. Only the window frame and the native menu bar are still drawn
+# by Windows at the display scale; chrome_scale() is for those.
+def pin_96dpi(root):
+    """Make Tk lay out at 96 dpi. Call right after tk.Tk(), before any
+    widget or font is built."""
+    root.tk.call("tk", "scaling", 96.0 / 72.0)
+
+
+def chrome_scale():
+    """Display scale for what Windows draws itself (1.0 at 100 %)."""
+    try:
+        dpi = ctypes.windll.user32.GetDpiForSystem()
+    except Exception:
+        return 1.0
+    return max(1.0, dpi / 96.0)
+
 
 def _win_rect(widget):
     """Visual rect of the top-level window holding `widget` (DWM bounds)."""
@@ -85,12 +112,12 @@ def capture_window(widget, name, extra_widgets=None):
     l, t, r, b = _win_rect(widget)
     img = ImageGrab.grab(bbox=(l, t, r, b), all_screens=True)
     path = os.path.join(OUT, name + ".png")
-    img.save(path)
     top = widget.winfo_toplevel()
     widgets = []
     _walk(top, l, t, widgets)
     if extra_widgets:
         widgets.extend(extra_widgets)
+    img.save(path)
     entry = {"name": name, "file": path,
              "img_w": img.size[0], "img_h": img.size[1],
              "origin": [l, t],
@@ -105,7 +132,9 @@ def capture_window(widget, name, extra_widgets=None):
 
 def main():
     root = tk.Tk()
+    pin_96dpi(root)
     root.withdraw()
+    k = chrome_scale()
 
     from ui_widgets import SplashScreen
     from version import version_string
@@ -134,9 +163,12 @@ def main():
         l, t, _, _ = _win_rect(root)
         cx = root.winfo_rootx() - l
         cy = root.winfo_rooty() - t
+        # Windows draws the menu bar at the display scale, so its box
+        # scales; the tab strip is Tk's and stays at 96 dpi.
         return [
             {"class": "Menu", "text": "Tools",
-             "x": cx + 4, "y": cy - 26, "w": 48, "h": 22},
+             "x": cx + int(4 * k), "y": cy - int(26 * k),
+             "w": int(48 * k), "h": int(22 * k)},
             {"class": "TabStrip", "text": "__tabstrip__",
              "x": app.notebook.winfo_rootx() - l,
              "y": app.notebook.winfo_rooty() - t,

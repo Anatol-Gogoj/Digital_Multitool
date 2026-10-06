@@ -37,6 +37,71 @@ mirrors the app to the local cache **only when `version.py`'s stamp changed**,
 then runs Python from local disk while keeping the working directory on the
 share so presets stay shared between users.
 
+**Restart now goes back through the launcher (2026-09-24).** `Tools → Update
+Software…` deploys to the share, not to anyone's cache, and only `launch_gui.sh`
+refreshes the cache. Restart now used to re-exec the app's own command line,
+which is the *cached* `gui.py` with the cached `PYTHONPATH`, so it came back as
+the version that was already running. This was reproduced against the reference
+copy on 2026-09-24. The bench check is pending: see *Bench check for Restart
+now* at the end of this section.
+
+Now, when the app runs from `${SCPI_CACHE:-$HOME/.cache/scpi_control}/SCPI_Control`,
+Restart runs what a click on the icon runs, `bash /usr/local/bin/scpi-launch.sh`
+(`relaunch.py`). It is on local disk and probes the share with a timed read. On a
+working share it runs `launch_gui.sh`, which re-syncs the cache (about 25 s, under
+the launcher's update window) and starts the new version. On a dead share it falls
+back as the icon does and says so. A PC without that desktop launcher runs
+`bash /mnt/shareDrive/_software/launch_gui.sh` directly, but only if a byte of it
+can be read. The Tk thread never touches the share when the desktop launcher is
+there.
+
+This also covers the desktop launcher's own share-down session (step 3 above:
+the cache run with `~/.local/share/scpi_control` as the working directory). The
+update in that session needed the share, so the restart finds the share up again
+and goes back to the normal path, with presets shared again. If the share has
+died again, the fallbacks show a note and bring back the cached copy.
+
+A launcher can name itself for Restart by exporting `SCPI_LAUNCHER=<its own
+path>`. None does yet. The GitHub fallback could do it in the installer's
+heredoc.
+
+Everywhere else, Restart re-execs as before:
+- a dev clone;
+- the GitHub fallback's `~/.cache/scpi_control_git`;
+- the share copy, when the launcher's sync failed.
+
+For the two clones, that reloads code the update did not touch, so start the app
+again from the icon instead.
+
+What to know about the restart:
+- **The app is gone for about half a minute after an update** (before, about
+  3 s). Outputs stay as they are, as the owner decided for Restart. If the new
+  version then fails to start, the app does not come back until someone starts
+  it. Switch outputs off first if they must not be left unattended.
+- **Close Edge Review, the tuner and plot windows before restarting.** They run
+  from the cache, which the re-sync rewrites under them (`rsync --delete`), so a
+  later lazy import could load files from the other version. Any start from the
+  icon after a deploy does the same.
+- **The new launcher runs inside the old one**, which is still waiting on the
+  same process, and each restart adds one more level. If the restarted app then
+  exits with an error, the "failed to start" dialog appears once per level:
+  twice after one restart. `launch.log.prev` holds the session before the
+  restart, followed by a copy of the restarted one. `PYTHONPATH` repeats the
+  cache pylibs once per level, which is harmless.
+- **The re-sync has no lock.** A second click on the icon during it starts a
+  second copy, as it always could after a deploy.
+
+`tests/test_relaunch.py` pins the desktop launcher, the cache path and the share
+path against the repo copies of the launch chain. On POSIX it also runs the
+reference launchers end to end, including a share that dies between the update
+and the restart. The live copies can still drift from the repo copies.
+
+**Line endings trap (found 2026-09-24).** A Windows checkout (`core.autocrlf`)
+has CRLF endings in `deploy/*.sh` and `*.reference`, and bash rejects those
+files (`set: pipefail\r: invalid option name`). The share is hosted on a Windows
+PC, so never copy a launcher onto it from a Windows checkout without converting
+the endings to LF.
+
 **How the launchers actually reach `/usr/local/bin` (corrected 2026-08-05).**
 Both `scpi-launch.sh` and `scpi-from-github.sh` are *generated* by
 `install_lab_launchers.sh` (repo copy: `deploy/install_lab_launchers.sh`),
@@ -51,6 +116,40 @@ GitHub fallback's runtime clone `~/.cache/scpi_control_git` stores its **own**
 URL in the scripts does nothing on a machine that already has that cache.
 Repoint it (`git -C ~/.cache/scpi_control_git remote set-url origin <url>`) or
 delete the directory and let it re-clone.
+
+### Bench check for Restart now (pending since 2026-09-24)
+
+The restart fix above was reproduced and tested only against the repo copies
+of the launchers. Neither check has been run on hc18kx2 yet, and the fix
+merges after them (owner's decision, 2026-09-24).
+
+**Check A: confirm the bug and the live launchers.** About 2 min; it deploys
+nothing.
+1. Run `grep -nE 'gui\.py|^CACHE=|^RUN_APP=' /mnt/shareDrive/_software/launch_gui.sh`.
+   It must show `RUN_APP="$CACHE/SCPI_Control"`, and `"$PY" "$RUN_APP/gui.py"`
+   as the command that starts the app.
+2. Run `grep -n 'launch_gui' /usr/local/bin/scpi-launch.sh`. The desktop
+   launcher must run `bash "$SHARE/launch_gui.sh"`.
+3. With the app open, `ps -o args= -C python3.11` must show
+   `~/.cache/scpi_control/SCPI_Control/gui.py`.
+4. If this PC's footer is behind `main`, run Update Software → Restart now.
+   On a version without the fix, the bug shows as a footer that did not change,
+   while `grep -m1 __version__ /mnt/shareDrive/_software/SCPI_Control/version.py`
+   shows the new stamp.
+
+**Check B: verify the fix.** About 5 min. Between steps 1 and 3, everyone who
+starts the app gets the fix branch, which is `main` plus the fix.
+1. Run `rm -rf /tmp/restart-fix && git clone -q --depth 1 -b claude/restart-through-launcher https://github.com/Anatol-Gogoj/Digital_Multitool /tmp/restart-fix && SCPI_SRC=/tmp/restart-fix bash /mnt/shareDrive/_software/update_software.sh`.
+2. Close the app and start it from the icon. The footer shows
+   `+<branch hash>`.
+3. Tools → Update Software…, which deploys `main` again, then Restart now.
+   The launcher's "updating" window appears, then the app comes back with
+   `main`'s hash in the footer, the same as the share's stamp.
+   `launch.log.prev` shows the restart.
+
+**The update that first installs the fix on a PC is restarted by the OLD
+code**, so that one restart still shows the old version. Start the app from
+the icon once after that update.
 
 ## Start-up time — where it actually goes
 

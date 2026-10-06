@@ -13,6 +13,610 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## The video is reviewed by exception: Save re-runs stale video edges, the accepted stills flag the frames, and a window walks them (2026-10-06)
+
+**TL;DR:** the video pass used to run once, minutes after the run, before
+anyone calibrated, and nothing ever read its output again. Now Edge
+Review's Save re-runs it whenever its edges are out of date. Each frame is
+checked against the run's accepted stills, which are frames of the same
+stream. A new 🎞 **Video review…** window walks only the frames the
+detector doubts or that disagree with the stills, and records accept /
+reject decisions in `video_review.csv`. `data.csv` is never touched by it.
+
+**Observation (13_backlight_2, 2026-10-05).**
+
+- The post-run job finished the video pass at 20:47:29 and the operator
+  saved the scale anchor at 20:51:20. The pass therefore ran with no scale
+  and the baseline fit as it was then (refused): `video_edges.csv` has 438
+  rows, every one flagged for review, none with an area.
+- Nothing re-ran it, and no tool read `video_edges.csv`. The only way to
+  look at a frame was `ffplay` and a guess at which ones mattered.
+
+**Decision.**
+
+- **Provenance.** The pass writes `video_edges.json` beside the CSV: the
+  detection settings, the baseline fit, the area method, the scale anchor,
+  stride and limit. `edges_stale` compares that record with the run as it
+  is now and names each input that changed. The CSV is written to a
+  `.part` file and renamed into place, so a failed pass leaves the old one
+  whole.
+- **Re-run after Save.** `save()` calls `sldea_video.after_save` after
+  data.csv, the anchor and the stamp are written, since all three are
+  inputs. When the edges are stale, a detached, low-priority
+  `sldea_video.py RUN --after-save` measures every frame again and logs
+  into `run.log`. A video still in local staging is not in the folder yet,
+  and the post-run job detects before it moves the files, so the re-run
+  cannot race it. Closing Edge Review does not stop the re-run.
+- **Checkpoints.** Every data.csv row with an area is an accepted still.
+  Its time is that of the stream frame it came from, read from `run.log`
+  ("(frame t=…s)"), with the planned time as the fallback.
+- **Flags** (`review_flags`). A frame is sent to a human when:
+  - the detector doubts it (`needs_review`), or found no edge;
+  - inside a landing bracketed by accepted stills, it reads more than
+    `REVIEW_BAND_PCT` = 2 % outside their range. That is the top of the
+    ±1–2 % budget in SLDEA_MEASUREMENT.md §1.1;
+  - outside any landing, it is a one-frame spike, or the frame where a step
+    of more than `REVIEW_JUMP_PCT` = 2 % lands. Per-frame repeatability is
+    0.08–0.26 % SD (§2.1).
+
+  Both the detector's confidence and agreement with the stills are needed
+  to pass a frame.
+- **Run-wide offset.** The video pass fits the baseline on the recorder's
+  cvtColor decode, the stills on the PNG decode. On a low-contrast disc the
+  two fits differ. `still_offset` measures the median video/still ratio at
+  the stills' own times. The bands are scaled by it, and it is said in
+  `run.log` and in the window. When it exceeds the band itself, the window
+  warns to check the anchor and the baseline.
+- **The window** (`sldea_video_review.py`, also runnable as
+  `python sldea_video_review.py RUN`):
+  - **Figure:** the area-against-time figure, with every series given its
+    own marker shape as well as a Tol colour.
+  - **Frame view:** the frame from `video.mkv`, cropped to the tracker's
+    search window, with the detector's outline re-detected on demand. The
+    re-detection uses the previous frame's method, so it reproduces the
+    pass's own choice. It runs on a worker thread that holds no Tk object.
+  - **Keys:** A / R / C, stretches with Shift, N / P between flagged
+    frames.
+  - **Decisions** go to `video_review.csv` with the area they judged. A
+    decision about an area the detector no longer reports is dropped, and
+    the drop is counted.
+  - **On close,** `video_edges.png` is redrawn with the decisions.
+- **Format unchanged: FFV1, lossless, full frame, 1 fps default.**
+  Measured on real frames (decoded the way the recorder decodes them,
+  OpenCV 4.13, this machine):
+
+  | format | MB/frame, 13_backlight_2 | MB/frame, P3_2 | worst area error vs lossless (13_bl_2 / P3_2) |
+  |---|---|---|---|
+  | FFV1 (today) | 0.641 | 0.516 | 0 / 0 (bit-exact) |
+  | FFV1, cropped to the search window, baseline outside | 0.459 | 0.380 | 0 % / **93 %** (the seam reads as edges) |
+  | VP9 | 0.175 | 0.119 | 0.8 % / **11.8 %** |
+  | MJPG | 0.067 | 0.055 | 0.8 % / **27.7 %** |
+  | MPEG-4 part 2 | 0.025 | 0.020 | 1.3 % / **40.6 %** |
+
+  - The real 13_backlight_2 recording is 280.4 MB for 438 frames, i.e.
+    0.64 MB/frame, or about 2.3 GB an hour at 1 fps.
+  - The zeroth-order entropy of the LOCO-I residual (sensor noise 1.7–2.1
+    gray) is 0.58–0.69 MB/frame. FFV1's context model already beats it, so
+    no lossless coder will do much better.
+  - FFV1's `coder`/`context` options changed nothing through OpenCV.
+  - This build has no H.264 (OpenH264 missing). AV1 took about 90 s for
+    two frames.
+  - The lossy formats look harmless at the median (0.13–0.52 %), but their
+    worst frames on the wrinkle-mode P3 run are 12–41 % wrong. That
+    confirms the 2026-09-23 reason for lossless.
+
+**Evidence.**
+
+- **Tests:**
+  - `tests/test_sldea_video.py`: flags, checkpoints, the offset, the stamp
+    and staleness, whole-or-nothing writes, the after-Save launcher and
+    job, decisions, and the figure's series.
+  - `tests/test_sldea_video_review.py` (new): navigation, decisions and
+    reopen, stretches, the off-thread outline, a clean close, and the
+    stale banner with its re-run.
+  - `tests/test_sldea_edge_gui.py`: the button and the Save hook.
+- **End to end** on a copy of 13_backlight_2:
+  - **Setup:** a 438-frame FFV1 video built from its stills on the real
+    `video_frames.csv` timing (281 MB, the original is 280.4 MB). The 60
+    stills were detected and accepted as a Save would write them, with the
+    baseline-fit retry of #365 merged locally.
+  - **Staleness:** `edges_stale` said "the automatic baseline fit changed
+    (none -> 405.2 px)".
+  - **Re-run:** `--after-save` measured all 438 frames in 72–77 s, with
+    2 frames flagged (frames 0 and 1, the detector's own doubt at 0 kV).
+    The video read −1.19 % against the stills (p10 −1.54, p90 −0.80).
+  - **Window:** opens in 0.9 s; outlines arrive in 0.4–0.6 s per frame.
+- **Found on the way and fixed in #365:** the retry's fill rule read 59 %
+  on the PNG and 51 % on the video decode of the same baseline. The
+  retry's fill is now the ring's 25th percentile.
+
+**Open.**
+
+- On a backlit run like 13_backlight_2, the video pass measures only with
+  #365 merged. Without it the baseline fit refuses, and every frame is
+  flagged by the detector, as before.
+- `test_sldea_video`'s FFV1 writer fails intermittently on Gogojster
+  (Windows, OpenCV 4.13). About one process in five sees "Unknown C++
+  exception" from `VideoWriter.write`, after which every write in that
+  process fails, so a suite skips or fails in a cascade. It is the same on
+  origin/main and has not been seen on the bench.
+- BENCH_TEST §Q16 (re-run after Save) and §Q17 (the window) are owed, with
+  §Q itself.
+
+## The baseline disc fit retries from the window centre when it refuses, and judges that retry against the ring around the disc (2026-10-05)
+
+**TL;DR:** on backlit run `13_backlight_2` the automatic baseline fit
+refused, so no other frame of the run could be measured: the tracker needs
+that fit, and the hand anchor only supplies the scale and the baseline's
+A0. When the original fit refuses, a second trace now starts at the centre
+of the search window and compares the disc with the ring just outside it
+instead of the frame-wide median. Every fit the original trace made is
+unchanged.
+
+**Observation (13_backlight_2 baseline, measured 2026-10-05, OpenCV 4.13).**
+
+- Rim step, outside minus inside: median 5.8 gray (2.7 %); 2.9-4.6 on the
+  right half, about 10 on the left. Rise 10-90 % in 17 px: sharp, but
+  shallow. Sensor noise about 2 gray, so noise is not the limit.
+- Backlight across the search window: about 212 (dim right side) to 226
+  (upper left). Frame-wide median 216; disc interior 213-215; the ring just
+  outside the disc 219-220. The median sits between the disc and its own
+  surround.
+- The seed class (paper - 5 = 211) took 0 % of the disc, so the seed
+  landed on the dim right side and 11 of 360 rays were usable (needs 40).
+- Seeded on the disc instead, the ray stage traces it: 160 edge points,
+  260° of arc, residual 1.5 % of r, circularity 0.96. The fill gate then
+  fails at 6 % against paper - 4, and passes at 59 % against the ring's
+  median - 4.
+- Flat-fielding the frame first (subtracting a 488-648 px closing) does not
+  rescue it: the disc stays about 4 levels below its surround, and 18 % of
+  it reaches the seed class.
+- Consequence: all 59 other rows were rejected "no reliable edge" (the
+  diff and texture channels see nothing; the disc moves about 1 px in
+  radius below 3 kV), and all 438 video frames were flagged.
+
+**Decision.**
+
+- `_baseline_disc_uncached` runs the original trace unchanged. Only when it
+  refuses does a retry run, seeded at the window centre, with the fill
+  judged against the ring from 1.15 r to 1.5 r around the fitted circle
+  (foil and glint excluded): the share of the interior darker than that
+  ring's 25th percentile. Every other gate is shared.
+- Why a percentile and not a margin under the ring's median (2026-10-06,
+  found by the video review's end-to-end check): with a fixed 4-level
+  margin the fill read 59 % on the baseline PNG and 51 % on the video
+  pass's cvtColor decode of the same file, which differ by at most one gray
+  level (0.5 on average). That is either side of the 55 % gate, so the
+  video pass refused the baseline the stills fitted. The ring's own
+  percentile moves with the picture: 0.90-0.96 on both decodes of both
+  0 kV frames. A circle with no darker disc under it reads about 25 % by
+  construction.
+- The result's `seed` key says which trace produced it
+  (`DISC_SEED_DARK` / `DISC_SEED_CENTRE`); `paper_lum` is the surround
+  level (the ring's median on the retry), so the calibration display
+  stretches between the disc and the surround the fit used.
+- A refusal always states the original trace's reason. The retry starts at
+  a fixed point whatever the frame holds, so its own refusal describes
+  that point: on a blank frame it read "covers only 40° of arc" where the
+  original's "nothing dark enough to seed on" is the useful sentence.
+- Not seeded from the hand anchor's centre: the calibration dialog runs the
+  fit before any anchor exists, and threading the anchor through every
+  caller of the cached fit would let two callers see different reference
+  discs.
+- The arc gate's sentence now states the 130° it applies (13 of 36
+  ten-degree sectors), not 120°. On `SLDEA_20260806_151857` it read
+  "covers only 120° (needs ≥ 120°)". The gate itself is unchanged.
+
+**Evidence (local corpus copy on Gogojster: 14 runs, plus `13_backlight`,
+`13_backlight_2` and Wonjin's run 13; Edge Review's pipeline replayed before
+and after by `sldea_batch_eval.py`).**
+
+- The 10 baselines the original trace fits are identical: diameter, centre,
+  conf, fill, arc, residual, edge count and paper level.
+- Two new fits, both checked by eye on the frame: `13_backlight_2` at
+  407 px, and `P3_7_2.3mL_20260729` at 541 px (refused before, 18 rays).
+- The other 7 still refuse, including the blank 2026-10-01 frame and the
+  saturated 2026-08-05 frames: the retry does not invent a disc on them.
+- Frame by frame, 17 runs replay identically (status, method, area, conf).
+  `13_backlight_2`: 60 rejected became 60 auto-accepted (tracker conf
+  0.81-0.86). `P3_7`: 48 rejected and 33 review became 31 auto and 50
+  review. Its outlines follow the visible edge on the frames checked; its
+  3.0 kV landing loses 8 % of area between the two snapshots, about 57 s
+  apart at constant voltage, which is visible in the frames rather than a
+  tracking artefact. The local copy holds no reviewed P3_7 areas: compare
+  against the campaign scorecard on big-electronic-box before using them.
+- Synthetic backlit scene (`_backlit_scene` in the tests): the original
+  trace refuses (1-4 rays usable on origin/main), the retry fits 199.3 px
+  against a true 200 px, and the same scene with no disc still refuses.
+  Rounded down, up, or shifted half a level either way (the two decodes'
+  difference), it still fits within a pixel; the fixed-margin rule fails
+  that test at fill 0.65.
+- The percentile rule changes no corpus decision: the 10 original fits
+  are bit-identical, the same two runs newly fit at the same diameters,
+  and the per-frame replay of both is identical frame for frame.
+- `test_electrode_mask_255_only_costs_a_flat_synthetic_strip` documented
+  the bright painted strip as a refusal. The retry now fits it at 199.8 px
+  against a true 200 px. Its invariant, never a wrong diameter, is kept and
+  is now asserted as the correct diameter.
+
+**Open.**
+
+- On `13_backlight_2` the automatic fit (407 px) is 4.3 % smaller than the
+  hand anchor (425 px): the hand circle sits at the outer foot of the
+  17 px rim ramp, the fit at its steepest point. The anchor guard will
+  flag it. Recalibrating in verify mode puts the scale, A0 and every frame
+  on one edge definition.
+- The disc's contrast on that frame is still small (about 6 gray levels,
+  3-5 on its right half). The fit now passes with room (fill 0.92, conf
+  0.78), but a more uniform backlight is the capture-side fix.
+- The video pass ran before calibration, so `13_backlight_2`'s
+  `video_edges.csv` is empty. Since the video review entry above, the
+  next Save of that run in Edge Review re-runs it with this fit.
+
+## The camera pre-flight shoots under the run's own lock, and says when the Webcam tab's fields and lock disagree (2026-10-05)
+
+**TL;DR:** on run `13_backlight` the pre-flight picture looked fine and
+every run frame came out blown out. The pre-flight was shot at the Webcam
+tab's locked exposure, the run at the panel's exposure field, and the two
+differed. The pre-flight now shoots under exactly the lock the run holds,
+and names the difference when the fields and the lock disagree. A stale
+settings file could also bring an old exposure back into the panel; the
+newer of the two settings files now wins.
+
+**Observation (run `13_backlight`, 2026-10-05, measured from its files).**
+
+- `setup.txt`: exposure 20 (2 ms), gain 0, the same values as front-lit
+  run 13 two hours earlier.
+- All 60 frames, from the warm-up on, are 57-66 % saturated (mean
+  226-227). The exposure was wrong from the first grab, not drifting.
+- The operator saw a reasonable picture in the Webcam preview and in the
+  pre-flight dialog.
+- In the code: `_sldea_worker` overrides the tab's lock with the panel's
+  `cam_exposure`/`cam_gain` for every grab, while `_sldea_preflight`
+  wrote those values and then grabbed through `oneshot_rgb`, which
+  re-stamps the tab's LOCK before the shutter. The preview runs on the
+  lock as well. A good pre-flight and a blown-out run at exposure 20
+  therefore mean the lock held a different exposure from the field.
+- How the field and the lock came apart on the bench is not established.
+  One mechanism the code allows: `save_camera_settings` writes the
+  fallback file when the primary is unwritable, but
+  `load_camera_settings` read the primary first, so a stale primary
+  refilled the panel (and the restored lock) on every rebuild.
+
+**Decision.**
+
+- One definition, `sldea_run_lock`, builds the lock both the pre-flight
+  and the run hold. The pre-flight's grab happens under it, and the tab's
+  own lock is restored afterwards (also when the grab raises).
+- `sldea_lock_mismatch` names a field-vs-lock difference in the dialog
+  and in run.log. The run keeps using the fields, as before; the change
+  is that the pre-flight now shows what that looks like.
+- `load_camera_settings` reads the newer of the two files first.
+- Not new camera I/O: the pre-flight writes the same four controls the
+  run writes seconds later, through the same `apply_locked`. Still to be
+  seen on the bench: with fields and lock different, the dialog's picture
+  matches the run's frames.
+
+## A run can record lossless video beside its snapshots, and detect edges on every frame afterwards (2026-09-23) — NOT bench-verified yet (BENCH_TEST §Q)
+
+**TL;DR:** tick 🎥 **Record** on the SLDEA tab and the run also records a
+lossless grey video (`video.mkv`, FFV1, 1–2 fps suggested, ~1 MB a
+frame). Each frame's time and commanded kV go in `video_frames.csv`. The
+snapshots are still taken on schedule, so `data.csv` and every tool that
+reads it are unchanged. Afterwards, `sldea_video.py RUN` (or the tab's
+checkbox) runs Edge Review's own detector on every frame. **Desk-tested
+only; it must pass BENCH_TEST §Q before it merges.**
+
+**Rebased onto main 2026-10-05** (written 2026-09-23, never pushed until
+then, so it sits above newer entries). Three things changed in the
+merge, none of them in the recording itself:
+
+- `#354` made readings logged as read, with "Trek inverts" flipping the
+  control only, and removed `_sldea_capture`'s `vsign`. The branch passed
+  `vsign=trek_sign`; that argument is gone, so the video run logs kV and
+  µA the way every other run now does.
+- `#334`'s start gate runs before the video pre-flight; both still come
+  before any HV question.
+- The two items `#334` left owed for this merge are now in the gate: with
+  Record ticked, an other-channel Webcam sweep is **refused** rather than
+  asked about (the recording holds the camera for the whole run, so it
+  would be the recording that fails), and a previous run's recorder that
+  is still closing holds off the next ▶ Run, as it already held off the
+  Webcam tab. Both pinned in `tests/test_sldea_interlock.py`.
+- The adversarial review of the rebase found the last still of a video
+  run could be **dropped**: the loop ends 0.3 s after the staircase while
+  a stream still waits up to 1.5 s for its frame, so a final pre-ramp
+  with no frame in time got no `data.csv` row at all. Every still left
+  pending on a run that reached its end now gets one last look at the
+  stream and then its row, with the frame or as NO FRAME. The Trek is not
+  held at its last level any longer for it; the cost is one scope read
+  per pending still before the zeroing. Pinned in
+  `tests/test_sldea_video.py`, which fails without it ("3/4 frames").
+
+**Observation → decision.**
+
+- *Asked for* (operator): video instead of, or beside, the snapshots, and
+  edge detection on all its frames. *Decided with the operator:* video
+  **beside** the snapshots, since the stills survive a recorder failure
+  and every downstream tool keeps working. The video is **lossless at
+  1–2 fps** because it is for measurement: compression smears the fine
+  texture the wrinkle channel reads.
+- *Measured* (this machine, OpenCV 5.0; the bench's 4.13 is §Q1):
+  - FFV1 8-bit grey is 0.97 MB per 1080p frame at the sensor's σ ≈ 2.5,
+    40–50 ms to encode, and **bit-exact** on decode. So ~2.5 GB for a
+    43-minute run at 1 fps.
+  - HuffYUV was larger and **not** bit-exact through OpenCV; MJPG is 14×
+    smaller but lossy. Both were rejected.
+- *Observed, and fixed on the way:* every still was a one-shot grab on
+  the thread that runs the watchdog and the ramp. Each grab re-stamped
+  every locked control through `v4l2-ctl` (two calls per control, 10 s
+  timeouts) and then streamed with a 45 s timeout, once retried. A
+  wedged camera could therefore hold the HV loop, and Abort, for
+  minutes.
+  - In a video run, the recorder's own threads own the camera, and the
+    loop only takes a copy of the newest frame (lock + copy). That
+    includes the breakdown frame on a watchdog trip.
+  - A stills-only run is unchanged. Moving it onto the same stream is
+    the obvious next step, but it changes the stills path for every run
+    and wants its own bench check.
+- *Decided:*
+  - **Before any HV:** the recorder starts before the SG output goes on.
+    If the stream delivers nothing in 5 s, the run falls back to
+    one-shot stills rather than losing them.
+  - **At the end:** the recorder stops (bounded) only after the SG is
+    zeroed and `data.csv` is closed.
+  - **Staging:** the file is written to local disk during the run (the
+    share has measured multi-second stalls) and moved into the run
+    folder by a separate thread afterwards. The move logs straight into
+    that run's `run.log`, because a new run may already own
+    `_sldea_log`.
+  - **Before HV is offered:** the tab refuses to start a video run
+    without an FFV1 encoder or local disk space for the estimate. It
+    offers a snapshots-only run instead, before any HV question.
+- *Decided:* all-frames detection runs **after** the run, as a separate
+  program, never during it: ~0.2 s a frame would contend with the HV
+  loop.
+  - It runs the stills' own path: `se.candidates` against the run's
+    baseline still, with the saved settings and the frame-to-frame
+    method bonus in time order.
+  - Scale comes from the saved anchor, else the baseline-disc fit.
+  - There is no review queue at thousands of frames. Every row carries
+    `conf` and `needs_review` instead, in `video_edges.csv`, and never in
+    `data.csv`.
+  - *Measured:* `imread`'s grey decode and `cvtColor` round differently
+    (up to 1 level on half the pixels). The baseline still is therefore
+    converted the way the video frames are, so reference and frames
+    share one conversion.
+- *Observed, and fixed:* nothing stopped the Webcam tab from opening the
+  camera, or rewriting its locked exposure, in the middle of a run. A
+  preview made the run's stills log NO FRAME, and Apply & Lock changed
+  exposure mid-run. Refused now during any SLDEA run, with the reason,
+  like a LIVE-owned SG channel.
+- *Adversarial review* (required for the HV runner, CLAUDE.md), same
+  day. **Verdict:** no path where the SG is zeroed later or not at all.
+  The zeroing is untouched and still first, and a video run removes
+  camera waits from the HV thread. It found five things to fix before a
+  bench visit, all fixed and each pinned by a test:
+  - **F1** A stream that dies mid-run was never reopened, so every
+    remaining still was lost. It is now reopened with backoff.
+  - **F2** Stills off the stream missed the per-still gain stamp
+    one-shot grabs get. A full restamp is now requested ~0.6 s before
+    each still, on the reader thread, and the frame read straight after
+    any stamp stall is discarded, since it may have been buffered during
+    it.
+  - **F3** A still could come from a frame captured up to 2 s *before*
+    its scheduled moment. It now takes only a frame captured after both
+    the stamp and the schedule. It retries on later ticks, never
+    blocking, and logs NO FRAME after 1.5 s. The frame's own time goes
+    into the notes, the telemetry event and run.log.
+  - **F4** The encoder could wait forever when its stop signal was
+    dropped behind a stalled disk. It now exits by itself.
+  - **F7** Telemetry now closes before the video's up-to-10 s stop, and
+    the tab release is in an outer `finally`.
+- *Also fixed from the review:*
+  - Frames after the staircase are no longer recorded under its planned
+    kV (**F5**).
+  - An Abort during camera startup no longer switches the SG on (**F8**).
+  - A slow open finishing after `stop()` no longer orphans the stream
+    (**F9**).
+  - `setup.txt` records the video *outcome* (**F11**).
+  - The move copies to `.part` then renames, is throttled, and runs as a
+    detached `sldea_video.py --finalize` that survives closing the app.
+    Detection runs on the local copy first (**F6/F12**).
+  - A LIVE start asks while a previous run's video is still copying to
+    the share (**F6**).
+  - "Read camera", which rewrites the lock, is guarded too (**P2**).
+- *Filed, not fixed here:*
+  - **P1** A stepped sweep started before a run keeps driving the SG
+    mid-run. This is pre-existing and has its own task.
+  - **F16 (design note)** An hour of native FFmpeg encoding and
+    debayering now runs in the process that supervises the HV, so a
+    native crash would leave the SG at its last offset with no watchdog.
+    That is the same exposure the live preview's debayer always had, but
+    for longer. Moving capture into a child process is the fix if the
+    bench ever shows a crash.
+- *Open:*
+  - BENCH_TEST §Q, the whole of it, now including the LIVE step with
+    the Trek HV disabled (**Q14**), which a DRY run cannot exercise.
+  - The long-stream gain check (**Q13**).
+  - Whether the bench's OpenCV wheel has FFV1 at all (**Q1**).
+  - Whether `--set-parm` actually sets the stream rate (**Q11**,
+    review F15).
+
+## Up/down runs are drawn leg by leg, and the plot gains an elapsed-time axis (2026-09-23)
+
+**TL;DR:** in the plot window an "Up/down (hysteresis)" run was averaged
+into one point per kV, so the loop it was recorded to show disappeared —
+and "pre/post separately" kept only the falling leg. Such runs are now
+drawn leg by leg by default (▲ rising, ▼ falling, small arrows in the
+direction of travel), and a new x axis, elapsed time, unrolls any run.
+Single-sweep figures are byte-identical to before; `--merge-legs
+--no-arrows` restores the old up/down figure exactly.
+
+**Rebased onto main 2026-10-05** (written 2026-09-23, never pushed until
+then, so it sits above newer entries). Main had since fixed the strain-%
+band (2026-10-02 entry): `_series` takes the panel's units. The leg and
+time-axis paths written here now pass them too; without that, a strain-%
+up/down plot drew a zero-width band at rest, which
+`test_updown_legs_and_the_time_axis_draw_the_strain_band_in_strain_points`
+pins. The `--strain-pct` flag registration in this branch's first commit
+had already reached main another way, so only its double-click fix and its
+flag source-scan test remain.
+
+**Observation → decision.**
+
+- *Observed* (operator report, then read in the code): `levels()` keyed
+  every row by `round(kV, 3)`. A level's rising and falling visits were
+  therefore averaged into its `mean`, and `--prepost`'s `post`/`pre`
+  slots were simply overwritten by whichever leg came last — the rising
+  leg never reached the figure. Current/power already drew in CSV order,
+  but retraced the way up in one colour with nothing to tell the legs
+  apart.
+- The data carries no direction field and needs none: CSV order is time
+  order. `sweep_legs` derives, per row, the **landing** (a landing's
+  post-/pre-ramp pair share one), the **leg** (direction of the ramp INTO
+  the landing; a same-kV landing where two up/down cycles meet takes the
+  ramp OUT of it) and the **cycle**.
+- *Decision* (operator's choice): leg split and arrows ON by default. Only
+  a run whose voltage ever FELL (`multi_leg`) is affected, so every
+  existing single-sweep figure is unchanged — proven byte for byte in all
+  three modes against `78315cc`, the commit this was cut from, and
+  `--merge-legs --no-arrows` reproduces the old up/down figure byte for
+  byte too.
+- *Decision:* the cross-run aggregate takes an up/down run's **first
+  rising leg**, and the caption and a warning say so. Averaging a device's
+  rising and falling visits is the blending this entry removes; the first
+  rise is the leg every single-sweep run in the pool also has.
+- Arrows are never drawn on a line sorted by kV (every arrow would point
+  right whatever the data did) — only on leg-split paths, a few per leg,
+  placed in the axis' own scaled space so they sit on the line on a log
+  axis too.
+- The x axis stays **nominal kV by default** (the 2026-08-04 decision
+  above stands). `--x time` is an option: minutes since the run started,
+  from `t_planned_s` (the run's own monotonic clock) or else the
+  wall-clock timestamps — never both within one run. It refuses
+  `--prepost`/`--mean`/`--aggregate` (they pool by kV) and `--vs-area`
+  (the other x switch); the window greys and neutralises them instead.
+- The tidy CSV gains three DATA columns for every figure: `elapsed_s`,
+  `leg`, `cycle`.
+- Found in passing and fixed: `sldea_plot.py RUN --strain-pct` was
+  rejected by the parser (never registered in `_BOOL_FLAGS`); on the
+  strain-% panel a double-click resolved against A/A₀ coordinates and
+  opened the wrong frame.
+- Found in passing, **not** changed here: Edge Review's `reconcile_pairs`
+  still pools same-kV frames across legs and repeats, with a tolerance
+  that grows with the visit count (filed as its own task). And the plot
+  suite's byte-identity test pins `_BASE_SHA = d11b01ad…`, which is not in
+  `main`'s history — on an ordinary clone it prints "skipped" and counts
+  as a pass, so that guard has not been running; the new leg tests pin
+  `78315cc` instead, which every clone has.
+
+## Calibration questions name their buttons and open over the calibration window (2026-10-05)
+
+**TL;DR:** the questions that follow a hand calibration (mostly met when
+the disc fit refuses a poor baseline frame) were long native Yes/No boxes,
+and they could open behind the calibration window. They are now short
+boxes whose buttons say what they do ("Use unchecked scale" / "Cancel"),
+owned by the calibration window so they always open on top of it. The
+gates, their order, their defaults and what each answer records are
+unchanged.
+
+**Observation (operator, 2026-10-05).** On a run whose baseline frame the
+automatic fit refused, the operator measured by hand and met "Anchor NOT
+cross-checked": 646 characters before the rescale note was appended
+(rendered at n = 3), ending "Use this UNCHECKED anchor anyway?" and then
+"No = cancel (...)". The new box is 304 characters with the same n. It was not clear whether Yes or No
+was the safe answer without reading the whole box. The boxes also opened
+behind the calibration window, which had to be dragged aside to find
+them. The cause of that is in the code: every gate called
+`messagebox.askyesno` / `askyesnocancel` with no `parent=`, so the box was
+owned by the main window, while the calibration window is a transient of
+the main window that holds the grab. On Windows the calibration window
+could stay above the box.
+
+**Decision.**
+
+- The five gate questions (range cap, unjudgeable round count, rounds
+  disagree, not cross-checked, anchor sanity check) go through
+  `cal_choice` in `sldea_edge_gui.py`: a bold one-line headline, a few
+  short lines of detail, and buttons named for the action. The answer
+  keys and the True/False/None contract are the old ones, so `finish()`
+  branches exactly as before.
+- The box is transient to the calibration window, centred over it, lifted
+  and focused, and it hands the calibration window's grab back when it
+  closes (a Tk grab is not a stack).
+- Enter, Escape and the close box all answer the default, which is still
+  the declining button on every gate; Enter is bound on each button so a
+  tabbed focus cannot turn it into an accept. The 2026-08-06 review rule
+  (no key press can accept an anchor) stands.
+- Percentages only on the range-cap and rounds-disagree boxes, as before:
+  a refit is one of their answers.
+- What came off the boxes: the P3_2 list of systematic errors and the
+  "REPEATABLE, not right" paragraph shrank to one sentence; the rescale
+  note is one sentence with its number. The record (`setup.txt`, the
+  calibration log, `sldea_diag`) is unchanged.
+- The in-window warnings (untouched circle, implausible size, fit gone)
+  now pass `parent=` the calibration window, and the calibration window
+  and the flat-frame notice lift and take focus when they open.
+
+Verified on the GUI suite with a display (`tests/test_sldea_edge_gui.py`);
+the new case opens the real box and checks the labels, the transient
+owner, Enter/Escape/close declining, and the grab hand-back. Not yet seen
+by an operator on the bench PC.
+
+### Same day, follow-up: the re-anchor confirmation gets named buttons too
+
+**TL;DR:** owner request after #355. The re-anchor question on a saved run
+now has "Write data.csv now" / "Keep for next Save" / "Cancel" instead of
+Yes / No / Cancel. Same three outcomes, same Cancel default, same evidence
+table.
+
+- It goes through `cal_choice`, owned by the main window (the calibration
+  window has closed by then). The labels live in one list,
+  `REANCHOR_BUTTONS`, which `_reanchor_msg` also quotes, so the scope
+  lines ("\"Write data.csv now\" WRITES data.csv NOW — SCALE ONLY: ...")
+  cannot drift from the buttons.
+- The evidence table (anchor before and after, multiplier, rows re-derived
+  and blanked, resting area against π·(d/2)²) is unchanged. It is shown in
+  TkFixedFont at a wider wrap, so its columns line up; the native box drew
+  it in a proportional font.
+
+## "Trek inverts" negates the control only, and starts ticked (2026-10-05)
+
+**TL;DR:** owner decision. The box is ticked by default, and ticking it now
+changes one thing: the control voltage sent to the signal generator is
+negated. The monitor check frames V_Out from 0 to +kV either way, and V_Out
+and I_Out are logged as read. This reverses the 2026-08-04 rule (D5) that a
+ticked box also framed V_Out 0..-need and multiplied both readings by -1.
+
+**Evidence.** All 14 runs on file with monitor readings read negative kV at
+a positive commanded voltage, with the box unticked and no INVERTED line in
+setup.txt (P3_6_2.5mL_20260729: -4.07 kV measured at 4.00 kV commanded, and
+the readings stop above 4.00 kV because the window was framed for the
+positive side). So on this bench the V_Out monitor reads the opposite sign
+to the control.
+
+**Why D5 was wrong for this bench.** D5 assumed the monitors follow the sign
+of the control. They measure the Trek output. Negating the control flips
+the output and both monitors together, so with the box ticked they read
+positive. Under D5 a ticked run framed the window for negative readings
+(the readings then sat above it) and multiplied them by -1 (logged
+negative): the same failure as the unticked runs on file, with no setting
+of the box that gave a positive, on-screen reading.
+
+**What changed.** `gui.py`: `trek_sign` drives `sg.set_offset` only; the
+monitor check passes `v_sign=1.0`; `_sldea_capture` lost its `vsign`
+argument; telemetry rows carry the readings as read; setup.txt says
+"monitor readings logged as read". `sldea_edge.run_health`: the `kv_sign`
+note is suppressed only for the older "sign-corrected in log" line, so a
+ticked run that still reads negative (a Trek that does not invert) is
+reported, naming the ticked box. Pinned by `tests/test_trek_polarity.py`.
+
+**Bench check.** First LIVE landing with the box ticked: `meas` positive and
+close to the commanded kV, and V_Out on screen for the whole ramp. Decision
+23 (detect the sign at the first landing) still stands for the case where
+this fails.
+
 ## A run cannot start, or carry on, on a picture with nothing in it (2026-10-02)
 
 **TL;DR:** on 2026-10-01 a LIVE run went out with the camera at exposure
@@ -318,6 +922,53 @@ runs held locally, 899 frames).**
   a DRY run and a LIVE run with the Trek's HV disabled, a normal frame
   starts normally, the settings warning, Cancel leaves the camera alone)
   has to pass before this merges.
+
+**Merged with #361 (2026-10-06).** This entry was written when the
+pre-flight's frame was exposed with the Webcam tab's lock. #361 (the
+camera pre-flight shoots under the run's own lock) changed that: the
+frame is now taken under `sldea_run_lock`, the tab's lock with the
+run's four controls on top, and the tab's lock is put back afterwards.
+The merge keeps both PRs and resolves the overlap:
+
+- The picture check is handed the lock the frame was taken under (the
+  run's). That lock is built from the run's own values, so its bold *This
+  preview was NOT taken with the run's settings* can no longer fire from
+  the dialog. It stays in the Tk-free report for a caller that hands it
+  another lock.
+- The Webcam tab's live preview running on a different lock is said by
+  #361's sentence, only for a camera with a device path (no other camera
+  is stamped by anything). Like every warning, it costs the start button
+  its default: `preflight_start_button(tab_mismatch=True)` gives
+  `PREFLIGHT_START_LOCK_DIFFERS`, so Return starts only a clean
+  pre-flight, as above.
+- **Found in the merge review:** a camera value that is a built-in
+  default (no readable box on the Webcam tab) showed a warning sign, but
+  Return still started the run. `preflight_start_button(fallback=True)`
+  now takes the default away from it too.
+- The SLDEA tab's camera line now says the tab's *live preview* will not
+  show what the run records (the pre-flight does), instead of the
+  pre-flight preview. The pre-flight's log line tells a camera with no
+  device path ("neither the pre-flight nor the run stamps them on it")
+  apart from a lock that agrees.
+- The baseline picture check reads the frame `_sldea_capture` returns,
+  which in a video run is the stream frame (#359). The call no longer
+  passes `vsign`, which #354 removed. In a video run a missing baseline
+  frame is blamed on the stream, not on the Webcam preview: the run holds
+  the camera.
+- **Tests:**
+  - #359's video worker tests start with the override, because their
+    synthetic frames are flat by construction.
+  - Two new tests run a LIVE video run without it: a flat stream stops at
+    the baseline, with the SG zeroed and switched off before the recorder
+    stops; a stream showing a disc runs to the end.
+- **BENCH_TEST §S** is rewritten where the merge made it invalid. The
+  flat baseline without the override is now a *covered start*: cover the
+  lens right after starting from a good pre-flight. S5 checks #361's
+  sentence and the new start label.
+- An adversarial review of the merge found no blocker. It exercised the
+  HV stop on the merged worker: a flat stream stops and zeroes the SG; a
+  stream that dies before the baseline stops; a textured stream completes.
+
 
 ## Hand calibration: an untouched circle is not a fit, the hand view is contrast-stretched, and a frame with no picture says so first (2026-10-02)
 
@@ -2395,7 +3046,10 @@ the version that was already running. The exception is when the cache sync
 failed at launch: the app then runs from the share, and a restart would
 load the new code. This was read from `deploy/launch_gui.sh.reference`;
 the live copy on the share was not checked. It is filed as a separate
-task.
+task. **Follow-up (2026-09-24): reproduced against the reference copy and
+fixed in #340.** Restart now runs the desktop launcher again when the app
+runs from the cache. The bench check is pending; see
+`deploy/BENCH_PC_NOTES.md`.
 
 **Verification.**
 

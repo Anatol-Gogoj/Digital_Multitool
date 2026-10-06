@@ -7,6 +7,10 @@ Never clicks Save — nothing in the run folder is modified except what the
 detector itself writes (setup.txt is untouched; picks are in-memory only).
 
 Usage: python capture_edge_review.py [run_dir]   (defaults to bench run 1)
+
+The figure caption in build_manual.py names the run and the frame this
+captured (v1.4.0: P3_6_2.5mL_20260729, frame 23 of 81). Capture another
+run and that caption must change with it.
 """
 import ctypes
 from ctypes import wintypes
@@ -81,6 +85,8 @@ def main():
     print("run:", run)
 
     root = tk.Tk()
+    from capture import pin_96dpi
+    pin_96dpi(root)                  # lay out as a 100 % display does
     root.geometry("1150x760+40+30")
     app = eg.EdgeReviewApp(root, path=run, auto=False)
     root.attributes("-topmost", True)
@@ -110,12 +116,14 @@ def main():
     l, t, r, b = _win_rect(root)
     img = ImageGrab.grab(bbox=(l, t, r, b), all_screens=True)
     path = os.path.join(OUT, "40_edge_review.png")
-    img.save(path)
     widgets = []
     _walk(root, l, t, widgets)
+    img.save(path)
     entry = {"name": "40_edge_review", "file": path,
              "img_w": img.size[0], "img_h": img.size[1],
-             "origin": [l, t], "client_offset": [0, 0],
+             "origin": [l, t],
+             # annotate.py places fixed rects and badges from here
+             "client_offset": [root.winfo_rootx() - l, root.winfo_rooty() - t],
              "widgets": widgets, "tab": "SLDEA Edge Review"}
 
     mpath = os.path.join(OUT, "widgets.json")

@@ -880,6 +880,12 @@ def test_make_opts_maps_choices_and_refuses_bad_combinations():
                  # so an options dict built with no arguments still
                  # describes the figure that existed before the option
                  'strain_pct': False,
+                 # 2026-09-23: kV stays the x axis, and the leg split and
+                 # its arrows default ON -- they only ever act on a run
+                 # whose voltage also fell, so a single sweep is
+                 # untouched (the byte-identity test below proves it
+                 # against the pre-change engine)
+                 'x': 'kv', 'split_legs': True, 'arrows': True,
                  # `#314`: the file, not the drawing -- and the defaults
                  # are the file every export wrote before it existed
                  'fmt': 'png', 'dpi': 300}
@@ -1107,8 +1113,9 @@ def test_gui_flag_opens_the_window_without_run_arguments():
 _BASE_SHA = 'd11b01ad0b9e3e28786d482fabb4fe6027a4438e'
 
 
-def _pre_change_module():
-    """sldea_plot as of _BASE_SHA, as an importable module, or None.
+def _pre_change_module(sha=None):
+    """sldea_plot as of `sha` (default _BASE_SHA), as an importable module,
+    or None.
 
     None when the object is not reachable (no git, a shallow clone, an
     exported tarball) -- the caller then SKIPS and says so, because a
@@ -1118,7 +1125,8 @@ def _pre_change_module():
     import subprocess
     root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
     try:
-        got = subprocess.run(['git', 'show', _BASE_SHA + ':sldea_plot.py'],
+        got = subprocess.run(['git', 'show',
+                              (sha or _BASE_SHA) + ':sldea_plot.py'],
                              cwd=root, capture_output=True, timeout=30)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
@@ -1178,16 +1186,38 @@ def test_default_output_is_byte_identical_to_the_pre_change_engine():
             # Ungrouped, that column is empty at every row, which is
             # asserted here too: adding the option must not have changed
             # what an ungrouped export SAYS, only what it can say.
+            # ...and 2026-09-23 added three DATA columns the same way:
+            # 'elapsed_s' (the time axis's x) and 'leg'/'cycle' (the
+            # grouping an up/down run is drawn by). Dropped BY NAME below,
+            # so the claim stays exactly as sharp: every other byte, in
+            # every row, identical. On this single sweep they must also say
+            # the obvious -- one rising leg, one cycle, the 0 kV rows in it.
+            # ...and the provenance stamps of 2026-10-02/03 (the area
+            # estimator, the OpenCV/numpy versions and the tracker's window
+            # limits) were added to TIDY_COLS without being listed here, so
+            # this case failed on main at the CSV step on every clone while
+            # the PNGs stayed byte-identical (found 2026-10-05 during the
+            # leg-branch rebase). They are stamps, not data the base engine
+            # could have written, so they are dropped by name too.
+            added = ('group', 'elapsed_s', 'leg', 'cycle',
+                     'area_estimator', 'opencv_version', 'numpy_version',
+                     'ray_win_hi', 'disc_fit_r_max')
             assert sp.TIDY_COLS[1] == 'group', sp.TIDY_COLS
-            assert 'group' not in old.TIDY_COLS, 'base already had it'
+            for col in added:
+                assert col in sp.TIDY_COLS, col
+                assert col not in old.TIDY_COLS, f"base already had {col}"
+            keep = [i for i, c in enumerate(sp.TIDY_COLS) if c not in added]
             with open(new_csv, newline='', encoding='utf-8') as a, \
                     open(old_csv, newline='', encoding='utf-8') as b:
                 new_rows = list(csv.reader(a))
                 old_rows = list(csv.reader(b))
             assert {r[1] for r in new_rows[1:]} <= {''}, \
                 'an ungrouped export wrote a group'
-            assert [r[:1] + r[2:] for r in new_rows] == old_rows, \
-                f"{mode} CSV moved beyond the new column"
+            legs = {r[sp.TIDY_COLS.index('leg')] for r in new_rows[1:]}
+            cycles = {r[sp.TIDY_COLS.index('cycle')] for r in new_rows[1:]}
+            assert legs == {'rise'} and cycles == {'1'}, (legs, cycles)
+            assert [[r[i] for i in keep] for r in new_rows] == old_rows, \
+                f"{mode} CSV moved beyond the new columns"
     finally:
         for p in (d, out):
             shutil.rmtree(p, ignore_errors=True)
@@ -3380,6 +3410,448 @@ def test_the_cli_option_table_cannot_drift_from_make_opts():
     invented = sorted(set(out) - set(base))
     assert not invented, \
         f"_cli_opts invents keys make_opts never made: {invented}"
+
+
+# --------------------------------------------------------------------------
+# up/down legs and the elapsed-time axis (2026-09-23)
+#
+# An "Up/down (hysteresis)" run visits every level below the peak twice.
+# Keyed by kV the plotter averaged the two visits into one point -- the loop
+# the run was recorded to show vanished -- and --prepost's per-kV slots kept
+# only the falling leg. These pin the leg-by-leg view, its arrows, the
+# elapsed-time axis, and that none of it moves a single-sweep figure.
+# --------------------------------------------------------------------------
+
+# the commit this work was cut from: an ANCESTOR of main, so -- unlike
+# _BASE_SHA, which main's history does not contain -- it is reachable in
+# every clone, and the comparisons below run everywhere rather than skip
+_LEGS_BASE_SHA = '78315cc27c9d2b001d99f8d198aa5a4e5bb1e1d5'
+
+FALL_OFFSET = 8.0       # mm2: the falling leg sits this much HIGHER
+
+
+def _updown_rows(end_kv=1.5, step_kv=0.5, updown=True, repeat=1):
+    """Rows exactly as the bench writes them -- the REAL SldeaProfile
+    schedule (warm-up and baseline frames, post-ramp before pre-ramp, step
+    numbers, planned times) -- with a falling leg FALL_OFFSET above the
+    rising one at every level: the viscoelastic lag the mode exists to
+    record. Timestamps trail the plan by 0.3 s, as grab latency does."""
+    import datetime
+    import sldea_profile as sprof
+    p = sprof.SldeaProfile(end_kv=end_kv, step_kv=step_kv, updown=updown,
+                           repeat=repeat)
+    seq = p.sequence()
+    t0 = datetime.datetime(2026, 9, 23, 10, 0, 0)
+    rows = []
+    for n, s in enumerate(sorted(p.snapshots, key=lambda s: s['t']), 1):
+        kv, st = s['nominal_kv'], s['step']
+        falling = st >= 2 and seq[st - 1] < seq[st - 2]
+        area = (None if s['tag'] == 'warmup' else
+                round(201.062 * (1 + 0.1 * kv)
+                      + (FALL_OFFSET if falling else 0.0), 3))
+        rows.append({
+            'snapshot': n, 'step': st, 'tag': s['tag'], 'nominal_kV': kv,
+            'measured_uA': round(-16.0 + (1.0 if falling else 2.0) * kv, 2),
+            't_planned_s': round(s['t'], 2),
+            'timestamp': (t0 + datetime.timedelta(seconds=s['t'] + 0.3)
+                          ).isoformat(timespec='milliseconds'),
+            'active_area_px': '' if area is None else round(area * 1435),
+            'active_area_mm2': '' if area is None else area,
+            'notes': '' if area is None else 'edge:disc-fit conf 0.93'})
+    return rows
+
+
+def _rise_area(kv):
+    return round(201.062 * (1 + 0.1 * kv), 3)
+
+
+def _loaded(rows, name='UD_run'):
+    """(tmpdir, run) -- the rows written as a run and loaded through the
+    real load_run, colour assigned the way prepare_runs does."""
+    d = _mktmp()
+    rd = os.path.join(d, name)
+    _fake_run(rd, rows)
+    run = sp.load_run(rd, lambda m: None)
+    run['color'] = sp.TOL_BRIGHT[0]
+    return d, run
+
+
+def _legs_of(run):
+    """[(kv, leg, cycle)] per LANDING, in time order."""
+    out, seen = [], set()
+    for r in run['rows']:
+        if r['landing'] is not None and r['landing'] not in seen:
+            seen.add(r['landing'])
+            out.append((r['kv'], r['leg'], r['cycle']))
+    return out
+
+
+def test_sweep_legs_reads_the_direction_from_the_kv_sequence():
+    cases = [
+        # a single sweep is all one rising leg -- the property that keeps
+        # its figure untouched
+        (dict(updown=False),
+         [(0.0, 'rise', 1), (0.5, 'rise', 1), (1.0, 'rise', 1),
+          (1.5, 'rise', 1)]),
+        # up/down: the peak ends the rising leg, then it falls
+        (dict(updown=True),
+         [(0.0, 'rise', 1), (0.5, 'rise', 1), (1.0, 'rise', 1),
+          (1.5, 'rise', 1), (1.0, 'fall', 1), (0.5, 'fall', 1)]),
+        # up/down x2: the bottom level is landed TWICE where the cycles
+        # meet; the second visit takes the direction of the ramp OUT of it
+        (dict(updown=True, repeat=2),
+         [(0.0, 'rise', 1), (0.5, 'rise', 1), (1.0, 'rise', 1),
+          (1.5, 'rise', 1), (1.0, 'fall', 1), (0.5, 'fall', 1),
+          (0.5, 'rise', 2), (1.0, 'rise', 2), (1.5, 'rise', 2),
+          (1.0, 'fall', 2), (0.5, 'fall', 2)]),
+        # a plain repeat drops straight from the peak back to the bottom:
+        # a one-landing fall, and cycle 2 rises from there
+        (dict(updown=False, repeat=2),
+         [(0.0, 'rise', 1), (0.5, 'rise', 1), (1.0, 'rise', 1),
+          (1.5, 'rise', 1), (0.5, 'fall', 1), (1.0, 'rise', 2),
+          (1.5, 'rise', 2)]),
+    ]
+    for kw, want in cases:
+        d, run = _loaded(_updown_rows(**kw))
+        try:
+            assert _legs_of(run) == want, (kw, _legs_of(run))
+            assert sp.multi_leg(run) == any(l == 'fall' for _k, l, _c in want)
+            # both snapshots of a landing share it: two rows per landing
+            # after the 0 kV frames, post-ramp first
+            by = {}
+            for r in run['rows']:
+                if r['landing']:
+                    by.setdefault(r['landing'], []).append(r['tag'])
+            assert all(v == ['post-ramp', 'pre-ramp'] for v in by.values()), by
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def test_sweep_legs_copes_without_step_numbers_and_with_a_trip():
+    # the fixtures (and pre-`step` data) carry no landing numbers: every
+    # level is still ONE rising leg, even written pre-ramp first
+    d, run = _loaded(_healthy_rows(4))
+    try:
+        assert {r['leg'] for r in run['rows']} == {'rise'}
+        assert {r['cycle'] for r in run['rows']} == {1}
+        assert not sp.multi_leg(run)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    # a watchdog row records the kV at the trip -- partway up a ramp -- and
+    # is a landing of its own, still on the rising leg
+    rows = _updown_rows(updown=False)
+    rows.append({'snapshot': len(rows) + 1, 'step': 99, 'tag': 'breakdown',
+                 'nominal_kV': 1.37, 'measured_uA': 150.0,
+                 't_planned_s': 999.0, 'timestamp': rows[-1]['timestamp']})
+    d, run = _loaded(rows)
+    try:
+        bd = [r for r in run['rows'] if r['tag'] == 'breakdown'][0]
+        others = {r['landing'] for r in run['rows'] if r is not bd}
+        assert bd['landing'] not in others and bd['leg'] == 'fall', \
+            "1.37 kV after the 1.5 kV landing is a way down"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_levels_by_landing_keeps_the_two_legs_apart():
+    d, run = _loaded(_updown_rows())
+    try:
+        # keyed by kV (the old view): the 1 kV level BLENDS both visits
+        by_kv = {round(l['kv'], 3): l for l in sp.levels(run)}
+        assert abs(by_kv[1.0]['mean']
+                   - (_rise_area(1.0) + FALL_OFFSET / 2)) < 1e-6
+        # keyed by landing: two entries at 1 kV, one per leg, unblended
+        at1 = [l for l in sp.levels(run, by='landing') if l['kv'] == 1.0]
+        assert [(l['leg'], round(l['mean'], 3)) for l in at1] == [
+            ('rise', _rise_area(1.0)),
+            ('fall', round(_rise_area(1.0) + FALL_OFFSET, 3))], at1
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    # ...and on a single sweep the two groupings hold the same numbers
+    d, run = _loaded(_updown_rows(updown=False))
+    try:
+        assert [(l['kv'], l['mean']) for l in sp.levels(run)] == [
+            (l['kv'], l['mean']) for l in sp.levels(run, by='landing')]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _arrows(ax):
+    """[(tail_x, tail_y, head_x, head_y)] for every direction arrow."""
+    return [(a.xyann[0], a.xyann[1], a.xy[0], a.xy[1])
+            for a in ax.texts if getattr(a, 'arrow_patch', None)]
+
+
+def _marked(ax, marker):
+    """[(x, y)] of every point drawn with `marker` on `ax`."""
+    out = []
+    for ln in ax.get_lines():
+        if ln.get_marker() == marker:
+            out += list(zip(ln.get_xdata(), ln.get_ydata()))
+    return out
+
+
+def test_updown_legs_and_the_time_axis_draw_the_strain_band_in_strain_points():
+    """The leg and time-axis paths (2026-09-23) were written before the
+    strain-band fix (2026-10-02) and met it at the 2026-10-05 rebase. Both
+    must pass the panel's units to the band: under --strain-pct a machine
+    point at A/A0 = r gets a half-width of 2 * r points, never 2 % of the
+    strain value (which is zero at rest). Read off the drawn bands."""
+    if not _has_mpl():
+        return
+    d, run = _loaded(_updown_rows())
+    try:
+        for kw in (dict(strain_pct=True), dict(strain_pct=True, x='time')):
+            fig = _drawn([run], sp.make_opts(**kw)[0])
+            bands = _band_polys(fig.axes[1])
+            assert bands, (kw, 'no band on the strain panel')
+            n = 0
+            for band in bands:
+                for x, (lo, hi) in band.items():
+                    r = 1.0 + (lo + hi) / 200.0
+                    half = (hi - lo) / 2.0
+                    assert abs(half - sp.MACHINE_BAND_PCT * r) < 1e-6, \
+                        (kw, x, lo, hi)
+                    n += 1
+            assert n >= 4, (kw, n)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_an_updown_run_draws_both_legs_with_their_arrows():
+    if not _has_mpl():
+        return
+    d, run = _loaded(_updown_rows())
+    try:
+        opts = sp.make_opts()[0]
+        fig = _drawn([run], opts)
+        ax = fig.axes[0]
+        up, down = _marked(ax, '^'), _marked(ax, 'v')
+        assert sorted(x for x, _y in up) == [0.0, 0.5, 1.0, 1.5], up
+        assert sorted(x for x, _y in down) == [0.5, 1.0], down
+        # the falling points carry the falling leg's OWN areas
+        for x, y in down:
+            assert abs(y - (_rise_area(x) + FALL_OFFSET)) < 1e-6, (x, y)
+        assert not _marked(ax, 'o'), "a leg-split run keeps no round dots"
+        arrows = _arrows(ax)
+        assert arrows, "no direction arrows on an up/down run"
+        for tx, ty, hx, hy in arrows:
+            rising = abs(ty - _rise_area(tx)) < 3.0
+            assert (hx > tx) == rising, (tx, ty, hx, hy)
+        cap = _caption(fig)
+        assert 'Up/down runs' in cap and 'direction of travel' in cap
+        # --no-arrows drops only the arrows; --merge-legs is the old view
+        fig = _drawn([run], sp.make_opts(arrows=False)[0])
+        assert not _arrows(fig.axes[0]) and _marked(fig.axes[0], 'v')
+        fig = _drawn([run], sp.make_opts(split_legs=False)[0])
+        assert not _marked(fig.axes[0], 'v') and _marked(fig.axes[0], 'o')
+        assert not _arrows(fig.axes[0])
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_prepost_keeps_the_rising_leg_of_an_updown_run():
+    if not _has_mpl():
+        return
+    d, run = _loaded(_updown_rows())
+    try:
+        # the old per-kV dict overwrote post/pre with the LAST visit, so
+        # the rising leg never reached the figure at all
+        fig = _drawn([run], sp.make_opts(prepost=True)[0])
+        ys_at_1kv = {round(y, 3) for x, y in _marked(fig.axes[0], '^')
+                     + _marked(fig.axes[0], 'v') if x == 1.0}
+        assert _rise_area(1.0) in ys_at_1kv, ys_at_1kv
+        assert round(_rise_area(1.0) + FALL_OFFSET, 3) in ys_at_1kv
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_current_mode_marks_the_legs_and_their_direction():
+    if not _has_mpl():
+        return
+    d, run = _loaded(_updown_rows())
+    try:
+        fig = _drawn([run], sp.make_opts(mode='current')[0])
+        ax = fig.axes[0]
+        assert _marked(ax, '^') and _marked(ax, 'v')
+        for tx, ty, hx, hy in _arrows(ax):
+            # rising samples sit on -16 + 2 kV, falling on -16 + 1 kV
+            rising = abs(ty - (-16.0 + 2.0 * tx)) < 0.3
+            assert (hx > tx) == rising, (tx, ty, hx, hy)
+        assert _arrows(ax)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_legs_and_arrows_leave_single_sweeps_and_merge_restores_updown():
+    """Byte for byte, against the engine this work was cut from: every
+    mode's DEFAULT figure of a single sweep, and --merge-legs --no-arrows
+    on an up/down run -- the escape hatch has to be exactly the old
+    figure, not a lookalike."""
+    if not _has_mpl():
+        return
+    old = _pre_change_module(_LEGS_BASE_SHA)
+    if old is None:
+        print('  (skipped: base sldea_plot not reachable via git)')
+        return
+    out = _mktmp()
+    try:
+        for label, rows, extra in (
+                ('single', _updown_rows(updown=False), {}),
+                ('updown', _updown_rows(), dict(split_legs=False,
+                                               arrows=False))):
+            d = os.path.join(out, label)
+            _fake_run(d, rows)
+            for mode in sp.MODES:
+                new_opts = sp.make_opts(mode=mode, **extra)[0]
+                old_opts = old.make_opts(mode=mode)[0]
+                new_png = sp.save_figure(
+                    sp.prepare_runs([d], new_opts), new_opts,
+                    os.path.join(out, f"{label}_{mode}_new.png"))
+                old_png = old.save_figure(
+                    old.prepare_runs([d], old_opts), old_opts,
+                    os.path.join(out, f"{label}_{mode}_old.png"))
+                with open(new_png, 'rb') as a, open(old_png, 'rb') as b:
+                    assert a.read() == b.read(), f"{label} {mode} PNG moved"
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_the_time_axis_plots_every_snapshot_in_the_order_taken():
+    if not _has_mpl():
+        return
+    d, run = _loaded(_updown_rows())
+    try:
+        assert run['t_src'] == 't_planned_s'
+        opts = sp.make_opts(x='time')[0]
+        fig = _drawn([run], opts)
+        ax = fig.axes[0]
+        line = max(ax.get_lines(), key=lambda ln: len(ln.get_xdata()))
+        want = [r['t_planned'] / 60.0 for r in run['rows']
+                if r['area_mm2'] is not None]
+        assert list(line.get_xdata()) == want, "not one point per snapshot"
+        assert want == sorted(want), "not in the order taken"
+        assert ax.get_xlabel() == 'Elapsed time (min)'
+        assert ax.get_title(loc='left') == 'Active area vs time'
+        cap = _caption(fig)
+        assert 'elapsed time' in cap and 't_planned_s' in cap, cap
+        assert not _arrows(ax), "time already runs one way; no arrows"
+        # the legs still say which stretch was the way down
+        assert _marked(ax, 'v') and _marked(ax, '^')
+        # current mode follows the same axis
+        fig = _drawn([run], sp.make_opts(mode='current', x='time')[0])
+        assert fig.axes[0].get_xlabel() == 'Elapsed time (min)'
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_time_axis_falls_back_to_timestamps_whole_runs_at_a_time():
+    rows = _updown_rows(updown=False)
+    for r in rows[3:]:
+        r['t_planned_s'] = ''             # a run half on the schedule...
+    d, run = _loaded(rows)
+    try:
+        # ...is read wholly off the wall clock, never on two clocks at once
+        assert run['t_src'] == 'timestamp'
+        first = next(r for r in run['rows'] if r['elapsed_s'] is not None)
+        assert first['elapsed_s'] == 0.0
+        assert all(r['elapsed_s'] is not None for r in run['rows'])
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_time_axis_refuses_what_it_cannot_mean():
+    assert sp.make_opts(x='time')[1] is None
+    assert '--x' in sp.make_opts(x='sideways')[1]
+    for kw in (dict(prepost=True), dict(mean=True), dict(aggregate=True),
+               dict(mode='current', vs_area=True)):
+        opts, err = sp.make_opts(x='time', **kw)
+        assert opts is None and err, kw
+
+
+def test_cli_takes_the_axis_and_the_leg_switches():
+    parsed = sp._parse_argv(['r', '--x', 'time', '--merge-legs',
+                             '--no-arrows'])
+    assert parsed is not None
+    _args, flags, vals = parsed
+    opts, err = sp._cli_opts(flags, vals)
+    assert err is None, err
+    assert (opts['x'], opts['split_legs'], opts['arrows']) == (
+        'time', False, False)
+    # a figspec re-renders them as recorded, and a flag still wins over it
+    spec = sp.build_figspec([], opts, 'sldea_plot_area')
+    back, err = sp._cli_opts(set(), {}, spec['opts'])
+    assert err is None and (back['x'], back['split_legs'],
+                            back['arrows']) == ('time', False, False)
+    back, err = sp._cli_opts(set(), {'--x': 'kv'}, spec['opts'])
+    assert err is None and back['x'] == 'kv'
+
+
+def test_tidy_csv_says_which_leg_and_when():
+    d, run = _loaded(_updown_rows())
+    try:
+        path = sp.write_tidy([run], os.path.join(d, 't.csv'))
+        with open(path, newline='', encoding='utf-8') as f:
+            rows = list(csv.DictReader(f))
+        got = [(r['tag'], r['nominal_kV'], r['leg'], r['cycle'])
+               for r in rows if r['tag'] == 'post-ramp']
+        assert got == [('post-ramp', '0.5', 'rise', '1'),
+                       ('post-ramp', '1.0', 'rise', '1'),
+                       ('post-ramp', '1.5', 'rise', '1'),
+                       ('post-ramp', '1.0', 'fall', '1'),
+                       ('post-ramp', '0.5', 'fall', '1')], got
+        assert [float(r['elapsed_s']) for r in rows] == [
+            r['t_planned'] for r in run['rows']]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_aggregate_takes_an_updown_runs_first_rising_leg():
+    d1, ud = _loaded(_updown_rows(), 'UD')
+    d2, ss = _loaded(_updown_rows(updown=False), 'SS')
+    try:
+        at = {round(l['kv'], 3): l['mean']
+              for l in sp.aggregate_levels([ud, ss], legs=True)}
+        # both runs rise identically, so the rising-leg mean IS that curve
+        assert abs(at[1.0] - _rise_area(1.0)) < 1e-6, at
+        blended = {round(l['kv'], 3): l['mean']
+                   for l in sp.aggregate_levels([ud, ss], legs=False)}
+        assert blended[1.0] > at[1.0], "--merge-legs keeps the old pooling"
+        if _has_mpl():
+            warns = []
+            fig = _drawn([ud, ss], sp.make_opts(aggregate=True)[0],
+                         warns.append)
+            assert 'FIRST RISING' in _caption(fig)
+            assert any('first rising leg' in w for w in warns), warns
+    finally:
+        shutil.rmtree(d1, ignore_errors=True)
+        shutil.rmtree(d2, ignore_errors=True)
+
+
+def test_every_flag_the_cli_reads_is_one_the_parser_accepts():
+    """The OTHER side of the seam the test above guards.
+
+    --strain-pct was wired through _cli_opts but never registered in
+    _BOOL_FLAGS, so `sldea_plot.py RUN --strain-pct` died in _parse_argv
+    with "unknown flag" -- the flag the docstring advertised could not be
+    typed (found 2026-09-23). The drift test compares _cli_opts with
+    make_opts and could not see it; this compares _cli_opts with the
+    parser, by reading the flags straight out of its source."""
+    import inspect
+    import re
+    read = set(re.findall(r"'(--[a-z][a-z-]*)'",
+                          inspect.getsource(sp._cli_opts)))
+    assert len(read) > 10, f"the scan found too few flags: {sorted(read)}"
+    missing = sorted(read - set(sp._BOOL_FLAGS) - set(sp._VALUED_FLAGS))
+    assert not missing, (
+        f"_cli_opts reads {missing}, which _parse_argv rejects as unknown "
+        f"-- register them in _BOOL_FLAGS or _VALUED_FLAGS")
+    # ...and the one that was broken, end to end
+    parsed = sp._parse_argv(['somerun', '--strain-pct'])
+    assert parsed is not None, "--strain-pct is rejected by the parser"
+    _args, flags, vals = parsed
+    opts, err = sp._cli_opts(flags, vals)
+    assert err is None and opts['strain_pct'] is True, (opts, err)
 
 
 def _run():

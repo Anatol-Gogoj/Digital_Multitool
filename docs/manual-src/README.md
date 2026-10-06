@@ -2,7 +2,7 @@
 
 `../digital-multitool-manual.html` is the illustrated user manual — a single
 self-contained file (all screenshots embedded as base64). It was last built
-from the **live app** at v1.2.0+91f5bfd-era tree on 2026-08-08 (59 pages incl. Part II): every
+from the **live app** at v1.4.2+a6ecbd4 on 2026-10-06 (66 pages incl. Part II; captured on a 175 % display with Tk pinned to 96 dpi, see the scaling note in capture.py): every
 screenshot is a real capture and every red callout is anchored to the actual
 widget's on-screen coordinates. When the GUI changes visibly, regenerate
 rather than hand-edit. This line is easy to forget — check it against the
@@ -171,6 +171,20 @@ Notes:
   layout drift can put a badge on top of a label. Badge placement is
   automatic but overridable per callout with `badge_side` (`left`/`right`/
   `top`/`bottom`/`tl`/`tr`/`bl`/`br`) or an exact `badge_at: [x, y]`.
+  `badge_at` and a fixed `rect: [x, y, w, h]` are measured from the
+  window's **client area**, not from the screenshot: the title bar and the
+  main window's menu bar are drawn by Windows at the display scale (52 px
+  tall at 100 %, 86 px at 175 %), so image-relative numbers moved with the
+  display that captured them. Read them off `widgets.json` as the widget's
+  `x, y` minus the shot's `client_offset`.
+- Scaled displays: the capture scripts make the process DPI-aware (so the
+  screenshot and the widget boxes share one pixel grid) and pin Tk to
+  96 dpi with `pin_96dpi()`, so every window lays out exactly as on a
+  100 % display. Only the window frame, the menu bar and native check-box
+  and combobox parts come out at the display scale. Do not go back to
+  resizing windows by the scale and shrinking the shot: it left
+  self-sized windows (the Arb Editor, the dialogs) cramped and softened
+  the text (v1.4.0's first manual build).
 - `capture_edge_review.py` needs a hydrated run folder with frames. It runs
   a real detection pass (~15 s for 81 frames) and never clicks Save, so the
   run's `data.csv` and `setup.txt` are left alone.

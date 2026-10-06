@@ -324,13 +324,13 @@ OPTIONS_FALLBACK = os.path.join(os.path.expanduser('~'), '.cache',
 REMEMBERED = ('mode', 'prepost', 'mean', 'bands', 'breakdown', 'vs_area',
               'logx', 'logy', 'marker_key', 'subplots', 'cadence_guard',
               'aggregate', 'aggregate_exact', 'groups', 'aggregate_only',
-              'strain_pct', 'fmt', 'dpi')
+              'strain_pct', 'x', 'split_legs', 'arrows', 'fmt', 'dpi')
 
 # The remembered options that are NAMES rather than flags, each with the
 # vocabulary sldea_plot validates it against -- read from sldea_plot so a
 # value the engine has retired can never survive a round trip here.
 ENUM_OPTIONS = {'mode': sp.MODES, 'subplots': sp.SUBPLOTS,
-                'fmt': sp.FORMATS}
+                'fmt': sp.FORMATS, 'x': sp.X_AXES}
 
 # ...and the ones that are NUMBERS (`#314` brought the first), each with
 # the engine's own checker. Same principle as ENUM_OPTIONS: the window
@@ -532,22 +532,32 @@ def plot_points(runs, opts, panel=0):
     if opts.get('aggregate_only') and opts.get('aggregate'):
         return []
     out = []
+    # the normalized panel's units, through the engine's own conversion:
+    # this used to divide by A0 inline, so with the strain-% panel on the
+    # click targets sat at 1.0-1.2 while the markers sat at 0-20 and a
+    # double-click resolved to the wrong frame (found 2026-09-23)
+    pct = bool(opts.get('strain_pct'))
     for run in runs:
         if opts['mode'] == 'area':
             a0 = run['a0']
             for r in run['rows']:
-                if r['kv'] is None or r['area_mm2'] is None:
+                # the x through the engine's own x_value, for the reason
+                # the y goes through norm_y: on the elapsed-time axis a kV
+                # target would sit where no marker was drawn (2026-09-23)
+                x = sp.x_value(r, opts)
+                if r['kv'] is None or r['area_mm2'] is None or x is None:
                     continue
                 if panel == 1:
                     if not a0:
                         continue
-                    out.append((r['kv'], r['area_mm2'] / a0, run, r))
+                    out.append((x, sp.norm_y(r['area_mm2'], a0, pct),
+                                run, r))
                 else:
-                    out.append((r['kv'], r['area_mm2'], run, r))
+                    out.append((x, r['area_mm2'], run, r))
             continue
         med = sp.run_ua_median(run)
         for r in run['rows']:
-            x = r['area_mm2'] if opts['vs_area'] else r['kv']
+            x = sp.x_value(r, opts)
             y = sp.power_mw(r, med) if opts['mode'] == 'power' else r['ua']
             if x is None or y is None:
                 continue
@@ -797,6 +807,29 @@ DRAW_TIPS = {
     'title_second': (
         "Replaces the second panel's built-in heading; area mode only, "
         "because current and power draw a single panel."),
+    # 2026-09-23
+    'x': (
+        "What the x axis measures. kV is the commanded voltage, where an "
+        "up/down or repeated run folds back over itself; elapsed time "
+        "unrolls it -- one point per snapshot in the order taken, minutes "
+        "since each run started (the scheduled time, or the wall clock "
+        "where a run has none). Pre/post, the mean line, the aggregate "
+        "and the area x axis all pool or place points by kV, so they "
+        "grey out on the time axis."),
+    'split_legs': (
+        "For a run whose voltage also FELL (Up/down, or a Repeat that "
+        "restarts lower): one line per leg, triangle-up points rising and "
+        "triangle-down falling, one point per landing. Unticked, the old "
+        "view: both visits to a level averaged into one point -- which "
+        "hides the hysteresis loop the run was recorded to show. A single "
+        "sweep has one leg and looks the same either way. The aggregate "
+        "takes such a run's first rising leg."),
+    'arrows': (
+        "Small arrowheads along each leg, pointing the way the voltage "
+        "went -- a few per leg, never on a line sorted by kV, where every "
+        "arrow would point right whatever the data did. Only on runs "
+        "drawn leg by leg, and not on the time axis, which already runs "
+        "one way."),
 }
 
 # Hover text for the run-folder buttons (`#323`) and the group editor
@@ -1192,6 +1225,10 @@ class PlotWindow:
         self.v_aggregate_exact = tk.BooleanVar(value=o['aggregate_exact'])
         self.v_aggregate_only = tk.BooleanVar(value=o['aggregate_only'])
         self.v_strain_pct = tk.BooleanVar(value=o['strain_pct'])
+        # 2026-09-23: the x axis, and how an up/down run is drawn
+        self.v_x = tk.StringVar(value=o['x'])
+        self.v_split_legs = tk.BooleanVar(value=o['split_legs'])
+        self.v_arrows = tk.BooleanVar(value=o['arrows'])
         # `#313`. NOT a Tk variable: the grouping is a mapping from run
         # directory to group name, which no Tk variable type can hold, so
         # it lives here and current_opts renders it into opts' canonical
@@ -1420,10 +1457,11 @@ class PlotWindow:
         # --- draw options
         df = ttk.LabelFrame(left, text="Draw", padding=6)
         df.pack(fill=tk.X, pady=(8, 0))
-        ttk.Checkbutton(df, text="pre/post separately "
-                                 "(post solid, pre dashed)",
-                        variable=self.v_prepost,
-                        command=self._toggled).pack(anchor=tk.W)
+        self.cb_prepost = ttk.Checkbutton(df, text="pre/post separately "
+                                                   "(post solid, pre dashed)",
+                                          variable=self.v_prepost,
+                                          command=self._toggled)
+        self.cb_prepost.pack(anchor=tk.W)
         # "…and the mean line" is a CHILD option: without separated
         # pre/post lines the single drawn line already IS the level mean
         # (draw_area: `if opts['mean'] or not opts['prepost']`), so the
@@ -1433,6 +1471,25 @@ class PlotWindow:
                                        variable=self.v_mean,
                                        command=self.schedule)
         self.cb_mean.pack(anchor=tk.W, padx=(18, 0))
+        # up/down runs (2026-09-23). Right under the lines they reshape:
+        # the leg split decides whether a level's two visits are two points
+        # or one averaged one, and the arrows are its CHILD -- they follow
+        # only a leg-split path, so on their own they would do nothing.
+        # ONE row for the pair: the column is already taller than most
+        # screens (the scroll tests skip below ~1270 px), and "…arrows"
+        # reads as the child of the box on its left just as an indent would
+        legrow = ttk.Frame(df)
+        legrow.pack(fill=tk.X)
+        self.cb_split_legs = ttk.Checkbutton(
+            legrow, text="up/down legs apart (▲ rising, ▼ falling)",
+            variable=self.v_split_legs, command=self._toggled)
+        self.cb_split_legs.pack(side=tk.LEFT)
+        add_tooltip(self.cb_split_legs, DRAW_TIPS['split_legs'])
+        self.cb_arrows = ttk.Checkbutton(
+            legrow, text="…arrows", variable=self.v_arrows,
+            command=self.schedule)
+        self.cb_arrows.pack(side=tk.LEFT, padx=(8, 0))
+        add_tooltip(self.cb_arrows, DRAW_TIPS['arrows'])
         # the two percentages come from sldea_plot's constants, here and
         # in BANDS_TIP, so the label cannot outlive the band it names
         self.cb_bands = ttk.Checkbutton(
@@ -1506,6 +1563,20 @@ class PlotWindow:
             variable=self.v_cadence, command=self.schedule)
         self.cb_cadence.pack(anchor=tk.W, padx=(18, 0))
         add_tooltip(self.cb_cadence, DRAW_TIPS['cadence_guard'])
+        # the x axis (2026-09-23). Radios, like Panels below: two fixed
+        # choices worth reading at once, on one row
+        xrow = ttk.Frame(df)
+        xrow.pack(fill=tk.X, pady=(2, 0))
+        lbl_x = ttk.Label(xrow, text="x axis:")
+        lbl_x.pack(side=tk.LEFT)
+        add_tooltip(lbl_x, DRAW_TIPS['x'])
+        self.rb_x = {}
+        for name, text in (('kv', 'nominal kV'), ('time', 'elapsed time')):
+            rb = ttk.Radiobutton(xrow, text=text, value=name,
+                                 variable=self.v_x, command=self._toggled)
+            rb.pack(side=tk.LEFT, padx=(6, 0))
+            add_tooltip(rb, DRAW_TIPS['x'])
+            self.rb_x[name] = rb
         self.cb_vs_area = ttk.Checkbutton(
             df, text="x axis = active area (needs reviewed runs)",
             variable=self.v_vs_area, command=self.schedule)
@@ -1960,13 +2031,22 @@ class PlotWindow:
         no-op — so the column cannot drift from what the figure does."""
         area = self.v_mode.get() == 'area'
         which = self.v_subplots.get()
+        # 2026-09-23. The time axis places each snapshot by WHEN it was
+        # taken, so every option that pools or places points by kV is inert
+        # on it -- make_opts refuses those pairings, and current_opts
+        # neutralises them, exactly as it does vs_area outside area mode
+        timeax = self.v_x.get() == 'time'
 
         def live(widget, on):
             widget.config(state='normal' if on else 'disabled')
 
+        live(self.cb_prepost, not timeax)
         # without separated pre/post lines the single drawn line already IS
         # the level mean (draw_area: `if opts['mean'] or not opts['prepost']`)
-        live(self.cb_mean, self.v_prepost.get())
+        live(self.cb_mean, self.v_prepost.get() and not timeax)
+        # the arrows follow only a leg-split path (_direction_arrows), and
+        # the time axis already runs one way
+        live(self.cb_arrows, self.v_split_legs.get() and not timeax)
         # coarse_cadence is consulted only inside `if opts['breakdown']`
         live(self.cb_cadence, self.v_breakdown.get())
         # the budget bands reach ONE line of the engine, draw_area's
@@ -1977,7 +2057,7 @@ class PlotWindow:
         # never had an area budget to draw (`#312`). The tooltip says which
         # of the two it is; the box greys rather than vanishing, as
         # everything else in this column does.
-        agg = self.v_aggregate.get()
+        agg = self.v_aggregate.get() and not timeax
         live(self.cb_bands, area and not agg)
         self.tip_bands.text = bands_tip(area, agg)
         # _marker_key is called by draw_area alone -- and inside it, only
@@ -1995,19 +2075,20 @@ class PlotWindow:
              area and self.v_subplots.get() != 'first')
         # the aggregate pools PER-LEVEL curves, which only area mode has;
         # make_opts refuses the other pairing outright
-        live(self.cb_aggregate, area)
+        live(self.cb_aggregate, area and not timeax)
         # nothing outside `if opts['aggregate']` reads the grid toggle
-        live(self.cb_aggregate_exact, area and self.v_aggregate.get())
+        live(self.cb_aggregate_exact, area and agg)
         # ...and make_opts REFUSES --aggregate-only without --aggregate,
         # so this one is not merely inert without it, it is an error
         # message where the figure goes. Greyed for the same reason as
         # every other child here, and the group summary below reports the
         # same state in words.
-        live(self.cb_aggregate_only, area and self.v_aggregate.get())
+        live(self.cb_aggregate_only, area and agg)
         self.lbl_groups.config(text=self.group_summary())
         # --vs-area is meaningless in area mode (the x axis IS area there);
         # the CLI refuses the combination, so the window does not offer it
-        live(self.cb_vs_area, not area)
+        # -- nor beside the time axis, which is the other x switch
+        live(self.cb_vs_area, not area and not timeax)
         # 'second' names a panel only area mode has
         live(self.rb_subplots['second'], area)
         # a heading only lands on a panel that RENDERS: --title and
@@ -2071,10 +2152,19 @@ class PlotWindow:
         away."""
         area = self.v_mode.get() == 'area'
         which = self.v_subplots.get()
+        # 2026-09-23: make_opts REFUSES the kV-only options beside the
+        # time axis; neutralised here against the same condition they are
+        # greyed by, so switching the axis draws a figure rather than an
+        # error message where the figure goes -- and the ticks are kept,
+        # so switching back restores them
+        kv = self.v_x.get() != 'time'
         return sp.make_opts(
             mode=self.v_mode.get(),
-            vs_area=self.v_vs_area.get() and not area,
-            prepost=self.v_prepost.get(), mean=self.v_mean.get(),
+            vs_area=self.v_vs_area.get() and not area and kv,
+            prepost=self.v_prepost.get() and kv,
+            mean=self.v_mean.get() and kv,
+            x=self.v_x.get(), split_legs=self.v_split_legs.get(),
+            arrows=self.v_arrows.get(),
             bands=self.v_bands.get(), breakdown=self.v_breakdown.get(),
             title=self.v_title.get().strip() or None,
             logx=self.v_logx.get(), logy=self.v_logy.get(),
@@ -2083,7 +2173,7 @@ class PlotWindow:
             # area mode only, and make_opts REFUSES the other pairing --
             # neutralised here exactly as vs_area is above, so a mode
             # switch produces a figure rather than an error message
-            aggregate=self.v_aggregate.get() and area,
+            aggregate=self.v_aggregate.get() and area and kv,
             aggregate_exact=self.v_aggregate_exact.get(),
             # `#313`. Neutralised against the SAME condition the box is
             # greyed by, and for the reason vs_area and subplots are:
@@ -2091,7 +2181,7 @@ class PlotWindow:
             # unticking the aggregate must produce a figure rather than
             # an error message where the figure goes.
             aggregate_only=(self.v_aggregate_only.get()
-                            and self.v_aggregate.get() and area),
+                            and self.v_aggregate.get() and area and kv),
             # the operator's grouping, in the engine's canonical form.
             # Passed in every mode: it draws nothing outside the
             # aggregate, and dropping it here would mean a figspec

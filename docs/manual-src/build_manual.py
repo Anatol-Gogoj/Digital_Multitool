@@ -157,7 +157,7 @@ def controls_details(area, label="Every control on this tab"):
 
 
 def section(slug, title, extra_html="", caution_keep=None, purpose=None,
-            img_key=None):
+            img_key=None, more_imgs=()):
     """One tab chapter, addressed by the tab's STABLE SLUG.
 
     `slug` is a single identifier doing three jobs that used to take three
@@ -167,10 +167,17 @@ def section(slug, title, extra_html="", caution_keep=None, purpose=None,
     POSITION baked into a filename ("06_Data_Logging"), so renaming or
     reordering a tab broke the build. `title` is prose and may be reworded
     freely. Chapters whose figure is not a tab shot pass `img_key`.
+
+    `more_imgs` are further annotated shots of the same tab, each shown with
+    its own legend under the first (v1.4.1: the SLDEA tab outgrew the capture
+    window, so its lower half is annotated on the scrolled shot).
     """
     a = content[slug]
     USED_CONTENT.add(slug)
     img = img_key or f"tab_{slug}"
+    extra_figs = "".join(
+        f"{fig(k, title + ' (scrolled down) — annotated screenshot')}"
+        f"{legend_grid(k)}" for k in more_imgs)
     return f"""
 <section id="{slug}">
   <header class="band">
@@ -179,6 +186,7 @@ def section(slug, title, extra_html="", caution_keep=None, purpose=None,
   </header>
   {fig(img, title + " — annotated screenshot")}
   {legend_grid(img)}
+  {extra_figs}
   {steps(slug)}
   {cautions(slug, caution_keep)}
   {controls_details(slug)}
@@ -462,7 +470,8 @@ body.append(section("dmm", "Digital Multimeter — BK 5493C",
 body.append(section("logging", "Data Logging", caution_keep=[0, 1, 2]))
 body.append(section("battery", "Battery Data", caution_keep=[0, 2, 4]))
 body.append(section("webcam", "Webcam", caution_keep=[1, 2, 4]))
-body.append(section("sldea", "SLDEA Test", caution_keep=[0, 1, 2, 4]))
+body.append(section("sldea", "SLDEA Test", caution_keep=[0, 1, 2, 4],
+                    more_imgs=("tab_sldea_bottom",)))
 
 ct = content["tools"]
 ct_caut = cautions("tools", keep=[0, 1, 2, 3])
@@ -496,8 +505,9 @@ body.append(f"""
   </div>
   <h3 class="subh">Edge Review — reviewing a run</h3>
   {fig('40_edge_review', 'SLDEA Edge Review on a real bench run — annotated')}
-  <p class="cap">A real review frame (bench run P3_1 at 2.25 kV, pre-ramp): A = disc-fit
-  (green), B/C = difference outlines. The machine's best pick is preselected — Enter agrees
+  <p class="cap">A real review frame (run P3_6_2.5mL_20260729, frame 23 of 81, 2.75 kV
+  pre-ramp; the run health strip above it flags missing and sign-flipped voltage
+  readings): A = disc-fit (green), B/C = difference outlines. The machine's best pick is preselected — Enter agrees
   and moves on.</p>
   {legend_grid('40_edge_review')}
   <div class="use"><h4>Reviewing a run</h4><ol>

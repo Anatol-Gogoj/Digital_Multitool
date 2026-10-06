@@ -463,7 +463,15 @@ def camera_lock_mismatch(cam_exp, cam_gain, locked):
     webcam.oneshot_rgb, which re-stamps webcam.LOCKED_CONTROLS just
     before the shutter, while the run overlays the Webcam-tab exposure
     and gain ENTRY values on that lock. Whenever the two disagree, the
-    picture the operator approves is not the picture the run takes."""
+    picture the operator approves is not the picture the run takes.
+
+    Since #361 (merged with this 2026-10-06) the pre-flight sets the
+    run's own lock (gui.sldea_run_lock) for its grab, and the dialog
+    hands THAT lock here. It is built from the run's own values, so from
+    the dialog this can no longer find a mismatch; it stays for a caller
+    that hands it another lock. The SLDEA tab's camera line
+    (camera_line) still compares the Webcam tab's lock: its live
+    preview runs on it, and the dialog says so through `tab_mismatch`."""
     held = locked or {}
     out = []
     for name, want in run_camera_controls(cam_exp, cam_gain):
@@ -534,12 +542,14 @@ def camera_line(cam_exp, cam_gain, locked=None, defaults=()):
         return text, False
     preview, _run = camera_mismatch_words(mismatch)
     return (f"{text}\n⚠ The Webcam tab has LOCKED {preview} instead, so "
-            f"the pre-flight preview will NOT show what the run records. "
-            f"Check the boxes on the Webcam tab, then press Apply & Lock.",
+            f"its live preview will NOT show what the run records (the "
+            f"pre-flight does). Check the boxes on the Webcam tab, then "
+            f"press Apply & Lock.",
             True)
 
 
-def preflight_start_button(level, mismatch=False, checked=True):
+def preflight_start_button(level, mismatch=False, checked=True,
+                           fallback=False, tab_mismatch=False):
     """The pre-flight's start button -> (label, is_default).
 
     The default button is the one that holds the focus and that Return
@@ -547,7 +557,14 @@ def preflight_start_button(level, mismatch=False, checked=True):
     the picture check really ran, and the preview was taken with the
     run's own camera settings. The 2026-10-01 run recorded a flat
     picture for 209 s of HV; its pre-flight was confirmed within 4 s,
-    and whatever that preview showed, "Looks good" was one Return away."""
+    and whatever that preview showed, "Looks good" was one Return away.
+
+    Two more warnings cost the default (2026-10-06, the #348/#361 merge
+    review): `fallback`, a camera value that is a built-in default because
+    the Webcam tab has no readable box for it (the dialog already said so
+    with a warning sign, but Return still started the run), and
+    `tab_mismatch`, the Webcam tab's lock disagreeing with the run's
+    fields, so its live preview is not what the run records (#361)."""
     if level == 'clipped':
         return "⚠ Start anyway (baseline blown out)", False
     if level == 'flat':
@@ -558,6 +575,10 @@ def preflight_start_button(level, mismatch=False, checked=True):
         return "⚠ Start anyway (exposure warning)", False
     if mismatch:
         return "⚠ Start anyway (preview does not match the run)", False
+    if fallback:
+        return "⚠ Start anyway (built-in camera values)", False
+    if tab_mismatch:
+        return PREFLIGHT_START_LOCK_DIFFERS, False
     return "✔ Looks good — start run", True
 
 
@@ -593,7 +614,7 @@ def preflight_disc_line(frame):
 
 
 def preflight_report(frame, cam_exp, cam_gain, locked=None, focus=None,
-                     defaults=()):
+                     defaults=(), tab_mismatch=False):
     """Everything the camera pre-flight says about one frame.
 
     `frame` is the RGB pre-flight frame, `locked` a copy of
@@ -630,10 +651,11 @@ def preflight_report(frame, cam_exp, cam_gain, locked=None, focus=None,
         content, content_error = None, str(e) or type(e).__name__
     level, hint = exposure_verdict(mean, sat, content)
     mismatch = camera_lock_mismatch(cam_exp, cam_gain, locked)
+    cam_text, cam_fallback = camera_for_run(cam_exp, cam_gain, defaults)
     label, is_default = preflight_start_button(
-        level, bool(mismatch), content is not None)
+        level, bool(mismatch), content is not None, fallback=cam_fallback,
+        tab_mismatch=tab_mismatch)
     disc = preflight_disc_line(frame)
-    cam_text = camera_for_run(cam_exp, cam_gain, defaults)[0]
     mismatch_line = ''
     if mismatch:
         preview, run = camera_mismatch_words(mismatch)
@@ -662,10 +684,14 @@ def preflight_report(frame, cam_exp, cam_gain, locked=None, focus=None,
         log.append(f"⚠ camera pre-flight: run camera exposure {cam_exp}, "
                    f"gain {cam_gain}, but the preview was NOT taken with "
                    f"them (it used {preview})")
+    elif locked:
+        log.append(f"camera pre-flight: run camera exposure {cam_exp}, gain "
+                   f"{cam_gain}; the lock this frame was taken under "
+                   f"agrees with them")
     else:
         log.append(f"camera pre-flight: run camera exposure {cam_exp}, gain "
-                   f"{cam_gain}; nothing locked on the Webcam tab disagrees "
-                   f"with them")
+                   f"{cam_gain}; this camera has no device path, so neither "
+                   f"the pre-flight nor the run stamps them on it")
     return {'mean': mean, 'sat_pct': sat, 'focus': focus,
             'content': content, 'content_error': content_error,
             'level': level, 'hint': hint,
@@ -745,6 +771,13 @@ def flat_stop_words(dry, drive_kv):
 # from. Tk-free, so the HV start path's rules are tested without a bench.
 
 PREFLIGHT_OVERRIDE_NO_PICTURE = 'no picture'
+
+# The start button's label when the only thing wrong is that the Webcam
+# tab's lock disagrees with the run's fields (#361's sentence): its live
+# preview is not what the run records. A warning, so not the default
+# button, as every warning in preflight_start_button (merged 2026-10-06).
+PREFLIGHT_START_LOCK_DIFFERS = ("\u26a0 Start anyway (the Webcam preview "
+                                "differs from the run)")
 PREFLIGHT_OVERRIDE_KEY = 'Pre-flight override'
 
 
@@ -781,22 +814,30 @@ def baseline_stop_reason(frame_taken, flat, cam_expected, override):
     return 'flat' if flat else ''
 
 
-def no_baseline_frame_line(override=''):
+def _no_frame_cause(video):
+    return ("the video stream gave no frame in time: check the camera and "
+            "its cable" if video else
+            "camera busy? close the Webcam preview")
+
+
+def no_baseline_frame_line(override='', video=False):
     """The run.log line for a baseline the camera gave no frame for, in
-    a run whose pre-flight did get one."""
+    a run whose pre-flight did get one. `video`: the run takes its stills
+    off the recorder's stream (2026-10-06), where the Webcam tab cannot be
+    the reason, since a video run holds the camera."""
+    cause = _no_frame_cause(video)
     if override:
         return (f"⚠⚠ NO BASELINE FRAME: the camera gave the pre-flight a "
-                f"picture but gave this run none for its baseline (camera "
-                f"busy? close the Webcam preview). The operator started "
-                f"anyway at the pre-flight ({override}), so the run CARRIES "
-                f"ON. Review this run by hand.")
-    return ("⚠⚠ NO BASELINE FRAME: the camera gave the pre-flight a picture "
-            "but gave this run none for its baseline (camera busy? close "
-            "the Webcam preview). Nothing in this run could be measured. "
-            "STOPPING NOW.")
+                f"picture but gave this run none for its baseline ({cause}). "
+                f"The operator started anyway at the pre-flight "
+                f"({override}), so the run CARRIES ON. Review this run by "
+                f"hand.")
+    return (f"⚠⚠ NO BASELINE FRAME: the camera gave the pre-flight a "
+            f"picture but gave this run none for its baseline ({cause}). "
+            f"Nothing in this run could be measured. STOPPING NOW.")
 
 
-def baseline_stop_words(reason, dry, drive_kv):
+def baseline_stop_words(reason, dry, drive_kv, video=False):
     """The words for a run that ends at its baseline frame.
 
     -> dict(stopped, status, title, box): the run.log line after the
@@ -814,8 +855,10 @@ def baseline_stop_words(reason, dry, drive_kv):
                     "The camera gave no frame for it, although it gave "
                     "the pre-flight one, so nothing in this run could "
                     "have been measured.\n\n" + drive
-                    + "\n\nClose the Webcam preview if it is running, "
-                    "check the camera, then press Run again." + tail)}
+                    + ("\n\nCheck the camera and its cable, then press "
+                       "Run again." if video else
+                       "\n\nClose the Webcam preview if it is running, "
+                       "check the camera, then press Run again.") + tail)}
     return {
         'stopped': f"run stopped at the baseline frame. {drive}",
         'status': ("STOPPED: NO PICTURE in the baseline frame, nothing "

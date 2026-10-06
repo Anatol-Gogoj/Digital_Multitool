@@ -391,10 +391,26 @@ def save_camera_settings(controls, path=None):
 
 
 def load_camera_settings(path=None):
-    """Previously saved controls, or {}. Checks the fallback location too."""
+    """Previously saved controls, or {}. Checks the fallback location too.
+
+    THE NEWER FILE WINS (2026-10-05). save_camera_settings writes the
+    fallback when the primary is unwritable, but this used to read the
+    primary first whenever it existed -- so on a bench with a root-owned
+    primary holding an old lock, every save went to the fallback and every
+    load (each start, each panel rebuild) brought the OLD values back into
+    the Webcam panel and the lock. Of the files that exist, the most
+    recently written is read first."""
     import json
-    paths = [path] if path is not None else [CAMERA_SETTINGS_PATH,
-                                             CAMERA_SETTINGS_FALLBACK]
+    if path is not None:
+        paths = [path]
+    else:
+        def mtime(p):
+            try:
+                return os.path.getmtime(p)
+            except OSError:
+                return float('-inf')
+        paths = sorted([CAMERA_SETTINGS_PATH, CAMERA_SETTINGS_FALLBACK],
+                       key=mtime, reverse=True)
     for p in paths:
         try:
             with open(p) as f:

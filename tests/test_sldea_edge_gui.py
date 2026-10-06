@@ -832,6 +832,39 @@ class _ModalSpy:
     def askyesno(self, title, msg='', **kw):
         return self._record(title, kw, False, msg)
 
+    def __call__(self, parent, title, headline, detail, buttons, default,
+                 **_layout):
+        """Stands in for gui.cal_choice, the calibration gates' question
+        box since 2026-10-05: buttons that NAME the action. Recorded like
+        a yes/no question, with the button LABELS in kwargs['buttons'],
+        and answered with the button KEY ('yes'/'no'/'cancel') that the
+        True/False/None answer maps to. The message is the headline and
+        the detail, one after the other.
+
+        THE BOX IS OWNED BY THE CALIBRATION WINDOW. A question parented to
+        the main window could open behind the (transient, grabbed)
+        calibration window, which is the bug this box was made to fix, so
+        every question the spy sees while that window is up must name it
+        as its parent. With the window closed (the re-anchor confirmation,
+        2026-10-05) the owner is the main window. `_layout` takes the
+        box's font and wrap options, which a spy has no use for."""
+        keys = [k for k, _lbl in buttons]
+        assert default in keys, (title, default, keys)
+        cal_win = getattr(self._app, '_cal_win', None)
+        if cal_win is not None:
+            assert parent is cal_win, (f"{title}: asked with parent "
+                                       f"{parent!r}, not the calibration "
+                                       f"window")
+        elif self._app is not None:
+            assert parent is self._app.root, (f"{title}: asked with parent "
+                                              f"{parent!r}, not the main "
+                                              f"window")
+        kw = {'default': default,
+              'buttons': [lbl for _k, lbl in buttons]}
+        ans = self._record(title, kw, 'cancel' in keys,
+                           headline + '\n' + (detail or ''))
+        return {True: 'yes', False: 'no', None: 'cancel'}[ans]
+
     def askyesnocancel(self, title, msg='', **kw):
         return self._record(title, kw, True, msg)
 
@@ -889,7 +922,7 @@ def test_calibration_dialog_drives_three_rounds_and_both_gates():
     real_mb = gui.messagebox
     spy = _ModalSpy(real_mb)
     answers, asked = spy.answers, spy.asked
-    gui.messagebox = spy
+    gui.messagebox = gui.cal_choice = spy
     # Nine circles, one per round: half 1's set, then half 2's set and
     # its post-restart set. Every triple has range/mean between 3.8 and
     # 4.4 % (the SE gate only goes silent under ~1.17 %, and since
@@ -1031,7 +1064,7 @@ def test_calibration_warnings_default_to_declining_them():
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)             # no answers: all defaults
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def advance(win, taken):
             for _ in range(12):
@@ -1113,7 +1146,7 @@ def test_return_key_cannot_finish_a_calibration():
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         # a fit that would pass both gates if it were ever accepted, so a
         # failure here is unambiguous: only Enter is under test
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
@@ -1206,7 +1239,7 @@ def test_mid_round_display_never_reveals_a_previous_fit():
         app = gui.EdgeReviewApp(root, path=run)
         # spread gate -> accept as measured; anchor guard -> override
         spy = _ModalSpy(real_mb, app, answers=[False, True])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def advance(win):
             for _ in range(6):
@@ -1305,7 +1338,7 @@ def test_unavailable_cross_check_is_stated_not_implied():
         # standing between this anchor and Save is the cross-check
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
         spy = _ModalSpy(real_mb, app, answers=[True])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def advance(win):
             for _ in range(6):
@@ -1458,7 +1491,7 @@ def test_mode_b_measures_in_original_coordinates_under_rotation():
         # the mask-area guard slightly, so answer every question with the
         # override — the gates are tested elsewhere; this is the geometry
         spy = _ModalSpy(real_mb, app, answers=[True] * 8)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def advance(win):
             _cal_onscreen(root, win)
@@ -1538,7 +1571,7 @@ def test_mode_b_is_blind_mid_round_and_shows_no_length_at_all():
         # differ by under 5 %, because a range over that is REFUSED since
         # 2026-10-03 and never reaches the gate this case is about.
         spy = _ModalSpy(real_mb, app, answers=[False, True])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def advance(win):
             _cal_onscreen(root, win)
@@ -1634,7 +1667,7 @@ def test_every_round_set_is_logged_accepted_or_declined():
         _fixed_spawn(gui, [(160.0, 120.0, 65.0), (160.0, 120.0, 66.3),
                            (160.0, 120.0, 67.6)])
         spy = _ModalSpy(real_mb, app, answers=[None])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         app._calibrate_scale(mode=CIRCLE)
         assert app.manual_ref is None, "cancel accepted an anchor"
         assert os.path.exists(log), "a declined round-set was not logged"
@@ -1656,7 +1689,7 @@ def test_every_round_set_is_logged_accepted_or_declined():
         # carrying the rotation angles this time
         gui.spawn_circle = real_spawn
         spy = _ModalSpy(real_mb, app, answers=[True] * 8)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def advance_b(win):
             _cal_onscreen(root, win)
@@ -1725,7 +1758,7 @@ def test_mode_b_keeps_every_safety_fix_of_the_review_round():
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)          # no answers: all defaults
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         # (a) five deliberately scattered chords (160 down to 154 px: a
         # 3.8 % range, over the SE gate and under the 2026-10-03 range cap,
@@ -1757,8 +1790,13 @@ def test_mode_b_keeps_every_safety_fix_of_the_review_round():
         # and nothing else.
         assert 'σ = ' in prompt and '% of diameter' in prompt, prompt
         assert '% in area' in prompt and 'budget ±' in prompt, prompt
-        assert 'Yes = refit' in prompt and 'No = accept as measured' in prompt
-        assert 'Cancel' in prompt, prompt
+        # the three answers are the BUTTONS since 2026-10-05, named for
+        # what they do, so no Yes/No legend has to be read to answer
+        btns = spy.asked[0][1]['buttons']
+        assert len(btns) == 3 and re.fullmatch(r'Refit all \d+ rounds',
+                                                btns[0]), btns
+        assert btns[1:] == ['Accept as measured', 'Cancel'], btns
+        assert 'Yes =' not in prompt and 'No =' not in prompt, prompt
         # AND IT STAYS SHORT. This prompt was 7 non-blank lines / 862 chars
         # and the operator met it on real data; three lines is what was asked
         # for, so three is what is pinned. The per-line cap is what keeps the
@@ -1905,7 +1943,7 @@ def test_mode_chooser_restarts_the_set_and_carries_the_modes_default_n():
     try:
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
-        gui.messagebox = _ModalSpy(real_mb, app, answers=[None])
+        gui.messagebox = gui.cal_choice = _ModalSpy(real_mb, app, answers=[None])
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
 
         def poke(win):
@@ -2037,15 +2075,50 @@ def test_scale_gate_rearms_on_every_run_switch():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_detection_clock_freezes_while_the_session_clock_runs_on():
+def _pending_ticks(root):
+    """The after() ids whose callback is the session tick (`#364`).
+
+    tkinter registers an after() callback under a Tcl command named after
+    the function, so `after info <id>` names `..._tick_clock` for exactly
+    these. Counting them, rather than trusting `_clock_job`, is what
+    catches a second tick chain that nothing tracks any more."""
+    out = []
+    for jid in root.tk.splitlist(root.tk.call('after', 'info')):
+        script = root.tk.splitlist(root.tk.call('after', 'info', jid))[0]
+        if str(script).endswith('_tick_clock'):
+            out.append(jid)
+    return out
+
+
+def _pump(root, secs):
+    """Run the Tk event loop for `secs` of wall time, so any timer that is
+    still scheduled gets its chance to fire."""
+    t0 = time.time()
+    while time.time() - t0 < secs:
+        root.update()
+        time.sleep(0.02)
+
+
+def _new_threads(before):
+    """Threads started since `before` (a set from threading.enumerate())."""
+    import threading
+    return [t for t in threading.enumerate() if t not in before]
+
+
+def test_detection_clock_freezes_and_the_session_clock_stops_with_the_pass():
     """`#237`: ONE clock ran from ▶ Detect Edges until 💾 Save, so the
     detection time was overwritten a second after it was produced and the
-    readout became a session stopwatch. Now: the detection line freezes
-    when the pass ends and is repainted by nothing else; the session line
-    keeps counting through Save and across a run switch; and the
-    detection line resets per run, because a saved run re-opened for a
+    readout became a session stopwatch. That split the readout in two: the
+    detection line freezes when the pass ends and is repainted by nothing
+    else, and it resets per run, because a saved run re-opened for a
     scale-only re-anchor (`#215`) runs NO detection and the absence of a
-    fresh detection time is the signal that says so."""
+    fresh detection time is the signal that says so.
+
+    `#364` (2026-10-06): the session line below it then ticked on for the
+    life of the window, which read as work still running after the
+    auto-detections were done. It now stops when the pass ends and holds
+    its last value; Save does not restart it and neither does a run switch
+    (only a new Detect does, pinned in the next case)."""
     import sldea_edge_gui as gui
     root = _tk_root_or_skip('two clocks')
     if root is None:
@@ -2067,9 +2140,12 @@ def test_detection_clock_freezes_while_the_session_clock_runs_on():
             return app.clock_lbl.cget('text')
 
         # BEFORE any pass: the absence is stated, not left blank, and the
-        # session clock is already running (the window is open)
+        # session clock is already running (the window is open), as ONE
+        # chain of ticks
         assert detect_txt() == 'detect: not run', detect_txt()
         assert session_txt().startswith('session '), session_txt()
+        assert app._clock_on and len(_pending_ticks(root)) == 1, \
+            _pending_ticks(root)
 
         # THE BOX HOLDS BOTH LINES AND THE WIDEST TEXT. Found by measuring
         # the real window: the toolbar row is one button tall, so the
@@ -2099,34 +2175,54 @@ def test_detection_clock_freezes_while_the_session_clock_runs_on():
         first_t0 = app._t0
         assert first_t0 is not None
 
-        # THE BUG'S OWN SHAPE: let the clock tick as if five minutes of
-        # review had passed. The session line must move; the detection
-        # line must be byte-identical -- it is an answer, not a stopwatch.
+        # THE PASS IS OVER, SO THE SESSION LINE STOPS (`#364`): the flag is
+        # down AND no tick is left queued -- not merely one that would find
+        # the flag down when it fired
+        assert not app._clock_on, "the session clock ran on after the pass"
+        assert app._clock_job is None, app._clock_job
+        assert _pending_ticks(root) == [], _pending_ticks(root)
+        held = session_txt()
+        assert held.startswith('session '), held
+
+        # THE BUG'S OWN SHAPE: five minutes of review go by after the pass.
+        # Neither line may move: the detection line is an answer, and the
+        # session line holds the value it had when the machine was done.
+        # Asked of a stray tick, and of the real event loop given more than
+        # a tick period to fire anything that is still scheduled.
         app._t_session -= 300
         app._tick_clock()
-        moved = session_txt()
-        assert moved == 'session 5m00s', moved
+        assert session_txt() == held, \
+            f"a stray tick repainted the stopped clock: {session_txt()}"
+        _pump(root, 1.3)
+        assert session_txt() == held, \
+            f"the session line kept counting after the pass: {session_txt()}"
         assert detect_txt() == frozen, "detection time kept counting"
+        assert _pending_ticks(root) == [], _pending_ticks(root)
 
-        # SAVE does not stop the session clock any more: a session
-        # outlives a Save (the batch cockpit saves one run and moves on)
+        # SAVE neither stops nor restarts it. Under `#237` that was because
+        # a session outlives a Save; now there is simply nothing running
+        # left to stop, and Save is no reason to start counting again.
         app.save()
-        assert app._clock_on, "Save stopped the session clock"
+        assert not app._clock_on, "Save restarted the session clock"
+        assert _pending_ticks(root) == [], _pending_ticks(root)
         app._t_session -= 60
         app._tick_clock()
-        assert session_txt() == 'session 6m00s', session_txt()
+        assert session_txt() == held, session_txt()
         assert detect_txt() == frozen, "Save rewrote the detection time"
 
         # A RUN SWITCH re-arms the detection line (it belonged to run B's
-        # pass) and leaves the session line alone (one session, many runs)
+        # pass) and leaves the session line alone (one session, many runs):
+        # still held, and NOT restarted -- picking a run is not machine work
         other = [i for i, v in enumerate(app.run_box['values'])
                  if 'SLDEA_A' in v][0]
         app.run_box.current(other)
         app._pick_run()
         assert detect_txt() == 'detect: not run', detect_txt()
         assert app._t0 is None
+        assert not app._clock_on, "a run switch restarted the session clock"
+        assert _pending_ticks(root) == [], _pending_ticks(root)
         app._tick_clock()
-        assert session_txt() == 'session 6m00s', session_txt()
+        assert session_txt() == held, session_txt()
 
         # THE SCALE-ONLY RE-ANCHOR PATH: run B is saved and carries px, so
         # re-opening it routes to re-anchor rather than calibrate -- and
@@ -2137,16 +2233,211 @@ def test_detection_clock_freezes_while_the_session_clock_runs_on():
         app._pick_run()
         assert app._scale_intent()['intent'] == gui.SCALE_INTENT_REANCHOR
         assert detect_txt() == 'detect: not run', detect_txt()
+        assert not app._clock_on and _pending_ticks(root) == []
 
         # A SECOND PASS IS TIMED ON ITS OWN: `_t0 = _t0 or now` made every
-        # later pass report the time since the FIRST one of the session
+        # later pass report the time since the FIRST one of the session.
+        # It ends stopped like the first.
         app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
         time.sleep(0.01)
         app.detect_all_sync()
         assert app._t0 > first_t0, "the second pass reused the first's t0"
+        assert not app._clock_on and _pending_ticks(root) == []
     finally:
         gui.messagebox = real_mb
         root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_detect_restarts_the_session_clock_and_the_pass_end_stops_it():
+    """`#364` (2026-10-06), the threaded path an operator actually uses.
+
+    Detect Edges starts the session line again (a batch session still
+    gets a session time) from the SAME origin, the window opening, so it is
+    neither reset to zero nor resumed from the value it held. Restarting a
+    clock that is already running (the first Detect of a window) leaves one
+    chain of ticks, not two. The end of the pass stops it again, and so
+    does a run switch that abandons a pass mid-flight: that pass never
+    reaches _finish_detect, and without the stop the line would count on
+    with no machine work left."""
+    import threading
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('session clock restart')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_clock_restart_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    workers = []
+    try:
+        _fake_run(os.path.join(d, 'SLDEA_A'))
+        run_b = _fake_run(os.path.join(d, 'SLDEA_B'))
+        app = gui.EdgeReviewApp(root, path=run_b)
+        assert app.run is not None
+
+        def session_txt():
+            return app.clock_lbl.cget('text')
+
+        def finish_pass():
+            t0 = time.time()
+            while app._detect_busy and time.time() - t0 < 15.0:
+                root.update()
+                time.sleep(0.02)
+            assert not app._detect_busy, "the detection pass never finished"
+
+        # the FIRST Detect, on a clock still running since the window
+        # opened: one chain before, one chain after, repainted at once
+        assert app._clock_on and len(_pending_ticks(root)) == 1
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app._t_session -= 300
+        before = set(threading.enumerate())
+        app.detect()
+        workers += _new_threads(before)
+        assert app._detect_busy
+        assert app._clock_on, "Detect did not run the session clock"
+        assert len(_pending_ticks(root)) == 1, \
+            f"a restart left {len(_pending_ticks(root))} tick chains"
+        assert session_txt() == 'session 5m00s', session_txt()
+
+        # the pass ends: stopped, nothing of it queued, value held
+        finish_pass()
+        assert not app._clock_on, "the session clock ran on after the pass"
+        assert app._clock_job is None and _pending_ticks(root) == []
+        held = session_txt()
+        assert held.startswith('session 5m'), held
+        app._t_session -= 60
+        _pump(root, 1.3)
+        assert session_txt() == held, \
+            f"the session line kept counting after the pass: {session_txt()}"
+
+        # A NEW DETECT RESTARTS IT, from the window-open origin: six
+        # minutes and change, not 0s (reset) and not the held 5m (resumed)
+        before = set(threading.enumerate())
+        app.detect()
+        workers += _new_threads(before)
+        assert app._clock_on, "a new Detect did not restart the session clock"
+        assert app._clock_job is not None
+        assert len(_pending_ticks(root)) == 1, _pending_ticks(root)
+        assert session_txt().startswith('session 6m'), session_txt()
+
+        # ...and a run switch that ABANDONS that pass stops it: forced
+        # past the disabled Run box, as the mid-detect switch case does
+        app.run_box.config(state='readonly')
+        other = [i for i, v in enumerate(app.run_box['values'])
+                 if 'SLDEA_A' in v][0]
+        app.run_box.current(other)
+        app._pick_run()
+        assert not app._detect_busy
+        assert not app._clock_on, \
+            "an abandoned pass left the session clock running"
+        assert app._clock_job is None and _pending_ticks(root) == []
+        held = session_txt()
+        # the stale worker finishes and its poll chain is dropped; neither
+        # may set the clock going again
+        for t in workers:
+            t.join(15.0)
+        app._t_session -= 60
+        _pump(root, 1.3)
+        assert not app._clock_on and _pending_ticks(root) == []
+        assert session_txt() == held, session_txt()
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        for t in workers:
+            t.join(15.0)
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_stopped_session_line_shows_the_time_at_the_stop():
+    """The session line a pass leaves behind is the time AT the stop
+    (2026-10-06). `#364` cancelled the tick and kept the last painted
+    value, which a pass run without the event loop (detect_all_sync: the
+    manual capture) never repainted: the v1.4.2 capture showed
+    "session 0s" beside "detect: 81 frames in 14s"."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('session clock value at stop')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_clock_stop_value_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_A'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert app._clock_on
+        assert app.clock_lbl.cget('text') == 'session 0s', \
+            app.clock_lbl.cget('text')
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        # five minutes since the window opened, and no tick in between:
+        # the event loop is never pumped
+        app._t_session -= 300
+        app.detect_all_sync()
+        assert not app._clock_on, "the pass did not stop the session clock"
+        held = app.clock_lbl.cget('text')
+        assert held.startswith('session 5m'), held
+        # a stop of a clock that is already stopped repaints nothing
+        app._t_session -= 60
+        app._stop_session_clock()
+        assert app.clock_lbl.cget('text') == held, app.clock_lbl.cget('text')
+    finally:
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_closing_mid_pass_leaves_nothing_scheduled():
+    """`#364` restarts the session tick on every Detect, so the busiest
+    moment to close the window is during a pass: the tick and the poll
+    loop are both queued. Measured AT THE MOMENT OF DESTROY, as the plot
+    window's `#283` case does, by a <Destroy> handler bound after the
+    app's own: a pending id there names a command Tk is about to delete,
+    which is the Tcl error one step early."""
+    import threading
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('close mid-pass')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_close_mid_pass_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    gui.messagebox = mb
+    workers = []
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_A'))
+        app = gui.EdgeReviewApp(root, path=run)
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        before = set(threading.enumerate())
+        app.detect()
+        workers += _new_threads(before)
+        assert app._detect_busy and app._clock_on
+        queued = set(root.tk.splitlist(root.tk.call('after', 'info')))
+        assert app._clock_job in queued, 'the restarted tick is not queued'
+        assert len(queued) >= 2, f'the poll loop is not queued: {queued}'
+        seen = {}
+
+        def spy(ev):
+            if str(ev.widget) != str(root):
+                return
+            seen['queued'] = list(root.tk.splitlist(
+                root.tk.call('after', 'info')))
+            seen['clock_on'] = app._clock_on
+            seen['clock_job'] = app._clock_job
+
+        root.bind('<Destroy>', spy, add='+')
+        root.destroy()
+        root = None
+        assert seen, "the window's own <Destroy> never reached the spy"
+        assert seen['queued'] == [], \
+            f"closing left {seen['queued']} scheduled"
+        assert not seen['clock_on'] and seen['clock_job'] is None, seen
+    finally:
+        gui.messagebox = real_mb
+        if root is not None:
+            root.destroy()
+        for t in workers:
+            t.join(15.0)
         shutil.rmtree(d, ignore_errors=True)
 
 
@@ -2404,6 +2695,92 @@ def test_save_commits_csv_before_renames():
         assert 'saved' in app.status.cget('text')
     finally:
         se.write_back = real_wb
+        gui.messagebox = real_mb
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_video_review_button_and_the_save_hook_follow_the_run():
+    """2026-10-06. 🎞 Video review… is live only when the run folder holds a
+    recording; Save hands the run to sldea_video.after_save and says what
+    it answered on the strip; a hook that raises never costs the Save; a
+    run with no video says nothing about video; the window is one at a
+    time, raised rather than reopened for the same run."""
+    import sldea_edge_gui as gui
+    import sldea_video as sv
+    import sldea_video_review as vr
+    root = _tk_root_or_skip('video review button')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_video_')
+    mb = _StubMB(yes=True)
+    real_mb, real_after, real_win = gui.messagebox, sv.after_save, \
+        vr.VideoReviewWindow
+    gui.messagebox = mb
+    calls, opened = [], []
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert str(app.video_btn.cget('state')) == 'disabled'
+        assert app._tips['video_btn'].text == gui.TIPS['video_btn_disabled']
+        for name in (sv.VIDEO_FILENAME, sv.VIDEO_INDEX_FILENAME):
+            open(os.path.join(run, name), 'w').close()
+        app._sync_detect_btn()
+        assert str(app.video_btn.cget('state')) == 'normal'
+        assert app._tips['video_btn'].text == gui.TIPS['video_btn']
+
+        def after(rundir, popen=None):
+            calls.append(rundir)
+            return "video edges re-running in the background (stub)"
+        sv.after_save = after
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect_all_sync()
+        app.save()
+        assert calls == [app.rundir], calls
+        text = app.status.cget('text')
+        assert text.startswith('saved') and \
+            'video edges re-running in the background (stub)' in text, text
+
+        def boom(rundir, popen=None):
+            raise OSError("share went away")
+        sv.after_save = boom
+        app.save()
+        text = app.status.cget('text')
+        assert text.startswith('saved') and \
+            'video edges not re-run (share went away)' in text, text
+
+        sv.after_save = real_after
+        for name in (sv.VIDEO_FILENAME, sv.VIDEO_INDEX_FILENAME):
+            os.remove(os.path.join(run, name))
+        app.save()
+        assert 'video' not in app.status.cget('text'), \
+            app.status.cget('text')
+
+        class _Win:
+            def __init__(self, master, rundir, on_close=None):
+                self.rundir, self.on_close = rundir, on_close
+                self._closed = False
+                self.lifted = 0
+                self.win = self
+                opened.append(self)
+
+            def lift(self):
+                self.lifted += 1
+
+            def close(self):
+                self._closed = True
+                self.on_close(self)
+        vr.VideoReviewWindow = _Win
+        app._open_video_review()
+        app._open_video_review()
+        assert len(opened) == 1 and opened[0].lifted == 1
+        opened[0].close()
+        assert app._video_win is None
+        app._open_video_review()
+        assert len(opened) == 2
+    finally:
+        sv.after_save = real_after
+        vr.VideoReviewWindow = real_win
         gui.messagebox = real_mb
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)
@@ -2932,7 +3309,7 @@ def test_mode_C_is_where_the_gate_opens_and_Accept_needs_the_button():
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)          # no answers: all defaults
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         fit = app._auto_disc()
         assert fit and fit.get('diam_px'), "fixture has no automatic fit"
 
@@ -3200,7 +3577,7 @@ def test_every_mode_holds_the_on_screen_line_budget():
             w.writerows(rd)
         app = gui.EdgeReviewApp(root, path=run)
         assert app._px_rows() == 2, app._px_rows()
-        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.messagebox = gui.cal_choice = _ModalSpy(real_mb, app)
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
         fit = app._auto_disc()
         assert fit and fit.get('diam_px'), "fixture has no automatic fit"
@@ -3510,7 +3887,7 @@ def test_a_refused_fit_falls_through_to_the_hand_measurement_and_says_why():
         assert app._auto_disc() is None, "the fixture no longer refuses"
         why = app._auto_disc_refusal()
         assert why and 'seed' in why, why
-        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.messagebox = gui.cal_choice = _ModalSpy(real_mb, app)
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
 
         def poke(win):
@@ -3605,7 +3982,7 @@ def test_an_untouched_circle_round_is_refused_by_the_button_and_by_enter():
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         # spawns that pass every OTHER check a round has (plausible size,
         # inside the frame), so the only reason left to refuse one is that
         # nobody touched it.
@@ -3757,7 +4134,7 @@ def test_an_untouched_two_point_round_is_refused():
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def poke(win):
             _cal_onscreen(root, win)
@@ -3821,7 +4198,7 @@ def test_a_flat_frame_opens_on_a_plain_statement_with_cancel_default():
         assert content['flat'] and content['contrast'] == 2.0, content
         assert app._auto_disc() is None, "the flat fixture has a fit"
         spy = _ModalSpy(real_mb, app)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         sentence = gui.flat_frame_text(content)
         log = os.path.join(run, gui.se.CAL_LOG_NAME)
 
@@ -4060,7 +4437,7 @@ def test_a_single_gray_frame_is_shown_plain_and_says_so():
         assert content['flat'] and content['contrast'] == 0.0, content
         assert gui.cal_content_window(content) is None
         spy = _ModalSpy(real_mb, app)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def look(win):
             p = app._cal_probe
@@ -4117,7 +4494,7 @@ def test_cancelling_the_flat_notice_says_what_the_scale_still_is():
         run = _flat_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         sentence = gui.flat_frame_text(gui.se.image_content(app._base_gray()))
 
         def cancel(win):
@@ -4232,7 +4609,7 @@ def test_a_frame_the_fit_found_a_disc_on_opens_no_flat_notice():
         fit = app._auto_disc()
         assert fit and abs(fit['diam_px'] - 160.0) < 2.0, fit
         spy = _ModalSpy(real_mb, app)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
 
         def look(win):
             p = app._cal_probe
@@ -4300,7 +4677,7 @@ def test_a_committed_re_anchor_repeats_the_caveat_on_the_status_strip():
         # (mean 160 px on a 160 px fit), so it asks nothing. Then the
         # re-anchor's own three-way question: Yes = commit now.
         spy = _ModalSpy(real_mb, app2, answers=[False, True])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         _fixed_spawn(gui, [(160.0, 120.0, 79.0), (160.0, 120.0, 80.0),
                            (160.0, 120.0, 81.0)])
 
@@ -4323,6 +4700,11 @@ def test_a_committed_re_anchor_repeats_the_caveat_on_the_status_strip():
                        'mode': CIRCLE}, saw
         assert [t for t, _kw in spy.asked] == \
             ['Rounds disagree', 'Re-anchor scale — SCALE ONLY'], spy.asked
+        # named buttons since 2026-10-05, declining to Cancel as before
+        assert spy.asked[1][1]['buttons'] == [
+            'Write data.csv now', 'Keep for next Save', 'Cancel'], spy.asked
+        assert spy.asked[1][1]['default'] == 'cancel', spy.asked
+        assert '"Write data.csv now" WRITES data.csv NOW' in spy.msgs[1]
         ref = app2.manual_ref
         assert ref is not None and ref['rounds_px'] == [158.0, 160.0,
                                                         162.0], ref
@@ -4341,6 +4723,66 @@ def test_a_committed_re_anchor_repeats_the_caveat_on_the_status_strip():
         assert gui.anchor_caveat(back) == cav, back
     finally:
         gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_failed_anchor_write_stays_on_the_status_strip_after_save():
+    """setup.txt refusing the scale anchor must still be on the strip when
+    Save returns (2026-10-06). The failure used to be written to the strip
+    and then overwritten by "saved in ...", so the operator never learned
+    that setup.txt lacks the anchor data.csv was just written at. Both
+    final strips are checked: the normal one and the plot-failure one."""
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('anchor write failure')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_save_anchor_fail_')
+    mb = _StubMB(yes=True)
+    real_mb = gui.messagebox
+    se_mod = gui.se
+    real_anchor = se_mod.save_scale_anchor
+    gui.messagebox = mb
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        app.detect_all_sync()
+
+        def boom(*a, **k):
+            raise OSError(28, 'No space left on device')
+
+        se_mod.save_scale_anchor = boom
+        app.save()
+        txt = app.status.cget('text')
+        assert txt.startswith('saved in '), txt
+        assert '⚠ scale anchor NOT recorded in setup.txt' in txt, txt
+        assert 'No space left on device' in txt, txt
+        # ahead of the routine tail, which a narrow window cuts first
+        assert txt.index('NOT recorded') < txt.index('data.csv updated'), txt
+        assert se_mod.load_scale_anchor(run) is None
+        # THE PLOT OR THE OVERLAYS FAILING as well: that strip keeps it too,
+        # and still ends on the error text
+        def plot_boom(_scale):
+            raise RuntimeError('disk full')
+        app._save_plot = plot_boom
+        app.save()
+        del app._save_plot
+        txt = app.status.cget('text')
+        assert txt.startswith('saved CSV; '), txt
+        assert '⚠ scale anchor NOT recorded in setup.txt' in txt, txt
+        assert txt.endswith('plot/overlays failed: disk full'), txt
+        # a Save whose anchor write succeeds says nothing of the old failure
+        se_mod.save_scale_anchor = real_anchor
+        app.save()
+        txt = app.status.cget('text')
+        assert txt.startswith('saved in '), txt
+        assert 'NOT recorded' not in txt, txt
+        back = se_mod.load_scale_anchor(run)
+        assert back and float(back['diam_px']) == 160.0, back
+    finally:
+        se_mod.save_scale_anchor = real_anchor
+        gui.messagebox = real_mb
         root.destroy()
         shutil.rmtree(d, ignore_errors=True)
 
@@ -4448,6 +4890,275 @@ def test_the_status_strip_after_save_still_says_what_was_accepted_over():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def _root_gone(root):
+    """True once `root` has been destroyed (#363): the application's Tk
+    commands go with it, so even asking whether it exists raises."""
+    import tkinter as tk
+    try:
+        root.winfo_exists()
+    except tk.TclError:
+        return True
+    return False
+
+
+def _anchors_363(se_mod, fit):
+    """(clean, caveat) hand anchors on the fixture's automatic fit, the
+    last two of test_the_status_strip_after_save_still_says_what_was_
+    accepted_over. `clean` is inside the SE gate with the cross-check
+    clear, so anchor_caveat says nothing; `caveat` is the honest anchor
+    over the SE gate, which gets the quiet SCALE CAVEAT lead. Fresh dicts
+    on every call, because Save may annotate the one it is handed."""
+    clear = se_mod.anchor_guard(fit['diam_px'], fit, 16.0)
+    assert not clear['warn'], clear
+    clean = {'method': se_mod.ANCHOR_METHOD_MANUAL,
+             'diam_px': float(fit['diam_px']), 'cal_mode': TWOPOINT,
+             'n_rounds': 5, 'spread_pct': 0.5, 'se_pct': 0.1,
+             'guard': se_mod.anchor_guard_note(clear, False)}
+    caveat = {'method': se_mod.ANCHOR_METHOD_MANUAL,
+              'diam_px': float(fit['diam_px']), 'cal_mode': CIRCLE,
+              'n_rounds': 3, 'se_pct': 1.05 / 3 ** 0.5,
+              'guard': se_mod.anchor_guard_note(clear, False)}
+    return clean, caveat
+
+
+def test_an_auto_window_closes_after_a_clean_save_and_only_then():
+    """#363 (2026-10-05). The SLDEA tab's auto-process opens Edge Review
+    with --auto on the run that just finished, and that window's job ends
+    with a clean Save of that run: data.csv, the anchor, the area-method
+    stamp, the plot and the overlays all written, no rename failed, no
+    anchor caveat. Then it closes, through root.destroy(), so the
+    <Destroy> path cancels every pending `after` callback.
+
+    Every Save with something to report keeps it open, its message where
+    it was said before: an anchor caveat or a failed plot or overlay on
+    the strip, a failed stamp or rename in its warning box, a failed
+    anchor write. So does a clean Save after the operator switched the
+    window to another run: it is the batch cockpit by then."""
+    import sldea_edge_gui as gui
+    se_mod = gui.se
+    real_detect = gui.EdgeReviewApp.detect
+    real_mb = gui.messagebox
+    real_anchor = se_mod.save_scale_anchor
+    real_stamp = se_mod.stamp_area_estimator
+    real_rename = se_mod.apply_rename_plan
+    # the --auto launch presses Detect 300 ms after opening, which would
+    # open the modal scale dialog; these cases measure through
+    # detect_all_sync instead, so the press is made a no-op
+    gui.EdgeReviewApp.detect = lambda self: None
+    mb = _StubMB(yes=True)
+    gui.messagebox = mb
+    d = tempfile.mkdtemp(prefix='edge_auto_close_')
+    root = None
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        _fake_run(os.path.join(d, 'SLDEA_20260102_000000'))
+        root = _tk_root_or_skip('auto close after save')
+        if root is None:
+            return
+        app = gui.EdgeReviewApp(root, path=run, auto=True)
+        assert app._closes_after_save(), (app._auto_run, app.rundir)
+        fit = app._auto_disc()
+        assert fit and fit.get('diam_px'), "fixture has no automatic fit"
+        clean, caveat = _anchors_363(se_mod, fit)
+        assert gui.anchor_caveat(clean) == ''
+        cav = gui.anchor_caveat(caveat)
+        assert 'SCALE CAVEAT' in cav, cav
+
+        def save_with(ref):
+            app.manual_ref = dict(ref)
+            app.detect_all_sync()
+            app.save()
+            assert not _root_gone(root), "an --auto Save with news closed"
+            return app.status.cget('text')
+
+        def no_disk(*_a, **_k):
+            raise OSError('share down')
+
+        def boom(*_a):
+            raise RuntimeError('disk full')
+
+        # AN ANCHOR CAVEAT: the strip after Save is where it is said
+        txt = save_with(caveat)
+        assert txt.startswith('saved in ') and cav in txt, txt
+        # THE PLOT OR THE OVERLAYS FAILED, on a clean anchor
+        for name in ('_save_plot', '_save_overlays'):
+            setattr(app, name, boom)
+            try:
+                txt = save_with(clean)
+            finally:
+                delattr(app, name)
+            assert txt.startswith('saved CSV; '), (name, txt)
+            assert txt.endswith('plot/overlays failed: disk full'), txt
+        # THE ANCHOR WAS NOT RECORDED in setup.txt
+        se_mod.save_scale_anchor = no_disk
+        try:
+            save_with(clean)
+        finally:
+            se_mod.save_scale_anchor = real_anchor
+        # THE AREA-METHOD STAMP WAS NOT WRITTEN (its own warning box)
+        del mb.warnings[:]
+        se_mod.stamp_area_estimator = no_disk
+        try:
+            save_with(clean)
+        finally:
+            se_mod.stamp_area_estimator = real_stamp
+        assert [w[0] for w in mb.warnings] == [
+            'Save: area-method stamp not written'], mb.warnings
+        # A FRAME RENAME FAILED (its own warning box, "Save again")
+        del mb.warnings[:]
+        se_mod.apply_rename_plan = lambda plan: (
+            0, ['SLDEA_s02_06.00kV_post-ramp.png: access denied'])
+        try:
+            save_with(clean)
+        finally:
+            se_mod.apply_rename_plan = real_rename
+        assert [w[0] for w in mb.warnings] == [
+            'Save: renames incomplete'], mb.warnings
+        # ANOTHER RUN in the same window: the operator made it a cockpit,
+        # so a clean Save of that run leaves it open
+        names = list(app.run_box['values'])
+        app.run_box.current([i for i, v in enumerate(names)
+                             if 'SLDEA_20260102_000000' in v][0])
+        app._pick_run()
+        assert not app._closes_after_save(), (app._auto_run, app.rundir)
+        txt = save_with(clean)
+        assert txt.startswith('saved in ') and 'data.csv updated' in txt, txt
+        # ...and back on its own run, a clean Save closes it
+        app.run_box.current([i for i, v in enumerate(names)
+                             if 'SLDEA_20260101_000000' in v][0])
+        app._pick_run()
+        assert app._closes_after_save(), (app._auto_run, app.rundir)
+        assert mb.errors == [], mb.errors
+        del mb.warnings[:]
+        app.manual_ref = dict(clean)
+        app.detect_all_sync()
+        # a callback that must not outlive the window, and a spy on the
+        # one shutdown path that cancels it
+        root.after(60000, lambda: None)
+        left = []
+        real_cancel = app._cancel_pending
+
+        def spy():
+            real_cancel()
+            left.append(root.tk.call('after', 'info'))
+        app._cancel_pending = spy
+        app.save()
+        assert _root_gone(root), "a clean --auto Save left the window open"
+        assert len(left) == 1 and not left[0], left
+        assert mb.errors == [] and mb.warnings == [], (mb.errors,
+                                                       mb.warnings)
+        # and it closed AFTER everything was written, not before
+        back = se_mod.load_scale_anchor(run)
+        assert back and abs(float(back['diam_px'])
+                            - clean['diam_px']) < 0.01, back
+        assert (se_mod.load_stamp(run).get('area_estimator')
+                == se_mod.AREA_ESTIMATOR_VERSION), se_mod.load_stamp(run)
+        assert os.path.isdir(os.path.join(run, 'overlays'))
+        with open(os.path.join(run, 'data.csv'), newline='') as f:
+            mm2 = [r['active_area_mm2'] for r in csv.DictReader(f)]
+        assert any(v.strip() for v in mm2), mm2
+    finally:
+        gui.EdgeReviewApp.detect = real_detect
+        gui.messagebox = real_mb
+        se_mod.save_scale_anchor = real_anchor
+        se_mod.stamp_area_estimator = real_stamp
+        se_mod.apply_rename_plan = real_rename
+        if root is not None and not _root_gone(root):
+            root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_an_auto_window_stays_open_when_the_video_rerun_did_not_start():
+    """#363 meets the video review (2026-10-06). Save hands a run with a
+    video to sldea_video.after_save; when that re-run could not start, the
+    only place it is said is the strip, so the Save is not clean and an
+    --auto window stays open. A re-run that did start is routine, and the
+    window closes as on any clean Save."""
+    import sldea_edge_gui as gui
+    import sldea_video as sv
+    se_mod = gui.se
+    real_detect = gui.EdgeReviewApp.detect
+    real_mb, real_after = gui.messagebox, sv.after_save
+    gui.EdgeReviewApp.detect = lambda self: None
+    gui.messagebox = _StubMB(yes=True)
+    d = tempfile.mkdtemp(prefix='edge_auto_video_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        for said, closes in (
+                ("video edges are out of date (x) and the re-run could not "
+                 "start (y): run `python sldea_video.py \"r\"`", False),
+                ("video edges re-running in the background (x)", True)):
+            root = _tk_root_or_skip('auto window and the video hook')
+            if root is None:
+                return
+            app = None
+            try:
+                sv.after_save = lambda rundir, popen=None, _s=said: _s
+                app = gui.EdgeReviewApp(root, path=run, auto=True)
+                fit = app._auto_disc()
+                clean, _caveat = _anchors_363(se_mod, fit)
+                app.manual_ref = dict(clean)
+                app.detect_all_sync()
+                app.save()
+                assert _root_gone(root) == closes, (said, closes)
+                if not closes:
+                    assert 'could not start' in app.status.cget('text')
+            finally:
+                if app is not None and not _root_gone(root):
+                    app._cancel_pending()
+                    root.destroy()
+    finally:
+        gui.EdgeReviewApp.detect = real_detect
+        gui.messagebox = real_mb
+        sv.after_save = real_after
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_window_opened_by_hand_stays_open_after_a_clean_save():
+    """#363 (2026-10-05). Opened by hand (the SLDEA tab's Edge Review...
+    button) or by the plot window's click-through (--goto), Edge Review
+    is the batch cockpit: it saves one run and moves to the next. A clean
+    Save leaves it open with "saved in ..." on the strip, as before."""
+    import sldea_edge_gui as gui
+    se_mod = gui.se
+    real_mb = gui.messagebox
+    mb = _StubMB(yes=True)
+    gui.messagebox = mb
+    d = tempfile.mkdtemp(prefix='edge_hand_open_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        for how in ({}, {'goto': 1}):
+            root = _tk_root_or_skip('hand-opened window stays open')
+            if root is None:
+                return
+            app = None
+            try:
+                app = gui.EdgeReviewApp(root, path=run, **how)
+                assert app._auto_run is None, (how, app._auto_run)
+                assert not app._closes_after_save(), how
+                fit = app._auto_disc()
+                assert fit and fit.get('diam_px'), "no automatic fit"
+                clean, _caveat = _anchors_363(se_mod, fit)
+                app.manual_ref = dict(clean)
+                app.detect_all_sync()
+                app.save()
+                assert not _root_gone(root), (how, "a cockpit closed")
+                txt = app.status.cget('text')
+                assert txt.startswith('saved in '), (how, txt)
+                assert 'data.csv updated' in txt, (how, txt)
+                assert 'SCALE' not in txt, (how, txt)
+                assert mb.errors == [] and mb.warnings == [], (
+                    how, mb.errors, mb.warnings)
+            finally:
+                if app is not None:
+                    app._cancel_pending()
+                if not _root_gone(root):
+                    root.destroy()
+    finally:
+        gui.messagebox = real_mb
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_hand_modes_show_a_stretched_view_and_record_the_same_diameters():
     """The hand modes show the frame through a display stretch, as the
     verify mode does: the verify mode's own window when there is a fit on
@@ -4479,7 +5190,7 @@ def test_hand_modes_show_a_stretched_view_and_record_the_same_diameters():
         cv2.imwrite(base, banded)
         app = gui.EdgeReviewApp(root, path=run)
         spy = _ModalSpy(real_mb, app)
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         fit = app._auto_disc()
         assert fit and fit.get('diam_px'), "fixture has no automatic fit"
         assert abs(fit['diam_px'] - 160.0) < 0.5, fit['diam_px']
@@ -4655,7 +5366,7 @@ def test_hand_modes_show_a_stretched_view_and_record_the_same_diameters():
 INCIDENT_SPAWNS = [(160.0, 120.0, 61.285), (160.0, 120.0, 55.721),
                    (160.0, 120.0, 70.114)]
 CAP_REFUSAL = ("The three rounds differ by 23.1 percent; more than 5 "
-               "percent cannot be trusted. Measure again, or cancel.")
+               "percent cannot be trusted.")
 
 
 def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
@@ -4702,7 +5413,7 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
 
         # ---- (1) circle mode, fit present, the old override script -------
         spy = _ModalSpy(real_mb, app, answers=[False, True])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         _fixed_spawn(gui, list(INCIDENT_SPAWNS))
         app.root.wait_window = advance
         app.status.config(text='')
@@ -4715,8 +5426,8 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
         assert spy.defaults() == ['no'], spy.asked
         prompt = spy.msgs[0]
         assert prompt.startswith(CAP_REFUSAL), prompt
-        assert 'Yes = measure again' in prompt and 'No = cancel' in prompt, \
-            prompt
+        assert spy.asked[0][1]['buttons'] == ['Measure again', 'Cancel'], \
+            spy.asked[0]
         # PERCENTAGES ONLY, on the prompt and on the dialog behind it (where
         # the only diameter is the current circle's own live readout): a
         # refit is one of the answers, so it must stay blind
@@ -4748,7 +5459,7 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
         # anyway" (the second override of 2026-10-01) is never offered.
         app._auto_disc = lambda: None
         spy = _ModalSpy(real_mb, app, answers=[True, False])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         _fixed_spawn(gui, list(INCIDENT_SPAWNS) * 2)
         states = []
 
@@ -4784,7 +5495,7 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
 
         # ---- (3) the two-point mode: five chords, a 23 % range -----------
         spy = _ModalSpy(real_mb, app, answers=[False, True])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         halves = [61.285, 55.721, 70.114, 62.5, 59.0]
 
         def chords(win):
@@ -4807,8 +5518,8 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
         # 23.4 and 24.0 have both been seen. What is pinned is that the
         # prompt quotes the set's OWN recorded range, well over the cap)
         m = re.match(r'The five rounds differ by (\d+\.\d) percent; more '
-                     r'than 5 percent cannot be trusted\. Measure again, '
-                     r'or cancel\.', spy.msgs[0])
+                     r'than 5 percent cannot be trusted\.$',
+                     spy.msgs[0].split('\n')[0])
         assert m, spy.msgs[0]
         quoted = float(m.group(1))
         assert 20.0 < quoted < 27.0, spy.msgs[0]
@@ -4820,7 +5531,7 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
 
         # ---- (4) a 4 % set reaches the gates it always met, unchanged ----
         spy = _ModalSpy(real_mb, app, answers=[False, True])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         _fixed_spawn(gui, [(160.0, 120.0, 65.0), (160.0, 120.0, 66.3),
                            (160.0, 120.0, 67.6)])
         app.root.wait_window = advance
@@ -4838,7 +5549,7 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
         # ---- (5) the Detect route keeps the reason on the strip ----------
         app.manual_ref = None
         spy = _ModalSpy(real_mb, app)              # all defaults: cancel
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         _fixed_spawn(gui, list(INCIDENT_SPAWNS))
         app._calibrate_scale(then_detect=True, mode=CIRCLE)
         assert app.manual_ref is None and not app.cands_all
@@ -4861,7 +5572,7 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
         app2 = gui.EdgeReviewApp(root, path=run)
         assert app2._scale_intent()['intent'] == gui.SCALE_INTENT_REANCHOR
         spy = _ModalSpy(real_mb, app2, answers=[False])
-        gui.messagebox = spy
+        gui.messagebox = gui.cal_choice = spy
         _fixed_spawn(gui, list(INCIDENT_SPAWNS))
 
         def measure(win):
@@ -4895,6 +5606,120 @@ def test_the_range_cap_refuses_the_incident_set_through_both_override_paths():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_re_anchor_setup_txt_refused_stays_on_the_status_strip():
+    """setup.txt refusing the re-anchor record must still be on the strip
+    when _reanchor_scale returns (2026-10-06). The failure used to be
+    written to the strip and then overwritten by the RE-ANCHORED line, so
+    the operator never learned that data.csv had just been re-derived at
+    the new scale while setup.txt kept the old anchor and no `reanchor`
+    marker. Driven through the real _reanchor_scale; only the re-anchor's
+    own write fails, the fixture's Save does not. Then the remedy the
+    strip names: a second re-anchor, once setup.txt is writable, records
+    the anchor as scale-only and says nothing of the failure."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    root = _tk_root_or_skip('re-anchor record failure')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_reanchor_record_fail_')
+    real_mb, real_spawn = gui.messagebox, gui.spawn_circle
+    real_choice = gui.cal_choice
+    se_mod = gui.se
+    real_anchor = se_mod.save_scale_anchor
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        # ---- a SAVED run, on a 150 px anchor the re-anchor corrects ------
+        gui.messagebox = _StubMB(yes=True)
+        app = gui.EdgeReviewApp(root, path=run)
+        app.manual_ref = {'method': se_mod.ANCHOR_METHOD_MANUAL,
+                          'diam_px': 150.0}
+        app.detect_all_sync()
+        app.save()
+        assert app.status.cget('text').startswith('saved in '), \
+            app.status.cget('text')
+        prev = se_mod.load_scale_anchor(run)
+        assert prev and float(prev['diam_px']) == 150.0, prev
+        assert 'reanchor' not in prev, prev
+        app2 = gui.EdgeReviewApp(root, path=run)
+
+        def measure(win):
+            for rb in _widgets_of(win, tk.Radiobutton):
+                if rb.cget('value') == CIRCLE:
+                    rb.invoke()
+            for _ in range(8):
+                if not win.winfo_exists():
+                    return
+                _hand_fit(app2)
+                _cal_step_button(win).invoke()
+
+        def reanchor():
+            # the route the scale button takes on this run
+            assert (app2._scale_intent()['intent']
+                    == gui.SCALE_INTENT_REANCHOR), app2._scale_intent()
+            # the SE gate: No = accept as measured (158/160/162 px on the
+            # 160 px fit, so the cross-check asks nothing). Then the
+            # three-way question: Yes = write data.csv now.
+            spy = _ModalSpy(real_mb, app2, answers=[False, True])
+            gui.messagebox = gui.cal_choice = spy
+            _fixed_spawn(gui, [(160.0, 120.0, 79.0), (160.0, 120.0, 80.0),
+                               (160.0, 120.0, 81.0)])
+            app2.root.wait_window = measure
+            app2._reanchor_scale()
+            assert [t for t, _kw in spy.asked] == \
+                ['Rounds disagree', 'Re-anchor scale — SCALE ONLY'], \
+                spy.asked
+            return app2.status.cget('text')
+
+        def no_space(*_a, **_k):
+            raise OSError(28, 'No space left on device')
+
+        # ---- data.csv commits, then setup.txt refuses the record ---------
+        se_mod.save_scale_anchor = no_space
+        try:
+            stat = reanchor()
+        finally:
+            se_mod.save_scale_anchor = real_anchor
+        assert app2.manual_ref['diam_px'] == 160.0, app2.manual_ref
+        assert stat.startswith('RE-ANCHORED (scale only, no re-review) — ⚠ '
+                               'new anchor NOT recorded in setup.txt, 📏 '
+                               're-anchor again once the folder is '
+                               'writable ('), stat
+        assert 'No space left on device' in stat, stat
+        # ahead of the numbers, because a narrow window cuts the tail
+        assert stat.index('NOT recorded') < stat.index('160.0 px'), stat
+        # and the caveat is still said, at the end as before
+        cav = gui.anchor_caveat(app2.manual_ref)
+        assert cav and stat.endswith('. ' + cav), (cav, stat)
+        # THE MISMATCH IT WARNS OF: data.csv holds the new scale ...
+        k2 = (app2.settings['diam_mm'] / 160.0) ** 2
+        with open(os.path.join(run, 'data.csv'), newline='') as f:
+            got = [(float(r['active_area_px']), float(r['active_area_mm2']))
+                   for r in csv.DictReader(f)
+                   if r['active_area_px'].strip()]
+        assert got, "the fixture Save measured no px"
+        for px, mm2 in got:
+            assert abs(mm2 / (px * k2) - 1.0) < 1e-3, (px, mm2, k2)
+        # ... while setup.txt still holds the old anchor, no marker
+        assert se_mod.load_scale_anchor(run) == prev
+        # ---- THE REMEDY: re-anchor again, the folder writable ------------
+        stat = reanchor()
+        assert stat.startswith('RE-ANCHORED (scale only, no re-review): '), \
+            stat
+        assert 'NOT recorded' not in stat, stat
+        back = se_mod.load_scale_anchor(run)
+        assert back['reanchor'] == se_mod.REANCHOR_SCALE_ONLY, back
+        assert float(back['diam_px']) == 160.0, back
+        # it names the anchor the run was reviewed at, read from the block
+        # the failed write left alone
+        assert float(back['prev_diam_px']) == 150.0, back
+    finally:
+        se_mod.save_scale_anchor = real_anchor
+        gui.messagebox, gui.spawn_circle = real_mb, real_spawn
+        gui.cal_choice = real_choice
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_switching_into_mode_C_gives_it_the_same_room_as_opening_in_it():
     """The canvas height must follow the MODE, not the mode the dialog
     happened to open in -- a canvas sized once and then re-used across a
@@ -4922,7 +5747,7 @@ def test_switching_into_mode_C_gives_it_the_same_room_as_opening_in_it():
     try:
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
-        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.messagebox = gui.cal_choice = _ModalSpy(real_mb, app)
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
 
         def grab(win, key):
@@ -5000,7 +5825,7 @@ def test_reusing_a_verified_anchor_keeps_it_verified_not_hand_measured():
             'verified_at': '2026-08-06T18:30:00',
             'guard': 'AUTO-VERIFIED by eye: ... NOT cross-checked'})
         app = gui.EdgeReviewApp(root, path=run)
-        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.messagebox = gui.cal_choice = _ModalSpy(real_mb, app)
 
         def poke(win):
             btns = _cal_buttons(win)
@@ -5097,7 +5922,7 @@ def test_measure_by_hand_leaves_mode_C_for_a_BLIND_mode_A_round_set():
     try:
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
-        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.messagebox = gui.cal_choice = _ModalSpy(real_mb, app)
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 70.0)
         fit = app._auto_disc()
         assert fit and fit.get('diam_px')
@@ -5279,7 +6104,7 @@ def test_the_dialog_says_which_of_the_two_folded_actions_it_serves():
     try:
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
-        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.messagebox = gui.cal_choice = _ModalSpy(real_mb, app)
         gui.spawn_circle = lambda *_a, **_k: (160.0, 120.0, 80.0)
 
         def look(tag):
@@ -5388,7 +6213,7 @@ def test_the_second_click_banks_the_round_and_Back_undoes_it():
     try:
         run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
         app = gui.EdgeReviewApp(root, path=run)
-        gui.messagebox = _ModalSpy(real_mb, app)
+        gui.messagebox = gui.cal_choice = _ModalSpy(real_mb, app)
 
         def poke(win):
             _cal_onscreen(root, win)
@@ -7512,12 +8337,236 @@ def test_edge_review_warns_in_one_line_off_the_pinned_opencv():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_tracker_card_names_an_a0_taken_from_the_scale_anchor():
+    """2026-10-05: when the automatic fit refuses the baseline frame, the
+    baseline row's 'resting' claim is the operator's anchor circle
+    (se.anchor_disc). The panel says so, with the circle's size, so the
+    operator judging that row in the queue knows what A is. A tracker
+    candidate still takes the panel, and an ordinary resting claim
+    still says nothing."""
+    import sldea_edge as se
+    import sldea_edge_gui as gui
+    anchor = {'method': se.ANCHOR_METHOD_MANUAL, 'diam_px': 577.4,
+              'cx': 960.0, 'cy': 540.0, 'is_baseline': True}
+    rest = dict(se.anchor_disc(anchor), method='resting', conf=0.74)
+    text = gui.tracker_card_text([rest])
+    assert text.startswith('A is A0 from the scale anchor'), text
+    assert 'refused this baseline frame' in text, text
+    assert '(577 px across)' in text, text
+    patch = {'method': 'diff-hi', 'area_px': 63040.0, 'conf': 0.63}
+    assert gui.tracker_card_text([patch, rest]).startswith(
+        'B is A0 from the scale anchor')
+    plain = {'method': 'resting', 'area_px': 217438.0, 'conf': 0.95}
+    assert gui.tracker_card_text([plain, patch]) == ''
+    disc = {'method': 'disc-fit', 'area_px': 217500.0, 'conf': 0.98,
+            'area_ratio': 1.0003, 'n_common': 211, 'n_trimmed': 0,
+            'trim_share': 0.0, 'one_sided': 0.062, 'hidden_pct': 41.4,
+            'ellipse_over_circle': 1.07}
+    assert gui.tracker_card_text([rest, disc]).startswith(
+        'B is the ray ratio')
+
+
+def test_cal_choice_names_its_buttons_and_opens_over_the_dialog():
+    """THE CALIBRATION QUESTION BOX ITSELF (operator 2026-10-05), on a
+    real display. The gate cases above answer it through _ModalSpy; this
+    is the one case that opens it.
+
+    Pinned: the buttons carry the action's name; the box is transient to
+    the window that asked (so Windows keeps it above that window instead
+    of behind it); a click returns that button's key; Enter, even with
+    the focus on an accepting button, Escape and the close box all return
+    the DEFAULT, the declining answer; and the grab the calibration
+    window held is handed back when the box closes."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    root = _tk_root_or_skip('cal_choice')
+    if root is None:
+        return
+    try:
+        parent = tk.Toplevel(root)
+        parent.geometry('480x320+120+120')
+        parent.update()
+        parent.grab_set()
+        seen = {}
+
+        def drive(action):
+            def go():
+                boxes = [w for w in parent.winfo_children()
+                         if isinstance(w, tk.Toplevel)]
+                if not boxes:
+                    seen['error'] = 'no question box opened'
+                    return
+                box = boxes[-1]
+                box.update()
+                btns = {b.cget('text'): b for b in _widgets(box, 'button')}
+                seen['labels'] = list(btns)
+                seen['active'] = [t for t, b in btns.items()
+                                  if str(b.cget('default')) == 'active']
+                seen['transient'] = str(box.transient())
+                seen['viewable'] = bool(box.winfo_viewable())
+                g = box.grab_current()
+                seen['grab'] = str(g) if g is not None else None
+                seen['box'] = str(box)
+                action(box, btns)
+
+            root.after(300, go)
+
+            def stuck():
+                # never hang the suite: a box nobody could close is closed
+                # here, and the answer it returns then fails the case
+                for w in parent.winfo_children():
+                    if isinstance(w, tk.Toplevel):
+                        seen['stuck'] = True
+                        w.destroy()
+            root.after(6000, stuck)
+
+        two = [('yes', 'Use unchecked scale'), ('no', 'Cancel')]
+
+        def ask(buttons=two, default='no'):
+            seen.clear()
+            return gui.cal_choice(parent, 'Anchor NOT cross-checked',
+                                  'Nothing can check this scale.',
+                                  'detail line', buttons, default)
+
+        # a click returns the clicked button's key
+        drive(lambda box, b: b['Use unchecked scale'].invoke())
+        assert ask() == 'yes', seen
+        assert seen['labels'] == ['Use unchecked scale', 'Cancel'], seen
+        assert seen['active'] == ['Cancel'], seen
+        assert seen['transient'] == str(parent), seen
+        assert seen['viewable'] and seen['grab'] == seen['box'], seen
+        assert 'stuck' not in seen, seen
+        # ... and the calibration window has its grab back
+        g = parent.grab_current()
+        assert g is not None and str(g) == str(parent), g
+
+        # Enter with the focus on the ACCEPTING button still declines
+        def enter_on_accept(box, b):
+            btn = b['Use unchecked scale']
+            btn.focus_force()
+            btn.event_generate('<Return>')
+        drive(enter_on_accept)
+        assert ask() == 'no', seen
+        assert 'stuck' not in seen, seen
+
+        # Escape declines
+        drive(lambda box, b: box.event_generate('<Escape>'))
+        assert ask() == 'no', seen
+        assert 'stuck' not in seen, seen
+
+        # the close box declines
+        drive(lambda box, b: box.tk.call(box.protocol('WM_DELETE_WINDOW')))
+        assert ask() == 'no', seen
+        assert 'stuck' not in seen, seen
+
+        # a three-way question declines to cancel
+        three = [('yes', 'Refit all 3 rounds'), ('no', 'Accept as measured'),
+                 ('cancel', 'Cancel')]
+        drive(lambda box, b: box.event_generate('<Escape>'))
+        assert ask(three, 'cancel') == 'cancel', seen
+        assert seen['active'] == ['Cancel'], seen
+        drive(lambda box, b: b['Accept as measured'].invoke())
+        assert ask(three, 'cancel') == 'no', seen
+        g = parent.grab_current()
+        assert g is not None and str(g) == str(parent), g
+
+        # the re-anchor confirmation's table: fixed-width and wider
+        def read_detail(box, b):
+            lbls = [w for w in _widgets(box, 'label')
+                    if w.cget('text') == 'col1   col2']
+            seen['font'] = str(lbls[0].cget('font')) if lbls else None
+            seen['wrap'] = int(str(lbls[0].cget('wraplength'))) \
+                if lbls else None
+            b['Cancel'].invoke()
+        drive(read_detail)
+        seen.clear()
+        assert gui.cal_choice(parent, 'Re-anchor scale — SCALE ONLY', 'H',
+                              'col1   col2', gui.REANCHOR_BUTTONS, 'cancel',
+                              detail_font='TkFixedFont',
+                              wraplength=760) == 'cancel', seen
+        assert seen['font'] == 'TkFixedFont' and seen['wrap'] == 760, seen
+        assert seen['labels'] == ['Write data.csv now', 'Keep for next Save',
+                                  'Cancel'], seen
+    finally:
+        root.destroy()
+
+
+def test_placing_trace_points_never_moves_the_canvas():
+    """Bug report 2026-10-05: clicking points in the trace window sometimes
+    jumped the picture to the right. The status line under the canvas was
+    one unwrapped string whose area figure gains digits as points are
+    placed; when it outgrew the window, Tk widened the window and the
+    centred 900 px canvas slid right (measured 4 -> 19 -> 28 -> 31 px).
+    The line is now wrapped at the canvas width with the numbers on their
+    own line, so neither the window's width nor the canvas's position may
+    change however large the area gets."""
+    import types
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    from PIL import Image
+    root = _tk_root_or_skip('trace window')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='trace_jump_')
+    try:
+        img = os.path.join(d, 'f.png')
+        Image.new('RGB', (1920, 1080), (150, 150, 150)).save(img)
+        app = types.SimpleNamespace(
+            root=root, base_ref=None, results={}, frame_rows=[],
+            run={'rows': [{'step': 3, 'tag': 'post-ramp',
+                           'nominal_kV': '1.0'}]},
+            trace_overlay_cands=lambda i: [])
+        # the window is transient to the root, and a transient of a
+        # withdrawn root is never mapped (it reads 1x1 and the case would
+        # pass without measuring anything), so the root is shown here
+        root.deiconify()
+        win = gui.TraceWindow(app, 0, img, mm_per_px=0.0396)
+        win.update()
+        w0, x0 = win.winfo_width(), win.cv.winfo_x()
+        assert w0 >= gui.TraceWindow.CV_W, ('trace window not mapped', w0)
+        h0 = win.winfo_height()
+        seen = []
+        # a growing square: the area runs from 0 through six digits, and
+        # the mm² figure appears once there are three points
+        for half in (0, 10, 60, 150, 260, 400):
+            win.model.add(960.0 - half, 540.0 - half)
+            win.model.add(960.0 + half, 540.0 - half)
+            win.model.add(960.0 + half, 540.0 + half)
+            win._vectors()
+            win.update()
+            seen.append((win.winfo_width(), win.cv.winfo_x(),
+                         win.winfo_height()))
+            win.model.restart()
+        assert all(s[:2] == (w0, x0) for s in seen), (w0, x0, seen)
+        assert all(s[2] == h0 for s in seen), (h0, seen)
+        assert 'mm²' in win.stat.cget('text'), win.stat.cget('text')
+        win.destroy()
+    finally:
+        root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count
     # line, in name order, in one bounded block -- run_tests.py explains why.
     import gc
     import traceback
+
+    gui_mod = None
+    try:
+        import sldea_edge_gui as gui_mod
+    except Exception:
+        pass
+    real_choice = getattr(gui_mod, 'cal_choice', None)
+
+    def _unspy():
+        # the cases restore gui.messagebox themselves; the question box
+        # they also replace (`gui.messagebox = gui.cal_choice = spy`) is
+        # put back here, once per case, so one case's spy cannot answer
+        # the next case's questions
+        if gui_mod is not None and real_choice is not None:
+            gui_mod.cal_choice = real_choice
 
     def _reap():
         """Collect Tk garbage HERE, in the main thread. (`#280`)
@@ -7550,8 +8599,10 @@ def _run():
         except Exception:
             failed.append((fn.__name__, traceback.format_exc()))
             print(f"FAIL {fn.__name__}")
+            _unspy()
             _reap()
             continue
+        _unspy()
         _reap()
         print(f"ok  {fn.__name__}")
     if not failed:

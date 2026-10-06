@@ -281,8 +281,15 @@ def test_electrode_mask_255_only_costs_a_flat_synthetic_strip():
     case where the change bites: `foil_mask` is texture-derived, so it
     does not recognise a painted rectangle as foil, leaving the
     brightness cut as the only thing rejecting it. Remove that and the
-    strip's own edge becomes a strong dark->light step, so the fit
-    refuses rather than returning a wrong diameter.
+    strip's own edge becomes a strong dark->light step, so the first
+    trace refuses rather than returning a wrong diameter.
+
+    Since the window-centre retry (2026-10-05) that refusal is no longer
+    the end: the retry starts inside the disc, the strip's edges are not
+    the strongest step on most of its rays, and it recovers the disc at
+    the right diameter. The invariant this test has always guarded is
+    unchanged -- never a WRONG diameter -- and is asserted below as
+    such: the retry's circle, or nothing.
 
     On REAL data it costs nothing, which is the point of this test's
     name. Measured across all 12 readable runs of the 2026-08-05 batch
@@ -298,9 +305,16 @@ def test_electrode_mask_255_only_costs_a_flat_synthetic_strip():
     yy, xx = np.mgrid[0:480, 0:640]
     img[(xx - 320) ** 2 + (yy - 240) ** 2 <= 100 * 100] = 165.0
     img[:, 312:326] = 250.0                               # BRIGHT strip
-    assert se.baseline_disc(img, dict(se.DEFAULT_SETTINGS)) is None
-    assert se.baseline_disc(
-        img, dict(se.DEFAULT_SETTINGS, electrode_lum=220.0)) is not None
+    ref = se.baseline_disc(img, dict(se.DEFAULT_SETTINGS))
+    assert ref is not None, se.baseline_disc_refusal(
+        img, dict(se.DEFAULT_SETTINGS))
+    assert ref['seed'] == se.DISC_SEED_CENTRE, ref['seed']
+    assert abs(ref['diam_px'] - 200) / 200 < 0.02, ref['diam_px']
+    assert abs(ref['cx'] - 320) < 3 and abs(ref['cy'] - 240) < 3, \
+        (ref['cx'], ref['cy'])
+    cut = se.baseline_disc(
+        img, dict(se.DEFAULT_SETTINGS, electrode_lum=220.0))
+    assert cut is not None and cut['seed'] == se.DISC_SEED_DARK, cut
     # The gain side — that 255 lets edge detection work on a dark
     # carbon-black electrode — is a BENCH observation (2026-08-05) and is
     # deliberately NOT asserted here: it has not been reproduced on
@@ -959,6 +973,92 @@ def test_baseline_disc_refuses_when_there_is_no_disc():
     Refusal is the contract -- mm falls back loudly, not wrongly."""
     base = _bridged_scene(with_disc=False)
     assert se.baseline_disc(base, dict(se.DEFAULT_SETTINGS)) is None
+
+
+def _backlit_scene(with_disc=True, seed=11):
+    """The 13_backlight_2 failure shape (2026-10-05): a backlit membrane
+    whose disc is only 6 gray levels darker than its own surround, under
+    a backlight that falls off by ~16 levels from a plateau around the
+    disc to the window's edge. The frame-wide median then sits BELOW the
+    disc's surround (real frame: disc 214, ring 220, median 216), so no
+    pixel of the disc is darker than paper - 5 and the first trace seeds
+    on the dim edge of the backlight. Soft rim (sigma 2.5 px) and sensor
+    grain (sigma 1.5) as on the bench."""
+    import cv2
+    rng = np.random.default_rng(seed)
+    h, w = 540, 960
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    rd = np.hypot(xx - 480, yy - 270)
+    img = 208.0 + 16.0 * np.exp(-(rd / 240.0) ** 4) - 4.0 * (xx / w)
+    if with_disc:
+        disc = (rd <= 100).astype(np.float32)
+        img -= 6.0 * cv2.GaussianBlur(disc, (0, 0), 2.5)
+    img += rng.normal(0, 1.5, img.shape).astype(np.float32)
+    return np.clip(img, 0, 255).astype(np.float32)
+
+
+def test_baseline_disc_retries_from_the_centre_on_a_backlit_gradient():
+    """The first trace refuses this scene (2-4 of 360 rays from a seed on
+    the dim edge, measured 2026-10-05); the retry from the window centre,
+    with the fill judged against the ring around the circle, traces the
+    disc at its true size and centre, and says it was the retry."""
+    s = dict(se.DEFAULT_SETTINGS)
+    for seed in (11, 12, 13):
+        img = _backlit_scene(with_disc=True, seed=seed)
+        ref = se.baseline_disc(img, s)
+        assert ref is not None, se.baseline_disc_refusal(img, s)
+        assert ref['seed'] == se.DISC_SEED_CENTRE, ref['seed']
+        assert abs(ref['diam_px'] - 200) / 200 < 0.03, ref['diam_px']
+        assert abs(ref['cx'] - 480) < 5 and abs(ref['cy'] - 270) < 5, \
+            (ref['cx'], ref['cy'])
+        assert ref['circ'] > 0.9, ref['circ']
+        # paper_lum is the level the fill was judged against: the ring,
+        # which sits ABOVE the frame-wide median on this scene
+        assert ref['paper_lum'] > float(np.median(img)) + 2, \
+            (ref['paper_lum'], float(np.median(img)))
+
+
+def test_the_retry_does_not_flip_on_a_one_level_decode_difference():
+    """2026-10-06: the retry's fill used to count interior pixels 4 gray
+    levels under the ring's median. On 13_backlight_2 the PNG decode read
+    59 % and the video pass's cvtColor decode of the same file 51 %, either
+    side of the 55 % gate. Its cut is now the ring's own 25th percentile,
+    which moves with the picture: rounding the scene down or up by up to
+    one gray level, as the two decodes do, changes neither the verdict
+    nor the diameter by more than a pixel."""
+    s = dict(se.DEFAULT_SETTINGS)
+    img = _backlit_scene(with_disc=True, seed=11)
+    fits = []
+    for variant in (img, np.floor(img), np.ceil(img),
+                    np.clip(img + 0.5, 0, 255), np.clip(img - 0.5, 0, 255)):
+        ref = se.baseline_disc(variant.astype(np.float32), s)
+        assert ref is not None, se.baseline_disc_refusal(
+            variant.astype(np.float32), s)
+        assert ref['seed'] == se.DISC_SEED_CENTRE
+        assert ref['solidity'] > 0.75, ref['solidity']
+        fits.append(ref['diam_px'])
+    assert max(fits) - min(fits) < 2.0, fits
+
+
+def test_backlight_without_a_disc_still_refuses():
+    """The retry must not turn a bare backlight into a disc: the same
+    plateau and fall-off with nothing on it refuses, and the reason is
+    the first trace's (the retry's own refusal describes the point it
+    started from, not the picture)."""
+    s = dict(se.DEFAULT_SETTINGS)
+    for seed in (11, 12, 13):
+        img = _backlit_scene(with_disc=False, seed=seed)
+        assert se.baseline_disc(img, s) is None
+        why = se.baseline_disc_refusal(img, s)
+        assert why and not why.startswith('traced from'), why
+
+
+def test_the_first_trace_still_owns_every_frame_it_fits():
+    """The retry runs only after a refusal: a scene the original trace
+    fits is reported exactly as before, tagged as the dark-region seed."""
+    ref = se.baseline_disc(_bridged_scene(with_disc=True),
+                           dict(se.DEFAULT_SETTINGS))
+    assert ref is not None and ref['seed'] == se.DISC_SEED_DARK, ref
 
 
 def test_photometric_fit_mask_excludes_a_large_changed_region():
@@ -3980,11 +4080,24 @@ def test_run_health_reports_missing_voltage_its_stop_point_and_its_sign():
         assert sign_only in it['text'], it['text']
         assert not _codes(items, 'stop')
         # the runner's own line says the monitor sign was accounted for
+        # (runs before 2026-10-05 multiplied the readings by -1)
         inv = _health_run(os.path.join(d, 'b'), rows=rows, runlog=log,
                           setup=setup + "Trek control polarity: INVERTED "
                           "(control = -kV/gain; monitor readings "
                           "sign-corrected in log)\n")
         assert 'kv_sign' not in _codes(se.run_health(inv))
+        # since 2026-10-05 a ticked box logs the readings as read, and a
+        # box set right reads POSITIVE: negative readings under it mean
+        # this Trek does not invert, so the note stays and says the box
+        # was ticked rather than that nothing recorded an inversion
+        raw = _health_run(os.path.join(d, 'g'), rows=rows, runlog=log,
+                          setup=setup + "Trek control polarity: INVERTED "
+                          "(control = -kV/gain; monitor readings logged "
+                          "as read)\n")
+        it = _item(se.run_health(raw), 'kv_sign')
+        assert 'records the "Trek inverts" box as ticked' in it['text']
+        assert 'does not record an inverted Trek' not in it['text']
+        assert 'Do not change any high-voltage setting' in it['text']
         # one landing holding a reading AND a blank: 'at', not 'above'
         at = _health_run(os.path.join(d, 'c'), setup=setup, runlog=log,
                          rows=rows[:4] + [('pre-ramp', 4.0, '', '-16.0')]
@@ -4868,6 +4981,161 @@ def test_telemetry_advisories_ride_the_next_snapshot_row_and_never_confirm():
         assert se.breakdown_flags(run['rows'], {}, s, rundir=rd) == ({}, {})
     finally:
         shutil.rmtree(d)
+
+
+# ---------------------------------------------------------------------------
+# A0 from the scale anchor when the automatic fit refuses (2026-10-05)
+# ---------------------------------------------------------------------------
+
+def _anchor(**kw):
+    """A hand anchor of the bridged scene's disc: centre (480, 270),
+    200 px across, measured on the baseline frame."""
+    a = {'method': se.ANCHOR_METHOD_MANUAL, 'diam_px': 200.0,
+         'cx': 480.0, 'cy': 270.0, 'is_baseline': True}
+    a.update(kw)
+    return a
+
+
+def test_anchor_disc_states_the_operators_circle_and_refuses_the_rest():
+    """anchor_disc turns a human-signed anchor measured on the baseline
+    frame, with a centre, into baseline_disc's shape; anything less is
+    None, so no caller can build A0 from an anchor that does not
+    describe this frame."""
+    ref = se.anchor_disc(_anchor(), (540, 960))
+    assert ref is not None
+    assert ref['method'] == 'anchor-disc'
+    assert ref['a0_from'] == se.ANCHOR_A0_FROM
+    assert abs(ref['area_px'] - np.pi * 100.0 ** 2) < 1e-6
+    assert (ref['cx'], ref['cy'], ref['diam_px']) == (480.0, 270.0, 200.0)
+    rad = np.hypot(ref['contour'][:, 0] - 480.0,
+                   ref['contour'][:, 1] - 270.0)
+    assert np.allclose(rad, 100.0), rad
+    # an approved automatic fit is a human-signed anchor too
+    assert se.anchor_disc(_anchor(method=se.ANCHOR_METHOD_VERIFIED)) \
+        is not None
+    for bad in (None, {}, _anchor(method='baseline-disc'),
+                _anchor(is_baseline=False), _anchor(is_baseline=None),
+                _anchor(cx=None), _anchor(cy='x'), _anchor(diam_px=0.0),
+                _anchor(diam_px=float('nan')), _anchor(cx=float('inf'))):
+        assert se.anchor_disc(bad, (540, 960)) is None, bad
+    # a centre off this frame does not describe it
+    assert se.anchor_disc(_anchor(cx=1000.0), (540, 960)) is None
+    assert se.anchor_disc(_anchor(cy=-1.0), (540, 960)) is None
+    assert se.anchor_disc(_anchor(cx=1000.0)) is not None   # no shape given
+
+
+def test_refused_baseline_gets_its_a0_from_the_anchor():
+    """The bug: a baseline the automatic fit refuses got no candidate,
+    auto-rejected, Save left its area blank, and sldea_plot skipped the
+    run for having no A0. With the anchor, the baseline row states the
+    operator's circle as its 'resting' claim, tagged."""
+    base = _bridged_scene(with_disc=False)
+    s = dict(se.DEFAULT_SETTINGS)
+    assert se.baseline_disc(base, s) is None
+    assert se.candidates(base, base, s) == []          # the old outcome
+    cands = se.candidates(base, base, s, anchor_ref=_anchor())
+    assert [c['method'] for c in cands] == ['resting'], \
+        [(c['method'], c['conf']) for c in cands]
+    rc = cands[0]
+    assert rc['a0_from'] == se.ANCHOR_A0_FROM
+    assert abs(rc['area_px'] - np.pi * 100.0 ** 2) < 1e-6
+    assert rc['diam_px'] == 200.0
+    # an anchor that cannot describe the frame changes nothing
+    assert se.candidates(base, base, s,
+                         anchor_ref=_anchor(cx=None)) == []
+    assert se.candidates(base, base, s,
+                         anchor_ref=_anchor(is_baseline=False)) == []
+
+
+def test_anchor_never_touches_other_frames_or_a_fit_that_succeeds():
+    """The anchor is a fallback for ONE row. A frame that is not the
+    baseline is measured exactly as without it, and when the automatic
+    fit accepts the baseline, its own claim stands."""
+    def key(cands):
+        return [(c['method'], round(float(c['area_px']), 3),
+                 round(float(c['conf']), 3)) for c in cands]
+    s = dict(se.DEFAULT_SETTINGS)
+    # refused baseline, an activated frame: identical with and without
+    base = _bridged_scene(with_disc=False)
+    img = base.copy()
+    yy, xx = np.mgrid[0:base.shape[0], 0:base.shape[1]]
+    img[(xx - 480) ** 2 + (yy - 270) ** 2 <= 110 ** 2] += 30.0
+    plain = se.candidates(base, img, s)
+    with_a = se.candidates(base, img, s, anchor_ref=_anchor())
+    assert plain, 'the activated frame should still be detected'
+    assert key(plain) == key(with_a)
+    assert not any(c.get('a0_from') for c in with_a)
+    # the fit accepts this baseline: the anchor is ignored, even a wrong one
+    base2 = _bridged_scene(with_disc=True)
+    assert se.baseline_disc(base2, s) is not None
+    plain2 = se.candidates(base2, base2, s)
+    with_a2 = se.candidates(base2, base2, s,
+                            anchor_ref=_anchor(diam_px=150.0))
+    assert key(plain2) == key(with_a2)
+    assert not any(c.get('a0_from') for c in with_a2)
+
+
+def test_refresh_anchor_a0_follows_the_anchor_save_scales_by():
+    """A calibration after Detect is held for the next Save. The
+    baseline claim built from the OLD anchor would then be scaled by the
+    NEW one and stop reading pi*(diam_mm/2)^2, so Save rebuilds it, or
+    drops it when the new anchor cannot state a circle. Rows not built
+    from the anchor are never touched."""
+    claim = dict(se.anchor_disc(_anchor()), method='resting', conf=0.95)
+    other = {'method': 'diff-hi', 'area_px': 5.0, 'diam_px': 2.0,
+             'cx': 1.0, 'cy': 1.0}
+    res = {0: dict(claim), 1: dict(other), 2: None}
+    assert se.refresh_anchor_a0(res, _anchor(), (540, 960)) == {}
+    assert res[0]['diam_px'] == 200.0
+    out = se.refresh_anchor_a0(res, _anchor(diam_px=210.0, cx=482.0),
+                               (540, 960))
+    assert out == {0: 'rebuilt'}, out
+    assert res[0]['diam_px'] == 210.0 and res[0]['cx'] == 482.0
+    assert abs(res[0]['area_px'] - np.pi * 105.0 ** 2) < 1e-6
+    assert res[0]['method'] == 'resting' and res[0]['conf'] == 0.95
+    assert res[0]['a0_from'] == se.ANCHOR_A0_FROM
+    assert res[1] == other and res[2] is None
+    out = se.refresh_anchor_a0(res, _anchor(cx=None), (540, 960))
+    assert out == {0: 'dropped'} and res[0] is None, out
+    assert res[1] == other
+
+
+def test_anchor_centre_survives_setup_txt():
+    """A reused anchor must still be able to state A0, so the centre is
+    recorded in the anchor block and read back as a float; an older
+    block without it loads exactly as before."""
+    d = tempfile.mkdtemp()
+    try:
+        se.save_scale_anchor(d, {'method': se.ANCHOR_METHOD_MANUAL,
+                                 'diam_px': 200.0, 'diam_mm': 16.0,
+                                 'mm_per_px': 0.08,
+                                 'anchor_is_baseline': True,
+                                 'disc_cx_px': 480.25, 'disc_cy_px': 270.5})
+        a = se.load_scale_anchor(d)
+        assert a['disc_cx_px'] == 480.25 and a['disc_cy_px'] == 270.5, a
+        se.save_scale_anchor(d, {'method': se.ANCHOR_METHOD_MANUAL,
+                                 'diam_px': 200.0, 'diam_mm': 16.0,
+                                 'mm_per_px': 0.08})
+        b = se.load_scale_anchor(d)
+        assert 'disc_cx_px' not in b and 'disc_cy_px' not in b, b
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_anchor_a0_note_reaches_the_csv():
+    """Save passes ANCHOR_A0_NOTE through apply_results' anno channel,
+    so the row says where its A0 came from, beside the edge token the
+    plot parses, and the area is pi*(diam_mm/2)^2 at the anchor's own
+    scale."""
+    rows = [{'tag': 'baseline', 'notes': '', 'active_area_px': '',
+             'active_area_mm2': '', 'active_diam_mm': ''}]
+    claim = dict(se.anchor_disc(_anchor()), method='resting', conf=0.95)
+    se.apply_results(rows, {0: claim}, 16.0 / 200.0, {},
+                     annos={0: se.ANCHOR_A0_NOTE})
+    assert se.ANCHOR_A0_NOTE in rows[0]['notes'], rows[0]['notes']
+    assert 'edge:resting conf 0.95' in rows[0]['notes'], rows[0]['notes']
+    assert abs(float(rows[0]['active_area_mm2'])
+               - np.pi * 8.0 ** 2) < 0.01, rows[0]['active_area_mm2']
 
 
 def _run():

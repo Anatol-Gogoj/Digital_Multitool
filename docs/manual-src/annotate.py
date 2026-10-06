@@ -58,10 +58,24 @@ def find(img, text):
     return None
 
 
+def client(img, x, y):
+    """A fixed `rect` / `badge_at` point -> image pixels.
+
+    Fixed coordinates are written relative to the window's CLIENT area
+    (Tk's own layout, which capture.py pins to 96 dpi), not to the shot.
+    The shot also holds the title bar and, on the main window, the menu
+    bar, and Windows draws both at the display scale: 52 px tall on a
+    100 % display, 86 px on a 175 % one. Image-relative numbers moved
+    with the display that captured them (2026-10-05)."""
+    ox, oy = img.get("client_offset", [0, 0])
+    return x + ox, y + oy
+
+
 def resolve(img, spec):
     """Spec -> pixel rect [x, y, w, h] or None."""
     if "rect" in spec:
-        return list(spec["rect"])
+        x, y, w, h = spec["rect"]
+        return [*client(img, x, y), w, h]
     texts = spec["union"] if "union" in spec else [spec["match"]]
     boxes = []
     for t in texts:
@@ -130,13 +144,13 @@ S["tab_lcr"] = {
 
 S["tab_scope"] = {
     "callouts": [
-        {"rect": [24, 179, 244, 26], "badge_side": "right",
+        {"rect": [21, 127, 246, 26], "badge_side": "right",
          "label": "Per-channel setup — one inner tab per channel (CH1–CH4)"},
         {"match": "Use as trigger:", "extend_right": 60, "badge_side": "right",
          "label": "Tick the channel that should trigger acquisition"},
         {"match": "Apply CH1 Config", "label": "Sends this channel only — does not touch the trigger"},
         {"match": "Apply All Settings", "label": "The only button that sends trigger source, level and slope"},
-        {"match": "Get CH1 Measurements", "badge_at": [160, 634],
+        {"match": "Get CH1 Measurements", "badge_at": [145, 619],
          "label": "Readouts are snapshots — click to refresh"},
         {"match": "Capture CH1 Waveform", "label": "Pulls the trace into a plot window with Save CSV"},
         {"match": "Acquisition Control", "label": "Run / Stop / Single / AutoSet"},
@@ -174,7 +188,7 @@ S["tab_dmm"] = {
         {"match": "IP:", "extend_right": 95, "label": "The meter's LAN address — this unit is Ethernet-only"},
         {"match": "Reconnect", "label": "Connect / retry at this IP"},
         {"match": "Function:", "extend_right": 130, "label": "What to measure — V, A, Ω, Hz, F (auto-ranged)"},
-        {"match": "Live reading", "badge_at": [302, 178],
+        {"match": "Live reading", "badge_at": [300, 92],
          "label": "Continuous display, ~2 readings per second"},
         {"match": "Read once", "label": "Single measurement"},
         {"match": "—", "label": "Reading appears here — red OVLD on overload"},
@@ -185,7 +199,7 @@ S["tab_logging"] = {
     "callouts": [
         {"match": "Log Directory:", "extend_right": 260, "label": "All CSV files land here (default ./logs)"},
         {"match": "Sample Interval (s):", "extend_right": 60, "label": "Seconds between samples"},
-        {"rect": [30, 183, 350, 335], "badge_side": "right",
+        {"rect": [28, 134, 352, 366], "badge_side": "right",
          "label": "Tick every source to record — one CSV per source"},
         {"match": "Start Logging", "label": "Opens fresh timestamped CSVs and starts sampling"},
         {"match": "Stop Logging", "label": "Closes the files and ends the run"},
@@ -195,7 +209,7 @@ S["tab_logging"] = {
 
 S["tab_battery"] = {
     "callouts": [
-        {"match": "Load File…", "badge_at": [19, 260], "label": "Open the raw cycler .xls/.xlsx export"},
+        {"match": "Load File…", "badge_at": [17, 174], "label": "Open the raw cycler .xls/.xlsx export"},
         {"match": "No file loaded", "label": "Shows filename + rows × columns when processed"},
         {"match": "Export Processed CSV…", "label": "Translated, merged table → CSV"},
         {"union": ["Plot style:", "Time unit:"], "extend_right": 85,
@@ -206,10 +220,10 @@ S["tab_battery"] = {
 
 S["tab_webcam"] = {
     "callouts": [
-        {"union": ["Camera:", "Refresh"], "extend_right": 40, "badge_at": [70, 258],
+        {"union": ["Camera:", "Refresh"], "extend_right": 40, "badge_at": [215, 204],
          "label": "Pick the camera; Refresh rescans devices"},
-        {"match": "Start Preview", "badge_at": [268, 258], "label": "Live view — the same button stops it"},
-        {"match": "Snapshot", "badge_at": [352, 258], "label": "Save one timestamped PNG"},
+        {"match": "Start Preview", "badge_at": [299, 204], "label": "Live view — the same button stops it"},
+        {"match": "Snapshot", "badge_at": [394, 204], "label": "Save one timestamped PNG"},
         {"match": "Show focus score", "label": "Sharpness number — turn the lens until it peaks"},
         {"match": "🔒 Apply & Lock", "label": "Locks every camera knob — prevents drift during runs"},
         {"match": "Start interval", "badge_side": "right", "label": "Automatic photo every N seconds"},
@@ -238,6 +252,21 @@ S["tab_sldea"] = {
                   "material, ink concentration (greyed for non-inks)"},
         {"match": "⚡ Breakdown watchdog (LIVE runs)", "label": "Aborts on sustained overcurrent — leave Enabled"},
         {"match": "📈 Scope kV/µA log", "label": "Logs kV/µA continuously to telemetry.csv — the current between photos"},
+    ],
+}
+
+# THE TAB'S LOWER HALF, ON ITS OWN SHOT (v1.4.1). The 🎥 video row (#359)
+# made the tab taller than the 1000 px capture window, so the run row and
+# the presets fell below the fold and their badges landed on the window's
+# bottom edge pointing at nothing. capture.py already took a scrolled-to-
+# bottom shot of every tall tab; the controls below the telemetry row are
+# annotated there instead, and build_manual.py shows it under the first.
+S["tab_sldea_bottom"] = {
+    "callouts": [
+        {"match": "🎥 Video beside the snapshots (lossless)",
+         "label": "Optional lossless video beside the snapshots (1–2 fps). "
+                  "NOT bench-verified yet — leave Record off on important "
+                  "runs; off = snapshots only"},
         {"match": "DRY RUN — HV OFF", "label": "Safety toggle — untick only for a live HV run"},
         {"match": "▶ Run (DRY)", "label": "Starts the run — the label shows the mode"},
         {"match": "■ Abort", "label": "Ramps to 0 kV first, then stops"},
@@ -268,24 +297,32 @@ S["20_arb_editor"] = {
     "callouts": [
         {"union": ["Points:", "Full-scale ±V:"], "extend_right": 45,
          "label": "Resolution (samples) and the volt scale (max ±10 V)"},
-        {"rect": [16, 96, 228, 268], "badge_side": "br",
+        {"rect": [16, 62, 226, 270], "badge_at": [200, 262],
+         # in the table's own empty rows: "br" met the Segment badge
          "label": "Breakpoint table — double-click a cell for exact values"},
-        {"rect": [258, 78, 620, 452], "label": "Click to add a point, drag dots, right-click deletes"},
+        {"rect": [258, 41, 622, 468], "label": "Click to add a point, drag dots, right-click deletes"},
         {"match": "Segment after point", "badge_side": "tr",
          "label": "Shape to the next point: LINE, HOLD, SINE, EXP…"},
         {"match": "Save to Library", "label": "Store the waveform for reuse"},
         {"match": "Export .bin for 4055B flash drive...", "label": "Preferred delivery: file for the 4055B's front USB port"},
         {"match": "Export for EasyWaveX (flash drive)...", "label": "Fallback: CSV template for the EasyWaveX PC"},
-        {"match": "Upload && Select", "label": "Direct upload — works over LAN only"},
+        {"match": "Upload & Select", "label": "Direct upload — works over LAN only"},
     ],
 }
 
 S["40_edge_review"] = {
     "callouts": [
-        {"match": "Run:", "extend_right": 310,
+        {"match": "Run:", "extend_right": 310, "badge_at": [268, 26],
+         # on the combobox's own blank end: below it is the Run health
+         # text, above it the window title
          "label": "Pick the run — ✓ marks already-processed runs"},
         {"match": "▶ Detect Edges",
          "label": "Traces every frame — picks/rejects from earlier passes reset"},
+        {"rect": [6, 57, 1397, 83], "badge_side": "bottom",
+         # a Text widget: no text= to match on. Its width follows the
+         # window's: 1290 until v1.4.1, 1397 since the Video review button
+         # (#366) widened the toolbar (widgets.json, class Text)
+         "label": "Run health — what the run's own files say went wrong at capture; advice only"},
         {"match": "Candidates",
          "label": "Machine outlines — colors match the A/B/C tags on the image"},
         {"union": ["✔ Accept (Enter)", "✘ Reject (R)"],
@@ -294,9 +331,16 @@ S["40_edge_review"] = {
         {"match": "review queue", "label": "Frames still waiting for a decision"},
         {"match": "📏 Calibrate / re-anchor…",
          "label": "Set or re-anchor the mm-per-px scale — verify the automatic disc fit"},
-        {"match": "💾 Save to data.csv…", "badge_side": "bottom",
-         # bottom, not the automatic left: the `#237` detect/session clock
-         # now sits left of Save, and the auto badge landed on its text
+        {"match": "🎞 Video review…", "badge_side": "top",
+         # on top like 2 and 8: the automatic right lands on the progress bar
+         "label": "Walk the video frames that disagree with the stills — grayed out until the run has a video"},
+        {"match": "💾 Save to data.csv…", "badge_at": [1418, 70],
+         # not the automatic left: the `#237` detect/session clock sits
+         # left of Save. Not "bottom" either: since `#346` the Run health
+         # text is there, so the badge sits on that strip's scrollbar.
+         # A FIXED x, so it follows the window width: the Video review
+         # button (#366) widened the window by 107 px and moved it from
+         # 1313 (v1.4.1), where it would now cover Run health text
          "label": "Writes accepted areas back (keeps a .bak) — confirms first"},
         {"match": "❓ How to use…", "badge_side": "left",
          "label": "The review loop in one short read — start here"},
@@ -409,7 +453,7 @@ def annotate(name, spec):
                             outline=RED, width=3)
         others = [o for o in occupied if o is not rect]
         if "badge_at" in cspec:
-            bx, by = cspec["badge_at"]
+            bx, by = client(src, *cspec["badge_at"])
         else:
             bx, by = place_badge(rect, others + placed, img_w, img_h, soft,
                                  side=cspec.get("badge_side"))

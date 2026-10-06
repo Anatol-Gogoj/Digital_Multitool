@@ -494,11 +494,17 @@ _ANCHOR_KEYS = ('method', 'cal_mode', 'diam_px', 'diam_mm', 'mm_per_px',
                 'reanchor', 'prev_diam_px', 'prev_implied_px',
                 'prev_method', 'prev_cal_mode', 'reanchor_rows',
                 'reanchor_blanked',
+                # the measured disc's centre, full-resolution px
+                # (2026-10-05): what lets a REUSED anchor still state the
+                # baseline row's A0 when the automatic fit refuses
+                # (anchor_disc). Absent on every older anchor.
+                'disc_cx_px', 'disc_cy_px',
                 'guard', 'saved', 'user')
 _ANCHOR_FLOATS = ('diam_px', 'diam_mm', 'mm_per_px', 'auto_diam_px',
                   'spread_px', 'spread_pct', 'sigma_pct', 'se_pct',
                   'fit_circ', 'fit_conf', 'fit_resid_px', 'fit_arc_cov',
-                  'prev_diam_px', 'prev_implied_px')
+                  'prev_diam_px', 'prev_implied_px',
+                  'disc_cx_px', 'disc_cy_px')
 _ANCHOR_INTS = ('n_rounds', 'fit_n_edge', 'reanchor_rows',
                 'reanchor_blanked')
 
@@ -3341,8 +3347,16 @@ def _resting_refit(prep, settings, ref):
     return c
 
 
-def candidates(base_gray, img_gray, settings, prev_method=None):
+def candidates(base_gray, img_gray, settings, prev_method=None,
+               anchor_ref=None):
     """Up to 3 candidate outlines for the active area, best first.
+
+    `anchor_ref`: the run's human-signed scale anchor (Edge Review's
+    manual_ref). Used ONLY on the baseline frame and ONLY when
+    baseline_disc refuses it: anchor_disc then supplies the resting disc,
+    so the baseline row still gets its 'resting' claim (A0), tagged
+    `a0_from`. Every other frame, and every run where the automatic fit
+    succeeds, is measured exactly as without it.
 
     `prev_method`: the winning method of the PREVIOUS frame in ramp
     order, when the caller iterates one. The incumbent channel gets a
@@ -3417,6 +3431,10 @@ def candidates(base_gray, img_gray, settings, prev_method=None):
     img_full, base_full = prep['img_full'], prep['base_full']
     ref = baseline_disc(base_gray, settings) if base_gray is not None \
         else None
+    if ref is None and is_baseline:
+        # the fit refused this baseline: the operator's own resting-disc
+        # measurement still states A0 (see anchor_disc)
+        ref = anchor_disc(anchor_ref, np.shape(base_gray))
     min_sol = float(settings.get('min_solidity', 0))
     gated = (float(np.percentile(sub, 99))
              < float(settings.get('min_diff', 10)))
@@ -4292,6 +4310,11 @@ def _fit_circle(pts):
 
 
 _DISC_CACHE = {}
+# Which trace produced a baseline_disc result (its 'seed' key): the
+# original dark-region seed with the frame-wide paper level, or the retry
+# from the window centre with the local surround (2026-10-05).
+DISC_SEED_DARK = 'dark-region'
+DISC_SEED_CENTRE = 'window-centre'
 # Why the fit refused, keyed exactly like _DISC_CACHE and evicted with it.
 # A parallel dict rather than a tuple in _DISC_CACHE so the cached VALUE
 # keeps its old shape: several readers do `dict(hit)` on it.
@@ -4320,13 +4343,21 @@ def baseline_disc(base_gray, settings):
     the strongest dark->light step on each ray whose edge neighborhood is
     clear of foil and glint (rays measuring through the strips are
     excluded, not repaired), and fit a circle robustly to the edge points
-    -- twice, because an off-centre seed truncates the far side. Refuses (None) unless the accepted edge
-    covers >= ~120 degrees of arc, the fit residual stays under 6% of the
+    -- twice, because an off-centre seed truncates the far side. Refuses
+    (None) unless the accepted edge covers 13 of 36 ten-degree sectors
+    (130 degrees), the fit residual stays under 6% of the
     radius, the circle is actually filled with the dark class, and the
     diameter is a plausible fraction of the ROI; conf is built from those
     same three quantities, so a shape that barely passes cannot read as
     certainty. Verified against the by-eye measurement on the three P3
     baselines (579/578/586 px): agreement within ~1%.
+
+    When that trace refuses, a second one runs from the centre of the
+    search window and judges the fill against the ring around the fitted
+    circle rather than the frame-wide paper level (2026-10-05, for backlit
+    frames whose illumination gradient exceeds the disc's own contrast;
+    see _baseline_disc_uncached). The result's 'seed' key says which
+    trace produced it (DISC_SEED_DARK or DISC_SEED_CENTRE).
 
     Returns a candidate-like dict (method 'baseline-disc') or None. When
     it refuses, WHICH gate refused is recorded and readable through
@@ -4373,6 +4404,103 @@ def baseline_disc_refusal(base_gray, settings):
     return _DISC_WHY.get(_disc_key(base_gray, settings))
 
 
+# The baseline row's A0 when the automatic fit refuses (2026-10-05).
+#
+# candidates() states the baseline row's area as the 'resting' claim, a
+# copy of the resting-disc reference. That reference used to be ONLY
+# baseline_disc, so on a poor baseline frame (blurred, badly exposed,
+# foil across the disc) the fit refused, the baseline row got no
+# candidate, auto-rejected as 'no change vs baseline', and Save left its
+# area blank. Every other accepted frame still had an area, but the run
+# had no A0, and sldea_plot skips a run with no A0 in area mode.
+#
+# Yet the run HAS a resting-disc measurement: the scale gate makes the
+# operator measure the resting disc on the baseline frame before any
+# Detect. Its diameter defines the scale, so the circle it describes is
+# exactly pi*(diam_mm/2)^2 in mm2 by construction. anchor_disc turns that
+# measurement into the same reference shape baseline_disc returns, and
+# candidates() uses it for the baseline row only, only when the fit
+# refused, and only from an anchor a human signed off on THIS frame that
+# carries the disc centre. The resulting claim is tagged `a0_from`, and
+# Save writes that provenance into the row's notes.
+ANCHOR_A0_FROM = 'scale-anchor'
+ANCHOR_A0_NOTE = 'A0 from the scale anchor (automatic disc fit refused)'
+
+
+def anchor_disc(anchor, frame_shape=None):
+    """The resting-disc reference implied by a human-signed scale anchor,
+    shaped like baseline_disc's result (method 'anchor-disc'), or None.
+
+    None unless the anchor is one of ANCHOR_METHODS, was measured on the
+    baseline frame (`is_baseline`), and carries a finite positive
+    `diam_px` and a disc centre (`cx`, `cy`, full-resolution px). With
+    `frame_shape` (h, w) the centre must also lie on that frame: an
+    anchor clicked on a different-sized frame does not describe it.
+
+    The circle is the operator's, not a fit, so it carries no edge
+    statistics (arc_cov, fit_resid_px, n_edge, paper_lum are absent,
+    not zero), and `conf` is the resting claim's to set."""
+    if not anchor or anchor.get('method') not in ANCHOR_METHODS:
+        return None
+    if not anchor.get('is_baseline'):
+        return None
+    try:
+        d = float(anchor.get('diam_px'))
+        cx = float(anchor.get('cx'))
+        cy = float(anchor.get('cy'))
+    except (TypeError, ValueError):
+        return None
+    if not (np.isfinite(d) and np.isfinite(cx) and np.isfinite(cy)):
+        return None
+    if d <= 0:
+        return None
+    if frame_shape is not None:
+        h, w = frame_shape[:2]
+        if not (0.0 <= cx < w and 0.0 <= cy < h):
+            return None
+    r = 0.5 * d
+    th = np.linspace(0, 2 * np.pi, 90, endpoint=False)
+    contour = np.stack([cx + r * np.cos(th), cy + r * np.sin(th)], axis=1)
+    return {'method': 'anchor-disc', 'area_px': float(np.pi * r * r),
+            'diam_px': d, 'cx': cx, 'cy': cy, 'circ': 1.0,
+            'solidity': 1.0, 'contour': contour, 'conf': None,
+            'wrinkle': None, 'spread_pct': 0.0,
+            'a0_from': ANCHOR_A0_FROM}
+
+
+def refresh_anchor_a0(results, anchor, frame_shape=None):
+    """Bring anchor-derived A0 claims in `results` up to date with the
+    CURRENT anchor, in place. -> {row index: 'rebuilt' | 'dropped'}.
+
+    The anchor can change after Detect (a scale calibration while a pass is
+    in memory is held for the next Save). A baseline 'resting' claim
+    built from the OLD anchor would then be written at the NEW anchor's
+    scale and no longer read pi*(diam_mm/2)^2. A claim whose anchor
+    still matches is left alone; one that differs is rebuilt from the
+    current anchor when anchor_disc accepts it, and set to None (a
+    rejected row) when it does not. Rows not built from the anchor are
+    never touched."""
+    out = {}
+    cur = anchor_disc(anchor, frame_shape)
+    for i, r in list(results.items()):
+        if not r or r.get('a0_from') != ANCHOR_A0_FROM:
+            continue
+        if cur is not None and all(
+                abs(float(r.get(k, np.nan)) - float(cur[k])) < 1e-6
+                for k in ('diam_px', 'cx', 'cy')):
+            continue
+        if cur is None:
+            results[i] = None
+            out[i] = 'dropped'
+            continue
+        fresh = dict(r)
+        for k in ('area_px', 'diam_px', 'cx', 'cy', 'contour'):
+            fresh[k] = cur[k]
+        results[i] = fresh
+        out[i] = 'rebuilt'
+    return out
+
+
 def _baseline_disc_uncached(base_gray, settings):
     """-> (candidate dict or None, refusal reason or None).
 
@@ -4380,7 +4508,27 @@ def _baseline_disc_uncached(base_gray, settings):
     they are not interchangeable: 'the disc is off the size range' sends
     the operator to check diam_mm and the camera zoom, while 'the arc is
     only 22% covered' sends them to look at what is lying across the
-    frame. A single 'refused' would send them to guess."""
+    frame. A single 'refused' would send them to guess.
+
+    Two traces, in order. The first seeds on the biggest central region
+    darker than the frame-wide paper level and judges fill against that
+    same level; it is the original fit, unchanged, and wherever it
+    succeeds its result stands. Only when it refuses does a second trace
+    run (2026-10-05): seeded at the centre of the search window, with the
+    fill judged against the ring just outside the fitted circle instead
+    of the frame-wide level (the share of the interior darker than that
+    ring's darker quarter; 2026-10-06). Every other gate is shared.
+
+    Why the second trace exists: a backlit membrane (13_backlight_2,
+    2026-10-05) puts the disc only ~6 gray levels below its own surround,
+    while the backlight falls off by ~15 across the window. The frame-wide
+    median then sits BETWEEN the disc and its surround, so no pixel of the
+    disc is darker than paper - 5 (the seed lands on the dim side of the
+    backlight) and 6% of its interior is darker than paper - 4 (the fill
+    gate). Seeded on the disc, the ray stage itself traces it cleanly
+    (260 deg of arc, residual 1.5% of r, circularity 0.96). The window
+    centre needs no dark class to find, and the operator frames the disc
+    there; a frame with no disc at the centre refuses as before."""
     import cv2
     if base_gray is None:
         return None, 'there is no readable baseline frame to fit'
@@ -4431,10 +4579,6 @@ def _baseline_disc_uncached(base_gray, settings):
         s = a * max(0.05, 1.0 - 4.0 * d2)
         if s > score:
             seed, score = (float(cx), float(cy)), s
-    if seed is None:
-        return None, (f"no central dark region big enough to seed on "
-                      f"(the paper reads {paper:.0f} gray and nothing "
-                      f"below it covers 0.2% of the search window)")
 
     r_hi = 0.55 * min(hs, ws)
     rs = np.arange(6.0, r_hi, 1.0)
@@ -4476,84 +4620,158 @@ def _baseline_disc_uncached(base_gray, settings):
                         cy0 + redge * np.sin(th[k])))
         return np.asarray(pts, np.float64)
 
-    pts = cast(*seed)
-    if len(pts) < 40:
-        return None, (f"only {len(pts)} of 360 radial rays found a clean "
-                      f"dark→light ink step (need 40) — the disc edge is "
-                      f"too faint, or the electrodes cover too much of it")
-    cx1, cy1, _r1, _k1 = _fit_circle(pts)
-    if not (0 <= cx1 <= ws and 0 <= cy1 <= hs):
-        return None, ("the first circle fit put the centre outside the "
-                      "search window — the edge points are not a disc")
-    pts = cast(cx1, cy1)                # re-cast from the fitted centre
-    if len(pts) < 40:
-        return None, (f"only {len(pts)} of 360 rays found a clean ink step "
-                      f"on the re-cast from the fitted centre (need 40)")
-    cx, cy, r, keep = _fit_circle(pts)
-    pin = pts[keep]
-    if len(pin) < 40 or not (0 <= cx <= ws and 0 <= cy <= hs):
-        return None, (f"{len(pin)} edge points survived the robust fit's "
-                      f"outlier trim (need 40), or its centre fell outside "
-                      f"the search window")
-    resid = float(np.median(np.abs(
-        np.hypot(pin[:, 0] - cx, pin[:, 1] - cy) - r)))
-    ang = np.degrees(np.arctan2(pin[:, 1] - cy, pin[:, 0] - cx)) % 360.0
-    cov = len(np.unique((ang // 10).astype(int))) / 36.0
     yy, xx = np.ogrid[0:hs, 0:ws]
-    inside = ((xx - cx) ** 2 + (yy - cy) ** 2 <= (0.9 * r) ** 2) & free
-    if int(inside.sum()) < 200:
-        return None, (f"only {int(inside.sum())} px inside the fitted "
-                      f"circle are free of foil and glint (need 200), so "
-                      f"the fill test could not be applied")
-    fill = float(((sm < paper - 4) & inside).sum()) / float(inside.sum())
     dmin = float(min(hs, ws))
-    # The four documented gates, named individually: 'refused' sends the
-    # operator to guess, while 'the arc is only 22% covered' sends them to
-    # look at what is lying across the frame (`#215` verify mode, 2026-08-06).
-    if cov < 0.34:
-        return None, (f"the accepted edge covers only {360 * cov:.0f}° of "
-                      f"arc (needs ≥ 120°) — something is lying across the "
-                      f"disc, or most of its boundary has no ink step")
-    if resid > 0.06 * r:
-        return None, (f"the fit residual is {resid * 100.0 / r:.1f}% of the "
-                      f"radius (limit 6%) — the surviving edge points are "
-                      f"not on one circle")
-    if fill < 0.55:
-        return None, (f"only {100 * fill:.0f}% of the fitted circle's "
-                      f"interior reads as the dark class (needs ≥ 55%) — "
-                      f"the circle is not sitting on the disc")
-    if not 0.06 * dmin <= 2 * r <= 0.85 * dmin:
-        return None, (f"the fitted diameter {2 * r / f:.0f} px is outside "
-                      f"the plausible range {0.06 * dmin / f:.0f}–"
-                      f"{0.85 * dmin / f:.0f} px for this search window — "
-                      f"check the camera zoom and roi_frac")
-    try:
-        ell = cv2.fitEllipse(pin.astype(np.float32))
-        circ = round(min(ell[1]) / max(max(ell[1]), 1e-6), 3)
-    except cv2.error:
-        circ = 0.0
-    # The one gate the old code lacked: a resting disc is ROUND. The blob
-    # it used to return read circ 0.32; a shadow rectangle's trimmed fit
-    # still only reaches ~0.7. The P3 discs measure 0.966-0.999.
-    if circ < 0.85:
-        return None, (f"the fitted shape's circularity is {circ:.2f} "
-                      f"(needs ≥ 0.85) — a resting disc is round, and this "
-                      f"is not; the P3 discs measure 0.966–0.999")
-    conf = min(0.99, 0.4 * fill + 0.35 * cov
-               + 0.25 * (1.0 - min(1.0, resid / (0.06 * r))))
-    inv = 1.0 / f
-    ccx = (cx + x0) * inv
-    ccy = (cy + y0) * inv
-    rr = r * inv
-    th2 = np.linspace(0, 2 * np.pi, 90, endpoint=False)
-    contour = np.stack([ccx + rr * np.cos(th2),
-                        ccy + rr * np.sin(th2)], axis=1)
-    return {'method': 'baseline-disc', 'area_px': float(np.pi * rr * rr),
-            'diam_px': float(2 * rr), 'cx': ccx, 'cy': ccy,
-            'circ': circ, 'solidity': round(fill, 3), 'contour': contour,
-            'conf': round(conf, 3), 'wrinkle': None, 'spread_pct': 0.0,
-            'arc_cov': round(cov, 2), 'fit_resid_px': round(resid * inv, 1),
-            'n_edge': int(len(pin)), 'paper_lum': round(paper, 1)}, None
+
+    def trace(seed_xy, local_fill):
+        """One seeded trace: cast, fit, re-cast from the fitted centre,
+        fit again, then the gates. -> (result or None, refusal or
+        None)."""
+        pts = cast(*seed_xy)
+        if len(pts) < 40:
+            return None, (f"only {len(pts)} of 360 radial rays found a "
+                          f"clean dark→light ink step (need 40) — the disc "
+                          f"edge is too faint, or the electrodes cover too "
+                          f"much of it")
+        cx1, cy1, _r1, _k1 = _fit_circle(pts)
+        if not (0 <= cx1 <= ws and 0 <= cy1 <= hs):
+            return None, ("the first circle fit put the centre outside the "
+                          "search window — the edge points are not a "
+                          "disc")
+        pts = cast(cx1, cy1)            # re-cast from the fitted centre
+        if len(pts) < 40:
+            return None, (f"only {len(pts)} of 360 rays found a clean ink "
+                          f"step on the re-cast from the fitted centre "
+                          f"(need 40)")
+        cx, cy, r, keep = _fit_circle(pts)
+        pin = pts[keep]
+        if len(pin) < 40 or not (0 <= cx <= ws and 0 <= cy <= hs):
+            return None, (f"{len(pin)} edge points survived the robust "
+                          f"fit's outlier trim (need 40), or its centre fell "
+                          f"outside the search window")
+        resid = float(np.median(np.abs(
+            np.hypot(pin[:, 0] - cx, pin[:, 1] - cy) - r)))
+        ang = np.degrees(np.arctan2(pin[:, 1] - cy, pin[:, 0] - cx)) % 360.0
+        cov = len(np.unique((ang // 10).astype(int))) / 36.0
+        d2c = (xx - cx) ** 2 + (yy - cy) ** 2
+        inside = (d2c <= (0.9 * r) ** 2) & free
+        if int(inside.sum()) < 200:
+            return None, (f"only {int(inside.sum())} px inside the fitted "
+                          f"circle are free of foil and glint (need 200), "
+                          f"so the fill test could not be applied")
+        level = paper
+        cut = paper - 4
+        if local_fill:
+            # the surround the disc must be darker than: the ring just
+            # outside it, clear of the ramp (which ends near 1.1 r) and
+            # of foil and glint. Its median is the level reported as
+            # paper_lum (the strips' dark interiors cross the ring).
+            ring = (d2c >= (1.15 * r) ** 2) & (d2c <= (1.5 * r) ** 2) & free
+            if int(ring.sum()) < 200:
+                return None, (f"only {int(ring.sum())} px of the ring "
+                              f"around the fitted circle are free of foil "
+                              f"and glint (need 200), so its surround "
+                              f"level could not be measured")
+            level = float(np.median(sm[ring]))
+            # The fill counts interior pixels darker than the DARKER
+            # QUARTER of that ring, not a fixed 4 gray levels under its
+            # median. With a disc only ~6 levels below its surround the
+            # fixed margin sits inside the disc's own spread: on
+            # 13_backlight_2 the fill read 59 % on the PNG decode and 51 %
+            # on the video pass's cvtColor decode of the same file (the
+            # two differ by at most 1 gray level, 0.5 on average), either
+            # side of the 55 % gate (2026-10-06). A percentile of the
+            # ring moves with the picture, so no conversion can flip it:
+            # 0.90-0.96 on both decodes of both 0 kV frames. A circle with
+            # no darker disc under it reads ~25 % by construction.
+            cut = float(np.percentile(sm[ring], 25))
+        fill = float(((sm < cut) & inside).sum()) / float(inside.sum())
+        # The four documented gates, named individually: 'refused' sends
+        # the operator to guess, while 'the arc is only 22% covered' sends
+        # them to look at what is lying across the frame (`#215` verify
+        # mode, 2026-08-06).
+        #
+        # Coverage counts occupied 10-degree sectors, so cov >= 0.34 takes
+        # 13 of 36 sectors: 130 deg. The sentence used to say 120, which
+        # read 'covers only 120 deg (needs >= 120 deg)' on a 12-sector
+        # refusal (SLDEA_20260806_151857, 2026-10-05). The gate is
+        # unchanged; only the number it states is now the one it applies.
+        if cov < 0.34:
+            need = 10 * int(math.ceil(0.34 * 36))
+            return None, (f"the accepted edge covers only {360 * cov:.0f}° "
+                          f"of arc (needs ≥ {need}°) — something is lying "
+                          f"across the disc, or most of its boundary has no "
+                          f"ink step")
+        if resid > 0.06 * r:
+            return None, (f"the fit residual is {resid * 100.0 / r:.1f}% of "
+                          f"the radius (limit 6%) — the surviving edge "
+                          f"points are not on one circle")
+        if fill < 0.55:
+            what = ('reads darker than the ring around it' if local_fill
+                    else 'reads as the dark class')
+            return None, (f"only {100 * fill:.0f}% of the fitted circle's "
+                          f"interior {what} (needs ≥ 55%) — the circle is "
+                          f"not sitting on the disc")
+        if not 0.06 * dmin <= 2 * r <= 0.85 * dmin:
+            return None, (f"the fitted diameter {2 * r / f:.0f} px is "
+                          f"outside the plausible range "
+                          f"{0.06 * dmin / f:.0f}–{0.85 * dmin / f:.0f} px "
+                          f"for this search window — check the camera zoom "
+                          f"and roi_frac")
+        try:
+            ell = cv2.fitEllipse(pin.astype(np.float32))
+            circ = round(min(ell[1]) / max(max(ell[1]), 1e-6), 3)
+        except cv2.error:
+            circ = 0.0
+        # The one gate the old code lacked: a resting disc is ROUND. The
+        # blob it used to return read circ 0.32; a shadow rectangle's
+        # trimmed fit still only reaches ~0.7. The P3 discs measure
+        # 0.966-0.999.
+        if circ < 0.85:
+            return None, (f"the fitted shape's circularity is {circ:.2f} "
+                          f"(needs ≥ 0.85) — a resting disc is round, and "
+                          f"this is not; the P3 discs measure "
+                          f"0.966–0.999")
+        conf = min(0.99, 0.4 * fill + 0.35 * cov
+                   + 0.25 * (1.0 - min(1.0, resid / (0.06 * r))))
+        inv = 1.0 / f
+        ccx = (cx + x0) * inv
+        ccy = (cy + y0) * inv
+        rr = r * inv
+        th2 = np.linspace(0, 2 * np.pi, 90, endpoint=False)
+        contour = np.stack([ccx + rr * np.cos(th2),
+                            ccy + rr * np.sin(th2)], axis=1)
+        # paper_lum is the level the fill was judged against, so the
+        # calibration display stretches between the disc and the surround
+        # this fit actually used
+        return {'method': 'baseline-disc', 'area_px': float(np.pi * rr * rr),
+                'diam_px': float(2 * rr), 'cx': ccx, 'cy': ccy,
+                'circ': circ, 'solidity': round(fill, 3),
+                'contour': contour, 'conf': round(conf, 3), 'wrinkle': None,
+                'spread_pct': 0.0, 'arc_cov': round(cov, 2),
+                'fit_resid_px': round(resid * inv, 1),
+                'n_edge': int(len(pin)), 'paper_lum': round(level, 1),
+                'seed': (DISC_SEED_CENTRE if local_fill
+                         else DISC_SEED_DARK)}, None
+
+    if seed is not None:
+        ref, why = trace(seed, False)
+        if ref is not None:
+            return ref, None
+    else:
+        why = (f"no central dark region big enough to seed on (the paper "
+               f"reads {paper:.0f} gray and nothing below it covers 0.2% of "
+               f"the search window)")
+    ref, _why2 = trace((ws / 2.0, hs / 2.0), True)
+    if ref is not None:
+        return ref, None
+    # A refusal always says the FIRST trace's reason. The retry starts at
+    # a fixed point whatever the frame holds, so its refusal describes
+    # that point, not the picture: on a blank frame or a bare step edge it
+    # reads 'covers only 40 deg of arc', where the first trace's 'nothing
+    # dark enough to seed on' is the sentence that sends the operator to
+    # the exposure.
+    return None, why
 
 
 # ---------------------------------------------------------------------------
@@ -4626,7 +4844,7 @@ def _health_setup(rundir):
     missing file or a missing line: every field then keeps its default."""
     text = _read_text(os.path.join(rundir, 'setup.txt'))
     out = {'found': text is not None, 'planned': None, 'dry': False,
-           'inverted': False, 'camera': ''}
+           'inverted': False, 'sign_corrected': False, 'camera': ''}
     if text is None:
         return out
     m = _SETUP_TOTAL.search(text)
@@ -4634,6 +4852,10 @@ def _health_setup(rundir):
         out['planned'] = int(m.group(1))
     out['dry'] = bool(re.search(r'^MODE:.*DRY RUN', text, re.M))
     out['inverted'] = 'Trek control polarity: INVERTED' in text
+    # Runs before 2026-10-05 multiplied both monitors by -1 when the box
+    # was ticked and said so on this line; newer runs log them as read.
+    out['sign_corrected'] = (out['inverted']
+                             and 'sign-corrected in log' in text)
     m = re.search(r'^--- Camera ---[ \t]*\n([^\n]+)', text, re.M)
     if m:
         out['camera'] = m.group(1).strip()
@@ -5065,7 +5287,8 @@ def run_health(rundir, run=None):
       dry_run               setup.txt says the HV was off             info
       kv_missing            powered rows without measured_kV          warn
       kv_sign               measured kV opposes the commanded sign,
-                            and setup.txt has no INVERTED line        info
+                            and setup.txt has no pre-2026-10-05
+                            "sign-corrected" INVERTED line            info
       ua_missing            rows without measured_uA                  warn
       ended_early           fewer rows than setup.txt planned, or
                             run.log ends 'aborted' short of the plan  warn
@@ -5240,16 +5463,22 @@ def run_health(rundir, run=None):
                 f"whole sweep next time.")
         signed = [i for i in read if abs(mkv[i]) >= HEALTH_SIGN_MIN_KV]
         opposite = [i for i in signed if mkv[i] * kvs[i] < 0]
+        # A ticked 'Trek inverts' box no longer excuses an opposite sign:
+        # since 2026-10-05 the readings are logged as read, and a box set
+        # right reads positive. Only the older sign-corrected runs are
+        # left alone, as before.
         if (opposite and 2 * len(opposite) > len(signed)
-                and setup['found'] and not setup['inverted']):
+                and setup['found'] and not setup['sign_corrected']):
             j = max(opposite, key=lambda i: abs(mkv[i]))
+            box = ("setup.txt records the \"Trek inverts\" box as ticked"
+                   if setup['inverted'] else
+                   "setup.txt does not record an inverted Trek")
             say('info', 'kv_sign',
                 f"The measured voltage has the opposite sign to the "
                 f"commanded voltage on {len(opposite)} of {len(signed)} "
                 f"readings (for example {mkv[j]:+.2f} kV measured at "
-                f"{kvs[j]:.2f} kV commanded), and setup.txt does not "
-                f"record an inverted Trek. This check looks only at the "
-                f"sign, not at the size of a reading."
+                f"{kvs[j]:.2f} kV commanded), and {box}. This check "
+                f"looks only at the sign, not at the size of a reading."
                 + (" A scope window framed for the other sign can be why "
                    "the readings stop early." if blank else "")
                 + " Do not change any high-voltage setting yourself: tell "

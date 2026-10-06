@@ -719,27 +719,114 @@ def test_moving_runs_between_groups_never_writes_setup_txt():
         assert {d: sorted(os.listdir(d)) for d, _l in win.runs} == listing
 
 
+def test_the_group_column_follows_a_seed_and_the_menu_keeps_materials():
+    """`#373`'s two seed buttons are grouping changes like any other, so
+    the Group column shows what they made the moment one is pressed. And
+    the menu's paths are assign_group's, so a group's material (its line
+    style) is set when the group is CREATED and kept when runs are moved
+    into it: that is how two spellings of one material become one
+    series, with the override still visible as Material against Group."""
+    with _Bare() as b, _Boxes() as boxes:
+        if not b.ok:
+            return
+        win = b.win
+        _campaign(b)
+        _label(_fake_run(b.tmp, 'N39hand'), 'Invisicon 3900')
+        win.populate()
+        by = {os.path.basename(d): d for d, _l in win.runs}
+
+        def cells():
+            return _cells_by_name(win)
+
+        def column_matches_grouping():
+            want = {os.path.basename(m): name
+                    for name, members in win.group_list() for m in members}
+            got = {n: c['group'] for n, c in cells().items()}
+            assert got == {n: want.get(n, '') for n in got}, (got, want)
+
+        def materials():
+            return dict(win.group_material_list())
+        # the material seed, through its button
+        _select(win, 'R1', 'P3a', 'P3b', 'P3c', 'N39', 'N39hand', 'CB1',
+                'NS')
+        win.btn_seed_material.invoke()
+        column_matches_grouping()
+        assert cells()['P3a']['group'] == P3
+        assert cells()['N39']['group'] == N3900
+        assert cells()['N39hand']['group'] == 'Invisicon 3900'
+        assert cells()['R1']['group'] == sp.NO_ELECTRODE_GROUP
+        assert cells()['NS']['group'] == sp.NOT_SPECIFIED
+        # a seeded run's two cells say the same thing
+        for name in ('R1', 'NS', 'N39', 'CB1'):
+            assert cells()[name]['material'] == cells()[name]['group'], name
+        # its child, through its button: the P3 runs split by volume
+        _select(win, 'P3a', 'P3b', 'P3c')
+        win.btn_seed_concentration.invoke()
+        column_matches_grouping()
+        assert cells()['P3a']['group'] == cells()['P3b']['group']
+        assert cells()['P3a']['group'] != cells()['P3c']['group']
+        assert '2.5 mL' in cells()['P3a']['group'], cells()['P3a']
+        # MOVE TO GROUP, from the menu, into an existing group: the run
+        # takes that group's material, the spelling it left is emptied
+        # and goes with its material, and Material still shows what the
+        # run's own setup.txt says
+        win.set_selected_dirs([by['N39hand']])
+        sub = win.root.nametowidget(win.group_menu().entrycget(0, 'menu'))
+        sub.invoke([sub.entrycget(i, 'label')
+                    if sub.type(i) != 'separator' else None
+                    for i in range(sub.index('end') + 1)].index(N3900))
+        column_matches_grouping()
+        assert cells()['N39hand']['group'] == N3900
+        assert cells()['N39hand']['material'] == 'Invisicon 3900'
+        assert materials()[N3900] == N3900
+        assert 'Invisicon 3900' not in dict(win.group_list())
+        assert 'Invisicon 3900' not in materials()
+        # NEW GROUP of one material takes that material; of two, none
+        win.ask_group_name = lambda: 'cb only'
+        win.set_selected_dirs([by['CB1']])
+        assert win._move_to_new_group() is None
+        assert materials()['cb only'] == CB
+        win.ask_group_name = lambda: 'mixed'
+        win.set_selected_dirs([by['CB1'], by['N39hand']])
+        assert win._move_to_new_group() is None
+        assert 'mixed' not in materials()
+        assert 'cb only' not in dict(win.group_list())   # emptied: gone
+        assert materials()[N3900] == N3900   # N39 still holds it
+        column_matches_grouping()
+        # NO GROUP empties 'mixed', and its (absent) material cannot
+        # outlive it into a later group of the same name
+        assert win.move_to_group('') is None
+        assert 'mixed' not in dict(win.group_list())
+        column_matches_grouping()
+        assert boxes.said == [], boxes.said
+
+
 def test_fit_widths_gives_way_in_order_and_never_below_a_floor():
-    """The picker's column arithmetic, measured on the case the corpus
-    produces once `#373` seeds groups from materials: three long cells
-    in a list too narrow for them."""
-    nat = {'run': 190, 'material': 155, 'group': 125}
+    """The picker's column arithmetic, on the case `#373`'s seeds produce:
+    three long cells in a list too narrow for them, the group name the
+    longest."""
+    nat = {'run': 190, 'material': 155, 'group': 200}
     floor = {'run': 138, 'material': 134, 'group': 56}
     order = g.RUN_COL_GIVE
     # room to spare: Run, the name column, takes the slack
     assert g.fit_widths(nat, floor, 600, order) == \
-        {'run': 320, 'material': 155, 'group': 125}
+        {'run': 245, 'material': 155, 'group': 200}
     # a little short: Run alone gives way
-    assert g.fit_widths(nat, floor, 440, order) == \
-        {'run': 160, 'material': 155, 'group': 125}
-    # shorter: Run down to its floor, then Group, then Material
+    assert g.fit_widths(nat, floor, 520, order) == \
+        {'run': 165, 'material': 155, 'group': 200}
+    # shorter: Run down to its floor, then Material, and Group keeps its
+    # width, since a seeded group name is the longest cell (`#373`)
+    out = g.fit_widths(nat, floor, 490, order)
+    assert out == {'run': 138, 'material': 152, 'group': 200}, out
+    assert sum(out.values()) == 490
+    # shorter still: Material at its floor too, then Group gives way
     out = g.fit_widths(nat, floor, 328, order)
     assert out == {'run': 138, 'material': 134, 'group': 56}, out
     assert sum(out.values()) == 328
     # shorter than the floors: none goes under one; the list scrolls
     assert g.fit_widths(nat, floor, 200, order) == floor
-    # Material is the column this exists for, so it gives way last
-    assert order[-1] == 'material' and order[0] == 'run'
+    # the order the owner chose once `#373` seeded long group names
+    assert order == ('run', 'material', 'group'), order
 
 
 def test_initial_state_falls_back_without_arguments():

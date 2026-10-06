@@ -1011,11 +1011,23 @@ RUN_COL_FLOOR = {'run': RUN_MARK + 'SLDEA_20261001_151016',
 # Run first, and only down to its floor: there a timestamp-named run
 # still shows whole with its mark, only a longer or `[folder#]`-tagged
 # name is cut short at the end, and the hover text has the whole label.
-# Group before Material, because Material is the column the issue is for
-# (it is what an operator sorts and reads, and 3900 against 3500 is its
-# last four characters), and a group seeded from the material repeats
-# it.
-RUN_COL_GIVE = ('run', 'group', 'material')
+# Material before Group, because `#373`'s seeded group names are the
+# LONGEST cells in the list: the material plus its concentration,
+# 'Carbon Solutions P3-SWNT, 2.5 mL' (186 px of text at 96 dpi, against
+# 145 for the material alone). Material's floor still shows '(no
+# electrode recorded)' whole, and with it every Invisicon name (3900
+# against 3500 is the last four characters): 'nano-c Invisicon 3900' is
+# 115 px against that floor's 124. Only a longer material, such as the
+# P3-SWNT name, loses its end, and the hover text has it whole.
+#
+# WHAT THE ORDER CAN AND CANNOT DO: it shares out the room ABOVE the
+# floors. The list asks for exactly its floors, so where nothing else
+# widens the controls column (the Windows analysis PC), a long material
+# and a long group name both sit at their floors whatever the order,
+# and Group shows about 50 px of a seeded name. The order takes effect
+# where the list is wider than its floors, and when one column's content
+# is shorter than its floor.
+RUN_COL_GIVE = ('run', 'material', 'group')
 
 # THE LIST ASKS FOR EXACTLY ITS FLOORS SIDE BY SIDE (PlotWindow.
 # _list_width), and that is the one width here that moves the window:
@@ -1023,7 +1035,8 @@ RUN_COL_GIVE = ('run', 'group', 'material')
 # now its widest member. On the Windows analysis PC (96 dpi) it widened
 # the column by 52 px and the window's floor from 715 px to 767, 41 px
 # for the three columns and 11 for the processed mark in front of the
-# name. That is 7 px past the 760 px the layout tests' narrowest window
+# name (measured on main and again over `#373`, whose seed buttons widen
+# nothing: 715 px without the picker either way). That is 7 px past the 760 px the layout tests' narrowest window
 # asks for, so Tk holds that case at the floor instead; what it asserts
 # (the warnings pane and the toolbar still on screen) holds there too.
 # A column wider than its share scrolls the list instead
@@ -1433,6 +1446,7 @@ class PlotWindow:
         self._sort = None              # (column id, descending) or None
         self._menu = None              # the open right-click menu, if any
         self._menu_vars = []           # its check indicators' variables
+        self._run_box_w = None         # the list's width at the last fit
         self._loaded = {}              # rundir -> loaded run dict (cache)
         self._prepared = []            # what the canvas is currently showing
         self._drawn_key = None         # ...and what it was derived from
@@ -1786,6 +1800,11 @@ class PlotWindow:
                       height=self.run_box.winfo_reqheight())
         box.grid_propagate(False)
         self.run_box.bind('<<TreeviewSelect>>', lambda _e: self.schedule())
+        # re-fit when the list's WIDTH changes, which is once, when it is
+        # first drawn: Tk would otherwise hand any room beyond the floors
+        # to Run alone, and RUN_COL_GIVE's order would only apply from
+        # the first grouping change on
+        self.run_box.bind('<Configure>', self._run_box_configured, add='+')
         # the `#374` group menu, on a right-click: Button-3 on Windows and
         # X11, Button-2 or Control-click on macOS
         self.run_box.bind('<Button-3>', self._run_menu)
@@ -2480,6 +2499,13 @@ class PlotWindow:
                             RUN_COL_GIVE)
         for col, width in widths.items():
             self.run_box.column(col, width=width)
+
+    def _run_box_configured(self, event):
+        """The list was drawn or resized: re-fit the columns to its real
+        width. Width only; a height change moves no column."""
+        if event.width != self._run_box_w:
+            self._run_box_w = event.width
+            self._fit_columns()
 
     def _run_xscrolled(self, first, last):
         """The list's sideways scroll report. The bar shows only while

@@ -202,9 +202,10 @@ def staging_root():
 # FFmpeg READS PAST THE END OF A GRAY FRAME (measured 2026-10-06 on
 # Windows OpenCV 4.13, whose bundled FFmpeg is 4.4). FFmpeg 4.x treats
 # 8-bit gray as "pseudo-paletted". OpenCV hands it the frame in place,
-# and FFmpeg's copy of that frame then reads a 1024 B palette that starts
-# at the byte after the last pixel. When unmapped memory begins inside
-# those 1024 B, write() throws "Unknown C++ exception". That is the
+# and FFmpeg's copy of that frame then reads a 1024 B palette from
+# width x height bytes after the first pixel: for a contiguous frame, the
+# byte after the last one. When unmapped memory begins inside those
+# 1024 B, write() throws "Unknown C++ exception". That is the
 # 1632 x 918 failure, where the allocator ends the frame at the same place
 # in every process, and the test suite's flake (64 x 48 and 320 x 240
 # frames, one process in five). OpenCV's own guard looks only 32 B past
@@ -334,7 +335,9 @@ def codec_available(tmpdir=None, frame=None):
 
 def codec_stop_words(why, dry):
     """The words for a video run that stops itself before any HV because
-    the codec failed at the stream's own size (VideoRecorder.check_codec).
+    the codec check at the stream's own size failed
+    (VideoRecorder.check_codec). `why` names the cause, which is not
+    always the size: a full staging disk fails the check too.
 
     -> dict(stopped, status, title, box), as
     sldea_profile.baseline_stop_words: the run.log line, the red status
@@ -343,16 +346,15 @@ def codec_stop_words(why, dry):
              "The signal generator output was never switched on by this "
              "run.")
     return {
-        'stopped': (f"run stopped before any HV: the video cannot be "
-                    f"recorded at the camera's frame size ({why}). {drive}"),
-        'status': ("STOPPED before HV: the video cannot be recorded at "
-                   "this frame size (see Run log)"),
-        'title': "Run stopped: video cannot be recorded",
+        'stopped': (f"run stopped before any HV: the video check at the "
+                    f"camera's frame size failed ({why}). {drive}"),
+        'status': "STOPPED before HV: the video check failed (see Run log)",
+        'title': "Run stopped: video check failed",
         'box': ("The run stopped itself before any high voltage.\n\n"
-                f"The lossless video could not be written at the size the "
-                f"camera delivers: {why}.\n\n{drive}\n\nUntick Record to "
-                f"run with snapshots only, then press Run again.\n\nThe "
-                f"Run log has the details.")}
+                f"Before recording, the run writes and reads back one of "
+                f"the camera's own frames, and that check failed: {why}."
+                f"\n\n{drive}\n\nUntick Record to run with snapshots only, "
+                f"then press Run again.\n\nThe Run log has the details.")}
 
 
 def open_stream(spec, fps=STREAM_FPS):
@@ -496,7 +498,8 @@ class VideoRecorder:
         already holds (codec_available(frame=...)), so it adds no camera
         I/O. Meant for after wait_first_frame(), at 0 V: a size the codec
         cannot record must stop the run before any HV, not turn up at the
-        first recorded frame (2026-10-06)."""
+        first recorded frame (2026-10-06). Once it has passed, the writer
+        records that size only."""
         with self._lock:
             got = self._latest
         if got is None:
@@ -505,7 +508,8 @@ class VideoRecorder:
             gray = _gray(got[0])
         except Exception as e:
             return False, f"the stream's frame could not be made gray ({e})"
-        ok, why = codec_available(frame=gray)
+        # in out_dir: the local disk the recording itself will be written to
+        ok, why = codec_available(tmpdir=self.out_dir, frame=gray)
         if ok:
             self.probed_size = (gray.shape[1], gray.shape[0])
         return ok, why
@@ -785,12 +789,16 @@ class VideoRecorder:
                     self.size = (wd, h)
                     if self.probed_size not in (None, self.size):
                         # a stream reopened at another size between the
-                        # check and the first recorded frame
-                        self._log(f"⚠ video: recording {wd} x {h}, but the "
-                                  f"codec was checked at "
-                                  f"{self.probed_size[0]} x "
-                                  f"{self.probed_size[1]}: this size was "
-                                  f"never checked")
+                        # check and the first recorded frame: a size never
+                        # checked may be cropped (odd) or fail, so it is
+                        # not recorded; the stills go on regardless
+                        self.error = (f"the stream delivers {wd} x {h}, but "
+                                      f"the codec was checked at "
+                                      f"{self.probed_size[0]} x "
+                                      f"{self.probed_size[1]}: NOT "
+                                      f"recording a size never checked")
+                        self._log(f"⚠ video: {self.error}")
+                        continue
                     vw = cv2.VideoWriter(
                         self.video_path,
                         cv2.VideoWriter_fourcc(*VIDEO_FOURCC), self.fps,

@@ -176,8 +176,9 @@ def test_the_probe_runs_at_the_frame_size_and_refuses_an_odd_one():
     assert sv.codec_available(frame=even) == (True, '')
     ok, why = sv.codec_available(frame=rng.integers(
         0, 256, (48, 65), dtype=np.uint8))
+    # a refusal of any kind is right (here: "read back as 64 x 48")
     assert ok is False, "an odd width must not pass as lossless"
-    assert '65 x 48' in why and 'read back as 64 x 48' in why, why
+    assert '65 x 48' in why, why
 
 
 def test_a_writer_that_throws_fails_the_probe_and_names_the_size():
@@ -339,11 +340,11 @@ def test_a_frame_through_ffmpeg_safe_survives_where_a_raw_one_faults():
     assert rc == 0 and res == ['ok', True], (rc, res, err[-800:])
     rc, res, err = _guard_child('raw')
     if rc == 0 and res and res[0] == 'ok':
-        print("  note: this FFmpeg did not read past a raw frame; the "
-              "test could not tell the layouts apart here")
-    else:
-        assert rc != 0 or (res and 'Unknown C++ exception' in res[0]), \
-            (rc, res, err[-800:])
+        raise _Skip(f"{sv._ffmpeg_version()} does not read past a raw "
+                    f"frame, so the layouts cannot be told apart here (the "
+                    f"ffmpeg_safe half passed)")
+    assert rc != 0 or (res and 'Unknown C++ exception' in res[0]), \
+        (rc, res, err[-800:])
 
 
 # ---------------------------------------------------------------- recorder
@@ -387,14 +388,15 @@ def test_the_recorder_writes_a_lossless_file_on_the_run_clock():
 def test_check_codec_probes_with_the_streams_own_frame():
     """VideoRecorder.check_codec: no camera I/O of its own. It hands the
     codec probe the frame the reader already holds, gray as recorded,
-    and remembers the size that passed; with no frame yet it refuses."""
+    probes on the recording's own disk and leaves nothing there, and
+    remembers the size that passed; with no frame yet it refuses."""
     _need_cv()
     d = tempfile.mkdtemp(prefix='sldea_video_test_')
     real = sv.codec_available
     seen = []
 
     def spy(tmpdir=None, frame=None):
-        seen.append(None if frame is None else frame.shape)
+        seen.append((tmpdir, None if frame is None else frame.shape))
         return real(tmpdir=tmpdir, frame=frame)
     try:
         idle = sv.VideoRecorder(lambda: _FakeCam(), d, log=lambda m: None)
@@ -405,10 +407,10 @@ def test_check_codec_probes_with_the_streams_own_frame():
                                log=lambda m: None).start()
         assert rec.wait_first_frame(3.0)
         assert rec.check_codec() == (True, '')
-        assert seen == [(96, 128)], seen
+        assert seen == [(d, (96, 128))], seen
         assert rec.probed_size == (128, 96)
         rec.stop(timeout=5.0)
-        assert not os.path.exists(os.path.join(d, 'probe.mkv'))
+        assert os.listdir(d) == [], os.listdir(d)
     finally:
         sv.codec_available = real
         shutil.rmtree(d, ignore_errors=True)
@@ -429,9 +431,11 @@ def test_a_stream_of_an_odd_size_fails_check_codec():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_recording_a_size_other_than_the_checked_one_is_logged():
+def test_a_size_other_than_the_checked_one_is_not_recorded():
     """A stream reopened at another size between the check and the
-    first recorded frame: the recording goes ahead, and says so."""
+    first recorded frame: that size was never checked, so it is not
+    recorded (an odd one would be cropped), the log says so, and the
+    stills are still served."""
     _need_cv()
     d = tempfile.mkdtemp(prefix='sldea_video_test_')
     logs = []
@@ -442,10 +446,15 @@ def test_recording_a_size_other_than_the_checked_one_is_logged():
         assert rec.check_codec() == (True, '')
         rec.probed_size = (64, 48)       # as if checked on another stream
         rec.set_t0(time.monotonic())
-        assert _wait(lambda: rec.written >= 1, 3.0)
+        assert _wait(lambda: rec.error is not None, 3.0)
+        time.sleep(0.5)
+        assert rec.latest()[0] is not None, "the stills must go on"
         rec.stop(timeout=5.0)
-        assert any('recording 128 x 96' in m and 'never checked' in m
-                   for m in logs), logs
+        assert rec.written == 0, rec.written
+        assert 'delivers 128 x 96' in rec.error \
+            and 'never checked' in rec.error, rec.error
+        assert any(rec.error in m for m in logs), logs
+        assert not os.path.exists(os.path.join(d, sv.VIDEO_FILENAME))
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -1182,8 +1191,28 @@ class _StubApp:
     SLDEA_STILL_WAIT_S = _G.SLDEA_STILL_WAIT_S
     _sldea_worker = _G._sldea_worker
     _sldea_capture = _G._sldea_capture
-    _sldea_video_postrun = _G._sldea_video_postrun
     _sldea_run_logger = _G._sldea_run_logger
+
+    @property
+    def _sldea_video_postrun(self):
+        """The real post-run job, wrapped so _drive can wait for it and
+        for the detached move it starts. The worker looks this up on its
+        own thread while starting the post-run thread, so the Event exists
+        before the worker returns. A test that deleted its folder while
+        the job still wrote into it failed with WinError 145 "The
+        directory is not empty" (2 of 14 runs of origin/main under load,
+        2026-10-06)."""
+        done = threading.Event()
+        self.postruns.append(done)
+
+        def run(*a, **k):
+            try:
+                self._G._sldea_video_postrun(self, *a, **k)
+                for proc in list(self._sldea_video_jobs):
+                    proc.wait(timeout=120)
+            finally:
+                done.set()
+        return run
 
     def __init__(self, sg=None):
         import types
@@ -1195,6 +1224,7 @@ class _StubApp:
         self._sldea_loglock = threading.Lock()
         self._sldea_recorder = None
         self._sldea_video_jobs = []
+        self.postruns = []
         self.lines = []
         self.statuses = []
         self.finished = 0
@@ -1267,6 +1297,10 @@ def _drive(app, tmp, stream, oneshot, dry=True, override=True,
             _short_profile(), tmp, 'RUN', 1, 2, 3, dry, tel_on=False,
             vid_on=True, vid_fps=5.0, picture_override=pov,
             cam_expected=cam_expected)
+        # the post-run job and its detached move write into the run
+        # folder after the worker returns; the caller deletes that folder
+        for done in app.postruns:
+            assert done.wait(150), "the post-run video job never finished"
     return os.path.join(tmp, 'RUN')
 
 
@@ -1558,18 +1592,24 @@ def test_a_stream_size_the_codec_cannot_record_stops_the_run_before_hv():
         assert not os.path.exists(os.path.join(rundir, sv.VIDEO_FILENAME))
         with open(os.path.join(rundir, 'setup.txt')) as f:
             setup = f.read()
-        assert ('Video outcome: NOT recorded -- the codec check at the '
-                "camera's frame size failed") in setup, setup
+        assert ('Video outcome: NOT recorded: the codec check at the '
+                "camera's frame size failed (FFV1 at 129 x 96") in setup, \
+            setup
         assert 'stopped before any HV' in setup
         assert not os.listdir(os.path.join(tmp, 'staging')), \
             "an empty staging dir was left behind"
+        # registered before it was stopped, so the camera guards that ask
+        # reader_alive() would have seen a reader that outlasted stop()
+        assert app._sldea_recorder is not None
+        assert not app._sldea_recorder.reader_alive()
 
 
 def test_a_video_run_logs_the_size_its_codec_was_checked_at():
     _need_cv()
     with tempfile.TemporaryDirectory() as tmp:
         app = _StubApp()
-        _drive(app, tmp, lambda spec, fps=10: _FakeCam(), _no_oneshot)
+        rundir = _drive(app, tmp, lambda spec, fps=10: _FakeCam(),
+                        _no_oneshot)
         assert app.finished == 1 and not app._sldea_stop, app.lines
         assert any(ln == f"video: {sv.VIDEO_FOURCC} checked at 128 x 96, "
                    f"the stream's own size: lossless" for ln in app.lines), \

@@ -4799,6 +4799,10 @@ LOGGING:
                         "5 s — NO recording; snapshots fall back to "
                         "one-shot grabs" + (f" ({rec.error})" if rec.error
                                             else ""))
+                    # registered before it is stopped: a reader that
+                    # outlasts stop()'s timeout still holds the camera, and
+                    # the guards that ask reader_alive() must see it
+                    self._sldea_recorder = rec
                     rec.stop(timeout=5.0)
                     rec = None
                     try:
@@ -4815,6 +4819,9 @@ LOGGING:
                 # asked for a lossless video, and this thread cannot ask
                 # whether to go on without one (the pre-flight's own
                 # codec question defaults to No for the same reason).
+                # A stream that will not start (above) still falls back to
+                # one-shot stills, as before: whether that should stop too
+                # is an open owner question (SLDEA_DECISIONS 2026-10-06).
                 if rec is not None and not self._sldea_stop:
                     ok, codec_why = rec.check_codec()
                     if ok:
@@ -4826,6 +4833,7 @@ LOGGING:
                         vid_stop = sldea_video.codec_stop_words(codec_why, dry)
                         self._sldea_stop = True
                         self._sldea_log(vid_stop['stopped'])
+                        self._sldea_recorder = rec    # as above: guards
                         rec.stop(timeout=5.0)
                         rec = None
                         try:
@@ -4846,10 +4854,10 @@ LOGGING:
                                "stream")
                 elif vid_stop:
                     # ASCII, so the locale-encoded open cannot refuse it
-                    outcome = ("NOT recorded -- the codec check at the "
+                    outcome = ("NOT recorded: the codec check at the "
                                "camera's frame size failed ("
                                + codec_why.encode('ascii', 'replace').decode()
-                               + "); the run was stopped before any HV")
+                               + "), so the run was stopped before any HV")
                 else:
                     outcome = ("NOT recorded -- the camera stream did not "
                                "start; snapshots were one-shot grabs as "

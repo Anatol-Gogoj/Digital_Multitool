@@ -613,9 +613,9 @@ Windows OpenCV 5.0 build, not the bench's 4.13.
 - [ ] **Q3.** Within ~5 s the run log says `video: recording 1 fps to
   local disk (…)` — **not** `delivered nothing … NO recording`. Just
   before it: `video: FFV1 checked at 1920 x 1080, the stream's own size:
-  lossless` (2026-10-06). A `run stopped before any HV: the video cannot
-  be recorded …` line instead means this camera's size fails on this
-  OpenCV: note the size and the reason.
+  lossless` (2026-10-06). A `run stopped before any HV: the video check
+  at the camera's frame size failed (…)` line instead means this
+  camera's size fails on this OpenCV: note the size and the reason.
 - [ ] **Q4.** Every `data.csv` row has a frame file. Open the baseline PNG
   next to one from a **stills-only** dry run of the same scene and
   settings: the same exposure, the same colour, no magenta checkerboard

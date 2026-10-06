@@ -1222,7 +1222,9 @@ def test_the_run_picker_scrolls_sideways_and_never_widens_the_window():
         # right-click on a row OUTSIDE the selection makes it the
         # selection, as file managers do; inside a multi-selection it
         # keeps the selection. The menu itself is stubbed: on Windows a
-        # real tk_popup is modal and would hold the suite.
+        # real tk_popup is modal and would hold the suite. Its grab is
+        # Tk's to release: on X11 a grab_release() straight after
+        # tk_popup leaves a menu that an outside click does not close.
         class _Menu:
             at = None
 
@@ -1230,7 +1232,8 @@ def test_the_run_picker_scrolls_sideways_and_never_widens_the_window():
                 self.at = (x, y)
 
             def grab_release(self):
-                pass
+                raise AssertionError('the popup grab is released by Tk '
+                                     'when the menu unposts')
         menu = _Menu()
         win.group_menu = lambda: menu
         second = win.displayed_runs()[1][0]

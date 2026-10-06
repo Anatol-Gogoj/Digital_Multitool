@@ -2765,10 +2765,12 @@ class PlotWindow:
         if not self.selected_dirs():
             return None
         menu = self.group_menu()
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
+        # NO grab_release() after it: on X11 (the bench) tk_popup posts
+        # the menu, sets a global grab on it and returns at once, and Tk
+        # releases that grab itself when the menu unposts (tk_popup in
+        # Tk 8.6's menu.tcl). Releasing it here would leave a menu that a
+        # click elsewhere does not close. Windows and aqua set no grab.
+        menu.tk_popup(event.x_root, event.y_root)
         return menu
 
     def move_to_group(self, name):

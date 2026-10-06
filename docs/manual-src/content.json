@@ -938,6 +938,10 @@
     "what": "Dry run rehearses timing and photos with HV off; unticking turns the row red for a live run. Abort ramps to 0 kV before stopping."
    },
    {
+    "label": "Camera for this run (the line under ▶ Run)",
+    "what": "Says which exposure and gain a run started now would use. A run takes them from the Webcam tab's boxes, not from whatever the camera happens to be set to. The line turns amber and starts with ⚠, giving the reason in words, when a value is a built-in default because the Webcam tab has no readable box for it (open the Webcam tab and press Read camera), or when the Webcam tab has locked different values, so its live preview does not show what the run will record (the pre-flight does)."
+   },
+   {
     "label": "Auto-open Edge Review",
     "what": "When a run finishes with frames, launches Edge Review on it and starts a default detection pass. That window closes by itself after a Save of that run with nothing to report: no warning, no scale caveat, and a real mm scale. Any message keeps it open, and so does switching it to another run."
    },
@@ -960,12 +964,13 @@
    "3. Set Output dir, DEA active area diam (mm), and the scope/SG channels.",
    "4. Do a dry run first to rehearse timing and camera captures.",
    "5. Untick DRY RUN; answer the scope-monitor and Energize HV prompts.",
-   "6. In camera pre-flight, center the DEA in the circle, check focus, start.",
+   "6. In camera pre-flight, center the DEA in the circle, check focus, start (Return starts only a clean pre-flight).",
    "7. Let it finish (or ■ Abort); Edge Review opens on the new run folder."
   ],
   "cautions": [
    "A live run drives real HV up to 10 kV through the Trek. Always stop with ■ Abort (it ramps to 0 kV first); closing the app mid-run can leave the Trek energized.",
    "If the scope-monitor check warns and you pick 'run anyway', the run completes but logs blank measured kV and wrong currents — this silently ruined five runs on 2026-07-25.",
+   "The camera pre-flight treats a flat picture (no visible disc) like a blown-out one: its start button reads ⚠ Start anyway (no picture), Return does nothing, and pressing it asks again (Enter = No). Unless you answered Yes there, a run stops itself the way ■ Abort does at its 0 kV baseline photo, taken as the first ramp begins, if that photo is flat, or if the camera gave the pre-flight a picture but gives the run none. The 2026-10-01 run went to 3 kV for 209 s on a flat grey picture. Yes is the deliberate override for a faint device: that run carries on, run.log and setup.txt record that you started anyway, and it needs reviewing by hand.",
    "A wrong DEA diameter corrupts the px-to-mm scale: every area number from that run is wrong and setup.txt must be hand-fixed before re-analysis.",
    "Running live with no scope means no measured kV/µA columns and no breakdown watchdog — the run continues even through a breakdown, and no telemetry.csv is written.",
    "During a live run the scope channels it reads (V_Out, I_Out), the timebase and trigger, and Stop, Single and AutoSet are locked on the Oscilloscope tab: the breakdown watchdog reads I_Out, and a re-coupled or frozen channel could blind it.",
@@ -1019,7 +1024,7 @@
   "subwindows": [
    {
     "name": "Camera pre-flight — SLDEA run",
-    "how_opened": "▶ Run (any mode) — snapshot with centering reticle; ✔ Looks good — start run / ✎ Adjust (open Webcam tab) / ✖ Cancel"
+    "how_opened": "▶ Run (any mode) — snapshot with centering reticle, exposure verdict and the run's camera settings; ✔ Looks good — start run (Return) only when every check is clean, otherwise a ⚠ Start anyway (…) button that names the problem / ✎ Adjust (open Webcam tab) / ✖ Cancel"
    },
    {
     "name": "Scope monitor setup (auto-fix prompt)",

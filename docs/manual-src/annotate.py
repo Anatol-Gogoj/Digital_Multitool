@@ -252,6 +252,21 @@ S["tab_sldea"] = {
                   "material, ink concentration (greyed for non-inks)"},
         {"match": "⚡ Breakdown watchdog (LIVE runs)", "label": "Aborts on sustained overcurrent — leave Enabled"},
         {"match": "📈 Scope kV/µA log", "label": "Logs kV/µA continuously to telemetry.csv — the current between photos"},
+    ],
+}
+
+# THE TAB'S LOWER HALF, ON ITS OWN SHOT (v1.4.1). The 🎥 video row (#359)
+# made the tab taller than the 1000 px capture window, so the run row and
+# the presets fell below the fold and their badges landed on the window's
+# bottom edge pointing at nothing. capture.py already took a scrolled-to-
+# bottom shot of every tall tab; the controls below the telemetry row are
+# annotated there instead, and build_manual.py shows it under the first.
+S["tab_sldea_bottom"] = {
+    "callouts": [
+        {"match": "🎥 Video beside the snapshots (lossless)",
+         "label": "Optional lossless video beside the snapshots (1–2 fps). "
+                  "NOT bench-verified yet — leave Record off on important "
+                  "runs; off = snapshots only"},
         {"match": "DRY RUN — HV OFF", "label": "Safety toggle — untick only for a live HV run"},
         {"match": "▶ Run (DRY)", "label": "Starts the run — the label shows the mode"},
         {"match": "■ Abort", "label": "Ramps to 0 kV first, then stops"},

@@ -36,7 +36,7 @@ Everything downstream keys off the slug:
 | `annotate.py` callout spec | `S["tab_logging"]` |
 | `annotate.py` legend | `legends["tab_logging"]` |
 | `content.json` entry | `"logging": {...}` (its `key` is the slug; its `area` records the on-screen label as *data*) |
-| `build_manual.py` chapter | `section("logging", "Data Logging", ...)` — also the `<section id>` and the NAV/SECTIONS id |
+| `build_manual.py` chapter | `section("logging", "Continuous Logging", ...)` — also the `<section id>` and the NAV/SECTIONS id |
 
 Before 2026-08-09 the shot name was built at capture time as
 `f"{i+1:02d}_{label-with-non-alnum-underscored}"` — the tab's **display

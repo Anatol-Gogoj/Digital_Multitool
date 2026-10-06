@@ -723,7 +723,7 @@
    "Closing the app leaves the supply exactly as-is: an ON output keeps powering the load.",
    "The current limit is constant-current, not a fuse — at the limit the supply lowers voltage to hold the current, so set it just above the expected draw.",
    "Above 35 V each output is capped at 1.5 A; Apply refuses voltage/current pairs outside the dual-range envelope.",
-   "To record readings over time use the Data Logging tab (writes per-channel psu CSVs) — Live readout only displays, it does not save."
+   "To record readings over time use the Continuous Logging tab (writes per-channel psu CSVs) — Live readout only displays, it does not save."
   ],
   "callouts": [
    {
@@ -814,12 +814,12 @@
    "Pick a Function from the dropdown (starts on DC Voltage).",
    "Click Read once, or tick Live reading for a continuous ~2 Hz display.",
    "Read the big number; the grey line beneath shows the raw value and unit.",
-   "To record: tick \"DMM\" on the Data Logging tab — it logs the function selected here to CSV."
+   "To record: tick \"DMM\" on the Continuous Logging tab — it logs the function selected here to CSV."
   ],
   "cautions": [
    "This unit is LAN-only — its USB never enumerated (known hardware issue). Do not troubleshoot USB; fix the network instead.",
    "The meter's socket accepts one client at a time. If Reconnect keeps failing, close any other program (or stale session) talking to it, or power-cycle the meter.",
-   "Data Logging records the Function selected at the moment you start logging; changing the dropdown mid-log does not change what is recorded.",
+   "Continuous Logging records the Function selected at the moment you start logging; changing the dropdown mid-log does not change what is recorded.",
    "OVLD means overload or no valid reading — the previous number is gone, not held.",
    "On Windows this tab is view-only: instrument connections are disabled, so Reconnect and readings only work on the lab (Linux) machine."
   ],
@@ -1050,16 +1050,16 @@
  },
  "logging": {
   "key": "logging",
-  "area": "Data Logging",
-  "purpose": "Records readings from the connected instruments to CSV files at a fixed interval — one timestamped file per source, so a run captures stimulus (sig gen, supply) and response (LCR, scope, DMM) side by side. Files are for offline analysis (Excel, Python); there is no live plot on this tab.",
+  "area": "Continuous Logging",
+  "purpose": "Records readings from the connected instruments to CSV files continuously, at a cadence you set in seconds or in Hz — one timestamped file per source, so a run captures stimulus (sig gen, supply) and response (LCR, scope, DMM) side by side. While a run goes, the tab shows each logged number's latest value with its min and max since Start; there is no live plot. Files are for offline analysis (Excel, Python).",
   "controls": [
    {
     "label": "Log Directory: + Browse",
     "what": "Folder where the CSV files are written (default ./logs); created automatically if missing."
    },
    {
-    "label": "Sample Interval (s):",
-    "what": "Seconds between samples; every ticked source is read once per interval."
+    "label": "Sample cadence: + s / Hz",
+    "what": "How often to sample: seconds between samples (s) or samples per second (Hz). Every ticked source is read once per sample. Switching the unit converts the number, so the cadence stays the same; the hint beside the box shows it in the other unit. Start refuses an empty box, a non-number, zero or a negative value."
    },
    {
     "label": "LCR Meter",
@@ -1090,6 +1090,10 @@
     "what": "Closes the files and ends the run (takes effect within about a second)."
    },
    {
+    "label": "Live Values (since Start)",
+    "what": "Each logged number's latest value, min and max since Start. -- means the latest read had no value (no signal, overload, an LCR status error or a failed read); such reads never count toward min or max. The line beneath counts samples and any skipped slots. Display only: Start clears it, and after Stop it keeps the last run's values."
+   },
+   {
     "label": "Log Status",
     "what": "Run messages: where each CSV was opened, per-source errors, dropped sources."
    },
@@ -1101,16 +1105,16 @@
   "workflow": [
    "1. Connect and configure the instruments on their own tabs first.",
    "2. Pick a Log Directory (Browse) or keep ./logs.",
-   "3. Enter the Sample Interval in seconds (e.g. 1.0).",
+   "3. Set the Sample cadence: seconds between samples (e.g. 1.0 s), or pick Hz for samples per second.",
    "4. Tick every source you want recorded.",
    "5. Click Start Logging and note the CSV paths in Log Status.",
-   "6. Watch Log Status during the run for errors or dropped sources.",
+   "6. During the run, watch Live Values (latest, min, max) and Log Status (errors, dropped sources).",
    "7. Click Stop Logging, then open the CSVs in Excel or Python."
   ],
   "cautions": [
    "A source that errors 5 times in a row is silently dropped for the rest of the run (one notice in Log Status) — check Log Status after long runs; if every source dies, logging stops itself.",
    "The DMM is logged with whatever function was selected on the DMM tab at the moment you pressed Start Logging — changing the function mid-run does not change what is recorded.",
-   "Sources are read one after another each tick, so with many sources or slow instruments the real spacing can be longer than the Sample Interval you typed.",
+   "Sources are read one after another each sample. If that takes longer than the cadence, the missed sample slots are skipped and counted under Live Values, never made up in a burst, so the real spacing becomes a whole multiple of the cadence.",
    "On a PC with no instruments connected, Start Logging refuses with \"Nothing to log\" — every ticked source must be connected on its tab.",
    "Files are flushed after every sample, so a crash or power loss loses at most the last row — but each Start opens new files; nothing is ever appended to an old run."
   ],
@@ -1120,8 +1124,8 @@
     "note": "CSV files are saved here"
    },
    {
-    "widget_text": "Sample Interval (s):",
-    "note": "seconds between samples"
+    "widget_text": "Sample cadence:",
+    "note": "seconds between samples, or Hz"
    },
    {
     "widget_text": "Log Instruments:",
@@ -1134,6 +1138,10 @@
    {
     "widget_text": "Stop Logging",
     "note": "closes files, ends the run"
+   },
+   {
+    "widget_text": "Live Values (since Start)",
+    "note": "latest, min and max since Start"
    },
    {
     "widget_text": "Log Status",
@@ -1150,7 +1158,7 @@
     "how_opened": "Browse"
    },
    {
-    "name": "Data Logging Tips (info popup)",
+    "name": "Continuous Logging Tips (info popup)",
     "how_opened": "📖 Show Usage Tips"
    }
   ]

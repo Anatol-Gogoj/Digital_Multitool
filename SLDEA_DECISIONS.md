@@ -13,6 +13,142 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## Group by material: setup.txt seeds the plot groups, and a group mean's line style is its electrode material (2026-10-06)
+
+**TL;DR:** the plot window can now fill its groups from each selected
+run's `Compliant electrode:` line in one click, and split them further by
+`Ink concentration:` with a second, indented button. Each group mean draws
+in its material's line style, so the subgroups of one material share a
+dash pattern and differ by color. The group palette grows from four Tol
+colors to seven, and no two means on a figure ever share both color and
+style. Figures with no recorded materials and four groups or fewer keep
+the colors and styles they had (`#373`).
+
+**Observation.**
+
+- With the aggregate on, the window drew one mean over every selected run
+  unless the operator typed each group by hand (`#313`). Comparing P3
+  against Invisicon 3900 against Invisicon 3500 took one Assign per
+  material.
+- `Electrode family:` cannot be the key: `electrode_family()` puts
+  P3-SWNT and both Invisicon inks in `cnt`, which is the one series this
+  request asked to split. The material string is the key.
+- `GROUP_COLORS` held four colors and the six-group concentration split
+  (P3 at 2.5, 2.3 and 1.5 mL, Invisicon 3900, Invisicon 3500, carbon
+  black) needs six. Past four, the old rule repeated a color with another
+  line style, which would have put two P3 volumes in one color and given
+  line style no meaning.
+- Two group-caption lines and the Members line ran off the right edge
+  once the group names became whole material names. Rendered at 100 dpi,
+  a 248-character Members line ended at 1.04 of the figure width and lost
+  its pointer to the tidy CSV. Group-caption text runs about 4 % wider
+  per character than the anchor line `CAPTION_LINE_MAX` was measured on.
+- Hinting makes 7 pt caption text wider on screen than its font metrics,
+  by an amount that depends on the dpi. Measured on the grouped lines at
+  every dpi from 50 to 1200: drawn / measured = 0.987 at 300 dpi, 1.03 at
+  96, 1.07 at 110, and 1.096 at worst (90 dpi).
+
+**Decision** (owner, 2026-10-06, for the scope; the measurements are this
+entry's).
+
+- **The key** is the `Compliant electrode:` value, compared
+  case-insensitively with whitespace collapsed. A group is named by the
+  spelling most of its runs recorded; on a tie the dropdown spelling wins,
+  then the first in sorted order. Free text stays free text. Two spellings
+  of one material (`Invisicon 3900` against `nano-c Invisicon 3900`) stay
+  apart until the operator moves runs between groups.
+- **No material is kept, not dropped.** A run with no such line goes to
+  `(no electrode recorded)`, a recorded `(not specified)` (or a blank
+  value) to `(not specified)`. The two stay separate, per the 2026-08-12
+  comment on `#268`.
+- **The concentration split is a child button, and concentration is not
+  part of the plain material key.** Each material splits by its
+  normalized `Ink concentration:` value (`2.5 mL`, `2.5mL` and `2.50 mL`
+  are one, labeled `<material>, 2.5 mL`). Materials whose line the runner
+  omits by design (`concentration_applies()`: carbon black, eGaIn, the
+  sprayed Invisicon inks) stay one group. An ink run with no line becomes
+  `<material>, (no concentration recorded)`. Runs with no material are
+  never split.
+- **A seed, not a mode.** Both buttons act on the selection only and
+  produce ordinary groups. Assign, Ungroup selected and Clear all work on
+  top, and the `#313` rule holds: the operator's grouping wins.
+- **The material is fixed when a group is formed** (a seed, an Assign
+  that creates the group, or a `--group` on the command line) and stored
+  as `group_materials` in the options and the figspec. Nothing reads
+  setup.txt at draw time, so `--from-spec` reproduces a figure byte for
+  byte even after a run's setup.txt is edited (tested). Runs moved into an
+  existing group take that group's material. That is what lets a move
+  merge two spellings into one series (`#374`) instead of turning the
+  group "mixed".
+- **Line styles.** Every group whose runs share one material draws that
+  material's style: solid, dashed, dash-dot, dotted, dash-dot-dot, then a
+  long dash (`GROUP_STYLES`). A group with no single material takes a
+  style no other group has. Colors go one per group in drawing order. A
+  repeated color is moved to the next color still free on that style, so
+  no two groups share both color and style. Each case past the palette
+  prints a console note. With no materials, groups get styles in order,
+  so four groups or fewer draw exactly the `#313` figure.
+- **Palette.** `GROUP_COLORS` keeps the four Tol high-contrast colors in
+  place and adds `#6699CC` (Tol medium-contrast), `#117733` and `#882255`
+  (Tol muted). They were the best extension a search found over Tol's
+  other qualitative schemes. No candidate was a `TOL_BRIGHT` run color,
+  and each had at least 3:1 contrast on white (WCAG 2.1 SC 1.4.11). Worst
+  pairwise CIEDE2000 over normal and Machado-2009 deutan / protan /
+  tritan, measured with the repo's simulator (linear RGB,
+  `tests/test_sldea_preview.py`), over the first N colors:
+
+  | N | floor | worst pair |
+  |---|---|---|
+  | 2 | 31.54 | `#000000` / `#BB5566`, protan |
+  | 3 | 26.02 | `#BB5566` / `#004488`, protan |
+  | 4 | 21.22 | `#BB5566` / `#DDAA33`, tritan |
+  | 5 | 21.22 | (unchanged) |
+  | 6 | 11.61 | `#BB5566` / `#117733`, deutan |
+  | 7 | 11.36 | `#004488` / `#882255`, protan |
+
+  For comparison, `TOL_BRIGHT`'s own worst pair over its seven colors is
+  8.62 by the same method. On a seeded figure the pairs near 11 are also
+  two different dash patterns. The group-to-run separation stays a shape
+  argument, as `#313` decided.
+- **Legend.** On a grouped figure the handles are 5.5 em (44 pt) long and
+  drawn at the mean's 2.2 pt width. The longest pattern period is 29.0 pt
+  (dash-dot-dot), and a 16 pt default handle could not tell dash-dot from
+  dash-dot-dot. An ungrouped figure keeps the default layout.
+- **The band edge carries no dash.** The SEM band stays a borderless fill.
+  The band rule is unchanged: SEM at n ≥ 2; at n = 1, no band and a
+  caption. A dashed edge would add two thin patterned curves per group
+  (twelve on the six-group figure), and an edge at band width reads as a
+  run curve.
+- **Captions.** The grouped caption gains one line saying what line style
+  means whenever a drawn group carries a material. Its lines are now cut
+  to their measured width (`CAPTION_FIT_FRAC` = 0.90 of the figure by font
+  metrics, so the worst measured dpi still ends by 0.99). The Members line
+  keeps its pointer to the CSV. Ungrouped figures are untouched.
+  `GROUP_NAME_MAX` goes from 40 to 64, because
+  `Carbon Solutions P3-SWNT, (no concentration recorded)` is 55
+  characters.
+
+**Found while measuring, not changed.** The `#313` palette table (29.23 /
+22.05 / 18.70, and `TOL_BRIGHT`'s adjacent-pair floor of 18.00) is
+reproduced to the last digit only when the Machado matrices are applied
+to gamma-encoded sRGB. `tests/test_sldea_preview.py` applies them in
+linear RGB, where the same adjacent-pair floor is 15.35, yet its
+docstring cites 18 as "the floor sldea_plot.py measures". The two
+methods disagree by up to about 19 % on one pair: 26.02 linear against
+22.05 gamma for `#BB5566` / `#004488`. Both are recorded in the
+`GROUP_COLORS` comment. Which one the house standard means is for the
+owner to say.
+
+**Not verified.** Whether the NanoC (Invisicon) runs carry
+`Compliant electrode:`. Checked read-only on 2026-10-06 from the analysis
+PC, `Z:\robot_incubator\SLDEA_data` holds 21 run folders. None is an
+Invisicon run. Only `13_backlight`, `13_backlight_2` (P3-SWNT, 0.5 mL) and
+`SLDEA_20261001_151016` (`Meijo 1`) carry the line. That copy is **not**
+the 2026-08-12 backfilled corpus: `P3_2_2.5mL_20260728` has no electrode
+line and no `.bak-20260812-pre-electrode-backfill` sidecar. The seed was
+exercised on synthetic runs and on scratch copies only. A bench check on
+the real corpus is owed.
+
 ## The video is reviewed by exception: Save re-runs stale video edges, the accepted stills flag the frames, and a window walks them (2026-10-06)
 
 **TL;DR:** the video pass used to run once, minutes after the run, before

@@ -179,10 +179,16 @@ With --auto (used by the SLDEA tab's "auto process"), the calibrate
 dialog opens on launch and detection chains automatically once
 calibration finishes, unless Run health shows a STOP: then nothing is
 pressed, the canvas says why, and the Detect button is live for a hand
-press (decision 16, 2026-10-03). Keyboard: 1/2/3 pick a candidate, R reject,
-4/D/T open the manual tracer (#162/#172 -- its Done stages the polygon
-as candidate D; Accept commits it like any other candidate),
-Left/Right navigate, Enter accept + next.
+press (decision 16, 2026-10-03). An --auto window is opened for ONE run,
+so a Save of that run with nothing to report closes it (#363,
+2026-10-05): data.csv, the scale anchor, the area-method stamp, the plot
+and the overlays all written, no rename failed and no anchor caveat.
+Anything else keeps it open with its message where it is said today (the
+status strip, or a warning box). A window opened by hand is the batch
+cockpit and stays open after every Save. Keyboard: 1/2/3 pick a
+candidate, R reject, 4/D/T open the manual tracer (#162/#172 -- its Done
+stages the polygon as candidate D; Accept commits it like any other
+candidate), Left/Right navigate, Enter accept + next.
 """
 import math
 import os
@@ -597,7 +603,8 @@ def session_readout(secs):
     window has been open. Runs from the moment Edge Review opens to the
     moment it closes: it is not reset by a run switch (the batch cockpit
     is one session across many runs) and not stopped by Save (reviewing
-    continues after one)."""
+    continues after one). The exception is an --auto window, which closes
+    after a clean Save of its own run (#363), and the session with it."""
     return f"session {fmt_dur(secs)}"
 # ---------------------------------------------------------------------------
 # hover tooltips (`#216`)
@@ -2303,6 +2310,9 @@ class EdgeReviewApp:
         # None while no run is loaded. Shown, not gated on: no button
         # reads it. The one reader is the --auto launch below, which
         # holds its Detect press on a STOP (decision 16, 2026-10-03)
+        self._auto_run = None    # the run an --auto launch opened, else
+        # None; set below once the run is picked. Save closes the window
+        # after a clean Save of THIS run only (#363, 2026-10-05)
         self._primary_font = None   # kept alive by _install_styles (`#216`)
         self._build_ui()
         start = path or DEFAULT_PARENT
@@ -2313,7 +2323,15 @@ class EdgeReviewApp:
         # means; the plot window never sends both.
         if goto is not None:
             self.goto_row(goto)
+        # THE --auto WINDOW SERVES ONE RUN (#363, 2026-10-05). The SLDEA
+        # tab's auto-process opens it on the run that just finished, so a
+        # clean Save of that run is the end of its job and closes it (see
+        # _closes_after_save). Recorded as the run, not as a bare flag: an
+        # operator who switches runs in this window is using it as the
+        # batch cockpit, and a cockpit stays open. None when the target
+        # was not found (no run is loaded, nothing to save).
         if auto and self.rundir:
+            self._auto_run = self.rundir
             if any(it.get('level') == 'stop' for it in self.health or ()):
                 # Decision 16 (2026-10-03): the press is held, not the
                 # button. The strip and the canvas carry the STOP, the
@@ -4487,6 +4505,12 @@ class EdgeReviewApp:
                    if has_bak else ""))
             return
         renamed, rn_errors = se.apply_rename_plan(plan)
+        # NOTHING TO REPORT (#363, 2026-10-05). A failed rename, anchor
+        # write or stamp write clears it. A failed plot or overlay returns
+        # before the close is reached, and the anchor caveat is checked at
+        # the close itself. Only a Save that ends with it still set may
+        # close an --auto window; any other ending keeps the window open.
+        quiet = not rn_errors
         if rn_errors:
             messagebox.showwarning(
                 "Save: renames incomplete",
@@ -4508,6 +4532,7 @@ class EdgeReviewApp:
             se.save_scale_anchor(self.rundir,
                                  self._anchor_record(self.manual_ref, scale))
         except OSError as e:
+            quiet = False
             self.status.config(
                 text=f"saved, but recording the scale anchor in "
                      f"setup.txt failed: {e}")
@@ -4538,6 +4563,7 @@ class EdgeReviewApp:
         try:
             se.stamp_area_estimator(self.rundir, stamp)
         except OSError as e:
+            quiet = False
             messagebox.showwarning(
                 "Save: area-method stamp not written",
                 f"data.csv is saved, but setup.txt could not be updated:"
@@ -4581,6 +4607,33 @@ class EdgeReviewApp:
             text=f"saved in {took} — "
                  + (f"{cav}. " if cav else '')
                  + f"data.csv updated ({scale_txt}){bd_txt}")
+        # CLOSE AFTER A CLEAN SAVE (#363, 2026-10-05), in an --auto window
+        # on its own run only. Clean means `quiet` held to the end, the
+        # strip names a real mm scale (not "no mm scale -- use Calibrate"),
+        # and there is no anchor caveat: the strip above is then routine
+        # and nobody needs to read it, so it is allowed to go unseen. Any
+        # other Save leaves the window open exactly as before. Closed by
+        # root.destroy(), the same path as the title-bar close button
+        # (there is no WM_DELETE_WINDOW handler): its <Destroy> binding
+        # runs _cancel_pending, so no `after` callback outlives the window.
+        if quiet and scale and not cav and self._closes_after_save():
+            self.root.destroy()
+
+    def _closes_after_save(self):
+        """True when this window is an --auto launch AND the run loaded now
+        is the run it was launched for (#363, 2026-10-05).
+
+        A window opened by hand is the batch cockpit (see session_readout)
+        and never closes on Save. Nor does an --auto window after the
+        operator switched it to another run: it is a cockpit by then.
+        Compared as normalized absolute paths, because Browse... can reach
+        the same folder by a differently spelled path."""
+        if not self._auto_run or not self.rundir:
+            return False
+
+        def norm(p):
+            return os.path.normcase(os.path.abspath(p))
+        return norm(self.rundir) == norm(self._auto_run)
 
     def _save_plot(self, scale):
         import matplotlib

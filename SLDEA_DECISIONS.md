@@ -568,6 +568,165 @@ one decode of `video.mkv` and timed each `write`. The detection loop
 called `candidates` and `needs_review` exactly as `detect_video` does, on
 the full frame and on each box in the same pass.
 
+## The video codec is checked at the camera's own frame size before any HV, and frames reach FFmpeg laid out so it cannot read past them (2026-10-06)
+
+**TL;DR:** the recorder's FFV1 check used a 64 x 48 frame, which passed
+sizes the recorder cannot write. A video run now writes and reads back
+a frame from the camera's own stream, at its real size, before the SG
+output is switched on, and stops the run there if that fails. The "Unknown C++
+exception" behind it, and behind `test_sldea_video`'s one-in-five
+failure, is FFmpeg 4.4 reading 1 KB past the end of every gray frame.
+Frames are now laid out so that read stays inside our own buffer.
+
+**Observation (Gogojster, Windows, OpenCV 4.13.0 with its bundled FFmpeg
+4.4, avcodec 58.134.100).** That is the `cv413` install pinned for the
+SLDEA review and put on `PYTHONPATH` for the suites. The repo venv's own
+OpenCV 5.0.0 (avcodec 61.19.100) does not reproduce the throw.
+
+- Each size was written in a fresh process, 3 processes per size, with
+  noise, flat and ramp frames:
+  - 1632 x 918, 1632 x 916 and 1664 x 918 threw "Unknown C++ exception
+    from OpenCV code" on the first write, 3 of 3. The file then held no
+    frames (593 B).
+  - 1632 x 920, 1630 x 918, 1600 x 918, 1080 x 1080 and 1920 x 1080 were
+    bit-exact.
+  - 1081 x 1080, 1083 x 1080, 1080 x 1081, 65 x 48 and 64 x 49 wrote
+    without error but read back one column or row short, as 1080 x 1080,
+    1082 x 1080, 1080 x 1080, 64 x 48 and 64 x 48.
+- **The odd sizes are OpenCV's doing.** `cap_ffmpeg_impl.hpp` at tag 4.13.0
+  says "we allow frames of odd width or height, but in this case we
+  truncate the rightmost column/the bottom row", then `width &= -2;
+  height &= -2;`.
+- **The throw is a read past the frame.** A 1920 x 1080 gray frame was
+  placed in front of an inaccessible page, with `slack` readable bytes
+  between its last pixel and that page:
+
+  | slack (B) | 0-32 | 33-1023 | 1024 and more |
+  |---|---|---|---|
+  | first write | ok | throws | ok |
+
+  At 100 B of slack, widths that are multiples of 32 threw (64, 96, 128,
+  1088, 1600, 1632, 1920) and the others did not (112, 1080, 1630).
+- The sources explain the table:
+  - OpenCV 4.13 copies a frame into its own buffer only when the row step
+    is not a multiple of 32, or when the end lies within 32 B of a page
+    boundary. Its comment reads "FFmpeg contains SIMD optimizations which
+    can sometimes read data past the supplied input buffer". Otherwise it
+    hands FFmpeg the caller's memory (`av_image_fill_arrays` on the
+    frame). For FFV1 the codec format is the input's, so no conversion
+    copies it first.
+  - FFmpeg 4.4 flags GRAY8 as `FF_PSEUDOPAL`. `av_image_fill_pointers`
+    puts the palette pointer width x height bytes after the first pixel,
+    which is the end of a contiguous frame, and `av_image_copy` then
+    copies `4*256` bytes from it. `avcodec_send_frame` reaches that
+    copy through `av_frame_ref`, which duplicates a non-refcounted frame.
+  - The read is 1024 B, OpenCV guards 32 B, and its own copy keeps only
+    32 B spare. FFmpeg 5.0's `pixdesc.c` no longer has `FF_PSEUDOPAL`.
+- **The flake is the same read.** `test_sldea_video` ran 25 times, five at
+  a time, with `VideoWriter.write` wrapped. Before each write the wrapper
+  predicted a fault from the frame's address and the readability of the
+  page after it (`VirtualQuery`). 12 of 25 processes saw an exception.
+  The test's frames are 64 x 48, 128 x 96 and 320 x 240, all multiples of
+  32 wide, so they go in place:
+
+  | write | ok | threw |
+  |---|---|---|
+  | in place, fault predicted | 0 | 115 |
+  | in place, no fault predicted | 4407 | 0 |
+  | copied by OpenCV first | 90 | 26 |
+
+  Copied frames fault inside OpenCV's own buffer, which Python cannot
+  see. The cascade of skips after the first exception was the same unlucky
+  heap block coming back for the next 64 x 48 probe, not a poisoned
+  process: 375 later writes in those processes were fine.
+- The camera's 1920 x 1080 frame has always been written without error.
+  A `cv2.cvtColor` gray frame of that size, allocated as the reader
+  allocates it, ended 3008 B before a page boundary in 200 of 200
+  allocations, clear of the 1024 B read. That is where the allocator
+  happens to put it, not a property of the code.
+
+**Decision.**
+
+- **Check at the real size, with the real frame.** Once the stream has
+  delivered a frame, and before the SG output is switched on,
+  `VideoRecorder.check_codec` writes and reads back the newest one, plus
+  a noise frame of its size, through `codec_available(frame=...)`. It
+  adds no camera I/O, and it writes in the staging folder, on the disk
+  the recording will use. A frame that throws or does not come back
+  bit-exact, shape included, stops the run through the Abort flag. Then:
+  - the SG is never switched on, and it is zeroed on the way out as
+    always;
+  - `run.log` and `setup.txt` (`Video outcome: NOT recorded: the codec
+    check ... failed (...)`), the red status line and a box say why;
+  - the words say "the video check failed" and give the reason, since a
+    full staging disk fails it too, not only a size;
+  - the box says to untick Record to run with snapshots only.
+
+  The worker cannot ask whether to go on without the video, and the Run
+  pre-flight's own codec question defaults to No, so the check stops the
+  run rather than quietly dropping the video. A passing check logs `video:
+  FFV1 checked at W x H, the stream's own size: lossless`. After that the
+  writer records that size only. A stream reopened at another size in
+  between is not recorded; the error is logged and the stills go on. The
+  Run pre-flight's 64 x 48 probe stays: it is the question "is there an
+  encoder at all", asked before anything starts.
+- **Lay frames out so FFmpeg cannot fault.** `ffmpeg_safe` copies each
+  frame into a reused buffer with a row stride that is a multiple of 32,
+  and places the end of its last row mid-page with more than a page of
+  buffer behind it. OpenCV therefore passes it in place, and the 1024 B
+  read lands in our buffer. Pixels and decode are unchanged. The
+  recorder, the probe and the test suite's own writer all use it. The
+  copy is one memcpy per recorded frame, 2 MB at 1 fps.
+
+**Verified (Gogojster, same build).**
+
+- With the layout, 1632 x 918, 1632 x 916 and 1664 x 918 pass the probe
+  (3 of 3 processes each), and the odd sizes are still refused, with the
+  read-back size named. The probe takes 0.42-0.45 s at 1920 x 1080.
+- Without the layout (the first commit alone), the probe refuses all
+  three even sizes with the exception named. Either way none reaches HV.
+- A child process puts an inaccessible page right behind the buffer: a
+  raw frame throws, and the same frame through `ffmpeg_safe` writes and
+  decodes bit-exactly (`test_a_frame_through_ffmpeg_safe_survives_where_a_raw_one_faults`).
+  Under the repo venv's OpenCV 5.0 the raw frame does not fault, and the
+  test reports a skip.
+- `test_sldea_video` with the wrapped writer, 25 processes, five at a
+  time: 0 of 7833 writes threw, against 141 before, and no test was
+  skipped. That exposed a second, older flake. Three runs failed
+  `test_the_last_still_gets_its_row_even_when_its_frame_never_comes`
+  with WinError 145 "The directory is not empty". Its temporary folder
+  was deleted while the detached post-run job was still moving the video
+  in, and it had already failed 2 of 14 times on origin/main. The worker
+  tests' driver now waits for the post-run job and its detached move
+  before a test deletes its folder. The final code passed 25 of 25 runs
+  at 45 of 45 tests, with 0 of 7809 writes throwing.
+
+**Open.**
+
+- **The bench is Linux, and there a read into an unmapped page is SIGSEGV,
+  not an exception.** If the bench wheel's FFmpeg is 4.x, an unlucky frame
+  would have killed the app mid-run with the SG output on, since closing
+  the app does not switch it off. `ffmpeg_safe` removes that case. Which
+  FFmpeg the bench wheel bundles is unchecked: `python sldea_video.py
+  --selftest` now prints it (#369).
+- Whether the bench's OpenCV crops odd sizes the same way is unverified.
+  The source is shared, so it is expected to.
+- **Owner question: should the other no-video starts stop too?** A run
+  with no camera, or whose stream delivers nothing in 5 s, still goes on
+  to HV without video and with one-shot stills, as before. Only a failed
+  codec check stops the run. The reason given above (the worker cannot
+  ask) applies to those two as well. The difference is the owner's
+  request for this case only, not a measured one.
+
+**Evidence.** Scratch scripts, not kept in the repo:
+`ffv1_sizes.py` (sizes, fresh processes), `ffv1_guard.py` (slack sweep
+and widths against a guard page), `ffv1_strided.py` (a row-strided view
+reaches FFmpeg in place), `flake_probe.py` with `flake_tally2.py` (the
+wrapped suite), `cam_slack.py` (where a 1080p frame ends). Sources read:
+OpenCV `modules/videoio/src/cap_ffmpeg_impl.hpp` at 4.13.0; FFmpeg n4.4
+`libavutil/imgutils.c`, `pixdesc.c`, `frame.c` and `libavcodec/encode.c`;
+FFmpeg n5.0 `libavutil/pixdesc.c`.
+
 ## The baseline disc fit retries from the window centre when it refuses, and judges that retry against the ring around the disc (2026-10-05)
 
 **TL;DR:** on backlit run `13_backlight_2` the automatic baseline fit

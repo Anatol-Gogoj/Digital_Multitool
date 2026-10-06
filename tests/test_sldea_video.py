@@ -20,11 +20,16 @@ What these pin down:
   * detect_video runs the stills' own detector on every frame, from the
     run folder or from the staging copy; the detached --finalize job
     detects first and moves second;
+  * the codec is checked at the stream's OWN size, with its own frame,
+    and frames reach FFmpeg laid out so that its read past the last pixel
+    stays in memory the recorder owns (2026-10-06: the cause of this
+    suite's one-process-in-five FFV1 failure on Windows);
   * the REAL run worker: stills come off the stream (no one-shot grab),
     setup.txt says what happened, a dead stream falls back to one-shot
     stills, the SG is zeroed BEFORE the recorder is stopped, the tab is
-    released even when the video shutdown throws, and an abort during
-    the camera startup never switches the SG output on.
+    released even when the video shutdown throws, an abort during the
+    camera startup never switches the SG output on, and neither does a
+    stream size the codec cannot record.
 
 Run: .venv/bin/python tests/test_sldea_video.py
 """
@@ -158,6 +163,190 @@ def test_the_codec_is_lossless_here_and_the_probe_never_raises():
     assert ok is False and why, "an unwritable probe dir must be an answer"
 
 
+def test_the_probe_runs_at_the_frame_size_and_refuses_an_odd_one():
+    """2026-10-06: the 64 x 48 probe passed sizes FFV1 cannot record.
+    Handed a frame, the probe writes and reads back THAT size. OpenCV's
+    FFmpeg writer truncates an odd width or height to even (its
+    cap_ffmpeg_impl.hpp, "we truncate the rightmost column/the bottom
+    row"), so an odd frame comes back a column short: not lossless."""
+    _need_cv()
+    import numpy as np
+    rng = np.random.default_rng(5)
+    even = rng.integers(0, 256, (48, 64, 3), dtype=np.uint8)   # BGR
+    assert sv.codec_available(frame=even) == (True, '')
+    ok, why = sv.codec_available(frame=rng.integers(
+        0, 256, (48, 65), dtype=np.uint8))
+    # a refusal of any kind is right (here: "read back as 64 x 48")
+    assert ok is False, "an odd width must not pass as lossless"
+    assert '65 x 48' in why, why
+
+
+def test_a_writer_that_throws_fails_the_probe_and_names_the_size():
+    """The other 2026-10-06 failure: at some sizes write() threw "Unknown
+    C++ exception" on the first frame. The probe turns that into an
+    answer naming the size, and releases the writer it opened."""
+    _need_cv()
+    import cv2
+    import numpy as np
+    real = cv2.VideoWriter
+    released = []
+
+    class Throws:
+        def __init__(self, *a, **k):
+            pass
+
+        def isOpened(self):
+            return True
+
+        def write(self, img):
+            raise cv2.error("Unknown C++ exception from OpenCV code")
+
+        def release(self):
+            released.append(True)
+    cv2.VideoWriter = Throws
+    try:
+        ok, why = sv.codec_available(frame=np.zeros((918, 1632), np.uint8))
+    finally:
+        cv2.VideoWriter = real
+    assert ok is False and released == [True], (ok, released)
+    assert '1632 x 918' in why and 'Unknown C++ exception' in why, why
+
+
+def test_ffmpeg_safe_keeps_the_pixels_and_room_past_the_last_one():
+    """The layout ffmpeg_safe promises: the same pixels; a row stride that
+    is a multiple of 32 and a last row ending mid-page, so OpenCV passes
+    the frame in place (its own copy keeps only 32 B spare); and more
+    than FFMPEG_OVERREAD bytes of the buffer past that end. The buffer is
+    reused for the next frame of the same size."""
+    import numpy as np
+    rng = np.random.default_rng(9)
+    for h, w in ((48, 64), (96, 128), (240, 320), (918, 1632),
+                 (1080, 1920), (96, 129), (1080, 1081)):
+        gray = rng.integers(0, 256, (h, w), dtype=np.uint8)
+        view, buf = sv.ffmpeg_safe(gray)
+        assert np.array_equal(view, gray), (h, w)
+        step = view.strides[0]
+        assert view.strides[1] == 1 and step % 32 == 0 and step >= w, \
+            (h, w, view.strides)
+        end = view.ctypes.data + step * h
+        assert end % sv._PAGE == sv._PAGE // 2, (h, w, end % sv._PAGE)
+        room = buf.ctypes.data + buf.size - end
+        assert room > sv.FFMPEG_OVERREAD, (h, w, room)
+        again, buf2 = sv.ffmpeg_safe(gray[::-1].copy(), buf)
+        assert buf2 is buf and np.array_equal(again, gray[::-1])
+    # not an 8-bit gray frame: handed back untouched, never narrowed
+    deep = np.full((4, 64), 1000, np.uint16)
+    same, nobuf = sv.ffmpeg_safe(deep)
+    assert same is deep and nobuf is None
+
+
+# Run in a child process, so the deliberate fault cannot touch the suite:
+# on Windows it is a C++ exception, on Linux a SIGSEGV that kills the
+# process. The child maps memory with an inaccessible page right after
+# it and writes one 1920 x 1080 frame. 'raw' is a contiguous frame ending
+# 100 B before that page, as a cv2-allocated frame sits when it fails.
+# 'safe' is the same picture through ffmpeg_safe, whose buffer is handed
+# in ending exactly at that page.
+_GUARD_CHILD = r'''
+import ctypes, json, os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+mode = sys.argv[2]
+import numpy as np, cv2
+import sldea_video as sv
+PAGE = 4096
+
+def guarded(nbytes):
+    pages = (nbytes + PAGE - 1) // PAGE
+    total = (pages + 1) * PAGE
+    if os.name == 'nt':
+        k32 = ctypes.windll.kernel32
+        k32.VirtualAlloc.restype = ctypes.c_void_p
+        k32.VirtualAlloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                                     ctypes.c_uint32, ctypes.c_uint32]
+        k32.VirtualProtect.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                                       ctypes.c_uint32,
+                                       ctypes.POINTER(ctypes.c_uint32)]
+        base = k32.VirtualAlloc(None, total, 0x3000, 0x04)
+        old = ctypes.c_uint32()
+        assert k32.VirtualProtect(base + pages * PAGE, PAGE, 0x01,
+                                  ctypes.byref(old))
+        keep = None
+    else:
+        import mmap
+        keep = mmap.mmap(-1, total)
+        base = ctypes.addressof(ctypes.c_char.from_buffer(keep))
+        libc = ctypes.CDLL(None)
+        libc.mprotect.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                                  ctypes.c_int]
+        assert libc.mprotect(base + pages * PAGE, PAGE, 0) == 0
+    start = base + pages * PAGE - nbytes
+    arr = np.frombuffer((ctypes.c_uint8 * nbytes).from_address(start),
+                        np.uint8)
+    return arr, keep
+
+def write_one(img, want, d, name):
+    path = os.path.join(d, name)
+    h, w = want.shape
+    vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*sv.VIDEO_FOURCC),
+                         1.0, (w, h), isColor=False)
+    try:
+        vw.write(img)
+        out = 'ok'
+    except Exception as e:
+        out = 'threw: %s' % e
+    vw.release()
+    cap = cv2.VideoCapture(path)
+    ok, g = cap.read()
+    cap.release()
+    exact = bool(ok) and np.array_equal(g[:, :, 0] if g.ndim == 3 else g,
+                                        want)
+    return out, exact
+
+h, w = 1080, 1920
+gray = np.random.default_rng(4).integers(0, 256, (h, w), dtype=np.uint8)
+with tempfile.TemporaryDirectory() as d:
+    if mode == 'raw':
+        img, keep = guarded(h * w + 100)
+        img = img[:h * w].reshape(h, w)
+        img[:] = gray
+    else:
+        buf, keep = guarded(((w + 31) & ~31) * h + 3 * PAGE)
+        img, _ = sv.ffmpeg_safe(gray, buf)
+    print(json.dumps(write_one(img, gray, d, mode + '.mkv')))
+'''
+
+
+def _guard_child(mode):
+    """-> (returncode, [write outcome, decoded bit-exactly] or None when
+    the child died before it could say, its stderr)."""
+    import json
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    p = subprocess.run([_sys.executable, '-c', _GUARD_CHILD, root, mode],
+                       capture_output=True, text=True, timeout=120)
+    out = p.stdout.strip().splitlines()
+    return p.returncode, (json.loads(out[-1]) if out else None), p.stderr
+
+
+def test_a_frame_through_ffmpeg_safe_survives_where_a_raw_one_faults():
+    """The fix measured, in a child process each: with unmapped memory
+    right behind the buffer, the raw frame faults on this OpenCV/FFmpeg
+    (an exception on Windows, a crash on Linux), and the ffmpeg_safe one
+    writes and decodes bit-exactly. An FFmpeg that does not read past the
+    frame (5.0 and later) passes both, and the test says it showed
+    nothing."""
+    _need_cv()
+    rc, res, err = _guard_child('safe')
+    assert rc == 0 and res == ['ok', True], (rc, res, err[-800:])
+    rc, res, err = _guard_child('raw')
+    if rc == 0 and res and res[0] == 'ok':
+        raise _Skip(f"{sv._ffmpeg_version()} does not read past a raw "
+                    f"frame, so the layouts cannot be told apart here (the "
+                    f"ffmpeg_safe half passed)")
+    assert rc != 0 or (res and 'Unknown C++ exception' in res[0]), \
+        (rc, res, err[-800:])
+
+
 # ---------------------------------------------------------------- recorder
 
 def test_the_recorder_writes_a_lossless_file_on_the_run_clock():
@@ -192,6 +381,80 @@ def test_the_recorder_writes_a_lossless_file_on_the_run_clock():
         assert rec.dropped == 0 and rec.error is None
         s = rec.summary()
         assert 'frames recorded' in s and 'stream' in s, s
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_check_codec_probes_with_the_streams_own_frame():
+    """VideoRecorder.check_codec: no camera I/O of its own. It hands the
+    codec probe the frame the reader already holds, gray as recorded,
+    probes on the recording's own disk and leaves nothing there, and
+    remembers the size that passed; with no frame yet it refuses."""
+    _need_cv()
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    real = sv.codec_available
+    seen = []
+
+    def spy(tmpdir=None, frame=None):
+        seen.append((tmpdir, None if frame is None else frame.shape))
+        return real(tmpdir=tmpdir, frame=frame)
+    try:
+        idle = sv.VideoRecorder(lambda: _FakeCam(), d, log=lambda m: None)
+        ok, why = idle.check_codec()
+        assert ok is False and 'no frame' in why, why
+        sv.codec_available = spy
+        rec = sv.VideoRecorder(lambda: _FakeCam(shape=(96, 128)), d,
+                               log=lambda m: None).start()
+        assert rec.wait_first_frame(3.0)
+        assert rec.check_codec() == (True, '')
+        assert seen == [(d, (96, 128))], seen
+        assert rec.probed_size == (128, 96)
+        rec.stop(timeout=5.0)
+        assert os.listdir(d) == [], os.listdir(d)
+    finally:
+        sv.codec_available = real
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_stream_of_an_odd_size_fails_check_codec():
+    _need_cv()
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    try:
+        rec = sv.VideoRecorder(lambda: _FakeCam(shape=(96, 129)), d,
+                               log=lambda m: None).start()
+        assert rec.wait_first_frame(3.0)
+        ok, why = rec.check_codec()
+        rec.stop(timeout=5.0)
+        assert ok is False and '129 x 96' in why, why
+        assert rec.probed_size is None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_size_other_than_the_checked_one_is_not_recorded():
+    """A stream reopened at another size between the check and the
+    first recorded frame: that size was never checked, so it is not
+    recorded (an odd one would be cropped), the log says so, and the
+    stills are still served."""
+    _need_cv()
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    logs = []
+    try:
+        rec = sv.VideoRecorder(lambda: _FakeCam(), d, fps=5,
+                               log=logs.append).start()
+        assert rec.wait_first_frame(3.0)
+        assert rec.check_codec() == (True, '')
+        rec.probed_size = (64, 48)       # as if checked on another stream
+        rec.set_t0(time.monotonic())
+        assert _wait(lambda: rec.error is not None, 3.0)
+        time.sleep(0.5)
+        assert rec.latest()[0] is not None, "the stills must go on"
+        rec.stop(timeout=5.0)
+        assert rec.written == 0, rec.written
+        assert 'delivers 128 x 96' in rec.error \
+            and 'never checked' in rec.error, rec.error
+        assert any(rec.error in m for m in logs), logs
+        assert not os.path.exists(os.path.join(d, sv.VIDEO_FILENAME))
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -508,16 +771,19 @@ def _write_video(folder, n, rng):
               newline='') as f:
         w = csv.writer(f)
         w.writerow(sv.INDEX_COLUMNS)
+        buf = None
         try:
             for i in range(n):
-                vw.write(_scene(30 + 6 * i, rng))
+                # through ffmpeg_safe, as the recorder writes: a raw
+                # 320 x 240 frame is in place for FFmpeg's read past its
+                # end, which threw in about one process in five here
+                # (Windows, OpenCV 4.13, measured 2026-10-06)
+                safe, buf = sv.ffmpeg_safe(_scene(30 + 6 * i, rng), buf)
+                vw.write(safe)
                 w.writerow([i, 2.0 + i, 0.5 * i, '', i + 1])
         except cv2.error as e:
-            # The same failure _need_cv's probe catches, arriving one write
-            # later: on Gogojster (Windows, OpenCV 4.13) about one process
-            # in five sees the FFV1 writer throw, and every write after it
-            # in that process too (2026-10-06). Not this suite's code:
-            # reported as could-not-run, never as a pass or a failure.
+            # still reported as could-not-run, never as a pass or a
+            # failure, should an OpenCV fail here for another reason
             vw.release()
             raise _Skip(f"this OpenCV's {sv.VIDEO_FOURCC} writer failed "
                         f"mid-file: {e}")
@@ -925,8 +1191,28 @@ class _StubApp:
     SLDEA_STILL_WAIT_S = _G.SLDEA_STILL_WAIT_S
     _sldea_worker = _G._sldea_worker
     _sldea_capture = _G._sldea_capture
-    _sldea_video_postrun = _G._sldea_video_postrun
     _sldea_run_logger = _G._sldea_run_logger
+
+    @property
+    def _sldea_video_postrun(self):
+        """The real post-run job, wrapped so _drive can wait for it and
+        for the detached move it starts. The worker looks this up on its
+        own thread while starting the post-run thread, so the Event exists
+        before the worker returns. A test that deleted its folder while
+        the job still wrote into it failed with WinError 145 "The
+        directory is not empty" (2 of 14 runs of origin/main under load,
+        2026-10-06)."""
+        done = threading.Event()
+        self.postruns.append(done)
+
+        def run(*a, **k):
+            try:
+                self._G._sldea_video_postrun(self, *a, **k)
+                for proc in list(self._sldea_video_jobs):
+                    proc.wait(timeout=120)
+            finally:
+                done.set()
+        return run
 
     def __init__(self, sg=None):
         import types
@@ -938,7 +1224,9 @@ class _StubApp:
         self._sldea_loglock = threading.Lock()
         self._sldea_recorder = None
         self._sldea_video_jobs = []
+        self.postruns = []
         self.lines = []
+        self.statuses = []
         self.finished = 0
         self.root = types.SimpleNamespace(after=self._after)
 
@@ -952,7 +1240,7 @@ class _StubApp:
         self.lines.append(str(msg))
 
     def _sldea_set_status(self, *a, **k):
-        pass
+        self.statuses.append(a[0] if a else '')
 
     def _sldea_finished(self):
         self.finished += 1
@@ -1009,6 +1297,10 @@ def _drive(app, tmp, stream, oneshot, dry=True, override=True,
             _short_profile(), tmp, 'RUN', 1, 2, 3, dry, tel_on=False,
             vid_on=True, vid_fps=5.0, picture_override=pov,
             cam_expected=cam_expected)
+        # the post-run job and its detached move write into the run
+        # folder after the worker returns; the caller deletes that folder
+        for done in app.postruns:
+            assert done.wait(150), "the post-run video job never finished"
     return os.path.join(tmp, 'RUN')
 
 
@@ -1267,6 +1559,61 @@ def test_an_abort_during_camera_startup_never_switches_the_sg_on():
         assert not [e for e in events if e[1] == 'sg.set_output'
                     and e[2][1] is True], [e[1:3] for e in events]
         assert app.finished == 1
+
+
+def test_a_stream_size_the_codec_cannot_record_stops_the_run_before_hv():
+    """2026-10-06: the codec is checked at the stream's OWN size, with its
+    own frame, before the SG output is switched on. A LIVE run whose
+    camera delivers a size FFV1 cannot record losslessly (odd, here)
+    stops there: the SG output is never switched on, the SG is still
+    zeroed and switched off on the way out, nothing is recorded or
+    shot, and setup.txt, run.log and the status line say why."""
+    _need_cv()
+    events = []
+    with tempfile.TemporaryDirectory() as tmp:
+        app = _StubApp(sg=_FakeSG(events))
+        rundir = _drive(app, tmp,
+                        lambda spec, fps=10: _FakeCam(shape=(96, 129)),
+                        _no_oneshot, dry=False)
+        assert app.finished == 1
+        assert app._sldea_stop, app.lines
+        assert not [e for e in events if e[1] == 'sg.set_output'
+                    and e[2][1] is True], [e[1:3] for e in events]
+        offs = [e for e in events if e[1] == 'sg.set_output']
+        assert offs and offs[-1][2][1] is False, [e[1:3] for e in events]
+        assert any('run stopped before any HV' in ln and '129 x 96' in ln
+                   and 'never switched on' in ln for ln in app.lines), \
+            app.lines
+        assert any(ln.startswith('run aborted: 0/') for ln in app.lines), \
+            app.lines
+        assert any(s.startswith('STOPPED before HV') for s in app.statuses), \
+            app.statuses
+        assert _read_csv(os.path.join(rundir, 'data.csv')) == []
+        assert not os.path.exists(os.path.join(rundir, sv.VIDEO_FILENAME))
+        with open(os.path.join(rundir, 'setup.txt')) as f:
+            setup = f.read()
+        assert ('Video outcome: NOT recorded: the codec check at the '
+                "camera's frame size failed (FFV1 at 129 x 96") in setup, \
+            setup
+        assert 'stopped before any HV' in setup
+        assert not os.listdir(os.path.join(tmp, 'staging')), \
+            "an empty staging dir was left behind"
+        # registered before it was stopped, so the camera guards that ask
+        # reader_alive() would have seen a reader that outlasted stop()
+        assert app._sldea_recorder is not None
+        assert not app._sldea_recorder.reader_alive()
+
+
+def test_a_video_run_logs_the_size_its_codec_was_checked_at():
+    _need_cv()
+    with tempfile.TemporaryDirectory() as tmp:
+        app = _StubApp()
+        rundir = _drive(app, tmp, lambda spec, fps=10: _FakeCam(),
+                        _no_oneshot)
+        assert app.finished == 1 and not app._sldea_stop, app.lines
+        assert any(ln == f"video: {sv.VIDEO_FOURCC} checked at 128 x 96, "
+                   f"the stream's own size: lossless" for ln in app.lines), \
+            app.lines
 
 
 def _run():

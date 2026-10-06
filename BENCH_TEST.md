@@ -600,12 +600,22 @@ Windows OpenCV 5.0 build, not the bench's 4.13.
 
 - [ ] **Q1.** `python sldea_video.py --selftest` on the bench PC prints
   `FFV1 lossless round trip: OK`. If not, stop: the bench wheel has no
-  encoder, and the tab will offer "Run WITHOUT video" instead.
+  encoder, and the tab will offer "Run WITHOUT video" instead. Since
+  2026-10-06 it also prints `FFV1 lossless round trip at 1920 x 1080: OK`,
+  and first a line `OpenCV …, avcodec …`. **Note the avcodec version**:
+  58.x is FFmpeg 4.x, which reads 1 KB past every gray frame (on Linux a
+  crash if that memory is unmapped; `ffmpeg_safe` keeps the read inside
+  the recorder's buffer), and 59 or later does not
+  (SLDEA_DECISIONS 2026-10-06, the codec at the camera's own size).
 - [ ] **Q2.** SLDEA tab → 🎥 **Record**, fps **1**. The size line shows
   roughly 2.5 GB for the default 0→10 kV profile. Set a short profile
   (0→2 kV, 1 kV steps, 20 s landings) and press **▶ Run (DRY)**.
 - [ ] **Q3.** Within ~5 s the run log says `video: recording 1 fps to
-  local disk (…)` — **not** `delivered nothing … NO recording`.
+  local disk (…)` — **not** `delivered nothing … NO recording`. Just
+  before it: `video: FFV1 checked at 1920 x 1080, the stream's own size:
+  lossless` (2026-10-06). A `run stopped before any HV: the video check
+  at the camera's frame size failed (…)` line instead means this
+  camera's size fails on this OpenCV: note the size and the reason.
 - [ ] **Q4.** Every `data.csv` row has a frame file. Open the baseline PNG
   next to one from a **stills-only** dry run of the same scene and
   settings: the same exposure, the same colour, no magenta checkerboard

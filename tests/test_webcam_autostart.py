@@ -308,6 +308,42 @@ def test_an_sldea_run_holds_the_start_off_with_no_dialog():
                 _close(root, app)
 
 
+def test_a_modal_dialog_holds_the_start_off():
+    """The SLDEA camera pre-flight is a grabbed dialog. By then sldea_run
+    has closed the preview's camera for the run, and _sldea_running is
+    not set until Start, so the run check alone does not see it. A grab
+    stops the pointer, not the keyboard, so the tab can still be opened
+    (Ctrl+Tab): no open while any dialog holds the grab, and the splash
+    says why. Closing the dialog does not start the preview by itself."""
+    import tkinter as tk
+    with _Patched() as p:
+        root, app = _app()
+        if root is None:
+            return
+        try:
+            dialog = tk.Toplevel(root)
+            dialog.grab_set()
+            _pump(root, 0.1)
+            if root.grab_current() is None:
+                print("   (skipped: this display gives no grab)")
+                dialog.destroy()
+                return
+            _select_webcam(app)
+            _pump(root, 0.4)
+            assert not app.cam_previewing
+            assert _opens() == [], _FakeCam.log
+            assert p.mb.calls == [], p.mb.calls
+            assert app.cam_splash[1] == gui.CAM_OFF_DIALOG, app.cam_splash
+            dialog.grab_release()
+            dialog.destroy()
+            assert _pump_until(
+                root, lambda: app.cam_splash[1] == gui.CAM_OFF_CLICK,
+                secs=2.0), app.cam_splash
+            assert _opens() == [], "closing the dialog must not open it"
+        finally:
+            _close(root, app)
+
+
 def test_a_capture_or_adjustment_holds_the_start_off_with_no_dialog():
     cases = (
         ('timed', 'timed', None, gui.CAM_OFF_TIMED),

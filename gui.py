@@ -211,6 +211,7 @@ CAM_OFF_SLDEA = "SLDEA run owns the camera"
 CAM_OFF_TIMED = "Timed capture is using the camera"
 CAM_OFF_SWEEP = "Stepped capture is using the camera"
 CAM_OFF_ADJUSTING = "A camera adjustment is running"
+CAM_OFF_DIALOG = "A dialog is open"
 CAM_OFF_NOT_FOUND = "Camera not found: {}"
 CAM_NO_FRAME_REASON = "The camera is not sending frames"
 
@@ -8150,6 +8151,17 @@ LOGGING:
         Reads flags only: no dialog, no camera I/O."""
         if self._cam_sldea_holds_camera():
             return CAM_OFF_SLDEA
+        # A modal dialog holds the pointer grab. The SLDEA camera pre-flight
+        # is one: sldea_run has already closed the preview's camera for the
+        # run, and _sldea_running is not set until the operator presses
+        # Start. A grab does not stop the keyboard reaching the notebook,
+        # so the tab can still be opened, and an auto-start there would
+        # hand the run a camera the preview holds.
+        try:
+            if self.root.grab_current() is not None:
+                return CAM_OFF_DIALOG
+        except tk.TclError:
+            pass
         # A timed or stepped capture's one-shot grabs need the device free;
         # its worker can still be finishing a step after Stop.
         if self.cam_seq_running or self._cam_worker_alive():

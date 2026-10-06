@@ -96,8 +96,42 @@ def _drawn(runs, opts, warn=lambda m: None):
 
 
 def _caption(fig):
-    """The figure-level caption text every figure carries."""
-    return '\n'.join(t.get_text() for t in fig.texts)
+    """The figure-level caption text every figure carries, AS COMPOSED:
+    every line whole, before it is wrapped to the figure's width
+    (2026-10-06). A phrase a test looks for cannot then be split by where
+    a row happens to break; that the drawn rows are these lines and keep
+    every word is test_the_caption_is_wrapped_inside_the_frame's job, and
+    _caption_rows is what is drawn."""
+    held = getattr(fig, sp._CAPTION_ATTR, None)
+    return '\n'.join(held[1] if held is not None and t is held[0]
+                     else t.get_text() for t in fig.texts)
+
+
+def _caption_rows(fig):
+    """The caption's rows as DRAWN, after the wrap -> [rows]."""
+    return getattr(fig, sp._CAPTION_ATTR)[0].get_text().split('\n')
+
+
+def _words(text):
+    """`text`'s words in order: what a wrap must keep, wherever it breaks
+    the rows and however much space it leaves at a break."""
+    return text.split()
+
+
+def _caption_right_edges(fig, rows=None):
+    """-> [right edge of each drawn caption row, as a fraction of the
+    figure width], measured in pixels at the figure's own dpi: what a
+    reader meets, where a character count is only a proxy."""
+    text = getattr(fig, sp._CAPTION_ATTR)[0]
+    fig.canvas.draw()
+    rend = fig.canvas.get_renderer()
+    out = []
+    for row in (rows if rows is not None else _caption_rows(fig)):
+        probe = fig.text(text.get_position()[0], 0.5, row,
+                         fontproperties=text.get_fontproperties())
+        out.append(probe.get_window_extent(rend).x1 / fig.bbox.width)
+        probe.remove()
+    return out
 
 
 def _band_count(fig):
@@ -1150,6 +1184,36 @@ def _default_opts_pair(old, mode):
             old.make_opts(mode=mode)[0])
 
 
+def _old_figure_rewrapped(old, dirs, old_opts, new_opts, path):
+    """The OLD engine's figure with ONLY the 2026-10-06 change applied to
+    it -> the PNG path, written as the new engine writes.
+
+    That change wraps a caption line too wide for the figure and grows the
+    strip to hold it, which moves every axis of the default area figure.
+    So the byte claim on that figure is restated rather than dropped: take
+    the old engine's figure, put the new engine's wrapped rows in its
+    caption, lay it out above the new engine's strip (from the default
+    subplot params, as relayout does), and every byte must match. The old
+    caption must be the new one's composed text exactly, so the words did
+    not change, only where the rows break."""
+    from matplotlib import rcParams
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    new = _drawn(sp.prepare_runs(dirs, new_opts), new_opts)
+    text, composed, _strip = getattr(new, sp._CAPTION_ATTR)
+    assert text.get_text() != composed, 'nothing wrapped; this one did not move'
+    fig = Figure(figsize=old.FIGSIZE[old_opts['mode']])
+    FigureCanvasAgg(fig)
+    old.draw(fig, old.prepare_runs(dirs, old_opts), old_opts)
+    caps = [t for t in fig.texts if t.get_text() == composed]
+    assert len(caps) == 1, "the caption's words changed, not only its rows"
+    caps[0].set_text(text.get_text())
+    fig.subplots_adjust(**{k: rcParams['figure.subplot.' + k]
+                           for k in sp._SUBPLOTPARS})
+    fig.tight_layout(rect=getattr(new, sp._RECT_ATTR))
+    return sp._savefig(fig, path, new_opts)
+
+
 def test_default_output_is_byte_identical_to_the_pre_change_engine():
     if not _has_mpl():
         return
@@ -1168,9 +1232,20 @@ def test_default_output_is_byte_identical_to_the_pre_change_engine():
             new_png = sp.save_figure(
                 sp.prepare_runs([d], new_opts), new_opts,
                 os.path.join(out, mode + '_new.png'))
-            old_png = old.save_figure(
-                old.prepare_runs([d], old_opts), old_opts,
-                os.path.join(out, mode + '_old.png'))
+            if mode == 'area':
+                # THE DELIBERATE MOVE of 2026-10-06: the default area
+                # figure's first caption line (280 characters) ran off the
+                # right edge and is wrapped now, so this figure is the old
+                # one with its caption re-wrapped and its strip re-laid,
+                # and nothing else (_old_figure_rewrapped). Current and
+                # power captions fit, and stay byte-identical outright.
+                old_png = _old_figure_rewrapped(
+                    old, [d], old_opts, new_opts,
+                    os.path.join(out, mode + '_old.png'))
+            else:
+                old_png = old.save_figure(
+                    old.prepare_runs([d], old_opts), old_opts,
+                    os.path.join(out, mode + '_old.png'))
             with open(new_png, 'rb') as a, open(old_png, 'rb') as b:
                 assert a.read() == b.read(), f"{mode} PNG moved"
             new_csv = sp.write_tidy(sp.prepare_runs([d], new_opts),
@@ -2191,27 +2266,19 @@ def test_the_strain_caption_states_the_band_that_is_drawn():
             # the sentence says "at 0 % strain"; the band then grows as
             # A/A0, so the drawn half-width is the stated points times r
             assert abs(half - stated * r) < 1e-9, (x, half, stated, r)
-        # the sentence has to be on the figure, not cut off at its edge:
-        # the caption's first line is already wider than the frame, so the
-        # sentence rides on the second line, which fits the same budget
-        # the aggregate captions are held to
-        assert len(cap.split('\n')[1]) <= sp.CAPTION_LINE_MAX, \
-            len(cap.split('\n')[1])
-        # and measured in pixels, the way a reader meets it: a character
-        # count is only a proxy. The line must end inside the frame with
-        # a little room, because a font or kerning change moves it by
-        # about 0.2 %. The same line without the sentence is far shorter,
-        # so a failure here means the sentence was lengthened.
-        sfig.canvas.draw()
-        rend = sfig.canvas.get_renderer()
-        box = [t for t in sfig.texts if 'Points = per-level' in t.get_text()]
-        assert len(box) == 1, len(box)
-        probe = sfig.text(box[0].get_position()[0], 0.5,
-                          box[0].get_text().split('\n')[1],
-                          fontsize=box[0].get_fontsize())
-        right = probe.get_window_extent(rend).x1 / sfig.bbox.width
-        probe.remove()
-        assert right <= 0.99, 'caption line 2 ends at %.3f' % right
+        # the sentence has to be ON the figure, not cut off at its edge.
+        # It rides on the caption's second line, which this test once held
+        # to 0.99 of the frame in one piece -- and which ended at 0.991 at
+        # this figure's 100 dpi and 1.002 at 96, so the test failed on
+        # main (measured 2026-10-06). Every line is wrapped to the
+        # figure's width since then, so the claim is now that every drawn
+        # row ends inside the frame with a little room, and that the rows
+        # still carry every word of the sentence.
+        assert m.group(0) in cap.split('\n')[1], cap
+        rows = _caption_rows(sfig)
+        assert _words('\n'.join(rows)) == _words(cap), rows
+        right = max(_caption_right_edges(sfig, rows))
+        assert right <= 0.99, 'a caption row ends at %.3f' % right
         # ratio mode, no bands, a single mm2 panel and the aggregate each
         # draw no strain band, so none of them may claim one
         _r, rfig = _band_fixture(d2)
@@ -3143,26 +3210,185 @@ def test_no_caption_line_runs_off_the_right_edge_of_the_figure():
         for line in cap.split('\n'):
             assert len(line) <= sp.CAPTION_LINE_MAX, (len(line), line)
         assert '…' in cap, 'nothing was truncated; fixture too tame'
-        # THE BUDGET IS AN ANCHOR, not a guess: 248 is the "Points ="
-        # line as it renders under an aggregate, which every figure in
-        # the handoff carries and which sits inside the frame.
+        # THE BUDGET'S ANCHOR: 248 is the "Points =" line as COMPOSED
+        # under an aggregate...
         under_agg = _caption(_drawn(runs[:1], sp.make_opts(
             aggregate=True)[0])).split('\n')
         assert max(len(l) for l in under_agg[:2]) == sp.CAPTION_LINE_MAX
         # ...and the same line WITHOUT the aggregate is 280, because the
         # band widths are appended whenever the budget bands are drawn.
-        # It clips on a default figure -- measured on the corpus, it ends
-        # "never averaged), banc". Recorded rather than fixed: that is a
-        # pre-existing defect on the most ordinary figure this tool
-        # draws, it predates `#313`, and repairing it moves the default
-        # figure's pixels, which the byte-identity guard above exists to
-        # make a deliberate decision rather than a side effect. The
-        # number is asserted so the next change here cannot make it
-        # quietly worse.
+        # Until 2026-10-06 the 280 ran off a default figure ("never
+        # averaged), banc") and the 248 did too at screen dpi (1.02 of the
+        # width at 96, 1.09 at 90). Both are WRAPPED now: the composed
+        # lengths stay what CAPTION_LINE_MAX's comment records, and
+        # test_the_caption_is_wrapped_inside_the_frame holds the drawn
+        # rows inside the frame.
         plain = _caption(_drawn(runs[:1], sp.make_opts()[0])).split('\n')
         assert max(len(l) for l in plain) == 280, [len(l) for l in plain]
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+# the dpis the drawn caption rows are held inside the frame at: the
+# window's canvas (100, and 96 / 110 / 150 / 200 under display scaling),
+# the export default (300), and the low end where hinting widens a row
+# most -- 88 and 90 are the worst above the readable floor, measured
+# 2026-10-06 (see CAPTION_FIT_FRAC)
+CAPTION_DPIS = (72, 88, 90, 96, 100, 110, 150, 200, 300)
+
+
+def test_the_caption_is_wrapped_inside_the_frame():
+    """MEASURED on main 0ffd1da, 2026-10-06: the default area figure's
+    first caption line, 280 characters, ran to 1.24 of the figure width
+    at 90 dpi, 1.16 at 96 and 1.12 at 300, losing part of the sentence
+    about the two area conventions from every exported PNG; under the
+    aggregate its 248 characters reached 1.09, 1.02 and 0.98. Every
+    caption line is now wrapped at its measured width. Each drawn row must
+    end inside 0.99 of the frame at every dpi above, and the rows must
+    carry every word of the caption as composed, in order."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        one = os.path.join(d, 'one')
+        _fake_run(one, _healthy_rows(8))
+        two = os.path.join(d, 'two')
+        _fake_run(two, _healthy_rows(8))
+        named = [_agg_run(d, n, [1.0, 2.0],
+                          lambda kv, i=i: 100.0 + i + 10 * kv)
+                 for i, n in enumerate(('P3_1_2.5mL_20260728',
+                                        'DOT_P3_1_20260729',
+                                        'SLCBvalidationTest'))]
+        groups = [['Carbon Solutions P3-SWNT 2.5 mL',
+                   [named[0]['dir'], named[1]['dir']]],
+                  ['Carbon black', [named[2]['dir']]]]
+        cases = [(kw, sp.prepare_runs(dirs, sp.make_opts(**kw)[0]))
+                 for kw, dirs in ((dict(), [one]),
+                                  (dict(prepost=True), [one]),
+                                  (dict(bands=False), [one]),
+                                  (dict(strain_pct=True), [one]),
+                                  (dict(aggregate=True), [one, two]),
+                                  (dict(x='time'), [one]),
+                                  (dict(mode='power'), [one]))]
+        cases.append((dict(aggregate=True, groups=groups), named))
+        wrapped = 0
+        for kw, runs in cases:
+            opts = sp.make_opts(**kw)[0]
+            for width in (sp.FIGSIZE[opts['mode']][0], 6.0):
+                from matplotlib.backends.backend_agg import FigureCanvasAgg
+                from matplotlib.figure import Figure
+                fig = Figure(figsize=(width, sp.FIGSIZE[opts['mode']][1]))
+                FigureCanvasAgg(fig)
+                sp.draw(fig, runs, opts)
+                cap, rows = _caption(fig), _caption_rows(fig)
+                assert _words('\n'.join(rows)) == _words(cap), (kw, rows)
+                wrapped += len(rows) > cap.count('\n') + 1
+                for dpi in CAPTION_DPIS:
+                    fig.set_dpi(dpi)
+                    right = max(_caption_right_edges(fig, rows))
+                    assert right <= 0.99, (kw, width, dpi, right)
+                # the strip holds the rows: the caption's top stays below
+                # every axes' lowest artist (its x label, its ticks)
+                fig.set_dpi(100)
+                fig.canvas.draw()
+                rend = fig.canvas.get_renderer()
+                top = getattr(fig, sp._CAPTION_ATTR)[0] \
+                    .get_window_extent(rend).y1
+                low = min(ax.get_tightbbox(rend).y0 for ax in fig.axes)
+                assert top < low, (kw, width, top, low)
+        # the default figure is the reason for all this: it wraps at its
+        # own size, and so do --prepost, --no-bands, strain and aggregate
+        assert wrapped >= 10, wrapped
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_caption_that_fits_is_left_exactly_as_it_was():
+    """The wrap only touches a line too wide for the figure. Current and
+    power captions fit at their size, so they are drawn as composed and
+    keep the 5% strip they always had, which is why those figures are
+    still byte-identical to the pre-change engine above."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        for mode in ('current', 'power'):
+            opts = sp.make_opts(mode=mode)[0]
+            fig = _drawn(sp.prepare_runs([d], opts), opts)
+            assert '\n'.join(_caption_rows(fig)) == _caption(fig)
+            assert getattr(fig, sp._RECT_ATTR) == (0, 0.05, 1, 1)
+        # ...and the area figure, which does wrap, takes the per-row
+        # allowance the multi-line captions already use (3 rows: 0.10)
+        opts = sp.make_opts()[0]
+        fig = _drawn(sp.prepare_runs([d], opts), opts)
+        assert len(_caption_rows(fig)) == 3, _caption_rows(fig)
+        assert getattr(fig, sp._RECT_ATTR)[1] == 0.025 + 0.025 * 3
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_resize_re_wraps_the_caption_as_a_rebuild_would():
+    """The window resizes through relayout, which does not rebuild the
+    figure (`#316`). The caption is the one thing on it that depends on
+    the width, so relayout re-wraps it and re-measures its strip, and must
+    land exactly where a draw at the new size lands: same rows, same rect,
+    same axes, to the last bit. Then back out to the old size."""
+    if not _has_mpl():
+        return
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    d = _mktmp()
+    try:
+        _fake_run(d, _healthy_rows(8))
+        opts = sp.make_opts(aggregate=True)[0]
+        runs = sp.prepare_runs([d], opts)
+
+        def fresh(w, h):
+            fig = Figure(figsize=(w, h))
+            FigureCanvasAgg(fig)
+            sp.draw(fig, runs, opts)
+            return fig
+
+        def state(fig):
+            return (_caption_rows(fig), getattr(fig, sp._RECT_ATTR),
+                    [tuple(ax.get_position().bounds) for ax in fig.axes])
+
+        fig = fresh(*sp.FIGSIZE['area'])
+        wide = state(fig)
+        for w, h in ((6.0, 4.0), (9.0, 5.4), sp.FIGSIZE['area']):
+            fig.set_size_inches(w, h)
+            assert sp.relayout(fig)
+            assert state(fig) == state(fresh(w, h)), (w, h)
+        assert state(fig) == wide
+        assert len(state(fresh(6.0, 4.0))[0]) > len(wide[0]), \
+            'a narrower figure wrapped no further; fixture too tame'
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_wrap_keeps_every_word_and_indents_the_continuations():
+    """_wrap on its own, with a character-count fit so it is hand-checked:
+    rows break at spaces, continuation rows carry the indent and still
+    fit with it, every word survives, and only a word wider than a whole
+    row is broken inside the word."""
+    def fits(s):
+        return len(s) <= 20
+    ind = sp.CAPTION_WRAP_INDENT
+    rows = sp._wrap('the quick brown fox jumps over the lazy dog', fits)
+    assert rows == ['the quick brown fox', ind + 'jumps over the', ind
+                    + 'lazy dog'], rows
+    assert all(fits(r) for r in rows)
+    # the double space between sentences stays inside a row
+    rows = sp._wrap('a.  Two spaces stay between sentences.', fits)
+    assert rows == ['a.  Two spaces stay', ind + 'between',
+                    ind + 'sentences.'], rows
+    # a word wider than a row is the only thing broken inside a word, and
+    # its pieces after the first still fit WITH the indent
+    rows = sp._wrap('C:/a/very/long/pasted/path/with/no/spaces x', fits)
+    assert rows == ['C:/a/very/long/paste', ind + 'd/path/with/no/s',
+                    ind + 'paces x'], rows
+    assert all(fits(r) for r in rows), rows
 
 
 # --------------------------------------------------------------------------
@@ -3687,7 +3913,9 @@ def test_legs_and_arrows_leave_single_sweeps_and_merge_restores_updown():
     """Byte for byte, against the engine this work was cut from: every
     mode's DEFAULT figure of a single sweep, and --merge-legs --no-arrows
     on an up/down run -- the escape hatch has to be exactly the old
-    figure, not a lookalike."""
+    figure, not a lookalike. Area figures since 2026-10-06: the old figure
+    with its caption re-wrapped and its strip re-laid, nothing else
+    (_old_figure_rewrapped)."""
     if not _has_mpl():
         return
     old = _pre_change_module(_LEGS_BASE_SHA)
@@ -3708,9 +3936,14 @@ def test_legs_and_arrows_leave_single_sweeps_and_merge_restores_updown():
                 new_png = sp.save_figure(
                     sp.prepare_runs([d], new_opts), new_opts,
                     os.path.join(out, f"{label}_{mode}_new.png"))
-                old_png = old.save_figure(
-                    old.prepare_runs([d], old_opts), old_opts,
-                    os.path.join(out, f"{label}_{mode}_old.png"))
+                if mode == 'area':
+                    old_png = _old_figure_rewrapped(
+                        old, [d], old_opts, new_opts,
+                        os.path.join(out, f"{label}_{mode}_old.png"))
+                else:
+                    old_png = old.save_figure(
+                        old.prepare_runs([d], old_opts), old_opts,
+                        os.path.join(out, f"{label}_{mode}_old.png"))
                 with open(new_png, 'rb') as a, open(old_png, 'rb') as b:
                     assert a.read() == b.read(), f"{label} {mode} PNG moved"
     finally:

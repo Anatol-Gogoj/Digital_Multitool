@@ -89,6 +89,12 @@ Rendering:
       --no-marker-key hides it. Area mode only -- current/power draw one
       plain dot per snapshot with no open/closed meaning, and a key there
       would claim a distinction the figure does not make.
+    - The caption under the panels is WRAPPED to the figure's width,
+      measured from the font, so no sentence runs off the right edge, in
+      the window at any size or in an export at any dpi (2026-10-06).
+      Continuation rows are indented. A figure whose caption already fits
+      keeps the layout it always had; one that wraps gets a caption strip
+      tall enough to hold it.
     - --aggregate (area mode only) adds ONE mean curve across the selected
       runs, in black with square markers. Its band is the STANDARD ERROR
       OF THE MEAN, sigma/sqrt(n), per level -- and with a single run
@@ -1358,6 +1364,61 @@ def _tight(fig, rect):
     return rect
 
 
+# ...with ONE exception, the caption (2026-10-06). It is wrapped to the
+# figure's width, so a narrower window needs it re-wrapped and its strip
+# re-measured, and only that. Held as (the caption's Text, the caption as
+# composed, the strip it was composed for) so relayout can redo exactly
+# that much; None on a figure draw() did not make.
+_CAPTION_ATTR = '_sldea_caption'
+
+# The gap kept between a wrapped caption's top and the figure's layout
+# rect, in figure height. The x-axis label sits just above the rect.
+CAPTION_PAD = 0.012
+
+
+def _set_caption(fig, cap, bottom):
+    """Write `cap` under the panels, wrapped to the figure's width, and lay
+    the figure out above it -> the layout rect.
+
+    `bottom` is the caption strip the caller reserved for `cap` as
+    composed, in figure height; _place_caption keeps it when every line
+    fits and grows it when one does not."""
+    text = fig.text(0.01, 0.005, '', fontsize=7, color='#555555')
+    setattr(fig, _CAPTION_ATTR, (text, cap, bottom))
+    return _tight(fig, (0, _place_caption(fig), 1, 1))
+
+
+def _place_caption(fig):
+    """(Re)write the figure's caption for the figure's CURRENT width and
+    -> the layout rect's bottom that clears it.
+
+    A line that fits is written exactly as composed. A caption whose every
+    line fits keeps the strip it was composed for, so a figure that never
+    ran off the edge lays out to the same pixels as before 2026-10-06.
+    One that wraps takes the larger of the per-line allowance the
+    multi-line captions already use (0.025 of the figure height a row,
+    plus 0.025, capped at 0.30) and its own measured top plus
+    CAPTION_PAD, measured because in a short window a 7 pt row is a
+    larger share of the height than the allowance assumes. Capped at 0.85
+    only so a pathological caption leaves the axes something."""
+    text, cap, bottom = getattr(fig, _CAPTION_ATTR)
+    fits = _caption_fitter(fig)
+    rows = []
+    for line in cap.split('\n'):
+        rows += [line] if fits(line) else _wrap(line, fits)
+    text.set_text('\n'.join(rows))
+    if len(rows) == cap.count('\n') + 1:
+        return bottom
+    bottom = max(bottom, min(0.025 + 0.025 * len(rows), 0.30))
+    try:
+        renderer = fig.canvas.get_renderer()
+        top = text.get_window_extent(renderer=renderer).y1 / fig.bbox.height
+        bottom = max(bottom, top + CAPTION_PAD)
+    except (AttributeError, TypeError, ValueError):
+        pass                    # no renderer yet: the allowance stands
+    return min(bottom, 0.85)
+
+
 _SUBPLOTPARS = ('left', 'right', 'bottom', 'top', 'wspace', 'hspace')
 
 
@@ -1384,6 +1445,12 @@ def relayout(fig):
         return False
     fig.subplots_adjust(**{k: rcParams['figure.subplot.' + k]
                            for k in _SUBPLOTPARS})
+    held = getattr(fig, _CAPTION_ATTR, None)
+    if held is not None and held[0] in fig.texts:
+        # the one width-dependent thing on a figure, the caption, is
+        # re-wrapped for the new width, and its strip with it
+        rect = (rect[0], _place_caption(fig), rect[2], rect[3])
+        setattr(fig, _RECT_ATTR, rect)
     fig.tight_layout(rect=rect)
     return True
 
@@ -1803,6 +1870,15 @@ def _warn_aggregate(runs, ag, opts, cap, warn, what='aggregate',
 # change with its own byte-identity guard to answer, not something to
 # slip into a grouping PR. Dated entry in SLDEA_HANDOFF.md; the number
 # is here so whoever takes it does not have to measure it again.
+#
+# FIXED 2026-10-06, and the anchor above corrected: 248 characters fit a
+# 300 dpi export and not the window. Measured on main 0ffd1da, the
+# 280-character line ends at 1.24 of the figure width at 90 dpi, 1.16 at
+# 96 and 1.12 at 300; the 248-character one under the aggregate at 1.09,
+# 1.02 and 0.98. Every caption line is now WRAPPED at its measured width
+# (_place_caption) instead of trusting a character count. This budget
+# still CUTS the grouped lines built from operator text; the wrap keeps
+# what survives the cut inside the frame.
 CAPTION_LINE_MAX = 248
 
 
@@ -1814,6 +1890,110 @@ def _fit(line, limit=CAPTION_LINE_MAX):
     it did. Every line the group caption builds from operator-supplied
     text goes through here."""
     return line if len(line) <= limit else line[:limit - 1].rstrip() + '…'
+
+
+# Continuation rows of a wrapped caption line start with this, so a
+# reader can see where one caption line ends and the next begins.
+CAPTION_WRAP_INDENT = '    '
+
+
+def _wrap(line, fits, indent=CAPTION_WRAP_INDENT):
+    """`line` broken at spaces into rows that each pass `fits` -> [rows].
+
+    EVERY WORD IS KEPT (2026-10-06). The caption's first line ran off the
+    right edge of every default area figure and lost the band widths, and
+    a measurement figure must not drop caption text without saying so.
+    Rows after the first carry `indent`. Only a single word wider than a
+    whole row (a pasted path, say) is broken inside the word, because
+    there is nowhere else to break it. The same function as the `#373`
+    branch's, which wraps its grouped lines with it."""
+    rows, cur = [], ''
+    for word in line.split(' '):
+        if not cur and not word:
+            continue                   # the spaces at a break ARE the break
+        lead = indent if rows else ''
+        cand = f"{cur} {word}" if cur else word
+        if fits(lead + cand):
+            cur = cand
+            continue
+        if cur:
+            rows.append(cur)
+            cur = ''
+            if not word:
+                continue
+            lead = indent
+        while not fits(lead + word):
+            k = len(word) - 1
+            while k > 1 and not fits(lead + word[:k]):
+                k -= 1
+            rows.append(word[:k])
+            word = word[k:]
+            lead = indent
+        cur = word
+    if cur or not rows:
+        rows.append(cur)
+    return rows[:1] + [indent + r for r in rows[1:]]
+
+
+# How much of the figure width a caption row may reach, by the font's own
+# metrics. Not 0.99: the raster is HINTED, and at a 7 pt size hinting
+# rounds glyph advances to whole pixels, so the drawn row is wider than
+# its metrics by an amount that depends on the dpi. Measured 2026-10-06
+# (matplotlib 3.11.1) on the caption lines of the default, --prepost,
+# strain, aggregate and power figures, every dpi from 50 to 159 and every
+# 10th to 1200: drawn / measured = 0.989 at 300 dpi (the export default),
+# 1.014 at 100 (the window), 1.025 at 96, 1.094 at 90, and at worst 1.121
+# at 57 and 1.119 at 88. At the `#373` branch's 0.90, a row of real
+# caption text ended at 1.002 of the width at 88 dpi. At 0.88, over every
+# row those figures and two grouped ones wrap to at 12.6, 9 and 6 in wide,
+# no row ends past 0.998 at any of those dpis, 0.978 from 72 dpi up and
+# 0.959 from 90 up. A run name of one repeated letter is the worst text
+# there is, since its rounding errors add instead of averaging; the
+# suite's 'Rxxx...' fixture ends by 0.974.
+CAPTION_FIT_FRAC = 0.88
+
+
+def _caption_fitter(fig, fontsize=7, left=0.01, frac=CAPTION_FIT_FRAC):
+    """-> fits(text): does `text` render, at the caption's size, inside
+    `frac` of `fig`'s width from the caption's own left edge?
+
+    Measured from the font itself (matplotlib's TextToPath, in points),
+    not from a renderer, so the answer is the same on the window's Tk
+    canvas, in a PNG and in an SVG, and needs nothing drawn first."""
+    room = fig.get_figwidth() * 72.0 * (frac - left)
+
+    def fits(text):
+        return _caption_width(text, fontsize) <= room
+    return fits
+
+
+_WIDTHS = {}
+
+
+def _caption_width(text, fontsize):
+    """`text`'s width in points at `fontsize`, by the font's metrics.
+
+    CACHED, because a window resize re-wraps the caption at every size a
+    drag passes through, and _wrap measures each row word by word.
+    Measured 2026-10-06 on an aggregate figure: uncached, the re-wrap
+    took 87 ms of a 124 ms relayout at 6 in wide (11 rows), against 38 ms
+    for the layout alone (`#316` is why that matters). Most strings recur
+    from one size to the next, so with the cache a drag through 20
+    distinct sizes from a cold start costs a median 59 ms a relayout,
+    against 42 ms without the caption step. The width depends only on
+    the string and the size: the caption's font is matplotlib's default,
+    which nothing in this tool changes at run time. Cleared when it
+    passes 20000 strings, so it cannot grow without bound."""
+    key = (text, fontsize)
+    width = _WIDTHS.get(key)
+    if width is None:
+        from matplotlib.font_manager import FontProperties
+        from matplotlib.textpath import TextToPath
+        if len(_WIDTHS) >= 20000:
+            _WIDTHS.clear()
+        width = _WIDTHS[key] = TextToPath().get_text_width_height_descent(
+            text, FontProperties(size=fontsize), ismath=False)[0]
+    return width
 
 
 def _group_caption(drawn, opts, hidden):
@@ -2532,12 +2712,13 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
         # The band is +-p of the AREA. Under strain percent the panel's
         # numbers are strain points, so "+-2%" there could be read as
         # "+-2 points everywhere", which is true only at rest. The note
-        # rides on the caption's SECOND line, not the first: the first is
+        # rides on the caption's SECOND line, not the first: the first was
         # already wider than the figure (see CAPTION_LINE_MAX's comment)
-        # and a clause appended to it would be cut off. The wording is
-        # kept short on purpose: this line ends at about 98 % of the frame
-        # width, and the test measures it in pixels. Only when the strain
-        # panel is really drawn, with bands on.
+        # and a clause appended to it was cut off. Every line is wrapped
+        # to the figure's width since 2026-10-06, so this one wraps too
+        # rather than running off the edge at screen dpi, where it ended
+        # at 1.00 of the width. Only when the strain panel is really
+        # drawn, with bands on.
         strain_note = ''
         if budget_bands and pct and axr is not None:
             strain_note = (
@@ -2564,17 +2745,17 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
            + _estimator_caption(runs)
            + _cadence_caption(cadence_notes)
            + _scale_caption(scale_notes))
-    fig.text(0.01, 0.005, cap, fontsize=7, color='#555555')
     # The caption grew three lines under the aggregate and the fixed 5%
     # strip clipped the last of them. Reserved space follows the LINE
     # COUNT -- but only when the aggregate, the time axis or a leg-split
     # run adds lines, so every figure that existed before `#268` still
     # lays out to the same pixels (the window/CLI byte-identity test
-    # would catch it if it did not).
+    # would catch it if it did not). A line too wide for the figure is
+    # wrapped, and the strip grows with it (_place_caption, 2026-10-06).
     bottom = 0.05
     if opts.get('aggregate') or timeax or split_any:
         bottom = min(0.025 + 0.025 * (cap.count('\n') + 1), 0.30)
-    _tight(fig, (0, bottom, 1, 1))
+    _set_caption(fig, cap, bottom)
     return fig
 
 
@@ -2801,13 +2982,13 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
            + (_legs_caption(opts, 'one snapshot') if split_any else "")
            + _cadence_caption(cadence_notes)
            + _scale_caption(scale_notes))
-    fig.text(0.01, 0.005, cap, fontsize=7, color='#555555')
     # a fixed 5% strip, as ever -- unless the time axis or a leg-split run
-    # added caption lines, which would otherwise be clipped
+    # added caption lines, which would otherwise be clipped, or a line had
+    # to be wrapped to the figure's width (_place_caption)
     bottom = 0.05
     if timeax or split_any:
         bottom = min(0.025 + 0.025 * (cap.count('\n') + 1), 0.30)
-    _tight(fig, (0, bottom, 1, 1))
+    _set_caption(fig, cap, bottom)
     return fig
 
 
@@ -2849,6 +3030,9 @@ def draw(fig, runs, opts, warn=lambda m: None):
     the axes it needs. THE entry point for anything that renders: the
     window's live canvas calls it on every toggle, and save_figure() calls
     it for the PNG, so what you see on screen is what lands in the file."""
+    # a figure reused for a new draw must not keep the last one's caption;
+    # draw_area / draw_signal hold this one's
+    setattr(fig, _CAPTION_ATTR, None)
     if opts['mode'] == 'area':
         axl, axr = area_axes(fig, opts)
         return draw_area(fig, axl, axr, runs, opts, warn)

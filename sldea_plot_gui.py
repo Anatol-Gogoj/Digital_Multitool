@@ -108,6 +108,12 @@ OUT_SUBDIR = 'plots'
 
 PROCESSED_MARK = '  ✓ processed'       # Edge Review's labelling convention
 
+# The run picker's form of it (`#374`): a short mark at the FRONT of the
+# Run cell, where no column width can clip it. The suffix above cost
+# ~50 px at the end of the cell, the first thing a narrow column cut.
+# Unprocessed rows are padded to the same width so the names line up.
+RUN_MARK = '✓ '
+
 # The smallest window the layout still WORKS in (`#271`). Width is
 # measured, not guessed: the controls column asks for whatever the theme
 # and DPI make it (295 px on the Windows analysis PC, wider on a
@@ -994,30 +1000,34 @@ RUN_ROWS = 9
 # How narrow each column may be squeezed when the three do not fit, given
 # as TEXT it must still show whole and measured in the list's own font,
 # so the floors follow the font and the DPI instead of one PC's pixels.
-# A timestamp-named run, the longest material placeholder, and a heading
-# with its sort arrow. At Tk's 96 dpi (Segoe UI 9) these are 128, 124
-# and 46 px of text (measured 2026-10-06).
-RUN_COL_FLOOR = {'run': 'SLDEA_20261001_151016',
+# A processed timestamp-named run, the longest material placeholder, and
+# a heading with its sort arrow. At Tk's 96 dpi (Segoe UI 9) these are
+# 139, 124 and 46 px of text (measured 2026-10-06).
+RUN_COL_FLOOR = {'run': RUN_MARK + 'SLDEA_20261001_151016',
                  'material': NO_ELECTRODE,
                  'group': 'Group ▲'}
 
 # The order the columns give way in when the list is short of width.
-# Run first, and only down to its floor, because the processed mark is
-# what it loses and the hover text has the whole label. Group before
-# Material, because Material is the column the issue is for (it is what
-# an operator sorts and reads, and 3900 against 3500 is its last four
-# characters), and a group seeded from the material repeats it.
+# Run first, and only down to its floor: there a timestamp-named run
+# still shows whole with its mark, only a longer or `[folder#]`-tagged
+# name is cut short at the end, and the hover text has the whole label.
+# Group before Material, because Material is the column the issue is for
+# (it is what an operator sorts and reads, and 3900 against 3500 is its
+# last four characters), and a group seeded from the material repeats
+# it.
 RUN_COL_GIVE = ('run', 'group', 'material')
 
 # THE LIST ASKS FOR EXACTLY ITS FLOORS SIDE BY SIDE (PlotWindow.
 # _list_width), and that is the one width here that moves the window:
 # `#271`'s floor is measured off the controls column, and this list is
 # now its widest member. On the Windows analysis PC (96 dpi) it widened
-# the column by 41 px and the window's floor from 715 px to 756, still
-# under the 760 px the layout tests' narrowest window asks for, so that
-# case keeps testing the size it names. A column wider than its share
-# scrolls the list instead (test_the_run_picker_scrolls_sideways_and_
-# never_widens_the_window).
+# the column by 52 px and the window's floor from 715 px to 767, 41 px
+# for the three columns and 11 for the processed mark in front of the
+# name. That is 7 px past the 760 px the layout tests' narrowest window
+# asks for, so Tk holds that case at the floor instead; what it asserts
+# (the warnings pane and the toolbar still on screen) holds there too.
+# A column wider than its share scrolls the list instead
+# (test_the_run_picker_scrolls_sideways_and_never_widens_the_window).
 
 
 # Hover text for the three headings. The Material one carries the
@@ -1026,8 +1036,9 @@ RUN_COL_GIVE = ('run', 'group', 'material')
 RUN_HEADING_TIPS = {
     'run': (
         "The run folder. [n] is the folder's number in the list above "
-        "(`#323`); ✓ processed means Edge Review saved areas for it. "
-        "Click a heading to sort by it, again to reverse."),
+        "(`#323`); a ✓ before the name means it is processed: Edge "
+        "Review saved areas for it. Click a heading to sort by it, again "
+        "to reverse. Run sorts by folder and name, whatever the mark."),
     'material': (
         "What the run's setup.txt recorded on its 'Compliant electrode:' "
         "line, exactly as written. (no electrode recorded) means the run "
@@ -1418,6 +1429,7 @@ class PlotWindow:
         # here as the window's own record of what each row says, so the
         # sort, the hover text and the tests never parse Tk's copy
         self._cells = []               # [{column id: text}]
+        self._run_meta = []            # [{'tag', 'name', 'processed'}]
         self._sort = None              # (column id, descending) or None
         self._menu = None              # the open right-click menu, if any
         self._loaded = {}              # rundir -> loaded run dict (cache)
@@ -1739,6 +1751,13 @@ class PlotWindow:
                                xscrollcommand=self._run_xscrolled)
         self._run_font = tkfont.nametofont(
             ttk.Style().lookup('Treeview', 'font') or 'TkDefaultFont')
+        # what an unprocessed row carries where the mark would be: the
+        # whole number of spaces nearest RUN_MARK's width in this font
+        # (4 spaces, 12 px, against the mark's 11 at 96 dpi), so names
+        # line up to within a pixel
+        space = max(1, self._run_font.measure(' '))
+        self._mark_pad = ' ' * max(1, round(
+            self._run_font.measure(RUN_MARK) / space))
         for col, head in RUN_COLUMNS:
             self.run_box.heading(col, text=head, anchor=tk.W,
                                  command=lambda c=col: self.sort_runs(c))
@@ -1789,7 +1808,7 @@ class PlotWindow:
         self.btn_drop.pack(side=tk.LEFT)
         add_tooltip(self.btn_drop, DROP_FOLDERS_TIP)
         ttk.Label(rf, foreground='#666', wraplength=260, justify=tk.LEFT,
-                  text="✓ processed = Edge Review saved areas for that "
+                  text="✓ = processed: Edge Review saved areas for that "
                        "run.").pack(fill=tk.X, pady=(4, 0))
 
         # --- groups (`#313`). Under the run list rather than in Draw,
@@ -2261,9 +2280,14 @@ class PlotWindow:
         if keep:
             wanted |= {sp.group_key(d) for d in self.selected_dirs()}
         self.runs = []
+        self._run_meta = []
         multi = len(self.parents) > 1
         for i, parent in enumerate(self.parents, 1):
             for name, label in list_runs(parent):
+                # the processed mark goes to the FRONT of the Run cell
+                # (`#374`): RUN_MARK, or blank of the same width
+                processed = label.endswith(PROCESSED_MARK)
+                tag = f"[{i}] " if multi else ''
                 # WHERE IT CAME FROM, once there is more than one answer,
                 # as a NUMBER keyed to the folder list above (`#323`).
                 # Two runs in different parents can share a name, so the
@@ -2276,7 +2300,10 @@ class PlotWindow:
                 # list of folders it refers to.
                 self.runs.append(
                     (os.path.join(parent, name),
-                     (f"[{i}] " if multi else '') + label))
+                     tag + (RUN_MARK if processed else self._mark_pad)
+                     + name))
+                self._run_meta.append({'tag': tag, 'name': name,
+                                       'processed': processed})
         # `#374`: Material is read here and only here (cached by path and
         # mtime, see recorded_electrode); Group is filled from the
         # window's grouping by _refresh_group_column below, which every
@@ -2482,10 +2509,10 @@ class PlotWindow:
         order = list(range(len(self.runs)))
         if self._sort is not None:
             col, desc = self._sort
-            filled = [i for i in order if self._cells[i][col]]
-            empty = [i for i in order if not self._cells[i][col]]
+            filled = [i for i in order if self._sort_text(i, col)]
+            empty = [i for i in order if not self._sort_text(i, col)]
             order = sorted(filled,
-                           key=lambda i: self._cells[i][col].casefold(),
+                           key=lambda i: self._sort_text(i, col).casefold(),
                            reverse=desc) + empty
         for pos, i in enumerate(order):
             self.run_box.move(self._iid(i), '', pos)
@@ -2494,6 +2521,16 @@ class PlotWindow:
             if self._sort is not None and self._sort[0] == col:
                 mark = ' ▼' if self._sort[1] else ' ▲'
             self.run_box.heading(col, text=head + mark)
+
+    def _sort_text(self, i, col):
+        """What row `i` sorts on in `col`: its cell, except that Run sorts
+        on the folder tag and the name, never on the processed mark in
+        front of them, which would split the list into processed and
+        not."""
+        if col == 'run':
+            meta = self._run_meta[i]
+            return meta['tag'] + meta['name']
+        return self._cells[i][col]
 
     def displayed_runs(self):
         """-> [(rundir, {column id: text})] in the order the picker shows
@@ -2510,8 +2547,12 @@ class PlotWindow:
         i = self._row_of(iid)
         if i is None or i >= len(self.runs):
             return ''
-        cells = self._cells[i]
-        return (f"{cells['run']}\n{self.runs[i][0]}\n\n"
+        cells, meta = self._cells[i], self._run_meta[i]
+        state = (f"{RUN_MARK}processed: Edge Review saved areas"
+                 if meta['processed'] else
+                 "not processed: no areas saved in Edge Review yet")
+        return (f"{meta['tag']}{meta['name']}\n{self.runs[i][0]}\n"
+                f"{state}\n\n"
                 f"Material (setup.txt): {cells['material']}\n"
                 f"Group (this window): {cells['group'] or 'none'}\n\n"
                 f"{RUN_ROW_HINT}")

@@ -436,10 +436,20 @@ def test_the_run_picker_shows_each_runs_material_and_group():
         assert rows['S2_3900']['material'] == 'nano-c Invisicon 3900'
         assert rows['S3_unspec']['material'] == '(not specified)'
         assert rows['S4_hand']['material'] == 'Invisicon 3900'
-        # the Run cell is the row text the Listbox had: the processed mark
-        # stays, and it says nothing on a run Edge Review never saved
-        assert rows['S2_3900']['run'] == 'S2_3900' + g.PROCESSED_MARK
-        assert rows['S3_unspec']['run'] == 'S3_unspec'
+        # the processed mark sits IN FRONT of the name, where no column
+        # width can clip it, and an unprocessed run is padded to the
+        # same width (to the nearest space) so the names line up
+        assert rows['S2_3900']['run'] == g.RUN_MARK + 'S2_3900'
+        assert rows['S3_unspec']['run'] == win._mark_pad + 'S3_unspec'
+        assert not win._mark_pad.strip()
+        font = win._run_font
+        assert abs(font.measure(win._mark_pad)
+                   - font.measure(g.RUN_MARK)) <= font.measure(' ') / 2
+        # the hover text says which, in words
+        tips = {os.path.basename(d): win.row_tip(win._iid(i))
+                for i, (d, _l) in enumerate(win.runs)}
+        assert 'processed: Edge Review saved areas' in tips['S2_3900']
+        assert 'not processed' in tips['S3_unspec']
         assert all(c['group'] == '' for c in rows.values())
         # what Tk shows is the window's record, cell for cell
         for iid in win.run_box.get_children():
@@ -468,7 +478,8 @@ def test_the_run_picker_shows_each_runs_material_and_group():
         # Clear all
         win._clear_groups()
         assert all(c['group'] == '' for _d, c in win.displayed_runs())
-        # the [folder#] tag stays in the Run column (`#323`)
+        # the [folder#] tag stays in the Run column (`#323`), first, with
+        # the mark after it
         other = _mktmp()
         try:
             _fake_run(other, 'X1')
@@ -477,6 +488,8 @@ def test_the_run_picker_shows_each_runs_material_and_group():
             tags = {c['run'].split(']')[0] + ']'
                     for _d, c in win.displayed_runs()}
             assert tags == {'[1]', '[2]'}, tags
+            assert _cells_by_name(win)['X1']['run'] == \
+                '[2] ' + g.RUN_MARK + 'X1'
         finally:
             shutil.rmtree(other, ignore_errors=True)
         # a REMEMBERED grouping shows the moment the window opens
@@ -508,7 +521,8 @@ def test_sorting_the_picker_reorders_the_list_and_not_the_figure():
                           ('S3', '(not specified)'),
                           ('S4', 'Invisicon 3900'),
                           ('S5', 'carbon black')):
-            _setup_txt(_fake_run(b.tmp, name), mat)
+            _setup_txt(_fake_run(b.tmp, name, processed=(name != 'S3')),
+                       mat)
         win.populate()
         listing = [d for d, _l in win.runs]
         by = {os.path.basename(d): d for d in listing}
@@ -517,6 +531,16 @@ def test_sorting_the_picker_reorders_the_list_and_not_the_figure():
 
         def column(col):
             return [c[col] for _d, c in win.displayed_runs()]
+
+        def names():
+            return [os.path.basename(d) for d, _c in win.displayed_runs()]
+        # Run sorts by NAME: the mark in front (S3 is unprocessed) must
+        # not split the list into processed and not
+        win.sort_runs('run')
+        assert names() == ['R1', 'S2', 'S3', 'S4', 'S5'], names()
+        assert win.run_box.heading('run', 'text') == 'Run ▲'
+        win.sort_runs('run')
+        assert names() == ['S5', 'S4', 'S3', 'S2', 'R1'], names()
         win.sort_runs('material')
         assert column('material') == sorted(column('material'),
                                             key=str.casefold)
@@ -526,6 +550,7 @@ def test_sorting_the_picker_reorders_the_list_and_not_the_figure():
                                             key=str.casefold, reverse=True)
         assert win.run_box.heading('material', 'text') == 'Material ▼'
         assert win.run_box.heading('run', 'text') == 'Run'
+        assert win.run_box.heading('group', 'text') == 'Group'
         # the figure's inputs did not move
         assert win.selected_dirs() == listing
         assert win._figure_key() == key
@@ -1055,8 +1080,12 @@ def test_the_run_picker_scrolls_sideways_and_never_widens_the_window():
         key, text = win._picker_tip(bx + 5, by + bh // 2)
         assert key == ('row', rows[0]), key
         first = win.displayed_runs()[0]
-        assert first[0] in text and first[1]['run'] in text
+        assert first[0] in text and os.path.basename(first[0]) in text
+        assert 'processed: Edge Review saved areas' in text
         assert g.NO_ELECTRODE in text and g.RUN_ROW_HINT in text
+        # the mark leads the cell, so the column's own width cannot clip
+        # it: the cell starts with it
+        assert first[1]['run'].startswith(g.RUN_MARK), first[1]['run']
 
         # right-click on a row OUTSIDE the selection makes it the
         # selection, as file managers do; inside a multi-selection it

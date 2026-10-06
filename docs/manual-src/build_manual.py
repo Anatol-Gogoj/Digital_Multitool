@@ -391,7 +391,7 @@ SECTIONS = [
     ("arb", "Arbitrary Waveform Editor"),
     ("psu", "DC Supply — BK 9174B"),
     ("dmm", "Digital Multimeter — BK 5493C"),
-    ("logging", "Data Logging"),
+    ("logging", "Continuous Logging"),
     ("battery", "Battery Data"),
     ("webcam", "Webcam"),
     ("sldea", "SLDEA Test"),
@@ -430,7 +430,7 @@ body.append(f"""
     <p class="eyebrow">Digital Multitool · v{__version__}</p>
     <h1>Digital Multitool</h1>
     <p class="sub">User manual for the lab bench-control app — one window for the
-    LCR meter, oscilloscope, signal generator, DC supply, DMM, data logging,
+    LCR meter, oscilloscope, signal generator, DC supply, DMM, continuous logging,
     battery post-processing, webcam captures and automated SLDEA tests.</p>
   </div>
   <figure class="splash"><img src="{b64(os.path.join(SHOTS, '00_splash.png'))}" alt="Digital Multitool splash screen"></figure>
@@ -484,7 +484,7 @@ body.append(section("psu", "DC Supply — BK 9174B",
                     caution_keep=[0, 1, 2, 3]))
 body.append(section("dmm", "Digital Multimeter — BK 5493C",
                     caution_keep=[0, 1, 2]))
-body.append(section("logging", "Data Logging", caution_keep=[0, 1, 2]))
+body.append(section("logging", "Continuous Logging", caution_keep=[0, 1, 2]))
 body.append(section("battery", "Battery Data", caution_keep=[0, 2, 4]))
 body.append(section("webcam", "Webcam", caution_keep=[1, 2, 4]))
 # Index 9 is the flat or missing baseline stop (#348, v1.4.3). It was

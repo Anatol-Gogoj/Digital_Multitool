@@ -198,11 +198,17 @@ S["tab_dmm"] = {
 S["tab_logging"] = {
     "callouts": [
         {"match": "Log Directory:", "extend_right": 260, "label": "All CSV files land here (default ./logs)"},
-        {"match": "Sample Interval (s):", "extend_right": 60, "label": "Seconds between samples"},
-        {"rect": [28, 134, 352, 366], "badge_side": "right",
+        {"match": "Sample cadence:", "extend_right": 180,
+         "label": "Seconds between samples, or pick Hz for samples per second"},
+        # #30 re-measured at 175 % with Tk pinned to 96 dpi (capture.py's
+        # setup) but NOT from a capture run: re-check it against
+        # widgets.json at the next manual build.
+        {"rect": [28, 133, 341, 366], "badge_side": "right",
          "label": "Tick every source to record — one CSV per source"},
         {"match": "Start Logging", "label": "Opens fresh timestamped CSVs and starts sampling"},
         {"match": "Stop Logging", "label": "Closes the files and ends the run"},
+        {"match": "Live Values (since Start)",
+         "label": "Latest value, min and max of every logged number since Start"},
         {"match": "Log Status", "label": "File paths, errors, and dropped sources appear here"},
     ],
 }

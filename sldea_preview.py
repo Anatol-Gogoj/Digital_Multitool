@@ -9,14 +9,21 @@ entry for it and fell through to a default.
 Colour is never the only cue. Each snapshot kind has its own SHAPE, and
 every colour comes from Paul Tol's schemes (CLAUDE.md), chosen by
 worst-case CIEDE2000 over normal + Machado-2009 deutan/protan/tritan
-simulation (2026-09-23):
+simulation, with the matrices applied in LINEAR RGB (2026-09-23):
 
     post-ramp vs pre-ramp fills (Tol bright blue vs yellow)     43.2
     staircase line (Tol high-contrast black) vs either fill    >= 39.2
     the green/red pair this replaced, under deuteranopia          6.6
 
-sldea_plot.py measures TOL_BRIGHT's own adjacent-pair floor the same way
-at 18.0, which is the bar tests/test_sldea_preview.py holds these to.
+tests/test_sldea_preview.py holds these pairs to a floor of 18.0. That
+is TOL_BRIGHT's adjacent-pair floor as the `#313` script measured it,
+with the matrices applied to gamma-encoded sRGB (the 18.00 that
+sldea_plot.py's GROUP_COLORS comment cites). Linear RGB is the standard
+since 2026-10-06: Machado, Oliveira & Fernandes, IEEE TVCG
+15(6):1291-1298, 2009, sec. 4.1, Eq. 8 builds the matrix from the
+primaries' spectral power distributions, and colorspacious and
+DaltonLens-Python both decode sRGB before applying it. Measured that way
+the same floor is 15.35, so 18.0 is the stricter of the two bars.
 Light fills (yellow, grey) carry a black edge, as Tol advises on white.
 
 Headless self-test: .venv/bin/python tests/test_sldea_preview.py

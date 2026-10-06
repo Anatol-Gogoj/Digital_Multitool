@@ -43,6 +43,10 @@ the colors and styles they had (`#373`).
   a 248-character Members line ended at 1.04 of the figure width and lost
   its pointer to the tidy CSV. Group-caption text runs about 4 % wider
   per character than the anchor line `CAPTION_LINE_MAX` was measured on.
+  Cutting the lines to fit was tried first and dropped real content: on
+  the six-group concentration split the "AGGREGATE BY GROUP" and
+  "Support" lines ended in "Carbon Solutions P3-S…" and lost the later
+  groups.
 - Hinting makes 7 pt caption text wider on screen than its font metrics,
   by an amount that depends on the dpi. Measured on the grouped lines at
   every dpi from 50 to 1200: drawn / measured = 0.987 at 300 dpi, 1.03 at
@@ -67,8 +71,10 @@ entry's).
   are one, labeled `<material>, 2.5 mL`). Materials whose line the runner
   omits by design (`concentration_applies()`: carbon black, eGaIn, the
   sprayed Invisicon inks) stay one group. An ink run with no line becomes
-  `<material>, (no concentration recorded)`. Runs with no material are
-  never split.
+  `<material>, (no concentration recorded)`. Runs with no material,
+  `(no electrode recorded)` and `(not specified)`, are never split by
+  concentration, whatever volumes they carry (owner, 2026-10-06; pinned
+  by a test).
 - **A seed, not a mode.** Both buttons act on the selection only and
   produce ordinary groups. Assign, Ungroup selected and Clear all work on
   top, and the `#313` rule holds: the operator's grouping wins.
@@ -119,25 +125,67 @@ entry's).
   caption. A dashed edge would add two thin patterned curves per group
   (twelve on the six-group figure), and an edge at band width reads as a
   run curve.
-- **Captions.** The grouped caption gains one line saying what line style
-  means whenever a drawn group carries a material. Its lines are now cut
-  to their measured width (`CAPTION_FIT_FRAC` = 0.90 of the figure by font
-  metrics, so the worst measured dpi still ends by 0.99). The Members line
-  keeps its pointer to the CSV. Ungrouped figures are untouched.
-  `GROUP_NAME_MAX` goes from 40 to 64, because
+- **Captions are wrapped, never cut** (owner, 2026-10-06). The grouped
+  caption gains one line saying what line style means whenever a drawn
+  group carries a material. Every grouped line is wrapped at its measured
+  width and keeps every word: rows end by `CAPTION_FIT_FRAC` = 0.90 of
+  the figure by font metrics, so the worst measured dpi still ends by
+  0.99, and continuation rows are indented. The caption strip grows to
+  hold the rows, measured rather than capped at the old 0.30, so no row
+  sits under the axes. The six-group campaign figure (twelve runs) wraps
+  to 11 caption rows and takes 0.30 of the height; longer names or more
+  groups now grow the strip instead of running under the axes. A resize
+  in the window re-wraps and re-measures it (`relayout`). Members
+  is the one line that may stop short: past three rows it ends with "…
+  (full membership in the tidy CSV's group column)", and otherwise it
+  ends by pointing at the same column. Tested at 90, 96, 110, 150 and
+  300 dpi: no grouped text lost, nothing past the right edge, nothing
+  over an axes. Ungrouped figures are untouched. `GROUP_NAME_MAX` goes
+  from 40 to 64, because
   `Carbon Solutions P3-SWNT, (no concentration recorded)` is 55
   characters.
+- **The CVD standard is linear RGB** (owner, 2026-10-06, on this source).
+  The Machado matrices are applied to linear RGB, after decoding sRGB:
+  - The model is built that way. Machado, Oliveira & Fernandes, "A
+    Physiologically-based Model for Simulation of Color Vision
+    Deficiency", IEEE TVCG 15(6):1291-1298, 2009, sec. 4.1, Eq. 8,
+    obtains the RGB-to-opponent matrix by "projecting the spectral power
+    distributions" of the RGB primaries onto the opponent-channel basis
+    functions. That is linear in light. The paper does not name an
+    encoding in words.
+  - The reference implementations do it. colorspacious,
+    `colorspacious/conversion.py`: `_CVD_forward` is registered on the
+    edge `"sRGB1-linear+CVD"` ↔ `"sRGB1-linear"`, reached from
+    `"sRGB1+CVD"` through `sRGB1_to_sRGB1_linear`. DaltonLens-Python,
+    `daltonlens/simulate.py`: `Simulator.simulate_cvd` calls
+    `convert.linearRGB_from_sRGB` before
+    `Simulator_Machado2009._simulate_cvd_linear_rgb`.
+  - The DaltonLens review (daltonlens.org, "Review of Open Source Color
+    Blindness Simulations") notes the authors' own code may not have
+    decoded sRGB when they tuned the model. That is about their
+    implementation, not the model, and changes nothing here.
 
-**Found while measuring, not changed.** The `#313` palette table (29.23 /
-22.05 / 18.70, and `TOL_BRIGHT`'s adjacent-pair floor of 18.00) is
-reproduced to the last digit only when the Machado matrices are applied
-to gamma-encoded sRGB. `tests/test_sldea_preview.py` applies them in
-linear RGB, where the same adjacent-pair floor is 15.35, yet its
-docstring cites 18 as "the floor sldea_plot.py measures". The two
-methods disagree by up to about 19 % on one pair: 26.02 linear against
-22.05 gamma for `#BB5566` / `#004488`. Both are recorded in the
-`GROUP_COLORS` comment. Which one the house standard means is for the
-owner to say.
+  `tests/test_sldea_preview.py` already measures this way. The `#313`
+  palette table (29.23 / 22.05 / 18.70, and `TOL_BRIGHT`'s adjacent-pair
+  floor of 18.00) was measured in gamma-encoded sRGB, which reproduces it
+  to the last digit. The two disagree by up to about 19 % on one pair
+  (26.02 linear against 22.05 gamma for `#BB5566` / `#004488`). By the
+  linear standard `TOL_BRIGHT`'s adjacent-pair floor is 15.35. So
+  `test_sldea_preview.py`'s asserted floor of 18 is stricter than its
+  stated rationale. The threshold is kept, and only its docstring's
+  citation is corrected.
+
+**Found while measuring, not changed.** The first line of the ungrouped
+caption ("Points = per-level pre/post snapshot pair…") runs off the right
+edge on origin/main exactly as on this branch, measured on the same
+runs. The 280-character default line ends at 1.12 to 1.24 of the figure
+width (300 to 90 dpi). The 248-character line under the aggregate ends
+at 0.98 to 1.09, inside only at 300 dpi. This is the defect the `#313`
+entry recorded, now measured across dpi. It is left alone, because
+ungrouped figures are out of scope here and a byte-identity test guards
+them. `sldea_preview.py`'s module docstring still says `sldea_plot.py`
+measures `TOL_BRIGHT`'s adjacent-pair floor "the same way at 18.0",
+which is false under the linear standard. It is not edited here.
 
 **Not verified.** Whether the NanoC (Invisicon) runs carry
 `Compliant electrode:`. Checked read-only on 2026-10-06 from the analysis

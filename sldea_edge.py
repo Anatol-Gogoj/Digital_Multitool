@@ -180,6 +180,44 @@ def _setup_text(rundir):
         return ''
 
 
+def electrode_of(rundir):
+    """The run's `Compliant electrode:` value as recorded (whitespace-
+    stripped), or None when setup.txt has no such line.
+
+    ONE reader for the field (`#373`, `#374`): the plot window's "Group by
+    material" seed and its run-picker column both call this, so the two
+    cannot disagree about what a run recorded. The three states stay
+    distinct, because the corpus relies on the difference (`#268`,
+    2026-08-12): None = the line is absent (the run predates the field,
+    or there is no readable setup.txt at all); '(not specified)' = the
+    operator was asked and declined, returned as-is; anything else is the
+    material exactly as typed or picked. Nothing is canonicalized here:
+    a family is sldea_profile.electrode_family's business, and a merge of
+    two spellings is the operator's.
+
+    Never raises: _setup_text's tolerant read, so a missing or undecodable
+    file degrades to None like a run that predates the field."""
+    m = re.search(r'^[ \t]*Compliant electrode:(.*)$', _setup_text(rundir),
+                  re.MULTILINE)
+    return m.group(1).strip() if m else None
+
+
+def ink_concentration_of(rundir):
+    """The run's `Ink concentration:` value as recorded (whitespace-
+    stripped, so '2.5 mL'), or None when setup.txt has no such line.
+
+    Same conventions as electrode_of, and the absence means one more thing
+    here: the runner OMITS the line by design for an electrode the
+    concentration does not apply to (sldea_profile.concentration_applies:
+    carbon black, eGaIn, the sprayed Invisicon inks), so None on such a
+    run is the expected answer rather than a gap. '(not specified)' is
+    returned as-is. No unit parsing: the plot's grouping normalizes
+    '2.5mL' and '2.50 mL' itself, and keeps the recorded text otherwise."""
+    m = re.search(r'^[ \t]*Ink concentration:(.*)$', _setup_text(rundir),
+                  re.MULTILINE)
+    return m.group(1).strip() if m else None
+
+
 def load_stamp(rundir):
     """The result stamps Edge Review's Save recorded for this run's
     data.csv -> {key: float} over STAMP_KEYS ({key: str} for the

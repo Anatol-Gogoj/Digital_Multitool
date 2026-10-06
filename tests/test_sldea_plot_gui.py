@@ -292,6 +292,543 @@ def test_runs_from_several_parents_all_reach_the_selection():
             shutil.rmtree(d, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# `#374`: the run picker's Material and Group columns
+# ---------------------------------------------------------------------------
+
+def _setup_txt(rundir, electrode=None):
+    """A setup.txt in the app's shape, CRLF as a Windows bench writes it,
+    with a `Compliant electrode:` line only when `electrode` is given."""
+    lines = ['SLDEA Test: fixture', 'Started: 2026-10-06T10:00:00', '',
+             'DEA nominal diameter: 16 mm', '']
+    if electrode is not None:
+        lines.append(f'Compliant electrode: {electrode}')
+    lines += ['', '--- Snapshots ---', 'baseline @ 0 kV', '']
+    path = os.path.join(rundir, 'setup.txt')
+    with open(path, 'w', encoding='utf-8', newline='') as f:
+        f.write('\r\n'.join(lines))
+    return path
+
+
+def _cells_by_name(win):
+    """{run folder name: its picker cells}, from the window's read-out."""
+    return {os.path.basename(d): c for d, c in win.displayed_runs()}
+
+
+def test_electrode_of_returns_the_line_as_recorded():
+    """The one reader `#373` and `#374` share. Absent and `(not
+    specified)` are different answers and both must survive: None means
+    the run predates the field, `(not specified)` that the operator
+    declined to say. Nothing is interpreted: electrode_family() would
+    call both Invisicon strings 'cnt', and this must not."""
+    p = _mktmp()
+    try:
+        bare = os.path.join(p, 'no_setup')
+        os.makedirs(bare)
+        assert g.se.electrode_of(bare) is None
+        old = os.path.join(p, 'predates_the_field')
+        os.makedirs(old)
+        _setup_txt(old)
+        assert g.se.electrode_of(old) is None
+        for i, (raw, want) in enumerate((
+                ('nano-c Invisicon 3900', 'nano-c Invisicon 3900'),
+                ('  Meijo 1   ', 'Meijo 1'),
+                ('(not specified)', '(not specified)'),
+                ('', ''))):
+            d = os.path.join(p, f'r{i}')
+            os.makedirs(d)
+            _setup_txt(d, raw)
+            assert g.se.electrode_of(d) == want, (raw, g.se.electrode_of(d))
+        # what the Material column makes of each answer
+        assert g.material_text(None) == g.NO_ELECTRODE \
+            == '(no electrode recorded)'
+        assert g.material_text('(not specified)') == '(not specified)'
+        assert g.material_text('') == '(not specified)'   # the app's word
+        assert g.material_text('Invisicon 3900') == 'Invisicon 3900'
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_setup_reads_are_cached_by_path_and_mtime():
+    """The lab share lists slowly already, so a re-listing must not
+    re-read every run's setup.txt: one stat each, and a read only for a
+    file that changed."""
+    import tkinter as tk
+    p = _mktmp()
+    real = g.se.electrode_of
+    reads = []
+
+    def spy(rundir):
+        reads.append(rundir)
+        return real(rundir)
+    try:
+        d = _fake_run(p, 'R1')
+        path = _setup_txt(d, 'carbon black')
+        g._ELECTRODE_CACHE.clear()
+        g.se.electrode_of = spy
+        assert g.recorded_electrode(d) == 'carbon black'
+        assert g.recorded_electrode(d) == 'carbon black'
+        assert len(reads) == 1, reads
+        # an edit is seen: new text AND a new mtime, stated rather than
+        # left to the clock, since two writes can share a tick
+        _setup_txt(d, 'eGaIn')
+        os.utime(path, (1_800_000_000, 1_800_000_000))
+        assert g.recorded_electrode(d) == 'eGaIn'
+        assert len(reads) == 2, reads
+        # a vanished file reads as no line, and costs no read
+        os.remove(path)
+        assert g.recorded_electrode(d) is None
+        assert len(reads) == 2, reads
+        # ...and through the window: a re-listing and a redraw read
+        # nothing that has not changed
+        r2 = _fake_run(p, 'R2')
+        _setup_txt(r2, 'carbon black')
+        try:
+            root = tk.Tk()
+        except tk.TclError as e:
+            print(f"   (skipped: no display for Tk: {e})")
+            return
+        try:
+            root.withdraw()
+            win = g.PlotWindow(root, p, remember=False)
+            n = len(reads)
+            assert n >= 3, reads           # R2's first read happened
+            win.populate()
+            win.set_selected_dirs([d, r2])
+            win.redraw()
+            assert len(reads) == n, reads[n:]
+            # CREATING a group reads its own runs once more, and only
+            # them: `#373` gives a new group the material its runs
+            # recorded, read at that moment. Moving runs into a group
+            # that exists reads nothing; it keeps the group's material.
+            win.set_selected_dirs([r2])
+            assert win.move_to_group('CB') is None
+            assert [sp.group_key(r) for r in reads[n:]] == \
+                [sp.group_key(r2)], reads[n:]
+            n = len(reads)
+            win.set_selected_dirs([d])
+            assert win.move_to_group('CB') is None
+            win.redraw()
+            assert len(reads) == n, reads[n:]
+        finally:
+            _shut(root)
+    finally:
+        g.se.electrode_of = real
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_the_run_picker_shows_each_runs_material_and_group():
+    """`#374`'s 'see': each row carries the material setup.txt recorded
+    and the group the window plots it in, and Group follows EVERY way the
+    grouping changes: Assign, Ungroup, Clear all, the menu, and the
+    remembered grouping a window opens on."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        _setup_txt(_fake_run(b.tmp, 'S2_3900'), 'nano-c Invisicon 3900')
+        _setup_txt(_fake_run(b.tmp, 'S3_unspec', processed=False),
+                   '(not specified)')
+        _setup_txt(_fake_run(b.tmp, 'S4_hand'), 'Invisicon 3900')
+        win.populate()
+        rows = _cells_by_name(win)
+        assert rows['R1']['material'] == g.NO_ELECTRODE
+        assert rows['S2_3900']['material'] == 'nano-c Invisicon 3900'
+        assert rows['S3_unspec']['material'] == '(not specified)'
+        assert rows['S4_hand']['material'] == 'Invisicon 3900'
+        # the processed mark sits IN FRONT of the name, where no column
+        # width can clip it, and an unprocessed run is padded to the
+        # same width (to the nearest space) so the names line up
+        assert rows['S2_3900']['run'] == g.RUN_MARK + 'S2_3900'
+        assert rows['S3_unspec']['run'] == win._mark_pad + 'S3_unspec'
+        assert not win._mark_pad.strip()
+        font = win._run_font
+        assert abs(font.measure(win._mark_pad)
+                   - font.measure(g.RUN_MARK)) <= font.measure(' ') / 2
+        # the hover text says which, in words
+        tips = {os.path.basename(d): win.row_tip(win._iid(i))
+                for i, (d, _l) in enumerate(win.runs)}
+        assert 'processed: Edge Review saved areas' in tips['S2_3900']
+        assert 'not processed' in tips['S3_unspec']
+        assert all(c['group'] == '' for c in rows.values())
+        # what Tk shows is the window's record, cell for cell
+        for iid in win.run_box.get_children():
+            i = win._row_of(iid)
+            assert [str(v) for v in win.run_box.item(iid, 'values')] == \
+                [win._cells[i][c] for c, _h in g.RUN_COLUMNS], iid
+        by = {os.path.basename(d): d for d, _l in win.runs}
+
+        def group_of(name):
+            return _cells_by_name(win)[name]['group']
+        # Assign, from the Groups box
+        win.set_selected_dirs([by['S2_3900'], by['S4_hand']])
+        win.v_group_name.set('3900')
+        win._assign_group()
+        assert group_of('S2_3900') == group_of('S4_hand') == '3900'
+        # Ungroup selected
+        win.set_selected_dirs([by['S4_hand']])
+        win._ungroup_selected()
+        assert group_of('S4_hand') == '' and group_of('S2_3900') == '3900'
+        # the menu's path
+        assert win.move_to_group('3900') is None
+        assert group_of('S4_hand') == '3900'
+        # Material is what setup.txt says, whatever the group says: the
+        # two cells disagree on screen rather than hide the override
+        assert _cells_by_name(win)['S4_hand']['material'] == 'Invisicon 3900'
+        # Clear all
+        win._clear_groups()
+        assert all(c['group'] == '' for _d, c in win.displayed_runs())
+        # the [folder#] tag stays in the Run column (`#323`), first, with
+        # the mark after it
+        other = _mktmp()
+        try:
+            _fake_run(other, 'X1')
+            win.parents.append(other)
+            win.populate()
+            tags = {c['run'].split(']')[0] + ']'
+                    for _d, c in win.displayed_runs()}
+            assert tags == {'[1]', '[2]'}, tags
+            assert _cells_by_name(win)['X1']['run'] == \
+                '[2] ' + g.RUN_MARK + 'X1'
+        finally:
+            shutil.rmtree(other, ignore_errors=True)
+        # a REMEMBERED grouping shows the moment the window opens
+        cfg = os.path.join(b.tmp, 'opts.json')
+        opts, err = sp.make_opts(groups=[['CB', [by['R1']]]])
+        assert err is None, err
+        assert g.save_options(b.tmp, opts, path=cfg) == cfg
+        real = g.OPTIONS_PATH
+        g.OPTIONS_PATH = cfg
+        try:
+            win2 = g.PlotWindow(b.root, b.tmp)
+        finally:
+            g.OPTIONS_PATH = real
+        assert _cells_by_name(win2)['R1']['group'] == 'CB'
+        assert _cells_by_name(win2)['S2_3900']['group'] == ''
+
+
+def test_sorting_the_picker_reorders_the_list_and_not_the_figure():
+    """A heading click sorts by that column (again: reversed), so one
+    material lines up for one Shift-click. It reorders the LIST only: the
+    figure takes its run colors from the selection's order, and a sort
+    that repainted the figure would be a control with a side effect
+    nobody asked for."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        for name, mat in (('S2', 'nano-c Invisicon 3900'),
+                          ('S3', '(not specified)'),
+                          ('S4', 'Invisicon 3900'),
+                          ('S5', 'carbon black')):
+            _setup_txt(_fake_run(b.tmp, name, processed=(name != 'S3')),
+                       mat)
+        win.populate()
+        listing = [d for d, _l in win.runs]
+        by = {os.path.basename(d): d for d in listing}
+        win.set_selected_dirs(listing)
+        key = win._figure_key()
+
+        def column(col):
+            return [c[col] for _d, c in win.displayed_runs()]
+
+        def names():
+            return [os.path.basename(d) for d, _c in win.displayed_runs()]
+        # Run sorts by NAME: the mark in front (S3 is unprocessed) must
+        # not split the list into processed and not
+        win.sort_runs('run')
+        assert names() == ['R1', 'S2', 'S3', 'S4', 'S5'], names()
+        assert win.run_box.heading('run', 'text') == 'Run ▲'
+        win.sort_runs('run')
+        assert names() == ['S5', 'S4', 'S3', 'S2', 'R1'], names()
+        win.sort_runs('material')
+        assert column('material') == sorted(column('material'),
+                                            key=str.casefold)
+        assert win.run_box.heading('material', 'text') == 'Material ▲'
+        win.sort_runs('material')
+        assert column('material') == sorted(column('material'),
+                                            key=str.casefold, reverse=True)
+        assert win.run_box.heading('material', 'text') == 'Material ▼'
+        assert win.run_box.heading('run', 'text') == 'Run'
+        assert win.run_box.heading('group', 'text') == 'Group'
+        # the figure's inputs did not move
+        assert win.selected_dirs() == listing
+        assert win._figure_key() == key
+        # Group: a run in no group goes last in both directions
+        win.set_selected_dirs([by['S5']])
+        assert win.move_to_group('CB') is None
+        win.set_selected_dirs([by['S2']])
+        assert win.move_to_group('3900') is None
+        win.sort_runs('group')
+        assert column('group')[:2] == ['3900', 'CB'], column('group')
+        assert set(column('group')[2:]) == {''}
+        win.sort_runs('group')
+        assert column('group')[:2] == ['CB', '3900'], column('group')
+        assert set(column('group')[2:]) == {''}
+        # the sort survives a grouping change and a re-listing
+        win.set_selected_dirs([by['S3']])
+        assert win.move_to_group('AA') is None
+        assert column('group')[:3] == ['CB', 'AA', '3900'], column('group')
+        win.populate()
+        assert column('group')[:3] == ['CB', 'AA', '3900'], column('group')
+        assert win.run_box.heading('group', 'text') == 'Group ▼'
+
+
+def test_the_move_to_group_menu_goes_through_assign_group():
+    """`#374`'s 'adjust': right-click the selected runs, Move to group,
+    then an existing group, a new one, or none. Every entry is
+    assign_group, so sp.check_groups keeps the last word, and a name it
+    REFUSES changes nothing (`#373`'s assign_group undoes it)."""
+    with _Bare() as b, _Boxes() as boxes:
+        if not b.ok:
+            return
+        win = b.win
+        _setup_txt(_fake_run(b.tmp, 'S2'), 'nano-c Invisicon 3900')
+        _setup_txt(_fake_run(b.tmp, 'S3'), 'Invisicon 3900')
+        win.populate()
+        by = {os.path.basename(d): d for d, _l in win.runs}
+        win.set_selected_dirs([by['S2']])
+        assert win.move_to_group('P3') is None
+        win.set_selected_dirs([by['R1'], by['S3']])
+        menu = win.group_menu()
+        assert menu.type(0) == 'cascade'
+        assert menu.entrycget(0, 'label') == 'Move to group'
+        sub = win.root.nametowidget(menu.entrycget(0, 'menu'))
+        labels = ['-' if sub.type(i) == 'separator'
+                  else sub.entrycget(i, 'label')
+                  for i in range(sub.index('end') + 1)]
+        assert labels == ['P3', '-', 'New group…', 'No group'], labels
+
+        def checks(m):
+            """{entry label: is its check shown} for a built menu, and
+            every checkable entry must still be LIVE: a check, never a
+            grayed entry."""
+            s = win.root.nametowidget(m.entrycget(0, 'menu'))
+            out = {}
+            for i in range(s.index('end') + 1):
+                if s.type(i) == 'checkbutton':
+                    assert str(s.entrycget(i, 'state')) == 'normal', i
+                    var = str(s.entrycget(i, 'variable'))
+                    out[s.entrycget(i, 'label')] = \
+                        win.root.getboolean(win.root.getvar(var))
+            return out
+        # the CURRENT group carries the check. None of the selection is
+        # grouped: No group is checked
+        assert win.selection_group() == ''
+        assert checks(menu) == {'P3': False, 'No group': True}
+        # every selected run in one group: that group is checked
+        win.set_selected_dirs([by['S2']])
+        assert win.selection_group() == 'P3'
+        assert checks(win.group_menu()) == {'P3': True, 'No group': False}
+        # a mixed selection: no check anywhere
+        win.set_selected_dirs([by['R1'], by['S2']])
+        assert win.selection_group() is None
+        assert checks(win.group_menu()) == {'P3': False, 'No group': False}
+        # choosing the checked entry is allowed, and changes nothing
+        win.set_selected_dirs([by['S2']])
+        before = win.group_list()
+        m = win.group_menu()
+        s = win.root.nametowidget(m.entrycget(0, 'menu'))
+        s.invoke(0)
+        assert win.group_list() == before
+        # back to the case the menu above was built for
+        win.set_selected_dirs([by['R1'], by['S3']])
+        menu = win.group_menu()
+        sub = win.root.nametowidget(menu.entrycget(0, 'menu'))
+
+        def groups():
+            return {n: c['group'] for n, c in _cells_by_name(win).items()}
+        # an existing group: this is also how two spellings of one
+        # material become one series
+        sub.invoke(labels.index('P3'))
+        assert groups() == {'R1': 'P3', 'S2': 'P3', 'S3': 'P3'}, groups()
+        assert [n for n, _m in win.current_opts()[0]['groups']] == ['P3']
+        # no group
+        sub.invoke(labels.index('No group'))
+        assert groups() == {'R1': '', 'S2': 'P3', 'S3': ''}, groups()
+        # a new group: a cancelled or blank prompt changes nothing...
+        for typed in (None, '   '):
+            win.ask_group_name = lambda typed=typed: typed
+            sub.invoke(labels.index('New group…'))
+            assert groups() == {'R1': '', 'S2': 'P3', 'S3': ''}, typed
+        # ...and a name makes the group, spelled as typed but trimmed
+        win.ask_group_name = lambda: '  Invisicon  '
+        sub.invoke(labels.index('New group…'))
+        assert groups() == {'R1': 'Invisicon', 'S2': 'P3',
+                            'S3': 'Invisicon'}, groups()
+        # with two groups: the shared one is checked, and runs from two
+        # different groups are a mixed selection like any other
+        win.set_selected_dirs([by['R1'], by['S3']])
+        assert checks(win.group_menu()) == {'P3': False, 'Invisicon': True,
+                                            'No group': False}
+        win.set_selected_dirs([by['R1'], by['S2']])
+        assert checks(win.group_menu()) == {'P3': False, 'Invisicon': False,
+                                            'No group': False}
+        assert boxes.said == [], boxes.said
+        # a name typed in another case JOINS the group of that name,
+        # since assign_group matches names case-insensitively (`#373`),
+        # rather than being refused as a second group of the same name
+        win.ask_group_name = lambda: 'p3'
+        win.set_selected_dirs([by['S3']])
+        assert win._move_to_new_group() is None
+        assert groups() == {'R1': 'Invisicon', 'S2': 'P3', 'S3': 'P3'}, \
+            groups()
+        # REFUSED WHOLE: an over-long name moves nothing
+        before = win.group_list()
+        bad = 'x' * (sp.GROUP_NAME_MAX + 1)
+        win.ask_group_name = lambda: bad
+        win.set_selected_dirs([by['R1']])
+        assert win._move_to_new_group()
+        assert boxes.said[-1][0] == 'showwarning', boxes.said
+        assert win.group_list() == before, win.group_list()
+        assert win.current_opts()[1] is None, win.current_opts()[1]
+        assert groups()['R1'] == 'Invisicon', groups()
+        # the same refusal through the Groups box's own Assign
+        win.v_group_name.set(bad)
+        win._assign_group()
+        assert win.group_list() == before
+
+
+def test_moving_runs_between_groups_never_writes_setup_txt():
+    """The grouping lives in the plot window and the figspec. setup.txt
+    is a lab-notebook document whose corrections are a reviewed batch,
+    so the picker reads it and nothing in the window may touch it: not a
+    byte, not an mtime, not a sidecar beside it."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        paths = [_setup_txt(_fake_run(b.tmp, n), m)
+                 for n, m in (('S2', 'nano-c Invisicon 3900'),
+                              ('S3', '(not specified)'))]
+        win.populate()
+        before = {p: (open(p, 'rb').read(), os.stat(p).st_mtime_ns)
+                  for p in paths}
+        listing = {d: sorted(os.listdir(d)) for d, _l in win.runs}
+        win.set_selected_dirs([d for d, _l in win.runs])
+        assert win.move_to_group('Invisicon') is None
+        win.sort_runs('material')
+        win.set_selected_dirs([d for d, _l in win.runs][:1])
+        assert win.move_to_group('') is None
+        win._clear_groups()
+        win.populate()
+        win.redraw()
+        after = {p: (open(p, 'rb').read(), os.stat(p).st_mtime_ns)
+                 for p in paths}
+        assert after == before
+        assert {d: sorted(os.listdir(d)) for d, _l in win.runs} == listing
+
+
+def test_the_group_column_follows_a_seed_and_the_menu_keeps_materials():
+    """`#373`'s two seed buttons are grouping changes like any other, so
+    the Group column shows what they made the moment one is pressed. And
+    the menu's paths are assign_group's, so a group's material (its line
+    style) is set when the group is CREATED and kept when runs are moved
+    into it: that is how two spellings of one material become one
+    series, with the override still visible as Material against Group."""
+    with _Bare() as b, _Boxes() as boxes:
+        if not b.ok:
+            return
+        win = b.win
+        _campaign(b)
+        _label(_fake_run(b.tmp, 'N39hand'), 'Invisicon 3900')
+        win.populate()
+        by = {os.path.basename(d): d for d, _l in win.runs}
+
+        def cells():
+            return _cells_by_name(win)
+
+        def column_matches_grouping():
+            want = {os.path.basename(m): name
+                    for name, members in win.group_list() for m in members}
+            got = {n: c['group'] for n, c in cells().items()}
+            assert got == {n: want.get(n, '') for n in got}, (got, want)
+
+        def materials():
+            return dict(win.group_material_list())
+        # the material seed, through its button
+        _select(win, 'R1', 'P3a', 'P3b', 'P3c', 'N39', 'N39hand', 'CB1',
+                'NS')
+        win.btn_seed_material.invoke()
+        column_matches_grouping()
+        assert cells()['P3a']['group'] == P3
+        assert cells()['N39']['group'] == N3900
+        assert cells()['N39hand']['group'] == 'Invisicon 3900'
+        assert cells()['R1']['group'] == sp.NO_ELECTRODE_GROUP
+        assert cells()['NS']['group'] == sp.NOT_SPECIFIED
+        # a seeded run's two cells say the same thing
+        for name in ('R1', 'NS', 'N39', 'CB1'):
+            assert cells()[name]['material'] == cells()[name]['group'], name
+        # its child, through its button: the P3 runs split by volume
+        _select(win, 'P3a', 'P3b', 'P3c')
+        win.btn_seed_concentration.invoke()
+        column_matches_grouping()
+        assert cells()['P3a']['group'] == cells()['P3b']['group']
+        assert cells()['P3a']['group'] != cells()['P3c']['group']
+        assert '2.5 mL' in cells()['P3a']['group'], cells()['P3a']
+        # MOVE TO GROUP, from the menu, into an existing group: the run
+        # takes that group's material, the spelling it left is emptied
+        # and goes with its material, and Material still shows what the
+        # run's own setup.txt says
+        win.set_selected_dirs([by['N39hand']])
+        sub = win.root.nametowidget(win.group_menu().entrycget(0, 'menu'))
+        sub.invoke([sub.entrycget(i, 'label')
+                    if sub.type(i) != 'separator' else None
+                    for i in range(sub.index('end') + 1)].index(N3900))
+        column_matches_grouping()
+        assert cells()['N39hand']['group'] == N3900
+        assert cells()['N39hand']['material'] == 'Invisicon 3900'
+        assert materials()[N3900] == N3900
+        assert 'Invisicon 3900' not in dict(win.group_list())
+        assert 'Invisicon 3900' not in materials()
+        # NEW GROUP of one material takes that material; of two, none
+        win.ask_group_name = lambda: 'cb only'
+        win.set_selected_dirs([by['CB1']])
+        assert win._move_to_new_group() is None
+        assert materials()['cb only'] == CB
+        win.ask_group_name = lambda: 'mixed'
+        win.set_selected_dirs([by['CB1'], by['N39hand']])
+        assert win._move_to_new_group() is None
+        assert 'mixed' not in materials()
+        assert 'cb only' not in dict(win.group_list())   # emptied: gone
+        assert materials()[N3900] == N3900   # N39 still holds it
+        column_matches_grouping()
+        # NO GROUP empties 'mixed', and its (absent) material cannot
+        # outlive it into a later group of the same name
+        assert win.move_to_group('') is None
+        assert 'mixed' not in dict(win.group_list())
+        column_matches_grouping()
+        assert boxes.said == [], boxes.said
+
+
+def test_fit_widths_gives_way_in_order_and_never_below_a_floor():
+    """The picker's column arithmetic, on the case `#373`'s seeds produce:
+    three long cells in a list too narrow for them, the group name the
+    longest."""
+    nat = {'run': 190, 'material': 155, 'group': 200}
+    floor = {'run': 138, 'material': 134, 'group': 56}
+    order = g.RUN_COL_GIVE
+    # room to spare: Run, the name column, takes the slack
+    assert g.fit_widths(nat, floor, 600, order) == \
+        {'run': 245, 'material': 155, 'group': 200}
+    # a little short: Run alone gives way
+    assert g.fit_widths(nat, floor, 520, order) == \
+        {'run': 165, 'material': 155, 'group': 200}
+    # shorter: Run down to its floor, then Material, and Group keeps its
+    # width, since a seeded group name is the longest cell (`#373`)
+    out = g.fit_widths(nat, floor, 490, order)
+    assert out == {'run': 138, 'material': 152, 'group': 200}, out
+    assert sum(out.values()) == 490
+    # shorter still: Material at its floor too, then Group gives way
+    out = g.fit_widths(nat, floor, 328, order)
+    assert out == {'run': 138, 'material': 134, 'group': 56}, out
+    assert sum(out.values()) == 328
+    # shorter than the floors: none goes under one; the list scrolls
+    assert g.fit_widths(nat, floor, 200, order) == floor
+    # the order the owner chose once `#373` seeded long group names
+    assert order == ('run', 'material', 'group'), order
+
+
 def test_initial_state_falls_back_without_arguments():
     parents, pre = g.initial_state([])
     assert parents and parents[0], 'no parent at all'
@@ -626,6 +1163,139 @@ def test_the_window_has_a_floor_it_cannot_collapse_below():
         w.resize(f'{mw}x{mh}')
         assert w.win.canvas.get_tk_widget().winfo_width() >= 100
         assert w.win.msg.winfo_ismapped() and w.win.toolbar.winfo_ismapped()
+
+
+def test_the_run_picker_scrolls_sideways_and_never_widens_the_window():
+    """`#374` put three columns where one used to be. A Treeview asks for
+    the SUM of its column widths, so left alone a long material, or a
+    separator dragged wide, would widen the controls column and with it
+    `#271`'s measured floor. The list asks for its column floors and no
+    more; anything wider scrolls the list, with a bar that is a report
+    of overflow (`#225`)."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        win, col = w.win, w.win.column
+        tree = win.run_box
+        box = tree.master
+        vbar = [c for c in box.winfo_children()
+                if c is not tree and c is not win.run_xbar][0]
+        assert box.winfo_reqwidth() == \
+            win._list_width() + vbar.winfo_reqwidth()
+        # the fixture's names and its placeholder material show whole,
+        # with no sideways bar
+        for c in ('run', 'material'):
+            assert tree.column(c, 'width') >= win._col_floor(c), c
+        assert not win.run_xbar.winfo_manager()
+        # a column dragged wide scrolls the LIST and moves no floor
+        natural = col.natural_width()
+        floor = win.apply_minsize()
+        tree.column('material', width=1500)
+        w.settle(0.3)
+        assert col.natural_width() == natural
+        assert win.apply_minsize() == floor
+        assert win.run_xbar.winfo_manager() == 'grid', 'no sideways bar'
+        # the next content change re-fits it, and the bar goes again
+        win._refresh_group_column()
+        w.settle(0.3)
+        assert not win.run_xbar.winfo_manager(), tree.xview()
+        # the hover text: a heading explains its column, a row shows
+        # itself whole, since the columns are narrow and clip
+        # (mid-column: within a few px of a boundary Tk reports the
+        # column SEPARATOR, which is where a drag starts)
+        x_mat = tree.column('run', 'width') + tree.column('material',
+                                                          'width') // 2
+        assert win._picker_tip(x_mat, 5) == (('heading', 'material'),
+                                             g.RUN_HEADING_TIPS['material'])
+        rows = tree.get_children()
+        bx, by, _bw, bh = tree.bbox(rows[0])
+        key, text = win._picker_tip(bx + 5, by + bh // 2)
+        assert key == ('row', rows[0]), key
+        first = win.displayed_runs()[0]
+        assert first[0] in text and os.path.basename(first[0]) in text
+        assert 'processed: Edge Review saved areas' in text
+        assert g.NO_ELECTRODE in text and g.RUN_ROW_HINT in text
+        # the mark leads the cell, so the column's own width cannot clip
+        # it: the cell starts with it
+        assert first[1]['run'].startswith(g.RUN_MARK), first[1]['run']
+
+        # right-click on a row OUTSIDE the selection makes it the
+        # selection, as file managers do; inside a multi-selection it
+        # keeps the selection. The menu itself is stubbed: on Windows a
+        # real tk_popup is modal and would hold the suite. Its grab is
+        # Tk's to release: on X11 a grab_release() straight after
+        # tk_popup leaves a menu that an outside click does not close.
+        class _Menu:
+            at = None
+
+            def tk_popup(self, x, y):
+                self.at = (x, y)
+
+            def grab_release(self):
+                raise AssertionError('the popup grab is released by Tk '
+                                     'when the menu unposts')
+        menu = _Menu()
+        win.group_menu = lambda: menu
+        second = win.displayed_runs()[1][0]
+        bx, by, _bw, bh = tree.bbox(rows[1])
+
+        class _E:
+            x, y = bx + 5, by + bh // 2
+            x_root, y_root = 400, 300
+        win.set_selected_dirs([first[0]])
+        assert win._run_menu(_E()) is menu and menu.at == (400, 300)
+        assert win.selected_dirs() == [second], win.selected_dirs()
+        everything = [d for d, _l in win.runs]
+        win.set_selected_dirs(everything)
+        assert win._run_menu(_E()) is menu
+        assert win.selected_dirs() == everything
+
+
+def test_the_window_opens_wide_enough_for_a_seeded_group_name():
+    """Owner decision 2026-10-06 (`#374`): the window keeps its `#271`
+    floor but OPENS wider, so the Group column shows a `#373`-seeded
+    name like RUN_GROUP_SAMPLE whole beside the other two columns. The
+    room has to reach Group, not the figure and not Run; the opening is
+    clamped to the work area; and the window still shrinks to its floor,
+    where the column hands the room back and the figure keeps
+    MIN_FIG_W."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        win, tree = w.win, w.win.run_box
+        for name in ('P3a', 'P3b'):
+            _label(_fake_run(w.tmp, name), P3, '2.5 mL')
+        win.populate()
+        _select(win, 'P3a', 'P3b')
+        win.btn_seed_concentration.invoke()
+        seeded = f'{P3}, 2.5 mL'
+        assert seeded == g.RUN_GROUP_SAMPLE
+        assert seeded in dict(win.group_list()), win.group_list()
+        floor = win.apply_minsize()
+        assert floor[0] == win.column.natural_width() + g.MIN_FIG_W
+        left, top, right, bottom = g.work_area(win.root)
+        if right - left < floor[0] + win.column.extra:
+            raise _Skip(f'desktop too narrow: the opening wants '
+                        f'{floor[0] + win.column.extra}px and the work '
+                        f'area is {right - left}px')
+        width, height, x, y = win.apply_opening_size()
+        assert left <= x and x + width <= right, (x, width, left, right)
+        assert top <= y and y + height <= bottom, (y, height, top, bottom)
+        assert w.settle(), 'the redraw never landed after opening'
+        assert win.root.winfo_width() == width
+        # the room reached GROUP: the seeded name shows whole...
+        assert tree.column('group', 'width') >= \
+            win._run_font.measure(seeded), tree.column('group', 'width')
+        assert tree.column('group', 'width') >= win._text_w(seeded)
+        # ...the figure still has more than its floor, and the floor
+        # itself did not move
+        assert win.canvas.get_tk_widget().winfo_width() > g.MIN_FIG_W
+        assert win.apply_minsize() == floor
+        # shrunk to the floor, the column hands the room back and the
+        # figure keeps MIN_FIG_W
+        w.resize(f'{floor[0]}x{max(floor[1], 600)}')
+        assert win.column.winfo_width() == win.column.natural_width()
+        assert win.canvas.get_tk_widget().winfo_width() >= g.MIN_FIG_W - 2
 
 
 def test_moving_the_window_does_not_cost_a_redraw():
@@ -2058,7 +2728,6 @@ def test_assigning_runs_to_groups_reaches_the_opts_the_figure_is_drawn_from():
     Assign -- and the grouping has to arrive in current_opts, because a
     group box that edited state the redraw never read would be the exact
     wiring gap this window has had before."""
-    import tkinter as tk
     with _Bare() as b:
         if not b.ok:
             return
@@ -2066,15 +2735,14 @@ def test_assigning_runs_to_groups_reaches_the_opts_the_figure_is_drawn_from():
         _fake_run(b.tmp, 'R2')
         win.populate()
         assert len(win.runs) == 2, win.runs
+        first, second = [d for d, _l in win.runs]
         assert win.current_opts()[0]['groups'] == []
         # nothing selected: refused with a sentence, not a traceback
-        win.run_box.selection_clear(0, tk.END)
+        assert win.set_selected_dirs([]) == []
         assert win.assign_group('CB', win.selected_dirs())
-        win.run_box.selection_clear(0, tk.END)
-        win.run_box.selection_set(0)
+        win.set_selected_dirs([first])
         assert win.assign_group('CB', win.selected_dirs()) is None
-        win.run_box.selection_clear(0, tk.END)
-        win.run_box.selection_set(1)
+        win.set_selected_dirs([second])
         assert win.assign_group('P3', win.selected_dirs()) is None
         opts, err = win.current_opts()
         assert not err, err
@@ -2084,13 +2752,12 @@ def test_assigning_runs_to_groups_reaches_the_opts_the_figure_is_drawn_from():
         assert win.group_list() == opts['groups']
         # a run moves between groups rather than being in both, which is
         # what the engine refuses outright
-        win.run_box.selection_clear(0, tk.END)
-        win.run_box.selection_set(0)
+        win.set_selected_dirs([first])
         assert win.assign_group('P3', win.selected_dirs()) is None
         assert [n for n, _m in win.group_list()] == ['P3'], win.group_list()
         assert len(win.group_list()[0][1]) == 2
         # ...and 'ungroup' takes them back out without touching the rest
-        win.run_box.selection_set(0, tk.END)
+        win.set_selected_dirs([d for d, _l in win.runs])
         assert win.assign_group('', win.selected_dirs()) is None
         assert win.group_list() == []
         assert win.current_opts()[0]['groups'] == []
@@ -2106,7 +2773,7 @@ def test_the_group_box_reports_what_it_will_and_will_not_draw():
             return
         win = b.win
         assert 'No groups' in win.group_summary()
-        win.run_box.selection_set(0)
+        win.set_selected_dirs([win.runs[0][0]])
         win.assign_group('CB', win.selected_dirs())
         win._groups_changed()
         assert 'CB (1)' in win.group_summary()
@@ -2251,14 +2918,11 @@ def _label(rundir, electrode=_ABSENT, conc=_ABSENT):
 
 
 def _select(win, *names):
-    """Select exactly the runs with these folder names. ONE place that
-    touches the run widget's own API, so the next change of widget
-    (`#374`) changes one helper rather than every case below."""
-    import tkinter as tk
-    win.run_box.selection_clear(0, tk.END)
-    for i, (rundir, _text) in enumerate(win.runs):
-        if os.path.basename(rundir) in names:
-            win.run_box.selection_set(i)
+    """Select exactly the runs with these folder names, through the
+    window's one selection setter (`#374`), so no case here touches the
+    run widget's own API."""
+    win.set_selected_dirs([rundir for rundir, _text in win.runs
+                           if os.path.basename(rundir) in names])
 
 
 def _campaign(b):

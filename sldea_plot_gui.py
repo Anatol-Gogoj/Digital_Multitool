@@ -34,6 +34,11 @@ Two things the window remembers or reaches for, both additive:
   * a double-click on a data point opens THAT FRAME in Edge Review
     (`#274`), through the same sibling-process launch the SLDEA tab's
     buttons use, with `--goto ROW`;
+  * the run list shows each run's recorded MATERIAL (setup.txt's
+    `Compliant electrode:` line, read only) and the GROUP this window
+    plots it in, sorts by any column, and moves the selected runs
+    between groups from a right-click menu (`#374`). The move changes
+    the plot window's grouping and never setup.txt;
   * the draw options are remembered PER PARENT FOLDER in a per-user file
     (`#275`), never in a run folder and never in the repo. Precedence is
     explicit CLI/init args > remembered > defaults, and a corrupt or
@@ -66,7 +71,8 @@ import time
 import tk_fontfix                      # must run before tkinter connects:
 tk_fontfix.apply()                     # colour-emoji glyphs hard-crash Tk
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import font as tkfont
 
 import sldea_edge as se
 import sldea_plot as sp
@@ -101,6 +107,12 @@ DEFAULT_PARENT = os.environ.get(
 OUT_SUBDIR = 'plots'
 
 PROCESSED_MARK = '  ✓ processed'       # Edge Review's labelling convention
+
+# The run picker's form of it (`#374`): a short mark at the FRONT of the
+# Run cell, where no column width can clip it. The suffix above cost
+# ~50 px at the end of the cell, the first thing a narrow column cut.
+# Unprocessed rows are padded to the same width so the names line up.
+RUN_MARK = '✓ '
 
 # The smallest window the layout still WORKS in (`#271`). Width is
 # measured, not guessed: the controls column asks for whatever the theme
@@ -198,6 +210,111 @@ def list_runs(parent):
     return [(n, n + (PROCESSED_MARK
                      if is_processed(os.path.join(parent, n)) else ''))
             for n in names]
+
+
+# ---------------------------------------------------------------------------
+# the run picker's Material column (`#374`)
+#
+# READ, NEVER WRITTEN. The column shows what setup.txt RECORDED on its
+# `Compliant electrode:` line, through se.electrode_of: the same reader
+# `#373`'s "Group by material" seed uses, so the column and the seed
+# cannot disagree about a run. Correcting a wrong material is a deliberate
+# edit to setup.txt outside this window; moving a run between groups here
+# changes the plot window's grouping and nothing else.
+#
+# CACHED BY PATH AND MTIME. populate() runs on open and on every Add
+# folder / Reset folders, and on the lab share a listing is already slow,
+# so a re-listing pays one stat per run and re-reads only a setup.txt
+# that changed. A file that is gone is a run with no line, like a file
+# that never had one.
+# ---------------------------------------------------------------------------
+
+# The engine's own words for the two non-answers (`#373`), so a run's
+# Material cell and the group "Group by material" puts it in read the same.
+NO_ELECTRODE = sp.NO_ELECTRODE_GROUP       # no line: predates the field
+NOT_SPECIFIED = sp.NOT_SPECIFIED           # the app's word for a blank answer
+
+_ELECTRODE_CACHE = {}          # normcased setup.txt path -> (stamp, value)
+
+
+def recorded_electrode(rundir):
+    """se.electrode_of(rundir), re-read only when setup.txt changed.
+
+    The stamp is (mtime_ns, size): mtime is what the issue asks for, and
+    the size catches an edit landing inside one tick of a coarse-mtime
+    file system. Never raises: a run whose setup.txt cannot be stat'ed
+    reads as one with no electrode line."""
+    path = os.path.join(rundir, 'setup.txt')
+    try:
+        st = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    stamp = (st.st_mtime_ns, st.st_size)
+    key = sp.group_key(path)
+    hit = _ELECTRODE_CACHE.get(key)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    value = se.electrode_of(rundir)
+    _ELECTRODE_CACHE[key] = (stamp, value)
+    return value
+
+
+def material_text(value):
+    """What the Material column shows for an se.electrode_of() answer.
+
+    The value as recorded, with the two non-answers kept apart: no line
+    at all is NO_ELECTRODE, and `(not specified)` stays itself. A blank
+    value (only a hand edit writes one) reads as `(not specified)`,
+    because that is what the app itself writes for a blank answer
+    (sldea_profile's setup writer)."""
+    if value is None:
+        return NO_ELECTRODE
+    return value or NOT_SPECIFIED
+
+
+def fit_widths(natural, floor, avail, order):
+    """-> {column: width in px} for the run picker.
+
+    Each column asks for its `natural` width, fitted to its content. With
+    room to spare, the first column in `order` takes the slack, so the
+    list has no dead strip on the right. Short of room, the columns give
+    way IN `order`, each down to its `floor` and no further; if even the
+    floors do not fit, the list scrolls sideways rather than clip a
+    column away. What a narrowed column hides is in the row's hover
+    text."""
+    out = dict(natural)
+    short = sum(out.values()) - avail
+    if short <= 0:
+        out[order[0]] -= short
+        return out
+    for col in order:
+        give = max(0, min(short, out[col] - floor[col]))
+        out[col] -= give
+        short -= give
+        if short <= 0:
+            break
+    return out
+
+
+def work_area(widget):
+    """-> (left, top, right, bottom) of the desktop's usable area, in
+    Tk's own pixels: on Windows the work area (the screen less the
+    taskbar), asked of the system, which answers in the same scaled
+    pixels Tk uses in a DPI-unaware process (1646 x 1029 for both on the
+    175 % analysis PC, measured 2026-10-06); elsewhere, or if the
+    question fails, the whole screen. Never raises."""
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            from ctypes import wintypes
+            rect = wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(
+                    0x0030, 0, ctypes.byref(rect), 0):   # SPI_GETWORKAREA
+                if rect.right > rect.left and rect.bottom > rect.top:
+                    return rect.left, rect.top, rect.right, rect.bottom
+        except Exception:
+            pass
+    return 0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight()
 
 
 def split_target(path):
@@ -649,12 +766,16 @@ class Tooltip:
                 pass
             self._after_id = None
 
+    def _where(self):
+        """-> the screen (x, y) the popup opens at: under the widget."""
+        return (self.widget.winfo_rootx() + 14,
+                self.widget.winfo_rooty() + self.widget.winfo_height() + 6)
+
     def _show(self):
         if self._tip is not None or not self.text:
             return
         try:
-            x = self.widget.winfo_rootx() + 14
-            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+            x, y = self._where()
         except tk.TclError:          # widget died while the timer was pending
             return
         tip = tk.Toplevel(self.widget)
@@ -678,6 +799,42 @@ class Tooltip:
 def add_tooltip(widget, text):
     """Attach a hover tooltip; returns the Tooltip."""
     return Tooltip(widget, text)
+
+
+class PointerTip(Tooltip):
+    """A tooltip whose text depends on WHAT is under the pointer (one row
+    or one heading of the run picker, `#374`), opened beside the pointer
+    rather than under the widget, which for a list is a long way from
+    the row being asked about.
+
+    `text_at(x, y)` -> (key, text) for widget coordinates. A new key
+    restarts the hover delay, so moving down the list does not leave the
+    last row's text on screen. Not part of the ui_widgets copy above,
+    which only gained the _where() hook this overrides; a plain Tooltip
+    still opens where it always did."""
+
+    def __init__(self, widget, text_at):
+        super().__init__(widget, '')
+        self.text_at = text_at
+        self._key = None
+        widget.bind('<Motion>', self._moved, add='+')
+        widget.bind('<Leave>', self._left, add='+')
+
+    def _moved(self, event):
+        key, text = self.text_at(event.x, event.y)
+        if key == self._key:
+            return
+        self._hide()
+        self._key, self.text = key, text
+        if text:
+            self._schedule()
+
+    def _left(self, _event=None):
+        self._key, self.text = None, ''
+
+    def _where(self):
+        return (self.widget.winfo_pointerx() + 16,
+                self.widget.winfo_pointery() + 18)
 
 
 # The bands are a CALIBRATED ERROR BUDGET, not a fit residual and not
@@ -845,6 +1002,102 @@ DRAW_TIPS = {
         "drawn leg by leg, and not on the time axis, which already runs "
         "one way."),
 }
+
+# The run picker (`#374`): one row per run, in three columns. Run keeps
+# the `[folder#]` tag (`#323`) and the processed mark; Material is what
+# setup.txt recorded; Group is how THIS WINDOW is plotting the run. The
+# last two stay apart on purpose: when the operator overrides a material
+# by moving a run, the two cells disagree on screen instead of the
+# override being hidden.
+RUN_COLUMNS = (('run', 'Run'), ('material', 'Material'), ('group', 'Group'))
+
+# Rows the list asks for. A Treeview row is 20 px at Tk's 96 dpi against
+# the old Listbox's 15 px line, so 9 rows (206 px with the heading)
+# replaces the Listbox's 12 lines (196 px) and adds only 10 px to the
+# controls column, which `#271`'s floor and the scroll cases are measured
+# off.
+RUN_ROWS = 9
+
+# How narrow each column may be squeezed when the three do not fit, given
+# as TEXT it must still show whole and measured in the list's own font,
+# so the floors follow the font and the DPI instead of one PC's pixels.
+# A processed timestamp-named run, the longest material placeholder, and
+# a heading with its sort arrow. At Tk's 96 dpi (Segoe UI 9) these are
+# 139, 124 and 46 px of text (measured 2026-10-06).
+RUN_COL_FLOOR = {'run': RUN_MARK + 'SLDEA_20261001_151016',
+                 'material': NO_ELECTRODE,
+                 'group': 'Group ▲'}
+
+# The order the columns give way in when the list is short of width.
+# Run first, and only down to its floor: there a timestamp-named run
+# still shows whole with its mark, only a longer or `[folder#]`-tagged
+# name is cut short at the end, and the hover text has the whole label.
+# Material before Group, because `#373`'s seeded group names are the
+# LONGEST cells in the list: the material plus its concentration,
+# 'Carbon Solutions P3-SWNT, 2.5 mL' (186 px of text at 96 dpi, against
+# 145 for the material alone). Material's floor still shows '(no
+# electrode recorded)' whole, and with it every Invisicon name (3900
+# against 3500 is the last four characters): 'nano-c Invisicon 3900' is
+# 115 px against that floor's 124. Only a longer material, such as the
+# P3-SWNT name, loses its end, and the hover text has it whole.
+#
+# WHAT THE ORDER CAN AND CANNOT DO: it shares out the room ABOVE the
+# floors. The list asks for exactly its floors, so where nothing else
+# widens the controls column (the Windows analysis PC), a long material
+# and a long group name both sit at their floors whatever the order,
+# and Group shows about 50 px of a seeded name. The order takes effect
+# where the list is wider than its floors, and when one column's content
+# is shorter than its floor.
+RUN_COL_GIVE = ('run', 'material', 'group')
+
+# ...which is why the window OPENS wider than its floor (owner decision,
+# 2026-10-06): the controls column asks for room beyond its natural
+# width, enough for Group to show a seeded name like this one whole
+# beside the other two columns at their floors. 186 px of text at 96
+# dpi, so 140 px over Group's floor. The room is taken only while the
+# window can spare it with the figure at MIN_FIG_W or wider, so the
+# floor itself does not move (PlotWindow.opening_size, ScrollColumn.
+# set_room).
+RUN_GROUP_SAMPLE = 'Carbon Solutions P3-SWNT, 2.5 mL'
+
+# THE LIST ASKS FOR EXACTLY ITS FLOORS SIDE BY SIDE (PlotWindow.
+# _list_width), and that is the one width here that moves the window:
+# `#271`'s floor is measured off the controls column, and this list is
+# now its widest member. On the Windows analysis PC (96 dpi) it widened
+# the column by 52 px and the window's floor from 715 px to 767, 41 px
+# for the three columns and 11 for the processed mark in front of the
+# name (measured on main and again over `#373`, whose seed buttons widen
+# nothing: 715 px without the picker either way). That is 7 px past the 760 px the layout tests' narrowest window
+# asks for, so Tk holds that case at the floor instead; what it asserts
+# (the warnings pane and the toolbar still on screen) holds there too.
+# A column wider than its share scrolls the list instead
+# (test_the_run_picker_scrolls_sideways_and_never_widens_the_window).
+
+
+# Hover text for the three headings. The Material one carries the
+# read-only promise, because the column sits one right-click away from
+# a menu that MOVES runs, and the two must not be confused.
+RUN_HEADING_TIPS = {
+    'run': (
+        "The run folder. [n] is the folder's number in the list above "
+        "(`#323`); a ✓ before the name means it is processed: Edge "
+        "Review saved areas for it. Click a heading to sort by it, again "
+        "to reverse. Run sorts by folder and name, whatever the mark."),
+    'material': (
+        "What the run's setup.txt recorded on its 'Compliant electrode:' "
+        "line, exactly as written. (no electrode recorded) means the run "
+        "predates the field; (not specified) means the operator declined "
+        "to say. Read only: nothing in this window writes setup.txt. Sort "
+        "by it to line each material up for one Shift-click."),
+    'group': (
+        "The group this window draws the run in: your grouping, kept "
+        "here and in the exported figspec, never in setup.txt. "
+        "Right-click selected runs to move them to another group, a new "
+        "one, or none. Where it disagrees with Material, that is an "
+        "override, shown rather than hidden."),
+}
+
+RUN_ROW_HINT = "Right-click the selected runs to move them to a group."
 
 # Hover text for the run-folder buttons (`#323`) and the group editor
 # (`#313`). Module constants for the reason every other tooltip here is
@@ -1104,6 +1357,13 @@ class ScrollColumn(ttk.Frame):
                                            anchor='nw')
         self.bar_shown = False
         self._geom = None
+        # ROOM BEYOND THE NATURAL WIDTH (`#374`): `extra` px the column
+        # would like on top of what its controls ask for, and `limit`,
+        # the widest the owner can spare right now (None = no limit). The
+        # natural width stays the FLOOR (natural_width), so the room is
+        # taken only when the window has it and handed back as it shrinks.
+        self.extra = 0
+        self.limit = None
         self.body.bind('<Configure>', self._refit)
         self._cv.bind('<Configure>', self._refit)
         # The wheel is grabbed only while the pointer is over the column
@@ -1126,14 +1386,33 @@ class ScrollColumn(ttk.Frame):
         want = self.body.winfo_reqwidth()
         need = self.body.winfo_reqheight()
         have = self._cv.winfo_height()
-        geom = (want, need, have)
+        width = self.width_for(want)
+        geom = (want, need, have, width)
         if geom == self._geom:
             return
         self._geom = geom
-        self._cv.config(width=want)
-        self._cv.itemconfigure(self._win, width=want, height=max(need, have))
-        self._cv.configure(scrollregion=(0, 0, want, max(need, have)))
+        self._cv.config(width=width)
+        self._cv.itemconfigure(self._win, width=width,
+                               height=max(need, have))
+        self._cv.configure(scrollregion=(0, 0, width, max(need, have)))
         self.show_bar(need > have + self.SLACK)
+
+    def width_for(self, want):
+        """The body's width: its natural `want`, plus as much of `extra`
+        as `limit` leaves room for beside the bar. Never under `want`."""
+        width = want + self.extra
+        if self.limit is not None:
+            bar = self.bar.winfo_reqwidth() if self.bar_shown else 0
+            width = min(width, self.limit - bar)
+        return max(want, width)
+
+    def set_room(self, extra=None, limit=None):
+        """Set `extra` and/or `limit` (see __init__) and re-fit."""
+        if extra is not None:
+            self.extra = max(0, int(extra))
+        if limit is not None:
+            self.limit = int(limit)
+        self._refit()
 
     def natural_width(self):
         """The width the column needs: what the controls ask for PLUS the
@@ -1216,6 +1495,15 @@ class PlotWindow:
                         else [p for p in (parent_dir or []) if p]
                         or [DEFAULT_PARENT])
         self.runs = []                 # [(rundir, label)] currently listed
+        # `#374`: the picker's cells per run, parallel to self.runs. Kept
+        # here as the window's own record of what each row says, so the
+        # sort, the hover text and the tests never parse Tk's copy
+        self._cells = []               # [{column id: text}]
+        self._run_meta = []            # [{'tag', 'name', 'processed'}]
+        self._sort = None              # (column id, descending) or None
+        self._menu = None              # the open right-click menu, if any
+        self._menu_vars = []           # its check indicators' variables
+        self._run_box_w = None         # the list's width at the last fit
         self._loaded = {}              # rundir -> loaded run dict (cache)
         self._prepared = []            # what the canvas is currently showing
         self._drawn_key = None         # ...and what it was derived from
@@ -1519,17 +1807,73 @@ class PlotWindow:
         self.lbl_parent.pack(fill=tk.X)
         box = ttk.Frame(rf)
         box.pack(fill=tk.BOTH, expand=True, pady=(4, 4))
-        sb = ttk.Scrollbar(box, orient=tk.VERTICAL)
-        # EXTENDED, not BROWSE: several runs on one figure is the reason
-        # this tool exists, so the picker must be able to say so.
-        # Ctrl/Shift-click and drag all work.
-        self.run_box = tk.Listbox(box, selectmode=tk.EXTENDED, height=12,
-                                  exportselection=False,
-                                  yscrollcommand=sb.set)
-        sb.config(command=self.run_box.yview)
-        sb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.run_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.run_box.bind('<<ListboxSelect>>', lambda _e: self.schedule())
+        # A Treeview with three columns since `#374`: the run, the
+        # material its setup.txt recorded, and the group this window
+        # plots it in. EXTENDED, not BROWSE: several runs on one figure is
+        # the reason this tool exists, so the picker must be able to say
+        # so. Ctrl-click and Shift-click both work.
+        self.run_box = ttk.Treeview(
+            box, columns=[c for c, _h in RUN_COLUMNS], show='headings',
+            selectmode='extended', height=RUN_ROWS)
+        sb = ttk.Scrollbar(box, orient=tk.VERTICAL,
+                           command=self.run_box.yview)
+        self.run_xbar = ttk.Scrollbar(box, orient=tk.HORIZONTAL,
+                                      command=self.run_box.xview)
+        self.run_box.configure(yscrollcommand=sb.set,
+                               xscrollcommand=self._run_xscrolled)
+        self._run_font = tkfont.nametofont(
+            ttk.Style().lookup('Treeview', 'font') or 'TkDefaultFont')
+        # what an unprocessed row carries where the mark would be: the
+        # whole number of spaces nearest RUN_MARK's width in this font
+        # (4 spaces, 12 px, against the mark's 11 at 96 dpi), so names
+        # line up to within a pixel
+        space = max(1, self._run_font.measure(' '))
+        self._mark_pad = ' ' * max(1, round(
+            self._run_font.measure(RUN_MARK) / space))
+        for col, head in RUN_COLUMNS:
+            self.run_box.heading(col, text=head, anchor=tk.W,
+                                 command=lambda c=col: self.sort_runs(c))
+            # only Run stretches: when the window gives the list more or
+            # less room, the name column absorbs it and Material and Group
+            # keep the widths their content was fitted to. A separator
+            # can be dragged down to the heading's own width, no further.
+            self.run_box.column(col, anchor=tk.W, stretch=(col == 'run'),
+                                minwidth=self._text_w(head),
+                                width=self._col_floor(col))
+        self.run_box.grid(row=0, column=0, sticky='nsew')
+        sb.grid(row=0, column=1, sticky='ns')
+        self.run_xbar.grid(row=1, column=0, sticky='ew')
+        self.run_xbar.grid_remove()        # a report of overflow (`#225`)
+        box.rowconfigure(0, weight=1)
+        box.columnconfigure(0, weight=1)
+        # THE BOX ASKS FOR A FIXED SIZE, whatever its columns are doing.
+        # A Treeview requests the SUM of its column widths, so a column
+        # fitted to a long material, or dragged wider by hand, would
+        # otherwise widen the whole controls column and with it `#271`'s
+        # measured floor. Fixed, a wide column scrolls sideways instead.
+        # (A ttk widget files its size request when it is configured, so
+        # the height below is real before the window is ever drawn.)
+        box.configure(width=self._list_width() + sb.winfo_reqwidth(),
+                      height=self.run_box.winfo_reqheight())
+        box.grid_propagate(False)
+        self.run_box.bind('<<TreeviewSelect>>', lambda _e: self.schedule())
+        # re-fit when the list's WIDTH changes, which is once, when it is
+        # first drawn: Tk would otherwise hand any room beyond the floors
+        # to Run alone, and RUN_COL_GIVE's order would only apply from
+        # the first grouping change on
+        self.run_box.bind('<Configure>', self._run_box_configured, add='+')
+        # the `#374` group menu, on a right-click: Button-3 on Windows and
+        # X11, Button-2 or Control-click on macOS
+        self.run_box.bind('<Button-3>', self._run_menu)
+        if self.run_box.tk.call('tk', 'windowingsystem') == 'aqua':
+            self.run_box.bind('<Button-2>', self._run_menu)
+            self.run_box.bind('<Control-Button-1>', self._run_menu)
+        PointerTip(self.run_box, self._picker_tip)
+        # the room Group wants beyond the floors (RUN_GROUP_SAMPLE), asked
+        # of the controls column, and the window's width, which decides
+        # how much of it the column may take
+        self.column.set_room(extra=self._group_room())
+        root.bind('<Configure>', self._root_configured, add='+')
         brow = ttk.Frame(rf)
         brow.pack(fill=tk.X)
         # ADDS a folder, never replaces the list (`#323`). The old
@@ -1546,7 +1890,7 @@ class PlotWindow:
         self.btn_drop.pack(side=tk.LEFT)
         add_tooltip(self.btn_drop, DROP_FOLDERS_TIP)
         ttk.Label(rf, foreground='#666', wraplength=260, justify=tk.LEFT,
-                  text="✓ processed = Edge Review saved areas for that "
+                  text="✓ = processed: Edge Review saved areas for that "
                        "run.").pack(fill=tk.X, pady=(4, 0))
 
         # --- groups (`#313`). Under the run list rather than in Draw,
@@ -2018,9 +2362,14 @@ class PlotWindow:
         if keep:
             wanted |= {sp.group_key(d) for d in self.selected_dirs()}
         self.runs = []
+        self._run_meta = []
         multi = len(self.parents) > 1
         for i, parent in enumerate(self.parents, 1):
             for name, label in list_runs(parent):
+                # the processed mark goes to the FRONT of the Run cell
+                # (`#374`): RUN_MARK, or blank of the same width
+                processed = label.endswith(PROCESSED_MARK)
+                tag = f"[{i}] " if multi else ''
                 # WHERE IT CAME FROM, once there is more than one answer,
                 # as a NUMBER keyed to the folder list above (`#323`).
                 # Two runs in different parents can share a name, so the
@@ -2033,17 +2382,31 @@ class PlotWindow:
                 # list of folders it refers to.
                 self.runs.append(
                     (os.path.join(parent, name),
-                     (f"[{i}] " if multi else '') + label))
-        self.run_box.delete(0, tk.END)
-        for _dir, label in self.runs:
-            self.run_box.insert(tk.END, label)
+                     tag + (RUN_MARK if processed else self._mark_pad)
+                     + name))
+                self._run_meta.append({'tag': tag, 'name': name,
+                                       'processed': processed})
+        # `#374`: Material is read here and only here (cached by path and
+        # mtime, see recorded_electrode); Group is filled from the
+        # window's grouping by _refresh_group_column below, which every
+        # grouping change also calls
+        self._cells = [{'run': label,
+                        'material': material_text(recorded_electrode(d)),
+                        'group': ''}
+                       for d, label in self.runs]
+        old = self.run_box.get_children()
+        if old:
+            self.run_box.delete(*old)
+        for i, cells in enumerate(self._cells):
+            self.run_box.insert('', tk.END, iid=self._iid(i),
+                                values=[cells[c] for c, _h in RUN_COLUMNS])
         self.lbl_parent.config(text=self._parent_label())
         self.btn_drop.config(state='normal' if len(self.parents) > 1
                              else 'disabled')
-        for i, (rundir, _l) in enumerate(self.runs):
-            if (sp.group_key(rundir) in wanted
-                    or os.path.basename(rundir) in names):
-                self.run_box.selection_set(i)
+        self.set_selected_dirs(
+            [d for d, _l in self.runs
+             if sp.group_key(d) in wanted or os.path.basename(d) in names])
+        self._refresh_group_column()
         if not self.runs:
             self._set_messages(
                 [f"no runs (directories holding data.csv) in "
@@ -2094,14 +2457,350 @@ class PlotWindow:
         self.schedule()
 
     def _select_all(self):
-        self.run_box.selection_set(0, tk.END)
+        self.set_selected_dirs([d for d, _l in self.runs])
         self.schedule()
 
     def selected_dirs(self):
         """The run directories currently selected. Held as full paths in
         `self.runs` since `#323` -- joining a name onto 'the' parent is
-        what dropped every run that did not live under it."""
-        return [self.runs[i][0] for i in self.run_box.curselection()]
+        what dropped every run that did not live under it.
+
+        In LISTING order, not in the order the picker shows them
+        (`#374`): the figure takes its run colors from this order, and
+        sorting the list by a column must not repaint the figure."""
+        chosen = set(self.run_box.selection())
+        return [d for i, (d, _l) in enumerate(self.runs)
+                if self._iid(i) in chosen]
+
+    def set_selected_dirs(self, rundirs):
+        """Select exactly these run directories and nothing else; an
+        empty list clears the selection. Matched the way sp.group_key
+        matches, so case and a relative spelling do not matter.
+        -> selected_dirs() afterwards.
+
+        THE ONE SELECTION SETTER (`#374`). The window and the tests pick
+        runs through this and read them back through selected_dirs(), so
+        the next change of list widget touches these two methods and no
+        caller."""
+        want = {sp.group_key(d) for d in rundirs}
+        self.run_box.selection_set(
+            [self._iid(i) for i, (d, _l) in enumerate(self.runs)
+             if sp.group_key(d) in want])
+        return self.selected_dirs()
+
+    # -- the run picker's columns and group menu (`#374`) -------------------
+
+    @staticmethod
+    def _iid(i):
+        """The picker's row id for self.runs[i]."""
+        return f'run{i}'
+
+    @staticmethod
+    def _row_of(iid):
+        """-> the self.runs index of a picker row id, or None."""
+        try:
+            return int(str(iid)[3:])
+        except ValueError:
+            return None
+
+    # the field's border, 1 px a side: every ttk theme on the Windows PC
+    # lays the Treeview out in a field with 'border': '1', and filling the
+    # widget's full width in vista left xview at (0, 0.994), which put up
+    # the sideways bar for 2 px
+    _FIELD_BORDERS = 2
+
+    def _text_w(self, text):
+        """The width a cell needs to show `text` whole, in px: the text in
+        the list's font, plus the cell's inset (about 4 px a side: a 134
+        px cell showed 126 px of a 128 px name, 2026-10-06) and 2 px of
+        air."""
+        return self._run_font.measure(text) + 10
+
+    def _col_floor(self, col):
+        """How narrow a squeeze may make `col`: RUN_COL_FLOOR's text."""
+        return self._text_w(RUN_COL_FLOOR[col])
+
+    def _list_width(self):
+        """What the list asks for: its column floors side by side."""
+        return (sum(self._col_floor(c) for c, _h in RUN_COLUMNS)
+                + self._FIELD_BORDERS)
+
+    def _group_room(self):
+        """px the controls column asks for beyond its natural width: what
+        Group needs over its floor to show RUN_GROUP_SAMPLE whole."""
+        return max(0, self._text_w(RUN_GROUP_SAMPLE)
+                   - self._col_floor('group'))
+
+    def _root_configured(self, event):
+        """The window changed size: the controls column may be as wide as
+        leaves the figure MIN_FIG_W, and no wider. A binding on the root
+        is inherited by every widget in it, so only the root's own event
+        counts."""
+        if event.widget is self.root:
+            self.column.set_room(limit=event.width - MIN_FIG_W)
+
+    def opening_size(self):
+        """-> (width, height, x, y) the window opens at (`#374`).
+
+        As wide as the window asks to be, which now includes the room the
+        controls column wants for Group (_group_room), CLAMPED to the
+        desktop's work area so a small screen still opens the whole
+        window on screen, and never under the `#271` floor. Centered in
+        the work area: the old opening, at the window manager's default
+        corner, already ran 47 px off the right of a 1646 px screen."""
+        self.root.update_idletasks()
+        left, top, right, bottom = work_area(self.root)
+        w = min(self.root.winfo_reqwidth(), right - left)
+        h = min(self.root.winfo_reqheight(), bottom - top)
+        w, h = max(w, self.min_size[0]), max(h, self.min_size[1])
+        return (w, h, left + max(0, (right - left - w) // 2),
+                top + max(0, (bottom - top - h) // 2))
+
+    def apply_opening_size(self):
+        """Open the window at opening_size(). launch() calls this; a
+        caller that sets its own geometry (the tests) simply does not.
+        -> what it set."""
+        w, h, x, y = self.opening_size()
+        try:
+            self.root.geometry(f'{w}x{h}+{x}+{y}')
+        except tk.TclError:                # not a toplevel to size
+            pass
+        return w, h, x, y
+
+    def _refresh_group_column(self):
+        """Fill the Group cells from the window's grouping, then re-fit
+        the columns and re-apply the sort.
+
+        Called by populate() and by _groups_changed(), which every
+        grouping change goes through (Assign, Ungroup selected, Clear
+        all, the Move to group menu), so the column cannot lag the
+        grouping the figure is drawn from. Remembered groups arrive with
+        the window's first populate()."""
+        where = {sp.group_key(k): n for k, n in self.groups.items()}
+        for i, (d, _l) in enumerate(self.runs):
+            name = where.get(sp.group_key(d), '')
+            self._cells[i]['group'] = name
+            self.run_box.set(self._iid(i), 'group', name)
+        self._fit_columns()
+        self._apply_sort()
+
+    def _fit_columns(self):
+        """Size the columns to what they hold: each fitted to its widest
+        cell and to its heading with room for a sort arrow, then fitted
+        into the width the list really has (fit_widths, RUN_COL_GIVE).
+
+        Re-run whenever the content changes, so a separator dragged by
+        hand lasts until the next listing or grouping change."""
+        natural, floor = {}, {}
+        for col, head in RUN_COLUMNS:
+            natural[col] = max(self._text_w(t) for t in
+                               [head + ' ▲'] + [c[col] for c in self._cells])
+            floor[col] = self._col_floor(col)
+        avail = self.run_box.winfo_width()
+        if avail <= 1:                 # not drawn yet: what the box asks for
+            avail = self._list_width()
+        widths = fit_widths(natural, floor, avail - self._FIELD_BORDERS,
+                            RUN_COL_GIVE)
+        for col, width in widths.items():
+            self.run_box.column(col, width=width)
+
+    def _run_box_configured(self, event):
+        """The list was drawn or resized: re-fit the columns to its real
+        width. Width only; a height change moves no column."""
+        if event.width != self._run_box_w:
+            self._run_box_w = event.width
+            self._fit_columns()
+
+    def _run_xscrolled(self, first, last):
+        """The list's sideways scroll report. The bar shows only while
+        the columns are wider than the list (`#225`: a bar reports
+        overflow, it is not furniture). It cannot oscillate: showing it
+        takes height, and the overflow is a matter of width."""
+        self.run_xbar.set(first, last)
+        over = float(first) > 0.0 or float(last) < 1.0
+        if over and not self.run_xbar.winfo_manager():
+            self.run_xbar.grid()
+        elif not over and self.run_xbar.winfo_manager():
+            self.run_xbar.grid_remove()
+
+    def sort_runs(self, col):
+        """A heading click: sort by that column, or reverse the sort if
+        it already is that column. Display order only (see
+        selected_dirs)."""
+        desc = (self._sort is not None and self._sort[0] == col
+                and not self._sort[1])
+        self._sort = (col, desc)
+        self._apply_sort()
+
+    def _apply_sort(self):
+        """Put the rows in the current sort's order and mark its heading
+        with a triangle (up = ascending). Ties keep listing order, and an
+        empty cell (a run in no group) goes last either way: 'no group'
+        is not a group to line up."""
+        order = list(range(len(self.runs)))
+        if self._sort is not None:
+            col, desc = self._sort
+            filled = [i for i in order if self._sort_text(i, col)]
+            empty = [i for i in order if not self._sort_text(i, col)]
+            order = sorted(filled,
+                           key=lambda i: self._sort_text(i, col).casefold(),
+                           reverse=desc) + empty
+        for pos, i in enumerate(order):
+            self.run_box.move(self._iid(i), '', pos)
+        for col, head in RUN_COLUMNS:
+            mark = ''
+            if self._sort is not None and self._sort[0] == col:
+                mark = ' ▼' if self._sort[1] else ' ▲'
+            self.run_box.heading(col, text=head + mark)
+
+    def _sort_text(self, i, col):
+        """What row `i` sorts on in `col`: its cell, except that Run sorts
+        on the folder tag and the name, never on the processed mark in
+        front of them, which would split the list into processed and
+        not."""
+        if col == 'run':
+            meta = self._run_meta[i]
+            return meta['tag'] + meta['name']
+        return self._cells[i][col]
+
+    def displayed_runs(self):
+        """-> [(rundir, {column id: text})] in the order the picker shows
+        them. The window's own read-out of its list."""
+        out = []
+        for iid in self.run_box.get_children():
+            i = self._row_of(iid)
+            out.append((self.runs[i][0], dict(self._cells[i])))
+        return out
+
+    def row_tip(self, iid):
+        """The hover text for one row: every cell in full, because the
+        columns are narrow and clip, plus the folder the run lives in."""
+        i = self._row_of(iid)
+        if i is None or i >= len(self.runs):
+            return ''
+        cells, meta = self._cells[i], self._run_meta[i]
+        state = (f"{RUN_MARK}processed: Edge Review saved areas"
+                 if meta['processed'] else
+                 "not processed: no areas saved in Edge Review yet")
+        return (f"{meta['tag']}{meta['name']}\n{self.runs[i][0]}\n"
+                f"{state}\n\n"
+                f"Material (setup.txt): {cells['material']}\n"
+                f"Group (this window): {cells['group'] or 'none'}\n\n"
+                f"{RUN_ROW_HINT}")
+
+    def _picker_tip(self, x, y):
+        """PointerTip's question: what is under (x, y), and what does
+        hovering it say? -> (key, text); a heading explains its column,
+        a row shows itself in full."""
+        tree = self.run_box
+        if tree.identify_region(x, y) == 'heading':
+            try:
+                col = RUN_COLUMNS[int(tree.identify_column(x)[1:]) - 1][0]
+            except (ValueError, IndexError):
+                return None, ''
+            return ('heading', col), RUN_HEADING_TIPS[col]
+        row = tree.identify_row(y)
+        if not row:
+            return None, ''
+        return ('row', row), self.row_tip(row)
+
+    def selection_group(self):
+        """-> the group EVERY selected run is in; '' when none of them is
+        in a group; None when they differ, or nothing is selected."""
+        where = {sp.group_key(k): n for k, n in self.groups.items()}
+        found = {where.get(sp.group_key(d), '') for d in self.selected_dirs()}
+        return found.pop() if len(found) == 1 else None
+
+    def group_menu(self):
+        """-> the right-click menu for the selected runs: one cascade,
+        Move to group, holding every existing group, then New group...
+        and No group. Built fresh per click, because the groups change.
+
+        The group the selection is ALREADY in carries a check: a group's
+        entry when every selected run is in it, No group when none of
+        them is grouped, and nothing for a mixed selection. A check, not
+        a grayed entry: every entry stays live, and choosing the checked
+        one simply changes nothing.
+
+        Every entry goes through assign_group, the same path as the
+        Groups box's Assign and Ungroup, so sp.check_groups has the last
+        word here too and the menu cannot build a grouping the CLI would
+        refuse."""
+        if self._menu is not None:
+            try:
+                self._menu.destroy()
+            except tk.TclError:
+                pass
+        menu = tk.Menu(self.run_box, tearoff=0)
+        sub = tk.Menu(menu, tearoff=0)
+        current = self.selection_group()
+        # a Tk variable per indicator, kept for the menu's lifetime: one
+        # that Python collects is unset in Tcl, and its check vanishes
+        self._menu_vars = []
+
+        def check(on):
+            var = tk.BooleanVar(master=menu, value=on)
+            self._menu_vars.append(var)
+            return var
+        names = [name for name, _m in self.group_list()]
+        for name in names:
+            sub.add_checkbutton(label=name, variable=check(current == name),
+                                command=lambda n=name: self.move_to_group(n))
+        if names:
+            sub.add_separator()
+        sub.add_command(label='New group…', command=self._move_to_new_group)
+        sub.add_checkbutton(label='No group', variable=check(current == ''),
+                            command=lambda: self.move_to_group(''))
+        menu.add_cascade(label='Move to group', menu=sub)
+        self._menu = menu
+        return menu
+
+    def _run_menu(self, event):
+        """Right-click on the list. A click on a row that is not selected
+        selects that row alone first, as file managers do, so the menu
+        always acts on what is highlighted. -> the menu, or None."""
+        row = self.run_box.identify_row(event.y)
+        if row and row not in self.run_box.selection():
+            self.run_box.selection_set([row])
+        if not self.selected_dirs():
+            return None
+        menu = self.group_menu()
+        # NO grab_release() after it: on X11 (the bench) tk_popup posts
+        # the menu, sets a global grab on it and returns at once, and Tk
+        # releases that grab itself when the menu unposts (tk_popup in
+        # Tk 8.6's menu.tcl). Releasing it here would leave a menu that a
+        # click elsewhere does not close. Windows and aqua set no grab.
+        menu.tk_popup(event.x_root, event.y_root)
+        return menu
+
+    def move_to_group(self, name):
+        """Move the selected runs into group `name`; '' takes them out of
+        any group. -> the refusal (also shown in a box), or None.
+
+        The grouping lives in this window and in the figspec it exports.
+        Nothing here writes setup.txt: a run whose RECORDED material is
+        wrong is corrected there, deliberately, outside the plotter."""
+        err = self.assign_group(name, self.selected_dirs())
+        if err:
+            messagebox.showwarning("Groups", err)
+            return err
+        self._groups_changed()
+        return None
+
+    def ask_group_name(self):
+        """The New group... prompt. -> what was typed, or None."""
+        n = len(self.selected_dirs())
+        return simpledialog.askstring(
+            "New group", f"Name the new group for the {n} selected "
+                         f"run{'' if n == 1 else 's'}:", parent=self.root)
+
+    def _move_to_new_group(self):
+        """New group...: ask for a name, then move the selection into it.
+        A cancelled or blank prompt changes nothing."""
+        name = self.ask_group_name()
+        if not (name or '').strip():
+            return None
+        return self.move_to_group(name)
 
     # -- groups (`#313`) ---------------------------------------------------
 
@@ -2140,6 +2839,7 @@ class PlotWindow:
         control. _sync_enabled too, because the aggregate's own greying
         does not change but the group label under the box reports on it."""
         self.lbl_groups.config(text=self.group_summary())
+        self._refresh_group_column()       # the picker's Group cells (`#374`)
         self.schedule()
 
     # -- options -----------------------------------------------------------
@@ -2802,8 +3502,9 @@ def launch(args=(), opts=None, out_dir=None, stem=None, explicit=None,
     explicit_opts for what that can and cannot tell apart."""
     parents, preselect = initial_state(args)
     root = tk.Tk()
-    PlotWindow(root, parents, preselect, opts=opts, out_dir=out_dir,
-               stem=stem, explicit=explicit, remember=remember)
+    win = PlotWindow(root, parents, preselect, opts=opts, out_dir=out_dir,
+                     stem=stem, explicit=explicit, remember=remember)
+    win.apply_opening_size()             # wide enough for Group (`#374`)
     root.mainloop()
     return 0
 

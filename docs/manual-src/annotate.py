@@ -267,12 +267,18 @@ S["tab_sldea_bottom"] = {
          "label": "Optional lossless video beside the snapshots (1–2 fps). "
                   "NOT bench-verified yet — leave Record off on important "
                   "runs; off = snapshots only"},
-        {"match": "DRY RUN — HV OFF", "label": "Safety toggle — untick only for a live HV run"},
-        {"match": "▶ Run (DRY)", "label": "Starts the run — the label shows the mode"},
-        {"match": "■ Abort", "label": "Ramps to 0 kV first, then stops"},
-        {"match": "🔍 Edge Review…", "badge_side": "bottom",
+        # The run row's badges go under the "Camera for this run" line
+        # (#348), which sits between this row and the Run log: a plain
+        # bottom badge covered its words (v1.4.3, see badge_below).
+        {"match": "DRY RUN — HV OFF", "badge_below": "Camera for this run",
+         "label": "Safety toggle — untick only for a live HV run"},
+        {"match": "▶ Run (DRY)", "badge_below": "Camera for this run",
+         "label": "Starts the run — the label shows the mode"},
+        {"match": "■ Abort", "badge_below": "Camera for this run",
+         "label": "Ramps to 0 kV first, then stops"},
+        {"match": "🔍 Edge Review…", "badge_below": "Camera for this run",
          "label": "Open Edge Review on a finished run — see the Edge Review section"},
-        {"match": "🎚 Tune params…", "badge_side": "bottom",
+        {"match": "🎚 Tune params…", "badge_below": "Camera for this run",
          "label": "Advanced — confirmation-gated; Save rewrites the run's detection settings"},
         # `#223`. Added WITH the button rather than at the next release:
         # the shots on disk predate it, so until a fresh capture this is a
@@ -282,7 +288,7 @@ S["tab_sldea_bottom"] = {
         # new ❓ button) waiting for the same capture, and the release
         # checklist is capture-then-annotate. A matcher deferred to
         # "later" is the failure mode `#248` exists to stop.
-        {"match": "📊 Plot runs…", "badge_side": "bottom",
+        {"match": "📊 Plot runs…", "badge_below": "Camera for this run",
          "label": "Several finished runs on one figure — Export writes the PNG and its tidy CSV together"},
         # Listed last rather than in screen order (it sits above the DRY RUN
         # row) so this entry stays clear of the DEA-diam callout that `#262`
@@ -412,6 +418,49 @@ def place_badge(rect, occupied, img_w, img_h, soft=(), r=16, side=None):
     return max(3 + r, x - 30), max(3 + r, cy)
 
 
+def badge_below(img, rect, text, img_w, img_h, r=16):
+    """A badge under the widget named by `text`, at the capsule's centre x.
+
+    For a row with a full-width line right under it (v1.4.3: the SLDEA
+    tab's "Camera for this run" line, #348). place_badge's soft list leaves
+    out widgets wider than 70 % of the shot, or nothing on a full-width row
+    could ever be badged, so a plain "bottom" badge landed ON that line and
+    hid its words. Anchored to the line itself rather than to fixed
+    coordinates, so it follows the line when the tab grows. A line that is
+    gone is a miss, like any other spec text. annotate() draws no arrow
+    from such a badge, because the arrow would cross the line."""
+    x, y, w, h = rect
+    line = find(img, text)
+    if line is None:
+        print(f"  !! no match for {text!r} in {img['name']} (badge_below)")
+        MISSES.append((img["name"], text))
+        return x + w / 2, y + h + 30
+    by = line["y"] + line["h"] + r + 2
+    return (min(max(x + w / 2, r + 3), img_w - r - 3),
+            min(max(by, r + 3), img_h - r - 3))
+
+
+def covered_text(img, badge, own, r=16, slack=3):
+    """Texts of the widgets a badge sits on, other than its own capsule's.
+
+    Advice for whoever runs the build, printed and never fatal: some
+    badges sit on a capsule border on purpose. Before v1.4.3 nothing
+    reported a badge that hid text at all, and one hid a whole line."""
+    bx, by = badge
+    bb = [bx - r + slack, by - r + slack, 2 * (r - slack), 2 * (r - slack)]
+    hits = []
+    for w in img["widgets"]:
+        t = w["text"].strip()
+        if not t or t == "__tabstrip__" or w["class"] in ("TLabelframe",
+                                                         "Labelframe"):
+            continue
+        box = [w["x"], w["y"], w["w"], w["h"]]
+        if rects_overlap(bb, box, pad=0) and not rects_overlap(box, own,
+                                                               pad=-6):
+            hits.append(t)
+    return hits
+
+
 def annotate(name, spec):
     want = spec.get("source", name)
     if want not in images:
@@ -454,16 +503,24 @@ def annotate(name, spec):
         others = [o for o in occupied if o is not rect]
         if "badge_at" in cspec:
             bx, by = client(src, *cspec["badge_at"])
+        elif "badge_below" in cspec:
+            bx, by = badge_below(src, rect, cspec["badge_below"], img_w,
+                                 img_h)
         else:
             bx, by = place_badge(rect, others + placed, img_w, img_h, soft,
                                  side=cspec.get("badge_side"))
         placed.append([bx - 16, by - 16, 32, 32])
+        for t in covered_text(src, (bx, by), rect):
+            print(f"  ?? {name} badge {i} covers {t[:60]!r}")
         # arrow from badge edge to capsule edge
         tx = min(max(bx, x), x + w)
         ty = min(max(by, y), y + h)
         dx, dy = tx - bx, ty - by
         dist = math.hypot(dx, dy)
-        if dist > 24:
+        # No arrow from a badge_below badge: it would cross the line the
+        # badge was moved under, and its white halo erased a letter at
+        # each crossing. The badge sits straight under its own capsule.
+        if dist > 24 and "badge_below" not in cspec:
             ux, uy = dx / dist, dy / dist
             sx, sy = bx + ux * 18, by + uy * 18
             ex, ey = tx - ux * 2, ty - uy * 2

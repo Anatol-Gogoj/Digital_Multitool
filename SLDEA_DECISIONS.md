@@ -13,6 +13,93 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## The plot caption is wrapped to the figure's width, so its first line stops running off the right edge (2026-10-06)
+
+**TL;DR:** the first line of the area figure's caption was wider than the
+figure, so every exported PNG lost its end: the band widths at 300 dpi,
+and at 90 dpi part of the sentence saying the two area conventions differ
+by 5.5 % and are never averaged. Every caption line is now wrapped at its
+measured width, with indented continuation rows, and the caption strip
+grows to hold them. A figure whose caption already fit, such as the
+default current and power figures, is unchanged to the byte.
+
+**Observation (main `0ffd1da`, the test suite's synthetic run).** The
+first line is fixed text, the same on every run, so the synthetic run
+shows what every figure showed. Right edge of the first line as a
+fraction of the figure width, measured in pixels:
+
+| Figure | First line | 90 dpi | 96 dpi | 300 dpi |
+|---|---|---|---|---|
+| default area | 280 characters | 1.24 | 1.16 | 1.12 |
+| `--prepost` | 300 | 1.31 | 1.23 | 1.19 |
+| `--aggregate`, or `--no-bands` | 248 | 1.09 | 1.02 | 0.98 |
+| default current or power | 111 | 0.70 | 0.66 | 0.64 |
+
+What the edge cut from the default figure's line:
+
+- 300 dpi, the export default: the line ends "…never averaged), ban" and
+  loses "ds ±2% machine / ±1% traced." (28 characters). The 2026-08-10
+  entry saw the same cut on the corpus.
+- 100 dpi, the plot window's figure: it ends "…never averaged" and loses
+  "), bands ±2% machine / ±1% traced." (34 characters).
+- 90 dpi: it ends "…differ +5.5% ar" and loses "ea, never averaged)" as
+  well as the band widths (52 characters).
+
+The 248-character line, which the 2026-08-10 entry took as the width that
+fits and made `CAPTION_LINE_MAX`, fits only at 300 dpi. It lost "ged)." at
+96 dpi and "ea, never averaged)." at 90.
+
+The strain figure's second line (242 characters, carrying the "Strain
+bands" sentence) ended at 0.991 of the width at 100 dpi and 1.002 at 96.
+That is why `test_the_strain_caption_states_the_band_that_is_drawn`
+failed on main: its 0.99 limit caught the same overflow, one line down.
+
+**Decision (this PR; Anatol merges).**
+
+- Every caption line wider than `CAPTION_FIT_FRAC` = 0.88 of the figure
+  width is wrapped at spaces (`_place_caption`, `_wrap`). Widths come from
+  the font's own metrics (`TextToPath`), so the wrap is the same in the
+  window, in a PNG and in an SVG. Continuation rows are indented four
+  spaces. Every word is kept; only a single word wider than a whole row is
+  broken inside the word.
+- 0.88, not the 0.90 the `#373` branch uses. Hinting draws a row wider
+  than its metrics by a factor that depends on the dpi. Measured at every
+  dpi from 50 to 159 and every 10th to 1200 (matplotlib 3.11.1): 0.989 at
+  300, 1.014 at 100, 1.025 at 96, 1.094 at 90, and at worst 1.121 at 57
+  and 1.119 at 88. At 0.90 a row of real caption text ended at 1.002 of the
+  width at 88 dpi. At 0.88, over every row that the default, `--prepost`,
+  `--no-bands`, strain, aggregate, time-axis, power and two grouped
+  figures wrap to at 12.6, 9 and 6 in wide, no row ends past 0.998 at any
+  of those dpis, past 0.978 from 72 dpi up, or past 0.959 from 90 up.
+- A caption whose every line fits keeps the strip it had: 5 % of the
+  height, or the per-line allowance under the aggregate, the time axis or
+  a leg split. A wrapped caption takes the larger of that allowance
+  counted on its rows and its measured top plus 0.012, capped at 0.85.
+  The default area caption goes from 2 lines to 3 rows and its strip from
+  0.05 to 0.10, so the panels lose 0.05 of the figure height (0.27 in of
+  5.4 in).
+- The window re-wraps on resize. `relayout` redoes the wrap and the strip
+  at the new width and lands exactly where a full redraw lands: same rows,
+  same layout rect, same axes positions. An engine test checks this, and
+  the window's resize test now exercises it.
+
+**The byte-identity claims, restated on purpose.** Two tests compare the
+default figures with older engines read from git, byte for byte. Current
+and power still match outright. The area figure cannot, because its axes
+move with the strip. Its claim is now: the old engine's figure, with its
+caption rows replaced by the new engine's wrapped rows and its layout
+re-run above the new strip, matches the new PNG byte for byte, and the old
+caption equals the new one's text before wrapping. So the words did not
+change, only where the rows break and how much room they get.
+
+**Not changed.** The caption's wording. `CAPTION_LINE_MAX` still cuts the
+grouped lines built from operator text at 248 characters; the wrap keeps
+what survives the cut inside the frame. The `#373` branch replaces that
+cut with the same `_wrap`. When the two meet: keep one `_wrap` (the code is
+identical), keep 0.88, and fold `_place_group_caption` into
+`_place_caption`, because on that branch a grouped figure's first caption
+lines are still not wrapped.
+
 ## The video is reviewed by exception: Save re-runs stale video edges, the accepted stills flag the frames, and a window walks them (2026-10-06)
 
 **TL;DR:** the video pass used to run once, minutes after the run, before

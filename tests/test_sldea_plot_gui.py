@@ -2343,21 +2343,30 @@ def test_by_concentration_is_the_material_seeds_child_and_splits_volumes():
         assert str(child.cget('text')).startswith('…')
         assert str(win.cb_cadence.cget('text')).startswith('…')
         _campaign(b)
-        _select(win, 'P3a', 'P3b', 'P3c', 'N39', 'CB1', 'NS')
+        # runs with NO material but an ink volume: owner decision
+        # 2026-10-06, they stay one group each and are never split
+        _label(_fake_run(b.tmp, 'NS2'), '(not specified)', '1.5 mL')
+        _label(_fake_run(b.tmp, 'NOEL'), _ABSENT, '2.5 mL')
+        win.populate()
+        _select(win, 'P3a', 'P3b', 'P3c', 'N39', 'CB1', 'NS', 'NS2', 'NOEL',
+                'R1')
         child.invoke()
         rows = {n: sorted(os.path.basename(p) for p in m)
                 for n, m in win.group_list()}
         assert list(rows) == [CB, f"{P3}, 1.5 mL", f"{P3}, 2.5 mL", N3900,
-                              sp.NOT_SPECIFIED], list(rows)
+                              sp.NOT_SPECIFIED, sp.NO_ELECTRODE_GROUP], \
+            list(rows)
         assert rows[f"{P3}, 2.5 mL"] == ['P3a', 'P3b'], rows
+        assert rows[sp.NOT_SPECIFIED] == ['NS', 'NS2'], rows
+        assert rows[sp.NO_ELECTRODE_GROUP] == ['NOEL', 'R1'], rows
         mats = dict(win.group_material_list())
         assert mats[f"{P3}, 1.5 mL"] == mats[f"{P3}, 2.5 mL"] == P3
         assert sp.NOT_SPECIFIED not in mats
         assert win.lbl_groups.cget('text') == win.group_summary()
         # ...and the plain seed over the same selection merges them back
         parent.invoke()
-        assert [n for n, _m in win.group_list()] == [CB, P3, N3900,
-                                                     sp.NOT_SPECIFIED]
+        assert [n for n, _m in win.group_list()] == [
+            CB, P3, N3900, sp.NOT_SPECIFIED, sp.NO_ELECTRODE_GROUP]
 
 
 def test_a_new_group_takes_its_material_and_moved_runs_take_the_groups():

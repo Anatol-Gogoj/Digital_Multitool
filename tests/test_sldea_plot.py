@@ -3381,6 +3381,34 @@ def test_seeding_by_concentration_splits_only_the_inks():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_runs_with_no_material_never_split_by_concentration():
+    """Owner decision 2026-10-06: '(no electrode recorded)' and
+    '(not specified)' stay ONE group each under the concentration split,
+    whatever ink volumes their runs carry. A volume without a material is
+    not a series anyone asked to compare."""
+    d = _mktmp()
+    try:
+        runs = _labeled(d, [('J', '(not specified)', '2.5 mL', 0),
+                            ('K', '(not specified)', '1.5 mL', 1),
+                            ('Kb', '', '(not specified)', 2),
+                            ('L', _ABSENT, '2.5 mL', 3),
+                            ('M', _ABSENT, '1.5 mL', 4),
+                            ('N', _ABSENT, _ABSENT, 5),
+                            ('P', P3, '2.5 mL', 6)])
+        seeded = sp.seed_groups([r['dir'] for r in runs], by='concentration')
+        by = {n: (m, sorted(os.path.basename(x) for x in ds))
+              for n, m, ds in seeded}
+        assert list(by) == [f"{P3}, 2.5 mL", sp.NOT_SPECIFIED,
+                            sp.NO_ELECTRODE_GROUP], list(by)
+        assert by[sp.NOT_SPECIFIED] == (None, ['J', 'K', 'Kb'])
+        assert by[sp.NO_ELECTRODE_GROUP] == (None, ['L', 'M', 'N'])
+        assert not any(n.startswith(sp.NOT_SPECIFIED + ',')
+                       or n.startswith(sp.NO_ELECTRODE_GROUP + ',')
+                       for n in by), list(by)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_a_long_material_name_is_cut_to_fit_and_never_merged():
     d = _mktmp()
     try:
@@ -3486,16 +3514,45 @@ def test_the_concentration_split_draws_one_mean_per_material_and_volume():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_a_seeded_caption_fits_the_frame_and_keeps_its_csv_pointer():
+def _caption_checks(fig, dpis=(90, 96, 110, 150, 300)):
+    """Every caption line of `fig` from 'AGGREGATE BY GROUP' on ends
+    inside the frame, and the caption's top clears every axes' full
+    extent (tick labels and axis label included), at each dpi: 90 and 110
+    are where hinting widens 7 pt text the most, 96 is this desktop's
+    screen, 300 the export default. -> the grouped caption lines."""
+    from matplotlib.text import Text
+    lines = _caption(fig).split('\n')
+    grouped = lines[lines.index(next(l for l in lines if l.startswith(
+        'AGGREGATE BY GROUP'))):]
+    caption = fig.texts[0]
+    for dpi in dpis:
+        fig.set_dpi(dpi)
+        renderer = fig.canvas.get_renderer()
+        width = fig.bbox.width
+        for line in grouped:
+            probe = Text(0, 0, line, fontsize=7)
+            probe.set_figure(fig)
+            right = 0.01 + probe.get_window_extent(renderer).width / width
+            assert right <= 0.99, (dpi, round(right, 3), line[:80])
+        top = caption.get_window_extent(renderer).y1
+        for ax in fig.axes:
+            floor = ax.get_tightbbox(renderer).y0
+            assert top < floor, (dpi, 'caption overlaps an axes',
+                                 round(top), round(floor))
+    return grouped
+
+
+def test_a_seeded_caption_wraps_inside_the_frame_and_keeps_every_word():
     """Seeded names are whole material names, and the 248-character
     budget let the grouped caption run off the right edge (measured
-    2026-10-06: the Members line ended at 1.04 of the figure width and
-    lost its pointer to the tidy CSV). Every grouped line is now cut to
-    its rendered width, checked here in rendered pixels, which is the
-    only measurement the reader's eye agrees with."""
+    2026-10-06: the Members line ended at 1.04 of the figure width). Cut
+    to fit, the 'AGGREGATE BY GROUP' and 'Support' lines then lost the
+    later groups ('Carbon Solutions P3-S...'). Every grouped line is now
+    WRAPPED to its rendered width, keeps every word, and the caption strip
+    grows so nothing sits under the axes, checked in rendered pixels at
+    five dpi, and again after a relayout to a narrower window."""
     if not _has_mpl():
         return
-    from matplotlib.text import Text
     d = _mktmp()
     try:
         spec = [(f"{tag}_run_with_a_long_folder_name_{i}", mat, conc, i)
@@ -3505,28 +3562,75 @@ def test_a_seeded_caption_fits_the_frame_and_keeps_its_csv_pointer():
                      ('E', N3900, _ABSENT), ('F', N3500, _ABSENT),
                      ('G', CB, _ABSENT), ('H', CB, _ABSENT)])]
         runs = _labeled(d, spec)
-        fig = _drawn(runs, _seeded_opts(runs, 'concentration',
-                                        aggregate_only=True))
-        lines = _caption(fig).split('\n')
-        grouped = lines[lines.index(next(l for l in lines if l.startswith(
-            'AGGREGATE BY GROUP'))):]
-        # at the dpi where hinting widens 7 pt text the most (90, 110),
-        # the window's screen dpi, and the export default
-        for dpi in (90, 96, 110, 150, 300):
-            fig.set_dpi(dpi)
-            renderer = fig.canvas.get_renderer()
-            width = fig.bbox.width
-            for line in grouped:
-                probe = Text(0, 0, line, fontsize=7)
-                probe.set_figure(fig)
-                right = (0.01 + probe.get_window_extent(renderer).width
-                         / width)
-                assert right <= 0.99, (dpi, round(right, 3), line[:80])
-        members = [l for l in grouped if l.startswith('Members: ')][0]
-        assert members.endswith("(full membership in the tidy CSV's "
-                                "group column)"), members[-80:]
+        opts = _seeded_opts(runs, 'concentration', aggregate_only=True)
+        names = [n for n, _m in opts['groups']]
+        assert len(names) == 6
+        fig = _drawn(runs, opts)
+        grouped = _caption_checks(fig)
+        flat = ' '.join(' '.join(grouped).split())
+        head = flat[flat.index('AGGREGATE BY GROUP'):flat.index('Line style')]
+        support = flat[flat.index('Support'):flat.index('Per-level')]
+        members = flat[flat.index('Members: '):]
+        for name in names:
+            assert name in head, ('lost from the head', name)
+            assert f"{name}:" in support, ('lost from Support', name)
+            assert f"{name} = " in members, ('lost from Members', name)
+        for r in runs:
+            assert r['name'] in members, r['name']
+        assert '…' not in head + support, 'a grouped line was cut'
+        assert members.endswith("(Also in the tidy CSV's group column.)")
+        assert len(grouped) > 7, 'nothing wrapped; fixture too tame'
+        # a narrower window: relayout re-wraps rather than overflowing,
+        # and the head and Support lines still name every group in full
+        # (Members may now reach its row limit and point at the CSV)
+        fig.set_size_inches(9.0, 5.4)
+        assert sp.relayout(fig)
+        narrow = _caption_checks(fig)
+        assert len(narrow) > len(grouped), 'relayout did not re-wrap'
+        again = ' '.join(' '.join(narrow).split())
+        assert again[:again.index('Members: ')] == \
+            flat[:flat.index('Members: ')]
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_members_line_past_three_rows_ends_with_the_csv_pointer():
+    """The one grouped line still allowed to stop short, and only with a
+    sentence saying where the rest is: forty long run names would
+    otherwise grow the caption over the panel."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        spec = [(f"R{i:02d}_a_rather_long_run_folder_name_here", P3, '2.5 mL',
+                 i % 5) for i in range(40)]
+        runs = _labeled(d, spec)
+        fig = _drawn(runs, _seeded_opts(runs, 'material',
+                                        aggregate_only=True))
+        grouped = _caption_checks(fig, dpis=(96, 300))
+        start = next(i for i, l in enumerate(grouped)
+                     if l.startswith('Members: '))
+        members = grouped[start:]
+        assert len(members) == sp.MEMBERS_MAX_ROWS, members
+        assert members[-1].endswith("(full membership in the tidy CSV's "
+                                    "group column)"), members[-1]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_wrapping_keeps_every_word_and_breaks_only_a_word_too_wide():
+    fits = lambda s: len(s) <= 20                       # noqa: E731
+    text = 'one two  three four five six seven eight nine ten'
+    rows = sp._wrap(text, fits, indent='  ')
+    assert all(fits(r) for r in rows), rows
+    assert all(r.startswith('  ') for r in rows[1:]), rows
+    assert ' '.join(rows).split() == text.split(), rows
+    long = sp._wrap('a ' + 'x' * 50 + ' b', fits, indent='  ')
+    assert all(fits(r) for r in long), long
+    assert ''.join(''.join(long).split()) == 'a' + 'x' * 50 + 'b'
+    assert sp._wrap('', fits) == ['']
+    # no width test: the character budget, exactly as before `#373`
+    assert sp._fit_or_wrap('x' * 300, None) == sp._fit('x' * 300)
 
 
 def test_no_two_groups_ever_share_color_and_style():
@@ -3777,7 +3881,14 @@ def test_no_caption_line_runs_off_the_right_edge_of_the_figure():
         cap = _caption(_drawn(runs, opts))
         for line in cap.split('\n'):
             assert len(line) <= sp.CAPTION_LINE_MAX, (len(line), line)
-        assert '…' in cap, 'nothing was truncated; fixture too tame'
+        # since `#373` a grouped line is WRAPPED rather than cut, so the
+        # fixture shows itself by continuation rows, and every group is
+        # still named in full
+        assert any(l.startswith(sp.CAPTION_WRAP_INDENT)
+                   for l in cap.split('\n')), 'nothing wrapped; too tame'
+        flat = ' '.join(cap.split())
+        for name, _members in groups:
+            assert f"{name}:" in flat, name
         # THE BUDGET IS AN ANCHOR, not a guess: 248 is the "Points ="
         # line as it renders under an aggregate, which every figure in
         # the handoff carries and which sits inside the frame.

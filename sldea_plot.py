@@ -920,12 +920,28 @@ AGGREGATE_COLOR = '#000000'
 # and the whole point is that these curves are statistics. `#313` chose
 # the four and their order by worst-case CIEDE2000 under normal +
 # deuteranopic + protanopic + tritanopic simulation (Machado 2009
-# severity-1.0 matrices) against every TOL_BRIGHT entry:
+# severity-1.0 matrices) against every TOL_BRIGHT entry. Its numbers,
+# kept as recorded (they turned out to be the gamma-encoded variant, see
+# THE STANDARD below):
 #
 #     groups   nearest OTHER GROUP     nearest RUN colour
 #     2        29.23                    8.24  (#BB5566 vs #AA3377, tritan)
 #     3        22.05                    3.98  (#004488 vs #AA3377, protan)
 #     4        18.70                    2.22  (#DDAA33 vs #CCBB44, deutan)
+#
+# THE STANDARD (owner, 2026-10-06): the Machado matrices are applied to
+# LINEAR RGB, after decoding sRGB, as tests/test_sldea_preview.py does.
+# Source: the model builds its matrix by integrating the RGB primaries'
+# spectral power distributions against the opponent-channel basis
+# functions (Machado, Oliveira & Fernandes, IEEE TVCG 15(6):1291-1298,
+# 2009, sec. 4.1, Eq. 8), which is linear in light, not in encoded
+# values; and the reference implementations do exactly that:
+# colorspacious, conversion.py, _CVD_forward, on the graph edge
+# "sRGB1-linear+CVD" <-> "sRGB1-linear"; DaltonLens-Python, simulate.py,
+# Simulator.simulate_cvd, which calls convert.linearRGB_from_sRGB before
+# Simulator_Machado2009._simulate_cvd_linear_rgb. The `#313` script
+# applied them to gamma-encoded sRGB, which reproduces its table above to
+# the last digit and reads up to ~19 % differently per pair.
 #
 # GROWN TO SEVEN by `#373` (2026-10-06): the concentration split draws six
 # means for one campaign (P3 at three volumes, Invisicon 3900 and 3500,
@@ -1762,12 +1778,48 @@ def aggregate_thin_levels(ag):
 # nothing but the window's shape did.
 _RECT_ATTR = '_sldea_layout_rect'
 
+# ...with ONE exception, the grouped caption (`#373`). It is wrapped to the
+# figure's width, so a narrower window needs it re-wrapped and its strip
+# re-measured, and only that. Held as (the caption's Text, a function of
+# the figure that returns the caption) so relayout can redo exactly that
+# much, and None on every figure whose caption does not depend on width.
+_CAPTION_ATTR = '_sldea_group_caption'
+
+# The gap kept between a grouped caption's top and the figure's layout
+# rect, in figure height. The x-axis label sits just above the rect.
+CAPTION_PAD = 0.012
+
 
 def _tight(fig, rect):
     """fig.tight_layout(rect=...), remembering the rect for relayout."""
     setattr(fig, _RECT_ATTR, rect)
     fig.tight_layout(rect=rect)
     return rect
+
+
+def _place_group_caption(fig):
+    """(Re)write a grouped figure's caption for the figure's CURRENT width
+    and -> the layout rect's bottom that clears it (`#373`).
+
+    The strip is the larger of the pre-`#373` per-line allowance (0.025 of
+    the figure height a line, plus 0.025) and the caption's own measured
+    top plus CAPTION_PAD, measured because a wrapped caption has more
+    lines than the old 0.30 cap allowed for, and because in a short window
+    a 7 pt line is a larger share of the height than the allowance
+    assumes. Capped at 0.85 only so a pathological caption leaves the
+    axes something; the six-group campaign figure (twelve runs) wraps to
+    11 rows and takes 0.30."""
+    text, compose = getattr(fig, _CAPTION_ATTR)
+    caption = compose(fig)
+    text.set_text(caption)
+    bottom = 0.025 + 0.025 * (caption.count('\n') + 1)
+    try:
+        renderer = fig.canvas.get_renderer()
+        top = text.get_window_extent(renderer=renderer).y1 / fig.bbox.height
+        bottom = max(bottom, top + CAPTION_PAD)
+    except (AttributeError, TypeError, ValueError):
+        pass                    # no renderer yet: the allowance stands
+    return min(bottom, 0.85)
 
 
 _SUBPLOTPARS = ('left', 'right', 'bottom', 'top', 'wspace', 'hspace')
@@ -1796,6 +1848,12 @@ def relayout(fig):
         return False
     fig.subplots_adjust(**{k: rcParams['figure.subplot.' + k]
                            for k in _SUBPLOTPARS})
+    held = getattr(fig, _CAPTION_ATTR, None)
+    if held is not None and held[0].get_figure() is fig:
+        # `#373`: the one width-dependent thing on a figure, the grouped
+        # caption, is re-wrapped for the new width, and its strip with it
+        rect = (rect[0], _place_group_caption(fig), rect[2], rect[3])
+        setattr(fig, _RECT_ATTR, rect)
     fig.tight_layout(rect=rect)
     return True
 
@@ -2230,34 +2288,75 @@ def _warn_aggregate(runs, ag, opts, cap, warn, what='aggregate',
 CAPTION_LINE_MAX = 248
 
 
-def _fit(line, limit=CAPTION_LINE_MAX, fits=None):
+def _fit(line, limit=CAPTION_LINE_MAX):
     """`line` truncated to the caption's width, with an ellipsis.
 
     A caption a reader cannot finish is not a caption -- but a caption
     that runs off the page is worse, because nothing on the figure says
     it did. Every line the group caption builds from operator-supplied
-    text goes through here.
+    text goes through here."""
+    return line if len(line) <= limit else line[:limit - 1].rstrip() + '…'
 
-    `fits` (`#373`) is _caption_fitter's measured-width test. Given, the
-    line is cut further until it really renders inside the frame, which
-    the character budget alone does not promise: group-caption text runs
-    about 4 % wider per character than the anchor line the budget was
-    measured on, and the seeded material names made that visible (a
-    248-character Members line ended at 1.04 of the figure width,
-    cutting off its pointer to the tidy CSV). Absent, the behavior is
-    the character budget exactly as before."""
-    if len(line) > limit:
-        line = line[:limit - 1].rstrip() + '…'
-    if fits is None or fits(line):
-        return line
-    lo, hi = 0, len(line) - 1
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if fits(line[:mid].rstrip() + '…'):
-            lo = mid
-        else:
-            hi = mid - 1
-    return line[:lo].rstrip() + '…'
+
+# Continuation lines of a wrapped caption line start with this, so a
+# reader can see where one caption sentence ends and the next begins.
+CAPTION_WRAP_INDENT = '    '
+
+
+def _wrap(line, fits, indent=CAPTION_WRAP_INDENT):
+    """`line` broken at spaces into rows that each pass `fits` -> [rows].
+
+    EVERY WORD IS KEPT (`#373`). Cutting a grouped caption line to fit
+    dropped real content: on the six-group concentration split the
+    'AGGREGATE BY GROUP' and 'Support' lines ended in 'Carbon Solutions
+    P3-S...' and lost the later groups, and a measurement figure must not
+    drop caption text without saying so. Rows after the first carry
+    `indent`. Only a single word wider than a whole row (a pasted path,
+    say) is broken inside the word, because there is nowhere else to
+    break it."""
+    rows, cur = [], ''
+    for word in line.split(' '):
+        if not cur and not word:
+            continue                   # the spaces at a break ARE the break
+        lead = indent if rows else ''
+        cand = f"{cur} {word}" if cur else word
+        if fits(lead + cand):
+            cur = cand
+            continue
+        if cur:
+            rows.append(cur)
+            cur = ''
+            if not word:
+                continue
+            lead = indent
+        while not fits(lead + word):
+            k = len(word) - 1
+            while k > 1 and not fits(lead + word[:k]):
+                k -= 1
+            rows.append(word[:k])
+            word = word[k:]
+            lead = indent
+        cur = word
+    if cur or not rows:
+        rows.append(cur)
+    return rows[:1] + [indent + r for r in rows[1:]]
+
+
+def _fit_or_wrap(line, fits):
+    """A caption line for the figure: wrapped to its measured width when
+    `fits` is given (`#373`, grouped figures), else cut to the character
+    budget exactly as before."""
+    if fits is None:
+        return _fit(line)
+    return '\n'.join(_wrap(line, fits))
+
+
+# The one grouped caption line that is still cut rather than wrapped in
+# full: Members. It names every run, so it grows with the selection, and
+# the tidy CSV's group column is its complete version. Three rows hold the
+# six-group campaign figure's twelve runs with room to spare; past that it
+# ends with a pointer to the CSV, as it did before `#373`.
+MEMBERS_MAX_ROWS = 3
 
 
 # How much of the figure width a fitted caption line may reach, by the
@@ -2319,8 +2418,10 @@ def _group_caption(drawn, opts, hidden, materials=False, fits=None):
     says what, on a line of its own. Without it the styles are only
     there to tell the curves apart, as before, and nothing is added.
 
-    `fits` (`#373`): _caption_fitter's width test, so every line is cut
-    to what really renders inside the frame (see _fit)."""
+    `fits` (`#373`): _caption_fitter's width test. Every line is then
+    WRAPPED to what really renders inside the frame, keeping every word
+    (_wrap); without it the lines are cut to the character budget as
+    before."""
     heads = []
     for name, runs, ag, _cap, _color, style in drawn:
         n = len(runs)
@@ -2336,11 +2437,11 @@ def _group_caption(drawn, opts, hidden, materials=False, fits=None):
                  f"runs to earn a band.")
     styles = ''
     if materials:
-        styles = '\n' + _fit(
+        styles = '\n' + _fit_or_wrap(
             "Line style = the electrode material the group's runs recorded "
             "in setup.txt when the group was formed: groups of one "
             "material share it and differ by color; a group of no single "
-            "material has a style of its own.", fits=fits)
+            "material has a style of its own.", fits)
     grid = ('Grid: exact-key pooling — only levels a run really measured.'
             if opts.get('aggregate_exact') else
             'Grid: runs interpolated onto the common levels, never '
@@ -2367,9 +2468,9 @@ def _group_caption(drawn, opts, hidden, materials=False, fits=None):
                                  'breakdown, so no cap fired.'))
     counts = ("Per-level support counts are not printed when groups share "
               "a panel; the console names each group's thinnest level.")
-    return ('\n' + _fit(head, fits=fits) + styles + '\n'
-            + _fit(grid, fits=fits) + '\n' + _fit(support, fits=fits)
-            + '\n' + counts)
+    return ('\n' + _fit_or_wrap(head, fits) + styles + '\n'
+            + _fit_or_wrap(grid, fits) + '\n'
+            + _fit_or_wrap(support, fits) + '\n' + _fit_or_wrap(counts, fits))
 
 
 def _group_members_caption(drawn, limit=CAPTION_LINE_MAX, fits=None):
@@ -2380,30 +2481,39 @@ def _group_members_caption(drawn, limit=CAPTION_LINE_MAX, fits=None):
     members a reader cannot recover is not a citable figure. Truncated
     to `limit` characters with the count kept, because the tidy CSV's new
     'group' column is the complete answer and this line only has to be
-    enough to recognize the figure. With `fits` (`#373`) it is also cut
-    to its measured width, keeping the pointer to the CSV on the figure:
-    the pointer is the one part of this line that must never be the bit
-    that runs off the edge."""
+    enough to recognize the figure.
+
+    With `fits` (`#373`) the line is WRAPPED to its measured width and
+    always ends by pointing at the CSV. It is the one grouped line still
+    allowed to stop short, and only past MEMBERS_MAX_ROWS rows; then it
+    says so and where the rest is, so nothing is dropped silently."""
     bits = [f"{name} = " + ', '.join(r['name'] for r in runs)
             for name, runs, _ag, _cap, _col, _st in drawn]
     line = 'Members: ' + '; '.join(bits) + '.'
-    if len(line) > limit or (fits is not None and not fits(line)):
+    if fits is not None:
+        whole = line + " (Also in the tidy CSV's group column.)"
+        rows = _wrap(whole, fits)
+        if len(rows) > MEMBERS_MAX_ROWS:
+            tail = "… (full membership in the tidy CSV's group column)"
+
+            def ok(k):
+                cand = line[:k].rstrip(' ,;') + tail
+                return len(_wrap(cand, fits)) <= MEMBERS_MAX_ROWS
+            lo, hi = 0, len(line)
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if ok(mid):
+                    lo = mid
+                else:
+                    hi = mid - 1
+            rows = _wrap(line[:lo].rstrip(' ,;') + tail, fits)
+        return '\n' + '\n'.join(rows)
+    if len(line) > limit:
         # the pointer to the full answer is part of the budget, not an
         # addition to it -- truncating to `limit` and THEN appending is
         # how a truncator produces a line longer than the one it cut
         tail = "… (full membership in the tidy CSV's group column)"
-
-        def ok(k):
-            cand = line[:k].rstrip(' ,;') + tail
-            return len(cand) <= limit and (fits is None or fits(cand))
-        lo, hi = 0, max(0, limit - len(tail))
-        while lo < hi:
-            mid = (lo + hi + 1) // 2
-            if ok(mid):
-                lo = mid
-            else:
-                hi = mid - 1
-        line = line[:lo].rstrip(' ,;') + tail
+        line = line[:max(0, limit - len(tail))].rstrip(' ,;') + tail
     return '\n' + line
 
 
@@ -2879,6 +2989,9 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     # answers unless a GROUP mean is actually drawn
     handle_em = None
     materials_drawn = False
+    # the grouped caption block, as a function of the figure's width
+    # (`#373`); None on every other figure, which keeps its fixed caption
+    group_caption = None
     if opts.get('aggregate'):
         # ONE mean, or one per operator-assigned group (`#313`). The two
         # paths are the same code with a different list of run sets: a
@@ -2977,15 +3090,17 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                                   else 'aggregate'),
                             labels=not grouped)
         if drawn_groups and grouped:
-            # cut to the width it really renders at (`#373`): seeded group
-            # names are whole material names, and a character budget let
-            # the Members line's pointer to the tidy CSV run off the edge
-            fits = _caption_fitter(fig)
-            agg_caption = (_group_caption(drawn_groups, opts, hide_runs,
-                                          materials=materials_drawn,
-                                          fits=fits)
-                           + _group_members_caption(drawn_groups,
-                                                    fits=fits))
+            # WRAPPED to the width it really renders at (`#373`): seeded
+            # group names are whole material names, and neither the
+            # character budget nor a cut kept every group on the figure.
+            # A function of the figure, not a string, because the width
+            # it wraps to is the figure's: relayout re-runs it when the
+            # window changes shape (_place_group_caption).
+            def group_caption(fits, drawn=tuple(drawn_groups),
+                              materials=materials_drawn):
+                return (_group_caption(drawn, opts, hide_runs,
+                                       materials=materials, fits=fits)
+                        + _group_members_caption(drawn, fits=fits))
         elif drawn_groups:
             name, subset, ag, cap_kv, _c, _s = drawn_groups[0]
             agg_caption = _aggregate_caption(subset, ag, opts, cap_kv)
@@ -3099,6 +3214,20 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                "incomplete on all runs)." + strain_note)
         if split_any:
             cap += _legs_caption(opts)
+    if group_caption is not None:
+        # `#373`: a grouped figure's caption is WRAPPED to the figure's
+        # width and its strip grows to hold it, measured rather than
+        # capped, so a wrapped line never sits under the axes.
+        head = cap
+        tail = (agg_caption
+                + _estimator_caption(runs)
+                + _cadence_caption(cadence_notes)
+                + _scale_caption(scale_notes))
+        text = fig.text(0.01, 0.005, '', fontsize=7, color='#555555')
+        setattr(fig, _CAPTION_ATTR, (
+            text, lambda f: head + group_caption(_caption_fitter(f)) + tail))
+        _tight(fig, (0, _place_group_caption(fig), 1, 1))
+        return fig
     cap = (cap
            + agg_caption
            + _estimator_caption(runs)
@@ -3389,6 +3518,9 @@ def draw(fig, runs, opts, warn=lambda m: None):
     the axes it needs. THE entry point for anything that renders: the
     window's live canvas calls it on every toggle, and save_figure() calls
     it for the PNG, so what you see on screen is what lands in the file."""
+    # a figure reused for a new draw must not keep the last one's grouped
+    # caption (`#373`); draw_area sets it again when this one has one
+    setattr(fig, _CAPTION_ATTR, None)
     if opts['mode'] == 'area':
         axl, axr = area_axes(fig, opts)
         return draw_area(fig, axl, axr, runs, opts, warn)

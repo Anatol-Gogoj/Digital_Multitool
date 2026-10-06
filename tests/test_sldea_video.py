@@ -508,9 +508,19 @@ def _write_video(folder, n, rng):
               newline='') as f:
         w = csv.writer(f)
         w.writerow(sv.INDEX_COLUMNS)
-        for i in range(n):
-            vw.write(_scene(30 + 6 * i, rng))
-            w.writerow([i, 2.0 + i, 0.5 * i, '', i + 1])
+        try:
+            for i in range(n):
+                vw.write(_scene(30 + 6 * i, rng))
+                w.writerow([i, 2.0 + i, 0.5 * i, '', i + 1])
+        except cv2.error as e:
+            # The same failure _need_cv's probe catches, arriving one write
+            # later: on Gogojster (Windows, OpenCV 4.13) about one process
+            # in five sees the FFV1 writer throw, and every write after it
+            # in that process too (2026-10-06). Not this suite's code:
+            # reported as could-not-run, never as a pass or a failure.
+            vw.release()
+            raise _Skip(f"this OpenCV's {sv.VIDEO_FOURCC} writer failed "
+                        f"mid-file: {e}")
     vw.release()
 
 
@@ -613,6 +623,282 @@ def test_the_cli_says_what_it_did():
         assert sv.main([os.path.join(d, 'frames')]) == 2      # no video
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+# ------------------------------------- review by exception (2026-10-06)
+
+def _edge(frame, t, area, review=False, method='disc-fit', kv=1.0):
+    return {'frame': frame, 't_s': t, 'nominal_kV': kv, 'area_px': area,
+            'area_mm2': None, 'conf': 0.9, 'method': method, 'wrinkle': 1.0,
+            'needs_review': review, 'scale_source': 'x'}
+
+
+def test_review_flags_send_only_doubt_and_disagreement_to_a_human():
+    """A landing bracketed by two accepted stills (t 10 and 14, areas 1000
+    and 1010) passes frames inside its 2 % band and flags one outside it;
+    the detector's own doubt and a frame with no area are flagged whatever
+    the stills say; outside any landing a 2 % step from the neighbours is
+    a 'jump' and a smooth ramp is not."""
+    cks = [{'frame_file': 'a.png', 'tag': 'post-ramp', 'step': '3',
+            'nominal_kV': 1.0, 't_s': 10.0, 'area_px': 1000.0},
+           {'frame_file': 'b.png', 'tag': 'pre-ramp', 'step': '3',
+            'nominal_kV': 1.0, 't_s': 14.0, 'area_px': 1010.0}]
+    edges = [_edge(0, 4.0, 900.0), _edge(1, 5.0, 905.0),
+             _edge(2, 6.0, 960.0),                    # ramp: +6 % jump
+             _edge(3, 7.0, 965.0), _edge(4, 8.0, 970.0),
+             _edge(5, 10.0, 1001.0), _edge(6, 11.0, 1000.0),
+             _edge(7, 12.0, 1050.0),                  # +4 % off the band
+             _edge(8, 13.0, 1005.0, review=True),     # detector doubts it
+             _edge(9, 14.0, None, method=''),         # no edge
+             _edge(10, 15.0, 1012.0)]                 # last landing frame
+    flags = sv.review_flags(edges, cks)
+    by = {f['frame']: f['reasons'] for f in flags}
+    assert by[5] == [] and by[6] == [] and by[10] == [], by
+    assert by[7] == ['off-stills'], by
+    assert by[8] == ['detector'], by
+    assert by[9] == ['no edge'], by
+    assert 'jump' in by[2], by
+    assert by[0] == [] and by[4] == [], by
+    band = next(f['band'] for f in flags if f['frame'] == 6)
+    assert abs(band[0] - 980.0) < 1e-6 and abs(band[1] - 1030.2) < 1e-6, \
+        band
+    # with no stills at all, only doubt and jumps are left to flag
+    bare = {f['frame']: f['reasons'] for f in sv.review_flags(edges, [])}
+    assert bare[7] == ['jump'] and bare[6] == [], bare
+
+
+def test_a_run_wide_video_offset_is_divided_out_and_a_local_error_is_not():
+    """The video's baseline fit comes from another decode than the stills',
+    so its areas can sit a percent or so off theirs on every frame
+    (13_backlight_2: -1.19 %). still_offset measures that ratio, the bands
+    are scaled by it, and a single frame that is off still is off."""
+    cks = [{'frame_file': f'{k}.png', 'tag': 'post-ramp', 'step': str(k),
+            'nominal_kV': 0.2 * k, 't_s': 10.0 * k, 'area_px': 1000.0 + k}
+           for k in range(1, 6)]
+    edges = []
+    for k in range(1, 6):
+        for j in range(3):
+            edges.append(_edge(len(edges), 10.0 * k + j - 1.0,
+                               (1000.0 + k) * 0.975))
+    off = sv.still_offset(edges, cks)
+    assert abs(off - 0.975) < 1e-9, off
+    raw = sv.review_flags(edges, cks, offset=None)
+    assert all('off-stills' in f['reasons'] for f in raw
+               if f['band'] is not None), raw
+    flags = sv.review_flags(edges, cks)          # 'auto'
+    assert not any(f['reasons'] for f in flags), flags
+    edges[7]['area_px'] *= 1.05                  # one frame really is off
+    flags = sv.review_flags(edges, cks)
+    assert [f['frame'] for f in flags if f['reasons']] == [7], flags
+    assert sv.still_offset(edges[:2], cks) is None   # too few matches
+
+
+def test_still_checkpoints_take_the_stream_frame_time_from_run_log():
+    """Accepted = data.csv holds an area. The time is the stream frame's,
+    from run.log, under the still's original name even after a breakdown
+    mark renamed it; without the line, the planned time; rows with no
+    area are not checkpoints."""
+    d = tempfile.mkdtemp(prefix='sldea_ck_')
+    try:
+        os.makedirs(os.path.join(d, 'frames'))
+        cols = ['snapshot', 'step', 'tag', 'nominal_kV', 't_planned_s',
+                'frame_file', 'active_area_px']
+        with open(os.path.join(d, 'data.csv'), 'w', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            w.writeheader()
+            w.writerow({'snapshot': 1, 'step': 0, 'tag': 'baseline',
+                        'nominal_kV': 0, 't_planned_s': 2.0,
+                        'frame_file': 's00.png', 'active_area_px': 1000})
+            w.writerow({'snapshot': 2, 'step': 1, 'tag': 'post-ramp',
+                        'nominal_kV': 0.2, 't_planned_s': 9.0,
+                        'frame_file': 's01_BREAKDOWN.png',
+                        'active_area_px': 1010})
+            w.writerow({'snapshot': 3, 'step': 1, 'tag': 'pre-ramp',
+                        'nominal_kV': 0.2, 't_planned_s': 16.0,
+                        'frame_file': 's01b.png', 'active_area_px': ''})
+            w.writerow({'snapshot': 4, 'step': 2, 'tag': 'post-ramp',
+                        'nominal_kV': 0.4, 't_planned_s': 24.0,
+                        'frame_file': 's02.png', 'active_area_px': 1020})
+        with open(os.path.join(d, 'run.log'), 'w', encoding='utf-8') as f:
+            f.write("[20:39:17] snap s00 0.00 kV [baseline]  meas -0.02 kV "
+                    "/ 1 µA  → s00.png  (frame t=2.12s)\n")
+            f.write("[20:39:24] snap s01 0.20 kV [post-ramp]  meas 0.20 kV "
+                    "/ -1 µA  → s01.png  (frame t=9.05s)\n")
+        cks = sv.still_checkpoints(d)
+        assert [c['frame_file'] for c in cks] == \
+            ['s00.png', 's01_BREAKDOWN.png', 's02.png'], cks
+        assert [c['t_s'] for c in cks] == [2.12, 9.05, 24.0], cks
+        assert [c['area_px'] for c in cks] == [1000.0, 1010.0, 1020.0]
+        assert [c['step'] for c in cks] == ['0', '1', '2']
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_video_pass_stamps_its_inputs_and_says_what_went_stale():
+    """video_edges.json records what the pass ran with; edges_stale reads
+    it back as None while nothing moved, and names each input that did:
+    a partial pass, a settings change, a scale anchor saved since."""
+    _need_cv()
+    import sldea_edge as se
+    d = _video_run(4)
+    try:
+        assert sv.edges_stale(d) == "there are no video edges yet"
+        sv.detect_video(d, log=lambda m: None, plot=False)
+        stamp = sv.read_stamp(d)
+        assert stamp and stamp['stride'] == 1 and stamp['limit'] is None
+        assert stamp['area_estimator'] == se.AREA_ESTIMATOR_VERSION
+        assert sv.edges_stale(d) is None
+        sv.detect_video(d, stride=2, log=lambda m: None, plot=False)
+        assert 'every 2th frame' in sv.edges_stale(d)
+        sv.detect_video(d, log=lambda m: None, plot=False)
+        s = se.load_settings(d)
+        s['min_diff'] = float(s['min_diff']) + 1.0
+        se.save_settings(d, s)
+        why = sv.edges_stale(d)
+        assert why and 'min_diff' in why, why
+        sv.detect_video(d, log=lambda m: None, plot=False)
+        assert sv.edges_stale(d) is None
+        se.save_scale_anchor(d, {'method': se.ANCHOR_METHOD_MANUAL,
+                                 'diam_px': 120.0, 'diam_mm': 16.0,
+                                 'mm_per_px': 16.0 / 120.0})
+        why = sv.edges_stale(d)
+        assert why and 'scale anchor changed (none -> 120.0 px)' in why, why
+        # a stamp that is missing is a stale pass, never a current one
+        os.remove(os.path.join(d, sv.VIDEO_STAMP_FILENAME))
+        assert 'before the video pass recorded' in sv.edges_stale(d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_failed_pass_leaves_the_previous_edges_whole():
+    """The rows go to a .part file renamed into place at the end, so a pass
+    that dies half way leaves the previous video_edges.csv untouched."""
+    _need_cv()
+    d = _video_run(4)
+    real = sv.iter_frames
+    try:
+        sv.detect_video(d, log=lambda m: None, plot=False)
+        with open(os.path.join(d, sv.VIDEO_EDGES_FILENAME), 'rb') as f:
+            before = f.read()
+
+        def dies(path):
+            for i, g in real(path):
+                if i == 2:
+                    raise OSError("decoder lost the file")
+                yield i, g
+        sv.iter_frames = dies
+        try:
+            sv.detect_video(d, log=lambda m: None, plot=False)
+        except OSError:
+            pass
+        else:
+            raise AssertionError("the decoder error must surface")
+        with open(os.path.join(d, sv.VIDEO_EDGES_FILENAME), 'rb') as f:
+            assert f.read() == before
+        assert not [n for n in os.listdir(d) if n.endswith('.part')], \
+            os.listdir(d)
+    finally:
+        sv.iter_frames = real
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_after_save_reruns_stale_edges_detached_and_only_then():
+    """No video in the folder: nothing to say, nothing started. Stale
+    edges: a detached `--after-save` job. Current edges: said, not
+    re-run."""
+    _need_cv()
+    calls = []
+
+    def popen(cmd, **kw):
+        calls.append((cmd, kw))
+        return None
+    bare = _video_run(video=False)
+    d = _video_run(3)
+    try:
+        assert sv.after_save(bare, popen=popen) is None and not calls
+        msg = sv.after_save(d, popen=popen)
+        assert msg.startswith('video edges re-running in the background'), \
+            msg
+        assert 'there are no video edges yet' in msg
+        cmd, kw = calls[-1]
+        assert cmd[-2:] == [d, '--after-save'], cmd
+        assert cmd[1].endswith('sldea_video.py'), cmd
+        if os.name == 'nt':
+            assert kw['creationflags'], kw
+        else:
+            assert kw['start_new_session'] is True, kw
+        assert kw['env']['PYTHONIOENCODING'] == 'utf-8'
+        sv.detect_video(d, log=lambda m: None, plot=False)
+        n = len(calls)
+        assert sv.after_save(d, popen=popen) == 'video edges are current'
+        assert len(calls) == n
+    finally:
+        shutil.rmtree(bare, ignore_errors=True)
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_after_save_job_says_why_and_what_in_run_log():
+    _need_cv()
+    d = _video_run(3)
+    try:
+        assert sv.main([d, '--after-save', '--no-plot']) == 0
+        with open(os.path.join(d, 'run.log'), encoding='utf-8') as f:
+            text = f.read()
+        assert 're-running after Save (there are no video edges yet)' \
+            in text, text
+        assert 'flagged for review against 0 accepted still(s)' in text, text
+        assert sv.edges_stale(d) is None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_decisions_round_trip_and_a_decision_on_a_changed_area_is_dropped():
+    d = tempfile.mkdtemp(prefix='sldea_dec_')
+    try:
+        assert sv.read_decisions(d) == ({}, 0)
+        dec = {3: {'frame': 3, 't_s': 5.0, 'decision': 'accept',
+                   'area_px': 1000.0, 'reasons': 'jump', 'user': 'u',
+                   'when': 'w'},
+               5: {'frame': 5, 't_s': 7.0, 'decision': 'reject',
+                   'area_px': None, 'reasons': 'no edge', 'user': 'u',
+                   'when': 'w'}}
+        sv.write_decisions(d, dec)
+        got, dropped = sv.read_decisions(d)
+        assert dropped == 0 and set(got) == {3, 5}
+        assert got[3]['decision'] == 'accept' and got[3]['area_px'] == 1000.0
+        assert got[5]['area_px'] is None
+        # the detector re-ran: frame 3 now reads 1004 px, frame 5 is gone
+        edges = [_edge(3, 5.0, 1004.0)]
+        got, dropped = sv.read_decisions(d, edges)
+        assert got == {} and dropped == 2, (got, dropped)
+        edges = [_edge(3, 5.0, 1000.2), _edge(5, 7.0, None, method='')]
+        got, dropped = sv.read_decisions(d, edges)
+        assert set(got) == {3, 5} and dropped == 0
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_figure_sorts_frames_by_what_a_reader_must_do():
+    """A decision outranks a flag; flagged frames are apart from clear
+    ones; frames with no area are left out; the stills are their own
+    series."""
+    edges = [_edge(0, 1.0, 100.0), _edge(1, 2.0, 101.0),
+             _edge(2, 3.0, 150.0), _edge(3, 4.0, 160.0),
+             _edge(4, 5.0, None, method='')]
+    flags = [{'frame': i, 'reasons': r} for i, r in
+             enumerate([[], [], ['jump'], ['jump'], ['no edge']])]
+    dec = {3: {'decision': 'reject'}, 0: {'decision': 'accept'}}
+    cks = [{'t_s': 1.0, 'area_px': 100.0, 'frame_file': 'a.png'}]
+    s = sv.plot_series(edges, flags, cks, dec)
+    assert [p[2] for p in s['clear']] == [1]
+    assert [p[2] for p in s['flagged']] == [2]
+    assert [p[2] for p in s['accepted']] == [0]
+    assert [p[2] for p in s['rejected']] == [3]
+    assert s['stills'] == [(1.0, 100.0, 'a.png')]
+    assert len(s['kv']) == 5
+    styles = {k[0]: k[2] for k in sv.SERIES_STYLE}
+    assert len(set(styles.values())) == len(styles), \
+        "every series needs its own marker shape, not just a colour"
 
 
 # ------------------------------------------------ the real run worker

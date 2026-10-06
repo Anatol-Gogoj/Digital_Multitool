@@ -643,8 +643,22 @@ Windows OpenCV 5.0 build, not the bench's 4.13.
   tab asks *"A video is still being copied"*. Answer yes, and check the
   telemetry spacing stays ~0.5 s while the copy runs (throttled to
   40 MB/s).
+- [ ] **Q16.** Review by exception (2026-10-06): after the Q9 run's video
+  is in its folder, open it in Edge Review, calibrate, ▶ Detect Edges and
+  💾 Save. The strip ends with *"video edges re-running in the background
+  (…)"*, and within a minute or two `run.log` gains *"video edges:
+  re-running after Save (…)"* then *"… N flagged for review against M
+  accepted still(s) …; the video reads ±x % against the stills
+  overall"*. Note N, M and x. Save again at once: the strip now says
+  *"video edges are current"* once the first re-run has finished.
+- [ ] **Q17.** 🎞 **Video review…** opens on the first flagged frame (or
+  frame 0 when none is flagged). ← → step frames; N / P jump between
+  flagged frames; the blue outline appears within about a second; A / R
+  record a decision and move on, and `video_review.csv` gains a row.
+  Close: `video_edges.png` is redrawn with the decision (diamond or
+  cross). Note how long the outline takes to appear on this PC.
 
-Record the date and the Q1/Q5/Q10/Q11/Q13/Q14 numbers in
+Record the date and the Q1/Q5/Q10/Q11/Q13/Q14/Q16/Q17 numbers in
 `SLDEA_DECISIONS.md`.
 
 ---

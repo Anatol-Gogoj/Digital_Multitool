@@ -150,6 +150,10 @@ def main():
 
     # -- main app ------------------------------------------------------
     import gui as gui_mod
+    # Opening the Webcam tab starts its preview (#375). The manual must
+    # never carry a photo from the build PC's camera: keep it off, so the
+    # tab is photographed showing its PREVIEW OFF splash.
+    gui_mod.CAM_AUTOSTART_ON_TAB = False
     app = gui_mod.InstrumentControlGUI(root)
     root.deiconify()
     h = min(1000, root.winfo_screenheight() - 90)

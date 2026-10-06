@@ -318,8 +318,10 @@ S["40_edge_review"] = {
          "label": "Pick the run — ✓ marks already-processed runs"},
         {"match": "▶ Detect Edges",
          "label": "Traces every frame — picks/rejects from earlier passes reset"},
-        {"rect": [6, 57, 1290, 83], "badge_side": "bottom",
-         # a Text widget: no text= to match on
+        {"rect": [6, 57, 1397, 83], "badge_side": "bottom",
+         # a Text widget: no text= to match on. Its width follows the
+         # window's: 1290 until v1.4.1, 1397 since the Video review button
+         # (#366) widened the toolbar (widgets.json, class Text)
          "label": "Run health — what the run's own files say went wrong at capture; advice only"},
         {"match": "Candidates",
          "label": "Machine outlines — colors match the A/B/C tags on the image"},
@@ -329,10 +331,16 @@ S["40_edge_review"] = {
         {"match": "review queue", "label": "Frames still waiting for a decision"},
         {"match": "📏 Calibrate / re-anchor…",
          "label": "Set or re-anchor the mm-per-px scale — verify the automatic disc fit"},
-        {"match": "💾 Save to data.csv…", "badge_at": [1313, 70],
+        {"match": "🎞 Video review…", "badge_side": "top",
+         # on top like 2 and 8: the automatic right lands on the progress bar
+         "label": "Walk the video frames that disagree with the stills — grayed out until the run has a video"},
+        {"match": "💾 Save to data.csv…", "badge_at": [1418, 70],
          # not the automatic left: the `#237` detect/session clock sits
          # left of Save. Not "bottom" either: since `#346` the Run health
-         # text is there, so the badge sits on that strip's scrollbar
+         # text is there, so the badge sits on that strip's scrollbar.
+         # A FIXED x, so it follows the window width: the Video review
+         # button (#366) widened the window by 107 px and moved it from
+         # 1313 (v1.4.1), where it would now cover Run health text
          "label": "Writes accepted areas back (keeps a .bak) — confirms first"},
         {"match": "❓ How to use…", "badge_side": "left",
          "label": "The review loop in one short read — start here"},

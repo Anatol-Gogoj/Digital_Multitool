@@ -44,6 +44,7 @@ import lcr_format
 import scope_trace
 import siggen_presets
 from siggen_presets import SignalGenPresetStore
+import sldea_liveview
 import sldea_presets
 from sldea_presets import SldeaPresetStore
 import sldea_preview
@@ -331,6 +332,12 @@ class InstrumentControlGUI:
         # start asks first while one is copying to the share)
         self._sldea_recorder = None
         self._sldea_video_jobs = []
+        # The live view (#376): a window that shows frames the run already
+        # holds, never the camera itself. A stills-only run hands each
+        # still over in ONE attribute (a reference swap in _sldea_capture);
+        # the view reads it from a Tk `after` loop (sldea_liveview).
+        self._sldea_live_still = None
+        self._sldea_live_view = sldea_liveview.LiveView(self)
         self.recording = False
         self.record_thread = None
         # Keys of background instrument operations in flight (issue #40) --
@@ -3100,6 +3107,21 @@ LOGGING:
                     "ones.").pack(side=tk.LEFT, padx=(8, 0))
         self.sldea_status = tk.Label(runf, text="idle", anchor='w', fg='#555')
         self.sldea_status.pack(side=tk.LEFT, padx=12)
+        # The live view (#376), at the far right and packed AFTER the
+        # status: the status line carries the run's alarms ("NOT ZEROED"),
+        # so it keeps its place and its claim on the row's width, and on
+        # a narrow window it is this button that gets squeezed.
+        add_tooltip(ttk.Button(runf, text="Live view…",
+                               command=lambda: sldea_liveview.notify(
+                                   self, 'open')),
+                    "The camera during a run: a video run's stream, "
+                    "or a stills-only run's newest still labelled with its "
+                    "age, with the commanded kV and the exposure of the "
+                    "frame shown. It opens by itself when a run starts and "
+                    "keeps the last frame after it ends. It only reads "
+                    "frames the run already holds and never opens the "
+                    "camera, so closing it never affects the run."
+                    ).pack(side=tk.RIGHT, padx=(8, 4))
 
         # The camera settings a run started now would use (2026-10-02). A
         # run takes its exposure and gain from the Webcam tab's entry
@@ -3923,6 +3945,13 @@ LOGGING:
                    f"{sldea_video.VIDEO_FILENAME}"
                    + (", edges after" if vid_detect else "") + "]"
                    if vid_on else ""))
+            # The live view (#376) forgets the previous run BEFORE this
+            # run's worker exists, so nothing from that run can pass as
+            # this one's: the still handed over last time is dropped here,
+            # and begin_run notes which recorder predates this run. Plain
+            # attribute writes on the Tk thread; notify never raises.
+            self._sldea_live_still = None
+            sldea_liveview.notify(self, 'begin_run', p, dry)
             started = True
             threading.Thread(
                 target=self._sldea_worker,
@@ -3937,6 +3966,8 @@ LOGGING:
                             vid_detect=vid_detect),
                 daemon=True).start()
             self.root.after(100, self._sldea_animate_cursor)  # playhead
+            # ...and opens with the run, once the worker is on its way
+            sldea_liveview.notify(self, 'open')
         finally:
             if not started:
                 with self._sldea_loglock:
@@ -4513,6 +4544,9 @@ LOGGING:
             self._sldea_prelog = None
         self.sldea_run_btn.config(state='normal')
         self.sldea_abort_btn.config(state='disabled')
+        # Last, once the tab is released: the live view keeps its last
+        # frame, labelled RUN ENDED (#376). notify never raises.
+        sldea_liveview.notify(self, 'end_run')
 
     def _sg_live_locked(self, channel=None, parent=None):
         """True (+ loud note) when a LIVE SLDEA run owns this SG channel.
@@ -5486,6 +5520,21 @@ LOGGING:
         if frame is not None:
             fname = p.frame_filename(snap['step'], snap['nominal_kv'],
                                      snap['tag'])
+            if not stream:
+                # The live view (#376) shows this still: ONE reference
+                # swap of an immutable tuple. No copy, no lock, no Tk, and
+                # nothing that depends on the view being open; the view
+                # only reads the frame. The try keeps even this from ever
+                # raising into the run. (A video run's view reads the
+                # recorder's stream instead.)
+                try:
+                    now = time.monotonic()
+                    self._sldea_live_still = sldea_liveview.LiveStill(
+                        frame, snap['step'], snap['nominal_kv'],
+                        snap['tag'], None if t0 is None else now - t0,
+                        now, time.time())
+                except Exception:
+                    pass
             try:
                 import cv2
                 if not cv2.imwrite(os.path.join(framedir, fname),

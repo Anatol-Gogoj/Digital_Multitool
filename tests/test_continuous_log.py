@@ -23,6 +23,7 @@ import math
 import shutil
 import tempfile
 import threading
+import time
 
 import continuous_log as cl
 
@@ -326,30 +327,52 @@ def test_the_summary_line_counts_samples_and_skipped_slots():
 
 
 def test_live_stats_survive_a_writer_and_a_reader_at_once():
-    """The worker writes while the Tk thread snapshots."""
+    """The worker writes while the Tk thread snapshots, and a run adds
+    rows as it goes (a source's first good read, an LCR mode change), so
+    the writer adds a new row on every read. `#389`: with one fixed row
+    this test passed with LiveStats' lock replaced by a no-op. The switch
+    interval is cut from the default 5 ms to 1 us so the threads trade
+    the GIL far more often; without the lock the reader's snapshot meets
+    "dictionary changed size during iteration" (or a row with a min and
+    no max yet) within milliseconds: 1000 of 1000 runs failed on Windows
+    and on WSL Debian, Python 3.13, 2026-10-06. With the lock the race
+    runs its 0.2 s."""
     st = cl.LiveStats(0.01)
     stop = threading.Event()
+    errors, wrote = [], []
 
     def writer():
         i = 0
-        while not stop.is_set():
-            st.record('DMM', [('DC Voltage', float(i % 100), 'V')])
-            st.tick()
-            i += 1
+        try:
+            while not stop.is_set():
+                st.record('DMM', [(f'Q{i}', float(i), 'V')])
+                st.tick()
+                i += 1
+        except Exception as e:             # reported by the reader below
+            errors.append(e)
+        wrote.append(i)
 
+    saved = _sys.getswitchinterval()
+    _sys.setswitchinterval(1e-6)
     t = threading.Thread(target=writer, daemon=True)
     t.start()
     try:
-        for _ in range(2000):
-            rows, ticks, _s = st.snapshot()
+        deadline = time.monotonic() + 0.2
+        while time.monotonic() < deadline:
+            rows, _ticks, _s = st.snapshot()
             for r in rows:
                 if r['min'] is not None:
-                    assert r['min'] <= r['max'], r
+                    assert r['max'] is not None and r['min'] <= r['max'], r
     finally:
         stop.set()
         t.join(5)
-    r = _row(st, 'DMM', 'DC Voltage')
-    assert (r['min'], r['max']) == (0.0, 99.0) or st.ticks < 100, r
+        _sys.setswitchinterval(saved)
+    assert not errors and wrote, (errors, wrote)
+    # nothing the writer did was lost or garbled
+    rows, ticks, _s = st.snapshot()
+    assert ticks == wrote[0], (ticks, wrote)
+    assert [(r['quantity'], r['min'], r['max']) for r in rows] == [
+        (f'Q{i}', float(i), float(i)) for i in range(wrote[0])]
 
 
 # --------------------------------------------------------------------------

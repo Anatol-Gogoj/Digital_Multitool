@@ -8614,11 +8614,16 @@ def _run():
     # broken test in suites that had five. Tracebacks land after the count
     # line, in name order, in one bounded block -- run_tests.py explains why.
     import gc
+    import threading
     import traceback
 
-    gui_mod = None
+    gui_mod = tk_mod = None
     try:
         import sldea_edge_gui as gui_mod
+    except Exception:
+        pass
+    try:
+        import tkinter as tk_mod
     except Exception:
         pass
     real_choice = getattr(gui_mod, 'cal_choice', None)
@@ -8650,23 +8655,92 @@ def _run():
         how it was finally caught.
 
         Collecting after every case keeps the freeing on this thread, where
-        Tk allows it.
+        Tk allows it. It cannot reach a thread or a root that outlives its
+        case; _stragglers and _roots_left below handle those.
         """
         gc.collect()
+
+    def _stragglers(before):
+        """Join the threads a case started and left running; return their
+        names. (`#280`)
+
+        A detection worker's target is the app's bound method, so while it
+        runs it holds the app and, through it, the root. One that outlives
+        its case drops that last reference on its own thread: the app's Tk
+        variables are freed there, and the root waits for the next
+        collection, which must not run on a worker either (measured
+        2026-10-06: a collection on another thread then aborts on
+        Tcl_AsyncDelete). Joined here, bounded, BEFORE _reap(), so that
+        collection is _reap()'s. Still a failure of the case, because only
+        the case can join while its own references hold the app, as
+        test_closing_mid_pass_leaves_nothing_scheduled does."""
+        left = [t for t in threading.enumerate()
+                if t not in before and t.is_alive()]
+        names = []
+        for t in left:
+            try:
+                t.join(15.0)
+            except RuntimeError:        # a thread Python did not start
+                pass
+            names.append(t.name + (' (still running after 15 s)'
+                                   if t.is_alive() else ''))
+        return names
+
+    def _roots_left():
+        """Destroy the Tk roots still alive after _reap(); return how many.
+        (`#280`)
+
+        Tk.destroy() clears tkinter._default_root on its way OUT, so a
+        destroy that raises half way leaves it naming a dead interpreter,
+        and every later image made without a master (each ImageTk.PhotoImage
+        in Edge Review) is made there. One teardown fault then reads as
+        'image "pyimage..." doesn't exist' in every later case that draws
+        (measured 2026-10-06: 2 and 6 such failures after one fault). A
+        root left alive is also freed later, on whichever thread drops it.
+        Cleared here so neither reaches the next case, as
+        tests/test_sldea_plot_gui.py's _shut does after each of its cases."""
+        if tk_mod is None:
+            return 0
+        roots = [o for o in gc.get_objects() if isinstance(o, tk_mod.Tk)]
+        n = len(roots)
+        while roots:
+            r = roots.pop()
+            try:
+                r.destroy()
+            except Exception:
+                pass
+            if getattr(tk_mod, '_default_root', None) is r:
+                tk_mod._default_root = None
+            del r
+        return n
 
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     failed = []
     for fn in fns:
+        before = set(threading.enumerate())
+        tb = ''
         try:
             fn()
         except Exception:
-            failed.append((fn.__name__, traceback.format_exc()))
-            print(f"FAIL {fn.__name__}")
-            _unspy()
-            _reap()
-            continue
+            tb = traceback.format_exc()
         _unspy()
+        left = _stragglers(before)
         _reap()
+        roots = _roots_left()
+        if roots:
+            _reap()
+        if left:
+            tb += (f"left behind (`#280`): {len(left)} thread(s) still "
+                   f"running when the case returned: {', '.join(left)}; "
+                   f"join them before the case's own references go\n")
+        if roots:
+            tb += (f"left behind (`#280`): {roots} Tk root(s) alive after "
+                   f"the collect; destroyed here and tkinter._default_root "
+                   f"cleared, so the cases after this one are unaffected\n")
+        if tb:
+            failed.append((fn.__name__, tb))
+            print(f"FAIL {fn.__name__}")
+            continue
         print(f"ok  {fn.__name__}")
     if not failed:
         print(f"\n{len(fns)} tests passed")

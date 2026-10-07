@@ -3310,6 +3310,183 @@ def test_the_axis_and_leg_controls_explain_themselves():
     assert 'first rising leg' in g.DRAW_TIPS['split_legs']
     assert 'point right' in g.DRAW_TIPS['arrows']
     assert set(g.ENUM_OPTIONS['x']) == set(sp.X_AXES)
+    # `#398`: what the field axis is, and where its t0 comes from
+    tip = g.DRAW_TIPS['x']
+    for phrase in ('NOMINAL electric field', 'mounted and prestretched',
+                   'never writes setup.txt', 'by hand'):
+        assert phrase in tip, phrase
+
+
+# ---------------------------------------------------------------------------
+# the field axis (`#398`)
+# ---------------------------------------------------------------------------
+
+FIELD_LABEL = 'Nominal field  V / t₀  (V/µm)'
+
+
+def _write_thickness(rundir, text):
+    """A setup.txt holding one `Film thickness:` line, as written by hand
+    or by the runner (the fixture runs have no setup.txt of their own)."""
+    with open(os.path.join(rundir, 'setup.txt'), 'w', encoding='utf-8') as f:
+        f.write(f"Film thickness: {text}\n")
+
+
+class _Pair:
+    """A WITHDRAWN window over two fixture runs, both selected, A with a
+    40 um film recorded and B with none. `opts` go to the window."""
+
+    def __init__(self, opts=None):
+        self.opts = opts
+        self.ok = False
+
+    def __enter__(self):
+        import tkinter as tk
+        self.tmp = _mktmp()
+        self.a = _fake_run(self.tmp, 'A_run')
+        self.b = _fake_run(self.tmp, 'B_run')
+        _write_thickness(self.a, '40 µm')
+        try:
+            self.root = tk.Tk()
+        except tk.TclError as e:
+            print(f"   (skipped: no display for Tk: {e})")
+            shutil.rmtree(self.tmp, ignore_errors=True)
+            self.root = None
+            return self
+        self.root.withdraw()
+        self.win = g.PlotWindow(self.root, self.tmp,
+                                preselect=['A_run', 'B_run'],
+                                opts=self.opts, remember=False)
+        self.ok = True
+        return self
+
+    def __exit__(self, *_exc):
+        if self.root is not None:
+            _shut(self.root)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        return False
+
+
+def test_the_field_axis_is_a_third_x_radio_and_greys_only_vs_area():
+    """`#398`: a third x radio. The field is the kV axis rescaled per run,
+    so every kV option stays live on it; only the area x axis, the other
+    x switch, greys and is neutralised, and its tick comes back with kV."""
+    with _Pair() as w:
+        if not w.ok:
+            return
+        win = w.win
+        assert list(win.rb_x) == ['kv', 'time', 'field']
+        assert win.rb_x['field'].cget('text') == 'field V/µm'
+        win.v_mode.set('current')
+        win._mode_changed()
+        win.v_vs_area.set(True)
+        assert win.current_opts()[0]['vs_area'] is True
+        win.v_x.set('field')
+        win._toggled()
+        assert _state(win.cb_vs_area) == 'disabled'
+        opts, err = win.current_opts()
+        assert err is None, err
+        assert opts['x'] == 'field' and opts['vs_area'] is False, opts
+        win.v_mode.set('area')
+        win._mode_changed()
+        win.v_prepost.set(True)
+        win.v_aggregate.set(True)
+        win._toggled()
+        for cb in (win.cb_prepost, win.cb_aggregate,
+                   win.cb_aggregate_exact):
+            assert _state(cb) == 'normal', cb.cget('text')
+        opts, err = win.current_opts()
+        assert err is None and opts['prepost'] and opts['aggregate'], opts
+        win.v_mode.set('current')
+        win._mode_changed()
+        win.v_x.set('kv')
+        win._toggled()
+        assert _state(win.cb_vs_area) == 'normal'
+        assert win.current_opts()[0]['vs_area'] is True
+
+
+def test_the_window_names_a_run_with_no_thickness_and_draws_it_once_added():
+    """`#398`: on the field axis a run with no thickness is left off, and
+    the messages under the figure name it and say how to add the line by
+    hand. The window writes nothing; once the line is there, picking the
+    run again draws it at its field. The click targets follow the axis."""
+    with _Pair() as w:
+        if not w.ok:
+            return
+        win = w.win
+        win.v_x.set('field')
+        win._toggled()
+        win.redraw()
+        assert [r['name'] for r in win._prepared] == ['A_run']
+        assert win.fig.axes[0].get_xlabel() == FIELD_LABEL
+        msg = win.msg.get('1.0', 'end')
+        assert 'field axis: 1 run(s) left off' in msg, msg
+        assert "B_run (no 'Film thickness:' line in its setup.txt)" in msg
+        assert "'Film thickness: 50 µm'" in msg and 'by hand' in msg
+        assert not os.path.exists(os.path.join(w.b, 'setup.txt')), \
+            'the window wrote a setup.txt'
+        # the fixture's two snapshots sit at 0 and 1 kV: 0 and 25 V/um
+        opts = win.current_opts()[0]
+        xs = [x for x, _y, _r, _row in g.plot_points(win._prepared, opts)]
+        assert xs == [0.0, 25.0], xs
+        _write_thickness(w.b, '50um')                # the operator's edit
+        win.set_selected_dirs([w.a])
+        win.redraw()
+        win.set_selected_dirs([w.a, w.b])
+        win.redraw()
+        got = {r['name']: (r['t0_um'], r['t0_src']) for r in win._prepared}
+        assert got == {'A_run': (40.0, 'setup.txt'),
+                       'B_run': (50.0, 'setup.txt')}, got
+        assert 'left off' not in win.msg.get('1.0', 'end')
+        with open(os.path.join(w.b, 'setup.txt'), encoding='utf-8') as f:
+            assert f.read() == 'Film thickness: 50um\n'
+
+
+def test_a_window_opened_from_a_spec_keeps_the_specs_t0_and_exports_it():
+    """`#398`: `--from-spec --gui` hands the window the spec's stored
+    thicknesses, and its runs keep them whatever setup.txt says now;
+    Export stores the t0 the figure was drawn with. A window opened
+    afresh reads setup.txt."""
+    import json
+    import tkinter as tk
+    tmp = _mktmp()
+    try:
+        a = _fake_run(tmp, 'A_run')
+        _write_thickness(a, '40 µm')
+        spec_opts, err = sp.make_opts(x='field',
+                                      film_thickness=[[a, 32.0]])
+        assert err is None, err
+        assert 'film_thickness' in g.explicit_opts(spec_opts)
+        for opts, want in ((spec_opts, (32.0, 'figspec')),
+                           (None, (40.0, 'setup.txt'))):
+            try:
+                root = tk.Tk()
+            except tk.TclError as e:
+                print(f"   (skipped: no display for Tk: {e})")
+                return
+            try:
+                root.withdraw()
+                win = g.PlotWindow(root, tmp, preselect=['A_run'],
+                                   opts=opts or sp.make_opts(x='field')[0],
+                                   remember=False)
+                win.redraw()
+                run = win._prepared[0]
+                assert (run['t0_um'], run['t0_src']) == want, \
+                    (run['t0_um'], run['t0_src'])
+                out = os.path.join(tmp, 'figs')
+                win.v_out.set(out)
+                win.v_stem.set('w')
+                with _Boxes() as boxes:
+                    win._export()
+                assert [k for k, _t, _m in boxes.said] == ['showinfo'], \
+                    boxes.said
+                with open(os.path.join(out, 'w.figspec.json'),
+                          encoding='utf-8') as f:
+                    stored = json.load(f)['opts']['film_thickness']
+                assert stored == [[os.path.abspath(a), want[0]]], stored
+            finally:
+                _shut(root)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _run():

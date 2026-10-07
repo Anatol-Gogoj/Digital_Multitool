@@ -1690,8 +1690,10 @@ def test_every_round_set_is_logged_accepted_or_declined():
         gui.spawn_circle = real_spawn
         spy = _ModalSpy(real_mb, app, answers=[True] * 8)
         gui.messagebox = gui.cal_choice = spy
+        dialog_st = []
 
         def advance_b(win):
+            dialog_st.append(app._cal_probe['st'])
             _cal_onscreen(root, win)
             for _ in range(12):
                 if not win.winfo_exists():
@@ -1713,8 +1715,16 @@ def test_every_round_set_is_logged_accepted_or_declined():
         rots = re.search(r'rot=([0-9.,]+)deg', two)
         assert rots, two
         angs = [float(v) for v in rots.group(1).split(',')]
-        assert len(angs) == 5 and len(set(angs)) == 5, angs
-        assert sorted(int(a // 72.0) for a in angs) == [0, 1, 2, 3, 4], angs
+        # one angle per 72 degree sector, read from the dialog's own angles:
+        # the log rounds to 0.1 degree, so an angle drawn in the last 0.05
+        # degree of a sector is LOGGED on the next sector's boundary. Seen
+        # 2026-10-06 in the `#280` runs (one logged as 288.0); the odds are
+        # 0.05/72 per angle, about one run in 290. The log must carry
+        # exactly those angles, rounded.
+        drawn = dialog_st[0]['rots']
+        assert len(drawn) == 5 and len(set(drawn)) == 5, drawn
+        assert sorted(int(a // 72.0) for a in drawn) == [0, 1, 2, 3, 4], drawn
+        assert angs == [float(f'{a:.1f}') for a in drawn], (angs, drawn)
         # the whole file is one line per round-set plus a header block,
         # ASCII, so it can be grepped and pasted into an issue
         with open(log, encoding='utf-8') as f:

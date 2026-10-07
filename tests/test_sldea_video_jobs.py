@@ -406,23 +406,33 @@ print(repr((os.nice(0), before, autogroup(), os.getsid(0) == os.getpid())))
 '''
 
 
-def test_on_linux_the_job_lowers_its_autogroup_only_as_session_leader():
-    """A job started the way the launchers start it (a session of its
-    own) ends at nice JOB_NICE with its autogroup at JOB_NICE as well. A
-    job run inside someone else's session (a terminal) lowers its own
-    nice only, and leaves that session's autogroup alone. Linux only."""
+def _priority_probes():
+    """(as a session leader, inside this session): what the probe saw in
+    a job started the way the launchers start it, and in one run inside
+    someone else's session (a terminal). Linux only."""
     if not sys.platform.startswith('linux'):
-        raise _Skip("autogroups are Linux's")
+        raise _Skip("nice values and autogroups are Linux's here")
     cmd = [sys.executable, '-c', _PRIORITY_PROBE, REPO]
     lead = eval(subprocess.run(cmd, capture_output=True, text=True,
                                start_new_session=True,
                                check=True).stdout.strip())
     inside = eval(subprocess.run(cmd, capture_output=True, text=True,
                                  check=True).stdout.strip())
-    base = os.nice(0)
     assert lead[3] is True and inside[3] is False, (lead, inside)
+    return lead, inside
+
+
+def test_on_linux_a_job_lowers_its_own_nice_in_any_session():
+    lead, inside = _priority_probes()
+    base = os.nice(0)
     assert lead[0] == min(19, base + sv.JOB_NICE), lead
     assert inside[0] == min(19, base + sv.JOB_NICE), inside
+
+
+def test_on_linux_a_job_lowers_its_autogroup_only_as_session_leader():
+    """The session leader's autogroup ends at JOB_NICE; a job inside
+    someone else's session leaves that session's autogroup alone."""
+    lead, inside = _priority_probes()
     if lead[1] is None:
         raise _Skip("this kernel has no /proc/self/autogroup")
     assert lead[2].endswith(f"nice {sv.JOB_NICE}"), lead

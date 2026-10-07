@@ -216,6 +216,28 @@ def test_a_writer_that_throws_fails_the_probe_and_names_the_size():
     assert '1632 x 918' in why and 'Unknown C++ exception' in why, why
 
 
+def test_a_folder_the_probe_cannot_write_in_is_not_blamed_on_the_encoder():
+    """#392: this OpenCV reports a writer it could not open in the same way
+    for a missing encoder and for a folder it cannot write in, here one
+    that is not there and one that is a file. The reason used to say "this
+    OpenCV build has no FFV1 encoder"; it now names both causes."""
+    _need_cv()
+    import numpy as np
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    try:
+        a_file = os.path.join(d, 'a_file')
+        with open(a_file, 'w') as f:
+            f.write('x')
+        for where in (os.path.join(d, 'no', 'such'), a_file):
+            ok, why = sv.codec_available(
+                tmpdir=where, frame=np.zeros((96, 128), np.uint8))
+            assert ok is False and why == (
+                f"could not open the {sv.VIDEO_FOURCC} writer (encoder or "
+                f"disk) for 128 x 96"), (where, why)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_ffmpeg_safe_keeps_the_pixels_and_room_past_the_last_one():
     """The layout ffmpeg_safe promises: the same pixels; a row stride that
     is a multiple of 32 and a last row ending mid-page, so OpenCV passes

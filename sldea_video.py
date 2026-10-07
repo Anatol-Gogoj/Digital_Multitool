@@ -312,8 +312,10 @@ def codec_available(tmpdir=None, frame=None):
         w = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*VIDEO_FOURCC),
                             1.0, (wd, h), isColor=False)
         if not w.isOpened():
-            return False, (f"this OpenCV build has no {VIDEO_FOURCC} "
-                           f"encoder for {size}")
+            # not only a missing encoder: OpenCV 4.13 reports a folder it
+            # cannot write in (missing, or a file) the same way (#392)
+            return False, (f"could not open the {VIDEO_FOURCC} writer "
+                           f"(encoder or disk) for {size}")
         buf = None
         try:
             for f in frames:

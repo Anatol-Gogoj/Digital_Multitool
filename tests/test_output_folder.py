@@ -3,7 +3,7 @@
 
 The bench's Tk folder dialog (tk_chooseDirectory) has no New Folder button,
 and the SLDEA tab's Browse opened at the working directory instead of at
-the folder in the box. Two layers, cheapest first:
+the folder in the box. Three layers, cheapest first:
 
   * output_folder on its own (stdlib only, so it also runs on Linux without
     tkinter): what a new folder's name may not be, what an empty or missing
@@ -14,6 +14,12 @@ the folder in the box. Two layers, cheapest first:
     refusals, the re-ask, Cancel, the box update, and that a refusal from
     the system is a message, not a traceback. Needs tkinter importable,
     not a display.
+  * the real app (needs a display): the button beside Browse on the SLDEA,
+    Webcam and Continuous Logging tabs, each wired to its own box; Browse
+    opening at the box's folder; and New folder... in Browse's state during
+    a LIVE SLDEA run and while logging runs. Nothing disables Browse then,
+    so nothing disables New folder... either, and the folder the running
+    worker writes to does not change.
 
 Run: .venv/bin/python tests/test_output_folder.py
 """
@@ -28,6 +34,7 @@ import os
 import shutil
 import string
 import tempfile
+import threading
 
 import output_folder as of
 
@@ -535,6 +542,224 @@ def test_browse_opens_at_the_box_and_cancel_changes_nothing():
         assert var.get() == tmp
         assert d.calls[0][3] == {'initialdir': os.path.abspath(runs),
                                  'parent': 'PARENT'}, d.calls
+
+
+# --------------------------------------------------------------------------
+# The real app (needs a display)
+# --------------------------------------------------------------------------
+
+# (button prefix, the box's variable, the box's name in messages)
+TABS = (('sldea', 'sldea_outdir', 'Output dir'),
+        ('cam', 'cam_dir_var', 'Save to'),
+        ('log', 'log_dir', 'Log Directory'))
+
+
+def _app():
+    """(root, app) with every tab built, or raise _Skip."""
+    try:
+        import tkinter as tk
+    except ImportError as e:
+        raise _Skip(f"no tkinter: {e}")
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        raise _Skip(f"no display for Tk: {e}")
+    import gui
+    # No instrument hunt: irrelevant here, and it starts threads.
+    gui.InstrumentControlGUI.auto_connect = lambda self: None
+    app = gui.InstrumentControlGUI(root)
+    root.update_idletasks()
+    return root, app
+
+
+def _app_dialogs(**answers):
+    """Fake dialogs for the app: ui_widgets' (the helpers) and gui's own,
+    so a picker that still called the real dialog could not block."""
+    import gui
+    import ui_widgets
+    return _fake_dialogs(ui_widgets, gui, **answers)
+
+
+class _MB:
+    """gui.messagebox stand-in for the run starts: answers questions by
+    title; a question it has no answer for fails the test."""
+
+    def __init__(self, answers):
+        self.answers = dict(answers)
+        self.calls = []
+
+    def askyesno(self, title, message, **kw):
+        self.calls.append(('askyesno', title, message))
+        if title not in self.answers:
+            raise AssertionError(f"unexpected question: {title!r}")
+        return self.answers[title]
+
+    def __getattr__(self, name):
+        if name.startswith('show'):
+            def note(title, message, **kw):
+                self.calls.append((name, title, message))
+            return note
+        raise AttributeError(name)
+
+
+def _enabled(btn):
+    return btn.instate(['!disabled'])
+
+
+def test_each_tab_has_new_folder_right_beside_browse():
+    root, app = _app()
+    try:
+        for prefix, _var_name, _box in TABS:
+            browse = getattr(app, f'{prefix}_browse_btn')
+            new = getattr(app, f'{prefix}_newdir_btn')
+            assert browse.cget('text') == 'Browse', prefix
+            assert new.cget('text') == of.NEW_FOLDER_LABEL, prefix
+            assert browse.master is new.master, prefix
+            assert browse.master.pack_slaves() == [browse, new], prefix
+            assert _enabled(browse) and _enabled(new), prefix
+        # each pair stands where Browse alone stood
+        for prefix in ('sldea', 'log'):
+            info = getattr(app, f'{prefix}_browse_btn').master.grid_info()
+            assert (int(info['row']), int(info['column'])) == (0, 2), info
+        row = app.cam_browse_btn.master.master.pack_slaves()
+        here = row.index(app.cam_browse_btn.master)
+        assert row[here - 1].winfo_class() == 'TEntry', row
+        assert str(row[here - 1].cget('textvariable')) == str(app.cam_dir_var)
+    finally:
+        root.destroy()
+
+
+def test_each_tabs_buttons_work_on_its_own_box():
+    root, app = _app()
+    try:
+        with _tmpdir() as tmp:
+            for prefix, var_name, box in TABS:
+                var = getattr(app, var_name)
+                others = {n: getattr(app, n).get()
+                          for _p, n, _b in TABS if n != var_name}
+                var.set(tmp)
+                with _app_dialogs(names=[f'{prefix} day']) as d:
+                    getattr(app, f'{prefix}_newdir_btn').invoke()
+                want = of.new_path(tmp, f'{prefix} day')
+                assert var.get() == want and os.path.isdir(want), \
+                    (prefix, var.get(), d.calls)
+                assert d.kinds() == ['askstring'], (prefix, d.calls)
+                assert d.calls[0][3]['parent'] is app.root
+                assert {n: getattr(app, n).get() for n in others} == others
+                assert app.status_bar.cget('text') == \
+                    f"New folder made: {want}", app.status_bar.cget('text')
+                # Browse opens at the folder now in the box
+                with _app_dialogs(folder='') as d:
+                    getattr(app, f'{prefix}_browse_btn').invoke()
+                assert d.kinds() == ['askdirectory'], (prefix, d.calls)
+                assert d.calls[0][3] == {'initialdir': os.path.abspath(want),
+                                         'parent': app.root}, d.calls
+                assert var.get() == want
+                # an empty box is explained, and nothing is asked
+                var.set('')
+                with _app_dialogs(names=['never asked']) as d:
+                    getattr(app, f'{prefix}_newdir_btn').invoke()
+                assert d.kinds() == ['showerror'], (prefix, d.calls)
+                assert d.calls[0][2].startswith(f"The {box} box is empty"), \
+                    d.calls
+            assert sorted(os.listdir(tmp)) == ['cam day', 'log day',
+                                               'sldea day']
+    finally:
+        root.destroy()
+
+
+def test_during_a_live_sldea_run_new_folder_stays_as_browse_does():
+    """The real sldea_run, LIVE, up to the worker (a stand-in that only
+    records its arguments). Nothing on the tab disables Browse during a run,
+    so nothing disables New folder...; and a folder made mid-run changes
+    only where the NEXT run goes, never the running one's folder."""
+    root, app = _app()
+    import gui
+    saved = (gui.messagebox, gui.INSTRUMENTS_SUPPORTED)
+    started = threading.Event()
+    seen = {}
+
+    def worker(*args, **kw):
+        seen['args'] = args
+        started.set()
+
+    try:
+        with _tmpdir() as tmp:
+            gui.messagebox = _MB({
+                'No current monitoring': True, 'Energize HV?': True,
+                'No electrode specified': True,
+                'No concentration specified': True})
+            gui.INSTRUMENTS_SUPPORTED = True    # the LIVE path on any OS
+            app.sg = object()     # "connected"; the stand-in never drives it
+            app.scope = None
+            app._sldea_worker = worker
+            app._sldea_skip_preflight = True
+            app._sldea_live_view = None     # no live-view window in a test
+            app.sldea_outdir.set(tmp)
+            app.sldea_dryrun.set(False)
+            app._sldea_dry_toggle()
+            assert _enabled(app.sldea_browse_btn)
+            assert _enabled(app.sldea_newdir_btn)
+            app.sldea_run()
+            assert started.wait(5), gui.messagebox.calls
+            # the run really is on, and LIVE
+            assert app._sldea_running and app._sldea_live_ch is not None
+            assert str(app.sldea_run_btn.cget('state')) == 'disabled'
+            assert seen['args'][1] == tmp and seen['args'][6] is False
+            # the point: New folder... is in Browse's state
+            assert _enabled(app.sldea_newdir_btn) == \
+                _enabled(app.sldea_browse_btn) is True
+            with _app_dialogs(names=['next session']) as d:
+                app.sldea_newdir_btn.invoke()
+            want = of.new_path(tmp, 'next session')
+            assert app.sldea_outdir.get() == want and os.path.isdir(want), \
+                d.calls
+            assert seen['args'][1] == tmp      # the running run's folder
+            app._sldea_finished()
+            assert not app._sldea_running
+            assert _enabled(app.sldea_newdir_btn) == \
+                _enabled(app.sldea_browse_btn) is True
+    finally:
+        gui.messagebox, gui.INSTRUMENTS_SUPPORTED = saved
+        root.destroy()
+
+
+def test_while_logging_runs_new_folder_stays_as_browse_does():
+    """The real start_logging with a stand-in worker, as in
+    tests/test_continuous_log.py: Start hands the worker its folder, so a
+    folder made while logging runs is for the NEXT Start."""
+    root, app = _app()
+    import gui
+    saved = gui.messagebox
+    runs = []
+    try:
+        with _tmpdir() as tmp:
+            gui.messagebox = _MB({})
+            app._logging_worker = lambda interval, cfg, tok: runs.append(cfg)
+            app.psu = object()            # "connected"; never called
+            app.log_lcr.set(False)
+            for ch in range(1, 5):
+                app.log_scope_channels[ch].set(False)
+            app.log_psu_channels[1].set(True)
+            app.log_dir.set(tmp)
+            app.start_logging()
+            app.record_thread.join(5)
+            assert app.recording and runs and runs[0]['dir'] == tmp, \
+                gui.messagebox.calls
+            assert str(app.log_start_btn.cget('state')) == 'disabled'
+            assert _enabled(app.log_newdir_btn) == \
+                _enabled(app.log_browse_btn) is True
+            with _app_dialogs(names=['next run']) as d:
+                app.log_newdir_btn.invoke()
+            want = of.new_path(tmp, 'next run')
+            assert app.log_dir.get() == want and os.path.isdir(want), d.calls
+            assert runs[0]['dir'] == tmp       # the running log's folder
+            app.stop_logging()
+            assert _enabled(app.log_newdir_btn) == \
+                _enabled(app.log_browse_btn) is True
+    finally:
+        gui.messagebox = saved
+        root.destroy()
 
 
 def _run():

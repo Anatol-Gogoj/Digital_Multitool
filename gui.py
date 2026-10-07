@@ -55,7 +55,8 @@ import sldea_video
 from sldea_profile import (SldeaProfile, control_v_for_kv, measured_kv,
                            measured_ua, fmt_duration)
 import sweep_plan
-from ui_widgets import ScrollableTab, SplashScreen, add_tooltip
+from ui_widgets import (ScrollableTab, SplashScreen, add_tooltip,
+                        browse_folder, folder_buttons, new_folder)
 from arb_editor import ArbWaveformEditor
 from waveform_render import unit_waveform, scale_waveform
 from version import version_string
@@ -2896,8 +2897,15 @@ LOGGING:
             'SCPI_SLDEA_DIR', '/mnt/shareDrive/robot_incubator/SLDEA_data'))
         ttk.Entry(outf, textvariable=self.sldea_outdir, width=34).grid(
             row=0, column=1, padx=6)
-        ttk.Button(outf, text="Browse",
-                   command=self._sldea_browse_out).grid(row=0, column=2)
+        # Browse opens at the folder in the box; New folder... makes one
+        # inside it (#394), because the bench's Tk folder dialog cannot.
+        # Neither is disabled during a run, exactly as Browse never was:
+        # the worker takes its own copy of the folder at Start, so the box
+        # only decides where the NEXT run goes.
+        btns, self.sldea_browse_btn, self.sldea_newdir_btn = folder_buttons(
+            outf, self._sldea_browse_out, self._sldea_new_folder,
+            "Output dir", "the runs that follow")
+        btns.grid(row=0, column=2)
         ttk.Label(outf, text="Run name (blank = auto):").grid(row=1, column=0,
                                                               sticky='e')
         self.sldea_runname = ttk.Entry(outf, width=26)
@@ -3523,9 +3531,21 @@ LOGGING:
                                       activebackground='#8e1a1a')
 
     def _sldea_browse_out(self):
-        d = filedialog.askdirectory()
-        if d:
-            self.sldea_outdir.set(d)
+        # opens at the folder in the box (#394); it used to open at the
+        # process's working directory whatever the box said
+        browse_folder(self.sldea_outdir, parent=self.root)
+
+    def _sldea_new_folder(self):
+        self._new_folder_into(self.sldea_outdir, "Output dir")
+
+    def _new_folder_into(self, var, box):
+        """New folder... on any tab (#394): make a folder inside the one in
+        `var` and put it there; the status bar names the folder made.
+        -> its path, or None when nothing was made."""
+        path = new_folder(var, box, parent=self.root)
+        if path and hasattr(self, 'status_bar'):
+            self.status_bar.config(text=f"New folder made: {path}")
+        return path
 
     def _sldea_conc_applicable(self, electrode=None):
         """Does Concentration (mL) mean anything for the chosen electrode?
@@ -5806,8 +5826,13 @@ LOGGING:
         ttk.Label(config_frame, text="Log Directory:").grid(row=0, column=0, sticky='w', pady=5)
         self.log_dir = tk.StringVar(value="./logs")
         ttk.Entry(config_frame, textvariable=self.log_dir, width=40).grid(row=0, column=1, padx=10, pady=5)
-        ttk.Button(config_frame, text="Browse", 
-                   command=self.select_log_dir).grid(row=0, column=2, padx=5)
+        # Browse + New folder... (#394). Neither is disabled while logging,
+        # as Browse never was: Start hands the worker the folder, so the
+        # box only decides where the NEXT Start writes.
+        btns, self.log_browse_btn, self.log_newdir_btn = folder_buttons(
+            config_frame, self.select_log_dir, self._log_new_folder,
+            "Log Directory", "the CSV files of the next Start")
+        btns.grid(row=0, column=2, padx=5)
 
         # Sample cadence (#30): ONE box plus a unit choice. The number is
         # read in the selected unit and stored in seconds
@@ -7152,9 +7177,11 @@ LOGGING:
     
     # Logging methods
     def select_log_dir(self):
-        directory = filedialog.askdirectory()
-        if directory:
-            self.log_dir.set(directory)
+        # opens at the folder in the box (#394), like the Webcam's Browse
+        browse_folder(self.log_dir, parent=self.root)
+
+    def _log_new_folder(self):
+        self._new_folder_into(self.log_dir, "Log Directory")
 
     def _log_cadence_echo_update(self):
         """The hint beside the cadence box: the same cadence in the other
@@ -7652,7 +7679,11 @@ LOGGING:
         add_tooltip(ttk.Entry(out, textvariable=self.cam_dir_var, width=44),
                     "Folder every snapshot/interval/sweep image is saved "
                     "into.").pack(side=tk.LEFT, padx=4)
-        ttk.Button(out, text="Browse", command=self._cam_browse_dir).pack(side=tk.LEFT)
+        # Browse + New folder... (#394), never disabled, as Browse never was
+        btns, self.cam_browse_btn, self.cam_newdir_btn = folder_buttons(
+            out, self._cam_browse_dir, self._cam_new_folder, "Save to",
+            "the images that follow")
+        btns.pack(side=tk.LEFT)
         ttk.Label(out, text="Prefix:").pack(side=tk.LEFT, padx=(10, 0))
         self.cam_prefix_var = tk.StringVar(value='cap')
         add_tooltip(ttk.Entry(out, textvariable=self.cam_prefix_var,
@@ -7819,9 +7850,12 @@ LOGGING:
         self.cam_refresh_devices()
 
     def _cam_browse_dir(self):
-        d = filedialog.askdirectory(initialdir=self.cam_dir_var.get() or '.')
-        if d:
-            self.cam_dir_var.set(d)
+        # at the folder in the box, or the nearest one above it that
+        # exists; an empty box opens at '.', as before (#394)
+        browse_folder(self.cam_dir_var, parent=self.root)
+
+    def _cam_new_folder(self):
+        self._new_folder_into(self.cam_dir_var, "Save to")
 
     def cam_refresh_devices(self):
         idxs = webcam.list_cameras()

@@ -63,11 +63,34 @@ def test_switching_the_unit_keeps_the_cadence():
     assert cl.convert_text('2', 'Hz', 's') == '0.5'
     third = cl.convert_text('3', 's', 'Hz')
     assert third == '0.333333', third
-    assert cl.convert_text(third, 'Hz', 's') == '3'    # 6 digits round-trip
+    assert cl.convert_text(third, 'Hz', 's') == '3'    # not always: below
     # same unit, or text that is not a cadence: left exactly as typed
     assert cl.convert_text('1.50', 's', 's') == '1.50'
     for text in ('', 'abc', '0', '-1', 'nan'):
         assert cl.convert_text(text, 's', 'Hz') == text, text
+
+
+def test_a_unit_switch_moves_the_cadence_by_at_most_5_ppm():
+    """`#389`: fmt_number's docstring promised that 6 significant digits
+    make s -> Hz -> s an exact round trip. They do not: 7 s comes back as
+    7.00001 s. Each switch rounds to 6 digits, which moves the cadence by
+    at most half a unit in the 6th digit (5 ppm), and that bound is what
+    the docstring now says."""
+    hz = cl.convert_text('7', 's', 'Hz')
+    assert hz == '0.142857', hz
+    assert cl.convert_text(hz, 'Hz', 's') == '7.00001'
+    assert math.isclose(cl.parse_cadence(hz, 'Hz'), 7.0, rel_tol=5e-6)
+    # the bound, over cadences from 0.1 ms to 10000 s
+    for k in range(-1000, 1001):
+        text = cl.fmt_number(10 ** (k / 250))
+        seconds = float(text)
+        hz = cl.convert_text(text, 's', 'Hz')
+        # Start reads the Hz box: one rounding away from the typed cadence
+        assert math.isclose(cl.parse_cadence(hz, 'Hz'), seconds,
+                            rel_tol=5e-6), (text, hz)
+        # switching back rounds once more
+        back = float(cl.convert_text(hz, 'Hz', 's'))
+        assert math.isclose(back, seconds, rel_tol=1e-5), (text, hz, back)
 
 
 def test_the_box_refuses_empty_non_numeric_zero_negative_and_non_finite():

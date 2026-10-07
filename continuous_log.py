@@ -131,8 +131,16 @@ def parse_cadence(text, unit=UNIT_S):
 
 def fmt_number(value):
     """A cadence number for the box and the echo: up to 6 significant
-    digits, no trailing zeros. 6 digits make s -> Hz -> s round-trip to the
-    same text (3 -> 0.333333 -> 3)."""
+    digits, no trailing zeros.
+
+    Rounding to 6 digits moves a number by at most half a unit in its 6th
+    digit, 5 parts per million, so a unit switch is not always an exact
+    round trip: 3 s -> 0.333333 Hz -> 3 s comes back, but 7 s -> 0.142857
+    Hz -> 7.00001 s does not (#389). Each switch moves the cadence by at
+    most 5 ppm, which is 5 us at a 1 s cadence. repr() would not make the
+    round trip exact either (1 / (1 / 49) is 49.00000000000001 in binary
+    floating point), and it would turn 3 s into 0.3333333333333333 Hz, 18
+    characters in a 12-character box."""
     return f"{value:.6g}"
 
 

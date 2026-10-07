@@ -32,9 +32,18 @@ run-plan staircase on the SLDEA tab (sldea_preview).
 HV-safety rules this module keeps (the run thread runs the watchdog and
 the ramp):
 
-* The run thread never calls anything here and never waits on it. Its
-  only contact is the attribute swap above, and that never depends on
-  whether this window is open, closed or destroyed.
+* The run thread never calls anything here. Its only contact is the
+  attribute swap above, and that never depends on whether this window is
+  open, closed or destroyed.
+* The run thread is not fully decoupled from this window, though. Its
+  own root.after calls (_sldea_log, _sldea_set_status) are marshaled to
+  the Tk thread by _tkinter and wait until that thread takes them, so
+  one made while a tick of this loop runs waits for the tick to end.
+  With a 1080p frame a tick costs about 10 ms, twice a second (#388:
+  6.6 ms median and 7.3 ms max without the Tk paste in the review; 9.5
+  ms median and 13 ms max with it on the development PC, 2026-10-06).
+  Any Tk work delays those calls the same way; the coupling predates
+  this window. A closed window has no tick and adds nothing.
 * Everything here runs on the Tk thread, from a Tk `after` loop at about
   2 Hz that only reads. It never opens, grabs from or re-stamps the
   camera: in a stills-only run a stream would contend for the device
@@ -339,7 +348,12 @@ def choose_place(root, area, size, gap=16, bottom_margin=48, slack=16):
     on the main window's own monitor whatever the layout, and
     `covers_root` is True: the caller then keeps the main window above
     it, so an automatic open never covers the SLDEA tab or its status
-    line, which carries the run's alarms."""
+    line, which carries the run's alarms.
+
+    Owner decision 2026-10-06 (#388): keep it so. With no room beside
+    the main window, the view opened at a run start stays behind it
+    until "Live view..." is pressed, so it can never cover the run
+    controls or Abort."""
     rx, ry, rw, rh = (int(v) for v in root)
     x0, y0, x1, y1 = (int(v) for v in area)
     w, h = (int(v) for v in size)

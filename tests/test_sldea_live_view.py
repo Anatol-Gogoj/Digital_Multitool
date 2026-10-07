@@ -12,7 +12,8 @@ attribute (app._sldea_live_still). What is pinned here:
   save has succeeded (#388), and it never touches the view object. A
   closed, destroyed or never-opened view costs the run nothing, and a
   hand-over that raises is swallowed: the still is saved and its row
-  written as before.
+  written as before. Nothing on the run's side writes into the frame the
+  view holds (#388).
 * The Tk side: the loop picks up a swapped still and labels it a still
   with its age, never as live; (None, None) from the recorder shows
   NO FRAME (stream stalled), and a NO FRAME on show before the run ended
@@ -475,6 +476,41 @@ def test_a_still_that_could_not_be_saved_is_never_handed_over():
         assert any('frame save error' in ln for ln in app.lines), app.lines
         assert any('could not be saved' in ln for ln in app.lines), \
             app.lines
+
+
+def test_the_frame_is_byte_identical_after_the_capture_and_baseline_check():
+    """#388: the hand-over makes no copy, so the view holds the very array
+    the run thread goes on using. Nothing on that side may write into it:
+    pinned byte for byte after _sldea_capture and the baseline picture
+    check, alone and in a whole stills-only DRY run (warm-up, baseline
+    and its check, landings), where every still is that one array."""
+    frame = _disc_frame()
+    before = frame.copy()
+    app = _HandOverApp()
+    with _tempfile.TemporaryDirectory() as tmp:
+        got, rows = _capture(app, frame, tmp=tmp)
+    assert got is frame and app.handed[0].frame is frame
+    flat, line = sldea_profile.baseline_picture_check(got, '')
+    assert not flat and line.endswith('OK'), line
+    assert frame.dtype == before.dtype and frame.shape == before.shape
+    assert frame.tobytes() == before.tobytes(), \
+        "the capture or the baseline check wrote into the frame"
+    p = _profile()
+    app = _HandOverApp()
+    with _tempfile.TemporaryDirectory() as tmp, _oneshot(frame):
+        t = _threading.Thread(
+            target=app._sldea_worker, args=(p, tmp, 'RUN', 1, 2, 3, True),
+            kwargs=dict(cam_exp=3, cam_gain=0), daemon=True)
+        t.start()
+        t.join(60)
+        assert not t.is_alive(), ("the worker stalled", app.lines)
+    assert not any(ln.startswith('ERROR') for ln in app.lines), app.lines
+    assert any(ln.startswith('baseline picture check') for ln in
+               app.lines), app.lines
+    assert len(app.handed) == len(p.snapshots), app.handed
+    assert all(h.frame is frame for h in app.handed)
+    assert frame.tobytes() == before.tobytes(), \
+        "the run wrote into the frame the view holds"
 
 
 def test_the_start_path_forgets_the_last_run_before_the_worker_exists():

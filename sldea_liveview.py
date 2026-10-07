@@ -41,6 +41,9 @@ the ramp):
   exactly as the refused Webcam preview did.
 * A frame from the run is never written to: the view works on its own
   thumbnail, and the full-size frame is dropped at the end of each tick.
+  The run thread goes on reading a still's frame after the hand-over
+  (the baseline picture check), so it may not write into it either;
+  gui._sldea_capture says so, and a test pins it byte for byte.
 * A new run forgets the previous one before that run's worker exists
   (begin_run), and a recorder left over from an earlier run is never
   taken for this run's (they are told apart by identity), so nothing

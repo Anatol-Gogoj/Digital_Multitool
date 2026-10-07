@@ -5787,7 +5787,10 @@ LOGGING:
             # the notes column of every row it reviews
             + (f"  (frame t={frame_t:.2f}s)" if frame_t is not None else ""))
         # The frame as grabbed (None when the camera gave none): the
-        # runner's baseline picture check reads it.
+        # runner's baseline picture check reads it. The live view holds a
+        # reference to this very array (the hand-over above makes no
+        # copy), so nothing may modify it in place: draw or convert on a
+        # copy. The live-view tests pin it byte for byte (#388).
         return frame
 
     def create_logging_tab(self):

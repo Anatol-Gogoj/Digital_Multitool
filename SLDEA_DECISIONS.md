@@ -727,6 +727,101 @@ OpenCV `modules/videoio/src/cap_ffmpeg_impl.hpp` at 4.13.0; FFmpeg n4.4
 `libavutil/imgutils.c`, `pixdesc.c`, `frame.c` and `libavcodec/encode.c`;
 FFmpeg n5.0 `libavutil/pixdesc.c`.
 
+### Follow-up (2026-10-06): setup.txt says how the video ended, the codec check gives up after 15 s, and a dead stream still does not stop the run (#392)
+
+**TL;DR:** setup.txt said "recording started" even when the video then
+stopped early or recorded nothing. A video run now ends setup.txt with a
+`Video outcome (end):` line: the frames recorded, or NOT recorded, and
+why the video stopped. The codec check gives up after 15 s and stops the
+run before any HV, and the owner decided that a missing camera or a dead
+stream at run start still does not stop the run.
+
+**Observation.**
+
+- `Video outcome:` was written once, before the staircase. A stream that
+  stopped delivering mid-run, a stream reopened at a size the codec was
+  not checked at, and an encoder that failed mid-run all ended the video
+  early, and only `run.log` said so. An unplugged camera does not even
+  set the recorder's error: the reader only tries to reopen the stream.
+  A rule keyed on `rec.error` alone would miss that case.
+- `check_codec` had no time limit. It runs at 0 V, before the SG output
+  is switched on, so a hang there cannot leave HV on, but the tab would
+  stay "running" with Abort waiting on it.
+- How long the check takes (Gogojster, Core Ultra 9 285H, the pinned
+  OpenCV 4.13.0 with avcodec 58.134.100; 3 fresh processes x 4 checks
+  per size, the first check in each process included): 0.23-0.25 s at
+  1920 x 1080, 0.54-0.58 s at 2448 x 2048 (the DFK's full sensor) and
+  0.89-0.92 s at 3840 x 2160. The #379 work measured 0.31-0.45 s at
+  1920 x 1080 and 1.2-1.3 s at 3840 x 2160 with the same build.
+- A staging folder the probe cannot write in (missing, or a file) makes
+  `VideoWriter.isOpened()` false, as a missing encoder does, and the
+  reason said "this OpenCV build has no FFV1 encoder".
+- The guard-page test counted any failed child as the fault (`rc != 0 or
+  ...`). The real guard child, started from a folder without
+  `sldea_video`, dies of a ModuleNotFoundError and passed that rule.
+
+**Decision.**
+
+- **The end line.** After `rec.stop()` in the worker's finally block, so
+  after the SG is zeroed, setup.txt gets one line from
+  `VideoRecorder.end_outcome()`:
+  - `Video outcome (end): recorded N frames, a to b s on the run's
+    clock` for a clean recording;
+  - that line followed by `, then stopped: <why>` when the recorder's
+    error or a dead stream ended the video early. A stream counts as
+    dead when its newest frame was more than `STILL_MAX_AGE_S` (2 s) old
+    as the recorder was stopped; the reader reads until then, so a live
+    one never is;
+  - `Video outcome (end): NOT recorded: <why>` when nothing was recorded;
+  - the count so far, saying so, when `stop()` gave up on an encoder
+    that was still writing. Dropped frames are counted.
+
+  A clean recording gets its line too. Without it, no line would mean
+  either "recorded well" or "the run never got this far" (the app closed
+  during the shutdown), and no run before this change has one. The line
+  is one line of ASCII, appended through the same locale-encoded open as
+  the start line. A failure to write it goes to `run.log`, never out of
+  the finally block.
+- **The codec check gives up after 15 s** (`CODEC_CHECK_TIMEOUT_S`). The
+  probe runs on a daemon thread, and a check given up on is a failed
+  check: the run stops before HV through the existing codec-stop words,
+  with the reason "was still running after 15 s, so it was given up on".
+  15 s is 11 times the slowest 3840 x 2160 figure above and 33 times the
+  slowest 1920 x 1080 one, and the bench's Bayer stream is at most 1920
+  wide (`webcam.choose_size`). A false stop costs a re-run; the limit
+  costs only the wait on a hang, at 0 V.
+- **The thread that cannot be killed** holds no camera: the check probes
+  a frame the reader already holds, and the worker stops the recorder as
+  on any failed check, which closes the stream. It writes only its probe
+  file in this run's staging folder, whose name no other run uses. The
+  worker leaves that folder in place while the probe runs, because on a
+  hung disk `rmdir` would hang the worker too. While the probe runs, the
+  next run's check refuses at once and says to restart the app, instead
+  of starting a second probe that could get stuck behind the first on a
+  lock inside FFmpeg. The refusal ends when the probe returns.
+- **A writer that will not open** is now "could not open the FFV1 writer
+  (encoder or disk)".
+- **The guard-page test** counts only the fault: "Unknown C++ exception"
+  from the write, or the child killed by SIGSEGV (returncode -11) or by
+  STATUS_ACCESS_VIOLATION (0xC0000005), and only after the child printed
+  that it was writing. Both codes were measured with a NULL read in a
+  child (`faulthandler._read_null`): -11 under WSL Debian and 0xC0000005
+  on Windows 11.
+- **Owner decision (2026-10-06), answering the question above:** a dead
+  stream or a missing camera at run start does NOT stop the run. The
+  stills are the measurement, and setup.txt records the video outcome;
+  a missing camera is already stopped at the pre-flight baseline (#348).
+  What setup.txt says in each case: a stream that delivers nothing in
+  5 s already gets its own `Video outcome: NOT recorded` start line; a
+  run whose recorder started now gets the end line; a run with no camera
+  at all writes no outcome line, only the run.log warning. That last
+  case is unchanged here. Whether setup.txt should say it too is an open
+  owner question.
+
+**Not verified.** Desk only (Gogojster, Windows 11). The timeout has not
+fired on a real hang: the tests stand in a probe that blocks. The bench
+line in #369 unplugs the camera in a DRY run and reads the end line.
+
 ## The baseline disc fit retries from the window centre when it refuses, and judges that retry against the ring around the disc (2026-10-05)
 
 **TL;DR:** on backlit run `13_backlight_2` the automatic baseline fit

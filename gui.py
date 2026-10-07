@@ -5003,8 +5003,8 @@ LOGGING:
                 # A check that hangs is given up on after
                 # CODEC_CHECK_TIMEOUT_S and fails the same way (#392).
                 # A stream that will not start (above) still falls back to
-                # one-shot stills, as before: whether that should stop too
-                # is an open owner question (SLDEA_DECISIONS 2026-10-06).
+                # one-shot stills, as before: the owner decided it does not
+                # stop the run (SLDEA_DECISIONS 2026-10-06, #392).
                 if rec is not None and not self._sldea_stop:
                     ok, codec_why = rec.check_codec()
                     if ok:

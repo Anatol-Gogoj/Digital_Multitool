@@ -392,6 +392,32 @@ def test_the_summary_line_counts_samples_and_skipped_slots():
     assert cl.summary_line(0, 0, None, False) == 'Stopped: 0 samples'
 
 
+def test_the_skipped_count_stays_readable_at_an_absurd_cadence():
+    """`#389`: main's > 0 bound accepts 1e-12 s, and there 50 ms of reads
+    skip about 5e10 slots a tick. The line shows the count exactly up to
+    a million and "over 1,000,000" beyond. Only the text is capped: the
+    count, the grid and what the box accepts stay as they were."""
+    assert cl.parse_cadence('1e-12', 's') == 1e-12       # still accepted
+    slot, due, skipped = cl.next_tick(0.0, 1e-12, 0, 0.05)
+    assert skipped > 4e10 and math.isclose(due, 0.05, abs_tol=1e-9), (
+        slot, due, skipped)
+    st = cl.LiveStats(1e-12)
+    st.tick(skipped)
+    _rows, ticks, total = st.snapshot()
+    assert total == skipped                    # the count is not capped
+    assert cl.summary_line(ticks, total, 1e-12, True) == (
+        'Running: 1 sample, every 1e-12 s (1e+12 Hz); over 1,000,000 '
+        'slots skipped (reads took longer than the cadence)')
+    head = 'Stopped: 5 samples, every 1 s (1 Hz); '
+    tail = ' skipped (reads took longer than the cadence)'
+    for n, words in ((1, '1 slot'), (12345, '12,345 slots'),
+                     (cl.SKIPPED_SHOWN_MAX, '1,000,000 slots'),
+                     (cl.SKIPPED_SHOWN_MAX + 1, 'over 1,000,000 slots'),
+                     (10 ** 15, 'over 1,000,000 slots')):
+        line = cl.summary_line(5, n, 1.0, False)
+        assert line == head + words + tail, (n, line)
+
+
 def test_live_stats_survive_a_writer_and_a_reader_at_once():
     """The worker writes while the Tk thread snapshots, and a run adds
     rows as it goes (a source's first good read, an LCR mode change), so

@@ -204,7 +204,9 @@ def next_tick(t_first, interval_s, slot, now):
 
     An interval too short for the grid arithmetic (the grid index stops
     being finite) degrades to "start now", which is what main's loop did
-    for such an interval anyway.
+    for such an interval anyway. Short of that, the count is exact and can
+    be absurd: about 5e10 per 50 ms of reads at a 1e-12 s cadence, which
+    the > 0 bound accepts. summary_line caps what it shows of it.
     """
     nxt = slot + 1
     due = t_first + nxt * interval_s
@@ -354,6 +356,17 @@ def fmt_value(value, unit):
     return lcr_format.format_si(value, unit, digits=6)
 
 
+# The summary line gives the skipped-slot count exactly up to this and
+# "over 1,000,000" beyond it (#389). A cadence far shorter than the reads
+# piles up absurd counts (about 5e10 per 50 ms of reads at 1e-12 s, which
+# main's > 0 bound accepts), and past a million the exact number says no
+# more than "most slots are skipped". Only the text is capped: the count,
+# the sampling grid and what the cadence box accepts are unchanged. A
+# floor on the cadence would also shorten the number, but it would refuse
+# cadences the box has always taken (MIN_INTERVAL_EXCLUSIVE_S).
+SKIPPED_SHOWN_MAX = 1_000_000
+
+
 def summary_line(ticks, skipped, interval_s, running):
     """The line under the live table."""
     if running and not ticks:
@@ -367,8 +380,11 @@ def summary_line(ticks, skipped, interval_s, running):
             cadence = ''
     line = f"{state}: {ticks} sample{'' if ticks == 1 else 's'}{cadence}"
     if skipped:
-        line += (f"; {skipped} slot{'' if skipped == 1 else 's'} skipped "
-                 "(reads took longer than the cadence)")
+        if skipped > SKIPPED_SHOWN_MAX:
+            count = f"over {SKIPPED_SHOWN_MAX:,} slots"
+        else:
+            count = f"{skipped:,} slot{'' if skipped == 1 else 's'}"
+        line += f"; {count} skipped (reads took longer than the cadence)"
     return line
 
 

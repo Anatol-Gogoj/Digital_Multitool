@@ -2501,6 +2501,7 @@ def test_run_switch_mid_detect_cannot_cross_contaminate():
     Now: switching is disabled while a worker runs, and even a forced
     switch (the pierced-event case) leaves stale output dropped by the
     generation token."""
+    import threading
     import sldea_edge as se
     import sldea_edge_gui as gui
     root = _tk_root_or_skip('mid-detect switch')
@@ -2517,6 +2518,7 @@ def test_run_switch_mid_detect_cannot_cross_contaminate():
         return real_cands(*a, **k)
 
     se.candidates = slow_cands
+    workers = []
     try:
         import cv2
         run_a = _fake_run(os.path.join(d, 'SLDEA_A'))
@@ -2545,7 +2547,9 @@ def test_run_switch_mid_detect_cannot_cross_contaminate():
             w.writerows(rows_a)
         app = gui.EdgeReviewApp(root, path=os.path.join(d, 'SLDEA_B'))
         app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        before = set(threading.enumerate())
         app.detect()
+        workers += _new_threads(before)
         assert app._detect_busy
         # the UI path is CLOSED during detection
         assert str(app.run_box.cget('state')) == 'disabled'
@@ -2575,7 +2579,9 @@ def test_run_switch_mid_detect_cannot_cross_contaminate():
         # 3-frame pass and report 'detected 3 frames' (review
         # 2026-08-05: this exact mutant survived the earlier version).
         app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        before = set(threading.enumerate())
         app.detect()
+        workers += _new_threads(before)
         t0 = time.time()
         while app._detect_busy and time.time() - t0 < 15.0:
             root.update()
@@ -2589,6 +2595,11 @@ def test_run_switch_mid_detect_cannot_cross_contaminate():
         se.candidates = real_cands
         gui.messagebox = real_mb
         root.destroy()
+        # joined while this frame still holds the app: a worker's target is
+        # the app's bound method, so one that outlived the case would drop
+        # the app's last reference on its own thread (`#280`, see _run)
+        for t in workers:
+            t.join(15.0)
         shutil.rmtree(d, ignore_errors=True)
 
 

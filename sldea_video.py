@@ -434,6 +434,7 @@ class VideoRecorder:
         self.error = None
         self.size = None                       # (w, h) of the recording
         self.probed_size = None                # (w, h) check_codec passed
+        self.stopped_at = None                 # clock time of the first stop()
         self._reader_t = threading.Thread(target=self._reader, daemon=True,
                                           name='sldea-video-reader')
         self._writer_t = threading.Thread(target=self._writer, daemon=True,
@@ -563,6 +564,10 @@ class VideoRecorder:
         self._recording = False
         self._stop.set()
         try:
+            if self.stopped_at is None:
+                # for end_outcome: the reader has read until now, so a
+                # live stream's newest frame is about a frame period old
+                self.stopped_at = self._clock()
             if self._reader_t.is_alive():
                 self._reader_t.join(max(0.0, min(2.0,
                                                  end - time.monotonic())))
@@ -628,6 +633,64 @@ class VideoRecorder:
                 + (f", {self.dropped} DROPPED -- the encoder could not keep "
                    f"up" if self.dropped else "")
                 + (f"; ERROR: {self.error}" if self.error else ""))
+
+    def end_outcome(self):
+        """How the recording ENDED, in words for the `Video outcome (end):`
+        line the tab appends to setup.txt after stop() (#392). setup.txt
+        says "recording started" before the staircase, and a stream that
+        stops delivering, a size the codec was not checked at or an encoder
+        failure all end a video early. Only run.log used to say so.
+
+            recorded N frames, a to b s on the run's clock
+            recorded N frames, a to b s ..., then stopped: why
+            NOT recorded: why
+
+        `why` is the recorder's error, or else a stream whose newest frame
+        was more than STILL_MAX_AGE_S old when stop() was called. The
+        reader keeps reading until then, so a live stream's newest frame is
+        always younger than that. A clean recording gets its line too, so
+        that a run which never got this far (the app closed during the
+        shutdown) can be told from one that recorded well. Dropped frames
+        are counted. While the encoder is still writing (stop() gave up on
+        it) the count is the count so far, and the words say so. One line
+        of ASCII, because the tab appends it through the same
+        locale-encoded open as the start line. Never raises."""
+        try:
+            n = self.written
+            why = self.error
+            seen = self.last_seen_clock
+            if why is None and self.stopped_at is not None and (
+                    seen is None
+                    or self.stopped_at - seen > STILL_MAX_AGE_S):
+                at = ''
+                if seen is not None and self.t0 is not None:
+                    at = (f" at {seen - self.t0:.1f} s"
+                          if seen >= self.t0 else " before recording began")
+                why = (f"the camera stream stopped delivering{at} and had "
+                       f"not come back by the end of the run")
+            span = ''
+            if self.first_t is not None and self.last_t is not None:
+                span = (f", {self.first_t:.1f} to {self.last_t:.1f} s on "
+                        f"the run's clock")
+            if self._writer_t.is_alive():
+                text = (f"{n} frames recorded by the end of the run{span}; "
+                        f"the encoder was still writing then, so "
+                        f"{VIDEO_INDEX_FILENAME} has the final count"
+                        + (f"; {why}" if why else ""))
+            elif n:
+                text = (f"recorded {n} frames{span}"
+                        + (f", then stopped: {why}" if why else ""))
+            else:
+                text = "NOT recorded: " + (
+                    why or ("the run ended before recording began"
+                            if self.t0 is None else
+                            "no frame reached the encoder before the run "
+                            "ended"))
+            if self.dropped:
+                text += f"; {self.dropped} frames dropped"
+        except Exception as e:
+            text = f"not known ({e})"
+        return ' '.join(str(text).split()).encode('ascii', 'replace').decode()
 
     # -- the threads -----------------------------------------------------------
 

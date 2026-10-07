@@ -5525,6 +5525,25 @@ LOGGING:
                     except Exception as e:
                         self._sldea_log(f"⚠ video shutdown failed ({e}) — the "
                                         f"recording is in {vid_staging}")
+                # How the recording ENDED (#392). setup.txt said "recording
+                # started" before the staircase, and a stream that stops
+                # delivering, an unchecked size or an encoder failure ends
+                # a video early. Written after stop(), so after the SG steps
+                # above: nothing about the HV waits on it. A write that
+                # fails goes to run.log and never out of this block.
+                if rec is not None:
+                    try:
+                        end_line = ("Video outcome (end): "
+                                    + rec.end_outcome() + "\n")
+                        with open(os.path.join(rundir, 'setup.txt'),
+                                  'a') as sf:
+                            sf.write(end_line)
+                    except Exception as e:
+                        try:
+                            self._sldea_log(f"⚠ video: setup.txt did not get "
+                                            f"its end-of-run video line ({e})")
+                        except Exception:
+                            pass
                 if cam_lock_saved is not None:
                     try:
                         webcam.set_locked(cam_lock_saved)

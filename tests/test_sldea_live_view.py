@@ -8,10 +8,11 @@ stills-only run's newest still, which the run thread hands over in one
 attribute (app._sldea_live_still). What is pinned here:
 
 * The run thread's side: the hand-over is one reference swap of the very
-  frame about to be saved (no copy), only for one-shot stills, and it
-  never touches the view object. A closed, destroyed or never-opened
-  view costs the run nothing, and a hand-over that raises is swallowed:
-  the still is saved and its row written as before.
+  frame just saved (no copy), only for one-shot stills and only once the
+  save has succeeded (#388), and it never touches the view object. A
+  closed, destroyed or never-opened view costs the run nothing, and a
+  hand-over that raises is swallowed: the still is saved and its row
+  written as before.
 * The Tk side: the loop picks up a swapped still and labels it a still
   with its age, never as live; (None, None) from the recorder shows
   NO FRAME (stream stalled), and a NO FRAME on show before the run ended
@@ -310,11 +311,11 @@ def _oneshot(frame):
         webcam.resolve_camera, webcam.oneshot_rgb = saved
 
 
-def _capture(app, frame, stream=False, tmp=None):
+def _capture(app, frame, stream=False, tmp=None, step=3):
     """The REAL _sldea_capture for one landing still -> (its return,
     the data.csv rows)."""
     p = _profile()
-    snap = {'t': 1.0, 'step': 3, 'nominal_kv': 0.5, 'tag': 'landing'}
+    snap = {'t': 1.0, 'step': step, 'nominal_kv': 0.5, 'tag': 'landing'}
     framedir = _os.path.join(tmp, 'frames')
     _os.makedirs(framedir, exist_ok=True)
     path = _os.path.join(tmp, 'data.csv')
@@ -416,14 +417,64 @@ def test_the_run_threads_code_has_one_hand_over_and_no_view_call():
                      'begin_run', 'end_run'):
             assert word not in src, (name, word)
     assert '_sldea_live_still' not in work, "the worker swaps nothing"
-    # the swap sits in a try that swallows everything, inside the
-    # one-shot branch only
+    # the swap sits in a try that swallows everything, in the one-shot
+    # branch only, and AFTER the save, only when it succeeded (#388)
     i = cap.index('self._sldea_live_still =')
     head = cap[:i]
-    assert head.rstrip().endswith('now = time.monotonic()'), head[-200:]
-    assert 'if not stream:' in head[head.rindex('fname = p.frame_filename'):]
+    assert head.rstrip().endswith('try:'), head[-200:]
+    branch = head[head.rindex('fname = p.frame_filename'):]
+    gate = branch.index('if not stream and not save_failed:')
+    assert branch.index('cv2.imwrite(') < gate, branch
+    assert branch.index('save_failed = True') < gate, branch
     tail = cap[i:]
     assert 'except Exception:' in tail[:600] and 'pass' in tail[:600]
+
+
+@_contextlib.contextmanager
+def _failing_imwrite(how):
+    """cv2.imwrite failing as on a full disk or a share that went away:
+    it returns False (`how` False) or raises `how`. Nothing is written."""
+    import cv2
+    saved = cv2.imwrite
+    calls = []
+
+    def fail(path, *a, **k):
+        calls.append(path)
+        if isinstance(how, BaseException):
+            raise how
+        return False
+    cv2.imwrite = fail
+    try:
+        yield calls
+    finally:
+        cv2.imwrite = saved
+
+
+def test_a_still_that_could_not_be_saved_is_never_handed_over():
+    """#388: the view must never show a frame as LAST STILL when it was
+    not saved. The hand-over follows a successful save, so a failed one
+    (imwrite returning False, or raising) hands nothing over, and the
+    view keeps the last still that was saved. The row and the run log
+    say NO FRAME as before, and the runner still gets its frame back."""
+    for how in (False, OSError("the share went away")):
+        app = _HandOverApp()
+        with _tempfile.TemporaryDirectory() as tmp:
+            _capture(app, _disc_frame(), tmp=tmp, step=3)          # saved
+            assert len(app.handed) == 1, app.handed
+            first = app.handed[0]
+            frame = _backlit_frame()
+            with _failing_imwrite(how) as calls:
+                got, rows = _capture(app, frame, tmp=tmp, step=4)
+        assert calls, "the save was never attempted"
+        assert got is frame, "the runner lost its frame"
+        assert len(app.handed) == 1 and app.handed[0] is first, \
+            (how, [h.step for h in app.handed])
+        assert app._sldea_live_still is first
+        assert rows and rows[0]['step'] == '4' and \
+            rows[0]['frame_file'] == '', rows
+        assert any('frame save error' in ln for ln in app.lines), app.lines
+        assert any('could not be saved' in ln for ln in app.lines), \
+            app.lines
 
 
 def test_the_start_path_forgets_the_last_run_before_the_worker_exists():
@@ -759,6 +810,29 @@ def test_closing_stops_the_loop_and_reopening_shows_the_newest():
         assert lv.notify(app, 'open')
         assert 'step 3' in view._state_lbl.cget('text'), _texts(view)
         assert view._job is not None
+
+
+def test_a_still_that_could_not_be_saved_never_shows_as_last_still():
+    """#388, in the window, through the REAL _sldea_capture: still 3 is
+    saved and shown; still 4, a backlit frame, fails to save. The window
+    goes on showing still 3 with its own exposure verdict (OK), never
+    still 4 or its CLIPPED."""
+    with _view() as (root, app, view):
+        app.scope = None
+        app._sldea_capture = _types.MethodType(G._sldea_capture, app)
+        _start(app, view)
+        with _tempfile.TemporaryDirectory() as tmp:
+            _capture(app, _disc_frame(), tmp=tmp, step=3)
+            _pump(root, 0.3)
+            assert view.state['kind'] == 'still', view.state
+            assert 'step 3 [landing]' in view._state_lbl.cget('text')
+            with _failing_imwrite(False):
+                _capture(app, _backlit_frame(), tmp=tmp, step=4)
+            _pump(root, 0.3)
+        text = view._state_lbl.cget('text')
+        assert view.state['kind'] == 'still', view.state
+        assert 'step 3 [landing]' in text and 'step 4' not in text, text
+        assert view._level_lbl.cget('text') == 'OK', _texts(view)
 
 
 def test_a_destroyed_window_or_root_never_raises():

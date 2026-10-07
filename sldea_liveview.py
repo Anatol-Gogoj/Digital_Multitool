@@ -19,11 +19,12 @@ frames the run ALREADY holds in memory:
   red, before the run ended stays red until the run has ended (#388):
   an operator who pressed Abort because the camera died must not see
   that relabeled as expected;
-* a stills-only run: the newest still, which the run thread hands over in
-  ONE attribute, app._sldea_live_still, as a LiveStill. That is a plain
-  reference swap: no copy, no lock the view could hold, no Tk call. The
-  view reads it on the Tk thread and labels it a still with its age, so
-  it is never read as live.
+* a stills-only run: the newest SAVED still, which the run thread hands
+  over in ONE attribute, app._sldea_live_still, as a LiveStill, once its
+  save has succeeded: a still that could not be saved is never shown as
+  one (#388). That is a plain reference swap: no copy, no lock the view
+  could hold, no Tk call. The view reads it on the Tk thread and labels
+  it a still with its age, so it is never read as live.
 
 It is called "live view" in code because "preview" already means the
 run-plan staircase on the SLDEA tab (sldea_preview).
@@ -109,16 +110,18 @@ NOTE = ("Read-only: this window shows frames the run already holds and "
         "Abort is on the SLDEA tab.")
 
 # One still, as the run thread hands it over (gui._sldea_capture):
-#   frame  the RGB frame about to be saved (the run's own array: the view
-#          only reads it)
+#   frame  the RGB frame just saved (the run's own array, not a copy: the
+#          view only reads it, and the run thread does not write it)
 #   step, kv, tag   the snapshot's step, nominal kV and tag
-#   t_run  run time when it was handed over (None without a run clock)
-#   mono   time.monotonic() then: the view's age clock, and its key for
-#          "is this a new still"
-#   wall   time.time() then, for the clock time shown
-# The hand-over happens just before the save, after the capture's scope
+#   t_run  run time at `mono` (None without a run clock)
+#   mono   time.monotonic() just before the save: the view's age clock,
+#          and its key for "is this a new still"
+#   wall   time.time() at the same moment, for the clock time shown
+# The clock is read just before the save, after the capture's scope
 # reads, so the shown age can understate the grab's by those reads (two
-# scope round trips; zero without a scope).
+# scope round trips; zero without a scope). The hand-over itself comes
+# after the save, and only when the save succeeded (#388), so a slow save
+# delays the still on screen but does not make it look younger.
 LiveStill = collections.namedtuple(
     'LiveStill', 'frame step kv tag t_run mono wall')
 
@@ -819,7 +822,7 @@ class LiveView:
                 f"{float(g['kv']):.2f} kV, taken "
                 f"{fmt_age(now_mono - g['mono'])} ago "
                 f"({fmt_clock(g['wall'])}). This run takes stills only, "
-                f"so this window shows the newest still the run took.")
+                f"so this window shows the newest still the run saved.")
         elif kind in ('stalled', 'closed'):
             why = ("the recorder has had no new frame for over 2 s"
                    if kind == 'stalled' else

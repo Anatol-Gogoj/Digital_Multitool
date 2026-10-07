@@ -218,6 +218,28 @@ def ink_concentration_of(rundir):
     return m.group(1).strip() if m else None
 
 
+def film_thickness_of(rundir):
+    """The run's `Film thickness:` value as recorded (whitespace-
+    stripped, so '50' and the micro-metre unit), or None when setup.txt
+    has no such line (`#398`).
+
+    The one reader for the field, beside electrode_of and
+    ink_concentration_of and with their three states: None = the line is
+    absent (a run that predates the SLDEA tab's box, or no readable
+    setup.txt at all); '(not specified)' = the operator was asked and
+    declined, returned as-is; anything else is the value exactly as
+    written. No unit parsing here: sldea_profile.film_thickness_um turns
+    a recorded value into t0 in um, and the plot's field axis divides by
+    that. The value is t0 as measured, with the film mounted and
+    prestretched (owner decision 2026-10-06).
+
+    Never raises: _setup_text's tolerant read, so a missing or undecodable
+    file degrades to None like a run that predates the field."""
+    m = re.search(r'^[ \t]*Film thickness:(.*)$', _setup_text(rundir),
+                  re.MULTILINE)
+    return m.group(1).strip() if m else None
+
+
 def load_stamp(rundir):
     """The result stamps Edge Review's Save recorded for this run's
     data.csv -> {key: float} over STAMP_KEYS ({key: str} for the

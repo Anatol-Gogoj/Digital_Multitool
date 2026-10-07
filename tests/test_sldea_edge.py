@@ -5138,6 +5138,30 @@ def test_anchor_a0_note_reaches_the_csv():
                - np.pi * 8.0 ** 2) < 0.01, rows[0]['active_area_mm2']
 
 
+def test_the_runners_thickness_line_reads_back_whatever_the_locale():
+    """setup_text -> setup.txt -> film_thickness_of -> t0 (`#398`), with
+    the file written as the runner writes it on each kind of PC: UTF-8,
+    and cp1252, whose micro sign every reader here decodes as U+FFFD.
+    Here rather than in test_sldea_profile.py, which runs without
+    numpy."""
+    p = sldea_profile.SldeaProfile(start_kv=0, end_kv=4, step_kv=2,
+                                   ramp_s=5, landing_s=60)
+    d = tempfile.mkdtemp(prefix='sldea_thick_')
+    try:
+        for codec, recorded in (('utf-8', '50 \u00b5m'),
+                                ('cp1252', '50 \ufffdm')):
+            with open(os.path.join(d, 'setup.txt'), 'w',
+                      encoding=codec) as f:
+                f.write(p.setup_text('r', 'ts', 1, 2, 3, True,
+                                     electrode='CNT',
+                                     film_thickness_um='50'))
+            assert se.film_thickness_of(d) == recorded, codec
+            assert sldea_profile.film_thickness_um(
+                se.film_thickness_of(d)) == 50.0
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count

@@ -568,6 +568,71 @@ def test_setup_text_says_not_specified_when_an_ink_run_declines():
     assert 'Ink concentration: (not specified)' in blank_electrode
 
 
+def test_parse_film_thickness_um_accepts_only_a_positive_number():
+    """`#398`. The box's rule is the concentration box's: a positive
+    number, junk refused at Run rather than written down, and a typed unit
+    refused rather than guessed at."""
+    from sldea_profile import parse_film_thickness_um
+    assert parse_film_thickness_um('50') == 50.0
+    assert parse_film_thickness_um(' 47.5 ') == 47.5
+    assert parse_film_thickness_um(120) == 120.0
+    for junk in ('', '   ', None, 'abc', '50 um', '50µm', '5,0', '0',
+                 '-1', 'nan', 'inf', '-inf'):
+        try:
+            parse_film_thickness_um(junk)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{junk!r} was accepted")
+
+
+def test_a_recorded_film_thickness_reads_as_t0_in_um():
+    """What setup.txt can hold -> t0 (`#398`): the runner's own line, the
+    spellings a hand edit produces, and the U+FFFD a cp1252 write leaves
+    once a UTF-8 reader has replaced the micro sign. Absent, declined and
+    unreadable values are all None; another unit is never guessed at."""
+    from sldea_profile import film_thickness_um
+    for text, want in (('50 µm', 50.0), ('50µm', 50.0),
+                       ('50 um', 50.0), ('50 UM', 50.0),
+                       ('50 \u03bcm', 50.0), ('50 \ufffdm', 50.0),
+                       ('50', 50.0), ('  47.5 µm  ', 47.5),
+                       ('1.2e2 µm', 120.0)):
+        assert film_thickness_um(text) == want, (text, want)
+    for text in (None, '', '(not specified)', 'fifty', '0.05 mm',
+                 '50 nm', '0 µm', '-5 µm', 'nan', '50 µm x2'):
+        assert film_thickness_um(text) is None, text
+
+
+def test_setup_text_records_the_film_thickness_in_the_device_block():
+    """`#398`: under the electrode (and the concentration, where that
+    applies), in the concentration's three states: the value with its
+    unit, '(not specified)' for a declined blank, and no line at all from
+    a caller that predates the box."""
+    p = SldeaProfile(start_kv=0, end_kv=4, step_kv=2, ramp_s=5, landing_s=60)
+    txt = p.setup_text('r', 'ts', 1, 2, 3, True, electrode='CNT',
+                       concentration_ml='2.5', film_thickness_um='50')
+    lines = txt.splitlines()
+    i = lines.index('Ink concentration: 2.5 mL')
+    assert lines[i + 1] == 'Film thickness: 50 µm', lines
+    assert lines[i + 2] == '' and lines[i + 3] == '--- Snapshots ---'
+    # a non-ink electrode has no concentration line; the thickness follows
+    # the family line instead, since every film has a thickness
+    cb = p.setup_text('r', 'ts', 1, 2, 3, True, electrode='carbon black',
+                      film_thickness_um=' 47.5 ').splitlines()
+    i = cb.index('Electrode family: carbon_black')
+    assert cb[i + 1] == 'Film thickness: 47.5 µm', cb
+    declined = p.setup_text('r', 'ts', 1, 2, 3, True, electrode='CNT',
+                            film_thickness_um='')
+    assert 'Film thickness: (not specified)' in declined.splitlines()
+    for older in (p.setup_text('r', 'ts', 1, 2, 3, True, electrode='CNT'),
+                  p.setup_text('r', 'ts', 1, 2, 3, True)):
+        assert 'Film thickness' not in older
+    # the runner writes setup.txt with the LOCALE codec: UTF-8 on the
+    # Linux bench, cp1252 on a Windows PC. The line must survive both.
+    for codec in ('utf-8', 'cp1252'):
+        txt.encode(codec)
+
+
 def test_setup_text_records_the_electrode_and_the_warm_up():
     p = SldeaProfile(start_kv=0, end_kv=4, step_kv=2, ramp_s=5, landing_s=60)
     txt = p.setup_text('r', 'ts', 1, 2, 3, True, electrode='carbon black')

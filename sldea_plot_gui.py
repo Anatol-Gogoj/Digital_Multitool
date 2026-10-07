@@ -858,6 +858,92 @@ class PointerTip(Tooltip):
                 self.widget.winfo_pointery() + 18)
 
 
+class DragSelect:
+    """Click-drag range selection on a ttk.Treeview (`#390`).
+
+    The run list was a Listbox until `#374`, and a drag down a Listbox
+    selected the rows it passed. A Tk 8.6 Treeview's own drag only moves
+    column separators, so this puts the range selection back without
+    taking over anything the Treeview does. Its bindings sit on a tag of
+    their own AFTER the Treeview class tag, so they see each press once
+    Tk has applied it (a click, a Shift-click or a Ctrl-click), and
+    nothing here returns 'break' or shadows a binding on the widget.
+
+    A press on a row is the drag's ANCHOR, and the selection that press
+    left is its BASE. Each row from the anchor to the row under the
+    pointer takes the anchor's state, and every other row keeps its
+    state in the base. After a plain click that selects exactly the rows
+    dragged over; after a Ctrl-click it adds them to the selection, or
+    takes them out, as the Listbox did. A press anywhere else starts no
+    drag, so a heading click still sorts and a separator drag still
+    resizes its column. Past the first or last row on screen, each
+    pointer motion scrolls the list one row and extends to the row then
+    at that edge: motion-driven, with no timer to cancel on close."""
+
+    def __init__(self, tree):
+        self.tree = tree
+        self._press = None             # (anchor row, base selection) or None
+        tag = f'DragSelect{id(self)}'
+        tags = list(tree.bindtags())
+        cls = tree.winfo_class()
+        at = tags.index(cls) + 1 if cls in tags else len(tags)
+        tree.bindtags(tuple(tags[:at] + [tag] + tags[at:]))
+        tree.bind_class(tag, '<ButtonPress-1>', self._pressed)
+        tree.bind_class(tag, '<B1-Motion>', self._dragged)
+        tree.bind_class(tag, '<ButtonRelease-1>', self._released)
+
+    def _pressed(self, event):
+        """Remember the row pressed, and the selection Tk just made."""
+        tree = self.tree
+        row = ''
+        if tree.identify_region(event.x, event.y) in ('cell', 'tree'):
+            row = tree.identify_row(event.y)
+        self._press = (row, frozenset(tree.selection())) if row else None
+
+    def _released(self, _event=None):
+        self._press = None
+
+    def _dragged(self, event):
+        """Give the rows from the anchor to the pointer the anchor's
+        state. Only when that changes the selection: every change sends
+        <<TreeviewSelect>>, and with it a redraw request."""
+        if self._press is None:
+            return
+        anchor, base = self._press
+        tree = self.tree
+        rows = list(tree.get_children())
+        if anchor not in rows:         # the list was refilled mid-drag
+            self._press = None
+            return
+        row = ''
+        # only inside the widget: below it, identify_row names the row
+        # that WOULD be there, which is off screen and not yet scrolled to
+        if 0 <= event.y < tree.winfo_height():
+            row = tree.identify_row(event.y)
+        row = row or self._edge_row(rows, event.y)
+        if not row:
+            return
+        lo, hi = sorted((rows.index(anchor), rows.index(row)))
+        span = set(rows[lo:hi + 1])
+        want = (base | span) if anchor in base else (base - span)
+        if want != set(tree.selection()):
+            tree.selection_set([r for r in rows if r in want])
+
+    def _edge_row(self, rows, y):
+        """The pointer is above or below the rows on screen: scroll one
+        row toward it. -> the row then at that edge, or '' if none."""
+        tree = self.tree
+        shown = [r for r in rows if tree.bbox(r)]
+        if not shown:
+            return ''
+        up = y < tree.bbox(shown[0])[1]
+        tree.yview_scroll(-1 if up else 1, 'units')
+        shown = [r for r in rows if tree.bbox(r)]
+        if not shown:
+            return ''
+        return shown[0] if up else shown[-1]
+
+
 # The bands are a CALIBRATED ERROR BUDGET, not a fit residual and not
 # anything this window computed (`#266`). Nothing on screen said so, and
 # the one number an operator sees next to every area — Edge Review's
@@ -1844,7 +1930,8 @@ class PlotWindow:
         # material its setup.txt recorded, and the group this window
         # plots it in. EXTENDED, not BROWSE: several runs on one figure is
         # the reason this tool exists, so the picker must be able to say
-        # so. Ctrl-click and Shift-click both work.
+        # so. Ctrl-click and Shift-click both work, and so does a drag
+        # (DragSelect, `#390`).
         self.run_box = ttk.Treeview(
             box, columns=[c for c, _h in RUN_COLUMNS], show='headings',
             selectmode='extended', height=RUN_ROWS)
@@ -1897,6 +1984,10 @@ class PlotWindow:
                       height=self.run_box.winfo_reqheight())
         box.grid_propagate(False)
         self.run_box.bind('<<TreeviewSelect>>', lambda _e: self.schedule())
+        # a drag down the list selects the rows it passes, as the Listbox
+        # did before `#374` (`#390`); click, Shift-click, Ctrl-click and
+        # the column separators stay the Treeview's own
+        DragSelect(self.run_box)
         # re-fit when the list's WIDTH changes, which is once, when it is
         # first drawn: Tk would otherwise hand any room beyond the floors
         # to Run alone, and RUN_COL_GIVE's order would only apply from

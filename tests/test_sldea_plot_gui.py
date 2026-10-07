@@ -1568,6 +1568,116 @@ def test_a_bar_that_appears_never_puts_the_figure_under_its_floor():
         _shut(root)
 
 
+def test_a_drag_selects_the_rows_it_passes_and_clicks_keep_their_jobs():
+    """`#390`: click-drag range selection went with the Listbox, because
+    a Tk 8.6 Treeview's own drag only moves column separators, and
+    DragSelect puts it back. Driven through generated events, since what
+    is under test is which bindings run and in what order.
+
+    A plain drag selects the rows it passes, either way and back again,
+    and a wobble inside the pressed row changes nothing. A Ctrl-drag
+    adds the rows it passes, or takes them out when it starts on a row
+    the Ctrl-click deselected. Past the bottom edge the list scrolls and
+    the range keeps growing. And the Treeview keeps its own jobs: Ctrl-
+    click toggles one row, Shift-click selects from the anchor, a
+    separator drag resizes its column, and a drag that starts on a
+    heading selects nothing."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        win, tree = w.win, w.win.run_box
+        for i in range(12):
+            _fake_run(w.tmp, f'D{i:02d}')
+        win.populate()
+        w.settle(0.3)
+        rows = list(tree.get_children())
+        shown = [r for r in rows if tree.bbox(r)]
+        assert len(rows) == 14 and len(shown) < len(rows), \
+            (len(rows), len(shown))
+
+        def at(iid, dx=10, dy=0):
+            x, y, _w, h = tree.bbox(iid)
+            return {'x': x + dx, 'y': y + h // 2 + dy}
+
+        def sel():
+            chosen = set(tree.selection())
+            return [r for r in rows if r in chosen]
+
+        def ev(sequence, **where):
+            tree.event_generate(sequence, **where)
+        # a plain drag
+        ev('<ButtonPress-1>', **at(rows[1]))
+        assert sel() == [rows[1]]
+        ev('<B1-Motion>', **at(rows[1], dx=14, dy=3))       # a wobble
+        assert sel() == [rows[1]]
+        ev('<B1-Motion>', **at(rows[4]))
+        assert sel() == rows[1:5], sel()
+        ev('<B1-Motion>', **at(rows[2]))
+        assert sel() == rows[1:3], sel()
+        ev('<B1-Motion>', **at(rows[0]))
+        assert sel() == rows[0:2], sel()
+        ev('<ButtonRelease-1>', **at(rows[0]))
+        # ...which reaches the figure like any other selection (listing
+        # order and display order agree here: nothing is sorted)
+        assert win.selected_dirs() == [d for d, _l in win.runs[0:2]]
+        # Ctrl-click toggles one row, and a Ctrl-drag adds the rows it
+        # passes...
+        ev('<Control-ButtonPress-1>', **at(rows[5]))
+        ev('<Control-ButtonRelease-1>', **at(rows[5]))
+        assert sel() == rows[0:2] + [rows[5]], sel()
+        ev('<Control-ButtonPress-1>', **at(rows[7]))
+        ev('<Control-B1-Motion>', **at(rows[8]))
+        ev('<Control-ButtonRelease-1>', **at(rows[8]))
+        assert sel() == rows[0:2] + [rows[5], rows[7], rows[8]], sel()
+        # ...or, from a row its Ctrl-click deselected, takes them out
+        ev('<Control-ButtonPress-1>', **at(rows[8]))
+        ev('<Control-B1-Motion>', **at(rows[7]))
+        ev('<Control-ButtonRelease-1>', **at(rows[7]))
+        assert sel() == rows[0:2] + [rows[5]], sel()
+        # Shift-click selects from the anchor, the last plain click's row
+        ev('<ButtonPress-1>', **at(rows[2]))
+        ev('<ButtonRelease-1>', **at(rows[2]))
+        assert sel() == [rows[2]], sel()
+        ev('<Shift-ButtonPress-1>', **at(rows[4]))
+        ev('<Shift-ButtonRelease-1>', **at(rows[4]))
+        assert sel() == rows[2:5], sel()
+        # past the bottom edge, each motion scrolls one row and extends
+        ev('<ButtonPress-1>', **at(rows[0]))
+        below = {'x': 20, 'y': tree.winfo_height() + 15}
+        for _ in range(3):
+            ev('<B1-Motion>', **below)
+        ev('<ButtonRelease-1>', **below)
+        got = sel()
+        assert tree.yview()[0] > 0.0, tree.yview()
+        assert got == rows[:len(got)] and len(got) > len(shown), \
+            (len(got), len(shown))
+        assert tree.bbox(got[-1]), 'the last row selected is off screen'
+        tree.yview_moveto(0)
+        w.settle(0.2)
+        before = sel()
+        # a separator drag still resizes its column, even wandering over
+        # the rows, and selects nothing
+        x = tree.column('run', 'width')
+        assert tree.identify_region(x, 5) == 'separator', \
+            tree.identify_region(x, 5)
+        ev('<ButtonPress-1>', x=x, y=5)
+        ev('<B1-Motion>', x=x + 30, y=5)
+        ev('<B1-Motion>', x=x + 30, y=at(rows[3])['y'])
+        ev('<ButtonRelease-1>', x=x + 30, y=at(rows[3])['y'])
+        assert tree.column('run', 'width') > x, (tree.column('run', 'width'),
+                                                 x)
+        assert sel() == before, sel()
+        # ...and a drag that starts on a heading selects nothing either
+        hx = tree.column('run', 'width') + \
+            tree.column('material', 'width') // 2
+        assert tree.identify_region(hx, 5) == 'heading'
+        ev('<ButtonPress-1>', x=hx, y=5)
+        ev('<B1-Motion>', x=hx, y=at(rows[5])['y'])
+        ev('<ButtonRelease-1>', x=hx, y=at(rows[5])['y'])
+        w.settle(0.2)
+        assert sel() == before, sel()
+
+
 def test_a_menu_click_keeps_the_selection_it_was_opened_for():
     """`#390`: on macOS the run menu also answers Control-click, which is
     a Button-1 press, and _run_menu did not return 'break', so the

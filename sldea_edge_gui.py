@@ -3884,13 +3884,21 @@ class EdgeReviewApp:
         # ...and then EVERY other pending callback on this interpreter.
         #
         # Tracking the two ids we own is not enough, because we do not own
-        # them all: a dialog, a tooltip's hide timer or a progress poll can
+        # them all: a dialog, a tooltip's hover timer or a progress poll can
         # each have one in flight, and any of them firing after destroy is
-        # a Tcl error on stderr at best. At worst the interpreter is torn
-        # down mid-callback and the process dies on
-        # 'Tcl_AsyncDelete: async handler deleted by the wrong thread',
-        # which is a plausible mechanism for `#280`'s runner-context flake:
-        # the suite builds 48 windows across 23 roots, so the odds compound.
+        # a Tcl error on stderr.
+        #
+        # Cancelled with Tcl's own `after cancel`, NOT root.after_cancel()
+        # (`#280`, measured 2026-10-06). tkinter's after_cancel also deletes
+        # the job's Tcl command, but takes its name off the ROOT's list
+        # only. A job that another widget owns (a Tooltip's timer, started
+        # by <Enter> whenever the pointer rests on a control of a window on
+        # screen) kept its name in that widget's list, and that widget's
+        # destroy then raised "can't delete Tcl command" half way through
+        # root.destroy(), before tkinter._default_root was cleared. In the
+        # test suite every later window then made its images in that dead
+        # interpreter: 'image "pyimage..." doesn't exist'. Each command is
+        # now deleted by the widget that owns it, when it is destroyed.
         #
         # Safe precisely because this only ever runs when the window is
         # going away -- there is nothing left that a pending callback could
@@ -3898,7 +3906,7 @@ class EdgeReviewApp:
         try:
             for jid in self.root.tk.call('after', 'info'):
                 try:
-                    self.root.after_cancel(jid)
+                    self.root.tk.call('after', 'cancel', jid)
                 except Exception:
                     pass
         except Exception:

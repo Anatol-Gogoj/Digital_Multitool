@@ -2441,6 +2441,58 @@ def test_closing_mid_pass_leaves_nothing_scheduled():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_hover_tip_timer_pending_at_close_does_not_stop_the_destroy():
+    """`#280`, measured 2026-10-06: the runner-context flake on this suite.
+
+    A Tooltip starts its popup timer on <Enter> with widget.after(), so the
+    job and its Tcl command belong to that control, and a window a case
+    puts on screen gets one whenever the pointer rests on a control with a
+    tip. _cancel_pending() cancelled every job through root.after_cancel(),
+    which deletes the command but takes its name off the ROOT's list only,
+    so the control kept a name that no longer existed. root.destroy() then
+    raised "can't delete Tcl command" at that control, before it cleared
+    tkinter._default_root, and each later case that drew made its image in
+    the dead interpreter: one teardown fault (the info label's tip, the
+    pointer resting on the side panel), then 'image "pyimage..." doesn't
+    exist' in every later case that draws (2 and 6 of them in the two
+    failing runs measured).
+
+    The timer is started here directly, as <Enter> starts it, so the case
+    does not depend on where the pointer is."""
+    import tkinter as tk
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('hover tip pending at close')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_tip_close_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert tk._default_root is root, "a root from an earlier case is live"
+        tip = app._tips['info']
+        tip._schedule()                    # what <Enter> on the label does
+        # SELF-CHECK: the timer is pending and the LABEL owns its command,
+        # or nothing here is tested
+        script = str(root.tk.splitlist(
+            root.tk.call('after', 'info', tip._after_id))[0])
+        assert script in (tip.widget._tclCommands or []), script
+        app._cancel_pending()
+        assert not root.tk.call('after', 'info'), root.tk.call('after', 'info')
+        try:
+            root.destroy()
+        except tk.TclError as e:
+            raise AssertionError(f"root.destroy() stopped half way: {e}")
+        assert tk._default_root is None, "root.destroy() did not finish"
+        root = None
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except tk.TclError:
+                pass
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_run_switch_mid_detect_cannot_cross_contaminate():
     """CRITICAL (audit 2026-08-05): the Run combobox and Browse… stayed
     live during a multi-minute detect, and the stale worker/poll chain

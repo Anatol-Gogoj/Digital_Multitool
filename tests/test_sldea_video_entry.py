@@ -10,7 +10,10 @@ tools. Pinned here:
 * the program opens on a run whose recording is in its folder even before
   video_edges.csv exists, so the window itself says what is missing; a
   folder with no video, and a window that cannot open, are said in a box
-  as well as on the console.
+  as well as on the console;
+* the plot window's right-click menu offers Video review... for the run
+  that was clicked, live only when that run's folder holds a recording,
+  and the window starts one review per run.
 
 Nothing here starts a process or opens a camera: every launch is a stub.
 The window cases need a Tk display and skip cleanly without one.
@@ -315,6 +318,182 @@ def test_a_review_that_cannot_open_says_why_on_screen():
             assert not alive, "the failed window's root was left alive"
     finally:
         vr.VideoReviewWindow = real_win
+        shutil.rmtree(p, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# the plot window's run menu
+# ---------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def _plot(parent):
+    """A PlotWindow on `parent`, remembering nothing, whose right-click
+    menu is never posted (a real tk_popup is modal on Windows)."""
+    import sldea_plot_gui as g
+    root = _tk_root()
+    try:
+        win = g.PlotWindow(root, parent, remember=False)
+        real_gm = win.group_menu
+
+        def gm():
+            m = real_gm()
+            m.tk_popup = lambda x, y: None
+            return m
+        win.group_menu = gm
+        yield win
+    finally:
+        _destroy(root)
+
+
+def _right_click(win, iid):
+    """Right-click picker row `iid` ('' = below the rows) -> (the menu,
+    the index of its last entry). The row is named directly: a withdrawn
+    window lays nothing out to aim at."""
+    win.run_box.identify_row = lambda y: iid
+
+    class _E:
+        x, y, x_root, y_root = 5, 5, 300, 200
+    win._run_menu(_E())
+    m = win._menu
+    return m, m.index('end')
+
+
+def _iids(win):
+    return {os.path.basename(d): win._iid(i)
+            for i, (d, _l) in enumerate(win.runs)}
+
+
+def test_the_run_menu_offers_the_clicked_runs_video_review():
+    """The `#383` menu gains Video review... for the run that was
+    right-clicked: live when that run's folder holds a recording, grey
+    with the reason in its label otherwise, and grey when the click
+    named no run. Inside a multi-selection the selection stays and the
+    clicked run is the one reviewed. The group cascade stays first."""
+    import sldea_plot_gui as g
+    p = _tmp()
+    try:
+        a = _run(p, 'A_video', video=True)
+        b = _run(p, 'B_plain')
+        with _plot(p) as win:
+            rows = _iids(win)
+            m, last = _right_click(win, rows['A_video'])
+            assert m.type(0) == 'cascade', "the group cascade moved"
+            assert m.type(last) == 'command' and \
+                m.type(last - 1) == 'separator', (m.type(last - 1),
+                                                   m.type(last))
+            assert m.entrycget(last, 'label') == g.VIDEO_ITEM
+            assert str(m.entrycget(last, 'state')) == 'normal'
+            assert [_same(d, a) for d in win.selected_dirs()] == [True]
+            spy = _Spawn()
+            real = g.subprocess
+            g.subprocess = spy
+            try:
+                m.invoke(last)
+            finally:
+                g.subprocess = real
+            assert len(spy.calls) == 1 and _same(spy.calls[0][0][2], a), \
+                spy.calls
+            # a run with no video in its folder: grey, and it says why
+            m, last = _right_click(win, rows['B_plain'])
+            assert m.entrycget(last, 'label') == g.VIDEO_ITEM_NO_VIDEO
+            assert str(m.entrycget(last, 'state')) == 'disabled'
+            # inside a multi-selection: the selection stays, and the
+            # clicked run is the one the entry is for
+            win.set_selected_dirs([a, b])
+            m, last = _right_click(win, rows['A_video'])
+            assert len(win.selected_dirs()) == 2, win.selected_dirs()
+            assert m.entrycget(last, 'label') == g.VIDEO_ITEM
+            # a right-click below the rows, with runs selected: no run
+            m, last = _right_click(win, '')
+            assert m.entrycget(last, 'label') == g.VIDEO_ITEM_NO_RUN
+            assert str(m.entrycget(last, 'state')) == 'disabled'
+            assert m.type(0) == 'cascade'
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_the_plot_window_starts_one_review_per_run_as_its_own_process():
+    """Owner decision 2026-10-06: a process of its own, launched as the
+    plot window launches Edge Review from a double-click, so a decoder
+    stall or crash cannot take the plot window down and the review
+    outlives it. One live review per run from this window: a second
+    request while it runs starts nothing and says so; another run is not
+    held up; a closed review can be opened again."""
+    import sldea_plot as sp
+    import sldea_plot_gui as g
+    p = _tmp()
+    try:
+        a = _run(p, 'A_video', video=True)
+        c = _run(p, 'C_video', video=True)
+        _run(p, 'B_plain')
+        with _plot(p) as win:
+            spy = _Spawn()
+            real = g.subprocess
+            g.subprocess = spy
+            try:
+                cmd = win.open_video_review(a)
+                assert cmd is not None and len(spy.calls) == 1
+                argv, kw = spy.calls[0]
+                assert argv == cmd
+                assert argv[0] == sys.executable
+                assert os.path.basename(argv[1]) == 'sldea_video_review.py'
+                assert os.path.isabs(argv[1]) and os.path.exists(argv[1])
+                assert argv[2:] == [a], argv
+                said = win.lbl_click.cget('text')
+                assert 'Video review opening on A_video' in said, said
+                # exactly the launch the double-click uses for Edge Review
+                win.open_in_edge_review({'dir': a, 'name': 'A_video'},
+                                        {'index': 0, 'snapshot': 1})
+                assert kw == spy.calls[1][1] == {'start_new_session': True}
+                assert spy.calls[1][0][0] == argv[0]
+                # while that review runs, its run is not opened twice
+                assert win.open_video_review(a) is None
+                assert len(spy.calls) == 2
+                said = win.lbl_click.cget('text')
+                assert 'A_video' in said and 'still open' in said, said
+                # another run is not held up by it
+                assert win.open_video_review(c) is not None
+                assert len(spy.calls) == 3
+                # once the first review has closed, its run opens again
+                win._video_reviews[sp.group_key(a)].rc = 0
+                assert win.open_video_review(a) is not None
+                assert len(spy.calls) == 4
+                # a run with no video starts nothing, and says why
+                assert win.open_video_review(
+                    os.path.join(p, 'B_plain')) is None
+                assert len(spy.calls) == 4
+                assert 'no video in its folder' in win.lbl_click.cget('text')
+            finally:
+                g.subprocess = real
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_the_plot_windows_answer_survives_the_redraw_a_right_click_asks():
+    """A right-click on a row outside the selection selects it, and the
+    selection change queues a redraw, which puts the click-through hint
+    back on the line the answer is written to. The redraw already asked
+    for lands first, so the answer stays on screen."""
+    import sldea_plot_gui as g
+    p = _tmp()
+    try:
+        a = _run(p, 'A_video', video=True)
+        with _plot(p) as win:
+            _pump(win.root, 0.5)             # the window's own first redraw
+            spy = _Spawn()
+            real = g.subprocess
+            g.subprocess = spy
+            try:
+                win.schedule()               # what the selection change does
+                assert win._redraw_after is not None
+                assert win.open_video_review(a) is not None
+                assert win._redraw_after is None, "a redraw is still due"
+                _pump(win.root, 0.4)
+                said = win.lbl_click.cget('text')
+                assert 'Video review opening on A_video' in said, said
+            finally:
+                g.subprocess = real
+    finally:
         shutil.rmtree(p, ignore_errors=True)
 
 

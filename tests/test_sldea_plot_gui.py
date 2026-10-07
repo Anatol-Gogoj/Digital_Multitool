@@ -1234,6 +1234,12 @@ def test_the_run_picker_scrolls_sideways_and_never_widens_the_window():
             def grab_release(self):
                 raise AssertionError('the popup grab is released by Tk '
                                      'when the menu unposts')
+
+            def add_separator(self):       # the #395 video entry's
+                pass
+
+            def add_command(self, **kw):
+                pass
         menu = _Menu()
         win.group_menu = lambda: menu
         second = win.displayed_runs()[1][0]

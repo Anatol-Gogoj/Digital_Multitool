@@ -17,7 +17,8 @@ attribute (app._sldea_live_still). What is pinned here:
   NO FRAME (stream stalled), and a NO FRAME on show before the run ended
   stays red through Abort (#388); a recorder left over from an earlier
   run is never read; the window survives the run end with its last frame
-  labelled RUN ENDED; a new run clears the previous frame.
+  labelled RUN ENDED; a new run clears the previous frame; a window
+  destroyed without close() reopens with its picture (#388).
 * The view never opens, grabs from or re-stamps the camera: every webcam
   entry point is replaced by a stub that fails the test if called.
 * The start and end paths: sldea_run forgets the previous run before the
@@ -761,15 +762,27 @@ def test_closing_stops_the_loop_and_reopening_shows_the_newest():
 
 
 def test_a_destroyed_window_or_root_never_raises():
+    """...and a window destroyed without close() reopens WITH its picture
+    (#388). The new window's label gets an image of its own; it used to
+    be left blank while _show pasted into the dead window's image, which
+    it did whenever the two pictures were the same size."""
     with _view() as (root, app, view):
         _start(app, view)
+        app._sldea_live_still = _still(step=1)
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'still' and view._photo is not None
+        old = view._photo
         view.win.destroy()                       # the window manager's way
         _pump(root, 0.3)
         assert view._job is None
-        app._sldea_live_still = _still(step=2)
+        app._sldea_live_still = _still(step=2)   # the same size as step 1
         _finish(app)
         assert view.state['kind'] == 'ended'
         assert lv.notify(app, 'open')            # reopens cleanly
+        assert view.is_open() and 'step 2' in view._state_lbl.cget('text')
+        shown = str(view._img_lbl.cget('image'))
+        assert shown and shown == str(view._photo), (shown, view._photo)
+        assert view._photo is not old
         root.destroy()
         view._tick()                             # a late tick: no raise
         assert lv.notify(app, 'end_run') in (True, False)

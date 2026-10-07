@@ -571,6 +571,11 @@ class LiveView:
     def _build(self):
         import tkinter as tk
         root = self.app.root
+        # A window destroyed without close() leaves its image behind
+        # (#388). _show would paste into it whenever the size matched and
+        # never give the new label an image, so the new window starts
+        # without one and _show makes its own.
+        self._photo = None
         win = tk.Toplevel(root)
         win.title("SLDEA live view")
         win.resizable(False, False)

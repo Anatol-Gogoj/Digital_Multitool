@@ -244,6 +244,13 @@ def as_number(value):
     return v
 
 
+# The Quantity a source shows in the live table while every read of it so
+# far has raised (#389). Such a source has no rows yet, so without this
+# stand-in it would be missing from the table and its failure would show
+# only in Log Status. Its first good read replaces the stand-in.
+READ_FAILED = '(read failed)'
+
+
 class LiveStats:
     """Current, min and max of every logged quantity, for ONE run.
 
@@ -257,7 +264,8 @@ class LiveStats:
     tab) starts new rows instead of taking a min across farads and henries.
 
     Only finite numbers count toward min and max. A reading without one
-    leaves min and max alone and shows as no current value.
+    leaves min and max alone and shows as no current value. A source whose
+    reads have all raised so far has one READ_FAILED stand-in row.
     """
 
     def __init__(self, interval_s=None):
@@ -267,21 +275,29 @@ class LiveStats:
         self.ticks = 0
         self.skipped = 0
 
+    @staticmethod
+    def _new_row(source, quantity, unit, missed=0):
+        return {'source': source, 'quantity': quantity, 'unit': unit,
+                'current': None, 'min': None, 'max': None, 'good': 0,
+                'missed': missed}
+
     def record(self, source, readings):
         """One successful read of `source`: `readings` is a list of
         (quantity, value, unit). Rows of this source that the read did not
-        produce lose their current value (they are no longer being read)."""
+        produce lose their current value (they are no longer being read).
+        A READ_FAILED stand-in of this source goes, and the rows this read
+        creates start with its count of misses."""
         seen = set()
         with self._lock:
+            stand_in = self._rows.pop((source, READ_FAILED, ''), None)
+            missed = stand_in['missed'] if stand_in else 0
             for quantity, value, unit in readings:
                 key = (source, quantity, unit or '')
                 seen.add(key)
                 row = self._rows.get(key)
                 if row is None:
-                    row = self._rows[key] = {
-                        'source': source, 'quantity': quantity,
-                        'unit': unit or '', 'current': None, 'min': None,
-                        'max': None, 'good': 0, 'missed': 0}
+                    row = self._rows[key] = self._new_row(
+                        source, quantity, unit or '', missed)
                 v = as_number(value)
                 row['current'] = v
                 if v is None:
@@ -298,12 +314,19 @@ class LiveStats:
 
     def record_failure(self, source):
         """A read of `source` that raised: every row of it shows no
-        current value and counts a miss; min and max are kept."""
+        current value and counts a miss; min and max are kept. A source
+        with no rows yet gets a READ_FAILED stand-in row, so a source that
+        fails from its first read still shows in the table."""
         with self._lock:
+            found = False
             for key, row in self._rows.items():
                 if key[0] == source:
                     row['current'] = None
                     row['missed'] += 1
+                    found = True
+            if not found:
+                self._rows[(source, READ_FAILED, '')] = self._new_row(
+                    source, READ_FAILED, '', missed=1)
 
     def tick(self, skipped=0):
         """One sampling tick done, and how many grid slots it overran."""

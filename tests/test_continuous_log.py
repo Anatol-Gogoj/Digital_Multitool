@@ -257,6 +257,49 @@ def test_an_overload_code_never_becomes_a_min_or_a_max():
     assert _row(st, 'DC Supply CH1', 'Power')['missed'] == 1
 
 
+def test_a_source_that_fails_from_its_first_read_still_gets_a_row():
+    """`#389`: record_failure marked only rows that already existed, so a
+    source whose first read raised was missing from the table and its
+    failure showed only in Log Status. It now gets one '(read failed)'
+    stand-in row until its first good read replaces it."""
+    assert cl.READ_FAILED == '(read failed)'
+    st = cl.LiveStats(1.0)
+    st.record('LCR', cl.lcr_quantities('CPD', 1e3, 3.3e-9, 0.002, 0))
+    st.record_failure('DMM')
+    st.record_failure('DMM')
+    rows, _t, _s = st.snapshot()
+    assert [(r['source'], r['quantity']) for r in rows] == [
+        ('LCR', 'Test frequency'), ('LCR', 'Cp'), ('LCR', 'D'),
+        ('DMM', '(read failed)')], rows
+    r = _row(st, 'DMM', '(read failed)')
+    assert (r['current'], r['min'], r['max']) == (None, None, None), r
+    assert (r['good'], r['missed']) == (0, 2), r
+    # the first good read replaces the stand-in; its misses carry over
+    st.record('DMM', cl.dmm_quantities('DC Voltage', 0.5, 'V'))
+    rows, _t, _s = st.snapshot()
+    assert [r['quantity'] for r in rows if r['source'] == 'DMM'] == [
+        'DC Voltage'], rows
+    r = _row(st, 'DMM', 'DC Voltage')
+    assert (r['current'], r['min'], r['max']) == (0.5, 0.5, 0.5), r
+    assert (r['good'], r['missed']) == (1, 2), r
+    # a source that has rows: a failure marks them, and no stand-in
+    st.record_failure('DMM')
+    rows, _t, _s = st.snapshot()
+    assert [r['quantity'] for r in rows if r['source'] == 'DMM'] == [
+        'DC Voltage'], rows
+    assert _row(st, 'DMM', 'DC Voltage')['missed'] == 3
+    # every row a stand-in turns into starts with its misses
+    st.record_failure('DC Supply CH1')
+    st.record('DC Supply CH1', cl.psu_quantities(
+        {'set_voltage_v': 12.0, 'meas_voltage_v': 11.9,
+         'meas_current_a': 0.3, 'power_w': 3.57}))
+    for q in ('Set V', 'Meas V', 'Meas A', 'Power'):
+        r = _row(st, 'DC Supply CH1', q)
+        assert (r['good'], r['missed']) == (1, 1), r
+    # the other source never noticed
+    assert _row(st, 'LCR', 'Cp')['current'] == 3.3e-9
+
+
 def test_start_is_the_reset():
     """start_logging makes a NEW LiveStats per run (asserted against the
     real app below); a new one holds nothing of the old."""
@@ -518,6 +561,35 @@ def test_the_loop_keeps_an_overload_code_in_the_csv_but_not_in_max():
         assert _dmm_csv_values(tmp) == ['1.5', '9.9e+37', '2.0']
     finally:
         shutil.rmtree(tmp)
+
+
+def test_the_loop_shows_a_source_whose_first_read_fails():
+    """`#389`: the DMM's first read raises. The table gets a '(read
+    failed)' row for it at once (the error is in Log Status as before),
+    and its first good read takes that row's place."""
+    for script, want in (
+            ([IOError('socket closed')],
+             [('(read failed)', None, 0, 1)]),
+            ([IOError('socket closed'), 0.25],
+             [('DC Voltage', 0.25, 1, 1)])):
+        tmp = tempfile.mkdtemp(prefix='contlog_')
+        try:
+            app = _LoopApp()
+            app.dmm = _FakeDMM(app, script)
+            stats = cl.LiveStats(0.001)
+            app._log_gen = tok = object()
+            app.logging_loop(0.001, _cfg(tmp, stats), tok)
+            rows, ticks, _s = stats.snapshot()
+            got = [(r['quantity'], r['current'], r['good'], r['missed'])
+                   for r in rows if r['source'] == 'DMM']
+            assert got == want, (script, got)
+            assert ticks == len(script), ticks
+            assert any('DMM error: socket closed' in m for m in app.lines)
+            # the raised read wrote no CSV row, as before
+            assert _dmm_csv_values(tmp) == [
+                str(v) for v in script if not isinstance(v, Exception)]
+        finally:
+            shutil.rmtree(tmp)
 
 
 class _FakeLCR:
@@ -832,6 +904,44 @@ def test_start_hands_the_worker_seconds_and_a_fresh_live_table():
     finally:
         gui.messagebox = saved
         shutil.rmtree(tmp, ignore_errors=True)
+        root.destroy()
+
+
+def test_the_table_shows_a_failing_source_and_drops_its_stand_in():
+    """`#389`: a source whose first read raised shows as '(read failed)';
+    once it reads, that row leaves the table rather than sitting there
+    stale beside the real ones."""
+    root, app = _app()
+    if root is None:
+        return
+    try:
+        stats = cl.LiveStats(1.0)
+        app._log_live_show(stats)
+        tree = app.log_live_tree
+
+        def shown():
+            return [tree.item(i, 'values') for i in tree.get_children()]
+
+        stats.record('DC Supply CH1', cl.psu_quantities(
+            {'set_voltage_v': 12.0, 'meas_voltage_v': 11.98,
+             'meas_current_a': 0.25, 'power_w': 2.995}))
+        stats.record_failure('DMM')
+        stats.tick()
+        app._log_live_render(stats, running=True)
+        assert shown()[-1] == ('DMM', '(read failed)', '--', '--', '--'), \
+            shown()
+        assert len(shown()) == 5, shown()
+        stats.record('DMM', cl.dmm_quantities('DC Voltage', 0.5, 'V'))
+        stats.tick()
+        app._log_live_render(stats, running=True)
+        assert [v[:2] for v in shown()] == [
+            ('DC Supply CH1', 'Set V'), ('DC Supply CH1', 'Meas V'),
+            ('DC Supply CH1', 'Meas A'), ('DC Supply CH1', 'Power'),
+            ('DMM', 'DC Voltage')], shown()
+        assert shown()[-1][2:] == ('500 mV', '500 mV', '500 mV'), shown()
+        assert ('DMM', '(read failed)', '') not in app._log_live_items
+        assert len(app._log_live_items) == 5
+    finally:
         root.destroy()
 
 

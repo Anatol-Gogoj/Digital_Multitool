@@ -189,13 +189,12 @@ PREVIEW_MAX_HEIGHT = 520   # webcam preview height budget (px)
 # harnesses set it False, so neither ever opens the camera of the PC they
 # run on (the manual would otherwise ship a photo of whatever it sees).
 CAM_AUTOSTART_ON_TAB = True
-# OPEN OWNER QUESTION (#375): should leaving the Webcam tab stop the preview?
-# True is the issue's recommendation: leaving stops it, unless interval
-# capture is running (it saves frames from the preview, so it needs it).
-# The stop is the Stop Preview button's: the tick ends and the device stays
-# open, so coming back resumes the stream instead of reopening it. False
-# leaves the preview reading frames on the Tk thread every 50 ms while you
-# work on other tabs.
+# Owner decision 2026-10-06 (#375): leaving the Webcam tab stops the preview.
+# Interval capture is the exception: it saves frames from the preview, so
+# it keeps it running. The stop is the Stop Preview button's: the tick ends
+# and the device stays open, so coming back resumes the stream instead of
+# reopening it. False leaves the preview reading frames on the Tk thread
+# every 50 ms while you work on other tabs.
 CAM_STOP_PREVIEW_ON_TAB_LEAVE = True
 CAM_AUTOSTART_DELAY_MS = 50   # lets the tab paint its splash before the open
 CAM_SPLASH_POLL_MS = 500      # keeps the reason current while it is on show

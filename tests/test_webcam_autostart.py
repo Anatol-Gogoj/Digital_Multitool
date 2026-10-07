@@ -7,7 +7,7 @@ one. Now opening the tab starts the preview through a start path that never
 opens a dialog, a stopped preview shows a large PREVIEW OFF with the reason
 over its dimmed last frame (or on black), and leaving the tab stops the
 preview unless interval capture needs it (gui.CAM_STOP_PREVIEW_ON_TAB_LEAVE,
-an open owner question).
+owner decision 2026-10-06).
 
 Headless apart from a Tk root: the camera, the device scan and the dialogs
 are stubbed, so no test here opens a real camera. Most tests build only the

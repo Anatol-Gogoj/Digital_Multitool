@@ -13,6 +13,113 @@ capture side has moved since (breakdown detection 2026-08-04, the
 telemetry sidecar 2026-08-05). **`PROJECT_HANDOFF.md` holds the current
 docket** — read it, not this line, for what is queued.
 
+## The SLDEA tab records the film thickness, and the plot can put the nominal electric field on its x axis (2026-10-06)
+
+**TL;DR:** the SLDEA tab has a "Film thickness (µm)" box under
+Concentration, and a run writes it into setup.txt as `Film thickness: 50
+µm`. The plot window and the CLI gain a third x axis, `--x field`: the
+nominal field E = V / t0 in V/µm, so devices on films of different
+thickness can share one figure. A run with no thickness recorded is left
+off the field axis by name, with how to add the line by hand, and each
+figure's thicknesses are kept in its figspec (`#398`).
+
+**Observation.**
+
+- The plot's x axis was nominal kV or elapsed time. At one voltage, films
+  of different thickness see different fields, so a kV figure cannot
+  compare devices made on them. No run recorded a film thickness
+  anywhere.
+- Owner decisions (2026-10-06, in the issue): the thickness is measured
+  with the film mounted and prestretched, so the entered value is t0 and
+  no prestretch is asked for; one value per run, with no ± field; the
+  nominal field only, the true field deferred; the axis unit is V/µm.
+- The runner writes setup.txt with the locale codec, and every reader
+  opens it as UTF-8 with errors='replace'. On the Linux bench the micro
+  sign round-trips. On a Windows PC (a dry run there) cp1252 writes it as
+  byte 0xB5, which every reader turns into U+FFFD, and Edge Review's Save
+  then rewrites the file with the U+FFFD in it. Checked here with the real
+  worker on Windows: the line reads back as `47.5 �m`.
+- On a kV or time figure nothing moves. Fifteen option sets (each mode on
+  the kV and the time axis, pre/post with the mean, the aggregate exact
+  and interpolated, groups with the runs hidden, strain %, log axes, the
+  area x axis, merged legs, one panel) drew PNGs byte-identical to main
+  `f69eade`'s engine, read out of git, and tidy CSVs identical apart from
+  the two new columns, which are blank there. The suite's own
+  byte-identity test reads an older commit that this PC's clone does not
+  have, so it skipped here.
+- The plot window's x-axis row now asks for 304 px (219 before) at Tk's
+  96 dpi. The controls column stays 407 px wide, because the run picker
+  is still its widest member, so the window floor stays 767 x 420.
+
+**Decision (this PR; Anatol merges).**
+
+- **The SLDEA tab.** The box sits on row 5 under Concentration, blank by
+  default and never greyed; "Trek inverts" moves down to row 6, after
+  the device fields. Its tooltip says to measure the film mounted and
+  prestretched. At Run it is checked the way the concentration is, in
+  the same place, before the worker exists and so before anything drives
+  the HV: a positive number, or a blank after a yes/no question whose
+  default is No. A number that is not one, or one typed with a unit, is
+  refused with nothing started.
+- **setup.txt.** The line goes in the device block, after the electrode
+  and the concentration lines, in the concentration's three states: the
+  value as typed with `µm`, `(not specified)` when the operator declined,
+  and no line at all from a caller that predates the box. Nothing else
+  in the file moves.
+- **Presets** store it as `thick_um`, a raw string like every box. A
+  preset saved before the box existed loads it BLANK and says nothing.
+  That is the one exception to the `#231` rule, under which an absent key
+  leaves its box alone and is reported: a box left alone would carry the
+  last film's thickness into a run on another film, and the run-start
+  question never fires on a box that is filled in.
+- **One reader,** `sldea_edge.film_thickness_of`, beside `electrode_of`
+  and `ink_concentration_of` and with their three states.
+  `sldea_profile.film_thickness_um` turns a recorded value into t0. It
+  reads the runner's line, `um`, the Greek mu, a bare number, and the
+  U+FFFD above, and it returns None for any other unit, never a guess.
+- **The field axis is the kV axis rescaled per run.** A run's t0 is one
+  number, so its field is its kV times 1000 / t0 (`run['x_scale']`).
+  Pre/post, the mean line, the legs, the breakdown X marks (they land at
+  the breakdown field) and the aggregate's grid and cap all work on it
+  through that factor. On the kV axis the factor is exactly 1.0, which is
+  why kV figures are unchanged to the byte. Power is still kV times the
+  current; the field only moves points along x. `--vs-area` is refused
+  beside it, as beside the time axis.
+- **When t0 is read.** A figure takes each run's t0 from its options'
+  `film_thickness` when that names the run, and from setup.txt otherwise,
+  at every render. Export stores the t0 of every drawn run in the
+  figspec, so `--from-spec` draws the same figure, to the byte, after a
+  setup.txt edit, and says which number it drew when setup.txt now
+  disagrees. The window keeps a spec's thicknesses only for a window
+  opened from that spec, and never remembers them between sessions.
+- **No thickness, no field.** A run with none is left off, and one
+  warning names each such run with its reason (no line, declined, or a
+  value that is not a thickness) and says to add `Film thickness: 50 µm`
+  to its setup.txt by hand. The plot tools never write setup.txt.
+- **Aggregates.** Interpolated pooling works on the field grid and stops
+  at the lowest breakdown field, quoted in V/µm. Exact-key pooling is
+  refused for a pool whose runs do not share one t0, because films of
+  different thickness share no field level and the "mean" would be each
+  run's points with n = 1. The refusal is a warning and a caption line,
+  and the pool keeps its color slot. A pool on one film pools exactly.
+- **Caption.** A field figure says that the field is nominal, V / t0,
+  with t0 measured mounted and prestretched, and that it does not follow
+  the film thinning as it expands. It names t0 when every run shares one.
+  The kV figure's sentence is unchanged.
+- **Tidy CSV.** Two columns after `elapsed_s`: `film_thickness_um` and
+  `field_V_per_um`, filled on a field figure from the t0 it drew with and
+  blank on every other figure, which reads no thickness.
+- **Console.** On a field figure each run's line adds its t0, where the
+  t0 came from, and the field of its first current-confirmed breakdown,
+  E_b = V_b / t0.
+
+**Not done here.** The true field (`#398` item 4): `FIELD_AXES` is where
+a second field axis would go, but it varies with A / A0 at every snapshot,
+so it cannot ride the per-run factor and needs its own branch. A
+Thickness column in the run picker is left for later, since `#390`
+reworks that table now. None of this is bench-verified yet: the box, the
+question and the setup.txt line on the Linux bench are a `#369` check.
+
 ## The plot caption is wrapped to the figure's width, so its first line stops running off the right edge (2026-10-06)
 
 **TL;DR:** the first line of the area figure's caption was wider than the

@@ -3502,6 +3502,8 @@ def launch(args=(), opts=None, out_dir=None, stem=None, explicit=None,
     explicit_opts for what that can and cannot tell apart."""
     parents, preselect = initial_state(args)
     root = tk.Tk()
+    import tk_stall                        # log each freeze, locally (#397)
+    tk_stall.watch(root, 'plot window')
     win = PlotWindow(root, parents, preselect, opts=opts, out_dir=out_dir,
                      stem=stem, explicit=explicit, remember=remember)
     win.apply_opening_size()             # wide enough for Group (`#374`)

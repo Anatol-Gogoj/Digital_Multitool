@@ -9050,6 +9050,8 @@ def _startup_failed(exc):
 
 if __name__ == "__main__":
     root = tk.Tk()
+    import tk_stall                        # log each freeze, locally (#397)
+    tk_stall.watch(root, 'main window')
     # Show a splash immediately: building the tabs takes a couple of seconds
     # and the desktop icon gives no feedback of its own.
     root.withdraw()

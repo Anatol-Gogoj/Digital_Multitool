@@ -585,6 +585,72 @@ def test_other_threads_cpu_is_not_charged_to_the_tk_thread():
 
 
 # ---------------------------------------------------------------------------
+# the hookups
+# ---------------------------------------------------------------------------
+
+# (file, entry function or None for the __main__ block, the app class)
+HOOKUPS = (('gui.py', None, 'InstrumentControlGUI'),
+           ('sldea_edge_gui.py', 'main', 'EdgeReviewApp'),
+           ('sldea_plot_gui.py', 'launch', 'PlotWindow'))
+
+
+def _entry_body(tree, func):
+    for node in tree.body:
+        if func is None and isinstance(node, ast.If) \
+                and isinstance(node.test, ast.Compare) \
+                and isinstance(node.test.left, ast.Name) \
+                and node.test.left.id == '__name__':
+            return node.body
+        if func is not None and isinstance(node, ast.FunctionDef) \
+                and node.name == func:
+            return node.body
+    raise AssertionError(f"no entry {func or '__main__'}")
+
+
+def _calls(node, dotted):
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call):
+            try:
+                if ast.unparse(n.func) == dotted:
+                    return n
+            except Exception:
+                pass
+    return None
+
+
+def _first(body, test):
+    return next((i for i, stmt in enumerate(body) if test(stmt)), None)
+
+
+def test_each_window_watches_its_root_as_soon_as_it_exists():
+    names = []
+    for fname, func, app in HOOKUPS:
+        with open(os.path.join(REPO, fname), encoding='utf-8') as fh:
+            tree = ast.parse(fh.read(), fname)
+        body = _entry_body(tree, func)
+        made = _first(body, lambda s: isinstance(s, ast.Assign)
+                      and [ast.unparse(t) for t in s.targets] == ['root']
+                      and _calls(s, 'tk.Tk') is not None)
+        watched = _first(body, lambda s: isinstance(s, ast.Expr)
+                         and _calls(s, 'tk_stall.watch') is not None)
+        built = _first(body, lambda s: _calls(s, app) is not None)
+        imported = _first(body, lambda s: isinstance(s, ast.Import) and any(
+            a.name == 'tk_stall' for a in s.names))
+        at_top = any(isinstance(s, ast.Import) and any(
+            a.name == 'tk_stall' for a in s.names) for s in tree.body)
+        where = f"{fname}:{func or '__main__'}"
+        assert None not in (made, watched, built), (where, made, watched,
+                                                    built)
+        assert made < watched < built, (where, made, watched, built)
+        assert at_top or (imported is not None and imported < watched), \
+            f"{where}: tk_stall.watch is called but tk_stall not imported"
+        call = _calls(body[watched], 'tk_stall.watch')
+        assert ast.unparse(call.args[0]) == 'root', where
+        names.append(call.args[1].value)
+    assert len(set(names)) == len(names) and all(names), names
+
+
+# ---------------------------------------------------------------------------
 # a real Tk root
 # ---------------------------------------------------------------------------
 

@@ -9031,6 +9031,8 @@ def parse_args(argv):
 def main():
     path, auto, goto = parse_args(sys.argv[1:])
     root = tk.Tk()
+    import tk_stall                        # log each freeze, locally (#397)
+    tk_stall.watch(root, 'Edge Review')
     EdgeReviewApp(root, path=path, auto=auto, goto=goto)
     root.mainloop()
 

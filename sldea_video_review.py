@@ -24,7 +24,9 @@ nearest frame.
 Usage:
     python sldea_video_review.py RUN
 
-Opened from Edge Review's "Video review" button. Headless tests:
+Opened from Edge Review's "Video review" button (in Edge Review's own
+process), and as this program from the SLDEA tab's button and the plot
+window's run menu (#395). Headless tests:
 .venv/bin/python tests/test_sldea_video_review.py
 """
 import datetime
@@ -36,7 +38,7 @@ import threading
 import tk_fontfix                      # must precede tkinter:
 tk_fontfix.apply()                     # colour emoji crash Tk
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 import numpy as np
 
@@ -650,18 +652,79 @@ class VideoReviewWindow:
             self.on_close(self)
 
 
+def _tell(text, root=None, error=True):
+    """Say `text` on the console and in a box over `root` (withdrawn), or
+    over a root of its own when none is given. Never raises.
+
+    The SLDEA tab and the plot window start this program as a process of
+    its own (#395), with no console that anyone reads, so what it has to
+    say goes on screen as well, as Edge Review says it for the window it
+    opens in its own process. With no display only the console line is
+    left, which is what the command line had before."""
+    try:
+        print(text)
+    except Exception:               # a console that cannot encode it
+        pass
+    own = root is None
+    try:
+        if own:
+            root = tk.Tk()
+        root.withdraw()
+        show = messagebox.showerror if error else messagebox.showinfo
+        show("Video review", text, parent=root)
+    except Exception:
+        pass
+    finally:
+        if own and root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
+def open_standalone(root, rundir):
+    """The window as its own program, on the Tk root `root`. -> the
+    window, or None once a box has said why it could not open and `root`
+    is destroyed."""
+    try:
+        return VideoReviewWindow(root, rundir, standalone=True)
+    except Exception as e:
+        _tell(f"The video review of {os.path.basename(rundir)} could not "
+              f"open:\n\n{e}", root)
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        return None
+
+
 def main(argv):
     if not argv or argv[0] in ('-h', '--help'):
         print(__doc__.split('Usage:')[1].split('Opened from')[0].rstrip())
         return 0 if argv else 2
     import sldea_edge as se
     rundir = se.resolve_run(argv[0]) or argv[0]
-    if not os.path.exists(os.path.join(rundir, sv.VIDEO_EDGES_FILENAME)):
-        print(f"no {sv.VIDEO_EDGES_FILENAME} in {rundir}: run "
-              f"`python sldea_video.py \"{rundir}\"` first")
+    # A run whose recording is in its folder opens before its video edges
+    # exist (#395). That is every video run for a while after it ends,
+    # and every run recorded without "edges after": the window itself
+    # says there are no edges yet and offers Re-run. Only a folder with no
+    # video at all is refused, here, before any window, and in words: the
+    # SLDEA tab starts this program without looking in the folder itself.
+    if not (sv.has_video(rundir) or os.path.exists(
+            os.path.join(rundir, sv.VIDEO_EDGES_FILENAME))):
+        _tell(f"There is no video of {os.path.basename(rundir)} to review "
+              f"yet: neither {sv.VIDEO_FILENAME} with "
+              f"{sv.VIDEO_INDEX_FILENAME} nor {sv.VIDEO_EDGES_FILENAME} is "
+              f"in\n{rundir}\nor that folder cannot be reached.\n\n"
+              f"When a run records video, a separate program moves the "
+              f"recording into its run folder after the run, after edge "
+              f"detection on every frame when that was ticked. Its "
+              f"progress, or the reason it stopped, is in run.log in that "
+              f"folder.", error=False)
         return 2
     root = tk.Tk()
-    VideoReviewWindow(root, rundir, standalone=True)
+    if open_standalone(root, rundir) is None:
+        return 1
     root.mainloop()
     return 0
 

@@ -5159,7 +5159,7 @@ LOGGING:
                 # `tel.failed` matters here: once the log has given up, a
                 # telemetry-only run must stop taking scope reads for
                 # nobody (three locked round-trips every tick, contending
-                # with the Data Logging tab for the same instrument).
+                # with the Continuous Logging tab for the same instrument).
                 if (watchdog is not None
                         or (tel is not None and not tel.failed)) \
                         and el - last_mon >= mon_dt:

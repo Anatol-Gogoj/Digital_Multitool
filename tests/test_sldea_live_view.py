@@ -14,8 +14,9 @@ attribute (app._sldea_live_still). What is pinned here:
   the still is saved and its row written as before.
 * The Tk side: the loop picks up a swapped still and labels it a still
   with its age, never as live; (None, None) from the recorder shows
-  NO FRAME (stream stalled); a recorder left over from an earlier run is
-  never read; the window survives the run end with its last frame
+  NO FRAME (stream stalled), and a NO FRAME on show before the run ended
+  stays red through Abort (#388); a recorder left over from an earlier
+  run is never read; the window survives the run end with its last frame
   labelled RUN ENDED; a new run clears the previous frame.
 * The view never opens, grabs from or re-stamps the camera: every webcam
   entry point is replaced by a stub that fails the test if called.
@@ -1031,7 +1032,9 @@ def test_a_stream_frame_is_never_shown_as_a_still():
     """Finding 4: a recorder that stops being readable (a natural cleanup
     of _sldea_recorder would do it) leaves a STREAM frame in hand. That
     is not a still: no 'still' state, no VIEW ERROR, and the run end
-    still shows the stream frame."""
+    still shows the stream frame. Mid-run it is a red NO FRAME that the
+    staircase's end does not relabel (#388); once the staircase is over
+    it is the run ending."""
     with _view() as (root, app, view):
         _start(app, view)
         app._sldea_recorder = _Rec(frame=_disc_frame(), age=0.1)
@@ -1043,11 +1046,20 @@ def test_a_stream_frame_is_never_shown_as_a_still():
         assert 'error' not in view.state['kind']
         app._sldea_elapsed = 99.0                        # staircase over
         _pump(root, 0.3)
-        assert view.state['kind'] == 'finishing', view.state
+        assert view.state['kind'] == 'closed', view.state
         _finish(app)
         text = view._state_lbl.cget('text')
         assert view.state['kind'] == 'ended'
         assert 'video stream frame taken' in text, text
+        # cleaned up only after the staircase: the run ending, in grey
+        _start(app, view)
+        app._sldea_recorder = _Rec(frame=_disc_frame(), age=0.1)
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live'
+        app._sldea_elapsed = 99.0
+        app._sldea_recorder = None
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'finishing', view.state
     # and the state builder refuses a still state on a stream frame
     view = lv.LiveView(_types.SimpleNamespace(root=None))
     view._good = {'src': 'stream', 'wall': _time.time(), 'thumb': None,
@@ -1059,9 +1071,11 @@ def test_a_stream_frame_is_never_shown_as_a_still():
 
 def test_a_stream_closing_as_the_run_finishes_is_grey_not_a_fault():
     """Finding 5: between rec.stop() and _sldea_finished the stream
-    closes at every normal video-run end. Once the staircase is over or
-    the run was stopped, that is RECORDING ENDED in grey, with the last
-    frame kept; a stream that dies mid-run is still red NO FRAME."""
+    closes at every normal video-run end. A stream still delivering when
+    the staircase ended or the run was stopped, which closes or stalls
+    only after that, is RECORDING ENDED in grey, with the last frame
+    kept. (A NO FRAME already on show before the run ended stays red:
+    the next test, #388.)"""
     with _view() as (root, app, view):
         p = _profile()
         _start(app, view, p)
@@ -1070,13 +1084,12 @@ def test_a_stream_closing_as_the_run_finishes_is_grey_not_a_fault():
         app._sldea_elapsed = 1.0
         _pump(root, 0.3)
         assert view.state['kind'] == 'live'
-        # mid-run death: red
-        rec.frame, rec.alive = None, False
-        _pump(root, 0.3)
-        assert view.state['kind'] == 'closed'
-        assert lv.BANNERS['closed'][1] == lv.TOL_RED
-        # the staircase is over: grey, in words, with the last frame
+        # the staircase is over; the stream delivers until rec.stop()
         app._sldea_elapsed = p.total_duration_s + 0.1
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live', view.state
+        # ...and then closes: grey, in words, with the last frame
+        rec.frame, rec.alive = None, False
         _pump(root, 0.3)
         st = view.state
         assert st['kind'] == 'finishing', st
@@ -1084,12 +1097,86 @@ def test_a_stream_closing_as_the_run_finishes_is_grey_not_a_fault():
         assert lv.BANNERS['finishing'][1] == lv.TOL_GREY
         assert 'expected' in st['text'] and 'NO FRAME' not in st['text']
         assert st['thumb'] is not None
-        # a stall after an Abort is the run ending too
+        # a stall that starts only after an Abort is the run ending too
+        _finish(app)
+        _start(app, view, p)
+        rec = _Rec(frame=_disc_frame(), age=0.1)
+        app._sldea_recorder = rec
         app._sldea_elapsed = 1.0
-        rec.alive = True                                 # stalled
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live'
+        app._sldea_stop = True                           # Abort
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live', view.state
+        rec.frame = None                                 # stalls after it
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'finishing', view.state
+
+
+def test_a_no_frame_on_show_before_the_run_ended_stays_red():
+    """#388: the camera dies, the view says NO FRAME in red, and the
+    operator presses Abort BECAUSE of it. That used to turn into the grey
+    "RECORDING ENDED ... This is expected." A stall or close the view
+    showed while the run was still going now stays red until the run has
+    ended: after an Abort and at the staircase's end alike, and through
+    a close and reopen of the window. A frame coming back clears it, and
+    a new run starts clean."""
+    with _view() as (root, app, view):
+        p = _profile()
+        _start(app, view, p)
+        rec = _Rec(frame=_disc_frame(), age=0.1)
+        app._sldea_recorder = rec
+        app._sldea_elapsed = 1.0
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live'
+        rec.frame = None                                 # camera unplugged
         _pump(root, 0.3)
         assert view.state['kind'] == 'stalled'
+        app._sldea_stop = True                           # Abort, for that
+        _pump(root, 0.3)
+        st = view.state
+        assert st['kind'] == 'stalled', st
+        assert st['banner'] == "NO FRAME (stream stalled)"
+        assert lv.BANNERS['stalled'][1] == lv.TOL_RED
+        assert st['text'].startswith('NO FRAME'), st['text']
+        assert 'expected' not in st['text'], st['text']
+        assert view._run_lbl.cget('text').startswith('Stopping'), \
+            _texts(view)
+        rec.alive = False                                # rec.stop()
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'closed', view.state
+        lv.notify(app, 'close')                          # and reopened
+        assert lv.notify(app, 'open')
+        assert view.state['kind'] == 'closed', view.state
+        _finish(app)
+        assert view.state['kind'] == 'ended'
+        # a new run forgets that: stopped before its stream gave a frame,
+        # its stall comes after the stop and is the run ending
+        _start(app, view, p)
         app._sldea_stop = True
+        app._sldea_recorder = _Rec(frame=None)
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'finishing', view.state
+        _finish(app)
+        # the staircase's end after a death mid-run: red as well
+        _start(app, view, p)
+        rec = _Rec(frame=_disc_frame(), age=0.1)
+        app._sldea_recorder = rec
+        app._sldea_elapsed = 1.0
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live'
+        rec.frame, rec.alive = None, False               # dies mid-run
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'closed'
+        app._sldea_elapsed = p.total_duration_s + 0.1    # staircase over
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'closed', view.state
+        assert lv.BANNERS['closed'][1] == lv.TOL_RED
+        # a frame coming back clears it: a stall after that is the end
+        rec.frame, rec.alive = _disc_frame(), True
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live', view.state
+        rec.frame = None
         _pump(root, 0.3)
         assert view.state['kind'] == 'finishing', view.state
 

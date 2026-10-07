@@ -1408,13 +1408,16 @@ def test_the_window_opens_wide_enough_for_a_seeded_group_name():
         floor = win.apply_minsize()
         assert floor[0] == win.column.natural_width() + g.MIN_FIG_W
         left, top, right, bottom = g.work_area(win.root)
-        if right - left < floor[0] + win.column.extra:
+        # the frame counts (`#390`): +x+y places it, WxH sizes the inside
+        fw, fh = win.frame_size()
+        if right - left - fw < floor[0] + win.column.extra:
             raise _Skip(f'desktop too narrow: the opening wants '
-                        f'{floor[0] + win.column.extra}px and the work '
-                        f'area is {right - left}px')
+                        f'{floor[0] + win.column.extra + fw}px with its '
+                        f'frame and the work area is {right - left}px')
         width, height, x, y = win.apply_opening_size()
-        assert left <= x and x + width <= right, (x, width, left, right)
-        assert top <= y and y + height <= bottom, (y, height, top, bottom)
+        assert left <= x and x + width + fw <= right, (x, width, left, right)
+        assert top <= y and y + height + fh <= bottom, \
+            (y, height, top, bottom)
         assert w.settle(), 'the redraw never landed after opening'
         assert win.root.winfo_width() == width
         # the room reached GROUP: the seeded name shows whole...
@@ -1430,6 +1433,64 @@ def test_the_window_opens_wide_enough_for_a_seeded_group_name():
         w.resize(f'{floor[0]}x{max(floor[1], 600)}')
         assert win.column.winfo_width() == win.column.natural_width()
         assert win.canvas.get_tk_widget().winfo_width() >= g.MIN_FIG_W - 2
+
+
+def test_the_opening_clamp_counts_the_window_frame():
+    """`#390`: `+x+y` places the window's OUTER frame and `WxH` sizes its
+    inside, so opening_size, clamping the inside to the work area, opened
+    a too-wide window a border's width past the work area's right edge
+    on Windows, and a title bar and a border past its bottom. work_area
+    is monkeypatched to an area narrower and shorter than the window
+    asks for, so the clamp branch is the one taken (the case above
+    cannot reach it on a desktop wide enough for it), and on Windows the
+    frame that was really drawn is checked against that area."""
+    import sys
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        win, root = w.win, w.win.root
+        root.update_idletasks()
+        fw, fh = win.frame_size()
+        floor_w, floor_h = win.min_size
+        req_w, req_h = root.winfo_reqwidth(), root.winfo_reqheight()
+        # above the floor with its frame, below what the window asks for
+        area_w = min(req_w + fw - 20, floor_w + fw + 100)
+        area_h = min(req_h + fh - 20, floor_h + fh + 100)
+        if area_w <= floor_w + fw or area_h <= floor_h + fh:
+            raise _Skip(f'no area between the floor {win.min_size} and '
+                        f'the request {(req_w, req_h)} to clamp into')
+        left, top = 30, 20
+        right, bottom = left + area_w, top + area_h
+        real = g.work_area
+        g.work_area = lambda _widget: (left, top, right, bottom)
+        try:
+            width, height, x, y = win.apply_opening_size()
+        finally:
+            g.work_area = real
+        # the clamp branch, and the frame inside the area, centered
+        assert width < req_w and height < req_h, (width, height, req_w,
+                                                  req_h)
+        assert left <= x and x + width + fw <= right, (x, width, fw, right)
+        assert top <= y and y + height + fh <= bottom, (y, height, fh,
+                                                        bottom)
+        assert abs((x - left) - (right - x - width - fw)) <= 1
+        assert w.settle(), 'the redraw never landed after opening'
+        assert (root.winfo_width(), root.winfo_height()) == (width, height)
+        if sys.platform != 'win32':
+            return
+        # where Windows really drew the frame, asked of Windows
+        import ctypes
+        from ctypes import wintypes
+        rect = wintypes.RECT()
+        assert ctypes.windll.user32.GetWindowRect(
+            int(root.wm_frame(), 16), ctypes.byref(rect))
+        assert left <= rect.left and rect.right <= right, \
+            (rect.left, rect.right, left, right)
+        assert top <= rect.top and rect.bottom <= bottom, \
+            (rect.top, rect.bottom, top, bottom)
+        # ...and it is the frame frame_size reported
+        assert (rect.right - rect.left - width,
+                rect.bottom - rect.top - height) == (fw, fh)
 
 
 def test_a_bar_that_appears_never_puts_the_figure_under_its_floor():

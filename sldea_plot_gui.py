@@ -2597,14 +2597,38 @@ class PlotWindow:
         desktop's work area so a small screen still opens the whole
         window on screen, and never under the `#271` floor. Centered in
         the work area: the old opening, at the window manager's default
-        corner, already ran 47 px off the right of a 1646 px screen."""
+        corner, already ran 47 px off the right of a 1646 px screen.
+
+        The clamp and the centering count the window's FRAME (`#390`):
+        `+x+y` places the outer frame, title bar and borders included,
+        while `WxH` sizes only the inside, so a window clamped to the
+        work area's width used to reach a border's width past its right
+        edge on Windows (frame_size)."""
         self.root.update_idletasks()
         left, top, right, bottom = work_area(self.root)
-        w = min(self.root.winfo_reqwidth(), right - left)
-        h = min(self.root.winfo_reqheight(), bottom - top)
+        fw, fh = self.frame_size()
+        w = min(self.root.winfo_reqwidth(), right - left - fw)
+        h = min(self.root.winfo_reqheight(), bottom - top - fh)
         w, h = max(w, self.min_size[0]), max(h, self.min_size[1])
-        return (w, h, left + max(0, (right - left - w) // 2),
-                top + max(0, (bottom - top - h) // 2))
+        return (w, h, left + max(0, (right - left - w - fw) // 2),
+                top + max(0, (bottom - top - h - fh) // 2))
+
+    def frame_size(self):
+        """-> (width, height) in px that the window's outer frame adds to
+        its inside: a border on each side, and the title bar plus a bottom
+        border as wide as a side one. That is a Windows frame: 616 x 439
+        outside for 600 x 400 inside, 8 px a side and 31 px above
+        (Windows 11 at 175 %, measured with GetWindowRect 2026-10-06).
+
+        Read off the mapped window as Tk reports it, so it is (0, 0),
+        the old client-size clamp, wherever the window manager has not
+        framed the window yet: X11 can frame it after this is asked."""
+        try:
+            side = max(0, self.root.winfo_rootx() - self.root.winfo_x())
+            head = max(0, self.root.winfo_rooty() - self.root.winfo_y())
+        except tk.TclError:                # not a window to ask
+            return 0, 0
+        return 2 * side, head + side
 
     def apply_opening_size(self):
         """Open the window at opening_size(). launch() calls this; a

@@ -4,9 +4,14 @@
 Both address long-standing GUI complaints (2026-07-10): content taller
 than the window was simply CUT OFF with no scrollbar, and none of the
 controls explained themselves (e.g. the LCR Speed/Avg fields).
+
+The output-folder pickers' Browse and New folder... buttons (#394) live
+here too, at the end; their decisions are in output_folder.py.
 """
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, filedialog, messagebox, simpledialog
+
+import output_folder
 
 
 class Tooltip:
@@ -430,3 +435,85 @@ class ScrollableTab(ScrollableFrame):
 
     def __init__(self, notebook):
         super().__init__(notebook, always_vbar=True, stretch_height=False)
+
+
+# ---- output-folder pickers (#394) ---------------------------------------
+# The bench's Tk folder dialog (tk_chooseDirectory) has no New Folder
+# button, so a fresh folder for a session meant a trip to the system file
+# manager. Each picker that chooses where output goes now has Browse, which
+# opens at the folder in its box, and New folder..., which makes a folder
+# inside that one and puts it in the box. The dialogs are this module's
+# filedialog / simpledialog / messagebox, so tests swap them for fakes.
+
+def browse_folder(var, parent=None):
+    """Browse for a folder, opening at the one in `var`.
+
+    Sets `var` to the folder chosen and returns it; Cancel changes nothing
+    and returns None. Where it opens: output_folder.browse_start.
+    """
+    opts = {'initialdir': output_folder.browse_start(var.get())}
+    if parent is not None:
+        opts['parent'] = parent
+    chosen = filedialog.askdirectory(**opts)
+    if not chosen:
+        return None
+    var.set(chosen)
+    return chosen
+
+
+def new_folder(var, box, parent=None):
+    """New folder...: make a folder inside the one in `var`, and put the new
+    folder in `var`. -> its path, or None when nothing was made.
+
+    `box` is the box's name as its label shows it, for the messages. A box
+    that is empty or names no folder is explained and nothing is asked. A
+    refused name is explained and the prompt comes back holding it, to be
+    fixed rather than retyped; Cancel leaves. A folder the system will not
+    make (a read-only or missing share) is explained and ends it.
+    """
+    title = "New folder"
+    opts = {} if parent is None else {'parent': parent}
+    where = var.get().strip()
+    problem = output_folder.parent_problem(where, box)
+    if problem:
+        messagebox.showerror(title, problem, **opts)
+        return None
+    typed = ''
+    while True:
+        typed = simpledialog.askstring(
+            title, f"Make a new folder inside\n{where}\n\nName:",
+            initialvalue=typed, **opts)
+        if typed is None:                       # Cancel
+            return None
+        try:
+            path = output_folder.make(where, typed)
+        except ValueError as e:                 # refused: say why, ask again
+            messagebox.showerror(title, str(e), **opts)
+            continue
+        except OSError as e:                    # e.g. a read-only share
+            messagebox.showerror(
+                title, output_folder.failed_text(where, typed, e), **opts)
+            return None
+        var.set(path)
+        return path
+
+
+def folder_buttons(master, browse, new, box, what):
+    """Browse and New folder... side by side, in a frame of their own.
+
+    `browse` and `new` are the two commands; `box` (the box's name) and
+    `what` (what goes into the folder) word the New folder... tooltip.
+    -> (frame, browse_button, new_folder_button). The caller places the
+    frame where Browse alone used to go, so the pair always sits together.
+    """
+    frame = ttk.Frame(master)
+    browse_btn = ttk.Button(frame, text="Browse", command=browse)
+    browse_btn.pack(side=tk.LEFT)
+    new_btn = ttk.Button(frame, text=output_folder.NEW_FOLDER_LABEL,
+                         command=new)
+    new_btn.pack(side=tk.LEFT, padx=(4, 0))
+    add_tooltip(new_btn,
+                f"Make a new, empty folder inside the folder in the {box} "
+                f"box and put it in the box, so {what} go into it. You type "
+                f"the name; a name already in use is refused.")
+    return frame, browse_btn, new_btn

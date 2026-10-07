@@ -17,7 +17,9 @@ tools. Pinned here:
 * the SLDEA tab's button sits beside Edge Review... and Plot runs...,
   follows the run that just ended (live when that run recorded video),
   and launches exactly like its neighbours, one review per run, without
-  looking in the run folder.
+  looking in the run folder;
+* Edge Review's button acts on the run in the Run box whether or not it
+  loaded, and looks at the folder again when the pointer comes onto it.
 
 Nothing here starts a process or opens a camera: every launch is a stub.
 The window cases need a Tk display and skip cleanly without one.
@@ -670,6 +672,91 @@ def test_the_sldea_tab_launches_the_review_like_its_neighbours():
     finally:
         gui.subprocess, gui.messagebox = real_sp, real_mb
         gui.sldea_video.has_video = real_has
+        shutil.rmtree(p, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Edge Review
+# ---------------------------------------------------------------------------
+
+def test_edge_review_reviews_the_run_in_the_box_even_when_it_did_not_load():
+    """The review needs the run's folder, never Edge Review's own load or
+    detection: a run that could not be loaded, but whose recording is in
+    its folder, still has its video reviewed from the button."""
+    import sldea_edge_gui as eg
+    import sldea_video_review as vr
+    root = _tk_root()
+    p = _tmp()
+    real_load, real_mb, real_win = eg.se.load_run, eg.messagebox, \
+        vr.VideoReviewWindow
+    opened = []
+
+    class _Win:
+        def __init__(self, master, rundir, on_close=None):
+            self.rundir, self.on_close = rundir, on_close
+            self._closed = False
+            self.win = self
+            opened.append(self)
+
+        def lift(self):
+            pass
+
+        def close(self):
+            self._closed = True
+    try:
+        run = _run(p, 'SLDEA_20261006_140000', video=True)
+
+        def unreadable(rundir):
+            raise OSError("data.csv is locked")
+        eg.se.load_run = unreadable
+        eg.messagebox = _Boxes()
+        app = eg.EdgeReviewApp(root, path=run)
+        assert app.run is None, "the fixture loaded after all"
+        assert eg.messagebox.errors, "the failed load said nothing"
+        assert app.run_box.get().split('  ')[0] == 'SLDEA_20261006_140000'
+        assert str(app.video_btn.cget('state')) == 'normal'
+        assert app._tips['video_btn'].text == eg.TIPS['video_btn']
+        vr.VideoReviewWindow = _Win
+        app._open_video_review()
+        assert len(opened) == 1 and _same(opened[0].rundir, run)
+    finally:
+        eg.se.load_run = real_load
+        eg.messagebox = real_mb
+        vr.VideoReviewWindow = real_win
+        _destroy(root)
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_edge_review_looks_at_the_folder_again_when_the_pointer_arrives():
+    """The SLDEA tab's auto-open picks a run the moment it ends, and its
+    recording reaches the folder a while later. The button used to stay
+    grey until the run was picked again, which throws its review pass
+    away. Now the pointer coming onto the button looks again, and the
+    loaded run is left as it was."""
+    import sldea_edge_gui as eg
+    root = _tk_root()
+    p = _tmp()
+    real_mb = eg.messagebox
+    try:
+        eg.messagebox = _Boxes()
+        run = _run(p, 'SLDEA_20261006_150000')
+        app = eg.EdgeReviewApp(root, path=run)
+        loaded = app.run
+        assert loaded is not None, "the fixture did not load"
+        root.deiconify()
+        _pump(root, 0.2)
+        assert str(app.video_btn.cget('state')) == 'disabled'
+        _add_video(run)
+        assert str(app.video_btn.cget('state')) == 'disabled', \
+            "something looked before the pointer arrived"
+        # processed before event_generate returns: no -when given
+        app.video_btn.event_generate('<Enter>', x=2, y=2)
+        assert str(app.video_btn.cget('state')) == 'normal'
+        assert app._tips['video_btn'].text == eg.TIPS['video_btn']
+        assert app.run is loaded, "the run was loaded again"
+    finally:
+        eg.messagebox = real_mb
+        _destroy(root)
         shutil.rmtree(p, ignore_errors=True)
 
 

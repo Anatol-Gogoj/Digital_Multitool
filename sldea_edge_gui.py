@@ -730,7 +730,9 @@ TIPS = {
                  "run's accepted stills. Accept / reject decisions go to "
                  "video_review.csv, never to data.csv.",
     'video_btn_disabled': "This run has no video in its folder (Record was "
-                          "off, or the recording is still being moved in).",
+                          "off, or the recording is still being moved in). "
+                          "The button looks again whenever the pointer "
+                          "comes onto it.",
     'save_btn': "Writes the accepted areas into data.csv (a .bak is kept) "
                 "and saves the plot and outline overlays — greyed out until "
                 "▶ Detect Edges has run, and it still refuses without the "
@@ -2583,6 +2585,11 @@ class EdgeReviewApp:
                                     style='Secondary.TButton',
                                     state='disabled')
         self.video_btn.pack(side=tk.LEFT, padx=(6, 0))
+        # ...and it looks at the folder again when the pointer comes onto
+        # it (#395): a recording moved in after the run was picked lights
+        # it without picking the run again, which would drop its review
+        self.video_btn.bind('<Enter>', lambda _e: self._sync_video_btn(),
+                            add='+')
         self._video_win = None
         # Save stays on the far RIGHT — the end of the job, and out of the
         # left-to-right flow (`#216`). It is NOT accented: two accents is
@@ -2880,24 +2887,33 @@ class EdgeReviewApp:
         self._sync_video_btn()
 
     def _sync_video_btn(self):
-        """🎞 Video review… is live when the loaded run's folder holds a
-        recording and its index (sldea_video.has_video). Called from
-        _sync_detect_btn, which every run change already goes through."""
+        """🎞 Video review… is live when the folder of the run in the Run
+        box holds a recording and its index (sldea_video.has_video),
+        whether or not that run loaded (#395): the review needs the folder
+        only, never this window's detection. With a run loaded, that run
+        is the one in the box, as before.
+
+        Called from _sync_detect_btn, which every run change already goes
+        through, and when the pointer comes onto the button: the recording
+        reaches the folder a while after the run, usually after the run
+        was picked here (the SLDEA tab's auto-open picks it at once)."""
         btn = getattr(self, 'video_btn', None)
         if btn is None:
             return
         import sldea_video as sv
-        have = bool(self.run is not None and self.rundir
-                    and sv.has_video(self.rundir))
+        have = bool(self.rundir and sv.has_video(self.rundir))
         btn.config(state='normal' if have else 'disabled')
         tip = self._tips.get('video_btn') if hasattr(self, '_tips') else None
         if tip is not None:
             tip.text = TIPS['video_btn' if have else 'video_btn_disabled']
 
     def _open_video_review(self):
-        """Open the video review window for the loaded run: one at a time
-        (the singleton rule of the aux windows, #176). Another run's window
-        is closed first; the same run's is raised."""
+        """Open the video review window for the run in the Run box, loaded
+        or not (#395), in this window's own process: one at a time (the
+        singleton rule of the aux windows, #176). Another run's window is
+        closed first; the same run's is raised."""
+        if not self.rundir:
+            return
         import sldea_video_review as vr
         cur = self._video_win
         if cur is not None and not cur._closed:

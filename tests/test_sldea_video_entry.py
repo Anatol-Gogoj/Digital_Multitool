@@ -13,7 +13,11 @@ tools. Pinned here:
   as well as on the console;
 * the plot window's right-click menu offers Video review... for the run
   that was clicked, live only when that run's folder holds a recording,
-  and the window starts one review per run.
+  and the window starts one review per run;
+* the SLDEA tab's button sits beside Edge Review... and Plot runs...,
+  follows the run that just ended (live when that run recorded video),
+  and launches exactly like its neighbours, one review per run, without
+  looking in the run folder.
 
 Nothing here starts a process or opens a camera: every launch is a stub.
 The window cases need a Tk display and skip cleanly without one.
@@ -494,6 +498,178 @@ def test_the_plot_windows_answer_survives_the_redraw_a_right_click_asks():
             finally:
                 g.subprocess = real
     finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# the SLDEA tab
+# ---------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def _gui():
+    """(root, app): the real main window, with no instrument hunt and no
+    camera preview (test_gui_tabs' recipe)."""
+    root = _tk_root()
+    import gui
+    saved = (gui.InstrumentControlGUI.auto_connect, gui.CAM_AUTOSTART_ON_TAB)
+    gui.InstrumentControlGUI.auto_connect = lambda self: None
+    gui.CAM_AUTOSTART_ON_TAB = False
+    try:
+        app = gui.InstrumentControlGUI(root)
+        root.withdraw()
+        yield root, app
+    finally:
+        (gui.InstrumentControlGUI.auto_connect,
+         gui.CAM_AUTOSTART_ON_TAB) = saved
+        _destroy(root)
+
+
+class _Rec:
+    """A recorder as the run leaves it: `written` frames."""
+
+    def __init__(self, written):
+        self.written = written
+
+
+def _end_run(app, rundir, rec):
+    """What the run's worker leaves for _sldea_finished: its run.log (None
+    for a run that never got a folder) and its recorder, then the Tk-side
+    end of the run itself."""
+    app._sldea_running = True
+    app._sldea_runlog = os.path.join(rundir, 'run.log') if rundir else None
+    app._sldea_recorder = rec
+    app._sldea_finished()
+
+
+def test_the_sldea_tab_has_the_button_beside_edge_review_and_plot_runs():
+    """Beside the other tools that open a run, before the status line, and
+    grey until a run with video has ended in this session."""
+    with _gui() as (_root, app):
+        btn = app.sldea_video_btn
+        slaves = btn.master.pack_slaves()
+        texts = [str(w.cget('text')) for w in slaves]
+        i = texts.index('🎞 Video review…')
+        assert texts[i - 3:i] == ['🔍 Edge Review…', '🎚 Tune params…',
+                                  '📊 Plot runs…'], texts
+        assert slaves[i + 1] is app.sldea_status, texts
+        assert str(btn.cget('state')) == 'disabled'
+        assert app._sldea_video_run is None
+
+
+def test_the_sldea_tab_button_follows_the_run_that_just_ended():
+    """It opens the video of the last run this tab finished, so each run's
+    end moves it on: live after a run whose own recorder wrote frames;
+    grey after a run without video (the recorder attribute still holds the
+    previous run's), after a recorder that wrote nothing, and after a run
+    that never got a folder. Its bookkeeping never raises: the live view
+    is told of the end after it whatever it met."""
+    import gui
+    p = _tmp()
+    try:
+        runs = [_run(p, f'RUN{k}', video=True) for k in range(5)]
+        with _gui() as (_root, app):
+            btn = app.sldea_video_btn
+            rec = _Rec(12)
+            _end_run(app, runs[0], rec)
+            assert _same(app._sldea_video_run, runs[0])
+            assert str(btn.cget('state')) == 'normal'
+            # the next run recorded nothing: _sldea_recorder still holds
+            # the first run's recorder, which is not this run's
+            _end_run(app, runs[1], rec)
+            assert app._sldea_video_run is None
+            assert str(btn.cget('state')) == 'disabled'
+            # a recorder of its own that wrote nothing (no stream, or the
+            # codec check stopped the run)
+            _end_run(app, runs[2], _Rec(0))
+            assert app._sldea_video_run is None
+            # a run that never got a folder
+            _end_run(app, None, _Rec(5))
+            assert app._sldea_video_run is None
+            # a video run again
+            _end_run(app, runs[3], _Rec(3))
+            assert _same(app._sldea_video_run, runs[3])
+            assert str(btn.cget('state')) == 'normal'
+
+            class _Broken:
+                @property
+                def written(self):
+                    raise RuntimeError("recorder state unreadable")
+            told = []
+            real_notify = gui.sldea_liveview.notify
+            gui.sldea_liveview.notify = \
+                lambda app_, action, *a: told.append(action) or True
+            try:
+                _end_run(app, runs[4], _Broken())
+            finally:
+                gui.sldea_liveview.notify = real_notify
+            assert told == ['end_run'], told
+            assert app._sldea_video_run is None, "left on the previous run"
+            assert str(btn.cget('state')) == 'disabled'
+            assert str(app.sldea_run_btn.cget('state')) == 'normal'
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_the_sldea_tab_launches_the_review_like_its_neighbours():
+    """The same interpreter, inherited working directory and detach flag
+    as Edge Review... and Plot runs..., and one review per run from this
+    button. The press never looks in the run folder, which is usually on
+    the share: it runs on the Tk thread of the app that drives the HV, and
+    the run worker's own Tk calls wait on that thread. A recording that
+    is not in the folder yet is the review program's to report."""
+    import gui
+    p = _tmp()
+    spy, boxes = _Spawn(), _Boxes()
+    looked = []
+    real_sp, real_mb = gui.subprocess, gui.messagebox
+    real_has = gui.sldea_video.has_video
+
+    def has_video(rundir):
+        looked.append(rundir)
+        return real_has(rundir)
+    try:
+        run = _run(p, 'SLDEA_20261006_120000', video=True)
+        later = _run(p, 'SLDEA_20261006_130000')
+        with _gui() as (_root, app):
+            gui.subprocess, gui.messagebox = spy, boxes
+            gui.sldea_video.has_video = has_video
+            app._sldea_open_plot(run)
+            app._sldea_open_edge_review(run)
+            (plot_argv, plot_kw), (edge_argv, edge_kw) = spy.calls
+            del spy.calls[:]
+            _end_run(app, run, _Rec(40))
+            app.sldea_video_btn.invoke()
+            assert len(spy.calls) == 1, spy.calls
+            argv, kw = spy.calls[0]
+            assert argv[0] == plot_argv[0] == edge_argv[0] == sys.executable
+            assert os.path.basename(argv[1]) == 'sldea_video_review.py'
+            assert os.path.dirname(argv[1]) == os.path.dirname(plot_argv[1])
+            assert os.path.exists(argv[1])
+            assert argv[2:] == [run], argv
+            assert kw == plot_kw == edge_kw == {'start_new_session': True}
+            said = app.status_bar.cget('text')
+            assert said == 'Video review opened on SLDEA_20261006_120000', \
+                said
+            # while it runs, a second press starts nothing and says so
+            app.sldea_video_btn.invoke()
+            assert len(spy.calls) == 1
+            said = app.status_bar.cget('text')
+            assert 'already open' in said and 'SLDEA_20261006_120000' in said
+            # once it has closed, the press opens it again
+            next(iter(app._sldea_video_reviews.values())).rc = 0
+            app.sldea_video_btn.invoke()
+            assert len(spy.calls) == 2
+            # a video run whose recording is still on its way in: the
+            # program is started all the same, and says so itself
+            _end_run(app, later, _Rec(40))
+            assert str(app.sldea_video_btn.cget('state')) == 'normal'
+            app.sldea_video_btn.invoke()
+            assert len(spy.calls) == 3 and spy.calls[2][0][2:] == [later]
+            assert not (boxes.infos or boxes.errors), boxes.infos
+            assert looked == [], f"the main app looked in {looked}"
+    finally:
+        gui.subprocess, gui.messagebox = real_sp, real_mb
+        gui.sldea_video.has_video = real_has
         shutil.rmtree(p, ignore_errors=True)
 
 

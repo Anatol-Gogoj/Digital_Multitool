@@ -33,7 +33,7 @@ What these pin down:
   * #392: setup.txt ends with how the recording ENDED (the frames it
     holds, or NOT recorded, and why it stopped), written after the HV
     shutdown; a codec check that hangs is given up on and stops the run
-    before HV.
+    before HV; the guard-page test counts only the real fault.
 
 Run: .venv/bin/python tests/test_sldea_video.py
 """
@@ -294,6 +294,7 @@ def write_one(img, want, d, name):
     vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*sv.VIDEO_FOURCC),
                          1.0, (w, h), isColor=False)
     try:
+        print('WRITING', flush=True)
         vw.write(img)
         out = 'ok'
     except Exception as e:
@@ -320,16 +321,45 @@ with tempfile.TemporaryDirectory() as d:
 '''
 
 
-def _guard_child(mode):
+def _guard_child(mode, root=None):
     """-> (returncode, [write outcome, decoded bit-exactly] or None when
-    the child died before it could say, its stderr)."""
+    the child died before it could say, its stdout lines, its stderr).
+    `root` is where the child imports sldea_video from (this checkout by
+    default). It runs in the temp folder, so that the '' a `-c` child has
+    on sys.path cannot find this checkout's modules for it."""
     import json
     import subprocess
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    root = root or os.path.dirname(os.path.dirname(os.path.abspath(
+        __file__)))
     p = subprocess.run([_sys.executable, '-c', _GUARD_CHILD, root, mode],
-                       capture_output=True, text=True, timeout=120)
-    out = p.stdout.strip().splitlines()
-    return p.returncode, (json.loads(out[-1]) if out else None), p.stderr
+                       capture_output=True, text=True, timeout=120,
+                       cwd=tempfile.gettempdir())
+    lines = p.stdout.strip().splitlines()
+    res = (json.loads(lines[-1]) if lines and lines[-1].startswith('[')
+           else None)
+    return p.returncode, res, lines, p.stderr
+
+
+# THE fault, and nothing else (#392). The child prints 'WRITING' just
+# before its write, and after that only these count: "Unknown C++
+# exception" from the write (Windows, where OpenCV turns the access
+# violation into one), or the child killed by SIGSEGV (Linux, returncode
+# -11) or by STATUS_ACCESS_VIOLATION (a Windows build that does not
+# convert it, returncode 0xC0000005). Both codes were measured with a
+# NULL read in a child, 2026-10-06. The old test took `rc != 0`, so a
+# child that died of an ImportError or an assertion counted as faulted.
+_GUARD_WRITING = 'WRITING'
+_ACCESS_VIOLATION = 0xC0000005
+
+
+def _guard_faulted(rc, res, lines):
+    """Did the guard child fault reading past its frame? See above."""
+    import signal
+    if _GUARD_WRITING not in lines:
+        return False
+    if res and 'Unknown C++ exception' in str(res[0]):
+        return True
+    return rc in (-signal.SIGSEGV, _ACCESS_VIOLATION)
 
 
 def test_a_frame_through_ffmpeg_safe_survives_where_a_raw_one_faults():
@@ -338,17 +368,58 @@ def test_a_frame_through_ffmpeg_safe_survives_where_a_raw_one_faults():
     (an exception on Windows, a crash on Linux), and the ffmpeg_safe one
     writes and decodes bit-exactly. An FFmpeg that does not read past the
     frame (5.0 and later) passes both, and the test says it showed
-    nothing."""
+    nothing. Only the fault itself counts (_guard_faulted): a raw child
+    that failed in any other way fails this test."""
     _need_cv()
-    rc, res, err = _guard_child('safe')
+    rc, res, lines, err = _guard_child('safe')
     assert rc == 0 and res == ['ok', True], (rc, res, err[-800:])
-    rc, res, err = _guard_child('raw')
+    rc, res, lines, err = _guard_child('raw')
     if rc == 0 and res and res[0] == 'ok':
         raise _Skip(f"{sv._ffmpeg_version()} does not read past a raw "
                     f"frame, so the layouts cannot be told apart here (the "
                     f"ffmpeg_safe half passed)")
-    assert rc != 0 or (res and 'Unknown C++ exception' in res[0]), \
-        (rc, res, err[-800:])
+    assert _guard_faulted(rc, res, lines), (rc, res, lines, err[-800:])
+
+
+def test_the_guard_test_counts_only_the_real_fault():
+    """#392: the test above used to count ANY failed child as the fault
+    (`rc != 0 or ...`), so a child that died before it wrote a frame, of
+    an ImportError or an assertion, passed it. Here are such children
+    for real: the old rule counts them, _guard_faulted does not. A child
+    that really faults (a NULL read) after it says it is writing counts,
+    with whatever code this platform gives it, and the same child does
+    not count without that line."""
+    import subprocess
+
+    def old_rule(rc, res):
+        return rc != 0 or bool(res and 'Unknown C++ exception' in res[0])
+
+    def child(code):
+        p = subprocess.run([_sys.executable, '-c', code],
+                           capture_output=True, text=True, timeout=120,
+                           cwd=tempfile.gettempdir())
+        return p.returncode, p.stdout.strip().splitlines(), p.stderr
+    # the guard child itself, from a root with no sldea_video in it
+    rc, res, lines, err = _guard_child(
+        'raw', root=os.path.join(tempfile.gettempdir(), 'no_such_root_392'))
+    assert rc != 0 and 'ModuleNotFoundError' in err, (rc, err[-400:])
+    assert old_rule(rc, res), "the old rule should count this child"
+    assert not _guard_faulted(rc, res, lines), (rc, res, lines)
+    # an assertion inside the child, even after it said it was writing
+    rc, lines, err = child(f"print({_GUARD_WRITING!r}, flush=True)\n"
+                           f"assert False, 'not the fault'\n")
+    assert rc != 0 and 'AssertionError' in err, (rc, err[-400:])
+    assert old_rule(rc, None) and not _guard_faulted(rc, None, lines)
+    # a real fault; on Windows, no error-report dialog may hold the child
+    rc, lines, err = child(
+        "import ctypes, faulthandler, os\n"
+        "if os.name == 'nt':\n"
+        "    ctypes.windll.kernel32.SetErrorMode(0x0002)\n"
+        f"print({_GUARD_WRITING!r}, flush=True)\n"
+        "faulthandler._read_null()\n")
+    assert _guard_faulted(rc, None, lines), (rc, lines, err[-400:])
+    assert not _guard_faulted(rc, None, [ln for ln in lines
+                                         if ln != _GUARD_WRITING])
 
 
 # ---------------------------------------------------------------- recorder

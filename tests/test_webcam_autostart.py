@@ -18,9 +18,10 @@ and the operator's own Stop stays stopped.
 Headless apart from a Tk root: the camera, the device scan and the dialogs
 are stubbed, so no test here opens a real camera. Most tests build only the
 real Webcam tab into a two-tab notebook; one builds the whole app, to check
-the tab's binding lives beside the SLDEA tab's. Apply & Lock, the timed
-capture and the SLDEA start path (into its real camera pre-flight dialog)
-run their real methods, with the camera layer under them stubbed.
+the tab's binding lives beside the SLDEA tab's. Stabilize, Auto-WB once,
+Auto-expose, Apply & Lock, the timed capture and the SLDEA start path (into
+its real camera pre-flight dialog) run their real methods, with the camera
+layer under them stubbed.
 
 Run: .venv/bin/python tests/test_webcam_autostart.py
 """
@@ -946,26 +947,62 @@ def test_stopping_leaves_the_splash_over_the_dimmed_last_frame():
 
 
 def test_every_stop_path_gets_the_splash():
-    """cam_stop_preview is what Stabilize, Auto-WB once, Auto-expose, the
-    timed and stepped captures and an SLDEA run start all call; the splash
-    is drawn after the caller has recorded what took the camera."""
-    with _Patched():
-        root, app = _app()
-        if root is None:
-            return
-        try:
-            _select_webcam(app)
-            assert _pump_until(root, lambda: app.cam_previewing)
-            # what _cam_start_timed does around its stop, in one callback
-            app.cam_stop_preview()
-            app.cam_seq_running = True
-            app._cam_seq_kind = 'timed'
-            app.cam_seq_thread = types.SimpleNamespace(is_alive=lambda: True)
-            _pump(root, 0.1)
-            assert app.cam_splash[1] == gui.CAM_OFF_TIMED, app.cam_splash
-            assert _shows_splash(app)
-        finally:
-            _close(root, app)
+    """Stabilize, Auto-WB once, Auto-expose, the timed capture and the
+    SLDEA run start each stop the preview with cam_stop_preview and only
+    then record what took the camera. Each runs its real method here, its
+    camera work held open, and the splash must name it over the dimmed
+    last frame, inside the reason watch's first period. Run is pressed on
+    another tab, where interval capture has kept the preview running."""
+    cases = (
+        ('Stabilize', G.cam_stabilize, gui.CAM_OFF_ADJUSTING),
+        ('Auto-WB once', G.cam_grey_world, gui.CAM_OFF_ADJUSTING),
+        ('Auto-expose', G.cam_auto_expose, gui.CAM_OFF_ADJUSTING),
+        ('timed capture', G.cam_toggle_timed, gui.CAM_OFF_TIMED),
+        ('SLDEA run start', G.sldea_run, gui.CAM_OFF_SLDEA),
+    )
+    for name, press, reason in cases:
+        with _Patched() as p, _CameraWork() as work:
+            root, app = _app()
+            if root is None:
+                return
+            try:
+                app._cam_device = lambda: '/dev/video0'
+                app._cam_save_frame = lambda *a, **kw: None   # no files
+                app.cam_tm_delays.set('0')                    # one shot
+                app.cam_tm_focus.set(False)                   # no CSV
+                _sldea_ready(app)
+                app._sldea_skip_preflight = True
+                _select_webcam(app)
+                assert _pump_until(root, lambda: app.cam_previewing and
+                                   app.cam_last_frame is not None), name
+                if press is G.sldea_run:
+                    app.cam_interval_job = root.after(600000, lambda: None)
+                    app.notebook.select(app.other_tab)
+                    _pump(root, 0.1)
+                    assert app.cam_previewing, name
+                press(app)
+                _pump(root, 0.2)
+                assert not app.cam_previewing, name
+                taken = app.cam_last_frame_at.strftime('%H:%M:%S')
+                assert app.cam_splash == (gui.CAM_SPLASH_OFF, reason,
+                                          "Last frame taken " + taken), (
+                    name, app.cam_splash)
+                assert _shows_splash(app), name
+                # the frame is kept, dimmed: the fake frame is flat 200 gray
+                r, g, b = app.cam_splash_img.getpixel((2, 2))
+                want = round(_FakeCam.level * gui.CAM_SPLASH_DIM)
+                assert abs(r - want) <= 2 and r == g == b, (name, r, want)
+                assert p.mb.calls == [], (name, p.mb.calls)
+                # let the work end, so no worker outlives the window
+                work.release()
+                if press is G.sldea_run:
+                    app._sldea_finished()
+                assert _pump_in_mainloop(root, lambda: not (
+                    'camera-ctrl' in app._bg_busy or app.cam_seq_running
+                    or app._cam_worker_alive())), name
+            finally:
+                work.release()
+                _close(root, app)
 
 
 def test_leaving_the_tab_stops_the_preview_unless_interval_capture_runs():
@@ -1096,7 +1133,17 @@ def test_an_adjustment_resumes_the_preview_only_on_the_tab():
 
 def test_the_quiet_check_agrees_with_cam_owned_by_sldea():
     """_cam_sldea_holds_camera is _cam_owned_by_sldea without the box; if
-    the two ever disagree, the tab-click start could take a run's camera."""
+    the two ever disagree, the tab-click start could take a run's camera.
+
+    Agreeing is not enough: both missed the same state, which #385's
+    review found. The real sldea_run closes the preview's camera for the
+    run before its camera pre-flight dialog, and sets _sldea_running only
+    once the operator presses Start there, so during the pre-flight
+    neither check sees the run. The second half drives the real start
+    path into the real pre-flight, opens the Webcam tab from inside it (a
+    grab holds the pointer, not the keyboard), and requires the tab-click
+    start to stay off the camera. That half fails on #385's code before
+    the review fix (58c8ece), which had only the two flag checks."""
     with _Patched() as p:
         app = G.__new__(G)
         recorders = (None,
@@ -1111,6 +1158,28 @@ def test_the_quiet_check_agrees_with_cam_owned_by_sldea():
                 assert p.mb.calls == [], "the quiet check opened a box"
                 loud = G._cam_owned_by_sldea(app)
                 assert quiet == loud, (running, rec, quiet, loud)
+    # the state between the flags: the run's own start path
+    with _Patched() as p, _CameraWork():
+        root, app = _app()
+        if root is None:
+            return
+        _sldea_ready(app)
+        try:
+            _select_webcam(app)
+            assert _pump_until(root, lambda: app.cam_previewing)
+            app.notebook.select(app.other_tab)        # to the SLDEA tab
+            _pump(root, 0.1)
+            seen = _through_the_preflight(root, app, 'cancel')
+            assert seen['dialog'], (p.mb.calls, app.sldea_lines)
+            if not seen.get('grab'):
+                print("   (skipped: this display gives no grab)")
+                return
+            assert seen['opens'] == [('open', 0)] and not seen['previewing'], (
+                "the tab-click start took the camera inside the SLDEA "
+                "camera pre-flight", seen)
+            assert seen['blocker'] is not None, seen
+        finally:
+            _close(root, app)
 
 
 def test_the_whole_app_keeps_both_tab_bindings():

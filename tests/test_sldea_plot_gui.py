@@ -909,6 +909,56 @@ def test_fit_widths_gives_way_in_order_and_never_below_a_floor():
     assert order == ('run', 'material', 'group'), order
 
 
+def test_the_headings_are_measured_in_the_heading_font():
+    """`#390`: _fit_columns measured each heading in the CELL font, but
+    ttk draws headings in TkHeadingFont, which is bold on X11 (the
+    bench), so Group's heading with its sort arrow could clip at Group's
+    floor there. Here the heading font is made bolder and larger than
+    the cells' on purpose, so the two cannot measure alike on any
+    desktop: each heading with its arrow has to fit the width its column
+    is given and its floor, and the heading alone the separator's
+    minimum. Then again through a theme that gives the headings a font
+    DESCRIPTION rather than a named font, which must not stop the window
+    from opening."""
+    import tkinter as tk
+    from tkinter import font as tkfont
+    from tkinter import ttk
+    p = _mktmp()
+    try:
+        _fake_run(p, 'R1')
+        for how in ('named font', 'description'):
+            try:
+                root = tk.Tk()
+            except tk.TclError as e:
+                print(f"   (skipped: no display for Tk: {e})")
+                return
+            try:
+                root.withdraw()
+                cell = tkfont.nametofont('TkDefaultFont')
+                size = abs(int(cell.actual('size'))) + 3
+                if how == 'named font':
+                    head = tkfont.nametofont('TkHeadingFont')
+                    head.configure(weight='bold', size=size)
+                else:
+                    desc = f"{{{cell.actual('family')}}} {size} bold"
+                    ttk.Style(root).configure('Heading', font=desc)
+                    head = tkfont.Font(root=root, font=desc)
+                assert head.measure('Group ▲') > cell.measure('Group ▲')
+                win = g.PlotWindow(root, p, remember=False)
+                tree, inset = win.run_box, win._text_w('')
+                for col, text in g.RUN_COLUMNS:
+                    need = head.measure(text + ' ▲') + inset
+                    assert tree.column(col, 'width') >= need, \
+                        (how, col, tree.column(col, 'width'), need)
+                    assert win._col_floor(col) >= need, (how, col)
+                    assert tree.column(col, 'minwidth') >= \
+                        head.measure(text) + inset, (how, col)
+            finally:
+                _shut(root)
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
 def test_initial_state_falls_back_without_arguments():
     parents, pre = g.initial_state([])
     assert parents and parents[0], 'no parent at all'

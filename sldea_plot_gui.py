@@ -298,6 +298,25 @@ def fit_widths(natural, floor, avail, order):
     return out
 
 
+def style_font(widget, style, fallback):
+    """-> the tkfont.Font that the ttk `style` draws its text in.
+
+    The style's font as ttk looks it up, which walks the style's parents
+    ('Treeview.Heading' falls back to 'Heading', the one ttk draws a
+    Treeview's headings with), else the named font `fallback`. A font
+    DESCRIPTION is wrapped as readily as a named font, and one that Tk
+    cannot read stands in as `fallback`, so a theme's font cannot stop
+    the window from opening."""
+    name = ttk.Style(widget).lookup(style, 'font') or fallback
+    try:
+        return tkfont.Font(root=widget, name=name, exists=True)
+    except tk.TclError:                    # a description, not a name
+        try:
+            return tkfont.Font(root=widget, font=name)
+        except tk.TclError:
+            return tkfont.Font(root=widget, name=fallback, exists=True)
+
+
 def work_area(widget):
     """-> (left, top, right, bottom) of the desktop's usable area, in
     Tk's own pixels: on Windows the work area (the screen less the
@@ -1025,7 +1044,9 @@ RUN_ROWS = 9
 # so the floors follow the font and the DPI instead of one PC's pixels.
 # A processed timestamp-named run, the longest material placeholder, and
 # a heading with its sort arrow. At Tk's 96 dpi (Segoe UI 9) these are
-# 139, 124 and 46 px of text (measured 2026-10-06).
+# 139, 124 and 46 px of text (measured 2026-10-06). A heading is measured
+# in the headings' font, not the cells' (`#390`, PlotWindow._col_floor):
+# the same on Windows, bold on X11, where Group's could otherwise clip.
 RUN_COL_FLOOR = {'run': RUN_MARK + 'SLDEA_20261001_151016',
                  'material': NO_ELECTRODE,
                  'group': 'Group ▲'}
@@ -1823,8 +1844,15 @@ class PlotWindow:
                                       command=self.run_box.xview)
         self.run_box.configure(yscrollcommand=sb.set,
                                xscrollcommand=self._run_xscrolled)
-        self._run_font = tkfont.nametofont(
-            ttk.Style().lookup('Treeview', 'font') or 'TkDefaultFont')
+        self._run_font = style_font(self.run_box, 'Treeview',
+                                    'TkDefaultFont')
+        # ...and the HEADINGS' font, which is not the cells' (`#390`): ttk
+        # draws headings in TkHeadingFont, bold on X11 (the bench) and
+        # smaller on macOS, so a heading measured in the cell font comes
+        # out short on the bench, and Group's heading with its sort arrow
+        # could clip at Group's floor
+        self._head_font = style_font(self.run_box, 'Treeview.Heading',
+                                     'TkHeadingFont')
         # what an unprocessed row carries where the mark would be: the
         # whole number of spaces nearest RUN_MARK's width in this font
         # (4 spaces, 12 px, against the mark's 11 at 96 dpi), so names
@@ -1840,7 +1868,7 @@ class PlotWindow:
             # keep the widths their content was fitted to. A separator
             # can be dragged down to the heading's own width, no further.
             self.run_box.column(col, anchor=tk.W, stretch=(col == 'run'),
-                                minwidth=self._text_w(head),
+                                minwidth=self._head_w(head),
                                 width=self._col_floor(col))
         self.run_box.grid(row=0, column=0, sticky='nsew')
         sb.grid(row=0, column=1, sticky='ns')
@@ -2517,9 +2545,20 @@ class PlotWindow:
         air."""
         return self._run_font.measure(text) + 10
 
+    def _head_w(self, text):
+        """The width a HEADING needs to show `text` whole: _text_w's sum,
+        but in the headings' own font (`#390`), since that is the font
+        ttk draws them in."""
+        return self._head_font.measure(text) + 10
+
     def _col_floor(self, col):
-        """How narrow a squeeze may make `col`: RUN_COL_FLOOR's text."""
-        return self._text_w(RUN_COL_FLOOR[col])
+        """How narrow a squeeze may make `col`: RUN_COL_FLOOR's text, and
+        never narrower than the column's heading with a sort arrow, each
+        measured in the font it is drawn in (`#390`). Group's floor text
+        is its heading, so there the heading font decides."""
+        head = dict(RUN_COLUMNS)[col]
+        return max(self._text_w(RUN_COL_FLOOR[col]),
+                   self._head_w(head + ' ▲'))
 
     def _list_width(self):
         """What the list asks for: its column floors side by side."""
@@ -2597,15 +2636,16 @@ class PlotWindow:
 
     def _fit_columns(self):
         """Size the columns to what they hold: each fitted to its widest
-        cell and to its heading with room for a sort arrow, then fitted
-        into the width the list really has (fit_widths, RUN_COL_GIVE).
+        cell and to its heading with room for a sort arrow (the heading in
+        the headings' font, `#390`), then fitted into the width the list
+        really has (fit_widths, RUN_COL_GIVE).
 
         Re-run whenever the content changes, so a separator dragged by
         hand lasts until the next listing or grouping change."""
         natural, floor = {}, {}
         for col, head in RUN_COLUMNS:
-            natural[col] = max(self._text_w(t) for t in
-                               [head + ' ▲'] + [c[col] for c in self._cells])
+            natural[col] = max([self._head_w(head + ' ▲')]
+                               + [self._text_w(c[col]) for c in self._cells])
             floor[col] = self._col_floor(col)
         avail = self.run_box.winfo_width()
         if avail <= 1:                 # not drawn yet: what the box asks for

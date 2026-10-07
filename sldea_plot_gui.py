@@ -226,7 +226,9 @@ def list_runs(parent):
 # folder / Reset folders, and on the lab share a listing is already slow,
 # so a re-listing pays one stat per run and re-reads only a setup.txt
 # that changed. A file that is gone is a run with no line, like a file
-# that never had one.
+# that never had one. Every grouping change re-reads the column the same
+# way (`#390`): the seed reads setup.txt fresh, and a column read only at
+# listing time could show an electrode the file no longer records.
 # ---------------------------------------------------------------------------
 
 # The engine's own words for the two non-answers (`#373`), so a run's
@@ -2386,14 +2388,13 @@ class PlotWindow:
                      + name))
                 self._run_meta.append({'tag': tag, 'name': name,
                                        'processed': processed})
-        # `#374`: Material is read here and only here (cached by path and
-        # mtime, see recorded_electrode); Group is filled from the
-        # window's grouping by _refresh_group_column below, which every
-        # grouping change also calls
-        self._cells = [{'run': label,
-                        'material': material_text(recorded_electrode(d)),
-                        'group': ''}
-                       for d, label in self.runs]
+        # `#374`: Material and Group are both filled by
+        # _refresh_group_column below, which every grouping change also
+        # calls: Group from the window's grouping, Material from
+        # setup.txt (cached by path and mtime, see recorded_electrode),
+        # so a listing reads each setup.txt once (`#390`)
+        self._cells = [{'run': label, 'material': '', 'group': ''}
+                       for _d, label in self.runs]
         old = self.run_box.get_children()
         if old:
             self.run_box.delete(*old)
@@ -2568,19 +2569,29 @@ class PlotWindow:
         return w, h, x, y
 
     def _refresh_group_column(self):
-        """Fill the Group cells from the window's grouping, then re-fit
-        the columns and re-apply the sort.
+        """Fill the Group cells from the window's grouping and the
+        Material cells from setup.txt, then re-fit the columns and
+        re-apply the sort.
 
         Called by populate() and by _groups_changed(), which every
         grouping change goes through (Assign, Ungroup selected, Clear
-        all, the Move to group menu), so the column cannot lag the
-        grouping the figure is drawn from. Remembered groups arrive with
-        the window's first populate()."""
+        all, the Move to group menu, both seed buttons), so the column
+        cannot lag the grouping the figure is drawn from. Remembered
+        groups arrive with the window's first populate().
+
+        MATERIAL IS RE-READ HERE TOO (`#390`). The seed buttons read
+        setup.txt fresh, and a Material cell read only when the list was
+        filled kept the old electrode beside the group a corrected
+        setup.txt had just seeded, so the two cells disagreed about the
+        run. recorded_electrode re-reads only a file whose stamp moved:
+        a grouping change costs one stat per listed run."""
         where = {sp.group_key(k): n for k, n in self.groups.items()}
         for i, (d, _l) in enumerate(self.runs):
-            name = where.get(sp.group_key(d), '')
-            self._cells[i]['group'] = name
-            self.run_box.set(self._iid(i), 'group', name)
+            iid, cells = self._iid(i), self._cells[i]
+            cells['material'] = material_text(recorded_electrode(d))
+            cells['group'] = where.get(sp.group_key(d), '')
+            self.run_box.set(iid, 'material', cells['material'])
+            self.run_box.set(iid, 'group', cells['group'])
         self._fit_columns()
         self._apply_sort()
 
@@ -2839,7 +2850,7 @@ class PlotWindow:
         control. _sync_enabled too, because the aggregate's own greying
         does not change but the group label under the box reports on it."""
         self.lbl_groups.config(text=self.group_summary())
-        self._refresh_group_column()       # the picker's Group cells (`#374`)
+        self._refresh_group_column()       # Group and Material (`#390`)
         self.schedule()
 
     # -- options -----------------------------------------------------------

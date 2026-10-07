@@ -801,6 +801,86 @@ def test_the_group_column_follows_a_seed_and_the_menu_keeps_materials():
         assert boxes.said == [], boxes.said
 
 
+class _StatSpy:
+    """Stands in for sldea_plot_gui's `os` module, recording each stat of
+    a setup.txt and passing everything else through to the real one."""
+
+    def __init__(self, real):
+        self.real = real
+        self.setups = []
+
+    def stat(self, path, *a, **kw):
+        if os.path.basename(path) == 'setup.txt':
+            self.setups.append(os.path.normcase(os.path.abspath(path)))
+        return self.real.stat(path, *a, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+
+def test_material_follows_a_setup_txt_edit_at_the_next_grouping_change():
+    """`#390`: the Material cell was read only when the list was filled,
+    while the seed buttons read setup.txt FRESH. An operator who fixed a
+    run's electrode, as the Material tooltip tells them to, and then
+    pressed Group by material saw the new electrode in Group and the old
+    one in Material: the disagreement the column's comment rules out.
+    Every grouping change now re-reads Material through the cache, so an
+    unchanged file still costs one stat and no read."""
+    with _Bare() as b, _Boxes() as boxes:
+        if not b.ok:
+            return
+        win = b.win
+        s2 = _fake_run(b.tmp, 'S2')
+        path = _setup_txt(s2, 'Invisicon 3500')
+        s3 = _fake_run(b.tmp, 'S3')
+        path3 = _setup_txt(s3, CB)
+        win.populate()
+        assert _cells_by_name(win)['S2']['material'] == 'Invisicon 3500'
+        # the operator corrects the run's setup.txt outside the window,
+        # with a new stamp stated rather than left to the clock
+        _setup_txt(s2, N3900)
+        os.utime(path, (1_800_000_000, 1_800_000_000))
+        _select(win, 'S2', 'S3')
+        win.btn_seed_material.invoke()
+        cells = _cells_by_name(win)
+        assert cells['S2']['group'] == N3900, cells['S2']
+        assert cells['S2']['material'] == N3900, cells['S2']
+        assert cells['S3']['material'] == cells['S3']['group'] == CB
+        # ...and so do Tk's copy of the cell and the row's hover text
+        i = [os.path.basename(d) for d, _l in win.runs].index('S2')
+        assert win.run_box.set(win._iid(i), 'material') == N3900
+        assert f"Material (setup.txt): {N3900}" in win.row_tip(win._iid(i))
+        # any grouping change re-reads it, the menu's path included
+        _setup_txt(s3, '(not specified)')
+        os.utime(path3, (1_800_000_100, 1_800_000_100))
+        _select(win, 'S3')
+        assert win.move_to_group('later') is None
+        assert _cells_by_name(win)['S3']['material'] == '(not specified)'
+        assert _cells_by_name(win)['S3']['group'] == 'later'
+        # THE COST: with nothing changed, one stat per listed run and no
+        # read, both for a grouping change and for a re-listing
+        real_os, real_read = g.os, g.se.electrode_of
+        spy, reads = _StatSpy(real_os), []
+
+        def read(rundir):
+            reads.append(rundir)
+            return real_read(rundir)
+        want = sorted(os.path.normcase(os.path.abspath(
+            os.path.join(d, 'setup.txt'))) for d, _l in win.runs)
+        assert len(want) == 3, want
+        try:
+            g.os, g.se.electrode_of = spy, read
+            win._refresh_group_column()
+            assert sorted(spy.setups) == want, spy.setups
+            del spy.setups[:]
+            win.populate()
+            assert sorted(spy.setups) == want, spy.setups
+        finally:
+            g.os, g.se.electrode_of = real_os, real_read
+        assert reads == [], reads
+        assert boxes.said == [], boxes.said
+
+
 def test_fit_widths_gives_way_in_order_and_never_below_a_floor():
     """The picker's column arithmetic, on the case `#373`'s seeds produce:
     three long cells in a list too narrow for them, the group name the

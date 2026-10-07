@@ -19,6 +19,12 @@ frames the run ALREADY holds in memory:
   red, before the run ended stays red until the run has ended (#388):
   an operator who pressed Abort because the camera died must not see
   that relabeled as expected;
+* a video run whose stream gives no frame while the run hands over
+  stills (its stream never started, so it goes on with one-shot stills,
+  #392): the newest saved still, under a red "VIDEO STREAM DOWN: LAST
+  STILL, NOT LIVE" banner (#388). A still handed over since the last
+  stream frame shown takes the place of the red NO FRAME; without one,
+  the rule above holds;
 * a stills-only run: the newest SAVED still, which the run thread hands
   over in ONE attribute, app._sldea_live_still, as a LiveStill, once its
   save has succeeded: a still that could not be saved is never shown as
@@ -109,6 +115,10 @@ BANNERS = {
     # still delivering until then; a NO FRAME already on show stays red
     # (#388, LiveView.poll)
     'finishing': ("RECORDING ENDED, NOT LIVE", TOL_GREY),
+    # a video run whose stream gives no frame but which hands over
+    # one-shot stills (its stream never started, #392): the newest saved
+    # still, with the stream fault in words and in red (#388)
+    'stream_down': ("VIDEO STREAM DOWN: LAST STILL, NOT LIVE", TOL_RED),
 }
 
 # exposure_verdict's levels, in words and in colour
@@ -465,6 +475,7 @@ class LiveView:
         self._good = None            # the last real frame shown this run
         self._still_key = None       # LiveStill.mono of the one in _good
         self._fault = False          # NO FRAME seen while the run went on
+        self._stream_mono = None     # capture time of the last stream frame
         self._ended_wall = None
         self._covers_root = False    # placed inside the main window's area
         self.state = None
@@ -480,6 +491,7 @@ class LiveView:
         self._good = None
         self._still_key = None
         self._fault = False
+        self._stream_mono = None
         self._ended_wall = None
         self._img_key = None
         self._mode = 'running'
@@ -727,7 +739,15 @@ class LiveView:
         stays red until _sldea_finished, Abort or not (#388). A frame
         coming back clears it. The view knows only what it polled, so a
         stream that died while the window was closed and is first seen
-        after the run ended reads as the run ending."""
+        after the run ended reads as the run ending.
+
+        A still handed over since the last stream frame this view showed
+        (or with none shown this run) comes first: while this run's
+        stream gives no frame, that still is shown as 'stream_down', the
+        still under a red VIDEO STREAM DOWN banner, Abort or not. That is
+        a video run whose stream never started, which goes on with
+        one-shot stills (#392). The red NO FRAME rule above applies only
+        without such a still."""
         now_mono = time.monotonic() if now_mono is None else now_mono
         now_wall = time.time() if now_wall is None else now_wall
         app = self.app
@@ -741,6 +761,15 @@ class LiveView:
             rec = None               # an earlier run's: never this one's
         if rec is not None:
             kind = self._poll_stream(rec, now_mono, now_wall)
+            if kind in ('stalled', 'closed') and self._still_since_stream():
+                # the stream gives no frame, but the run hands over stills
+                # (the worker registers a recorder whose stream never
+                # started, then goes on with one-shot stills): show the
+                # newest, and say in red that the stream is down
+                if (self._good or {}).get('src') != 'still':
+                    self._still_key = None   # take the still, not _good
+                self._poll_still(now_mono)
+                kind = 'stream_down'
         else:
             kind = self._poll_still(now_mono)
         if kind in ('live', 'still'):
@@ -756,6 +785,16 @@ class LiveView:
             # else it stays red: an Abort pressed BECAUSE the camera died
             # must not relabel that as the recording's expected end (#388)
         return self._state(kind, now_mono, now_wall)
+
+    def _still_since_stream(self):
+        """True when this run has handed over a still since the last
+        stream frame this view showed, or with no stream frame shown this
+        run at all. Both clocks are time.monotonic(): LiveStill.mono, and
+        the stream frame's capture time (_poll_stream)."""
+        still = getattr(self.app, '_sldea_live_still', None)
+        if still is None:
+            return False
+        return self._stream_mono is None or still.mono > self._stream_mono
 
     def _run_over(self):
         """True once the run is on its way out: stopped (Abort, a
@@ -790,6 +829,7 @@ class LiveView:
                       'age_at_poll': age, 'mono': now_mono - (age or 0.0),
                       'wall': now_wall - (age or 0.0), 't_run': t,
                       'seq': now_mono}
+        self._stream_mono = self._good['mono']
         del frame
         return 'live'
 
@@ -817,8 +857,9 @@ class LiveView:
 
     def _state(self, kind, now_mono, now_wall):
         g = self._good
-        if kind == 'still' and (g is None or g.get('src') != 'still'):
-            kind = 'waiting' if g is None else 'closed'
+        if kind in ('still', 'stream_down') and \
+                (g is None or g.get('src') != 'still'):
+            kind = 'waiting' if g is None and kind == 'still' else 'closed'
         st = {'kind': kind, 'banner': BANNERS[kind][0]}
         if kind == 'idle':
             st['text'] = ("No SLDEA run yet. This window opens by itself "
@@ -840,6 +881,14 @@ class LiveView:
                 f"{fmt_age(now_mono - g['mono'])} ago "
                 f"({fmt_clock(g['wall'])}). This run takes stills only, "
                 f"so this window shows the newest still the run saved.")
+        elif kind == 'stream_down':
+            st['text'] = (
+                f"VIDEO STREAM DOWN: the camera stream gives no frame, so "
+                f"no video is being recorded and the run takes one-shot "
+                f"stills. LAST STILL, not live: step {g['step']} "
+                f"[{g['tag']}] at {float(g['kv']):.2f} kV, taken "
+                f"{fmt_age(now_mono - g['mono'])} ago "
+                f"({fmt_clock(g['wall'])}).")
         elif kind in ('stalled', 'closed'):
             why = ("the recorder has had no new frame for over 2 s"
                    if kind == 'stalled' else
@@ -868,7 +917,7 @@ class LiveView:
                           f"not live. {what}")
         st['run'] = self._run_words(kind)
         shows_frame = g is not None and kind in ('live', 'still', 'ended',
-                                                 'finishing')
+                                                 'finishing', 'stream_down')
         st['exposure'] = exposure_words(g['exposure'] if shows_frame
                                         else None)
         st['thumb'] = g['thumb'] if shows_frame else None

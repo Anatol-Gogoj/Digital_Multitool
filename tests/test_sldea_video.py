@@ -32,7 +32,8 @@ What these pin down:
     stream size the codec cannot record;
   * #392: setup.txt ends with how the recording ENDED (the frames it
     holds, or NOT recorded, and why it stopped), written after the HV
-    shutdown.
+    shutdown; a codec check that hangs is given up on and stops the run
+    before HV.
 
 Run: .venv/bin/python tests/test_sldea_video.py
 """
@@ -666,6 +667,52 @@ def test_a_slow_encoder_drops_frames_and_still_finishes_by_itself():
         rows = _read_csv(os.path.join(d, sv.VIDEO_INDEX_FILENAME))
         assert len(rows) == rec.written, "the index was not closed"
     finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_check_codec_gives_up_on_a_hung_probe_and_refuses_while_it_runs():
+    """#392: a probe that hangs (encoder or staging disk) must not hold the
+    runner at 0 V, with Abort waiting on it. check_codec gives up after
+    its timeout and fails, naming the size and the limit. The probe it
+    gave up on runs on; while it does, the next check refuses at once
+    and starts no second probe, and once it returns, checks run again."""
+    _need_cv()
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    real = sv.codec_available
+    release = threading.Event()
+    calls = []
+
+    def hangs(tmpdir=None, frame=None):
+        calls.append(tmpdir)
+        release.wait(30)
+        return real(tmpdir=tmpdir, frame=frame)
+    try:
+        sv.codec_available = hangs
+        rec = sv.VideoRecorder(lambda: _FakeCam(), d,
+                               log=lambda m: None).start()
+        assert rec.wait_first_frame(3.0)
+        t = time.monotonic()
+        ok, why = rec.check_codec(timeout=0.5)
+        took = time.monotonic() - t
+        assert ok is False and 0.4 < took < 2.0, (ok, took)
+        assert why.startswith('the FFV1 check at 128 x 96 was still '
+                              'running after 0.5 s, so it was given up'), why
+        assert rec.probed_size is None and rec.codec_check_running()
+        t = time.monotonic()
+        ok, why = rec.check_codec(timeout=0.5)
+        assert ok is False and time.monotonic() - t < 0.3, why
+        assert 'earlier run' in why and 'restart the app' in why, why
+        assert calls == [d], calls             # no second probe started
+        release.set()
+        assert _wait(lambda: not rec.codec_check_running(), 10.0)
+        sv.codec_available = real
+        assert rec.check_codec() == (True, '')
+        assert rec.probed_size == (128, 96)
+        rec.stop(timeout=5.0)
+    finally:
+        release.set()
+        sv.codec_available = real
+        sv._abandoned_probe = None
         shutil.rmtree(d, ignore_errors=True)
 
 
@@ -1864,6 +1911,55 @@ def test_the_end_line_follows_the_hv_shutdown_and_a_failed_one_is_logged():
     finally:
         sv.VideoRecorder.stop = real_stop
         sv.VideoRecorder.end_outcome = real_outcome
+
+
+def test_a_codec_check_that_hangs_stops_the_run_before_hv():
+    """#392: a check given up on after CODEC_CHECK_TIMEOUT_S stops a LIVE
+    run as a failed check does. The SG output is never switched on and is
+    still zeroed and switched off on the way out, the camera is let go,
+    and setup.txt, run.log and the status line say why. The run's staging
+    folder is left alone while the probe may still be writing in it."""
+    _need_cv()
+    events = []
+    real, real_limit = sv.codec_available, sv.CODEC_CHECK_TIMEOUT_S
+    release = threading.Event()
+
+    def hangs(tmpdir=None, frame=None):
+        release.wait(60)
+        return real(tmpdir=tmpdir, frame=frame)
+    sv.codec_available, sv.CODEC_CHECK_TIMEOUT_S = hangs, 0.5
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _StubApp(sg=_FakeSG(events))
+            rundir = _drive(app, tmp, lambda spec, fps=10: _FakeCam(),
+                            _no_oneshot, dry=False)
+            assert app.finished == 1 and app._sldea_stop, app.lines
+            assert not [e for e in events if e[1] == 'sg.set_output'
+                        and e[2][1] is True], [e[1:3] for e in events]
+            offs = [e for e in events if e[1] == 'sg.set_output']
+            assert offs and offs[-1][2][1] is False, [e[1:3] for e in events]
+            assert any('run stopped before any HV' in ln
+                       and 'was still running after 0.5 s' in ln
+                       for ln in app.lines), app.lines
+            assert any(s.startswith('STOPPED before HV')
+                       for s in app.statuses), app.statuses
+            assert _read_csv(os.path.join(rundir, 'data.csv')) == []
+            with open(os.path.join(rundir, 'setup.txt')) as f:
+                setup = f.read()
+            assert ("Video outcome: NOT recorded: the codec check at the "
+                    "camera's frame size failed (the FFV1 check at 128 x 96 "
+                    "was still running after 0.5 s") in setup, setup
+            assert 'Video outcome (end)' not in setup, setup
+            rec = app._sldea_recorder
+            assert not rec.reader_alive() and rec.codec_check_running()
+            assert os.listdir(os.path.join(tmp, 'staging')), \
+                "the folder the probe was still writing in was removed"
+            release.set()
+            assert _wait(lambda: not rec.codec_check_running(), 30)
+    finally:
+        release.set()
+        sv.codec_available, sv.CODEC_CHECK_TIMEOUT_S = real, real_limit
+        sv._abandoned_probe = None
 
 
 def _run():

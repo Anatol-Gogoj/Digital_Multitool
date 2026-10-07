@@ -114,6 +114,27 @@ STILL_MAX_AGE_S = 2.0
 REOPEN_AFTER_FAILS = 40
 REOPEN_BACKOFF_MAX_S = 5.0
 
+# The run's codec check (VideoRecorder.check_codec) is given up on after
+# this long, and a check given up on is a failed check: the run stops
+# before any HV (#392). It runs at 0 V, before the SG output is switched
+# on, so the limit only bounds how long Abort waits on a hang there.
+# Measured 2026-10-06 on Gogojster (Core Ultra 9 285H, OpenCV 4.13.0,
+# avcodec 58.134.100), 3 fresh processes x 4 checks per size, the first
+# check in a process included: 0.23-0.25 s at 1920 x 1080, 0.54-0.58 s
+# at 2448 x 2048 (the DFK's full sensor) and 0.89-0.92 s at 3840 x 2160.
+# The #379 work measured 0.31-0.45 s at 1920 x 1080 and 1.2-1.3 s at
+# 3840 x 2160 with the same OpenCV. The bench's Bayer stream is at most
+# 1920 wide (webcam.choose_size). 15 s is 11 times the slowest
+# 3840 x 2160 figure and 33 times the slowest 1920 x 1080 one, so a
+# slower bench PC or disk still passes; a false stop costs a re-run, and
+# a long limit costs only the wait on a hang.
+CODEC_CHECK_TIMEOUT_S = 15.0
+
+# A codec check that was given up on and whose thread is still running
+# (a thread cannot be killed). While it runs, the next check refuses at
+# once (VideoRecorder.check_codec).
+_abandoned_probe = None
+
 # The post-run copy into the run folder is throttled: gigabytes pushed at
 # full speed to the share compete with the NEXT run's own writes there.
 COPY_MAX_BPS = 40e6
@@ -434,6 +455,7 @@ class VideoRecorder:
         self.error = None
         self.size = None                       # (w, h) of the recording
         self.probed_size = None                # (w, h) check_codec passed
+        self._probe_t = None                   # check_codec's probe thread
         self.stopped_at = None                 # clock time of the first stop()
         self._reader_t = threading.Thread(target=self._reader, daemon=True,
                                           name='sldea-video-reader')
@@ -492,7 +514,7 @@ class VideoRecorder:
         with self._lock:
             return self._latest is not None
 
-    def check_codec(self):
+    def check_codec(self, timeout=None):
         """-> (True, '') when the codec writes AND reads back, bit-exactly,
         a frame of the size this stream ACTUALLY delivers, else (False,
         why). Never raises. It probes with the newest frame the reader
@@ -500,7 +522,19 @@ class VideoRecorder:
         I/O. Meant for after wait_first_frame(), at 0 V: a size the codec
         cannot record must stop the run before any HV, not turn up at the
         first recorded frame (2026-10-06). Once it has passed, the writer
-        records that size only."""
+        records that size only.
+
+        The probe runs on a daemon thread, and after `timeout` s
+        (CODEC_CHECK_TIMEOUT_S when None) the check gives up on it and
+        fails, so a hung encoder or staging disk cannot hold the runner,
+        and with it Abort, at 0 V (#392). The thread cannot be killed and
+        runs on. It holds no camera, only its probe file in this run's
+        staging folder, whose name no other run uses;
+        codec_check_running() says whether it is still there. While it
+        runs, every later check in this process refuses at once rather
+        than start a second probe that could wait behind the first on a
+        lock inside FFmpeg. The refusal ends when that probe returns."""
+        global _abandoned_probe
         with self._lock:
             got = self._latest
         if got is None:
@@ -509,11 +543,46 @@ class VideoRecorder:
             gray = _gray(got[0])
         except Exception as e:
             return False, f"the stream's frame could not be made gray ({e})"
-        # in out_dir: the local disk the recording itself will be written to
-        ok, why = codec_available(tmpdir=self.out_dir, frame=gray)
+        size = f"{gray.shape[1]} x {gray.shape[0]}"
+        stuck = _abandoned_probe
+        if stuck is not None and stuck.is_alive():
+            return False, (f"the {VIDEO_FOURCC} check given up on in an "
+                           f"earlier run is still running, and a new one "
+                           f"could get stuck behind it; restart the app to "
+                           f"record video")
+        limit = CODEC_CHECK_TIMEOUT_S if timeout is None else float(timeout)
+        answer = []
+
+        def probe():
+            # in out_dir: the local disk the recording itself will use
+            answer.append(codec_available(tmpdir=self.out_dir, frame=gray))
+        t = threading.Thread(target=probe, daemon=True,
+                             name='sldea-codec-check')
+        try:
+            t.start()
+        except Exception as e:
+            return False, f"the {VIDEO_FOURCC} check did not start ({e})"
+        t.join(limit)
+        if t.is_alive():
+            self._probe_t = t
+            _abandoned_probe = t
+            return False, (f"the {VIDEO_FOURCC} check at {size} was still "
+                           f"running after {limit:g} s, so it was given up "
+                           f"on; the encoder or the staging disk is stuck or "
+                           f"very slow")
+        if not answer:
+            return False, (f"the {VIDEO_FOURCC} check at {size} ended "
+                           f"without an answer")
+        ok, why = answer[0]
         if ok:
             self.probed_size = (gray.shape[1], gray.shape[0])
         return ok, why
+
+    def codec_check_running(self):
+        """True while the probe check_codec gave up on is still running: it
+        may still be writing its probe file in out_dir."""
+        t = self._probe_t
+        return t is not None and t.is_alive()
 
     def latest(self, max_age_s=STILL_MAX_AGE_S, not_before=None):
         """-> (a COPY of the newest BGR frame, its run time t_s), or

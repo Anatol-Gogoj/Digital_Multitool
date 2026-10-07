@@ -5000,6 +5000,8 @@ LOGGING:
                 # asked for a lossless video, and this thread cannot ask
                 # whether to go on without one (the pre-flight's own
                 # codec question defaults to No for the same reason).
+                # A check that hangs is given up on after
+                # CODEC_CHECK_TIMEOUT_S and fails the same way (#392).
                 # A stream that will not start (above) still falls back to
                 # one-shot stills, as before: whether that should stop too
                 # is an open owner question (SLDEA_DECISIONS 2026-10-06).
@@ -5016,9 +5018,13 @@ LOGGING:
                         self._sldea_log(vid_stop['stopped'])
                         self._sldea_recorder = rec    # as above: guards
                         rec.stop(timeout=5.0)
+                        # a check given up on may still be writing in the
+                        # folder, and on a hung disk rmdir would hang here
+                        probing = rec.codec_check_running()
                         rec = None
                         try:
-                            os.rmdir(vid_staging)    # empty: nothing written
+                            if not probing:
+                                os.rmdir(vid_staging)  # empty: nothing written
                         except OSError:
                             pass
                 if rec is not None:

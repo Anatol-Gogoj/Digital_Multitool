@@ -1428,6 +1428,81 @@ def test_the_window_opens_wide_enough_for_a_seeded_group_name():
         assert win.canvas.get_tk_widget().winfo_width() >= g.MIN_FIG_W - 2
 
 
+def test_a_bar_that_appears_never_puts_the_figure_under_its_floor():
+    """`#390`: ScrollColumn took its width BEFORE deciding the bar, and
+    width_for leaves room for the bar only while it shows. So in a window
+    between the floor and the floor plus the room Group asks for, where
+    the column is held to what leaves the figure MIN_FIG_W, a bar that
+    appeared because the window got SHORTER widened the column by its
+    own width, and the figure sat that much under MIN_FIG_W until the
+    next resize.
+
+    Usually a second <Configure> hid it: the body is stretched to the
+    canvas height, so it shrinks when the bar appears, and its own
+    <Configure> refit the column with the bar counted. Not when the
+    canvas was already within SLACK px under the body's request, where
+    the body's height does not change: a slow drag of the bottom edge
+    passes through that band. The sizes below go through it (measured
+    2026-10-06: the old order left the figure at 343 px, 17 under).
+
+    A bare column over a body of known size, so the case runs on any
+    desktop: the window's own controls are taller than some screens,
+    which is why the two scroll cases above can skip."""
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    try:
+        col = g.ScrollColumn(root)
+        col.pack(side=tk.LEFT, fill=tk.Y)
+        tk.Frame(col.body, width=200, height=400).pack()
+        fig = tk.Frame(root)
+        fig.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        col.set_room(extra=140)
+
+        def configured(event):         # PlotWindow._root_configured's rule
+            if event.widget is root:
+                col.set_room(limit=event.width - g.MIN_FIG_W)
+        root.bind('<Configure>', configured, add='+')
+        # between the floor (body, bar and figure) and the floor plus the
+        # 140 px of room, so it is `limit` that holds the column
+        width = 200 + col.bar.winfo_reqwidth() + g.MIN_FIG_W + 60
+        room = width - g.MIN_FIG_W
+        root.update_idletasks()
+        need = col.body.winfo_reqheight()
+        assert need == 400, need
+        # room to spare; then just under the body's request, inside the
+        # SLACK, still no bar; then short, where the bar appears and the
+        # body keeps its height; and back
+        for height, bar in ((need + 200, False), (need - 2, False),
+                            (need - 100, True), (need - 2, False),
+                            (need - 100, True), (need + 200, False)):
+            root.geometry(f'{width}x{height}')
+
+            def landed():
+                return ((root.winfo_width(), root.winfo_height())
+                        == (width, height) and col.bar_shown is bar
+                        and col.winfo_width() == room
+                        and fig.winfo_width() == g.MIN_FIG_W)
+            t0 = time.time()
+            while time.time() - t0 < 3.0:
+                root.update()
+                if time.time() - t0 > 0.5 and landed():
+                    break
+                time.sleep(0.02)
+            assert (root.winfo_width(), root.winfo_height()) == \
+                (width, height), 'the window did not take the size asked'
+            assert col.bar_shown is bar, (height, col.bar_shown)
+            assert col.winfo_width() == room, \
+                (height, col.winfo_width(), room)
+            assert fig.winfo_width() == g.MIN_FIG_W, \
+                (height, fig.winfo_width())
+    finally:
+        _shut(root)
+
+
 def test_moving_the_window_does_not_cost_a_redraw():
     """`#271`: <Configure> also fires when the canvas merely MOVES -- and
     it does move, by the scrollbar's width, every time the bar appears. A

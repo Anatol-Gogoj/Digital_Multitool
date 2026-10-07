@@ -1405,10 +1405,21 @@ class ScrollColumn(ttk.Frame):
 
     def _refit(self, _event=None):
         """Re-measure and show or hide the bar. Idempotent: it is bound to
-        both <Configure>s and they trip each other."""
+        both <Configure>s and they trip each other.
+
+        The bar is decided FIRST and the width after it (`#390`). Whether
+        the bar shows depends on the heights alone, so nothing below can
+        change that answer, while width_for leaves room for the bar only
+        while it shows. In the old order the width was taken as if the
+        bar were not there, so a bar that appeared because the window got
+        shorter left the figure a bar's width under MIN_FIG_W until the
+        next resize: adding the bar changes no size that either
+        <Configure> reports. One pass, so there is no second refit for
+        the two handlers to trip."""
         want = self.body.winfo_reqwidth()
         need = self.body.winfo_reqheight()
         have = self._cv.winfo_height()
+        self.show_bar(need > have + self.SLACK)
         width = self.width_for(want)
         geom = (want, need, have, width)
         if geom == self._geom:
@@ -1418,7 +1429,6 @@ class ScrollColumn(ttk.Frame):
         self._cv.itemconfigure(self._win, width=width,
                                height=max(need, have))
         self._cv.configure(scrollregion=(0, 0, width, max(need, have)))
-        self.show_bar(need > have + self.SLACK)
 
     def width_for(self, want):
         """The body's width: its natural `want`, plus as much of `extra`

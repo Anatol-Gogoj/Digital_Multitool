@@ -222,6 +222,40 @@ def test_min_and_max_accumulate_and_bad_reads_never_poison_them():
     assert cl.fmt_value(None, 'V') == '--'
 
 
+def test_an_overload_code_never_becomes_a_min_or_a_max():
+    """`#389`: as_number took anything float() parses, so a DMM that
+    answers an overload with a bare 9.9E37 would have set Max to it for
+    the rest of the run. SCPI's no-number codes (+-9.9E37, 9.91E37) and
+    anything larger now come back None, like the scope's do in its
+    driver; ordinary large readings are still numbers."""
+    for code in (9.9e37, -9.9e37, 9.91e37, '9.9E37', '+9.90000000E+37',
+                 '-9.9E+37', 1e300):
+        assert cl.as_number(code) is None, code
+    for value in (1.2e9, -4.5e8, 3.3e-12, 0.0):
+        assert cl.as_number(value) == value, value
+    st = cl.LiveStats(1.0)
+    for v in (2.0, 9.9e37, 5.0, -9.9e37, 9.91e37, 3.0):
+        st.record('DMM', [('DC Voltage', v, 'V')])
+    r = _row(st, 'DMM', 'DC Voltage')
+    assert (r['current'], r['min'], r['max']) == (3.0, 2.0, 5.0), r
+    assert r['good'] == 3 and r['missed'] == 3, r
+    st.record('DMM', [('DC Voltage', 9.9e37, 'V')])
+    assert _row(st, 'DMM', 'DC Voltage')['current'] is None
+    # the supply's power is V * I: a code times a current is no reading
+    # either, though at 2.97e37 it is under the code itself
+    reading = {'set_voltage_v': 12.0, 'meas_voltage_v': 9.9e37,
+               'meas_current_a': 0.3, 'power_w': 9.9e37 * 0.3}
+    assert cl.psu_quantities(reading)[3] == ('Power', None, 'W')
+    st.record('DC Supply CH1', cl.psu_quantities(reading))
+    st.record('DC Supply CH1', cl.psu_quantities(
+        {'set_voltage_v': 12.0, 'meas_voltage_v': 11.9,
+         'meas_current_a': 0.3, 'power_w': 3.57}))
+    for q, top in (('Meas V', 11.9), ('Meas A', 0.3), ('Power', 3.57)):
+        r = _row(st, 'DC Supply CH1', q)
+        assert r['max'] == top, r
+    assert _row(st, 'DC Supply CH1', 'Power')['missed'] == 1
+
+
 def test_start_is_the_reset():
     """start_logging makes a NEW LiveStats per run (asserted against the
     real app below); a new one holds nothing of the old."""
@@ -275,6 +309,7 @@ def test_source_rows_mirror_the_csv_columns():
                               'meas_current_a': 0.3, 'power_w': 3.57})
     assert [q for q, _v, _u in rows] == ['Set V', 'Meas V', 'Meas A',
                                          'Power']
+    assert rows[3] == ('Power', 3.57, 'W'), rows
     assert cl.dmm_quantities('DC Voltage', 0.1, 'V') == [
         ('DC Voltage', 0.1, 'V')]
 
@@ -431,6 +466,33 @@ def test_the_loop_feeds_min_max_and_leaves_the_csvs_as_they_were():
         assert data[0] == ['Timestamp', 'Set V', 'Meas V', 'Meas A',
                            'Power (W)']
         assert len(data) == 1 + 5, data
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _dmm_csv_values(tmp):
+    files = [f for f in _os.listdir(tmp) if f.startswith('dmm_')]
+    assert len(files) == 1, files
+    with open(_os.path.join(tmp, files[0]), newline='') as fh:
+        return [row[2] for row in list(csv.reader(fh))[1:]]
+
+
+def test_the_loop_keeps_an_overload_code_in_the_csv_but_not_in_max():
+    """`#389`: a bare 9.9E37 from the DMM stays in the CSV exactly as the
+    meter answered it (the CSV is the raw record, and the code is plain to
+    see there), while the live table shows -- and keeps it out of min and
+    max."""
+    tmp = tempfile.mkdtemp(prefix='contlog_')
+    try:
+        app = _LoopApp()
+        app.dmm = _FakeDMM(app, [1.5, 9.9e37, 2.0])
+        stats = cl.LiveStats(0.001)
+        app._log_gen = tok = object()
+        app.logging_loop(0.001, _cfg(tmp, stats), tok)
+        r = _row(stats, 'DMM', 'DC Voltage')
+        assert (r['current'], r['min'], r['max']) == (2.0, 1.5, 2.0), r
+        assert (r['good'], r['missed']) == (2, 1), r
+        assert _dmm_csv_values(tmp) == ['1.5', '9.9e+37', '2.0']
     finally:
         shutil.rmtree(tmp)
 

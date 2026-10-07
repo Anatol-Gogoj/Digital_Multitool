@@ -213,11 +213,25 @@ def next_tick(t_first, interval_s, slot, now):
 
 # ---- Live current / min / max ----------------------------------------------
 
+# A reading this large is an instrument saying "no number", never a value.
+# SCPI's codes for that are 9.9E37 (INFinity), -9.9E37 (NINFinity) and
+# 9.91E37 (NAN), and the Tek scope answers an off-screen measurement with
+# 9.9E37 (TekMSO24.measure_raw, which already turns it into None). The
+# DMM, supply and LCR replies reach LiveStats as plain floats, so a bare
+# code would become a max and stay one for the rest of the run (#389).
+# What the 5493C answers on an overload is unchecked (#369 asks the
+# bench); its parser test assumes '9.9E37 OVLD', which is not a number and
+# so already comes back None. The CSVs are not filtered: they keep
+# whatever the instrument answered.
+OVERLOAD_CODE = 9.9e37
+
+
 def as_number(value):
     """A reading as a finite float, or None when it carries no number.
 
-    None (scope 'No signal', DMM overload), NaN, infinities, booleans and
-    unparseable strings all come back None, so a failed read can never
+    None (scope 'No signal', DMM overload), NaN, infinities, booleans,
+    unparseable strings and the SCPI overload codes (anything at or above
+    OVERLOAD_CODE in size) all come back None, so a failed read can never
     become a min or a max."""
     if value is None or isinstance(value, bool):
         return None
@@ -225,7 +239,9 @@ def as_number(value):
         v = float(value)
     except (TypeError, ValueError):
         return None
-    return v if math.isfinite(v) else None
+    if not math.isfinite(v) or abs(v) >= OVERLOAD_CODE:
+        return None
+    return v
 
 
 class LiveStats:
@@ -380,8 +396,18 @@ def sg_quantities(bswv):
 
 
 def psu_quantities(reading):
-    return [(name, reading.get(key), unit)
-            for key, name, unit in PSU_QUANTITIES]
+    """The supply's row. Power is the driver's V_meas * I_meas, so it is a
+    miss whenever either factor is: 9.9E37 V times 0.3 A is 2.97E37 W,
+    under OVERLOAD_CODE, and would otherwise become the max (#389)."""
+    rows = []
+    for key, name, unit in PSU_QUANTITIES:
+        value = reading.get(key)
+        if key == 'power_w' and (
+                as_number(reading.get('meas_voltage_v')) is None
+                or as_number(reading.get('meas_current_a')) is None):
+            value = None
+        rows.append((name, value, unit))
+    return rows
 
 
 def dmm_quantities(function, value, unit):

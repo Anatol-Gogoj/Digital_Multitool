@@ -2819,12 +2819,17 @@ class PlotWindow:
     def _run_menu(self, event):
         """Right-click on the list. A click on a row that is not selected
         selects that row alone first, as file managers do, so the menu
-        always acts on what is highlighted. -> the menu, or None."""
+        always acts on what is highlighted.
+
+        -> 'break', always (`#390`): on macOS the menu also answers
+        Control-click, which is a Button-1 press, and without the break
+        the Treeview's own Button-1 binding ran after it and selected
+        the clicked row alone, collapsing the selection the menu was for."""
         row = self.run_box.identify_row(event.y)
         if row and row not in self.run_box.selection():
             self.run_box.selection_set([row])
         if not self.selected_dirs():
-            return None
+            return 'break'
         menu = self.group_menu()
         # NO grab_release() after it: on X11 (the bench) tk_popup posts
         # the menu, sets a global grab on it and returns at once, and Tk
@@ -2832,7 +2837,7 @@ class PlotWindow:
         # Tk 8.6's menu.tcl). Releasing it here would leave a menu that a
         # click elsewhere does not close. Windows and aqua set no grab.
         menu.tk_popup(event.x_root, event.y_root)
-        return menu
+        return 'break'
 
     def move_to_group(self, name):
         """Move the selected runs into group `name`; '' takes them out of

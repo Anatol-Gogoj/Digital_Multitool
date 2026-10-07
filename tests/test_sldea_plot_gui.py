@@ -1372,12 +1372,16 @@ def test_the_run_picker_scrolls_sideways_and_never_widens_the_window():
         class _E:
             x, y = bx + 5, by + bh // 2
             x_root, y_root = 400, 300
+        # 'break' (`#390`), so no class binding runs after the menu: on
+        # macOS a Control-click is a Button-1 press, and the Treeview's
+        # own binding would select the clicked row alone
         win.set_selected_dirs([first[0]])
-        assert win._run_menu(_E()) is menu and menu.at == (400, 300)
+        assert win._run_menu(_E()) == 'break' and menu.at == (400, 300)
         assert win.selected_dirs() == [second], win.selected_dirs()
         everything = [d for d, _l in win.runs]
         win.set_selected_dirs(everything)
-        assert win._run_menu(_E()) is menu
+        menu.at = None
+        assert win._run_menu(_E()) == 'break' and menu.at == (400, 300)
         assert win.selected_dirs() == everything
 
 
@@ -1501,6 +1505,40 @@ def test_a_bar_that_appears_never_puts_the_figure_under_its_floor():
                 (height, fig.winfo_width())
     finally:
         _shut(root)
+
+
+def test_a_menu_click_keeps_the_selection_it_was_opened_for():
+    """`#390`: on macOS the run menu also answers Control-click, which is
+    a Button-1 press, and _run_menu did not return 'break', so the
+    Treeview's own Button-1 binding ran after it and the selection the
+    menu was opened for collapsed to the clicked row. Driven through a
+    real event with the binding macOS gets, bound here by hand since
+    this is not a Mac; on Windows the class binding that would run next
+    is Ctrl-click's toggle, which takes the row out instead. The menu is
+    stubbed: a real tk_popup is modal on Windows."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        win, tree = w.win, w.win.run_box
+
+        class _Menu:
+            posted = 0
+
+            def tk_popup(self, _x, _y):
+                self.posted += 1
+        menu = _Menu()
+        win.group_menu = lambda: menu
+        tree.bind('<Control-Button-1>', win._run_menu)
+        everything = [d for d, _l in win.runs]
+        assert len(everything) == 2, everything
+        win.set_selected_dirs(everything)
+        x, y, _w, h = tree.bbox(tree.get_children()[1])
+        tree.event_generate('<Control-ButtonPress-1>', x=x + 10,
+                            y=y + h // 2)
+        tree.event_generate('<Control-ButtonRelease-1>', x=x + 10,
+                            y=y + h // 2)
+        assert menu.posted == 1, menu.posted
+        assert win.selected_dirs() == everything, win.selected_dirs()
 
 
 def test_moving_the_window_does_not_cost_a_redraw():

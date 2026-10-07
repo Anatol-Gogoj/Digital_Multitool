@@ -8616,6 +8616,7 @@ def _run():
     import gc
     import threading
     import traceback
+    import weakref
 
     gui_mod = tk_mod = None
     try:
@@ -8686,6 +8687,8 @@ def _run():
                                    if t.is_alive() else ''))
         return names
 
+    blamed = weakref.WeakSet()          # roots _roots_left has reported
+
     def _roots_left():
         """Destroy the Tk roots still alive after _reap(); return how many.
         (`#280`)
@@ -8698,17 +8701,28 @@ def _run():
         (measured 2026-10-06: 2 and 6 such failures after one fault). A
         root left alive is also freed later, on whichever thread drops it.
         Cleared here so neither reaches the next case, as
-        tests/test_sldea_plot_gui.py's _shut does after each of its cases."""
+        tests/test_sldea_plot_gui.py's _shut does after each of its cases.
+
+        A destroy that raised stopped at the widget it raised on, and the
+        widgets after it keep their Tcl commands, which hold the root alive
+        from inside Tcl. So the destroy is retried until it gets past every
+        such widget. A root that still cannot be freed is reported once, by
+        the case that left it, never again by the cases after it."""
         if tk_mod is None:
             return 0
-        roots = [o for o in gc.get_objects() if isinstance(o, tk_mod.Tk)]
+        roots = [o for o in gc.get_objects()
+                 if isinstance(o, tk_mod.Tk) and o not in blamed]
         n = len(roots)
         while roots:
             r = roots.pop()
-            try:
-                r.destroy()
-            except Exception:
-                pass
+            blamed.add(r)
+            for _ in range(20):
+                try:
+                    r.destroy()
+                except Exception:
+                    if r.children:      # stopped at a child: go past it
+                        continue
+                break
             if getattr(tk_mod, '_default_root', None) is r:
                 tk_mod._default_root = None
             del r

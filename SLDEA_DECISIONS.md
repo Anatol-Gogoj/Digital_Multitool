@@ -3075,6 +3075,110 @@ budget includes pre/post pair scatter (`SLDEA_MEASUREMENT.md` §2.2), so it
 is a policy choice and not a bug fix. The bands drawn there are now the
 right width in both units.
 
+## Every run names its breakdown watchdog's state before the HV and in its records; the watchdog stays ticked by default (2026-10-08)
+
+**TL;DR:** "Energize HV?" now names the breakdown watchdog's state, ON with
+its rule or OFF with the reason, and run.log's start line and setup.txt's
+`Breakdown watchdog:` line record it in every run (`#406`). The box stays
+ticked by default. Its 100 µA / 3 s rule misses small breakdowns
+(`#219`), but it is the only thing that stops a LIVE run on a
+breakdown, and replayed on the single-layer runs on file it stops none
+that was not breaking down: healthy runs stayed within 15.0 µA of their
+baseline.
+
+**Observation.**
+
+- The trip rule is |I - baseline| ≥ Trip (µA) held for Confirm (s) of
+  consecutive reads at about 2 Hz. Both numbers are typed by hand, with
+  defaults of 100 µA and 3 s (`#219`).
+- It misses small or short breakdowns:
+  - `SLDEA_20260723_152205`: 4 frames confirmed on 26 µA and 79 µA
+    deviations against a 0.9 µA run-median baseline, both under the
+    default trip.
+  - `SLDEA_20260723_233451`: the -207 µA staircase, which the live
+    watchdog missed in real time.
+  - The 2026-08-04 ground-truth batch: every confirmed breakdown was a
+    deviation of 11 to 192 µA, so the smallest sit below the default. The
+    step-change detector caught them after the fact (`#158`, shipped in
+    `#195`).
+  - The two 07-23 runs are retired from the measurement campaign but kept
+    as the breakdown fixture: a geometry error does not touch a current
+    trace (2026-08-06 comment on `#219`).
+- On the runs on file it makes no false stop. The 18 single-layer runs
+  with current on the lab share were summarized and replayed on
+  2026-10-08 for `#219` (labels set from each run's own samples; the two
+  2026-08-05 runs recorded no current):
+  - The 11 healthy runs stayed within 15.0 µA of their baseline:
+    `P3_5_2.5mL_0729` 15.0 µA, `P3_6_2.5mL_20260729` 14.6 µA, the other
+    nine 6.9 µA or less. The borderline `SLDEA_20260806_151857` reached
+    14.5 µA.
+  - The three self-clearing transients reached 24.4 µA (one read on a
+    ramp in an operator run), 48.4 µA (`P3_7_2.3mL_20260729`, one
+    snapshot) and 137.4 µA (`SLDEA_20260729_104531`, one snapshot, then
+    healthy to 10 kV).
+  - The three breakdowns reached 58.5 µA (`SLDEA_20260723_155425`),
+    79.3 µA (152205) and 208.5 µA (233451).
+  - Replayed on all 18, the 100 µA / 3 s rule trips only on 233451, 52 s
+    after its onset. 12 of the 18 are snapshot-only, with reads seconds to
+    a minute apart, so the replay cannot say how long 104531's 137.4 µA
+    lasted; that run went on to 10 kV.
+- It is the only thing that stops a run on a breakdown. `#219`'s N-sigma
+  rule runs in shadow and acts on nothing, so with the box unticked a
+  LIVE run that breaks down keeps ramping until its end or ■ Abort. By
+  its rule the watchdog trips on a sustained short (100 µA or more from
+  the baseline, or the scope's off-screen sentinel, for 3 s). That is the
+  rule's design, not an observation: the one trip on single-layer data is
+  the replay's on 233451, and that run's live watchdog missed it.
+- Nothing recorded the watchdog's state. The run-start line named its rule
+  only when armed and said nothing otherwise; setup.txt and
+  "Energize HV?" never mentioned it. A run started with the box unticked
+  (a preset saved unticked loads unticked) left no line saying that
+  nothing watched it.
+- The owner's direction of 2026-08-07 (`#219`): our breakdown current
+  transients last milliseconds, so a sustained-over-threshold rule is
+  mismatched at its core. The trip should be N sigma from the run's own
+  running mean, with N's default set from the quiet-rig spread that the
+  §N probe measures. That work waits on §N1 at the bench.
+
+**Decision (owner, 2026-10-08; `#406`).** An unticked default was decided
+first that day and reversed the same day. The evidence first cited for
+the reversal came from multilayer devices filed among the SLDEA runs by
+mistake; the owner discounted it, and the decision rests on the
+single-layer runs above.
+
+1. The box stays ticked by default until `#219`'s N-sigma rule replaces
+   the typed trip. A preset saved unticked still loads unticked, and one
+   that predates the box leaves it ticked, with the usual "not in this
+   preset" note.
+2. "Energize HV?" names the state inside the same dialog: no new
+   question, the same title, and No is still the default. Armed:
+   "Breakdown watchdog: ON. The run stops itself when the current stays
+   100 µA or more away from the baseline it learns at 0 kV, for 3 s of
+   consecutive reads." Unticked: "Breakdown watchdog: OFF. Nothing stops
+   this run on a breakdown; only ■ Abort or the end of the run does."
+   Ticked with no scope: OFF, "no scope to read the current".
+3. run.log's start line always carries a watchdog tag. The armed wording
+   is unchanged (`[watchdog: dev ≥100 µA for 3s, baseline learned at
+   0 kV]`); otherwise it is `[watchdog: OFF (box unticked)]`,
+   `(no scope to read the current)` or `(dry run, no HV)`.
+4. setup.txt carries `Breakdown watchdog: ON, trips when |I - baseline| >=
+   100 uA for 3 s of consecutive reads (...)` or `Breakdown watchdog: OFF
+   (<reason>)`, under the I_Out line. It is ASCII, so the runner's
+   locale-encoded write cannot refuse it. Runs from before this change
+   have no such line, so "OFF" and "not recorded" stay apart.
+5. One function, `sldea_profile.watchdog_record`, words all three from the
+   one reading that sldea_run hands the worker, taken before
+   "Energize HV?". The dialog cannot name a watchdog the run does not get.
+
+**What it costs.** Nothing changes for a ticked run. An operator who
+unticks the box still can, and that LIVE run keeps ramping through a
+breakdown or a short until its end or ■ Abort, with the Trek's own current
+limit as the only automatic stop. The difference is that it is now said
+before the HV and written into the run's own files.
+
+**Not done here.** Setting the trip from real runs (`#219`), and the trip
+logic and spike capture (`#189`).
+
 ## A LIVE run locks the scope channels it reads, and the settings they share (2026-09-24)
 
 **TL;DR:** during a LIVE run, the Oscilloscope tab or a bench-profile load

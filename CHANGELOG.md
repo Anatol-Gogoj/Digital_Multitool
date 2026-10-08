@@ -6,6 +6,107 @@ manual PDF. Older releases are summarized here and link to their full notes.
 The measurement-chain decision log (`SLDEA_DECISIONS.md`) is the record of
 *why*; this file is the record of *what shipped*.
 
+## v1.4.5 (2026-10-08, pre-release)
+
+**TL;DR:** The SLDEA tab has a new layout with the presets on top and Run in
+view without scrolling, shows the folder a run will write to, and refuses a
+run name that would overwrite an earlier run. "Energize HV?" now says whether
+the breakdown watchdog is on, and a second breakdown rule runs in shadow only:
+it logs what it would have done and stops nothing. The Webcam tab sets and
+locks the camera in one press, check boxes and radio buttons on the Linux
+bench show a check mark and a dot, and none of this is bench-checked yet: the
+checks are in #369.
+
+### SLDEA test tab
+
+- **A new layout** (#437). Run configuration presets sit across the top, the
+  settings in a left column and the kV preview in a right one, then the run
+  row and the log. The tab is 883 px tall instead of 1183: nothing scrolls at
+  1320 x 990, and the whole ▶ Run button shows at 1024 x 768. Every control,
+  label and tooltip is kept. The preview's snapshot markers are about 14 %
+  smaller, and the pointer finds them from as far away as before (#430).
+- **The folder a run will write to** (#435). A line under Run name reads
+  "Saves to:" and the folder, and warns as you type. ▶ Run refuses, before any
+  HV question and with no "start anyway", a folder that already holds a run
+  (setup.txt or data.csv), a run name that cannot be a folder name (plain
+  ASCII only: u for µ, as in 2.5uL), an Output dir on the share while the
+  share is not mounted, and one that does not answer within 3 s. Before, a
+  run name used twice made the second run write over the first. On Windows
+  the built-in Output dir is a Linux path under the share, so a DRY run there
+  is now refused as "share not mounted" until Output dir or `SCPI_SLDEA_DIR`
+  names a real folder.
+- **"Energize HV?" names the breakdown watchdog's state** (#433): ON with its
+  Trip and Confirm, or OFF and why. run.log's start line and a new setup.txt
+  line record the same. The box stays ticked by default. ▶ Run now refuses a
+  ticked LIVE run whose Trip or Confirm is not a positive number (a nan or a
+  zero used to be armed as typed), and a run whose watchdog state changed
+  while a question was open. A LIVE run that loses its scope before the
+  watchdog arms runs on, as before, and now says NOT ARMED in run.log and
+  setup.txt.
+- **A second breakdown rule runs in shadow** (#434). On every LIVE run with
+  current reads, the N-sigma rule watches beside the 100 µA / 3 s watchdog: a
+  read 5 sigma or 20 µA (whichever is larger) away from the run's recent
+  quiet reads, twice in a row, would trip it. It acts on nothing. It marks a
+  would-trip in telemetry.csv, and after the run lists its away reads in
+  run.log and its verdict in setup.txt. Replayed on the 18 single-layer runs
+  on file, it made no false trip and caught a breakdown the watchdog missed.
+  The watchdog still stops runs; the shadow lines from LIVE runs will decide
+  whether the rule may act.
+- **setup.txt's camera block** (#436) now records the white balance, the
+  camera device, pixel format and frame size, and every locked control, not
+  only exposure and gain.
+- **Programs started from the tab say whether they opened** (#445). Edge
+  Review, the tuner, the plot window and the video review read "starting" on
+  the status bar, then "opened" once they have run for 2 s. One that fails
+  before then is named there, with a box giving its exit code, its last lines
+  and its log file; during a run the box waits until the run has ended, so it
+  never covers ■ Abort. What these programs print now goes to `launch_logs`
+  in `~/.cache/scpi_control` (or `$SCPI_CACHE`), not to `launch.log`.
+- **[PLACEHOLDER #423: fill in if #423 merges before the tag, otherwise
+  delete this line.]** The watchdog waits for a scope Reconnect in flight.
+
+### Webcam tab
+
+- **Auto-set camera** (#436). One press stops the preview, pins gain at 0,
+  finds the exposure for a mid-gray picture, balances the white on the scene
+  in view, locks and saves it all, and starts the preview. A step that fails
+  says which and leaves the previous lock. 🔒 Apply & Lock now sits beside the
+  exposure and gain boxes, and a value typed there but not locked is named on
+  the status line. Every other control and the single steps (Read camera,
+  Auto-expose, Auto-WB once, Stabilize) sit under "Advanced camera settings",
+  closed when the tab opens. The focus score is on by default and its label
+  is larger.
+- **Stabilize and Auto-WB once search the scene in view** (#436). Before,
+  every trial picture was shot at the locked values, so they found the lock
+  again. Both now put the lock back on the camera when they end (#441).
+- **A lock that set nothing is a failure** (#436). Apply & Lock on a panel the
+  camera reported no controls for used to clear the previous lock and save
+  over it; now it keeps the previous lock and says "Nothing locked".
+- **Refresh and Read camera refuse while a camera adjustment runs** (#436,
+  #441). They used to put a trial exposure into the boxes a run takes.
+
+### All windows
+
+- **A check mark and a dot on every platform** (#431, #432). A ticked check
+  box shows a white check in a Tol-blue box, and a selected radio button a
+  blue dot in a ring, instead of the Linux bench theme's filled square and
+  filled diamond. The DRY RUN box and Edge Review's candidate rows get them
+  too. Nothing changes size on Windows; on the bench theme a check box is
+  3 px wider.
+
+### Diagnostics and tests
+
+- **`run_tests.py` fails a suite that reports no test** (#442). The Trek
+  polarity suite had run nothing while listed as ok; it now runs its three
+  tests, and the sweep plan suite no longer stops at its first failure.
+- **The plot window cancels its queued redraws when it closes** (#443), and
+  its tests fail on a leaked callback instead of sweeping it up.
+- **Edge Review's calibration question box hands the grab back by name**
+  (#444): hardening against a KeyError that no path reaches today.
+- **The watchdog's 0.5 s cadence is a gate, not a validated period** (#440).
+  LIVE runs record a median tick of 0.56 s and gaps up to 1.45 s. Comment and
+  decision log only.
+
 ## v1.4.4 (2026-10-08, pre-release)
 
 **TL;DR:** Everything that reached `main` after v1.4.3, and none of it has been

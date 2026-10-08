@@ -6380,14 +6380,15 @@ Observation → decision:
   actually wins, and refuses to start a run from a frame that has
   already lost the measurement.
 
-## Correction: the watchdog's 0.5 s cadence was never timed, and the telemetry shortfall bar is 70 %, not 80 % (2026-10-08)
+## Correction: the watchdog's 0.5 s cadence is a gate, not a validated period; LIVE runs record a 0.56 s median tick, and the shortfall bar is 70 %, not 80 % (2026-10-08)
 
 **TL;DR:** The telemetry sidecar entry below (2026-08-05) calls the
-breakdown watchdog's 0.5 s monitor cadence "bench-validated". No bench
-session has timed it: 0.5 s is the value the confirm streak was designed
-around. The same entry says the shortfall warning fires below 80 % of the
-target rate, but the code has always used 70 %. Wording only; no value
-and no behavior changes (`#424`).
+breakdown watchdog's 0.5 s monitor cadence "bench-validated", but 0.5 s
+is only the gate: three LIVE runs with the watchdog armed recorded a
+median tick of 0.56 s and gaps up to 1.45 s, and nobody has checked the
+confirm streak against those numbers. The same entry says the shortfall
+warning fires below 80 % of target, but the code uses 70 %. Wording
+only; no value and no behavior changes (`#424`).
 
 **Observation.**
 
@@ -6398,54 +6399,77 @@ and no behavior changes (`#424`).
   watchdog armed it stays exactly 0.5 s — its bench-validated sampling is
   NOT re-timed by a logging feature".
 - The commit that wrote both (`6bd72c9`, 2026-08-05) says "the watchdog's
-  0.5 s cadence is untouched" and "Not bench-verified yet". Untouched was
-  true; validated never was.
+  0.5 s cadence is untouched", which was true. Its "Not bench-verified
+  yet — smoke it on the next visit before trusting the file" is about
+  `telemetry.csv`, not the cadence. No check then or since has validated
+  the period.
 - 0.5 s is a gate, not a period. The loop sleeps `SLDEA_POLL_S` = 0.1 s a
   pass and reads I_Out on the first pass where `el - last_mon >= mon_dt`,
-  so a tick is never shorter than 0.5 s and is longer by however late the
-  pass that notices it runs. The code's own estimate, beside
-  `TELEMETRY_SHORTFALL_FRAC`: "a 0.5 s gate actually fires at 0.5-0.6 s,
-  and every snapshot steals a tick for its camera grab". That is a desk
-  estimate too.
-- The confirm streak is counted in seconds, not reads: it trips on the
-  first read at least `confirm_s` (3 s) after the first over-trip read.
-  At an exact 0.5 s that is 3.0 / 0.5 + 1 = 7 consecutive reads. A longer
-  real period means fewer reads in the streak and up to one period more
-  before the trip.
-- Nothing on record measures the period. The repo quotes no measured
-  value, and both bench checks that bear on it are unticked in `#369`:
-  - §N1, the watchdog probe. `#369` says: "Its section B times one I_Out
-    read and an I+V pair." Section B times the scope read each tick makes
-    and prints the worst-case I_Out read as a share of the 0.5 s tick
-    (`rate_verdict` in `bench/test_sldea_watchdog_probe.py`). It does not
-    run the run loop, so it bounds the read's part of the period, not the
-    period.
-  - §M, the telemetry dry-run smoke. Its pass bar is "the achieved rate is
-    **1.4 Hz or better**". At the default 2 Hz every tick writes one
-    periodic row stamped with the tick's own elapsed time, so the run
-    log's `telemetry: N samples, X.XX Hz achieved (target 2), max gap …`
-    line is the tick's achieved rate and worst gap. On a DRY run the
-    watchdog is not armed, but the gate is the same 0.5 s
-    (`tel.period_s` at 2 Hz). A DRY run also makes none of the SG writes
-    a LIVE ramp makes in the same loop. On a LIVE run with the watchdog
-    armed the same line reports the watchdog's own cadence.
+  so a tick is never shorter than 0.5 s. It runs late by however long the
+  pass that notices it takes, and a still's camera grab holds the loop.
+  The code's own desk estimate, beside `TELEMETRY_SHORTFALL_FRAC`: "a
+  0.5 s gate actually fires at 0.5-0.6 s, and every snapshot steals a
+  tick for its camera grab". The gate and `SLDEA_POLL_S` are unchanged
+  since `6bd72c9`.
+- **The bench records the period.** At the default 2 Hz every tick writes
+  one periodic `telemetry.csv` row stamped with the tick's own elapsed
+  time, and run.log's `telemetry:` line gives the achieved rate and the
+  longest gap. Three LIVE runs had the watchdog armed (`dev ≥100 µA for
+  3s, baseline learned at 0 kV`) and telemetry at 2 Hz. The gaps below
+  are recomputed from their periodic rows (copies pulled from the lab
+  share on 2026-10-08):
+
+  | Run | run.log `telemetry:` line | Ticks | Gap min / median / mean / max (s) | Gaps over 1 s | Stills |
+  |---|---|---|---|---|---|
+  | `SLDEA_20261001_151016` | 1.69 Hz, max gap 1.4 s | 347 | 0.500 / 0.555 / 0.592 / 1.433 | 22 | 26 |
+  | operator run 13 (2026-10-05) | 1.65 Hz, max gap 1.4 s | 623 | 0.500 / 0.558 / 0.606 / 1.449 | 51 | 52 |
+  | operator run 16 (2026-10-06, video) | 1.69 Hz, max gap 1.1 s | 136 | 0.501 / 0.556 / 0.591 / 1.101 | 2 | 14 |
+
+  Every gap over 1 s has a still inside it. The one-shot runs show about
+  one such gap per still; run 16 takes its stills off the video stream
+  and shows two. LIVE runs at the same gate with the watchdog off agree:
+  `13_backlight_2` 1.71 Hz with a max gap of 1.3 s (the figure `#369`
+  quotes under §M as evidence on file), `13_backlight` 1.66 Hz,
+  `SLDEA_20260806_151857` 1.78 Hz.
+- **Until now the repo quoted no bench value.** The only measured tick
+  figure in this log is a desk one, in the 2026-08-05 entry: "Measured:
+  mean tick gap at a 3 s share 3.10 s → 0.73 s", against a simulated
+  slow share.
+- **Recorded is not validated.** Nobody has checked the confirm streak
+  against these numbers. The streak counts seconds, not reads
+  (`BreakdownWatchdog.update`): `_over_since` is the first over-trip
+  read's time, and the trip is the first later read with
+  `t - _over_since >= confirm_s` (3 s). So the trip comes at least 3.0 s
+  after the first over-trip read and less than 3.0 s plus the gap that
+  crosses the 3 s mark: under 4.45 s at the longest gap measured. At an
+  exact 0.5 s it takes 3.0 / 0.5 + 1 = 7 reads. Replaying every tick of
+  the three runs above as the start of a sustained over-trip current, the
+  trip comes 3.01 to 4.27 s after the first over-trip read: after 7 reads
+  in 667 of 1090 starts, 6 reads in 375 and 5 reads in 48 (fewer reads
+  where a still's long gap falls inside the streak).
+- **§N1 section B measures the read, not the period.** `#369` says: "Its
+  section B times one I_Out read and an I+V pair." It prints the
+  worst-case read as a share of the 0.5 s tick (`rate_verdict` in
+  `bench/test_sldea_watchdog_probe.py`) and does not run the loop.
 - The 2026-08-05 entry also says: "a run below 80 % of target says so
   explicitly". The same commit set `TELEMETRY_SHORTFALL_FRAC = 0.7`, with
   the comment "Only a real inability to keep up should raise a warning,
-  so the bar is 70% of target, not 80%." §M's 1.4 Hz bar is 70 % of 2 Hz.
-  No other document states 80 % (searched: README, BENCH_TEST,
+  so the bar is 70% of target, not 80%." §M's pass bar, 1.4 Hz, is 70 %
+  of 2 Hz. No other document states 80 % (searched: README, BENCH_TEST,
   SLDEA_MEASUREMENT, the quickstart, CHANGELOG and the manual sources).
 
 **Decision.**
 
 - Quote 0.5 s as the watchdog's monitor gate, the cadence its confirm
-  streak was designed around. Its real period on the bench is unmeasured;
-  do not call it validated. Telemetry still does not re-time it.
-- The first numbers come from `#369`: §N1 section B for the cost of the
-  read inside a tick, and §M's `telemetry:` line for the achieved rate and
-  worst gap at the 0.5 s gate. The figure that counts is the same line
-  from a LIVE run with the watchdog armed and telemetry at 2 Hz, which
-  times the watchdog itself.
+  streak was designed around. Quote the bench period as recorded, from
+  the three runs above: median tick 0.56 s, mean 0.59 to 0.61 s, longest
+  gap 1.45 s, 1.65 to 1.69 Hz. Call neither one validated: whether a 3 s
+  streak that trips 3.0 to 4.3 s in, after 5 to 7 reads, is the right
+  rule has not been decided. Telemetry still does not re-time the gate.
+- §N1 section B in `#369` stays open for what it measures: the cost of a
+  read and the headroom for polling faster than 2 Hz. The period needs no
+  new check; every LIVE run with telemetry at 2 Hz records it in its
+  `telemetry:` line.
 - The telemetry shortfall warning fires below 70 % of the target rate
   (`TELEMETRY_SHORTFALL_FRAC`), 1.4 Hz at the default 2 Hz. Read the
   80 % in the 2026-08-05 entry as 70 %.

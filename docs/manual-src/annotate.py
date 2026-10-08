@@ -150,7 +150,10 @@ S["tab_scope"] = {
          "label": "Tick the channel that should trigger acquisition"},
         {"match": "Apply CH1 Config", "label": "Sends this channel only — does not touch the trigger"},
         {"match": "Apply All Settings", "label": "The only button that sends trigger source, level and slope"},
-        {"match": "Get CH1 Measurements", "badge_at": [145, 619],
+        # badge in the gap right of "RMS: --", above the button: at
+        # [145, 619] it sat on the button's word "Measurements" (v1.4.4
+        # and v1.4.5 shots).
+        {"match": "Get CH1 Measurements", "badge_at": [129, 597],
          "label": "Readouts are snapshots — click to refresh"},
         {"match": "Capture CH1 Waveform", "label": "Pulls the trace into a plot window with Save CSV"},
         {"match": "Acquisition Control", "label": "Run / Stop / Single / AutoSet"},
@@ -235,10 +238,24 @@ S["tab_webcam"] = {
         # No extend_right: the union already spans the camera box between
         # the two, and the 40 px it had ran the capsule's edge through
         # "Start Preview" (v1.4.4 shot).
-        {"union": ["Camera:", "Refresh"], "badge_at": [215, 204],
+        # Badges 1 to 3 sit under the Camera settings box, each below its
+        # own button, with no arrow (badge_below). Their fixed badge_at
+        # points put them there too, but the arrows up to the buttons cut
+        # through the box's title and its "no camera controls detected"
+        # line in the v1.4.4 and v1.4.5 shots, and nowhere around the top
+        # row is free of text (the tab strip above, the box below). Badge 1
+        # goes under Refresh, the capsule's right end: at its centre it
+        # sat right under the Advanced toggle and read as that toggle's.
+        {"union": ["Camera:", "Refresh"],
+         "badge_below": "Camera settings (locked on every capture)",
+         "badge_align": "right",
          "label": "Pick the camera; Refresh rescans devices"},
-        {"match": "Start Preview", "badge_at": [299, 204], "label": "Live view — the same button stops it"},
-        {"match": "Snapshot", "badge_at": [394, 204], "label": "Save one timestamped PNG"},
+        {"match": "Start Preview",
+         "badge_below": "Camera settings (locked on every capture)",
+         "label": "Live view — the same button stops it"},
+        {"match": "Snapshot",
+         "badge_below": "Camera settings (locked on every capture)",
+         "label": "Save one timestamped PNG"},
         {"match": "Show focus score", "label": "Sharpness number — turn the lens until it peaks"},
         # #400: one button replaces the four-press sequence, and Apply &
         # Lock sits beside the boxes it locks (owner decision 2026-10-08).
@@ -246,10 +263,9 @@ S["tab_webcam"] = {
         # callout may name them.
         {"match": "🔒 Apply & Lock", "label": "Locks what the boxes say, for every capture"},
         {"match": "Auto-set camera", "label": "One press: gain 0, exposure for mid-gray, white balance, then locks it all"},
-        # badge under the toggle, in the preview's top margin beside badges
-        # 1 to 3: the automatic right-hand badge sat on badge 1's arrow
-        # (v1.4.5 layout check, 2026-10-08).
-        {"match": "▸ Advanced camera settings", "badge_side": "bottom",
+        # badge right of the toggle, on the empty status row: under it,
+        # it would sit on badge 1 (v1.4.5 shot).
+        {"match": "▸ Advanced camera settings", "badge_side": "right",
          "label": "Every camera control, and the single steps (Stabilize, Auto-WB once...)"},
     ],
 }
@@ -282,7 +298,9 @@ S["tab_sldea"] = {
         # to bottom, then the run row. Badge numbers follow this order.
         {"match": "Run configuration presets",
          "label": "Start here: load a saved setup, or save this tab under a name. Never the run name, and never the LIVE state"},
-        {"match": "Test Profile (voltages in kV",
+        # badge on the capsule's bottom-right corner: the automatic one on
+        # its right covered the preview's "10 kV" axis label (v1.4.5 shot).
+        {"match": "Test Profile (voltages in kV", "badge_side": "br",
          "label": "The voltage staircase — start/end/step, ramp and landing times (the 0 kV reference photo is always taken)"},
         # #402 (v1.4.5): the run folder line under Run name. Its text
         # changes with the boxes ("Saves to: ...", a warning on its second
@@ -347,7 +365,12 @@ S["tab_sldea"] = {
 
 S["20_arb_editor"] = {
     "callouts": [
+        # badge in the empty title bar above the capsule (negative client
+        # y): the automatic top-right corner covered the Full-scale value
+        # "10" (v1.4.4 and v1.4.5 shots), and there is no free room beside
+        # or below this row.
         {"union": ["Points:", "Full-scale ±V:"], "extend_right": 45,
+         "badge_at": [299, -12],
          "label": "Resolution (samples) and the volt scale (max ±10 V)"},
         {"rect": [16, 62, 226, 270], "badge_at": [200, 262],
          # in the table's own empty rows: "br" met the Segment badge
@@ -408,7 +431,10 @@ S["21_arb_bin_export"] = {
 
 S["22_arb_easywavex_export"] = {
     "callouts": [
-        {"union": ["Frequency (Hz):", "Phase (deg):"], "extend_right": 100,
+        # extend_right 92, not 100: the capsule then ends at the entries'
+        # right edge, and no longer clips the first letter of the hints
+        # beside them ("highest ...", "leave 0"; v1.4.4 and v1.4.5 shots).
+        {"union": ["Frequency (Hz):", "Phase (deg):"], "extend_right": 92,
          "badge_side": "tr",
          "label": "Header values — lab defaults pre-filled (1 V = 1 kV at the Trek)"},
         {"match": "Save CSV...", "label": "Writes the exact template EasyWaveX expects"},
@@ -464,8 +490,10 @@ def place_badge(rect, occupied, img_w, img_h, soft=(), r=16, side=None):
     return max(3 + r, x - 30), max(3 + r, cy)
 
 
-def badge_below(img, rect, text, img_w, img_h, r=16):
-    """A badge under the widget named by `text`, at the capsule's centre x.
+def badge_below(img, rect, text, img_w, img_h, r=16, align="center"):
+    """A badge under the widget named by `text`, at the capsule's centre x
+    (align="right": inside the capsule's right end instead, for a capsule
+    whose centre sits under another callout's widget).
 
     For a row with a full-width line right under it (v1.4.3: the SLDEA
     tab's "Camera for this run" line, #348). place_badge's soft list leaves
@@ -482,7 +510,8 @@ def badge_below(img, rect, text, img_w, img_h, r=16):
         MISSES.append((img["name"], text))
         return x + w / 2, y + h + 30
     by = line["y"] + line["h"] + r + 2
-    return (min(max(x + w / 2, r + 3), img_w - r - 3),
+    bx = x + w - r if align == "right" else x + w / 2
+    return (min(max(bx, r + 3), img_w - r - 3),
             min(max(by, r + 3), img_h - r - 3))
 
 
@@ -551,7 +580,8 @@ def annotate(name, spec):
             bx, by = client(src, *cspec["badge_at"])
         elif "badge_below" in cspec:
             bx, by = badge_below(src, rect, cspec["badge_below"], img_w,
-                                 img_h)
+                                 img_h, align=cspec.get("badge_align",
+                                                        "center"))
         else:
             bx, by = place_badge(rect, others + placed, img_w, img_h, soft,
                                  side=cspec.get("badge_side"))

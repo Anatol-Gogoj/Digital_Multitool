@@ -1268,7 +1268,7 @@ their searches said nothing about the scene.
 - The exposure search judged the mean of all three channels, which the red
   and blue balance change. In the camera model with the bench's stale
   balance (red 204, blue 104; the bench read red 204 on 2026-07-24), the
-  search stopped at exposure 64 with a mean of 166, and balancing the white
+  search stopped at exposure 64 with a mean of 167, and balancing the white
   afterwards left that picture at a mean of 128, well under mid-gray.
 
 **Decision (owner, 2026-10-07: Auto-set redoes the white balance every

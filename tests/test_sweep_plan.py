@@ -287,7 +287,7 @@ def test_gui_wrapper_delegates():
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count
-    # line, in name order, in one bounded block -- run_tests.py explains why.
+    # line, in name order, in one bounded block (run_tests.py explains why).
     # This runner stopped at the first failure until #426, so every case
     # after a broken one went unrun and unreported.
     import traceback

@@ -141,7 +141,7 @@ def test_the_box_negates_the_sg_control_voltage():
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count
-    # line, in name order, in one bounded block -- run_tests.py explains why.
+    # line, in name order, in one bounded block (run_tests.py explains why).
     # Until #426 this file had no runner at all: run_tests.py executes each
     # suite as a script, so it exited 0 having run none of these.
     import traceback

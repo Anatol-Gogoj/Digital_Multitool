@@ -1075,6 +1075,45 @@ class BreakdownWatchdog:
         return False
 
 
+def watchdog_record(ticked, armed, dry, trip_ua, confirm_s):
+    """(setup_line, log_tag, dialog_text): the breakdown watchdog a run
+    starts with, worded for setup.txt, run.log and "Energize HV?" (#406).
+
+    `armed` is what sldea_run hands the worker (the box ticked, a LIVE
+    run, a scope to read the current from), and all three texts are built
+    from it, so none of them can claim something the run does not do. The
+    box starts ticked, but an operator can untick it, and a preset saved
+    unticked loads unticked. Before #406 no line anywhere said that
+    nothing watched such a run, so OFF is said as plainly as ON.
+    setup_line is an ASCII `Key: value` line, because the worker writes
+    setup.txt in the locale encoding. The armed log tag is the run.log
+    wording runs have carried since 2026-08-04, unchanged, so old and new
+    logs read alike."""
+    if armed:
+        return (f"Breakdown watchdog: ON, trips when |I - baseline| >= "
+                f"{trip_ua:g} uA for {confirm_s:g} s of consecutive reads "
+                f"(baseline learned at 0 kV; absolute |I| if that baseline "
+                f"is refused)",
+                f"watchdog: dev ≥{trip_ua:g} µA for {confirm_s:g}s, "
+                f"baseline learned at 0 kV",
+                f"Breakdown watchdog: ON. The run stops itself when the "
+                f"current stays {trip_ua:g} µA or more away from the "
+                f"baseline it learns at 0 kV, for {confirm_s:g} s of "
+                f"consecutive reads.")
+    if dry:
+        why = "dry run, no HV"
+    elif not ticked:
+        why = "box unticked"
+    else:
+        why = "no scope to read the current"
+    return (f"Breakdown watchdog: OFF ({why})",
+            f"watchdog: OFF ({why})",
+            "Breakdown watchdog: OFF"
+            + ("" if why == "box unticked" else f" ({why})")
+            + ". Nothing stops this run on a breakdown; only ■ Abort or "
+              "the end of the run does.")
+
+
 TELEMETRY_FILENAME = 'telemetry.csv'
 TELEMETRY_COLUMNS = ['t_s', 'timestamp', 'nominal_kV', 'measured_kV',
                      'measured_uA', 'v_status', 'i_status', 'event']
@@ -1520,7 +1559,11 @@ class SldeaProfile:
 
     def setup_text(self, run_name, started_iso, sg_ch, vmon_ch, imon_ch,
                    dry_run, cam_info='', dea_diam_mm=None, electrode=None,
-                   concentration_ml=None, film_thickness_um=None):
+                   concentration_ml=None, film_thickness_um=None,
+                   watchdog=None):
+        """`watchdog` is watchdog_record's setup line (#406), written under
+        the I_Out line it watches; None (a caller that predates it) writes
+        no line, so an older run and an OFF run stay apart."""
         step_desc = (f"{self.step_kv:g} kV/step" if self.step_kv
                      else f"{self.n_steps_req} steps")
         return "\n".join([
@@ -1545,7 +1588,7 @@ class SldeaProfile:
             "--- Measurement (Trek monitors on scope) ---",
             f"V_Out: scope CH{vmon_ch}  ({VMON_KV_PER_V:g} kV per scope-volt)",
             f"I_Out: scope CH{imon_ch}  ({IMON_UA_PER_V:g} uA per scope-volt; "
-            f"10 V = 2000 uA)",
+            f"10 V = 2000 uA)"] + ([] if watchdog is None else [watchdog]) + [
             "",
             "--- Camera ---",
             cam_info or "(settings not recorded)",

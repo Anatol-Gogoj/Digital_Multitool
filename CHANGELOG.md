@@ -40,9 +40,17 @@ checks are in #369.
   line record the same. The box stays ticked by default. ▶ Run now refuses a
   ticked LIVE run whose Trip or Confirm is not a positive number (a nan or a
   zero used to be armed as typed), and a run whose watchdog state changed
-  while a question was open. A LIVE run that loses its scope before the
-  watchdog arms runs on, as before, and now says NOT ARMED in run.log and
-  setup.txt.
+  while a question was open.
+- **A ticked LIVE run always arms its watchdog** (#446). When a scope
+  Reconnect is still running as the run reaches its arming line or its 0 kV
+  baseline, the run waits for it at 0 V, with ■ Abort checked and all waits
+  within one 25 s bound, then takes the baseline and arms. With a short
+  baseline (fewer than 4 of 8 reads) or no scope at all, it arms on the
+  absolute rule, |I| ≥ Trip, and run.log and setup.txt say so; with no scope
+  it reads nothing until a later Reconnect succeeds. Only a stop (■ Abort or
+  the window closed) leaves a run NOT ARMED, which replaces #433's NOT ARMED
+  record for a run that lost its scope. A run with no scope when ▶ Run is
+  pressed is unchanged: "Energize HV?" says OFF and it does not arm.
 - **A second breakdown rule runs in shadow** (#434). On every LIVE run with
   current reads, the N-sigma rule watches beside the 100 µA / 3 s watchdog: a
   read 5 sigma or 20 µA (whichever is larger) away from the run's recent
@@ -62,8 +70,6 @@ checks are in #369.
   and its log file; during a run the box waits until the run has ended, so it
   never covers ■ Abort. What these programs print now goes to `launch_logs`
   in `~/.cache/scpi_control` (or `$SCPI_CACHE`), not to `launch.log`.
-- **[PLACEHOLDER #423: fill in if #423 merges before the tag, otherwise
-  delete this line.]** The watchdog waits for a scope Reconnect in flight.
 
 ### Webcam tab
 

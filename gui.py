@@ -4556,7 +4556,8 @@ LOGGING:
                 self._sldea_log("run refused: " + " ".join(refusal.split()))
                 return
             # Video (2026-09-23) is settled next, still before any HV
-            # question (the start gate above asks nothing):
+            # question (the start gate above asks only whether to run
+            # beside a stepped sweep, which writes to no instrument):
             # an operator who asked for a recording must not learn it is
             # impossible after agreeing to energize the Trek.
             vid_on, vid_fps = self._sldea_video_preflight(p)
@@ -4571,8 +4572,10 @@ LOGGING:
             wd_on = bool(wd_ticked and not dry and self.scope is not None)
             # Trip and Confirm. Ticked on a LIVE run, they are the rule
             # "Energize HV?" and the records quote as ON, so anything but a
-            # finite number above zero is refused here, before any
-            # question (HV review 2026-10-08, #406). Junk used to fall back
+            # finite number above zero is refused here, before any HV
+            # question (HV review 2026-10-08, #406; the start gate and the
+            # video pre-flight above may already have asked theirs, which
+            # write to no instrument). Junk used to fall back
             # to 100 uA / 3 s unsaid; a nan or inf trip (or confirm) was
             # armed and could never fire; a zero or negative trip fires on
             # every read. A DRY or unticked run arms nothing from them and

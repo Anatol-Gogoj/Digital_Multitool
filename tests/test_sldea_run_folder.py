@@ -582,6 +582,8 @@ def test_a_run_that_appears_after_the_check_makes_this_run_fail():
         assert len(errors) == 1, app.lines
         assert 'setup.txt appeared in the run folder' in errors[0], errors
         assert 'before any HV' in errors[0], errors
+        # true here: this run wrote nothing in that folder before it failed
+        assert "left that run's files as they were" in errors[0], errors
         assert not any(l.startswith('run complete') for l in app.lines)
         assert _bytes_of(os.path.join(run, 'setup.txt')) == before['setup']
         assert sorted(os.listdir(run)) == ['frames', 'setup.txt'], \
@@ -595,7 +597,10 @@ def test_a_run_that_appears_after_the_check_makes_this_run_fail():
 def test_a_data_csv_that_appears_after_the_check_is_not_overwritten():
     """The same for a folder that got only a data.csv meanwhile: data.csv
     is opened with mode 'x' too, still before the camera and the SG, so it
-    stays as it was and the SG is only zeroed."""
+    stays as it was and the SG is only zeroed. By then this run has made
+    its own setup.txt there and appended to the run.log there, and the
+    message says so instead of "left that run's files as they were"
+    (final HV review 2026-10-08, finding 3)."""
     mb = T._MB(T.LIVE_OK)
     with tempfile.TemporaryDirectory() as tmp, T._patched(mb):
         run = os.path.join(tmp, 'RUN')
@@ -615,6 +620,13 @@ def test_a_data_csv_that_appears_after_the_check_is_not_overwritten():
         errors = [l for l in app.lines if l.startswith('ERROR')]
         assert len(errors) == 1, app.lines
         assert 'data.csv appeared in the run folder' in errors[0], errors
+        assert ("This run stopped before any HV, but it had already written "
+                "its setup.txt in that folder and added its log lines to the "
+                "run.log there; it overwrote none of the other run's files."
+                ) in errors[0], errors
+        assert 'as they were' not in errors[0], errors
+        assert sorted(os.listdir(run)) == ['data.csv', 'frames', 'run.log',
+                                           'setup.txt'], os.listdir(run)
         assert _bytes_of(data) == before['data']
         writes = [w[1:] for w in app.sg.writes]
         assert writes == [('set_offset', 1, (0.0,)),

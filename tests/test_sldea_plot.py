@@ -4175,6 +4175,266 @@ def test_wrap_keeps_every_word_and_indents_the_continuations():
 
 
 # --------------------------------------------------------------------------
+# the caption's cost, the window's cut, the legend that covers data, and
+# names with '$' (`#391`)
+# --------------------------------------------------------------------------
+
+def _wrap_word_by_word(line, fits, indent=sp.CAPTION_WRAP_INDENT):
+    """_wrap as it was before `#391`, verbatim: one exact width test after
+    every word. The reference the steered wrap must match row for row."""
+    rows, cur = [], ''
+    for word in line.split(' '):
+        if not cur and not word:
+            continue
+        lead = indent if rows else ''
+        cand = f"{cur} {word}" if cur else word
+        if fits(lead + cand):
+            cur = cand
+            continue
+        if cur:
+            rows.append(cur)
+            cur = ''
+            if not word:
+                continue
+            lead = indent
+        while len(word) > 1 and not fits(lead + word):
+            k = len(word) - 1
+            while k > 1 and not fits(lead + word[:k]):
+                k -= 1
+            rows.append(word[:k])
+            word = word[k:]
+            lead = indent
+        cur = word
+    if cur or not rows:
+        rows.append(cur)
+    return rows[:1] + [indent + r for r in rows[1:]]
+
+
+def _members_word_by_word(drawn, fits):
+    """The Members line as it was composed before `#391`: the same
+    bisection, with every probe wrapped word by word and in full. The
+    names fed to it carry no '$' or '\\', so `#391`'s escaping does not
+    enter into the comparison."""
+    bits = [f"{name} = " + ', '.join(r['name'] for r in runs)
+            for name, runs, *_rest in drawn]
+    line = 'Members: ' + '; '.join(bits) + '.'
+    rows = _wrap_word_by_word(line + " (Also in the tidy CSV's group "
+                                     "column.)", fits)
+    if len(rows) > sp.MEMBERS_MAX_ROWS:
+        tail = "… (full membership in the tidy CSV's group column)"
+
+        def ok(k):
+            cand = line[:k].rstrip(' ,;') + tail
+            return len(_wrap_word_by_word(cand, fits)) <= sp.MEMBERS_MAX_ROWS
+        lo, hi = 0, len(line)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if ok(mid):
+                lo = mid
+            else:
+                hi = mid - 1
+        rows = _wrap_word_by_word(line[:lo].rstrip(' ,;') + tail, fits)
+    return '\n' + '\n'.join(rows)
+
+
+def _fitter_at(width):
+    """The caption's width test for a figure `width` inches wide."""
+    from matplotlib.figure import Figure
+    return sp._caption_fitter(Figure(figsize=(width, 5.4)))
+
+
+def _counted(fits):
+    """`fits` that counts its calls in `.calls`, keeping its estimate."""
+    def counted(text):
+        counted.calls += 1
+        return fits(text)
+    counted.calls = 0
+    if hasattr(fits, 'reach'):
+        counted.reach = fits.reach
+    return counted
+
+
+# the widths the equivalence cases walk: a near-floor window to beyond the
+# export, at steps that are not round numbers so the breaks land anywhere
+_EQUIV_WIDTHS = tuple(round(3.1 + 0.83 * i, 2) for i in range(13))
+
+# Members lines the search has to get through: the reviewer's six-group,
+# 12-run seed (`#382`), seeded names with ', ' in them, forty long folder
+# names in one group, run names carrying ', ' and '; ' of their own, a
+# double space, and a folder name too long for one row
+_MEMBER_SETS = (
+    [(f"{P3}, {c}", [{'name': f"P3_{2 * i + j}_2.5mL_2026072{2 * i + j}"}
+                     for j in range(2)])
+     for i, c in enumerate(('2.5 mL', '2.3 mL', '1.5 mL'))]
+    + [(m, [{'name': f"P3_{6 + 2 * i + j}_2.5mL_2026072{(6 + 2 * i + j) % 10}"}
+            for j in range(2)])
+       for i, m in enumerate((N3500, N3900, CB))],
+    [(P3, [{'name': f"R{i:02d}_a_rather_long_run_folder_name_here"}
+           for i in range(40)])],
+    [(sp.NO_ELECTRODE_GROUP, [{'name': 'run, with a comma'},
+                              {'name': 'run; with a semicolon'}]),
+     (sp.NOT_SPECIFIED, [{'name': 'double  space run'}]),
+     (f"{P3}, {sp.NO_CONCENTRATION}", [{'name': 'Q' * 70}]),
+     ('eGaIn', [{'name': f"EG_{i}_20260801"} for i in range(9)]),
+     (f"{P3}, 0.5 mL", [{'name': 'SLCBvalidationTest'},
+                        {'name': 'DOT_P3_1_20260729'}])],
+)
+
+
+def test_the_steered_wrap_picks_the_rows_the_word_by_word_wrap_picks():
+    """`#391`: _wrap measures a row once with the words an estimate says
+    fit, instead of once per word, and must still pick exactly the rows
+    the word-by-word loop picked, or every caption and the byte-identity
+    tests above would move. Checked on every caption line of a default,
+    an aggregate and a five-group seeded figure plus hand-made hard cases,
+    at 13 widths; the steering must really save measurements; and a wrap
+    given a deliberately wrong estimate must still pick the same rows."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        one = os.path.join(d, 'one')
+        _fake_run(one, _healthy_rows(8))
+        two = os.path.join(d, 'two')
+        _fake_run(two, _healthy_rows(8))
+        runs = _labeled(d, [(f"P3_{i}_2.5mL_2026072{i % 10}", m, c, i)
+                            for i, (m, c) in enumerate(
+                                [(P3, '2.5 mL'), (P3, '2.5 mL'),
+                                 (P3, '2.3 mL'), (P3, '1.5 mL'),
+                                 (N3900, _ABSENT), (CB, _ABSENT)])])
+        lines = []
+        for opts, dirs in ((sp.make_opts()[0], [one]),
+                           (sp.make_opts(aggregate=True)[0], [one, two]),
+                           (_seeded_opts(runs, 'concentration'), None)):
+            fig = _drawn(sp.prepare_runs(dirs, opts) if dirs else runs, opts)
+            held = getattr(fig, sp._CAPTION_ATTR)[1]
+            # a grouped caption composed with a test that passes every
+            # line, so its lines come whole, as the wrap receives them
+            composed = held(lambda s: True) if callable(held) else held
+            lines += [l for l in composed.split('\n') if l]
+        lines += ['a.  Two spaces stay between sentences, and  two more.',
+                  'C:/a/very/long/pasted/path/with/no/spaces/at/all/in/it/'
+                  'whatsoever/to/be/broken/somewhere x y z',
+                  ' '.join(['Rxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'] * 12)]
+        assert len(lines) > 15, len(lines)
+        steered = plain = 0
+        for width in _EQUIV_WIDTHS:
+            fits = _fitter_at(width)
+            for line in lines:
+                a, b = _counted(fits), _counted(lambda s, f=fits: f(s))
+                assert sp._wrap(line, a) == _wrap_word_by_word(line, b), \
+                    (width, line[:60])
+                steered += a.calls
+                plain += b.calls
+        # the point of it: far fewer exact measurements for the same rows
+        assert steered * 2 < plain, (steered, plain)
+        # ...and the estimate only steers. On real text it is close enough
+        # to land on every row's end, so a wrap that TRUSTED it would pass
+        # the cases above too; an estimate that is wrong on purpose, too
+        # long and too short at random, must still give the same rows
+        import random
+        rng = random.Random(391)
+        for line in lines:
+            for n in (25, 60, 140):
+                def exact(s, n=n):
+                    return len(s) <= n
+
+                def lying(s, n=n):
+                    return len(s) <= n
+                lying.reach = lambda _head, _words, _i: rng.randint(0, 14)
+                assert sp._wrap(line, lying) == \
+                    _wrap_word_by_word(line, exact), (n, line[:60])
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_members_search_picks_the_break_the_exact_search_picks():
+    """Owner decision 2026-10-06 (`#391`): per-word estimates may only
+    STEER the Members line's search, and each probe is still decided by
+    the exact width test, so the line is cut where it always was. Over
+    13 widths and four sets of names, including the seeded names with
+    ', ' in them, the new search returns exactly what the old one (every
+    probe wrapped word by word, in full) returns."""
+    if not _has_mpl():
+        return
+    import random
+    rng = random.Random(391)
+    cut = 0
+    for width in _EQUIV_WIDTHS:
+        fits = _fitter_at(width)
+        for names in _MEMBER_SETS:
+            drawn = [(name, runs, None, None, None, None)
+                     for name, runs in names]
+            want = _members_word_by_word(drawn, fits)
+            got = sp._group_members_caption(drawn, fits=fits)
+            assert got == want, (width, names[0][0])
+            cut += got.endswith("(full membership in the tidy CSV's group "
+                                "column)")
+            # an estimate wrong on purpose steers worse, never elsewhere
+            # (every third width: a wrong guess costs measurements)
+            if _EQUIV_WIDTHS.index(width) % 3 == 0:
+                lying = _counted(fits)
+                lying.reach = lambda _head, _words, _i: rng.randint(0, 14)
+                assert sp._group_members_caption(drawn, fits=lying) == \
+                    want, (width, names[0][0], 'lying estimate')
+    # the search itself ran, not only the line that fits
+    assert cut >= 10, cut
+
+
+def test_a_row_limit_stops_the_wrap_early_and_counts_the_same():
+    """`#391`: the Members search only asks whether a cut wraps to more
+    than MEMBERS_MAX_ROWS rows, so _wrap(limit=) stops once a row past
+    the limit starts. Its length must answer that question exactly as the
+    whole wrap does, and under the limit it must BE the whole wrap: over
+    generated lines with double spaces and words too long for a row, at
+    several character-count widths and on the real width test."""
+    import random
+    rng = random.Random(391)
+    vocab = ['a', 'to', 'the', 'group,', 'mean;', '', '', 'P3-SWNT,',
+             'x' * 30, 'Carbon', 'Solutions', '2.5', 'mL', '(no', 'band)']
+    cases = []
+    for _ in range(300):
+        line = ' '.join(rng.choice(vocab) for _ in range(rng.randint(0, 40)))
+        n = rng.randint(6, 40)
+        cases.append((line, lambda s, n=n: len(s) <= n))
+    if _has_mpl():
+        for width in (3.3, 5.2, 9.7):
+            fits = _fitter_at(width)
+            for line, _f in cases[:40]:
+                cases.append((line, fits))
+    for line, fits in cases:
+        whole = sp._wrap(line, fits)
+        for limit in (0, 1, 2, 3, 5):
+            short = sp._wrap(line, fits, limit=limit)
+            assert (len(short) > limit) == (len(whole) > limit), \
+                (line, limit, short, whole)
+            if len(whole) <= limit:
+                assert short == whole, (line, limit)
+
+
+def test_the_width_cache_tells_one_font_from_another():
+    """`#391`: the caption's width cache was keyed on the text and the size
+    alone, so had anything changed the font family, the wrap would have
+    trusted the first family's widths. The key holds the font now: under
+    a serif rc the same text measures as serif, and back outside the
+    context it measures as the default again."""
+    if not _has_mpl():
+        return
+    import matplotlib
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.textpath import TextToPath
+    text = 'Members: Carbon Solutions P3-SWNT, 2.5 mL = P3_1_2.5mL_20260728'
+    sans = sp._caption_width(text, 7)
+    with matplotlib.rc_context({'font.family': 'serif'}):
+        serif = sp._caption_width(text, 7)
+        truth = TextToPath().get_text_width_height_descent(
+            text, FontProperties(size=7), ismath=False)[0]
+        assert serif == truth, (serif, truth, sans)
+    assert abs(serif - sans) > 1.0, (serif, sans)
+    assert sp._caption_width(text, 7) == sans
+
+
+# --------------------------------------------------------------------------
 # the export format and the dpi (`#314`) -- the first options that describe
 # the FILE rather than the drawing
 # --------------------------------------------------------------------------

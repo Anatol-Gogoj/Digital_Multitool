@@ -2357,7 +2357,7 @@ def _fit(line, limit=CAPTION_LINE_MAX):
 CAPTION_WRAP_INDENT = '    '
 
 
-def _wrap(line, fits, indent=CAPTION_WRAP_INDENT):
+def _wrap(line, fits, indent=CAPTION_WRAP_INDENT, limit=None):
     """`line` broken at spaces into rows that each pass `fits` -> [rows].
 
     EVERY WORD IS KEPT (`#373`, 2026-10-06). Cutting a grouped caption
@@ -2368,21 +2368,63 @@ def _wrap(line, fits, indent=CAPTION_WRAP_INDENT):
     figure and lost the band widths. A measurement figure must not drop
     caption text without saying so. Rows after the first carry `indent`.
     Only a single word wider than a whole row (a pasted path, say) is
-    broken inside the word, because there is nowhere else to break it."""
-    rows, cur = [], ''
-    for word in line.split(' '):
+    broken inside the word, because there is nowhere else to break it.
+
+    STEERED BY AN ESTIMATE, DECIDED BY `fits` (`#391`). A width test from
+    _caption_fitter also carries `fits.reach`, a guess at how many more
+    words fit on the row from per-word widths. The loop measures the row
+    with that many words added in ONE exact test, and takes them when it
+    passes, instead of measuring the row again after every word; a guess
+    that fails is shortened one word at a time. The rows are exactly the
+    ones the word-by-word loop picks, because appending text never makes
+    a row narrower, so a row that passes with n more words passes with
+    fewer. Any other `fits` (a character count, say) is walked word by
+    word, as before.
+
+    `limit` is for a caller that only counts rows (the Members search):
+    the wrap stops as soon as a row past `limit` begins, so the list it
+    returns then is cut short and good only for its length, which is more
+    than `limit` exactly when the whole wrap's is."""
+    reach = getattr(fits, 'reach', None)
+    words = line.split(' ')
+    # `stop`: the first word known NOT to fit on the current row, found by
+    # a failed guess, so a later guess on that row never measures past it
+    rows, cur, i, stop = [], '', 0, None
+    while i < len(words):
+        word = words[i]
         if not cur and not word:
+            i += 1
             continue                   # the spaces at a break ARE the break
+        if not cur and limit is not None and len(rows) >= limit:
+            return rows + [word]       # a row past `limit` starts here
         lead = indent if rows else ''
+        if cur and reach is not None:
+            n = reach(lead + cur, words, i)
+            if stop is not None:
+                n = min(n, stop - i)
+            while n > 1:
+                cand = ' '.join([cur] + words[i:i + n])
+                if fits(lead + cand):
+                    break
+                stop = i + n - 1
+                n -= 1
+            if n > 1:
+                # n word-by-word passes, made in one measurement
+                cur = cand
+                i += n
+                continue
+        i += 1
         cand = f"{cur} {word}" if cur else word
         if fits(lead + cand):
             cur = cand
             continue
         if cur:
             rows.append(cur)
-            cur = ''
+            cur, stop = '', None
             if not word:
                 continue
+            if limit is not None and len(rows) >= limit:
+                return rows + [word]
             lead = indent
         # a single character that still does not fit is a row of its own:
         # it cannot be broken, and breaking it again would never end
@@ -2393,7 +2435,9 @@ def _wrap(line, fits, indent=CAPTION_WRAP_INDENT):
             rows.append(word[:k])
             word = word[k:]
             lead = indent
-        cur = word
+            if limit is not None and len(rows) >= limit:
+                return rows + [word]
+        cur, stop = word, None
     if cur or not rows:
         rows.append(cur)
     return rows[:1] + [indent + r for r in rows[1:]]
@@ -2440,40 +2484,77 @@ def _caption_fitter(fig, fontsize=7, left=0.01, frac=CAPTION_FIT_FRAC):
 
     Measured from the font itself (matplotlib's TextToPath, in points),
     not from a renderer, so the answer is the same on the window's Tk
-    canvas, in a PNG and in an SVG, and needs nothing drawn first."""
+    canvas, in a PNG and in an SVG, and needs nothing drawn first.
+
+    `fits.reach(head, words, i)` is the estimate _wrap steers by (`#391`):
+    how many of words[i:] still fit on the row `head` starts, counting
+    each word's own cached width plus one word gap. It is close (the gap
+    between two words depends on the letters either side of it, and this
+    takes one typical gap) and it never decides a row: _wrap measures
+    whatever it guesses with `fits` itself."""
     room = fig.get_figwidth() * 72.0 * (frac - left)
+    font = _caption_font(fontsize)
 
     def fits(text):
-        return _caption_width(text, fontsize) <= room
+        return _caption_width(text, fontsize, font) <= room
+
+    # what one space between two words adds, side bearings included
+    gap = (_caption_width('n n', fontsize, font)
+           - 2 * _caption_width('n', fontsize, font))
+
+    def reach(head, words, i):
+        used = _caption_width(head, fontsize, font)
+        n = 0
+        for word in words[i:]:
+            used += gap + _caption_width(word, fontsize, font)
+            if used > room:
+                break
+            n += 1
+        return n
+    fits.reach = reach
     return fits
 
 
 _WIDTHS = {}
 
 
-def _caption_width(text, fontsize):
+def _caption_font(fontsize):
+    """-> (FontProperties, key): the font a caption width is measured in,
+    as rcParams resolve it NOW, and what names it in the width cache: the
+    configured family and the font file that family resolved to (`#391`).
+    Nothing in this tool changes the font at run time, but a cache keyed
+    on the text and size alone would hand a later family the widths of
+    the first one, and the wrap would then trust them."""
+    from matplotlib.font_manager import FontProperties, findfont
+    prop = FontProperties(size=fontsize)
+    return prop, (tuple(prop.get_family()), findfont(prop))
+
+
+def _caption_width(text, fontsize, font=None):
     """`text`'s width in points at `fontsize`, by the font's metrics.
+    `font` is _caption_font(fontsize), resolved here when not given.
 
     CACHED, because a window resize re-wraps the caption at every size a
-    drag passes through, and _wrap measures each row word by word.
-    Measured 2026-10-06 on an aggregate figure: uncached, the re-wrap
-    took 87 ms of a 124 ms relayout at 6 in wide (11 rows), against 38 ms
-    for the layout alone (`#316` is why that matters). Most strings recur
-    from one size to the next, so with the cache a drag through 20
-    distinct sizes from a cold start costs a median 59 ms a relayout,
-    against 42 ms without the caption step. The width depends only on
-    the string and the size: the caption's font is matplotlib's default,
-    which nothing in this tool changes at run time. Cleared when it
-    passes 20000 strings, so it cannot grow without bound."""
-    key = (text, fontsize)
+    drag passes through, and _wrap measures rows. Measured 2026-10-06 on
+    an aggregate figure: uncached, the re-wrap took 87 ms of a 124 ms
+    relayout at 6 in wide (11 rows), against 38 ms for the layout alone
+    (`#316` is why that matters). Most strings recur from one size to the
+    next, so with the cache a drag through 20 distinct sizes from a cold
+    start costs a median 59 ms a relayout, against 42 ms without the
+    caption step. The width depends only on the string, the size and the
+    font, and the key holds all three (the font since `#391`). Cleared
+    when it passes 20000 strings, so it cannot grow without bound."""
+    if font is None:
+        font = _caption_font(fontsize)
+    prop, family = font
+    key = (text, fontsize, family)
     width = _WIDTHS.get(key)
     if width is None:
-        from matplotlib.font_manager import FontProperties
-        from matplotlib.textpath import TextToPath
+        from matplotlib.textpath import text_to_path
         if len(_WIDTHS) >= 20000:
             _WIDTHS.clear()
-        width = _WIDTHS[key] = TextToPath().get_text_width_height_descent(
-            text, FontProperties(size=fontsize), ismath=False)[0]
+        width = _WIDTHS[key] = text_to_path.get_text_width_height_descent(
+            text, prop, ismath=False)[0]
     return width
 
 
@@ -2580,10 +2661,19 @@ def _group_members_caption(drawn, limit=CAPTION_LINE_MAX, fits=None):
         rows = _wrap(whole, fits)
         if len(rows) > MEMBERS_MAX_ROWS:
             tail = "… (full membership in the tidy CSV's group column)"
+            # the longest cut of the line that still wraps to
+            # MEMBERS_MAX_ROWS rows with the pointer on, by bisection. Each
+            # probe is decided by the exact width test; the estimate in
+            # `fits` only steers each probe's wrap, and the row count stops
+            # at the limit, so every probe answers as the word-by-word wrap
+            # does and the search lands where it always landed (`#391`).
+
+            def cut(k):
+                return line[:k].rstrip(' ,;') + tail
 
             def ok(k):
-                cand = line[:k].rstrip(' ,;') + tail
-                return len(_wrap(cand, fits)) <= MEMBERS_MAX_ROWS
+                return len(_wrap(cut(k), fits, limit=MEMBERS_MAX_ROWS)) \
+                    <= MEMBERS_MAX_ROWS
             lo, hi = 0, len(line)
             while lo < hi:
                 mid = (lo + hi + 1) // 2
@@ -2591,7 +2681,7 @@ def _group_members_caption(drawn, limit=CAPTION_LINE_MAX, fits=None):
                     lo = mid
                 else:
                     hi = mid - 1
-            rows = _wrap(line[:lo].rstrip(' ,;') + tail, fits)
+            rows = _wrap(cut(lo), fits)
         return '\n' + '\n'.join(rows)
     if len(line) > limit:
         # the pointer to the full answer is part of the budget, not an

@@ -702,6 +702,147 @@ def test_a_quiet_live_run_lists_no_away_read():
         assert _away_entries(app) == [], app.lines
 
 
+def _levels_volts(app, steps, base_v):
+    """I_Out monitor volts: `base_v`, then each (after_s, volts) of
+    `steps` from `after_s` seconds after the ramp's first SG write."""
+    t_ramp = []
+
+    def volts(ch):
+        if ch != 3:
+            return 0.0
+        v = base_v
+        if L._ramping(app):
+            if not t_ramp:
+                t_ramp.append(time.monotonic())
+            dt = time.monotonic() - t_ramp[0]
+            for after_s, step_v in steps:
+                if dt >= after_s:
+                    v = step_v
+        return v
+    return volts
+
+
+def _spied_run(tmp):
+    """A ticked LIVE run, telemetry at 2 Hz: 10 uA at rest, 40 uA from 3 s
+    after the ramp starts (the shadow would trip; under the 100 uA trip),
+    160 uA from 5 s (the watchdog trips, confirm 1 s). -> (app, calls):
+    in the order the worker made them, every BreakdownWatchdog.update and
+    NSigmaWatchdog.update (called, then decided), every telemetry event
+    and periodic row (with hold_flush as it stood), and every flush of
+    the telemetry file."""
+    calls = []
+    saved = (sp.BreakdownWatchdog.update, sp.NSigmaWatchdog.update,
+             sp.TelemetryLog.event, sp.TelemetryLog.sample,
+             sp.TelemetryLog.__init__)
+
+    def watchdog(self, t_s, ua, offscreen=False):
+        calls.append(('watchdog', t_s))
+        tripped = saved[0](self, t_s, ua, offscreen=offscreen)
+        calls.append(('watchdog decided', t_s, tripped))
+        return tripped
+
+    def shadow(self, t_s, kv, ua, offscreen=False):
+        calls.append(('shadow', t_s))
+        tripped = saved[1](self, t_s, kv, ua, offscreen=offscreen)
+        calls.append(('shadow decided', t_s, tripped))
+        return tripped
+
+    def event(self, t_s, timestamp, nominal_kv, event, **kw):
+        calls.append(('event', t_s, str(event), self.hold_flush))
+        return saved[2](self, t_s, timestamp, nominal_kv, event, **kw)
+
+    def sample(self, t_s, timestamp, nominal_kv, **kw):
+        calls.append(('sample', t_s, self.hold_flush))
+        return saved[3](self, t_s, timestamp, nominal_kv, **kw)
+
+    class _Flushes:
+        def __init__(self, f):
+            self._f = f
+
+        def __getattr__(self, name):
+            return getattr(self._f, name)
+
+        def flush(self):
+            calls.append(('flush',))
+            return self._f.flush()
+
+    def init(self, *a, **k):
+        saved[4](self, *a, **k)
+        self._f = _Flushes(self._f)
+
+    (sp.BreakdownWatchdog.update, sp.NSigmaWatchdog.update,
+     sp.TelemetryLog.event, sp.TelemetryLog.sample,
+     sp.TelemetryLog.__init__) = (watchdog, shadow, event, sample, init)
+    try:
+        app = _run(tmp, ticked=True, tel=True, confirm_s='1', landing_s=8.0,
+                   volts=lambda a: _levels_volts(
+                       a, ((3.0, 0.2), (5.0, 0.8)), 0.05))
+    finally:
+        (sp.BreakdownWatchdog.update, sp.NSigmaWatchdog.update,
+         sp.TelemetryLog.event, sp.TelemetryLog.sample,
+         sp.TelemetryLog.__init__) = saved
+    return app, calls
+
+
+def _shadow_event(calls):
+    [(i, ev)] = [(i, c) for i, c in enumerate(calls)
+                 if c[0] == 'event' and c[2].startswith('SHADOW')]
+    return i, ev
+
+
+def test_in_every_tick_the_watchdog_decides_before_the_shadow():
+    """HV review 2026-10-08, finding 3: nothing pinned WHEN the shadow
+    runs. With its block moved above the watchdog's trip branch, and a
+    would-trip made to cost 2 s, every suite still passed. Here, in a real
+    worker run whose shadow would trip at 40 uA before the watchdog trips
+    at 160 uA: on every read the shadow is fed, the call just before it is
+    the watchdog's decision on that same read (not a trip), and the
+    would-trip's telemetry row comes after both decisions of its tick."""
+    with tempfile.TemporaryDirectory() as tmp:
+        app, calls = _spied_run(tmp)
+    assert app._sldea_bd_tripped, app.lines
+    shadow_ticks = [c[1] for c in calls if c[0] == 'shadow']
+    assert len(shadow_ticks) >= 5, calls
+    for t in shadow_ticks:
+        i = calls.index(('shadow', t))
+        assert calls[i - 2:i] == [('watchdog', t),
+                                  ('watchdog decided', t, False)], \
+            calls[max(0, i - 4):i + 1]
+    i_ev, ev = _shadow_event(calls)
+    t_ev = ev[1]
+    assert calls[i_ev - 4:i_ev] == [
+        ('watchdog', t_ev), ('watchdog decided', t_ev, False),
+        ('shadow', t_ev), ('shadow decided', t_ev, True)], \
+        calls[max(0, i_ev - 5):i_ev + 1]
+    # the watchdog went on reading after the would-trip, and tripped later
+    [t_trip] = [c[1] for c in calls if c[0] == 'watchdog decided' and c[2]]
+    assert t_trip > t_ev, (t_trip, t_ev)
+    assert calls.index(('watchdog decided', t_trip, True)) > i_ev
+
+
+def test_the_would_trip_row_is_written_without_a_flush_and_kept():
+    """HV review 2026-10-08, the note on the would-trip row: it is the one
+    file write the shadow adds to the HV loop, and in the review's model a
+    3 s stall on it delayed the watchdog's trip that followed (3.06 s to
+    SG zero became 5.65 s). It is now written with hold_flush set, so it
+    issues no flush of its own: the periodic row after it flushes it, the
+    hold is put back for that row, and the row is in telemetry.csv after
+    the run."""
+    with tempfile.TemporaryDirectory() as tmp:
+        app, calls = _spied_run(tmp)
+        rows = [r for r in _telemetry_events(tmp)
+                if r['event'].startswith('SHADOW')]
+    assert app._sldea_bd_tripped, app.lines
+    i_ev, ev = _shadow_event(calls)
+    assert ev[3] is True, ev                       # held while written
+    after = calls[i_ev + 1:]
+    first_flush = after.index(('flush',))
+    samples = [c for c in after[:first_flush] if c[0] == 'sample']
+    assert samples, after[:first_flush + 1]        # a periodic row flushed
+    assert samples[0][2] is False, samples[0]      # ...the hold put back
+    assert len(rows) == 1 and rows[0]['event'] == ev[2], (rows, ev)
+
+
 def _run_all():
     # Failures are collected, not fatal (`#280`); a case that cannot run
     # here is counted as skipped, not passed.

@@ -30,8 +30,11 @@ import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
     _os.path.abspath(__file__))))
 
+import atexit
 import gc
 import queue
+import shutil
+import tempfile
 import threading
 import time
 import types
@@ -40,6 +43,11 @@ import gui
 import webcam
 
 G = gui.InstrumentControlGUI
+# The stub runs' Output dir: an empty folder of their own. Run refuses a
+# folder that already holds a run (#402), so '.' with the name RUN would
+# have failed these cases in any checkout holding a stray RUN/setup.txt.
+_OUTDIR = tempfile.mkdtemp(prefix='test_webcam_autostart_')
+atexit.register(shutil.rmtree, _OUTDIR, True)
 # _Patched runs the reason watch every POLL_MS instead of the app's 500 ms:
 # the resume is only seen across watch periods, and the suite went from
 # about 16 s to 55 s at the app's rate. WATCH is one period with room for a
@@ -399,7 +407,7 @@ def _sldea_ready(app):
     for name in ('sldea_autoproc', 'sldea_trek_inv', 'sldea_wd_on',
                  'sldea_tel_on', 'sldea_vid_on', 'sldea_vid_detect'):
         setattr(app, name, _var(False))
-    app.sldea_outdir, app.sldea_runname = _var('.'), _var('RUN')
+    app.sldea_outdir, app.sldea_runname = _var(_OUTDIR), _var('RUN')
     app.sldea_run_btn = app.sldea_abort_btn = types.SimpleNamespace(
         config=lambda **kw: None)
     app.scope = None

@@ -13,18 +13,20 @@ frames the run ALREADY holds in memory:
   VideoRecorder.latest() (a lock held for one reference read, and a BGR
   copy made outside it; only the thumbnail is converted to RGB).
   (None, None) from it is shown as "NO FRAME (stream stalled)", the
-  dead-camera signal #48 asks for. A stream that stalls or closes only
-  once the run is finishing is expected, and is shown in grey as
-  "RECORDING ENDED". One that had already stalled or closed, on show in
-  red, before the run ended stays red until the run has ended (#388):
-  an operator who pressed Abort because the camera died must not see
-  that relabeled as expected;
-* a video run whose stream gives no frame while the run hands over
-  stills (its stream never started, so it goes on with one-shot stills,
-  #392): the newest saved still, under a red "VIDEO STREAM DOWN: LAST
-  STILL, NOT LIVE" banner (#388). A still handed over since the last
-  stream frame shown takes the place of the red NO FRAME; without one,
-  the rule above holds;
+  dead-camera signal #48 asks for. Only a stream this view saw still
+  delivering once the run was over (stopped or past its staircase) is
+  expected to close: when it then stalls or closes, that is shown in grey
+  as "RECORDING ENDED". Every other stall or close stays red until the
+  run has ended (#388): one on show before the run ended, a stream that
+  never delivered (registered dead after an Abort included), and one that
+  died while this window was closed. An operator who pressed Abort
+  because the camera died must not see that relabeled as expected;
+* a video run whose stream delivers nothing in its first 5 s (it goes on
+  with one-shot stills, #392): the newest saved still, under a red
+  "VIDEO STREAM DOWN: LAST STILL, NOT LIVE" banner (#388). A still handed
+  over since the last stream frame shown takes the place of the red NO
+  FRAME; without one, the rule above holds. A recorder that fails to
+  start at all is never registered, and that run reads as stills-only;
 * a stills-only run: the newest SAVED still, which the run thread hands
   over in ONE attribute, app._sldea_live_still, as a LiveStill, once its
   save has succeeded: a still that could not be saved is never shown as
@@ -111,13 +113,13 @@ BANNERS = {
     'ended': ("RUN ENDED, NOT LIVE", TOL_GREY),
     'error': ("LIVE VIEW ERROR, NOT LIVE", TOL_RED),
     # the stream closing once the staircase is over or the run was
-    # stopped: expected, so grey and in words. Only for a stream that was
-    # still delivering until then; a NO FRAME already on show stays red
-    # (#388, LiveView.poll)
+    # stopped: expected, so grey and in words. Only for a stream this
+    # view saw still delivering with the run over; any other NO FRAME
+    # stays red (#388, LiveView.poll)
     'finishing': ("RECORDING ENDED, NOT LIVE", TOL_GREY),
     # a video run whose stream gives no frame but which hands over
-    # one-shot stills (its stream never started, #392): the newest saved
-    # still, with the stream fault in words and in red (#388)
+    # one-shot stills (it delivered nothing in its first 5 s, #392): the
+    # newest saved still, with the stream fault in words and in red (#388)
     'stream_down': ("VIDEO STREAM DOWN: LAST STILL, NOT LIVE", TOL_RED),
 }
 
@@ -474,7 +476,7 @@ class LiveView:
         self._prev_rec = _ref(None)  # the recorder that predates this run
         self._good = None            # the last real frame shown this run
         self._still_key = None       # LiveStill.mono of the one in _good
-        self._fault = False          # NO FRAME seen while the run went on
+        self._live_after_end = False  # a stream frame seen, the run over
         self._stream_mono = None     # capture time of the last stream frame
         self._ended_wall = None
         self._covers_root = False    # placed inside the main window's area
@@ -490,7 +492,7 @@ class LiveView:
         self._prev_rec = _ref(getattr(self.app, '_sldea_recorder', None))
         self._good = None
         self._still_key = None
-        self._fault = False
+        self._live_after_end = False
         self._stream_mono = None
         self._ended_wall = None
         self._img_key = None
@@ -733,21 +735,24 @@ class LiveView:
         also kept as self.state). Reads only; never waits on the run and
         never touches the camera.
 
-        A stream that stalls or closes once the run is over (_run_over)
-        is the run ending: grey 'finishing'. A stall or close this view
-        already showed while the run was still going is a fault, and it
-        stays red until _sldea_finished, Abort or not (#388). A frame
-        coming back clears it. The view knows only what it polled, so a
-        stream that died while the window was closed and is first seen
-        after the run ended reads as the run ending.
+        A stall or close is the run ending, grey 'finishing', only once
+        this view has seen the stream deliver a frame with the run already
+        over (_run_over). At a normal end and after an Abort the reader
+        goes on until rec.stop(), and latest() serves its last frame for
+        2 s after that, so an open window sees about four such polls.
+        Every other stall or close stays red until _sldea_finished (#388):
+        one on show before the run ended, a stream that never delivered
+        (registered dead after an Abort included), and one that died while
+        the window was closed. The cost: a window first opened after a
+        normal end's last frame has aged out shows red until RUN ENDED.
 
         A still handed over since the last stream frame this view showed
         (or with none shown this run) comes first: while this run's
         stream gives no frame, that still is shown as 'stream_down', the
         still under a red VIDEO STREAM DOWN banner, Abort or not. That is
-        a video run whose stream never started, which goes on with
-        one-shot stills (#392). The red NO FRAME rule above applies only
-        without such a still."""
+        a video run whose stream delivered nothing in its first 5 s, which
+        goes on with one-shot stills (#392). The red NO FRAME rule above
+        applies only without such a still."""
         now_mono = time.monotonic() if now_mono is None else now_mono
         now_wall = time.time() if now_wall is None else now_wall
         app = self.app
@@ -763,24 +768,22 @@ class LiveView:
             kind = self._poll_stream(rec, now_mono, now_wall)
             if kind in ('stalled', 'closed') and self._still_since_stream():
                 # the stream gives no frame, but the run hands over stills
-                # (the worker registers a recorder whose stream never
-                # started, then goes on with one-shot stills): show the
-                # newest, and say in red that the stream is down
+                # (the worker registers a recorder whose stream delivered
+                # nothing in 5 s, then goes on with one-shot stills): show
+                # the newest, and say in red that the stream is down
                 if (self._good or {}).get('src') != 'still':
                     self._still_key = None   # take the still, not _good
                 self._poll_still(now_mono)
                 kind = 'stream_down'
         else:
             kind = self._poll_still(now_mono)
-        if kind in ('live', 'still'):
-            self._fault = False          # a frame again: no fault on show
-        elif kind in ('stalled', 'closed'):
-            if not self._run_over():
-                self._fault = True       # shown in red while the run goes
-            elif not self._fault:
-                # rec.stop() runs after the staircase (up to 10 s) before
-                # _sldea_finished: a stream closing then is the run
-                # ending, not a camera fault, and is not shown in red
+        if kind in ('live', 'stalled', 'closed') and self._run_over():
+            if kind == 'live':
+                # still delivering with the run over: the stream closes
+                # because the run ends (rec.stop() runs after the
+                # staircase, up to 10 s before _sldea_finished)
+                self._live_after_end = True
+            elif self._live_after_end:
                 kind = 'finishing'
             # else it stays red: an Abort pressed BECAUSE the camera died
             # must not relabel that as the recording's expected end (#388)

@@ -2748,7 +2748,7 @@ class PlotWindow:
         `+x+y` places the outer frame, title bar and borders included,
         while `WxH` sizes only the inside, so a window clamped to the
         work area's width used to reach a border's width past its right
-        edge on Windows (frame_size)."""
+        edge on Windows. frame_size knows the frame on Windows only."""
         self.root.update_idletasks()
         left, top, right, bottom = work_area(self.root)
         fw, fh = self.frame_size()
@@ -2765,9 +2765,12 @@ class PlotWindow:
         outside for 600 x 400 inside, 8 px a side and 31 px above
         (Windows 11 at 175 %, measured with GetWindowRect 2026-10-06).
 
-        Read off the mapped window as Tk reports it, so it is (0, 0),
-        the old client-size clamp, wherever the window manager has not
-        framed the window yet: X11 can frame it after this is asked."""
+        Read off the mapped window as Tk reports it, which counts the
+        frame on Windows ONLY. On X11 Tk keeps the inside's root position
+        as the toplevel's x and y, framed or not (ConfigureEvent and
+        ComputeReparentGeometry in tkUnixWm.c, read for the `#390`
+        review), so this is (0, 0) there and the opening keeps the old
+        client-size clamp. macOS is not measured."""
         try:
             side = max(0, self.root.winfo_rootx() - self.root.winfo_x())
             head = max(0, self.root.winfo_rooty() - self.root.winfo_y())

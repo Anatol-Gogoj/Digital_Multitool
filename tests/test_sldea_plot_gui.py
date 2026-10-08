@@ -1453,7 +1453,11 @@ def test_the_opening_clamp_counts_the_window_frame():
     is monkeypatched to an area narrower and shorter than the window
     asks for, so the clamp branch is the one taken (the case above
     cannot reach it on a desktop wide enough for it), and on Windows the
-    frame that was really drawn is checked against that area."""
+    frame that was really drawn is checked against that area.
+
+    In effect a Windows case: frame_size counts the frame on Windows
+    only. On X11 it is (0, 0), so there the case checks no more than the
+    old client-size clamp (`#390` review)."""
     import sys
     with _Win('1400x900') as w:
         if not w.ok:

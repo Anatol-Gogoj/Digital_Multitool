@@ -226,9 +226,10 @@ def list_runs(parent):
 # folder / Reset folders, and on the lab share a listing is already slow,
 # so a re-listing pays one stat per run and re-reads only a setup.txt
 # that changed. A file that is gone is a run with no line, like a file
-# that never had one. Every grouping change re-reads the column the same
-# way (`#390`): the seed reads setup.txt fresh, and a column read only at
-# listing time could show an electrode the file no longer records.
+# that never had one. A grouping change re-reads the cells of the runs
+# it acts on the same way (`#390`): the seed reads setup.txt fresh, and
+# a cell read only at listing time could show an electrode the file no
+# longer records beside the group the seed just made from it.
 # ---------------------------------------------------------------------------
 
 # The engine's own words for the two non-answers (`#373`), so a run's
@@ -2785,29 +2786,34 @@ class PlotWindow:
             pass
         return w, h, x, y
 
-    def _refresh_group_column(self):
-        """Fill the Group cells from the window's grouping and the
-        Material cells from setup.txt, then re-fit the columns and
-        re-apply the sort.
+    def _refresh_group_column(self, reread=None):
+        """Fill the Group cells from the window's grouping, re-read the
+        Material cells of the runs in `reread` from setup.txt (None:
+        every listed run), then re-fit the columns and re-apply the sort.
 
-        Called by populate() and by _groups_changed(), which every
-        grouping change goes through (Assign, Ungroup selected, Clear
-        all, the Move to group menu, both seed buttons), so the column
-        cannot lag the grouping the figure is drawn from. Remembered
-        groups arrive with the window's first populate().
+        Called by populate(), which re-reads every run, and by
+        _groups_changed(), which every grouping change goes through
+        (Assign, Ungroup selected, Clear all, the Move to group menu,
+        both seed buttons), so the column cannot lag the grouping the
+        figure is drawn from. Remembered groups arrive with the window's
+        first populate().
 
-        MATERIAL IS RE-READ HERE TOO (`#390`). The seed buttons read
-        setup.txt fresh, and a Material cell read only when the list was
-        filled kept the old electrode beside the group a corrected
-        setup.txt had just seeded, so the two cells disagreed about the
-        run. recorded_electrode re-reads only a file whose stamp moved:
-        a grouping change costs one stat per listed run."""
+        MATERIAL IS RE-READ FOR THE RUNS A CHANGE ACTS ON (`#390`). The
+        seed buttons read setup.txt fresh, and a Material cell read only
+        when the list was filled kept the old electrode beside the group
+        a corrected setup.txt had just seeded, so the two cells disagreed
+        about the run. Those runs only: each re-read is a stat on the Tk
+        thread, which on a network share is a round trip, or the whole
+        SMB timeout when the share is offline. recorded_electrode reads
+        a file again only when its stamp moved."""
         where = {sp.group_key(k): n for k, n in self.groups.items()}
+        fresh = None if reread is None else {sp.group_key(d) for d in reread}
         for i, (d, _l) in enumerate(self.runs):
             iid, cells = self._iid(i), self._cells[i]
-            cells['material'] = material_text(recorded_electrode(d))
+            if fresh is None or sp.group_key(d) in fresh:
+                cells['material'] = material_text(recorded_electrode(d))
+                self.run_box.set(iid, 'material', cells['material'])
             cells['group'] = where.get(sp.group_key(d), '')
-            self.run_box.set(iid, 'material', cells['material'])
             self.run_box.set(iid, 'group', cells['group'])
         self._fit_columns()
         self._apply_sort()
@@ -3022,7 +3028,7 @@ class PlotWindow:
         if err:
             messagebox.showwarning("Groups", err)
             return err
-        self._groups_changed()
+        self._groups_changed(self.selected_dirs())
         return None
 
     def ask_group_name(self):
@@ -3048,14 +3054,14 @@ class PlotWindow:
         if err:
             messagebox.showwarning("Groups", err)
             return
-        self._groups_changed()
+        self._groups_changed(self.selected_dirs())
 
     def _ungroup_selected(self):
         err = self.assign_group('', self.selected_dirs())
         if err:
             messagebox.showwarning("Groups", err)
             return
-        self._groups_changed()
+        self._groups_changed(self.selected_dirs())
 
     def _seed_groups(self, by):
         """The two seed buttons (`#373`): 'material', or its child
@@ -3064,7 +3070,7 @@ class PlotWindow:
         if err:
             messagebox.showwarning("Groups", err)
             return
-        self._groups_changed()
+        self._groups_changed(self.selected_dirs())
 
     def _clear_groups(self):
         self.groups = {}
@@ -3072,12 +3078,17 @@ class PlotWindow:
         self.group_materials = {}
         self._groups_changed()
 
-    def _groups_changed(self):
+    def _groups_changed(self, reread=()):
         """The grouping moved: re-read it out, then redraw like any other
         control. _sync_enabled too, because the aggregate's own greying
-        does not change but the group label under the box reports on it."""
+        does not change but the group label under the box reports on it.
+
+        `reread`: the run directories the change acted on, the selection
+        for every control but Clear all, whose Material cells are read
+        from setup.txt again (`#390`). Clear all reads none: it sets no
+        group that a Material cell could disagree with."""
         self.lbl_groups.config(text=self.group_summary())
-        self._refresh_group_column()       # Group and Material (`#390`)
+        self._refresh_group_column(reread)  # Group, and Material (`#390`)
         self.schedule()
 
     # -- options -----------------------------------------------------------

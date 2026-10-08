@@ -824,8 +824,9 @@ def test_material_follows_a_setup_txt_edit_at_the_next_grouping_change():
     run's electrode, as the Material tooltip tells them to, and then
     pressed Group by material saw the new electrode in Group and the old
     one in Material: the disagreement the column's comment rules out.
-    Every grouping change now re-reads Material through the cache, so an
-    unchanged file still costs one stat and no read."""
+    A grouping change now re-reads the Material of the runs it acts on,
+    through the cache: one stat each, a read only for a file that
+    changed, and nothing at all for the runs it does not act on."""
     with _Bare() as b, _Boxes() as boxes:
         if not b.ok:
             return
@@ -857,24 +858,33 @@ def test_material_follows_a_setup_txt_edit_at_the_next_grouping_change():
         assert win.move_to_group('later') is None
         assert _cells_by_name(win)['S3']['material'] == '(not specified)'
         assert _cells_by_name(win)['S3']['group'] == 'later'
-        # THE COST: with nothing changed, one stat per listed run and no
-        # read, both for a grouping change and for a re-listing
+        # THE COST, with nothing changed: a grouping change stats the
+        # setup.txt of each run it acts on and no other (each stat is on
+        # the Tk thread, and on the lab share a round trip), Clear all
+        # stats none, a re-listing stats every run's once, and nothing
+        # is read
         real_os, real_read = g.os, g.se.electrode_of
         spy, reads = _StatSpy(real_os), []
 
         def read(rundir):
             reads.append(rundir)
             return real_read(rundir)
-        want = sorted(os.path.normcase(os.path.abspath(
-            os.path.join(d, 'setup.txt'))) for d, _l in win.runs)
-        assert len(want) == 3, want
+
+        def setup_of(*dirs):
+            return sorted(os.path.normcase(os.path.abspath(
+                os.path.join(d, 'setup.txt'))) for d in dirs)
+        everything = [d for d, _l in win.runs]
+        assert len(everything) == 3, everything
         try:
             g.os, g.se.electrode_of = spy, read
-            win._refresh_group_column()
-            assert sorted(spy.setups) == want, spy.setups
+            _select(win, 'S3')
+            assert win.move_to_group('') is None
+            assert sorted(spy.setups) == setup_of(s3), spy.setups
             del spy.setups[:]
+            win._clear_groups()
+            assert spy.setups == [], spy.setups
             win.populate()
-            assert sorted(spy.setups) == want, spy.setups
+            assert sorted(spy.setups) == setup_of(*everything), spy.setups
         finally:
             g.os, g.se.electrode_of = real_os, real_read
         assert reads == [], reads

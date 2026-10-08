@@ -2452,6 +2452,61 @@ def test_the_window_cuts_its_caption_and_exports_it_whole():
             assert f.read() == r.read(), 'the window cut reached the export'
 
 
+def test_the_toolbar_save_writes_the_whole_caption():
+    """The #391 review: the stock toolbar Save wrote the live figure, so
+    in a window that had cut its caption the file carried "Caption cut
+    in this window" in place of the rows. The window's toolbar now lays
+    the figure out with the whole caption for savefig alone, at the
+    window's size: the file gets the rows an export at that size has,
+    and the window is cut again afterwards, showing what it showed."""
+    import matplotlib
+    import tkinter.filedialog as fd
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        win.v_aggregate.set(True)
+        win.redraw()
+        opts, err = win.current_opts()
+        assert not err and opts['aggregate'], err
+        win.fig.set_size_inches(4.5, 3.0)
+        assert win.relayout()
+        cut = getattr(win.fig, sp._CUT_ATTR)
+        assert cut > 0, 'nothing cut at 4.5 x 3.0 in; fixture too tame'
+        shown = getattr(win.fig, sp._CAPTION_ATTR)[0].get_text()
+        ex = Figure(figsize=(4.5, 3.0), dpi=win.fig.dpi)
+        FigureCanvasAgg(ex)
+        sp.draw(ex, win._prepared, opts)
+        whole = getattr(ex, sp._CAPTION_ATTR)[0].get_text()
+        assert 'Caption cut' not in whole and whole != shown, whole
+        target = os.path.join(b.tmp, 'toolbar.png')
+        seen = []
+        real_dialog = fd.asksaveasfilename
+        real_dir = matplotlib.rcParams['savefig.directory']
+        real_save = win.fig.savefig
+
+        def spy(*a, **kw):
+            seen.append((getattr(win.fig, sp._CAPTION_ATTR)[0].get_text(),
+                         getattr(win.fig, sp._CUT_ATTR)))
+            return real_save(*a, **kw)
+        win.fig.savefig = spy
+        fd.asksaveasfilename = lambda **kw: target
+        try:
+            win.toolbar.save_figure()
+        finally:
+            fd.asksaveasfilename = real_dialog
+            matplotlib.rcParams['savefig.directory'] = real_dir
+            vars(win.fig).pop('savefig', None)
+        assert os.path.isfile(target), 'the toolbar saved nothing'
+        assert seen == [(whole, 0)], seen
+        assert getattr(win.fig, sp._CUT_ATTR) == cut
+        assert getattr(win.fig, sp._CAPTION_ATTR)[0].get_text() == shown
+        assert getattr(win.fig, sp._WINDOW_ATTR, False) is True
+        assert 'savefig' not in vars(win.fig), 'the save left its wrapper'
+
+
 def test_a_typo_in_the_dpi_box_is_refused_not_rendered():
     """The `#314` refusal, in the window. It is REPORTED where the
     filenames are (a bad number does not spoil the preview -- the canvas

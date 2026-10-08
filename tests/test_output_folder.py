@@ -671,8 +671,9 @@ def test_each_tabs_buttons_work_on_its_own_box():
 def test_during_a_live_sldea_run_new_folder_stays_as_browse_does():
     """The real sldea_run, LIVE, up to the worker (a stand-in that only
     records its arguments). Nothing on the tab disables Browse during a run,
-    so nothing disables New folder...; and a folder made mid-run changes
-    only where the NEXT run goes, never the running one's folder."""
+    so nothing disables New folder... either. That the running run keeps
+    its own folder is pinned on the worker's source, in
+    test_the_workers_never_read_the_box_themselves."""
     root, app = _app()
     import gui
     saved = (gui.messagebox, gui.INSTRUMENTS_SUPPORTED)
@@ -685,10 +686,13 @@ def test_during_a_live_sldea_run_new_folder_stays_as_browse_does():
 
     try:
         with _tmpdir() as tmp:
+            # every question a run start with blank device fields asks;
+            # #398 adds the film thickness one (harmless before it lands)
             gui.messagebox = _MB({
                 'No current monitoring': True, 'Energize HV?': True,
                 'No electrode specified': True,
-                'No concentration specified': True})
+                'No concentration specified': True,
+                'No film thickness specified': True})
             gui.INSTRUMENTS_SUPPORTED = True    # the LIVE path on any OS
             app.sg = object()     # "connected"; the stand-in never drives it
             app.scope = None
@@ -714,7 +718,6 @@ def test_during_a_live_sldea_run_new_folder_stays_as_browse_does():
             want = of.new_path(tmp, 'next session')
             assert app.sldea_outdir.get() == want and os.path.isdir(want), \
                 d.calls
-            assert seen['args'][1] == tmp      # the running run's folder
             app._sldea_finished()
             assert not app._sldea_running
             assert _enabled(app.sldea_newdir_btn) == \
@@ -726,8 +729,9 @@ def test_during_a_live_sldea_run_new_folder_stays_as_browse_does():
 
 def test_while_logging_runs_new_folder_stays_as_browse_does():
     """The real start_logging with a stand-in worker, as in
-    tests/test_continuous_log.py: Start hands the worker its folder, so a
-    folder made while logging runs is for the NEXT Start."""
+    tests/test_continuous_log.py. Neither button is locked while logging
+    runs; that the running log keeps its own folder is pinned on the
+    worker's source, in test_the_workers_never_read_the_box_themselves."""
     root, app = _app()
     import gui
     saved = gui.messagebox
@@ -753,13 +757,34 @@ def test_while_logging_runs_new_folder_stays_as_browse_does():
                 app.log_newdir_btn.invoke()
             want = of.new_path(tmp, 'next run')
             assert app.log_dir.get() == want and os.path.isdir(want), d.calls
-            assert runs[0]['dir'] == tmp       # the running log's folder
             app.stop_logging()
             assert _enabled(app.log_newdir_btn) == \
                 _enabled(app.log_browse_btn) is True
     finally:
         gui.messagebox = saved
         root.destroy()
+
+
+def test_the_workers_never_read_the_box_themselves():
+    """Why a change to the box cannot move a running SLDEA run or log:
+    sldea_run hands _sldea_worker the box's folder as an argument, and
+    start_logging hands logging_loop cfg['dir']; neither worker reads the
+    box. Pinned on the source, because a stand-in worker cannot show what
+    the real one reads."""
+    import inspect
+    try:
+        import gui
+    except ImportError as e:              # gui.py needs tkinter
+        raise _Skip(f"no tkinter: {e}")
+    G = gui.InstrumentControlGUI
+    for name, box in (('_sldea_worker', 'self.sldea_outdir'),
+                      ('_logging_worker', 'self.log_dir'),
+                      ('logging_loop', 'self.log_dir')):
+        assert box not in inspect.getsource(getattr(G, name)), \
+            f"{name} reads {box}"
+    # ...and Start is where each one gets the folder from the box
+    assert 'self.sldea_outdir.get()' in inspect.getsource(G.sldea_run)
+    assert 'self.log_dir.get()' in inspect.getsource(G.start_logging)
 
 
 def _run():

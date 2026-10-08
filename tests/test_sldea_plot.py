@@ -4505,6 +4505,12 @@ def _window_fig(runs, opts, size):
     return fig
 
 
+def _ncols(legend):
+    """A legend's column count. matplotlib 3.6 renamed the attribute from
+    _ncol to _ncols, and requirements.txt allows 3.5."""
+    return getattr(legend, '_ncols', None) or getattr(legend, '_ncol')
+
+
 def _layout_state(fig):
     """Everything a relayout must reproduce: caption rows, rect, axes,
     and where the run legend is."""
@@ -4513,7 +4519,7 @@ def _layout_state(fig):
     return (_caption_rows(fig), tuple(getattr(fig, sp._RECT_ATTR)),
             [tuple(ax.get_position().bounds) for ax in fig.axes],
             None if below is None else
-            (below._ncols, tuple(below.get_bbox_to_anchor().bounds)))
+            (_ncols(below), tuple(below.get_bbox_to_anchor().bounds)))
 
 
 def test_the_window_cuts_a_caption_that_would_squeeze_its_panels():
@@ -4667,7 +4673,7 @@ def test_a_legend_that_covers_data_moves_below_the_panels():
         below = held['below']
         assert below is not None and below in fig.legends
         assert not held['legend'].get_visible()
-        assert below._ncols > 1, below._ncols
+        assert _ncols(below) > 1, _ncols(below)
         assert [t.get_text() for t in below.get_texts()] == \
             [t.get_text() for t in held['legend'].get_texts()]
         caption = getattr(fig, sp._CAPTION_ATTR)[0]

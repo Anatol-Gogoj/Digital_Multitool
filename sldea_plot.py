@@ -2135,7 +2135,10 @@ def _legend_below(fig, held, floor, renderer):
     below = None
     try:
         while True:
-            below = fig.legend(handles=held['handles'], ncols=k,
+            # ncol, not ncols: ncols needs matplotlib 3.6, and
+            # requirements.txt allows 3.5, where it raised a TypeError
+            # that left the legend in its panel for good
+            below = fig.legend(handles=held['handles'], ncol=k,
                                loc='lower left',
                                bbox_to_anchor=(0.01, floor + gap),
                                bbox_transform=fig.transFigure,

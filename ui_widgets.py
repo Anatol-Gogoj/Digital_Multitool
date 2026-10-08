@@ -461,12 +461,14 @@ def browse_folder(var, parent=None):
     return chosen
 
 
-def new_folder(var, box, parent=None):
+def new_folder(var, box, parent=None, share=None):
     """New folder...: make a folder inside the one in `var`, and put the new
     folder in `var`. -> its path, or None when nothing was made.
 
     `box` is the box's name as its label shows it, for the messages. A box
-    that is empty or names no folder is explained and nothing is asked. A
+    that is empty or names no folder is explained and nothing is asked, and
+    so is a box under the lab share's mount point while the share is not
+    mounted, when `share` (a path on the share) says where that is. A
     refused name is explained and the prompt comes back holding it, to be
     fixed rather than retyped; Cancel leaves. A folder the system will not
     make (a read-only or missing share) is explained and ends it.
@@ -474,7 +476,8 @@ def new_folder(var, box, parent=None):
     title = "New folder"
     opts = {} if parent is None else {'parent': parent}
     where = var.get().strip()
-    problem = output_folder.parent_problem(where, box)
+    problem = output_folder.parent_problem(
+        where, box, mount=output_folder.share_mount(share))
     if problem:
         messagebox.showerror(title, problem, **opts)
         return None

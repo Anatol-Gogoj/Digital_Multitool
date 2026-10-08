@@ -14,7 +14,8 @@ tested anywhere, Linux without tkinter included:
   * browse_start -- where a Browse dialog opens: the folder in the box, or
     the nearest folder above it that still exists.
   * parent_problem / name_problem -- what New folder... refuses, worded as
-    the message to show.
+    the message to show; share_mount -- the lab share's mount point, which
+    parent_problem checks is really mounted.
   * new_path / make -- where the new folder goes, and making it.
   * failed_text -- the message for a folder the system would not make (a
     read-only or missing share), so that case is never a traceback.
@@ -63,12 +64,44 @@ def browse_start(box):
     return path
 
 
-def parent_problem(where, box):
+def share_mount(share):
+    """The mount point of the network share holding `share`, a Linux path
+    on that share: its first two levels. None when `share` is not an
+    absolute Linux path that deep (a Windows path, for one).
+
+    For the SLDEA tab's built-in Output dir,
+    /mnt/shareDrive/robot_incubator/SLDEA_data, that is /mnt/shareDrive,
+    the folder the lab's Share Drive desktop entry opens
+    (deploy/install_lab_launchers.sh).
+    """
+    share = share or ''
+    parts = [p for p in share.split('/') if p]
+    if not share.startswith('/') or len(parts) < 2:
+        return None
+    return '/' + '/'.join(parts[:2])
+
+
+def _is_under(path, top):
+    """Is `path` the folder `top` or a folder inside it? Compared as text
+    (absolute, case-folded where the OS folds case), so the comparison
+    itself never touches the share."""
+    path = os.path.normcase(os.path.abspath(path))
+    top = os.path.normcase(os.path.abspath(top))
+    return path == top or path.startswith(top.rstrip(os.sep) + os.sep)
+
+
+def parent_problem(where, box, mount=None):
     """Why New folder... cannot make a folder inside `where` (the text in
     the `box` box), as the message to show, or None when it can.
 
     It never picks a parent of its own: a folder made somewhere the
     operator did not choose is worse than being asked to choose one.
+
+    `mount` is the lab share's mount point (share_mount), when the caller
+    knows it. While the share is not mounted there, the mount point is a
+    plain folder on this PC's own disk, and so is anything left under it.
+    A folder made there would stay on this PC instead of going to the
+    share, so that is refused too.
     """
     where = (where or '').strip()
     again = f"then press {NEW_FOLDER_LABEL} again."
@@ -77,6 +110,12 @@ def parent_problem(where, box):
                 f"new one in.\n\nFill the box first (type a folder or use "
                 f"Browse), {again}")
     if os.path.isdir(where):
+        if mount and _is_under(where, mount) and not os.path.ismount(mount):
+            return (f"The share is not mounted at {mount}, so the folder in "
+                    f"the {box} box is on this PC's own disk:\n{where}\n\n"
+                    f"A folder made there would stay on this PC instead of "
+                    f"going to the share. Check that the share is mounted, "
+                    f"{again}")
         return None
     if os.path.exists(where):
         return (f"The {box} box names a file, not a folder:\n{where}\n\n"

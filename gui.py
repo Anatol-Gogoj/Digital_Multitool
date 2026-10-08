@@ -2894,7 +2894,7 @@ LOGGING:
         outf.pack(fill='x', padx=10, pady=8)
         ttk.Label(outf, text="Output dir:").grid(row=0, column=0, sticky='e')
         self.sldea_outdir = tk.StringVar(value=os.environ.get(
-            'SCPI_SLDEA_DIR', '/mnt/shareDrive/robot_incubator/SLDEA_data'))
+            'SCPI_SLDEA_DIR', self.SLDEA_SHARE_DIR))
         ttk.Entry(outf, textvariable=self.sldea_outdir, width=34).grid(
             row=0, column=1, padx=6)
         # Browse opens at the folder in the box; New folder... makes one
@@ -3538,11 +3538,18 @@ LOGGING:
     def _sldea_new_folder(self):
         self._new_folder_into(self.sldea_outdir, "Output dir")
 
+    # The SLDEA tab's built-in Output dir: the lab share as the Linux bench
+    # mounts it (SCPI_SLDEA_DIR overrides the box per PC). New folder... on
+    # every tab reads the share's mount point off it, to refuse a folder on
+    # the bare mount point while the share is not mounted (#394).
+    SLDEA_SHARE_DIR = '/mnt/shareDrive/robot_incubator/SLDEA_data'
+
     def _new_folder_into(self, var, box):
         """New folder... on any tab (#394): make a folder inside the one in
         `var` and put it there; the status bar names the folder made.
         -> its path, or None when nothing was made."""
-        path = new_folder(var, box, parent=self.root)
+        path = new_folder(var, box, parent=self.root,
+                          share=self.SLDEA_SHARE_DIR)
         if path and hasattr(self, 'status_bar'):
             self.status_bar.config(text=f"New folder made: {path}")
         return path

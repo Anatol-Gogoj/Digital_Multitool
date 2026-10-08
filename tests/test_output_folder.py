@@ -283,6 +283,82 @@ def test_an_empty_missing_or_file_box_is_explained_and_no_parent_guessed():
         assert os.listdir(tmp) == ['a_file'], os.listdir(tmp)
 
 
+def test_the_share_mount_point_is_read_off_a_share_path():
+    """Its first two levels: /mnt/shareDrive for the SLDEA tab's built-in
+    Output dir. Nothing that is not an absolute Linux path that deep."""
+    share = '/mnt/shareDrive/robot_incubator/SLDEA_data'
+    assert of.share_mount(share) == '/mnt/shareDrive'
+    assert of.share_mount('/mnt//shareDrive/x/') == '/mnt/shareDrive'
+    assert of.share_mount('/mnt/shareDrive') == '/mnt/shareDrive'
+    for other in ('', None, '/', '/mnt', 'mnt/shareDrive/x', 'C:\\SLDEA',
+                  'C:/SLDEA/runs', 'Z:\\Anatol Gogoj\\runs'):
+        assert of.share_mount(other) is None, other
+
+
+def _fake_ismount(mount, mounted):
+    """os.path.ismount, except that `mount` is or is not one as told: a
+    test cannot mount or unmount anything."""
+    def ismount(path):
+        if os.path.normcase(os.path.abspath(path)) == \
+                os.path.normcase(os.path.abspath(mount)):
+            return mounted
+        return os.path.ismount(path)
+    return ismount
+
+
+def test_a_folder_on_an_unmounted_share_is_refused():
+    """With the share not mounted, its mount point is a plain folder on the
+    PC's own disk, and so is anything left under it: a folder made there
+    would stay on the PC. Mounted, the same folders are fine, and so is a
+    folder that only starts with the mount point's name."""
+    with _tmpdir() as tmp:
+        mount = os.path.join(tmp, 'mnt', 'shareDrive')
+        data = os.path.join(mount, 'robot_incubator', 'SLDEA_data')
+        os.makedirs(data)
+        twin = os.path.join(tmp, 'mnt', 'shareDrive2')
+        local = os.path.join(tmp, 'local')
+        os.mkdir(twin)
+        os.mkdir(local)
+        for mounted in (False, True):
+            fake = _OsProxy(os.path, {'ismount': _fake_ismount(mount,
+                                                               mounted)})
+            with _os_patched(of, path=fake):
+                for where in (mount, data, data + os.sep, f'  {data}  '):
+                    msg = of.parent_problem(where, 'Output dir', mount=mount)
+                    if mounted:
+                        assert msg is None, (where, msg)
+                        continue
+                    assert msg and msg.startswith(
+                        f"The share is not mounted at {mount}, so the folder "
+                        f"in the Output dir box is on this PC's own disk:\n"
+                        f"{where.strip()}\n"), (where, msg)
+                    assert 'would stay on this PC' in msg, msg
+                    assert of.NEW_FOLDER_LABEL in msg, msg
+                for where in (twin, local):
+                    assert of.parent_problem(where, 'Output dir',
+                                             mount=mount) is None, where
+                # no mount point known, no check
+                assert of.parent_problem(data, 'Output dir') is None
+        assert sorted(os.listdir(os.path.join(tmp, 'mnt'))) == [
+            'shareDrive', 'shareDrive2']
+
+
+def test_the_mount_check_with_the_real_ismount_on_linux():
+    """No fake here: a plain folder standing in for the mount point is
+    refused, which is exactly what an unmounted share's mount point is,
+    and a real mount point (/proc) is not."""
+    if os.name != 'posix':
+        raise _Skip("needs a POSIX mount table")
+    if not os.path.ismount('/proc'):
+        raise _Skip("/proc is not a mount point here")
+    with _tmpdir() as tmp:
+        bare = os.path.join(tmp, 'shareDrive')
+        os.mkdir(bare)
+        msg = of.parent_problem(bare, 'Output dir', mount=bare)
+        assert msg and 'share is not mounted' in msg, msg
+    assert of.parent_problem('/proc', 'Output dir', mount='/proc') is None
+
+
 def test_browse_opens_at_the_folder_in_the_box():
     with _tmpdir() as tmp:
         runs = os.path.join(tmp, 'runs')
@@ -542,6 +618,37 @@ def test_an_unwritable_parent_is_a_message_not_a_traceback():
         assert os.listdir(tmp) == []
 
 
+def test_new_folder_on_an_unmounted_share_asks_nothing():
+    """new_folder reads the mount point off `share` and refuses before the
+    prompt, so nothing is asked and nothing is made on the bare mount
+    point. share_mount is pointed at a temp folder: the real one is Linux's
+    /mnt/shareDrive."""
+    ui = _ui()
+    share = '/mnt/shareDrive/robot_incubator/SLDEA_data'
+    with _tmpdir() as tmp:
+        mount = os.path.join(tmp, 'mnt', 'shareDrive')
+        os.makedirs(mount)
+        saved = of.share_mount
+        of.share_mount = lambda s: mount if s == share else None
+        try:
+            fake = _OsProxy(os.path, {'ismount': _fake_ismount(mount, False)})
+            with _fake_dialogs(ui, names=['never asked']) as d, \
+                    _os_patched(of, path=fake):
+                var = _Var(mount)
+                assert ui.new_folder(var, 'Save to', share=share) is None
+                assert d.kinds() == ['showerror'], d.calls
+                assert 'share is not mounted' in d.calls[0][2], d.calls
+                assert var.get() == mount and os.listdir(mount) == []
+                # without the share's path nothing knows the mount point
+                with _fake_dialogs(ui, names=['day 1']) as d2:
+                    assert ui.new_folder(var, 'Save to') == os.path.join(
+                        mount, 'day 1')
+                assert d2.kinds() == ['askstring'], d2.calls
+        finally:
+            of.share_mount = saved
+        assert os.listdir(mount) == ['day 1']
+
+
 def test_browse_opens_at_the_box_and_cancel_changes_nothing():
     ui = _ui()
     with _tmpdir() as tmp:
@@ -685,6 +792,28 @@ def test_each_tabs_buttons_work_on_its_own_box():
             assert sorted(os.listdir(tmp)) == ['cam day', 'log day',
                                                'sldea day']
     finally:
+        root.destroy()
+
+
+def test_every_tab_checks_the_share_mount_point():
+    """Each tab's New folder... hands new_folder the SLDEA tab's built-in
+    share path, the one place the app knows where the share lives, so the
+    bare-mount-point check covers the Webcam and Logging boxes too."""
+    root, app = _app()
+    import gui
+    saved = gui.new_folder
+    seen = []
+    gui.new_folder = lambda var, box, parent=None, share=None: \
+        seen.append((box, share))
+    try:
+        for prefix, _var_name, _box in TABS:
+            getattr(app, f'{prefix}_newdir_btn').invoke()
+        share = gui.InstrumentControlGUI.SLDEA_SHARE_DIR
+        assert share == '/mnt/shareDrive/robot_incubator/SLDEA_data'
+        assert seen == [(box, share) for _p, _v, box in TABS], seen
+        assert of.share_mount(share) == '/mnt/shareDrive'
+    finally:
+        gui.new_folder = saved
         root.destroy()
 
 

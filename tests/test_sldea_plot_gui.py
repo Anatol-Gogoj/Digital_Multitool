@@ -1712,16 +1712,25 @@ def test_a_drag_selects_the_rows_it_passes_and_clicks_keep_their_jobs():
         w.settle(0.2)
         before = sel()
         # a separator drag still resizes its column, even wandering over
-        # the rows, and selects nothing
-        x = tree.column('run', 'width')
+        # the rows, and selects nothing. Material's separator, not Run's:
+        # Run is the one column that stretches, and Tk's layout hands it
+        # whatever room the others leave, so a drag of Run's own separator
+        # is taken back at the next layout. Tk 8.6.15 lays out inside the
+        # identify that its release handler makes, so there the drag is
+        # gone before the release returns; 8.6.14 kept it until a later
+        # layout, which is why the old check of Run passed there. The
+        # width is read once the loop has run: the one the operator keeps.
+        mat_w = tree.column('material', 'width')
+        x = tree.column('run', 'width') + mat_w
         assert tree.identify_region(x, 5) == 'separator', \
             tree.identify_region(x, 5)
         ev('<ButtonPress-1>', x=x, y=5)
         ev('<B1-Motion>', x=x + 30, y=5)
         ev('<B1-Motion>', x=x + 30, y=at(rows[3])['y'])
         ev('<ButtonRelease-1>', x=x + 30, y=at(rows[3])['y'])
-        assert tree.column('run', 'width') > x, (tree.column('run', 'width'),
-                                                 x)
+        w.settle(0.2)
+        assert tree.column('material', 'width') > mat_w, \
+            (tree.column('material', 'width'), mat_w)
         assert sel() == before, sel()
         # ...and a drag that starts on a heading selects nothing either
         hx = tree.column('run', 'width') + \

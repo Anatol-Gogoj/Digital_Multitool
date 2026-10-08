@@ -1,26 +1,34 @@
 #!/usr/bin/env python3
-"""A ticked LIVE run waits at 0 V for a scope Reconnect still in flight at
-its watchdog's arming line, then arms as usual (#423).
+"""A ticked LIVE run waits at 0 V for a scope Reconnect in flight while it
+arms its breakdown watchdog, then arms as usual (#423).
 
 A LIVE Reconnect confirmed in a run's first seconds (#339) used to leave
 the run with no watchdog: the worker builds it once, at the arming line
 after the SG output goes on at 0 V, and only if the scope is there. Since
-#406's HV review such a run says NOT ARMED. Owner decision 2026-10-08:
-while the scope's Reconnect is still in flight there, the run waits at
-0 V, bounded, with Abort checked throughout; a scope back in time gets the
-normal on-time baseline and arms exactly as an on-time arming does; any
-other end stays NOT ARMED as #406 records it, with the wait recorded too.
-The wait comes before the run clock starts, so the profile, stills, video
-and telemetry keep their timing. (The first attempt armed late from
-inside the run loop instead; its HV review dropped it.)
+#406's HV review such a run says NOT ARMED. Owner decisions 2026-10-08:
+
+* while the scope's own Reconnect is in flight at the arming line, the run
+  waits at 0 V, bounded, with Abort checked throughout; a scope back in
+  time gets the normal on-time baseline and arms as an on-time arming
+  does; any other end stays NOT ARMED as #406 records it, with the wait
+  recorded too;
+* a Reconnect that lands during the 0 kV baseline (the likelier case: the
+  baseline takes about 2.8 s) is waited for too, and the baseline taken
+  again, with ONE bound for all the waits together;
+* a baseline still short of reads (fewer than 4 of 8), on time or after a
+  wait, arms on the absolute rule |I| >= trip, and setup.txt says so;
+* Abort or the window closing ends the baseline at once.
+
+All of it happens before the run clock starts, so the profile, stills,
+video and telemetry keep their timing.
 
 Every run below is the real sldea_run and the real worker on the
 scope-lock suite's fakes (tests/test_scope_live_lock.py), with two things
 real that the other suites stub: _run_bg, so a connect runs on its own
 thread and its done callback lands on the "Tk" thread (this test's pump),
-and _reconnect, pressed during the worker's camera setup, before its
-arming line, with Yes to its "Scope in use" question. Each scope read
-takes 0.13 s, the bench's: per-run medians of 104 to 141 ms in nine
+and _reconnect, pressed during the worker's camera setup or during its
+baseline, with Yes to its "Scope in use" question. Each scope read takes
+0.13 s, the bench's: per-run medians of 104 to 141 ms in nine
 telemetry.csv files (HV review of the first attempt, 2026-10-08). The
 scope reads 7 uA at 0 kV, not 0, so a learned baseline shows: a ramp
 current of -95 uA trips a 100 uA watchdog only against that baseline
@@ -51,12 +59,36 @@ TRIP_V = 0.6              # 120 uA, over the 100 uA trip either way
 BASE_ONLY_V = -0.475      # -95 uA: trips only against the 7 uA baseline
 WAIT_LINE = ("breakdown watchdog: the scope Reconnect is still running, so "
              "the run waits for it here at 0 V, up to ")
+REWAIT_RE = re.compile(r"breakdown watchdog: only (\d) of the 8 baseline "
+                       r"reads at 0 kV answered, and a scope Reconnect is "
+                       r"running, so the run waits for it here at 0 V, up "
+                       r"to (\d+\.\d) s more \(one (\S+) s bound for every "
+                       r"wait\), then takes the baseline again\.")
+BACK_RE = re.compile(r"breakdown watchdog: the scope is back after a "
+                     r"(\d+\.\d) s wait at 0 V; taking the 0 kV baseline "
+                     r"now, as at any arming$")
 NOT_ARMED = "⚠⚠ BREAKDOWN WATCHDOG NOT ARMED — "
-ARMED_RE = re.compile(r"breakdown watchdog ARMED after a (\d+\.\d) s wait "
-                      r"at 0 V for the scope Reconnect, as at any arming")
+ARMED_RE = re.compile(r"breakdown watchdog ARMED after (\d+\.\d) s of "
+                      r"waiting at 0 V for the scope Reconnect"
+                      r"( \((\d) waits\))?, as at any arming \(the line "
+                      r"above says what its 0 kV baseline came to\)$")
 BASELINE_7 = ("watchdog baseline 7.0 µA (median of 8 reads at 0 kV); trip "
               "|I−baseline| ≥ 100 µA for 1s")
+STOPPED = "the run was stopped (Abort or the window closed)"
 ANSWERS = {'Energize HV?': True, L.LOCK: True}
+ON_AT_0V = [('set_load_polarity', 1, 'HZ'),
+            ('set_basic_wave', 1, {'WVTP': 'DC', 'OFST': 0.0}),
+            ('set_output', 1, True)]
+
+
+def _unavailable(n):
+    return (f"watchdog baseline unavailable ({n}/8 reads ok) — absolute "
+            f"trip |I| ≥ 100 µA for 1s")
+
+
+def _absolute_row(n):
+    return (f"Breakdown watchdog (start): armed on the absolute rule |I| >= "
+            f"100 uA; only {n} of 8 0 kV reads answered")
 
 
 class _TimedSG(L._FakeSG):
@@ -123,19 +155,38 @@ class _App(L._App):
         assert len(hits) == 1, (head, self.lines)
         return hits[0]
 
+    def index(self, pred):
+        """Where the one run.log line matching `pred` is."""
+        hits = [i for i, ln in enumerate(self.lines) if pred(ln)]
+        assert len(hits) == 1, self.lines
+        return hits[0]
 
-def _scope(app, ramp_v, reads):
+
+def _scope(app, ramp_v, reads, read_s=READ_S):
     """A fake scope at 7 uA on I_Out at 0 kV and `ramp_v` once the ramp has
-    started, each read taking READ_S. Every read is noted in `reads` as
+    started, each read taking `read_s`. Every read is noted in `reads` as
     (scope, caller, channel, SG writes so far, time)."""
     s = L._FakeScope(volts=lambda ch: (
         (ramp_v if L._ramping(app) else REST_V) if ch == 3 else 0.0))
 
     def on_read(ch, caller):
         reads.append((s, caller, ch, list(app.sg.writes), time.monotonic()))
-        time.sleep(READ_S)
+        time.sleep(read_s)
     s.on_read = on_read
     return s
+
+
+def _on_nth_read(scope, reads, n, action):
+    """Run `action()` as the worker starts its n-th read of `scope` (1 = the
+    first), before that read is answered."""
+    inner = scope.on_read
+
+    def on_read(ch, caller):
+        if caller == '_sldea_worker' and len(_worker_reads(reads, scope)) \
+                == n - 1:
+            action()
+        inner(ch, caller)
+    scope.on_read = on_read
 
 
 class _Connect:
@@ -174,17 +225,22 @@ def _press(app, connect):
     assert pressed.wait(10), "the Reconnect was never pressed"
 
 
-def _at_camera(app, connect, settle=None):
-    """Press Reconnect where the worker resolves the camera, before its
-    arming line. `settle(app)` is waited for before the worker goes on."""
+def _at_camera(app, action):
+    """Run `action()` where the worker resolves the camera, before its
+    arming line."""
     def resolve(idx):
-        _press(app, connect)
-        t_end = time.monotonic() + 10
-        while settle is not None and not settle(app):
-            assert time.monotonic() < t_end, "the Reconnect never settled"
-            time.sleep(0.01)
+        action()
         return {'kind': 'cv2', 'index': int(idx)}
     gui.webcam.resolve_camera = resolve           # _patched restores
+
+
+def _back_when_running(app, scope):
+    """The scope is back (no Reconnect: the handle simply returns) at the
+    run loop's first status update, so from the run clock's start on."""
+    def status(text, fg=None):
+        if app.scope is None and not text.startswith('LIVE  waiting'):
+            app.scope = scope
+    app._sldea_set_status = status
 
 
 def _pump(app, each=None, timeout=90):
@@ -201,10 +257,11 @@ def _pump(app, each=None, timeout=90):
     assert app.worker_error is None, repr(app.worker_error)
 
 
-def _settle_connect(app, connect):
-    """Let a connect still held end (as a failure when it gives None) and
-    its done callback run, so no thread outlives the test."""
-    connect.release()
+def _settle(app, *connects):
+    """Let connects still held end (as a failure when they give None) and
+    their done callbacks run, so no thread outlives the test."""
+    for c in connects:
+        c.release()
     t_end = time.monotonic() + 10
     while 'connect' in app._bg_busy:
         assert time.monotonic() < t_end
@@ -217,6 +274,12 @@ def _setup_rows(tmp):
     with open(os.path.join(tmp, 'RUN', 'setup.txt'), 'rb') as f:
         raw = f.read()
     return raw.decode('ascii').splitlines()   # ASCII, every line of it
+
+
+def _watchdog_rows(tmp):
+    """setup.txt's rows after its start block, about the watchdog."""
+    return [r for r in _setup_rows(tmp)
+            if r.startswith('Breakdown watchdog (')]
 
 
 def _shadow_made():
@@ -235,7 +298,40 @@ def _shadow_made():
     return made, restore
 
 
-def _waited_run(tmp, ramp_v, delay_s=1.0):
+def _shadow_bases(made):
+    """The baselines the run's #219 shadow rules were built with (the
+    start line's rule text builds one with none, which is left out)."""
+    return [(None if kw['base_loc'] is None else round(kw['base_loc'], 9),
+             kw['base_sigma']) for _a, kw in made if 'base_loc' in kw]
+
+
+def _worker_reads(reads, scope):
+    """The worker's reads of `scope` (baseline and monitor ticks)."""
+    return [r for r in reads if r[0] is scope and r[1] == '_sldea_worker']
+
+
+def _baseline_reads(reads, scope):
+    """The worker's first ten reads of `scope`: its 0 kV baseline, when it
+    took one (the run loop's monitor reads come after them)."""
+    return _worker_reads(reads, scope)[:10]
+
+
+def _assert_at_0v_until_baseline(app, reads, scope):
+    """No offset written until `scope` had given its ten baseline reads,
+    and the SG on at 0 V, nothing else, throughout."""
+    base = _baseline_reads(reads, scope)
+    assert len(base) == 10 and all(r[2] == 3 for r in base), base
+    for r in base:
+        assert r[3] == ON_AT_0V, r[3]
+
+
+def _ends_at_0v(app):
+    assert app.sg.writes[-2:] == [('set_offset', 1, 0.0),
+                                  ('set_output', 1, False)], \
+        app.sg.writes[-4:]
+
+
+def _run_waited(tmp, ramp_v, delay_s=1.0):
     """A ticked LIVE run whose scope Reconnect is pressed at the camera
     step and comes back `delay_s` later with a new scope; -> (app, new,
     old, reads, shadow constructions)."""
@@ -247,121 +343,109 @@ def _waited_run(tmp, ramp_v, delay_s=1.0):
             old = app.scope
             new = _scope(app, ramp_v, reads)
             connect = _Connect(new, delay_s)
-            _at_camera(app, connect)
+            _at_camera(app, lambda: _press(app, connect))
             app.sldea_run()
             _pump(app)
-            _settle_connect(app, connect)
+            _settle(app, connect)
     finally:
         restore()
     return app, new, old, reads, made
-
-
-def _baseline_reads(reads, scope):
-    """The worker's first ten reads of `scope`: its 0 kV baseline, when
-    it took one (the run loop's monitor reads come after them)."""
-    return [r for r in reads if r[0] is scope
-            and r[1] == '_sldea_worker'][:10]
-
-
-def _shadow_bases(made):
-    """The baselines the run's #219 shadow rules were built with (the
-    start line's rule text builds one with none, which is left out)."""
-    return [(round(kw['base_loc'], 9), kw['base_sigma'])
-            for _a, kw in made if 'base_loc' in kw]
 
 
 def _assert_waited_and_armed(app, new, reads, made, tmp):
     """The wait happened at 0 V, then the normal baseline on the new
     scope, and the run armed as an on-time arming does."""
     t_wait = app.when(WAIT_LINE)
-    [armed] = [ln for ln in app.lines if ARMED_RE.match(ln)]
-    waited = float(ARMED_RE.match(armed).group(1))
-    assert 0.3 <= waited <= 2.5, armed
-    # the normal baseline: ten reads of the NEW scope at 0 V, after the
-    # wait, the first two discarded, a 7 uA median from the other eight
-    base = _baseline_reads(reads, new)
-    assert len(base) == 10 and all(r[2] == 3 for r in base), base
-    assert base[0][4] > t_wait
-    on_at_0v = [('set_load_polarity', 1, 'HZ'),
-                ('set_basic_wave', 1, {'WVTP': 'DC', 'OFST': 0.0}),
-                ('set_output', 1, True)]
-    for r in base:            # the SG on at 0 V, nothing else, throughout
-        assert r[3] == on_at_0v, r[3]
-    assert BASELINE_7 in app.lines, app.lines
-    i_wait = app.lines.index(next(ln for ln in app.lines
-                                  if ln.startswith(WAIT_LINE)))
-    assert i_wait < app.lines.index(BASELINE_7) < app.lines.index(armed)
+    i_back = app.index(BACK_RE.match)
+    waited = float(BACK_RE.match(app.lines[i_back]).group(1))
+    assert 0.3 <= waited <= 2.5, app.lines[i_back]
+    _assert_at_0v_until_baseline(app, reads, new)
+    assert _baseline_reads(reads, new)[0][4] > t_wait
+    i_armed = app.index(ARMED_RE.match)
+    m = ARMED_RE.match(app.lines[i_armed])
+    assert float(m.group(1)) == waited and m.group(2) is None, m.group(0)
+    assert i_back < app.lines.index(BASELINE_7) < i_armed
     assert not any(NOT_ARMED in ln or 'baseline unavailable' in ln
                    for ln in app.lines), app.lines
     # the #219 shadow starts as at an on-time arming: the same baseline
     assert _shadow_bases(made) == [(7.0, 0.0)], made
-    rows = _setup_rows(tmp)
-    assert (f"Breakdown watchdog (scope wait): {waited:.1f} s at 0 V for a "
-            f"scope Reconnect; the scope came back and the watchdog armed"
-            in rows), rows
-    assert not any('NOT armed' in r for r in rows), rows
+    assert _watchdog_rows(tmp) == [
+        f"Breakdown watchdog (scope wait): {waited:.1f} s at 0 V for a "
+        f"scope Reconnect at the arming line; the scope came back"], \
+        _watchdog_rows(tmp)
     return waited
 
 
 # --------------------------------------------------------------------------
-# The words
+# The words, and the order of the Reconnect's writes
 # --------------------------------------------------------------------------
 
 def test_the_wait_records_are_worded_for_every_outcome():
-    rec = sp.scope_wait_record
-    log, rows = rec('armed', 3.24, 25.0)
-    assert log == ("breakdown watchdog ARMED after a 3.2 s wait at 0 V for "
-                   "the scope Reconnect, as at any arming (the line above "
-                   "says what its 0 kV baseline came to)"), log
-    assert rows == ["Breakdown watchdog (scope wait): 3.2 s at 0 V for a "
-                    "scope Reconnect; the scope came back and the watchdog "
-                    "armed"], rows
+    assert sp.scope_wait_start_line(25.0, 25.0) == (
+        "breakdown watchdog: the scope Reconnect is still running, so the "
+        "run waits for it here at 0 V, up to 25 s, before it arms. ■ Abort "
+        "ends the run.")
+    assert REWAIT_RE.match(sp.scope_wait_start_line(25.0, 21.04, 2))
+    assert sp.scope_wait_start_line(25.0, 21.04, 2).endswith(
+        "up to 21.0 s more (one 25 s bound for every wait), then takes the "
+        "baseline again. ■ Abort ends the run.")
+    head = "Breakdown watchdog (scope wait): 3.2 s at 0 V for a scope " \
+           "Reconnect "
+    ends = {'back': "the scope came back",
+            'failed': "the Reconnect failed",
+            'timeout': "still running at the 25 s limit",
+            'aborted': STOPPED}
+    for outcome, end in ends.items():
+        log, rows = sp.scope_wait_lines(outcome, 3.24, 25.0)
+        assert rows == [head + "at the arming line; " + end], rows
+        assert (log is not None) == (outcome == 'back'), (outcome, log)
+        log, rows = sp.scope_wait_lines(outcome, 3.24, 25.0, 2)
+        assert rows == [head + "after only 2 of 8 0 kV baseline reads "
+                        "answered; " + end], rows
+        if outcome == 'back':
+            assert BACK_RE.match(log), log
+        elif outcome == 'aborted':
+            assert log == ("breakdown watchdog: waited 3.2 s at 0 V for the "
+                           "scope Reconnect: the run was stopped (■ Abort or "
+                           "the window closed). It ends here, at 0 V."), log
+        else:
+            assert log == (f"breakdown watchdog: waited 3.2 s at 0 V for the "
+                           f"scope Reconnect: {end}. The baseline stays "
+                           f"short, so the absolute rule follows."), log
     tail = (" Nothing stops this run on a breakdown; only ■ Abort or the end "
             "of the run does. Energize HV? and the start line said ON.")
-    cases = {
-        'timeout': ("the scope was gone when the run reached the arming "
-                    "line, and its Reconnect was still running after a "
-                    "25.0 s wait at 0 V, the limit." + tail,
-                    ["Breakdown watchdog (start): NOT armed (no scope)",
-                     "Breakdown watchdog (scope wait): 25.0 s at 0 V for a "
-                     "scope Reconnect, still running at the 25 s limit, so "
-                     "NOT armed"]),
-        'failed': ("the scope was gone when the run reached the arming "
-                   "line, and its Reconnect failed after a 25.0 s wait at "
-                   "0 V." + tail,
-                   ["Breakdown watchdog (start): NOT armed (no scope)",
-                    "Breakdown watchdog (scope wait): 25.0 s at 0 V for a "
-                    "scope Reconnect, which failed, so NOT armed"]),
-        'aborted': ("■ Abort was pressed after a 25.0 s wait at 0 V for the "
-                    "scope Reconnect. The run ends here, at 0 V. Energize "
-                    "HV? and the start line said ON.",
-                    ["Breakdown watchdog (start): NOT armed (stopped while "
-                     "waiting for the scope)",
-                     "Breakdown watchdog (scope wait): 25.0 s at 0 V for a "
-                     "scope Reconnect, ended by Abort, so NOT armed"]),
-        'unread': ("the scope came back after a 25.0 s wait at 0 V for its "
-                   "Reconnect, but only 2 of the 8 baseline reads at 0 kV "
-                   "answered (a baseline needs 4), so there is no baseline "
-                   "to arm from." + tail,
-                   ["Breakdown watchdog (start): NOT armed (scope back, but "
-                    "no 0 kV baseline)",
-                    "Breakdown watchdog (scope wait): 25.0 s at 0 V for a "
-                    "scope Reconnect; the scope came back, but only 2 of 8 "
-                    "0 kV reads answered, so NOT armed"]),
-    }
-    for outcome, (words, want_rows) in cases.items():
-        log, rows = rec(outcome, 25.0, 25.0, good=2)
-        assert log == NOT_ARMED + words, (outcome, log)
-        assert rows == want_rows, (outcome, rows)
-    for outcome in ('armed',) + tuple(cases):
-        for r in rec(outcome, 1.0, 25.0, good=1)[1]:
-            r.encode('ascii')              # setup.txt's locale encoding
-            assert r.startswith('Breakdown watchdog ('), r
-    try:
-        rec('back', 1.0, 25.0)
-    except ValueError:
-        pass
-    else:
+    assert sp.scope_wait_not_armed('timeout', 25.0) == (
+        NOT_ARMED + "the scope was gone when the run reached the arming "
+        "line, and its Reconnect was still running after a 25.0 s wait at "
+        "0 V, the limit." + tail,
+        ["Breakdown watchdog (start): NOT armed (no scope)"])
+    assert sp.scope_wait_not_armed('failed', 1.04) == (
+        NOT_ARMED + "the scope was gone when the run reached the arming "
+        "line, and its Reconnect failed after a 1.0 s wait at 0 V." + tail,
+        ["Breakdown watchdog (start): NOT armed (no scope)"])
+    assert sp.scope_wait_not_armed('aborted', 0.36) == (
+        NOT_ARMED + "the run was stopped (■ Abort or the window closed) "
+        "after a 0.4 s wait at 0 V for the scope Reconnect. It ends here, "
+        "at 0 V. Energize HV? and the start line said ON.",
+        ["Breakdown watchdog (start): NOT armed (stopped while waiting for "
+         "the scope)"])
+    assert ARMED_RE.match(sp.scope_wait_armed_line(3.24, 1))
+    assert ARMED_RE.match(sp.scope_wait_armed_line(3.24, 2)).group(3) == '2'
+    assert sp.absolute_fallback_line(100.0, 2) == _absolute_row(2)
+    for outcome in ends:
+        for good in (None, 3):
+            for r in sp.scope_wait_lines(outcome, 1.0, 25.0, good)[1]:
+                r.encode('ascii')          # setup.txt's locale encoding
+    for outcome in ('timeout', 'failed', 'aborted'):
+        for r in sp.scope_wait_not_armed(outcome, 1.0)[1]:
+            r.encode('ascii')
+    sp.absolute_fallback_line(75.0, 0).encode('ascii')
+    for bad in (lambda: sp.scope_wait_lines('unread', 1.0, 25.0),
+                lambda: sp.scope_wait_not_armed('back', 1.0)):
+        try:
+            bad()
+        except ValueError:
+            continue
         raise AssertionError("an unknown outcome was worded")
 
 
@@ -369,8 +453,54 @@ def test_the_bound_is_twenty_five_seconds():
     assert G.SLDEA_SCOPE_WAIT_S == 25.0
 
 
+class _SetOrder(L._App):
+    """The scope-lock stub (its _run_bg runs the connect inline), noting
+    every write of the scope handle and of the in-flight mark, in order."""
+
+    def __setattr__(self, name, value):
+        log = self.__dict__.get('set_log')
+        if log is not None and name in ('scope', '_scope_reconnecting'):
+            log.append((name, value))
+        object.__setattr__(self, name, value)
+
+
+def test_the_mark_goes_up_before_the_handle_and_down_after_it():
+    """The read-order argument rests on two write orders on the Tk thread:
+    the mark is set before the handle is dropped, and the new handle is in
+    place before the mark is cleared. A failed connect clears the mark
+    before its error box, which can stay open for as long as the operator
+    leaves it. Another instrument's Reconnect never touches the mark."""
+    new = L._FakeScope()
+    mb = L._MB({})
+    with L._patched(mb):
+        app = _SetOrder()
+        old = app.scope
+        app.set_log = []
+        mb.showerror = lambda *a, **k: app.set_log.append(('showerror',))
+        app._reconnect('scope', lambda: new, app.scope_status)
+        assert app.set_log == [('_scope_reconnecting', True),
+                               ('scope', None), ('scope', new),
+                               ('_scope_reconnecting', False)], app.set_log
+        assert old.closed and app.scope is new
+
+        app.set_log = []
+
+        def fails():
+            raise IOError("no device found")
+        app._reconnect('scope', fails, app.scope_status)
+        assert app.set_log == [('_scope_reconnecting', True),
+                               ('scope', None),
+                               ('_scope_reconnecting', False),
+                               ('showerror',)], app.set_log
+        assert app.scope is None
+
+        app.set_log = []
+        app._reconnect('lcr', lambda: L._FakeScope(), app.scope_status)
+        assert app.set_log == [], app.set_log
+
+
 # --------------------------------------------------------------------------
-# What a run does
+# A Reconnect in flight at the arming line
 # --------------------------------------------------------------------------
 
 def test_a_reconnect_in_flight_is_waited_for_at_0_v_then_armed():
@@ -378,7 +508,7 @@ def test_a_reconnect_in_flight_is_waited_for_at_0_v_then_armed():
     the normal baseline on the new scope, arms, and trips at 120 uA over
     the 100 uA trip. The old session is closed by the Reconnect."""
     with tempfile.TemporaryDirectory() as tmp:
-        app, new, old, reads, made = _waited_run(tmp, TRIP_V)
+        app, new, old, reads, made = _run_waited(tmp, TRIP_V)
         assert old.closed
         assert any(ln.startswith("⚠ scope Reconnect during the LIVE run "
                                  "(confirmed)") for ln in app.lines)
@@ -388,9 +518,7 @@ def test_a_reconnect_in_flight_is_waited_for_at_0_v_then_armed():
                    app.lines), app.lines
         assert any(ln.startswith('⚡ BREAKDOWN CONFIRMED — I=120 µA')
                    for ln in app.lines), app.lines
-        assert app.sg.writes[-2:] == [('set_offset', 1, 0.0),
-                                      ('set_output', 1, False)], \
-            app.sg.writes[-4:]
+        _ends_at_0v(app)
 
 
 def test_the_waited_arming_trips_on_the_learned_baseline():
@@ -398,27 +526,57 @@ def test_the_waited_arming_trips_on_the_learned_baseline():
     the waited arming learned, and 95 uA in absolute terms: only a
     watchdog that holds the learned baseline trips on it."""
     with tempfile.TemporaryDirectory() as tmp:
-        app, new, _old, reads, made = _waited_run(tmp, BASE_ONLY_V)
+        app, new, _old, reads, made = _run_waited(tmp, BASE_ONLY_V)
         _assert_waited_and_armed(app, new, reads, made, tmp)
         assert app._sldea_bd_tripped, app.lines
         assert any(ln.startswith('⚡ BREAKDOWN CONFIRMED — I=-95 µA')
                    for ln in app.lines), app.lines
 
 
+def test_a_reconnect_that_fails_during_the_wait_ends_it_at_once():
+    """The connect fails 0.5 s after the press: the wait ends then, not at
+    the bound, the run says NOT ARMED with that cause, and goes on to its
+    end as before."""
+    with tempfile.TemporaryDirectory() as tmp:
+        with L._patched(L._MB(ANSWERS)) as mb:
+            app = _App(tmp)
+            connect = _Connect(None, 0.5)
+            _at_camera(app, lambda: _press(app, connect))
+            app.sldea_run()
+            _pump(app)
+        assert ('showerror', 'Connection Error') in [c[:2] for c in
+                                                     mb.calls], mb.calls
+        t_wait = app.when(WAIT_LINE)
+        [warn] = [ln for ln in app.lines if NOT_ARMED in ln]
+        m = re.search(r"the scope was gone when the run reached the arming "
+                      r"line, and its Reconnect failed after a (\d+\.\d) s "
+                      r"wait at 0 V\.", warn)
+        assert m and float(m.group(1)) < 1.0, warn
+        assert app.when(NOT_ARMED) - t_wait < 1.0
+        assert app.sg.first('set_offset') > app.when(NOT_ARMED)
+        assert any(ln.startswith('run complete') for ln in app.lines), \
+            app.lines
+        assert _watchdog_rows(tmp) == [
+            f"Breakdown watchdog (scope wait): {m.group(1)} s at 0 V for a "
+            f"scope Reconnect at the arming line; the Reconnect failed",
+            "Breakdown watchdog (start): NOT armed (no scope)"], \
+            _watchdog_rows(tmp)
+        assert not any(ARMED_RE.match(ln) for ln in app.lines)
+
+
 def test_a_reconnect_that_never_finishes_ends_the_wait_not_armed():
     """The connect still running at the bound (1.5 s here): the run stops
-    waiting, stays NOT ARMED and says so, then goes on as before, through
-    a current that a watchdog would have tripped on."""
+    waiting, stays NOT ARMED and says so, then goes on as before."""
     with tempfile.TemporaryDirectory() as tmp:
         reads = []
         with L._patched(L._MB(ANSWERS)):
             app = _App(tmp, wait_s=1.5)
             connect = _Connect(_scope(app, TRIP_V, reads), 60.0)
-            _at_camera(app, connect)
+            _at_camera(app, lambda: _press(app, connect))
             app.sldea_run()
             _pump(app)
             assert app.scope is None and app._scope_reconnecting
-            _settle_connect(app, connect)
+            _settle(app, connect)
             assert app.scope is not None and not app._scope_reconnecting
         t_wait = app.when(WAIT_LINE)
         assert WAIT_LINE + "1.5 s, before it arms. ■ Abort ends the run." \
@@ -439,26 +597,58 @@ def test_a_reconnect_that_never_finishes_ends_the_wait_not_armed():
             app.lines
         assert not app._sldea_bd_tripped
         assert ('set_offset', 1, 1.0) in app.sg.writes
-        assert app.sg.writes[-2:] == [('set_offset', 1, 0.0),
-                                      ('set_output', 1, False)]
-        rows = _setup_rows(tmp)
-        i = rows.index("Breakdown watchdog (start): NOT armed (no scope)")
-        assert rows[i + 1] == (
+        _ends_at_0v(app)
+        assert _watchdog_rows(tmp) == [
             f"Breakdown watchdog (scope wait): {m.group(1)} s at 0 V for a "
-            f"scope Reconnect, still running at the 1.5 s limit, so NOT "
-            f"armed"), rows[i:i + 2]
-        assert not any('ARMED after' in ln for ln in app.lines)
+            f"scope Reconnect at the arming line; still running at the "
+            f"1.5 s limit",
+            "Breakdown watchdog (start): NOT armed (no scope)"], \
+            _watchdog_rows(tmp)
+        assert not any(ARMED_RE.match(ln) for ln in app.lines)
+
+
+def test_a_scope_back_at_the_bound_still_counts_as_back():
+    """The Reconnect's done callback lands while the worker is between two
+    polls, and the bound passes in that gap: the scope is back, and that
+    is checked before the bound. Deterministic: the done callback's two
+    writes (handle, then mark) are made from inside the wait's own status
+    update, after the bound."""
+    with tempfile.TemporaryDirectory() as tmp:
+        reads = []
+        with L._patched(L._MB(ANSWERS)):
+            app = _App(tmp, wait_s=0.5)
+            new = _scope(app, BASE_ONLY_V, reads)
+
+            def drop():                     # what _reconnect does, in order
+                app._scope_reconnecting = True
+                app.scope = None
+            _at_camera(app, drop)
+
+            def status(text, fg=None):
+                if text.startswith('LIVE  waiting') and app.scope is None:
+                    time.sleep(0.6)
+                    app.scope = new
+                    app._scope_reconnecting = False
+            app._sldea_set_status = status
+            app.sldea_run()
+            _pump(app)
+        i_back = app.index(BACK_RE.match)
+        assert float(BACK_RE.match(app.lines[i_back]).group(1)) >= 0.5
+        assert BASELINE_7 in app.lines and not any(
+            NOT_ARMED in ln for ln in app.lines), app.lines
+        assert app._sldea_bd_tripped, app.lines
 
 
 def test_abort_during_the_wait_ends_the_run_at_0_v_promptly():
     """Abort 0.3 s into a wait whose connect never comes back, with the
     full 25 s bound: the run ends within a poll or two, at 0 V, its SG
-    never commanded above 0 V, and its records say why it never armed."""
+    never commanded above 0 V, and its records say it was stopped, without
+    claiming which of Abort or the window close did it."""
     with tempfile.TemporaryDirectory() as tmp:
         with L._patched(L._MB(ANSWERS)):
             app = _App(tmp)
             connect = _Connect(None, 60.0)
-            _at_camera(app, connect)
+            _at_camera(app, lambda: _press(app, connect))
             app.sldea_run()
             pressed = []
 
@@ -471,81 +661,23 @@ def test_abort_during_the_wait_ends_the_run_at_0_v_promptly():
                     app.sldea_abort()          # ■ Abort, on the Tk thread
             _pump(app, each=abort_once_waiting)
             done_t = time.monotonic()
-            _settle_connect(app, connect)
+            _settle(app, connect)
         assert pressed, app.lines
         assert done_t - pressed[0] < 1.0, done_t - pressed[0]
         assert not any(w[0] == 'set_offset' and w[2] != 0
                        for w in app.sg.writes), app.sg.writes
-        assert app.sg.writes[-2:] == [('set_offset', 1, 0.0),
-                                      ('set_output', 1, False)], \
-            app.sg.writes
+        _ends_at_0v(app)
         assert any(ln.startswith('run aborted') for ln in app.lines), \
             app.lines
         [warn] = [ln for ln in app.lines if NOT_ARMED in ln]
-        assert re.search(r"■ Abort was pressed after a 0\.\d s wait at 0 V "
-                         r"for the scope Reconnect\. The run ends here", warn), \
-            warn
-        rows = _setup_rows(tmp)
-        assert "Breakdown watchdog (start): NOT armed (stopped while " \
-            "waiting for the scope)" in rows, rows
-        assert any(r.startswith("Breakdown watchdog (scope wait): ")
-                   and r.endswith(", ended by Abort, so NOT armed")
-                   for r in rows), rows
-
-
-def test_a_scope_that_drops_again_during_the_baseline_does_not_arm():
-    """The scope back after the wait, then gone again at its fourth
-    baseline read (a second Reconnect, answered Yes): two of the eight
-    reads that count answered, which is no baseline, so the run stays
-    NOT ARMED. The first attempt armed blind here on the absolute rule.
-    The second Reconnect brings a scope back 1 s later, reading 120 uA on
-    the ramp, and nothing trips: not armed means not armed."""
-    with tempfile.TemporaryDirectory() as tmp:
-        reads = []
-        with L._patched(L._MB(ANSWERS)):
-            app = _App(tmp)
-            third = _scope(app, TRIP_V, reads)
-            second_connect = _Connect(third, 1.0)
-            new = _scope(app, TRIP_V, reads)
-            inner = new.on_read
-
-            def drop_at_fourth(ch, caller):
-                if caller == '_sldea_worker' and len(
-                        _baseline_reads(reads, new)) == 3:
-                    _press(app, second_connect)   # the handle is gone now
-                inner(ch, caller)
-            new.on_read = drop_at_fourth
-            connect = _Connect(new, 0.5)
-            _at_camera(app, connect)
-            app.sldea_run()
-            _pump(app)
-            _settle_connect(app, second_connect)
-        assert len(_baseline_reads(reads, new)) == 4, reads
-        assert app.lines.count("⚠ scope Reconnect during the LIVE run "
-                               "(confirmed) — no kV/µA readings until its "
-                               "new session is open") == 2, app.lines
-        [warn] = [ln for ln in app.lines if NOT_ARMED in ln]
-        assert re.search(r"the scope came back after a \d+\.\d s wait at 0 V "
-                         r"for its Reconnect, but only 2 of the 8 baseline "
-                         r"reads at 0 kV answered", warn), warn
-        assert not any('baseline unavailable' in ln or 'ARMED after' in ln
-                       or ln.startswith('watchdog baseline')
-                       for ln in app.lines), app.lines
-        # the third scope was read during the run, at 120 uA on the ramp,
-        # and nothing stopped the run
-        assert any(r[0] is third and any(w[0] == 'set_offset' and w[2] > 0
-                                         for w in r[3]) for r in reads), \
-            reads
-        assert any(ln.startswith('run complete') for ln in app.lines), \
-            app.lines
-        assert not app._sldea_bd_tripped
-        rows = _setup_rows(tmp)
-        i = rows.index("Breakdown watchdog (start): NOT armed (scope back, "
-                       "but no 0 kV baseline)")
-        assert re.fullmatch(r"Breakdown watchdog \(scope wait\): \d+\.\d s at "
-                            r"0 V for a scope Reconnect; the scope came back, "
-                            r"but only 2 of 8 0 kV reads answered, so NOT "
-                            r"armed", rows[i + 1]), rows[i:i + 2]
+        assert re.search(r"the run was stopped \(■ Abort or the window "
+                         r"closed\) after a 0\.\d s wait at 0 V for the scope "
+                         r"Reconnect\. It ends here, at 0 V\.", warn), warn
+        rows = _watchdog_rows(tmp)
+        assert len(rows) == 2 and rows[0].endswith(
+            "at the arming line; " + STOPPED), rows
+        assert rows[1] == ("Breakdown watchdog (start): NOT armed (stopped "
+                           "while waiting for the scope)"), rows
 
 
 def test_no_reconnect_in_flight_means_no_wait():
@@ -556,9 +688,14 @@ def test_no_reconnect_in_flight_means_no_wait():
         with L._patched(L._MB(ANSWERS)):
             app = _App(tmp)
             connect = _Connect(None, 0.0)
-            _at_camera(app, connect, settle=lambda a: (
-                'connect' not in a._bg_busy
-                and not a._scope_reconnecting))
+
+            def press_and_let_it_fail():
+                _press(app, connect)
+                t_end = time.monotonic() + 10
+                while 'connect' in app._bg_busy or app._scope_reconnecting:
+                    assert time.monotonic() < t_end
+                    time.sleep(0.01)
+            _at_camera(app, press_and_let_it_fail)
             app.sldea_run()
             _pump(app)
         assert connect.calls == 1
@@ -575,9 +712,8 @@ def test_no_reconnect_in_flight_means_no_wait():
         t_on = app.sg.first('set_output', lambda w: w[2] is True)
         assert app.sg.first('set_offset') - t_on < 0.3
         assert any(ln.startswith('run complete') for ln in app.lines)
-        rows = _setup_rows(tmp)
-        assert "Breakdown watchdog (start): NOT armed (no scope)" in rows
-        assert not any('(scope wait)' in r for r in rows), rows
+        assert _watchdog_rows(tmp) == [
+            "Breakdown watchdog (start): NOT armed (no scope)"]
 
 
 def test_an_on_time_arming_is_unchanged():
@@ -595,20 +731,256 @@ def test_an_on_time_arming_is_unchanged():
                 _pump(app)
         finally:
             restore()
-        assert not any(ln.startswith(WAIT_LINE) or 'ARMED' in ln
+        assert not any(ln.startswith('breakdown watchdog') or 'ARMED' in ln
                        for ln in app.lines), app.lines
-        base = _baseline_reads(reads, app.scope)
-        assert len(base) == 10, base
+        _assert_at_0v_until_baseline(app, reads, app.scope)
         assert BASELINE_7 in app.lines, app.lines
         assert _shadow_bases(made) == [(7.0, 0.0)], made
-        assert all(not any(w[0] == 'set_offset' for w in r[3])
-                   for r in base), base
         assert app._sldea_bd_tripped, app.lines
         assert any(ln.startswith('⚡ BREAKDOWN CONFIRMED — I=-95 µA')
                    for ln in app.lines), app.lines
-        rows = _setup_rows(tmp)
-        assert not any('(scope wait)' in r or 'NOT armed' in r
-                       for r in rows), rows
+        assert _watchdog_rows(tmp) == [], _watchdog_rows(tmp)
+
+
+# --------------------------------------------------------------------------
+# A Reconnect during the 0 kV baseline: wait again, take it again
+# --------------------------------------------------------------------------
+
+def test_a_reconnect_during_an_on_time_baseline_is_waited_for():
+    """The likelier #339 case: the scope there at the arming line, the
+    Reconnect pressed at its fourth baseline read. Two of eight reads
+    answered, a Reconnect in flight: the run waits at 0 V, takes the whole
+    baseline again on the new scope, and arms from it (it trips at -95 uA,
+    which only the learned 7 uA baseline can)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        reads = []
+        made, restore = _shadow_made()
+        try:
+            with L._patched(L._MB(ANSWERS)):
+                app = _App(tmp)
+                first = app.scope = _scope(app, BASE_ONLY_V, reads)
+                new = _scope(app, BASE_ONLY_V, reads)
+                connect = _Connect(new, 1.0)
+                _on_nth_read(first, reads, 4, lambda: _press(app, connect))
+                app.sldea_run()
+                _pump(app)
+                _settle(app, connect)
+        finally:
+            restore()
+        assert len(_worker_reads(reads, first)) == 4, reads
+        i_re = app.index(REWAIT_RE.match)
+        m = REWAIT_RE.match(app.lines[i_re])
+        assert m.group(1) == '2' and m.group(3) == '25', m.group(0)
+        i_back = app.index(BACK_RE.match)
+        waited = float(BACK_RE.match(app.lines[i_back]).group(1))
+        _assert_at_0v_until_baseline(app, reads, new)
+        i_armed = app.index(ARMED_RE.match)
+        assert i_re < i_back < app.lines.index(BASELINE_7) < i_armed
+        assert float(ARMED_RE.match(app.lines[i_armed]).group(1)) == waited
+        assert not any(ln.startswith('watchdog baseline unavailable')
+                       or NOT_ARMED in ln for ln in app.lines), app.lines
+        assert _shadow_bases(made) == [(7.0, 0.0)], made
+        assert app._sldea_bd_tripped, app.lines
+        assert any(ln.startswith('⚡ BREAKDOWN CONFIRMED — I=-95 µA')
+                   for ln in app.lines), app.lines
+        assert _watchdog_rows(tmp) == [
+            f"Breakdown watchdog (scope wait): {waited:.1f} s at 0 V for a "
+            f"scope Reconnect after only 2 of 8 0 kV baseline reads "
+            f"answered; the scope came back"], _watchdog_rows(tmp)
+
+
+def test_a_reconnect_during_the_waited_baseline_is_waited_for_again():
+    """The scope back after the first wait, then a second Reconnect at its
+    fourth baseline read: the run waits again, takes the baseline again on
+    the third scope, arms after two waits and trips at 120 uA. (The first
+    version of this change left that run NOT ARMED.)"""
+    with tempfile.TemporaryDirectory() as tmp:
+        reads = []
+        with L._patched(L._MB(ANSWERS)):
+            app = _App(tmp)
+            third = _scope(app, TRIP_V, reads)
+            second_connect = _Connect(third, 1.0)
+            new = _scope(app, TRIP_V, reads)
+            _on_nth_read(new, reads, 4, lambda: _press(app, second_connect))
+            connect = _Connect(new, 0.5)
+            _at_camera(app, lambda: _press(app, connect))
+            app.sldea_run()
+            _pump(app)
+            _settle(app, connect, second_connect)
+        assert len(_worker_reads(reads, new)) == 4, reads
+        assert app.lines.count("⚠ scope Reconnect during the LIVE run "
+                               "(confirmed) — no kV/µA readings until its "
+                               "new session is open") == 2, app.lines
+        backs = [ln for ln in app.lines if BACK_RE.match(ln)]
+        assert len(backs) == 2, app.lines
+        waits = [float(BACK_RE.match(b).group(1)) for b in backs]
+        assert REWAIT_RE.match(
+            app.lines[app.index(REWAIT_RE.match)]).group(1) == '2'
+        _assert_at_0v_until_baseline(app, reads, third)
+        m = ARMED_RE.match(app.lines[app.index(ARMED_RE.match)])
+        assert m.group(3) == '2', m.group(0)
+        assert abs(float(m.group(1)) - sum(waits)) <= 0.11, (m.group(0),
+                                                             waits)
+        assert BASELINE_7 in app.lines
+        assert app._sldea_bd_tripped, app.lines
+        assert any(ln.startswith('⚡ BREAKDOWN CONFIRMED — I=120 µA')
+                   for ln in app.lines), app.lines
+        rows = _watchdog_rows(tmp)
+        assert len(rows) == 2, rows
+        assert rows[0].endswith("at the arming line; the scope came back")
+        assert rows[1].endswith("after only 2 of 8 0 kV baseline reads "
+                                "answered; the scope came back"), rows
+
+
+def test_all_the_waits_share_one_bound():
+    """A 3 s bound: the first wait takes 0.5 s, the baseline about 1.9 s
+    more until a second Reconnect, which never finishes. The re-wait gets
+    only what is left of the 3 s, then the run arms on the absolute rule
+    from its short baseline and says so."""
+    with tempfile.TemporaryDirectory() as tmp:
+        reads = []
+        with L._patched(L._MB(ANSWERS)):
+            app = _App(tmp, wait_s=3.0)
+            second_connect = _Connect(None, 60.0)
+            new = _scope(app, TRIP_V, reads)
+            _on_nth_read(new, reads, 4, lambda: _press(app, second_connect))
+            connect = _Connect(new, 0.5)
+            _at_camera(app, lambda: _press(app, connect))
+            app.sldea_run()
+            _pump(app)
+            _settle(app, connect, second_connect)
+        t_first = app.when(WAIT_LINE)
+        m = REWAIT_RE.match(app.lines[app.index(REWAIT_RE.match)])
+        left = float(m.group(2))
+        assert 0.2 <= left <= 1.5 and m.group(3) == '3', m.group(0)
+        i_end = app.index(lambda ln: ln.startswith(
+            "breakdown watchdog: waited ") and "still running at the 3 s "
+            "limit. The baseline stays short, so the absolute rule "
+            "follows." in ln)
+        assert 2.95 <= app.line_t[i_end] - t_first <= 3.4, \
+            app.line_t[i_end] - t_first
+        i_un = app.lines.index(_unavailable(2))
+        i_armed = app.index(ARMED_RE.match)
+        assert i_end < i_un < i_armed
+        assert ARMED_RE.match(app.lines[i_armed]).group(3) == '2'
+        assert not any(NOT_ARMED in ln for ln in app.lines), app.lines
+        rows = _watchdog_rows(tmp)
+        assert len(rows) == 3, rows
+        assert rows[0].endswith("at the arming line; the scope came back")
+        assert rows[1].endswith("after only 2 of 8 0 kV baseline reads "
+                                "answered; still running at the 3 s limit")
+        assert rows[2] == _absolute_row(2), rows
+
+
+# --------------------------------------------------------------------------
+# A baseline still short: the absolute rule (owner decision 2026-10-08)
+# --------------------------------------------------------------------------
+
+def _short_baseline_run(tmp, waited):
+    """A ticked LIVE run whose scope stops answering at its fourth
+    baseline read with no Reconnect in flight (the handle simply goes), and
+    is there again from the run clock's start, at 120 uA on the ramp.
+    With `waited`, the scope came back from a wait at the arming line
+    first."""
+    reads = []
+    made, restore = _shadow_made()
+    try:
+        with L._patched(L._MB(ANSWERS)):
+            app = _App(tmp)
+            scope = _scope(app, TRIP_V, reads)
+
+            def gone():
+                app.scope = None
+            _on_nth_read(scope, reads, 4, gone)
+            _back_when_running(app, scope)
+            if waited:
+                connect = _Connect(scope, 0.5)
+                _at_camera(app, lambda: _press(app, connect))
+            else:
+                app.scope = scope
+            app.sldea_run()
+            _pump(app)
+            if waited:
+                _settle(app, connect)
+    finally:
+        restore()
+    return app, scope, reads, made
+
+
+def test_a_short_on_time_baseline_arms_on_the_absolute_rule():
+    """Two of eight reads on time: the absolute rule, as before, and now
+    setup.txt says so instead of leaving the start line's "baseline
+    learned at 0 kV" standing. The scope back from the run clock's start
+    at 120 uA trips it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        app, scope, reads, made = _short_baseline_run(tmp, waited=False)
+        assert len(_baseline_reads(reads, scope)) >= 4
+        assert _unavailable(2) in app.lines, app.lines
+        assert not any(ln.startswith('breakdown watchdog')
+                       or NOT_ARMED in ln for ln in app.lines), app.lines
+        assert _shadow_bases(made) == [(None, None)], made
+        assert _watchdog_rows(tmp) == [_absolute_row(2)], _watchdog_rows(tmp)
+        assert app._sldea_bd_tripped, app.lines
+        assert any(ln.startswith('⚡ BREAKDOWN CONFIRMED — I=120 µA')
+                   for ln in app.lines), app.lines
+
+
+def test_a_short_baseline_after_a_wait_arms_on_the_absolute_rule():
+    """The same after a wait (owner decision 2026-10-08, reversing the
+    first review's NOT ARMED): the absolute rule, recorded, and it trips
+    at 120 uA once the scope answers again. NOT ARMED would have read
+    nothing at all with telemetry off."""
+    with tempfile.TemporaryDirectory() as tmp:
+        app, scope, reads, made = _short_baseline_run(tmp, waited=True)
+        i_back = app.index(BACK_RE.match)
+        i_un = app.lines.index(_unavailable(2))
+        i_armed = app.index(ARMED_RE.match)
+        assert i_back < i_un < i_armed
+        assert not any(NOT_ARMED in ln or REWAIT_RE.match(ln)
+                       for ln in app.lines), app.lines
+        assert _shadow_bases(made) == [(None, None)], made
+        rows = _watchdog_rows(tmp)
+        assert len(rows) == 2 and rows[0].endswith(
+            "at the arming line; the scope came back"), rows
+        assert rows[1] == _absolute_row(2), rows
+        assert app._sldea_bd_tripped, app.lines
+        assert any(ln.startswith('⚡ BREAKDOWN CONFIRMED — I=120 µA')
+                   for ln in app.lines), app.lines
+
+
+# --------------------------------------------------------------------------
+# Abort during the baseline
+# --------------------------------------------------------------------------
+
+def test_abort_ends_the_baseline_at_once():
+    """A scope whose reads take 1 s each (one stalled near its timeout),
+    Abort pressed at the second baseline read: the run ends after the read
+    in progress, not after eight more, at 0 V, with no baseline verdict."""
+    with tempfile.TemporaryDirectory() as tmp:
+        reads = []
+        with L._patched(L._MB(ANSWERS)):
+            app = _App(tmp)
+            app.scope = _scope(app, TRIP_V, reads, read_s=1.0)
+            app.sldea_run()
+            pressed = []
+
+            def abort_at_second_read():
+                if not pressed and len(reads) >= 2:
+                    pressed.append(time.monotonic())
+                    app.sldea_abort()
+            _pump(app, each=abort_at_second_read)
+            done_t = time.monotonic()
+        assert pressed, app.lines
+        assert done_t - pressed[0] < 1.6, done_t - pressed[0]
+        assert len(reads) <= 3, len(reads)
+        assert not any(ln.startswith('watchdog baseline')
+                       for ln in app.lines), app.lines
+        assert any(ln.startswith('run aborted') for ln in app.lines), \
+            app.lines
+        assert not any(w[0] == 'set_offset' and w[2] != 0
+                       for w in app.sg.writes), app.sg.writes
+        _ends_at_0v(app)
+        assert _watchdog_rows(tmp) == [], _watchdog_rows(tmp)
 
 
 def _run():
@@ -621,9 +993,9 @@ def _run():
             fn()
         except Exception:
             failed.append((fn.__name__, traceback.format_exc()))
-            print(f"FAIL {fn.__name__}")
+            print(f"FAIL {fn.__name__}", flush=True)
             continue
-        print(f"ok  {fn.__name__}")
+        print(f"ok  {fn.__name__}", flush=True)
     if not failed:
         print(f"\n{len(fns)} tests passed")
         return 0

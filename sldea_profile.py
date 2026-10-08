@@ -1550,67 +1550,112 @@ def watchdog_record(ticked, armed, dry, trip_ua, confirm_s):
               "the end of the run does.")
 
 
-def scope_wait_record(outcome, waited_s, limit_s, good=0):
-    """(log_line, setup_lines): the records of a ticked LIVE run that
-    reached its watchdog's arming line while a scope Reconnect was still
-    in flight, and waited for it there at 0 V, before the run clock
-    started (#423).
+# How a wait for a scope Reconnect can end (#423): the scope came back,
+# the Reconnect ended without one, the one bound ran out, or the run was
+# stopped (■ Abort, or the window closing, which sets the same flag).
+SCOPE_WAIT_ENDS = {
+    'back': "the scope came back",
+    'failed': "the Reconnect failed",
+    'timeout': "still running at the {limit:g} s limit",
+    'aborted': "the run was stopped (Abort or the window closed)",
+}
 
-    `outcome` is what the wait came to:
-    - 'armed': the scope came back and the watchdog armed, from the usual
-      0 kV baseline;
-    - 'unread': the scope came back, but only `good` of the 8 baseline
-      reads that count answered, fewer than a baseline needs (4), so the
-      watchdog is NOT armed;
-    - 'timeout': the Reconnect was still running at `limit_s`;
-    - 'failed': the Reconnect ended without a scope;
-    - 'aborted': Abort was pressed during the wait.
 
-    A NOT armed outcome writes a `Breakdown watchdog (start):` line, #406's
-    `NOT armed (no scope)` when the scope never came back, then a
-    `Breakdown watchdog (scope wait):` line; an armed one writes the wait
-    line only. Both are ASCII, because the worker writes setup.txt in the
-    locale encoding. The run.log line for a NOT armed outcome is #406's
-    warning, with the wait in place of its guess "(a Reconnect?)"."""
+def scope_wait_start_line(limit_s, left_s, good=None):
+    """run.log's line as a ticked LIVE run starts waiting at 0 V for a
+    scope Reconnect in flight (#423): at the arming line (`good` None), or
+    again after a 0 kV baseline that got only `good` of its 8 reads, with
+    `left_s` left of the one `limit_s` bound for every wait."""
+    if good is None:
+        return (f"breakdown watchdog: the scope Reconnect is still running, "
+                f"so the run waits for it here at 0 V, up to {limit_s:g} s, "
+                f"before it arms. ■ Abort ends the run.")
+    return (f"breakdown watchdog: only {good} of the 8 baseline reads at "
+            f"0 kV answered, and a scope Reconnect is running, so the run "
+            f"waits for it here at 0 V, up to {left_s:.1f} s more (one "
+            f"{limit_s:g} s bound for every wait), then takes the baseline "
+            f"again. ■ Abort ends the run.")
+
+
+def scope_wait_lines(outcome, waited_s, limit_s, good=None):
+    """(log_line, setup_rows) for how one wait ended (#423).
+
+    `good` as in scope_wait_start_line. Every wait gets one ASCII
+    `Breakdown watchdog (scope wait):` row, because setup.txt is written in
+    the locale encoding. run.log gets a line when the scope came back (the
+    baseline follows) and when a re-wait ended without it (the absolute
+    rule follows, unless the run was stopped); a first wait that ended
+    without it gets
+    scope_wait_not_armed's warning instead, so log_line is None there."""
+    if outcome not in SCOPE_WAIT_ENDS:
+        raise ValueError(f"unknown scope wait outcome {outcome!r}")
     w = f"{waited_s:.1f} s"
-    wait = f"Breakdown watchdog (scope wait): {w} at 0 V for a scope Reconnect"
-    if outcome == 'armed':
-        return (f"breakdown watchdog ARMED after a {w} wait at 0 V for the "
-                f"scope Reconnect, as at any arming (the line above says "
-                f"what its 0 kV baseline came to)",
-                [f"{wait}; the scope came back and the watchdog armed"])
+    end = SCOPE_WAIT_ENDS[outcome].format(limit=limit_s)
+    where = ("at the arming line" if good is None else
+             f"after only {good} of 8 0 kV baseline reads answered")
+    row = (f"Breakdown watchdog (scope wait): {w} at 0 V for a scope "
+           f"Reconnect {where}; {end}")
+    if outcome == 'back':
+        log = (f"breakdown watchdog: the scope is back after a {w} wait at "
+               f"0 V; taking the 0 kV baseline now, as at any arming")
+    elif good is not None and outcome == 'aborted':
+        log = (f"breakdown watchdog: waited {w} at 0 V for the scope "
+               f"Reconnect: the run was stopped (■ Abort or the window "
+               f"closed). It ends here, at 0 V.")
+    elif good is not None:
+        log = (f"breakdown watchdog: waited {w} at 0 V for the scope "
+               f"Reconnect: {end}. The baseline stays short, so the "
+               f"absolute rule follows.")
+    else:
+        log = None
+    return log, [row]
+
+
+def scope_wait_not_armed(outcome, waited_s):
+    """(log_line, setup_rows) for a ticked LIVE run whose first wait, at
+    the arming line, ended without the scope (#423): #406's NOT ARMED
+    warning, with how the wait ended in place of its guess "(a
+    Reconnect?)", and #406's ASCII `Breakdown watchdog (start):` row."""
+    w = f"{waited_s:.1f} s"
     head = "⚠⚠ BREAKDOWN WATCHDOG NOT ARMED — "
-    tail = (" Nothing stops this run on a breakdown; only ■ Abort or the "
-            "end of the run does. Energize HV? and the start line said ON.")
-    gone = "the scope was gone when the run reached the arming line, and "
-    if outcome == 'unread':
-        return (head + f"the scope came back after a {w} wait at 0 V for "
-                f"its Reconnect, but only {good} of the 8 baseline reads at "
-                f"0 kV answered (a baseline needs 4), so there is no "
-                f"baseline to arm from." + tail,
-                ["Breakdown watchdog (start): NOT armed (scope back, but no "
-                 "0 kV baseline)",
-                 f"{wait}; the scope came back, but only {good} of 8 0 kV "
-                 f"reads answered, so NOT armed"])
-    if outcome == 'timeout':
-        return (head + gone + f"its Reconnect was still running after a "
-                f"{w} wait at 0 V, the limit." + tail,
-                ["Breakdown watchdog (start): NOT armed (no scope)",
-                 f"{wait}, still running at the {limit_s:g} s limit, so NOT "
-                 f"armed"])
-    if outcome == 'failed':
-        return (head + gone + f"its Reconnect failed after a {w} wait at "
-                f"0 V." + tail,
-                ["Breakdown watchdog (start): NOT armed (no scope)",
-                 f"{wait}, which failed, so NOT armed"])
+    said = "Energize HV? and the start line said ON."
     if outcome == 'aborted':
-        return (head + f"■ Abort was pressed after a {w} wait at 0 V for the "
-                f"scope Reconnect. The run ends here, at 0 V. Energize HV? "
-                f"and the start line said ON.",
+        return (head + f"the run was stopped (■ Abort or the window closed) "
+                f"after a {w} wait at 0 V for the scope Reconnect. It ends "
+                f"here, at 0 V. " + said,
                 ["Breakdown watchdog (start): NOT armed (stopped while "
-                 "waiting for the scope)",
-                 f"{wait}, ended by Abort, so NOT armed"])
-    raise ValueError(f"unknown scope wait outcome {outcome!r}")
+                 "waiting for the scope)"])
+    if outcome == 'timeout':
+        why = f"its Reconnect was still running after a {w} wait at 0 V, " \
+              f"the limit."
+    elif outcome == 'failed':
+        why = f"its Reconnect failed after a {w} wait at 0 V."
+    else:
+        raise ValueError(f"not a NOT armed wait outcome: {outcome!r}")
+    return (head + "the scope was gone when the run reached the arming "
+            "line, and " + why + " Nothing stops this run on a breakdown; "
+            "only ■ Abort or the end of the run does. " + said,
+            ["Breakdown watchdog (start): NOT armed (no scope)"])
+
+
+def scope_wait_armed_line(total_s, n_waits):
+    """run.log's line for a run that waited for a scope Reconnect and then
+    armed (#423), after the baseline line that says what the 0 kV baseline
+    came to: learned, refused, or too short (the absolute rule)."""
+    return (f"breakdown watchdog ARMED after {total_s:.1f} s of waiting at "
+            f"0 V for the scope Reconnect"
+            + (f" ({n_waits} waits)" if n_waits > 1 else "")
+            + ", as at any arming (the line above says what its 0 kV "
+              "baseline came to)")
+
+
+def absolute_fallback_line(trip_ua, good):
+    """setup.txt's ASCII row for a run whose 0 kV baseline got fewer than
+    4 of its 8 reads, on time or after a wait, and so armed on the
+    absolute rule (owner decision 2026-10-08, #423). The start line's
+    "baseline learned at 0 kV" plan did not happen; this row says so."""
+    return (f"Breakdown watchdog (start): armed on the absolute rule |I| >= "
+            f"{trip_ua:g} uA; only {good} of 8 0 kV reads answered")
 
 
 # The #219 N-sigma rule's defaults, chosen on the 18 single-layer runs

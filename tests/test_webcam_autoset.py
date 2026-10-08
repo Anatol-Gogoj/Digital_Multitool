@@ -162,6 +162,10 @@ def test_the_main_view_keeps_what_a_run_uses_and_advanced_starts_closed():
             assert set(rows) == {c['name'] for c in DFK_CONTROLS}, rows
             for name in gui.CAM_MAIN_CONTROLS:
                 assert _descends(rows[name][1], app.camctl_main), name
+            # exposure first, though the camera reports gain first
+            col = {name: int(rows[name][1].master.grid_info()['column'])
+                   for name in gui.CAM_MAIN_CONTROLS}
+            assert col['exposure_time_absolute'] < col['gain'], col
             assert app.cam_exposure is rows['exposure_time_absolute'][1]
             assert app.cam_gain is rows['gain'][1]
             others = set(rows) - set(gui.CAM_MAIN_CONTROLS)

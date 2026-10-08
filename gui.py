@@ -8587,14 +8587,14 @@ LOGGING:
             return
         saved = webcam.load_camera_settings()
         col = row = 0
-        main_col = 0
         for c in ctrls:
             name = c['name']
             if main is not None and name in CAM_MAIN_CONTROLS:
+                # exposure first, then gain, whatever order the camera
+                # reports them in
                 frame = ttk.Frame(main)
-                frame.grid(row=0, column=main_col, sticky='w',
-                           padx=(0, 18), pady=2)
-                main_col += 1
+                frame.grid(row=0, column=CAM_MAIN_CONTROLS.index(name),
+                           sticky='w', padx=(0, 18), pady=2)
                 in_main = True
             else:
                 frame = ttk.Frame(self.camctl_grid)

@@ -1500,6 +1500,96 @@ flag source-scan test remain.
   as a pass, so that guard has not been running; the new leg tests pin
   `78315cc` instead, which every clone has.
 
+## The N-sigma breakdown rule runs in shadow on every LIVE run, beside the fixed watchdog (2026-10-08)
+
+**TL;DR:** A second breakdown rule now runs on every LIVE run whose
+monitor reads run. It trips, in its own record only, when the current sits
+5 sigma or 20 µA (whichever is larger) from where this run's current has
+been, for 2 reads in a row (`#219`). It acts on nothing: the 100 µA / 3 s
+watchdog still stops runs. Replayed on the 18 single-layer runs with
+current on file, it made no false trip, let the three self-clearing
+transients pass, and caught two of the three breakdowns, one that the
+fixed rule missed and one 44 s sooner. None of those breakdowns has
+telemetry, so the rule has not yet met one at its live read rate. It
+stays in shadow until the §N1 probe and a bench campaign say it should
+act.
+
+**Observation** (replay on the 18 single-layer runs with current copied
+from the lab share, 2026-10-08: data.csv, telemetry.csv, setup.txt and
+run.log only).
+
+- 6 runs have telemetry.csv (about 2 Hz). 12 are snapshot-only, two reads
+  per landing seconds to a minute apart; they were replayed as settled
+  landing reads, which understates what the live rule sees. The two
+  2026-08-05 runs recorded no current. Three more runs in the same share
+  folder are multilayer devices filed there by mistake; they are not
+  evidence here.
+- Labels were set from the samples themselves:
+  - 3 breakdowns, all snapshot-only: `SLDEA_20260723_152205`,
+    `SLDEA_20260723_155425` and `SLDEA_20260723_233451`.
+  - 3 self-clearing transients: `SLDEA_20260729_104531`'s -153 µA
+    snapshot, `P3_7_2.3mL_20260729`'s -64 µA snapshot, and one -24 µA read
+    on a ramp in an operator run.
+  - 1 borderline: `SLDEA_20260806_151857`'s two reads 14.5 µA off its
+    -16 µA level.
+  - 11 healthy.
+- Today's rule missed 152205 and 155425, caught 233451 52 s after its
+  onset, and made no false trip.
+- The N-sigma rule (N 5, floor 20 µA, 2 in a row, window 40) made no false
+  trip and tripped on no transient. It caught 152205 (+7 s) and 233451
+  (+8 s). It missed 155425, whose event is the run's last snapshot, where
+  no two-in-a-row rule can see it. It did not trip on the 08-06 dip.
+- The floor decides, not N. From N 3 to 8 nothing in the sweep changes,
+  because sigma stays at its 0.5 µA floor on MEAN reads. A 10 µA floor
+  false-trips healthy P3_5 (an 11.1 µA wobble), 12.5 µA trips the 08-06
+  dip, 15 to 25 µA does neither, and 30 µA misses 152205.
+- What the single-layer runs cannot show. None of their three
+  breakdowns has telemetry, so the rule has been replayed on a real
+  breakdown only at snapshot spacing, never at 2 Hz. None shows a
+  slow-onset fault, which the rule's window would follow by design (the
+  suite pins it: 20 µA of creep over 400 reads is never away). Both rest
+  on the rule's design and on synthetic reads, not on runs.
+- The desk prototype of the same morning judged reads before it had a
+  location. On a run without a 0 kV baseline its window never filled and it
+  could not trip, so its first real-run sweep was vacuous.
+
+**Decision (owner, 2026-10-08, "shadow mode now"; `#219`).**
+
+1. `sldea_profile.NSigmaWatchdog`, with `NSIGMA_DEFAULTS`: N 5, floor
+   20 µA, 2 reads in a row, window 40 quiet landing reads, bar doubled on
+   ramps and in a landing's first second, off-screen counted as away. 20 µA
+   is the middle of the zero-false range and the after-the-fact detector's
+   own `breakdown_dev_ua`, so the live and post-hoc verdicts draw one line.
+   No single-read spike tier.
+2. It runs in shadow on every LIVE run whose monitor reads run (the
+   watchdog armed, or telemetry on). It reads only what the monitor tick
+   already reads, after the fixed watchdog has decided. No new instrument
+   I/O.
+3. It acts on nothing. A would-trip writes one telemetry.csv event row,
+   with no current on it so no reader counts that read twice. After the SG
+   is zeroed, one run.log line and setup.txt's `Watchdog shadow (end):`
+   line give its outcome. Any exception inside it disables only the
+   shadow.
+4. setup.txt's `Watchdog shadow:` line, under `#406`'s watchdog line, names
+   the rule and its parameters. DRY runs and runs with no current reads say
+   OFF and run no shadow.
+5. It is not armed on a refused 0 kV baseline, by the fixed watchdog's own
+   bound (`credible_baseline_ua`).
+6. The fixed rule stays beside it as the backstop. The N-sigma window
+   follows slow drift, so a fault that grows slowly enough would be taken
+   as normal; the fixed rule's 0 kV baseline does not move. No
+   single-layer run on file shows that case: the backstop rests on the
+   design and on the owner's decision.
+
+**Before it may act.** The §N1 probe's quiet-rig sigma per measurement
+token; a bench campaign of LIVE runs in shadow with no false would-trip and
+every confirmed event caught, which would also be the first real
+breakdowns it sees at its live read rate; the owner's call on whether a
+self-clearing excursion (one read far off, or a short burst past the
+scope's screen) should stop a run; and a peak token (`#189`) if
+millisecond arcs are to be seen at all. Letting it act changes breakdown
+semantics and gets a dated entry of its own.
+
 ## Calibration questions name their buttons and open over the calibration window (2026-10-05)
 
 **TL;DR:** the questions that follow a hand calibration (mostly met when

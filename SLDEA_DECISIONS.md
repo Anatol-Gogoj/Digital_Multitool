@@ -1606,6 +1606,59 @@ close to the commanded kV, and V_Out on screen for the whole ramp. Decision
 23 (detect the sign at the first landing) still stands for the case where
 this fails.
 
+## A run name used before is refused, and the SLDEA tab shows where a run will write (2026-10-08)
+
+**TL;DR:** typing a run name a second time made the next run write over
+the first one: the worker opens setup.txt and data.csv with mode 'w' in a
+folder made with `exist_ok=True`. ▶ Run now refuses a run folder that
+already holds setup.txt or data.csv, with no "start anyway", before it
+asks anything. A line under Run name shows the folder as the operator
+types and warns when it already holds a run.
+
+**Observation.** Read in the code (`#402`), not met on the bench yet.
+`_sldea_worker` built `rundir = os.path.join(outdir, runname or
+p.run_dirname(started))`, called `os.makedirs(framedir, exist_ok=True)`,
+then opened `setup.txt` and `data.csv` with mode `'w'` and appended to
+`run.log`. A typed name that matched an earlier run's folder truncated
+that run's setup.txt and data.csv, overwrote every frame whose step, kV
+and tag repeated, and mixed the two runs in one run.log. Edge Review's
+Save writes the areas into data.csv, so a reviewed run lost its review
+too. Nothing asked first, and nothing on the tab showed the folder.
+
+**Decision.**
+
+- **Refuse, do not ask.** An earlier run's data.csv may be the only copy,
+  and an overwrite cannot be undone. A blank name is never refused: its
+  folder is named from the start time.
+- **A typed name follows New folder's rules** (`output_folder.name_problem`,
+  `#394`): one folder inside the Output dir, a name Windows and the share
+  accept, plain ASCII, because OpenCV on the lab's Windows PCs cannot open
+  frames in a folder named otherwise (measured in `#394`'s review).
+- **A folder that does not answer is refused too.** The two stats run on a
+  thread and Run waits for them at most `RUN_FOLDER_CHECK_S`, 3 s: a run
+  already there cannot be ruled out, and a share that hangs would stall
+  the run's own writes as well. On a local disk the check costs 0.15 ms
+  (median of 200, Windows VM).
+- **Where it sits.** Right after the start gate, before the video
+  pre-flight, the HV questions and the camera pre-flight, so an operator
+  is never asked about the HV and then refused over a name. `sldea_run`
+  reads both boxes there, once, and hands those values to the worker, so
+  the folder checked is the folder written.
+- **One join.** The worker makes its folder through
+  `sldea_profile.run_folder`, which the tab's line uses too; it gives the
+  old expression's result to the byte.
+
+**What changed.** `sldea_profile.py`: `run_folder`, `run_name_problem`,
+`holds_run`, `holds_run_within`, `run_folder_refusal`, `run_folder_line`.
+`gui.py`: the line under Run name (row 2 of the Output & Measurement box;
+the device rows below it moved down one), its check on a thread, the
+refusal in `sldea_run`, the worker's one line, and a look again from
+`_sldea_finished`. Pinned by `tests/test_sldea_run_folder.py`.
+
+**Bench check (#369).** On a lab PC, type the name of a run that exists:
+the line warns and ▶ Run refuses. Check the line on the real share's
+mount, also while the share is unmounted.
+
 ## A run cannot start, or carry on, on a picture with nothing in it (2026-10-02)
 
 **TL;DR:** on 2026-10-01 a LIVE run went out with the camera at exposure

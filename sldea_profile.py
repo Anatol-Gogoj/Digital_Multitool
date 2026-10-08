@@ -192,6 +192,112 @@ def parse_concentration_ml(text):
     return value
 
 
+# The FILM THICKNESS (`#398`): t0, in micrometres, measured with the film
+# MOUNTED AND PRESTRETCHED (owner decision 2026-10-06), so the number the
+# operator types is the thickness the plot's nominal field E = V / t0
+# divides by, with no prestretch correction anywhere. One value per run and
+# no +/- field, by the same decision. setup.txt carries it beside the
+# electrode as 'Film thickness: 50 um'.
+#
+# 'um', in ASCII, and not the micro sign the issue's text and the SLDEA
+# tab's label use (owner decision 2026-10-07). The runner writes setup.txt
+# with the LOCALE codec, which the runner's own comments say to keep ASCII
+# so the open cannot refuse a line: on a cp932, cp936 or cp949 Windows PC
+# the micro sign raises UnicodeEncodeError on the first write, and on a
+# cp1252 one it lands as byte 0xB5, which every reader here decodes as
+# U+FFFD. The file already says 'uA' rather than the micro-amp sign.
+FILM_THICKNESS_UNIT = 'um'
+
+# A recorded value's unit, as film_thickness_um reads it: the 'um' the
+# runner writes, and for a hand-edited line the micro sign, the Greek small
+# mu and U+FFFD. The last is a micro sign written in cp1252 and read back
+# as UTF-8 with errors='replace', which is how every reader of setup.txt
+# opens it, and how Edge Review's Save then rewrites the file.
+_THICKNESS_UNIT_RE = r'(?:[\u00b5\u03bcu\ufffd]m)?'
+
+
+# The NUMBER a thickness is written as, for the box and for the recorded
+# line alike: ASCII digits, an optional point and exponent. ONE pattern,
+# because the box used to take whatever float() takes, which is more than
+# the reader read back: '1_000', fullwidth and Arabic-Indic digits, and
+# '50.' (the old reader wanted a digit after the point). Such a value
+# passed at Run and was then left off the field axis as unreadable
+# (adversarial review 2026-10-07). Now the box refuses at Run whatever the
+# reader cannot read.
+_THICKNESS_NUMBER_RE = (r'[-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)'
+                        r'(?:[eE][-+]?[0-9]+)?')
+
+# The range a film thickness is expected in, in um, outside which the run
+# asks before it starts (`#398`, review 2026-10-07). Prestretched elastomer
+# films are tens to hundreds of um thick, which sits inside with room at
+# both ends. And the range spans a factor of 400, less than 1000, so any
+# thickness inside it typed in the wrong unit lands outside it: in mm
+# (0.05 for 50 um) below 5, in nm above 2000. A question, never a refusal:
+# an unusual film is still the operator's to run.
+FILM_THICKNESS_PLAUSIBLE_UM = (5.0, 2000.0)
+
+
+def parse_film_thickness_um(text):
+    """Film thickness text -> a positive float in um, or ValueError
+    (`#398`).
+
+    parse_concentration_ml's rule, for its reason: the number goes into
+    setup.txt as a fact about the device, so junk, zero, negatives, nan
+    and inf are refused, and so is a blank, which is a question the run
+    asks separately. A bare number only, in _THICKNESS_NUMBER_RE, the
+    pattern film_thickness_um reads the recorded line with, so nothing
+    the box accepts can come back unreadable. The box is labelled in um,
+    and a unit typed into it is refused, as '2.5 mL' is in the
+    concentration box, rather than guessed at."""
+    import math
+    import re
+    s = str(text or '').strip()
+    if re.fullmatch(_THICKNESS_NUMBER_RE, s) is None:
+        raise ValueError(
+            f"film thickness must be a number in um, got {s!r}")
+    value = float(s)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(
+            f"film thickness must be a positive number of um, got {s!r}")
+    return value
+
+
+def film_thickness_plausible(t0_um):
+    """Is `t0_um` inside FILM_THICKNESS_PLAUSIBLE_UM? (`#398`) The run
+    asks before it starts on one that is not."""
+    lo, hi = FILM_THICKNESS_PLAUSIBLE_UM
+    return lo <= t0_um <= hi
+
+
+def film_thickness_um(recorded):
+    """A recorded `Film thickness:` value -> t0 in um, or None when there
+    is none to use (`#398`).
+
+    `recorded` is what sldea_edge.film_thickness_of returns: None when the
+    line is absent, '(not specified)' when the operator declined, else the
+    value as written. The first two are None here, and so is a value that
+    is not a positive number in um; a caller that has to say WHY tells
+    them apart from the recorded text.
+
+    The value the runner writes ('50 um'), the same with no space, with
+    the micro sign or the Greek mu, with the U+FFFD a cp1252 write of a
+    micro sign leaves (_THICKNESS_UNIT_RE), and a bare number all read as
+    that number: the first is what the runner writes and the others are
+    what a hand edit or an older Windows run produce. The number is
+    _THICKNESS_NUMBER_RE, the box's own pattern. Any other unit
+    ('0.05 mm') is None rather than a guess."""
+    import re
+    m = re.fullmatch(r'\s*(' + _THICKNESS_NUMBER_RE + r')\s*'
+                     + _THICKNESS_UNIT_RE + r'\s*', str(recorded or ''),
+                     re.IGNORECASE)
+    if m is None:
+        return None
+    try:
+        return parse_film_thickness_um(m.group(1))
+    except ValueError:
+        return None
+
+
 def compute_levels(start_kv, end_kv, step_kv=None, n_steps=None):
     """Ordered list of landing voltages (kV).
 
@@ -1414,7 +1520,7 @@ class SldeaProfile:
 
     def setup_text(self, run_name, started_iso, sg_ch, vmon_ch, imon_ch,
                    dry_run, cam_info='', dea_diam_mm=None, electrode=None,
-                   concentration_ml=None):
+                   concentration_ml=None, film_thickness_um=None):
         step_desc = (f"{self.step_kv:g} kV/step" if self.step_kv
                      else f"{self.n_steps_req} steps")
         return "\n".join([
@@ -1459,7 +1565,18 @@ class SldeaProfile:
             [f"Ink concentration: {str(concentration_ml).strip()} mL"
              if str(concentration_ml or '').strip()
              else "Ink concentration: (not specified)"]
-            if concentration_applies(electrode) else []) + ["",
+            if concentration_applies(electrode) else []) + (
+            # Film thickness (`#398`), t0 for the plot's field axis, in the
+            # same device block. The concentration's three states: the
+            # value as typed with its unit, "(not specified)" when the
+            # operator was asked and declined (''), and NO line from a
+            # caller that predates the field (None), so a run that
+            # declined and a run that never had the box stay apart.
+            [] if film_thickness_um is None
+            else [f"Film thickness: {str(film_thickness_um).strip()} "
+                  f"{FILM_THICKNESS_UNIT}"
+                  if str(film_thickness_um).strip()
+                  else "Film thickness: (not specified)"]) + ["",
             "--- Snapshots ---",
             ("baseline @ 0 kV"
              + (f" (after a {self.baseline_warmup_s:g}s camera warm-up "

@@ -921,6 +921,9 @@ def test_make_opts_maps_choices_and_refuses_bad_combinations():
                  # `#373`: no group has a recorded material, which is
                  # the `#313` figure: every group its own line style
                  'group_materials': [],
+                 # `#398`: no stored film thickness, so a field figure
+                 # reads every run's t0 from setup.txt
+                 'film_thickness': [],
                  # the normalized panel's UNITS. Defaults to the ratio,
                  # so an options dict built with no arguments still
                  # describes the figure that existed before the option
@@ -1285,9 +1288,12 @@ def test_default_output_is_byte_identical_to_the_pre_change_engine():
             # the PNGs stayed byte-identical (found 2026-10-05 during the
             # leg-branch rebase). They are stamps, not data the base engine
             # could have written, so they are dropped by name too.
+            # ...and the field axis' t0 and x (`#398`), which are blank on
+            # every figure but a field one, so dropped by name too.
             added = ('group', 'elapsed_s', 'leg', 'cycle',
                      'area_estimator', 'opencv_version', 'numpy_version',
-                     'ray_win_hi', 'disc_fit_r_max')
+                     'ray_win_hi', 'disc_fit_r_max',
+                     'film_thickness_um', 'field_V_per_um')
             assert sp.TIDY_COLS[1] == 'group', sp.TIDY_COLS
             for col in added:
                 assert col in sp.TIDY_COLS, col
@@ -5628,6 +5634,576 @@ def test_every_flag_the_cli_reads_is_one_the_parser_accepts():
     _args, flags, vals = parsed
     opts, err = sp._cli_opts(flags, vals)
     assert err is None and opts['strain_pct'] is True, (opts, err)
+
+
+# ---------------------------------------------------------------------------
+# the field axis (`#398`): E = V / t0, with t0 the film thickness the run's
+# setup.txt records, fixed in the figspec when the figure is made
+# ---------------------------------------------------------------------------
+
+UM = 'µm'
+FIELD_LABEL = 'Nominal field  V / t₀  (V/µm)'
+
+
+def _set_thickness(rundir, value=_ABSENT, crlf=False):
+    """Put `Film thickness: <value>` at the top of the run's setup.txt,
+    where the runner's device block sits, replacing any such line;
+    _ABSENT removes it. `value` is written as given, so a case can write
+    the runner's '50 um' (micro sign), a declined '(not specified)' or a
+    hand-typed oddity."""
+    path = os.path.join(rundir, 'setup.txt')
+    try:
+        with open(path, encoding='utf-8') as f:
+            old = [ln for ln in f.read().splitlines()
+                   if not ln.startswith('Film thickness:')]
+    except OSError:
+        old = []
+    lines = ([] if value is _ABSENT else [f"Film thickness: {value}"]) + old
+    with open(path, 'w', encoding='utf-8',
+              newline='\r\n' if crlf else '\n') as f:
+        f.write('\n'.join(lines) + '\n')
+
+
+def _field_run(parent, name, t0=_ABSENT, broke=True):
+    """A run on _healthy_rows' staircase (0.5 kV steps to 4 kV) whose
+    current confirms a breakdown at 3.5 kV when `broke`, with `t0` as its
+    setup.txt's film thickness: a number is written with the runner's
+    unit, a string as it is."""
+    d = os.path.join(parent, name)
+    rows = _healthy_rows(8)
+    if broke:
+        for snap, ua in ((14, -80.0), (15, -140.0), (16, -205.0)):
+            rows[snap - 1]['measured_uA'] = ua
+    _fake_run(d, rows)
+    if t0 is not _ABSENT:
+        _set_thickness(d, f"{t0:g} {UM}" if isinstance(t0, (int, float))
+                       else t0)
+    return d
+
+
+def _stdout_of(fn, *args):
+    """-> (fn's return value, what it printed)."""
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = fn(*args)
+    return rc, buf.getvalue()
+
+
+def _close(a, b, tol=1e-9):
+    return len(a) == len(b) and all(abs(x - y) <= tol for x, y in zip(a, b))
+
+
+def test_the_film_thickness_reader_keeps_absent_and_not_specified_apart():
+    """`#398`: the third reader keeps the other two's contract: the value
+    as recorded, stripped; None when the LINE is absent (or there is no
+    readable setup.txt); '(not specified)' as-is."""
+    import sldea_edge as se
+    d = _mktmp()
+    try:
+        a, b, c, e = (os.path.join(d, n) for n in 'abce')
+        for p in (a, b, c, e):
+            os.makedirs(p)
+        _set_thickness(a, f"  50 {UM}  ")
+        _set_thickness(b, '(not specified)')
+        _set_thickness(c)                          # a setup.txt, no line
+        _set_thickness(e, f"47 {UM}", crlf=True)
+        assert se.film_thickness_of(a) == f"50 {UM}"
+        assert se.film_thickness_of(b) == '(not specified)'
+        assert os.path.exists(os.path.join(c, 'setup.txt'))
+        assert se.film_thickness_of(c) is None
+        assert se.film_thickness_of(e) == f"47 {UM}", \
+            repr(se.film_thickness_of(e))
+        assert se.film_thickness_of(os.path.join(d, 'nowhere')) is None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_field_axis_puts_every_point_at_v_over_t0():
+    """`#398`: x = nominal kV x 1000 / t0, with each run's own t0, for its
+    curve and for its breakdown X marks, which land at the breakdown
+    FIELD. The axis and the panel heading say what the axis is."""
+    if not _has_mpl():
+        return
+    p = _mktmp()
+    try:
+        a = _field_run(p, 'A', 50)
+        b = _field_run(p, 'B', 40)
+        opts, err = sp.make_opts(x='field')
+        assert err is None, err
+        runs = sp.prepare_runs([a, b], opts)
+        assert [(r['name'], r['t0_um'], r['t0_src'], r['x_scale'])
+                for r in runs] == [('A', 50.0, 'setup.txt', 20.0),
+                                   ('B', 40.0, 'setup.txt', 25.0)]
+        fig = _drawn(runs, opts)
+        ax = fig.axes[0]
+        assert ax.get_xlabel() == FIELD_LABEL
+        assert fig.axes[1].get_xlabel() == FIELD_LABEL
+        assert ax.get_title(loc='left') == 'Active area vs field'
+        kvs = [0.5 * s for s in range(0, 9)]
+        for run, t0 in zip(runs, (50.0, 40.0)):
+            want = [kv * 1000.0 / t0 for kv in kvs]
+            curves = [list(l.get_xdata()) for l in ax.get_lines()
+                      if l.get_color() == run['color']
+                      and len(l.get_xdata()) == len(kvs)]
+            assert any(_close(c, want) for c in curves), (run['name'],
+                                                           curves)
+            # rows 13-15 confirm: two at 3.5 kV and one at 4.0 kV
+            marks = sorted(l.get_xdata()[0] for l in ax.get_lines()
+                           if l.get_marker() == 'X'
+                           and l.get_color() == run['color'])
+            assert _close(marks, [3500.0 / t0, 3500.0 / t0, 4000.0 / t0]), \
+                (run['name'], marks)
+        # the same runs on the kV axis are where they always were
+        kv_opts = sp.make_opts()[0]
+        fig = _drawn(sp.prepare_runs([a, b], kv_opts), kv_opts)
+        assert fig.axes[0].get_xlabel() == 'Nominal voltage (kV)'
+        assert any(_close(list(l.get_xdata()), kvs)
+                   for l in fig.axes[0].get_lines())
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_a_run_with_no_film_thickness_is_left_off_and_named_with_the_fix():
+    """`#398`: a run with no usable t0 cannot go on the field axis. ONE
+    warning names every such run with its reason and says how to add the
+    line by hand, since the plot tools never write setup.txt. Every other
+    axis reads no thickness and leaves every run on the figure."""
+    p = _mktmp()
+    try:
+        ok = _field_run(p, 'OK', 50)
+        absent = _field_run(p, 'ABSENT')
+        declined = _field_run(p, 'DECLINED', '(not specified)')
+        odd = _field_run(p, 'ODD', 'fifty microns')
+
+        def raw(d):
+            with open(os.path.join(d, 'setup.txt'), 'rb') as f:
+                return f.read()
+        before = {d: raw(d) for d in (ok, absent, declined, odd)}
+        warns = []
+        runs = sp.prepare_runs([ok, absent, declined, odd],
+                               sp.make_opts(x='field')[0], warns.append)
+        assert [r['name'] for r in runs] == ['OK']
+        assert runs[0]['color'] == sp.TOL_BRIGHT[0]
+        msgs = [w for w in warns if w.startswith('field axis:')]
+        assert len(msgs) == 1, warns
+        m = msgs[0]
+        assert '3 run(s) left off' in m, m
+        assert "ABSENT (no 'Film thickness:' line in its setup.txt)" in m, m
+        assert 'DECLINED (its setup.txt records it as (not specified))' \
+            in m, m
+        assert ("ODD (its setup.txt records 'fifty microns', which is not "
+                f"a thickness in {UM})") in m, m
+        assert "'Film thickness: 50 um'" in m, m
+        assert 'mounted and prestretched' in m and 'by hand' in m, m
+        assert 'never writes setup.txt' in m, m
+        for d, was in before.items():
+            assert raw(d) == was, d
+        assert sp.prepare_runs([absent], sp.make_opts(x='field')[0]) == []
+        for kw in ({}, {'mode': 'current'}, {'x': 'time'}):
+            warns = []
+            runs = sp.prepare_runs([ok, absent, declined, odd],
+                                   sp.make_opts(**kw)[0], warns.append)
+            assert len(runs) == 4, kw
+            assert not any('thickness' in w for w in warns), (kw, warns)
+            assert all(r['t0_um'] is None and r['x_scale'] == 1.0
+                       for r in runs), kw
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_the_figspec_fixes_each_t0_so_from_spec_redraws_after_an_edit():
+    """`#382`'s rule for group materials, applied to t0 (`#398`): read
+    from setup.txt when the figure is made, stored in the figspec, and
+    taken from there by --from-spec, so the re-render is the same figure
+    to the byte after the run's setup.txt changed, and says it drew the
+    stored number. A figure made afresh, or a spec re-rendered over other
+    runs, reads setup.txt as it is now."""
+    if not _has_mpl():
+        return
+    p = _mktmp()
+    outs = [_mktmp() for _ in range(4)]
+    out, again, fresh, other = outs
+    try:
+        a = _field_run(p, 'A', 50)
+        b = _field_run(p, 'B', 40)
+        rc, printed = _stdout_of(sp.main, [a, b, '--x', 'field',
+                                           '--aggregate', '--out', out,
+                                           '--stem', 'f'])
+        assert rc == 0, printed
+        assert ('A: 17 rows, 6 traced, breakdown row(s) [13, 14, 15], '
+                't0 50 um (setup.txt), first breakdown at 3.5 kV = 70 V/um'
+                in printed), printed
+        assert 't0 40 um (setup.txt), first breakdown at 3.5 kV = 87.5 V/um' \
+            in printed, printed
+        spec_path = os.path.join(out, 'f.figspec.json')
+        spec = _read_json(spec_path)
+        assert spec['opts']['x'] == 'field'
+        assert spec['opts']['film_thickness'] == [
+            [os.path.abspath(a), 50.0], [os.path.abspath(b), 40.0]], spec
+        _set_thickness(a, f"25 {UM}")             # somebody re-measured
+        rc, printed = _stdout_of(sp.main, ['--from-spec', spec_path,
+                                           '--out', again])
+        assert rc == 0, printed
+        for name in ('f.png', 'f.csv'):
+            with open(os.path.join(out, name), 'rb') as x, \
+                    open(os.path.join(again, name), 'rb') as y:
+                assert x.read() == y.read(), f"{name} moved"
+        assert _read_json(os.path.join(again, 'f.figspec.json'))['opts'] \
+            == spec['opts']
+        assert ('A: drawn at the film thickness this figure was made with, '
+                f"50 {UM} (its figspec); its setup.txt now records "
+                f"'25 {UM}'") in printed, printed
+        assert 't0 50 um (figspec)' in printed, printed
+        # made afresh: the new number
+        assert sp.main([a, b, '--x', 'field', '--out', fresh, '--stem',
+                        'f']) == 0
+        assert _read_json(os.path.join(fresh, 'f.figspec.json'))['opts'][
+            'film_thickness'][0] == [os.path.abspath(a), 25.0]
+        # this spec over other runs: theirs, read now, and only theirs
+        c = _field_run(p, 'C', 20)
+        assert sp.main([c, '--from-spec', spec_path, '--out', other]) == 0
+        assert _read_json(os.path.join(other, 'f.figspec.json'))['opts'][
+            'film_thickness'] == [[os.path.abspath(c), 20.0]]
+    finally:
+        for d in [p] + outs:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_field_aggregate_interpolates_onto_the_field_grid():
+    """`#398`. Interpolated pooling works on the field grid, capped at the
+    lowest breakdown FIELD and saying so in V/um."""
+    if not _has_mpl():
+        return
+    p = _mktmp()
+    try:
+        a = _field_run(p, 'A', 50)
+        b = _field_run(p, 'B', 40)
+        warns = []
+        opts = sp.make_opts(x='field', aggregate=True)[0]
+        fig = _drawn(sp.prepare_runs([a, b], opts), opts, warns.append)
+        agg = _thick(fig)
+        assert len(agg) == 1, agg
+        want = sorted({round(k * 0.5 * 1000.0 / t0, 3)
+                       for t0 in (50, 40) for k in range(0, 9)})
+        assert list(agg[0].get_xdata()) == [x for x in want if x < 70.0]
+        assert f"Stops at 70 V/{UM}, the first current-confirmed " \
+            f"breakdown." in _caption(fig)
+        assert any(f"capped at 70 V/{UM}" in w for w in warns), warns
+        assert any(f"V/{UM}, " in w and 'thinnest measured support' in w
+                   for w in warns), warns
+        assert not any('across films' in w for w in warns), warns
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_exact_field_pooling_counts_the_levels_where_films_meet():
+    """`#398`, owner decision 2026-10-07: exact-key pooling on the field
+    axis pools as it does on the kV axis, n per level, and is never
+    refused. Two films of different thickness share a field level only
+    where V1/t1 = V2/t2: 0 V/um for every pair, every 20 V/um for 25 and
+    50 um films on these 0.5 kV steps, and nothing else for 47 and 50 um.
+    The console and the caption say how many levels hold more than one
+    thickness; one film says nothing; a group is judged on its own runs."""
+    if not _has_mpl():
+        return
+    p = _mktmp()
+    try:
+        f25 = _field_run(p, 'F25', 25)
+        f47 = _field_run(p, 'F47', 47)
+        f50 = _field_run(p, 'F50', 50)
+        s50 = _field_run(p, 'S50', 50)
+        opts = sp.make_opts(x='field', aggregate=True,
+                            aggregate_exact=True)[0]
+        # every run breaks at 3.5 kV, so the cap is the 50 um film's 70
+        for pair, shared, total in (((f25, f50), 4, 7), ((f47, f50), 1, 13)):
+            runs = sp.prepare_runs(list(pair), opts)
+            ag = sp.aggregate_levels(runs, exact=True)
+            assert len(ag) == total, ag
+            assert sum(1 for l in ag if l['n'] == 2) == shared, ag
+            if shared == 4:
+                assert [(l['kv'], l['n']) for l in ag] == [
+                    (0.0, 2), (10.0, 1), (20.0, 2), (30.0, 1), (40.0, 2),
+                    (50.0, 1), (60.0, 2)], ag
+            else:
+                # 0.5 kV over 47 um is 10.638 V/um, which no multiple of
+                # 10 meets below the cap: the films share 0 V/um alone
+                assert [l['kv'] for l in ag if l['n'] == 2] == [0.0], ag
+            warns = []
+            fig = _drawn(runs, opts, warns.append)
+            agg = _thick(fig)
+            assert len(agg) == 1, 'the exact mean must be drawn'
+            assert list(agg[0].get_xdata()) == [l['kv'] for l in ag]
+            t0s = ', '.join(f"{r['t0_um']:g}"
+                            for r in sorted(runs, key=lambda r: r['t0_um']))
+            note = (f"{shared} of {total} levels hold more than one "
+                    f"thickness")
+            assert any(w.startswith('aggregate: exact-level pooling across '
+                                    'films of different thickness')
+                       and f"({t0s} {UM})" in w and note in w
+                       and 'V1/t1 = V2/t2' in w for w in warns), warns
+            cap = _caption(fig)
+            assert 'V1/t1 = V2/t2' in cap, cap
+            assert f"aggregate ({t0s} {UM}): {note}" in cap, cap
+            assert 'NOT drawn' not in cap
+        # one film: the kV pooling rescaled, and nothing to say
+        warns = []
+        fig = _drawn(sp.prepare_runs([f50, s50], opts), opts, warns.append)
+        assert list(_thick(fig)[0].get_xdata()) == [10.0 * k
+                                                    for k in range(0, 7)]
+        assert not any('across films' in w for w in warns), warns
+        assert 'across films' not in _caption(fig)
+        # grouped: each group is judged on its own runs
+        groups = [['mixed', [f25, f50]], ['fifty', [s50]]]
+        gopts = sp.make_opts(x='field', aggregate=True, aggregate_exact=True,
+                             groups=groups)[0]
+        warns = []
+        fig = _drawn(sp.prepare_runs([f25, f50, s50], gopts), gopts,
+                     warns.append)
+        labels = _agg_lines(fig)
+        assert any(t.startswith('mixed') for t in labels), labels
+        assert any(t.startswith('fifty') for t in labels), labels
+        across = [w for w in warns if 'across films' in w]
+        assert len(across) == 1 and across[0].startswith("group 'mixed'"), \
+            warns
+        assert (f"group 'mixed' (25, 50 {UM}): 4 of 7 levels hold more "
+                f"than one thickness") in _caption(fig)
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_a_dollar_in_a_mixed_film_group_name_is_drawn_as_typed():
+    """`#391` x `#398`: the mixed-films caption names its group, and a '$'
+    pair in that name made a caption row mathtext ("mi$x$ed" came out as
+    "mi", an italic x and "ed") until the name went through _shown like
+    every other drawn name. No row is math at any width, and the name
+    reads as typed once matplotlib unescapes it; the console warning
+    keeps the name as typed."""
+    if not _has_mpl():
+        return
+    from matplotlib import cbook
+    p = _mktmp()
+    try:
+        f25 = _field_run(p, 'F25', 25)
+        f50 = _field_run(p, 'F50', 50)
+        s50 = _field_run(p, 'S50', 50)
+        name = 'mi$x$ed'
+        groups = [[name, [f25, f50]], ['fifty', [s50]]]
+        opts = sp.make_opts(x='field', aggregate=True, aggregate_exact=True,
+                            groups=groups)[0]
+        warns = []
+        fig = _drawn(sp.prepare_runs([f25, f50, s50], opts), opts,
+                     warns.append)
+        assert any(w.startswith(f"group {name!r}") for w in warns), warns
+        for width in (12.6, 7.0, 4.5):
+            fig.set_size_inches(width, 5.4)
+            assert sp.relayout(fig)
+            rows = _caption_rows(fig)
+            for row in rows:
+                assert not cbook.is_math_text(row), (width, row)
+            shown = ' '.join(r.replace(r'\$', '$') for r in rows)
+            assert f"group {name!r}" in ' '.join(shown.split()), \
+                (width, shown)
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_an_updown_run_on_the_field_axis_draws_its_legs_at_v_over_t0():
+    """`#398`, review 2026-10-07: a run whose voltage also fell is drawn
+    leg by leg (_draw_area_legs), a path of its own beside the per-level
+    one, so it gets a pin of its own: its triangles, its two leg lines
+    and its arrows sit at kV x 1000 / t0, and so does its aggregate, which
+    takes the first rising leg."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        rd = os.path.join(d, 'UD_run')
+        _fake_run(rd, _updown_rows())
+        _set_thickness(rd, '40 um')
+        opts = sp.make_opts(x='field')[0]
+        runs = sp.prepare_runs([rd], opts)
+        assert runs and runs[0]['x_scale'] == 25.0, runs
+        assert sp.multi_leg(runs[0])
+        ax = _drawn(runs, opts).axes[0]
+        assert sorted(x for x, _y in _marked(ax, '^')) == [
+            0.0, 12.5, 25.0, 37.5]
+        assert sorted(x for x, _y in _marked(ax, 'v')) == [12.5, 25.0]
+        legs = sorted(tuple(float(x) for x in ln.get_xdata())
+                      for ln in ax.get_lines()
+                      if ln.get_marker() in ('None', '', None)
+                      and len(ln.get_xdata()) > 1)
+        assert legs == [(0.0, 12.5, 25.0, 37.5), (37.5, 25.0, 12.5)], legs
+        arrows = _arrows(ax)
+        assert arrows, 'no direction arrows on an up/down run'
+        assert max(max(tx, hx) for tx, _ty, hx, _hy in arrows) > 1.5, \
+            arrows
+        aopts = sp.make_opts(x='field', aggregate=True)[0]
+        fig = _drawn(sp.prepare_runs([rd], aopts), aopts)
+        assert list(_thick(fig)[0].get_xdata()) == [0.0, 12.5, 25.0, 37.5]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_field_axis_options_are_checked_like_every_other():
+    """`#398`: the field axis keeps every kV option, since it is the kV
+    axis rescaled per run, and refuses --vs-area, the other x switch. Its
+    stored thicknesses are canonical, survive JSON, and are validated
+    rather than repaired."""
+    import json
+    o, err = sp.make_opts(x='field', prepost=True, mean=True,
+                          aggregate=True, aggregate_exact=True)
+    assert err is None and o['x'] == 'field', err
+    for mode in ('current', 'power'):
+        assert sp.make_opts(mode=mode, x='field')[1] is None, mode
+    o, err = sp.make_opts(mode='current', x='field', vs_area=True)
+    assert o is None and err == ('--x field and --vs-area both choose the '
+                                 'x axis -- pick one'), err
+    assert sp.make_opts(mode='current', x='time', vs_area=True)[1] == \
+        '--x time and --vs-area both choose the x axis -- pick one'
+    o, err = sp.make_opts(x='field', film_thickness=[('somerun', 50)])
+    assert err is None, err
+    assert o['film_thickness'] == [[os.path.abspath('somerun'), 50.0]]
+    assert json.loads(json.dumps(o)) == o
+    for bad, needle in ((['x'], 'pair'), ('50', 'list of'),
+                        ([['r', 0]], 'positive'), ([['r', -1.0]], 'positive'),
+                        ([['r', float('nan')]], 'positive'),
+                        ([['r', True]], 'positive'), ([['r', '50']],
+                                                      'positive'),
+                        ([['', 50]], 'run directory'),
+                        ([['r', 50, 1]], 'run directory'),
+                        ([['r', 50], ['r', 40]], 'two film thicknesses')):
+        o, err = sp.make_opts(film_thickness=bad)
+        assert o is None and needle in (err or ''), (bad, err)
+    # a spec's thicknesses travel through the command line's rebuild
+    spec_opts = sp.make_opts(x='field',
+                             film_thickness=[['r', 40.0]])[0]
+    back, err = sp._cli_opts(set(), {}, dict(spec_opts))
+    assert err is None and back == spec_opts, (back, err)
+    parsed = sp._parse_argv(['somerun', '--x', 'field'])
+    _args, flags, vals = parsed
+    assert sp._cli_opts(flags, vals)[0]['x'] == 'field'
+
+
+def test_a_thickness_too_large_for_a_float_is_refused_not_a_crash():
+    """Review 2026-10-07: a JSON integer too large for a float (here 400
+    digits, from a hand-edited figspec) made math.isfinite raise
+    OverflowError out of make_opts. It is refused like any other bad
+    thickness, and --from-spec says so and exits 2."""
+    import json
+    huge = 10 ** 400
+    o, err = sp.make_opts(x='field', film_thickness=[['r', huge]])
+    assert o is None and 'positive number' in (err or ''), err
+    out = _mktmp()
+    try:
+        path = os.path.join(out, 'huge.figspec.json')
+        opts = dict(sp.make_opts(x='field')[0],
+                    film_thickness=[[os.path.join(out, 'r'), huge]])
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({'spec_version': sp.SPEC_VERSION, 'stem': 's',
+                       'runs': [os.path.join(out, 'r')], 'opts': opts}, f)
+        rc, printed = _stdout_of(sp.main, ['--from-spec', path, '--out',
+                                           out])
+        assert rc == 2, (rc, printed)
+        assert 'film thickness entry' in printed, printed
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_the_tidy_csv_carries_t0_and_the_field_on_a_field_figure_only():
+    """`#398`: the tidy CSV is the figure's evidence, and a field figure's
+    x cannot be recovered from its kV column. So it carries the t0 the
+    figure used and each row's field, and on any other figure, which
+    reads no thickness, both columns are blank."""
+    if not _has_mpl():
+        return
+    p, out = _mktmp(), _mktmp()
+    try:
+        a = _field_run(p, 'A', 40)
+        opts = sp.make_opts(x='field')[0]
+        _png, tidy = sp.export(sp.prepare_runs([a], opts), opts, out, 'f')
+        with open(tidy, newline='', encoding='utf-8') as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) == 17
+        for r in rows:
+            assert r['film_thickness_um'] == '40.0', r
+            assert abs(float(r['field_V_per_um'])
+                       - float(r['nominal_kV']) * 25.0) < 1e-9, r
+        opts = sp.make_opts()[0]
+        png, tidy = sp.export(sp.prepare_runs([a], opts), opts, out, 'k')
+        with open(tidy, newline='', encoding='utf-8') as f:
+            rows = list(csv.DictReader(f))
+        assert {r['film_thickness_um'] for r in rows} == {''}
+        assert {r['field_V_per_um'] for r in rows} == {''}
+        assert _read_json(sp.figspec_path(png))['opts'][
+            'film_thickness'] == []
+    finally:
+        for d in (p, out):
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_field_caption_says_the_field_is_nominal_and_names_t0():
+    """`#398`: the caption says the field is NOMINAL, V / t0 with t0
+    measured mounted and prestretched, on every field figure, and names
+    t0 when every run shares one. The kV figure keeps its sentence."""
+    if not _has_mpl():
+        return
+    p = _mktmp()
+    try:
+        a = _field_run(p, 'A', 50)
+        b = _field_run(p, 'B', 50)
+        c = _field_run(p, 'C', 40)
+        head = f"X axis: nominal field E = V / t₀ in V/{UM}"
+        opts = sp.make_opts(x='field')[0]
+        cap = _caption(_drawn(sp.prepare_runs([a, b], opts), opts))
+        assert head in cap, cap
+        assert ("measured mounted and prestretched (50 "
+                f"{UM} on every run)") in cap, cap
+        assert 'does not follow the film thinning' in cap, cap
+        assert 'X axis: nominal kV' not in cap, cap
+        cap = _caption(_drawn(sp.prepare_runs([a, c], opts), opts))
+        assert '(per run in the tidy CSV and the figspec)' in cap, cap
+        for kw in ({'mode': 'current'}, {'mode': 'power'},
+                   {'aggregate': True, 'aggregate_only': True}):
+            o = sp.make_opts(x='field', **kw)[0]
+            cap = _caption(_drawn(sp.prepare_runs([a, b], o), o))
+            assert head in cap, (kw, cap)
+        o = sp.make_opts()[0]
+        assert ('X axis: nominal kV (measured_kV telemetry incomplete on '
+                'all runs).') in _caption(_drawn(sp.prepare_runs([a], o), o))
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_current_and_power_go_on_the_field_axis_with_power_still_in_kv():
+    """`#398`: the per-snapshot figures move along x only. Power is still
+    |kV x (uA - median)|: the field is where a point sits, never a factor
+    in what it measures."""
+    if not _has_mpl():
+        return
+    p = _mktmp()
+    try:
+        a = _field_run(p, 'A', 40)
+        for mode in ('current', 'power'):
+            lines = {}
+            for x in ('kv', 'field'):
+                o = sp.make_opts(mode=mode, x=x)[0]
+                fig = _drawn(sp.prepare_runs([a], o), o)
+                ax = fig.axes[0]
+                assert ax.get_xlabel() == (FIELD_LABEL if x == 'field'
+                                           else 'Nominal voltage (kV)')
+                data = [l for l in ax.get_lines()
+                        if l.get_linestyle() == '-' and len(l.get_xdata())
+                        == 17]
+                assert len(data) == 1, (mode, x)
+                lines[x] = data[0]
+            assert _close(list(lines['field'].get_xdata()),
+                          [v * 25.0 for v in lines['kv'].get_xdata()])
+            assert list(lines['field'].get_ydata()) == \
+                list(lines['kv'].get_ydata()), mode
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
 
 
 def _run():

@@ -1558,7 +1558,9 @@ def watchdog_record(ticked, armed, dry, trip_ua, confirm_s):
 NSIGMA_DEFAULTS = {
     'n_sigma': 5.0,         # the bar is n_sigma x sigma ...
     'dev_min': 20.0,        # ... or this many uA, whichever is larger
-    'window': 40,           # quiet reads behind location and sigma (20 s)
+    'window': 40,           # quiet reads behind location and sigma; about
+                            # 24 s at the recorded 0.59 to 0.61 s mean tick
+                            # (#424), not 20 s: the 0.5 s gate is a minimum
     'k_consec': 2,          # away reads in a row that would trip it
     'sigma_floor': 0.5,     # uA; sigma is never taken below this
     'guard': 2,             # newest quiet reads left out of the window

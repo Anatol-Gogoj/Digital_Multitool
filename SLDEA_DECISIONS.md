@@ -3226,9 +3226,12 @@ and worker over the scope-lock suite's fakes.
    went to its end unarmed. `test_sldea_watchdog_default` now lands the
    change inside the pre-flight both ways, and that mutant fails it.
 7. Ticked on a LIVE run, a Trip or Confirm that is not a finite number
-   above zero refuses Run before any question, with a message naming the
-   box. A DRY run and an unticked LIVE run arm nothing from the boxes and
-   keep the old fallback.
+   above zero refuses Run before any HV question, with a message naming
+   the box. The start gate's "Stepped sweep still running" and the video
+   pre-flight's questions can come first; neither writes to an
+   instrument, and both are asked again on the next press. A DRY run and
+   an unticked LIVE run arm nothing from the boxes and keep the old
+   fallback.
 8. For the second observation the owner chose to run on with a truthful
    record (2026-10-08): a ticked LIVE run that reaches the worker's
    arming line with no scope goes on unwatched, run.log gets a

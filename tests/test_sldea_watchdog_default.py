@@ -526,11 +526,14 @@ def test_the_watchdog_boxes_parse_to_positive_finite_numbers_only():
 
 def test_a_ticked_live_run_refuses_a_trip_or_confirm_it_cannot_use():
     """HV review 2026-10-08: ticked on a LIVE run, a Trip or Confirm that
-    is not a finite number above zero refuses Run before any question,
+    is not a finite number above zero refuses Run before any HV question,
     with a message naming the box. The fault predates #406, but the
     records now quote these boxes as the rule: "abc" used to run as
     100 uA / 3 s unsaid, nan and inf never trip, a zero or negative trip
-    fires on every read. Nothing is asked, driven or made."""
+    fires on every read. The start gate's "Stepped sweep still running"
+    and the video pre-flight's questions can come first (final HV review
+    2026-10-08, finding 2); neither asks here, so nothing is asked,
+    driven or made."""
     for key, box, default in (('wd_ua', 'Trip (µA)', '100'),
                               ('wd_s', 'Confirm (s)', '3')):
         for bad in BAD_WATCHDOG_VALUES:

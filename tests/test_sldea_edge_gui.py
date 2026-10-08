@@ -8685,14 +8685,17 @@ def _run():
         collection is _reap()'s. Still a failure of the case, because only
         the case can join while its own references hold the app, as
         test_closing_mid_pass_leaves_nothing_scheduled does."""
+        # A _DummyThread is one Python did not start (a foreign thread that
+        # called in). It cannot be joined, and is_alive() on one raises
+        # on 3.13 and asserts on the bench's 3.11, so it is left out
+        # rather than let this guard end the run.
         left = [t for t in threading.enumerate()
-                if t not in before and t.is_alive()]
+                if t not in before
+                and not isinstance(t, threading._DummyThread)
+                and t.is_alive()]
         names = []
         for t in left:
-            try:
-                t.join(15.0)
-            except RuntimeError:        # a thread Python did not start
-                pass
+            t.join(15.0)
             names.append(t.name + (' (still running after 15 s)'
                                    if t.is_alive() else ''))
         return names

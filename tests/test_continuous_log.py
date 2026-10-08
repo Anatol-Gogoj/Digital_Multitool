@@ -23,6 +23,7 @@ import math
 import shutil
 import tempfile
 import threading
+import time
 
 import continuous_log as cl
 
@@ -62,11 +63,34 @@ def test_switching_the_unit_keeps_the_cadence():
     assert cl.convert_text('2', 'Hz', 's') == '0.5'
     third = cl.convert_text('3', 's', 'Hz')
     assert third == '0.333333', third
-    assert cl.convert_text(third, 'Hz', 's') == '3'    # 6 digits round-trip
+    assert cl.convert_text(third, 'Hz', 's') == '3'    # not always: below
     # same unit, or text that is not a cadence: left exactly as typed
     assert cl.convert_text('1.50', 's', 's') == '1.50'
     for text in ('', 'abc', '0', '-1', 'nan'):
         assert cl.convert_text(text, 's', 'Hz') == text, text
+
+
+def test_a_unit_switch_moves_the_cadence_by_at_most_5_ppm():
+    """`#389`: fmt_number's docstring promised that 6 significant digits
+    make s -> Hz -> s an exact round trip. They do not: 7 s comes back as
+    7.00001 s. Each switch rounds to 6 digits, which moves the cadence by
+    at most half a unit in the 6th digit (5 ppm), and that bound is what
+    the docstring now says."""
+    hz = cl.convert_text('7', 's', 'Hz')
+    assert hz == '0.142857', hz
+    assert cl.convert_text(hz, 'Hz', 's') == '7.00001'
+    assert math.isclose(cl.parse_cadence(hz, 'Hz'), 7.0, rel_tol=5e-6)
+    # the bound, over cadences from 0.1 ms to 10000 s
+    for k in range(-1000, 1001):
+        text = cl.fmt_number(10 ** (k / 250))
+        seconds = float(text)
+        hz = cl.convert_text(text, 's', 'Hz')
+        # Start reads the Hz box: one rounding away from the typed cadence
+        assert math.isclose(cl.parse_cadence(hz, 'Hz'), seconds,
+                            rel_tol=5e-6), (text, hz)
+        # switching back rounds once more
+        back = float(cl.convert_text(hz, 'Hz', 's'))
+        assert math.isclose(back, seconds, rel_tol=1e-5), (text, hz, back)
 
 
 def test_the_box_refuses_empty_non_numeric_zero_negative_and_non_finite():
@@ -222,6 +246,108 @@ def test_min_and_max_accumulate_and_bad_reads_never_poison_them():
     assert cl.fmt_value(None, 'V') == '--'
 
 
+def test_an_overload_code_never_becomes_a_min_or_a_max():
+    """`#389`: as_number took anything float() parses, so a DMM that
+    answers an overload with a bare 9.9E37 would have set Max to it for
+    the rest of the run. SCPI's no-number codes (+-9.9E37, 9.91E37) and
+    anything larger now come back None, like the scope's do in its
+    driver; ordinary large readings are still numbers."""
+    for code in (9.9e37, -9.9e37, 9.91e37, '9.9E37', '+9.90000000E+37',
+                 '-9.9E+37', 1e300):
+        assert cl.as_number(code) is None, code
+    for value in (1.2e9, -4.5e8, 3.3e-12, 0.0):
+        assert cl.as_number(value) == value, value
+    st = cl.LiveStats(1.0)
+    for v in (2.0, 9.9e37, 5.0, -9.9e37, 9.91e37, 3.0):
+        st.record('DMM', [('DC Voltage', v, 'V')])
+    r = _row(st, 'DMM', 'DC Voltage')
+    assert (r['current'], r['min'], r['max']) == (3.0, 2.0, 5.0), r
+    assert r['good'] == 3 and r['missed'] == 3, r
+    st.record('DMM', [('DC Voltage', 9.9e37, 'V')])
+    assert _row(st, 'DMM', 'DC Voltage')['current'] is None
+    # the supply's power is V * I: a code times a current is no reading
+    # either, though at 2.97e37 it is under the code itself
+    reading = {'set_voltage_v': 12.0, 'meas_voltage_v': 9.9e37,
+               'meas_current_a': 0.3, 'power_w': 9.9e37 * 0.3}
+    assert cl.psu_quantities(reading)[3] == ('Power', None, 'W')
+    # the current is the other factor: at 0 V a current code makes 0 W
+    off = {'set_voltage_v': 0.0, 'meas_voltage_v': 0.0,
+           'meas_current_a': 9.9e37, 'power_w': 0.0 * 9.9e37}
+    assert off['power_w'] == 0.0
+    assert cl.psu_quantities(off)[3] == ('Power', None, 'W')
+    st.record('DC Supply CH1', cl.psu_quantities(reading))
+    st.record('DC Supply CH1', cl.psu_quantities(
+        {'set_voltage_v': 12.0, 'meas_voltage_v': 11.9,
+         'meas_current_a': 0.3, 'power_w': 3.57}))
+    for q, top in (('Meas V', 11.9), ('Meas A', 0.3), ('Power', 3.57)):
+        r = _row(st, 'DC Supply CH1', q)
+        assert r['max'] == top, r
+    assert _row(st, 'DC Supply CH1', 'Power')['missed'] == 1
+
+
+def test_a_source_that_fails_from_its_first_read_still_gets_a_row():
+    """`#389`: record_failure marked only rows that already existed, so a
+    source whose first read raised was missing from the table and its
+    failure showed only in Log Status. It now gets one '(read failed)'
+    stand-in row until its first good read replaces it."""
+    assert cl.READ_FAILED == '(read failed)'
+    st = cl.LiveStats(1.0)
+    st.record('LCR', cl.lcr_quantities('CPD', 1e3, 3.3e-9, 0.002, 0))
+    st.record_failure('DMM')
+    st.record_failure('DMM')
+    rows, _t, _s = st.snapshot()
+    assert [(r['source'], r['quantity']) for r in rows] == [
+        ('LCR', 'Test frequency'), ('LCR', 'Cp'), ('LCR', 'D'),
+        ('DMM', '(read failed)')], rows
+    r = _row(st, 'DMM', '(read failed)')
+    assert (r['current'], r['min'], r['max']) == (None, None, None), r
+    assert (r['good'], r['missed']) == (0, 2), r
+    # the first good read replaces the stand-in; its misses carry over
+    st.record('DMM', cl.dmm_quantities('DC Voltage', 0.5, 'V'))
+    rows, _t, _s = st.snapshot()
+    assert [r['quantity'] for r in rows if r['source'] == 'DMM'] == [
+        'DC Voltage'], rows
+    r = _row(st, 'DMM', 'DC Voltage')
+    assert (r['current'], r['min'], r['max']) == (0.5, 0.5, 0.5), r
+    assert (r['good'], r['missed']) == (1, 2), r
+    # a source that has rows: a failure marks them, and no stand-in
+    st.record_failure('DMM')
+    rows, _t, _s = st.snapshot()
+    assert [r['quantity'] for r in rows if r['source'] == 'DMM'] == [
+        'DC Voltage'], rows
+    assert _row(st, 'DMM', 'DC Voltage')['missed'] == 3
+    # every row a stand-in turns into starts with its misses
+    st.record_failure('DC Supply CH1')
+    st.record('DC Supply CH1', cl.psu_quantities(
+        {'set_voltage_v': 12.0, 'meas_voltage_v': 11.9,
+         'meas_current_a': 0.3, 'power_w': 3.57}))
+    for q in ('Set V', 'Meas V', 'Meas A', 'Power'):
+        r = _row(st, 'DC Supply CH1', q)
+        assert (r['good'], r['missed']) == (1, 1), r
+    # the other source never noticed
+    assert _row(st, 'LCR', 'Cp')['current'] == 3.3e-9
+
+
+def test_a_read_with_no_numbers_keeps_the_stand_in():
+    """A read that raises nothing but yields no rows (a BSWV reply with no
+    numeric keys gives sg_quantities nothing) has nothing to show, so the
+    '(read failed)' stand-in stays, with its misses, until a read yields
+    rows. Review of `#389`: the stand-in used to go on any read that did
+    not raise, taking the source out of the table."""
+    st = cl.LiveStats(1.0)
+    st.record_failure('SigGen CH1')
+    st.record_failure('SigGen CH1')
+    empty = cl.sg_quantities({'WVTP': 'SINE'})
+    assert empty == [], empty
+    st.record('SigGen CH1', empty)
+    r = _row(st, 'SigGen CH1', '(read failed)')
+    assert (r['current'], r['good'], r['missed']) == (None, 0, 2), r
+    st.record('SigGen CH1', cl.sg_quantities({'WVTP': 'SINE', 'FRQ': 100.0}))
+    rows, _t, _s = st.snapshot()
+    assert [(r['quantity'], r['current'], r['good'], r['missed'])
+            for r in rows] == [('Frequency', 100.0, 1, 2)], rows
+
+
 def test_start_is_the_reset():
     """start_logging makes a NEW LiveStats per run (asserted against the
     real app below); a new one holds nothing of the old."""
@@ -275,6 +401,7 @@ def test_source_rows_mirror_the_csv_columns():
                               'meas_current_a': 0.3, 'power_w': 3.57})
     assert [q for q, _v, _u in rows] == ['Set V', 'Meas V', 'Meas A',
                                          'Power']
+    assert rows[3] == ('Power', 3.57, 'W'), rows
     assert cl.dmm_quantities('DC Voltage', 0.1, 'V') == [
         ('DC Voltage', 0.1, 'V')]
 
@@ -290,31 +417,83 @@ def test_the_summary_line_counts_samples_and_skipped_slots():
     assert cl.summary_line(0, 0, None, False) == 'Stopped: 0 samples'
 
 
+def test_the_skipped_count_stays_readable_at_an_absurd_cadence():
+    """`#389`: main's > 0 bound accepts 1e-12 s, and there 50 ms of reads
+    skip about 5e10 slots a tick. The line shows the count exactly up to
+    a million and "over 1,000,000" beyond. Only the text is capped: the
+    count, the grid and what the box accepts stay as they were."""
+    assert cl.parse_cadence('1e-12', 's') == 1e-12       # still accepted
+    slot, due, skipped = cl.next_tick(0.0, 1e-12, 0, 0.05)
+    assert skipped > 4e10 and math.isclose(due, 0.05, abs_tol=1e-9), (
+        slot, due, skipped)
+    st = cl.LiveStats(1e-12)
+    st.tick(skipped)
+    _rows, ticks, total = st.snapshot()
+    assert total == skipped                    # the count is not capped
+    assert cl.summary_line(ticks, total, 1e-12, True) == (
+        'Running: 1 sample, every 1e-12 s (1e+12 Hz); over 1,000,000 '
+        'slots skipped (reads took longer than the cadence)')
+    head = 'Stopped: 5 samples, every 1 s (1 Hz); '
+    tail = ' skipped (reads took longer than the cadence)'
+    for n, words in ((1, '1 slot'), (12345, '12,345 slots'),
+                     (cl.SKIPPED_SHOWN_MAX, '1,000,000 slots'),
+                     (cl.SKIPPED_SHOWN_MAX + 1, 'over 1,000,000 slots'),
+                     (10 ** 15, 'over 1,000,000 slots')):
+        line = cl.summary_line(5, n, 1.0, False)
+        assert line == head + words + tail, (n, line)
+
+
 def test_live_stats_survive_a_writer_and_a_reader_at_once():
-    """The worker writes while the Tk thread snapshots."""
+    """The worker writes while the Tk thread snapshots, and a run adds
+    rows as it goes (a source's first good read, an LCR mode change), so
+    the writer adds a new row on every read. `#389`: with one fixed row
+    this test passed with LiveStats' lock replaced by a no-op. The switch
+    interval is cut from the default 5 ms to 1 us so the threads trade
+    the GIL far more often; without the lock the reader's snapshot meets
+    "dictionary changed size during iteration" (or a row with a min and
+    no max yet) within milliseconds: 1000 of 1000 runs failed on Windows
+    and on WSL Debian, Python 3.13, 2026-10-06. With the lock the race
+    runs its 0.2 s."""
     st = cl.LiveStats(0.01)
     stop = threading.Event()
+    errors, wrote = [], []
 
     def writer():
         i = 0
-        while not stop.is_set():
-            st.record('DMM', [('DC Voltage', float(i % 100), 'V')])
-            st.tick()
-            i += 1
+        try:
+            while not stop.is_set():
+                st.record('DMM', [(f'Q{i}', float(i), 'V')])
+                st.tick()
+                i += 1
+        except Exception as e:             # reported by the reader below
+            errors.append(e)
+        wrote.append(i)
 
-    t = threading.Thread(target=writer, daemon=True)
-    t.start()
+    saved = _sys.getswitchinterval()
+    t = None
     try:
-        for _ in range(2000):
-            rows, ticks, _s = st.snapshot()
+        # inside the try, so a writer that fails to start still gets the
+        # switch interval put back
+        _sys.setswitchinterval(1e-6)
+        t = threading.Thread(target=writer, daemon=True)
+        t.start()
+        deadline = time.monotonic() + 0.2
+        while time.monotonic() < deadline:
+            rows, _ticks, _s = st.snapshot()
             for r in rows:
                 if r['min'] is not None:
-                    assert r['min'] <= r['max'], r
+                    assert r['max'] is not None and r['min'] <= r['max'], r
     finally:
         stop.set()
-        t.join(5)
-    r = _row(st, 'DMM', 'DC Voltage')
-    assert (r['min'], r['max']) == (0.0, 99.0) or st.ticks < 100, r
+        if t is not None and t.is_alive():
+            t.join(5)
+        _sys.setswitchinterval(saved)
+    assert not errors and wrote, (errors, wrote)
+    # nothing the writer did was lost or garbled
+    rows, ticks, _s = st.snapshot()
+    assert ticks == wrote[0], (ticks, wrote)
+    assert [(r['quantity'], r['min'], r['max']) for r in rows] == [
+        (f'Q{i}', float(i), float(i)) for i in range(wrote[0])]
 
 
 # --------------------------------------------------------------------------
@@ -433,6 +612,62 @@ def test_the_loop_feeds_min_max_and_leaves_the_csvs_as_they_were():
         assert len(data) == 1 + 5, data
     finally:
         shutil.rmtree(tmp)
+
+
+def _dmm_csv_values(tmp):
+    files = [f for f in _os.listdir(tmp) if f.startswith('dmm_')]
+    assert len(files) == 1, files
+    with open(_os.path.join(tmp, files[0]), newline='') as fh:
+        return [row[2] for row in list(csv.reader(fh))[1:]]
+
+
+def test_the_loop_keeps_an_overload_code_in_the_csv_but_not_in_max():
+    """`#389`: a bare 9.9E37 from the DMM stays in the CSV exactly as the
+    meter answered it (the CSV is the raw record, and the code is plain to
+    see there), while the live table shows -- and keeps it out of min and
+    max."""
+    tmp = tempfile.mkdtemp(prefix='contlog_')
+    try:
+        app = _LoopApp()
+        app.dmm = _FakeDMM(app, [1.5, 9.9e37, 2.0])
+        stats = cl.LiveStats(0.001)
+        app._log_gen = tok = object()
+        app.logging_loop(0.001, _cfg(tmp, stats), tok)
+        r = _row(stats, 'DMM', 'DC Voltage')
+        assert (r['current'], r['min'], r['max']) == (2.0, 1.5, 2.0), r
+        assert (r['good'], r['missed']) == (2, 1), r
+        assert _dmm_csv_values(tmp) == ['1.5', '9.9e+37', '2.0']
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_the_loop_shows_a_source_whose_first_read_fails():
+    """`#389`: the DMM's first read raises. The table gets a '(read
+    failed)' row for it at once (the error is in Log Status as before),
+    and its first good read takes that row's place."""
+    for script, want in (
+            ([IOError('socket closed')],
+             [('(read failed)', None, 0, 1)]),
+            ([IOError('socket closed'), 0.25],
+             [('DC Voltage', 0.25, 1, 1)])):
+        tmp = tempfile.mkdtemp(prefix='contlog_')
+        try:
+            app = _LoopApp()
+            app.dmm = _FakeDMM(app, script)
+            stats = cl.LiveStats(0.001)
+            app._log_gen = tok = object()
+            app.logging_loop(0.001, _cfg(tmp, stats), tok)
+            rows, ticks, _s = stats.snapshot()
+            got = [(r['quantity'], r['current'], r['good'], r['missed'])
+                   for r in rows if r['source'] == 'DMM']
+            assert got == want, (script, got)
+            assert ticks == len(script), ticks
+            assert any('DMM error: socket closed' in m for m in app.lines)
+            # the raised read wrote no CSV row, as before
+            assert _dmm_csv_values(tmp) == [
+                str(v) for v in script if not isinstance(v, Exception)]
+        finally:
+            shutil.rmtree(tmp)
 
 
 class _FakeLCR:
@@ -747,6 +982,44 @@ def test_start_hands_the_worker_seconds_and_a_fresh_live_table():
     finally:
         gui.messagebox = saved
         shutil.rmtree(tmp, ignore_errors=True)
+        root.destroy()
+
+
+def test_the_table_shows_a_failing_source_and_drops_its_stand_in():
+    """`#389`: a source whose first read raised shows as '(read failed)';
+    once it reads, that row leaves the table rather than sitting there
+    stale beside the real ones."""
+    root, app = _app()
+    if root is None:
+        return
+    try:
+        stats = cl.LiveStats(1.0)
+        app._log_live_show(stats)
+        tree = app.log_live_tree
+
+        def shown():
+            return [tree.item(i, 'values') for i in tree.get_children()]
+
+        stats.record('DC Supply CH1', cl.psu_quantities(
+            {'set_voltage_v': 12.0, 'meas_voltage_v': 11.98,
+             'meas_current_a': 0.25, 'power_w': 2.995}))
+        stats.record_failure('DMM')
+        stats.tick()
+        app._log_live_render(stats, running=True)
+        assert shown()[-1] == ('DMM', '(read failed)', '--', '--', '--'), \
+            shown()
+        assert len(shown()) == 5, shown()
+        stats.record('DMM', cl.dmm_quantities('DC Voltage', 0.5, 'V'))
+        stats.tick()
+        app._log_live_render(stats, running=True)
+        assert [v[:2] for v in shown()] == [
+            ('DC Supply CH1', 'Set V'), ('DC Supply CH1', 'Meas V'),
+            ('DC Supply CH1', 'Meas A'), ('DC Supply CH1', 'Power'),
+            ('DMM', 'DC Voltage')], shown()
+        assert shown()[-1][2:] == ('500 mV', '500 mV', '500 mV'), shown()
+        assert ('DMM', '(read failed)', '') not in app._log_live_items
+        assert len(app._log_live_items) == 5
+    finally:
         root.destroy()
 
 

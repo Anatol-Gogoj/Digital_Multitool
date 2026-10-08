@@ -5159,7 +5159,7 @@ LOGGING:
                 # `tel.failed` matters here: once the log has given up, a
                 # telemetry-only run must stop taking scope reads for
                 # nobody (three locked round-trips every tick, contending
-                # with the Data Logging tab for the same instrument).
+                # with the Continuous Logging tab for the same instrument).
                 if (watchdog is not None
                         or (tel is not None and not tel.failed)) \
                         and el - last_mon >= mon_dt:
@@ -7282,10 +7282,14 @@ LOGGING:
                                           "sample...")
 
     def _log_live_render(self, stats, running):
-        """Redraw the live table from `stats` (main thread)."""
+        """Redraw the live table from `stats` (main thread). A row that
+        has left `stats` leaves the table too: a source's '(read failed)'
+        stand-in goes once the source reads (#389)."""
         rows, ticks, skipped = stats.snapshot()
+        keys = set()
         for row in rows:
             key = (row['source'], row['quantity'], row['unit'])
+            keys.add(key)
             values = (row['source'], row['quantity'],
                       continuous_log.fmt_value(row['current'], row['unit']),
                       continuous_log.fmt_value(row['min'], row['unit']),
@@ -7296,6 +7300,8 @@ LOGGING:
                     '', 'end', values=values)
             else:
                 self.log_live_tree.item(iid, values=values)
+        for key in [k for k in self._log_live_items if k not in keys]:
+            self.log_live_tree.delete(self._log_live_items.pop(key))
         self.log_live_summary.config(text=continuous_log.summary_line(
             ticks, skipped, stats.interval_s, running))
 

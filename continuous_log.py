@@ -131,8 +131,16 @@ def parse_cadence(text, unit=UNIT_S):
 
 def fmt_number(value):
     """A cadence number for the box and the echo: up to 6 significant
-    digits, no trailing zeros. 6 digits make s -> Hz -> s round-trip to the
-    same text (3 -> 0.333333 -> 3)."""
+    digits, no trailing zeros.
+
+    Rounding to 6 digits moves a number by at most half a unit in its 6th
+    digit, 5 parts per million, so a unit switch is not always an exact
+    round trip: 3 s -> 0.333333 Hz -> 3 s comes back, but 7 s -> 0.142857
+    Hz -> 7.00001 s does not (#389). Each switch moves the cadence by at
+    most 5 ppm, which is 5 us at a 1 s cadence. repr() would not make the
+    round trip exact either (1 / (1 / 49) is 49.00000000000001 in binary
+    floating point), and it would turn 3 s into 0.3333333333333333 Hz, 18
+    characters in a 12-character box."""
     return f"{value:.6g}"
 
 
@@ -196,7 +204,9 @@ def next_tick(t_first, interval_s, slot, now):
 
     An interval too short for the grid arithmetic (the grid index stops
     being finite) degrades to "start now", which is what main's loop did
-    for such an interval anyway.
+    for such an interval anyway. Short of that, the count is exact and can
+    be absurd: about 5e10 per 50 ms of reads at a 1e-12 s cadence, which
+    the > 0 bound accepts. summary_line caps what it shows of it.
     """
     nxt = slot + 1
     due = t_first + nxt * interval_s
@@ -213,11 +223,25 @@ def next_tick(t_first, interval_s, slot, now):
 
 # ---- Live current / min / max ----------------------------------------------
 
+# A reading this large is an instrument saying "no number", never a value.
+# SCPI's codes for that are 9.9E37 (INFinity), -9.9E37 (NINFinity) and
+# 9.91E37 (NAN), and the Tek scope answers an off-screen measurement with
+# 9.9E37 (TekMSO24.measure_raw, which already turns it into None). The
+# DMM, supply and LCR replies reach LiveStats as plain floats, so a bare
+# code would become a max and stay one for the rest of the run (#389).
+# What the 5493C answers on an overload is unchecked (#369 asks the
+# bench); its parser test assumes '9.9E37 OVLD', which is not a number and
+# so already comes back None. The CSVs are not filtered: they keep
+# whatever the instrument answered.
+OVERLOAD_CODE = 9.9e37
+
+
 def as_number(value):
     """A reading as a finite float, or None when it carries no number.
 
-    None (scope 'No signal', DMM overload), NaN, infinities, booleans and
-    unparseable strings all come back None, so a failed read can never
+    None (scope 'No signal', DMM overload), NaN, infinities, booleans,
+    unparseable strings and the SCPI overload codes (anything at or above
+    OVERLOAD_CODE in size) all come back None, so a failed read can never
     become a min or a max."""
     if value is None or isinstance(value, bool):
         return None
@@ -225,7 +249,16 @@ def as_number(value):
         v = float(value)
     except (TypeError, ValueError):
         return None
-    return v if math.isfinite(v) else None
+    if not math.isfinite(v) or abs(v) >= OVERLOAD_CODE:
+        return None
+    return v
+
+
+# The Quantity a source shows in the live table while every read of it so
+# far has raised (#389). Such a source has no rows yet, so without this
+# stand-in it would be missing from the table and its failure would show
+# only in Log Status. Its first good read replaces the stand-in.
+READ_FAILED = '(read failed)'
 
 
 class LiveStats:
@@ -241,7 +274,8 @@ class LiveStats:
     tab) starts new rows instead of taking a min across farads and henries.
 
     Only finite numbers count toward min and max. A reading without one
-    leaves min and max alone and shows as no current value.
+    leaves min and max alone and shows as no current value. A source whose
+    reads have all raised so far has one READ_FAILED stand-in row.
     """
 
     def __init__(self, interval_s=None):
@@ -251,21 +285,32 @@ class LiveStats:
         self.ticks = 0
         self.skipped = 0
 
+    @staticmethod
+    def _new_row(source, quantity, unit, missed=0):
+        return {'source': source, 'quantity': quantity, 'unit': unit,
+                'current': None, 'min': None, 'max': None, 'good': 0,
+                'missed': missed}
+
     def record(self, source, readings):
         """One successful read of `source`: `readings` is a list of
         (quantity, value, unit). Rows of this source that the read did not
-        produce lose their current value (they are no longer being read)."""
+        produce lose their current value (they are no longer being read).
+        A READ_FAILED stand-in of this source goes once a read yields rows,
+        and the rows that read creates start with its count of misses. A
+        read that yields none (sg_quantities of a reply with no numbers)
+        leaves the stand-in and its count as they are."""
         seen = set()
         with self._lock:
+            stand_in = (self._rows.pop((source, READ_FAILED, ''), None)
+                        if readings else None)
+            missed = stand_in['missed'] if stand_in else 0
             for quantity, value, unit in readings:
                 key = (source, quantity, unit or '')
                 seen.add(key)
                 row = self._rows.get(key)
                 if row is None:
-                    row = self._rows[key] = {
-                        'source': source, 'quantity': quantity,
-                        'unit': unit or '', 'current': None, 'min': None,
-                        'max': None, 'good': 0, 'missed': 0}
+                    row = self._rows[key] = self._new_row(
+                        source, quantity, unit or '', missed)
                 v = as_number(value)
                 row['current'] = v
                 if v is None:
@@ -282,12 +327,19 @@ class LiveStats:
 
     def record_failure(self, source):
         """A read of `source` that raised: every row of it shows no
-        current value and counts a miss; min and max are kept."""
+        current value and counts a miss; min and max are kept. A source
+        with no rows yet gets a READ_FAILED stand-in row, so a source that
+        fails from its first read still shows in the table."""
         with self._lock:
+            found = False
             for key, row in self._rows.items():
                 if key[0] == source:
                     row['current'] = None
                     row['missed'] += 1
+                    found = True
+            if not found:
+                self._rows[(source, READ_FAILED, '')] = self._new_row(
+                    source, READ_FAILED, '', missed=1)
 
     def tick(self, skipped=0):
         """One sampling tick done, and how many grid slots it overran."""
@@ -307,6 +359,17 @@ def fmt_value(value, unit):
     return lcr_format.format_si(value, unit, digits=6)
 
 
+# The summary line gives the skipped-slot count exactly up to this and
+# "over 1,000,000" beyond it (#389). A cadence far shorter than the reads
+# piles up absurd counts (about 5e10 per 50 ms of reads at 1e-12 s, which
+# main's > 0 bound accepts), and past a million the exact number says no
+# more than "most slots are skipped". Only the text is capped: the count,
+# the sampling grid and what the cadence box accepts are unchanged. A
+# floor on the cadence would also shorten the number, but it would refuse
+# cadences the box has always taken (MIN_INTERVAL_EXCLUSIVE_S).
+SKIPPED_SHOWN_MAX = 1_000_000
+
+
 def summary_line(ticks, skipped, interval_s, running):
     """The line under the live table."""
     if running and not ticks:
@@ -320,8 +383,11 @@ def summary_line(ticks, skipped, interval_s, running):
             cadence = ''
     line = f"{state}: {ticks} sample{'' if ticks == 1 else 's'}{cadence}"
     if skipped:
-        line += (f"; {skipped} slot{'' if skipped == 1 else 's'} skipped "
-                 "(reads took longer than the cadence)")
+        if skipped > SKIPPED_SHOWN_MAX:
+            count = f"over {SKIPPED_SHOWN_MAX:,} slots"
+        else:
+            count = f"{skipped:,} slot{'' if skipped == 1 else 's'}"
+        line += f"; {count} skipped (reads took longer than the cadence)"
     return line
 
 
@@ -380,8 +446,18 @@ def sg_quantities(bswv):
 
 
 def psu_quantities(reading):
-    return [(name, reading.get(key), unit)
-            for key, name, unit in PSU_QUANTITIES]
+    """The supply's row. Power is the driver's V_meas * I_meas, so it is a
+    miss whenever either factor is: 9.9E37 V times 0.3 A is 2.97E37 W,
+    under OVERLOAD_CODE, and would otherwise become the max (#389)."""
+    rows = []
+    for key, name, unit in PSU_QUANTITIES:
+        value = reading.get(key)
+        if key == 'power_w' and (
+                as_number(reading.get('meas_voltage_v')) is None
+                or as_number(reading.get('meas_current_a')) is None):
+            value = None
+        rows.append((name, value, unit))
+    return rows
 
 
 def dmm_quantities(function, value, unit):

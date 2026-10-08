@@ -663,8 +663,9 @@ def test_the_reads_change_only_the_measurement_and_data_source():
     """What 'probe' means in SCOPE_DRIVER, pinned on the REAL driver: a
     measurement programs the scope's one MEASUREMENT:IMMED slot and a
     waveform capture its DATA source, and nothing else. That is why Get
-    Measurements, Capture Waveform and Data Logging stay usable during a
-    LIVE run: the run's measure_raw re-programs the slot on every read."""
+    Measurements, Capture Waveform and Continuous Logging stay usable
+    during a LIVE run: the run's measure_raw re-programs the slot on every
+    read."""
     s = _Session({'MEASUREMENT:IMMED:VALUE?': '0.05', 'WFMPRE:NR_PT?': '2',
                   'WFMPRE:XINCR?': '0.001'})
     scope = TekMSO24(resource='USB0::FAKE::INSTR', rm=_RM(s))
@@ -996,7 +997,7 @@ SCOPE_USERS = {
     'gui.InstrumentControlGUI.scope_capture_waveform': (
         'read', 'Capture CHx Waveform', {'get_waveform': 1}),
     'gui.InstrumentControlGUI.logging_loop': (
-        'read', 'the Data Logging tab', {'get_all_measurements': 1}),
+        'read', 'the Continuous Logging tab', {'get_all_measurements': 1}),
 }
 
 

@@ -4130,6 +4130,36 @@ LOGGING:
             # worker needs a scope to read the current (audit 2026-07-25).
             wd_ticked = bool(self.sldea_wd_on.get())
             wd_on = bool(wd_ticked and not dry and self.scope is not None)
+            # Trip and Confirm. Ticked on a LIVE run, they are the rule
+            # "Energize HV?" and the records quote as ON, so anything but a
+            # finite number above zero is refused here, before any
+            # question (HV review 2026-10-08, #406). Junk used to fall back
+            # to 100 uA / 3 s unsaid; a nan or inf trip (or confirm) was
+            # armed and could never fire; a zero or negative trip fires on
+            # every read. A DRY or unticked run arms nothing from them and
+            # keeps the old fallback.
+            if wd_ticked and not dry:
+                for key, box, default in (('wd_ua', 'Trip (µA)', '100'),
+                                          ('wd_s', 'Confirm (s)', '3')):
+                    try:
+                        text = str(self.sldea_vars[key].get()).strip()
+                    except KeyError:
+                        continue          # no such box: the default below
+                    try:
+                        sldea_profile.parse_watchdog_value(text)
+                    except ValueError:
+                        self._sldea_log(f"run refused — breakdown watchdog "
+                                        f"{box} is '{text}', not a "
+                                        f"positive number")
+                        messagebox.showerror(
+                            "SLDEA",
+                            f"Breakdown watchdog {box} must be a positive "
+                            f"number — '{text}' is not one.\n\nThe watchdog "
+                            f"is ticked for this LIVE run, and Energize HV? "
+                            f"and the run's records would quote this box as "
+                            f"its rule. Fix the box (the default is "
+                            f"{default}), then press ▶ Run again.")
+                        return
             try:
                 wd_ua = float(self.sldea_vars['wd_ua'].get())
                 wd_s = float(self.sldea_vars['wd_s'].get())
@@ -4357,6 +4387,36 @@ LOGGING:
             go, _ = self._sldea_start_gate(sgch, dry, allowed_sweep,
                                            final=True)
             if not go:
+                return
+            # The watchdog decision once more, here, with the expression
+            # it was first read with (HV review 2026-10-08, #406). "Energize
+            # HV?", the start line and setup.txt are worded from the
+            # reading taken before the questions, and a scope Reconnect
+            # whose done callback ran inside one of them changes it: the
+            # scope back means a ticked run would start unarmed beside a
+            # connected scope, the scope gone means records that say ON
+            # for a run that cannot arm. Nothing from here to the worker
+            # yields to Tk, so a run whose state still matches starts with
+            # exactly what it was asked about; one whose state changed is
+            # refused before any HV, like the start gate above.
+            wd_ticked_now = bool(self.sldea_wd_on.get())
+            wd_now = bool(wd_ticked_now and not dry
+                          and self.scope is not None)
+            if wd_now != wd_on:
+                was = sldea_profile.watchdog_state(wd_ticked, wd_on, dry)
+                now = sldea_profile.watchdog_state(wd_ticked_now, wd_now,
+                                                   dry)
+                change = f"{was} → {now}"
+                self._sldea_log(f"run refused — the breakdown watchdog's "
+                                f"state changed since Energize HV? "
+                                f"({change}); nothing was sent to the SG")
+                messagebox.showerror(
+                    "SLDEA — run blocked",
+                    f"The breakdown watchdog's state changed since "
+                    f"Energize HV? ({change}). A scope Reconnect that "
+                    f"finished while a question was open does this.\n\n"
+                    f"Nothing was sent to the signal generator. Press ▶ Run "
+                    f"again to be asked with the state as it is now.")
                 return
             self._sldea_stop = False
             self._sldea_bd_tripped = False

@@ -265,6 +265,210 @@ def test_a_ticked_live_run_arms_it_as_before_and_records_on():
             setup, setup
 
 
+class _MBThen(L._MB):
+    """_MB, plus a callback run once a given question has been answered:
+    where a scope Reconnect's done callback lands when it finishes inside
+    that dialog's nested event loop."""
+
+    def __init__(self, answers, then):
+        super().__init__(answers)
+        self.then = dict(then)
+
+    def askyesno(self, title, message, **kw):
+        answer = super().askyesno(title, message, **kw)
+        fn = self.then.pop(title, None)
+        if fn is not None:
+            fn()
+        return answer
+
+
+def _assert_refused_at_the_commit_point(app, mb, tmp, change):
+    """Refused after "Energize HV?" was answered Yes, with nothing sent to
+    the SG and nothing left in a started state."""
+    hv = [c for c in mb.calls if c[1] == 'Energize HV?']
+    assert len(hv) == 1, mb.calls
+    [(kind, title, msg, _kw)] = [c for c in mb.calls if c[0] != 'askyesno']
+    assert (kind, title) == ('showerror', 'SLDEA — run blocked'), mb.calls
+    assert msg.startswith("The breakdown watchdog's state changed since "
+                          "Energize HV? (" + change + ")."), msg
+    assert "Nothing was sent to the signal generator." in msg, msg
+    assert any(ln.startswith("run refused — the breakdown watchdog's state "
+                             "changed since Energize HV? (" + change + ")")
+               for ln in app.lines), app.lines
+    assert app.worker_args is None, "a refused run started its worker"
+    assert app.sg.writes == [], app.sg.writes
+    assert not os.path.exists(_rundir(tmp))
+    assert not app._sldea_running and not app._sldea_starting
+    assert app._sldea_live_ch is None and app._sldea_scope_chs is None
+    assert app._sldea_prelog is None
+
+
+def test_a_watchdog_state_that_changed_under_a_question_refuses_the_run():
+    """HV review 2026-10-08, finding 1. sldea_run reads the watchdog's
+    state before its questions, and a scope Reconnect whose done callback
+    runs inside one of them changes it. Both ways are refused at the
+    commit point, before any SG write, and Run works again afterwards:
+    - the scope mid-Reconnect (None) when Run is pressed, back while "No
+      current monitoring" is open: "Energize HV?" said OFF (no scope), and
+      the run would have gone unarmed beside a connected scope at 120 uA
+      (before the fix it ran to its end; main armed and tripped);
+    - the scope there when Run is pressed, gone while "Energize HV?" is
+      open: everything said ON for a run that could not arm.
+    Then the same ticked run with nothing changing arms and trips at
+    120 uA over the 100 uA trip, as on main."""
+    def run(tmp, mb, scope_at_run, change_after):
+        with L._patched(mb):
+            app = L._App(tmp, dry=False, real_worker=True, wd_on=True)
+            scope = app.scope
+            app.sldea_vars['wd_ua'].set('100')
+            app.sldea_vars['wd_s'].set('1')
+            app._sldea_build_profile = lambda: (
+                L._short_profile(landing_s=6.0), None)
+            scope.volts = lambda ch: (0.6 if ch == 3 and L._ramping(app)
+                                      else 0.0)
+            mb.then = {change_after: (
+                (lambda: setattr(app, 'scope', scope)) if not scope_at_run
+                else (lambda: setattr(app, 'scope', None)))}
+            if not scope_at_run:
+                app.scope = None             # the Reconnect in flight
+            app.sldea_run()
+            app.root.run_pending()
+        return app, scope
+
+    # the scope comes back inside "No current monitoring"
+    with tempfile.TemporaryDirectory() as tmp:
+        mb = _MBThen({'No current monitoring': True, 'Energize HV?': True},
+                     {})
+        app, scope = run(tmp, mb, False, 'No current monitoring')
+        assert mb.titles('askyesno') == ['No current monitoring',
+                                         'Energize HV?'], mb.calls
+        hv = [c[2] for c in mb.calls if c[1] == 'Energize HV?'][0]
+        assert "Breakdown watchdog: OFF (no scope to read the current)" in \
+            hv, hv
+        assert app.scope is scope
+        _assert_refused_at_the_commit_point(
+            app, mb, tmp, "OFF (no scope to read the current) → ON")
+
+        # ...and Run pressed again, nothing changing now: armed, and it
+        # trips at 120 uA over the 100 uA trip, as main does
+        mb2 = L._MB(L.LIVE_OK)
+        with L._patched(mb2):
+            app.sldea_run()
+            assert app.worker_done.wait(60), app.lines
+            assert app.worker_error is None, repr(app.worker_error)
+            app.root.run_pending()
+        assert app.worker_args[11:14] == (True, 100.0, 1.0), \
+            app.worker_args[11:14]
+        assert app._sldea_bd_tripped, app.lines
+        assert any(ln.startswith('run BREAKDOWN-ABORT') for ln in
+                   app.lines), app.lines
+        assert app.sg.writes[-2:] == [('set_offset', 1, 0.0),
+                                      ('set_output', 1, False)], \
+            app.sg.writes[-4:]
+
+    # the scope goes inside "Energize HV?"
+    with tempfile.TemporaryDirectory() as tmp:
+        mb = _MBThen({'Energize HV?': True}, {})
+        app, _scope = run(tmp, mb, True, 'Energize HV?')
+        hv = [c[2] for c in mb.calls if c[1] == 'Energize HV?'][0]
+        assert "Breakdown watchdog: ON." in hv, hv
+        _assert_refused_at_the_commit_point(
+            app, mb, tmp, "ON → OFF (no scope to read the current)")
+
+
+def test_the_short_state_words_match_the_records():
+    assert sp.watchdog_state(True, True, False) == 'ON'
+    for ticked, armed, dry in ((False, False, False), (True, False, False),
+                               (True, False, True), (False, False, True)):
+        assert sp.watchdog_record(ticked, armed, dry, 100.0, 3.0)[0] == (
+            'Breakdown watchdog: ' + sp.watchdog_state(ticked, armed, dry))
+
+
+BAD_WATCHDOG_VALUES = ('nan', 'inf', '0', '-5', 'abc')
+
+
+def test_the_watchdog_boxes_parse_to_positive_finite_numbers_only():
+    for good, value in (('100', 100.0), (' 2.5 ', 2.5), ('1e2', 100.0)):
+        assert sp.parse_watchdog_value(good) == value, good
+    for bad in BAD_WATCHDOG_VALUES + ('', '  ', '-inf', 'NaN', None):
+        try:
+            sp.parse_watchdog_value(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad!r} was accepted")
+
+
+def test_a_ticked_live_run_refuses_a_trip_or_confirm_it_cannot_use():
+    """HV review 2026-10-08: ticked on a LIVE run, a Trip or Confirm that
+    is not a finite number above zero refuses Run before any question,
+    with a message naming the box. The fault predates #406, but the
+    records now quote these boxes as the rule: "abc" used to run as
+    100 uA / 3 s unsaid, nan and inf never trip, a zero or negative trip
+    fires on every read. Nothing is asked, driven or made."""
+    for key, box, default in (('wd_ua', 'Trip (µA)', '100'),
+                              ('wd_s', 'Confirm (s)', '3')):
+        for bad in BAD_WATCHDOG_VALUES:
+            with tempfile.TemporaryDirectory() as tmp:
+                mb = L._MB({})          # any question fails the test
+                with L._patched(mb):
+                    app = L._App(tmp, dry=False, wd_on=True)
+                    app.sldea_vars[key].set(bad)
+                    app.sldea_run()
+                assert [c[:2] for c in mb.calls] == \
+                    [('showerror', 'SLDEA')], (box, bad, mb.calls)
+                msg = mb.calls[0][2]
+                assert msg.startswith(
+                    f"Breakdown watchdog {box} must be a positive number — "
+                    f"'{bad}' is not one."), msg
+                assert f"(the default is {default})" in msg, msg
+                assert any(ln.startswith(f"run refused — breakdown watchdog "
+                                         f"{box} is '{bad}'")
+                           for ln in app.lines), app.lines
+                assert app.worker_args is None, (box, bad)
+                assert app.sg.writes == [], app.sg.writes
+                assert not os.path.exists(_rundir(tmp))
+                assert app._sldea_prelog is None
+                assert not getattr(app, '_sldea_starting', False)
+
+
+def test_a_dry_or_unticked_run_is_not_refused_for_the_watchdog_boxes():
+    """Neither arms anything from the boxes, so neither is refused for
+    them: the unticked LIVE run reaches "Energize HV?" (answered No) and
+    says OFF, and the ticked DRY run starts and records OFF. A good value
+    on a ticked LIVE run reaches "Energize HV?" with that value."""
+    for bad in BAD_WATCHDOG_VALUES:
+        with tempfile.TemporaryDirectory() as tmp:
+            mb = L._MB({'Energize HV?': False})
+            with L._patched(mb):
+                app = L._App(tmp, dry=False, wd_on=False)
+                app.sldea_vars['wd_ua'].set(bad)
+                app.sldea_vars['wd_s'].set(bad)
+                app.sldea_run()
+            assert mb.titles() == ['Energize HV?'], (bad, mb.calls)
+            assert ("\n\n" + OFF_DIALOG + "\n\nProceed?") in mb.calls[0][2]
+        with tempfile.TemporaryDirectory() as tmp:
+            mb = L._MB({})
+            with L._patched(mb):
+                app = L._App(tmp, dry=True, wd_on=True)
+                app.sldea_vars['wd_ua'].set(bad)
+                app.sldea_vars['wd_s'].set(bad)
+                app.sldea_run()
+                assert app.worker_done.wait(10), app.lines
+            assert mb.calls == [], (bad, mb.calls)
+            assert app.worker_args[11] is False
+            assert '  [watchdog: OFF (dry run, no HV)]' in _start_line(app)
+    with tempfile.TemporaryDirectory() as tmp:
+        mb = L._MB({'Energize HV?': False})
+        with L._patched(mb):
+            app = L._App(tmp, dry=False, wd_on=True)
+            app.sldea_vars['wd_ua'].set(' 50 ')
+            app.sldea_vars['wd_s'].set('2.5')
+            app.sldea_run()
+        assert mb.titles() == ['Energize HV?'], mb.calls
+        assert ("stays 50 µA or more away from the baseline it learns at "
+                "0 kV, for 2.5 s of consecutive reads.") in mb.calls[0][2]
+
+
 def test_a_dry_run_records_off_whatever_the_box_says():
     for ticked in (True, False):
         with tempfile.TemporaryDirectory() as tmp:

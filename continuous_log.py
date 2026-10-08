@@ -295,11 +295,14 @@ class LiveStats:
         """One successful read of `source`: `readings` is a list of
         (quantity, value, unit). Rows of this source that the read did not
         produce lose their current value (they are no longer being read).
-        A READ_FAILED stand-in of this source goes, and the rows this read
-        creates start with its count of misses."""
+        A READ_FAILED stand-in of this source goes once a read yields rows,
+        and the rows that read creates start with its count of misses. A
+        read that yields none (sg_quantities of a reply with no numbers)
+        leaves the stand-in and its count as they are."""
         seen = set()
         with self._lock:
-            stand_in = self._rows.pop((source, READ_FAILED, ''), None)
+            stand_in = (self._rows.pop((source, READ_FAILED, ''), None)
+                        if readings else None)
             missed = stand_in['missed'] if stand_in else 0
             for quantity, value, unit in readings:
                 key = (source, quantity, unit or '')

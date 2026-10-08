@@ -328,6 +328,26 @@ def test_a_source_that_fails_from_its_first_read_still_gets_a_row():
     assert _row(st, 'LCR', 'Cp')['current'] == 3.3e-9
 
 
+def test_a_read_with_no_numbers_keeps_the_stand_in():
+    """A read that raises nothing but yields no rows (a BSWV reply with no
+    numeric keys gives sg_quantities nothing) has nothing to show, so the
+    '(read failed)' stand-in stays, with its misses, until a read yields
+    rows. Review of `#389`: the stand-in used to go on any read that did
+    not raise, taking the source out of the table."""
+    st = cl.LiveStats(1.0)
+    st.record_failure('SigGen CH1')
+    st.record_failure('SigGen CH1')
+    empty = cl.sg_quantities({'WVTP': 'SINE'})
+    assert empty == [], empty
+    st.record('SigGen CH1', empty)
+    r = _row(st, 'SigGen CH1', '(read failed)')
+    assert (r['current'], r['good'], r['missed']) == (None, 0, 2), r
+    st.record('SigGen CH1', cl.sg_quantities({'WVTP': 'SINE', 'FRQ': 100.0}))
+    rows, _t, _s = st.snapshot()
+    assert [(r['quantity'], r['current'], r['good'], r['missed'])
+            for r in rows] == [('Frequency', 100.0, 1, 2)], rows
+
+
 def test_start_is_the_reset():
     """start_logging makes a NEW LiveStats per run (asserted against the
     real app below); a new one holds nothing of the old."""

@@ -1242,6 +1242,68 @@ and after by `sldea_batch_eval.py`).**
   `video_edges.csv` is empty. Since the video review entry above, the
   next Save of that run in Edge Review re-runs it with this fit.
 
+## A run records the camera state it was shot under, and the camera adjustments search the scene instead of the lock (2026-10-07)
+
+**TL;DR:** setup.txt now records the camera state a run stamps: every
+locked control with its value, the red and blue balance, the device, its
+pixel format and the picture size. The Webcam tab's new Auto-set camera
+runs gain, exposure, white balance and lock in one press. It, Stabilize and
+Auto-WB once now shoot each trial picture under the trial's own values;
+they used to shoot every trial under the lock, so with a lock in place
+their searches said nothing about the scene.
+
+**Observation (2026-10-07, from the code; the model numbers are from
+`tests/test_webcam_autoset.py` and `tests/test_camera_controls.py`).**
+
+- The camera block of setup.txt was one line, "exposure N, gain N, WB off
+  (manual)". It named neither the red and blue balance the run stamps nor
+  any other locked control (brightness among them), and it read the same
+  when exposure and gain were the built-in fallbacks 6 and 60.
+- `webcam.oneshot_rgb` stamps the lock onto the camera before every grab.
+  Stabilize wrote a trial exposure and gain 0, then grabbed, and the grab
+  put the locked exposure and gain back; Auto-WB once did the same with the
+  red and blue balance. A lock is restored at every start, so on the bench
+  every trial picture was the locked one. The quickstart already told
+  operators to skip Stabilize for this reason.
+- The exposure search judged the mean of all three channels, which the red
+  and blue balance change. In the camera model with the bench's stale
+  balance (red 204, blue 104; the bench read red 204 on 2026-07-24), the
+  search stopped at exposure 64 with a mean of 166, and balancing the white
+  afterwards left that picture at a mean of 128, well under mid-gray.
+
+**Decision (owner, 2026-10-07: Auto-set redoes the white balance every
+time, and setup.txt records as much as possible).**
+
+1. **Auto-set camera** pins gain at its floor (0), finds the exposure for a
+   mid-gray picture, balances the white by gray world on the scene in view,
+   then locks and saves everything, in that order, because each step
+   depends on the one before. A step that fails stops the sequence, names
+   the step, and leaves the previous lock and the boxes as they were. The
+   boxes and the lock come out equal, so the run (which takes the boxes)
+   and the preview (which shows the lock) see the same picture.
+2. **Every trial picture is shot under its own controls**
+   (`oneshot_rgb(..., controls=...)`), and the lock changes only at the
+   last step. Stabilize and Auto-WB once use the same two searches
+   (`webcam.find_exposure`, `webcam.balance_gray_world`).
+3. **The exposure search judges the green channel**, which red and blue
+   balance do not touch. The exposure it finds holds once the white is
+   balanced, when the three means are equal: in the model, exposure 80 with
+   or without the stale balance.
+4. **setup.txt's camera block** keeps its summary as the line under
+   `--- Camera ---`, because Edge Review's run health quotes that line,
+   and adds `Camera device:`, `Camera pixel format:`, `Camera frame size:`
+   and `Camera controls:` lines (every control of the run's lock, as
+   `name=value`). It is built on the Tk thread from what the app already
+   holds: the lock the run stamps (`sldea_run_lock`) and the camera the
+   pre-flight resolved. There is no camera I/O on the run path. A run
+   whose pre-flight did not run writes "(not known: ...)", never an earlier
+   run's camera, and fallback values are named as built-in defaults.
+
+**Not verified on the bench.** How long Auto-set takes on the DFK, whether
+its three steps converge on a real backlit scene, and whether the green
+channel picks the exposures the whole mean picked on the gray scenes on
+file. The checks are listed in #369.
+
 ## The camera pre-flight shoots under the run's own lock, and says when the Webcam tab's fields and lock disagree (2026-10-05)
 
 **TL;DR:** on run `13_backlight` the pre-flight picture looked fine and

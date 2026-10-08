@@ -60,10 +60,15 @@ def _need_display():
 
 def _clean_env():
     """The user's environment, minus any developer font workaround: the app
-    must stand on its own exactly as it does for a user."""
+    must stand on its own exactly as it does for a user.
+
+    One addition: the freeze log goes to the null device. The logger still
+    runs, as it does for a user, but a test launch on the bench PC must not
+    add records to the log an operator sends in (`#397`)."""
     env = {k: v for k, v in os.environ.items()
            if k not in ('FONTCONFIG_FILE', 'XDG_CONFIG_HOME')}
     env['DISPLAY'] = DISPLAY
+    env['SCPI_STALL_LOG'] = os.devnull
     return env
 
 

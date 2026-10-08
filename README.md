@@ -95,6 +95,10 @@ For a headless smoke test of the transport stack:
 
 This lists all PyVISA-visible USB-TMC resources, then instantiates each known class and prints its `*IDN?` response.
 
+### When a window freezes
+
+The main window, Edge Review and the plot window log every freeze longer than 0.3 s to a local file, `tk_stall.log`, beside the launcher's own log: on Linux in the same folder as `launch.log` (`~/.cache/scpi_control`, or `$SCPI_CACHE` when that is set), on Windows in `%LOCALAPPDATA%\scpi_control`. Each `STALL` record names the window, how long it froze, the code it was stuck in, and the CPU time its Tk thread used meanwhile: close to the freeze's length means the window was computing; close to zero means it waited on a file, an instrument or a lock, or the PC was too busy (Linux records carry the load average). With any freeze report, send `tk_stall.log` and, if there is one, `tk_stall.log.1`: after a busy day the freeze may already have moved there. `SCPI_STALL_LOG=0` switches the logger off, and `SCPI_STALL_LOG=<file>` writes somewhere else; a bare file name lands in that same folder, never in the folder the app was started from (`tk_stall.py`).
+
 ## Running on Windows
 
 Instrument control is **Linux-only** (the pyvisa-py/libusb/udev stack lives on the bench box), but the app itself is cross-platform: on Windows the instrument tabs are view/edit-only (a note says so; presets and bench profiles can still be prepared and are shared via the ShareDrive), while **Battery Data** and **Webcam** are fully functional.

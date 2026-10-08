@@ -1906,7 +1906,11 @@ Decisions:
   name. setup.txt is its first write, right after `makedirs`, and data.csv
   follows; both come before the camera and the first SG write, so a lost
   race takes the `makedirs` failure's path: "ERROR:" in the run log, and
-  the finally zeroes the SG. A blank name keeps 'w'.
+  the finally zeroes the SG. A blank name keeps 'w'. When it is data.csv
+  that fails, this run has already written its setup.txt in that folder
+  and appended its log lines to the run.log there, so its message says
+  that, not that it left the folder as it was (final HV review,
+  2026-10-08).
 - **The line is always two lines high**: "Saves to:" and the folder, cut
   from the left to the line's width so the run folder's name shows, then
   a warning or nothing. While a run is on it says "Writing to:" and that
@@ -3541,11 +3545,19 @@ and worker over the scope-lock suite's fakes.
    run is refused the way the start gate refuses one: a "run blocked"
    box that names the change (for example "OFF (no scope to read the
    current) → ON"), nothing sent to the SG, and ▶ Run asks again with the
-   state as it is then.
+   state as it is then. The check must stay below the last point that
+   yields, the camera pre-flight, not just below "Energize HV?": the
+   final HV review moved it to just after that question and every suite
+   still passed, while a run whose scope came back inside the pre-flight
+   went to its end unarmed. `test_sldea_watchdog_default` now lands the
+   change inside the pre-flight both ways, and that mutant fails it.
 7. Ticked on a LIVE run, a Trip or Confirm that is not a finite number
-   above zero refuses Run before any question, with a message naming the
-   box. A DRY run and an unticked LIVE run arm nothing from the boxes and
-   keep the old fallback.
+   above zero refuses Run before any HV question, with a message naming
+   the box. The start gate's "Stepped sweep still running" and the video
+   pre-flight's questions can come first; neither writes to an
+   instrument, and both are asked again on the next press. A DRY run and
+   an unticked LIVE run arm nothing from the boxes and keep the old
+   fallback.
 8. For the second observation the owner chose to run on with a truthful
    record (2026-10-08): a ticked LIVE run that reaches the worker's
    arming line with no scope goes on unwatched, run.log gets a

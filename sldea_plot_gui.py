@@ -76,6 +76,7 @@ from tkinter import font as tkfont
 
 import sldea_edge as se
 import sldea_plot as sp
+import tk_checkmarks
 
 # ASCII only: this is the one thing the module prints to a console, and a
 # Windows cp1252 console cannot carry the docstring's prose.
@@ -1713,6 +1714,7 @@ class PlotWindow:
     def __init__(self, root, parent_dir, preselect=(), opts=None,
                  out_dir=None, stem=None, explicit=None, remember=True):
         self.root = root
+        tk_checkmarks.install_check_marks(root)  # check marks (#407)
         # `#323`: SEVERAL parent folders, in the order they arrived, and
         # `self.parent` is the first of them -- the one the options file
         # and the default output folder are keyed on. A single string is

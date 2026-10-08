@@ -916,16 +916,27 @@ def open_run_file(rundir, name, run_name, **kw):
     folder after Run checked it (another PC on the share, in the minutes
     the dialogs took) makes this one fail instead of writing over it
     (#402 review). The FileExistsError then says so in words, for the run
-    log. A blank name's folder is new by its time stamp and keeps 'w'."""
+    log, with what this run had already left there: the worker opens
+    setup.txt first, then appends to run.log, then opens data.csv, so a
+    data.csv that fails finds this run's setup.txt and log lines already
+    in that folder (final HV review 2026-10-08, finding 3). A blank name's
+    folder is new by its time stamp and keeps 'w'."""
     import os
     path = os.path.join(rundir, name)
     try:
         return open(path, 'x' if (run_name or '').strip() else 'w', **kw)
     except FileExistsError:
+        if name == 'setup.txt':
+            left = ("This run stopped before any HV and left that run's "
+                    "files as they were.")
+        else:
+            left = ("This run stopped before any HV, but it had already "
+                    "written its setup.txt in that folder and added its log "
+                    "lines to the run.log there; it overwrote none of the "
+                    "other run's files.")
         raise FileExistsError(
             f"{name} appeared in the run folder {rundir} after ▶ Run "
-            f"checked it: another run is writing there. This run stopped "
-            f"before any HV and left that run's files as they were. Type "
+            f"checked it: another run is writing there. {left} Type "
             f"another run name and press ▶ Run again.") from None
 
 

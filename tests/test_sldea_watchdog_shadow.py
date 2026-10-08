@@ -4,10 +4,13 @@
 Owner decision 2026-10-08: build the N-sigma rule now and run it in shadow:
 it reads the very current the monitor tick already reads, records what it
 would have done (one telemetry event row, one run.log line and one
-setup.txt line after the SG is zeroed), and acts on nothing.
-BreakdownWatchdog (100 uA for 3 s) still stops runs. No single-read spike
-tier. Defaults N 5, floor 20 uA, 2 reads in a row, window 40, chosen on
-the 18 single-layer runs replayed on 2026-10-08 (SLDEA_DECISIONS.md).
+setup.txt line after the SG is zeroed), and acts on nothing. Every away
+read, a lone one included, is listed too, in one run.log entry after the
+SG is zeroed, so the owner can decide later whether a single away read is
+a breakdown. BreakdownWatchdog (100 uA for 3 s) still stops runs. No
+single-read spike tier. Defaults N 5, floor 20 uA, 2 reads in a row,
+window 40, chosen on the 18 single-layer runs replayed on 2026-10-08
+(SLDEA_DECISIONS.md).
 
 The first half pins the rule itself, on made-up reads and on short traces
 copied from real runs (numbers only). The second half runs the real
@@ -127,6 +130,98 @@ def test_off_screen_counts_as_away_but_one_read_alone_does_not_trip():
     assert _feed(wd, reads) == 0.5 * 21
     assert wd.how == 'off-screen, 2 reads in a row'
     assert "the current was off the scope's screen" in wd.outcome_text()
+
+
+# --------------------------------------------------------------------------
+# Every away read is kept (owner, 2026-10-08: log every single away read in
+# shadow, then decide whether a single-read excursion is a breakdown)
+# --------------------------------------------------------------------------
+
+def test_a_lone_away_read_is_listed_though_it_never_trips():
+    """One read 30 uA off at a settled landing, then back: no would-trip,
+    and one away line with the time, kV, reading, location, deviation and
+    bar."""
+    wd = sp.NSigmaWatchdog(base_loc=-16.0, base_sigma=0.3)
+    reads = (_settled(6.75, -16.0, 30) + [(6.75, -46.0)]
+             + _settled(6.75, -16.0, 10))
+    assert _feed(wd, reads) is None, wd.outcome_text()
+    assert wd.n_away == 1 and len(wd.away) == 1, wd.away
+    lines = wd.away_lines()
+    assert lines == [
+        "1 away read in 41 reads",
+        "away at 15.0 s (6.75 kV, landing): I -46.0 uA, 30.0 uA from "
+        "location -16.0 uA (bar 20.0 uA, sigma 0.50 uA); 1 in a row"], lines
+    for line in lines:
+        line.encode('ascii')
+
+
+def test_an_off_screen_read_is_listed_as_off_screen():
+    wd = sp.NSigmaWatchdog(base_loc=-16.0, base_sigma=0.3)
+    reads = (_settled(1.0, -16.0, 20) + [(1.0, None, True)]
+             + _settled(1.0, -16.0, 5))
+    assert _feed(wd, reads) is None, wd.outcome_text()
+    assert wd.away_lines() == [
+        "1 away read in 26 reads",
+        "away at 10.0 s (1.00 kV, landing): off the scope's screen "
+        "(location -16.0 uA); 1 in a row"], wd.away_lines()
+
+
+def test_k_away_reads_in_a_row_are_each_listed_and_trip_once():
+    """152205's size of step, held: both away reads are listed, the second
+    marked, and the rule trips once, at the second, as before."""
+    wd = sp.NSigmaWatchdog(base_loc=1.0, base_sigma=0.3)
+    reads = _settled(5.5, 1.0, 30) + _settled(5.5, -25.5, 5)
+    assert _feed(wd, reads) == 0.5 * 31, wd.outcome_text()
+    # nothing is judged after the would-trip: no second trip, no more lines
+    for k in range(4):
+        assert wd.update(16.0 + 0.5 * k, 5.5, -25.5) is True
+    assert wd.trip['t'] == 15.5, wd.trip
+    assert wd.n_away == 2, wd.away
+    lines = wd.away_lines()
+    assert len(lines) == 3, lines
+    assert lines[0] == "2 away reads in 32 reads", lines
+    assert lines[1] == ("away at 15.0 s (5.50 kV, landing): I -25.5 uA, "
+                        "26.5 uA from location 1.0 uA (bar 20.0 uA, sigma "
+                        "0.50 uA); 1 in a row"), lines
+    assert lines[2].startswith("away at 15.5 s (5.50 kV, landing): "), lines
+    assert lines[2].endswith("; 2 in a row, would trip"), lines
+
+
+def test_quiet_noise_lists_no_away_read():
+    """The quiet staircase above: no away read, so nothing to list."""
+    rnd = random.Random(7)
+    wd = sp.NSigmaWatchdog(base_loc=0.0, base_sigma=1.0)
+    reads = []
+    for step in range(12):
+        kv0, kv1 = 0.25 * step, 0.25 * (step + 1)
+        reads += [(kv0 + (kv1 - kv0) * f, rnd.gauss(0, 1.2))
+                  for f in (0.25, 0.5, 0.75)]
+        reads += [(kv1, max(-3.5, min(3.5, rnd.gauss(0, 1.2))))
+                  for _ in range(60)]
+    assert _feed(wd, reads) is None, wd.outcome_text()
+    assert wd.n_reads == len(reads)
+    assert (wd.n_away, wd.away, wd.away_lines()) == (0, [], []), wd.away
+
+
+def test_the_away_list_is_capped_and_says_how_many_it_left_out():
+    assert sp.NSIGMA_AWAY_LOG_MAX == 100
+    # lone away reads, each followed by a quiet one: none trips the rule
+    wobble = [(2.0, 30.0), (2.0, 0.0)] * 150
+    wd = sp.NSigmaWatchdog(base_loc=0.0, base_sigma=0.3)
+    assert wd.away_max == 100
+    assert _feed(wd, _settled(2.0, 0.0, 20) + wobble) is None, \
+        wd.outcome_text()
+    assert (wd.n_away, len(wd.away)) == (150, 100), (wd.n_away,
+                                                     len(wd.away))
+    lines = wd.away_lines()
+    assert lines[0] == ("150 away reads in 320 reads; the first 100 "
+                        "listed, 50 more not"), lines[0]
+    assert len(lines) == 101, len(lines)
+    # and a smaller cap holds the same way
+    wd = sp.NSigmaWatchdog(base_loc=0.0, base_sigma=0.3, away_max=3)
+    _feed(wd, _settled(2.0, 0.0, 20) + wobble[:10])
+    assert wd.away_lines()[0] == ("5 away reads in 30 reads; the first 3 "
+                                  "listed, 2 more not"), wd.away_lines()
 
 
 def test_an_unreadable_read_neither_extends_nor_breaks_the_streak():
@@ -313,9 +408,49 @@ def _step_volts(app, after_s, base_v, step_v):
     return volts
 
 
+def _one_spike(after_s, base_v, spike_v):
+    """A `volts` factory for _run: I_Out reads `base_v`, except ONE read
+    taken by the run loop itself (not a snapshot's) at least `after_s`
+    seconds after the ramp's first SG write, which reads `spike_v`."""
+    def factory(app):
+        state = {'t_ramp': None, 'done': False, 'caller': None}
+
+        def on_read(ch, caller):
+            state['caller'] = caller
+        app.scope.on_read = on_read
+
+        def volts(ch):
+            if ch != 3:
+                return 0.0
+            if L._ramping(app):
+                if state['t_ramp'] is None:
+                    state['t_ramp'] = time.monotonic()
+                if (not state['done'] and state['caller'] == '_sldea_worker'
+                        and time.monotonic() - state['t_ramp'] >= after_s):
+                    state['done'] = True
+                    return spike_v
+            return base_v
+        return volts
+    return factory
+
+
+def _log_spy(seen):
+    """A `hook` for _run: every run.log message, with the SG's writes as
+    they stood when it was logged."""
+    def hook(app):
+        log = app._sldea_log
+
+        def spy(msg):
+            seen.append((str(msg), list(app.sg.writes)))
+            log(msg)
+        app._sldea_log = spy
+    return hook
+
+
 def _run(tmp, dry=False, ticked=False, tel=True, volts=None, trip_ua='100',
-         confirm_s='3', landing_s=12.0, answers=None, scope=True):
-    """The real sldea_run and worker to the run's end; -> app."""
+         confirm_s='3', landing_s=12.0, answers=None, scope=True, hook=None):
+    """The real sldea_run and worker to the run's end; -> app. `hook(app)`
+    runs just before sldea_run."""
     mb = L._MB(answers if answers is not None else
                ({} if dry else L.LIVE_OK))
     with L._patched(mb):
@@ -329,6 +464,8 @@ def _run(tmp, dry=False, ticked=False, tel=True, volts=None, trip_ua='100',
             app.scope = None
         elif volts is not None:
             app.scope.volts = volts(app)
+        if hook is not None:
+            hook(app)
         app.sldea_run()
         assert app.worker_done.wait(90), app.lines
         assert app.worker_error is None, repr(app.worker_error)
@@ -488,6 +625,81 @@ def test_dry_runs_and_runs_without_reads_are_as_before():
         setup = _read(os.path.join(_rundir(tmp), 'setup.txt'))
         assert ("\nWatchdog shadow: OFF (no current reads: watchdog and "
                 "telemetry both off)\n") in setup, setup
+
+
+def _away_entries(app):
+    return [ln for ln in app.lines if ln.startswith('SHADOW away reads')]
+
+
+def test_a_lone_away_read_on_a_live_run_is_listed_after_the_sg_is_zeroed():
+    """The watchdog unticked, telemetry on: ONE read at 40 uA, 9 s into
+    the ramp, against the run's 10 uA. The shadow does not trip, and the
+    run lists that read in run.log once, in one entry, and only after the
+    SG is at 0 V and off: nothing about it is logged from the run loop."""
+    seen = []
+    with tempfile.TemporaryDirectory() as tmp:
+        app = _run(tmp, ticked=False, tel=True,
+                   volts=_one_spike(9.0, 0.05, 0.2), hook=_log_spy(seen))
+        assert any(ln.startswith('run complete') for ln in app.lines), \
+            app.lines
+        assert not app._sldea_bd_tripped
+        [line] = _shadow_lines(app)
+        assert line.startswith('SHADOW N-sigma (acts on nothing): no trip '
+                               'in '), line
+        [entry] = _away_entries(app)
+        rows = entry.split('\n  ')
+        assert len(rows) == 2, rows
+        assert rows[0].startswith('SHADOW away reads (N-sigma, acts on '
+                                  'nothing): 1 away read in '), rows[0]
+        assert rows[1].startswith('away at '), rows[1]
+        assert ('(1.00 kV, landing): I 40.0 uA, 30.0 uA from location '
+                '10.0 uA (bar 20.0 uA, sigma 0.50 uA); 1 in a row') in \
+            rows[1], rows[1]
+        # no would-trip, so no telemetry event row for the shadow
+        assert not any(r['event'].startswith('SHADOW')
+                       for r in _telemetry_events(tmp))
+    # when it was logged: the SG was already zeroed and switched off, and
+    # no other message mentions the read
+    [(msg, sg_then)] = [(m, w) for m, w in seen if 'away at ' in m]
+    assert msg == entry
+    assert sg_then[-2:] == [('set_offset', 1, 0.0),
+                            ('set_output', 1, False)], sg_then[-4:]
+
+
+def test_a_would_trip_lists_both_reads_and_is_still_one_would_trip():
+    """The held 30 uA step of the first run test: both away reads are
+    listed, the second marked, and there is still exactly one would-trip:
+    one telemetry event row and one end line."""
+    with tempfile.TemporaryDirectory() as tmp:
+        app = _run(tmp, ticked=False, tel=True,
+                   volts=lambda a: _step_volts(a, 8.0, 0.05, 0.2))
+        assert any(ln.startswith('run complete') for ln in app.lines), \
+            app.lines
+        [line] = _shadow_lines(app)
+        assert 'would trip at ' in line, line
+        shadow_events = [r for r in _telemetry_events(tmp)
+                         if r['event'].startswith('SHADOW')]
+        assert len(shadow_events) == 1, shadow_events
+        [entry] = _away_entries(app)
+        rows = entry.split('\n  ')
+        assert len(rows) == 3, rows
+        assert rows[0].startswith('SHADOW away reads (N-sigma, acts on '
+                                  'nothing): 2 away reads in '), rows[0]
+        assert rows[1].endswith('; 1 in a row'), rows[1]
+        assert rows[2].endswith('; 2 in a row, would trip'), rows[2]
+
+
+def test_a_quiet_live_run_lists_no_away_read():
+    """The watchdog ticked (so the shadow has the 0 kV baseline), the
+    current a steady 10 uA: no away read, so no entry at all."""
+    with tempfile.TemporaryDirectory() as tmp:
+        app = _run(tmp, ticked=True, tel=True, landing_s=4.0)
+        assert any(ln.startswith('run complete') for ln in app.lines), \
+            app.lines
+        [line] = _shadow_lines(app)
+        assert line.startswith('SHADOW N-sigma (acts on nothing): no trip '
+                               'in '), line
+        assert _away_entries(app) == [], app.lines
 
 
 def _run_all():

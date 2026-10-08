@@ -5163,8 +5163,9 @@ LOGGING:
         `watchdog_shadow` is sldea_run's setup.txt line for the #219
         N-sigma rule (sldea_profile.shadow_record). With it, a LIVE run
         whose monitor reads run feeds the rule those same reads in SHADOW:
-        it acts on nothing, and its outcome is written after the SG is
-        zeroed. None (a caller that predates it) runs no shadow."""
+        it acts on nothing, and its outcome and every away read it saw are
+        written after the SG is zeroed. None (a caller that predates it)
+        runs no shadow."""
         import os
         import csv as _csv
         started = datetime.now()
@@ -5176,6 +5177,7 @@ LOGGING:
         completed = False
         cam_lock_saved = None         # Webcam-tab lock, restored at the end
         shadow = None                 # #219 N-sigma rule, shadow (below)
+        shadow_rule = None            # ...the same rule, kept after an error
         shadow_end = None             # its outcome when it could not run
         shadow_base = (None, None)    # 0 kV baseline (median, sigma) for it
         shadow_refused = None         # ...or the baseline the bound refused
@@ -5529,7 +5531,7 @@ LOGGING:
                                   f"{shadow_refused:.1f} uA was refused "
                                   f"(a standing fault current)")
                 else:
-                    shadow = sldea_profile.NSigmaWatchdog(
+                    shadow = shadow_rule = sldea_profile.NSigmaWatchdog(
                         base_loc=shadow_base[0], base_sigma=shadow_base[1])
             self._sldea_voff_logged = False   # V_Out clip: log once per run
             self._sldea_ioff_logged = False   # I_Out clip: log once per run
@@ -5688,7 +5690,10 @@ LOGGING:
                     # decided: it cannot delay a trip, and it acts on
                     # nothing. A would-trip is one telemetry event row now
                     # (no current on it, so no reader counts the read twice)
-                    # and one run.log line after the SG is zeroed. Any
+                    # and one run.log line after the SG is zeroed. Every
+                    # away read, a lone one included, is only kept in the
+                    # rule's memory here (capped) and written after the SG
+                    # is zeroed: no file or Tk call on this loop for it. Any
                     # error stops only the shadow, never this loop.
                     if shadow is not None and not shadow.tripped:
                         try:
@@ -5950,6 +5955,21 @@ LOGGING:
                     except Exception:
                         pass
                     tel.close()
+                # The #219 shadow's away reads, after the SG is zeroed: a
+                # count line and one line per listed read, as ONE run.log
+                # entry, so one file write and one Tk hand-off however many
+                # there are (the rule caps the list). None at all on a run
+                # that never left the bar. A record, so it never leaves
+                # this block.
+                if shadow_rule is not None:
+                    try:
+                        away = shadow_rule.away_lines()
+                        if away:
+                            self._sldea_log(
+                                "SHADOW away reads (N-sigma, acts on "
+                                "nothing): " + "\n  ".join(away))
+                    except Exception:
+                        pass
                 # The #219 shadow's outcome, after the SG is zeroed: one
                 # run.log line and one setup.txt line, whatever it saw. A
                 # record like the telemetry, so it never leaves this block.

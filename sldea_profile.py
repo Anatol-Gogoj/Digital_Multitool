@@ -1131,6 +1131,13 @@ NSIGMA_DEFAULTS = {
     'ramp_factor': 2.0,     # the bar on ramps and while a landing settles
 }
 
+# Away reads the shadow lists in run.log, per run (#219). Every away read is
+# counted; the first this many are listed, one line each, written once after
+# the SG is zeroed. A cap, so a run that wobbles across the bar from start
+# to end cannot grow the list, or that one write, without bound: 100 lines
+# are about 13 KB.
+NSIGMA_AWAY_LOG_MAX = 100
+
 
 class NSigmaWatchdog:
     """The #219 breakdown rule: away when the current sits N sigmas from
@@ -1140,6 +1147,9 @@ class NSigmaWatchdog:
     It runs in SHADOW (owner, 2026-10-08): the LIVE worker feeds it the
     very reads the monitor tick already takes and records what it would
     have done, and it acts on nothing; BreakdownWatchdog still stops runs.
+    It also keeps every away read, a lone one included (`away`, `n_away`,
+    `away_lines`), so the owner can decide later whether a single away
+    read is a breakdown (2026-10-08).
 
     Location and sigma are the median and 1.4826 x the median absolute
     deviation of the last `window` QUIET reads, the newest `guard` of them
@@ -1171,7 +1181,7 @@ class NSigmaWatchdog:
     def __init__(self, n_sigma=None, window=None, k_consec=None,
                  dev_min=None, sigma_floor=None, guard=None, w_min=None,
                  settle_s=None, ramp_factor=None, base_loc=None,
-                 base_sigma=None):
+                 base_sigma=None, away_max=None):
         d = NSIGMA_DEFAULTS
         self.n_sigma = float(d['n_sigma'] if n_sigma is None else n_sigma)
         self.window = int(d['window'] if window is None else window)
@@ -1196,6 +1206,12 @@ class NSigmaWatchdog:
         self.how = ''
         self.trip = None              # dict: t, kv, ua, dev, bar, loc, sigma
         self.peak = None              # largest judged departure, same keys
+        # The first away_max away reads (the trip's keys plus phase, streak
+        # and offscreen), and the count of every away read, listed or not.
+        self.away_max = int(NSIGMA_AWAY_LOG_MAX if away_max is None
+                            else away_max)
+        self.away = []
+        self.n_away = 0
 
     def stats(self):
         """(location, sigma) the next read is judged by, or (None, None)
@@ -1261,6 +1277,19 @@ class NSigmaWatchdog:
             if not away and not ramping and not settling:
                 self._keep(ua)
         self._streak = self._streak + 1 if away else 0
+        if away:
+            # Every away read, for the owner's call on single-read
+            # excursions (#219): always counted, listed up to away_max.
+            # Memory only: the worker writes the list once, after the SG
+            # is zeroed, so nothing here waits on a file or on Tk.
+            self.n_away += 1
+            if len(self.away) < self.away_max:
+                self.away.append({
+                    't': t_s, 'kv': kv, 'ua': ua, 'dev': dev, 'bar': bar,
+                    'loc': loc, 'sigma': sig, 'offscreen': bool(offscreen),
+                    'phase': ('ramp' if ramping else
+                              'settling' if settling else 'landing'),
+                    'streak': self._streak})
         if self._streak >= self.k_consec:
             self.tripped = True
             self.how = ('off-screen' if offscreen else 'away') + \
@@ -1296,6 +1325,36 @@ class NSigmaWatchdog:
         return (f"no trip in {self.n_reads} reads; largest departure "
                 f"{pk['dev']:.1f} uA (bar {pk['bar']:.1f} uA) at "
                 f"{pk['t']:.1f} s ({pk['kv']:.2f} kV)")
+
+    def away_lines(self):
+        """Every away read it saw, ASCII, for run.log (#219): a count line,
+        then one line per listed read with its time, kV, reading, the
+        location it was judged against, the deviation and the bar. [] with
+        no away read, so a quiet run logs nothing. The owner reads these to
+        decide whether a single away read is a breakdown."""
+        if not self.n_away:
+            return []
+        n = len(self.away)
+        head = (f"{self.n_away} away read{'' if self.n_away == 1 else 's'} "
+                f"in {self.n_reads} reads")
+        if self.n_away > n:
+            head += f"; the first {n} listed, {self.n_away - n} more not"
+        out = [head]
+        for a in self.away:
+            if a['offscreen']:
+                what = "off the scope's screen"
+                if a['loc'] is not None:
+                    what += f" (location {a['loc']:.1f} uA)"
+            else:
+                what = (f"I {a['ua']:.1f} uA, {a['dev']:.1f} uA from "
+                        f"location {a['loc']:.1f} uA (bar {a['bar']:.1f} "
+                        f"uA, sigma {a['sigma']:.2f} uA)")
+            run = f"{a['streak']} in a row"
+            if a['streak'] >= self.k_consec:
+                run += ", would trip"
+            out.append(f"away at {a['t']:.1f} s ({a['kv']:.2f} kV, "
+                       f"{a['phase']}): {what}; {run}")
+        return out
 
 
 def shadow_record(live, monitored):

@@ -1510,9 +1510,11 @@ watchdog still stops runs. Replayed on the 18 single-layer runs with
 current on file, it made no false trip, let the three self-clearing
 transients pass, and caught two of the three breakdowns, one that the
 fixed rule missed and one 44 s sooner. None of those breakdowns has
-telemetry, so the rule has not yet met one at its live read rate. It
-stays in shadow until the §N1 probe and a bench campaign say it should
-act.
+telemetry, so the rule has not yet met one at its live read rate. Every
+away read, a lone one included, is listed in run.log once the SG is
+zeroed, so the owner can decide later whether a single away read is a
+breakdown. It stays in shadow until the §N1 probe and a bench campaign
+say it should act.
 
 **Observation** (replay on the 18 single-layer runs with current copied
 from the lab share, 2026-10-08: data.csv, telemetry.csv, setup.txt and
@@ -1580,6 +1582,19 @@ run.log only).
    as normal; the fixed rule's 0 kV baseline does not move. No
    single-layer run on file shows that case: the backstop rests on the
    design and on the owner's decision.
+7. Every away read is logged, a lone one included (owner, 2026-10-08),
+   so the owner can judge single-read excursions before any spike rule
+   is decided. The rule keeps each away read in memory: its time, kV and
+   reading, the location it was judged against, the deviation, the bar,
+   whether it fell on a ramp, a settling landing or a landing, and how
+   many in a row. It counts all of them and keeps the first 100
+   (`NSIGMA_AWAY_LOG_MAX`). After the SG is zeroed, run.log gets one
+   entry: a count line, then one line per kept read. A run with no away
+   read gets no entry. Nothing about it is written from the run loop: a
+   file write or a Tk hand-off there per away read could hold up the
+   loop that services ■ Abort and the ramp to zero (`#405`). For the same
+   reason telemetry.csv gets no row per away read; its periodic rows
+   already carry the current at the telemetry rate.
 
 **Before it may act.** The §N1 probe's quiet-rig sigma per measurement
 token; a bench campaign of LIVE runs in shadow with no false would-trip and

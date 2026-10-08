@@ -270,6 +270,11 @@ def test_an_overload_code_never_becomes_a_min_or_a_max():
     reading = {'set_voltage_v': 12.0, 'meas_voltage_v': 9.9e37,
                'meas_current_a': 0.3, 'power_w': 9.9e37 * 0.3}
     assert cl.psu_quantities(reading)[3] == ('Power', None, 'W')
+    # the current is the other factor: at 0 V a current code makes 0 W
+    off = {'set_voltage_v': 0.0, 'meas_voltage_v': 0.0,
+           'meas_current_a': 9.9e37, 'power_w': 0.0 * 9.9e37}
+    assert off['power_w'] == 0.0
+    assert cl.psu_quantities(off)[3] == ('Power', None, 'W')
     st.record('DC Supply CH1', cl.psu_quantities(reading))
     st.record('DC Supply CH1', cl.psu_quantities(
         {'set_voltage_v': 12.0, 'meas_voltage_v': 11.9,

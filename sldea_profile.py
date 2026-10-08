@@ -961,6 +961,16 @@ def run_folder_line(outdir, run_name, found=None, slow=False, fits=None,
     return f"{first}\n{fit_end(warning, fits)}", True, full
 
 
+def run_folder_writing_line(folder, fits=None):
+    """The line while a run is on -> (text, warn, full): "Writing to:" and
+    the folder that run writes to, cut as run_folder_line cuts it. The
+    boxes stay editable during a run, and judging them then once warned
+    that the run's own folder "already holds a run" (#402 review)."""
+    import os
+    folder = os.path.abspath(folder)
+    return fit_path('Writing to: ', folder, '', fits), False, folder
+
+
 def preflight_start_button(level, mismatch=False, checked=True,
                            fallback=False, tab_mismatch=False):
     """The pre-flight's start button -> (label, is_default).

@@ -874,37 +874,204 @@ def test_the_line_warns_while_the_share_is_not_mounted():
         assert line.cget('fg') == app.SLDEA_FOLDER_COLORS['ok']
 
 
+def _line_threads():
+    return [t for t in threading.enumerate() if t.name == LINE_THREAD]
+
+
 def test_a_share_that_hangs_never_freezes_the_window():
     """Every keystroke redraws at once while the check hangs; the line
-    says the Output dir is not answering; only one check is ever out; the
-    answer shows once it comes."""
+    says the Output dir is not answering; a burst of typing sends one
+    check, and a burst while that one is stuck one more; the answer shows
+    once it comes."""
     with tempfile.TemporaryDirectory() as tmp, _real_app() as (root, app), \
             _hanging_share() as gate:
         line = app.sldea_folder_line
         app.SLDEA_FOLDER_SLOW_S = 0.3
         app.sldea_outdir.set(tmp)
         worst = 0.0
-        for name in ('A', 'AB', 'ABC', 'ABCD', 'ABCDE'):
-            # The trace runs the redraw inside set(): a stat made there
-            # would hold it for the share's 30 s. Painting is timed apart.
-            t0 = time.monotonic()
-            app.sldea_runname_var.set(name)
-            worst = max(worst, time.monotonic() - t0)
-            root.update()
-            # the path for THIS keystroke, with or without the slow note
-            first = line.cget('text').split('\n')[0]
-            assert first == _saves_to(app, os.path.join(tmp, name)), first
-            _settle(root, lambda: False, timeout=0.4)
+        out = []
+        for burst in (('A', 'AB', 'ABC'), ('ABCD', 'ABCDE')):
+            for name in burst:
+                # The trace runs the redraw inside set(): a stat made there
+                # would hold it for the share's 30 s. Painting is timed
+                # apart. Keys come faster than the pause before a check.
+                t0 = time.monotonic()
+                app.sldea_runname_var.set(name)
+                worst = max(worst, time.monotonic() - t0)
+                root.update()
+                first = line.cget('text').split('\n')[0]
+                assert first == _saves_to(app, os.path.join(tmp, name)), \
+                    first
+                _settle(root, lambda: False, timeout=0.1)
+            # the last key of the burst: a check goes out, and hangs
+            assert _settle(root, lambda: 'not answering' in
+                           line.cget('text')), line.cget('text')
+            assert line.cget('text').startswith(
+                _saves_to(app, os.path.join(tmp, burst[-1]))), \
+                line.cget('text')
+            assert line.cget('fg') == WINE
+            out.append(len(_line_threads()))
         assert worst < 0.5, worst
-        assert _settle(root, lambda: 'not answering' in line.cget('text')), \
-            line.cget('text')
-        assert line.cget('fg') == WINE
-        out = [t for t in threading.enumerate() if t.name == LINE_THREAD]
-        assert len(out) == 1, out
+        assert out == [1, 2], out
         gate.set()
         assert _settle(root, lambda: line.cget('text') ==
                        _saves_to(app, os.path.join(tmp, 'ABCDE'))), \
             line.cget('text')
+
+
+@contextlib.contextmanager
+def _hanging_under(top):
+    """sldea_profile.holds_run blocks until the yielded event is set for a
+    folder under `top`, as on a share that has gone away, and is the real
+    one anywhere else."""
+    gate = threading.Event()
+    real = sprof.holds_run
+    hung = os.path.normcase(os.path.abspath(top))
+
+    def maybe(folder):
+        if os.path.normcase(os.path.abspath(folder)).startswith(hung):
+            gate.wait(30)
+            return []
+        return real(folder)
+    sprof.holds_run = maybe
+    try:
+        yield gate
+    finally:
+        gate.set()
+        sprof.holds_run = real
+
+
+def test_a_stuck_check_of_another_folder_never_claims_the_line():
+    """#402 review, finding 5: a check stuck on a share made the line say
+    "not answering" for whatever folder the boxes named, a local one
+    included, until the stat returned, which on a hard mount may be never.
+    The line now describes the folder the boxes name: switching the Output
+    dir to a local folder, or the name to another one, drops the stuck
+    check's claim at once, and the folder named now gets its own check."""
+    with tempfile.TemporaryDirectory() as tmp, _real_app() as (root, app):
+        hung, local = os.path.join(tmp, 'hung'), os.path.join(tmp, 'local')
+        os.mkdir(hung)
+        os.mkdir(local)
+        _a_run_in(os.path.join(local, 'RUN'))
+        line = app.sldea_folder_line
+        app.SLDEA_FOLDER_SLOW_S = 0.3
+        with _hanging_under(hung) as gate:
+            app.sldea_outdir.set(hung)
+            app.sldea_runname_var.set('RUN')
+            assert _settle(root, lambda: 'not answering' in
+                           line.cget('text')), line.cget('text')
+            # the Output dir moves to a local folder: no claim, and checked
+            app.sldea_outdir.set(local)
+            root.update()
+            assert 'not answering' not in line.cget('text'), \
+                line.cget('text')
+            assert line.cget('text') == _saves_to(
+                app, os.path.join(local, 'RUN')), line.cget('text')
+            assert _settle(root, lambda: _holds_run(line.cget('text'))), \
+                line.cget('text')
+            # the name changes while the check of another name is stuck
+            app.sldea_outdir.set(hung)
+            app.sldea_runname_var.set('A')
+            assert _settle(root, lambda: 'not answering' in
+                           line.cget('text')), line.cget('text')
+            app.sldea_runname_var.set('B')
+            root.update()
+            assert line.cget('text') == _saves_to(
+                app, os.path.join(hung, 'B')), line.cget('text')
+            # B's own check hangs too, and the line says so for B
+            assert _settle(root, lambda: 'not answering' in
+                           line.cget('text')), line.cget('text')
+            assert line.cget('text').startswith(
+                _saves_to(app, os.path.join(hung, 'B')))
+            gate.set()
+            assert _settle(root, lambda: line.cget('text') ==
+                           _saves_to(app, os.path.join(hung, 'B'))), \
+                line.cget('text')
+
+
+def test_the_line_names_the_running_runs_folder():
+    """#402 review, finding 5: while a run was on, the line judged the
+    boxes, and after a tab change it warned that the run's own folder
+    "already holds a run". It now says "Writing to:" and the folder that
+    run writes to, whatever the boxes say, until the run ends, and checks
+    nothing meanwhile; then it judges the boxes again."""
+    with tempfile.TemporaryDirectory() as tmp, _real_app() as (root, app):
+        line = app.sldea_folder_line
+        run = os.path.join(tmp, 'RUN')
+        app.sldea_outdir.set(tmp)
+        app.sldea_runname_var.set('RUN')
+        assert _settle(root, lambda: line.cget('text') ==
+                       _saves_to(app, run)), line.cget('text')
+        # what sldea_run does once the worker is on its way, and what the
+        # worker then writes
+        app._sldea_running = True
+        app._sldea_folder_run = (tmp, 'RUN')
+        _a_run_in(run)
+        app._sldea_folder_refresh()
+        assert line.cget('text').startswith('Writing to: '), \
+            line.cget('text')
+        writing = sprof.fit_path('Writing to: ', os.path.abspath(run), '',
+                                 app._sldea_folder_fits())
+        assert line.cget('text') == writing, line.cget('text')
+        # a tab change and retyped boxes leave it alone, and check nothing
+        app.notebook.event_generate('<<NotebookTabChanged>>')
+        app.sldea_runname_var.set('OTHER')
+        app.sldea_outdir.set(os.path.join(tmp, 'elsewhere'))
+        _settle(root, lambda: False, timeout=0.6)
+        assert line.cget('text') == writing, line.cget('text')
+        assert line.cget('fg') == app.SLDEA_FOLDER_COLORS['ok']
+        assert app._sldea_folder_job is None
+        # a blank name: the worker's stamped folder, once its run.log is
+        # live
+        app._sldea_folder_run = (tmp, '')
+        app._sldea_folder_refresh()
+        assert sprof.AUTO_RUN_DIRNAME in line.cget('text'), line.cget('text')
+        stamped = os.path.join(tmp, 'SLDEA_20261008_131500')
+        app._sldea_runlog = os.path.join(stamped, 'run.log')
+        assert _settle(root, lambda: line.cget('text').endswith(
+            'SLDEA_20261008_131500')), line.cget('text')
+        # the run ends: the boxes are judged again
+        app.sldea_outdir.set(tmp)
+        app.sldea_runname_var.set('RUN')
+        app._sldea_finished()
+        assert _settle(root, lambda: _holds_run(line.cget('text'))), \
+            line.cget('text')
+
+
+def test_a_run_finished_while_its_folder_is_checked_is_seen():
+    """#402 review, finding 6: _sldea_finished asks for a look while a
+    check of the same folder is still out, one that looked before the run
+    wrote. That check is asked to go again once it is back, so the line
+    ends up warning; without that, its stale "no run" stood."""
+    with tempfile.TemporaryDirectory() as tmp, _real_app() as (root, app):
+        line = app.sldea_folder_line
+        run = os.path.join(tmp, 'RUN')
+        gate = threading.Event()
+        calls = []
+        real = sprof.holds_run
+
+        def first_is_stale(folder):
+            calls.append(folder)
+            if len(calls) == 1:
+                gate.wait(30)
+                return []             # what it saw before the run wrote
+            return real(folder)
+        sprof.holds_run = first_is_stale
+        try:
+            app.sldea_outdir.set(tmp)
+            app.sldea_runname_var.set('RUN')
+            assert _settle(root, lambda: len(calls) == 1), calls
+            _a_run_in(run)                       # the run writes...
+            app._sldea_finished()                # ...and ends
+            _settle(root, lambda: False, timeout=0.6)   # past the pause
+            assert len(calls) == 1, calls        # one check out at a time
+            gate.set()
+            assert _settle(root, lambda: _holds_run(line.cget('text'))), \
+                line.cget('text')
+            assert len(calls) == 2, calls
+        finally:
+            gate.set()
+            sprof.holds_run = real
 
 
 def test_a_finished_run_turns_the_line_to_a_warning():

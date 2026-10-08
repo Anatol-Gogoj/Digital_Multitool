@@ -3052,6 +3052,8 @@ LOGGING:
         self._sldea_folder_pause = None    # after id: check once typing stops
         self._sldea_folder_job = None      # the check out on its thread
         self._sldea_folder_poll_id = None  # after id: its next look
+        self._sldea_folder_run_id = None   # after id: a run's folder again
+        self._sldea_folder_run = None      # (Output dir, Run name) of a run
         self.sldea_folder_line.bind('<Destroy>', self._sldea_folder_stop,
                                     add='+')
         self.sldea_runname_var.trace_add('write', self._sldea_folder_refresh)
@@ -3791,10 +3793,16 @@ LOGGING:
     # time: a stat on a share that has gone away can block for minutes,
     # and on the Tk thread that would freeze the window at every
     # keystroke. A check with no answer after SLDEA_FOLDER_SLOW_S says so
-    # on the line and keeps waiting at a slower pace.
+    # on the line and keeps waiting at a slower pace. Once the boxes name
+    # another folder, a check that slow is left to finish on its own and
+    # the folder named now is checked instead (#402 review), so a new
+    # check goes out at most once per SLDEA_FOLDER_SLOW_S however long a
+    # share hangs. While a run is on, the line names the folder that run
+    # writes to instead of judging the boxes.
     SLDEA_FOLDER_PAUSE_MS = 300
     SLDEA_FOLDER_POLL_MS = 100
     SLDEA_FOLDER_SLOW_S = 2.0
+    SLDEA_FOLDER_RUN_MS = 500
     # The job line's colors (#396): the repo's muted gray, and Paul Tol's
     # muted wine for a warning (7.7:1 as text on the Windows background).
     SLDEA_FOLDER_COLORS = {'ok': MUTED, 'warn': '#882255'}
@@ -3807,30 +3815,73 @@ LOGGING:
         return (self.sldea_outdir.get(),
                 self.sldea_runname_var.get().strip())
 
-    def _sldea_folder_slow(self):
-        """True while a check has been out longer than SLDEA_FOLDER_SLOW_S.
-        Checks go out one at a time, so no folder of that Output dir can be
-        checked meanwhile, whichever one the boxes name now."""
-        job = self._sldea_folder_job
+    def _sldea_folder_stuck(self, job):
+        """Has this check been out longer than SLDEA_FOLDER_SLOW_S?"""
         return bool(job is not None and not job['done']
                     and time.monotonic() - job['t0']
                     > self.SLDEA_FOLDER_SLOW_S)
 
+    def _sldea_folder_slow(self, folder):
+        """True while the check of `folder` has been out longer than
+        SLDEA_FOLDER_SLOW_S. A check of another folder never makes the
+        line say "not answering" (#402 review): the line describes the
+        folder the boxes name now."""
+        job = self._sldea_folder_job
+        return (job is not None and job['folder'] == folder
+                and self._sldea_folder_stuck(job))
+
+    def _sldea_folder_writing(self):
+        """The folder the run in progress writes to: the worker's own, once
+        its run.log is live (exact for a blank name too), else the boxes
+        sldea_run read when Run was pressed -> (folder, exact)."""
+        runlog = getattr(self, '_sldea_runlog', None)
+        if runlog:
+            return os.path.dirname(runlog), True
+        where = getattr(self, '_sldea_folder_run', None)
+        if where:
+            return sldea_profile.run_folder(*where), bool(where[1])
+        return sldea_profile.run_folder(*self._sldea_folder_boxes()), False
+
     def _sldea_folder_redraw(self):
         """Draw the line for what the boxes name now, from the last check
-        of that folder when there is one -> (Output dir, Run name)."""
+        of that folder when there is one, or, while a run is on, for the
+        folder that run writes to -> (Output dir, Run name)."""
         outdir, name = self._sldea_folder_boxes()
+        if self._sldea_running:
+            folder, exact = self._sldea_folder_writing()
+            text, warn, full = sldea_profile.run_folder_writing_line(
+                folder, fits=self._sldea_folder_fits())
+            self.sldea_folder_line.config(
+                text=text,
+                fg=self.SLDEA_FOLDER_COLORS['warn' if warn else 'ok'])
+            self._sldea_folder_tip.text = full
+            if not exact and self._sldea_folder_run_id is None:
+                # a blank name's folder is stamped by the worker: look again
+                self._sldea_folder_run_id = self.root.after(
+                    self.SLDEA_FOLDER_RUN_MS, self._sldea_folder_run_tick)
+            return outdir, name
         folder = sldea_profile.run_folder(outdir, name)
         seen = self._sldea_folder_seen
         self._sldea_folder_show(
             outdir, name, seen[1] if seen and seen[0] == folder else None,
-            slow=self._sldea_folder_slow())
+            slow=self._sldea_folder_slow(folder))
         return outdir, name
+
+    def _sldea_folder_run_tick(self):
+        self._sldea_folder_run_id = None
+        if self._sldea_running:
+            try:
+                self._sldea_folder_redraw()
+            except Exception:
+                pass
 
     def _sldea_folder_wanted(self, outdir, name):
         """Is there anything to check for this folder? A typed name it can
         use, or a blank name on the share, whose mount is checked (#402
-        review). Text only, no file system call."""
+        review), and never while a run is on. Text only, no file system
+        call."""
+        if self._sldea_running:
+            return False
         if name:
             return not sldea_profile.run_name_problem(name)
         return output_folder.on_share(sldea_profile.run_folder(outdir, name),
@@ -3838,8 +3889,9 @@ LOGGING:
 
     def _sldea_folder_refresh(self, *_args):
         """Redraw the run folder line from the two boxes now, then check
-        that folder once the typing pauses. A trace and a tab change call
-        this; it never raises, it is a label."""
+        that folder once the typing pauses. A trace, a tab change, the
+        start of a run and its end call this; it never raises, it is a
+        label."""
         try:
             outdir, name = self._sldea_folder_redraw()
             if self._sldea_folder_pause is not None:
@@ -3884,21 +3936,37 @@ LOGGING:
         except Exception:
             pass
 
+    def _sldea_folder_abandon(self):
+        """Leave the check out now to finish on its own thread, into its own
+        dict, which nothing reads any more, and stop polling it."""
+        self._sldea_folder_job = None
+        if self._sldea_folder_poll_id is not None:
+            try:
+                self.root.after_cancel(self._sldea_folder_poll_id)
+            except Exception:
+                pass
+            self._sldea_folder_poll_id = None
+
     def _sldea_folder_check(self):
         """Send the check of the run folder the boxes name out on its
         thread, or, while one is still out, ask for another when it is
-        back."""
+        back. A check stuck on a folder the boxes no longer name is
+        abandoned instead of waited for."""
         self._sldea_folder_pause = None
-        job = self._sldea_folder_job
-        if job is not None:
-            job['again'] = True
-            return
         try:
             outdir, name = self._sldea_folder_boxes()
+            if not self._sldea_folder_wanted(outdir, name):
+                return
             folder = sldea_profile.run_folder(outdir, name)
             mount = sldea_share_mount()
         except Exception:
             return
+        job = self._sldea_folder_job
+        if job is not None:
+            if job['folder'] == folder or not self._sldea_folder_stuck(job):
+                job['again'] = True
+                return
+            self._sldea_folder_abandon()
         job = {'folder': folder, 'outdir': outdir, 'name': name,
                'mount': mount, 'found': None, 'done': False,
                'again': False, 't0': time.monotonic()}
@@ -3923,18 +3991,26 @@ LOGGING:
             return
         try:
             if not job['done']:
-                slow = self._sldea_folder_slow()
-                if slow:
+                stuck = self._sldea_folder_stuck(job)
+                if stuck:
+                    outdir, name = self._sldea_folder_boxes()
+                    if sldea_profile.run_folder(outdir, name) != \
+                            job['folder']:
+                        # stuck on a folder the boxes no longer name: it
+                        # has no claim on the line (#402 review)
+                        self._sldea_folder_abandon()
+                        self._sldea_folder_redraw()
+                        self._sldea_folder_check()
+                        return
                     self._sldea_folder_redraw()
                 self._sldea_folder_next(
-                    self.SLDEA_FOLDER_POLL_MS * (5 if slow else 1))
+                    self.SLDEA_FOLDER_POLL_MS * (5 if stuck else 1))
                 return
             self._sldea_folder_job = None
             self._sldea_folder_seen = (job['folder'], job['found'])
             outdir, name = self._sldea_folder_redraw()
             now = sldea_profile.run_folder(outdir, name)
-            if ((job['again'] or now != job['folder'])
-                    and self._sldea_folder_wanted(outdir, name)):
+            if job['again'] or now != job['folder']:
                 self._sldea_folder_check()
         except Exception:
             pass
@@ -3943,7 +4019,8 @@ LOGGING:
         """<Destroy> of the line: cancel its timers, so none fires into a
         window that is gone. A check still out on its thread finishes on
         its own; it holds nothing of the app's."""
-        for attr in ('_sldea_folder_pause', '_sldea_folder_poll_id'):
+        for attr in ('_sldea_folder_pause', '_sldea_folder_poll_id',
+                     '_sldea_folder_run_id'):
             job = getattr(self, attr, None)
             setattr(self, attr, None)
             if job is not None:
@@ -4647,6 +4724,14 @@ LOGGING:
             # beside this window when there is room, otherwise behind it,
             # and the keyboard focus comes back here either way
             sldea_liveview.notify(self, 'open_with_run')
+            # The run folder line names the folder this run writes to until
+            # it ends, instead of judging the boxes, which stay editable
+            # (#402 review). A label: no file system call, it never raises,
+            # and a test's stand-in app has no line.
+            self._sldea_folder_run = (outdir, runname)
+            refresh = getattr(self, '_sldea_folder_refresh', None)
+            if refresh is not None:
+                refresh()
             # Video review... steps out of the run row until the run ends,
             # so the status line and Live view... keep their room (#395).
             # Last, once the run is under way; it never raises.

@@ -226,7 +226,10 @@ def list_runs(parent):
 # folder / Reset folders, and on the lab share a listing is already slow,
 # so a re-listing pays one stat per run and re-reads only a setup.txt
 # that changed. A file that is gone is a run with no line, like a file
-# that never had one.
+# that never had one. A grouping change re-reads the cells of the runs
+# it acts on the same way (`#390`): the seed reads setup.txt fresh, and
+# a cell read only at listing time could show an electrode the file no
+# longer records beside the group the seed just made from it.
 # ---------------------------------------------------------------------------
 
 # The engine's own words for the two non-answers (`#373`), so a run's
@@ -294,6 +297,25 @@ def fit_widths(natural, floor, avail, order):
         if short <= 0:
             break
     return out
+
+
+def style_font(widget, style, fallback):
+    """-> the tkfont.Font that the ttk `style` draws its text in.
+
+    The style's font as ttk looks it up, which walks the style's parents
+    ('Treeview.Heading' falls back to 'Heading', the one ttk draws a
+    Treeview's headings with), else the named font `fallback`. A font
+    DESCRIPTION is wrapped as readily as a named font, and one that Tk
+    cannot read stands in as `fallback`, so a theme's font cannot stop
+    the window from opening."""
+    name = ttk.Style(widget).lookup(style, 'font') or fallback
+    try:
+        return tkfont.Font(root=widget, name=name, exists=True)
+    except tk.TclError:                    # a description, not a name
+        try:
+            return tkfont.Font(root=widget, font=name)
+        except tk.TclError:
+            return tkfont.Font(root=widget, name=fallback, exists=True)
 
 
 def work_area(widget):
@@ -837,6 +859,145 @@ class PointerTip(Tooltip):
                 self.widget.winfo_pointery() + 18)
 
 
+def row_on_screen(tree, y):
+    """-> the Treeview row at widget height `y`, or '' when no row there
+    is on screen.
+
+    identify_row alone is not enough (`#390` review). Tk 8.6 counts rows
+    from where the top row would be, with no lower bound (IdentifyItem in
+    ttkTreeview.c), so over the headings of a list scrolled down it
+    names a row scrolled out of sight above them. bbox() is empty for
+    such a row."""
+    row = tree.identify_row(y)
+    return row if row and tree.bbox(row) else ''
+
+
+class DragSelect:
+    """Click-drag range selection on a ttk.Treeview (`#390`).
+
+    The run list was a Listbox until `#374`, and a drag down a Listbox
+    selected the rows it passed. A Tk 8.6 Treeview's own drag only moves
+    column separators, so this puts the range selection back without
+    taking over anything the Treeview does. Its bindings sit on two tags
+    of their own, around the Treeview class tag: the row pressed is read
+    on the one BEFORE it, while Tk has not yet scrolled a cut-off row
+    into view, and the selection the press made on the one AFTER it,
+    once Tk has applied the click, Shift-click or Ctrl-click. Nothing
+    here returns 'break' or shadows a binding on the widget.
+
+    A press on a row is the drag's ANCHOR, and the selection that press
+    left is its BASE. Each row from the anchor to the row under the
+    pointer takes the anchor's state, and every other row keeps its
+    state in the base. After a plain click that selects exactly the rows
+    dragged over; after a Ctrl-click it adds them to the selection, or
+    takes them out, as the Listbox did. A press anywhere else starts no
+    drag, so a heading click still sorts and a separator drag still
+    resizes its column. With the pointer above the top row (over the
+    headings, too) or below the last whole row, each pointer motion
+    scrolls the list one row and extends to the whole row then at that
+    edge: motion-driven, with no timer to cancel on close. Only rows on
+    screen are ever taken (row_on_screen, _whole)."""
+
+    def __init__(self, tree):
+        self.tree = tree
+        self._row = ''                 # the row pressed, read before Tk
+        self._press = None             # (anchor row, base selection) or None
+        # TWO tags (`#390` review): the press is read on one BEFORE the
+        # Treeview class, the selection it made on one AFTER it
+        before, after = f'DragSelectPress{id(self)}', f'DragSelect{id(self)}'
+        tags = list(tree.bindtags())
+        cls = tree.winfo_class()
+        if cls in tags:
+            at = tags.index(cls)
+            tags[at:at + 1] = [before, cls, after]
+        else:
+            tags += [before, after]
+        tree.bindtags(tuple(tags))
+        tree.bind_class(before, '<ButtonPress-1>', self._pressing)
+        tree.bind_class(after, '<ButtonPress-1>', self._pressed)
+        tree.bind_class(after, '<B1-Motion>', self._dragged)
+        tree.bind_class(after, '<ButtonRelease-1>', self._released)
+
+    def _pressing(self, event):
+        """Before the Treeview class: the row pressed. Read here because
+        Tk's own press handler can scroll a row cut off at the bottom
+        into view (BrowseTo's 'see', in the Tk sources the review read;
+        this PC's 8.6.14 does not), and after that event.y names the row
+        below it, or no row when the pressed one was the last."""
+        tree = self.tree
+        self._row = ''
+        if tree.identify_region(event.x, event.y) in ('cell', 'tree'):
+            self._row = row_on_screen(tree, event.y)
+
+    def _pressed(self, _event):
+        """After the Treeview class: the selection that press made is the
+        drag's base, and the row read before it is its anchor."""
+        row, self._row = self._row, ''
+        self._press = (row, frozenset(self.tree.selection())) if row else None
+
+    def _released(self, _event=None):
+        self._press = None
+
+    def _dragged(self, event):
+        """Give the rows from the anchor to the pointer the anchor's
+        state. Only when that changes the selection: every change sends
+        <<TreeviewSelect>>, and with it a redraw request."""
+        if self._press is None:
+            return
+        anchor, base = self._press
+        tree = self.tree
+        rows = list(tree.get_children())
+        if anchor not in rows:         # the list was refilled mid-drag
+            self._press = None
+            return
+        row = ''
+        # only inside the widget: below it, identify_row names the row
+        # that WOULD be there, which is off screen and not yet scrolled
+        # to; and over the headings row_on_screen turns down the hidden
+        # row Tk names there, so the headings count as above the top row
+        if 0 <= event.y < tree.winfo_height():
+            row = row_on_screen(tree, event.y)
+        row = row or self._edge_row(rows, event.y)
+        if not row:
+            return
+        lo, hi = sorted((rows.index(anchor), rows.index(row)))
+        span = set(rows[lo:hi + 1])
+        want = (base | span) if anchor in base else (base - span)
+        if want != set(tree.selection()):
+            tree.selection_set([r for r in rows if r in want])
+
+    def _edge_row(self, rows, y):
+        """The pointer is above or below the rows on screen, the headings
+        included: scroll one row toward it. -> the row then at that edge,
+        wholly on screen, or '' if there is none."""
+        tree = self.tree
+        whole = self._whole(rows)
+        if not whole:
+            return ''
+        up = y < tree.bbox(whole[0])[1]
+        tree.yview_scroll(-1 if up else 1, 'units')
+        whole = self._whole(rows)
+        if not whole:
+            return ''
+        return whole[0] if up else whole[-1]
+
+    def _whole(self, rows):
+        """-> the rows wholly inside the widget, top to bottom. A box from
+        bbox() is not enough (`#390` review): Tk gives one to the row just
+        past the last whole row too, which can be entirely out of sight.
+        Tk 8.6.14 does that before a scroll; a Tk that brings its scroll
+        state up to date inside bbox() (8.6.15 on, by the review's
+        reading of ttkTreeview.c) does it right after one as well."""
+        tree = self.tree
+        height = tree.winfo_height()
+        out = []
+        for r in rows:
+            box = tree.bbox(r)
+            if box and box[1] + box[3] <= height:
+                out.append(r)
+        return out
+
+
 # The bands are a CALIBRATED ERROR BUDGET, not a fit residual and not
 # anything this window computed (`#266`). Nothing on screen said so, and
 # the one number an operator sees next to every area — Edge Review's
@@ -1023,7 +1184,9 @@ RUN_ROWS = 9
 # so the floors follow the font and the DPI instead of one PC's pixels.
 # A processed timestamp-named run, the longest material placeholder, and
 # a heading with its sort arrow. At Tk's 96 dpi (Segoe UI 9) these are
-# 139, 124 and 46 px of text (measured 2026-10-06).
+# 139, 124 and 46 px of text (measured 2026-10-06). A heading is measured
+# in the headings' font, not the cells' (`#390`, PlotWindow._col_floor):
+# the same on Windows, bold on X11, where Group's could otherwise clip.
 RUN_COL_FLOOR = {'run': RUN_MARK + 'SLDEA_20261001_151016',
                  'material': NO_ELECTRODE,
                  'group': 'Group ▲'}
@@ -1382,10 +1545,21 @@ class ScrollColumn(ttk.Frame):
 
     def _refit(self, _event=None):
         """Re-measure and show or hide the bar. Idempotent: it is bound to
-        both <Configure>s and they trip each other."""
+        both <Configure>s and they trip each other.
+
+        The bar is decided FIRST and the width after it (`#390`). Whether
+        the bar shows depends on the heights alone, so nothing below can
+        change that answer, while width_for leaves room for the bar only
+        while it shows. In the old order the width was taken as if the
+        bar were not there, so a bar that appeared because the window got
+        shorter left the figure a bar's width under MIN_FIG_W until the
+        next resize: adding the bar changes no size that either
+        <Configure> reports. One pass, so there is no second refit for
+        the two handlers to trip."""
         want = self.body.winfo_reqwidth()
         need = self.body.winfo_reqheight()
         have = self._cv.winfo_height()
+        self.show_bar(need > have + self.SLACK)
         width = self.width_for(want)
         geom = (want, need, have, width)
         if geom == self._geom:
@@ -1395,7 +1569,6 @@ class ScrollColumn(ttk.Frame):
         self._cv.itemconfigure(self._win, width=width,
                                height=max(need, have))
         self._cv.configure(scrollregion=(0, 0, width, max(need, have)))
-        self.show_bar(need > have + self.SLACK)
 
     def width_for(self, want):
         """The body's width: its natural `want`, plus as much of `extra`
@@ -1811,7 +1984,8 @@ class PlotWindow:
         # material its setup.txt recorded, and the group this window
         # plots it in. EXTENDED, not BROWSE: several runs on one figure is
         # the reason this tool exists, so the picker must be able to say
-        # so. Ctrl-click and Shift-click both work.
+        # so. Ctrl-click and Shift-click both work, and so does a drag
+        # (DragSelect, `#390`).
         self.run_box = ttk.Treeview(
             box, columns=[c for c, _h in RUN_COLUMNS], show='headings',
             selectmode='extended', height=RUN_ROWS)
@@ -1821,8 +1995,15 @@ class PlotWindow:
                                       command=self.run_box.xview)
         self.run_box.configure(yscrollcommand=sb.set,
                                xscrollcommand=self._run_xscrolled)
-        self._run_font = tkfont.nametofont(
-            ttk.Style().lookup('Treeview', 'font') or 'TkDefaultFont')
+        self._run_font = style_font(self.run_box, 'Treeview',
+                                    'TkDefaultFont')
+        # ...and the HEADINGS' font, which is not the cells' (`#390`): ttk
+        # draws headings in TkHeadingFont, bold on X11 (the bench) and
+        # smaller on macOS, so a heading measured in the cell font comes
+        # out short on the bench, and Group's heading with its sort arrow
+        # could clip at Group's floor
+        self._head_font = style_font(self.run_box, 'Treeview.Heading',
+                                     'TkHeadingFont')
         # what an unprocessed row carries where the mark would be: the
         # whole number of spaces nearest RUN_MARK's width in this font
         # (4 spaces, 12 px, against the mark's 11 at 96 dpi), so names
@@ -1838,7 +2019,7 @@ class PlotWindow:
             # keep the widths their content was fitted to. A separator
             # can be dragged down to the heading's own width, no further.
             self.run_box.column(col, anchor=tk.W, stretch=(col == 'run'),
-                                minwidth=self._text_w(head),
+                                minwidth=self._head_w(head),
                                 width=self._col_floor(col))
         self.run_box.grid(row=0, column=0, sticky='nsew')
         sb.grid(row=0, column=1, sticky='ns')
@@ -1857,6 +2038,10 @@ class PlotWindow:
                       height=self.run_box.winfo_reqheight())
         box.grid_propagate(False)
         self.run_box.bind('<<TreeviewSelect>>', lambda _e: self.schedule())
+        # a drag down the list selects the rows it passes, as the Listbox
+        # did before `#374` (`#390`); click, Shift-click, Ctrl-click and
+        # the column separators stay the Treeview's own
+        DragSelect(self.run_box)
         # re-fit when the list's WIDTH changes, which is once, when it is
         # first drawn: Tk would otherwise hand any room beyond the floors
         # to Run alone, and RUN_COL_GIVE's order would only apply from
@@ -2386,14 +2571,13 @@ class PlotWindow:
                      + name))
                 self._run_meta.append({'tag': tag, 'name': name,
                                        'processed': processed})
-        # `#374`: Material is read here and only here (cached by path and
-        # mtime, see recorded_electrode); Group is filled from the
-        # window's grouping by _refresh_group_column below, which every
-        # grouping change also calls
-        self._cells = [{'run': label,
-                        'material': material_text(recorded_electrode(d)),
-                        'group': ''}
-                       for d, label in self.runs]
+        # `#374`: Material and Group are both filled by
+        # _refresh_group_column below, which every grouping change also
+        # calls: Group from the window's grouping, Material from
+        # setup.txt (cached by path and mtime, see recorded_electrode),
+        # so a listing reads each setup.txt once (`#390`)
+        self._cells = [{'run': label, 'material': '', 'group': ''}
+                       for _d, label in self.runs]
         old = self.run_box.get_children()
         if old:
             self.run_box.delete(*old)
@@ -2516,9 +2700,20 @@ class PlotWindow:
         air."""
         return self._run_font.measure(text) + 10
 
+    def _head_w(self, text):
+        """The width a HEADING needs to show `text` whole: _text_w's sum,
+        but in the headings' own font (`#390`), since that is the font
+        ttk draws them in."""
+        return self._head_font.measure(text) + 10
+
     def _col_floor(self, col):
-        """How narrow a squeeze may make `col`: RUN_COL_FLOOR's text."""
-        return self._text_w(RUN_COL_FLOOR[col])
+        """How narrow a squeeze may make `col`: RUN_COL_FLOOR's text, and
+        never narrower than the column's heading with a sort arrow, each
+        measured in the font it is drawn in (`#390`). Group's floor text
+        is its heading, so there the heading font decides."""
+        head = dict(RUN_COLUMNS)[col]
+        return max(self._text_w(RUN_COL_FLOOR[col]),
+                   self._head_w(head + ' ▲'))
 
     def _list_width(self):
         """What the list asks for: its column floors side by side."""
@@ -2547,14 +2742,41 @@ class PlotWindow:
         desktop's work area so a small screen still opens the whole
         window on screen, and never under the `#271` floor. Centered in
         the work area: the old opening, at the window manager's default
-        corner, already ran 47 px off the right of a 1646 px screen."""
+        corner, already ran 47 px off the right of a 1646 px screen.
+
+        The clamp and the centering count the window's FRAME (`#390`):
+        `+x+y` places the outer frame, title bar and borders included,
+        while `WxH` sizes only the inside, so a window clamped to the
+        work area's width used to reach a border's width past its right
+        edge on Windows. frame_size knows the frame on Windows only."""
         self.root.update_idletasks()
         left, top, right, bottom = work_area(self.root)
-        w = min(self.root.winfo_reqwidth(), right - left)
-        h = min(self.root.winfo_reqheight(), bottom - top)
+        fw, fh = self.frame_size()
+        w = min(self.root.winfo_reqwidth(), right - left - fw)
+        h = min(self.root.winfo_reqheight(), bottom - top - fh)
         w, h = max(w, self.min_size[0]), max(h, self.min_size[1])
-        return (w, h, left + max(0, (right - left - w) // 2),
-                top + max(0, (bottom - top - h) // 2))
+        return (w, h, left + max(0, (right - left - w - fw) // 2),
+                top + max(0, (bottom - top - h - fh) // 2))
+
+    def frame_size(self):
+        """-> (width, height) in px that the window's outer frame adds to
+        its inside: a border on each side, and the title bar plus a bottom
+        border as wide as a side one. That is a Windows frame: 616 x 439
+        outside for 600 x 400 inside, 8 px a side and 31 px above
+        (Windows 11 at 175 %, measured with GetWindowRect 2026-10-06).
+
+        Read off the mapped window as Tk reports it, which counts the
+        frame on Windows ONLY. On X11 Tk keeps the inside's root position
+        as the toplevel's x and y, framed or not (ConfigureEvent and
+        ComputeReparentGeometry in tkUnixWm.c, read for the `#390`
+        review), so this is (0, 0) there and the opening keeps the old
+        client-size clamp. macOS is not measured."""
+        try:
+            side = max(0, self.root.winfo_rootx() - self.root.winfo_x())
+            head = max(0, self.root.winfo_rooty() - self.root.winfo_y())
+        except tk.TclError:                # not a window to ask
+            return 0, 0
+        return 2 * side, head + side
 
     def apply_opening_size(self):
         """Open the window at opening_size(). launch() calls this; a
@@ -2567,34 +2789,54 @@ class PlotWindow:
             pass
         return w, h, x, y
 
-    def _refresh_group_column(self):
-        """Fill the Group cells from the window's grouping, then re-fit
-        the columns and re-apply the sort.
+    def _refresh_group_column(self, reread=None):
+        """Fill the Group cells from the window's grouping, re-read the
+        Material cells of the runs in `reread` from setup.txt (None:
+        every listed run), then re-fit the columns and re-apply the sort.
 
-        Called by populate() and by _groups_changed(), which every
-        grouping change goes through (Assign, Ungroup selected, Clear
-        all, the Move to group menu), so the column cannot lag the
-        grouping the figure is drawn from. Remembered groups arrive with
-        the window's first populate()."""
+        Called by populate(), which re-reads every run, and by
+        _groups_changed(), which every grouping change goes through
+        (Assign, Ungroup selected, Clear all, the Move to group menu,
+        both seed buttons), so the column cannot lag the grouping the
+        figure is drawn from. Remembered groups arrive with the window's
+        first populate().
+
+        MATERIAL IS RE-READ FOR THE RUNS A CHANGE ACTS ON (`#390`). The
+        seed buttons read setup.txt fresh, and a Material cell read only
+        when the list was filled kept the old electrode beside the group
+        a corrected setup.txt had just seeded, so the two cells disagreed
+        about the run. Those runs only: each re-read is a stat on the Tk
+        thread, which on a network share is a round trip, or the whole
+        SMB timeout when the share is offline. recorded_electrode reads
+        a file again only when its stamp moved."""
         where = {sp.group_key(k): n for k, n in self.groups.items()}
+        fresh = None if reread is None else {sp.group_key(d) for d in reread}
         for i, (d, _l) in enumerate(self.runs):
-            name = where.get(sp.group_key(d), '')
-            self._cells[i]['group'] = name
-            self.run_box.set(self._iid(i), 'group', name)
+            iid, cells = self._iid(i), self._cells[i]
+            if fresh is None or sp.group_key(d) in fresh:
+                cells['material'] = material_text(recorded_electrode(d))
+                self.run_box.set(iid, 'material', cells['material'])
+            cells['group'] = where.get(sp.group_key(d), '')
+            self.run_box.set(iid, 'group', cells['group'])
         self._fit_columns()
         self._apply_sort()
 
     def _fit_columns(self):
         """Size the columns to what they hold: each fitted to its widest
-        cell and to its heading with room for a sort arrow, then fitted
-        into the width the list really has (fit_widths, RUN_COL_GIVE).
+        cell and to its heading with room for a sort arrow (the heading in
+        the headings' font, `#390`), then fitted into the width the list
+        really has (fit_widths, RUN_COL_GIVE).
 
         Re-run whenever the content changes, so a separator dragged by
-        hand lasts until the next listing or grouping change."""
+        hand lasts until the next listing or grouping change. That holds
+        for Material's and Group's; Run is the stretch column, and Tk's
+        layout gives it back whatever room the others leave, so a drag of
+        Run's own separator is undone at the next layout (straight away on
+        Tk 8.6.15, whose identify lays out first)."""
         natural, floor = {}, {}
         for col, head in RUN_COLUMNS:
-            natural[col] = max(self._text_w(t) for t in
-                               [head + ' ▲'] + [c[col] for c in self._cells])
+            natural[col] = max([self._head_w(head + ' ▲')]
+                               + [self._text_w(c[col]) for c in self._cells])
             floor[col] = self._col_floor(col)
         avail = self.run_box.winfo_width()
         if avail <= 1:                 # not drawn yet: what the box asks for
@@ -2699,7 +2941,9 @@ class PlotWindow:
             except (ValueError, IndexError):
                 return None, ''
             return ('heading', col), RUN_HEADING_TIPS[col]
-        row = tree.identify_row(y)
+        # on screen only: over a heading separator of a scrolled list,
+        # identify_row names a hidden row (row_on_screen, `#390` review)
+        row = row_on_screen(tree, y)
         if not row:
             return None, ''
         return ('row', row), self.row_tip(row)
@@ -2758,12 +3002,19 @@ class PlotWindow:
     def _run_menu(self, event):
         """Right-click on the list. A click on a row that is not selected
         selects that row alone first, as file managers do, so the menu
-        always acts on what is highlighted. -> the menu, or None."""
-        row = self.run_box.identify_row(event.y)
+        always acts on what is highlighted. A click where no row is on
+        screen (the headings of a scrolled list) selects nothing new: Tk
+        names a hidden row there (row_on_screen, `#390` review).
+
+        -> 'break', always (`#390`): on macOS the menu also answers
+        Control-click, which is a Button-1 press, and without the break
+        the Treeview's own Button-1 binding ran after it and selected
+        the clicked row alone, collapsing the selection the menu was for."""
+        row = row_on_screen(self.run_box, event.y)
         if row and row not in self.run_box.selection():
             self.run_box.selection_set([row])
         if not self.selected_dirs():
-            return None
+            return 'break'
         menu = self.group_menu()
         # NO grab_release() after it: on X11 (the bench) tk_popup posts
         # the menu, sets a global grab on it and returns at once, and Tk
@@ -2771,7 +3022,7 @@ class PlotWindow:
         # Tk 8.6's menu.tcl). Releasing it here would leave a menu that a
         # click elsewhere does not close. Windows and aqua set no grab.
         menu.tk_popup(event.x_root, event.y_root)
-        return menu
+        return 'break'
 
     def move_to_group(self, name):
         """Move the selected runs into group `name`; '' takes them out of
@@ -2784,7 +3035,7 @@ class PlotWindow:
         if err:
             messagebox.showwarning("Groups", err)
             return err
-        self._groups_changed()
+        self._groups_changed(self.selected_dirs())
         return None
 
     def ask_group_name(self):
@@ -2810,14 +3061,14 @@ class PlotWindow:
         if err:
             messagebox.showwarning("Groups", err)
             return
-        self._groups_changed()
+        self._groups_changed(self.selected_dirs())
 
     def _ungroup_selected(self):
         err = self.assign_group('', self.selected_dirs())
         if err:
             messagebox.showwarning("Groups", err)
             return
-        self._groups_changed()
+        self._groups_changed(self.selected_dirs())
 
     def _seed_groups(self, by):
         """The two seed buttons (`#373`): 'material', or its child
@@ -2826,7 +3077,7 @@ class PlotWindow:
         if err:
             messagebox.showwarning("Groups", err)
             return
-        self._groups_changed()
+        self._groups_changed(self.selected_dirs())
 
     def _clear_groups(self):
         self.groups = {}
@@ -2834,12 +3085,17 @@ class PlotWindow:
         self.group_materials = {}
         self._groups_changed()
 
-    def _groups_changed(self):
+    def _groups_changed(self, reread=()):
         """The grouping moved: re-read it out, then redraw like any other
         control. _sync_enabled too, because the aggregate's own greying
-        does not change but the group label under the box reports on it."""
+        does not change but the group label under the box reports on it.
+
+        `reread`: the run directories the change acted on, the selection
+        for every control but Clear all, whose Material cells are read
+        from setup.txt again (`#390`). Clear all reads none: it sets no
+        group that a Material cell could disagree with."""
         self.lbl_groups.config(text=self.group_summary())
-        self._refresh_group_column()       # the picker's Group cells (`#374`)
+        self._refresh_group_column(reread)  # Group, and Material (`#390`)
         self.schedule()
 
     # -- options -----------------------------------------------------------

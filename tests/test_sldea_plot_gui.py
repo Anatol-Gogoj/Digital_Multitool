@@ -801,6 +801,96 @@ def test_the_group_column_follows_a_seed_and_the_menu_keeps_materials():
         assert boxes.said == [], boxes.said
 
 
+class _StatSpy:
+    """Stands in for sldea_plot_gui's `os` module, recording each stat of
+    a setup.txt and passing everything else through to the real one."""
+
+    def __init__(self, real):
+        self.real = real
+        self.setups = []
+
+    def stat(self, path, *a, **kw):
+        if os.path.basename(path) == 'setup.txt':
+            self.setups.append(os.path.normcase(os.path.abspath(path)))
+        return self.real.stat(path, *a, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+
+def test_material_follows_a_setup_txt_edit_at_the_next_grouping_change():
+    """`#390`: the Material cell was read only when the list was filled,
+    while the seed buttons read setup.txt FRESH. An operator who fixed a
+    run's electrode, as the Material tooltip tells them to, and then
+    pressed Group by material saw the new electrode in Group and the old
+    one in Material: the disagreement the column's comment rules out.
+    A grouping change now re-reads the Material of the runs it acts on,
+    through the cache: one stat each, a read only for a file that
+    changed, and nothing at all for the runs it does not act on."""
+    with _Bare() as b, _Boxes() as boxes:
+        if not b.ok:
+            return
+        win = b.win
+        s2 = _fake_run(b.tmp, 'S2')
+        path = _setup_txt(s2, 'Invisicon 3500')
+        s3 = _fake_run(b.tmp, 'S3')
+        path3 = _setup_txt(s3, CB)
+        win.populate()
+        assert _cells_by_name(win)['S2']['material'] == 'Invisicon 3500'
+        # the operator corrects the run's setup.txt outside the window,
+        # with a new stamp stated rather than left to the clock
+        _setup_txt(s2, N3900)
+        os.utime(path, (1_800_000_000, 1_800_000_000))
+        _select(win, 'S2', 'S3')
+        win.btn_seed_material.invoke()
+        cells = _cells_by_name(win)
+        assert cells['S2']['group'] == N3900, cells['S2']
+        assert cells['S2']['material'] == N3900, cells['S2']
+        assert cells['S3']['material'] == cells['S3']['group'] == CB
+        # ...and so do Tk's copy of the cell and the row's hover text
+        i = [os.path.basename(d) for d, _l in win.runs].index('S2')
+        assert win.run_box.set(win._iid(i), 'material') == N3900
+        assert f"Material (setup.txt): {N3900}" in win.row_tip(win._iid(i))
+        # any grouping change re-reads it, the menu's path included
+        _setup_txt(s3, '(not specified)')
+        os.utime(path3, (1_800_000_100, 1_800_000_100))
+        _select(win, 'S3')
+        assert win.move_to_group('later') is None
+        assert _cells_by_name(win)['S3']['material'] == '(not specified)'
+        assert _cells_by_name(win)['S3']['group'] == 'later'
+        # THE COST, with nothing changed: a grouping change stats the
+        # setup.txt of each run it acts on and no other (each stat is on
+        # the Tk thread, and on the lab share a round trip), Clear all
+        # stats none, a re-listing stats every run's once, and nothing
+        # is read
+        real_os, real_read = g.os, g.se.electrode_of
+        spy, reads = _StatSpy(real_os), []
+
+        def read(rundir):
+            reads.append(rundir)
+            return real_read(rundir)
+
+        def setup_of(*dirs):
+            return sorted(os.path.normcase(os.path.abspath(
+                os.path.join(d, 'setup.txt'))) for d in dirs)
+        everything = [d for d, _l in win.runs]
+        assert len(everything) == 3, everything
+        try:
+            g.os, g.se.electrode_of = spy, read
+            _select(win, 'S3')
+            assert win.move_to_group('') is None
+            assert sorted(spy.setups) == setup_of(s3), spy.setups
+            del spy.setups[:]
+            win._clear_groups()
+            assert spy.setups == [], spy.setups
+            win.populate()
+            assert sorted(spy.setups) == setup_of(*everything), spy.setups
+        finally:
+            g.os, g.se.electrode_of = real_os, real_read
+        assert reads == [], reads
+        assert boxes.said == [], boxes.said
+
+
 def test_fit_widths_gives_way_in_order_and_never_below_a_floor():
     """The picker's column arithmetic, on the case `#373`'s seeds produce:
     three long cells in a list too narrow for them, the group name the
@@ -827,6 +917,56 @@ def test_fit_widths_gives_way_in_order_and_never_below_a_floor():
     assert g.fit_widths(nat, floor, 200, order) == floor
     # the order the owner chose once `#373` seeded long group names
     assert order == ('run', 'material', 'group'), order
+
+
+def test_the_headings_are_measured_in_the_heading_font():
+    """`#390`: _fit_columns measured each heading in the CELL font, but
+    ttk draws headings in TkHeadingFont, which is bold on X11 (the
+    bench), so Group's heading with its sort arrow could clip at Group's
+    floor there. Here the heading font is made bolder and larger than
+    the cells' on purpose, so the two cannot measure alike on any
+    desktop: each heading with its arrow has to fit the width its column
+    is given and its floor, and the heading alone the separator's
+    minimum. Then again through a theme that gives the headings a font
+    DESCRIPTION rather than a named font, which must not stop the window
+    from opening."""
+    import tkinter as tk
+    from tkinter import font as tkfont
+    from tkinter import ttk
+    p = _mktmp()
+    try:
+        _fake_run(p, 'R1')
+        for how in ('named font', 'description'):
+            try:
+                root = tk.Tk()
+            except tk.TclError as e:
+                print(f"   (skipped: no display for Tk: {e})")
+                return
+            try:
+                root.withdraw()
+                cell = tkfont.nametofont('TkDefaultFont')
+                size = abs(int(cell.actual('size'))) + 3
+                if how == 'named font':
+                    head = tkfont.nametofont('TkHeadingFont')
+                    head.configure(weight='bold', size=size)
+                else:
+                    desc = f"{{{cell.actual('family')}}} {size} bold"
+                    ttk.Style(root).configure('Heading', font=desc)
+                    head = tkfont.Font(root=root, font=desc)
+                assert head.measure('Group ▲') > cell.measure('Group ▲')
+                win = g.PlotWindow(root, p, remember=False)
+                tree, inset = win.run_box, win._text_w('')
+                for col, text in g.RUN_COLUMNS:
+                    need = head.measure(text + ' ▲') + inset
+                    assert tree.column(col, 'width') >= need, \
+                        (how, col, tree.column(col, 'width'), need)
+                    assert win._col_floor(col) >= need, (how, col)
+                    assert tree.column(col, 'minwidth') >= \
+                        head.measure(text) + inset, (how, col)
+            finally:
+                _shut(root)
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
 
 
 def test_initial_state_falls_back_without_arguments():
@@ -1242,12 +1382,16 @@ def test_the_run_picker_scrolls_sideways_and_never_widens_the_window():
         class _E:
             x, y = bx + 5, by + bh // 2
             x_root, y_root = 400, 300
+        # 'break' (`#390`), so no class binding runs after the menu: on
+        # macOS a Control-click is a Button-1 press, and the Treeview's
+        # own binding would select the clicked row alone
         win.set_selected_dirs([first[0]])
-        assert win._run_menu(_E()) is menu and menu.at == (400, 300)
+        assert win._run_menu(_E()) == 'break' and menu.at == (400, 300)
         assert win.selected_dirs() == [second], win.selected_dirs()
         everything = [d for d, _l in win.runs]
         win.set_selected_dirs(everything)
-        assert win._run_menu(_E()) is menu
+        menu.at = None
+        assert win._run_menu(_E()) == 'break' and menu.at == (400, 300)
         assert win.selected_dirs() == everything
 
 
@@ -1274,13 +1418,16 @@ def test_the_window_opens_wide_enough_for_a_seeded_group_name():
         floor = win.apply_minsize()
         assert floor[0] == win.column.natural_width() + g.MIN_FIG_W
         left, top, right, bottom = g.work_area(win.root)
-        if right - left < floor[0] + win.column.extra:
+        # the frame counts (`#390`): +x+y places it, WxH sizes the inside
+        fw, fh = win.frame_size()
+        if right - left - fw < floor[0] + win.column.extra:
             raise _Skip(f'desktop too narrow: the opening wants '
-                        f'{floor[0] + win.column.extra}px and the work '
-                        f'area is {right - left}px')
+                        f'{floor[0] + win.column.extra + fw}px with its '
+                        f'frame and the work area is {right - left}px')
         width, height, x, y = win.apply_opening_size()
-        assert left <= x and x + width <= right, (x, width, left, right)
-        assert top <= y and y + height <= bottom, (y, height, top, bottom)
+        assert left <= x and x + width + fw <= right, (x, width, left, right)
+        assert top <= y and y + height + fh <= bottom, \
+            (y, height, top, bottom)
         assert w.settle(), 'the redraw never landed after opening'
         assert win.root.winfo_width() == width
         # the room reached GROUP: the seeded name shows whole...
@@ -1296,6 +1443,508 @@ def test_the_window_opens_wide_enough_for_a_seeded_group_name():
         w.resize(f'{floor[0]}x{max(floor[1], 600)}')
         assert win.column.winfo_width() == win.column.natural_width()
         assert win.canvas.get_tk_widget().winfo_width() >= g.MIN_FIG_W - 2
+
+
+def test_the_opening_clamp_counts_the_window_frame():
+    """`#390`: `+x+y` places the window's OUTER frame and `WxH` sizes its
+    inside, so opening_size, clamping the inside to the work area, opened
+    a too-wide window a border's width past the work area's right edge
+    on Windows, and a title bar and a border past its bottom. work_area
+    is monkeypatched to an area narrower and shorter than the window
+    asks for, so the clamp branch is the one taken (the case above
+    cannot reach it on a desktop wide enough for it), and on Windows the
+    frame that was really drawn is checked against that area.
+
+    In effect a Windows case: frame_size counts the frame on Windows
+    only. On X11 it is (0, 0), so there the case checks no more than the
+    old client-size clamp (`#390` review)."""
+    import sys
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        win, root = w.win, w.win.root
+        root.update_idletasks()
+        fw, fh = win.frame_size()
+        floor_w, floor_h = win.min_size
+        req_w, req_h = root.winfo_reqwidth(), root.winfo_reqheight()
+        # above the floor with its frame, below what the window asks for
+        area_w = min(req_w + fw - 20, floor_w + fw + 100)
+        area_h = min(req_h + fh - 20, floor_h + fh + 100)
+        if area_w <= floor_w + fw or area_h <= floor_h + fh:
+            raise _Skip(f'no area between the floor {win.min_size} and '
+                        f'the request {(req_w, req_h)} to clamp into')
+        left, top = 30, 20
+        right, bottom = left + area_w, top + area_h
+        real = g.work_area
+        g.work_area = lambda _widget: (left, top, right, bottom)
+        try:
+            width, height, x, y = win.apply_opening_size()
+        finally:
+            g.work_area = real
+        # the clamp branch, and the frame inside the area, centered
+        assert width < req_w and height < req_h, (width, height, req_w,
+                                                  req_h)
+        assert left <= x and x + width + fw <= right, (x, width, fw, right)
+        assert top <= y and y + height + fh <= bottom, (y, height, fh,
+                                                        bottom)
+        assert abs((x - left) - (right - x - width - fw)) <= 1
+        assert w.settle(), 'the redraw never landed after opening'
+        assert (root.winfo_width(), root.winfo_height()) == (width, height)
+        if sys.platform != 'win32':
+            return
+        # where Windows really drew the frame, asked of Windows
+        import ctypes
+        from ctypes import wintypes
+        rect = wintypes.RECT()
+        assert ctypes.windll.user32.GetWindowRect(
+            int(root.wm_frame(), 16), ctypes.byref(rect))
+        assert left <= rect.left and rect.right <= right, \
+            (rect.left, rect.right, left, right)
+        assert top <= rect.top and rect.bottom <= bottom, \
+            (rect.top, rect.bottom, top, bottom)
+        # ...and it is the frame frame_size reported
+        assert (rect.right - rect.left - width,
+                rect.bottom - rect.top - height) == (fw, fh)
+
+
+def test_a_bar_that_appears_never_puts_the_figure_under_its_floor():
+    """`#390`: ScrollColumn took its width BEFORE deciding the bar, and
+    width_for leaves room for the bar only while it shows. So in a window
+    between the floor and the floor plus the room Group asks for, where
+    the column is held to what leaves the figure MIN_FIG_W, a bar that
+    appeared because the window got SHORTER widened the column by its
+    own width, and the figure sat that much under MIN_FIG_W until the
+    next resize.
+
+    Usually a second <Configure> hid it: the body is stretched to the
+    canvas height, so it shrinks when the bar appears, and its own
+    <Configure> refit the column with the bar counted. Not when the
+    canvas was already within SLACK px under the body's request, where
+    the body's height does not change: a slow drag of the bottom edge
+    passes through that band. The sizes below go through it (measured
+    2026-10-06: the old order left the figure at 343 px, 17 under).
+
+    A bare column over a body of known size, so the case runs on any
+    desktop: the window's own controls are taller than some screens,
+    which is why the two scroll cases above can skip."""
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"   (skipped: no display for Tk: {e})")
+        return
+    try:
+        col = g.ScrollColumn(root)
+        col.pack(side=tk.LEFT, fill=tk.Y)
+        tk.Frame(col.body, width=200, height=400).pack()
+        fig = tk.Frame(root)
+        fig.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        col.set_room(extra=140)
+
+        def configured(event):         # PlotWindow._root_configured's rule
+            if event.widget is root:
+                col.set_room(limit=event.width - g.MIN_FIG_W)
+        root.bind('<Configure>', configured, add='+')
+        # between the floor (body, bar and figure) and the floor plus the
+        # 140 px of room, so it is `limit` that holds the column
+        width = 200 + col.bar.winfo_reqwidth() + g.MIN_FIG_W + 60
+        room = width - g.MIN_FIG_W
+        root.update_idletasks()
+        need = col.body.winfo_reqheight()
+        assert need == 400, need
+        # room to spare; then just under the body's request, inside the
+        # SLACK, still no bar; then short, where the bar appears and the
+        # body keeps its height; and back
+        for height, bar in ((need + 200, False), (need - 2, False),
+                            (need - 100, True), (need - 2, False),
+                            (need - 100, True), (need + 200, False)):
+            root.geometry(f'{width}x{height}')
+
+            def landed():
+                return ((root.winfo_width(), root.winfo_height())
+                        == (width, height) and col.bar_shown is bar
+                        and col.winfo_width() == room
+                        and fig.winfo_width() == g.MIN_FIG_W)
+            t0 = time.time()
+            while time.time() - t0 < 3.0:
+                root.update()
+                if time.time() - t0 > 0.5 and landed():
+                    break
+                time.sleep(0.02)
+            assert (root.winfo_width(), root.winfo_height()) == \
+                (width, height), 'the window did not take the size asked'
+            assert col.bar_shown is bar, (height, col.bar_shown)
+            assert col.winfo_width() == room, \
+                (height, col.winfo_width(), room)
+            assert fig.winfo_width() == g.MIN_FIG_W, \
+                (height, fig.winfo_width())
+    finally:
+        _shut(root)
+
+
+def _more_runs(w, n=12):
+    """Add `n` runs to a _Win's folder and re-list. -> the picker's row
+    ids in the order shown: 2 + n of them, about 9 on screen."""
+    for i in range(n):
+        _fake_run(w.tmp, f'D{i:02d}')
+    w.win.populate()
+    w.settle(0.3)
+    return list(w.win.run_box.get_children())
+
+
+def _whole_rows(tree, rows):
+    """-> the rows wholly inside the list widget, top to bottom: the
+    test's own reading, kept apart from DragSelect's."""
+    out = []
+    for r in rows:
+        box = tree.bbox(r)
+        if box and box[1] + box[3] <= tree.winfo_height():
+            out.append(r)
+    return out
+
+
+class _MenuStub:
+    """The run menu, stubbed: a real tk_popup is modal on Windows and
+    would hold the suite. It counts the posts, and it takes the entries
+    #395's Video review item adds after the group menu is built."""
+
+    def __init__(self):
+        self.posted = 0
+
+    def tk_popup(self, _x, _y):
+        self.posted += 1
+
+    def add_separator(self):
+        pass
+
+    def add_command(self, **_kw):
+        pass
+
+
+def test_a_drag_selects_the_rows_it_passes_and_clicks_keep_their_jobs():
+    """`#390`: click-drag range selection went with the Listbox, because
+    a Tk 8.6 Treeview's own drag only moves column separators, and
+    DragSelect puts it back. Driven through generated events, since what
+    is under test is which bindings run and in what order.
+
+    A plain drag selects the rows it passes, either way and back again,
+    and a wobble inside the pressed row changes nothing. A Ctrl-drag
+    adds the rows it passes, or takes them out when it starts on a row
+    the Ctrl-click deselected. Past the bottom edge the list scrolls and
+    the range keeps growing. And the Treeview keeps its own jobs: Ctrl-
+    click toggles one row, Shift-click selects from the anchor, a
+    separator drag resizes its column, and a drag that starts on a
+    heading selects nothing."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        win, tree = w.win, w.win.run_box
+        for i in range(12):
+            _fake_run(w.tmp, f'D{i:02d}')
+        win.populate()
+        w.settle(0.3)
+        rows = list(tree.get_children())
+        shown = [r for r in rows if tree.bbox(r)]
+        assert len(rows) == 14 and len(shown) < len(rows), \
+            (len(rows), len(shown))
+
+        def at(iid, dx=10, dy=0):
+            x, y, _w, h = tree.bbox(iid)
+            return {'x': x + dx, 'y': y + h // 2 + dy}
+
+        def sel():
+            chosen = set(tree.selection())
+            return [r for r in rows if r in chosen]
+
+        def ev(sequence, **where):
+            tree.event_generate(sequence, **where)
+        # a plain drag
+        ev('<ButtonPress-1>', **at(rows[1]))
+        assert sel() == [rows[1]]
+        ev('<B1-Motion>', **at(rows[1], dx=14, dy=3))       # a wobble
+        assert sel() == [rows[1]]
+        ev('<B1-Motion>', **at(rows[4]))
+        assert sel() == rows[1:5], sel()
+        ev('<B1-Motion>', **at(rows[2]))
+        assert sel() == rows[1:3], sel()
+        ev('<B1-Motion>', **at(rows[0]))
+        assert sel() == rows[0:2], sel()
+        ev('<ButtonRelease-1>', **at(rows[0]))
+        # ...which reaches the figure like any other selection (listing
+        # order and display order agree here: nothing is sorted)
+        assert win.selected_dirs() == [d for d, _l in win.runs[0:2]]
+        # Ctrl-click toggles one row, and a Ctrl-drag adds the rows it
+        # passes...
+        ev('<Control-ButtonPress-1>', **at(rows[5]))
+        ev('<Control-ButtonRelease-1>', **at(rows[5]))
+        assert sel() == rows[0:2] + [rows[5]], sel()
+        ev('<Control-ButtonPress-1>', **at(rows[7]))
+        ev('<Control-B1-Motion>', **at(rows[8]))
+        ev('<Control-ButtonRelease-1>', **at(rows[8]))
+        assert sel() == rows[0:2] + [rows[5], rows[7], rows[8]], sel()
+        # ...or, from a row its Ctrl-click deselected, takes them out
+        ev('<Control-ButtonPress-1>', **at(rows[8]))
+        ev('<Control-B1-Motion>', **at(rows[7]))
+        ev('<Control-ButtonRelease-1>', **at(rows[7]))
+        assert sel() == rows[0:2] + [rows[5]], sel()
+        # Shift-click selects from the anchor, the last plain click's row
+        ev('<ButtonPress-1>', **at(rows[2]))
+        ev('<ButtonRelease-1>', **at(rows[2]))
+        assert sel() == [rows[2]], sel()
+        ev('<Shift-ButtonPress-1>', **at(rows[4]))
+        ev('<Shift-ButtonRelease-1>', **at(rows[4]))
+        assert sel() == rows[2:5], sel()
+        # past the bottom edge, each motion scrolls one row and extends
+        ev('<ButtonPress-1>', **at(rows[0]))
+        below = {'x': 20, 'y': tree.winfo_height() + 15}
+        for _ in range(3):
+            ev('<B1-Motion>', **below)
+        ev('<ButtonRelease-1>', **below)
+        got = sel()
+        assert tree.yview()[0] > 0.0, tree.yview()
+        assert got == rows[:len(got)] and len(got) > len(shown), \
+            (len(got), len(shown))
+        # wholly on screen, not just with a box: Tk also gives one to the
+        # row past the last whole row (`#390` review)
+        assert got[-1] in _whole_rows(tree, rows), \
+            'the last row selected is not wholly on screen'
+        tree.yview_moveto(0)
+        w.settle(0.2)
+        before = sel()
+        # a separator drag still resizes its column, even wandering over
+        # the rows, and selects nothing. Material's separator, not Run's:
+        # Run is the one column that stretches, and Tk's layout hands it
+        # whatever room the others leave, so a drag of Run's own separator
+        # is taken back at the next layout. Tk 8.6.15 lays out inside the
+        # identify that its release handler makes, so there the drag is
+        # gone before the release returns; 8.6.14 kept it until a later
+        # layout, which is why the old check of Run passed there. The
+        # width is read once the loop has run: the one the operator keeps.
+        mat_w = tree.column('material', 'width')
+        x = tree.column('run', 'width') + mat_w
+        assert tree.identify_region(x, 5) == 'separator', \
+            tree.identify_region(x, 5)
+        ev('<ButtonPress-1>', x=x, y=5)
+        ev('<B1-Motion>', x=x + 30, y=5)
+        ev('<B1-Motion>', x=x + 30, y=at(rows[3])['y'])
+        ev('<ButtonRelease-1>', x=x + 30, y=at(rows[3])['y'])
+        w.settle(0.2)
+        assert tree.column('material', 'width') > mat_w, \
+            (tree.column('material', 'width'), mat_w)
+        assert sel() == before, sel()
+        # ...and a drag that starts on a heading selects nothing either
+        hx = tree.column('run', 'width') + \
+            tree.column('material', 'width') // 2
+        assert tree.identify_region(hx, 5) == 'heading'
+        ev('<ButtonPress-1>', x=hx, y=5)
+        ev('<B1-Motion>', x=hx, y=at(rows[5])['y'])
+        ev('<ButtonRelease-1>', x=hx, y=at(rows[5])['y'])
+        w.settle(0.2)
+        assert sel() == before, sel()
+
+
+def test_a_menu_click_keeps_the_selection_it_was_opened_for():
+    """`#390`: on macOS the run menu also answers Control-click, which is
+    a Button-1 press, and _run_menu did not return 'break', so the
+    Treeview's own Button-1 binding ran after it and the selection the
+    menu was opened for collapsed to the clicked row. Driven through a
+    real event with the binding macOS gets, bound here by hand since
+    this is not a Mac; on Windows the class binding that would run next
+    is Ctrl-click's toggle, which takes the row out instead. The menu is
+    stubbed (_MenuStub)."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        win, tree = w.win, w.win.run_box
+        menu = _MenuStub()
+        win.group_menu = lambda: menu
+        tree.bind('<Control-Button-1>', win._run_menu)
+        everything = [d for d, _l in win.runs]
+        assert len(everything) == 2, everything
+        win.set_selected_dirs(everything)
+        x, y, _w, h = tree.bbox(tree.get_children()[1])
+        tree.event_generate('<Control-ButtonPress-1>', x=x + 10,
+                            y=y + h // 2)
+        tree.event_generate('<Control-ButtonRelease-1>', x=x + 10,
+                            y=y + h // 2)
+        assert menu.posted == 1, menu.posted
+        assert win.selected_dirs() == everything, win.selected_dirs()
+
+
+def test_a_drag_over_the_headings_scrolls_and_takes_only_rows_on_screen():
+    """`#390` review: over the headings of a list scrolled down, Tk's
+    identify_row names a row scrolled out of sight above them (Tk 8.6
+    IdentifyItem counts rows from where the top row would be, with no
+    lower bound). The drag took that row: dragged up and released over
+    the headings, it selected runs nobody could see, which the figure
+    and the export then drew, and the list did not scroll. The headings
+    now count as above the top row, so each motion there scrolls up one
+    row, and only rows on screen are taken."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        tree = w.win.run_box
+        rows = _more_runs(w)
+        tree.yview_scroll(3, 'units')
+        w.settle(0.3)
+        assert _whole_rows(tree, rows)[0] == rows[3], tree.yview()
+        # the Tk behavior the guard is for: a hidden row, named there
+        hidden = tree.identify_row(5)
+        assert hidden in rows[:3] and not tree.bbox(hidden), hidden
+
+        def sel():
+            chosen = set(tree.selection())
+            return [r for r in rows if r in chosen]
+        x, y, _w, h = tree.bbox(rows[6])
+        tree.event_generate('<ButtonPress-1>', x=x + 10, y=y + h // 2)
+        assert sel() == [rows[6]], sel()
+        tree.event_generate('<B1-Motion>', x=x + 10, y=5)
+        assert _whole_rows(tree, rows)[0] == rows[2], \
+            'the list did not scroll up a row'
+        assert sel() == rows[2:7], sel()
+        tree.event_generate('<B1-Motion>', x=x + 10, y=5)
+        tree.event_generate('<ButtonRelease-1>', x=x + 10, y=5)
+        assert sel() == rows[1:7], sel()
+        whole = _whole_rows(tree, rows)
+        assert all(r in whole for r in sel()), (sel(), whole)
+
+
+def test_a_drag_past_the_bottom_takes_only_rows_wholly_on_screen():
+    """`#390` review: Tk's bbox() gives a box to the row just past the
+    last whole row as well, and that row can be entirely out of sight.
+    _edge_row took the last row with a box, so a drag past the bottom
+    could select a run nobody could see. It now stops at the last row
+    wholly inside the widget.
+
+    On this PC's Tk 8.6.14, bbox() reads the scroll state the last
+    redraw left, so right after a scroll it happened to name the right
+    row; the review reads Tk 8.6.15's bbox() as bringing that state up
+    to date first. The case does that after each scroll, so it holds
+    the drag to the newer behavior here too."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        tree = w.win.run_box
+        rows = _more_runs(w)
+        whole = _whole_rows(tree, rows)
+        assert len(whole) < len(rows), (len(whole), len(rows))
+        real = tree.yview_scroll
+
+        def scroll(number, what):
+            real(number, what)
+            tree.update_idletasks()        # the scroll state, made current
+        tree.yview_scroll = scroll
+
+        def sel():
+            chosen = set(tree.selection())
+            return [r for r in rows if r in chosen]
+        start = whole[len(whole) // 2]
+        x, y, _w, h = tree.bbox(start)
+        tree.event_generate('<ButtonPress-1>', x=x + 10, y=y + h // 2)
+        below = {'x': x + 10, 'y': tree.winfo_height() + 15}
+        for step in (1, 2):
+            tree.event_generate('<B1-Motion>', **below)
+            got, whole = sel(), _whole_rows(tree, rows)
+            assert got[0] == start and got[-1] == whole[-1], \
+                (step, got, whole)
+            assert all(r in whole for r in got), (step, got, whole)
+        tree.event_generate('<ButtonRelease-1>', **below)
+        assert tree.yview()[0] > 0.0, tree.yview()
+
+
+def test_a_click_on_the_headings_of_a_scrolled_list_names_no_hidden_run():
+    """`#390` review, the same Tk behavior as the drag's: a right-click on
+    the headings of a list scrolled down made the hidden row Tk names
+    there the whole selection, and opened the menu for it; the hover
+    text over a heading separator described that row. Neither takes a
+    row that is not on screen now: the menu keeps the selection it was
+    opened over, and the separator has no hover text of its own."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        win, tree = w.win, w.win.run_box
+        rows = _more_runs(w)
+        menu = _MenuStub()
+        win.group_menu = lambda: menu
+        picked = [win.runs[win._row_of(r)][0] for r in rows[4:6]]
+        win.set_selected_dirs(picked)
+        tree.yview_scroll(3, 'units')
+        w.settle(0.3)
+        hidden = tree.identify_row(5)
+        assert hidden and not tree.bbox(hidden), hidden
+        x = tree.column('run', 'width') // 2
+        assert tree.identify_region(x, 5) == 'heading'
+        tree.event_generate('<ButtonPress-3>', x=x, y=5)
+        tree.event_generate('<ButtonRelease-3>', x=x, y=5)
+        assert menu.posted == 1, menu.posted
+        assert win.selected_dirs() == picked, win.selected_dirs()
+        # the hover text: a heading still explains its column...
+        assert win._picker_tip(x, 5)[0] == ('heading', 'run')
+        # ...and a separator in the heading row is no row at all
+        sep = tree.column('run', 'width')
+        assert tree.identify_region(sep, 5) == 'separator'
+        assert win._picker_tip(sep, 5) == (None, ''), win._picker_tip(sep, 5)
+        # while a row on screen still shows itself
+        bx, by, _bw, bh = tree.bbox(rows[4])
+        assert win._picker_tip(bx + 5, by + bh // 2)[0] == ('row', rows[4])
+
+
+def test_a_drag_from_a_cut_off_bottom_row_keeps_that_row_as_its_anchor():
+    """`#390` review: a plain press on the row cut off at the bottom of
+    the list makes Tk scroll that row into view ('see' in its press
+    handler), and DragSelect, after the Treeview class, then read the row
+    from event.y, which by that time named the row below it (or no row,
+    when the pressed one was the last). Dragging up from it cleared the
+    selection instead of selecting the rows passed. The row is now read
+    on a tag before the class, where Tk has not scrolled yet.
+
+    The list is made half a row taller than its nine rows so that one
+    row is cut off, and packed without expand, so that a taller desktop,
+    which stretches the controls, cannot change that.
+
+    This PC's Tk 8.6.14 counts a cut-off row as on screen and does not
+    scroll on that press (measured 2026-10-07), while the Tk sources the
+    review read do. The case puts that scroll in on a tag of its own
+    right after the Treeview class, where the newer handler's would run,
+    so the drag is held to it here too."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        tree = w.win.run_box
+        rows = _more_runs(w)
+        box = tree.master
+        box.pack_configure(expand=False)
+        box.configure(height=box.winfo_height() + tree.bbox(rows[0])[3] // 2)
+        w.settle(0.4)
+        height = tree.winfo_height()
+        cut = rows[rows.index(_whole_rows(tree, rows)[-1]) + 1]
+        bx, by, _bw, bh = tree.bbox(cut)
+        assert by < height - 3 < by + bh, ('not cut off', by, bh, height)
+
+        def see_it(event):
+            """The newer press handler's 'see': a cut-off row pressed is
+            scrolled wholly into view."""
+            row = tree.identify_row(event.y)
+            box = tree.bbox(row) if row else ''
+            if box and box[1] + box[3] > tree.winfo_height():
+                tree.yview_scroll(1, 'units')
+        tags = list(tree.bindtags())
+        at = tags.index(tree.winfo_class()) + 1
+        tree.bindtags(tuple(tags[:at] + ['SeeLikeNewerTk'] + tags[at:]))
+        tree.bind_class('SeeLikeNewerTk', '<ButtonPress-1>', see_it)
+
+        def sel():
+            chosen = set(tree.selection())
+            return [r for r in rows if r in chosen]
+        top = tree.yview()[0]
+        tree.event_generate('<ButtonPress-1>', x=bx + 10, y=by + 3)
+        assert tree.yview()[0] > top, 'Tk did not scroll the row into view'
+        assert sel() == [cut], sel()
+        i = rows.index(cut)
+        tx, ty, _tw, th = tree.bbox(rows[i - 4])
+        tree.event_generate('<B1-Motion>', x=tx + 10, y=ty + th // 2)
+        tree.event_generate('<ButtonRelease-1>', x=tx + 10, y=ty + th // 2)
+        assert sel() == rows[i - 4:i + 1], sel()
 
 
 def test_moving_the_window_does_not_cost_a_redraw():

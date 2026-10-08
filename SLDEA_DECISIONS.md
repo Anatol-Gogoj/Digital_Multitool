@@ -3219,7 +3219,12 @@ and worker over the scope-lock suite's fakes.
    run is refused the way the start gate refuses one: a "run blocked"
    box that names the change (for example "OFF (no scope to read the
    current) → ON"), nothing sent to the SG, and ▶ Run asks again with the
-   state as it is then.
+   state as it is then. The check must stay below the last point that
+   yields, the camera pre-flight, not just below "Energize HV?": the
+   final HV review moved it to just after that question and every suite
+   still passed, while a run whose scope came back inside the pre-flight
+   went to its end unarmed. `test_sldea_watchdog_default` now lands the
+   change inside the pre-flight both ways, and that mutant fails it.
 7. Ticked on a LIVE run, a Trip or Confirm that is not a finite number
    above zero refuses Run before any question, with a message naming the
    box. A DRY run and an unticked LIVE run arm nothing from the boxes and

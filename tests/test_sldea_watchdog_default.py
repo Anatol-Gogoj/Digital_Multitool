@@ -434,6 +434,74 @@ def test_a_watchdog_state_that_changed_under_a_question_refuses_the_run():
             app, mb, tmp, "ON → OFF (no scope to read the current)")
 
 
+def _scope_changed_inside_the_preflight(scope_at_run, answers, said, change):
+    """Final HV review 2026-10-08, finding 1: the re-check must sit below
+    the LAST point where sldea_run yields to Tk, not just below "Energize
+    HV?". After that question come the electrode, concentration and
+    thickness questions and then the camera pre-flight, whose dialog runs
+    its own event loop; a scope Reconnect whose done callback lands there
+    changes the watchdog's state as surely as one inside a question. A
+    re-check moved up to just after "Energize HV?" (a plausible "refuse
+    as early as possible" refactor, the reviewer's mutant M1) passed every
+    other suite and let a ticked LIVE run go to its end unarmed beside a
+    connected scope at 120 uA over a 100 uA / 1 s trip. Here the
+    Reconnect lands in a stand-in for the pre-flight, every question
+    already answered, and the run must be refused at the commit point,
+    before any SG write."""
+    with tempfile.TemporaryDirectory() as tmp:
+        mb = L._MB(answers)
+        with L._patched(mb):
+            app = L._App(tmp, dry=False, real_worker=True, wd_on=True)
+            scope = app.scope
+            app.sldea_vars['wd_ua'].set('100')
+            app.sldea_vars['wd_s'].set('1')
+            app._sldea_build_profile = lambda: (
+                L._short_profile(landing_s=6.0), None)
+            scope.volts = lambda ch: (0.6 if ch == 3 and L._ramping(app)
+                                      else 0.0)
+            reached = []
+
+            def preflight(cam_exp, cam_gain):
+                # the Reconnect's done callback, inside the pre-flight's
+                # dialog: every question has been answered by now
+                reached.append(mb.titles('askyesno'))
+                app.scope = None if scope_at_run else scope
+                return True
+            app._sldea_preflight = preflight
+            if not scope_at_run:
+                app.scope = None                 # the Reconnect in flight
+            app.sldea_run()
+            started = app.worker_args is not None
+            if started:                          # let a wrong start end
+                assert app.worker_done.wait(60), app.lines
+            app.root.run_pending()
+        assert reached == [list(answers)], (reached, mb.calls)
+        assert app.scope is (None if scope_at_run else scope)
+        hv = [c[2] for c in mb.calls if c[1] == 'Energize HV?'][0]
+        assert said in hv, hv
+        assert not started, ("a run whose watchdog state changed inside the "
+                             "camera pre-flight started", app.lines,
+                             app.sg.writes[:3])
+        _assert_refused_at_the_commit_point(app, mb, tmp, change)
+
+
+def test_a_scope_back_inside_the_camera_preflight_refuses_the_run():
+    """The scope mid-Reconnect (None) when Run is pressed, so "Energize
+    HV?" said OFF (no scope), and back inside the camera pre-flight."""
+    _scope_changed_inside_the_preflight(
+        False, {'No current monitoring': True, 'Energize HV?': True},
+        "Breakdown watchdog: OFF (no scope to read the current)",
+        "OFF (no scope to read the current) → ON")
+
+
+def test_a_scope_lost_inside_the_camera_preflight_refuses_the_run():
+    """The scope there when Run is pressed, so "Energize HV?" said ON, and
+    gone inside the camera pre-flight: a run that could not arm."""
+    _scope_changed_inside_the_preflight(
+        True, {'Energize HV?': True}, "Breakdown watchdog: ON.",
+        "ON → OFF (no scope to read the current)")
+
+
 def test_the_short_state_words_match_the_records():
     assert sp.watchdog_state(True, True, False) == 'ON'
     for ticked, armed, dry in ((False, False, False), (True, False, False),

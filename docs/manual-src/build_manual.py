@@ -490,8 +490,10 @@ body.append(section("webcam", "Webcam", caution_keep=[1, 2, 4]))
 # Index 9 is the flat or missing baseline stop (#348, v1.4.3). It was
 # appended rather than inserted: these keep lists are indexes, and an insert
 # at 2 silently swapped which cautions this box shows.
-body.append(section("sldea", "SLDEA Test", caution_keep=[0, 1, 2, 4, 9],
-                    more_imgs=("tab_sldea_bottom",)))
+# One shot since the two-column layout (#403): the tab fits the capture
+# window again, so capture.py takes no tab_sldea_bottom and every SLDEA
+# callout is on tab_sldea (annotate.py).
+body.append(section("sldea", "SLDEA Test", caution_keep=[0, 1, 2, 4, 9]))
 
 ct = content["tools"]
 ct_caut = cautions("tools", keep=[0, 1, 2, 3])

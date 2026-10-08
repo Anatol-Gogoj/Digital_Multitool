@@ -650,8 +650,86 @@ def camera_line(cam_exp, cam_gain, locked=None, defaults=()):
     return (f"{text}\n⚠ The Webcam tab has LOCKED {preview} instead, so "
             f"its live preview will NOT show what the run records (the "
             f"pre-flight does). Check the boxes on the Webcam tab, then "
-            f"press Apply & Lock.",
+            f"press Apply & Lock (under Advanced), or press Auto-set "
+            f"camera there.",
             True)
+
+
+CAMERA_NOT_KNOWN = "(not known: the camera pre-flight did not run)"
+
+
+def camera_record(cam_exp, cam_gain, run_lock=None, camera=None,
+                  defaults=()):
+    """setup.txt's camera block, under '--- Camera ---' (#400): one
+    summary line, then `Key: value` lines with everything the app knows
+    about the camera when the run starts, so a run records the camera
+    state its pictures were shot under.
+
+    `run_lock` is the lock the run stamps before every grab
+    (gui.sldea_run_lock: the Webcam tab's lock, with manual exposure, white
+    balance auto off, and the run's exposure and gain on top), or None from
+    a caller that does not know it. `camera` is what the camera pre-flight
+    found: webcam.resolve_camera's spec ('kind', 'device', 'fourcc', 'w',
+    'h') and 'frame', the (width, height) of the picture it took; None when
+    the pre-flight did not run. `defaults` names the run's values that are
+    built-in fallbacks (gui._sldea_cam_defaults), as camera_for_run does.
+
+    The summary stays the first line: Edge Review's run health quotes the
+    line under the header (sldea_edge._health_setup). ASCII only, because
+    the runner writes setup.txt in the locale's encoding."""
+    lock = dict(run_lock or {})
+    cam = dict(camera or {})
+    if run_lock is None:
+        white = "white balance manual (balance not recorded)"
+    elif 'red_balance' in lock and 'blue_balance' in lock:
+        white = (f"white balance manual, red {int(lock['red_balance'])}, "
+                 f"blue {int(lock['blue_balance'])}")
+    else:
+        white = "white balance manual (red and blue not locked)"
+    stamped = bool(cam.get('device')) if camera is not None else True
+    if stamped:
+        summary = f"exposure {cam_exp}, gain {cam_gain}, {white}"
+    else:
+        summary = (f"exposure {cam_exp} and gain {cam_gain} asked for, but "
+                   f"this camera has no V4L2 controls, so none was set")
+    names = tuple(defaults or ())
+    if names:
+        summary += (f" ({names[0]} is a built-in default"
+                    if len(names) == 1 else
+                    f" ({' and '.join(names)} are built-in defaults")
+        summary += ": no readable box on the Webcam tab)"
+    lines = [summary]
+    if camera is None:
+        lines += [f"Camera device: {CAMERA_NOT_KNOWN}",
+                  f"Camera pixel format: {CAMERA_NOT_KNOWN}",
+                  f"Camera frame size: {CAMERA_NOT_KNOWN}"]
+    else:
+        index = cam.get('index')
+        lines.append("Camera device: " + (
+            str(cam['device']) if cam.get('device')
+            else f"OpenCV camera {index}" if index is not None
+            else "(not known)"))
+        if cam.get('kind') == 'bayer' and cam.get('fourcc'):
+            lines.append(f"Camera pixel format: {cam['fourcc']} (raw Bayer)")
+        else:
+            lines.append("Camera pixel format: (chosen by OpenCV)")
+        size = cam.get('frame') or (
+            (cam.get('w'), cam.get('h')) if cam.get('w') and cam.get('h')
+            else None)
+        lines.append(f"Camera frame size: {int(size[0])} x {int(size[1])}"
+                     if size else
+                     "Camera frame size: (not known: the pre-flight took "
+                     "no picture)")
+    if run_lock is None:
+        lines.append("Camera controls: (not recorded)")
+    elif not stamped:
+        lines.append("Camera controls: (none set: no V4L2 controls)")
+    elif not lock:
+        lines.append("Camera controls: (none locked)")
+    else:
+        lines.append("Camera controls: " + ", ".join(
+            f"{name}={int(lock[name])}" for name in sorted(lock)))
+    return "\n".join(lines)
 
 
 def preflight_start_button(level, mismatch=False, checked=True,

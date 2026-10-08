@@ -4375,6 +4375,9 @@ LOGGING:
             # skipped pre-flight leaves both at their defaults, which is
             # the behaviour before those decisions.
             self._sldea_preflight_seen = {'frame': False, 'override': ''}
+            # ...and so is the camera it found, for setup.txt (#400): a
+            # skipped pre-flight leaves it unknown, never the last run's
+            self._sldea_preflight_camera = None
             if not getattr(self, '_sldea_skip_preflight', False):
                 if not self._sldea_preflight(cam_exp, cam_gain):
                     self._sldea_log("run cancelled at camera pre-flight")
@@ -4382,6 +4385,20 @@ LOGGING:
             seen = self._sldea_preflight_seen
             cam_expected = bool(seen.get('frame'))
             picture_override = str(seen.get('override') or '')
+            # setup.txt's camera block (#400), built here on the Tk thread
+            # from what the app already holds: the lock the run will stamp,
+            # what the pre-flight resolved, and which values are fallbacks.
+            # No camera I/O, and it never raises; None leaves the worker
+            # its plain line.
+            try:
+                cam_record = sldea_profile.camera_record(
+                    cam_exp, cam_gain,
+                    sldea_run_lock(dict(webcam.LOCKED_CONTROLS), cam_exp,
+                                   cam_gain),
+                    camera=getattr(self, '_sldea_preflight_camera', None),
+                    defaults=self._sldea_cam_defaults())
+            except Exception:
+                cam_record = None
             # ...and again at the commit point, where it asks nothing: every
             # question above waits on the operator for as long as they take,
             # and nothing between this check and _sldea_live_ch claiming the
@@ -4434,7 +4451,8 @@ LOGGING:
                             picture_override=picture_override,
                             vid_on=vid_on, vid_fps=vid_fps or 1.0,
                             vid_detect=vid_detect,
-                            film_thickness_um=film_thickness_um),
+                            film_thickness_um=film_thickness_um,
+                            cam_record=cam_record),
                 daemon=True).start()
             self.root.after(100, self._sldea_animate_cursor)  # playhead
             # ...and opens with the run, once the worker is on its way:
@@ -4685,8 +4703,10 @@ LOGGING:
         # stamped by neither the pre-flight nor the run, so it has no lock
         # to disagree with and `lock` stays empty.
         lock = {}
+        seen_spec = None
         try:
             spec = webcam.resolve_camera(0)
+            seen_spec = spec
             if spec.get('device'):
                 dev = spec['device']
                 lock = sldea_run_lock(lock_before, cam_exp, cam_gain)
@@ -4701,6 +4721,18 @@ LOGGING:
             frame = None
         finally:
             webcam.set_locked(lock_before)
+        # What the camera is, for the run's setup.txt (#400): the spec this
+        # pre-flight resolved anyway, and the size of the picture it took.
+        # No camera I/O of its own, and nothing here can change the verdict.
+        self._sldea_preflight_camera = None
+        if seen_spec is not None:
+            try:
+                cam = dict(seen_spec)
+                if frame is not None:
+                    cam['frame'] = (int(frame.shape[1]), int(frame.shape[0]))
+                self._sldea_preflight_camera = cam
+            except Exception:
+                pass
         # #361's sentence, for a camera the lock applies to: one with a
         # device path (`lock` is set only then). Neither the pre-flight
         # nor the run stamps any other camera, so it has no lock to
@@ -5168,7 +5200,8 @@ LOGGING:
                       tel_hz=sldea_profile.TELEMETRY_MAX_HZ, electrode='',
                       concentration_ml=None, cam_expected=False,
                       picture_override='', vid_on=False, vid_fps=1.0,
-                      vid_detect=False, film_thickness_um=None):
+                      vid_detect=False, film_thickness_um=None,
+                      cam_record=None):
         """Host-sequenced staircase runner (daemon thread; no Tk calls except
         via _sldea_log/_sldea_set_status/after). Drives the SG DC offset along
         p.kv_at(t), fires webcam+scope snapshots on schedule, writes the run
@@ -5184,7 +5217,12 @@ LOGGING:
 
         `film_thickness_um` is the film thickness box as sldea_run checked
         it (`#398`): the number, '' when the operator declined, None with
-        no box. It only reaches setup.txt (sldea_profile.setup_text)."""
+        no box. It only reaches setup.txt (sldea_profile.setup_text).
+
+        `cam_record` is setup.txt's camera block as sldea_run built it on
+        the Tk thread (sldea_profile.camera_record, #400): the lock this run
+        stamps, the camera the pre-flight found, and any fallback value.
+        None (a caller that predates it) writes the plain summary line."""
         import os
         import csv as _csv
         started = datetime.now()
@@ -5212,7 +5250,8 @@ LOGGING:
                     runname or p.run_dirname(started),
                     started.isoformat(timespec='seconds'),
                     sgch, vch, ich, dry,
-                    f"exposure {cam_exp}, gain {cam_gain}, WB off (manual)",
+                    cam_record or sldea_profile.camera_record(cam_exp,
+                                                              cam_gain),
                     dea_diam_mm=diam_mm, electrode=electrode,
                     concentration_ml=concentration_ml,
                     film_thickness_um=film_thickness_um))

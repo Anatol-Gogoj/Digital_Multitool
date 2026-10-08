@@ -9,13 +9,15 @@ and one Auto-set camera button, which pins gain at its floor, finds the
 exposure for a mid-gray picture, balances the white on the scene, and
 writes and locks it all; everything else sits under Advanced, closed until
 opened. The focus score is on by default, with a label about twice as
-tall (owner decision 2026-10-07: Auto-set redoes the white balance
-every time).
+tall. setup.txt records the camera state the run stamps (owner decisions
+2026-10-07: Auto-set redoes the white balance every time, and setup.txt
+records as much as possible).
 
 Headless apart from a Tk root: the camera is a model (a picture whose mean
 follows the exposure and whose red and blue follow their balance), so no
 test here opens a real camera. The tab is the real one, built by the real
-builder (test_webcam_autostart's harness).
+builder (test_webcam_autostart's harness), and the run start is the real
+sldea_run on the interlock suite's stub app.
 
 Run: .venv/bin/python tests/test_webcam_autoset.py
 """
@@ -24,10 +26,15 @@ import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
     _os.path.abspath(__file__))))
 
+import os
+import tempfile
+import types
 
 import gui
+import sldea_profile
 import webcam
 import test_camera_controls as CC  # noqa: E402
+import test_sldea_interlock as T  # noqa: E402
 import test_webcam_autostart as WA  # noqa: E402
 
 DFK_CONTROLS = webcam.parse_controls(CC.SAMPLE)
@@ -408,6 +415,57 @@ def test_the_focus_score_is_on_by_default_and_its_label_is_twice_as_tall():
     # a picture too narrow for the label shrinks it instead of cutting it
     small = Image.new('RGB', (200, 150))
     assert 0 < gui.draw_focus_overlay(small, 1234) < height
+
+
+def test_sldea_run_hands_the_worker_the_camera_block():
+    """The camera block is built on the Tk thread in sldea_run, from the
+    lock the run stamps and the camera the pre-flight found, and the
+    worker writes it into setup.txt as handed."""
+    dfk = {'kind': 'bayer', 'device': '/dev/video0', 'fourcc': 'RGGB',
+           'w': 1920, 'h': 1080, 'frame': (1920, 1080)}
+    saved = dict(webcam.LOCKED_CONTROLS)
+    try:
+        webcam.set_locked({'brightness': 240, 'red_balance': 92,
+                           'blue_balance': 151})
+        mb = T._MB({'No film thickness specified': True})
+        with tempfile.TemporaryDirectory() as tmp, T._patched(mb):
+            app = T._App(tmp, real_worker=True)
+            app._sldea_cam_defaults = types.MethodType(
+                gui.InstrumentControlGUI._sldea_cam_defaults, app)
+            app.on_preflight = lambda: setattr(app, '_sldea_preflight_camera',
+                                               dfk)
+            app.sldea_run()
+            assert app.worker_done.wait(30), app.lines
+            T._assert_clean_run(app)
+            rec = app.worker_kw['cam_record']
+            want = sldea_profile.camera_record(
+                6, 60, gui.sldea_run_lock(webcam.LOCKED_CONTROLS, 6, 60),
+                camera=dfk, defaults=['exposure', 'gain'])
+            assert rec == want, (rec, want)
+            assert "Camera device: /dev/video0" in rec.splitlines()
+            assert rec.splitlines()[0].startswith(
+                "exposure 6, gain 60, white balance manual, red 92, blue "
+                "151"), rec
+            import sldea_edge
+            health = sldea_edge._health_setup(os.path.join(tmp, 'RUN'))
+            assert health['camera'] == rec.splitlines()[0], health
+            app.root.run_pending()
+        # a pre-flight that does not report a camera leaves it unknown,
+        # never the camera an earlier run found
+        mb = T._MB({'No film thickness specified': True})
+        with tempfile.TemporaryDirectory() as tmp, T._patched(mb):
+            app = T._App(tmp)
+            app._sldea_cam_defaults = types.MethodType(
+                gui.InstrumentControlGUI._sldea_cam_defaults, app)
+            app._sldea_preflight_camera = dfk          # stale
+            app.sldea_run()
+            assert app.worker_done.wait(30), app.lines
+            rec = app.worker_kw['cam_record']
+            assert (f"Camera device: {sldea_profile.CAMERA_NOT_KNOWN}"
+                    in rec.splitlines()), rec
+            app.root.run_pending()
+    finally:
+        webcam.set_locked(saved)
 
 
 def _run():

@@ -877,10 +877,12 @@ class DragSelect:
     The run list was a Listbox until `#374`, and a drag down a Listbox
     selected the rows it passed. A Tk 8.6 Treeview's own drag only moves
     column separators, so this puts the range selection back without
-    taking over anything the Treeview does. Its bindings sit on a tag of
-    their own AFTER the Treeview class tag, so they see each press once
-    Tk has applied it (a click, a Shift-click or a Ctrl-click), and
-    nothing here returns 'break' or shadows a binding on the widget.
+    taking over anything the Treeview does. Its bindings sit on two tags
+    of their own, around the Treeview class tag: the row pressed is read
+    on the one BEFORE it, while Tk has not yet scrolled a cut-off row
+    into view, and the selection the press made on the one AFTER it,
+    once Tk has applied the click, Shift-click or Ctrl-click. Nothing
+    here returns 'break' or shadows a binding on the widget.
 
     A press on a row is the drag's ANCHOR, and the selection that press
     left is its BASE. Each row from the anchor to the row under the
@@ -897,23 +899,40 @@ class DragSelect:
 
     def __init__(self, tree):
         self.tree = tree
+        self._row = ''                 # the row pressed, read before Tk
         self._press = None             # (anchor row, base selection) or None
-        tag = f'DragSelect{id(self)}'
+        # TWO tags (`#390` review): the press is read on one BEFORE the
+        # Treeview class, the selection it made on one AFTER it
+        before, after = f'DragSelectPress{id(self)}', f'DragSelect{id(self)}'
         tags = list(tree.bindtags())
         cls = tree.winfo_class()
-        at = tags.index(cls) + 1 if cls in tags else len(tags)
-        tree.bindtags(tuple(tags[:at] + [tag] + tags[at:]))
-        tree.bind_class(tag, '<ButtonPress-1>', self._pressed)
-        tree.bind_class(tag, '<B1-Motion>', self._dragged)
-        tree.bind_class(tag, '<ButtonRelease-1>', self._released)
+        if cls in tags:
+            at = tags.index(cls)
+            tags[at:at + 1] = [before, cls, after]
+        else:
+            tags += [before, after]
+        tree.bindtags(tuple(tags))
+        tree.bind_class(before, '<ButtonPress-1>', self._pressing)
+        tree.bind_class(after, '<ButtonPress-1>', self._pressed)
+        tree.bind_class(after, '<B1-Motion>', self._dragged)
+        tree.bind_class(after, '<ButtonRelease-1>', self._released)
 
-    def _pressed(self, event):
-        """Remember the row pressed, and the selection Tk just made."""
+    def _pressing(self, event):
+        """Before the Treeview class: the row pressed. Read here because
+        Tk's own press handler can scroll a row cut off at the bottom
+        into view (BrowseTo's 'see', in the Tk sources the review read;
+        this PC's 8.6.14 does not), and after that event.y names the row
+        below it, or no row when the pressed one was the last."""
         tree = self.tree
-        row = ''
+        self._row = ''
         if tree.identify_region(event.x, event.y) in ('cell', 'tree'):
-            row = tree.identify_row(event.y)
-        self._press = (row, frozenset(tree.selection())) if row else None
+            self._row = row_on_screen(tree, event.y)
+
+    def _pressed(self, _event):
+        """After the Treeview class: the selection that press made is the
+        drag's base, and the row read before it is its anchor."""
+        row, self._row = self._row, ''
+        self._press = (row, frozenset(self.tree.selection())) if row else None
 
     def _released(self, _event=None):
         self._press = None

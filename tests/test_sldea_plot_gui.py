@@ -1866,6 +1866,64 @@ def test_a_click_on_the_headings_of_a_scrolled_list_names_no_hidden_run():
         assert win._picker_tip(bx + 5, by + bh // 2)[0] == ('row', rows[4])
 
 
+def test_a_drag_from_a_cut_off_bottom_row_keeps_that_row_as_its_anchor():
+    """`#390` review: a plain press on the row cut off at the bottom of
+    the list makes Tk scroll that row into view ('see' in its press
+    handler), and DragSelect, after the Treeview class, then read the row
+    from event.y, which by that time named the row below it (or no row,
+    when the pressed one was the last). Dragging up from it cleared the
+    selection instead of selecting the rows passed. The row is now read
+    on a tag before the class, where Tk has not scrolled yet.
+
+    The list is made half a row taller than its nine rows so that one
+    row is cut off, and packed without expand, so that a taller desktop,
+    which stretches the controls, cannot change that.
+
+    This PC's Tk 8.6.14 counts a cut-off row as on screen and does not
+    scroll on that press (measured 2026-10-07), while the Tk sources the
+    review read do. The case puts that scroll in on a tag of its own
+    right after the Treeview class, where the newer handler's would run,
+    so the drag is held to it here too."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        tree = w.win.run_box
+        rows = _more_runs(w)
+        box = tree.master
+        box.pack_configure(expand=False)
+        box.configure(height=box.winfo_height() + tree.bbox(rows[0])[3] // 2)
+        w.settle(0.4)
+        height = tree.winfo_height()
+        cut = rows[rows.index(_whole_rows(tree, rows)[-1]) + 1]
+        bx, by, _bw, bh = tree.bbox(cut)
+        assert by < height - 3 < by + bh, ('not cut off', by, bh, height)
+
+        def see_it(event):
+            """The newer press handler's 'see': a cut-off row pressed is
+            scrolled wholly into view."""
+            row = tree.identify_row(event.y)
+            box = tree.bbox(row) if row else ''
+            if box and box[1] + box[3] > tree.winfo_height():
+                tree.yview_scroll(1, 'units')
+        tags = list(tree.bindtags())
+        at = tags.index(tree.winfo_class()) + 1
+        tree.bindtags(tuple(tags[:at] + ['SeeLikeNewerTk'] + tags[at:]))
+        tree.bind_class('SeeLikeNewerTk', '<ButtonPress-1>', see_it)
+
+        def sel():
+            chosen = set(tree.selection())
+            return [r for r in rows if r in chosen]
+        top = tree.yview()[0]
+        tree.event_generate('<ButtonPress-1>', x=bx + 10, y=by + 3)
+        assert tree.yview()[0] > top, 'Tk did not scroll the row into view'
+        assert sel() == [cut], sel()
+        i = rows.index(cut)
+        tx, ty, _tw, th = tree.bbox(rows[i - 4])
+        tree.event_generate('<B1-Motion>', x=tx + 10, y=ty + th // 2)
+        tree.event_generate('<ButtonRelease-1>', x=tx + 10, y=ty + th // 2)
+        assert sel() == rows[i - 4:i + 1], sel()
+
+
 def test_moving_the_window_does_not_cost_a_redraw():
     """`#271`: <Configure> also fires when the canvas merely MOVES -- and
     it does move, by the scrollbar's width, every time the bar appears. A

@@ -435,6 +435,63 @@ def test_auto_set_refuses_while_a_run_or_another_adjustment_has_the_camera():
             WA._reap()
 
 
+def test_read_camera_refuses_while_a_run_or_an_adjustment_has_the_camera():
+    """Review of #400: Read camera rebuilds the rows, puts the saved lock
+    back and fills the boxes from the camera. Under a running adjustment
+    that put the trial value the camera was shooting under into the boxes
+    a run takes, and the saved lock over the one Apply & Lock or Auto-set
+    was writing. It now refuses there, as Auto-set does, and while an
+    SLDEA run holds the camera, as before."""
+    with WA._Patched() as p, _Camera():
+        root, app = _tab()
+        if root is None:
+            return
+        try:
+            rows = dict(app.camctl_rows)
+            assert _box(app, 'exposure_time_absolute') == '20'
+            # the camera mid-adjustment: shooting a trial at exposure 80
+            trial = [dict(c, value=80) if c['name'] ==
+                     'exposure_time_absolute' else dict(c)
+                     for c in DFK_CONTROLS]
+            webcam.list_controls = lambda device: [dict(c) for c in trial]
+            # ...and the lock the adjustment has just written
+            written = dict(STALE_LOCK, exposure_time_absolute=31)
+            webcam.set_locked(written)
+            app._bg_busy.add('camera-ctrl')
+            app.cam_read_controls()
+            WA._pump(root, 0.1)
+            assert app.camctl_rows == rows, "the rows were rebuilt"
+            assert _box(app, 'exposure_time_absolute') == '20'
+            assert webcam.LOCKED_CONTROLS == written, webcam.LOCKED_CONTROLS
+            status = app.cam_sensor_status.cget('text')
+            assert 'another camera adjustment is still running' in status, \
+                status
+            assert 'Read camera' in status, status
+            assert str(app.cam_sensor_status.cget('foreground')) == \
+                gui.CAM_STATUS_WARN
+            assert p.mb.calls == [], p.mb.calls
+            # an SLDEA run that holds the camera: refused with its box
+            app._bg_busy.discard('camera-ctrl')
+            app._sldea_running = True
+            app.cam_read_controls()
+            WA._pump(root, 0.1)
+            assert [c[1] for c in p.mb.calls] == [
+                "Camera in use — SLDEA run"], p.mb.calls
+            assert app.camctl_rows == rows, "the rows were rebuilt"
+            assert webcam.LOCKED_CONTROLS == written, webcam.LOCKED_CONTROLS
+            # with the camera free, it reads it
+            app._sldea_running = False
+            app.cam_read_controls()
+            WA._pump(root, 0.1)
+            assert _box(app, 'exposure_time_absolute') == '80'
+            assert app.cam_sensor_status.cget('text') == "read from camera"
+        finally:
+            app._bg_busy.discard('camera-ctrl')
+            app._sldea_running = False
+            WA._close(root, app)
+            WA._reap()
+
+
 def _preview_stopped_by_the_operator(root, app):
     """The Webcam tab on screen with its preview off: opened (the tab
     starts its preview, #375), then stopped with Start/Stop Preview."""

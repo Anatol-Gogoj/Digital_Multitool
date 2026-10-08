@@ -8805,6 +8805,15 @@ LOGGING:
         # (adversarial review 2026-09-23)
         if self._cam_owned_by_sldea():
             return
+        if 'camera-ctrl' in self._bg_busy:
+            # ...and while an adjustment runs (#400 review): it would fill
+            # the boxes a run takes with the trial values the camera is
+            # shooting under, and put the saved lock back over the one Apply
+            # & Lock or Auto-set is writing
+            self._cam_status("another camera adjustment is still running; "
+                             "press Read camera when it has finished",
+                             'warn')
+            return
         self._cam_build_control_rows()
         device = self._cam_device() or '/dev/video0'
         ctrls = webcam.list_controls(device)

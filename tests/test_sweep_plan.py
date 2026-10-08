@@ -285,12 +285,33 @@ def test_gui_wrapper_delegates():
 
 
 def _run():
+    # Failures are collected, not fatal (`#280`): failing fast reported one
+    # broken test in suites that had five. Tracebacks land after the count
+    # line, in name order, in one bounded block -- run_tests.py explains why.
+    # This runner stopped at the first failure until #426, so every case
+    # after a broken one went unrun and unreported.
+    import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
+    failed = []
     for fn in fns:
-        fn()
+        try:
+            fn()
+        except Exception:
+            failed.append((fn.__name__, traceback.format_exc()))
+            print(f"FAIL {fn.__name__}")
+            continue
         print(f"ok  {fn.__name__}")
-    print(f"\n{len(fns)} tests passed")
+    if not failed:
+        print(f"\n{len(fns)} tests passed")
+        return 0
+    head = f"{len(failed)} of {len(fns)} tests failed"
+    print(f"\n{head}")
+    for name, tb in failed:
+        print(f"===== FAIL {name} =====")
+        print(tb.rstrip('\n'))
+    print(f"===== end {head} =====")
+    return 1
 
 
 if __name__ == '__main__':
-    _run()
+    raise SystemExit(_run())

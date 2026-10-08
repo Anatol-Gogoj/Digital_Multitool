@@ -825,10 +825,12 @@ def test_during_an_sldea_run_both_pickers_refuse_with_a_note():
     that only records its arguments). While it runs, Output dir's Browse
     and New folder... both refuse with a note and change nothing: the run
     keeps the folder it started in, and the box also aims Edge Review, the
-    tuner and the plot window. The two buttons stay in one state, the
-    Logging and Webcam pickers are not locked, and once the run has ended
-    both SLDEA pickers work again. That the running run keeps its own
-    folder is pinned on the worker's source, in
+    tuner and the plot window. The two buttons stay in one state. The
+    Logging and Webcam New folder... refuse during the LIVE run only (it
+    touches the share on the Tk thread, which the HV worker waits on) and
+    work during the DRY one, and once the run has ended both SLDEA
+    pickers work again. That the running run keeps its own folder is
+    pinned on the worker's source, in
     test_the_workers_never_read_the_box_themselves."""
     root, app = _app()
     import gui
@@ -881,16 +883,27 @@ def test_during_an_sldea_run_both_pickers_refuse_with_a_note():
                     assert 'Abort first' in text, text
                     assert app.sldea_outdir.get() == tmp
                 assert sorted(os.listdir(tmp)) == before
-                # an SLDEA run locks only the SLDEA tab's pickers
+                # the other tabs' New folder... refuse during a LIVE run
+                # only: it touches the share on the Tk thread, which the
+                # HV worker's root.after calls wait on
                 for prefix, var_name in (('log', 'log_dir'),
                                          ('cam', 'cam_dir_var')):
                     getattr(app, var_name).set(tmp)
                     name = f'{prefix} during {"dry" if dry else "live"}'
                     with _app_dialogs(names=[name]) as d:
                         getattr(app, f'{prefix}_newdir_btn').invoke()
-                    assert d.kinds() == ['askstring'], (prefix, d.calls)
-                    assert getattr(app, var_name).get() == \
-                        of.new_path(tmp, name)
+                    if dry:
+                        assert d.kinds() == ['askstring'], (prefix, d.calls)
+                        assert getattr(app, var_name).get() == \
+                            of.new_path(tmp, name)
+                    else:
+                        assert d.kinds() == ['showinfo'], (prefix, d.calls)
+                        assert d.calls[0][1] == 'New folder', d.calls
+                        assert 'LIVE SLDEA run' in d.calls[0][2], d.calls
+                        assert 'Abort first' in d.calls[0][2], d.calls
+                        assert getattr(app, var_name).get() == tmp
+                    # Browse on those tabs is not locked (it lists the
+                    # share on the Tk thread as it did before #394)
                 app._sldea_finished()
                 assert not app._sldea_running
                 assert _enabled(app.sldea_newdir_btn) == \
@@ -906,7 +919,7 @@ def test_during_an_sldea_run_both_pickers_refuse_with_a_note():
                 assert d.kinds() == ['askdirectory'], d.calls
             assert sorted(os.listdir(tmp)) == [
                 'after dry', 'after live', 'cam during dry',
-                'cam during live', 'log during dry', 'log during live']
+                'log during dry']
     finally:
         gui.messagebox, gui.INSTRUMENTS_SUPPORTED = saved
         root.destroy()

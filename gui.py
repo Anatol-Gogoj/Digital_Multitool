@@ -3574,7 +3574,24 @@ LOGGING:
     def _new_folder_into(self, var, box):
         """New folder... on any tab (#394): make a folder inside the one in
         `var` and put it there; the status bar names the folder made.
-        -> its path, or None when nothing was made."""
+        -> its path, or None when nothing was made.
+
+        Refused on every tab while a LIVE SLDEA run drives the HV (the
+        v1.4.4 HV-safety review, 2026-10-07): making the folder checks and
+        writes the share on the Tk thread, and the run's worker reaches Tk
+        through root.after, which waits for this thread (a 2 s block held
+        a worker's root.after for 1.99 s, measured), so a stalled share
+        would hold up the run's staircase and watchdog for as long as it
+        stalls. The SLDEA tab's own pickers refuse during any run
+        (_sldea_out_locked)."""
+        if getattr(self, '_sldea_live_ch', None) is not None:
+            messagebox.showinfo(
+                "New folder",
+                "A LIVE SLDEA run is driving the HV. New folder… waits for "
+                "it to end: making a folder checks the share from this "
+                "window, and a slow share would hold up the run.\n\nWait "
+                "for the run to finish, or ■ Abort first.")
+            return None
         path = new_folder(var, box, parent=self.root,
                           share=self.SLDEA_SHARE_DIR)
         if path and hasattr(self, 'status_bar'):

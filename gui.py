@@ -2967,6 +2967,7 @@ LOGGING:
         self.sldea_canvas.bind('<Leave>',
                                lambda _ev: self.sldea_canvas.delete('hover'))
         self._sldea_marks = []
+        self._sldea_reach = 0.0           # the pointer's reach, px (#401)
 
         outf = ttk.LabelFrame(f, text="Output & Measurement", padding=10)
         outf.pack(fill='x', padx=10, pady=8)
@@ -3564,9 +3565,15 @@ LOGGING:
         if pts:
             c.create_line(*pts, fill=sldea_preview.LINE, width=2)
         marks = sldea_preview.snapshot_points(p, x0, y0, x1, y1)
+        landing = [(x, y) for x, y, s in marks if s['step'] > 0]
         r = sldea_preview.marker_radius(
-            [(x, y) for x, y, s in marks if s['step'] > 0],
+            landing,
             r_min=sldea_preview.R_MIN * k, r_max=sldea_preview.R_MAX * k)
+        # The pointer's reach is the radius the markers had before #401,
+        # plus 3 px, so the smaller markers are no harder to hover.
+        self._sldea_reach = sldea_preview.marker_radius(
+            landing, r_min=sldea_preview.HOVER_R_MIN * k,
+            r_max=sldea_preview.HOVER_R_MAX * k) + 3
         # time order: the baseline lands on top of the warm-up ring it
         # shares 0 kV with, and each landing's markers over the one before
         for x, y, s in marks:
@@ -3592,7 +3599,7 @@ LOGGING:
         display factor `k`. Anchored LEFT on purpose: the tab scrolls
         sideways when the window is narrower than its widest row, and a
         right-aligned legend went off-screen."""
-        r = 4.5 * k
+        r = sldea_preview.R_LEGEND * k
         x = left
         for tag in tags:
             self._sldea_draw_marker(c, tag, x + 1.4 * r, y, r, tags='legend')
@@ -3611,9 +3618,10 @@ LOGGING:
         p = self._sldea_profile
         if not p or not self._sldea_marks:
             return
+        reach = self._sldea_reach
         near = [(abs(x - ev.x) + abs(y - ev.y), s)
-                for x, y, r, s in self._sldea_marks
-                if abs(x - ev.x) <= r + 3 and abs(y - ev.y) <= r + 3]
+                for x, y, _r, s in self._sldea_marks
+                if abs(x - ev.x) <= reach and abs(y - ev.y) <= reach]
         if not near:
             return
         near.sort(key=lambda d: (d[0], -d[1]['t']))

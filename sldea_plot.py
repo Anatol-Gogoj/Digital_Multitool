@@ -1823,6 +1823,37 @@ _CAPTION_ATTR = '_sldea_caption'
 # rect, in figure height. The x-axis label sits just above the rect.
 CAPTION_PAD = 0.012
 
+# The most of the figure's height the caption strip may take IN THE PLOT
+# WINDOW (`#391`); an export is never cut. Since 2026-10-06 the strip is
+# measured, so it holds every row, but rows are points and the window is
+# resizable. Measured on the suite's synthetic runs (main f69eade): at
+# 4.5 x 3.0 in an aggregate figure's strip took 0.50 of the height and
+# its panels 0.19, and at 3.6 x 2.5 in the strip reached 0.84,
+# tight_layout gave up and the axes overprinted the caption. 0.30 is the
+# most the per-row allowance ever reserved before the wrap. Past it the
+# window keeps the first rows and says, in the caption, how many more
+# the exported figure carries (_cut_caption); the same aggregate figure
+# then keeps 0.40 and 0.33 of the height for its panels.
+WINDOW_CAPTION_MAX = 0.30
+
+# Set on the plot window's live figure by window_figure(), and on no
+# other: every export draws into a fresh Figure.
+_WINDOW_ATTR = '_sldea_window_figure'
+
+# How many caption rows the window's last placement cut, 0 when none.
+_CUT_ATTR = '_sldea_caption_cut'
+
+
+def window_figure(fig):
+    """Mark `fig` as the plot window's live canvas figure -> `fig`.
+
+    Its caption strip is then capped at WINDOW_CAPTION_MAX (`#391`). Only
+    the window calls this, once, on the Figure it keeps for its canvas;
+    save_figure and figure_* draw into a Figure of their own, so an
+    exported figure keeps its whole caption."""
+    setattr(fig, _WINDOW_ATTR, True)
+    return fig
+
 
 def _set_caption(fig, cap, bottom):
     """Write `cap` under the panels, wrapped to the figure's width, and lay
@@ -1853,8 +1884,12 @@ def _place_caption(fig):
     row is a larger share of the height than the allowance assumes. A
     grouped one (`#373`) does the same with the allowance NOT capped, as
     that branch laid it out. Capped at 0.85 only so a pathological
-    caption leaves the axes something."""
+    caption leaves the axes something.
+
+    On the plot window's figure (window_figure) a strip past
+    WINDOW_CAPTION_MAX is cut there instead (`#391`, _cut_caption)."""
     text, cap, bottom = getattr(fig, _CAPTION_ATTR)
+    setattr(fig, _CUT_ATTR, 0)
     fits = _caption_fitter(fig)
     if callable(cap):
         cap = cap(fits)
@@ -1862,24 +1897,65 @@ def _place_caption(fig):
     for line in cap.split('\n'):
         rows += [line] if fits(line) else _wrap(line, fits)
     text.set_text('\n'.join(rows))
+    if bottom is not None and len(rows) == cap.count('\n') + 1:
+        return bottom
+    strip = _caption_strip(fig, text, len(rows), bottom)
+    if getattr(fig, _WINDOW_ATTR, False) and strip > WINDOW_CAPTION_MAX:
+        strip = _cut_caption(fig, text, rows, bottom, fits)
+    return min(strip, 0.85)
+
+
+def _caption_strip(fig, text, n, bottom):
+    """The strip a caption of `n` rows, written in `text`, needs -> figure
+    height. `bottom` is the strip it was composed for, None on a grouped
+    figure: see _place_caption."""
     if bottom is None:
         # grouped (`#373`): the per-row allowance is NOT capped. A row
         # takes about 0.022 of a 5.4 in figure, so the allowance keeps a
         # margin over the measured top that grows with the rows, and the
         # strip still clears the axes when it was measured at 300 dpi and
         # is drawn at 90, where hinting makes 7 pt rows about 12 % taller
-        bottom = 0.025 + 0.025 * len(rows)
-    elif len(rows) == cap.count('\n') + 1:
-        return bottom
+        bottom = 0.025 + 0.025 * n
     else:
-        bottom = max(bottom, min(0.025 + 0.025 * len(rows), 0.30))
+        bottom = max(bottom, min(0.025 + 0.025 * n, 0.30))
     try:
         renderer = fig.canvas.get_renderer()
         top = text.get_window_extent(renderer=renderer).y1 / fig.bbox.height
         bottom = max(bottom, top + CAPTION_PAD)
     except (AttributeError, TypeError, ValueError):
         pass                    # no renderer yet: the allowance stands
-    return min(bottom, 0.85)
+    return bottom
+
+
+def _cut_notice(more):
+    """The row that ends a caption the plot window cut (`#391`). Short, so
+    it stays one row down to about a 4.5 in wide window."""
+    return (f"[Caption cut in this window: {more} more "
+            f"row{'' if more == 1 else 's'} in the export.]")
+
+
+def _cut_caption(fig, text, rows, bottom, fits):
+    """Cut the window's caption to fit WINDOW_CAPTION_MAX -> its strip.
+
+    Keeps the most leading rows whose strip, with the notice row saying
+    how many rows follow in the export, still fits; the notice is
+    wrapped like any caption line. At least one row is cut, since the
+    whole caption did not fit. When even the notice alone does not fit
+    (a window near its floor), the notice stands alone and its strip is
+    what it is."""
+    def strip(k):
+        shown = rows[:k] + _wrap(_cut_notice(len(rows) - k), fits)
+        text.set_text('\n'.join(shown))
+        return _caption_strip(fig, text, len(shown), bottom)
+    lo, hi = 0, len(rows) - 1
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if strip(mid) <= WINDOW_CAPTION_MAX:
+            lo = mid
+        else:
+            hi = mid - 1
+    setattr(fig, _CUT_ATTR, len(rows) - lo)
+    return strip(lo)
 
 
 _SUBPLOTPARS = ('left', 'right', 'bottom', 'top', 'wspace', 'hspace')

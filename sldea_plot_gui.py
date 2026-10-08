@@ -2208,8 +2208,11 @@ class PlotWindow:
                                    text=CLICK_HINT)
         self.lbl_click.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(2, 2))
 
-        # --- canvas
-        self.fig = Figure(figsize=sp.FIGSIZE['area'], dpi=100)
+        # --- canvas. Marked as the window's figure, so a caption that would
+        # squeeze the panels is cut here, and only here (`#391`); every
+        # export draws into a Figure of its own and keeps the whole caption
+        self.fig = sp.window_figure(Figure(figsize=sp.FIGSIZE['area'],
+                                           dpi=100))
         self.canvas = FigureCanvasTkAgg(self.fig, master=right)
         widget = self.canvas.get_tk_widget()
         self.toolbar = NavigationToolbar2Tk(self.canvas, right,

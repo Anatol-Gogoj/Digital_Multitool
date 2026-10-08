@@ -4495,6 +4495,136 @@ def test_a_dollar_sign_in_a_name_is_drawn_as_typed():
             shutil.rmtree(p, ignore_errors=True)
 
 
+def _window_fig(runs, opts, size):
+    """A figure drawn as the plot window draws it, at `size` inches."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    fig = sp.window_figure(Figure(figsize=size, dpi=100))
+    FigureCanvasAgg(fig)
+    sp.draw(fig, runs, opts)
+    return fig
+
+
+def _layout_state(fig):
+    """Everything a relayout must reproduce: caption rows, rect and
+    axes."""
+    return (_caption_rows(fig), tuple(getattr(fig, sp._RECT_ATTR)),
+            [tuple(ax.get_position().bounds) for ax in fig.axes])
+
+
+def test_the_window_cuts_a_caption_that_would_squeeze_its_panels():
+    """`#391`, measured on main f69eade: at 4.5 x 3.0 in an aggregate
+    figure's caption strip took 0.50 of the height and its panels 0.19;
+    at 3.6 x 2.5 in it took 0.84, tight_layout gave up and the axes
+    overprinted the caption. In the plot window the strip now stops at
+    WINDOW_CAPTION_MAX: the first rows stay, the last row says how many
+    more the export carries, the caption clears the axes, and a resize
+    lands exactly where a fresh window draw lands."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        one = os.path.join(d, 'one')
+        _fake_run(one, _healthy_rows(8))
+        two = os.path.join(d, 'two')
+        _fake_run(two, _healthy_rows(8))
+        opts = sp.make_opts(aggregate=True)[0]
+        runs = sp.prepare_runs([one, two], opts)
+        full = len(_caption_rows(_drawn(runs, opts)))
+        fig = _window_fig(runs, opts, sp.FIGSIZE['area'])
+        for size in ((4.5, 3.0), (3.6, 2.5), (7.0, 3.5)):
+            fig.set_size_inches(*size)
+            assert sp.relayout(fig)
+            assert _layout_state(fig) == _layout_state(
+                _window_fig(runs, opts, size)), size
+            rows = _caption_rows(fig)
+            cut = getattr(fig, sp._CUT_ATTR)
+            assert cut > 0, size
+            # the notice ends the caption, wrapped like any line, and the
+            # rows before it are the export's first rows, as drawn there
+            notice = sp._wrap(sp._cut_notice(cut), sp._caption_fitter(fig))
+            assert rows[-len(notice):] == notice, rows
+            kept = rows[:-len(notice)]
+            whole = _caption_rows(_sized(runs, opts, size))
+            assert kept == whole[:len(kept)], size
+            assert len(whole) == len(kept) + cut, (size, cut)
+            assert getattr(fig, sp._RECT_ATTR)[1] <= sp.WINDOW_CAPTION_MAX
+            fig.canvas.draw()
+            rend = fig.canvas.get_renderer()
+            top = getattr(fig, sp._CAPTION_ATTR)[0].get_window_extent(rend).y1
+            assert top < min(ax.get_tightbbox(rend).y0 for ax in fig.axes)
+            panels = min(ax.get_position().height for ax in fig.axes)
+            assert panels > 0.3, (size, panels)
+        # ...and at the export's own size this caption fits under the cap,
+        # so the window shows all of it, as the export does
+        fig.set_size_inches(*sp.FIGSIZE['area'])
+        assert sp.relayout(fig)
+        assert getattr(fig, sp._CUT_ATTR) == 0
+        assert len(_caption_rows(fig)) == full
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _sized(runs, opts, size):
+    """A fresh export-path draw at `size` inches (no window mark)."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    fig = Figure(figsize=size, dpi=100)
+    FigureCanvasAgg(fig)
+    sp.draw(fig, runs, opts)
+    return fig
+
+
+def _twelve_seeded(d):
+    """The #380/#382 reviewer's 12-run fixture: two runs each of P3 at
+    2.5, 2.3 and 1.5 mL, Invisicon 3900 and 3500, and carbon black."""
+    kinds = ([(P3, '2.5 mL')] * 2 + [(P3, '2.3 mL')] * 2
+             + [(P3, '1.5 mL')] * 2 + [(N3900, _ABSENT)] * 2
+             + [(N3500, _ABSENT)] * 2 + [(CB, _ABSENT)] * 2)
+    return _labeled(d, [(f"P3_{i}_2.5mL_2026072{i % 10}", m, c, i)
+                        for i, (m, c) in enumerate(kinds)])
+
+
+def test_an_export_is_byte_identical_whatever_the_window_cut():
+    """`#391`: only the window's figure is cut. The six-group seed's
+    caption takes 0.375 of the height at FIGSIZE, past the window's cap,
+    so the window cuts it there; the exported PNG must still carry the
+    whole caption and stay byte-identical: with the window's figure cut
+    and re-laid at several sizes in the same process, and with the cap
+    set far tighter."""
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        runs = _twelve_seeded(d)
+        opts = _seeded_opts(runs, 'concentration')
+        first = sp.save_figure(runs, opts, os.path.join(out, 'first.png'))
+        win = _window_fig(runs, opts, sp.FIGSIZE['area'])
+        assert getattr(win, sp._CUT_ATTR) > 0, 'nothing cut; fixture too tame'
+        for size in ((7.0, 3.5), (4.5, 3.0), sp.FIGSIZE['area']):
+            win.set_size_inches(*size)
+            assert sp.relayout(win)
+        again = sp.save_figure(runs, opts, os.path.join(out, 'again.png'))
+        real = sp.WINDOW_CAPTION_MAX
+        sp.WINDOW_CAPTION_MAX = 0.05
+        try:
+            tight = sp.save_figure(runs, opts, os.path.join(out, 'tight.png'))
+        finally:
+            sp.WINDOW_CAPTION_MAX = real
+        with open(first, 'rb') as a:
+            want = a.read()
+        for p in (again, tight):
+            with open(p, 'rb') as b:
+                assert b.read() == want, p
+        # the export's caption is the whole one, with no notice in it
+        rows = _caption_rows(_drawn(runs, opts))
+        assert not any('Caption cut' in r for r in rows), rows
+        assert getattr(win, sp._CUT_ATTR) > 0
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
 # --------------------------------------------------------------------------
 # the export format and the dpi (`#314`) -- the first options that describe
 # the FILE rather than the drawing

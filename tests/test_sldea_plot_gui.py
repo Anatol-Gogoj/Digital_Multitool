@@ -2416,6 +2416,42 @@ def test_the_window_exports_the_format_and_dpi_it_shows():
         assert spec['opts']['fmt'] == 'png' and spec['opts']['dpi'] == 120
 
 
+def test_the_window_cuts_its_caption_and_exports_it_whole():
+    """`#391`: the window marks its own figure, so in a small window a
+    caption that would squeeze the panels is cut there, with a row that
+    says so; Export draws a figure of its own and writes the whole
+    caption, byte for byte what the engine writes for the same runs and
+    options."""
+    with _Bare() as b:
+        if not b.ok:
+            return
+        win = b.win
+        assert getattr(win.fig, sp._WINDOW_ATTR, False), 'figure not marked'
+        win.v_aggregate.set(True)
+        win.redraw()
+        opts, err = win.current_opts()
+        assert not err and opts['aggregate'], err
+        assert getattr(win.fig, sp._CUT_ATTR) == 0
+        win.fig.set_size_inches(4.5, 3.0)
+        assert win.relayout()
+        rows = getattr(win.fig, sp._CAPTION_ATTR)[0].get_text().split('\n')
+        cut = getattr(win.fig, sp._CUT_ATTR)
+        assert cut > 0, rows
+        assert 'Caption cut in this window' in ' '.join(rows[-2:]), rows
+        assert getattr(win.fig, sp._RECT_ATTR)[1] <= sp.WINDOW_CAPTION_MAX
+        out = os.path.join(b.tmp, 'figs')
+        win.v_out.set(out)
+        win.v_stem.set('w')
+        with _Boxes() as boxes:
+            win._export()
+        assert [k for k, _t, _m in boxes.said] == ['showinfo'], boxes.said
+        ref = sp.save_figure(win._prepared, opts,
+                             os.path.join(b.tmp, 'ref.png'))
+        with open(os.path.join(out, 'w.png'), 'rb') as f, \
+                open(ref, 'rb') as r:
+            assert f.read() == r.read(), 'the window cut reached the export'
+
+
 def test_a_typo_in_the_dpi_box_is_refused_not_rendered():
     """The `#314` refusal, in the window. It is REPORTED where the
     filenames are (a bad number does not spoil the preview -- the canvas

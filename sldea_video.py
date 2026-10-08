@@ -987,15 +987,21 @@ class JobProgress:
     PROGRESS_EVERY_S, a change of phase at once; finish() writes the
     job's last word. Nothing here raises: the record is for the
     operator's eyes, and failing to write it must never cost the job its
-    real work. `clock` is for tests."""
+    real work. `clock` is for tests.
 
-    def __init__(self, rundir, job, path=None, clock=time.time):
+    `pid` is the JOB's process, which a watcher asks about once the record
+    has gone quiet (pid_alive): -1, the default, for this process; None in
+    the record a launcher writes before the job exists (_launch_job)."""
+
+    def __init__(self, rundir, job, path=None, clock=time.time,
+                 pid=-1):
         self.path = path or progress_path(rundir)
         self._clock = clock
         now = clock()
         self.rec = {'job': job,
                     'run': os.path.basename(os.path.abspath(rundir)),
-                    'pid': os.getpid(), 'phase': 'starting',
+                    'pid': os.getpid() if pid == -1 else pid,
+                    'phase': 'starting',
                     'started': now, 'phase_started': now, 't': now}
         self._wrote = None              # when the record last reached disk
 
@@ -1100,6 +1106,64 @@ def read_progress(path):
     return rec if isinstance(rec, dict) else None
 
 
+_KERNEL32 = None
+
+
+def pid_alive(pid):
+    """True while process `pid` exists and has not exited, False once it
+    is gone (or `pid` is no process id). One that exists but is not ours
+    to ask about counts as alive. Never raises, and never signals: on
+    Windows os.kill would TERMINATE the process, so this asks
+    OpenProcess and GetExitCodeProcess there. A process id can be reused
+    once its process is gone (soon, on Windows), so a caller asks only
+    about a job it has reason to think recent."""
+    global _KERNEL32
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name == 'nt':
+        try:
+            import ctypes
+            from ctypes import wintypes
+            if _KERNEL32 is None:
+                k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+                k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL,
+                                            wintypes.DWORD)
+                k32.OpenProcess.restype = wintypes.HANDLE
+                k32.GetExitCodeProcess.argtypes = (
+                    wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+                k32.GetExitCodeProcess.restype = wintypes.BOOL
+                k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+                _KERNEL32 = k32
+            k32 = _KERNEL32
+            # PROCESS_QUERY_LIMITED_INFORMATION
+            h = k32.OpenProcess(0x1000, False, pid)
+            if not h:
+                # ERROR_ACCESS_DENIED: there, but not ours to ask about
+                return ctypes.get_last_error() == 5
+            try:
+                code = wintypes.DWORD()
+                if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                    return True
+                return code.value == 259            # STILL_ACTIVE
+            finally:
+                k32.CloseHandle(h)
+        except Exception:
+            return True
+    try:
+        os.kill(pid, 0)                 # signal 0: a check, sends nothing
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def _count(v):
     """A record's count as an int, or None."""
     f = _num(v)
@@ -1116,25 +1180,40 @@ def _dur(sec):
     return f"{sec / 3600:.1f} h"
 
 
-def progress_text(rec, now=None):
+# The jobs by name, in words for the job line.
+_JOB_WORDS = {'finalize': 'the post-run job',
+              'rerun': 'the edge re-run after Save'}
+
+
+def progress_text(rec, now=None, ended=None):
     """The SLDEA tab's job line for a progress record -> (text, level).
 
     `level` is 'busy', 'done' or 'warn'. The tab colors the line by it,
-    and the words say the same thing without the color: a failure or a
-    job gone quiet starts with the warning sign and names run.log. A busy
-    line quotes the time left once the phase has run 5 s, from its own
-    rate. Pure."""
+    and the words say the same thing without the color: every warning,
+    a failure, a job gone quiet or one that ended with a caveat, starts
+    with the warning sign and names run.log. A busy line quotes the time
+    left once the phase has run 5 s, from its own rate.
+
+    `ended`: the watcher knows the job's program is gone while its record
+    still says busy, so the job ended without its last word; an exit code
+    (int) when the watcher has one, else True. Pure."""
     now = time.time() if now is None else float(now)
     head = f"video of {rec.get('run') or 'the run'}"
     phase = rec.get('phase')
     rerun = rec.get('job') == 'rerun'
     if phase == 'done':
-        warn = bool(rec.get('warn'))
-        return ((f"⚠ " if warn else "") + f"{head}: "
-                f"{rec.get('text') or 'done'}", 'warn' if warn else 'done')
+        if rec.get('warn'):
+            return (f"⚠ {head}: {rec.get('text') or 'done'}; see run.log",
+                    'warn')
+        return f"{head}: {rec.get('text') or 'done'}", 'done'
     if phase == 'failed':
         return (f"⚠ {head}: {rec.get('text') or 'the job failed'}; see "
                 f"run.log", 'warn')
+    if ended is not None and ended is not False:
+        code = '' if ended is True else f" (exit code {ended})"
+        return (f"⚠ {head}: "
+                f"{_JOB_WORDS.get(rec.get('job'), 'the video job')} ended"
+                f"{code} without its last word; see run.log", 'warn')
     done, total = _count(rec.get('done')), _count(rec.get('total'))
     if phase == 'detect':
         busy = (("re-running edge detection after Save" if rerun
@@ -1639,9 +1718,11 @@ def _launch_job(cmd, rundir, job, popen=None):
     starting. That matters for the re-run after Save, because an --auto
     Edge Review closes right after the Save that started it (#363), and
     the SLDEA tab stops following a run once nothing is left that may
-    report on it. A launch that fails says so in the record as well.
-    -> the Popen."""
-    prog = JobProgress(rundir, job)
+    report on it. A launch that fails says so in the record as well. The
+    record's pid stays None until the job writes its own (job_progress,
+    the first thing it does), so no watcher mistakes the launcher for the
+    job. -> the Popen."""
+    prog = JobProgress(rundir, job, pid=None)
     prog.write()
     try:
         return (popen or subprocess.Popen)(cmd,
@@ -1650,11 +1731,6 @@ def _launch_job(cmd, rundir, job, popen=None):
         prog.finish(False, f"{_JOB_WORDS.get(job, job)} could not start "
                            f"({e})")
         raise
-
-
-# The jobs by name, in words for the job line.
-_JOB_WORDS = {'finalize': 'the post-run job',
-              'rerun': 'the edge re-run after Save'}
 
 
 def launch_finalize(staging, rundir, detect=False, popen=None):
@@ -1758,6 +1834,25 @@ def launch_rerun(rundir, popen=None):
     return _launch_job(cmd, rundir, 'rerun', popen=popen)
 
 
+def rerun_running(rundir, now=None):
+    """True while the run's progress record says a re-run after Save is
+    at work: phase not final, a word within PROGRESS_STALE_S, and its
+    program alive (pid_alive), or no pid of its own yet because the
+    launcher has only just announced it. A record gone quiet longer than
+    that is not trusted, because a dead job's process id can be reused.
+    Never raises."""
+    rec = read_progress(progress_path(rundir))
+    if not rec or rec.get('job') != 'rerun' \
+            or rec.get('phase') in PROGRESS_FINAL:
+        return False
+    t = _num(rec.get('t'))
+    now = time.time() if now is None else now
+    if t is None or now - t > PROGRESS_STALE_S:
+        return False
+    pid = rec.get('pid')
+    return pid is None or pid_alive(pid)
+
+
 def after_save(rundir, popen=None):
     """Edge Review's Save hook: re-run the video pass when its edges are
     out of date. -> one plain sentence for the status strip, or None when
@@ -1766,7 +1861,15 @@ def after_save(rundir, popen=None):
     No video in the folder also covers a run whose recording is still in
     local staging: the post-run job detects there first and moves the
     files in only afterwards, so a video in the folder means that job's
-    detection is over and a re-run cannot race it."""
+    detection is over and a re-run cannot race it.
+
+    ONE RE-RUN AT A TIME (#396 review). A second Save while a re-run is
+    still at work (rerun_running) starts no second one: two would share
+    the run's progress record, so the SLDEA tab's line would flip between
+    their counts, and together they would take every core. The sentence
+    says so, and begins like the other "not re-run" sentences
+    (VIDEO_SAVE_PROBLEMS in Edge Review), so an --auto window stays open
+    for it: the edges stay out of date until a Save after that re-run."""
     if not has_video(rundir):
         return None
     try:
@@ -1775,6 +1878,10 @@ def after_save(rundir, popen=None):
         why = f"their inputs could not be checked ({e})"
     if why is None:
         return "video edges are current"
+    if rerun_running(rundir):
+        return (f"video edges are out of date ({why}), and a re-run is "
+                f"already running, so no second one was started: Save "
+                f"again when it has finished")
     try:
         launch_rerun(rundir, popen=popen)
     except Exception as e:
@@ -2245,9 +2352,12 @@ def main(argv):
     if not run:
         print("give a run folder")
         return 2
+    # The re-run's own pid goes into its record first, before the import
+    # and the run lookup below, which may wait on the share: a watcher
+    # that finds the record quiet asks whether this process is alive.
+    prog = job_progress(run, 'rerun') if after else None
     import sldea_edge as se
     rundir = se.resolve_run(run) or run
-    prog = job_progress(rundir, 'rerun') if after else None
     if not os.path.exists(os.path.join(rundir, VIDEO_FILENAME)):
         print(f"no {VIDEO_FILENAME} in {rundir}")
         if prog is not None:

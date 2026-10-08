@@ -137,8 +137,8 @@ def test_the_record_is_written_whole_once_a_second_and_never_raises():
 def test_the_job_line_says_what_how_far_and_how_it_ended():
     base = {'run': 'R', 't': 1000.0, 'phase_started': 990.0}
 
-    def say(now=1000.0, **rec):
-        return sv.progress_text(dict(base, **rec), now=now)
+    def say(now=1000.0, ended=None, **rec):
+        return sv.progress_text(dict(base, **rec), now=now, ended=ended)
     assert say(job='finalize', phase='starting') == (
         "video of R: starting the post-run job", 'busy')
     assert say(job='rerun', phase='starting') == (
@@ -161,8 +161,20 @@ def test_the_job_line_says_what_how_far_and_how_it_ended():
         "2.3 GB, about 9 s left")
     assert say(job='finalize', phase='done', text='ready') == (
         "video of R: ready", 'done')
+    # every warning names run.log, an ending with a caveat too (review F4)
     assert say(job='finalize', phase='done', text='ready, but x',
-               warn=True) == ("⚠ video of R: ready, but x", 'warn')
+               warn=True) == ("⚠ video of R: ready, but x; see run.log",
+                              'warn')
+    # a busy record whose program is gone, as the watcher found out
+    assert say(job='finalize', phase='copy', done=1, total=2, ended=1) == (
+        "⚠ video of R: the post-run job ended (exit code 1) without its "
+        "last word; see run.log", 'warn')
+    assert say(job='rerun', phase='detect', done=1, total=2, ended=True) == (
+        "⚠ video of R: the edge re-run after Save ended without its last "
+        "word; see run.log", 'warn')
+    assert say(job='rerun', phase='done', text='edges re-run',
+               ended=True) == ("video of R: edges re-run", 'done'), \
+        "a last word outranks a watcher's guess"
     assert say(job='rerun', phase='failed', text='it broke') == (
         "⚠ video of R: it broke; see run.log", 'warn')
     # a busy record that stopped changing: said, with what it last said
@@ -255,9 +267,10 @@ def test_the_launchers_announce_the_job_and_start_it_detached_and_low():
                 assert 'start_new_session' not in kw
             else:
                 assert kw['start_new_session'] is True, kw
-            # announced BEFORE the program existed
+            # announced BEFORE the program existed, with no process id: the
+            # launcher's own would read as the job's to a watcher
             assert rec and rec['phase'] == 'starting' and \
-                rec['job'] == job, rec
+                rec['job'] == job and rec['pid'] is None, rec
         assert sv.launch_finalize(stage, run, False,
                                   popen=_Popen()) == 'proc'
         # a launch that fails says so in the record, and still raises
@@ -270,6 +283,113 @@ def test_the_launchers_announce_the_job_and_start_it_detached_and_low():
         rec = sv.read_progress(sv.progress_path(run))
         assert rec['phase'] == 'failed' and rec['text'] == (
             'the edge re-run after Save could not start (no fork)'), rec
+
+
+def test_pid_alive_tells_a_live_process_from_a_finished_one():
+    """pid_alive never signals anything (on Windows os.kill would end the
+    process); it answers for this process, for one that has exited, and
+    for things that are not process ids."""
+    assert sv.pid_alive(os.getpid())
+    p = subprocess.Popen([sys.executable, '-c', 'pass'])
+    p.wait(60)
+    # `p` keeps the finished process's handle open, so Windows cannot hand
+    # its id to another process while this asks
+    assert sv.pid_alive(p.pid) is False, p.pid
+    for junk in (None, 'x', 0, -5):
+        assert sv.pid_alive(junk) is False, junk
+
+
+def _video_folder(parent):
+    """A run folder has_video accepts (stand-in files) with no video edges
+    yet, which edges_stale says without reading anything."""
+    d = os.path.join(parent, 'SLDEA_20261006_101500')
+    os.makedirs(d)
+    for n in (sv.VIDEO_FILENAME, sv.VIDEO_INDEX_FILENAME):
+        open(os.path.join(d, n), 'w').close()
+    return d
+
+
+def test_a_save_starts_no_second_rerun_while_one_is_at_work():
+    """Review F5. A Save while a re-run of the same run is at work (busy,
+    a word within PROGRESS_STALE_S, its program alive, or no process id
+    yet because it was only just launched) starts no second re-run and
+    says so, in words that begin like Edge Review's other "not re-run"
+    sentences, so an --auto window stays open for it. A re-run that has
+    finished, gone quiet or died does not hold the next one back."""
+    with _Env() as env:
+        d = _video_folder(env.tmp)
+
+        def record(t=None, pid=os.getpid(), **kw):
+            p = sv.JobProgress(d, 'rerun', pid=pid)
+            p.rec.update(kw)
+            assert p.write(now=t)
+        quiet = time.time() - sv.PROGRESS_STALE_S - 5
+        cases = [  # (the record, a second re-run starts)
+            (dict(phase='detect', done=5, total=50), False),
+            (dict(phase='starting', pid=None), False),
+            (dict(phase='detect', done=5, total=50, t=quiet), True),
+            (dict(phase='done', text='edges re-run'), True),
+            (dict(phase='failed', text='it broke'), True)]
+        for rec, starts in cases:
+            record(**rec)
+            popen = _Popen()
+            msg = sv.after_save(d, popen=popen)
+            assert bool(popen.calls) == starts, (rec, msg)
+            if starts:
+                assert msg.startswith('video edges re-running'), (rec, msg)
+            else:
+                # the reason in brackets is edges_stale's ("no video edges
+                # yet"; without numpy, that the inputs could not be checked)
+                assert msg.startswith('video edges are out of date ('), msg
+                assert msg.endswith(
+                    "), and a re-run is already running, so no second one "
+                    "was started: Save again when it has finished"), msg
+        # a busy record whose program is gone holds nothing back either
+        record(phase='detect', done=5, total=50)
+        real = sv.pid_alive
+        try:
+            sv.pid_alive = lambda pid: False
+            popen = _Popen()
+            assert sv.after_save(d, popen=popen).startswith(
+                'video edges re-running') and popen.calls
+        finally:
+            sv.pid_alive = real
+        # nor does the post-run job's own record (it is the one that moved
+        # the video in, so it is in its last moments)
+        p = sv.JobProgress(d, 'finalize')
+        p.rec.update(phase='copy', done=1, total=2)
+        assert p.write()
+        popen = _Popen()
+        assert sv.after_save(d, popen=popen) and popen.calls
+
+
+def test_the_rerun_writes_its_own_pid_before_it_looks_up_the_run():
+    """Review F1. The re-run's first act is to put its own process id in
+    the record, so a watcher that finds the record quiet can ask whether
+    it lives, even while the run lookup waits on a stalled share."""
+    try:
+        import sldea_edge as se
+    except ImportError as e:            # numpy (WSL)
+        raise _Skip(f"sldea_edge does not import here: {e}")
+    with _Env() as env:
+        d = os.path.join(env.tmp, 'SLDEA_20261006_101500')
+        os.makedirs(d)
+        os.environ[sv.JOB_PROGRESS_ENV] = sv.progress_path(d)
+        assert sv.JobProgress(d, 'rerun', pid=None).write()  # the launcher
+        seen = []
+        real = se.resolve_run
+
+        def lookup(run):
+            seen.append(sv.read_progress(sv.progress_path(d)))
+            return real(run)
+        se.resolve_run = lookup
+        try:
+            assert sv.main([d, '--after-save']) == 2        # no video.mkv
+        finally:
+            se.resolve_run = real
+        assert seen and seen[0]['pid'] == os.getpid(), seen
+        rec = sv.read_progress(sv.progress_path(d))
+        assert rec['phase'] == 'failed' and rec['pid'] == os.getpid(), rec
 
 
 def _staged(folder, size=3 << 20):
@@ -678,6 +798,8 @@ def _line_app():
     class App:
         SLDEA_JOB_POLL_MS = G.SLDEA_JOB_POLL_MS
         SLDEA_JOB_IDLE_MS = G.SLDEA_JOB_IDLE_MS
+        SLDEA_JOB_GIVE_UP_S = G.SLDEA_JOB_GIVE_UP_S
+        SLDEA_JOB_COLORS = G.SLDEA_JOB_COLORS
         _sldea_job_watch = G._sldea_job_watch
         _sldea_job_resume = G._sldea_job_resume
         _sldea_job_tick = G._sldea_job_tick
@@ -733,12 +855,12 @@ def test_the_job_line_follows_the_post_run_job_and_then_stops():
         _say(run, 'finalize', 'detect', done=120, total=438)
         app.tick()
         assert app.text().endswith('detecting edges 120/438'), app.text()
-        assert app.sldea_job_line.cget('fg') == '#555'
+        assert app.sldea_job_line.cget('fg') == '#555555'     # gui.MUTED
         _say(run, 'finalize', 'done', text='ready in the run folder')
         proc.code = 0
         app.tick()
         assert app.text().endswith(': ready in the run folder'), app.text()
-        assert app.sldea_job_line.cget('fg') == '#2e7d32'
+        assert app.sldea_job_line.cget('fg') == '#117733'     # Tol muted
         assert app.root.pending() is None, "the poll outlived the job"
 
 
@@ -797,7 +919,7 @@ def test_the_job_line_reports_a_rerun_after_save():
         assert app.root.pending() is None
 
 
-def test_the_job_line_says_when_a_job_ended_or_went_quiet_without_a_word():
+def test_the_job_line_says_when_the_post_run_job_ended_without_a_word():
     with _Env() as env:
         app = _line_app()
         run = os.path.join(env.tmp, 'R')
@@ -806,16 +928,81 @@ def test_the_job_line_says_when_a_job_ended_or_went_quiet_without_a_word():
         assert app.text() == ("⚠ video of R: the post-run job ended (exit "
                               "code 1) without its last word; see run.log"), \
             app.text()
-        assert app.sldea_job_line.cget('fg') == '#8a5a00'
+        assert app.sldea_job_line.cget('fg') == '#882255'     # Tol muted
         assert app.root.pending() is None
-        # a re-run nobody here holds the process of: quiet too long
-        p = _say(run, 'rerun', 'detect', done=5, total=10)
-        p.rec['t'] = time.time() - sv.PROGRESS_STALE_S - 30
-        assert p.write(now=p.rec['t'])
+
+
+def _quiet(run, job, pid, ago, **kw):
+    """A busy record of `job` that last spoke `ago` seconds ago."""
+    p = sv.JobProgress(run, job, pid=pid)
+    p.rec.update(kw)
+    assert p.write(now=time.time() - ago)
+
+
+def test_the_job_line_waits_out_a_quiet_rerun_and_reads_its_last_word():
+    """Review F1, the reviewer's scenario S1. The --auto window closed
+    after a clean Save, so nothing here holds the re-run's process, and a
+    step of the re-run wrote nothing for longer than PROGRESS_STALE_S
+    (the CSV and the figure after its last frame, on a slow share). The
+    line says the job has gone quiet but goes on looking, at the idle
+    pace, while its program lives, and so reads the last word when it
+    comes. It used to stop there for good, amber over a re-run that
+    succeeded."""
+    with _Env() as env:
+        app = _line_app()
+        run = os.path.join(env.tmp, 'R')
+        _quiet(run, 'rerun', os.getpid(), sv.PROGRESS_STALE_S + 60,
+               phase='detect', done=438, total=438)
+        app._sldea_job_watch(run)                 # no process handle here
+        assert app.text().startswith("⚠ video of R: no word from the job "
+                                     "for 3 min"), app.text()
+        assert app.root.pending()[0] == app.SLDEA_JOB_IDLE_MS, \
+            "the line stopped on a re-run that is still alive"
+        app.tick()
+        assert app.root.pending()[0] == app.SLDEA_JOB_IDLE_MS
+        _say(run, 'rerun', 'done',
+             text='edges re-run after Save, 438 frames (2 flagged for '
+                  'review)')
+        app.tick()
+        assert app.text() == ("video of R: edges re-run after Save, 438 "
+                              "frames (2 flagged for review)"), app.text()
+        assert app.sldea_job_line.cget('fg') == '#117733'
+        assert app.root.pending() is None
+
+
+def test_the_job_line_stops_on_a_quiet_job_whose_program_is_gone():
+    """Quiet, and its program is gone (pid_alive): the job ended without
+    its last word. Said, and the poll stops."""
+    with _Env() as env:
+        app = _line_app()
+        run = os.path.join(env.tmp, 'R')
+        done = subprocess.Popen([sys.executable, '-c', 'pass'])
+        done.wait(60)                   # `done` keeps its id from reuse
+        _quiet(run, 'rerun', done.pid, sv.PROGRESS_STALE_S + 10,
+               phase='detect', done=5, total=10)
+        app._sldea_job_watch(run)
+        assert app.text() == ("⚠ video of R: the edge re-run after Save "
+                              "ended without its last word; see run.log"), \
+            app.text()
+        assert app.root.pending() is None
+
+
+def test_the_job_line_gives_up_on_a_record_quiet_too_long():
+    """No process id to ask about (the launcher's record, its job never
+    wrote): the line goes on looking at the idle pace up to
+    SLDEA_JOB_GIVE_UP_S, then stops, still saying the job went quiet."""
+    with _Env() as env:
+        run = os.path.join(env.tmp, 'R')
+        app = _line_app()
+        _quiet(run, 'rerun', None, sv.PROGRESS_STALE_S + 10)
+        app._sldea_job_watch(run)
+        assert app.text().startswith("⚠ video of R: no word from the job")
+        assert app.root.pending()[0] == app.SLDEA_JOB_IDLE_MS
         app2 = _line_app()
+        _quiet(run, 'rerun', None, app2.SLDEA_JOB_GIVE_UP_S + 10)
         app2._sldea_job_watch(run)
-        assert app2.text().startswith("⚠ video of R: no word from the job"), \
-            app2.text()
+        assert app2.text().startswith("⚠ video of R: no word from the job "
+                                      "for 30 min"), app2.text()
         assert app2.root.pending() is None
 
 

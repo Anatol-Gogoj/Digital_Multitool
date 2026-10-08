@@ -3282,7 +3282,7 @@ LOGGING:
         # first time a job reports, so a session without video looks as
         # it did.
         self.sldea_job_line = tk.Label(f, text="", anchor='w',
-                                       justify='left', fg='#555',
+                                       justify='left', fg=MUTED,
                                        wraplength=1100)
 
         # The camera settings a run started now would use (2026-10-02). A
@@ -5644,6 +5644,24 @@ LOGGING:
     # often.
     SLDEA_JOB_POLL_MS = 1000
     SLDEA_JOB_IDLE_MS = 2000
+    # How long the line goes on looking at a busy record that has stopped
+    # changing (#396 review). A re-run after Save is a program nobody here
+    # holds a handle on, and a step of it can write nothing for longer than
+    # sldea_video.PROGRESS_STALE_S: its start-up and staleness check on a
+    # stalled share, or the CSV and the figure after its last frame. The
+    # line then says the job has gone quiet, but keeps looking at the idle
+    # pace while the job's program is alive (sldea_video.pid_alive), so its
+    # last word is still read when it comes; at most this long, because
+    # Windows reuses process ids.
+    SLDEA_JOB_GIVE_UP_S = 30 * 60
+    # The job line's colors (#396 review): the repo's muted gray (MUTED)
+    # while a job works, then Paul Tol's muted green and muted wine, the
+    # two muted Tol colors sldea_plot.GROUP_COLORS already uses. Their WCAG
+    # contrast as text on the Windows default background (#F0F0F0) is
+    # 6.5:1, 5.0:1 and 7.7:1; the repo's Tol yellows come to 1.7 and
+    # 1.9:1 there, too faint for words. The words carry the meaning, and
+    # the color only repeats it.
+    SLDEA_JOB_COLORS = {'busy': MUTED, 'done': '#117733', 'warn': '#882255'}
 
     def _sldea_job_watch(self, rundir, proc=None):
         """Follow the background video jobs of `rundir` on the job line
@@ -5674,11 +5692,13 @@ LOGGING:
     def _sldea_job_tick(self):
         """One look at the followed run's progress record, and the next
         one scheduled while anything may still report on it: the post-run
-        job still running, a record saying a job is busy that has not gone
-        quiet (sldea_video.PROGRESS_STALE_S), or an Edge Review window
-        opened from this tab, whose Save may start a re-run. Otherwise
-        the poll stops, and the line keeps the last word. Tk thread only;
-        never raises."""
+        job still running, a record saying a job is busy (once it has gone
+        quiet, sldea_video.PROGRESS_STALE_S, only while its program is
+        alive and for at most SLDEA_JOB_GIVE_UP_S), or an Edge Review
+        window opened from this tab, whose Save may start a re-run.
+        Otherwise the poll stops, and the line keeps the last word. Tk
+        thread only; never raises. The process check runs only on a quiet
+        record, so a tick is still a stat and, when that changed, a read."""
         job = getattr(self, '_sldea_job', None)
         if job is None:
             return
@@ -5702,38 +5722,44 @@ LOGGING:
             run = os.path.basename(os.path.abspath(job['rundir']))
             busy = (rec is not None and rec.get('phase')
                     not in sldea_video.PROGRESS_FINAL)
+            quiet = (now - float(rec.get('t') or 0.0)) if busy else 0.0
+            fresh = busy and quiet <= sldea_video.PROGRESS_STALE_S
+            ended = None        # the job's program is gone without a word
+            if (code is not None and busy
+                    and rec.get('job') == 'finalize'):
+                ended = code
+            elif busy and not fresh and rec.get('pid') is not None \
+                    and not sldea_video.pid_alive(rec.get('pid')):
+                ended = True
+            waiting = (busy and ended is None
+                       and quiet <= self.SLDEA_JOB_GIVE_UP_S)
             if rec is None:
                 text, level = (f"video of {run}: the post-run job gives no "
                                f"progress here; see run.log"), 'busy'
             else:
-                text, level = sldea_video.progress_text(rec, now=now)
-            quiet = (now - float(rec.get('t') or 0.0)) if busy else 0.0
-            live = busy and quiet <= sldea_video.PROGRESS_STALE_S
-            if (code is not None and busy
-                    and rec.get('job') == 'finalize'):
-                text = (f"⚠ video of {run}: the post-run job ended (exit "
-                        f"code {code}) without its last word; see run.log")
-                level, live = 'warn', False
+                text, level = sldea_video.progress_text(rec, now=now,
+                                                        ended=ended)
             self._sldea_job_show(text, level)
             edge_open = any(p.poll() is None for p in
                             getattr(self, '_sldea_edge_procs', ()))
             running = proc is not None and code is None
-            if running or live or edge_open:
+            if running or waiting or edge_open:
                 job['after'] = self.root.after(
-                    self.SLDEA_JOB_POLL_MS if (running or live)
+                    self.SLDEA_JOB_POLL_MS if (running or fresh)
                     else self.SLDEA_JOB_IDLE_MS, self._sldea_job_tick)
         except Exception:
             pass                # a progress line is never worth a traceback
 
     def _sldea_job_show(self, text, level):
         """Put `text` on the job line, colored by `level` ('busy', 'done'
-        or 'warn': the status line's gray and green, the camera line's
-        amber). The words carry the meaning on their own: a warning starts
-        with the warning sign. Packed under the run row the first time."""
+        or 'warn', SLDEA_JOB_COLORS). The words carry the meaning on their
+        own: a warning starts with the warning sign and names run.log.
+        Packed under the run row the first time."""
         lbl = getattr(self, 'sldea_job_line', None)
         if lbl is None:
             return
-        fg = {'busy': '#555', 'done': '#2e7d32'}.get(level, '#8a5a00')
+        colors = self.SLDEA_JOB_COLORS
+        fg = colors.get(level, colors['warn'])
         try:
             if lbl.cget('text') != text or lbl.cget('fg') != fg:
                 lbl.config(text=text, fg=fg)

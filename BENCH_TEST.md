@@ -622,7 +622,11 @@ Windows OpenCV 5.0 build, not the bench's 4.13.
   (the Bayer-phase trap, README), mean grey within ±2 levels.
 - [ ] **Q5.** The end of the log: `video: N frames recorded at ~1.00 fps`
   with **no** `DROPPED`, then `video.mkv and video_frames.csv are in the
-  run folder`. `video.mkv` is ~1 MB per frame.
+  run folder`. `video.mkv` is ~1 MB per frame. The last line of
+  `setup.txt` is `Video outcome (end): recorded N frames, 0.0 to T s on
+  the run's clock` (#392): the same N as the rows of `video_frames.csv`,
+  and nothing after the clock (no `then stopped`, dropout, control-call
+  or `dropped` note).
 - [ ] **Q6.** `video.mkv` plays (VLC or `ffplay`): grey, the right way up,
   the same field of view as the PNGs, and no frozen stretch.
 - [ ] **Q7.** During a run, Webcam tab → **Start Preview** is refused with
@@ -646,7 +650,22 @@ Windows OpenCV 5.0 build, not the bench's 4.13.
   and a rate that persists would slow later one-shot grabs.
 - [ ] **Q12.** Camera unplugged mid-run (dry): the log says `reopening
   (attempt n)`, and once replugged, `camera stream reopened`. The stills
-  in between log NO FRAME; the ones after are filed normally.
+  in between log NO FRAME; the ones after are filed normally. On the
+  Bayer path `camera stream reopened` can also appear before the
+  replug: a reopen starts `v4l2-ctl` even with no camera, and it exits
+  again. The last line of `setup.txt` (#392) is `Video outcome (end):
+  recorded N frames, 0.0 to T s on the run's clock; the camera stream
+  dropped out for ~2 s or more and came back 1x`, with no `then
+  stopped`, and the hole shows in the `t_s` column of
+  `video_frames.csv`.
+- [ ] **Q12b.** The same, but leave the camera unplugged to the end of
+  the run (#392). The run still ends `run complete` on its stills
+  schedule, with every still after the unplug a NO FRAME row, and the
+  last line of `setup.txt` is `Video outcome (end): recorded N frames,
+  0.0 to T1 s on the run's clock, then stopped: the camera stream
+  stopped delivering at T2 s and had not come back by the end of the
+  run`: T2 about the moment of the unplug, N the rows of
+  `video_frames.csv`.
 - [ ] **Q13.** Gain over a long stream: a **≥ 40-minute** dry video run
   of an unchanging scene. Compare the baseline still with the **last**
   still (mean grey within ±2 levels), and look for any `gain` drift in
@@ -680,8 +699,18 @@ Windows OpenCV 5.0 build, not the bench's 4.13.
   record a decision and move on, and `video_review.csv` gains a row.
   Close: `video_edges.png` is redrawn with the decision (diamond or
   cross). Note how long the outline takes to appear on this PC.
+- [ ] **Q18.** Camera control calls while the stream runs (#392): in the
+  Q13 run's log (or that of any DRY video run of a few minutes), the
+  `video: N frames recorded …` line includes `camera control calls up
+  to X s`. That is the longest `webcam.apply_locked` the reader ran: the
+  5 s refresh (gain left out) or the full restamp before a still, two
+  `v4l2-ctl` runs per control. Note X. The reader takes no frame during
+  a call, so a restamp much over 2 s leaves its still a NO FRAME row (it
+  starts 0.6 s before the still, which waits at most 1.5 s past its
+  time). A call still running when a run ends is named in `setup.txt`'s
+  end line, not blamed on the camera.
 
-Record the date and the Q1/Q5/Q10/Q11/Q13/Q14/Q16/Q17 numbers in
+Record the date and the Q1/Q5/Q10/Q11/Q13/Q14/Q16/Q17/Q18 numbers in
 `SLDEA_DECISIONS.md`.
 
 ---

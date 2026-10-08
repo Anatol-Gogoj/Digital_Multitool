@@ -114,6 +114,27 @@ STILL_MAX_AGE_S = 2.0
 REOPEN_AFTER_FAILS = 40
 REOPEN_BACKOFF_MAX_S = 5.0
 
+# The run's codec check (VideoRecorder.check_codec) is given up on after
+# this long, and a check given up on is a failed check: the run stops
+# before any HV (#392). It runs at 0 V, before the SG output is switched
+# on, so the limit only bounds how long Abort waits on a hang there.
+# Measured 2026-10-06 on Gogojster (Core Ultra 9 285H, OpenCV 4.13.0,
+# avcodec 58.134.100), 3 fresh processes x 4 checks per size, the first
+# check in a process included: 0.23-0.25 s at 1920 x 1080, 0.54-0.58 s
+# at 2448 x 2048 (the DFK's full sensor) and 0.89-0.92 s at 3840 x 2160.
+# The #379 work measured 0.31-0.45 s at 1920 x 1080 and 1.2-1.3 s at
+# 3840 x 2160 with the same OpenCV. The bench's Bayer stream is at most
+# 1920 wide (webcam.choose_size). 15 s is 11 times the slowest
+# 3840 x 2160 figure and 33 times the slowest 1920 x 1080 one, so a
+# slower bench PC or disk still passes; a false stop costs a re-run, and
+# a long limit costs only the wait on a hang.
+CODEC_CHECK_TIMEOUT_S = 15.0
+
+# A codec check that was given up on and whose thread is still running
+# (a thread cannot be killed). While it runs, the next check refuses at
+# once (VideoRecorder.check_codec).
+_abandoned_probe = None
+
 # The post-run copy into the run folder is throttled: gigabytes pushed at
 # full speed to the share compete with the NEXT run's own writes there.
 COPY_MAX_BPS = 40e6
@@ -291,8 +312,10 @@ def codec_available(tmpdir=None, frame=None):
         w = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*VIDEO_FOURCC),
                             1.0, (wd, h), isColor=False)
         if not w.isOpened():
-            return False, (f"this OpenCV build has no {VIDEO_FOURCC} "
-                           f"encoder for {size}")
+            # not only a missing encoder: OpenCV 4.13 reports a folder it
+            # cannot write in (missing, or a file) the same way (#392)
+            return False, (f"could not open the {VIDEO_FOURCC} writer "
+                           f"(encoder or disk) for {size}")
         buf = None
         try:
             for f in frames:
@@ -355,6 +378,20 @@ def codec_stop_words(why, dry):
                 f"the camera's own frames, and that check failed: {why}."
                 f"\n\n{drive}\n\nUntick Record to run with snapshots only, "
                 f"then press Run again.\n\nThe Run log has the details.")}
+
+
+def codec_check_stuck():
+    """The refusal words while a codec check given up on in this process
+    (VideoRecorder.check_codec) is still running, else ''. A new probe
+    could get stuck behind it, so nothing probes while it runs: neither
+    the run's check nor Run's own pre-flight, which runs on the Tk
+    thread, where a stuck probe would freeze the window (#392 review)."""
+    t = _abandoned_probe
+    if t is not None and t.is_alive():
+        return (f"the {VIDEO_FOURCC} check given up on in an earlier run is "
+                f"still running, and a new one could get stuck behind it; "
+                f"restart the app to record video")
+    return ''
 
 
 def open_stream(spec, fps=STREAM_FPS):
@@ -428,12 +465,21 @@ class VideoRecorder:
         self.index_path = os.path.join(out_dir, VIDEO_INDEX_FILENAME)
         self.seen = self.written = self.dropped = self.read_failures = 0
         self.reopens = 0
+        # reopens followed by a frame: on the bench's Bayer path a reopen
+        # "succeeds" with the camera still unplugged (v4l2-ctl starts,
+        # then exits), so `reopens` counts attempts, not returns
+        self.stream_returns = 0
         self.first_t = self.last_t = None
         self.first_seen_clock = self.last_seen_clock = None
         self.restamp_done = None               # clock time of the last one
         self.error = None
         self.size = None                       # (w, h) of the recording
         self.probed_size = None                # (w, h) check_codec passed
+        self._probe_t = None                   # check_codec's probe thread
+        self.stopped_at = None                 # clock time of the first stop()
+        self._in_control = None                # when a control call began
+        self.stopped_in_control = None         # ...as stop() found it
+        self.control_max_s = None              # longest control call, s
         self._reader_t = threading.Thread(target=self._reader, daemon=True,
                                           name='sldea-video-reader')
         self._writer_t = threading.Thread(target=self._writer, daemon=True,
@@ -491,7 +537,7 @@ class VideoRecorder:
         with self._lock:
             return self._latest is not None
 
-    def check_codec(self):
+    def check_codec(self, timeout=None):
         """-> (True, '') when the codec writes AND reads back, bit-exactly,
         a frame of the size this stream ACTUALLY delivers, else (False,
         why). Never raises. It probes with the newest frame the reader
@@ -499,7 +545,20 @@ class VideoRecorder:
         I/O. Meant for after wait_first_frame(), at 0 V: a size the codec
         cannot record must stop the run before any HV, not turn up at the
         first recorded frame (2026-10-06). Once it has passed, the writer
-        records that size only."""
+        records that size only.
+
+        The probe runs on a daemon thread, and after `timeout` s
+        (CODEC_CHECK_TIMEOUT_S when None) the check gives up on it and
+        fails, so a hung encoder or staging disk cannot hold the runner,
+        and with it Abort, at 0 V (#392). The thread cannot be killed and
+        runs on. It holds no camera, only its probe file in this run's
+        staging folder, whose name no other run uses;
+        codec_check_running() says whether it is still there. While it
+        runs, every later check in this process refuses at once rather
+        than start a second probe that could wait behind the first on a
+        lock inside FFmpeg (codec_check_stuck, which Run's pre-flight asks
+        too). The refusal ends when that probe returns."""
+        global _abandoned_probe
         with self._lock:
             got = self._latest
         if got is None:
@@ -508,11 +567,43 @@ class VideoRecorder:
             gray = _gray(got[0])
         except Exception as e:
             return False, f"the stream's frame could not be made gray ({e})"
-        # in out_dir: the local disk the recording itself will be written to
-        ok, why = codec_available(tmpdir=self.out_dir, frame=gray)
+        size = f"{gray.shape[1]} x {gray.shape[0]}"
+        stuck = codec_check_stuck()
+        if stuck:
+            return False, stuck
+        limit = CODEC_CHECK_TIMEOUT_S if timeout is None else float(timeout)
+        answer = []
+
+        def probe():
+            # in out_dir: the local disk the recording itself will use
+            answer.append(codec_available(tmpdir=self.out_dir, frame=gray))
+        t = threading.Thread(target=probe, daemon=True,
+                             name='sldea-codec-check')
+        try:
+            t.start()
+        except Exception as e:
+            return False, f"the {VIDEO_FOURCC} check did not start ({e})"
+        t.join(limit)
+        if t.is_alive():
+            self._probe_t = t
+            _abandoned_probe = t
+            return False, (f"the {VIDEO_FOURCC} check at {size} was still "
+                           f"running after {limit:g} s, so it was given up "
+                           f"on; the encoder or the staging disk is stuck or "
+                           f"very slow")
+        if not answer:
+            return False, (f"the {VIDEO_FOURCC} check at {size} ended "
+                           f"without an answer")
+        ok, why = answer[0]
         if ok:
             self.probed_size = (gray.shape[1], gray.shape[0])
         return ok, why
+
+    def codec_check_running(self):
+        """True while the probe check_codec gave up on is still running: it
+        may still be writing its probe file in out_dir."""
+        t = self._probe_t
+        return t is not None and t.is_alive()
 
     def latest(self, max_age_s=STILL_MAX_AGE_S, not_before=None):
         """-> (a COPY of the newest BGR frame, its run time t_s), or
@@ -563,6 +654,12 @@ class VideoRecorder:
         self._recording = False
         self._stop.set()
         try:
+            if self.stopped_at is None:
+                # for end_outcome: the reader has read until now, so a
+                # live stream's newest frame is about a frame period old,
+                # unless the reader is inside a camera control call
+                self.stopped_in_control = self._in_control
+                self.stopped_at = self._clock()
             if self._reader_t.is_alive():
                 self._reader_t.join(max(0.0, min(2.0,
                                                  end - time.monotonic())))
@@ -627,7 +724,89 @@ class VideoRecorder:
                    else "")
                 + (f", {self.dropped} DROPPED -- the encoder could not keep "
                    f"up" if self.dropped else "")
+                + (f"; camera control calls up to {self.control_max_s:.2f} s"
+                   if self.control_max_s is not None else "")
                 + (f"; ERROR: {self.error}" if self.error else ""))
+
+    def end_outcome(self):
+        """How the recording ENDED, in words for the `Video outcome (end):`
+        line the tab appends to setup.txt after stop() (#392). setup.txt
+        says "recording started" before the staircase, and a stream that
+        stops delivering, a size the codec was not checked at or an encoder
+        failure all end a video early. Only run.log used to say so.
+
+            recorded N frames, a to b s on the run's clock
+            recorded N frames, a to b s ..., then stopped: why
+            NOT recorded: why
+
+        `why` is the recorder's error, or else a stream whose newest frame
+        was more than STILL_MAX_AGE_S old when stop() was called. The
+        reader keeps reading until then, so a live stream's newest frame is
+        always younger than that, except while the reader itself is inside
+        a camera control call (the refresh or restamp: webcam.apply_locked,
+        two v4l2-ctl runs per control, 10 s timeouts). If stop() found it
+        in one that began while the stream was still live, the line says
+        so instead of blaming the camera (#392 review). A clean recording
+        gets its line too, so that a run which never got this far (the app
+        closed during the shutdown) can be told from one that recorded
+        well. Dropped frames are counted, and so are dropouts the stream
+        came back from (a reopen followed by frames), each of them ~2 s or
+        more with no frame (REOPEN_AFTER_FAILS reads). While the encoder is
+        still writing (stop() gave up on it) the count is the count so far,
+        and the words say so. One line of ASCII, because the tab appends it
+        through the same locale-encoded open as the start line. Never
+        raises."""
+        try:
+            n = self.written
+            why = self.error
+            seen = self.last_seen_clock
+            busy = ''
+            if why is None and self.stopped_at is not None and (
+                    seen is None
+                    or self.stopped_at - seen > STILL_MAX_AGE_S):
+                call = self.stopped_in_control
+                if call is not None and seen is not None \
+                        and call - seen <= STILL_MAX_AGE_S:
+                    # the stream was live when the call began: the quiet
+                    # at the end is the reader's, not the camera's
+                    busy = (f"; the reader was inside a camera control "
+                            f"call for {self.stopped_at - call:.1f} s at "
+                            f"the end")
+                else:
+                    at = ''
+                    if seen is not None and self.t0 is not None:
+                        at = (f" at {seen - self.t0:.1f} s"
+                              if seen >= self.t0
+                              else " before recording began")
+                    why = (f"the camera stream stopped delivering{at} and "
+                           f"had not come back by the end of the run")
+            span = ''
+            if self.first_t is not None and self.last_t is not None:
+                span = (f", {self.first_t:.1f} to {self.last_t:.1f} s on "
+                        f"the run's clock")
+            if self._writer_t.is_alive():
+                text = (f"{n} frames recorded by the end of the run{span}; "
+                        f"the encoder was still writing then, so "
+                        f"{VIDEO_INDEX_FILENAME} has the final count"
+                        + (f"; {why}" if why else ""))
+            elif n:
+                text = (f"recorded {n} frames{span}"
+                        + (f", then stopped: {why}" if why else ""))
+            else:
+                text = "NOT recorded: " + (
+                    why or ("the run ended before recording began"
+                            if self.t0 is None else
+                            "no frame reached the encoder before the run "
+                            "ended"))
+            text += busy
+            if self.stream_returns:
+                text += (f"; the camera stream dropped out for ~2 s or more "
+                         f"and came back {self.stream_returns}x")
+            if self.dropped:
+                text += f"; {self.dropped} frames dropped"
+        except Exception as e:
+            text = f"not known ({e})"
+        return ' '.join(str(text).split()).encode('ascii', 'replace').decode()
 
     # -- the threads -----------------------------------------------------------
 
@@ -659,6 +838,23 @@ class VideoRecorder:
         with self._stats:
             setattr(self, attr, getattr(self, attr) + 1)
 
+    def _control_call(self, fn):
+        """Run a camera control call (refresh or restamp) on the reader,
+        which reads no frame meanwhile. While it runs, _in_control holds
+        its start, for stop() and end_outcome; the longest one is kept for
+        the summary (BENCH_TEST Q18). Never raises."""
+        start = self._clock()
+        self._in_control = start
+        try:
+            fn()
+        except Exception:
+            pass
+        finally:
+            self._in_control = None
+        took = self._clock() - start
+        if self.control_max_s is None or took > self.control_max_s:
+            self.control_max_s = took
+
     def _reader(self):
         try:
             cam = self._open()
@@ -672,21 +868,16 @@ class VideoRecorder:
         last_refresh = self._clock()
         fails = 0
         skip_next = False
+        reopened = False             # a reopen not yet followed by a frame
         while not self._stop.is_set():
             if self._restamp_req.is_set() and self._restamp is not None:
                 self._restamp_req.clear()
-                try:
-                    self._restamp()
-                except Exception:
-                    pass
+                self._control_call(self._restamp)
                 self.restamp_done = self._clock()
                 skip_next = True
             elif self._refresh is not None \
                     and self._clock() - last_refresh >= self._refresh_s:
-                try:
-                    self._refresh()
-                except Exception:
-                    pass
+                self._control_call(self._refresh)
                 last_refresh = self._clock()
                 skip_next = True
             with self._lock:
@@ -706,6 +897,7 @@ class VideoRecorder:
                     if not self._reopen():
                         break
                     skip_next = True
+                    reopened = True
                 else:
                     time.sleep(0.05)
                 continue
@@ -713,6 +905,9 @@ class VideoRecorder:
             if skip_next:            # possibly buffered during the stall
                 skip_next = False
                 continue
+            if reopened:             # the stream really came back
+                reopened = False
+                self.stream_returns += 1
             self.seen += 1
             if self.first_seen_clock is None:
                 self.first_seen_clock = now

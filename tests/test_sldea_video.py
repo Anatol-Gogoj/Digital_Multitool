@@ -29,7 +29,11 @@ What these pin down:
     stills, the SG is zeroed BEFORE the recorder is stopped, the tab is
     released even when the video shutdown throws, an abort during the
     camera startup never switches the SG output on, and neither does a
-    stream size the codec cannot record.
+    stream size the codec cannot record;
+  * #392: setup.txt ends with how the recording ENDED (the frames it
+    holds, or NOT recorded, and why it stopped), written after the HV
+    shutdown; a codec check that hangs is given up on and stops the run
+    before HV; the guard-page test counts only the real fault.
 
 Run: .venv/bin/python tests/test_sldea_video.py
 """
@@ -212,6 +216,28 @@ def test_a_writer_that_throws_fails_the_probe_and_names_the_size():
     assert '1632 x 918' in why and 'Unknown C++ exception' in why, why
 
 
+def test_a_folder_the_probe_cannot_write_in_is_not_blamed_on_the_encoder():
+    """#392: this OpenCV reports a writer it could not open in the same way
+    for a missing encoder and for a folder it cannot write in, here one
+    that is not there and one that is a file. The reason used to say "this
+    OpenCV build has no FFV1 encoder"; it now names both causes."""
+    _need_cv()
+    import numpy as np
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    try:
+        a_file = os.path.join(d, 'a_file')
+        with open(a_file, 'w') as f:
+            f.write('x')
+        for where in (os.path.join(d, 'no', 'such'), a_file):
+            ok, why = sv.codec_available(
+                tmpdir=where, frame=np.zeros((96, 128), np.uint8))
+            assert ok is False and why == (
+                f"could not open the {sv.VIDEO_FOURCC} writer (encoder or "
+                f"disk) for 128 x 96"), (where, why)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_ffmpeg_safe_keeps_the_pixels_and_room_past_the_last_one():
     """The layout ffmpeg_safe promises: the same pixels; a row stride that
     is a multiple of 32 and a last row ending mid-page, so OpenCV passes
@@ -290,6 +316,7 @@ def write_one(img, want, d, name):
     vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*sv.VIDEO_FOURCC),
                          1.0, (w, h), isColor=False)
     try:
+        print('WRITING', flush=True)
         vw.write(img)
         out = 'ok'
     except Exception as e:
@@ -316,16 +343,45 @@ with tempfile.TemporaryDirectory() as d:
 '''
 
 
-def _guard_child(mode):
+def _guard_child(mode, root=None):
     """-> (returncode, [write outcome, decoded bit-exactly] or None when
-    the child died before it could say, its stderr)."""
+    the child died before it could say, its stdout lines, its stderr).
+    `root` is where the child imports sldea_video from (this checkout by
+    default). It runs in the temp folder, so that the '' a `-c` child has
+    on sys.path cannot find this checkout's modules for it."""
     import json
     import subprocess
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    root = root or os.path.dirname(os.path.dirname(os.path.abspath(
+        __file__)))
     p = subprocess.run([_sys.executable, '-c', _GUARD_CHILD, root, mode],
-                       capture_output=True, text=True, timeout=120)
-    out = p.stdout.strip().splitlines()
-    return p.returncode, (json.loads(out[-1]) if out else None), p.stderr
+                       capture_output=True, text=True, timeout=120,
+                       cwd=tempfile.gettempdir())
+    lines = p.stdout.strip().splitlines()
+    res = (json.loads(lines[-1]) if lines and lines[-1].startswith('[')
+           else None)
+    return p.returncode, res, lines, p.stderr
+
+
+# THE fault, and nothing else (#392). The child prints 'WRITING' just
+# before its write, and after that only these count: "Unknown C++
+# exception" from the write (Windows, where OpenCV turns the access
+# violation into one), or the child killed by SIGSEGV (Linux, returncode
+# -11) or by STATUS_ACCESS_VIOLATION (a Windows build that does not
+# convert it, returncode 0xC0000005). Both codes were measured with a
+# NULL read in a child, 2026-10-06. The old test took `rc != 0`, so a
+# child that died of an ImportError or an assertion counted as faulted.
+_GUARD_WRITING = 'WRITING'
+_ACCESS_VIOLATION = 0xC0000005
+
+
+def _guard_faulted(rc, res, lines):
+    """Did the guard child fault reading past its frame? See above."""
+    import signal
+    if _GUARD_WRITING not in lines:
+        return False
+    if res and 'Unknown C++ exception' in str(res[0]):
+        return True
+    return rc in (-signal.SIGSEGV, _ACCESS_VIOLATION)
 
 
 def test_a_frame_through_ffmpeg_safe_survives_where_a_raw_one_faults():
@@ -334,17 +390,58 @@ def test_a_frame_through_ffmpeg_safe_survives_where_a_raw_one_faults():
     (an exception on Windows, a crash on Linux), and the ffmpeg_safe one
     writes and decodes bit-exactly. An FFmpeg that does not read past the
     frame (5.0 and later) passes both, and the test says it showed
-    nothing."""
+    nothing. Only the fault itself counts (_guard_faulted): a raw child
+    that failed in any other way fails this test."""
     _need_cv()
-    rc, res, err = _guard_child('safe')
+    rc, res, lines, err = _guard_child('safe')
     assert rc == 0 and res == ['ok', True], (rc, res, err[-800:])
-    rc, res, err = _guard_child('raw')
+    rc, res, lines, err = _guard_child('raw')
     if rc == 0 and res and res[0] == 'ok':
         raise _Skip(f"{sv._ffmpeg_version()} does not read past a raw "
                     f"frame, so the layouts cannot be told apart here (the "
                     f"ffmpeg_safe half passed)")
-    assert rc != 0 or (res and 'Unknown C++ exception' in res[0]), \
-        (rc, res, err[-800:])
+    assert _guard_faulted(rc, res, lines), (rc, res, lines, err[-800:])
+
+
+def test_the_guard_test_counts_only_the_real_fault():
+    """#392: the test above used to count ANY failed child as the fault
+    (`rc != 0 or ...`), so a child that died before it wrote a frame, of
+    an ImportError or an assertion, passed it. Here are such children
+    for real: the old rule counts them, _guard_faulted does not. A child
+    that really faults (a NULL read) after it says it is writing counts,
+    with whatever code this platform gives it, and the same child does
+    not count without that line."""
+    import subprocess
+
+    def old_rule(rc, res):
+        return rc != 0 or bool(res and 'Unknown C++ exception' in res[0])
+
+    def child(code):
+        p = subprocess.run([_sys.executable, '-c', code],
+                           capture_output=True, text=True, timeout=120,
+                           cwd=tempfile.gettempdir())
+        return p.returncode, p.stdout.strip().splitlines(), p.stderr
+    # the guard child itself, from a root with no sldea_video in it
+    rc, res, lines, err = _guard_child(
+        'raw', root=os.path.join(tempfile.gettempdir(), 'no_such_root_392'))
+    assert rc != 0 and 'ModuleNotFoundError' in err, (rc, err[-400:])
+    assert old_rule(rc, res), "the old rule should count this child"
+    assert not _guard_faulted(rc, res, lines), (rc, res, lines)
+    # an assertion inside the child, even after it said it was writing
+    rc, lines, err = child(f"print({_GUARD_WRITING!r}, flush=True)\n"
+                           f"assert False, 'not the fault'\n")
+    assert rc != 0 and 'AssertionError' in err, (rc, err[-400:])
+    assert old_rule(rc, None) and not _guard_faulted(rc, None, lines)
+    # a real fault; on Windows, no error-report dialog may hold the child
+    rc, lines, err = child(
+        "import ctypes, faulthandler, os\n"
+        "if os.name == 'nt':\n"
+        "    ctypes.windll.kernel32.SetErrorMode(0x0002)\n"
+        f"print({_GUARD_WRITING!r}, flush=True)\n"
+        "faulthandler._read_null()\n")
+    assert _guard_faulted(rc, None, lines), (rc, lines, err[-400:])
+    assert not _guard_faulted(rc, None, [ln for ln in lines
+                                         if ln != _GUARD_WRITING])
 
 
 # ---------------------------------------------------------------- recorder
@@ -455,6 +552,8 @@ def test_a_size_other_than_the_checked_one_is_not_recorded():
             and 'never checked' in rec.error, rec.error
         assert any(rec.error in m for m in logs), logs
         assert not os.path.exists(os.path.join(d, sv.VIDEO_FILENAME))
+        # and setup.txt's end line says so (#392)
+        assert rec.end_outcome() == "NOT recorded: " + rec.error
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -662,6 +761,366 @@ def test_a_slow_encoder_drops_frames_and_still_finishes_by_itself():
         assert len(rows) == rec.written, "the index was not closed"
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_check_codec_gives_up_on_a_hung_probe_and_refuses_while_it_runs():
+    """#392: a probe that hangs (encoder or staging disk) must not hold the
+    runner at 0 V, with Abort waiting on it. check_codec gives up after
+    its timeout and fails, naming the size and the limit. The probe it
+    gave up on runs on; while it does, the next check refuses at once
+    and starts no second probe, and once it returns, checks run again."""
+    _need_cv()
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    real = sv.codec_available
+    release = threading.Event()
+    calls = []
+
+    def hangs(tmpdir=None, frame=None):
+        calls.append(tmpdir)
+        release.wait(30)
+        return real(tmpdir=tmpdir, frame=frame)
+    try:
+        sv.codec_available = hangs
+        rec = sv.VideoRecorder(lambda: _FakeCam(), d,
+                               log=lambda m: None).start()
+        assert rec.wait_first_frame(3.0)
+        t = time.monotonic()
+        ok, why = rec.check_codec(timeout=0.5)
+        took = time.monotonic() - t
+        assert ok is False and 0.4 < took < 2.0, (ok, took)
+        assert why.startswith('the FFV1 check at 128 x 96 was still '
+                              'running after 0.5 s, so it was given up'), why
+        assert rec.probed_size is None and rec.codec_check_running()
+        t = time.monotonic()
+        ok, why = rec.check_codec(timeout=0.5)
+        assert ok is False and time.monotonic() - t < 0.3, why
+        assert 'earlier run' in why and 'restart the app' in why, why
+        assert calls == [d], calls             # no second probe started
+        release.set()
+        assert _wait(lambda: not rec.codec_check_running(), 10.0)
+        sv.codec_available = real
+        assert rec.check_codec() == (True, '')
+        assert rec.probed_size == (128, 96)
+        rec.stop(timeout=5.0)
+    finally:
+        release.set()
+        sv.codec_available = real
+        sv._abandoned_probe = None
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_runs_preflight_probes_nothing_while_a_given_up_check_runs():
+    """#392 review: Run's own pre-flight runs on the Tk thread before any
+    worker exists: a 64 x 48 codec probe, then disk_usage on the staging
+    disk. While a check given up on in an earlier run is still running,
+    either could hang the whole window. The pre-flight then probes
+    nothing and asks the existing "Video unavailable" question in the
+    refusal's words: Yes is a snapshots-only run, No cancels. Once that
+    check has returned, both probes run as before."""
+    import shutil as _shutil
+    import types
+    import gui
+    calls, asked, answer = [], [], [True]
+    release = threading.Event()
+    stuck = threading.Thread(target=release.wait, args=(30,), daemon=True)
+    real_probe, real_usage = sv.codec_available, _shutil.disk_usage
+    real_ask = gui.messagebox.askyesno
+
+    def probe(*a, **k):
+        calls.append('codec_available')
+        return True, ''
+
+    def usage(path):
+        calls.append('disk_usage')
+        return real_usage(path)
+
+    def ask(title, message, **k):
+        asked.append((title, message, k.get('default')))
+        return answer[0]
+    app = types.SimpleNamespace(
+        sldea_vid_on=types.SimpleNamespace(get=lambda: True),
+        sldea_vars={'vid_fps': types.SimpleNamespace(get=lambda: '1')},
+        lines=[])
+    app._sldea_log = app.lines.append
+    preflight = gui.InstrumentControlGUI._sldea_video_preflight
+    p = _short_profile()
+    try:
+        sv.codec_available, _shutil.disk_usage = probe, usage
+        gui.messagebox.askyesno = ask
+        stuck.start()
+        sv._abandoned_probe = stuck
+        assert preflight(app, p) == (False, None)     # Yes: snapshots only
+        title, message, default = asked[-1]
+        assert title == 'Video unavailable' and default == 'no', asked
+        assert 'given up on in an earlier run is still running' in message \
+            and 'restart the app to record video' in message, message
+        assert any('snapshots only' in ln for ln in app.lines), app.lines
+        answer[0] = False
+        assert preflight(app, p) == (None, None)      # No: nothing starts
+        assert calls == [], calls
+        release.set()
+        stuck.join(5.0)
+        assert preflight(app, p) == (True, 1.0)
+        assert calls == ['codec_available', 'disk_usage'], calls
+        assert len(asked) == 2, asked
+    finally:
+        release.set()
+        sv.codec_available, _shutil.disk_usage = real_probe, real_usage
+        gui.messagebox.askyesno = real_ask
+        sv._abandoned_probe = None
+
+
+def test_the_end_outcome_of_a_clean_recording_and_of_one_never_begun():
+    """#392: the words for setup.txt's `Video outcome (end):` line. A clean
+    recording gives its frame count, which is the row count of
+    video_frames.csv, and its span on the run's clock, and nothing about
+    stopping. A run that ended before its clock started was NOT
+    recorded, and the line says why."""
+    _need_cv()
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    try:
+        rec = sv.VideoRecorder(lambda: _FakeCam(), d, fps=5,
+                               log=lambda m: None).start()
+        assert rec.wait_first_frame(3.0)
+        rec.set_t0(time.monotonic())
+        assert _wait(lambda: rec.written >= 3, 3.0)
+        rec.end_recording()
+        rec.stop(timeout=5.0)
+        rows = _read_csv(os.path.join(d, sv.VIDEO_INDEX_FILENAME))
+        assert len(rows) == rec.written >= 3, (len(rows), rec.written)
+        assert rec.end_outcome() == (
+            f"recorded {len(rows)} frames, {rec.first_t:.1f} to "
+            f"{rec.last_t:.1f} s on the run's clock")
+        early = sv.VideoRecorder(lambda: _FakeCam(),
+                                 os.path.join(d, 'early'),
+                                 log=lambda m: None).start()
+        assert early.wait_first_frame(3.0)
+        early.end_recording()
+        early.stop(timeout=5.0)
+        assert early.end_outcome() == \
+            "NOT recorded: the run ended before recording began"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_end_outcome_names_a_stream_that_stopped_delivering():
+    """The bench case behind #392: the camera unplugged mid-run. The frames
+    before it are recorded and rec.error stays None, since the reader only
+    tries to reopen, yet the video ended there. The end line says how
+    many frames, then that the stream stopped, and when."""
+    _need_cv()
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    opened = []
+
+    def open_cam():
+        # the first stream dies after 25 frames; a reopened one delivers
+        # nothing, as with the cable still out
+        opened.append(1)
+        return _FakeCam(die_after=25 if len(opened) == 1 else 0)
+    try:
+        rec = sv.VideoRecorder(open_cam, d, fps=5,
+                               log=lambda m: None).start()
+        assert rec.wait_first_frame(3.0)
+        rec.set_t0(time.monotonic())
+        assert _wait(lambda: rec.written >= 1, 3.0)
+        # silent for longer than a still may be old
+        assert _wait(lambda: time.monotonic() - rec.last_seen_clock
+                     > sv.STILL_MAX_AGE_S + 0.3, 8.0)
+        rec.end_recording()
+        rec.stop(timeout=5.0)
+        assert rec.error is None and rec.written >= 1, rec.summary()
+        lost = rec.last_seen_clock - rec.t0
+        assert rec.end_outcome() == (
+            f"recorded {rec.written} frames, {rec.first_t:.1f} to "
+            f"{rec.last_t:.1f} s on the run's clock, then stopped: the "
+            f"camera stream stopped delivering at {lost:.1f} s and had not "
+            f"come back by the end of the run")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_end_outcome_does_not_blame_the_camera_for_a_control_call():
+    """#392 review: the reader itself runs the camera control calls (the
+    refresh every 5 s and the restamp before each still: apply_locked, two
+    v4l2-ctl runs per control, 10 s timeouts), and reads no frame
+    meanwhile. A stop() 2.2 s into a 2.5 s refresh found the newest frame
+    over 2 s old, and the end line said the stream stopped delivering.
+    The reader now notes the call, and the line names it instead; the
+    summary gives the longest call (BENCH_TEST Q18)."""
+    import re
+    _need_cv()
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    started = threading.Event()
+
+    def slow_refresh():
+        started.set()
+        time.sleep(2.5)
+    try:
+        rec = sv.VideoRecorder(lambda: _FakeCam(), d, fps=5,
+                               refresh=slow_refresh, refresh_s=1.0,
+                               log=lambda m: None).start()
+        assert rec.wait_first_frame(3.0)
+        rec.set_t0(time.monotonic())
+        assert _wait(lambda: rec.written >= 1, 3.0)
+        assert started.wait(5.0), "the refresh never ran"
+        time.sleep(2.2)
+        rec.end_recording()
+        rec.stop(timeout=5.0)
+        out = rec.end_outcome()
+        assert 'stopped delivering' not in out and 'then stopped' not in out, \
+            out
+        assert re.fullmatch(
+            r"recorded \d+ frames, \d+\.\d to \d+\.\d s on the run's clock; "
+            r"the reader was inside a camera control call for 2\.\d s at the "
+            r"end", out), out
+        assert 'camera control calls up to 2.' in rec.summary(), \
+            rec.summary()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_stream_already_quiet_when_a_control_call_began_is_still_named():
+    """The other side of the rule above, on the recorder's own numbers: a
+    control call in progress at stop() explains the quiet only if the
+    stream was live when the call began. A stream that had been quiet for
+    longer than a still may be old before then had stopped delivering."""
+    rec = sv.VideoRecorder(lambda: _FakeCam(), tempfile.gettempdir())
+    rec.t0, rec.written, rec.first_t, rec.last_t = 100.0, 10, 0.0, 9.0
+    rec.last_seen_clock, rec.stopped_at = 109.5, 130.0
+    rec.stopped_in_control = 110.0           # 0.5 s after the last frame
+    assert rec.end_outcome() == (
+        "recorded 10 frames, 0.0 to 9.0 s on the run's clock; the reader "
+        "was inside a camera control call for 20.0 s at the end")
+    rec.stopped_in_control = 128.0           # 18.5 s after it
+    assert rec.end_outcome() == (
+        "recorded 10 frames, 0.0 to 9.0 s on the run's clock, then stopped: "
+        "the camera stream stopped delivering at 9.5 s and had not come "
+        "back by the end of the run")
+    rec.stopped_in_control = None            # no call at all
+    assert 'then stopped: the camera stream stopped delivering at 9.5 s' \
+        in rec.end_outcome()
+
+
+def test_the_end_outcome_names_a_dropout_the_stream_came_back_from():
+    """#392 review: a stream that dropped out and came back read as a clean
+    recording ("recorded 8 frames, 0.1 to 7.0 s") while run.log said
+    "stream REOPENED 1x". The end line now counts the returns: reopens
+    followed by a frame. A reopen that brings nothing back is not one,
+    since on the bench's Bayer path a reopen "succeeds" with the camera
+    still unplugged."""
+    _need_cv()
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    cams = [_FakeCam(period=0.005, die_after=40), _FakeCam(period=0.005)]
+    opened = []
+
+    def open_cam():
+        cam = cams[min(len(opened), len(cams) - 1)]
+        opened.append(cam)
+        return cam
+    try:
+        rec = sv.VideoRecorder(open_cam, d, fps=5,
+                               log=lambda m: None).start()
+        assert rec.wait_first_frame(3.0)
+        rec.set_t0(time.monotonic())
+        assert _wait(lambda: rec.stream_returns == 1, 8.0), rec.summary()
+        n = rec.written
+        assert _wait(lambda: rec.written > n, 3.0), "not recording again"
+        rec.end_recording()
+        rec.stop(timeout=5.0)
+        assert rec.reopens == 1, rec.summary()
+        assert rec.end_outcome() == (
+            f"recorded {rec.written} frames, {rec.first_t:.1f} to "
+            f"{rec.last_t:.1f} s on the run's clock; the camera stream "
+            f"dropped out for ~2 s or more and came back 1x")
+        rec.stream_returns = 0                   # reopened, never came back
+        assert 'came back' not in rec.end_outcome()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_end_outcome_counts_the_frames_before_an_encoder_failure():
+    _need_cv()
+    import cv2
+    real = cv2.VideoWriter
+
+    class FailsOnTheFourth:
+        def __init__(self, *a, **k):
+            self.n = 0
+
+        def isOpened(self):
+            return True
+
+        def write(self, img):
+            self.n += 1
+            if self.n == 4:
+                raise cv2.error("Unknown C++ exception from OpenCV code")
+
+        def release(self):
+            pass
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    try:
+        cv2.VideoWriter = FailsOnTheFourth
+        try:
+            rec = sv.VideoRecorder(lambda: _FakeCam(), d, fps=5,
+                                   log=lambda m: None).start()
+            assert rec.wait_first_frame(3.0)
+            rec.set_t0(time.monotonic())
+            assert _wait(lambda: rec.error is not None, 5.0)
+            rec.end_recording()
+            rec.stop(timeout=5.0)
+        finally:
+            cv2.VideoWriter = real
+        assert rec.written == 3, rec.written
+        assert rec.end_outcome() == (
+            f"recorded 3 frames, {rec.first_t:.1f} to {rec.last_t:.1f} s on "
+            f"the run's clock, then stopped: encoder failed: Unknown C++ "
+            f"exception from OpenCV code")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_end_outcome_while_the_encoder_is_still_writing():
+    """stop() gave up on an encoder that was still writing: the line gives
+    the count so far, says the encoder was still at it and where the final
+    count is; once it has finished, the final count, dropped frames
+    counted."""
+    _need_cv()
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    try:
+        def slow_kv(t):                 # runs on the WRITER, per frame
+            time.sleep(0.4)
+            return 0.0
+        rec = sv.VideoRecorder(lambda: _FakeCam(period=0.01), d, fps=5,
+                               kv_at=slow_kv, queue_max=1,
+                               log=lambda m: None).start()
+        assert rec.wait_first_frame(3.0)
+        rec.set_t0(time.monotonic())
+        time.sleep(1.0)
+        rec.end_recording()
+        rec.stop(timeout=0.1)
+        busy = rec.end_outcome()
+        assert rec.wait_finished(10.0), "the encoder never exited"
+        assert 'the encoder was still writing then, so video_frames.csv ' \
+               'has the final count' in busy, busy
+        so_far = busy.split(' ', 1)[0]           # the count kept growing
+        assert busy.startswith(f"{so_far} frames recorded by the end of the "
+                               f"run") and int(so_far) <= rec.written, busy
+        done = rec.end_outcome()
+        assert done.startswith(f"recorded {rec.written} frames, "), done
+        assert rec.dropped > 0 and done.endswith(
+            f"; {rec.dropped} frames dropped"), done
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_end_outcome_is_one_line_of_ascii():
+    """The tab appends it to setup.txt through a locale-encoded open, as it
+    does the start line, and setup.txt is read line by line: a newline or
+    a non-ASCII character in an error must not break either."""
+    rec = sv.VideoRecorder(lambda: _FakeCam(), tempfile.gettempdir())
+    rec.error = "encoder failed: café\n  second line"
+    assert rec.end_outcome() == \
+        "NOT recorded: encoder failed: caf? second line"
 
 
 # ---------------------------------------------------------------- finalize
@@ -1436,6 +1895,14 @@ def test_a_video_run_takes_its_stills_off_the_stream():
         assert 'Video outcome: recording started' in setup
         assert any(l.startswith('video:') and 'frames recorded' in l
                    for l in app.lines), app.lines
+        # how the recording ended (#392), last, after the start line: the
+        # video's own frame count, and nothing about stopping
+        lines = setup.splitlines()
+        assert lines[-2].startswith('Video outcome: recording started'), \
+            lines[-3:]
+        assert lines[-1].startswith(
+            f"Video outcome (end): recorded {len(rows)} frames, "), lines[-1]
+        assert lines[-1].endswith(" s on the run's clock"), lines[-1]
 
 
 def test_a_stream_that_delivers_nothing_falls_back_to_one_shot_stills():
@@ -1461,6 +1928,35 @@ def test_a_stream_that_delivers_nothing_falls_back_to_one_shot_stills():
             assert 'Video outcome: NOT recorded' in f.read()
         assert not os.listdir(os.path.join(tmp, 'staging')), \
             "an empty staging dir was left behind"
+
+
+def test_a_camera_setup_that_fails_says_so_in_setup_txt():
+    """#392 review: with no camera attached the stream fails to open and
+    the branch above writes its NOT recorded line. Only a camera setup
+    that raises (no spec at all) wrote nothing, and setup.txt kept its
+    promise of a video.mkv. The run still goes on without frames, as it
+    always did; setup.txt now ends "NOT recorded: camera setup failed"."""
+    import gui
+    with tempfile.TemporaryDirectory() as tmp:
+        app = _StubApp()
+
+        def broken(index):
+            raise RuntimeError('v4l2-ctl went away')
+        with _Patched(tmp, lambda spec, fps=10: _FakeCam(), _no_oneshot):
+            gui.webcam.resolve_camera = broken     # _Patched puts it back
+            app._sldea_worker(_short_profile(), tmp, 'RUN', 1, 2, 3, True,
+                              tel_on=False, vid_on=True, vid_fps=5.0)
+        rundir = os.path.join(tmp, 'RUN')
+        assert app.finished == 1, app.lines
+        assert any('camera setup failed (v4l2-ctl went away)' in ln
+                   for ln in app.lines), app.lines
+        with open(os.path.join(rundir, 'setup.txt')) as f:
+            lines = f.read().splitlines()
+        assert lines[-1] == "Video outcome: NOT recorded: camera setup " \
+            "failed", lines[-3:]
+        assert not os.path.exists(os.path.join(tmp, 'staging'))
+        data = _read_csv(os.path.join(rundir, 'data.csv'))
+        assert data and not any(r['frame_file'] for r in data), data
 
 
 def test_the_last_still_gets_its_row_even_when_its_frame_never_comes():
@@ -1614,6 +2110,138 @@ def test_a_video_run_logs_the_size_its_codec_was_checked_at():
         assert any(ln == f"video: {sv.VIDEO_FOURCC} checked at 128 x 96, "
                    f"the stream's own size: lossless" for ln in app.lines), \
             app.lines
+
+
+def test_a_stream_that_dies_mid_run_is_named_at_the_end_of_setup_txt():
+    """The bench check for #392, at the desk: the camera stops delivering
+    mid-run and does not come back. The run still ends complete on its
+    stills schedule (the later stills are NO FRAME rows), and setup.txt,
+    which said "recording started", ends with the frames the video holds
+    and that the stream stopped."""
+    _need_cv()
+    snaps = sorted(_short_profile().snapshots, key=lambda s: s['t'])
+    with tempfile.TemporaryDirectory() as tmp:
+        first_open = []
+
+        class _Unplugged(_FakeCam):
+            # frames for a second after the stream first opened, then
+            # none, from this stream or any the reader reopens
+            def read(self):
+                if time.monotonic() > first_open[0] + 1.0:
+                    time.sleep(self.period)
+                    return None
+                return super().read()
+
+        def stream(spec, fps=10):
+            if not first_open:
+                first_open.append(time.monotonic())
+            return _Unplugged()
+        app = _StubApp()
+        rundir = _drive(app, tmp, stream, _no_oneshot)
+        data = _read_csv(os.path.join(rundir, 'data.csv'))
+        assert len(data) == len(snaps), (len(data), app.lines)
+        assert data[0]['frame_file'] and not data[-1]['frame_file'], data
+        assert f"run complete: {len(snaps)}/{len(snaps)} frames" \
+            in app.lines, app.lines
+        index = os.path.join(rundir, sv.VIDEO_INDEX_FILENAME)
+        assert _wait(lambda: os.path.exists(index), 30), os.listdir(rundir)
+        n = len(_read_csv(index))
+        with open(os.path.join(rundir, 'setup.txt')) as f:
+            lines = f.read().splitlines()
+        assert lines[-2] == ("Video outcome: recording started; snapshots "
+                             "taken off the stream"), lines[-3:]
+        end = lines[-1]
+        assert n >= 1 and end.startswith(
+            f"Video outcome (end): recorded {n} frames, "), (n, end)
+        assert ", then stopped: the camera stream stopped delivering at " \
+            in end and end.endswith(
+                " s and had not come back by the end of the run"), end
+
+
+def test_the_end_line_follows_the_hv_shutdown_and_a_failed_one_is_logged():
+    """#392's line is written in the finally block after the SG is zeroed
+    and switched off and after the recorder is stopped. A failure to write
+    it goes to the run log and goes no further: the tab is released and
+    the recording is still moved into the run folder."""
+    _need_cv()
+    events = []
+    real_stop = _stop_recorder_spy(events)
+    real_outcome = sv.VideoRecorder.end_outcome
+
+    def outcome(self):
+        events.append((time.monotonic(), 'rec.end_outcome', (), {}))
+        raise RuntimeError('setup.txt went away')
+    sv.VideoRecorder.end_outcome = outcome
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _StubApp(sg=_FakeSG(events))
+            rundir = _drive(app, tmp, lambda spec, fps=10: _FakeCam(),
+                            _no_oneshot, dry=False)
+            names = [e[1] for e in events]
+            last_off = max(i for i, e in enumerate(events)
+                           if e[1] == 'sg.set_output' and e[2][1] is False)
+            assert last_off < names.index('rec.stop') \
+                < names.index('rec.end_outcome'), names
+            assert app.finished == 1
+            assert any('setup.txt did not get its end-of-run video line '
+                       '(setup.txt went away)' in ln for ln in app.lines), \
+                app.lines
+            with open(os.path.join(rundir, 'setup.txt')) as f:
+                assert 'Video outcome (end)' not in f.read()
+            assert os.path.exists(os.path.join(rundir, sv.VIDEO_FILENAME)), \
+                os.listdir(rundir)
+    finally:
+        sv.VideoRecorder.stop = real_stop
+        sv.VideoRecorder.end_outcome = real_outcome
+
+
+def test_a_codec_check_that_hangs_stops_the_run_before_hv():
+    """#392: a check given up on after CODEC_CHECK_TIMEOUT_S stops a LIVE
+    run as a failed check does. The SG output is never switched on and is
+    still zeroed and switched off on the way out, the camera is let go,
+    and setup.txt, run.log and the status line say why. The run's staging
+    folder is left alone while the probe may still be writing in it."""
+    _need_cv()
+    events = []
+    real, real_limit = sv.codec_available, sv.CODEC_CHECK_TIMEOUT_S
+    release = threading.Event()
+
+    def hangs(tmpdir=None, frame=None):
+        release.wait(60)
+        return real(tmpdir=tmpdir, frame=frame)
+    sv.codec_available, sv.CODEC_CHECK_TIMEOUT_S = hangs, 0.5
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _StubApp(sg=_FakeSG(events))
+            rundir = _drive(app, tmp, lambda spec, fps=10: _FakeCam(),
+                            _no_oneshot, dry=False)
+            assert app.finished == 1 and app._sldea_stop, app.lines
+            assert not [e for e in events if e[1] == 'sg.set_output'
+                        and e[2][1] is True], [e[1:3] for e in events]
+            offs = [e for e in events if e[1] == 'sg.set_output']
+            assert offs and offs[-1][2][1] is False, [e[1:3] for e in events]
+            assert any('run stopped before any HV' in ln
+                       and 'was still running after 0.5 s' in ln
+                       for ln in app.lines), app.lines
+            assert any(s.startswith('STOPPED before HV')
+                       for s in app.statuses), app.statuses
+            assert _read_csv(os.path.join(rundir, 'data.csv')) == []
+            with open(os.path.join(rundir, 'setup.txt')) as f:
+                setup = f.read()
+            assert ("Video outcome: NOT recorded: the codec check at the "
+                    "camera's frame size failed (the FFV1 check at 128 x 96 "
+                    "was still running after 0.5 s") in setup, setup
+            assert 'Video outcome (end)' not in setup, setup
+            rec = app._sldea_recorder
+            assert not rec.reader_alive() and rec.codec_check_running()
+            assert os.listdir(os.path.join(tmp, 'staging')), \
+                "the folder the probe was still writing in was removed"
+            release.set()
+            assert _wait(lambda: not rec.codec_check_running(), 30)
+    finally:
+        release.set()
+        sv.codec_available, sv.CODEC_CHECK_TIMEOUT_S = real, real_limit
+        sv._abandoned_probe = None
 
 
 def _run():

@@ -4227,7 +4227,14 @@ LOGGING:
             return False, None
         import shutil
         fps = sldea_video.clamp_fps(self.sldea_vars['vid_fps'].get())
-        ok, why = sldea_video.codec_available()
+        # A codec check given up on in an earlier run may still be stuck
+        # in FFmpeg or on the staging disk, and either probe below could
+        # then hang this, the Tk thread: refused in words instead, with
+        # both probes skipped (#392 review).
+        why = sldea_video.codec_check_stuck()
+        ok = not why
+        if ok:
+            ok, why = sldea_video.codec_available()
         if not ok:
             if messagebox.askyesno(
                     "Video unavailable",
@@ -5032,6 +5039,14 @@ LOGGING:
             if vid_on and spec is None:
                 self._sldea_log("⚠ video requested but there is no camera "
                                 "— no recording")
+                # setup.txt promised a video above; the other no-video
+                # branches below say so there too (#392 review)
+                try:
+                    with open(os.path.join(rundir, 'setup.txt'), 'a') as sf:
+                        sf.write("Video outcome: NOT recorded: camera setup "
+                                 "failed\n")
+                except OSError:
+                    pass
             elif vid_on:
                 dev = spec.get('device')
                 # unique per RUN, not per run name: a reused name while the
@@ -5088,9 +5103,11 @@ LOGGING:
                 # asked for a lossless video, and this thread cannot ask
                 # whether to go on without one (the pre-flight's own
                 # codec question defaults to No for the same reason).
+                # A check that hangs is given up on after
+                # CODEC_CHECK_TIMEOUT_S and fails the same way (#392).
                 # A stream that will not start (above) still falls back to
-                # one-shot stills, as before: whether that should stop too
-                # is an open owner question (SLDEA_DECISIONS 2026-10-06).
+                # one-shot stills, as before: the owner decided it does not
+                # stop the run (SLDEA_DECISIONS 2026-10-06, #392).
                 if rec is not None and not self._sldea_stop:
                     ok, codec_why = rec.check_codec()
                     if ok:
@@ -5104,9 +5121,13 @@ LOGGING:
                         self._sldea_log(vid_stop['stopped'])
                         self._sldea_recorder = rec    # as above: guards
                         rec.stop(timeout=5.0)
+                        # a check given up on may still be writing in the
+                        # folder, and on a hung disk rmdir would hang here
+                        probing = rec.codec_check_running()
                         rec = None
                         try:
-                            os.rmdir(vid_staging)    # empty: nothing written
+                            if not probing:
+                                os.rmdir(vid_staging)  # empty: nothing written
                         except OSError:
                             pass
                 if rec is not None:
@@ -5613,6 +5634,25 @@ LOGGING:
                     except Exception as e:
                         self._sldea_log(f"⚠ video shutdown failed ({e}) — the "
                                         f"recording is in {vid_staging}")
+                # How the recording ENDED (#392). setup.txt said "recording
+                # started" before the staircase, and a stream that stops
+                # delivering, an unchecked size or an encoder failure ends
+                # a video early. Written after stop(), so after the SG steps
+                # above: nothing about the HV waits on it. A write that
+                # fails goes to run.log and never out of this block.
+                if rec is not None:
+                    try:
+                        end_line = ("Video outcome (end): "
+                                    + rec.end_outcome() + "\n")
+                        with open(os.path.join(rundir, 'setup.txt'),
+                                  'a') as sf:
+                            sf.write(end_line)
+                    except Exception as e:
+                        try:
+                            self._sldea_log(f"⚠ video: setup.txt did not get "
+                                            f"its end-of-run video line ({e})")
+                        except Exception:
+                            pass
                 if cam_lock_saved is not None:
                     try:
                         webcam.set_locked(cam_lock_saved)

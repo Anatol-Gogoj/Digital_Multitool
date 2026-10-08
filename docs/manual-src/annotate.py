@@ -237,7 +237,13 @@ S["tab_webcam"] = {
         {"match": "Start Preview", "badge_at": [299, 204], "label": "Live view — the same button stops it"},
         {"match": "Snapshot", "badge_at": [394, 204], "label": "Save one timestamped PNG"},
         {"match": "Show focus score", "label": "Sharpness number — turn the lens until it peaks"},
-        {"match": "🔒 Apply & Lock", "label": "Locks every camera knob — prevents drift during runs"},
+        # #400: one button replaces the four-press sequence, and Apply &
+        # Lock sits beside the boxes it locks (owner decision 2026-10-08).
+        # The single steps sit under Advanced, closed in the shot, so no
+        # callout may name them.
+        {"match": "🔒 Apply & Lock", "label": "Locks what the boxes say, for every capture"},
+        {"match": "Auto-set camera", "label": "One press: gain 0, exposure for mid-gray, white balance, then locks it all"},
+        {"match": "▸ Advanced camera settings", "label": "Every camera control, and the single steps (Stabilize, Auto-WB once...)"},
     ],
 }
 
@@ -256,19 +262,28 @@ S["tab_webcam_bottom"] = {
 
 S["tab_sldea"] = {
     "callouts": [
+        # ONE SHOT again (#403, 2026-10-08). The tab was taller than the
+        # 1000 px capture window from v1.4.1 (the video row, #359) until
+        # the two-column layout, so its lower half had a scrolled shot of
+        # its own, tab_sldea_bottom, annotated separately. The tab is now
+        # 847 px at 96 dpi and capture.py takes that second shot only when
+        # the body is taller than the view, so every callout is here, in
+        # screen order: the presets across the top, the left column top
+        # to bottom, then the run row. Badge numbers follow this order.
+        {"match": "Run configuration presets",
+         "label": "Start here: load a saved setup, or save this tab under a name. Never the run name, and never the LIVE state"},
         {"match": "Test Profile (voltages in kV",
          "label": "The voltage staircase — start/end/step, ramp and landing times (the 0 kV reference photo is always taken)"},
-        # `#292`: ONE capsule over the three rows that define the device.
-        # They were two separate callouts (diam, and concentration numbered
-        # last and eleven badges away) for a pair of fields the operator
-        # fills in as one flow — the same reading-order argument `#290` used
-        # to move the Trek checkbutton off this block (gui.py: "those two
-        # define the DEVICE and read as one flow ... this is a DRIVE setting
-        # and comes after"). Trek inverts therefore stays OUT of the union.
-        # The px→mm warning stays inline: it is the one field here that can
-        # silently corrupt every area in the run.
-        # The film thickness row (#398, v1.4.4) joined the device fields
-        # under Concentration, and joins the capsule with them.
+        # `#292`: ONE capsule over the rows that define the device. They
+        # were two separate callouts (diam, and concentration numbered
+        # last and eleven badges away) for fields the operator fills in as
+        # one flow, the same reading-order argument `#290` used to move the
+        # Trek checkbutton off this block (gui.py: "those define the DEVICE
+        # and read as one flow ... this is a DRIVE setting and comes
+        # after"). Trek inverts therefore stays OUT of the union. Film
+        # thickness (#398) joined the device rows under Concentration.
+        # The px-to-mm warning stays inline: it is the one field here that
+        # can silently corrupt every area in the run.
         {"union": ["DEA active area diam (mm):", "Electrode:",
                    "Concentration (mL):", "Film thickness (µm):"],
          "extend_right": 175,
@@ -278,17 +293,6 @@ S["tab_sldea"] = {
                   "thickness (mounted and prestretched)"},
         {"match": "⚡ Breakdown watchdog (LIVE runs)", "label": "Aborts on sustained overcurrent — leave Enabled"},
         {"match": "📈 Scope kV/µA log", "label": "Logs kV/µA continuously to telemetry.csv — the current between photos"},
-    ],
-}
-
-# THE TAB'S LOWER HALF, ON ITS OWN SHOT (v1.4.1). The 🎥 video row (#359)
-# made the tab taller than the 1000 px capture window, so the run row and
-# the presets fell below the fold and their badges landed on the window's
-# bottom edge pointing at nothing. capture.py already took a scrolled-to-
-# bottom shot of every tall tab; the controls below the telemetry row are
-# annotated there instead, and build_manual.py shows it under the first.
-S["tab_sldea_bottom"] = {
-    "callouts": [
         {"match": "🎥 Video beside the snapshots (lossless)",
          "label": "Optional lossless video beside the snapshots (1–2 fps). "
                   "NOT bench-verified yet — leave Record off on important "
@@ -306,14 +310,9 @@ S["tab_sldea_bottom"] = {
          "label": "Open Edge Review on a finished run — see the Edge Review section"},
         {"match": "🎚 Tune params…", "badge_below": "Camera for this run",
          "label": "Advanced — confirmation-gated; Save rewrites the run's detection settings"},
-        # `#223`. Added WITH the button rather than at the next release:
-        # the shots on disk predate it, so until a fresh capture this is a
-        # miss and the manual build fails on it (`#248`). That is the
-        # intended state -- the build is ALREADY red on three legitimate
-        # misses (the renamed 📏 button, the `#224` telemetry label, the
-        # new ❓ button) waiting for the same capture, and the release
-        # checklist is capture-then-annotate. A matcher deferred to
-        # "later" is the failure mode `#248` exists to stop.
+        # `#223`. Added WITH the button rather than at the next release,
+        # so a capture that predates it fails the build on this miss
+        # (`#248`) instead of shipping without the callout.
         {"match": "📊 Plot runs…", "badge_below": "Camera for this run",
          "label": "Several finished runs on one figure — Export writes the PNG and its tidy CSV together"},
         # v1.4.4: the run row's right end (#386 Live view, #417 Video
@@ -322,14 +321,6 @@ S["tab_sldea_bottom"] = {
          "label": "Video review of the last run that ended with a recording"},
         {"match": "Live view…", "badge_below": "Camera for this run",
          "label": "The camera during a run; it never opens the camera itself"},
-        # Listed last rather than in screen order (it sits above the DRY RUN
-        # row) so this entry stays clear of the DEA-diam callout that `#262`
-        # is rewriting three lines up. Badge numbering follows list order, so
-        # the presets capsule is numbered last on the shot — cosmetic only.
-        # Its badge goes top right: the default corner sat on Live view…
-        # once the run row grew a Video review button (#417, v1.4.4).
-        {"match": "Run configuration presets", "badge_side": "tr",
-         "label": "Save the whole tab under a name and recall it — never the run name, and never the LIVE state"},
     ],
 }
 

@@ -767,6 +767,89 @@ def test_setup_text_covers_key_facts():
     assert 'DEA nominal diameter: 16 mm' in txt
 
 
+# The lock a run stamps (gui.sldea_run_lock of a bench-like Webcam-tab lock,
+# with the run's exposure 23 and gain 0 on top), and the camera the
+# pre-flight found on the bench DFK.
+_RUN_LOCK = {'auto_exposure': 1, 'white_balance_automatic': 0,
+             'exposure_time_absolute': 23, 'gain': 0, 'brightness': 240,
+             'red_balance': 92, 'blue_balance': 151}
+_DFK = {'kind': 'bayer', 'device': '/dev/video0', 'fourcc': 'RGGB',
+        'w': 1920, 'h': 1080, 'frame': (1920, 1080)}
+
+
+def test_the_camera_record_says_the_state_the_run_stamps():
+    """#400: setup.txt recorded "exposure N, gain N, WB off (manual)", which
+    named neither the white balance nor any other control the run stamps.
+    The owner's decision: record as much of the camera state as possible."""
+    from sldea_profile import camera_record
+    rec = camera_record(23, 0, _RUN_LOCK, camera=_DFK)
+    lines = rec.splitlines()
+    assert lines[0] == ("exposure 23, gain 0, white balance manual, red 92, "
+                        "blue 151"), lines[0]
+    assert lines[1:] == [
+        "Camera device: /dev/video0",
+        "Camera pixel format: RGGB (raw Bayer)",
+        "Camera frame size: 1920 x 1080",
+        "Camera controls: auto_exposure=1, blue_balance=151, "
+        "brightness=240, exposure_time_absolute=23, gain=0, "
+        "red_balance=92, white_balance_automatic=0"], lines
+    assert rec.isascii(), rec     # the runner writes the locale's codec
+    assert 'WB off' not in rec
+
+
+def test_the_camera_record_says_what_it_does_not_know():
+    from sldea_profile import camera_record, CAMERA_NOT_KNOWN
+    # a caller that knows neither the lock nor the camera (the worker's own
+    # fallback, and every run whose pre-flight was skipped)
+    lines = camera_record(6, 60).splitlines()
+    assert lines[0] == ("exposure 6, gain 60, white balance manual (balance "
+                        "not recorded)"), lines[0]
+    assert f"Camera device: {CAMERA_NOT_KNOWN}" in lines
+    assert "Camera controls: (not recorded)" in lines
+    # a lock without red and blue, and the run's values as fallbacks
+    lines = camera_record(6, 60, {'gain': 60}, camera=_DFK,
+                          defaults=['exposure', 'gain']).splitlines()
+    assert lines[0].startswith("exposure 6, gain 60, white balance manual "
+                               "(red and blue not locked) (exposure and "
+                               "gain are built-in defaults"), lines[0]
+    # an OpenCV camera with no V4L2 controls: nothing was set
+    lines = camera_record(23, 0, _RUN_LOCK,
+                          camera={'kind': 'cv2', 'index': 0}).splitlines()
+    assert 'none was set' in lines[0], lines[0]
+    assert "Camera device: OpenCV camera 0" in lines
+    assert "Camera pixel format: (chosen by OpenCV)" in lines
+    assert "Camera controls: (none set: no V4L2 controls)" in lines
+    # a pre-flight that took no picture still knows the spec's size
+    cam = dict(_DFK)
+    del cam['frame']
+    assert "Camera frame size: 1920 x 1080" in camera_record(
+        23, 0, _RUN_LOCK, camera=cam).splitlines()
+
+
+def test_the_camera_block_keeps_every_setup_txt_reader_working():
+    """The summary stays the line under '--- Camera ---', which Edge
+    Review's run health quotes, and the new Key: value lines move none of
+    the readers: the diameter, the electrode, the edge settings."""
+    import tempfile
+    import sldea_edge
+    from sldea_profile import camera_record
+    p = SldeaProfile(start_kv=0, end_kv=1, step_kv=0.5)
+    txt = p.setup_text('RUN', '2026-10-08T00:00:00', 1, 2, 3, True,
+                       camera_record(23, 0, _RUN_LOCK, camera=_DFK),
+                       dea_diam_mm=16, electrode='CNT')
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(_os.path.join(tmp, 'setup.txt'), 'w') as f:
+            f.write(txt)
+        health = sldea_edge._health_setup(tmp)
+        assert health['camera'] == ("exposure 23, gain 0, white balance "
+                                    "manual, red 92, blue 151"), health
+        assert sldea_edge.load_settings(tmp) == dict(
+            sldea_edge.DEFAULT_SETTINGS, diam_mm=16.0)
+        assert sldea_edge.electrode_of(tmp) == 'CNT'
+    block = txt.split("--- Camera ---\n", 1)[1].split("\n\n", 1)[0]
+    assert block.splitlines()[1] == "Camera device: /dev/video0", block
+
+
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count

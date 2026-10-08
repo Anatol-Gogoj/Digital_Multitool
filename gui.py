@@ -756,7 +756,8 @@ class InstrumentControlGUI:
         self._bg_busy = set()
         # True while the scope's own Reconnect is in flight, from just
         # before its handle goes to just after the new one is in place:
-        # what a ticked LIVE run waits for at its arming line (#423). The
+        # what a ticked LIVE run waits for while it arms its watchdog, at
+        # the arming line or after a baseline cut short (#423). The
         # 'connect' key above is shared by every instrument's connect and
         # is cleared before the done callback sets the handle.
         self._scope_reconnecting = False
@@ -1353,13 +1354,14 @@ class InstrumentControlGUI:
                                 "new session is open")
         old = getattr(self, key)
         # The scope's Reconnect is marked in flight BEFORE its handle goes
-        # (#423): a ticked LIVE run that reaches its arming line meanwhile
-        # waits for it there, at 0 V. That run reads the handle and then
-        # this mark, so a handle it finds gone always comes with the mark
-        # already set. done() clears the mark only after the new handle is
-        # in place, and the waiting run reads the mark and then the
-        # handle, so a cleared mark means the handle it reads next is the
-        # Reconnect's outcome. Plain attribute writes on this thread and
+        # (#423): a ticked LIVE run that is arming its watchdog meanwhile
+        # waits for it at 0 V. At its arming line it reads the handle and
+        # then this mark, so a handle it finds gone always comes with the
+        # mark already set; a baseline cut short reads the mark alone.
+        # done() clears the mark only after the new handle is in place,
+        # and the waiting run reads the mark and then the handle, so a
+        # cleared mark means the handle it reads next is the Reconnect's
+        # outcome. Plain attribute writes on this thread and
         # reads on the worker's, as for the handle itself.
         if key == 'scope':
             self._scope_reconnecting = True

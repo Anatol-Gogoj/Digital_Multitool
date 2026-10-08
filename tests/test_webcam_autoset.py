@@ -330,12 +330,18 @@ def test_auto_set_refuses_while_a_run_or_another_adjustment_has_the_camera():
         if root is None:
             return
         try:
+            # the run holds the camera before the tab is opened, so the
+            # tab's own start (#375) is held off too
             app._sldea_running = True
+            WA._select_webcam(app)
+            WA._pump(root, 0.6)
             app.cam_auto_set()
             WA._pump(root, 0.2)
             assert [c[1] for c in p.mb.calls] == [
                 "Camera in use — SLDEA run"], p.mb.calls
             assert cam.scene.calls == [] and cam.saves == []
+            assert not app.cam_previewing and WA._opens() == [], \
+                WA._FakeCam.log
             app._sldea_running = False
             app._bg_busy.add('camera-ctrl')
             app.cam_auto_set()
@@ -347,6 +353,54 @@ def test_auto_set_refuses_while_a_run_or_another_adjustment_has_the_camera():
             assert webcam.LOCKED_CONTROLS == STALE_LOCK
         finally:
             app._bg_busy.discard('camera-ctrl')
+            WA._close(root, app)
+            WA._reap()
+
+
+def _preview_stopped_by_the_operator(root, app):
+    """The Webcam tab on screen with its preview off: opened (the tab
+    starts its preview, #375), then stopped with Start/Stop Preview."""
+    WA._select_webcam(app)
+    WA._pump_until(root, lambda: app.cam_previewing, 3.0)
+    if app.cam_previewing:
+        app.cam_toggle_preview()
+    WA._pump(root, 0.2)
+    assert not app.cam_previewing
+
+
+def test_auto_set_shows_its_result_even_when_the_preview_was_off():
+    """Owner decision 2026-10-08: Auto-set starts the preview at its end,
+    also when it was off before, so the operator sees the result. A failed
+    Auto-set leaves an off preview off: one error box, not a second one
+    from a camera that may have gone."""
+    with WA._Patched() as p, _Camera():
+        root, app = _tab()
+        if root is None:
+            return
+        try:
+            _preview_stopped_by_the_operator(root, app)
+            opens = len(WA._opens())
+            _press(root, app, app.cam_auto_set)
+            assert app.cam_previewing, "Auto-set left the preview off"
+            assert len(WA._opens()) == opens + 1, WA._FakeCam.log
+            assert not [c for c in p.mb.calls if c[0] == 'showerror'], \
+                p.mb.calls
+        finally:
+            WA._close(root, app)
+            WA._reap()
+    with WA._Patched() as p, _Camera() as cam:
+        root, app = _tab()
+        if root is None:
+            return
+        try:
+            _preview_stopped_by_the_operator(root, app)
+            cam.scene.oneshot = lambda spec, count=2, controls=None: None
+            webcam.oneshot_rgb = cam.scene.oneshot
+            _press(root, app, app.cam_auto_set)
+            assert not app.cam_previewing
+            assert [c[1] for c in p.mb.calls] == ["Auto-set camera"], \
+                p.mb.calls
+        finally:
             WA._close(root, app)
             WA._reap()
 

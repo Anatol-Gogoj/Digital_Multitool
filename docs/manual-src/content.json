@@ -1312,8 +1312,12 @@
     "what": "The two values a run takes, in the main view. A value typed here changes nothing until it is locked; the line under the boxes says so as you type."
    },
    {
+    "label": "🔒 Apply & Lock",
+    "what": "Beside the exposure and gain boxes: writes every panel value to the camera, keeps re-asserting them during all captures, and saves them for the next start. Needed after typing a value by hand."
+   },
+   {
     "label": "Auto-set camera",
-    "what": "One press: stops the preview, pins gain at 0, finds the exposure for a mid-gray picture, balances the white on the scene in view, then writes and locks everything for every capture, saves it for the next start and restarts the preview. A step that fails leaves the previous lock."
+    "what": "One press: stops the preview, pins gain at 0, finds the exposure for a mid-gray picture, balances the white on the scene in view, then writes and locks everything for every capture, saves it for the next start and starts the preview, so you see the result. A step that fails leaves the previous lock."
    },
    {
     "label": "Advanced camera settings",

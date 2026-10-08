@@ -8262,7 +8262,7 @@ LOGGING:
                     "mid-gray picture, balances white on the scene in "
                     "view (gray world), then writes and locks everything "
                     "for every capture, saves it for the next start, and "
-                    "restarts the preview. Takes several seconds. A step "
+                    "starts the preview. Takes several seconds. A step "
                     "that fails leaves the previous lock as it was.")
         self.cam_sensor_status = ttk.Label(sens, text="", foreground=MUTED)
         self.cam_sensor_status.pack(fill='x', pady=(4, 0))
@@ -8831,7 +8831,8 @@ LOGGING:
         the exposure found for a mid-gray picture at that gain, the white
         balanced on the scene in view (gray world) at that exposure, then
         everything written and locked as Apply & Lock does, saved for the
-        next start, and the preview restarted as after any adjustment.
+        next start, and the preview started so the operator sees the
+        result, also when it was off before (owner decision 2026-10-08).
 
         Every trial picture is shot under its own controls, never under the
         lock (webcam.find_exposure, webcam.balance_gray_world), and the lock
@@ -8945,7 +8946,16 @@ LOGGING:
                 self.status_bar.config(
                     text=f"Camera: auto-set, {result['n']} controls locked")
             finally:
-                self._cam_after_adjustment(was_previewing)
+                if error is None and not (CAM_STOP_PREVIEW_ON_TAB_LEAVE
+                                          and not self._cam_tab_selected()):
+                    # the result on screen, even when the preview was off
+                    # before (owner decision 2026-10-08). cam_start_preview
+                    # refuses while an SLDEA run holds the camera. A failed
+                    # Auto-set, or one finished after the operator left the
+                    # tab, restores the preview as any adjustment does.
+                    self.cam_start_preview()
+                else:
+                    self._cam_after_adjustment(was_previewing)
                 refresh = getattr(self, '_sldea_cam_line_refresh', None)
                 if refresh is not None and hasattr(self, 'sldea_cam_line'):
                     try:

@@ -168,37 +168,73 @@ and ask the lab how to confirm it and when the Trek's HV may be enabled (box ite
 "DRY RUN - HV OFF" (the row turns red and says "LIVE - HV WILL BE DRIVEN") and press the button,
 which now reads "Run - LIVE HV".
 
-The dialogs come in this order. Enter answers the default: No on every question except "Scope
-monitor setup" (Yes) and the pre-flight picture (Enter presses "Looks good - start run").
-1. "SLDEA - run blocked" (a Webcam-tab sweep is writing the run's own SG channel, or a timed capture
-   or camera adjustment is going): stop it, press Run again. For a sweep on the run's own channel,
-   press "Stop sweep", then set that channel to 0 V or output OFF on the Signal Gen tab (the dry-run
-   text of this dialog says so; the live text leaves it out). "Stepped sweep still running" (a sweep
-   on the other SG channel) asks "Start the run with the sweep still going?" Yes risks "NO FRAME"
-   photos; answer No, press "Stop sweep" on the Webcam tab, press Run. An error "SLDEA" that starts
-   "Signal generator not connected" also stops the run.
-2. "No current monitoring" (no scope): Yes = no kV/uA readings, watchdog or telemetry. Answer No.
-3. "Scope monitor setup" (only if the scope window is wrong): "Yes = fix and continue", "No = run
+The dialogs come in this order; a dry run skips items 5 to 10. Enter answers the default: No on
+every question except "Scope monitor setup" (Yes) and the pre-flight picture (Enter presses "Looks
+good - start run"). An error box asks nothing: the run did not start, nothing was sent to the signal
+generator, so fix what it names and press Run again.
+1. An error "SLDEA" that starts "Fix the profile first": a staircase field is not a number or is
+   out of range.
+2. "SLDEA - run blocked", "This run cannot start yet": a Webcam-tab sweep is writing the run's own
+   SG channel, a timed capture or camera adjustment is going, the previous run's video recorder is
+   still releasing the camera, a Signal Gen tab command is still being sent (live runs), or a sweep
+   on the other SG channel needs the camera while video "Record" is ticked. Stop it, or wait, and
+   press Run again. For a sweep on the run's own channel, press "Stop sweep", then set that channel
+   to 0 V or output OFF on the Signal Gen tab (the dry-run text of this dialog says so; the live
+   text leaves it out). "Stepped sweep still running" (a sweep on the other SG channel, "Record"
+   unticked) asks "Start the run with the sweep still going?" Yes risks "NO FRAME" photos; answer
+   No, press "Stop sweep" on the Webcam tab, press Run.
+3. "SLDEA run folder": the run will not write there, and there is no "start anyway". The folder
+   "already holds a run" (setup.txt or data.csv), the run name cannot name a folder (plain ASCII
+   only: "u for" the micro sign, "as in 2.5uL"), the share is not mounted, or the Output dir could
+   not be read or did not answer within 3 s ("Could not check the run folder"). A blank name is
+   refused only on the share, when it is not mounted or does not answer. The line under "Run name
+   (blank = auto)" says the same before you press Run: "Saves to:" and the folder, then a warning
+   ending "Run will refuse". Type another name or clear the box, or have the share mounted, and
+   press Run again.
+4. Only with video "Record" ticked: "Video unavailable" ("This PC cannot record the lossless video")
+   or "Not enough disk for the video", each asking "Run WITHOUT video (snapshots only)?" Yes runs
+   with snapshots only; No stops the run.
+5. Only with the watchdog ticked: an error "SLDEA", "Breakdown watchdog Trip (uA) must be a positive
+   number" (or "Confirm (s)"): the box is blank, zero, negative or not a number. The defaults are
+   100 and 3.
+6. "Linux only" (a live run on Windows). An error "SLDEA" that starts "Signal generator not
+   connected": connect it on the Signal Gen tab, or use a dry run.
+7. "No current monitoring" (no scope): Yes = no kV/uA readings, watchdog or telemetry. Answer No.
+8. "Scope monitor setup" (only if the scope window is wrong): "Yes = fix and continue", "No = run
    anyway", "Cancel = stop". Yes rewrites scale, position, attenuation, offset, coupling and
    channel-on for both monitor channels at once, even if you cancel a later dialog (BENCH_TEST.md
    section O says take the fix). No keeps what was flagged ("this silently ruined five runs on
-   2026-07-25", manual). No problem: no dialog, only the log line "monitor check: OK".
-4. "Energize HV?": "LIVE run - this drives the Trek up to" your top kV "via SG CH" and the channel,
-   then the staircase summary, the breakdown watchdog's state ("Breakdown watchdog: ON..." with
-   its trip and confirm time, or "Breakdown watchdog: OFF. Nothing stops this run on a
-   breakdown..." if the box was unticked), and "Proceed?". Yes means carry on. Nothing is sent to the signal generator until the
-   last dialog is answered. Then the program sets the channel to DC at 0 V, output ON, and ramps
-   up. The dialog shows no polarity or folder, so check them first.
-5. "No electrode specified", "No concentration specified" (CNT inks only), "No film thickness
-   specified": "Start the run without it?" Yes records nothing. Answer No, fill the field, press
-   Run again. "Film thickness looks unusual" means a value outside 5 to 2000 um, such as one typed
-   in mm: answer No and fix it.
-6. The camera pre-flight. With no frame it is a question, "Camera pre-flight": "No camera frame
-   available", "Continue anyway?". Yes starts a run with no images and no areas: answer No and fix
-   the camera. Otherwise it is the picture window, "Camera pre-flight - SLDEA run". "Looks good -
-   start run" starts the staircase now. "Adjust (open Webcam tab)" and "Cancel" cancel the run:
-   fix it, press Run, answer every dialog again. A clipped frame renames the first button "Start
-   anyway (baseline blown out)" and adds the question "Baseline is blown out" (default No).
+   2026-07-25", manual). No problem: no dialog, only the log line "monitor check: OK". If the fix
+   fails, an error "Scope", "Could not rescale", stops the run.
+9. "A video is still being copied" (a previous run's video is still being moved into its run folder,
+   on the share this run writes to): "Start the LIVE run anyway?" Answer No and wait until the line
+   under the Run row says "ready in the run folder" (section 7, step 5).
+10. "Energize HV?": "LIVE run - this drives the Trek up to" your top kV "via SG CH" and the channel,
+    then the staircase summary, the breakdown watchdog's state ("Breakdown watchdog: ON..." with its
+    trip and confirm time, or "Breakdown watchdog: OFF. Nothing stops this run on a breakdown..." if
+    the box was unticked), and "Proceed?". Yes means carry on. Nothing is sent to the signal
+    generator until the last dialog is answered. Then the program sets the channel to DC at 0 V,
+    output ON, and ramps up. The dialog shows no polarity or folder, so check them first.
+11. "No electrode specified", "No concentration specified" (CNT inks only), "No film thickness
+    specified": "Start the run without it?" Yes records nothing. Answer No, fill the field, press
+    Run again. "Film thickness looks unusual" means a value outside 5 to 2000 um, such as one typed
+    in mm: answer No and fix it. An error "SLDEA" that starts "Concentration (mL) must be a positive
+    number" or "Film thickness (um) must be a positive number": fix the box or clear it.
+12. The camera pre-flight. With no frame it is a question, "Camera pre-flight": "No camera frame
+    available", "Continue anyway?". Yes starts a run with no images and no areas: answer No and fix
+    the camera. If the picture check itself fails, "Camera pre-flight" says "The picture check could
+    not run" and asks "Start the run anyway?": answer No. Otherwise it is the picture window,
+    "Camera pre-flight - SLDEA run". "Looks good - start run" starts the staircase now. "Adjust
+    (open Webcam tab)" and "Cancel" cancel the run: fix it, press Run, answer every dialog again. A
+    warning renames the first button "Start anyway (...)" and takes Enter off it. Pressed on a
+    clipped frame, that button asks "Baseline is blown out", on a flat one "No picture in this
+    frame" (both default No).
+13. After the last answer the run checks twice more, asks nothing, and either starts or refuses:
+    "SLDEA - run blocked" again if something from item 2 began while a dialog was open (a sweep
+    started "while this run was being set up"), or, rarely, "SLDEA - run blocked" with "The
+    breakdown watchdog's state changed since Energize HV?" (a scope "Reconnect" finished while a
+    question was open). Nothing was sent to the signal generator: press Run again and answer with
+    the state as it is now.
 
 ## 6. While it runs
 

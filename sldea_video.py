@@ -465,6 +465,10 @@ class VideoRecorder:
         self.index_path = os.path.join(out_dir, VIDEO_INDEX_FILENAME)
         self.seen = self.written = self.dropped = self.read_failures = 0
         self.reopens = 0
+        # reopens followed by a frame: on the bench's Bayer path a reopen
+        # "succeeds" with the camera still unplugged (v4l2-ctl starts,
+        # then exits), so `reopens` counts attempts, not returns
+        self.stream_returns = 0
         self.first_t = self.last_t = None
         self.first_seen_clock = self.last_seen_clock = None
         self.restamp_done = None               # clock time of the last one
@@ -745,9 +749,11 @@ class VideoRecorder:
         so instead of blaming the camera (#392 review). A clean recording
         gets its line too, so that a run which never got this far (the app
         closed during the shutdown) can be told from one that recorded
-        well. Dropped frames are counted. While the encoder is still
-        writing (stop() gave up on it) the count is the count so far, and
-        the words say so. One line of ASCII, because the tab appends it
+        well. Dropped frames are counted, and so are dropouts the stream
+        came back from (a reopen followed by frames), each of them ~2 s or
+        more with no frame (REOPEN_AFTER_FAILS reads). While the encoder is
+        still writing (stop() gave up on it) the count is the count so far,
+        and the words say so. One line of ASCII, because the tab appends it
         through the same locale-encoded open as the start line. Never
         raises."""
         try:
@@ -793,6 +799,9 @@ class VideoRecorder:
                             "no frame reached the encoder before the run "
                             "ended"))
             text += busy
+            if self.stream_returns:
+                text += (f"; the camera stream dropped out for ~2 s or more "
+                         f"and came back {self.stream_returns}x")
             if self.dropped:
                 text += f"; {self.dropped} frames dropped"
         except Exception as e:
@@ -859,6 +868,7 @@ class VideoRecorder:
         last_refresh = self._clock()
         fails = 0
         skip_next = False
+        reopened = False             # a reopen not yet followed by a frame
         while not self._stop.is_set():
             if self._restamp_req.is_set() and self._restamp is not None:
                 self._restamp_req.clear()
@@ -887,6 +897,7 @@ class VideoRecorder:
                     if not self._reopen():
                         break
                     skip_next = True
+                    reopened = True
                 else:
                     time.sleep(0.05)
                 continue
@@ -894,6 +905,9 @@ class VideoRecorder:
             if skip_next:            # possibly buffered during the stall
                 skip_next = False
                 continue
+            if reopened:             # the stream really came back
+                reopened = False
+                self.stream_returns += 1
             self.seen += 1
             if self.first_seen_clock is None:
                 self.first_seen_clock = now

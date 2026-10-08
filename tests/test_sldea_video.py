@@ -1001,6 +1001,43 @@ def test_a_stream_already_quiet_when_a_control_call_began_is_still_named():
         in rec.end_outcome()
 
 
+def test_the_end_outcome_names_a_dropout_the_stream_came_back_from():
+    """#392 review: a stream that dropped out and came back read as a clean
+    recording ("recorded 8 frames, 0.1 to 7.0 s") while run.log said
+    "stream REOPENED 1x". The end line now counts the returns: reopens
+    followed by a frame. A reopen that brings nothing back is not one,
+    since on the bench's Bayer path a reopen "succeeds" with the camera
+    still unplugged."""
+    _need_cv()
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    cams = [_FakeCam(period=0.005, die_after=40), _FakeCam(period=0.005)]
+    opened = []
+
+    def open_cam():
+        cam = cams[min(len(opened), len(cams) - 1)]
+        opened.append(cam)
+        return cam
+    try:
+        rec = sv.VideoRecorder(open_cam, d, fps=5,
+                               log=lambda m: None).start()
+        assert rec.wait_first_frame(3.0)
+        rec.set_t0(time.monotonic())
+        assert _wait(lambda: rec.stream_returns == 1, 8.0), rec.summary()
+        n = rec.written
+        assert _wait(lambda: rec.written > n, 3.0), "not recording again"
+        rec.end_recording()
+        rec.stop(timeout=5.0)
+        assert rec.reopens == 1, rec.summary()
+        assert rec.end_outcome() == (
+            f"recorded {rec.written} frames, {rec.first_t:.1f} to "
+            f"{rec.last_t:.1f} s on the run's clock; the camera stream "
+            f"dropped out for ~2 s or more and came back 1x")
+        rec.stream_returns = 0                   # reopened, never came back
+        assert 'came back' not in rec.end_outcome()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_the_end_outcome_counts_the_frames_before_an_encoder_failure():
     _need_cv()
     import cv2

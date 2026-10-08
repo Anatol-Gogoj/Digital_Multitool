@@ -348,13 +348,22 @@ def apply_locked(device, exclude=None):
     stable by pinning it at its floor at Apply time, where the AGC clamps."""
     if not LOCKED_CONTROLS:
         return 0
+    return stamp_controls(device, LOCKED_CONTROLS, exclude)
+
+
+def stamp_controls(device, controls, exclude=None):
+    """Stamp `controls` ({name: value}) onto the device, autos first, and
+    return how many were set. A control the device refuses is skipped.
+    apply_locked stamps the lock this way; a camera adjustment's trial
+    picture stamps its own trial values (oneshot_rgb's `controls`)."""
+    controls = dict(controls or {})
     exclude = exclude or set()
     n = 0
-    for name in list(_CTRL_ORDER) + [k for k in LOCKED_CONTROLS
+    for name in list(_CTRL_ORDER) + [k for k in controls
                                      if k not in _CTRL_ORDER]:
-        if name in LOCKED_CONTROLS and name not in exclude:
+        if name in controls and name not in exclude:
             try:
-                set_control(device, name, LOCKED_CONTROLS[name])
+                set_control(device, name, controls[name])
                 n += 1
             except Exception:
                 pass
@@ -569,17 +578,33 @@ def resolve_camera(index):
     return {'kind': 'cv2', 'index': int(index)}
 
 
-def oneshot_rgb(spec, count=2):
+def _stamp_for_grab(device, controls):
+    """The locked knobs, or a trial's own `controls` when given (#400)."""
+    if controls is None:
+        apply_locked(device)
+    else:
+        stamp_controls(device, controls)
+
+
+def oneshot_rgb(spec, count=2, controls=None):
     """One fresh RGB frame from a resolve_camera() spec, or None.
 
     Opens and closes the capture each call, so nothing has to stay warm and
     no frame can be stale. `count` frames are streamed and the last kept
     (the first settles after any control change).
+
+    `controls`, when given, are stamped before the grab INSTEAD of the lock
+    (#400): a camera adjustment shoots each trial under its own values.
+    Stamping the lock there put the locked exposure and white balance back
+    on before every trial, so with a lock in place (one is restored at every
+    start) every trial picture was the locked one, and Stabilize's search
+    and Auto-WB once's loop said nothing about the scene.
     """
     import cv2
     import numpy as np
     if spec.get('kind') == 'bayer':
-        apply_locked(spec['device'])   # user-locked knobs win on every grab
+        # user-locked knobs (or the trial's) win on every grab
+        _stamp_for_grab(spec['device'], controls)
         data = grab_raw(spec['device'], spec['fourcc'], spec['w'], spec['h'],
                         count=count)
         if not data:
@@ -595,7 +620,7 @@ def oneshot_rgb(spec, count=2):
     # within ~0.5 s (see apply_locked), so a lock applied in advance is a
     # lock the firmware has time to walk back before the shutter.
     if spec.get('device'):
-        apply_locked(spec['device'])
+        _stamp_for_grab(spec['device'], controls)
     cap = cv2.VideoCapture(spec['index'])
     try:
         if not cap.isOpened():
@@ -606,6 +631,84 @@ def oneshot_rgb(spec, count=2):
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) if ok else None
     finally:
         cap.release()
+
+
+# ---- camera adjustments: the exposure search and gray-world WB (#400) ------
+# Stabilize, Auto-WB once and the Webcam tab's Auto-set camera search with
+# one-shot grabs. Each trial is shot under its own controls (oneshot_rgb's
+# `controls`), never under the lock, and nothing here changes the lock: the
+# caller locks the result, or keeps the previous lock when a step fails.
+
+GAIN_FLOOR = 0          # the DFK's firmware auto-gain is clamped here
+EXPOSURE_TRIALS = (16, 24, 32, 40, 50, 64, 80, 100, 130)
+MID_GRAY = 150          # the picture mean the exposure search aims for
+GRAY_WORLD_ROUNDS = 5   # pictures at most per white balance
+GRAY_WORLD_TOL = 0.04   # |r/g - 1| + |b/g - 1| below this counts as gray
+
+
+def exposure_trial(base, exposure):
+    """The controls one exposure trial is shot under: `base` with manual
+    exposure, white balance auto off, gain at its floor and `exposure` on
+    top. Also what Auto-set locks before the white balance is added."""
+    return dict(base or {}, auto_exposure=1, white_balance_automatic=0,
+                gain=GAIN_FLOOR, exposure_time_absolute=int(exposure))
+
+
+def find_exposure(spec, base, trials=EXPOSURE_TRIALS, target=MID_GRAY):
+    """Pin gain at its floor and find the exposure whose picture mean is
+    nearest `target` -> (exposure, mean), or None when no trial gave a
+    picture.
+
+    Stabilize's search (2026-07-24): trials from short to long, stopping at
+    the first picture at or above the target, the nearest one winning. Each
+    trial is shot under exposure_trial(base, exposure)."""
+    best = None
+    for exp in trials:
+        frame = oneshot_rgb(spec, count=3, controls=exposure_trial(base, exp))
+        if frame is None:
+            continue
+        mean = float(frame.mean())
+        if best is None or abs(mean - target) < abs(best[1] - target):
+            best = (int(exp), mean)
+        if mean >= target:
+            break
+    return best
+
+
+def balance_gray_world(spec, base, red=None, blue=None,
+                       rounds=GRAY_WORLD_ROUNDS, tol=GRAY_WORLD_TOL):
+    """Gray-world white balance on the current scene -> (err, red, blue):
+    the red and blue balance whose picture came closest to equal red, green
+    and blue means, and that error (|r/g - 1| + |b/g - 1|, 0 = gray).
+
+    Auto-WB once's loop (2026-07-24): it starts from `red` and `blue` (64,
+    the DFK's default, when missing) and moves each toward the green mean,
+    up to `rounds` pictures, each shot under `base` with white balance auto
+    off and the trial balance on top. Raises RuntimeError when the camera
+    gives no picture, or one with a black color channel, where no balance
+    can be measured."""
+    rb = float(red) if red else 64.0
+    bb = float(blue) if blue else 64.0
+    best = None
+    for _ in range(max(1, int(rounds))):
+        trial = dict(base or {}, white_balance_automatic=0,
+                     red_balance=int(rb), blue_balance=int(bb))
+        frame = oneshot_rgb(spec, count=3, controls=trial)
+        if frame is None:
+            raise RuntimeError("no frame (camera busy?)")
+        r, g, b = [float(frame[..., i].mean()) for i in range(3)]
+        if min(r, g, b) <= 0:
+            raise RuntimeError("a color channel of the picture is black, so "
+                               "no white balance can be measured (lens cap "
+                               "or light off?)")
+        err = abs(r / g - 1) + abs(b / g - 1)
+        if best is None or err < best[0]:
+            best = (err, int(rb), int(bb))
+        if err < tol:
+            break
+        rb = min(255, max(1, rb * (g / r) ** 0.9))
+        bb = min(255, max(1, bb * (g / b) ** 0.9))
+    return best
 
 
 class V4L2BayerCamera:

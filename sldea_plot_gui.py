@@ -2828,7 +2828,11 @@ class PlotWindow:
         really has (fit_widths, RUN_COL_GIVE).
 
         Re-run whenever the content changes, so a separator dragged by
-        hand lasts until the next listing or grouping change."""
+        hand lasts until the next listing or grouping change. That holds
+        for Material's and Group's; Run is the stretch column, and Tk's
+        layout gives it back whatever room the others leave, so a drag of
+        Run's own separator is undone at the next layout (straight away on
+        Tk 8.6.15, whose identify lays out first)."""
         natural, floor = {}, {}
         for col, head in RUN_COLUMNS:
             natural[col] = max([self._head_w(head + ' ▲')]

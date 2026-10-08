@@ -19,7 +19,9 @@ for seconds. What these pin down:
   * an error inside the writing reaches the caller on the Tk thread, as
     it always did, and leaves nothing busy behind;
   * a window torn down mid-Save lets the worker finish the file in hand
-    and stop, without hanging.
+    and stop, without hanging;
+  * Save collects garbage on the Tk thread before its worker starts, so
+    a dead Tk object is never freed on the worker (Tcl_AsyncDelete).
 
 The tests drive a real EdgeReviewApp on a synthetic run and skip cleanly
 when Tk cannot open a display.
@@ -556,6 +558,48 @@ def test_a_window_torn_down_mid_save_lets_the_worker_stop_cleanly():
     finally:
         gate.set()
         gui.se.write_back = real_write
+        gui.messagebox = real_mb
+        if not _gone(root):
+            root.destroy()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_save_collects_garbage_on_the_tk_thread_before_its_worker():
+    """The Tcl_AsyncDelete guard. The cyclic collector runs on whichever
+    thread allocates, and a Tk object freed on the worker aborts the
+    program (_save_in_background). So Save collects on the Tk thread
+    before its worker exists: a gc.collect() spy sees a call there while
+    no Save worker is alive, and none from any other thread. Whether a
+    dead window is freed on the worker is a race, so the abort itself is
+    not reproduced; this pins where and when the collection happens."""
+    import sldea_edge_gui as gui
+    root = _root()
+    real_mb, real_collect = gui.messagebox, gui.gc.collect
+    d = tempfile.mkdtemp(prefix='edge_save_gc_')
+    calls = []
+    try:
+        gui.messagebox = _MB()
+        run = _fake_run(os.path.join(d, 'SLDEA_20261006_120000'))
+        app = _prepared_app(gui, root, run)
+        before = set(threading.enumerate())
+
+        def spy(*a, **k):
+            calls.append((threading.current_thread()
+                          is threading.main_thread(),
+                          any(t.name == 'edge-review-save'
+                              and t not in before
+                              for t in threading.enumerate())))
+            return real_collect(*a, **k)
+        gui.gc.collect = spy
+        app.save()
+        gui.gc.collect = real_collect
+        assert app.status.cget('text').startswith('saved in '), \
+            app.status.cget('text')
+        # (on the Tk thread, no worker alive yet)
+        assert (True, False) in calls, calls
+        assert all(main for main, _worker in calls), calls
+    finally:
+        gui.gc.collect = real_collect
         gui.messagebox = real_mb
         if not _gone(root):
             root.destroy()

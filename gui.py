@@ -2885,7 +2885,7 @@ LOGGING:
         # left column (staircase, output and device, watchdog / telemetry /
         # video) and what they LOOK AT is in the right one (the kV preview,
         # and later the camera panel #404 adds). It fits a 1320 x 990 window
-        # with no scrolling (885 px at 96 dpi; the single column it replaced
+        # with no scrolling (875 px at 96 dpi; the single column it replaced
         # was 1183 px), and the Run button stays in the lower third of the
         # tab, under everything it acts on.
         #

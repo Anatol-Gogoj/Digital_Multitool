@@ -244,7 +244,7 @@ S["tab_sldea"] = {
         # 1000 px capture window from v1.4.1 (the video row, #359) until
         # the two-column layout, so its lower half had a scrolled shot of
         # its own, tab_sldea_bottom, annotated separately. The tab is now
-        # 885 px at 96 dpi and capture.py takes that second shot only when
+        # 875 px at 96 dpi and capture.py takes that second shot only when
         # the body is taller than the view, so every callout is here, in
         # screen order: the presets across the top, the left column top
         # to bottom, then the run row. Badge numbers follow this order.

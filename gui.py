@@ -4041,6 +4041,12 @@ LOGGING:
             # Free the camera: the Webcam preview holds /dev/video0 open and
             # a one-shot grab can't run while it streams (empty frames
             # otherwise).
+            # From here to the run flag the Webcam tab counts the camera as
+            # this run's (#393): the pre-flight can ask a question before
+            # its dialog exists, and on Windows that box holds no Tk grab.
+            # Cleared at the run flag, or in the finally on any exit before
+            # that.
+            self._sldea_starting = True
             try:
                 self.cam_stop_preview()
                 if self.cam is not None:
@@ -4074,6 +4080,7 @@ LOGGING:
             self._sldea_stop = False
             self._sldea_bd_tripped = False
             self._sldea_running = True
+            self._sldea_starting = False      # the run flag holds it now
             # LIVE interlock: the driven SG channel belongs to the run until
             # it ends (user decision 2026-07-25: lock the active channel,
             # leave the other usable, loud note on any attempt).
@@ -4122,6 +4129,7 @@ LOGGING:
             sldea_liveview.notify(self, 'open_with_run')
         finally:
             if not started:
+                self._sldea_starting = False
                 with self._sldea_loglock:
                     self._sldea_prelog = None
 
@@ -4729,10 +4737,14 @@ LOGGING:
         (they logged NO FRAME); Apply & Lock replaced the exposure the run
         had locked, so frames on either side of the click were exposed
         differently -- and a video run holds the camera for the whole
-        hour. Refused, with the reason, like a LIVE-owned SG channel."""
+        hour. Refused, with the reason, like a LIVE-owned SG channel.
+
+        The run holds it from the moment sldea_run frees the camera for it,
+        before the run flag is set (_sldea_starting, #393)."""
         rec = getattr(self, '_sldea_recorder', None)
-        if not getattr(self, '_sldea_running', False) and not (
-                rec is not None and rec.reader_alive()):
+        held = (getattr(self, '_sldea_running', False)
+                or getattr(self, '_sldea_starting', False))
+        if not held and not (rec is not None and rec.reader_alive()):
             # ...a run's recorder that is still shutting down holds the
             # camera too, even though the run itself has ended
             return False
@@ -8491,9 +8503,11 @@ LOGGING:
 
     def _cam_sldea_holds_camera(self):
         """_cam_owned_by_sldea's test, without its dialog: an SLDEA run is
-        going, or its video recorder is still letting go of the camera.
-        Keep the two in step (tests/test_webcam_autostart.py checks)."""
-        if getattr(self, '_sldea_running', False):
+        going, its start path has freed the camera for it (#393), or its
+        video recorder is still letting go of the camera. Keep the two in
+        step (tests/test_webcam_autostart.py checks)."""
+        if (getattr(self, '_sldea_running', False)
+                or getattr(self, '_sldea_starting', False)):
             return True
         rec = getattr(self, '_sldea_recorder', None)
         return rec is not None and rec.reader_alive()
@@ -8506,11 +8520,17 @@ LOGGING:
         # A modal dialog holds the pointer grab. The SLDEA camera pre-flight
         # is one: sldea_run has already closed the preview's camera for the
         # run, and _sldea_running is not set until the operator presses
-        # Start. A grab does not stop the keyboard reaching the notebook,
-        # so the tab can still be opened, and an auto-start there would
-        # hand the run a camera the preview holds.
+        # Start (_sldea_starting now covers that stretch as well). A grab
+        # does not stop the keyboard reaching the notebook, so the tab can
+        # still be opened, and an auto-start there would hand the run a
+        # camera the preview holds.
+        # The grab is asked for by its Tcl name. tkinter's grab_current()
+        # looks the window up among the widgets tkinter made, and raises
+        # KeyError for one Tk made itself (a message box or the folder
+        # chooser on X11, a combobox dropdown anywhere), which killed the
+        # reason watch (#393).
         try:
-            if self.root.grab_current() is not None:
+            if str(self.root.tk.call('grab', 'current', self.root._w)):
                 return CAM_OFF_DIALOG
         except tk.TclError:
             pass

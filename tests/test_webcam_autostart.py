@@ -30,6 +30,7 @@ import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
     _os.path.abspath(__file__))))
 
+import gc
 import queue
 import threading
 import time
@@ -39,21 +40,31 @@ import gui
 import webcam
 
 G = gui.InstrumentControlGUI
-# One period of the reason watch, with room for a busy desktop: long
-# enough for the watch to have looked at least once.
-WATCH = gui.CAM_SPLASH_POLL_MS / 1000.0 + 0.2
+# _Patched runs the reason watch every POLL_MS instead of the app's 500 ms:
+# the resume is only seen across watch periods, and the suite went from
+# about 16 s to 55 s at the app's rate. WATCH is one period with room for a
+# busy desktop: long enough for the watch to have looked at least once.
+POLL_MS = 100
+WATCH = POLL_MS / 1000.0 + 0.2
 
 
 class _MB:
     """messagebox stub: records every call, answers every question No
-    (Yes with `yes`, for the tests that start a DRY SLDEA run)."""
+    (Yes with `yes`, for the tests that start a DRY SLDEA run). `on_ask`,
+    when set, is called inside the box as on_ask(kind, title), as if it
+    were still on screen; a bool it returns is the answer."""
 
     def __init__(self, yes=False):
         self.calls = []
         self.yes = yes
+        self.on_ask = None
 
     def _ask(self, name, title, msg='', **kw):
         self.calls.append((name, title, msg))
+        if self.on_ask is not None:
+            answer = self.on_ask(name, title)
+            if answer is not None:
+                return answer
         return self.yes
 
     def __getattr__(self, name):
@@ -111,7 +122,7 @@ class _Patched:
         self.saved_gui = {n: getattr(gui, n) for n in (
             'messagebox', 'CAM_AUTOSTART_ON_TAB',
             'CAM_STOP_PREVIEW_ON_TAB_LEAVE', 'CAM_NO_FRAME_S',
-            'CAM_AUTOSTART_DELAY_MS')}
+            'CAM_AUTOSTART_DELAY_MS', 'CAM_SPLASH_POLL_MS')}
         webcam.Camera = _FakeCam
         webcam.list_cameras = lambda max_index=8: [0]
         webcam.list_controls = lambda device: []
@@ -120,6 +131,7 @@ class _Patched:
         self.mb = gui.messagebox = _MB(self.yes)
         gui.CAM_AUTOSTART_ON_TAB = True
         gui.CAM_STOP_PREVIEW_ON_TAB_LEAVE = True
+        gui.CAM_SPLASH_POLL_MS = POLL_MS     # read when the watch is armed
         _FakeCam.log = []
         _FakeCam.fail = None
         _FakeCam.blank = False
@@ -205,6 +217,18 @@ def _close(root, app):
         root.destroy()
 
 
+def _reap():
+    """Free dropped Tk objects HERE, on the main thread (the pattern from
+    #280, see test_sldea_edge_gui's _reap). Several tests below run worker
+    threads (the real _run_bg, the timed capture's worker, sldea_run's), and
+    CPython frees a dropped Tk root whenever it next collects, which can be
+    inside one of them. Tk then aborts the whole process with
+    "Tcl_AsyncDelete: async handler deleted by the wrong thread"; a mutation
+    run of this suite did, once. Called after every test, and before each
+    case of a test that builds several roots and runs threads."""
+    gc.collect()
+
+
 def _pump(root, secs):
     end = time.monotonic() + secs
     while time.monotonic() < end:
@@ -251,6 +275,13 @@ def _camera_boxes(p):
 
 def _select_webcam(app):
     app.notebook.select(app._cam_tab)
+
+
+def _grab_name(root):
+    """The Tcl name of the window holding the grab, or ''. By name, as
+    gui.py asks: tkinter's grab_current() raises KeyError for a window
+    Tk made itself."""
+    return str(root.tk.call('grab', 'current', root._w))
 
 
 def _shows_splash(app):
@@ -346,7 +377,9 @@ def _var(value):
 
 class _Vars(dict):
     """sldea_vars for the real sldea_run. A box it has no entry for reads
-    empty, as an untouched box does."""
+    empty, as an untouched box does. sldea_run asks about some empty boxes
+    before it frees the camera (#398 adds one for the film thickness), so
+    every test that presses Run here answers its questions Yes."""
 
     def __missing__(self, key):
         return _var('')
@@ -386,17 +419,20 @@ def _sldea_ready(app):
     app._sldea_worker = lambda *a, **kw: None
 
 
-def _through_the_preflight(root, app, button, probe_ms=1000):
+def _through_the_preflight(root, app, button):
     """Press the real Run (sldea_run, DRY) and, from inside its real camera
     pre-flight dialog, open the Webcam tab as the keyboard can: a Tk grab
     holds the pointer, not the keyboard, so the arrow keys still move a
-    tab strip that has the focus. Past the tab-click start's delay
-    and a reason-watch period, note what the tab did, then press the
-    dialog's `button`, 'start' or 'cancel'. Returns the notes; 'dialog' is
-    False when sldea_run never showed the dialog."""
+    tab strip that has the focus. Past the tab-click start's delay and a
+    reason-watch period, counted from the tab opening, note what the tab
+    did, then press the dialog's `button`, 'start' or 'cancel'. Returns
+    the notes; 'dialog' is False when sldea_run never showed the dialog,
+    and 'armed' says the tab had a start owed or its watch running, so a
+    'no open' seen there is not vacuous."""
     import tkinter as tk
     from tkinter import ttk
     seen = {'dialog': False}
+    jobs = []
 
     def dialog():
         wins = [w for w in root.winfo_children()
@@ -405,8 +441,12 @@ def _through_the_preflight(root, app, button, probe_ms=1000):
         return wins[-1] if wins else None
 
     def open_tab():
-        seen['grab'] = root.grab_current() is not None
+        seen['grab'] = bool(_grab_name(root))
         _select_webcam(app)
+        # timed from here, so the start's delay and the watch get their
+        # turn however late this ran
+        jobs.append(root.after(gui.CAM_AUTOSTART_DELAY_MS
+                               + gui.CAM_SPLASH_POLL_MS + 200, probe))
 
     def probe():
         win = dialog()
@@ -415,7 +455,11 @@ def _through_the_preflight(root, app, button, probe_ms=1000):
             seen['opens'] = list(_opens())
             seen['previewing'] = app.cam_previewing
             seen['blocker'] = app._cam_autostart_blocker()
+            seen['quiet'] = app._cam_sldea_holds_camera()
             seen['splash'] = app.cam_splash
+            seen['armed'] = bool(
+                getattr(app, '_cam_resume_pending', False)
+                or getattr(app, '_cam_watch_job', None) is not None)
             if win is not None:
                 start, _adjust, cancel = [
                     b for f in win.winfo_children()
@@ -428,7 +472,7 @@ def _through_the_preflight(root, app, button, probe_ms=1000):
             if win is not None and win.winfo_exists():
                 win.destroy()           # never leave sldea_run waiting
 
-    jobs = [root.after(200, open_tab), root.after(probe_ms, probe)]
+    jobs.append(root.after(200, open_tab))
     try:
         app.sldea_run()
     finally:
@@ -647,11 +691,14 @@ def test_a_timed_capture_ending_resumes_the_preview_once():
 def test_an_sldea_run_ending_resumes_the_preview_once():
     """#393 through the real start path. The operator leaves the tab to
     press Run, opens the Webcam tab again from inside the camera
-    pre-flight (its grab holds the start off), and presses Start there:
-    the run holds it off until it ends, and then the preview starts once,
-    with no dialog. With Cancel instead, the camera is free at once and
-    the preview starts then."""
+    pre-flight (the run's start already holds the camera, and the dialog
+    holds the grab), and presses Start there: the run holds the start off
+    until it ends, and then the preview starts once, with no dialog. With
+    Cancel instead, the camera is free at once and the preview starts
+    then."""
     for button in ('start', 'cancel'):
+        root = app = None
+        _reap()                 # the last case's Tk objects, on this thread
         with _Patched(yes=True) as p, _CameraWork():
             root, app = _app()
             if root is None:
@@ -667,10 +714,11 @@ def test_an_sldea_run_ending_resumes_the_preview_once():
                 if not seen.get('grab'):
                     print("   (skipped: this display gives no grab)")
                     return
-                # inside the pre-flight: held off, and no open
+                # inside the pre-flight: no open, though a start is owed
                 assert seen['opens'] == [('open', 0)], (button, seen)
                 assert not seen['previewing'], (button, seen)
-                assert seen['splash'][1] == gui.CAM_OFF_DIALOG, (button, seen)
+                assert seen['armed'], (button, seen)
+                assert seen['splash'][1] == gui.CAM_OFF_SLDEA, (button, seen)
                 if button == 'start':
                     assert app._sldea_running, (p.mb.calls, app.sldea_lines)
                     _pump(root, WATCH)                # into the run
@@ -800,7 +848,12 @@ def test_the_operators_stop_is_not_undone_when_a_blocker_clears():
 def test_a_hold_off_that_clears_off_the_tab_waits_for_the_next_visit():
     """The resume is for the tab on screen: a run that ends while the
     operator is on another tab starts nothing, and the next visit starts
-    the preview the usual way."""
+    the preview the usual way. A regression guard only: main had no
+    resume at all, so this passes there too. Four guards keep the resume
+    on the shown tab (the watch's tab check and _cam_autostart's, from
+    #385; _cam_resume_if_clear's and the leave-tab clear, from #393), and
+    it fails only with all four removed. The run ends just as the
+    operator leaves, so the watch armed on the tab still fires once."""
     with _Patched() as p:
         root, app = _app()
         if root is None:
@@ -810,7 +863,6 @@ def test_a_hold_off_that_clears_off_the_tab_waits_for_the_next_visit():
             _select_webcam(app)
             _pump(root, WATCH)
             app.notebook.select(app.other_tab)
-            _pump(root, 0.1)
             app._sldea_running = False                # it ends off the tab
             _pump(root, WATCH)
             assert _opens() == [] and not app.cam_previewing, _FakeCam.log
@@ -820,6 +872,140 @@ def test_a_hold_off_that_clears_off_the_tab_waits_for_the_next_visit():
             assert p.mb.calls == [], p.mb.calls
         finally:
             _close(root, app)
+
+
+def test_a_window_tk_made_itself_holds_the_start_off_then_lets_it_run():
+    """A message box and the folder chooser on X11, and a combobox dropdown
+    on every platform, are windows Tk makes itself; the Webcam tab has four
+    comboboxes. tkinter's grab_current() raises KeyError for such a window,
+    so while one held the grab the reason watch died: the preview never
+    came back, and the splash kept naming a blocker that was gone (#393
+    review). The grab is now read by its Tcl name. Here one of them takes
+    the grab while a start is owed: it holds the start off as "A dialog is
+    open", the watch keeps going, and once it lets go the preview starts,
+    once."""
+    for kind in ('message box', 'combobox dropdown'):
+        with _Patched() as p:
+            root, app = _app()
+            if root is None:
+                return
+            try:
+                app._bg_busy.add('camera-ctrl')       # held off on arrival
+                _select_webcam(app)
+                _pump(root, WATCH)
+                assert _opens() == [] and app._cam_resume_pending, kind
+                # Tk's own window takes the grab
+                if kind == 'message box':
+                    root.tk.eval('toplevel .__tk__messagebox')
+                    root.tk.eval('grab set .__tk__messagebox')
+                else:
+                    root.tk.call('ttk::combobox::Post', app.cam_combo._w)
+                _pump(root, 0.2)
+                if not _grab_name(root):
+                    print(f"   (skipped: the {kind} took no grab here)")
+                    return
+                app._bg_busy.discard('camera-ctrl')   # the first one ends
+                _pump(root, WATCH)
+                assert not app.cam_previewing and _opens() == [], (
+                    kind, _FakeCam.log)
+                assert app.cam_splash[1] == gui.CAM_OFF_DIALOG, (
+                    kind, app.cam_splash)
+                assert app._cam_watch_job is not None, (
+                    kind, "the reason watch died")
+                # Tk's window lets go
+                if kind == 'message box':
+                    root.tk.eval('destroy .__tk__messagebox')
+                else:
+                    root.tk.call('ttk::combobox::Unpost', app.cam_combo._w)
+                assert _pump_until(root, lambda: app.cam_previewing,
+                                   secs=3.0), (kind, app.cam_splash)
+                _pump(root, WATCH)
+                assert _opens() == [('open', 0)], (kind, _FakeCam.log)
+                assert p.mb.calls == [], (kind, p.mb.calls)
+            finally:
+                try:
+                    root.tk.eval('catch {destroy .__tk__messagebox}')
+                    root.tk.call('ttk::combobox::Unpost', app.cam_combo._w)
+                except Exception:
+                    pass
+                _close(root, app)
+
+
+def test_a_preflight_question_before_its_dialog_holds_the_start_off():
+    """sldea_run frees the camera, and then its pre-flight can ask a
+    question before its dialog exists: "No camera frame available" when
+    the camera gives none, and the picture-check question when that check
+    raises. On Windows those are native boxes that hold no Tk grab, and
+    _sldea_running is not set yet, so only the run's own start flag
+    (_sldea_starting, #393) holds the Webcam tab off while one is up.
+
+    No path in the app reaches the Webcam tab under such a box today, so
+    this drives the gap directly: Run is called with the Webcam tab shown
+    and its preview live, which leaves a start owed, and the stub box,
+    which holds no grab either, stays up for two reason-watch periods.
+    Nothing may open the camera meanwhile. Answered No, the run is
+    cancelled and the preview comes back once; answered Yes, the run
+    starts and holds it off until it ends."""
+    import sldea_profile
+    real_report = sldea_profile.preflight_report
+
+    def check_raises(*a, **kw):
+        raise RuntimeError("check failed")
+
+    for case, answer in (('no frame', False), ('check raises', True)):
+        root = app = None
+        _reap()                 # the last case's Tk objects, on this thread
+        with _Patched(yes=True) as p, _CameraWork() as work:
+            root, app = _app()
+            if root is None:
+                return
+            _sldea_ready(app)
+            seen = {}
+
+            def inside_the_box(kind, title):
+                if title != 'Camera pre-flight':
+                    return None
+                seen['grab'] = _grab_name(root)
+                _pump(root, 2 * WATCH)                # the box is up
+                seen['opens'] = list(_opens())
+                seen['previewing'] = app.cam_previewing
+                seen['armed'] = app._cam_resume_pending
+                seen['splash'] = app.cam_splash
+                return answer
+
+            p.mb.on_ask = inside_the_box
+            if case == 'no frame':
+                work.frame = None
+            else:
+                sldea_profile.preflight_report = check_raises
+            try:
+                _select_webcam(app)
+                assert _pump_until(root, lambda: app.cam_previewing)
+                app.sldea_run()            # Run, with the Webcam tab shown
+                assert seen, (case, p.mb.calls, app.sldea_lines)
+                assert seen['grab'] == '', (case, seen)
+                assert (seen['opens'] == [('open', 0)]
+                        and not seen['previewing']), (
+                    case, "the preview took the camera under the "
+                          "pre-flight's question", seen)
+                assert seen['armed'], (case, seen)
+                assert seen['splash'][1] == gui.CAM_OFF_SLDEA, (case, seen)
+                if answer:
+                    assert app._sldea_running, (case, app.sldea_lines)
+                    _pump(root, WATCH)
+                    assert not app.cam_previewing, case
+                    app._sldea_finished()             # the run ends
+                else:
+                    assert not app._sldea_running, case
+                assert _pump_until(root, lambda: app.cam_previewing,
+                                   secs=3.0), (case, app.cam_splash)
+                _pump(root, WATCH)
+                # sldea_run closed the preview's camera: one new open
+                assert _opens() == [('open', 0)] * 2, (case, _FakeCam.log)
+                assert not _camera_boxes(p), (case, p.mb.calls)
+            finally:
+                sldea_profile.preflight_report = real_report
+                _close(root, app)
 
 
 def test_a_capture_or_adjustment_holds_the_start_off_with_no_dialog():
@@ -961,7 +1147,12 @@ def test_every_stop_path_gets_the_splash():
         ('SLDEA run start', G.sldea_run, gui.CAM_OFF_SLDEA),
     )
     for name, press, reason in cases:
-        with _Patched() as p, _CameraWork() as work:
+        root = app = None
+        _reap()                 # the last case's Tk objects, on this thread
+        with _Patched(yes=True) as p, _CameraWork() as work:
+            # the reason on screen must be the one the stop path's own
+            # queued redraw put there, so the watch stays out of the way
+            gui.CAM_SPLASH_POLL_MS = 5000
             root, app = _app()
             if root is None:
                 return
@@ -982,6 +1173,8 @@ def test_every_stop_path_gets_the_splash():
                     assert app.cam_previewing, name
                 press(app)
                 _pump(root, 0.2)
+                if press is G.sldea_run:
+                    assert app._sldea_running, (p.mb.calls, app.sldea_lines)
                 assert not app.cam_previewing, name
                 taken = app.cam_last_frame_at.strftime('%H:%M:%S')
                 assert app.cam_splash == (gui.CAM_SPLASH_OFF, reason,
@@ -992,7 +1185,12 @@ def test_every_stop_path_gets_the_splash():
                 r, g, b = app.cam_splash_img.getpixel((2, 2))
                 want = round(_FakeCam.level * gui.CAM_SPLASH_DIM)
                 assert abs(r - want) <= 2 and r == g == b, (name, r, want)
-                assert p.mb.calls == [], (name, p.mb.calls)
+                if press is G.sldea_run:
+                    # its questions about empty boxes are answered Yes;
+                    # the Webcam side must not have shown a box
+                    assert not _camera_boxes(p), (name, p.mb.calls)
+                else:
+                    assert p.mb.calls == [], (name, p.mb.calls)
                 # let the work end, so no worker outlives the window
                 work.release()
                 if press is G.sldea_run:
@@ -1135,51 +1333,65 @@ def test_the_quiet_check_agrees_with_cam_owned_by_sldea():
     """_cam_sldea_holds_camera is _cam_owned_by_sldea without the box; if
     the two ever disagree, the tab-click start could take a run's camera.
 
-    Agreeing is not enough: both missed the same state, which #385's
+    Agreeing is not enough: both once missed the same state, which #385's
     review found. The real sldea_run closes the preview's camera for the
-    run before its camera pre-flight dialog, and sets _sldea_running only
-    once the operator presses Start there, so during the pre-flight
-    neither check sees the run. The second half drives the real start
-    path into the real pre-flight, opens the Webcam tab from inside it (a
-    grab holds the pointer, not the keyboard), and requires the tab-click
-    start to stay off the camera. That half fails on #385's code before
-    the review fix (58c8ece), which had only the two flag checks."""
+    run before its camera pre-flight, and sets _sldea_running only once
+    the operator presses Start there. So the first half drives the real
+    start path into the real pre-flight dialog, opens the Webcam tab from
+    inside it (a grab holds the pointer, not the keyboard), and requires
+    the tab-click start to stay off the camera, and the run's own check
+    to see the run there (_sldea_starting, #393). That half fails on
+    #385's code before its review fix (58c8ece), which had neither the
+    grab check nor the flag. The second half checks that the two agree,
+    and are right, on every state of the three flags they read."""
+    # the state between the flags: the run's own start path
+    with _Patched(yes=True) as p, _CameraWork():
+        root, app = _app()
+        if root is not None:
+            _sldea_ready(app)
+            try:
+                _select_webcam(app)
+                assert _pump_until(root, lambda: app.cam_previewing)
+                app.notebook.select(app.other_tab)    # to the SLDEA tab
+                _pump(root, 0.1)
+                seen = _through_the_preflight(root, app, 'cancel')
+                assert seen['dialog'], (p.mb.calls, app.sldea_lines)
+                if seen.get('grab'):
+                    assert (seen['opens'] == [('open', 0)]
+                            and not seen['previewing']), (
+                        "the tab-click start took the camera inside the "
+                        "SLDEA camera pre-flight", seen)
+                    assert seen['armed'], seen
+                    assert seen['blocker'] is not None, seen
+                    # the run's own check sees the run there, so (second
+                    # half) _cam_owned_by_sldea refuses the tab's buttons
+                    assert seen['quiet'], seen
+                else:
+                    print("   (start path skipped: this display gives no "
+                          "grab)")
+            finally:
+                _close(root, app)
+    # every state of the three flags the two checks read
+    root = app = None
     with _Patched() as p:
         app = G.__new__(G)
         recorders = (None,
                      types.SimpleNamespace(reader_alive=lambda: True),
                      types.SimpleNamespace(reader_alive=lambda: False))
         for running in (False, True):
-            for rec in recorders:
-                app._sldea_running = running
-                app._sldea_recorder = rec
-                p.mb.calls.clear()
-                quiet = app._cam_sldea_holds_camera()
-                assert p.mb.calls == [], "the quiet check opened a box"
-                loud = G._cam_owned_by_sldea(app)
-                assert quiet == loud, (running, rec, quiet, loud)
-    # the state between the flags: the run's own start path
-    with _Patched() as p, _CameraWork():
-        root, app = _app()
-        if root is None:
-            return
-        _sldea_ready(app)
-        try:
-            _select_webcam(app)
-            assert _pump_until(root, lambda: app.cam_previewing)
-            app.notebook.select(app.other_tab)        # to the SLDEA tab
-            _pump(root, 0.1)
-            seen = _through_the_preflight(root, app, 'cancel')
-            assert seen['dialog'], (p.mb.calls, app.sldea_lines)
-            if not seen.get('grab'):
-                print("   (skipped: this display gives no grab)")
-                return
-            assert seen['opens'] == [('open', 0)] and not seen['previewing'], (
-                "the tab-click start took the camera inside the SLDEA "
-                "camera pre-flight", seen)
-            assert seen['blocker'] is not None, seen
-        finally:
-            _close(root, app)
+            for starting in (False, True):
+                for rec in recorders:
+                    app._sldea_running = running
+                    app._sldea_starting = starting
+                    app._sldea_recorder = rec
+                    p.mb.calls.clear()
+                    quiet = app._cam_sldea_holds_camera()
+                    assert p.mb.calls == [], "the quiet check opened a box"
+                    loud = G._cam_owned_by_sldea(app)
+                    state = (running, starting, rec, quiet, loud)
+                    assert quiet == loud, state
+                    assert quiet == (running or starting or (
+                        rec is not None and rec.reader_alive())), state
 
 
 def test_the_whole_app_keeps_both_tab_bindings():
@@ -1226,6 +1438,8 @@ def _run():
             failed.append((fn.__name__, traceback.format_exc()))
             print(f"FAIL {fn.__name__}")
             continue
+        finally:
+            _reap()             # this test's Tk objects, on this thread
         print(f"ok  {fn.__name__}")
     if not failed:
         print(f"\n{len(fns)} tests passed")

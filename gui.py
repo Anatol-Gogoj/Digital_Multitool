@@ -2883,8 +2883,8 @@ LOGGING:
         # drafts rendered at 96 dpi): the presets first, then two columns,
         # then the run row and the log. What the operator SETS is in the
         # left column (staircase, output and device, watchdog / telemetry /
-        # video) and what they LOOK AT is in the right one (the kV preview
-        # and the camera panel #404 will fill). It fits a 1320 x 990 window
+        # video) and what they LOOK AT is in the right one (the kV preview,
+        # and later the camera panel #404 adds). It fits a 1320 x 990 window
         # with no scrolling (885 px at 96 dpi; the single column it replaced
         # was 1183 px), and the Run button stays in the lower third of the
         # tab, under everything it acts on.
@@ -3024,17 +3024,25 @@ LOGGING:
                                           "marker for its landing, kV and "
                                           "time)",
                               padding=6)
-        prev.pack(fill='x', padx=6, pady=(4, 6))
+        # The preview fills the right column, down to the bottom of the
+        # left one, which sets the row's height (owner decision 2026-10-08:
+        # no "planned" box for #404 until the panel itself lands). 230 px
+        # is only what it asks for, so it never makes the row taller or
+        # moves the run row. #404 puts its camera panel back by building
+        # it into `right` and packing it under this frame (fill='x',
+        # padx=6, pady=(0, 6)): pack serves every requested height before
+        # an expanding slave grows, so the preview then takes what is left,
+        # never less than its 230 px. _sldea_redraw reads the canvas's
+        # real size, so the plot follows either way.
+        prev.pack(fill='both', expand=True, padx=6, pady=(4, 6))
         self.sldea_canvas = tk.Canvas(prev, height=230, bg='white',
                                       highlightthickness=0)
-        self.sldea_canvas.pack(fill='x')
+        self.sldea_canvas.pack(fill='both', expand=True)
         self.sldea_canvas.bind('<Configure>', lambda _ev: self._sldea_redraw())
         self.sldea_canvas.bind('<Motion>', self._sldea_hover)
         self.sldea_canvas.bind('<Leave>',
                                lambda _ev: self.sldea_canvas.delete('hover'))
         self._sldea_marks = []
-        self._sldea_camera_placeholder(right).pack(anchor='nw', padx=6,
-                                                   pady=(0, 6))
 
         outf = ttk.LabelFrame(left, text="Output & Measurement", padding=8)
         outf.pack(fill='x', padx=6, pady=(0, 6))
@@ -3353,24 +3361,6 @@ LOGGING:
             w.bind('<Enter>', lambda _ev: self._sldea_cam_line_refresh(),
                    add='+')
         self._sldea_cam_line_refresh()
-
-    def _sldea_camera_placeholder(self, parent):
-        """Room for the planned camera panel (#404): a labelled frame of the
-        size it will take, holding no control, so the layout (#403) is
-        measured with the panel in it. #404 replaces it with the panel.
-        Paul Tol pale grey for the picture area, black words."""
-        cam = ttk.LabelFrame(parent, text="Camera panel (planned, #404)",
-                             padding=6)
-        pic = tk.Canvas(cam, width=320, height=240, bg='#DDDDDD',
-                        highlightthickness=0)
-        pic.pack()
-        pic.create_text(160, 120, fill='#000000', justify='center',
-                        text="live preview\nwith the focus score\n(#404)")
-        tk.Label(cam, fg='#000000',
-                 text="Auto-set camera  |  exposure, gain  |  "
-                      "More camera settings...").pack(anchor='w',
-                                                       pady=(6, 0))
-        return cam
 
     def _sldea_build_run_row(self, runf, column):
         """The run row in `runf`, then the background job's line and the

@@ -12,11 +12,13 @@ V/um, measured with the film mounted and prestretched (owner decision
   film's number in it.
 * At Run it is checked the way the concentration is, before the worker
   exists and so before anything drives the HV: a positive number, or
-  blank after a yes/no question whose default is No. A number that is
-  not one is refused with nothing started.
-* What reaches setup.txt, through the REAL worker: the number with its
-  unit, or '(not specified)' after a Yes, and it reads back as t0 through
-  the one reader whatever codec the PC's locale wrote it in.
+  blank after a yes/no question whose default is No. Anything the plot's
+  reader could not read back is refused with nothing started, and a
+  number outside the usual range is asked about, default No (review
+  2026-10-07).
+* What reaches setup.txt, through the REAL worker: the number with 'um',
+  or '(not specified)' after a Yes, and it reads back as t0 through the
+  one reader whatever codec the PC's locale wrote it in.
 
 The run-start cases drive the real sldea_run on test_sldea_interlock's
 stub app: its fake signal generator records every write, and its
@@ -41,6 +43,7 @@ import sldea_profile as sprof  # noqa: E402
 import test_sldea_interlock as T  # noqa: E402
 
 NO_T0 = 'No film thickness specified'
+ODD_T0 = 'Film thickness looks unusual'
 UM = 'µm'
 
 
@@ -104,8 +107,8 @@ def test_yes_starts_without_it_and_setup_txt_says_not_specified():
 def test_a_typed_thickness_is_recorded_and_reads_back_as_t0():
     """No question, the number to the worker by keyword, and a setup.txt
     line that reads back as t0. The worker writes setup.txt with the
-    locale's codec, so on a cp1252 PC the micro sign comes back as U+FFFD
-    through every reader here, and t0 must survive that too."""
+    locale's codec, so the line is ASCII, 'um' (owner decision
+    2026-10-07): the same bytes on every PC, cp1252 here included."""
     for dry in (True, False):
         mb = T._MB(T.LIVE_OK)
         with tempfile.TemporaryDirectory() as tmp, T._patched(mb):
@@ -116,15 +119,19 @@ def test_a_typed_thickness_is_recorded_and_reads_back_as_t0():
             assert NO_T0 not in mb.titles(), mb.calls
             assert app.worker_kw['film_thickness_um'] == '47.5'
             recorded = se.film_thickness_of(os.path.join(tmp, 'RUN'))
-            assert recorded in (f'47.5 {UM}', '47.5 \ufffdm'), recorded
+            assert recorded == '47.5 um', recorded
             assert sprof.film_thickness_um(recorded) == 47.5
             app.root.run_pending()
 
 
 def test_a_thickness_that_is_not_a_positive_number_is_refused_up_front():
     """Refused with an error, asked nothing, started nothing: the
-    concentration box's rule, and a typed unit is not a number."""
-    for bad in ('abc', '0', '-5', 'nan', '50 um', '5,0'):
+    concentration box's rule, and a typed unit is not a number. Nor is
+    anything the plot's reader cannot read back, though float() takes it
+    (review 2026-10-07): underscores, fullwidth and Arabic-Indic digits."""
+    for bad in ('abc', '0', '-5', 'nan', '50 um', '5,0', '1_000',
+                chr(0xFF15) + chr(0xFF10), chr(0x0665) + chr(0x0660),
+                '1e999'):
         mb = T._MB()                          # any question at all fails
         with tempfile.TemporaryDirectory() as tmp, T._patched(mb):
             app = _app(tmp, bad)
@@ -136,6 +143,47 @@ def test_a_thickness_that_is_not_a_positive_number_is_refused_up_front():
             assert mb.titles('askyesno') == [], mb.calls
             _not_started(app)
             assert app.events == [], app.events
+
+
+def test_an_unusual_thickness_is_asked_about_before_anything_runs():
+    """Review 2026-10-07: a thickness outside 5 to 2000 um, where a value
+    typed in mm or nm lands, asks before the run starts, default No. No
+    stops it before the worker, the pre-flight and the signal generator;
+    Yes runs with the number as typed. Inside the range, bounds included,
+    nothing is asked."""
+    for typed, answer in (('0.05', False), ('2500', False),
+                          ('0.05', True)):
+        for dry in ((True, False) if not answer else (True,)):
+            mb = T._MB(dict(T.LIVE_OK, **{ODD_T0: answer}))
+            with tempfile.TemporaryDirectory() as tmp, T._patched(mb):
+                app = _app(tmp, typed, dry=dry, real_worker=answer)
+                app.sldea_run()
+                want = ([] if dry else ['No current monitoring',
+                                        'Energize HV?']) + [ODD_T0]
+                assert mb.titles('askyesno') == want, (typed, mb.calls)
+                [(_k, _t, msg, kw)] = [c for c in mb.calls
+                                       if c[1] == ODD_T0]
+                assert kw.get('default') == 'no', kw
+                assert f'{typed} {UM}' in msg and 'in mm' in msg, msg
+                if not answer:
+                    _not_started(app)
+                    assert any(l.endswith('outside the usual range')
+                               for l in app.lines), app.lines
+                    continue
+                assert app.worker_done.wait(30), app.lines
+                T._assert_clean_run(app)
+                assert app.worker_kw['film_thickness_um'] == typed
+                assert se.film_thickness_of(
+                    os.path.join(tmp, 'RUN')) == f'{typed} um'
+                app.root.run_pending()
+    for typed in ('5', '50', '2000'):
+        mb = T._MB()                          # any question at all fails
+        with tempfile.TemporaryDirectory() as tmp, T._patched(mb):
+            app = _app(tmp, typed)
+            app.sldea_run()
+            assert app.worker_done.wait(5), (typed, app.lines)
+            assert mb.calls == [], (typed, mb.calls)
+            assert app.worker_kw['film_thickness_um'] == typed
 
 
 def test_a_tab_with_no_thickness_box_asks_nothing_and_writes_no_line():
@@ -197,7 +245,7 @@ def test_the_box_sits_under_concentration_and_a_preset_carries_it():
         assert int(trek[0].grid_info()['row']) > int(bi['row'])
         [tip] = [t for w, t in tips if w is box]
         assert 'MOUNTED AND PRESTRETCHED' in tip, tip
-        assert f'Film thickness: 50 {UM}' in tip, tip
+        assert 'Film thickness: 50 um' in tip, tip
         assert box.get() == ''
         box.insert(0, '47.5')
         snap = app._sldea_collect_preset()

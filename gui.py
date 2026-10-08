@@ -2996,7 +2996,7 @@ LOGGING:
                     "frame, the way the device is tested. That is t0, the "
                     "thickness the plot window's field axis divides the "
                     "voltage by (V/µm), so a stretch ratio is not needed.\n"
-                    "Written to setup.txt as 'Film thickness: 50 µm'. "
+                    "Written to setup.txt as 'Film thickness: 50 um'. "
                     "Optional, but the run will ask before starting without "
                     "it: a run with no thickness cannot be plotted against "
                     "the field.")
@@ -4033,14 +4033,17 @@ LOGGING:
             # drives the HV: a positive number, or blank after a question.
             # '' records "(not specified)". None (no such box: a stripped-
             # down tab) asks nothing and writes no line, as a run from
-            # before the box did.
+            # before the box did. A number outside the usual range asks
+            # too, default No: a thickness typed in mm or nm lands there
+            # (sldea_profile.FILM_THICKNESS_PLAUSIBLE_UM).
             try:
                 film_thickness_um = self.sldea_vars['thick_um'].get().strip()
             except KeyError:
                 film_thickness_um = None
             if film_thickness_um:
                 try:
-                    sldea_profile.parse_film_thickness_um(film_thickness_um)
+                    t0_um = sldea_profile.parse_film_thickness_um(
+                        film_thickness_um)
                 except ValueError:
                     messagebox.showerror(
                         "SLDEA",
@@ -4048,6 +4051,20 @@ LOGGING:
                         f"'{film_thickness_um}' is not one.\n\nFix it, or "
                         f"clear the box if you do not want to record a "
                         f"film thickness for this run.")
+                    return
+                lo_um, hi_um = sldea_profile.FILM_THICKNESS_PLAUSIBLE_UM
+                if (not sldea_profile.film_thickness_plausible(t0_um)
+                        and not messagebox.askyesno(
+                            "Film thickness looks unusual",
+                            f"Film thickness {t0_um:g} µm is outside "
+                            f"{lo_um:g} to {hi_um:g} µm, where prestretched "
+                            f"films usually are. A thickness typed in mm "
+                            f"(0.05 for 50 µm) or in nm lands out here.\n\n"
+                            f"Start the run with {t0_um:g} µm?",
+                            default='no')):
+                    self._sldea_log(
+                        "run cancelled — film thickness outside the usual "
+                        "range")
                     return
             elif film_thickness_um is not None and not messagebox.askyesno(
                     "No film thickness specified",

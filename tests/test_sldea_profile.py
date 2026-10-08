@@ -576,14 +576,62 @@ def test_parse_film_thickness_um_accepts_only_a_positive_number():
     assert parse_film_thickness_um('50') == 50.0
     assert parse_film_thickness_um(' 47.5 ') == 47.5
     assert parse_film_thickness_um(120) == 120.0
+    for typed, want in (('50.', 50.0), ('.5', 0.5), ('+50', 50.0),
+                        ('5e1', 50.0)):
+        assert parse_film_thickness_um(typed) == want, typed
+    # what float() takes and the plot's reader does not (review
+    # 2026-10-07): underscores, fullwidth and Arabic-Indic digits
+    fullwidth = chr(0xFF15) + chr(0xFF10)              # fifty, fullwidth
+    arabic_indic = chr(0x0665) + chr(0x0660)            # fifty, Arabic-Indic
     for junk in ('', '   ', None, 'abc', '50 um', '50µm', '5,0', '0',
-                 '-1', 'nan', 'inf', '-inf'):
+                 '-1', 'nan', 'inf', '-inf', '1_000', fullwidth,
+                 arabic_indic, '1e999', '5 0', '0x32'):
         try:
             parse_film_thickness_um(junk)
         except ValueError:
             pass
         else:
             raise AssertionError(f"{junk!r} was accepted")
+
+
+def test_the_box_accepts_exactly_what_the_plot_reads_back():
+    """`#398`, review 2026-10-07: the Run check and the plot's reader share
+    one number pattern, so a value the box accepts is one the field axis
+    can read from the line setup_text writes, and a value it refuses is
+    one the reader would have left off as 'not a thickness'."""
+    from sldea_profile import (SldeaProfile, film_thickness_um,
+                               parse_film_thickness_um)
+    p = SldeaProfile(start_kv=0, end_kv=4, step_kv=2, ramp_s=5, landing_s=60)
+    for typed in ('50', '47.5', '50.', '.5', '+50', '5e1', '1_000',
+                  chr(0xFF15) + chr(0xFF10), chr(0x0665) + chr(0x0660),
+                  '1e999', '0', 'abc'):
+        try:
+            box = parse_film_thickness_um(typed)
+        except ValueError:
+            box = None
+        txt = p.setup_text('r', 'ts', 1, 2, 3, True, electrode='CNT',
+                           film_thickness_um=typed)
+        [line] = [ln for ln in txt.splitlines()
+                  if ln.startswith('Film thickness:')]
+        back = film_thickness_um(line.split(':', 1)[1])
+        assert back == box, (typed, box, back)
+
+
+def test_an_unusual_thickness_is_one_the_run_asks_about():
+    """`#398`, review 2026-10-07: the bounds the run asks outside of. Every
+    film in range, typed in mm or in nm by mistake, lands outside it."""
+    from sldea_profile import (FILM_THICKNESS_PLAUSIBLE_UM,
+                               film_thickness_plausible)
+    lo, hi = FILM_THICKNESS_PLAUSIBLE_UM
+    assert (lo, hi) == (5.0, 2000.0)
+    for t0 in (lo, 10.0, 50.0, 500.0, hi):
+        assert film_thickness_plausible(t0), t0
+    for t0 in (0.05, 1.0, 4.9, 2001.0, 50000.0):
+        assert not film_thickness_plausible(t0), t0
+    assert hi / lo < 1000.0
+    for t0 in (lo, 50.0, hi):
+        assert not film_thickness_plausible(t0 / 1000.0), t0    # in mm
+        assert not film_thickness_plausible(t0 * 1000.0), t0    # in nm
 
 
 def test_a_recorded_film_thickness_reads_as_t0_in_um():
@@ -613,14 +661,14 @@ def test_setup_text_records_the_film_thickness_in_the_device_block():
                        concentration_ml='2.5', film_thickness_um='50')
     lines = txt.splitlines()
     i = lines.index('Ink concentration: 2.5 mL')
-    assert lines[i + 1] == 'Film thickness: 50 µm', lines
+    assert lines[i + 1] == 'Film thickness: 50 um', lines
     assert lines[i + 2] == '' and lines[i + 3] == '--- Snapshots ---'
     # a non-ink electrode has no concentration line; the thickness follows
     # the family line instead, since every film has a thickness
     cb = p.setup_text('r', 'ts', 1, 2, 3, True, electrode='carbon black',
                       film_thickness_um=' 47.5 ').splitlines()
     i = cb.index('Electrode family: carbon_black')
-    assert cb[i + 1] == 'Film thickness: 47.5 µm', cb
+    assert cb[i + 1] == 'Film thickness: 47.5 um', cb
     declined = p.setup_text('r', 'ts', 1, 2, 3, True, electrode='CNT',
                             film_thickness_um='')
     assert 'Film thickness: (not specified)' in declined.splitlines()
@@ -628,8 +676,13 @@ def test_setup_text_records_the_film_thickness_in_the_device_block():
                   p.setup_text('r', 'ts', 1, 2, 3, True)):
         assert 'Film thickness' not in older
     # the runner writes setup.txt with the LOCALE codec: UTF-8 on the
-    # Linux bench, cp1252 on a Windows PC. The line must survive both.
-    for codec in ('utf-8', 'cp1252'):
+    # Linux bench, cp1252 on most Windows PCs, cp932/cp936/cp949 on East
+    # Asian ones, which have no micro sign at all (owner decision
+    # 2026-10-07: 'um', as the file's 'uA'). ASCII survives every one.
+    for line in (lines[lines.index('Ink concentration: 2.5 mL') + 1],
+                 'Film thickness: (not specified)'):
+        line.encode('ascii')
+    for codec in ('ascii', 'utf-8', 'cp1252', 'cp932', 'cp936', 'cp949'):
         txt.encode(codec)
 
 

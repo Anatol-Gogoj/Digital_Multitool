@@ -12,7 +12,7 @@ Usage:
                          [--subplots both|first|second] [--cadence-guard]
                          [--aggregate] [--aggregate-exact]
                          [--group NAME=RUN[,RUN...]] [--aggregate-only]
-                         [--strain-pct] [--x kv|time] [--merge-legs]
+                         [--strain-pct] [--x kv|time|field] [--merge-legs]
                          [--no-arrows] [--format png|svg] [--dpi N]
     python sldea_plot.py --from-spec FILE.figspec.json [flags to override]
     python sldea_plot.py --gui [RUN ...]        # window (see below)
@@ -58,6 +58,26 @@ Modes:
               the order taken, so an up/down or repeated run no longer
               folds back over itself. Refuses --prepost/--mean/--aggregate
               (they pool per kV level) and --vs-area.
+    --x field draws every mode against the nominal electric field
+              E = V / t0 in V/um (2026-10-06, `#398`): V is the nominal
+              voltage the kV axis uses, t0 the film thickness the run's
+              setup.txt records ('Film thickness: 50 um', measured with
+              the film mounted and prestretched). Runs on films of
+              different thickness then share an axis. A run with no usable
+              thickness is left off, by name, with how to add the line to
+              setup.txt by hand; this tool never writes setup.txt. Each
+              run's t0 is fixed when the figure is made and stored in the
+              figspec ('film_thickness'), so --from-spec draws the same
+              figure after a setup.txt edit, and the tidy CSV carries t0
+              and the field on every row. The X marks sit at the breakdown
+              field. --aggregate pools runs on the field grid by
+              interpolation. --aggregate-exact pools exact levels as on
+              the kV axis, but two films of different thickness share a
+              field level only where V1/t1 = V2/t2 (0 V/um always, 25 and
+              50 um films on 0.5 kV steps every 20 V/um), so most levels
+              may hold one film's runs; the console and the caption say
+              how many levels hold more than one thickness. Refuses
+              --vs-area.
 
 Up/down and repeated runs:
     A run whose voltage also FELL (Up/down, or a Repeat that restarts
@@ -315,7 +335,31 @@ MODES = ('area', 'current', 'power')
 # axis on which an up/down or repeated run stops folding back over itself.
 # --vs-area stays its own flag: it predates this, and it is a current/
 # power-mode switch rather than a third general axis.
-X_AXES = ('kv', 'time')
+#
+# 'field' (2026-10-06, `#398`) is the nominal electric field E = V / t0 in
+# V/um, t0 being the film thickness the run's setup.txt records. It is
+# the kV axis RESCALED PER RUN: one run's t0 is one number, so its field is
+# its kV times a constant (prepare_runs puts that constant in
+# run['x_scale']), and everything that pools or places points by kV level
+# (pre/post, the mean line, the legs, the aggregate and its cap, the
+# breakdown marks) works on it unchanged.
+X_AXES = ('kv', 'time', 'field')
+
+# The x axes that are an electric FIELD, and so need each run's t0. One
+# today. The true field (`#398` item 4, deferred) would be the second:
+# E_true = (V / t0) * (A / A0) if the film keeps its volume and thins
+# evenly. It is NOT a constant per run, since A moves at every snapshot,
+# so it cannot ride run['x_scale']: it would take a branch of its own in
+# x_value and in the per-level drawing, beside the per-run t0 that
+# prepare_runs already resolves for every axis named here.
+FIELD_AXES = ('field',)
+
+# Each axis' label and the unit the captions and warnings quote positions
+# on it in. Read through x_label / x_unit, never typed at a call site.
+X_LABELS = {'kv': 'Nominal voltage (kV)',
+            'time': 'Elapsed time (min)',
+            'field': 'Nominal field  V / t₀  (V/µm)'}
+X_UNITS = {'kv': 'kV', 'time': 'min', 'field': 'V/µm'}
 
 # which panel(s) a figure renders (`#270`). 'first'/'second' name the same
 # panels --title-first/--title-second do, so one vocabulary covers both.
@@ -563,16 +607,41 @@ def x_value(r, opts):
     if opts.get('x') == 'time':
         t = r.get('elapsed_s')
         return None if t is None else t / 60.0
+    if opts.get('x') in FIELD_AXES:
+        # the row's field, put there by prepare_runs from its run's t0;
+        # None on a row with no kV, or one never prepared for this axis
+        return r.get('field')
     if opts.get('vs_area'):
         return r['area_mm2']
     return r['kv']
 
 
 def x_label(opts):
-    if opts.get('x') == 'time':
-        return 'Elapsed time (min)'
+    if opts.get('x') in ('time',) + FIELD_AXES:
+        return X_LABELS[opts['x']]
     return 'Active area (mm²)' if opts.get('vs_area') \
-        else 'Nominal voltage (kV)'
+        else X_LABELS['kv']
+
+
+def x_unit(opts):
+    """The unit a position on this figure's x axis is quoted in, in the
+    captions and the warnings: 'kV', or 'V/um' (micro sign) on the field
+    axis (`#398`). The aggregate's cap and its thinnest level are such
+    positions; on the field axis they are fields, not voltages."""
+    return X_UNITS.get(opts.get('x') or 'kv', X_UNITS['kv'])
+
+
+def nominal_field(kv, t0_um):
+    """E = V / t0 in V/um, from a nominal kV and a film t0_um micrometres
+    thick, or None when either is missing (`#398`). 1 kV across 1 um is
+    1000 V/um: 6 kV across a 50 um film is 120 V/um.
+
+    The same product prepare_runs puts on every row (kV times the run's
+    x_scale, 1000 / t0), so a value computed here and a row's x agree to
+    the last bit."""
+    if kv is None or not t0_um:
+        return None
+    return kv * (1000.0 / t0_um)
 
 
 def load_run(arg, warn):
@@ -1370,6 +1439,69 @@ def check_group_materials(value):
     return out, None
 
 
+def check_film_thickness(value):
+    """-> (the canonical film_thickness value, None) or (None, an error).
+
+    `film_thickness` (`#398`) records, per run, the film thickness t0 in
+    um that a FIELD-axis figure divided its voltages by: [[run directory,
+    t0], ...]. Like group_materials it is DERIVED, never typed: export
+    writes it from the runs it drew, and on the next render prepare_runs
+    takes a run's t0 from here before it looks at setup.txt, so
+    --from-spec redraws the same field axis after a setup.txt edit. A run
+    it does not name is read from setup.txt as usual.
+
+    Lists, not tuples, for check_groups' JSON reason, in the order given.
+    Each t0 must be a positive finite number (a bool is not one). A run
+    named twice, or an entry of any other shape, is refused rather than
+    repaired: a spec is a file a human can edit."""
+    if value is None:
+        return [], None
+    if isinstance(value, (str, bytes)) or not hasattr(value, '__iter__'):
+        return None, ('film thickness must be a list of (run directory, '
+                      'thickness in um) pairs')
+    out, seen = [], set()
+    for entry in value:
+        if (isinstance(entry, (str, bytes))
+                or not hasattr(entry, '__iter__')):
+            return None, (f"film thickness entry {entry!r} is not a (run "
+                          f"directory, thickness in um) pair")
+        pair = list(entry)
+        if (len(pair) != 2 or not isinstance(pair[0], str)
+                or not pair[0].strip()):
+            return None, (f"film thickness entry {entry!r} must be a run "
+                          f"directory and a thickness in um")
+        t0 = pair[1]
+        try:
+            # float() first: math.isfinite on a JSON integer too large for
+            # a float raises OverflowError (a 400-digit thickness in a
+            # hand-edited spec, review 2026-10-07), and a spec must be
+            # refused, never crash the command line
+            t0 = (None if isinstance(t0, bool)
+                  or not isinstance(t0, (int, float)) else float(t0))
+        except OverflowError:
+            t0 = None
+        if t0 is None or not math.isfinite(t0) or t0 <= 0:
+            return None, (f"film thickness entry {entry!r}: the thickness "
+                          f"must be a positive number of um")
+        path = os.path.abspath(pair[0].strip())
+        key = group_key(path)
+        if key in seen:
+            return None, (f"{os.path.basename(path)} is given two film "
+                          f"thicknesses")
+        seen.add(key)
+        out.append([path, float(t0)])
+    return out, None
+
+
+def film_thickness_record(runs):
+    """-> the film_thickness value for a figure drawn from `runs`
+    (`#398`): [[run directory, t0], ...] in drawing order, for every run
+    that carries a t0. What export stores in a field-axis figure's
+    figspec, so it names exactly the runs on the figure."""
+    return [[os.path.abspath(r['dir']), float(r['t0_um'])]
+            for r in runs if r.get('t0_um')]
+
+
 def derive_group_materials(groups, runs=()):
     """For a grouping made on the COMMAND LINE: -> group_materials, from
     what each group's runs recorded in setup.txt (`#373`).
@@ -1602,7 +1734,11 @@ def aggregate_cap_kv(runs):
     spread spikes to ~15% through the transition before falling again as
     the runs re-agree on having collapsed -- the average of a mixture, not
     an average expansion."""
-    kvs = [k for k in (lowest_breakdown_kv(r) for r in runs)
+    # in the figure's x units (`#398`): each run's breakdown kV times its
+    # x_scale, which is 1.0 on the kV axis and 1000 / t0 on the field
+    # axis, where the lowest breakdown FIELD is what the mean must stop at
+    kvs = [k * r.get('x_scale', 1.0)
+           for r, k in ((r, lowest_breakdown_kv(r)) for r in runs)
            if k is not None]
     return min(kvs) if kvs else None
 
@@ -1649,14 +1785,22 @@ def run_level_curve(run, norm=False, pct=False, legs=False):
     first rising leg only. The aggregate pools one curve per run on a kV
     grid, and averaging a device's rising and falling visits to a level
     is the very blending the leg-split view exists to stop; the first
-    rise is the leg every single-sweep run in the pool also has."""
+    rise is the leg every single-sweep run in the pool also has.
+
+    `key` and `kv` are POSITIONS on the figure's x axis (`#398`): the
+    level's kV times the run's x_scale, which prepare_runs sets to 1.0
+    on the kV axis and to 1000 / t0 on the field axis. So the field
+    aggregate pools runs on a grid of fields, and two runs on films of
+    different thickness meet on it only by interpolation."""
     if norm and not run.get('a0'):
         return []
     out = []
     rows = first_rise_rows(run) if legs and multi_leg(run) else None
+    scale = run.get('x_scale', 1.0)
     for lv in levels(run, rows=rows):
         y = norm_y(lv['mean'], run['a0'], pct) if norm else lv['mean']
-        out.append({'key': round(lv['kv'], 3), 'kv': lv['kv'], 'y': y,
+        x = lv['kv'] * scale
+        out.append({'key': round(x, 3), 'kv': x, 'y': y,
                     'confirmed': lv['confirmed']})
     return out
 
@@ -1767,6 +1911,22 @@ def aggregate_thin_levels(ag):
     all."""
     full = aggregate_full_n(ag)
     return [l for l in ag if l['n_measured'] < full]
+
+
+def _levels_across_films(runs, ag, legs=True):
+    """How many of the aggregate's levels `ag` hold runs of MORE THAN ONE
+    film thickness (`#398`), read from each run's own level curve exactly
+    as aggregate_levels pooled it.
+
+    For an exact-pooled field aggregate: a level is a field, and two films
+    of different thickness share one only where V1/t1 = V2/t2, so this is
+    the number of levels whose n really mixes films. The rest count the
+    runs of one film."""
+    films = {}
+    for r in runs:
+        for p in run_level_curve(r, legs=legs):
+            films.setdefault(p['key'], set()).add(r.get('t0_um'))
+    return sum(1 for l in ag if len(films.get(l['kv'], ())) > 1)
 
 
 # ---------------------------------------------------------------------------
@@ -2009,6 +2169,8 @@ def default_panel_titles(opts, runs=()):
     lead = ('Areal strain from baseline area' if opts.get('strain_pct')
             else 'Normalized to baseline area')
     return {'first': ('Active area vs time' if opts.get('x') == 'time'
+                      else 'Active area vs field'
+                      if opts.get('x') in FIELD_AXES
                       else 'Active area vs voltage'),
             'second': f"{lead} ({a0txt})"}
 
@@ -2065,6 +2227,32 @@ def _time_axis_caption(runs):
     else:
         how = "no run carried a usable time"
     return f"X axis: elapsed time since each run started ({how})."
+
+
+# The caption's x-axis sentence on the kV axis, exactly as every area
+# figure has carried it.
+_KV_AXIS_CAPTION = ("X axis: nominal kV (measured_kV telemetry incomplete "
+                    "on all runs).")
+
+
+def _x_axis_caption(opts, runs=()):
+    """The caption's x-axis sentence: the kV axis' unchanged, or on the
+    field axis (`#398`) what the field is and what it is not. It is
+    NOMINAL, V / t0 with V the nominal kV and t0 the thickness measured
+    with the film mounted and prestretched, so it does not follow the
+    film thinning as it expands. One t0 shared by every run is named;
+    several are in the tidy CSV and the figspec, since a run's name and
+    its t0 on one line each would outgrow the caption."""
+    if opts.get('x') not in FIELD_AXES:
+        return _KV_AXIS_CAPTION
+    t0s = sorted({r['t0_um'] for r in runs if r.get('t0_um')})
+    which = (f"{t0s[0]:g} µm on every run" if len(t0s) == 1
+             else "per run in the tidy CSV and the figspec")
+    return ("X axis: nominal field E = V / t₀ in V/µm, V the nominal kV "
+            "(measured_kV telemetry incomplete on all runs) and t₀ the "
+            "film thickness in each run's setup.txt, measured mounted and "
+            f"prestretched ({which}). Nominal: it does not follow the film "
+            "thinning as it expands.")
 
 
 def _legs_caption(opts, point="one landing's post/pre mean"):
@@ -2217,7 +2405,8 @@ def _aggregate_caption(runs, ag, opts, cap):
             'Grid: runs interpolated onto the common levels, never '
             'extrapolated past a run\'s own range and never across a '
             'breakdown.')
-    stop = (f"Stops at {cap:g} kV, the first current-confirmed breakdown."
+    stop = (f"Stops at {cap:g} {x_unit(opts)}, the first current-confirmed "
+            f"breakdown."
             if cap is not None else
             "No current-confirmed breakdown among these runs, so the "
             "first-breakdown cap did not fire.")
@@ -2276,7 +2465,8 @@ def _warn_aggregate(runs, ag, opts, cap, warn, what='aggregate',
                  "'a+b' count on the figure, and " if labels else '')
         warn(f"{what}: {len(interp)} of {len(ag)} levels carry "
              f"interpolated contributions (thinnest measured support: "
-             f"{worst['kv']:g} kV, {worst['n_measured']} measured / "
+             f"{worst['kv']:g} {x_unit(opts)}, {worst['n_measured']} "
+             f"measured / "
              f"{worst['n_interpolated']} interpolated) -- {where}"
              f"--aggregate-exact pools only real readings")
     thin = [l for l in ag if l['n'] < n_runs]
@@ -2286,9 +2476,9 @@ def _warn_aggregate(runs, ag, opts, cap, warn, what='aggregate',
              f"past its own measured range); levels with n < 2 carry no "
              f"band at all")
     if cap is not None:
-        warn(f"{what}: capped at {cap:g} kV, the first current-confirmed "
-             f"breakdown -- past it the mean mixes intact and collapsed "
-             f"devices, which is not a physical quantity")
+        warn(f"{what}: capped at {cap:g} {x_unit(opts)}, the first "
+             f"current-confirmed breakdown -- past it the mean mixes intact "
+             f"and collapsed devices, which is not a physical quantity")
     else:
         advis = [r['name'] for r in runs if r.get('advis')]
         extra = (f" {len(advis)} run(s) carry a breakdown ADVISORY "
@@ -2542,8 +2732,8 @@ def _group_caption(drawn, opts, hidden, materials=False, fits=None):
         bits.append(f"{name}: n = {full} over {len(ag)} levels"
                     + (f", {thin} short or interpolated"
                        if thin else ", all measured")
-                    + (f", capped at {cap:g} kV" if cap is not None
-                       else ''))
+                    + (f", capped at {cap:g} {x_unit(opts)}"
+                       if cap is not None else ''))
     # the cap sentence ONCE, not per group: it is the same sentence every
     # time it does not fire, and repeating it is what pushed the first
     # draft of this line off the right edge of the figure
@@ -2743,21 +2933,22 @@ LEG_STYLE_ROWS = (('rising leg', {'linestyle': '', 'marker': '^'}),
                   ('falling leg', {'linestyle': '', 'marker': 'v'}))
 
 
-def _leg_paths(ents, yf, trk, btrk):
+def _leg_paths(ents, yf, trk, btrk, scale=1.0):
     """Time-ordered landing entries (levels(by='landing')) -> one
     (xs, ys, traced, band_traced, markers) per leg.
 
     Every leg after the first starts its LINE at the previous leg's last
     point, so the drawn path turns at the peak the way the voltage did --
     but not its MARKER there (None): that point belongs to the leg that
-    reached it, and is already marked by it."""
+    reached it, and is already marked by it. `scale` is the run's
+    x_scale: each x is the landing's kV times it (`#398`)."""
     out, prev, grp = [], None, []
 
     def flush():
         pts = ([prev] if prev is not None else []) + grp
         marks = ([None] if prev is not None else []) + [
             LEG_MARKERS.get(e['leg'], 'o') for e in grp]
-        out.append(([e['kv'] for e in pts], [yf(e) for e in pts],
+        out.append(([e['kv'] * scale for e in pts], [yf(e) for e in pts],
                     [e[trk] for e in pts], [e[btrk] for e in pts], marks))
 
     for e in ents:
@@ -2772,7 +2963,7 @@ def _leg_paths(ents, yf, trk, btrk):
 
 
 def _draw_area_legs(axl, axr, run, lvs, opts, color, budget_bands, pct,
-                    sinks, arrows):
+                    sinks, arrows, scale=1.0):
     """draw_area for a run whose voltage also FELL: the same curves the
     per-level view draws -- pre/post and/or the mean -- but per LANDING,
     one line per leg, triangle-up on a rising leg and triangle-down on a
@@ -2782,7 +2973,7 @@ def _draw_area_legs(axl, axr, run, lvs, opts, color, budget_bands, pct,
     Travel paths go into `arrows` (panel -> [(xs, ys, color)]) for
     _direction_arrows, which runs once the scales are final: the mean
     line's when it is drawn, else the post-ramp line's -- one set per
-    run, not one per series."""
+    run, not one per series. `scale` is the run's x_scale (`#398`)."""
     xs_all, ysl_all, ysr_all = sinks
     a0 = run['a0']
     series = []
@@ -2808,12 +2999,13 @@ def _draw_area_legs(axl, axr, run, lvs, opts, color, budget_bands, pct,
             else:
                 def yf(e):
                     return norm_y(e[key], a0, pct)
-            for xs, ys, tr, btr, mks in _leg_paths(ents, yf, trk, btrk):
+            for xs, ys, tr, btr, mks in _leg_paths(ents, yf, trk, btrk,
+                                                   scale):
                 _series(ax, xs, ys, tr, color, ls, bands, btr,
                         pct=(pct and panel == 1), markers=mks)
                 if key == arrow_key:
                     arrows[panel].append((xs, ys, color))
-        xs_all += [e['kv'] for e in ents]
+        xs_all += [e['kv'] * scale for e in ents]
         ysl_all += [e[key] for e in ents]
         ysr_all += [norm_y(e[key], a0, pct) for e in ents]
 
@@ -2947,10 +3139,15 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
     # A single sweep takes neither branch below -- the else is the code
     # that always drew it, untouched -- so its figure cannot move.
     timeax = opts.get('x') == 'time'
+    # `#398`: on the field axis a level sits at its kV times the run's
+    # x_scale (1000 / t0); on the kV axis that factor is exactly 1.0, so
+    # every position there is the kV it always was, to the bit
+    fieldax = opts.get('x') in FIELD_AXES
     split_any = False
     arrow_paths = {0: [], 1: []}
     for run in ([] if hide_runs else runs):
         color = run['color']
+        k = run.get('x_scale', 1.0)
         split = opts.get('split_legs', True) and multi_leg(run)
         if timeax:
             if not _draw_area_time(axl, axr, run, opts, color, budget_bands,
@@ -2964,15 +3161,16 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                 continue
             split_any = True
             _draw_area_legs(axl, axr, run, lvs, opts, color, budget_bands,
-                            pct, (xs_all, ysl_all, ysr_all), arrow_paths)
+                            pct, (xs_all, ysl_all, ysr_all), arrow_paths,
+                            scale=k)
         else:
             lvs = levels(run)
             if not lvs:
                 continue
-        xs = [l['kv'] for l in lvs]
+        xs = [l['kv'] * k for l in lvs]
         if opts['prepost'] and not (timeax or split):
             for key, ls in (('post', '-'), ('pre', '--')):
-                pts = [(l['kv'], l[key], l['traced_' + key])
+                pts = [(l['kv'] * k, l[key], l['traced_' + key])
                        for l in lvs if l[key] is not None]
                 if pts:
                     px, py, pt = zip(*pts)
@@ -3061,7 +3259,8 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
             if unanchored:
                 warn(f"{run['name']}: confirmed breakdown row(s) "
                      f"{unanchored} have no reviewed area -- drawn as "
-                     f"dashed verticals at their kV (see current mode)")
+                     f"dashed verticals at their "
+                     f"{'field' if fieldax else 'kV'} (see current mode)")
         run_handles.append(Line2D([], [], color=color, label=run['name']))
 
     agg_caption = ''
@@ -3114,6 +3313,9 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
             warn(f"aggregate by group: {note}")
         label_ax = axl if axl is not None else axr
         drawn_groups = []
+        # exact-level pools of more than one film thickness on the field
+        # axis (`#398`): (what, t0s, levels holding more than one, levels)
+        mixed_films = []
         for i, (name, subset) in enumerate(
                 sets if grouped else [(None, runs)]):
             color, ls = styles[i] if grouped else (AGGREGATE_COLOR, '-')
@@ -3174,6 +3376,28 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                             what=(f"group {name!r}" if grouped
                                   else 'aggregate'),
                             labels=not grouped)
+            t0s = (sorted({r.get('t0_um') or 0.0 for r in subset})
+                   if fieldax and opts.get('aggregate_exact') else [])
+            if len(t0s) > 1:
+                # Pooled exactly, as on the kV axis, and SAID (owner
+                # decision 2026-10-07): a run's field levels are its kV
+                # levels over its own t0, so two films of different
+                # thickness meet only where V1/t1 = V2/t2. That is 0 V/um
+                # for every pair, and every 20 V/um for 25 and 50 um films
+                # on 0.5 kV steps, but most levels of most pairs hold one
+                # film's runs, which n alone does not show.
+                what = f"group {name!r}" if grouped else 'aggregate'
+                shared = _levels_across_films(
+                    subset, ag, opts.get('split_legs', True))
+                mixed_films.append((what, t0s, shared, len(ag)))
+                warn(f"{what}: exact-level pooling across films of "
+                     f"different thickness "
+                     f"({', '.join(f'{t:g}' for t in t0s)} µm). Two films "
+                     f"share a field level only where V1/t1 = V2/t2, so "
+                     f"{shared} of {len(ag)} levels hold more than one "
+                     f"thickness, and n at the others counts the runs of "
+                     f"one film. Without --aggregate-exact the runs are "
+                     f"interpolated onto a common field grid.")
         if drawn_groups and grouped:
             # WRAPPED to the width it really renders at (`#373`): seeded
             # group names are whole material names, and neither the
@@ -3200,6 +3424,18 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                  f"voltage -- only the first rising leg joins the mean, "
                  f"since averaging a device's rising and falling visits "
                  f"to a level is the blending the leg view exists to stop")
+        if mixed_films:
+            # on the figure too: the PNG travels without the console, and
+            # an n that counts one film at most levels is not the n a
+            # reader assumes (`#398`)
+            agg_caption += (
+                "\nExact levels across films of different thickness: two "
+                "films share a field level only where V1/t1 = V2/t2. "
+                + '; '.join(
+                    f"{what} ({', '.join(f'{t:g}' for t in t0s)} µm): "
+                    f"{shared} of {levels} levels hold more than one "
+                    f"thickness"
+                    for what, t0s, shared, levels in mixed_films) + ".")
 
     scale_notes = []
     # the headings both panels will carry, resolved in ONE place so the
@@ -3256,8 +3492,7 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
         cap = ("Per-run curves HIDDEN — this panel carries the aggregate "
                "means alone; every contributing run is still in the tidy "
                "CSV beside this figure, with its group.\n"
-               "X axis: nominal kV (measured_kV telemetry incomplete on "
-               "all runs).")
+               + _x_axis_caption(opts, runs))
     elif timeax:
         cap = ("Points = one per snapshot, joined in the order taken"
                + (" (triangle-up on a rising leg, triangle-down on a "
@@ -3296,8 +3531,7 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                + (", bands ±2% machine / ±1% traced" if budget_bands
                   else "") + ".\n"
                "X = current-confirmed breakdown (recomputed, 2026-08-05 "
-               "semantics).  X axis: nominal kV (measured_kV telemetry "
-               "incomplete on all runs)." + strain_note)
+               "semantics).  " + _x_axis_caption(opts, runs) + strain_note)
         if split_any:
             cap += _legs_caption(opts)
     if group_caption is not None:
@@ -3430,6 +3664,7 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
         return x_value(r, opts)
 
     timeax = opts.get('x') == 'time'
+    fieldax = opts.get('x') in FIELD_AXES        # `#398`
     split_any = False
     arrow_paths = []
     run_handles = []
@@ -3552,14 +3787,15 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
            # run is named here as it is on the area figure
            + (_estimator_caption(runs) if opts['vs_area'] else '')
            + (("\n" + _time_axis_caption(runs)) if timeax else "")
+           + (("\n" + _x_axis_caption(opts, runs)) if fieldax else "")
            + (_legs_caption(opts, 'one snapshot') if split_any else "")
            + _cadence_caption(cadence_notes)
            + _scale_caption(scale_notes))
-    # a fixed 5% strip, as ever -- unless the time axis or a leg-split run
-    # added caption lines, which would otherwise be clipped, or a line had
-    # to be wrapped to the figure's width (_place_caption)
+    # a fixed 5% strip, as ever, unless the time or field axis or a
+    # leg-split run added caption lines, which would otherwise be clipped,
+    # or a line had to be wrapped to the figure's width (_place_caption)
     bottom = 0.05
-    if timeax or split_any:
+    if timeax or fieldax or split_any:
         bottom = min(0.025 + 0.025 * (cap.count('\n') + 1), 0.30)
     _set_caption(fig, cap, bottom)
     return fig
@@ -3638,6 +3874,7 @@ def save_figure(runs, opts, path, warn=lambda m: None):
 # ---------------------------------------------------------------------------
 
 TIDY_COLS = ['run', 'group', 'snapshot', 'nominal_kV', 'elapsed_s',
+             'film_thickness_um', 'field_V_per_um',
              'phase', 'tag', 'leg', 'cycle',
              'area_mm2', 'convention', 'area_estimator', 'opencv_version',
              'numpy_version', 'ray_win_hi', 'disc_fit_r_max',
@@ -3705,7 +3942,15 @@ def write_tidy(runs, path, groups=()):
     for every figure whatever its options: the elapsed-time axis's x, and
     the grouping an up/down run is drawn by (see sweep_legs) -- a figure
     whose rising and falling curves cannot be told apart in its own CSV
-    is not reproducible from it."""
+    is not reproducible from it.
+
+    'film_thickness_um' and 'field_V_per_um' (2026-10-06, `#398`) are the
+    field axis' t0 and x: the thickness the run's fields were divided by,
+    and nominal_kV x 1000 / t0 on each row, so a field figure can be
+    redrawn from its CSV alone. Filled only when the figure IS a field
+    figure, from the t0 it was drawn with (prepare_runs: the figspec, or
+    setup.txt as read then), and blank on every other figure, which reads
+    no thickness at all. A row with no kV has no field either."""
     with open(path, 'w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
         w.writerow(TIDY_COLS)
@@ -3717,6 +3962,7 @@ def write_tidy(runs, path, groups=()):
             estimator = run.get('estimator') or 1
             libs = run.get('lib_versions') or {}
             limits = run.get('tracker_limits') or {}
+            t0 = run.get('t0_um')
             for r in run['rows']:
                 area = None if hide_areas else r['area_mm2']
                 conv = ('' if area is None
@@ -3737,10 +3983,13 @@ def write_tidy(runs, path, groups=()):
                 exp = (area / run['a0'] if area and run['a0'] else '')
                 pw = power_mw(r, med)
                 t = r.get('elapsed_s')
+                e = r.get('field') if t0 else None
                 w.writerow([
                     run['name'], group, r['snapshot'],
                     '' if r['kv'] is None else r['kv'],
                     '' if t is None else round(t, 3),
+                    '' if not t0 else t0,
+                    '' if e is None else round(e, 4),
                     r['phase'], r['tag'],
                     r.get('leg', ''),
                     '' if r.get('cycle') is None else r['cycle'],
@@ -3877,6 +4126,22 @@ def write_tidy(runs, path, groups=()):
 # column already says which run is in which line, and a line style is
 # drawing, not data.
 #
+# `x='field'` and `film_thickness` (`#398`) have been through. The axis
+# is a new NAME for an existing option, so it reached sites 2-4 by the
+# enum it joined, and its weight is in site 5: the kV axis rescaled per
+# run (run['x_scale']), at every place that turns a level's kV into a
+# position, the aggregate's grid key and its cap included, and in the
+# unit the captions and warnings quote positions in (x_unit). The
+# thickness is DERIVED like group_materials, but WHEN differs: its moment
+# is the figure being WRITTEN (export, from the runs prepare_runs
+# resolved), since a t0 belongs to a run and not to a grouping action. It
+# rides site 2 without a flag (_cli_opts inherits a spec's), is NOT
+# remembered by the window (site 4: a stale t0 would be a wrong number,
+# not an inert label, so the window keeps only a spec's, for the window
+# opened from it, and reads every other run's setup.txt at each redraw),
+# and DOES reach the tidy CSV (site 9), as the elapsed-time axis' x did:
+# a field figure's x is not recoverable from its kV column alone.
+#
 #   1. make_opts() below -- the keyword, its default, any validation.
 #      MISSING THIS IS LOUD: every other site raises TypeError.
 #
@@ -3949,7 +4214,8 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
               cadence_guard=False, aggregate=False,
               aggregate_exact=False, groups=(), aggregate_only=False,
               fmt=DEFAULT_FORMAT, dpi=None, strain_pct=False,
-              x='kv', split_legs=True, arrows=True, group_materials=()):
+              x='kv', split_legs=True, arrows=True, group_materials=(),
+              film_thickness=()):
     """-> (opts dict, error message or None).
 
     The CLI builds this from its flags and the window from its tick boxes,
@@ -3994,7 +4260,14 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
     leg, so neither changes one byte of it (the test suite proves that
     against the pre-change engine, and that --merge-legs --no-arrows
     reproduces the old up/down figure too). --x time refuses the options
-    that pool snapshots on the kV axis, and --vs-area, the other x switch."""
+    that pool snapshots on the kV axis, and --vs-area, the other x switch.
+
+    `x='field'` (`#398`) is the kV axis rescaled per run, so it keeps every
+    kV option and refuses only --vs-area. `film_thickness` travels with it:
+    the t0 each run's field was divided by when the figure was made
+    (check_film_thickness), written by export and read back from a spec,
+    never typed. Empty by default, which is a figure that reads every t0
+    from setup.txt."""
     if fmt not in FORMATS:
         return None, f"unknown --format {fmt} ({' | '.join(FORMATS)})"
     dpi, dpi_err = check_dpi(dpi)
@@ -4032,6 +4305,9 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
     mats = {n.casefold(): m for n, m in group_materials}
     group_materials = [[n, mats[n.casefold()]] for n, _m in groups
                        if n.casefold() in mats]
+    film_thickness, thick_err = check_film_thickness(film_thickness)
+    if thick_err:
+        return None, thick_err
     if aggregate_only and not aggregate:
         # REFUSED, not ignored, and this is the one combination where the
         # difference matters: "hide the runs" with nothing to replace
@@ -4044,13 +4320,15 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
     x = x or 'kv'
     if x not in X_AXES:
         return None, f"unknown --x {x} ({' | '.join(X_AXES)})"
+    if x != 'kv' and vs_area:
+        # REFUSED, for the reason `#268` refused the aggregate outside
+        # area mode: a flag that silently did nothing would re-render as
+        # a different figure on the next --from-spec
+        return None, (f'--x {x} and --vs-area both choose the x axis '
+                      f'-- pick one')
     if x == 'time':
-        # REFUSED, each of them, for the reason `#268` refused the
-        # aggregate outside area mode: a flag that silently did nothing
-        # would re-render as a different figure on the next --from-spec
-        if vs_area:
-            return None, ('--x time and --vs-area both choose the x axis '
-                          '-- pick one')
+        # ...and so is everything that pools snapshots by kV level, which
+        # the field axis keeps (it is the kV axis rescaled per run)
         if prepost or mean:
             return None, ('--prepost and --mean pool each level\'s '
                           'snapshots on the kV axis; with --x time every '
@@ -4072,6 +4350,7 @@ def make_opts(mode='area', vs_area=False, prepost=False, mean=False,
             'aggregate_exact': bool(aggregate_exact),
             'groups': groups,
             'group_materials': group_materials,
+            'film_thickness': film_thickness,
             'aggregate_only': bool(aggregate_only),
             'strain_pct': bool(strain_pct),
             'x': x, 'split_legs': bool(split_legs), 'arrows': bool(arrows),
@@ -4213,6 +4492,13 @@ def export(runs, opts, out_dir, stem, warn=lambda m: None):
     os.makedirs(out_dir, exist_ok=True)
     img, tidy = output_paths(out_dir, stem, opts['mode'],
                              opts.get('fmt', DEFAULT_FORMAT))
+    if opts.get('x') in FIELD_AXES:
+        # `#398`: the t0 each drawn run's field was divided by, fixed in
+        # the figspec at the moment the figure is written, from the runs
+        # themselves (prepare_runs resolved them), so the spec names
+        # exactly the runs on the figure and --from-spec redraws this
+        # field axis whatever setup.txt says by then
+        opts = dict(opts, film_thickness=film_thickness_record(runs))
     save_figure(runs, opts, img, warn)
     # the grouping the FIGURE was drawn from, never a second opinion
     # (`#313`, landing site 9): the CSV is the figure's evidence, and
@@ -4254,6 +4540,39 @@ def describe_output(img_path, opts):
     return f"{what}, {size} bytes"
 
 
+def _film_thickness(run, stored, warn):
+    """-> (t0 in um, where it came from, why there is none) for one run on
+    a field axis (`#398`).
+
+    `stored` is opts' film_thickness as {group_key(run dir): t0}. A run it
+    names keeps that t0 whatever its setup.txt says now, because the
+    figure being re-made was made with it, and a warning says so when the
+    two differ. Any other run's t0 is read from setup.txt now, through the
+    one reader (se.film_thickness_of) and sldea_profile.film_thickness_um.
+    (None, None, why) when there is none to use, `why` naming which of
+    the three reasons it is."""
+    recorded = se.film_thickness_of(run['dir'])
+    now = sprof.film_thickness_um(recorded)
+    key = group_key(run['dir'])
+    if key in stored:
+        t0 = stored[key]
+        if now != t0:
+            warn(f"{run['name']}: drawn at the film thickness this figure "
+                 f"was made with, {t0:g} µm (its figspec); its setup.txt "
+                 f"now records "
+                 + (repr(recorded) if recorded is not None
+                    else "no 'Film thickness:' line"))
+        return t0, 'figspec', ''
+    if now is not None:
+        return now, 'setup.txt', ''
+    if recorded is None:
+        return None, None, "no 'Film thickness:' line in its setup.txt"
+    if material_key(recorded) == material_key(NOT_SPECIFIED):
+        return None, None, "its setup.txt records it as (not specified)"
+    return None, None, (f"its setup.txt records {recorded!r}, which is not "
+                        f"a thickness in µm")
+
+
 def prepare_runs(args, opts, warn=lambda m: None, allow_suspect=False,
                  load=None, allow_old_estimator=False):
     """Resolve, load, era-guard, filter and colour the runs -> list.
@@ -4269,9 +4588,22 @@ def prepare_runs(args, opts, warn=lambda m: None, allow_suspect=False,
     re-reading each run's CSV (and recomputing its breakdown flags) that
     often made it feel broken, so it passes a cache -- the guards below
     still run every time, because which runs are plottable depends on the
-    mode."""
+    mode.
+
+    On a FIELD axis (`#398`) every run also needs its film thickness t0:
+    opts' film_thickness when it names the run (a figspec, so the figure
+    is the one that was made), else the run's setup.txt, read here at
+    every render. A run with none is left off, and one warning names
+    each such run and says how to add the line by hand. The t0 lands on
+    run['t0_um'] (with run['t0_src']), the factor from kV to the axis on
+    run['x_scale'], and each row's field on row['field'], which x_value
+    reads; on every other axis t0 is None and the factor 1.0."""
     load = load or load_run
     uses_areas = needs_areas(opts)
+    field = opts.get('x') in FIELD_AXES
+    stored = {group_key(d): t0
+              for d, t0 in (opts.get('film_thickness') or ())}
+    no_t0 = []
     runs = []
     for a in args:
         run = load(a, warn)
@@ -4283,6 +4615,9 @@ def prepare_runs(args, opts, warn=lambda m: None, allow_suspect=False,
         run['suspect_kept'] = False
         run['old_estimator_kept'] = False
         run['old_estimator_hidden'] = False
+        # ...nor a field axis' t0 into a kV figure (`#398`)
+        run['t0_um'] = run['t0_src'] = None
+        run['x_scale'] = 1.0
         if suspect_old_scale(run):
             if allow_suspect:
                 warn(f"{run['name']}: pre-{SCALE_FIX_DATE} areas "
@@ -4330,7 +4665,29 @@ def prepare_runs(args, opts, warn=lambda m: None, allow_suspect=False,
                      f"method (before 2026-10-02) -- run kept for "
                      f"{opts['mode']} mode (currents unaffected); area "
                      f"columns blanked in the tidy CSV")
+        if field:
+            t0, src, why = _film_thickness(run, stored, warn)
+            if t0 is None:
+                no_t0.append((run['name'], why))
+                continue
+            run['t0_um'], run['t0_src'] = t0, src
+            run['x_scale'] = 1000.0 / t0
+            for r in run['rows']:
+                r['field'] = (None if r['kv'] is None
+                              else r['kv'] * run['x_scale'])
         runs.append(run)
+    if no_t0:
+        # ONE warning naming every run, with the fix: the window shows it
+        # where the figure's other exclusions are shown, and the plot
+        # tools never write setup.txt themselves (`#398`)
+        warn(f"field axis: {len(no_t0)} run(s) left off, with no usable "
+             f"film thickness: "
+             + '; '.join(f"{name} ({why})" for name, why in no_t0)
+             + ". To plot a run against the field, add a line like "
+               "'Film thickness: 50 um' (its film's thickness in um, "
+               "measured mounted and prestretched) to that run's setup.txt "
+               "by hand, then plot again. This tool never writes "
+               "setup.txt.")
     if uses_areas:
         kept = []
         for run in runs:
@@ -4585,6 +4942,12 @@ def _cli_opts(flags, vals, base=None):
             if err:
                 return None, err
             groups.append(pair)
+    # `#398`: a spec's film thicknesses are inherited verbatim, and there
+    # is no flag for them. prepare_runs reads only the runs they do not
+    # name from setup.txt, which is what lets --from-spec redraw the same
+    # field axis after a setup.txt edit, and what reads the new runs when
+    # positional RUNs replace the spec's.
+    film_thickness = base.get('film_thickness', ())
 
     return make_opts(mode=val('--mode', 'mode', 'area'),
                      vs_area=on('--vs-area', 'vs_area'),
@@ -4606,6 +4969,7 @@ def _cli_opts(flags, vals, base=None):
                                         'aggregate_exact'),
                      groups=groups,
                      group_materials=group_materials,
+                     film_thickness=film_thickness,
                      aggregate_only=on('--aggregate-only',
                                        'aggregate_only'),
                      # `#314`. Both go through val() like any other named
@@ -4622,6 +4986,23 @@ def _cli_opts(flags, vals, base=None):
                      arrows=off('--no-arrows', 'arrows'),
                      fmt=val('--format', 'fmt', DEFAULT_FORMAT),
                      dpi=val('--dpi', 'dpi', DEFAULT_DPI))
+
+
+def _field_note(run):
+    """The tail of a run's console line on a field-axis figure (`#398`):
+    its t0 and where that came from, and the nominal field of its first
+    current-confirmed breakdown, E_b = V_b / t0 (first_breakdown_kv, the
+    first in time). '' for a run with no t0, which is every run on any
+    other axis. ASCII ('um'), as console report text stays."""
+    t0 = run.get('t0_um')
+    if not t0:
+        return ''
+    note = f", t0 {t0:g} um ({run.get('t0_src') or '?'})"
+    kv_b = first_breakdown_kv(run)
+    if kv_b is not None:
+        note += (f", first breakdown at {kv_b:g} kV = "
+                 f"{nominal_field(kv_b, t0):.4g} V/um")
+    return note
 
 
 def main(argv):
@@ -4712,7 +5093,7 @@ def main(argv):
         bd = (f"breakdown row(s) {sorted(run['flags'])}" if run['flags']
               else 'no confirmed breakdown')
         print(f"{run['name']}: {len(run['rows'])} rows, "
-              f"{n_traced} traced, {bd}")
+              f"{n_traced} traced, {bd}" + _field_note(run))
     if opts['mode'] == 'area' and len(runs) > 1:
         print('note: cross-run ABSOLUTE mm2 comparability needs the batch '
               'control round; the A/A0 panel is the safe comparison '

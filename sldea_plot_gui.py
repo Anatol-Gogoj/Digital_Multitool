@@ -1147,7 +1147,20 @@ DRAW_TIPS = {
         "since each run started (the scheduled time, or the wall clock "
         "where a run has none). Pre/post, the mean line, the aggregate "
         "and the area x axis all pool or place points by kV, so they "
-        "grey out on the time axis."),
+        "grey out on the time axis.\n\n"
+        "field is the NOMINAL electric field V / t₀ in V/µm, so runs on "
+        "films of different thickness share an axis: the same voltage, "
+        "over the film thickness t₀ each run's setup.txt records (its "
+        "'Film thickness:' line, measured with the film mounted and "
+        "prestretched). It does not follow the film thinning as it "
+        "expands. A run with no thickness recorded is left off, and the "
+        "messages below name it and say how to add the line to its "
+        "setup.txt by hand; this window never writes setup.txt, and reads "
+        "the line each time it redraws, so pick the run again after "
+        "adding it. With exact-level pooling, two films of different "
+        "thickness share a field level only where V1/t1 = V2/t2, so most "
+        "levels may hold one film's runs; the messages say how many hold "
+        "more than one."),
     'split_legs': (
         "For a run whose voltage also FELL (Up/down, or a Repeat that "
         "restarts lower): one line per leg, triangle-up points rising and "
@@ -1753,6 +1766,11 @@ class PlotWindow:
         # setup.txt, so a group's line style cannot move under it.
         self.group_materials = {}
         self._set_groups(o['groups'], o.get('group_materials'))
+        # `#398`: the film thicknesses a figspec stored ([[run dir, t0]]),
+        # only ever from the explicit options of a window opened from one
+        # (`--from-spec --gui`); never remembered between sessions, so a
+        # window opened afresh reads every t0 from setup.txt
+        self.film_thickness = list(o.get('film_thickness') or [])
         self.v_group_name = tk.StringVar(value='')
         self.v_subplots = tk.StringVar(value=o['subplots'])
         self.v_title_first = tk.StringVar(value=o['title_first'] or '')
@@ -2252,15 +2270,17 @@ class PlotWindow:
             variable=self.v_cadence, command=self.schedule)
         self.cb_cadence.pack(anchor=tk.W, padx=(18, 0))
         add_tooltip(self.cb_cadence, DRAW_TIPS['cadence_guard'])
-        # the x axis (2026-09-23). Radios, like Panels below: two fixed
-        # choices worth reading at once, on one row
+        # the x axis (2026-09-23). Radios, like Panels below: fixed
+        # choices worth reading at once, on one row. The field (`#398`)
+        # is the third: the nominal field V / t0 from each run's setup.txt
         xrow = ttk.Frame(df)
         xrow.pack(fill=tk.X, pady=(2, 0))
         lbl_x = ttk.Label(xrow, text="x axis:")
         lbl_x.pack(side=tk.LEFT)
         add_tooltip(lbl_x, DRAW_TIPS['x'])
         self.rb_x = {}
-        for name, text in (('kv', 'nominal kV'), ('time', 'elapsed time')):
+        for name, text in (('kv', 'nominal kV'), ('time', 'elapsed time'),
+                           ('field', 'field V/µm')):
             rb = ttk.Radiobutton(xrow, text=text, value=name,
                                  variable=self.v_x, command=self._toggled)
             rb.pack(side=tk.LEFT, padx=(6, 0))
@@ -3212,9 +3232,10 @@ class PlotWindow:
         live(self.cb_aggregate_only, area and agg)
         self.lbl_groups.config(text=self.group_summary())
         # --vs-area is meaningless in area mode (the x axis IS area there);
-        # the CLI refuses the combination, so the window does not offer it
-        # -- nor beside the time axis, which is the other x switch
-        live(self.cb_vs_area, not area and not timeax)
+        # the CLI refuses the combination, so the window does not offer it,
+        # nor beside the time or the field axis (`#398`), the other x
+        # switches
+        live(self.cb_vs_area, not area and self.v_x.get() == 'kv')
         # 'second' names a panel only area mode has
         live(self.rb_subplots['second'], area)
         # a heading only lands on a panel that RENDERS: --title and
@@ -3286,7 +3307,10 @@ class PlotWindow:
         kv = self.v_x.get() != 'time'
         return sp.make_opts(
             mode=self.v_mode.get(),
-            vs_area=self.v_vs_area.get() and not area and kv,
+            # ...and --vs-area beside the field axis too (`#398`), which
+            # keeps every other kV option: it is kV rescaled per run
+            vs_area=(self.v_vs_area.get() and not area
+                     and self.v_x.get() == 'kv'),
             prepost=self.v_prepost.get() and kv,
             mean=self.v_mean.get() and kv,
             x=self.v_x.get(), split_legs=self.v_split_legs.get(),
@@ -3318,6 +3342,11 @@ class PlotWindow:
             # its line style, carried beside the grouping so the figspec
             # and the options file store the pair together
             group_materials=self.group_material_list(),
+            # `#398`: the film thicknesses of the spec this window was
+            # opened from, if any, so its runs keep the t0 their figure
+            # was made with; every other run's is read from setup.txt by
+            # prepare_runs at each redraw. Export stores what was drawn.
+            film_thickness=self.film_thickness,
             # 'second' outside area mode is the one combination make_opts
             # refuses. Neutralised to the default exactly as vs_area is
             # above: an error message where the figure goes is not what a

@@ -2993,6 +2993,27 @@ LOGGING:
                        lambda _ev: self._sldea_conc_sync())
         electrode.bind('<KeyRelease>', lambda _ev: self._sldea_conc_sync())
         self._sldea_conc_sync()
+        # Film thickness (`#398`): t0 for the plot window's field axis,
+        # E = V / t0 in V/um. Measured with the film MOUNTED AND
+        # PRESTRETCHED (owner decision 2026-10-06), so the number is t0
+        # itself and no prestretch is asked for. Blank by default and
+        # never greyed: every film has a thickness, whatever the electrode.
+        # Row 5, under Concentration, because it describes the device too.
+        ttk.Label(outf, text="Film thickness (µm):").grid(row=5, column=0,
+                                                          sticky='e')
+        thick = ttk.Entry(outf, width=8)
+        thick.grid(row=5, column=1, sticky='w', padx=6)
+        add_tooltip(thick,
+                    "Thickness of the dielectric film in micrometres, "
+                    "measured with the film MOUNTED AND PRESTRETCHED on the "
+                    "frame, the way the device is tested. That is t0, the "
+                    "thickness the plot window's field axis divides the "
+                    "voltage by (V/µm), so a stretch ratio is not needed.\n"
+                    "Written to setup.txt as 'Film thickness: 50 um'. "
+                    "Optional, but the run will ask before starting without "
+                    "it: a run with no thickness cannot be plotted against "
+                    "the field.")
+        self.sldea_vars['thick_um'] = thick
         # Ticked by default (owner decision 2026-10-05): every run on file
         # with monitor readings read NEGATIVE kV with the box unticked and
         # no INVERTED line in setup.txt, i.e. the lab's Trek inverts. Ticked,
@@ -3009,14 +3030,16 @@ LOGGING:
                     "then drives a negative control so the HV output, and "
                     "the V_Out and I_Out monitors, read positive. Ticked by "
                     "default: the lab's Trek inverts. Untick it for an "
-                    "amplifier wired non-inverting.").grid(row=5, column=0,
+                    "amplifier wired non-inverting.").grid(row=6, column=0,
                                                   columnspan=3, sticky='w',
                                                   pady=(4, 0))
-        # row=5, BELOW the electrode+concentration pair: those two define
-        # the DEVICE and read as one flow (operator note 2026-08-08 — the
-        # checkbutton between them broke it); this is a DRIVE setting and
-        # comes after. History: it once overlapped the electrode row
-        # outright (`#231` moved the field in, `#262` un-stacked it).
+        # row=6, BELOW the electrode, concentration and film thickness:
+        # those define the DEVICE and read as one flow (operator note
+        # 2026-08-08: the checkbutton between them broke it); this is a
+        # DRIVE setting and comes after. History: it once overlapped the
+        # electrode row outright (`#231` moved the field in, `#262`
+        # un-stacked it), and sat on row 5 until the thickness took it
+        # (`#398`).
 
         # Breakdown watchdog (LIVE runs): deliberately slow-to-trip monitor
         # of the Trek I_Out on the scope; sustained overcurrent -> snapshot
@@ -4081,6 +4104,55 @@ LOGGING:
                     self._sldea_log(
                         "run cancelled — concentration not specified")
                     return
+            # Film thickness (`#398`), checked the way the concentration
+            # is, here, before the worker exists and so before anything
+            # drives the HV: a positive number, or blank after a question.
+            # '' records "(not specified)". None (no such box: a stripped-
+            # down tab) asks nothing and writes no line, as a run from
+            # before the box did. A number outside the usual range asks
+            # too, default No: a thickness typed in mm or nm lands there
+            # (sldea_profile.FILM_THICKNESS_PLAUSIBLE_UM).
+            try:
+                film_thickness_um = self.sldea_vars['thick_um'].get().strip()
+            except KeyError:
+                film_thickness_um = None
+            if film_thickness_um:
+                try:
+                    t0_um = sldea_profile.parse_film_thickness_um(
+                        film_thickness_um)
+                except ValueError:
+                    messagebox.showerror(
+                        "SLDEA",
+                        f"Film thickness (µm) must be a positive number — "
+                        f"'{film_thickness_um}' is not one.\n\nFix it, or "
+                        f"clear the box if you do not want to record a "
+                        f"film thickness for this run.")
+                    return
+                lo_um, hi_um = sldea_profile.FILM_THICKNESS_PLAUSIBLE_UM
+                if (not sldea_profile.film_thickness_plausible(t0_um)
+                        and not messagebox.askyesno(
+                            "Film thickness looks unusual",
+                            f"Film thickness {t0_um:g} µm is outside "
+                            f"{lo_um:g} to {hi_um:g} µm, where prestretched "
+                            f"films usually are. A thickness typed in mm "
+                            f"(0.05 for 50 µm) or in nm lands out here.\n\n"
+                            f"Start the run with {t0_um:g} µm?",
+                            default='no')):
+                    self._sldea_log(
+                        "run cancelled — film thickness outside the usual "
+                        "range")
+                    return
+            elif film_thickness_um is not None and not messagebox.askyesno(
+                    "No film thickness specified",
+                    "This run will not record the film thickness (the "
+                    "film measured mounted and prestretched, in µm).\n\n"
+                    "The plot window's field axis (V/µm) divides the "
+                    "voltage by it, so this run could only go on that axis "
+                    "after the line is added to its setup.txt by hand.\n\n"
+                    "Start the run without it?", default='no'):
+                self._sldea_log(
+                    "run cancelled — film thickness not specified")
+                return
             autoproc = self.sldea_autoproc.get()
             trek_sign = -1.0 if self.sldea_trek_inv.get() else 1.0
             # Breakdown watchdog (live only). Only claim it is armed when it
@@ -4191,7 +4263,8 @@ LOGGING:
                 kwargs=dict(cam_expected=cam_expected,
                             picture_override=picture_override,
                             vid_on=vid_on, vid_fps=vid_fps or 1.0,
-                            vid_detect=vid_detect),
+                            vid_detect=vid_detect,
+                            film_thickness_um=film_thickness_um),
                 daemon=True).start()
             self.root.after(100, self._sldea_animate_cursor)  # playhead
             # ...and opens with the run, once the worker is on its way:
@@ -4871,7 +4944,7 @@ LOGGING:
                       tel_hz=sldea_profile.TELEMETRY_MAX_HZ, electrode='',
                       concentration_ml=None, cam_expected=False,
                       picture_override='', vid_on=False, vid_fps=1.0,
-                      vid_detect=False):
+                      vid_detect=False, film_thickness_um=None):
         """Host-sequenced staircase runner (daemon thread; no Tk calls except
         via _sldea_log/_sldea_set_status/after). Drives the SG DC offset along
         p.kv_at(t), fires webcam+scope snapshots on schedule, writes the run
@@ -4883,7 +4956,11 @@ LOGGING:
         pre-flight's flat gate ('' for none); both come from
         _sldea_preflight_seen (decisions 12 to 14, 2026-10-03) and decide
         what the baseline frame may do to the run, see
-        sldea_profile.baseline_stop_reason."""
+        sldea_profile.baseline_stop_reason.
+
+        `film_thickness_um` is the film thickness box as sldea_run checked
+        it (`#398`): the number, '' when the operator declined, None with
+        no box. It only reaches setup.txt (sldea_profile.setup_text)."""
         import os
         import csv as _csv
         started = datetime.now()
@@ -4913,7 +4990,8 @@ LOGGING:
                     sgch, vch, ich, dry,
                     f"exposure {cam_exp}, gain {cam_gain}, WB off (manual)",
                     dea_diam_mm=diam_mm, electrode=electrode,
-                    concentration_ml=concentration_ml))
+                    concentration_ml=concentration_ml,
+                    film_thickness_um=film_thickness_um))
                 if trek_sign < 0:
                     sf.write("Trek control polarity: INVERTED (control = "
                              "-kV/gain; monitor readings logged as read)\n")

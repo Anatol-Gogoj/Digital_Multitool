@@ -5138,6 +5138,37 @@ def test_anchor_a0_note_reaches_the_csv():
                - np.pi * 8.0 ** 2) < 0.01, rows[0]['active_area_mm2']
 
 
+def test_the_runners_thickness_line_reads_back_whatever_the_locale():
+    """setup_text -> setup.txt -> film_thickness_of -> t0 (`#398`), with
+    the file written as the runner writes it on each kind of PC: UTF-8
+    on the Linux bench, cp1252 on most Windows PCs and cp932 on a
+    Japanese one, which has no micro sign at all. The runner writes
+    'um', so the line reads back the same in all three (owner decision
+    2026-10-07). A micro sign typed by hand still reads, including as
+    the U+FFFD a cp1252 save of it turns into. Here rather than in
+    test_sldea_profile.py, which runs without numpy."""
+    p = sldea_profile.SldeaProfile(start_kv=0, end_kv=4, step_kv=2,
+                                   ramp_s=5, landing_s=60)
+    d = tempfile.mkdtemp(prefix='sldea_thick_')
+    path = os.path.join(d, 'setup.txt')
+    try:
+        for codec in ('utf-8', 'cp1252', 'cp932'):
+            with open(path, 'w', encoding=codec) as f:
+                f.write(p.setup_text('r', 'ts', 1, 2, 3, True,
+                                     electrode='CNT',
+                                     film_thickness_um='50'))
+            assert se.film_thickness_of(d) == '50 um', codec
+            assert sldea_profile.film_thickness_um(
+                se.film_thickness_of(d)) == 50.0
+        with open(path, 'w', encoding='cp1252') as f:
+            f.write('Film thickness: 50 ' + chr(0xb5) + 'm\n')
+        assert se.film_thickness_of(d) == '50 ' + chr(0xfffd) + 'm'
+        assert sldea_profile.film_thickness_um(
+            se.film_thickness_of(d)) == 50.0
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _run():
     # Failures are collected, not fatal (`#280`): failing fast reported one
     # broken test in suites that had five. Tracebacks land after the count

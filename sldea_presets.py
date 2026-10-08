@@ -33,7 +33,9 @@ Each preset records the app version that wrote it. Fields have been
 moving (`#231`), so loading is tolerant in BOTH directions -- an unknown
 key is skipped, a key this preset does not carry leaves its widget alone
 -- and every skip is reported back to the caller so the GUI can say what
-it did not apply. A load never silently half-applies.
+it did not apply. A load never silently half-applies. The one exception
+is BLANK_WHEN_ABSENT (`#398`): the film thickness, which a preset older
+than its box loads as blank, because that is what such a preset recorded.
 
 Headless self-test: .venv/Scripts/python tests/test_sldea_presets.py
 """
@@ -64,7 +66,8 @@ TEXT_FIELDS = (
     # device under test. conc_ml is stored even when the electrode makes it
     # inapplicable: a preset is a snapshot of the BOXES, and whether the
     # box is greyed follows the electrode the preset loads (`#276`).
-    'diam_mm', 'electrode', 'conc_ml',
+    # thick_um is the film thickness t0 in um (`#398`).
+    'diam_mm', 'electrode', 'conc_ml', 'thick_um',
     # breakdown watchdog
     'wd_ua', 'wd_s',
     # telemetry
@@ -78,6 +81,15 @@ BOOL_FIELDS = ('updown', 'trek_inv', 'wd_on', 'tel_on', 'autoproc',
                'vid_on', 'vid_detect')
 
 ALL_FIELDS = TEXT_FIELDS + BOOL_FIELDS
+
+# Fields added after presets were in use whose ABSENCE from a stored preset
+# has a meaning of its own (`#398`). A preset saved before the film
+# thickness box existed recorded no thickness, so it loads one: the box is
+# cleared, with no warning, and the run then asks before starting without
+# a thickness. Leaving the box alone, the rule for every other absent key,
+# would carry the thickness typed for one film into a run on another, and
+# nothing at run start would ask about a box that is filled in.
+BLANK_WHEN_ABSENT = ('thick_um',)
 
 # Refused on save and reported-as-ignored on load. The aliases are here so
 # a hand-edited or foreign file naming the HV state in any obvious way is
@@ -95,6 +107,7 @@ FIELD_LABELS = {
     'vch': 'V_Out scope CH', 'ich': 'I_Out scope CH', 'sgch': 'SG CH',
     'diam_mm': 'DEA diam (mm)', 'electrode': 'Electrode',
     'conc_ml': 'Concentration (mL)',
+    'thick_um': 'Film thickness (um)',
     'trek_inv': 'Trek inverts',
     'wd_on': 'Watchdog enabled', 'wd_ua': 'Watchdog trip (uA)',
     'wd_s': 'Watchdog confirm (s)',
@@ -154,6 +167,10 @@ def normalise_for_load(stored, saved_app_version=None):
       * a key this build does not know  -> skipped, warned
       * a key this preset does not have -> the widget is left alone, warned
 
+    ...except a BLANK_WHEN_ABSENT key (`#398`), which an older preset
+    lacks because it predates the box: it loads as '' with no warning,
+    since "this preset recorded no thickness" is what its absence means.
+
     The app version that wrote the preset is quoted only when something was
     actually skipped -- otherwise every load after a version bump would nag
     about a preset that applied perfectly.
@@ -174,7 +191,9 @@ def normalise_for_load(stored, saved_app_version=None):
         else:
             warnings.append(f"skipped unknown setting {key!r}")
     for key in ALL_FIELDS:
-        if key not in fields:
+        if key not in fields and key in BLANK_WHEN_ABSENT:
+            fields[key] = ''
+        elif key not in fields:
             warnings.append(
                 f"{field_label(key)} is not in this preset -- left as it is")
     if warnings:

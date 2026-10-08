@@ -46,6 +46,7 @@ SAMPLE = {
     'outdir': '/mnt/shareDrive/robot_incubator/SLDEA_data',
     'vch': '2', 'ich': '3', 'sgch': '1',
     'diam_mm': '16', 'electrode': 'carbon black', 'conc_ml': '2.5',
+    'thick_um': '50',
     'trek_inv': True,
     'wd_on': True, 'wd_ua': '100', 'wd_s': '3',
     'tel_on': False, 'tel_hz': '2',
@@ -472,6 +473,57 @@ def test_the_concentration_is_stored_and_round_trips():
         assert fields['conc_ml'] == '2.5'
         assert sldea_profile.concentration_applies(
             fields['electrode']) is False
+    finally:
+        restore()
+
+
+def test_the_film_thickness_is_stored_with_the_device_fields():
+    """`#398`. Stored as the raw string, like every box, so a half-typed
+    thickness still saves; the run-start check is where it is judged."""
+    store, _root, restore = _sandbox()
+    try:
+        assert 'thick_um' in sldea_presets.TEXT_FIELDS
+        assert sldea_presets.field_label('thick_um') == \
+            'Film thickness (um)'
+        for typed in ('47.5', '', '5O'):
+            store.save('film', dict(SAMPLE, thick_um=typed))
+            fields, warnings = store.load('film')
+            assert warnings == [], warnings
+            assert fields['thick_um'] == typed, fields
+    finally:
+        restore()
+
+
+def test_a_preset_older_than_the_thickness_box_loads_it_blank_quietly():
+    """`#398`. A preset saved before the box existed recorded no film
+    thickness, so it loads one: the box is cleared rather than left
+    holding the last film's number, and nothing is reported, because
+    nothing in the preset was skipped. Every other absent key is still
+    left alone and reported (#231)."""
+    store, root, restore = _sandbox()
+    try:
+        store.save('old', SAMPLE)
+        path = os.path.join(root, 'sldea_presets.json')
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+        del data['presets']['old']['fields']['thick_um']
+        data['presets']['old']['app_version'] = '1.4.3'
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+        fields, warnings = store.load('old')
+        assert warnings == [], warnings
+        assert fields['thick_um'] == ''
+        assert fields == dict(SAMPLE, thick_um=''), fields
+        # ...and an older preset missing something else as well still
+        # reports THAT, and only that
+        del data['presets']['old']['fields']['tel_hz']
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+        fields, warnings = store.load('old')
+        text = ' | '.join(warnings)
+        assert 'Telemetry rate (Hz) is not in this preset' in text, text
+        assert 'thickness' not in text.lower(), text
+        assert fields['thick_um'] == '' and 'tel_hz' not in fields
     finally:
         restore()
 

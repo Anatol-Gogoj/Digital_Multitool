@@ -126,10 +126,25 @@ class VideoReviewWindow:
         self._changed = False         # a decision was made this session
         self._poll_job = None
         self.outline = None           # (gen, contour or None, area or None)
-        self._load()
-        self._build()
-        first = self._next_flagged(-1, +1)
-        self.show(first if first is not None else 0)
+        try:
+            self._load()
+            self._build()
+            first = self._next_flagged(-1, +1)
+            self.show(first if first is not None else 0)
+        except Exception:
+            # A run that cannot be read must not leave this window behind,
+            # empty, one more for every press of the button that opened it
+            # (Edge Review's opens it on a run that did not load there,
+            # #395): undo what was started and let the caller say why. The
+            # standalone master is the caller's; open_standalone destroys
+            # it once its box has said why.
+            self._stop_jobs()
+            if not standalone:
+                try:
+                    self.win.destroy()
+                except tk.TclError:
+                    pass
+            raise
 
     # ------------------------------------------------------------- data
     def _load(self):
@@ -604,11 +619,15 @@ class VideoReviewWindow:
                               "(progress in this run's run.log). Close and "
                               "reopen this window when it has finished.")
 
-    def close(self):
-        if self._closed:
-            return
+    def _stop_jobs(self):
+        """Stop what this window has going: the outline worker's next
+        request, the outline poll, matplotlib's pending redraw and the open
+        recording. Safe on a window whose construction stopped part way,
+        which has no outline worker or figure yet (see __init__)."""
         self._closed = True
-        self.jobs.closed = True
+        jobs = getattr(self, 'jobs', None)
+        if jobs is not None:
+            jobs.closed = True
         if self._poll_job is not None:
             try:
                 self.win.after_cancel(self._poll_job)
@@ -619,16 +638,22 @@ class VideoReviewWindow:
         # pending it fires into the destroyed window (Edge Review's
         # _cancel_pending documents the same defect for its own jobs).
         # Only this window's jobs are cancelled: the master's are not ours.
-        idle = getattr(self.fig_canvas, '_idle_draw_id', None)
+        canvas = getattr(self, 'fig_canvas', None)
+        idle = getattr(canvas, '_idle_draw_id', None)
         if idle:
             try:
-                self.fig_canvas.get_tk_widget().after_cancel(idle)
+                canvas.get_tk_widget().after_cancel(idle)
             except Exception:
                 pass
-            self.fig_canvas._idle_draw_id = None
+            canvas._idle_draw_id = None
         if self._cap is not None:
             self._cap.release()
             self._cap = None
+
+    def close(self):
+        if self._closed:
+            return
+        self._stop_jobs()
         if self._changed and self.edges:
             # the PNG beside the CSV says what the review decided, so a
             # reader of the run folder sees it without opening this window

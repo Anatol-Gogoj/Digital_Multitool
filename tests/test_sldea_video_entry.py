@@ -20,7 +20,9 @@ tools. Pinned here:
   video), and launches exactly like Edge Review... and Plot runs..., one
   review per run, without looking in the run folder;
 * Edge Review's button acts on the run in the Run box whether or not it
-  loaded, and looks at the folder again when the pointer comes onto it.
+  loaded, and looks at the folder again when the pointer comes onto it;
+  a review that cannot read the run says why and leaves no window behind,
+  in Edge Review's process and as the program alike.
 
 Nothing here starts a process or opens a camera: every launch is a stub.
 The window cases need a Tk display and skip cleanly without one.
@@ -325,6 +327,43 @@ def test_a_review_that_cannot_open_says_why_on_screen():
             assert not alive, "the failed window's root was left alive"
     finally:
         vr.VideoReviewWindow = real_win
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_a_run_the_review_cannot_read_is_said_over_its_own_root():
+    """The case above with the real window: the run's data.csv cannot be
+    read. A window that fails part way now cleans up after itself (see the
+    Edge Review case below), but the program's window IS its root, and the
+    box that says why needs that root: it is left to open_standalone,
+    which destroys it only after the box."""
+    import sldea_edge as se
+    import sldea_video_review as vr
+    p = _tmp()
+    real_load = se.load_run
+
+    def unreadable(rundir):
+        raise OSError("data.csv is locked")
+    try:
+        run = _run(p, 'SLDEA_20261006_113000', video=True, edges=True)
+        se.load_run = unreadable
+        with _program_roots() as made, _review_boxes() as boxes:
+            assert vr.main([run]) == 1
+            [root] = made
+            assert not root.looped, "a main loop ran for a failed window"
+            assert len(boxes.errors) == 1 and not boxes.infos, \
+                (boxes.errors, boxes.infos)
+            title, text, parent = boxes.errors[0]
+            assert title == 'Video review'
+            assert 'data.csv is locked' in text, text
+            assert parent is root
+            import tkinter
+            try:
+                alive = bool(root.winfo_exists())
+            except tkinter.TclError:
+                alive = False
+            assert not alive, "the failed window's root was left alive"
+    finally:
+        se.load_run = real_load
         shutil.rmtree(p, ignore_errors=True)
 
 
@@ -835,6 +874,49 @@ def test_edge_review_reviews_the_run_in_the_box_even_when_it_did_not_load():
         eg.se.load_run = real_load
         eg.messagebox = real_mb
         vr.VideoReviewWindow = real_win
+        _destroy(root)
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_edge_review_leaves_no_window_when_the_review_cannot_read_the_run():
+    """The real review window, on a run whose data.csv neither Edge Review
+    nor the review can read. The review made its window before reading the
+    run, so every press of the button left one more empty "Video review"
+    window on screen, outside the one-at-a-time rule (#395 review). Now
+    each press says why in a box and leaves no window behind."""
+    import sldea_edge_gui as eg
+    tk = _tk()
+    root = _tk_root()
+    p = _tmp()
+    real_load, real_mb = eg.se.load_run, eg.messagebox
+
+    def unreadable(rundir):
+        raise OSError("data.csv is locked")
+
+    def reviews():
+        return [w.title() for w in root.winfo_children()
+                if isinstance(w, tk.Toplevel)
+                and w.title().startswith('Video review')]
+    try:
+        run = _run(p, 'SLDEA_20261006_143000', video=True)
+        eg.se.load_run = unreadable
+        eg.messagebox = _Boxes()
+        app = eg.EdgeReviewApp(root, path=run)
+        assert app.run is None, "the fixture loaded after all"
+        assert str(app.video_btn.cget('state')) == 'normal'
+        before = len(eg.messagebox.errors)
+        for _ in range(2):
+            app._open_video_review()
+            root.update()
+        assert reviews() == [], f"windows left behind: {reviews()}"
+        said = eg.messagebox.errors[before:]
+        assert len(said) == 2, said
+        assert all('data.csv is locked' in text for _t, text, _p in said), \
+            said
+        assert app._video_win is None
+    finally:
+        eg.se.load_run = real_load
+        eg.messagebox = real_mb
         _destroy(root)
         shutil.rmtree(p, ignore_errors=True)
 

@@ -3292,12 +3292,17 @@ class PlotWindow:
         """Drop the figure canvas's pending idle draw, if any. Never
         raises.
 
-        relayout() and the toolbar's Save queue one through matplotlib's
-        draw_idle, and nothing else cancels it: this window embeds the
+        Many paths queue one through matplotlib's draw_idle: this
+        window's relayout() and its toolbar's Save; matplotlib's own
+        <Configure> handler on every canvas resize, and its <Map> handler
+        when the pixel ratio changes (backends/_backend_tk.py); and the
+        toolbar's pan, zoom, Home, Back and Forward (backend_bases.py),
+        as of matplotlib 3.11.2. So it is cancelled by its id, whoever
+        queued it. Nothing else cancels it: this window embeds the
         canvas with no FigureManager, and FigureManagerTk.destroy is
-        where matplotlib cancels it for the windows it makes itself
-        (matplotlib/backends/_backend_tk.py). The id is that method's
-        own, the canvas's private _idle_draw_id. Should a matplotlib
+        where matplotlib cancels it for the windows it makes itself.
+        The id is that method's own, the canvas's private
+        _idle_draw_id. Should a matplotlib
         release rename it, this finds nothing to cancel and the test
         suite's _shut() names the draw it left (`#427`).
 

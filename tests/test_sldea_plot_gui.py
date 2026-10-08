@@ -2725,7 +2725,8 @@ def test_closing_cancels_the_pending_redraw_before_it_destroys_the_root():
     remember_now ran while the widgets it reads were still alive.
 
     The figure canvas's idle draw goes the same way (`#427`): it is
-    matplotlib's after(), queued by relayout() and the toolbar's Save.
+    matplotlib's after(), queued by relayout(), every canvas resize and
+    the toolbar (Save, pan, zoom, Home, Back, Forward), among others.
     The module's only other after() is Tooltip's hover timer, which
     cancels itself on <Destroy> -- asserted here rather than assumed,
     since _closing's docstring leans on it."""

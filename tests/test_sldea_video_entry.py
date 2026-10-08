@@ -769,13 +769,21 @@ def test_the_sldea_tab_launches_the_review_like_its_neighbours():
     button. The press never looks in the run folder, which is usually on
     the share: it runs on the Tk thread of the app that drives the HV, and
     the run worker's own Tk calls wait on that thread. A recording that
-    is not in the folder yet is the review program's to report."""
+    is not in the folder yet is the review program's to report.
+
+    Since #429 all three send their output to a log file of their own
+    (launch_check), and the status line says "starting" until the program
+    has stayed up for launch_check.CHECK_MS, then "opened"."""
     import gui
+    import launch_check
+    import subprocess
     p = _tmp()
     spy, boxes = _Spawn(), _Boxes()
     looked = []
     real_sp, real_mb = gui.subprocess, gui.messagebox
     real_has = gui.sldea_video.has_video
+    real_logs = launch_check.LOG_DIR
+    logs = launch_check.LOG_DIR = os.path.join(p, 'launch_logs')
 
     def has_video(rundir):
         looked.append(rundir)
@@ -783,7 +791,7 @@ def test_the_sldea_tab_launches_the_review_like_its_neighbours():
     try:
         run = _run(p, 'SLDEA_20261006_120000', video=True)
         later = _run(p, 'SLDEA_20261006_130000')
-        with _gui() as (_root, app):
+        with _gui() as (root, app):
             gui.subprocess, gui.messagebox = spy, boxes
             gui.sldea_video.has_video = has_video
             app._sldea_open_plot(run)
@@ -799,10 +807,23 @@ def test_the_sldea_tab_launches_the_review_like_its_neighbours():
             assert os.path.dirname(argv[1]) == os.path.dirname(plot_argv[1])
             assert os.path.exists(argv[1])
             assert argv[2:] == [run], argv
-            assert kw == plot_kw == edge_kw == {'start_new_session': True}
+            # detached as before, no working folder or environment of its
+            # own, and its stdout and stderr in one log file per start
+            for k in (kw, plot_kw, edge_kw):
+                assert set(k) == {'start_new_session', 'stdout', 'stderr'}, k
+                assert k['start_new_session'] is True
+                assert k['stderr'] == subprocess.STDOUT
+                assert k['stdout'].closed, "the app kept the log open"
+            assert len({id(k['stdout']) for k in (kw, plot_kw, edge_kw)}) == 3
+            assert len([n for n in os.listdir(logs) if n.endswith('.log')]) \
+                == 3, os.listdir(logs)
             said = app.status_bar.cget('text')
-            assert said == 'Video review opened on SLDEA_20261006_120000', \
+            assert said == 'Video review starting on SLDEA_20261006_120000…', \
                 said
+            assert _until(root, lambda: app.status_bar.cget('text') ==
+                          'Video review opened on SLDEA_20261006_120000',
+                          timeout=launch_check.CHECK_MS / 1000.0 + 3.0), \
+                app.status_bar.cget('text')
             # while it runs, a second press starts nothing and says so
             app.sldea_video_btn.invoke()
             assert len(spy.calls) == 1
@@ -823,6 +844,7 @@ def test_the_sldea_tab_launches_the_review_like_its_neighbours():
     finally:
         gui.subprocess, gui.messagebox = real_sp, real_mb
         gui.sldea_video.has_video = real_has
+        launch_check.LOG_DIR = real_logs
         shutil.rmtree(p, ignore_errors=True)
 
 

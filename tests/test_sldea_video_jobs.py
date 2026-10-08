@@ -1087,6 +1087,10 @@ def test_an_edge_review_opened_from_the_tab_keeps_the_line_looking():
         app.status_bar = _Label()
         started = []
         real = gui.subprocess.Popen
+        # the launch's log (#429) goes in this test's folder, not the
+        # user's own
+        real_logs = gui.launch_check.LOG_DIR
+        gui.launch_check.LOG_DIR = os.path.join(env.tmp, 'launch_logs')
         try:
             gui.subprocess.Popen = lambda cmd, **kw: (started.append(cmd)
                                                       or _Proc())
@@ -1103,6 +1107,7 @@ def test_an_edge_review_opened_from_the_tab_keeps_the_line_looking():
             assert app.root.pending()[0] == app.SLDEA_JOB_IDLE_MS
         finally:
             gui.subprocess.Popen = real
+            gui.launch_check.LOG_DIR = real_logs
 
 
 def test_the_job_line_sits_under_the_run_row_once_a_job_reports():

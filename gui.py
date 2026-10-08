@@ -39,6 +39,7 @@ from datetime import datetime
 import bench_profiles
 from bench_profiles import BenchProfileStore
 import continuous_log
+import launch_check
 import presets_path
 import relaunch
 from instruments import BK894, TekMSO24, BK4055B, BK9174B, BK5493C
@@ -259,6 +260,51 @@ def sldea_lock_mismatch(lock, cam_exp, cam_gain):
             + ", ".join(diffs) + ". The Webcam preview uses the lock; this "
             "run uses the fields, as this picture does. Press Apply & Lock "
             "on the Webcam tab to make them agree.")
+
+
+def sldea_launch(app, program, cmd, target, title=None):
+    """Start `cmd`, one of the SLDEA tab's programs, as a process of its
+    own and say on the status bar whether it opened (#429). -> its Popen,
+    or None when it could not be started (said in a box titled `title`,
+    else `program`, as before).
+
+    The launchers used to say "<program> opened on <run>" as soon as Popen
+    returned, so a program that died at once read as opened and its error
+    went nowhere the operator could see. Now the line says "starting"
+    until the program has run for launch_check.CHECK_MS, then "opened" (if
+    nothing else has used the status bar meanwhile). A program that
+    exited by then is said on the status bar, and in a box with its exit
+    code, the last lines it printed and its log. The program's output is
+    in that log, a local file (launch_check), never a pipe it could fill.
+
+    Started as before: the same arguments, working folder, environment
+    and start_new_session. The look is after() polls of proc.poll() on
+    the Tk thread, so nothing here waits: this is the app that drives the
+    HV, and the run worker's Tk calls wait on this thread (#397, #405).
+    Module-level, like sldea_video_after_run, so a test's stand-in app
+    can launch."""
+    name = os.path.basename(target)
+    try:
+        run = launch_check.start(cmd, program, popen=subprocess.Popen)
+    except Exception as e:
+        messagebox.showerror(title or program, f"Could not launch: {e}")
+        return None
+    starting = f"{program} starting on {name}…"
+    app.status_bar.config(text=starting)
+
+    def up():
+        if app.status_bar.cget('text') == starting:
+            app.status_bar.config(text=f"{program} opened on {name}")
+
+    def down(code):
+        app.status_bar.config(
+            text=f"{program} stopped on {name} before it opened "
+                 f"({launch_check.exit_words(code)})")
+        messagebox.showerror(title or program,
+                             launch_check.report(run, code))
+
+    launch_check.watch(app.root, run.proc, up, down)
+    return run.proc
 
 
 def sldea_video_after_run(app, runlog):
@@ -4853,12 +4899,8 @@ LOGGING:
                               'sldea_edge_gui.py')
         target = rundir or self.sldea_outdir.get()
         cmd = [sys.executable, script, target] + (['--auto'] if auto else [])
-        try:
-            proc = subprocess.Popen(cmd, start_new_session=True)
-            self.status_bar.config(
-                text=f"Edge Review opened on {os.path.basename(target)}")
-        except Exception as e:
-            messagebox.showerror("Edge Review", f"Could not launch: {e}")
+        proc = sldea_launch(self, "Edge Review", cmd, target)
+        if proc is None:
             return
         # Kept (#396): while a window opened here is open, its Save may
         # start a re-run of the video pass, and the job line reports it.
@@ -4939,13 +4981,8 @@ LOGGING:
                     f"data2.csv …) and a frames/ folder. Point the output "
                     f"dir at the run itself or at a folder of runs.")
                 return
-        try:
-            subprocess.Popen([sys.executable, script, target],
-                             start_new_session=True)
-            self.status_bar.config(
-                text=f"Edge tuner opened on {os.path.basename(target)}")
-        except Exception as e:
-            messagebox.showerror("Edge tuner", f"Could not launch: {e}")
+        sldea_launch(self, "Edge tuner", [sys.executable, script, target],
+                     target)
 
     def _sldea_open_plot(self, rundir):
         """Launch the cross-run plot window (its own process, like the two
@@ -4960,13 +4997,8 @@ LOGGING:
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               'sldea_plot_gui.py')
         target = rundir or self.sldea_outdir.get()
-        try:
-            subprocess.Popen([sys.executable, script, target],
-                             start_new_session=True)
-            self.status_bar.config(
-                text=f"Plot window opened on {os.path.basename(target)}")
-        except Exception as e:
-            messagebox.showerror("SLDEA plot", f"Could not launch: {e}")
+        sldea_launch(self, "Plot window", [sys.executable, script, target],
+                     target, title="SLDEA plot")
 
     def _sldea_open_video_review(self):
         """Launch the video review window on the run this tab finished
@@ -5000,12 +5032,10 @@ LOGGING:
             return
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               'sldea_video_review.py')
-        try:
-            self._sldea_video_reviews[key] = subprocess.Popen(
-                [sys.executable, script, rundir], start_new_session=True)
-            self.status_bar.config(text=f"Video review opened on {name}")
-        except Exception as e:
-            messagebox.showerror("Video review", f"Could not launch: {e}")
+        proc = sldea_launch(self, "Video review",
+                            [sys.executable, script, rundir], rundir)
+        if proc is not None:
+            self._sldea_video_reviews[key] = proc
 
     def sldea_abort(self):
         self._sldea_stop = True

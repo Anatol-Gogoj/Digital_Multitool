@@ -1075,6 +1075,24 @@ class BreakdownWatchdog:
         return False
 
 
+def watchdog_off_reason(ticked, dry):
+    """Why a run's breakdown watchdog is not armed, in the words
+    watchdog_record uses: a DRY run, the box unticked, or, ticked on a
+    LIVE run, no scope to read the current."""
+    if dry:
+        return "dry run, no HV"
+    if not ticked:
+        return "box unticked"
+    return "no scope to read the current"
+
+
+def watchdog_state(ticked, armed, dry):
+    """'ON' or 'OFF (<reason>)': watchdog_record's state in short, for
+    sldea_run's refusal when it changed between "Energize HV?" and the
+    commit point (HV review 2026-10-08, #406)."""
+    return "ON" if armed else f"OFF ({watchdog_off_reason(ticked, dry)})"
+
+
 def watchdog_record(ticked, armed, dry, trip_ua, confirm_s):
     """(setup_line, log_tag, dialog_text): the breakdown watchdog a run
     starts with, worded for setup.txt, run.log and "Energize HV?" (#406).
@@ -1100,12 +1118,7 @@ def watchdog_record(ticked, armed, dry, trip_ua, confirm_s):
                 f"current stays {trip_ua:g} µA or more away from the "
                 f"baseline it learns at 0 kV, for {confirm_s:g} s of "
                 f"consecutive reads.")
-    if dry:
-        why = "dry run, no HV"
-    elif not ticked:
-        why = "box unticked"
-    else:
-        why = "no scope to read the current"
+    why = watchdog_off_reason(ticked, dry)
     return (f"Breakdown watchdog: OFF ({why})",
             f"watchdog: OFF ({why})",
             "Breakdown watchdog: OFF"

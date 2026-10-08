@@ -265,6 +265,125 @@ def test_a_ticked_live_run_arms_it_as_before_and_records_on():
             setup, setup
 
 
+class _MBThen(L._MB):
+    """_MB, plus a callback run once a given question has been answered:
+    where a scope Reconnect's done callback lands when it finishes inside
+    that dialog's nested event loop."""
+
+    def __init__(self, answers, then):
+        super().__init__(answers)
+        self.then = dict(then)
+
+    def askyesno(self, title, message, **kw):
+        answer = super().askyesno(title, message, **kw)
+        fn = self.then.pop(title, None)
+        if fn is not None:
+            fn()
+        return answer
+
+
+def _assert_refused_at_the_commit_point(app, mb, tmp, change):
+    """Refused after "Energize HV?" was answered Yes, with nothing sent to
+    the SG and nothing left in a started state."""
+    hv = [c for c in mb.calls if c[1] == 'Energize HV?']
+    assert len(hv) == 1, mb.calls
+    [(kind, title, msg, _kw)] = [c for c in mb.calls if c[0] != 'askyesno']
+    assert (kind, title) == ('showerror', 'SLDEA — run blocked'), mb.calls
+    assert msg.startswith("The breakdown watchdog's state changed since "
+                          "Energize HV? (" + change + ")."), msg
+    assert "Nothing was sent to the signal generator." in msg, msg
+    assert any(ln.startswith("run refused — the breakdown watchdog's state "
+                             "changed since Energize HV? (" + change + ")")
+               for ln in app.lines), app.lines
+    assert app.worker_args is None, "a refused run started its worker"
+    assert app.sg.writes == [], app.sg.writes
+    assert not os.path.exists(_rundir(tmp))
+    assert not app._sldea_running and not app._sldea_starting
+    assert app._sldea_live_ch is None and app._sldea_scope_chs is None
+    assert app._sldea_prelog is None
+
+
+def test_a_watchdog_state_that_changed_under_a_question_refuses_the_run():
+    """HV review 2026-10-08, finding 1. sldea_run reads the watchdog's
+    state before its questions, and a scope Reconnect whose done callback
+    runs inside one of them changes it. Both ways are refused at the
+    commit point, before any SG write, and Run works again afterwards:
+    - the scope mid-Reconnect (None) when Run is pressed, back while "No
+      current monitoring" is open: "Energize HV?" said OFF (no scope), and
+      the run would have gone unarmed beside a connected scope at 120 uA
+      (before the fix it ran to its end; main armed and tripped);
+    - the scope there when Run is pressed, gone while "Energize HV?" is
+      open: everything said ON for a run that could not arm.
+    Then the same ticked run with nothing changing arms and trips at
+    120 uA over the 100 uA trip, as on main."""
+    def run(tmp, mb, scope_at_run, change_after):
+        with L._patched(mb):
+            app = L._App(tmp, dry=False, real_worker=True, wd_on=True)
+            scope = app.scope
+            app.sldea_vars['wd_ua'].set('100')
+            app.sldea_vars['wd_s'].set('1')
+            app._sldea_build_profile = lambda: (
+                L._short_profile(landing_s=6.0), None)
+            scope.volts = lambda ch: (0.6 if ch == 3 and L._ramping(app)
+                                      else 0.0)
+            mb.then = {change_after: (
+                (lambda: setattr(app, 'scope', scope)) if not scope_at_run
+                else (lambda: setattr(app, 'scope', None)))}
+            if not scope_at_run:
+                app.scope = None             # the Reconnect in flight
+            app.sldea_run()
+            app.root.run_pending()
+        return app, scope
+
+    # the scope comes back inside "No current monitoring"
+    with tempfile.TemporaryDirectory() as tmp:
+        mb = _MBThen({'No current monitoring': True, 'Energize HV?': True},
+                     {})
+        app, scope = run(tmp, mb, False, 'No current monitoring')
+        assert mb.titles('askyesno') == ['No current monitoring',
+                                         'Energize HV?'], mb.calls
+        hv = [c[2] for c in mb.calls if c[1] == 'Energize HV?'][0]
+        assert "Breakdown watchdog: OFF (no scope to read the current)" in \
+            hv, hv
+        assert app.scope is scope
+        _assert_refused_at_the_commit_point(
+            app, mb, tmp, "OFF (no scope to read the current) → ON")
+
+        # ...and Run pressed again, nothing changing now: armed, and it
+        # trips at 120 uA over the 100 uA trip, as main does
+        mb2 = L._MB(L.LIVE_OK)
+        with L._patched(mb2):
+            app.sldea_run()
+            assert app.worker_done.wait(60), app.lines
+            assert app.worker_error is None, repr(app.worker_error)
+            app.root.run_pending()
+        assert app.worker_args[11:14] == (True, 100.0, 1.0), \
+            app.worker_args[11:14]
+        assert app._sldea_bd_tripped, app.lines
+        assert any(ln.startswith('run BREAKDOWN-ABORT') for ln in
+                   app.lines), app.lines
+        assert app.sg.writes[-2:] == [('set_offset', 1, 0.0),
+                                      ('set_output', 1, False)], \
+            app.sg.writes[-4:]
+
+    # the scope goes inside "Energize HV?"
+    with tempfile.TemporaryDirectory() as tmp:
+        mb = _MBThen({'Energize HV?': True}, {})
+        app, _scope = run(tmp, mb, True, 'Energize HV?')
+        hv = [c[2] for c in mb.calls if c[1] == 'Energize HV?'][0]
+        assert "Breakdown watchdog: ON." in hv, hv
+        _assert_refused_at_the_commit_point(
+            app, mb, tmp, "ON → OFF (no scope to read the current)")
+
+
+def test_the_short_state_words_match_the_records():
+    assert sp.watchdog_state(True, True, False) == 'ON'
+    for ticked, armed, dry in ((False, False, False), (True, False, False),
+                               (True, False, True), (False, False, True)):
+        assert sp.watchdog_record(ticked, armed, dry, 100.0, 3.0)[0] == (
+            'Breakdown watchdog: ' + sp.watchdog_state(ticked, armed, dry))
+
+
 def test_a_dry_run_records_off_whatever_the_box_says():
     for ticked in (True, False):
         with tempfile.TemporaryDirectory() as tmp:

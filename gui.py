@@ -2899,9 +2899,9 @@ LOGGING:
             row=0, column=1, padx=6)
         # Browse opens at the folder in the box; New folder... makes one
         # inside it (#394), because the bench's Tk folder dialog cannot.
-        # Neither is disabled during a run, exactly as Browse never was:
-        # the worker takes its own copy of the folder at Start, so the box
-        # only decides where the NEXT run goes.
+        # Both refuse while a run is on (_sldea_out_locked): the run keeps
+        # the folder it started in, while the box also aims Edge Review...,
+        # Tune params... and Plot runs... and is what a preset Save stores.
         btns, self.sldea_browse_btn, self.sldea_newdir_btn = folder_buttons(
             outf, self._sldea_browse_out, self._sldea_new_folder,
             "Output dir", "the runs that follow")
@@ -3530,12 +3530,39 @@ LOGGING:
             self.sldea_run_btn.config(text="▶ Run — LIVE HV", bg='#c62828',
                                       activebackground='#8e1a1a')
 
+    def _sldea_out_locked(self):
+        """True (+ a note) while an SLDEA run is on, LIVE or DRY: Output
+        dir's Browse and New folder... wait for it to end (#394).
+
+        The run keeps writing to the folder it started in, but the box also
+        aims Edge Review..., Tune params... and Plot runs..., and a preset
+        Save stores it, so a change mid-run would point those at a folder
+        the run is not using. New folder... can also chain several modal
+        prompts, and the Abort button cannot be clicked until they all
+        close. Refused here in the handlers, like a mid-run preset load
+        (sldea_load_preset), so the run's start and end paths are
+        untouched."""
+        if not self._sldea_running:
+            return False
+        messagebox.showinfo(
+            "SLDEA Output dir",
+            "A run is in progress. It keeps writing to the folder it "
+            "started in, so changing Output dir now would not move it, and "
+            "Edge Review…, Tune params… and Plot runs… would open on a "
+            "folder the run is not using.\n\nWait for the run to finish, or "
+            "■ Abort first.")
+        return True
+
     def _sldea_browse_out(self):
         # opens at the folder in the box (#394); it used to open at the
         # process's working directory whatever the box said
+        if self._sldea_out_locked():
+            return
         browse_folder(self.sldea_outdir, parent=self.root)
 
     def _sldea_new_folder(self):
+        if self._sldea_out_locked():
+            return
         self._new_folder_into(self.sldea_outdir, "Output dir")
 
     # The SLDEA tab's built-in Output dir: the lab share as the Linux bench
@@ -5833,9 +5860,10 @@ LOGGING:
         ttk.Label(config_frame, text="Log Directory:").grid(row=0, column=0, sticky='w', pady=5)
         self.log_dir = tk.StringVar(value="./logs")
         ttk.Entry(config_frame, textvariable=self.log_dir, width=40).grid(row=0, column=1, padx=10, pady=5)
-        # Browse + New folder... (#394). Neither is disabled while logging,
-        # as Browse never was: Start hands the worker the folder, so the
-        # box only decides where the NEXT Start writes.
+        # Browse + New folder... (#394), not locked while logging runs:
+        # Start hands the worker its folder, so a change here does not move
+        # the running log. The box is also the LCR sweep's default CSV
+        # folder (_default_sweep_path).
         btns, self.log_browse_btn, self.log_newdir_btn = folder_buttons(
             config_frame, self.select_log_dir, self._log_new_folder,
             "Log Directory", "the CSV files of the next Start")
@@ -7686,7 +7714,9 @@ LOGGING:
         add_tooltip(ttk.Entry(out, textvariable=self.cam_dir_var, width=44),
                     "Folder every snapshot/interval/sweep image is saved "
                     "into.").pack(side=tk.LEFT, padx=4)
-        # Browse + New folder... (#394), never disabled, as Browse never was
+        # Browse + New folder... (#394), not locked during a capture: the
+        # sweep and timed captures take the folder at Start, and the
+        # interval capture reads the box at every shot, as it always has.
         btns, self.cam_browse_btn, self.cam_newdir_btn = folder_buttons(
             out, self._cam_browse_dir, self._cam_new_folder, "Save to",
             "the images that follow")

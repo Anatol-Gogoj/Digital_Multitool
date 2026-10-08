@@ -15,11 +15,11 @@ the folder in the box. Three layers, cheapest first:
     the system is a message, not a traceback. Needs tkinter importable,
     not a display.
   * the real app (needs a display): the button beside Browse on the SLDEA,
-    Webcam and Continuous Logging tabs, each wired to its own box; Browse
-    opening at the box's folder; and New folder... in Browse's state during
-    a LIVE SLDEA run and while logging runs. Nothing disables Browse then,
-    so nothing disables New folder... either, and the folder the running
-    worker writes to does not change.
+    Webcam and Continuous Logging tabs, each wired to its own box and to
+    the share's mount point; Browse opening at the box's folder; the SLDEA
+    tab's two pickers refusing with a note while a run is on (LIVE or DRY)
+    while the Logging and Webcam ones stay open, also while logging runs;
+    and, on their source, the run workers never reading the box.
 
 Run: .venv/bin/python tests/test_output_folder.py
 """
@@ -472,6 +472,9 @@ class _Dialogs:
     def showerror(self, title, message, **kw):
         self.calls.append(('showerror', title, message, kw))
 
+    def showinfo(self, title, message, **kw):
+        self.calls.append(('showinfo', title, message, kw))
+
     def __getattr__(self, name):
         raise AssertionError(f"unexpected dialog: {name}")
 
@@ -817,22 +820,19 @@ def test_every_tab_checks_the_share_mount_point():
         root.destroy()
 
 
-def test_during_a_live_sldea_run_new_folder_stays_as_browse_does():
-    """The real sldea_run, LIVE, up to the worker (a stand-in that only
-    records its arguments). Nothing on the tab disables Browse during a run,
-    so nothing disables New folder... either. That the running run keeps
-    its own folder is pinned on the worker's source, in
+def test_during_an_sldea_run_both_pickers_refuse_with_a_note():
+    """The real sldea_run, LIVE and then DRY, up to the worker (a stand-in
+    that only records its arguments). While it runs, Output dir's Browse
+    and New folder... both refuse with a note and change nothing: the run
+    keeps the folder it started in, and the box also aims Edge Review, the
+    tuner and the plot window. The two buttons stay in one state, the
+    Logging and Webcam pickers are not locked, and once the run has ended
+    both SLDEA pickers work again. That the running run keeps its own
+    folder is pinned on the worker's source, in
     test_the_workers_never_read_the_box_themselves."""
     root, app = _app()
     import gui
     saved = (gui.messagebox, gui.INSTRUMENTS_SUPPORTED)
-    started = threading.Event()
-    seen = {}
-
-    def worker(*args, **kw):
-        seen['args'] = args
-        started.set()
-
     try:
         with _tmpdir() as tmp:
             # every question a run start with blank device fields asks;
@@ -845,32 +845,68 @@ def test_during_a_live_sldea_run_new_folder_stays_as_browse_does():
             gui.INSTRUMENTS_SUPPORTED = True    # the LIVE path on any OS
             app.sg = object()     # "connected"; the stand-in never drives it
             app.scope = None
-            app._sldea_worker = worker
             app._sldea_skip_preflight = True
             app._sldea_live_view = None     # no live-view window in a test
-            app.sldea_outdir.set(tmp)
-            app.sldea_dryrun.set(False)
-            app._sldea_dry_toggle()
-            assert _enabled(app.sldea_browse_btn)
-            assert _enabled(app.sldea_newdir_btn)
-            app.sldea_run()
-            assert started.wait(5), gui.messagebox.calls
-            # the run really is on, and LIVE
-            assert app._sldea_running and app._sldea_live_ch is not None
-            assert str(app.sldea_run_btn.cget('state')) == 'disabled'
-            assert seen['args'][1] == tmp and seen['args'][6] is False
-            # the point: New folder... is in Browse's state
-            assert _enabled(app.sldea_newdir_btn) == \
-                _enabled(app.sldea_browse_btn) is True
-            with _app_dialogs(names=['next session']) as d:
-                app.sldea_newdir_btn.invoke()
-            want = of.new_path(tmp, 'next session')
-            assert app.sldea_outdir.get() == want and os.path.isdir(want), \
-                d.calls
-            app._sldea_finished()
-            assert not app._sldea_running
-            assert _enabled(app.sldea_newdir_btn) == \
-                _enabled(app.sldea_browse_btn) is True
+            for dry in (False, True):
+                started = threading.Event()
+                seen = {}
+
+                def worker(*args, _seen=seen, _started=started, **_kw):
+                    _seen['args'] = args
+                    _started.set()
+
+                app._sldea_worker = worker
+                app.sldea_outdir.set(tmp)
+                app.sldea_dryrun.set(dry)
+                app._sldea_dry_toggle()
+                app.sldea_run()
+                assert started.wait(5), (dry, gui.messagebox.calls)
+                # the run really is on, LIVE the first time, DRY the second
+                assert app._sldea_running, dry
+                assert (app._sldea_live_ch is None) == dry
+                assert str(app.sldea_run_btn.cget('state')) == 'disabled'
+                assert seen['args'][1] == tmp and seen['args'][6] is dry
+                # the two buttons stay in one state...
+                assert _enabled(app.sldea_newdir_btn) == \
+                    _enabled(app.sldea_browse_btn) is True
+                # ...and both refuse, asking nothing and changing nothing
+                before = sorted(os.listdir(tmp))
+                for btn in (app.sldea_browse_btn, app.sldea_newdir_btn):
+                    with _app_dialogs(names=['not now'], folder=tmp) as d:
+                        btn.invoke()
+                    assert d.kinds() == ['showinfo'], (dry, d.calls)
+                    title, text = d.calls[0][1], d.calls[0][2]
+                    assert title == 'SLDEA Output dir', title
+                    assert text.startswith('A run is in progress.'), text
+                    assert 'Abort first' in text, text
+                    assert app.sldea_outdir.get() == tmp
+                assert sorted(os.listdir(tmp)) == before
+                # an SLDEA run locks only the SLDEA tab's pickers
+                for prefix, var_name in (('log', 'log_dir'),
+                                         ('cam', 'cam_dir_var')):
+                    getattr(app, var_name).set(tmp)
+                    name = f'{prefix} during {"dry" if dry else "live"}'
+                    with _app_dialogs(names=[name]) as d:
+                        getattr(app, f'{prefix}_newdir_btn').invoke()
+                    assert d.kinds() == ['askstring'], (prefix, d.calls)
+                    assert getattr(app, var_name).get() == \
+                        of.new_path(tmp, name)
+                app._sldea_finished()
+                assert not app._sldea_running
+                assert _enabled(app.sldea_newdir_btn) == \
+                    _enabled(app.sldea_browse_btn) is True
+                # after the run, both work again
+                name = f'after {"dry" if dry else "live"}'
+                with _app_dialogs(names=[name]) as d:
+                    app.sldea_newdir_btn.invoke()
+                assert d.kinds() == ['askstring'], d.calls
+                assert app.sldea_outdir.get() == of.new_path(tmp, name)
+                with _app_dialogs(folder='') as d:
+                    app.sldea_browse_btn.invoke()
+                assert d.kinds() == ['askdirectory'], d.calls
+            assert sorted(os.listdir(tmp)) == [
+                'after dry', 'after live', 'cam during dry',
+                'cam during live', 'log during dry', 'log during live']
     finally:
         gui.messagebox, gui.INSTRUMENTS_SUPPORTED = saved
         root.destroy()
@@ -941,6 +977,14 @@ def _run():
     # broken test in suites that had five. Tracebacks land after the count
     # line, in name order, in one bounded block -- run_tests.py explains why.
     import traceback
+    # A failure message can carry the app's glyphs (the run-lock note's
+    # Abort square, a refused micro sign or emoji). Printed to a cp1252
+    # pipe they raised UnicodeEncodeError and cut the report off before the
+    # traceback (seen 2026-10-07); escape what the stream cannot encode.
+    try:
+        _sys.stdout.reconfigure(errors='backslashreplace')
+    except AttributeError:          # not a TextIOWrapper: leave it be
+        pass
     names = [n for n in sorted(globals()) if n.startswith('test_')]
     ran = skipped = 0
     failed = []

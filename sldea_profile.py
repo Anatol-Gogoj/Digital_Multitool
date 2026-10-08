@@ -678,7 +678,7 @@ RUN_FOLDER_CHECK_S = 3.0
 # Past this many characters the line shortens the path from the left, so a
 # long Output dir cannot push the tab's channel boxes aside. The run
 # folder's own name always shows whole; the tooltip has the whole path.
-RUN_FOLDER_LINE_CHARS = 60
+RUN_FOLDER_LINE_CHARS = 44
 
 
 def run_folder(outdir, run_name, started=None):
@@ -801,8 +801,7 @@ def run_folder_line(outdir, run_name, found=None, slow=False):
     folder = os.path.abspath(run_folder(outdir, name))
     short = _short_path(folder)
     if not name:
-        return (f"Saves to: {short}  (stamped when the run starts)", False,
-                folder)
+        return f"Saves to: {short}  (stamped at start)", False, folder
     if found:
         return (f"⚠ {short} already holds a run "
                 f"({' and '.join(found)}). ▶ Run will refuse it: type "

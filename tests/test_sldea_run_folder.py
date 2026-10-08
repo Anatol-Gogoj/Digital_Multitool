@@ -183,7 +183,7 @@ def test_the_line_says_where_and_warns_in_words():
         text, warn, full = sprof.run_folder_line(tmp, '')
         assert text.startswith('Saves to: ') and not warn, text
         assert sprof.AUTO_RUN_DIRNAME in text, text
-        assert 'stamped when the run starts' in text, text
+        assert 'stamped at start' in text, text
         text, warn, full = sprof.run_folder_line(tmp, 'NEW', found=[])
         assert full == os.path.abspath(os.path.join(tmp, 'NEW')), full
         assert text == 'Saves to: ' + sprof._short_path(full), text
@@ -398,6 +398,15 @@ def test_the_line_sits_under_run_name_follows_the_boxes_and_warns():
         assert line.cget('fg') == app.SLDEA_FOLDER_COLORS['ok']
         assert app._sldea_folder_tip.text == os.path.abspath(
             os.path.join(tmp, 'NEW'))
+        # Where the boxes beside the line sit, in every state below: its
+        # text changes at every keystroke and must never move them.
+        beside = (app.sldea_vars['vch'], app.sldea_browse_btn)
+        spots = set()
+
+        def note():
+            root.update_idletasks()
+            spots.add(tuple(w.winfo_x() for w in beside))
+        note()
         # a folder that holds a run: warned once its check is back
         _a_run_in(os.path.join(tmp, 'RUN'))
         app.sldea_runname_var.set('RUN')
@@ -405,11 +414,17 @@ def test_the_line_sits_under_run_name_follows_the_boxes_and_warns():
                        line.cget('text')), line.cget('text')
         assert line.cget('text').startswith('\u26a0')
         assert line.cget('fg') == WINE
+        note()
         # a name that cannot be a folder name: warned at once
         app.sldea_runname_var.set('a:b')
         root.update()
         assert 'Run name' in line.cget('text'), line.cget('text')
         assert line.cget('fg') == WINE
+        note()
+        app.sldea_runname_var.set('')
+        root.update()
+        note()
+        assert len(spots) == 1, spots
         # Browse and New folder... set the Output dir box: followed too
         other = os.path.join(tmp, 'other')
         os.mkdir(other)

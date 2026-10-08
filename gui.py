@@ -3010,12 +3010,18 @@ LOGGING:
         # data.csv without a word; the line warns, in words and in Tol's
         # muted wine, when the folder already holds a run, and Run refuses
         # it. The check behind the warning runs on a thread
-        # (_sldea_folder_check). Row 2, beside the SG channel box.
+        # (_sldea_folder_check). Row 2, beside the SG channel box. It asks
+        # for no width of its own (width=1) and wraps to the width its two
+        # columns already have, so its text, which changes at every
+        # keystroke, never moves the boxes beside it.
         self.sldea_folder_line = tk.Label(outf, text='', anchor='w',
-                                          justify='left', fg=MUTED,
-                                          wraplength=430)
+                                          justify='left', fg=MUTED, width=1)
         self.sldea_folder_line.grid(row=2, column=1, columnspan=2,
-                                    sticky='w', padx=6)
+                                    sticky='ew', padx=6)
+        self.sldea_folder_line.bind(
+            '<Configure>',
+            lambda ev: ev.widget.config(wraplength=max(ev.width - 4, 120)),
+            add='+')
         self._sldea_folder_tip = Tooltip(self.sldea_folder_line, '')
         self._sldea_folder_seen = None     # (folder, what its check found)
         self._sldea_folder_pause = None    # after id: check once typing stops

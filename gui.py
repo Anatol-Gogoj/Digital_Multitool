@@ -3021,7 +3021,8 @@ LOGGING:
         self._sldea_folder_pause = None    # after id: check once typing stops
         self._sldea_folder_job = None      # the check out on its thread
         self._sldea_folder_poll_id = None  # after id: its next look
-        self.sldea_folder_line.bind('<Destroy>', self._sldea_folder_stop)
+        self.sldea_folder_line.bind('<Destroy>', self._sldea_folder_stop,
+                                    add='+')
         self.sldea_runname_var.trace_add('write', self._sldea_folder_refresh)
         self.sldea_outdir.trace_add('write', self._sldea_folder_refresh)
         for r, lbl, key, default, vals in (

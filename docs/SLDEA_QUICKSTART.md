@@ -350,6 +350,7 @@ On 2026-10-01 (run SLDEA_20261001_151016) three things went wrong in a row, mark
 | "Rounds disagree" after hand circles (failure 3: 23 percent apart, accepted) | Hand fits on a disc you cannot see | "Refit all", or "Cancel" and ask |
 | 25 of 26 frames "no-change/no-edge", queue empty | Blank pictures, not a stiff device | Do not Save. Look at the first and last frame |
 | A window froze (not responding) | Something held its main thread | Send tk_stall.log and tk_stall.log.1 from ~/.cache/scpi_control (or $SCPI_CACHE) with your report |
+| Status bar: "Edge Review stopped on ... before it opened" (or the tuner, plot window, video review), and a box | That program failed as it started | Send the box's text and the log file it names (in ~/.cache/scpi_control/launch_logs) with your report |
 
 ## 11. Words used in this tool
 

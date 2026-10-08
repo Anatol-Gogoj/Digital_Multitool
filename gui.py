@@ -3010,18 +3010,29 @@ LOGGING:
         # data.csv without a word; the line warns, in words and in Tol's
         # muted wine, when the folder already holds a run, and Run refuses
         # it. The check behind the warning runs on a thread
-        # (_sldea_folder_check). Row 2, beside the SG channel box. It asks
-        # for no width of its own (width=1) and wraps to the width its two
-        # columns already have, so its text, which changes at every
-        # keystroke, never moves the boxes beside it.
-        self.sldea_folder_line = tk.Label(outf, text='', anchor='w',
-                                          justify='left', fg=MUTED, width=1)
+        # (_sldea_folder_check). Row 2, beside the SG channel box. Its size
+        # never follows its text, which changes at every keystroke: it asks
+        # for no width of its own (width=1) and takes the width its two
+        # columns already have, so the boxes beside it stay put, and it is
+        # always two lines high (height=2), so the rows below it, the Run
+        # button's included, stay put too (#402 review). Line 1 is the
+        # folder, cut from the left to that width; line 2 a warning or
+        # nothing. It never wraps: run_folder_line fits each line to the
+        # width.
+        self.sldea_folder_line = tk.Label(outf, text='', anchor='nw',
+                                          justify='left', fg=MUTED, width=1,
+                                          height=2)
         self.sldea_folder_line.grid(row=2, column=1, columnspan=2,
                                     sticky='ew', padx=6)
-        self.sldea_folder_line.bind(
-            '<Configure>',
-            lambda ev: ev.widget.config(wraplength=max(ev.width - 4, 120)),
-            add='+')
+        try:
+            self._sldea_folder_font = tkfont.nametofont(
+                str(self.sldea_folder_line.cget('font')))
+        except tk.TclError:
+            self._sldea_folder_font = tkfont.Font(
+                root=self.root, font=self.sldea_folder_line.cget('font'))
+        self._sldea_folder_width = None    # the width last fitted to
+        self.sldea_folder_line.bind('<Configure>', self._sldea_folder_resized,
+                                    add='+')
         self._sldea_folder_tip = Tooltip(self.sldea_folder_line, '')
         self._sldea_folder_seen = None     # (folder, what its check found)
         self._sldea_folder_pause = None    # after id: check once typing stops
@@ -3818,11 +3829,36 @@ LOGGING:
             pass
 
     def _sldea_folder_show(self, outdir, name, found, slow=False):
-        text, warn, full = sldea_profile.run_folder_line(outdir, name, found,
-                                                         slow)
+        text, warn, full = sldea_profile.run_folder_line(
+            outdir, name, found, slow, fits=self._sldea_folder_fits())
         self.sldea_folder_line.config(
             text=text, fg=self.SLDEA_FOLDER_COLORS['warn' if warn else 'ok'])
         self._sldea_folder_tip.text = full
+
+    def _sldea_folder_fits(self):
+        """fits(text): does one line of text fit the run folder line's
+        width, in its font? None before Tk has laid the line out, and
+        run_folder_line then counts characters until the <Configure> that
+        gives it a width redraws it."""
+        line = self.sldea_folder_line
+        width = line.winfo_width()
+        if width <= 1:
+            return None
+        room = width - 2 * sum(line.winfo_pixels(line.cget(opt)) for opt in
+                               ('borderwidth', 'highlightthickness', 'padx'))
+        measure = self._sldea_folder_font.measure
+        return lambda text: measure(text) <= room
+
+    def _sldea_folder_resized(self, event):
+        """<Configure> of the line: fit its text to its new width. The text
+        never changes its size (width=1, height=2), so this cannot loop."""
+        if event.width == self._sldea_folder_width:
+            return
+        self._sldea_folder_width = event.width
+        try:
+            self._sldea_folder_redraw()
+        except Exception:
+            pass
 
     def _sldea_folder_check(self):
         """Send the check of the run folder the boxes name out on its

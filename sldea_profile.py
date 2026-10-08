@@ -675,10 +675,13 @@ AUTO_RUN_DIRNAME = 'SLDEA_<date>_<time>'
 # thread because sldea_run is on the Tk thread, and a stat on a share that
 # has gone away can block for minutes.
 RUN_FOLDER_CHECK_S = 3.0
-# Past this many characters the line shortens the path from the left, so a
-# long Output dir cannot push the tab's channel boxes aside. The run
-# folder's own name always shows whole; the tooltip has the whole path.
-RUN_FOLDER_LINE_CHARS = 44
+# The line is two lines of text in a box of fixed height (#402 review): the
+# folder, then a warning or nothing, so its text never moves the rows
+# below it. Each line is shortened to the width the tab gives it, measured
+# in its font by the caller (run_folder_line's `fits`). Without a measured
+# width (the tab before Tk has laid it out) a line holds this many
+# characters.
+RUN_FOLDER_LINE_CHARS = 64
 
 
 def run_folder(outdir, run_name, started=None):
@@ -768,58 +771,99 @@ def run_folder_refusal(outdir, run_name, timeout_s=None):
     return None
 
 
-def _short_path(path, limit=RUN_FOLDER_LINE_CHARS):
-    """`path` cut from the left at a separator, behind an ellipsis, to fit
-    `limit` characters. Its last part, the run folder's name, is always
-    kept whole."""
-    if len(path) <= limit:
-        return path
-    cuts = [i for i, c in enumerate(path) if c in '/\\']
-    if not cuts:
-        return path
-    keep = cuts[-1]
-    for i in reversed(cuts):
-        if len(path) - i + 1 > limit:
-            break
-        keep = i
-    return '…' + path[keep:]
+def _fits_chars(text):
+    """run_folder_line's `fits` when the caller has no measured width."""
+    return len(text) <= RUN_FOLDER_LINE_CHARS
 
 
-def run_folder_line(outdir, run_name, found=None, slow=False):
+def fit_path(head, path, tail='', fits=None):
+    """One line of text, head + path + tail, with `path` cut from the left
+    behind an ellipsis until fits(line) holds: first at a separator, then,
+    when even the last part does not fit, character by character. So the
+    run folder's name, at the end, is what shows when anything does. A
+    width too narrow for `tail` as well loses the tail. `fits` None counts
+    characters (_fits_chars)."""
+    fits = fits or _fits_chars
+    line = head + path + tail
+    if fits(line):
+        return line
+    last = max(path.rfind('/'), path.rfind('\\'))
+    cuts = [i for i, c in enumerate(path) if c in '/\\' and i > 0]
+    cuts += range(last + 1, len(path))
+    for i in cuts:
+        line = head + '…' + path[i:] + tail
+        if fits(line):
+            return line
+    if tail:                       # a width too narrow for the tail too
+        return fit_path(head, path, '', fits)
+    return fit_end(head + '…' + path[-1:], fits)
+
+
+def fit_end(text, fits=None):
+    """`text` cut at its end behind an ellipsis until fits(text) holds. A
+    safety net for a warning that does not fit the line, as on a wider
+    font: the words are written to fit, and the tooltip has them whole."""
+    fits = fits or _fits_chars
+    if fits(text):
+        return text
+    for n in range(len(text) - 1, 0, -1):
+        cut = text[:n].rstrip() + '…'
+        if fits(cut):
+            return cut
+    return '…'
+
+
+def run_folder_line(outdir, run_name, found=None, slow=False, fits=None):
     """The SLDEA tab's line under Run name -> (text, warn, full).
+
+    `text` is at most two lines, each fitting the line's width (`fits`,
+    a test of one line of text; None counts characters): "Saves to:" and
+    the folder, cut from the left so the run folder's name shows, then a
+    warning or nothing. The label keeps two lines of height whatever this
+    says, so the rows below never move (#402 review).
 
     `found` is what the last check of this folder saw (holds_run's list),
     None while that is not known. `slow` says the check out now has not
-    answered for a while. `full` is the whole path, or the whole message
-    for a refused name, for the tooltip. `warn` asks the caller for its
+    answered for a while. `full`, for the tooltip, is the whole path, and
+    below it the whole reason for a warning. `warn` asks the caller for its
     warning colour; the words say the same, so colour is never the only
     cue. A relative Output dir is shown from the working folder, where the
     run would really write; that costs no file system call."""
     import os
+    import output_folder
+    fits = fits or _fits_chars
     name = (run_name or '').strip()
     problem = run_name_problem(name)
-    if problem:
-        import output_folder
-        first = problem.split('. ')[0].rstrip('.') + '.'
-        # a name that is not plain ASCII also gets New folder's way round
-        # it, in its own words (owner decision 2026-10-08)
-        hint = (f" {output_folder.ASCII_HINT}"
-                if output_folder.ASCII_HINT in problem else '')
-        return (f"⚠ Run name: {first}{hint} ▶ Run will refuse it.",
-                True, problem)
     folder = os.path.abspath(run_folder(outdir, name))
-    short = _short_path(folder)
-    if not name:
-        return f"Saves to: {short}  (stamped at start)", False, folder
-    if found:
-        return (f"⚠ {short} already holds a run "
-                f"({' and '.join(found)}). ▶ Run will refuse it: type "
-                f"another name.", True, folder)
-    if slow and found is None:
-        return (f"⚠ Saves to: {short}  (the Output dir is not answering, "
-                f"so a run already there cannot be ruled out yet)", True,
-                folder)
-    return f"Saves to: {short}", False, folder
+    first = fit_path('Saves to: ', folder,
+                     '' if name else '  (stamped at start)', fits)
+    warning = detail = ''
+    if problem:
+        # a name that is not plain ASCII gets New folder's way round it,
+        # in its own words (owner decision 2026-10-08)
+        if output_folder.ASCII_HINT in problem:
+            warning = ("⚠ Plain ASCII only: u for µ, as in 2.5uL. "
+                       "▶ Run will refuse it.")
+        else:
+            reason = problem.split('. ')[0].rstrip('.') + '.'
+            warning = f"⚠ {reason} ▶ Run will refuse it."
+            if not fits(warning):
+                warning = "⚠ Not a folder name: ▶ Run will refuse it."
+        detail = problem
+    elif found:
+        warning = "⚠ Already holds a run: ▶ Run will refuse this name."
+        detail = (f"It already holds {' and '.join(found)}. A run started "
+                  f"there would write over that run's files.")
+    elif slow and found is None:
+        warning = ("⚠ The Output dir is not answering: ▶ Run would "
+                   "refuse.")
+        detail = ("The check of this folder has not answered yet, so a run "
+                  "already there cannot be ruled out. If it is on the share, "
+                  "check that the share is mounted.")
+    full = folder + (f"\n\n{detail}" if detail else '')
+    if not warning:
+        return first, False, full
+    return f"{first}\n{fit_end(warning, fits)}", True, full
 
 
 def preflight_start_button(level, mismatch=False, checked=True,

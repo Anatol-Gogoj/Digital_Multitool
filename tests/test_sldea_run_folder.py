@@ -178,42 +178,96 @@ def test_the_refusal_names_the_folder_and_spares_new_and_blank_names():
             assert word in why, (bad, why)
 
 
+def _lines(text):
+    """The line's text as its lines: at most two, folder then warning."""
+    lines = text.split('\n')
+    assert 1 <= len(lines) <= 2, text
+    return lines
+
+
 def test_the_line_says_where_and_warns_in_words():
+    """Line 1 says where, line 2 warns in words or is absent; the tooltip
+    has the whole path and below it the whole reason."""
     with tempfile.TemporaryDirectory() as tmp:
         text, warn, full = sprof.run_folder_line(tmp, '')
-        assert text.startswith('Saves to: ') and not warn, text
-        assert sprof.AUTO_RUN_DIRNAME in text, text
-        assert 'stamped at start' in text, text
+        [first] = _lines(text)
+        assert first.startswith('Saves to: ') and not warn, text
+        assert sprof.AUTO_RUN_DIRNAME in first, text
+        assert first.endswith('  (stamped at start)'), text
         text, warn, full = sprof.run_folder_line(tmp, 'NEW', found=[])
         assert full == os.path.abspath(os.path.join(tmp, 'NEW')), full
-        assert text == 'Saves to: ' + sprof._short_path(full), text
+        assert text == sprof.fit_path('Saves to: ', full), text
         assert not warn
-        text, warn, _full = sprof.run_folder_line(tmp, 'RUN',
-                                                  found=['setup.txt'])
-        assert warn and text.startswith('\u26a0'), text
-        assert 'already holds a run (setup.txt)' in text, text
-        assert 'refuse' in text, text
+        text, warn, full = sprof.run_folder_line(tmp, 'RUN',
+                                                 found=['setup.txt'])
+        first, second = _lines(text)
+        assert first == sprof.fit_path(
+            'Saves to: ', os.path.abspath(os.path.join(tmp, 'RUN'))), text
+        assert warn and second.startswith('\u26a0'), text
+        assert 'already holds a run' in second.lower(), text
+        assert 'refuse' in second, text
+        assert 'setup.txt' in full and 'write over' in full, full
         text, warn, full = sprof.run_folder_line(tmp, 'a:b')
-        assert warn and 'Run name' in text and 'refuse' in text, text
+        _first, second = _lines(text)
+        assert warn and 'cannot contain :' in second, text
+        assert 'refuse' in second, text
         assert 'Windows' in full, full          # the whole reason, hovered
         # not plain ASCII: the line also says New folder's way round it,
         # in its words, before Run is pressed (owner decision 2026-10-08)
         import output_folder
-        text, warn, full = sprof.run_folder_line(tmp, 'P3_7_2.5µL')
-        assert warn and 'plain ASCII' in text, text
-        assert output_folder.ASCII_HINT in text, text
-        assert 'u for µ' in text and 'refuse' in text, text
+        text, warn, full = sprof.run_folder_line(tmp, 'P3_7_2.5\u00b5L')
+        _first, second = _lines(text)
+        assert warn and 'Plain ASCII' in second, text
+        assert 'u for \u00b5, as in 2.5uL' in second, text
+        assert 'refuse' in second, text
+        assert output_folder.ASCII_HINT in full, full
         text, _warn, _full = sprof.run_folder_line(tmp, 'a:b')
-        assert output_folder.ASCII_HINT not in text, text
+        assert 'u for' not in text, text
         text, warn, _full = sprof.run_folder_line(tmp, 'NEW', None, slow=True)
-        assert warn and 'not answering' in text, text
+        assert warn and 'not answering' in _lines(text)[1], text
+        # a reason too long for the line gives way to a short one; the
+        # tooltip keeps the whole reason
+        text, warn, full = sprof.run_folder_line(tmp, 'CON')
+        _first, second = _lines(text)
+        assert second == ('\u26a0 Not a folder name: \u25b6 Run will refuse '
+                          'it.'), text
+        assert 'device name' in full, full
     deep = ('/mnt/shareDrive/robot_incubator/SLDEA_data/Upload 20260804/'
             + 'deeper/' * 8)
     text, _warn, _full = sprof.run_folder_line(deep, 'P3_6_2.5mL_20260729',
                                                found=[])
     assert text.endswith('P3_6_2.5mL_20260729'), text      # the name, whole
     assert '\u2026' in text, text                          # the head, cut
-    assert len(text) <= len('Saves to: ') + sprof.RUN_FOLDER_LINE_CHARS + 1
+    assert len(text) <= sprof.RUN_FOLDER_LINE_CHARS, text
+
+
+def test_each_line_is_fitted_to_the_width_from_the_left():
+    """With a measured width (here: characters), line 1 keeps the run
+    folder's name and cuts the path's head, character by character once
+    the name alone is too long; line 2 is cut at its end only as a safety
+    net. Neither ever passes the width."""
+    for room in (20, 30, 45, 80):
+        def fits(text, room=room):
+            return len(text) <= room
+        for outdir, name in (('/mnt/shareDrive/a/b/c/d/e', 'P3_6_2.5mL'),
+                             ('C:\\data\\x\\y', 'A_VERY_LONG_RUN_NAME_x'),
+                             ('/x', 'RUN'), ('/x', '')):
+            for found, slow in (([], False), (['setup.txt'], False),
+                                (None, True)):
+                text, _warn, _full = sprof.run_folder_line(
+                    outdir, name, found, slow, fits=fits)
+                for line in _lines(text):
+                    assert fits(line), (room, line)
+                first = _lines(text)[0]
+                path = os.path.abspath(sprof.run_folder(outdir, name))
+                tail = path[-3:] + ('' if name else '  (stamped at start)')
+                if fits('Saves to: \u2026' + tail):
+                    assert first.endswith(tail), (room, first)
+    assert sprof.fit_end('abcdef', lambda t: len(t) <= 4) == 'abc\u2026'
+    assert sprof.fit_path('S: ', '/a/b/NAME', '',
+                          lambda t: len(t) <= 9) == 'S: \u2026/NAME'
+    assert sprof.fit_path('S: ', '/a/b/NAME', '',
+                          lambda t: len(t) <= 7) == 'S: \u2026AME'
 
 
 # --------------------------------------------------------------------------
@@ -422,8 +476,26 @@ def _settle(root, pred, timeout=3.0):
     return pred()
 
 
-def _saves_to(folder):
-    return 'Saves to: ' + sprof._short_path(os.path.abspath(folder))
+def _saves_to(app, folder):
+    """Line 1 for `folder`, fitted to the line's width as the app fits it."""
+    return sprof.fit_path('Saves to: ', os.path.abspath(folder), '',
+                          app._sldea_folder_fits())
+
+
+def _holds_run(text):
+    return 'already holds a run' in text.lower()
+
+
+def _select_sldea(root, app):
+    """Show the SLDEA tab, so its widgets are laid out for real."""
+    nb = app.notebook
+    for i in range(nb.index('end')):
+        if 'SLDEA' in nb.tab(i, 'text'):
+            nb.select(i)
+            break
+    else:
+        raise AssertionError('no SLDEA tab')
+    root.update()
 
 
 def test_the_line_sits_under_run_name_follows_the_boxes_and_warns():
@@ -444,7 +516,8 @@ def test_the_line_sits_under_run_name_follows_the_boxes_and_warns():
             typed = 'NEW'[:i + 1]
             assert line.cget('text').endswith(typed), line.cget('text')
         assert _settle(root, lambda: line.cget('text') ==
-                       _saves_to(os.path.join(tmp, 'NEW'))), line.cget('text')
+                       _saves_to(app, os.path.join(tmp, 'NEW'))), \
+            line.cget('text')
         assert line.cget('fg') == app.SLDEA_FOLDER_COLORS['ok']
         assert app._sldea_folder_tip.text == os.path.abspath(
             os.path.join(tmp, 'NEW'))
@@ -460,21 +533,22 @@ def test_the_line_sits_under_run_name_follows_the_boxes_and_warns():
         # a folder that holds a run: warned once its check is back
         _a_run_in(os.path.join(tmp, 'RUN'))
         app.sldea_runname_var.set('RUN')
-        assert _settle(root, lambda: 'already holds a run' in
-                       line.cget('text')), line.cget('text')
-        assert line.cget('text').startswith('\u26a0')
+        assert _settle(root, lambda: _holds_run(line.cget('text'))), \
+            line.cget('text')
+        assert line.cget('text').split('\n')[1].startswith('⚠')
         assert line.cget('fg') == WINE
         note()
         # a name that cannot be a folder name: warned at once
         app.sldea_runname_var.set('a:b')
         root.update()
-        assert 'Run name' in line.cget('text'), line.cget('text')
+        assert 'cannot contain :' in line.cget('text'), line.cget('text')
         assert line.cget('fg') == WINE
         note()
         # a µ in the name: warned at once, with New folder's way round it
         app.sldea_runname_var.set('P3_7_2.5µL')
         root.update()
-        assert 'u for µ, as in 2.5uL' in line.cget('text'), line.cget('text')
+        assert 'u for µ, as in 2.5uL' in line.cget('text'), \
+            line.cget('text')
         assert line.cget('fg') == WINE
         note()
         app.sldea_runname_var.set('')
@@ -487,9 +561,60 @@ def test_the_line_sits_under_run_name_follows_the_boxes_and_warns():
         app.sldea_runname_var.set('RUN')
         app.sldea_outdir.set(other)
         assert _settle(root, lambda: line.cget('text') ==
-                       _saves_to(os.path.join(other, 'RUN'))), \
+                       _saves_to(app, os.path.join(other, 'RUN'))), \
             line.cget('text')
         assert line.cget('fg') == app.SLDEA_FOLDER_COLORS['ok']
+
+
+def test_the_line_never_moves_the_rows_below_it():
+    """#402 review: a warning took the line to two lines and the µ hint to
+    three, so every row below it, ▶ Run included, jumped after each typing
+    pause. The line is two lines high whatever it says, each line fitted
+    to its width: the Run button and the row under the line stay put
+    through a blank name, a long name in a long Output dir, a name whose
+    folder holds a run, and a µ, and the run folder's name always shows."""
+    with tempfile.TemporaryDirectory() as tmp, _real_app() as (root, app):
+        _select_sldea(root, app)
+        line = app.sldea_folder_line
+        below = app.sldea_vars['diam_mm']          # the row under the line
+        deep = os.path.join(tmp, *(['a_long_folder_name_for_a_test'] * 6))
+        os.makedirs(deep)
+        long_name = 'P3_6_2.5mL_Triazole_20261008_and_then_some_more'
+        _a_run_in(os.path.join(tmp, 'RUN'))
+        spots, texts = {}, {}
+
+        def note(state):
+            root.update()
+            spots[state] = (app.sldea_run_btn.winfo_rooty()
+                            - root.winfo_rooty(), below.winfo_y(),
+                            line.winfo_height())
+            texts[state] = line.cget('text')
+        app.sldea_outdir.set(tmp)
+        app.sldea_runname_var.set('')
+        _settle(root, lambda: False, timeout=0.5)
+        note('blank')
+        app.sldea_outdir.set(deep)
+        app.sldea_runname_var.set(long_name)
+        _settle(root, lambda: False, timeout=0.5)
+        note('long')
+        app.sldea_outdir.set(tmp)
+        app.sldea_runname_var.set('RUN')
+        assert _settle(root, lambda: _holds_run(line.cget('text'))), \
+            line.cget('text')
+        note('used')
+        app.sldea_runname_var.set('P3_7_2.5µL')
+        root.update()
+        note('micro')
+        assert len(set(spots.values())) == 1, spots
+        fits = app._sldea_folder_fits()
+        assert fits is not None, 'the line was never laid out'
+        for state, text in texts.items():
+            for part in _lines(text):
+                assert fits(part), (state, part)
+        assert texts['long'].endswith(long_name), texts['long']
+        assert texts['long'].startswith('Saves to: …'), texts['long']
+        assert len(_lines(texts['used'])) == 2, texts['used']
+        assert len(_lines(texts['micro'])) == 2, texts['micro']
 
 
 def test_a_share_that_hangs_never_freezes_the_window():
@@ -510,9 +635,8 @@ def test_a_share_that_hangs_never_freezes_the_window():
             worst = max(worst, time.monotonic() - t0)
             root.update()
             # the path for THIS keystroke, with or without the slow note
-            want = sprof._short_path(os.path.abspath(os.path.join(tmp, name)))
-            text = line.cget('text')
-            assert text.endswith(want) or want + '  (' in text, text
+            first = line.cget('text').split('\n')[0]
+            assert first == _saves_to(app, os.path.join(tmp, name)), first
             _settle(root, lambda: False, timeout=0.4)
         assert worst < 0.5, worst
         assert _settle(root, lambda: 'not answering' in line.cget('text')), \
@@ -522,7 +646,7 @@ def test_a_share_that_hangs_never_freezes_the_window():
         assert len(out) == 1, out
         gate.set()
         assert _settle(root, lambda: line.cget('text') ==
-                       _saves_to(os.path.join(tmp, 'ABCDE'))), \
+                       _saves_to(app, os.path.join(tmp, 'ABCDE'))), \
             line.cget('text')
 
 
@@ -534,11 +658,12 @@ def test_a_finished_run_turns_the_line_to_a_warning():
         app.sldea_outdir.set(tmp)
         app.sldea_runname_var.set('RUN')
         assert _settle(root, lambda: line.cget('text') ==
-                       _saves_to(os.path.join(tmp, 'RUN'))), line.cget('text')
+                       _saves_to(app, os.path.join(tmp, 'RUN'))), \
+            line.cget('text')
         _a_run_in(os.path.join(tmp, 'RUN'))      # what the worker wrote
         app._sldea_finished()
-        assert _settle(root, lambda: 'already holds a run' in
-                       line.cget('text')), line.cget('text')
+        assert _settle(root, lambda: _holds_run(line.cget('text'))), \
+            line.cget('text')
 
 
 def _run():

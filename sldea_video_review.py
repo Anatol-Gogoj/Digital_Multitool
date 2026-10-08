@@ -24,7 +24,9 @@ nearest frame.
 Usage:
     python sldea_video_review.py RUN
 
-Opened from Edge Review's "Video review" button. Headless tests:
+Opened from Edge Review's "Video review" button (in Edge Review's own
+process), and as this program from the SLDEA tab's button and the plot
+window's run menu (#395). Headless tests:
 .venv/bin/python tests/test_sldea_video_review.py
 """
 import datetime
@@ -36,7 +38,7 @@ import threading
 import tk_fontfix                      # must precede tkinter:
 tk_fontfix.apply()                     # colour emoji crash Tk
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 import numpy as np
 
@@ -117,6 +119,7 @@ class VideoReviewWindow:
         self.win = master if standalone else tk.Toplevel(master)
         self.win.title(f"Video review — {os.path.basename(rundir)}")
         self._cap = None
+        self._video_missing = False   # video.mkv not in the folder (_read)
         self._photo = None
         self._closed = False
         self._img = None
@@ -124,10 +127,25 @@ class VideoReviewWindow:
         self._changed = False         # a decision was made this session
         self._poll_job = None
         self.outline = None           # (gen, contour or None, area or None)
-        self._load()
-        self._build()
-        first = self._next_flagged(-1, +1)
-        self.show(first if first is not None else 0)
+        try:
+            self._load()
+            self._build()
+            first = self._next_flagged(-1, +1)
+            self.show(first if first is not None else 0)
+        except Exception:
+            # A run that cannot be read must not leave this window behind,
+            # empty, one more for every press of the button that opened it
+            # (Edge Review's opens it on a run that did not load there,
+            # #395): undo what was started and let the caller say why. The
+            # standalone master is the caller's; open_standalone destroys
+            # it once its box has said why.
+            self._stop_jobs()
+            if not standalone:
+                try:
+                    self.win.destroy()
+                except tk.TclError:
+                    pass
+            raise
 
     # ------------------------------------------------------------- data
     def _load(self):
@@ -189,6 +207,20 @@ class VideoReviewWindow:
         top = ttk.Frame(w, padding=(8, 6, 8, 2))
         top.pack(fill='x')
         lines = []
+        have_video = sv.has_video(self.rundir)
+        if not os.path.exists(os.path.join(self.rundir, sv.VIDEO_FILENAME)):
+            # The post-run job writes video_edges.csv BEFORE it moves the
+            # recording in (finalize_and_detect), and that copy to the share
+            # is throttled to COPY_MAX_BPS. A review opened in between found
+            # every frame unreadable and said nothing about why (#395
+            # review).
+            lines.append(f"⚠ The recording is not in this run's folder yet, "
+                         f"so no frame can be shown. After a video run a "
+                         f"separate program moves it in once the edges are "
+                         f"measured; run.log in this folder shows its "
+                         f"progress, or why it stopped. Open this window "
+                         f"again once run.log says {sv.VIDEO_FILENAME} is "
+                         f"in the run folder.")
         if self.stale:
             lines.append(f"⚠ These video edges are out of date: {self.stale}."
                          f" Edge Review's Save re-runs them; or press "
@@ -222,7 +254,7 @@ class VideoReviewWindow:
         self.rerun_btn = ttk.Button(top, text="↻ Re-run video edges",
                                     command=self.rerun)
         self.rerun_btn.pack(side='right')
-        if not (self.stale and sv.has_video(self.rundir)):
+        if not (self.stale and have_video):
             self.rerun_btn.config(state='disabled')
 
         self.fig = Figure(figsize=(self.FIG_W_IN, self.FIG_H_IN), dpi=100)
@@ -369,7 +401,8 @@ class VideoReviewWindow:
         import cv2
         if self._cap is None:
             path = os.path.join(self.rundir, sv.VIDEO_FILENAME)
-            if not os.path.exists(path):
+            self._video_missing = not os.path.exists(path)
+            if self._video_missing:
                 return None
             self._cap = cv2.VideoCapture(path)
         return sv.read_frame(self._cap, frame)
@@ -395,8 +428,11 @@ class VideoReviewWindow:
         img = self._img
         if img is None:
             self.cv.create_text(self.CV_W // 2, self.CV_H // 2, fill='white',
-                                text="this frame does not read from "
-                                     "video.mkv")
+                                text=(f"{sv.VIDEO_FILENAME} is not in the "
+                                      f"run folder yet"
+                                      if self._video_missing else
+                                      "this frame does not read from "
+                                      "video.mkv"))
             return
         x0, y0, x1, y1 = self._view_box(img.shape)
         crop = img[y0:y1, x0:x1].astype(np.float32)
@@ -602,11 +638,15 @@ class VideoReviewWindow:
                               "(progress in this run's run.log). Close and "
                               "reopen this window when it has finished.")
 
-    def close(self):
-        if self._closed:
-            return
+    def _stop_jobs(self):
+        """Stop what this window has going: the outline worker's next
+        request, the outline poll, matplotlib's pending redraw and the open
+        recording. Safe on a window whose construction stopped part way,
+        which has no outline worker or figure yet (see __init__)."""
         self._closed = True
-        self.jobs.closed = True
+        jobs = getattr(self, 'jobs', None)
+        if jobs is not None:
+            jobs.closed = True
         if self._poll_job is not None:
             try:
                 self.win.after_cancel(self._poll_job)
@@ -617,16 +657,22 @@ class VideoReviewWindow:
         # pending it fires into the destroyed window (Edge Review's
         # _cancel_pending documents the same defect for its own jobs).
         # Only this window's jobs are cancelled: the master's are not ours.
-        idle = getattr(self.fig_canvas, '_idle_draw_id', None)
+        canvas = getattr(self, 'fig_canvas', None)
+        idle = getattr(canvas, '_idle_draw_id', None)
         if idle:
             try:
-                self.fig_canvas.get_tk_widget().after_cancel(idle)
+                canvas.get_tk_widget().after_cancel(idle)
             except Exception:
                 pass
-            self.fig_canvas._idle_draw_id = None
+            canvas._idle_draw_id = None
         if self._cap is not None:
             self._cap.release()
             self._cap = None
+
+    def close(self):
+        if self._closed:
+            return
+        self._stop_jobs()
         if self._changed and self.edges:
             # the PNG beside the CSV says what the review decided, so a
             # reader of the run folder sees it without opening this window
@@ -650,18 +696,79 @@ class VideoReviewWindow:
             self.on_close(self)
 
 
+def _tell(text, root=None, error=True):
+    """Say `text` on the console and in a box over `root` (withdrawn), or
+    over a root of its own when none is given. Never raises.
+
+    The SLDEA tab and the plot window start this program as a process of
+    its own (#395), with no console that anyone reads, so what it has to
+    say goes on screen as well, as Edge Review says it for the window it
+    opens in its own process. With no display only the console line is
+    left, which is what the command line had before."""
+    try:
+        print(text)
+    except Exception:               # a console that cannot encode it
+        pass
+    own = root is None
+    try:
+        if own:
+            root = tk.Tk()
+        root.withdraw()
+        show = messagebox.showerror if error else messagebox.showinfo
+        show("Video review", text, parent=root)
+    except Exception:
+        pass
+    finally:
+        if own and root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
+def open_standalone(root, rundir):
+    """The window as its own program, on the Tk root `root`. -> the
+    window, or None once a box has said why it could not open and `root`
+    is destroyed."""
+    try:
+        return VideoReviewWindow(root, rundir, standalone=True)
+    except Exception as e:
+        _tell(f"The video review of {os.path.basename(rundir)} could not "
+              f"open:\n\n{e}", root)
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        return None
+
+
 def main(argv):
     if not argv or argv[0] in ('-h', '--help'):
         print(__doc__.split('Usage:')[1].split('Opened from')[0].rstrip())
         return 0 if argv else 2
     import sldea_edge as se
     rundir = se.resolve_run(argv[0]) or argv[0]
-    if not os.path.exists(os.path.join(rundir, sv.VIDEO_EDGES_FILENAME)):
-        print(f"no {sv.VIDEO_EDGES_FILENAME} in {rundir}: run "
-              f"`python sldea_video.py \"{rundir}\"` first")
+    # A run whose recording is in its folder opens before its video edges
+    # exist (#395). That is every video run for a while after it ends,
+    # and every run recorded without "edges after": the window itself
+    # says there are no edges yet and offers Re-run. Only a folder with no
+    # video at all is refused, here, before any window, and in words: the
+    # SLDEA tab starts this program without looking in the folder itself.
+    if not (sv.has_video(rundir) or os.path.exists(
+            os.path.join(rundir, sv.VIDEO_EDGES_FILENAME))):
+        _tell(f"There is no video of {os.path.basename(rundir)} to review "
+              f"yet: neither {sv.VIDEO_FILENAME} with "
+              f"{sv.VIDEO_INDEX_FILENAME} nor {sv.VIDEO_EDGES_FILENAME} is "
+              f"in\n{rundir}\nor that folder cannot be reached.\n\n"
+              f"When a run records video, a separate program moves the "
+              f"recording into its run folder after the run, after edge "
+              f"detection on every frame when that was ticked. Its "
+              f"progress, or the reason it stopped, is in run.log in that "
+              f"folder.", error=False)
         return 2
     root = tk.Tk()
-    VideoReviewWindow(root, rundir, standalone=True)
+    if open_standalone(root, rundir) is None:
+        return 1
     root.mainloop()
     return 0
 

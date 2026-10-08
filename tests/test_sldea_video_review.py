@@ -18,6 +18,7 @@ import csv
 import gc
 import os
 import shutil
+import tempfile
 
 import sldea_video as sv
 import test_sldea_video as tv
@@ -263,6 +264,45 @@ def test_stale_edges_are_said_and_a_rerun_is_offered():
         root.destroy()
         if d:
             shutil.rmtree(d, ignore_errors=True)
+
+
+def test_edges_whose_recording_is_not_in_the_folder_yet_say_so():
+    """The post-run job writes video_edges.csv before it moves the
+    recording into the run folder, and that copy is throttled to
+    COPY_MAX_BPS (40 MB/s): about a minute per hour recorded at 1 fps
+    (2.3 GB an hour, SLDEA_DECISIONS.md). A review opened in between, from
+    the SLDEA tab's button or as the program, showed "this frame does not
+    read" on every frame and said nothing about why (#395 review). It now
+    says the recording is not in the folder yet and where its progress
+    is, and a review opened once it is in reads the frames as before."""
+    root = _root()
+    d = held = None
+    try:
+        d = _review_run()
+        held = tempfile.mkdtemp(prefix='sldea_video_staging_')
+        for n in (sv.VIDEO_FILENAME, sv.VIDEO_INDEX_FILENAME):
+            shutil.move(os.path.join(d, n), os.path.join(held, n))
+        w = _open(root, d)
+        head = w.head.cget('text')
+        assert "not in this run's folder yet" in head and 'run.log' in head, \
+            head
+        said = [w.cv.itemcget(i, 'text') for i in w.cv.find_all()
+                if w.cv.type(i) == 'text']
+        assert said == [f"{sv.VIDEO_FILENAME} is not in the run folder yet"], \
+            said
+        assert str(w.rerun_btn.cget('state')) == 'disabled'
+        w.close()
+        for n in (sv.VIDEO_FILENAME, sv.VIDEO_INDEX_FILENAME):
+            shutil.move(os.path.join(held, n), os.path.join(d, n))
+        w = _open(root, d)
+        assert 'not in this run' not in w.head.cget('text')
+        assert w._img is not None, "a frame did not read with the recording in"
+        w.close()
+    finally:
+        root.destroy()
+        for folder in (d, held):
+            if folder:
+                shutil.rmtree(folder, ignore_errors=True)
 
 
 def _run():

@@ -1273,7 +1273,14 @@ RUN_HEADING_TIPS = {
         "override, shown rather than hidden."),
 }
 
-RUN_ROW_HINT = "Right-click the selected runs to move them to a group."
+RUN_ROW_HINT = ("Right-click the selected runs to move them to a group, or "
+                "a run with video to open its video review.")
+
+# The run menu's video entry (#395). A grey entry carries its reason in
+# its label, because a menu entry has no hover text to explain itself.
+VIDEO_ITEM = "🎞 Video review…"
+VIDEO_ITEM_NO_VIDEO = "🎞 Video review… (no video in this run's folder)"
+VIDEO_ITEM_NO_RUN = "🎞 Video review… (right-click on a run)"
 
 # Hover text for the run-folder buttons (`#323`) and the group editor
 # (`#313`). Module constants for the reason every other tooltip here is
@@ -1702,6 +1709,7 @@ class PlotWindow:
         self._warns = []
         self._title_rows = []          # the heading boxes (`#315`)
         self._title_focused = None     # the one with the caret, if any
+        self._video_reviews = {}       # run -> the review started here (#395)
         root.title("SLDEA plot — cross-run figures")
 
         # PRECEDENCE (`#275`): explicit CLI/init args > remembered >
@@ -3036,6 +3044,7 @@ class PlotWindow:
         if not self.selected_dirs():
             return 'break'
         menu = self.group_menu()
+        self.video_review_item(menu, row)      # for the CLICKED run (#395)
         # NO grab_release() after it: on X11 (the bench) tk_popup posts
         # the menu, sets a global grab on it and returns at once, and Tk
         # releases that grab itself when the menu unposts (tk_popup in
@@ -3043,6 +3052,75 @@ class PlotWindow:
         # click elsewhere does not close. Windows and aqua set no grab.
         menu.tk_popup(event.x_root, event.y_root)
         return 'break'
+
+    def video_review_item(self, menu, row):
+        """Put Video review... at the end of the run menu `menu`, for the
+        run whose picker row `row` was right-clicked (#395). Live when that
+        run's folder holds a recording and its index
+        (sldea_video.has_video); grey, with the reason in its label,
+        otherwise. The CLICKED run rather than the selection: a review is
+        of one run, and the click is what names it.
+        -> the run directory the entry acts on, or None."""
+        import sldea_video as sv
+        i = self._row_of(row) if row else None
+        rundir = (self.runs[i][0]
+                  if i is not None and 0 <= i < len(self.runs) else None)
+        menu.add_separator()
+        if rundir is None:
+            menu.add_command(label=VIDEO_ITEM_NO_RUN, state='disabled')
+        elif not sv.has_video(rundir):
+            menu.add_command(label=VIDEO_ITEM_NO_VIDEO, state='disabled')
+        else:
+            menu.add_command(label=VIDEO_ITEM, command=lambda d=rundir:
+                             self.open_video_review(d))
+            return rundir
+        return None
+
+    def open_video_review(self, rundir):
+        """The video review window on `rundir`, as its own process, launched
+        exactly as open_in_edge_review launches Edge Review (owner decision
+        2026-10-06): a decoder stall or a crash in it cannot take this
+        window down, and it stays open when this window closes.
+
+        One live review per run from this window: while the one started
+        here for that run is still running, no second is started, and the
+        click-through line says so. Stale or missing video edges are the
+        review window's to say. -> the argv used, or None."""
+        import sldea_video as sv
+        # The redraw that a right-click on an unselected row asked for
+        # lands FIRST: _redraw puts CLICK_HINT back on this line, and a
+        # redraw still pending would take the answer below straight down.
+        if self._redraw_after is not None:
+            self._cancel_redraw()
+            self.redraw()
+        name = os.path.basename(rundir)
+        # finished reviews are dropped (poll() also reaps them on Linux)
+        self._video_reviews = {k: p for k, p in self._video_reviews.items()
+                               if p.poll() is None}
+        key = sp.group_key(rundir)
+        if key in self._video_reviews:
+            self.lbl_click.config(
+                text=f"the video review of {name} started from this window "
+                     f"is still open; close it to open it again")
+            return None
+        if not sv.has_video(rundir):
+            self.lbl_click.config(
+                text=f"{name} has no video in its folder "
+                     f"({sv.VIDEO_FILENAME} and {sv.VIDEO_INDEX_FILENAME}), "
+                     f"so there is nothing to review")
+            return None
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              'sldea_video_review.py')
+        cmd = [sys.executable, script, rundir]
+        try:
+            self._video_reviews[key] = subprocess.Popen(
+                cmd, start_new_session=True)
+        except Exception as e:
+            messagebox.showerror("Video review",
+                                 f"Could not launch the video review:\n{e}")
+            return None
+        self.lbl_click.config(text=f"→ Video review opening on {name}")
+        return cmd
 
     def move_to_group(self, name):
         """Move the selected runs into group `name`; '' takes them out of

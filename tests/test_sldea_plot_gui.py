@@ -1568,6 +1568,45 @@ def test_a_bar_that_appears_never_puts_the_figure_under_its_floor():
         _shut(root)
 
 
+def _more_runs(w, n=12):
+    """Add `n` runs to a _Win's folder and re-list. -> the picker's row
+    ids in the order shown: 2 + n of them, about 9 on screen."""
+    for i in range(n):
+        _fake_run(w.tmp, f'D{i:02d}')
+    w.win.populate()
+    w.settle(0.3)
+    return list(w.win.run_box.get_children())
+
+
+def _whole_rows(tree, rows):
+    """-> the rows wholly inside the list widget, top to bottom: the
+    test's own reading, kept apart from DragSelect's."""
+    out = []
+    for r in rows:
+        box = tree.bbox(r)
+        if box and box[1] + box[3] <= tree.winfo_height():
+            out.append(r)
+    return out
+
+
+class _MenuStub:
+    """The run menu, stubbed: a real tk_popup is modal on Windows and
+    would hold the suite. It counts the posts, and it takes the entries
+    #395's Video review item adds after the group menu is built."""
+
+    def __init__(self):
+        self.posted = 0
+
+    def tk_popup(self, _x, _y):
+        self.posted += 1
+
+    def add_separator(self):
+        pass
+
+    def add_command(self, **_kw):
+        pass
+
+
 def test_a_drag_selects_the_rows_it_passes_and_clicks_keep_their_jobs():
     """`#390`: click-drag range selection went with the Listbox, because
     a Tk 8.6 Treeview's own drag only moves column separators, and
@@ -1651,7 +1690,10 @@ def test_a_drag_selects_the_rows_it_passes_and_clicks_keep_their_jobs():
         assert tree.yview()[0] > 0.0, tree.yview()
         assert got == rows[:len(got)] and len(got) > len(shown), \
             (len(got), len(shown))
-        assert tree.bbox(got[-1]), 'the last row selected is off screen'
+        # wholly on screen, not just with a box: Tk also gives one to the
+        # row past the last whole row (`#390` review)
+        assert got[-1] in _whole_rows(tree, rows), \
+            'the last row selected is not wholly on screen'
         tree.yview_moveto(0)
         w.settle(0.2)
         before = sel()
@@ -1686,18 +1728,12 @@ def test_a_menu_click_keeps_the_selection_it_was_opened_for():
     real event with the binding macOS gets, bound here by hand since
     this is not a Mac; on Windows the class binding that would run next
     is Ctrl-click's toggle, which takes the row out instead. The menu is
-    stubbed: a real tk_popup is modal on Windows."""
+    stubbed (_MenuStub)."""
     with _Win('1400x900') as w:
         if not w.ok:
             return
         win, tree = w.win, w.win.run_box
-
-        class _Menu:
-            posted = 0
-
-            def tk_popup(self, _x, _y):
-                self.posted += 1
-        menu = _Menu()
+        menu = _MenuStub()
         win.group_menu = lambda: menu
         tree.bind('<Control-Button-1>', win._run_menu)
         everything = [d for d, _l in win.runs]
@@ -1710,6 +1746,124 @@ def test_a_menu_click_keeps_the_selection_it_was_opened_for():
                             y=y + h // 2)
         assert menu.posted == 1, menu.posted
         assert win.selected_dirs() == everything, win.selected_dirs()
+
+
+def test_a_drag_over_the_headings_scrolls_and_takes_only_rows_on_screen():
+    """`#390` review: over the headings of a list scrolled down, Tk's
+    identify_row names a row scrolled out of sight above them (Tk 8.6
+    IdentifyItem counts rows from where the top row would be, with no
+    lower bound). The drag took that row: dragged up and released over
+    the headings, it selected runs nobody could see, which the figure
+    and the export then drew, and the list did not scroll. The headings
+    now count as above the top row, so each motion there scrolls up one
+    row, and only rows on screen are taken."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        tree = w.win.run_box
+        rows = _more_runs(w)
+        tree.yview_scroll(3, 'units')
+        w.settle(0.3)
+        assert _whole_rows(tree, rows)[0] == rows[3], tree.yview()
+        # the Tk behavior the guard is for: a hidden row, named there
+        hidden = tree.identify_row(5)
+        assert hidden in rows[:3] and not tree.bbox(hidden), hidden
+
+        def sel():
+            chosen = set(tree.selection())
+            return [r for r in rows if r in chosen]
+        x, y, _w, h = tree.bbox(rows[6])
+        tree.event_generate('<ButtonPress-1>', x=x + 10, y=y + h // 2)
+        assert sel() == [rows[6]], sel()
+        tree.event_generate('<B1-Motion>', x=x + 10, y=5)
+        assert _whole_rows(tree, rows)[0] == rows[2], \
+            'the list did not scroll up a row'
+        assert sel() == rows[2:7], sel()
+        tree.event_generate('<B1-Motion>', x=x + 10, y=5)
+        tree.event_generate('<ButtonRelease-1>', x=x + 10, y=5)
+        assert sel() == rows[1:7], sel()
+        whole = _whole_rows(tree, rows)
+        assert all(r in whole for r in sel()), (sel(), whole)
+
+
+def test_a_drag_past_the_bottom_takes_only_rows_wholly_on_screen():
+    """`#390` review: Tk's bbox() gives a box to the row just past the
+    last whole row as well, and that row can be entirely out of sight.
+    _edge_row took the last row with a box, so a drag past the bottom
+    could select a run nobody could see. It now stops at the last row
+    wholly inside the widget.
+
+    On this PC's Tk 8.6.14, bbox() reads the scroll state the last
+    redraw left, so right after a scroll it happened to name the right
+    row; the review reads Tk 8.6.15's bbox() as bringing that state up
+    to date first. The case does that after each scroll, so it holds
+    the drag to the newer behavior here too."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        tree = w.win.run_box
+        rows = _more_runs(w)
+        whole = _whole_rows(tree, rows)
+        assert len(whole) < len(rows), (len(whole), len(rows))
+        real = tree.yview_scroll
+
+        def scroll(number, what):
+            real(number, what)
+            tree.update_idletasks()        # the scroll state, made current
+        tree.yview_scroll = scroll
+
+        def sel():
+            chosen = set(tree.selection())
+            return [r for r in rows if r in chosen]
+        start = whole[len(whole) // 2]
+        x, y, _w, h = tree.bbox(start)
+        tree.event_generate('<ButtonPress-1>', x=x + 10, y=y + h // 2)
+        below = {'x': x + 10, 'y': tree.winfo_height() + 15}
+        for step in (1, 2):
+            tree.event_generate('<B1-Motion>', **below)
+            got, whole = sel(), _whole_rows(tree, rows)
+            assert got[0] == start and got[-1] == whole[-1], \
+                (step, got, whole)
+            assert all(r in whole for r in got), (step, got, whole)
+        tree.event_generate('<ButtonRelease-1>', **below)
+        assert tree.yview()[0] > 0.0, tree.yview()
+
+
+def test_a_click_on_the_headings_of_a_scrolled_list_names_no_hidden_run():
+    """`#390` review, the same Tk behavior as the drag's: a right-click on
+    the headings of a list scrolled down made the hidden row Tk names
+    there the whole selection, and opened the menu for it; the hover
+    text over a heading separator described that row. Neither takes a
+    row that is not on screen now: the menu keeps the selection it was
+    opened over, and the separator has no hover text of its own."""
+    with _Win('1400x900') as w:
+        if not w.ok:
+            return
+        win, tree = w.win, w.win.run_box
+        rows = _more_runs(w)
+        menu = _MenuStub()
+        win.group_menu = lambda: menu
+        picked = [win.runs[win._row_of(r)][0] for r in rows[4:6]]
+        win.set_selected_dirs(picked)
+        tree.yview_scroll(3, 'units')
+        w.settle(0.3)
+        hidden = tree.identify_row(5)
+        assert hidden and not tree.bbox(hidden), hidden
+        x = tree.column('run', 'width') // 2
+        assert tree.identify_region(x, 5) == 'heading'
+        tree.event_generate('<ButtonPress-3>', x=x, y=5)
+        tree.event_generate('<ButtonRelease-3>', x=x, y=5)
+        assert menu.posted == 1, menu.posted
+        assert win.selected_dirs() == picked, win.selected_dirs()
+        # the hover text: a heading still explains its column...
+        assert win._picker_tip(x, 5)[0] == ('heading', 'run')
+        # ...and a separator in the heading row is no row at all
+        sep = tree.column('run', 'width')
+        assert tree.identify_region(sep, 5) == 'separator'
+        assert win._picker_tip(sep, 5) == (None, ''), win._picker_tip(sep, 5)
+        # while a row on screen still shows itself
+        bx, by, _bw, bh = tree.bbox(rows[4])
+        assert win._picker_tip(bx + 5, by + bh // 2)[0] == ('row', rows[4])
 
 
 def test_moving_the_window_does_not_cost_a_redraw():

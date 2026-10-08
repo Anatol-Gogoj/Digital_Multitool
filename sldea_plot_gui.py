@@ -858,6 +858,19 @@ class PointerTip(Tooltip):
                 self.widget.winfo_pointery() + 18)
 
 
+def row_on_screen(tree, y):
+    """-> the Treeview row at widget height `y`, or '' when no row there
+    is on screen.
+
+    identify_row alone is not enough (`#390` review). Tk 8.6 counts rows
+    from where the top row would be, with no lower bound (IdentifyItem in
+    ttkTreeview.c), so over the headings of a list scrolled down it
+    names a row scrolled out of sight above them. bbox() is empty for
+    such a row."""
+    row = tree.identify_row(y)
+    return row if row and tree.bbox(row) else ''
+
+
 class DragSelect:
     """Click-drag range selection on a ttk.Treeview (`#390`).
 
@@ -876,9 +889,11 @@ class DragSelect:
     dragged over; after a Ctrl-click it adds them to the selection, or
     takes them out, as the Listbox did. A press anywhere else starts no
     drag, so a heading click still sorts and a separator drag still
-    resizes its column. Past the first or last row on screen, each
-    pointer motion scrolls the list one row and extends to the row then
-    at that edge: motion-driven, with no timer to cancel on close."""
+    resizes its column. With the pointer above the top row (over the
+    headings, too) or below the last whole row, each pointer motion
+    scrolls the list one row and extends to the whole row then at that
+    edge: motion-driven, with no timer to cancel on close. Only rows on
+    screen are ever taken (row_on_screen, _whole)."""
 
     def __init__(self, tree):
         self.tree = tree
@@ -917,9 +932,11 @@ class DragSelect:
             return
         row = ''
         # only inside the widget: below it, identify_row names the row
-        # that WOULD be there, which is off screen and not yet scrolled to
+        # that WOULD be there, which is off screen and not yet scrolled
+        # to; and over the headings row_on_screen turns down the hidden
+        # row Tk names there, so the headings count as above the top row
         if 0 <= event.y < tree.winfo_height():
-            row = tree.identify_row(event.y)
+            row = row_on_screen(tree, event.y)
         row = row or self._edge_row(rows, event.y)
         if not row:
             return
@@ -930,18 +947,35 @@ class DragSelect:
             tree.selection_set([r for r in rows if r in want])
 
     def _edge_row(self, rows, y):
-        """The pointer is above or below the rows on screen: scroll one
-        row toward it. -> the row then at that edge, or '' if none."""
+        """The pointer is above or below the rows on screen, the headings
+        included: scroll one row toward it. -> the row then at that edge,
+        wholly on screen, or '' if there is none."""
         tree = self.tree
-        shown = [r for r in rows if tree.bbox(r)]
-        if not shown:
+        whole = self._whole(rows)
+        if not whole:
             return ''
-        up = y < tree.bbox(shown[0])[1]
+        up = y < tree.bbox(whole[0])[1]
         tree.yview_scroll(-1 if up else 1, 'units')
-        shown = [r for r in rows if tree.bbox(r)]
-        if not shown:
+        whole = self._whole(rows)
+        if not whole:
             return ''
-        return shown[0] if up else shown[-1]
+        return whole[0] if up else whole[-1]
+
+    def _whole(self, rows):
+        """-> the rows wholly inside the widget, top to bottom. A box from
+        bbox() is not enough (`#390` review): Tk gives one to the row just
+        past the last whole row too, which can be entirely out of sight.
+        Tk 8.6.14 does that before a scroll; a Tk that brings its scroll
+        state up to date inside bbox() (8.6.15 on, by the review's
+        reading of ttkTreeview.c) does it right after one as well."""
+        tree = self.tree
+        height = tree.winfo_height()
+        out = []
+        for r in rows:
+            box = tree.bbox(r)
+            if box and box[1] + box[3] <= height:
+                out.append(r)
+        return out
 
 
 # The bands are a CALIBRATED ERROR BUDGET, not a fit residual and not
@@ -2875,7 +2909,9 @@ class PlotWindow:
             except (ValueError, IndexError):
                 return None, ''
             return ('heading', col), RUN_HEADING_TIPS[col]
-        row = tree.identify_row(y)
+        # on screen only: over a heading separator of a scrolled list,
+        # identify_row names a hidden row (row_on_screen, `#390` review)
+        row = row_on_screen(tree, y)
         if not row:
             return None, ''
         return ('row', row), self.row_tip(row)
@@ -2934,13 +2970,15 @@ class PlotWindow:
     def _run_menu(self, event):
         """Right-click on the list. A click on a row that is not selected
         selects that row alone first, as file managers do, so the menu
-        always acts on what is highlighted.
+        always acts on what is highlighted. A click where no row is on
+        screen (the headings of a scrolled list) selects nothing new: Tk
+        names a hidden row there (row_on_screen, `#390` review).
 
         -> 'break', always (`#390`): on macOS the menu also answers
         Control-click, which is a Button-1 press, and without the break
         the Treeview's own Button-1 binding ran after it and selected
         the clicked row alone, collapsing the selection the menu was for."""
-        row = self.run_box.identify_row(event.y)
+        row = row_on_screen(self.run_box, event.y)
         if row and row not in self.run_box.selection():
             self.run_box.selection_set([row])
         if not self.selected_dirs():

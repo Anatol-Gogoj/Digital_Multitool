@@ -774,7 +774,19 @@ stream at run start still does not stop the run.
     one never is;
   - `Video outcome (end): NOT recorded: <why>` when nothing was recorded;
   - the count so far, saying so, when `stop()` gave up on an encoder
-    that was still writing. Dropped frames are counted.
+    that was still writing. Dropped frames are counted;
+  - `; the reader was inside a camera control call for N s at the end`
+    instead of a dead stream, when `stop()` found the reader inside a
+    control call that began while the stream was still live (review,
+    2026-10-07). The reader runs those calls itself and reads no frame
+    meanwhile: the 5 s refresh and each still's restamp,
+    `webcam.apply_locked`, two `v4l2-ctl` runs per control with 10 s
+    timeouts. The run.log summary gives the longest one, which BENCH_TEST
+    Q18 reads off the DFK;
+  - `; the camera stream dropped out for ~2 s or more and came back Nx`
+    when a reopen was followed by frames (review, 2026-10-07). A reopen
+    alone does not count: on the Bayer path it starts `v4l2-ctl` even
+    with no camera attached, so `reopens` counts attempts.
 
   A clean recording gets its line too. Without it, no line would mean
   either "recorded well" or "the run never got this far" (the app closed
@@ -799,6 +811,16 @@ stream at run start still does not stop the run.
   next run's check refuses at once and says to restart the app, instead
   of starting a second probe that could get stuck behind the first on a
   lock inside FFmpeg. The refusal ends when the probe returns.
+- **Run's own pre-flight asks first** (review, 2026-10-07). It runs on
+  the Tk thread before any worker exists, and its 64 x 48 probe and the
+  `disk_usage` of the staging disk did not look at a stuck probe, so a
+  second Run after a hang could freeze the whole window. Both now ask
+  `codec_check_stuck()`. While a given-up probe still runs, the
+  pre-flight skips both probes and asks the existing "Video unavailable
+  ... Run WITHOUT video (snapshots only)?" question in the refusal's
+  words. "Restart the app" may not clear a hung disk either: on Linux,
+  Restart re-execs the process (`os.execv`), and an exec cannot finish
+  while a thread is stuck in uninterruptible disk I/O. Not tried.
 - **A writer that will not open** is now "could not open the FFV1 writer
   (encoder or disk)".
 - **The guard-page test** counts only the fault: "Unknown C++ exception"
@@ -809,18 +831,27 @@ stream at run start still does not stop the run.
   on Windows 11.
 - **Owner decision (2026-10-06), answering the question above:** a dead
   stream or a missing camera at run start does NOT stop the run. The
-  stills are the measurement, and setup.txt records the video outcome;
-  a missing camera is already stopped at the pre-flight baseline (#348).
-  What setup.txt says in each case: a stream that delivers nothing in
-  5 s already gets its own `Video outcome: NOT recorded` start line; a
-  run whose recorder started now gets the end line; a run with no camera
-  at all writes no outcome line, only the run.log warning. That last
-  case is unchanged here. Whether setup.txt should say it too is an open
-  owner question.
+  stills are the measurement, and setup.txt records the video outcome.
+  Each case now has its line (corrected in review, 2026-10-07):
+  - no camera attached: `webcam.resolve_camera` still returns a spec,
+    the stream fails to open, and the existing branch writes its `Video
+    outcome: NOT recorded` line saying the camera stream did not start;
+  - a stream that delivers nothing in 5 s: the same line;
+  - a camera setup that raised, leaving no spec: `Video outcome: NOT
+    recorded: camera setup failed`, new here;
+  - a run whose recorder started: the end line above.
 
-**Not verified.** Desk only (Gogojster, Windows 11). The timeout has not
-fired on a real hang: the tests stand in a probe that blocks. The bench
-line in #369 unplugs the camera in a DRY run and reads the end line.
+  What stops a run at its baseline is separate (#348,
+  `sldea_profile.baseline_stop_reason`): a flat baseline still, or no
+  baseline frame at all when the pre-flight got one. The pre-flight
+  override switches both off. The decision as passed on also said that a
+  missing camera is stopped at the pre-flight baseline; that holds only
+  when the pre-flight got a frame and no override was taken.
+
+**Not verified.** Desk only (Gogojster, Windows 11). Neither the timeout
+nor the pre-flight refusal has met a real hang, and the control-call
+rule has not met a slow `v4l2-ctl`: the tests stand in fakes that block.
+The bench lines are BENCH_TEST Q5, Q12, Q12b and Q18 (#369).
 
 ## The baseline disc fit retries from the window centre when it refuses, and judges that retry against the ring around the disc (2026-10-05)
 

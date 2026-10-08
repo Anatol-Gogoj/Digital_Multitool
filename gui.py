@@ -5760,11 +5760,25 @@ LOGGING:
                             if (shadow.update(el, p.kv_at(el), ua,
                                               offscreen=ioff)
                                     and tel is not None):
-                                tel.event(
-                                    el, datetime.now().isoformat(
-                                        timespec='milliseconds'),
-                                    p.kv_at(el), "SHADOW N-sigma "
-                                    + shadow.outcome_text())
+                                # Written, not flushed (HV review
+                                # 2026-10-08): this row is the one file
+                                # write the shadow adds to this loop, and
+                                # its own flush on a stalled share delayed
+                                # the next tick's live trip by the stall.
+                                # hold_flush keeps the row in the file's
+                                # buffer; the next flush (the periodic row
+                                # below, or tel.close() after the SG is
+                                # zeroed) writes it out.
+                                held = tel.hold_flush
+                                tel.hold_flush = True
+                                try:
+                                    tel.event(
+                                        el, datetime.now().isoformat(
+                                            timespec='milliseconds'),
+                                        p.kv_at(el), "SHADOW N-sigma "
+                                        + shadow.outcome_text())
+                                finally:
+                                    tel.hold_flush = held
                         except Exception as e:
                             shadow_end = (f"stopped by an error at "
                                           f"{el:.1f} s: "

@@ -939,6 +939,68 @@ def test_the_end_outcome_names_a_stream_that_stopped_delivering():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_the_end_outcome_does_not_blame_the_camera_for_a_control_call():
+    """#392 review: the reader itself runs the camera control calls (the
+    refresh every 5 s and the restamp before each still: apply_locked, two
+    v4l2-ctl runs per control, 10 s timeouts), and reads no frame
+    meanwhile. A stop() 2.2 s into a 2.5 s refresh found the newest frame
+    over 2 s old, and the end line said the stream stopped delivering.
+    The reader now notes the call, and the line names it instead; the
+    summary gives the longest call (BENCH_TEST Q18)."""
+    import re
+    _need_cv()
+    d = tempfile.mkdtemp(prefix='sldea_video_test_')
+    started = threading.Event()
+
+    def slow_refresh():
+        started.set()
+        time.sleep(2.5)
+    try:
+        rec = sv.VideoRecorder(lambda: _FakeCam(), d, fps=5,
+                               refresh=slow_refresh, refresh_s=1.0,
+                               log=lambda m: None).start()
+        assert rec.wait_first_frame(3.0)
+        rec.set_t0(time.monotonic())
+        assert _wait(lambda: rec.written >= 1, 3.0)
+        assert started.wait(5.0), "the refresh never ran"
+        time.sleep(2.2)
+        rec.end_recording()
+        rec.stop(timeout=5.0)
+        out = rec.end_outcome()
+        assert 'stopped delivering' not in out and 'then stopped' not in out, \
+            out
+        assert re.fullmatch(
+            r"recorded \d+ frames, \d+\.\d to \d+\.\d s on the run's clock; "
+            r"the reader was inside a camera control call for 2\.\d s at the "
+            r"end", out), out
+        assert 'camera control calls up to 2.' in rec.summary(), \
+            rec.summary()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_stream_already_quiet_when_a_control_call_began_is_still_named():
+    """The other side of the rule above, on the recorder's own numbers: a
+    control call in progress at stop() explains the quiet only if the
+    stream was live when the call began. A stream that had been quiet for
+    longer than a still may be old before then had stopped delivering."""
+    rec = sv.VideoRecorder(lambda: _FakeCam(), tempfile.gettempdir())
+    rec.t0, rec.written, rec.first_t, rec.last_t = 100.0, 10, 0.0, 9.0
+    rec.last_seen_clock, rec.stopped_at = 109.5, 130.0
+    rec.stopped_in_control = 110.0           # 0.5 s after the last frame
+    assert rec.end_outcome() == (
+        "recorded 10 frames, 0.0 to 9.0 s on the run's clock; the reader "
+        "was inside a camera control call for 20.0 s at the end")
+    rec.stopped_in_control = 128.0           # 18.5 s after it
+    assert rec.end_outcome() == (
+        "recorded 10 frames, 0.0 to 9.0 s on the run's clock, then stopped: "
+        "the camera stream stopped delivering at 9.5 s and had not come "
+        "back by the end of the run")
+    rec.stopped_in_control = None            # no call at all
+    assert 'then stopped: the camera stream stopped delivering at 9.5 s' \
+        in rec.end_outcome()
+
+
 def test_the_end_outcome_counts_the_frames_before_an_encoder_failure():
     _need_cv()
     import cv2

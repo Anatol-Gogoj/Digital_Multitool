@@ -473,6 +473,9 @@ class VideoRecorder:
         self.probed_size = None                # (w, h) check_codec passed
         self._probe_t = None                   # check_codec's probe thread
         self.stopped_at = None                 # clock time of the first stop()
+        self._in_control = None                # when a control call began
+        self.stopped_in_control = None         # ...as stop() found it
+        self.control_max_s = None              # longest control call, s
         self._reader_t = threading.Thread(target=self._reader, daemon=True,
                                           name='sldea-video-reader')
         self._writer_t = threading.Thread(target=self._writer, daemon=True,
@@ -649,7 +652,9 @@ class VideoRecorder:
         try:
             if self.stopped_at is None:
                 # for end_outcome: the reader has read until now, so a
-                # live stream's newest frame is about a frame period old
+                # live stream's newest frame is about a frame period old,
+                # unless the reader is inside a camera control call
+                self.stopped_in_control = self._in_control
                 self.stopped_at = self._clock()
             if self._reader_t.is_alive():
                 self._reader_t.join(max(0.0, min(2.0,
@@ -715,6 +720,8 @@ class VideoRecorder:
                    else "")
                 + (f", {self.dropped} DROPPED -- the encoder could not keep "
                    f"up" if self.dropped else "")
+                + (f"; camera control calls up to {self.control_max_s:.2f} s"
+                   if self.control_max_s is not None else "")
                 + (f"; ERROR: {self.error}" if self.error else ""))
 
     def end_outcome(self):
@@ -731,26 +738,42 @@ class VideoRecorder:
         `why` is the recorder's error, or else a stream whose newest frame
         was more than STILL_MAX_AGE_S old when stop() was called. The
         reader keeps reading until then, so a live stream's newest frame is
-        always younger than that. A clean recording gets its line too, so
-        that a run which never got this far (the app closed during the
-        shutdown) can be told from one that recorded well. Dropped frames
-        are counted. While the encoder is still writing (stop() gave up on
-        it) the count is the count so far, and the words say so. One line
-        of ASCII, because the tab appends it through the same
-        locale-encoded open as the start line. Never raises."""
+        always younger than that, except while the reader itself is inside
+        a camera control call (the refresh or restamp: webcam.apply_locked,
+        two v4l2-ctl runs per control, 10 s timeouts). If stop() found it
+        in one that began while the stream was still live, the line says
+        so instead of blaming the camera (#392 review). A clean recording
+        gets its line too, so that a run which never got this far (the app
+        closed during the shutdown) can be told from one that recorded
+        well. Dropped frames are counted. While the encoder is still
+        writing (stop() gave up on it) the count is the count so far, and
+        the words say so. One line of ASCII, because the tab appends it
+        through the same locale-encoded open as the start line. Never
+        raises."""
         try:
             n = self.written
             why = self.error
             seen = self.last_seen_clock
+            busy = ''
             if why is None and self.stopped_at is not None and (
                     seen is None
                     or self.stopped_at - seen > STILL_MAX_AGE_S):
-                at = ''
-                if seen is not None and self.t0 is not None:
-                    at = (f" at {seen - self.t0:.1f} s"
-                          if seen >= self.t0 else " before recording began")
-                why = (f"the camera stream stopped delivering{at} and had "
-                       f"not come back by the end of the run")
+                call = self.stopped_in_control
+                if call is not None and seen is not None \
+                        and call - seen <= STILL_MAX_AGE_S:
+                    # the stream was live when the call began: the quiet
+                    # at the end is the reader's, not the camera's
+                    busy = (f"; the reader was inside a camera control "
+                            f"call for {self.stopped_at - call:.1f} s at "
+                            f"the end")
+                else:
+                    at = ''
+                    if seen is not None and self.t0 is not None:
+                        at = (f" at {seen - self.t0:.1f} s"
+                              if seen >= self.t0
+                              else " before recording began")
+                    why = (f"the camera stream stopped delivering{at} and "
+                           f"had not come back by the end of the run")
             span = ''
             if self.first_t is not None and self.last_t is not None:
                 span = (f", {self.first_t:.1f} to {self.last_t:.1f} s on "
@@ -769,6 +792,7 @@ class VideoRecorder:
                             if self.t0 is None else
                             "no frame reached the encoder before the run "
                             "ended"))
+            text += busy
             if self.dropped:
                 text += f"; {self.dropped} frames dropped"
         except Exception as e:
@@ -805,6 +829,23 @@ class VideoRecorder:
         with self._stats:
             setattr(self, attr, getattr(self, attr) + 1)
 
+    def _control_call(self, fn):
+        """Run a camera control call (refresh or restamp) on the reader,
+        which reads no frame meanwhile. While it runs, _in_control holds
+        its start, for stop() and end_outcome; the longest one is kept for
+        the summary (BENCH_TEST Q18). Never raises."""
+        start = self._clock()
+        self._in_control = start
+        try:
+            fn()
+        except Exception:
+            pass
+        finally:
+            self._in_control = None
+        took = self._clock() - start
+        if self.control_max_s is None or took > self.control_max_s:
+            self.control_max_s = took
+
     def _reader(self):
         try:
             cam = self._open()
@@ -821,18 +862,12 @@ class VideoRecorder:
         while not self._stop.is_set():
             if self._restamp_req.is_set() and self._restamp is not None:
                 self._restamp_req.clear()
-                try:
-                    self._restamp()
-                except Exception:
-                    pass
+                self._control_call(self._restamp)
                 self.restamp_done = self._clock()
                 skip_next = True
             elif self._refresh is not None \
                     and self._clock() - last_refresh >= self._refresh_s:
-                try:
-                    self._refresh()
-                except Exception:
-                    pass
+                self._control_call(self._refresh)
                 last_refresh = self._clock()
                 skip_next = True
             with self._lock:

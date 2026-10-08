@@ -4186,6 +4186,766 @@ def test_wrap_keeps_every_word_and_indents_the_continuations():
 
 
 # --------------------------------------------------------------------------
+# the caption's cost, the window's cut, the legend that covers data, and
+# names with '$' (`#391`)
+# --------------------------------------------------------------------------
+
+def _wrap_word_by_word(line, fits, indent=sp.CAPTION_WRAP_INDENT):
+    """_wrap as it was before `#391`, verbatim: one exact width test after
+    every word. The reference the steered wrap must match row for row."""
+    rows, cur = [], ''
+    for word in line.split(' '):
+        if not cur and not word:
+            continue
+        lead = indent if rows else ''
+        cand = f"{cur} {word}" if cur else word
+        if fits(lead + cand):
+            cur = cand
+            continue
+        if cur:
+            rows.append(cur)
+            cur = ''
+            if not word:
+                continue
+            lead = indent
+        while len(word) > 1 and not fits(lead + word):
+            k = len(word) - 1
+            while k > 1 and not fits(lead + word[:k]):
+                k -= 1
+            rows.append(word[:k])
+            word = word[k:]
+            lead = indent
+        cur = word
+    if cur or not rows:
+        rows.append(cur)
+    return rows[:1] + [indent + r for r in rows[1:]]
+
+
+def _members_word_by_word(drawn, fits):
+    """The Members line as it was composed before `#391`: the same
+    bisection, with every probe wrapped word by word and in full. The
+    names fed to it carry no '$' or '\\', so `#391`'s escaping does not
+    enter into the comparison."""
+    bits = [f"{name} = " + ', '.join(r['name'] for r in runs)
+            for name, runs, *_rest in drawn]
+    line = 'Members: ' + '; '.join(bits) + '.'
+    rows = _wrap_word_by_word(line + " (Also in the tidy CSV's group "
+                                     "column.)", fits)
+    if len(rows) > sp.MEMBERS_MAX_ROWS:
+        tail = "… (full membership in the tidy CSV's group column)"
+
+        def ok(k):
+            cand = line[:k].rstrip(' ,;') + tail
+            return len(_wrap_word_by_word(cand, fits)) <= sp.MEMBERS_MAX_ROWS
+        lo, hi = 0, len(line)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if ok(mid):
+                lo = mid
+            else:
+                hi = mid - 1
+        rows = _wrap_word_by_word(line[:lo].rstrip(' ,;') + tail, fits)
+    return '\n' + '\n'.join(rows)
+
+
+def _fitter_at(width):
+    """The caption's width test for a figure `width` inches wide."""
+    from matplotlib.figure import Figure
+    return sp._caption_fitter(Figure(figsize=(width, 5.4)))
+
+
+def _counted(fits):
+    """`fits` that counts its calls in `.calls`, keeping its estimate."""
+    def counted(text):
+        counted.calls += 1
+        return fits(text)
+    counted.calls = 0
+    if hasattr(fits, 'reach'):
+        counted.reach = fits.reach
+    return counted
+
+
+# the widths the equivalence cases walk: a near-floor window to beyond the
+# export, at steps that are not round numbers so the breaks land anywhere
+_EQUIV_WIDTHS = tuple(round(3.1 + 0.83 * i, 2) for i in range(13))
+
+# Members lines the search has to get through: the reviewer's six-group,
+# 12-run seed (`#382`), seeded names with ', ' in them, forty long folder
+# names in one group, run names carrying ', ' and '; ' of their own, a
+# double space, and a folder name too long for one row
+_MEMBER_SETS = (
+    [(f"{P3}, {c}", [{'name': f"P3_{2 * i + j}_2.5mL_2026072{2 * i + j}"}
+                     for j in range(2)])
+     for i, c in enumerate(('2.5 mL', '2.3 mL', '1.5 mL'))]
+    + [(m, [{'name': f"P3_{6 + 2 * i + j}_2.5mL_2026072{(6 + 2 * i + j) % 10}"}
+            for j in range(2)])
+       for i, m in enumerate((N3500, N3900, CB))],
+    [(P3, [{'name': f"R{i:02d}_a_rather_long_run_folder_name_here"}
+           for i in range(40)])],
+    [(sp.NO_ELECTRODE_GROUP, [{'name': 'run, with a comma'},
+                              {'name': 'run; with a semicolon'}]),
+     (sp.NOT_SPECIFIED, [{'name': 'double  space run'}]),
+     (f"{P3}, {sp.NO_CONCENTRATION}", [{'name': 'Q' * 70}]),
+     ('eGaIn', [{'name': f"EG_{i}_20260801"} for i in range(9)]),
+     (f"{P3}, 0.5 mL", [{'name': 'SLCBvalidationTest'},
+                        {'name': 'DOT_P3_1_20260729'}])],
+)
+
+
+def test_the_steered_wrap_picks_the_rows_the_word_by_word_wrap_picks():
+    """`#391`: _wrap measures a row once with the words an estimate says
+    fit, instead of once per word, and must still pick exactly the rows
+    the word-by-word loop picked, or every caption and the byte-identity
+    tests above would move. Checked on every caption line of a default,
+    an aggregate and a five-group seeded figure plus hand-made hard cases,
+    at 13 widths; the steering must really save measurements; and a wrap
+    given a deliberately wrong estimate must still pick the same rows."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        one = os.path.join(d, 'one')
+        _fake_run(one, _healthy_rows(8))
+        two = os.path.join(d, 'two')
+        _fake_run(two, _healthy_rows(8))
+        runs = _labeled(d, [(f"P3_{i}_2.5mL_2026072{i % 10}", m, c, i)
+                            for i, (m, c) in enumerate(
+                                [(P3, '2.5 mL'), (P3, '2.5 mL'),
+                                 (P3, '2.3 mL'), (P3, '1.5 mL'),
+                                 (N3900, _ABSENT), (CB, _ABSENT)])])
+        lines = []
+        for opts, dirs in ((sp.make_opts()[0], [one]),
+                           (sp.make_opts(aggregate=True)[0], [one, two]),
+                           (_seeded_opts(runs, 'concentration'), None)):
+            fig = _drawn(sp.prepare_runs(dirs, opts) if dirs else runs, opts)
+            held = getattr(fig, sp._CAPTION_ATTR)[1]
+            # a grouped caption composed with a test that passes every
+            # line, so its lines come whole, as the wrap receives them
+            composed = held(lambda s: True) if callable(held) else held
+            lines += [l for l in composed.split('\n') if l]
+        lines += ['a.  Two spaces stay between sentences, and  two more.',
+                  'C:/a/very/long/pasted/path/with/no/spaces/at/all/in/it/'
+                  'whatsoever/to/be/broken/somewhere x y z',
+                  ' '.join(['Rxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'] * 12)]
+        assert len(lines) > 15, len(lines)
+        steered = plain = 0
+        for width in _EQUIV_WIDTHS:
+            fits = _fitter_at(width)
+            for line in lines:
+                a, b = _counted(fits), _counted(lambda s, f=fits: f(s))
+                assert sp._wrap(line, a) == _wrap_word_by_word(line, b), \
+                    (width, line[:60])
+                steered += a.calls
+                plain += b.calls
+        # the point of it: far fewer exact measurements for the same rows
+        assert steered * 2 < plain, (steered, plain)
+        # ...and the estimate only steers. On real text it is close enough
+        # to land on every row's end, so a wrap that TRUSTED it would pass
+        # the cases above too; an estimate that is wrong on purpose, too
+        # long and too short at random, must still give the same rows
+        import random
+        rng = random.Random(391)
+        for line in lines:
+            for n in (25, 60, 140):
+                def exact(s, n=n):
+                    return len(s) <= n
+
+                def lying(s, n=n):
+                    return len(s) <= n
+                lying.reach = lambda _head, _words, _i: rng.randint(0, 14)
+                assert sp._wrap(line, lying) == \
+                    _wrap_word_by_word(line, exact), (n, line[:60])
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_members_search_picks_the_break_the_exact_search_picks():
+    """Owner decision 2026-10-06 (`#391`): per-word estimates may only
+    STEER the Members line's search, and each probe is still decided by
+    the exact width test, so the line is cut where it always was. Over
+    13 widths and four sets of names, including the seeded names with
+    ', ' in them, the new search returns exactly what the old one (every
+    probe wrapped word by word, in full) returns."""
+    if not _has_mpl():
+        return
+    import random
+    rng = random.Random(391)
+    cut = 0
+    for width in _EQUIV_WIDTHS:
+        fits = _fitter_at(width)
+        for names in _MEMBER_SETS:
+            drawn = [(name, runs, None, None, None, None)
+                     for name, runs in names]
+            want = _members_word_by_word(drawn, fits)
+            got = sp._group_members_caption(drawn, fits=fits)
+            assert got == want, (width, names[0][0])
+            cut += got.endswith("(full membership in the tidy CSV's group "
+                                "column)")
+            # an estimate wrong on purpose steers worse, never elsewhere
+            # (every third width: a wrong guess costs measurements)
+            if _EQUIV_WIDTHS.index(width) % 3 == 0:
+                lying = _counted(fits)
+                lying.reach = lambda _head, _words, _i: rng.randint(0, 14)
+                assert sp._group_members_caption(drawn, fits=lying) == \
+                    want, (width, names[0][0], 'lying estimate')
+    # the search itself ran, not only the line that fits
+    assert cut >= 10, cut
+
+
+def test_a_row_limit_stops_the_wrap_early_and_counts_the_same():
+    """`#391`: the Members search only asks whether a cut wraps to more
+    than MEMBERS_MAX_ROWS rows, so _wrap(limit=) stops once a row past
+    the limit starts. Its length must answer that question exactly as the
+    whole wrap does, and under the limit it must BE the whole wrap: over
+    generated lines with double spaces and words too long for a row, at
+    several character-count widths and on the real width test."""
+    import random
+    rng = random.Random(391)
+    vocab = ['a', 'to', 'the', 'group,', 'mean;', '', '', 'P3-SWNT,',
+             'x' * 30, 'Carbon', 'Solutions', '2.5', 'mL', '(no', 'band)']
+    cases = []
+    for _ in range(300):
+        line = ' '.join(rng.choice(vocab) for _ in range(rng.randint(0, 40)))
+        n = rng.randint(6, 40)
+        cases.append((line, lambda s, n=n: len(s) <= n))
+    if _has_mpl():
+        for width in (3.3, 5.2, 9.7):
+            fits = _fitter_at(width)
+            for line, _f in cases[:40]:
+                cases.append((line, fits))
+    for line, fits in cases:
+        whole = sp._wrap(line, fits)
+        for limit in (0, 1, 2, 3, 5):
+            short = sp._wrap(line, fits, limit=limit)
+            assert (len(short) > limit) == (len(whole) > limit), \
+                (line, limit, short, whole)
+            if len(whole) <= limit:
+                assert short == whole, (line, limit)
+
+
+def test_the_width_cache_tells_one_font_from_another():
+    """`#391`: the caption's width cache was keyed on the text and the size
+    alone, so had anything changed the font family, the wrap would have
+    trusted the first family's widths. The key holds the font now: under
+    a serif rc the same text measures as serif, and back outside the
+    context it measures as the default again."""
+    if not _has_mpl():
+        return
+    import matplotlib
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.textpath import TextToPath
+    text = 'Members: Carbon Solutions P3-SWNT, 2.5 mL = P3_1_2.5mL_20260728'
+    sans = sp._caption_width(text, 7)
+    with matplotlib.rc_context({'font.family': 'serif'}):
+        serif = sp._caption_width(text, 7)
+        truth = TextToPath().get_text_width_height_descent(
+            text, FontProperties(size=7), ismath=False)[0]
+        assert serif == truth, (serif, truth, sans)
+    assert abs(serif - sans) > 1.0, (serif, sans)
+    assert sp._caption_width(text, 7) == sans
+
+
+def test_lone_run_groups_are_listed_with_semicolons():
+    """`#391`: seeded names carry ', ' themselves, so 'A, 2.5 mL, B has one
+    run' read as three groups. The lone-run sentence joins them with
+    '; ', as the head line already does."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        runs = _labeled(d, [('A', P3, '2.5 mL', 0), ('B', P3, '1.5 mL', 3),
+                            ('C', N3900, _ABSENT, 6)])
+        fig = _drawn(runs, _seeded_opts(runs, 'concentration'))
+        flat = ' '.join(_caption(fig).split())
+        assert (f"{P3}, 1.5 mL; {P3}, 2.5 mL; {N3900} has one run: an "
+                f"aggregate needs ≥ 2 runs to earn a band.") in flat, flat
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_dollar_sign_in_a_name_is_drawn_as_typed():
+    """`#391`: matplotlib reads a '$...$' pair as mathtext, per caption row,
+    so a run or group name holding one came out as math on one row and
+    literally when the wrap split it, and two names with one '$' each
+    could pair up. The names are escaped where they are drawn: no legend
+    entry and no caption row is math at any width, every one reads as
+    typed once matplotlib unescapes it, and the tidy CSV keeps the
+    names as recorded."""
+    if not _has_mpl():
+        return
+    from matplotlib import cbook
+    from matplotlib.legend import Legend
+    d, out = _mktmp(), _mktmp()
+    try:
+        runs = _labeled(d, [('cost$1$_run', P3, '2.5 mL', 0),
+                            ('B$', P3, '2.5 mL', 3), ('C$x', CB, _ABSENT, 6)])
+        groups = [['P3 at $2.5$ mL', [runs[0]['dir'], runs[1]['dir']]],
+                  ['$CB', [runs[2]['dir']]]]
+        opts = sp.make_opts(aggregate=True, groups=groups)[0]
+        fig = _drawn(runs, opts)
+        for width in (12.6, 6.0, 4.0):
+            fig.set_size_inches(width, 5.4)
+            assert sp.relayout(fig)
+            legends = [c for ax in fig.axes for c in ax.get_children()
+                       if isinstance(c, Legend)] + list(fig.legends)
+            texts = [t.get_text() for leg in legends
+                     for t in leg.get_texts()] + _caption_rows(fig)
+            for t in texts:
+                assert not cbook.is_math_text(t), (width, t)
+            shown = ' '.join(t.replace(r'\$', '$') for t in texts)
+            for name in ('cost$1$_run', 'B$', 'C$x', 'P3 at $2.5$ mL',
+                         '$CB'):
+                assert name in shown, (width, name)
+        _img, tidy = sp.export(runs, opts, out, 'dollar')
+        with open(tidy, newline='', encoding='utf-8') as f:
+            got = {(r['run'], r['group']) for r in csv.DictReader(f)}
+        assert ('cost$1$_run', 'P3 at $2.5$ mL') in got, got
+        assert ('C$x', '$CB') in got, got
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def _window_fig(runs, opts, size):
+    """A figure drawn as the plot window draws it, at `size` inches."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    fig = sp.window_figure(Figure(figsize=size, dpi=100))
+    FigureCanvasAgg(fig)
+    sp.draw(fig, runs, opts)
+    return fig
+
+
+def _ncols(legend):
+    """A legend's column count. matplotlib 3.6 renamed the attribute from
+    _ncol to _ncols, and requirements.txt allows 3.5."""
+    return getattr(legend, '_ncols', None) or getattr(legend, '_ncol')
+
+
+def _layout_state(fig):
+    """Everything a relayout must reproduce: caption rows, rect, axes,
+    and where the run legend is."""
+    held = getattr(fig, sp._LEGEND_ATTR, None)
+    below = held and held['below']
+    return (_caption_rows(fig), tuple(getattr(fig, sp._RECT_ATTR)),
+            [tuple(ax.get_position().bounds) for ax in fig.axes],
+            None if below is None else
+            (_ncols(below), tuple(below.get_bbox_to_anchor().bounds)))
+
+
+def test_the_window_cuts_a_caption_that_would_squeeze_its_panels():
+    """`#391`, measured on main f69eade: at 4.5 x 3.0 in an aggregate
+    figure's caption strip took 0.50 of the height and its panels 0.19;
+    at 3.6 x 2.5 in it took 0.84, tight_layout gave up and the axes
+    overprinted the caption. In the plot window the strip now stops at
+    WINDOW_CAPTION_MAX: the first rows stay, the last row says how many
+    more the export carries, the caption clears the axes, and a resize
+    lands exactly where a fresh window draw lands."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        one = os.path.join(d, 'one')
+        _fake_run(one, _healthy_rows(8))
+        two = os.path.join(d, 'two')
+        _fake_run(two, _healthy_rows(8))
+        opts = sp.make_opts(aggregate=True)[0]
+        runs = sp.prepare_runs([one, two], opts)
+        full = len(_caption_rows(_drawn(runs, opts)))
+        fig = _window_fig(runs, opts, sp.FIGSIZE['area'])
+        for size in ((4.5, 3.0), (3.6, 2.5), (7.0, 3.5)):
+            fig.set_size_inches(*size)
+            assert sp.relayout(fig)
+            assert _layout_state(fig) == _layout_state(
+                _window_fig(runs, opts, size)), size
+            rows = _caption_rows(fig)
+            cut = getattr(fig, sp._CUT_ATTR)
+            assert cut > 0, size
+            # the notice ends the caption, wrapped like any line, and the
+            # rows before it are the export's first rows, as drawn there
+            notice = sp._wrap(sp._cut_notice(cut), sp._caption_fitter(fig))
+            assert rows[-len(notice):] == notice, rows
+            kept = rows[:-len(notice)]
+            whole = _caption_rows(_sized(runs, opts, size))
+            assert kept == whole[:len(kept)], size
+            assert len(whole) == len(kept) + cut, (size, cut)
+            assert getattr(fig, sp._RECT_ATTR)[1] <= sp.WINDOW_CAPTION_MAX
+            fig.canvas.draw()
+            rend = fig.canvas.get_renderer()
+            top = getattr(fig, sp._CAPTION_ATTR)[0].get_window_extent(rend).y1
+            assert top < min(ax.get_tightbbox(rend).y0 for ax in fig.axes)
+            panels = min(ax.get_position().height for ax in fig.axes)
+            assert panels > 0.3, (size, panels)
+        # ...and at the export's own size this caption fits under the cap,
+        # so the window shows all of it, as the export does
+        fig.set_size_inches(*sp.FIGSIZE['area'])
+        assert sp.relayout(fig)
+        assert getattr(fig, sp._CUT_ATTR) == 0
+        assert len(_caption_rows(fig)) == full
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _sized(runs, opts, size):
+    """A fresh export-path draw at `size` inches (no window mark)."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    fig = Figure(figsize=size, dpi=100)
+    FigureCanvasAgg(fig)
+    sp.draw(fig, runs, opts)
+    return fig
+
+
+def _twelve_seeded(d):
+    """The #380/#382 reviewer's 12-run fixture: two runs each of P3 at
+    2.5, 2.3 and 1.5 mL, Invisicon 3900 and 3500, and carbon black."""
+    kinds = ([(P3, '2.5 mL')] * 2 + [(P3, '2.3 mL')] * 2
+             + [(P3, '1.5 mL')] * 2 + [(N3900, _ABSENT)] * 2
+             + [(N3500, _ABSENT)] * 2 + [(CB, _ABSENT)] * 2)
+    return _labeled(d, [(f"P3_{i}_2.5mL_2026072{i % 10}", m, c, i)
+                        for i, (m, c) in enumerate(kinds)])
+
+
+def test_an_export_is_byte_identical_whatever_the_window_cut():
+    """`#391`: only the window's figure is cut. The six-group seed's
+    caption needs 0.329 of the height at FIGSIZE (measured top plus
+    CAPTION_PAD; its row allowance there is 0.375), past the window's
+    cap, so the window cuts it there; the exported PNG must still carry the
+    whole caption and stay byte-identical: with the window's figure cut
+    and re-laid at several sizes in the same process, and with the cap
+    set far tighter."""
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        runs = _twelve_seeded(d)
+        opts = _seeded_opts(runs, 'concentration')
+        first = sp.save_figure(runs, opts, os.path.join(out, 'first.png'))
+        win = _window_fig(runs, opts, sp.FIGSIZE['area'])
+        assert getattr(win, sp._CUT_ATTR) > 0, 'nothing cut; fixture too tame'
+        for size in ((7.0, 3.5), (4.5, 3.0), sp.FIGSIZE['area']):
+            win.set_size_inches(*size)
+            assert sp.relayout(win)
+        again = sp.save_figure(runs, opts, os.path.join(out, 'again.png'))
+        real = sp.WINDOW_CAPTION_MAX
+        sp.WINDOW_CAPTION_MAX = 0.05
+        try:
+            tight = sp.save_figure(runs, opts, os.path.join(out, 'tight.png'))
+        finally:
+            sp.WINDOW_CAPTION_MAX = real
+        with open(first, 'rb') as a:
+            want = a.read()
+        for p in (again, tight):
+            with open(p, 'rb') as b:
+                assert b.read() == want, p
+        # the export's caption is the whole one, with no notice in it
+        rows = _caption_rows(_drawn(runs, opts))
+        assert not any('Caption cut' in r for r in rows), rows
+        assert getattr(win, sp._CUT_ATTR) > 0
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def _five_seeded(d):
+    """The #382 reviewer's five-run seed: P3 at 2.5 and 1.5 mL, Invisicon
+    3900, carbon black and a run with no electrode line, one run each."""
+    runs = _labeled(d, [('RA', P3, '2.5 mL', 0), ('RB', P3, '1.5 mL', 3),
+                        ('RC', N3900, _ABSENT, 6), ('RD', CB, _ABSENT, 9),
+                        ('RE', _ABSENT, _ABSENT, 12)])
+    return runs, _seeded_opts(runs, 'concentration')
+
+
+def test_a_legend_that_covers_data_moves_below_the_panels():
+    """`#391`, the #382 reviewer's render: the five-group seed's run legend,
+    upper left, covered curves and markers of the left panel. It moves
+    below the panels, as one legend over several columns with every entry
+    it had, clear of the axes above and the caption below and inside the
+    frame at every dpi checked; nothing on a panel is under it; and a
+    resize lands where a fresh draw lands."""
+    if not _has_mpl():
+        return
+    from matplotlib.legend import Legend
+    d = _mktmp()
+    try:
+        runs, opts = _five_seeded(d)
+        real = sp._place_legend
+        sp._place_legend = lambda fig, rect: rect
+        try:
+            before = _drawn(runs, opts)
+        finally:
+            sp._place_legend = real
+        held = getattr(before, sp._LEGEND_ATTR)
+        rend = before.canvas.get_renderer()
+        assert sp._legend_covers_data(held['ax'], held['legend'], rend), \
+            'the fixture no longer shows the reviewer\'s overlap'
+        fig = _drawn(runs, opts)
+        held = getattr(fig, sp._LEGEND_ATTR)
+        below = held['below']
+        assert below is not None and below in fig.legends
+        assert not held['legend'].get_visible()
+        assert _ncols(below) > 1, _ncols(below)
+        assert [t.get_text() for t in below.get_texts()] == \
+            [t.get_text() for t in held['legend'].get_texts()]
+        caption = getattr(fig, sp._CAPTION_ATTR)[0]
+        for dpi in (88, 96, 100, 150, 300):
+            fig.set_dpi(dpi)
+            fig.canvas.draw()
+            rend = fig.canvas.get_renderer()
+            box = below.get_window_extent(rend)
+            assert box.y1 < min(ax.get_tightbbox(rend).y0
+                                for ax in fig.axes), dpi
+            assert box.y0 > caption.get_window_extent(rend).y1, dpi
+            assert box.x1 <= 0.99 * fig.bbox.width, (dpi, box.x1)
+            for ax in fig.axes:
+                assert not sp._legend_covers_data(ax, below, rend), dpi
+                assert not [c for c in ax.get_children()
+                            if isinstance(c, Legend) and c.get_visible()
+                            and c.get_title().get_text() != 'marker fill']
+        fig.set_dpi(100)
+        for size in ((9.0, 5.4), (7.0, 4.5), sp.FIGSIZE['area']):
+            fig.set_size_inches(*size)
+            assert sp.relayout(fig)
+            assert _layout_state(fig) == _layout_state(
+                _sized(runs, opts, size)), size
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_legend_that_covers_nothing_stays_put_to_the_byte():
+    """The other half of `#391`'s legend rule: a legend that covers no data
+    is measured and left exactly where it was, so its figure is
+    byte-identical to one drawn with the rule switched off. The default
+    figures' byte-identity tests above hold the same line against the
+    engines read from git."""
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        one = os.path.join(d, 'one')
+        _fake_run(one, _healthy_rows(8))
+        two = os.path.join(d, 'two')
+        _fake_run(two, _healthy_rows(8))
+        cb = _agg_run(d, 'CB1', [1.0, 2.0, 3.0], lambda kv: 100.0 + 5 * kv)
+        p1 = _agg_run(d, 'P3_1', [1.0, 2.0, 3.0], lambda kv: 110.0 + 10 * kv)
+        groups = [['CB', [cb['dir']]], ['P3', [p1['dir']]]]
+        cases = [(sp.make_opts()[0], [one]),
+                 (sp.make_opts(prepost=True)[0], [one]),
+                 (sp.make_opts(aggregate=True)[0], [one, two]),
+                 (sp.make_opts(aggregate=True, groups=groups)[0], None)]
+        for i, (opts, dirs) in enumerate(cases):
+            runs = sp.prepare_runs(dirs, opts) if dirs else [cb, p1]
+            fig = _drawn(runs, opts)
+            assert getattr(fig, sp._LEGEND_ATTR)['below'] is None, i
+            with_rule = sp.save_figure(runs, opts,
+                                       os.path.join(out, f"{i}_on.png"))
+            real = sp._place_legend
+            sp._place_legend = lambda fig, rect: rect
+            try:
+                without = sp.save_figure(runs, opts,
+                                         os.path.join(out, f"{i}_off.png"))
+            finally:
+                sp._place_legend = real
+            with open(with_rule, 'rb') as a, open(without, 'rb') as b:
+                assert a.read() == b.read(), i
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_a_legend_too_big_to_move_stays_in_its_panel():
+    """`#391`: moving a legend out costs the panels its strip. Past half
+    the panel's height the cure is worse than the overlap, so a thirteen-
+    entry legend in a 7 x 3.5 in figure stays in its panel, visible. And
+    in the window, once the caption had to be cut there is no height to
+    give, so the six-group seed's legend stays in at FIGSIZE although the
+    export of the same figure moves it."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        runs = _twelve_seeded(d)
+        plain = sp.make_opts(aggregate=True)[0]
+        small = _sized(runs, plain, (7.0, 3.5))
+        held = getattr(small, sp._LEGEND_ATTR)
+        rend = small.canvas.get_renderer()
+        assert sp._legend_covers_data(held['ax'], held['legend'], rend)
+        assert held['below'] is None and held['legend'].get_visible()
+        assert not small.legends, 'a rejected candidate legend stayed on'
+        seeded = _seeded_opts(runs, 'concentration')
+        assert getattr(_drawn(runs, seeded), sp._LEGEND_ATTR)['below'] \
+            is not None
+        win = _window_fig(runs, seeded, sp.FIGSIZE['area'])
+        assert getattr(win, sp._CUT_ATTR) > 0
+        held = getattr(win, sp._LEGEND_ATTR)
+        assert held['below'] is None and held['legend'].get_visible()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _caption_clear_of_axes(fig):
+    """(caption top, lowest axes edge) in pixels, after a draw."""
+    fig.canvas.draw()
+    rend = fig.canvas.get_renderer()
+    top = getattr(fig, sp._CAPTION_ATTR)[0].get_window_extent(rend).y1
+    return top, min(ax.get_tightbbox(rend).y0 for ax in fig.axes)
+
+
+def test_a_large_window_shows_the_whole_grouped_caption():
+    """The #391 review: the window judged a grouped caption by its row
+    allowance (0.025 + 0.025 a row), not by what it measures, so every
+    grouped caption of 12 or more rows was cut at every window size. The
+    twelve-run seed lost 2 rows at 16 x 9 and 19 x 10 in, about a
+    maximized window, where the whole caption needs 0.163 and 0.149 of
+    the height, and 8 of 17 rows at 8 x 9 in, where it needs 0.245; and
+    because the caption was cut, the run legend stayed over the data
+    while the export at the same size moved it below. Now the window
+    shows every row there, as the export does, the legend moves as the
+    export's does, and the caption clears the axes."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        runs = _twelve_seeded(d)
+        opts = _seeded_opts(runs, 'concentration')
+        for size in ((16.0, 9.0), (19.0, 10.0), (8.0, 9.0)):
+            win = _window_fig(runs, opts, size)
+            assert getattr(win, sp._CUT_ATTR) == 0, size
+            ex = _sized(runs, opts, size)
+            assert _caption_rows(win) == _caption_rows(ex), size
+            top, floor = _caption_clear_of_axes(win)
+            assert top < floor, (size, top, floor)
+            if size != (8.0, 9.0):
+                assert getattr(win, sp._LEGEND_ATTR)['below'] is not None, \
+                    size
+                assert getattr(ex, sp._LEGEND_ATTR)['below'] is not None, \
+                    size
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_wide_short_window_keeps_the_caption_clear_of_the_axes():
+    """The #391 review, on main too: when no caption line wraps, the
+    window kept the strip the caption was composed for without measuring
+    it, so in a wide, short window (20 x 2.5 and 16 x 2.2 in, a two-run
+    aggregate) its five rows reached into the axes, and the window cut
+    was never reached. The window now measures every caption and keeps
+    the composed strip only where the caption really fits it: at 20 x 5.4
+    in, where no line wraps and the caption fits, the strip is the
+    composed one and the window lays out exactly as the export does, as
+    on main; at the export's own size, where one line wraps, the two
+    still agree."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        one = os.path.join(d, 'one')
+        _fake_run(one, _healthy_rows(8))
+        two = os.path.join(d, 'two')
+        _fake_run(two, _healthy_rows(8))
+        opts = sp.make_opts(aggregate=True)[0]
+        runs = sp.prepare_runs([one, two], opts)
+        for size in ((20.0, 2.5), (16.0, 2.2), (20.0, 2.0), (12.6, 2.4)):
+            win = _window_fig(runs, opts, size)
+            top, floor = _caption_clear_of_axes(win)
+            assert top < floor, (size, top, floor)
+        win = _window_fig(runs, opts, (20.0, 5.4))
+        text, cap, composed = getattr(win, sp._CAPTION_ATTR)
+        assert len(_caption_rows(win)) == cap.count('\n') + 1, 'it wrapped'
+        assert getattr(win, sp._RECT_ATTR)[1] == composed, \
+            'the composed strip moved where the caption fits it'
+        assert _layout_state(win) == _layout_state(
+            _sized(runs, opts, (20.0, 5.4)))
+        win = _window_fig(runs, opts, sp.FIGSIZE['area'])
+        assert getattr(win, sp._CUT_ATTR) == 0
+        assert _layout_state(win) == _layout_state(
+            _sized(runs, opts, sp.FIGSIZE['area']))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_members_cut_never_leaves_half_an_escaped_dollar():
+    """The #391 review: the Members line's cut strips a trailing '\\'
+    because a cut can land between the two characters of an escaped '$'
+    (_shown), and a lone '\\' then draws as a stray backslash. Nothing
+    tested it: without the strip, 58 of 840 cuts in the review's sweep
+    left one. Here names holding '$' are cut at many widths, and no row
+    may hold a '\\' that does not escape a '$', or read as mathtext."""
+    if not _has_mpl():
+        return
+    from matplotlib import cbook
+    from matplotlib.figure import Figure
+    tail = "… (full membership in the tidy CSV's group column)"
+    cuts = 0
+    for i in range(40):
+        fits = sp._caption_fitter(Figure(figsize=(3.1 + 0.113 * i, 5.4)))
+        for stem in ('R$', '$$', 'x$y$z'):
+            runs = [{'name': f"{stem}{k:02d}_{'x' * (k % 7)}"}
+                    for k in range(40)]
+            cap = sp._group_members_caption(
+                [('G$roup', runs, None, None, None, None)], fits=fits)
+            joined = cap.lstrip('\n')
+            cuts += tail in joined
+            for k, ch in enumerate(joined):
+                if ch == '\\':
+                    assert joined[k + 1:k + 2] == '$', \
+                        (i, stem, joined[max(0, k - 20):k + 25])
+            for row in joined.split('\n'):
+                assert not cbook.is_math_text(row), (i, stem, row)
+    assert cuts > 60, f'only {cuts} cut lines: the sweep stopped cutting'
+
+
+def test_legend_cover_counts_markers_bands_and_text():
+    """_legend_covers_data counts more than lines: a marker by its
+    radius, a band, and a text on the axes. Only the line case was
+    pinned (the #391 review removed each of the other three checks and
+    the suite still passed). Each kind is put under the legend alone,
+    then away from it; a marker just outside the legend's box but
+    within its radius counts."""
+    if not _has_mpl():
+        return
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    from matplotlib.lines import Line2D
+
+    def place(what, where):
+        fig = Figure(figsize=(6.0, 4.0), dpi=100)
+        FigureCanvasAgg(fig)
+        ax = fig.add_subplot(111)
+        ax.set_xlim(0, 10)
+        ax.set_ylim(0, 10)
+        legend = ax.legend(handles=[Line2D([], [], color='k',
+                                           label='run A, a long name')],
+                           loc='upper left')
+        fig.canvas.draw()
+        rend = fig.canvas.get_renderer()
+        box = legend.get_window_extent(rend)
+        inv = ax.transData.inverted()
+        if where == 'under':
+            x, y = inv.transform(((box.x0 + box.x1) / 2,
+                                  (box.y0 + box.y1) / 2))
+        elif where == 'edge':
+            # 2 px below the box: inside an 8 pt marker's radius
+            x, y = inv.transform(((box.x0 + box.x1) / 2, box.y0 - 2))
+        else:
+            x, y = 8.5, 1.5
+        if what == 'marker':
+            ax.plot([x], [y], linestyle='None', marker='o', markersize=8)
+        elif what == 'band':
+            ax.fill_between([x - 0.2, x + 0.2], [y - 0.2] * 2,
+                            [y + 0.2] * 2)
+        else:
+            ax.text(x, y, 'note', ha='center', va='center')
+        fig.canvas.draw()
+        return sp._legend_covers_data(ax, legend, fig.canvas.get_renderer())
+
+    for what in ('marker', 'band', 'text'):
+        assert place(what, 'under'), what
+        assert not place(what, 'away'), what
+    assert place('marker', 'edge'), 'a marker is counted by its radius'
+
+
+# --------------------------------------------------------------------------
 # the export format and the dpi (`#314`) -- the first options that describe
 # the FILE rather than the drawing
 # --------------------------------------------------------------------------
@@ -5214,6 +5974,42 @@ def test_exact_field_pooling_counts_the_levels_where_films_meet():
             warns
         assert (f"group 'mixed' (25, 50 {UM}): 4 of 7 levels hold more "
                 f"than one thickness") in _caption(fig)
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_a_dollar_in_a_mixed_film_group_name_is_drawn_as_typed():
+    """`#391` x `#398`: the mixed-films caption names its group, and a '$'
+    pair in that name made a caption row mathtext ("mi$x$ed" came out as
+    "mi", an italic x and "ed") until the name went through _shown like
+    every other drawn name. No row is math at any width, and the name
+    reads as typed once matplotlib unescapes it; the console warning
+    keeps the name as typed."""
+    if not _has_mpl():
+        return
+    from matplotlib import cbook
+    p = _mktmp()
+    try:
+        f25 = _field_run(p, 'F25', 25)
+        f50 = _field_run(p, 'F50', 50)
+        s50 = _field_run(p, 'S50', 50)
+        name = 'mi$x$ed'
+        groups = [[name, [f25, f50]], ['fifty', [s50]]]
+        opts = sp.make_opts(x='field', aggregate=True, aggregate_exact=True,
+                            groups=groups)[0]
+        warns = []
+        fig = _drawn(sp.prepare_runs([f25, f50, s50], opts), opts,
+                     warns.append)
+        assert any(w.startswith(f"group {name!r}") for w in warns), warns
+        for width in (12.6, 7.0, 4.5):
+            fig.set_size_inches(width, 5.4)
+            assert sp.relayout(fig)
+            rows = _caption_rows(fig)
+            for row in rows:
+                assert not cbook.is_math_text(row), (width, row)
+            shown = ' '.join(r.replace(r'\$', '$') for r in rows)
+            assert f"group {name!r}" in ' '.join(shown.split()), \
+                (width, shown)
     finally:
         shutil.rmtree(p, ignore_errors=True)
 

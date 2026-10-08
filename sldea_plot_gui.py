@@ -1670,6 +1670,41 @@ MODE_HINT = {
 }
 
 
+def whole_caption_toolbar(base):
+    """`base` (matplotlib's NavigationToolbar2Tk) with a Save button that
+    writes the whole caption (`#391` review).
+
+    The window cuts a caption that would squeeze its panels, and says so
+    in a last row ("Caption cut in this window..."); that cut is for the
+    screen. The stock Save writes the live figure as it is, so the file
+    carried the notice instead of the rows. This Save keeps what it
+    always kept, the window's size and the zoom, and lays the figure out
+    with the whole caption for the file alone, as an export at this size
+    would, then puts the window's layout back. The dialog opens on the
+    window's layout; only savefig sees the other one."""
+    class WholeCaptionToolbar(base):
+        def save_figure(self, *args):
+            fig = self.canvas.figure
+            real = fig.savefig
+
+            def whole(*a, **kw):
+                setattr(fig, sp._WINDOW_ATTR, False)
+                try:
+                    sp.relayout(fig)
+                    return real(*a, **kw)
+                finally:
+                    setattr(fig, sp._WINDOW_ATTR, True)
+                    sp.relayout(fig)
+                    self.canvas.draw_idle()
+            fig.savefig = whole
+            try:
+                return super().save_figure(*args)
+            finally:
+                del fig.savefig     # the class's savefig again
+
+    return WholeCaptionToolbar
+
+
 class PlotWindow:
     """The whole tool. One instance per process (the button opens a fresh
     process, exactly like 🔍 Edge Review… and 🎚 Tune params…), so there is
@@ -2421,12 +2456,16 @@ class PlotWindow:
                                    text=CLICK_HINT)
         self.lbl_click.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(2, 2))
 
-        # --- canvas
-        self.fig = Figure(figsize=sp.FIGSIZE['area'], dpi=100)
+        # --- canvas. Marked as the window's figure, so a caption that would
+        # squeeze the panels is cut here, and only here (`#391`); every
+        # export draws into a Figure of its own and keeps the whole caption
+        self.fig = sp.window_figure(Figure(figsize=sp.FIGSIZE['area'],
+                                           dpi=100))
         self.canvas = FigureCanvasTkAgg(self.fig, master=right)
         widget = self.canvas.get_tk_widget()
-        self.toolbar = NavigationToolbar2Tk(self.canvas, right,
-                                            pack_toolbar=False)
+        # its Save writes the whole caption, not the window's cut one
+        self.toolbar = whole_caption_toolbar(NavigationToolbar2Tk)(
+            self.canvas, right, pack_toolbar=False)
         self.toolbar.update()
         self.toolbar.pack(side=tk.BOTTOM, fill=tk.X)
         widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)

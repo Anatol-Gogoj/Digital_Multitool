@@ -776,12 +776,27 @@ def coarse_cadence(run, opts):
     return secs is not None and secs > CADENCE_COARSE_S
 
 
+def _shown(name):
+    """An operator's run or group name as figure text: every '$' escaped
+    (`#391`), so the name is drawn as typed.
+
+    matplotlib reads text with an even number of unescaped '$' as
+    mathtext, and decides that per caption ROW. So a '$...$' pair in a
+    name came out as math when a row held it whole and literally when the
+    wrap split it, and two names with one '$' each could pair up on one
+    row. Escaped, no row of a name is ever math, and matplotlib draws
+    '\\$' as '$'. A name with no '$' is returned as it is, so its figure
+    does not move. Only what is drawn is escaped: the tidy CSV, the
+    figspec and the console keep the name as recorded."""
+    return name.replace('$', r'\$')
+
+
 def _cadence_note(run):
     """'<run> every 6.1 s (snapshot spacing)' -- deliberately compact: it
     goes on ONE caption line, and the caption has a figure's width, not a
     console's. The console/window warning wraps this in the full
     sentence."""
-    return (f"{run['name']} every {run['cadence_s']:.1f} s "
+    return (f"{_shown(run['name'])} every {run['cadence_s']:.1f} s "
             f"({run.get('cadence_src', '?')})")
 
 
@@ -835,7 +850,7 @@ def _estimator_caption(runs):
     (kept on --allow-old-estimator), or '' when there are none. A figure
     that mixes the two estimators has to say so ON the figure: the PNG
     travels without the command line that made it."""
-    names = [r['name'] for r in runs if r.get('old_estimator_kept')]
+    names = [_shown(r['name']) for r in runs if r.get('old_estimator_kept')]
     if not names:
         return ''
     return (f"\nOLD area method (ellipse, before 2026-10-02; kept on "
@@ -1968,6 +1983,37 @@ _CAPTION_ATTR = '_sldea_caption'
 # rect, in figure height. The x-axis label sits just above the rect.
 CAPTION_PAD = 0.012
 
+# The most of the figure's height the caption strip may take IN THE PLOT
+# WINDOW (`#391`); an export is never cut. Since 2026-10-06 the strip is
+# measured, so it holds every row, but rows are points and the window is
+# resizable. Measured on the suite's synthetic runs (main f69eade): at
+# 4.5 x 3.0 in an aggregate figure's strip took 0.50 of the height and
+# its panels 0.19, and at 3.6 x 2.5 in the strip reached 0.84,
+# tight_layout gave up and the axes overprinted the caption. 0.30 is the
+# most the per-row allowance ever reserved before the wrap. Past it the
+# window keeps the first rows and says, in the caption, how many more
+# the exported figure carries (_cut_caption); the same aggregate figure
+# then keeps 0.40 and 0.33 of the height for its panels.
+WINDOW_CAPTION_MAX = 0.30
+
+# Set on the plot window's live figure by window_figure(), and on no
+# other: every export draws into a fresh Figure.
+_WINDOW_ATTR = '_sldea_window_figure'
+
+# How many caption rows the window's last placement cut, 0 when none.
+_CUT_ATTR = '_sldea_caption_cut'
+
+
+def window_figure(fig):
+    """Mark `fig` as the plot window's live canvas figure -> `fig`.
+
+    Its caption strip is then capped at WINDOW_CAPTION_MAX (`#391`). Only
+    the window calls this, once, on the Figure it keeps for its canvas;
+    save_figure and figure_* draw into a Figure of their own, so an
+    exported figure keeps its whole caption."""
+    setattr(fig, _WINDOW_ATTR, True)
+    return fig
+
 
 def _set_caption(fig, cap, bottom):
     """Write `cap` under the panels, wrapped to the figure's width, and lay
@@ -1977,10 +2023,13 @@ def _set_caption(fig, cap, bottom):
     function of _caption_fitter's width test that composes it. `bottom`
     is the caption strip the caller reserved for `cap` as composed, in
     figure height; _place_caption keeps it when every line fits and grows
-    it when one does not. None, the grouped figure's, always measures."""
+    it when one does not. None, the grouped figure's, always measures.
+
+    Last, a run legend that covers data moves below the panels
+    (_place_legend, `#391`)."""
     text = fig.text(0.01, 0.005, '', fontsize=7, color='#555555')
     setattr(fig, _CAPTION_ATTR, (text, cap, bottom))
-    return _tight(fig, (0, _place_caption(fig), 1, 1))
+    return _place_legend(fig, _tight(fig, (0, _place_caption(fig), 1, 1)))
 
 
 def _place_caption(fig):
@@ -1998,8 +2047,19 @@ def _place_caption(fig):
     row is a larger share of the height than the allowance assumes. A
     grouped one (`#373`) does the same with the allowance NOT capped, as
     that branch laid it out. Capped at 0.85 only so a pathological
-    caption leaves the axes something."""
+    caption leaves the axes something.
+
+    On the plot window's figure (window_figure) a strip past
+    WINDOW_CAPTION_MAX is cut there instead (`#391`, _cut_caption), and
+    two things are measured that an export takes on trust (the #391
+    review): a caption whose lines all fit is measured too, and keeps
+    its composed strip only when it really fits there (a wide, short
+    window overprinted the axes with it, on main as well); and a grouped
+    caption's allowance stops at the cap, so the cut follows what the
+    caption measures, not its row count (any grouped caption of 12 or
+    more rows was cut at every window size, a maximized one included)."""
     text, cap, bottom = getattr(fig, _CAPTION_ATTR)
+    setattr(fig, _CUT_ATTR, 0)
     fits = _caption_fitter(fig)
     if callable(cap):
         cap = cap(fits)
@@ -2007,24 +2067,78 @@ def _place_caption(fig):
     for line in cap.split('\n'):
         rows += [line] if fits(line) else _wrap(line, fits)
     text.set_text('\n'.join(rows))
+    if bottom is not None and len(rows) == cap.count('\n') + 1:
+        if not getattr(fig, _WINDOW_ATTR, False):
+            return bottom
+        try:
+            renderer = fig.canvas.get_renderer()
+            top = (text.get_window_extent(renderer=renderer).y1
+                   / fig.bbox.height)
+        except (AttributeError, TypeError, ValueError):
+            return bottom
+        if top + CAPTION_PAD <= bottom:
+            return bottom       # fits its allowance: as on main
+    strip = _caption_strip(fig, text, len(rows), bottom)
+    if getattr(fig, _WINDOW_ATTR, False) and strip > WINDOW_CAPTION_MAX:
+        strip = _cut_caption(fig, text, rows, bottom, fits)
+    return min(strip, 0.85)
+
+
+def _caption_strip(fig, text, n, bottom):
+    """The strip a caption of `n` rows, written in `text`, needs -> figure
+    height. `bottom` is the strip it was composed for, None on a grouped
+    figure: see _place_caption."""
     if bottom is None:
         # grouped (`#373`): the per-row allowance is NOT capped. A row
         # takes about 0.022 of a 5.4 in figure, so the allowance keeps a
         # margin over the measured top that grows with the rows, and the
         # strip still clears the axes when it was measured at 300 dpi and
-        # is drawn at 90, where hinting makes 7 pt rows about 12 % taller
-        bottom = 0.025 + 0.025 * len(rows)
-    elif len(rows) == cap.count('\n') + 1:
-        return bottom
+        # is drawn at 90, where hinting makes 7 pt rows about 12 % taller.
+        # The window draws and measures at one dpi, so there the allowance
+        # stops at the cap and the measured top decides whether to cut
+        bottom = 0.025 + 0.025 * n
+        if getattr(fig, _WINDOW_ATTR, False):
+            bottom = min(bottom, WINDOW_CAPTION_MAX)
     else:
-        bottom = max(bottom, min(0.025 + 0.025 * len(rows), 0.30))
+        bottom = max(bottom, min(0.025 + 0.025 * n, 0.30))
     try:
         renderer = fig.canvas.get_renderer()
         top = text.get_window_extent(renderer=renderer).y1 / fig.bbox.height
         bottom = max(bottom, top + CAPTION_PAD)
     except (AttributeError, TypeError, ValueError):
         pass                    # no renderer yet: the allowance stands
-    return min(bottom, 0.85)
+    return bottom
+
+
+def _cut_notice(more):
+    """The row that ends a caption the plot window cut (`#391`). Short, so
+    it stays one row down to about a 4.5 in wide window."""
+    return (f"[Caption cut in this window: {more} more "
+            f"row{'' if more == 1 else 's'} in the export.]")
+
+
+def _cut_caption(fig, text, rows, bottom, fits):
+    """Cut the window's caption to fit WINDOW_CAPTION_MAX -> its strip.
+
+    Keeps the most leading rows whose strip, with the notice row saying
+    how many rows follow in the export, still fits; the notice is
+    wrapped like any caption line. At least one row is cut, since the
+    whole caption did not fit. When even the notice alone does not fit
+    (a window near its floor), the notice stands alone and its strip is
+    what it is."""
+    def strip(k):
+        shown = rows[:k] + _wrap(_cut_notice(len(rows) - k), fits)
+        text.set_text('\n'.join(shown))
+        return _caption_strip(fig, text, len(shown), bottom)
+    lo, hi = 0, len(rows) - 1
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if strip(mid) <= WINDOW_CAPTION_MAX:
+            lo = mid
+        else:
+            hi = mid - 1
+    setattr(fig, _CUT_ATTR, len(rows) - lo)
+    return strip(lo)
 
 
 _SUBPLOTPARS = ('left', 'right', 'bottom', 'top', 'wspace', 'hspace')
@@ -2043,24 +2157,207 @@ def relayout(fig):
     would have laid out, which is the only thing that makes it a shortcut
     rather than a second layout engine.
 
+    The run legend goes back into its panel first and is placed again
+    after the layout, as draw() places it (`#391`, _place_legend): whether
+    it covers data depends on the size.
+
     -> True when there was a layout to re-run, False when this figure was
     never drawn by draw() (or was cleared since), which is the caller's
     signal that it needs a real draw and not a shortcut."""
-    from matplotlib import rcParams
-
     rect = getattr(fig, _RECT_ATTR, None)
     if rect is None or not fig.axes:
         return False
-    fig.subplots_adjust(**{k: rcParams['figure.subplot.' + k]
-                           for k in _SUBPLOTPARS})
+    _default_subplotpars(fig)
     held = getattr(fig, _CAPTION_ATTR, None)
     if held is not None and held[0] in fig.texts:
         # the one width-dependent thing on a figure, the caption, is
         # re-wrapped for the new width, and its strip with it
         rect = (rect[0], _place_caption(fig), rect[2], rect[3])
         setattr(fig, _RECT_ATTR, rect)
+        _legend_inside(fig)
+        fig.tight_layout(rect=rect)
+        _place_legend(fig, rect)
+        return True
     fig.tight_layout(rect=rect)
     return True
+
+
+def _default_subplotpars(fig):
+    """Reset `fig`'s subplot params to the rcParams defaults, the state a
+    fresh figure is laid out from (see relayout)."""
+    from matplotlib import rcParams
+    fig.subplots_adjust(**{k: rcParams['figure.subplot.' + k]
+                           for k in _SUBPLOTPARS})
+
+
+# ---------------------------------------------------------------------------
+# the run legend below the panels when it covers data (`#391`)
+# ---------------------------------------------------------------------------
+
+# The area figure's run legend, held as {'ax', 'legend', 'handles',
+# 'handlelength', 'below'} so relayout can place it again; None on every
+# other figure. 'below' is the figure legend standing in for it while it
+# sits under the panels, else None.
+#
+# Observed on a five-group seeded render (#382's review): the run legend
+# sits upper left, and with whole material names it is wide and tall
+# enough to cover curves and markers of the left panel, where the frame
+# hides them at 90 %. Area curves rise to the right, so the free corners
+# are upper left, where the legend is, and lower right, where the marker
+# key is; no other corner of a panel helps a legend that size. So a
+# legend that covers data leaves the panel, and one that does not stays
+# exactly where it was, to the byte.
+_LEGEND_ATTR = '_sldea_run_legend'
+
+# ...but only when the strip it needs there is at most this share of the
+# height its panel had with the legend inside; otherwise the legend stays
+# in its panel, as before. The panels give the strip up, so past this the
+# cure is worse than the overlap. Without the limit a 13-entry legend
+# moved out of a 7 x 3.5 in window left the panels 0.15 of the figure
+# (0.45 with it in), and out of an export of that size it made
+# tight_layout give up, so the axes overprinted legend and caption.
+LEGEND_BELOW_MAX = 0.5
+
+# Clear space above and below a legend placed under the panels, points.
+LEGEND_GAP_PT = 4.0
+
+
+def _legend_covers_data(ax, legend, renderer):
+    """Does `legend`, where it is laid out now, cover anything drawn on
+    `ax`: a line, a marker (by its radius), a band, or a text on the axes?
+    A reference line across the axes counts as well."""
+    from matplotlib.transforms import Bbox
+    box = legend.get_window_extent(renderer)
+    px = ax.get_figure().dpi / 72.0
+    for line in ax.get_lines():
+        if not line.get_visible():
+            continue
+        path = line.get_transform().transform_path(line.get_path())
+        if line.get_linestyle() not in ('None', '', ' ') \
+                and len(path.vertices) > 1 \
+                and path.intersects_bbox(box, filled=False):
+            return True
+        if line.get_marker() not in (None, 'None', '', ' '):
+            r = line.get_markersize() * px / 2.0
+            grown = Bbox.from_extents(box.x0 - r, box.y0 - r,
+                                      box.x1 + r, box.y1 + r)
+            if grown.count_contains(path.vertices):
+                return True
+    for coll in ax.collections:
+        if not coll.get_visible():
+            continue
+        to = coll.get_transform()
+        if any(to.transform_path(p).intersects_bbox(box, filled=True)
+               for p in coll.get_paths()):
+            return True
+    return any(t.get_visible() and t.get_text()
+               and t.get_window_extent(renderer).overlaps(box)
+               for t in ax.texts)
+
+
+def _legend_columns(widths, legend, fs, room):
+    """The most columns whose legend is no wider than `room` -> int.
+
+    `widths` are the entries' widths, handle and pad included, in
+    pixels, and `fs` the font size in pixels. Columns are filled the way
+    matplotlib fills them, top to bottom in np.array_split's chunks, so
+    a column is as wide as its widest entry."""
+    import numpy as np
+    for k in range(len(widths), 1, -1):
+        cols = [max(c) for c in np.array_split(widths, k) if len(c)]
+        need = (sum(cols) + (len(cols) - 1) * legend.columnspacing * fs
+                + 2 * legend.borderpad * fs)
+        if need <= room:
+            return k
+    return 1
+
+
+def _legend_below(fig, held, floor, renderer):
+    """Stand a figure legend in for the run legend under the panels, just
+    above the caption strip that ends at `floor` -> the strip it takes,
+    in figure height, or None when it cannot go there: wider than the
+    figure in one column, or a strip past LEGEND_BELOW_MAX of the panel's
+    height. Then nothing has changed."""
+    legend = held['legend']
+    panel = held['ax'].get_position().height
+    fs = 8 * fig.dpi / 72.0
+    pad = (legend.handlelength + legend.handletextpad) * fs
+    widths = [pad + t.get_window_extent(renderer).width
+              for t in legend.get_texts()]
+    # the caption's budget, for the caption's reason: text drawn at
+    # another dpi than it was measured at hints wider. Measured at 0.98
+    # instead, a three-column legend ended at 1.02 of the width at 96 dpi
+    room = (CAPTION_FIT_FRAC - 0.01) * fig.bbox.width
+    gap = LEGEND_GAP_PT / 72.0 / fig.get_figheight()
+    extra = ({} if held['handlelength'] is None
+             else {'handlelength': held['handlelength']})
+    k = _legend_columns(widths, legend, fs, room)
+    below = None
+    try:
+        while True:
+            # ncol, not ncols: ncols needs matplotlib 3.6, and
+            # requirements.txt allows 3.5, where it raised a TypeError
+            # that left the legend in its panel for good
+            below = fig.legend(handles=held['handles'], ncol=k,
+                               loc='lower left',
+                               bbox_to_anchor=(0.01, floor + gap),
+                               bbox_transform=fig.transFigure,
+                               borderaxespad=0, fontsize=8, framealpha=0.9,
+                               **extra)
+            box = below.get_window_extent(renderer)
+            if box.width <= room or k == 1:
+                break
+            below.remove()
+            below, k = None, k - 1
+        strip = box.height / fig.bbox.height + 2 * gap
+        if box.width > room or strip > LEGEND_BELOW_MAX * panel:
+            return None
+        legend.set_visible(False)
+        held['below'], below = below, None
+        return strip
+    finally:
+        # a candidate that does not stand in, or one whose measuring
+        # failed part way, never stays on the figure as a second legend
+        if below is not None:
+            below.remove()
+
+
+def _legend_inside(fig):
+    """Put a run legend _legend_below moved back into its panel."""
+    held = getattr(fig, _LEGEND_ATTR, None)
+    if held is not None and held['below'] is not None:
+        held['below'].remove()
+        held['below'] = None
+        held['legend'].set_visible(True)
+
+
+def _place_legend(fig, rect):
+    """Leave the run legend in its panel unless it covers data there; if
+    it does, move it below the panels when they keep enough height, and
+    lay the panels out above it -> the layout rect.
+
+    Runs right after the layout above the caption strip `rect` ends at,
+    with the legend in its panel, which is where draw() leaves it and
+    where relayout puts it back first. A legend that covers nothing is
+    only measured, so its figure stays the same to the byte.
+
+    In the plot window, a window that had to cut its caption has no
+    height to spare, so its legend stays in the panel: moving it out
+    would take back the room the cut gave the panels."""
+    held = getattr(fig, _LEGEND_ATTR, None)
+    if held is None or getattr(fig, _CUT_ATTR, 0):
+        return rect
+    try:
+        renderer = fig.canvas.get_renderer()
+        if not _legend_covers_data(held['ax'], held['legend'], renderer):
+            return rect
+        strip = _legend_below(fig, held, rect[1], renderer)
+    except (AttributeError, TypeError, ValueError):
+        return rect             # no renderer to measure with: leave it
+    if strip is None:
+        return rect
+    _default_subplotpars(fig)
+    return _tight(fig, (rect[0], rect[1] + strip, rect[2], rect[3]))
 
 
 def _style_axes(ax, xlabel, ylabel):
@@ -2547,7 +2844,7 @@ def _fit(line, limit=CAPTION_LINE_MAX):
 CAPTION_WRAP_INDENT = '    '
 
 
-def _wrap(line, fits, indent=CAPTION_WRAP_INDENT):
+def _wrap(line, fits, indent=CAPTION_WRAP_INDENT, limit=None):
     """`line` broken at spaces into rows that each pass `fits` -> [rows].
 
     EVERY WORD IS KEPT (`#373`, 2026-10-06). Cutting a grouped caption
@@ -2558,21 +2855,63 @@ def _wrap(line, fits, indent=CAPTION_WRAP_INDENT):
     figure and lost the band widths. A measurement figure must not drop
     caption text without saying so. Rows after the first carry `indent`.
     Only a single word wider than a whole row (a pasted path, say) is
-    broken inside the word, because there is nowhere else to break it."""
-    rows, cur = [], ''
-    for word in line.split(' '):
+    broken inside the word, because there is nowhere else to break it.
+
+    STEERED BY AN ESTIMATE, DECIDED BY `fits` (`#391`). A width test from
+    _caption_fitter also carries `fits.reach`, a guess at how many more
+    words fit on the row from per-word widths. The loop measures the row
+    with that many words added in ONE exact test, and takes them when it
+    passes, instead of measuring the row again after every word; a guess
+    that fails is shortened one word at a time. The rows are exactly the
+    ones the word-by-word loop picks, because appending text never makes
+    a row narrower, so a row that passes with n more words passes with
+    fewer. Any other `fits` (a character count, say) is walked word by
+    word, as before.
+
+    `limit` is for a caller that only counts rows (the Members search):
+    the wrap stops as soon as a row past `limit` begins, so the list it
+    returns then is cut short and good only for its length, which is more
+    than `limit` exactly when the whole wrap's is."""
+    reach = getattr(fits, 'reach', None)
+    words = line.split(' ')
+    # `stop`: the first word known NOT to fit on the current row, found by
+    # a failed guess, so a later guess on that row never measures past it
+    rows, cur, i, stop = [], '', 0, None
+    while i < len(words):
+        word = words[i]
         if not cur and not word:
+            i += 1
             continue                   # the spaces at a break ARE the break
+        if not cur and limit is not None and len(rows) >= limit:
+            return rows + [word]       # a row past `limit` starts here
         lead = indent if rows else ''
+        if cur and reach is not None:
+            n = reach(lead + cur, words, i)
+            if stop is not None:
+                n = min(n, stop - i)
+            while n > 1:
+                cand = ' '.join([cur] + words[i:i + n])
+                if fits(lead + cand):
+                    break
+                stop = i + n - 1
+                n -= 1
+            if n > 1:
+                # n word-by-word passes, made in one measurement
+                cur = cand
+                i += n
+                continue
+        i += 1
         cand = f"{cur} {word}" if cur else word
         if fits(lead + cand):
             cur = cand
             continue
         if cur:
             rows.append(cur)
-            cur = ''
+            cur, stop = '', None
             if not word:
                 continue
+            if limit is not None and len(rows) >= limit:
+                return rows + [word]
             lead = indent
         # a single character that still does not fit is a row of its own:
         # it cannot be broken, and breaking it again would never end
@@ -2583,7 +2922,9 @@ def _wrap(line, fits, indent=CAPTION_WRAP_INDENT):
             rows.append(word[:k])
             word = word[k:]
             lead = indent
-        cur = word
+            if limit is not None and len(rows) >= limit:
+                return rows + [word]
+        cur, stop = word, None
     if cur or not rows:
         rows.append(cur)
     return rows[:1] + [indent + r for r in rows[1:]]
@@ -2630,40 +2971,77 @@ def _caption_fitter(fig, fontsize=7, left=0.01, frac=CAPTION_FIT_FRAC):
 
     Measured from the font itself (matplotlib's TextToPath, in points),
     not from a renderer, so the answer is the same on the window's Tk
-    canvas, in a PNG and in an SVG, and needs nothing drawn first."""
+    canvas, in a PNG and in an SVG, and needs nothing drawn first.
+
+    `fits.reach(head, words, i)` is the estimate _wrap steers by (`#391`):
+    how many of words[i:] still fit on the row `head` starts, counting
+    each word's own cached width plus one word gap. It is close (the gap
+    between two words depends on the letters either side of it, and this
+    takes one typical gap) and it never decides a row: _wrap measures
+    whatever it guesses with `fits` itself."""
     room = fig.get_figwidth() * 72.0 * (frac - left)
+    font = _caption_font(fontsize)
 
     def fits(text):
-        return _caption_width(text, fontsize) <= room
+        return _caption_width(text, fontsize, font) <= room
+
+    # what one space between two words adds, side bearings included
+    gap = (_caption_width('n n', fontsize, font)
+           - 2 * _caption_width('n', fontsize, font))
+
+    def reach(head, words, i):
+        used = _caption_width(head, fontsize, font)
+        n = 0
+        for word in words[i:]:
+            used += gap + _caption_width(word, fontsize, font)
+            if used > room:
+                break
+            n += 1
+        return n
+    fits.reach = reach
     return fits
 
 
 _WIDTHS = {}
 
 
-def _caption_width(text, fontsize):
+def _caption_font(fontsize):
+    """-> (FontProperties, key): the font a caption width is measured in,
+    as rcParams resolve it NOW, and what names it in the width cache: the
+    configured family and the font file that family resolved to (`#391`).
+    Nothing in this tool changes the font at run time, but a cache keyed
+    on the text and size alone would hand a later family the widths of
+    the first one, and the wrap would then trust them."""
+    from matplotlib.font_manager import FontProperties, findfont
+    prop = FontProperties(size=fontsize)
+    return prop, (tuple(prop.get_family()), findfont(prop))
+
+
+def _caption_width(text, fontsize, font=None):
     """`text`'s width in points at `fontsize`, by the font's metrics.
+    `font` is _caption_font(fontsize), resolved here when not given.
 
     CACHED, because a window resize re-wraps the caption at every size a
-    drag passes through, and _wrap measures each row word by word.
-    Measured 2026-10-06 on an aggregate figure: uncached, the re-wrap
-    took 87 ms of a 124 ms relayout at 6 in wide (11 rows), against 38 ms
-    for the layout alone (`#316` is why that matters). Most strings recur
-    from one size to the next, so with the cache a drag through 20
-    distinct sizes from a cold start costs a median 59 ms a relayout,
-    against 42 ms without the caption step. The width depends only on
-    the string and the size: the caption's font is matplotlib's default,
-    which nothing in this tool changes at run time. Cleared when it
-    passes 20000 strings, so it cannot grow without bound."""
-    key = (text, fontsize)
+    drag passes through, and _wrap measures rows. Measured 2026-10-06 on
+    an aggregate figure: uncached, the re-wrap took 87 ms of a 124 ms
+    relayout at 6 in wide (11 rows), against 38 ms for the layout alone
+    (`#316` is why that matters). Most strings recur from one size to the
+    next, so with the cache a drag through 20 distinct sizes from a cold
+    start costs a median 59 ms a relayout, against 42 ms without the
+    caption step. The width depends only on the string, the size and the
+    font, and the key holds all three (the font since `#391`). Cleared
+    when it passes 20000 strings, so it cannot grow without bound."""
+    if font is None:
+        font = _caption_font(fontsize)
+    prop, family = font
+    key = (text, fontsize, family)
     width = _WIDTHS.get(key)
     if width is None:
-        from matplotlib.font_manager import FontProperties
-        from matplotlib.textpath import TextToPath
+        from matplotlib.textpath import text_to_path
         if len(_WIDTHS) >= 20000:
             _WIDTHS.clear()
-        width = _WIDTHS[key] = TextToPath().get_text_width_height_descent(
-            text, FontProperties(size=fontsize), ismath=False)[0]
+        width = _WIDTHS[key] = text_to_path.get_text_width_height_descent(
+            text, prop, ismath=False)[0]
     return width
 
 
@@ -2700,15 +3078,19 @@ def _group_caption(drawn, opts, hidden, materials=False, fits=None):
     heads = []
     for name, runs, ag, _cap, _color, style in drawn:
         n = len(runs)
-        heads.append(f"{name} ({group_style_name(style)}, {n} run"
+        heads.append(f"{_shown(name)} ({group_style_name(style)}, {n} run"
                      f"{'' if n == 1 else 's'}"
                      f"{'' if n >= 2 else ' — NO BAND'})")
     head = ("AGGREGATE BY GROUP (squares): " + '; '.join(heads)
             + f". Bands are SEM (σ/√n), NOT the ±{TRACED_BAND_PCT:g}–"
               f"{MACHINE_BAND_PCT:g}% instrument budget.")
-    lone = [name for name, runs, _a, _c, _col, _s in drawn if len(runs) < 2]
+    lone = [_shown(name) for name, runs, _a, _c, _col, _s in drawn
+            if len(runs) < 2]
     if lone:
-        head += (f" {', '.join(lone)} has one run: an aggregate needs ≥ 2 "
+        # joined with '; ' (`#391`): a seeded name carries ', ' itself
+        # ('Carbon Solutions P3-SWNT, 2.5 mL'), so ', ' made the list read
+        # as more groups than it named
+        head += (f" {'; '.join(lone)} has one run: an aggregate needs ≥ 2 "
                  f"runs to earn a band.")
     styles = ''
     if materials:
@@ -2729,7 +3111,7 @@ def _group_caption(drawn, opts, hidden, materials=False, fits=None):
         full = aggregate_full_n(ag)
         thin = len(aggregate_thin_levels(ag))
         capped = capped or cap is not None
-        bits.append(f"{name}: n = {full} over {len(ag)} levels"
+        bits.append(f"{_shown(name)}: n = {full} over {len(ag)} levels"
                     + (f", {thin} short or interpolated"
                        if thin else ", all measured")
                     + (f", capped at {cap:g} {x_unit(opts)}"
@@ -2762,7 +3144,7 @@ def _group_members_caption(drawn, limit=CAPTION_LINE_MAX, fits=None):
     always ends by pointing at the CSV. It is the one grouped line still
     allowed to stop short, and only past MEMBERS_MAX_ROWS rows; then it
     says so and where the rest is, so nothing is dropped silently."""
-    bits = [f"{name} = " + ', '.join(r['name'] for r in runs)
+    bits = [f"{_shown(name)} = " + ', '.join(_shown(r['name']) for r in runs)
             for name, runs, _ag, _cap, _col, _st in drawn]
     line = 'Members: ' + '; '.join(bits) + '.'
     if fits is not None:
@@ -2770,10 +3152,21 @@ def _group_members_caption(drawn, limit=CAPTION_LINE_MAX, fits=None):
         rows = _wrap(whole, fits)
         if len(rows) > MEMBERS_MAX_ROWS:
             tail = "… (full membership in the tidy CSV's group column)"
+            # the longest cut of the line that still wraps to
+            # MEMBERS_MAX_ROWS rows with the pointer on, by bisection. Each
+            # probe is decided by the exact width test; the estimate in
+            # `fits` only steers each probe's wrap, and the row count stops
+            # at the limit, so every probe answers as the word-by-word wrap
+            # does and the search lands where it always landed (`#391`).
+            # A '\' is never left at the cut: it would be half of an
+            # escaped '$' (_shown) and draw as a stray backslash.
+
+            def cut(k):
+                return line[:k].rstrip(' ,;\\') + tail
 
             def ok(k):
-                cand = line[:k].rstrip(' ,;') + tail
-                return len(_wrap(cand, fits)) <= MEMBERS_MAX_ROWS
+                return len(_wrap(cut(k), fits, limit=MEMBERS_MAX_ROWS)) \
+                    <= MEMBERS_MAX_ROWS
             lo, hi = 0, len(line)
             while lo < hi:
                 mid = (lo + hi + 1) // 2
@@ -2781,7 +3174,7 @@ def _group_members_caption(drawn, limit=CAPTION_LINE_MAX, fits=None):
                     lo = mid
                 else:
                     hi = mid - 1
-            rows = _wrap(line[:lo].rstrip(' ,;') + tail, fits)
+            rows = _wrap(cut(lo), fits)
         return '\n' + '\n'.join(rows)
     if len(line) > limit:
         # the pointer to the full answer is part of the budget, not an
@@ -2873,13 +3266,19 @@ def _legend(ax, run_handles, style_rows, handlelength=None):
     `handlelength` (font-size units) is GROUP_HANDLE_EM on a grouped
     figure, so a dash pattern is long enough to read in the key (`#373`);
     None keeps matplotlib's default and every other figure's layout."""
+    extra = {} if handlelength is None else {'handlelength': handlelength}
+    return ax.legend(handles=_legend_handles(run_handles, style_rows),
+                     fontsize=8, loc='upper left', framealpha=0.9, **extra)
+
+
+def _legend_handles(run_handles, style_rows):
+    """The run legend's entries: the runs (and means), then the style rows
+    this figure earned, each a grey proxy line."""
     from matplotlib.lines import Line2D
     handles = list(run_handles)
     for label, kw in style_rows:
         handles.append(Line2D([], [], color='#666666', label=label, **kw))
-    extra = {} if handlelength is None else {'handlelength': handlelength}
-    return ax.legend(handles=handles, fontsize=8, loc='upper left',
-                     framealpha=0.9, **extra)
+    return handles
 
 
 # the two marker fills `_series` draws, as the figure's own key (`#267`).
@@ -3261,7 +3660,8 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                      f"{unanchored} have no reviewed area -- drawn as "
                      f"dashed verticals at their "
                      f"{'field' if fieldax else 'kV'} (see current mode)")
-        run_handles.append(Line2D([], [], color=color, label=run['name']))
+        run_handles.append(Line2D([], [], color=color,
+                                  label=_shown(run['name'])))
 
     agg_caption = ''
     # did the aggregate actually PRINT a count on the legend axis? Only
@@ -3357,8 +3757,9 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
             drawn_groups.append((name, subset, ag, cap_kv, color, ls))
             n = len(subset)
             if grouped:
-                label = (f"{name} — mean of {n} runs (±SEM)" if band
-                         else f"{name} — mean of 1 run (no band)")
+                label = (f"{_shown(name)} — mean of {n} runs (±SEM)"
+                         if band else
+                         f"{_shown(name)} — mean of 1 run (no band)")
             else:
                 label = (f"aggregate mean of {n} runs (±SEM)" if band
                          else 'aggregate mean (1 run — no band)')
@@ -3419,7 +3820,8 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                          in drawn_groups for r in subset if multi_leg(r)})
         if updown and opts.get('split_legs', True):
             agg_caption += ("\nUp/down runs contribute their FIRST RISING "
-                            "leg to the mean: " + ', '.join(updown) + ".")
+                            "leg to the mean: "
+                            + ', '.join(map(_shown, updown)) + ".")
             warn(f"aggregate: {', '.join(updown)} also ran DOWN in "
                  f"voltage -- only the first rising leg joins the mean, "
                  f"since averaging a device's rising and falling visits "
@@ -3428,11 +3830,15 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
             # on the figure too: the PNG travels without the console, and
             # an n that counts one film at most levels is not the n a
             # reader assumes (`#398`)
+            # the group's name as drawn: escaped by _shown, like every
+            # name on the figure (`#391`); the warning above keeps it as
+            # typed. Not repr of _shown: repr would double the backslash
             agg_caption += (
                 "\nExact levels across films of different thickness: two "
                 "films share a field level only where V1/t1 = V2/t2. "
                 + '; '.join(
-                    f"{what} ({', '.join(f'{t:g}' for t in t0s)} µm): "
+                    f"{_shown(what)} "
+                    f"({', '.join(f'{t:g}' for t in t0s)} µm): "
                     f"{shared} of {levels} levels hold more than one "
                     f"thickness"
                     for what, t0s, shared, levels in mixed_films) + ".")
@@ -3477,6 +3883,11 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                            {'linestyle': '--'}))
     main_legend = _legend(legend_ax, run_handles, style_rows,
                           handlelength=handle_em)
+    # held so the layout can move it below the panels if it covers data
+    # there, and relayout can place it again (`#391`, _place_legend)
+    setattr(fig, _LEGEND_ATTR, {
+        'ax': legend_ax, 'legend': main_legend, 'handlelength': handle_em,
+        'handles': _legend_handles(run_handles, style_rows), 'below': None})
     # the open/closed key explains the RUN markers, and with the runs
     # hidden there are none on the figure to explain -- the same rule that
     # keeps it out of current/power mode (`#267`), reached from the other
@@ -3744,7 +4155,8 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
                             markerfacecolor='white', markeredgewidth=1.2,
                             zorder=5)
                     had_adv = True
-        run_handles.append(Line2D([], [], color=color, label=run['name']))
+        run_handles.append(Line2D([], [], color=color,
+                                  label=_shown(run['name'])))
 
     ylabel = ('|kV × (µA − run median)|  (mW)' if power
               else 'Measured current (µA)')
@@ -3779,7 +4191,8 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
               "product was ~100% instrument zero × kV on the P3 era "
               "(−16 µA idle)."
               + (f"  RAW product (no median): "
-                 f"{', '.join(raw_power)}." if raw_power else "")
+                 f"{', '.join(map(_shown, raw_power))}." if raw_power
+                 else "")
               if power else
               "Currents carry each era's instrument offset "
               "(07-29 ≈ −16 µA idle).")
@@ -3839,9 +4252,10 @@ def draw(fig, runs, opts, warn=lambda m: None):
     the axes it needs. THE entry point for anything that renders: the
     window's live canvas calls it on every toggle, and save_figure() calls
     it for the PNG, so what you see on screen is what lands in the file."""
-    # a figure reused for a new draw must not keep the last one's caption;
-    # draw_area / draw_signal hold this one's
+    # a figure reused for a new draw must not keep the last one's caption
+    # or run legend; draw_area / draw_signal hold this one's
     setattr(fig, _CAPTION_ATTR, None)
+    setattr(fig, _LEGEND_ATTR, None)
     if opts['mode'] == 'area':
         axl, axr = area_axes(fig, opts)
         return draw_area(fig, axl, axr, runs, opts, warn)

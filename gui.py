@@ -2879,12 +2879,63 @@ LOGGING:
         self.notebook.add(_tab, text="SLDEA Test")
         f = _tab.body
 
-        # Layout draft A (#403): two columns. What the operator SETS is on
-        # the left (staircase, output and device, watchdog / telemetry /
-        # video), what they LOOK AT is on the right (the kV preview and the
-        # camera panel #404 will fill), and the presets, run row and log
-        # run across the bottom, presets directly above the run row as
-        # before (a Load leaves the tab in DRY, right under the button).
+        # The tab's layout (#403, owner's choice 2026-10-08, from three
+        # drafts rendered at 96 dpi): the presets first, then two columns,
+        # then the run row and the log. What the operator SETS is in the
+        # left column (staircase, output and device, watchdog / telemetry /
+        # video) and what they LOOK AT is in the right one (the kV preview
+        # and the camera panel #404 will fill). It fits a 1320 x 990 window
+        # with no scrolling (885 px at 96 dpi; the single column it replaced
+        # was 1183 px), and the Run button stays in the lower third of the
+        # tab, under everything it acts on.
+        #
+        # Named run-configuration presets (`#265`) come FIRST, across the
+        # top: a session starts by loading the campaign's preset, and
+        # everything the operator then checks or changes is below it.
+        # A load always leaves the tab in DRY (the DRY/LIVE box in the run
+        # row says so), so arming the HV stays a separate, deliberate
+        # click at the bottom. What a preset does NOT carry (run name,
+        # DRY/LIVE) and why is in sldea_presets.py.
+        presf = ttk.LabelFrame(f, text="Run configuration presets", padding=6)
+        presf.pack(fill='x', padx=10, pady=(6, 2))
+        ttk.Label(presf, text="Preset:").pack(side=tk.LEFT)
+        self.sldea_preset_select = ttk.Combobox(presf, width=22,
+                                                state='readonly')
+        self.sldea_preset_select.pack(side=tk.LEFT, padx=(4, 6))
+        add_tooltip(self.sldea_preset_select,
+                    "Saved run configurations. They live in the same shared "
+                    "presets/ library as the signal-generator presets, so "
+                    "the other bench user sees yours.")
+        add_tooltip(ttk.Button(presf, text="Load",
+                               command=self.sldea_load_preset),
+                    "Fill this tab from the selected preset: the staircase, "
+                    "Output dir, scope/SG channels, DEA diameter, electrode, "
+                    "Trek inverts, and the watchdog and telemetry settings.\n"
+                    "Your RUN NAME is left alone, and the tab always comes "
+                    "back in DRY — a preset never re-arms the HV. Anything "
+                    "the preset could not supply is listed rather than "
+                    "quietly skipped.").pack(side=tk.LEFT)
+        add_tooltip(ttk.Button(presf, text="Delete",
+                               command=self.sldea_delete_preset),
+                    "Remove the selected preset from the shared library. "
+                    "Asks first.").pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(presf, text="Save current as:").pack(side=tk.LEFT,
+                                                       padx=(16, 2))
+        self.sldea_preset_name = ttk.Entry(presf, width=20)
+        self.sldea_preset_name.pack(side=tk.LEFT)
+        add_tooltip(self.sldea_preset_name,
+                    "Name for the settings currently on this tab. Reusing a "
+                    "name overwrites that preset, after asking.")
+        add_tooltip(ttk.Button(presf, text="Save",
+                               command=self.sldea_save_preset),
+                    "Store this tab's settings under that name. Fields are "
+                    "saved exactly as typed, so a half-finished number is "
+                    "never the reason a save fails.").pack(side=tk.LEFT,
+                                                           padx=(4, 0))
+        self.sldea_refresh_presets()
+
+        # The two columns. Built left first, so the Tab key walks the
+        # left column top to bottom before the right one.
         top = ttk.Frame(f)
         top.pack(fill='x', padx=4, pady=(4, 0))
         top.columnconfigure(1, weight=1)
@@ -3123,7 +3174,10 @@ LOGGING:
         # BELOW the electrode, concentration and film thickness: those
         # define the DEVICE and read as one flow (operator note 2026-08-08:
         # the checkbutton between them broke it); this is a DRIVE setting
-        # and comes after.
+        # and comes after. History: it once overlapped the electrode row
+        # outright (`#231` moved the field in, `#262` un-stacked it), sat
+        # on row 5 until the thickness took it (`#398`), and moved down one
+        # more when the three channels took a line of their own (`#403`).
 
         # Breakdown watchdog (LIVE runs): deliberately slow-to-trip monitor
         # of the Trek I_Out on the scope; sustained overcurrent -> snapshot
@@ -3162,9 +3216,38 @@ LOGGING:
                  text="waits until it is SURE — sustained overcurrent only"
                  ).pack(side=tk.LEFT, padx=12)
 
-        # Continuous monitor log (#157/#189). THIS LABEL IS DUPLICATED BY
-        # HAND (content.json twice, annotate.py, BENCH_TEST section M):
-        # re-derive the list with git grep -n "Scope kV" before changing it.
+        # Continuous monitor log (#157/#189). The watchdog samples the
+        # current at 2 Hz on every run and used to discard every sample,
+        # so nothing electrical was recorded between snapshots and a
+        # breakdown could not even be dated afterwards.
+        # The label names the instrument and the quantities on purpose:
+        # "telemetry" alone could mean run progress or link health. The
+        # FILE keeps its name (#224) -- telemetry.csv is already written by
+        # shipped code and referenced in README/BENCH_TEST/the manual, and
+        # renaming it would strand every run captured with v1.1.0.
+        #
+        # THIS LABEL IS DUPLICATED BY HAND and nothing enforces the
+        # copies, so changing the text here means changing all of these
+        # in the same commit:
+        #   docs/manual-src/content.json -- the control entry ("label")
+        #   docs/manual-src/content.json -- the inert callout entry
+        #        ("widget_text"), a second, separate copy
+        #   docs/manual-src/annotate.py  -- the callout matcher; it
+        #        matches this literal on-screen string and merely PRINTS
+        #        "no match" when it drifts, so the manual silently loses
+        #        the callout instead of failing the build
+        #   BENCH_TEST.md, section M step 2 -- tells a bench operator to
+        #        find this box by name; if it drifts they hunt for a box
+        #        title that no longer exists
+        # Do NOT trust that list to be complete -- re-derive it, because
+        # every previous attempt at this undercounted by one:
+        #     git grep -n "Scope kV"
+        # Keep such a search ASCII-only. git grep matches BYTES, so the
+        # micro sign is two bytes and a pattern like "kV/.A log" matches
+        # NOTHING while still looking like it worked.
+        # docs/digital-multitool-manual.{html,pdf} carry the label too,
+        # but they are GENERATED: the manual pipeline rewrites them at the
+        # next version bump. Never hand-edit those.
         telf = ttk.LabelFrame(left, text="📈 Scope kV/µA log (telemetry.csv)",
                               padding=6)
         telf.pack(fill='x', padx=6, pady=(0, 6))
@@ -3246,49 +3329,6 @@ LOGGING:
         self.sldea_vid_info = tk.Label(vidf, text='', fg='#555')
         self.sldea_vid_info.pack(side=tk.LEFT, padx=12)
 
-        # Named run-configuration presets (`#265`), directly above the run
-        # row: the DRY/LIVE checkbox is the next thing under the Load
-        # button, and a load always leaves the tab in DRY, so the operator
-        # sees that state exactly where they clicked. What a preset does
-        # NOT carry (run name, DRY/LIVE) and why is in sldea_presets.py.
-        presf = ttk.LabelFrame(f, text="Run configuration presets", padding=6)
-        presf.pack(fill='x', padx=10, pady=(0, 6))
-        ttk.Label(presf, text="Preset:").pack(side=tk.LEFT)
-        self.sldea_preset_select = ttk.Combobox(presf, width=22,
-                                                state='readonly')
-        self.sldea_preset_select.pack(side=tk.LEFT, padx=(4, 6))
-        add_tooltip(self.sldea_preset_select,
-                    "Saved run configurations. They live in the same shared "
-                    "presets/ library as the signal-generator presets, so "
-                    "the other bench user sees yours.")
-        add_tooltip(ttk.Button(presf, text="Load",
-                               command=self.sldea_load_preset),
-                    "Fill this tab from the selected preset: the staircase, "
-                    "Output dir, scope/SG channels, DEA diameter, electrode, "
-                    "Trek inverts, and the watchdog and telemetry settings.\n"
-                    "Your RUN NAME is left alone, and the tab always comes "
-                    "back in DRY — a preset never re-arms the HV. Anything "
-                    "the preset could not supply is listed rather than "
-                    "quietly skipped.").pack(side=tk.LEFT)
-        add_tooltip(ttk.Button(presf, text="Delete",
-                               command=self.sldea_delete_preset),
-                    "Remove the selected preset from the shared library. "
-                    "Asks first.").pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Label(presf, text="Save current as:").pack(side=tk.LEFT,
-                                                       padx=(16, 2))
-        self.sldea_preset_name = ttk.Entry(presf, width=20)
-        self.sldea_preset_name.pack(side=tk.LEFT)
-        add_tooltip(self.sldea_preset_name,
-                    "Name for the settings currently on this tab. Reusing a "
-                    "name overwrites that preset, after asking.")
-        add_tooltip(ttk.Button(presf, text="Save",
-                               command=self.sldea_save_preset),
-                    "Store this tab's settings under that name. Fields are "
-                    "saved exactly as typed, so a half-finished number is "
-                    "never the reason a save fails.").pack(side=tk.LEFT,
-                                                           padx=(4, 0))
-        self.sldea_refresh_presets()
-
         # The run row, the background job's line and the camera line stay
         # one pack column: _sldea_job_show packs the job line before the
         # camera line, and sldea_video_btn_sync re-packs Video review...
@@ -3316,7 +3356,8 @@ LOGGING:
 
     def _sldea_camera_placeholder(self, parent):
         """Room for the planned camera panel (#404): a labelled frame of the
-        size it will take, holding no control. Layout draft only (#403).
+        size it will take, holding no control, so the layout (#403) is
+        measured with the panel in it. #404 replaces it with the panel.
         Paul Tol pale grey for the picture area, black words."""
         cam = ttk.LabelFrame(parent, text="Camera panel (planned, #404)",
                              padding=6)
@@ -3334,8 +3375,8 @@ LOGGING:
     def _sldea_build_run_row(self, runf, column):
         """The run row in `runf`, then the background job's line and the
         camera line under it in `column`, the pack column that holds
-        `runf` (#403 drafts: one builder for every layout). Nothing here
-        changed from the single-column tab but the parents."""
+        `runf` (#403). Nothing here changed from the single-column tab
+        but the parents."""
         self.sldea_dryrun = tk.BooleanVar(value=True)
         self.sldea_dry_cb = tk.Checkbutton(
             runf, text="DRY RUN — HV OFF", variable=self.sldea_dryrun,
@@ -3396,10 +3437,19 @@ LOGGING:
                     "camera, so closing it never affects the run."
                     ).pack(side=tk.RIGHT, padx=(8, 4))
         # The video review of the run this tab FINISHED last (#395), next
-        # to Live view... and packed AFTER it, so a row too short for
-        # everything takes its room from this button first. HIDDEN while a
-        # run is going (sldea_video_btn_sync); grey until a run that
-        # recorded video has ended here.
+        # to Live view... and launched like the tools on the left. Packed
+        # AFTER Live view..., so a row too short for everything takes its
+        # room from this button first: the status line and Live view...
+        # keep exactly what they had before it existed, during a run and
+        # after one that ended on a long alarm (measured: beside Plot
+        # runs..., it left Live view... 6 px during a run in the default
+        # window and pushed it off the row after "NOT ZEROED"). HIDDEN
+        # while a run is going, since it opens the last finished run only.
+        # Grey until a run that recorded video has ended here, and again
+        # after a run without video: sldea_video_after_run moves it on as
+        # each run ends, sldea_video_btn_sync shows and hides it. The
+        # reviews it started are kept per run folder, so a second press
+        # while one is still open starts no second window.
         self._sldea_video_run = None
         self._sldea_video_rec_seen = None
         self._sldea_video_reviews = {}
@@ -3419,16 +3469,26 @@ LOGGING:
                     "right-click menu, or "
                     "Edge Review.").pack(side=tk.RIGHT, padx=(8, 0))
 
-        # The background video job's line (#396), under the run row, packed
-        # the first time a job reports (_sldea_job_show), before the camera
-        # line. Never the status above: that one carries the run's alarms.
+        # The background video job's line (#396), under the run row: the
+        # post-run move of a recording into the run folder (with its edge
+        # detection), then a re-run after Edge Review's Save, each as its
+        # program reports it (_sldea_job_watch). A line of its own, never
+        # the status above: that one carries the run's alarms ("NOT
+        # ZEROED"), which a progress line must not overwrite. Packed the
+        # first time a job reports (_sldea_job_show, before the camera
+        # line), so a session without video looks as it did.
         self.sldea_job_line = tk.Label(column, text="", anchor='w',
                                        justify='left', fg=MUTED,
                                        wraplength=1100)
 
-        # The camera settings a run started now would use (2026-10-02):
-        # read from the Webcam tab's two entry boxes and the lock dict,
-        # never the camera. Refreshed on tab changes and on <Enter>.
+        # The camera settings a run started now would use (2026-10-02). A
+        # run takes its exposure and gain from the Webcam tab's entry
+        # boxes, and nothing on this tab said so: the 2026-10-01 run went
+        # out at exposure 3 with no screen showing that number. Refreshed
+        # whenever a tab is selected and whenever the pointer comes onto
+        # this tab (the Webcam tab fills its boxes from the camera in a
+        # background job at startup, possibly after this tab is showing);
+        # it reads two entry boxes and the lock dict, never the camera.
         self.sldea_cam_line = tk.Label(column, text="", anchor='w',
                                        justify='left', fg='#555',
                                        wraplength=1100)

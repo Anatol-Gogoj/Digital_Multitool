@@ -3084,7 +3084,9 @@ ticked by default. Its 100 µA / 3 s rule misses small breakdowns
 (`#219`), but it is the only thing that stops a LIVE run on a
 breakdown, and replayed on the single-layer runs on file it stops none
 that was not breaking down: healthy runs stayed within 15.0 µA of their
-baseline.
+baseline. After the same day's HV review, Run is refused before any HV
+when the state changed while a question was open, or when a ticked LIVE
+run's Trip or Confirm is not a positive number.
 
 **Observation.**
 
@@ -3168,16 +3170,66 @@ single-layer runs above.
    have no such line, so "OFF" and "not recorded" stay apart.
 5. One function, `sldea_profile.watchdog_record`, words all three from the
    one reading that sldea_run hands the worker, taken before
-   "Energize HV?". The dialog cannot name a watchdog the run does not get.
+   "Energize HV?" and checked again at the commit point (decision 6).
+   The dialog cannot name a watchdog the run does not start with. A scope
+   lost after the run has started is the HV review's second observation
+   below.
 
-**What it costs.** Nothing changes for a ticked run. An operator who
+**What it costs.** A ticked run that starts is armed as on main: the box
+ticked, a LIVE run, a scope at the commit point. What is new for it is
+two refusals before any HV (decisions 6 and 7). An operator who
 unticks the box still can, and that LIVE run keeps ramping through a
 breakdown or a short until its end or ■ Abort, with the Trek's own current
 limit as the only automatic stop. The difference is that it is now said
 before the HV and written into the run's own files.
 
+**HV review, same day (2026-10-08).** An adversarial review of this
+change's HV path. Each observation was reproduced on the real sldea_run
+and worker over the scope-lock suite's fakes.
+
+*Observation.*
+
+- Reading the state before the questions opened a gap that main
+  (`9e94274`) did not have. A scope Reconnect sets the scope handle to
+  None at once and restores it from its done callback, and that callback
+  can run inside a pre-HV dialog's nested event loop. With the scope back
+  inside "No current monitoring", "Energize HV?" said "OFF (no scope to
+  read the current)" and the run went unarmed beside a connected scope:
+  at 120 µA over a 100 µA / 1 s trip it ran to its end, where main armed
+  and ended in BREAKDOWN-ABORT. The other way round, a scope gone inside
+  "Energize HV?" left all three records saying ON for a run that could
+  not arm.
+- The worker does not arm on the decision it is handed alone. Its arming
+  line, after the SG output goes on, needs the scope as well, so a LIVE
+  Reconnect confirmed in the run's first seconds (the open item of
+  `#339`) leaves the run unarmed while all three records say ON, and no
+  line says so. Losing the watchdog this way predates `#406`; the records
+  that claim ON are this change's.
+- The Trip and Confirm boxes took any value. Junk ran as 100 µA / 3 s
+  without a word; a nan or inf trip or confirm was armed and can never
+  fire; a zero or negative trip fires on every read. That predates
+  `#406` too, but the records now quote the boxes as the rule.
+
+*Decision (2026-10-08).*
+
+6. sldea_run computes the decision once more at the commit point, after
+   the final start gate, with the same expression (box ticked, a LIVE
+   run, a scope). Nothing from there to the worker yields to Tk. If it
+   differs from the one the dialog and the records were worded from, the
+   run is refused the way the start gate refuses one: a "run blocked"
+   box that names the change (for example "OFF (no scope to read the
+   current) → ON"), nothing sent to the SG, and ▶ Run asks again with the
+   state as it is then.
+7. Ticked on a LIVE run, a Trip or Confirm that is not a finite number
+   above zero refuses Run before any question, with a message naming the
+   box. A DRY run and an unticked LIVE run arm nothing from the boxes and
+   keep the old fallback.
+
 **Not done here.** Setting the trip from real runs (`#219`), and the trip
-logic and spike capture (`#189`).
+logic and spike capture (`#189`). The HV review's second observation: whether
+a ticked LIVE run whose watchdog cannot be built at its arming line
+stops before the SG output goes on, or goes on with records that say it
+was not armed, is the owner's call.
 
 ## A LIVE run locks the scope channels it reads, and the settings they share (2026-09-24)
 

@@ -228,6 +228,7 @@ import sldea_trace as strc
 # modules. If it happens, these two travel together or both get copied
 # then -- one decision, made once, with the split in front of us.
 import ui_widgets as uiw
+import tk_checkmarks
 
 DEFAULT_PARENT = os.environ.get('SCPI_SLDEA_DIR',
                                 '/mnt/shareDrive/robot_incubator/SLDEA_data')
@@ -2333,6 +2334,7 @@ def tracker_card_text(cands):
 class EdgeReviewApp:
     def __init__(self, root, path=None, auto=False, goto=None):
         self.root = root
+        tk_checkmarks.install_check_marks(root)   # not filled squares (#407)
         root.title("SLDEA Edge Review — Digital Multitool")
         root.geometry("1150x760")
         # Corrected after _build_ui, once the layout can be asked what it
@@ -2807,6 +2809,7 @@ class EdgeReviewApp:
                 # opens the tracer; Done stages, Accept commits (#172)
                 command=self._trace if k == TRACE_SLOT
                 else self._choose_current)
+            tk_checkmarks.mark_classic_radiobutton(rb)   # a dot (#421)
             rb.pack(side='left', fill='x', expand=True)
             self.cand_radios.append(rb)
         # the tracker's account of the frame (2026-10-02): what its
@@ -6013,10 +6016,11 @@ class EdgeReviewApp:
                 choices = [c for c in choices
                            if c[0] != se.CAL_MODE_VERIFY]
             for val, txt in choices:
-                tk.Radiobutton(chooser, text=txt, value=val,
-                               variable=mode_var,
-                               command=lambda: switch_mode()).pack(
-                                   side=tk.LEFT, padx=(4, 8))
+                rb = tk.Radiobutton(chooser, text=txt, value=val,
+                                    variable=mode_var,
+                                    command=lambda: switch_mode())
+                tk_checkmarks.mark_classic_radiobutton(rb)   # (#421)
+                rb.pack(side=tk.LEFT, padx=(4, 8))
             # ---- the two per-mode controls, each in its own box ----------
             # BOXED so they can be DE-RENDERED as a unit, caption and all
             # (`#215`, operator 2026-08-07, second pass). Greying them out

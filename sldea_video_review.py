@@ -43,6 +43,7 @@ from tkinter import messagebox, ttk
 import numpy as np
 
 import sldea_video as sv
+import tk_checkmarks
 
 
 def _user():
@@ -117,6 +118,7 @@ class VideoReviewWindow:
         self.rundir = rundir
         self.on_close = on_close
         self.win = master if standalone else tk.Toplevel(master)
+        tk_checkmarks.install_check_marks(self.win)   # check marks (#407)
         self.win.title(f"Video review — {os.path.basename(rundir)}")
         self._cap = None
         self._video_missing = False   # video.mkv not in the folder (_read)

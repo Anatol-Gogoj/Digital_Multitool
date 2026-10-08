@@ -54,8 +54,17 @@ LEGEND_ORDER = ('warmup', 'baseline', 'post-ramp', 'pre-ramp')
 # default 0->10 kV x 0.25 kV profile one landing's pre-ramp snapshot sits
 # ~5 px from the next landing's post-ramp one, so markers there stay near
 # the floor and may just touch -- the outlines keep both shapes readable.
-R_MIN = 4.0
-R_MAX = 7.0
+# `#401` made them about 14 % smaller (4 -> 3.5 and 7 -> 6).
+R_MIN = 3.5
+R_MAX = 6.0
+# The legend's glyphs, at one radius in the same place between floor and
+# ceiling as before `#401` (4.5 then).
+R_LEGEND = 3.9
+# The pointer's reach keeps the radius bounds the markers had before
+# `#401`, so a smaller marker is no harder to hover: the reach is this
+# radius, chosen by marker_radius the same way, plus 3 px.
+HOVER_R_MIN = 4.0
+HOVER_R_MAX = 7.0
 
 
 def _scales(profile, x0, y0, x1, y1):

@@ -43,6 +43,7 @@ import presets_path
 import relaunch
 from instruments import BK894, TekMSO24, BK4055B, BK9174B, BK5493C
 import lcr_format
+import output_folder
 import scope_trace
 import siggen_presets
 from siggen_presets import SignalGenPresetStore
@@ -55,8 +56,9 @@ import sldea_video
 from sldea_profile import (SldeaProfile, control_v_for_kv, measured_kv,
                            measured_ua, fmt_duration)
 import sweep_plan
-from ui_widgets import (ScrollableTab, SplashScreen, add_tooltip,
+from ui_widgets import (ScrollableTab, SplashScreen, Tooltip, add_tooltip,
                         browse_folder, folder_buttons, new_folder)
+from tk_checkmarks import install_check_marks, mark_classic_checkbutton
 from arb_editor import ArbWaveformEditor
 from waveform_render import unit_waveform, scale_waveform
 from version import version_string
@@ -221,6 +223,24 @@ CAM_OFF_DIALOG = "A dialog is open"
 CAM_OFF_NOT_FOUND = "Camera not found: {}"
 CAM_NO_FRAME_REASON = "The camera is not sending frames"
 
+# ---- Webcam tab: Auto-set camera, Advanced, the focus overlay (#400) -------
+# The main view keeps what a run uses (exposure and gain), Apply & Lock
+# beside them, and Auto-set camera. Every other control the camera
+# reports and the single steps sit under Advanced, collapsed until
+# opened.
+CAM_MAIN_CONTROLS = ('exposure_time_absolute', 'gain')
+CAM_AUTOSET_TEXT = "Auto-set camera"
+CAM_ADVANCED_SHOW = "▸ Advanced camera settings"
+CAM_ADVANCED_HIDE = "▾ Advanced camera settings"
+# Status colors, Paul Tol muted green and wine. The words carry the state.
+CAM_STATUS_DONE = '#117733'
+CAM_STATUS_WARN = '#882255'
+# The focus score is on by default, and its label is drawn about twice its
+# old 11 px height (24 px type: 22 px tall in Arial Bold, 23 in DejaVu
+# Sans Bold, measured 2026-10-07).
+CAM_FOCUS_DEFAULT = True
+CAM_FOCUS_LABEL_PX = 24
+
 SG_LOAD_HIGHZ = 'High-Z'   # UI label for the SCPI 'HZ' (high impedance) token
 
 # Signal generator over LAN. Arb upload works only over the wire (USB's
@@ -329,6 +349,31 @@ def sldea_video_btn_sync(app):
         pass
 
 
+def _sldea_folder_look(job):
+    """The SLDEA run folder line's check (#402), on its own thread: what
+    the run folder of `job['outdir']` and `job['name']` holds, or that the
+    share it is on is not mounted at `job['mount']`
+    (sldea_profile.run_folder_look). It is handed a dict of text, nothing
+    of the app's, so a check that outlives the window frees no Tk object
+    off the Tk thread. `found` stays None when the check itself raised,
+    which the line shows as not known."""
+    try:
+        job['found'] = sldea_profile.run_folder_look(
+            job['outdir'], job['name'], job['mount'])
+    finally:
+        job['done'] = True
+
+
+def sldea_share_mount():
+    """The lab share's mount point, read off the SLDEA tab's built-in
+    Output dir as New folder... reads it (#394): /mnt/shareDrive. Run
+    refuses a run folder under it while nothing is mounted there, and the
+    run folder line warns about it (#402 review); a folder anywhere else
+    is not affected. A function, so a test can aim it at a folder of its
+    own."""
+    return output_folder.share_mount(InstrumentControlGUI.SLDEA_SHARE_DIR)
+
+
 def _lan_reachable(resource, timeout=2.0):
     """Quick TCP liveness probe of a TCPIP VISA resource's host, so a missing
     box/cable falls back to USB fast instead of waiting out a long VISA open
@@ -379,6 +424,41 @@ def _splash_font(px):
             font = ImageFont.load_default()
     _SPLASH_FONTS[px] = font
     return font
+
+
+def draw_focus_overlay(img, score):
+    """Draw the focus score's area-of-interest circle, its center cross and
+    its label on `img` (an RGB PIL image, changed in place); return the
+    label's height in pixels, 0 with no label (#400).
+
+    Drawn like the live view's reticle (sldea_liveview): Tol cyan over a
+    black under-stroke, so it reads on a bright picture and on a dark one.
+    The label is CAM_FOCUS_LABEL_PX type, about twice its old height, and
+    shrinks only when the picture is too narrow for it. `score` None draws
+    the circle alone."""
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(img)
+    tw, th = img.size
+    cx, cy = tw // 2, th // 2
+    r = int(webcam.FOCUS_AOI_RADIUS_FRAC * min(tw, th))
+    for fill, cw, lw in (('#000000', 5, 3),
+                         (sldea_liveview.TOL_CYAN, 3, 1)):
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=fill,
+                     width=cw)
+        draw.line([cx - 6, cy, cx + 6, cy], fill=fill, width=lw)
+        draw.line([cx, cy - 6, cx, cy + 6], fill=fill, width=lw)
+    if score is None:
+        return 0
+    label = f"focus {score:.0f}  (higher = sharper)"
+    px = CAM_FOCUS_LABEL_PX
+    font = _splash_font(px)
+    while px > 10 and draw.textlength(label, font=font) > tw - 12:
+        px -= 2
+        font = _splash_font(px)
+    draw.text((6, 4), label, font=font, fill=sldea_liveview.TOL_CYAN,
+              stroke_width=2, stroke_fill='#000000')
+    box = draw.textbbox((6, 4), label, font=font)
+    return box[3] - box[1]
 
 
 def draw_preview_splash(img, headline, reason, stamp=None):
@@ -448,6 +528,9 @@ class InstrumentControlGUI:
         # to report what is being built (tab construction takes ~2.6 s).
         self._progress = progress or (lambda _text: None)
         self.root = root
+        # a check mark in every checkbox, not the Linux theme's filled
+        # square (#407); before any widget, so all of them get it
+        install_check_marks(root)
         self.root.title(f"Lab Instrument Control  —  {version_string()}")
         # A comfortable default, no longer load-bearing. This size used to
         # be the only thing keeping the LCR tab's right-hand column
@@ -2879,9 +2962,84 @@ LOGGING:
         self.notebook.add(_tab, text="SLDEA Test")
         f = _tab.body
 
-        inp = ttk.LabelFrame(f, text="Test Profile (voltages in kV; "
-                             "1 V control = 1 kV, Trek max 10 kV)", padding=10)
-        inp.pack(fill='x', padx=10, pady=8)
+        # The tab's layout (#403, owner's choice 2026-10-08, from three
+        # drafts rendered at 96 dpi): the presets first, then two columns,
+        # then the run row and the log. What the operator SETS is in the
+        # left column (staircase, output and device, watchdog / telemetry /
+        # video) and what they LOOK AT is in the right one (the kV preview,
+        # and later the camera panel #404 adds). It fits a 1320 x 990 window
+        # with no scrolling (847 px at 96 dpi; the single column it replaced
+        # was 1183 px), and the Run button stays in the lower third of the
+        # tab, under everything it acts on. At 1024 x 768 the whole Run
+        # button is in view as well (owner decision 2026-10-08), with 11 px
+        # to spare once #402's run folder line, two text lines tall, is in.
+        # The vertical padding above the run row was trimmed by 28 px for
+        # that: the columns sit right under the presets, the boxes are 4 px
+        # apart, Test Profile and Output & Measurement take 6 px of
+        # vertical padding instead of 8, and the snapshot line, the summary
+        # and the run row have 4 px of top padding instead of 6. Anything
+        # that adds height above the run row cuts the button's bottom edge
+        # off again.
+        #
+        # Named run-configuration presets (`#265`) come FIRST, across the
+        # top: a session starts by loading the campaign's preset, and
+        # everything the operator then checks or changes is below it.
+        # A load always leaves the tab in DRY (the DRY/LIVE box in the run
+        # row says so), so arming the HV stays a separate, deliberate
+        # click at the bottom. What a preset does NOT carry (run name,
+        # DRY/LIVE) and why is in sldea_presets.py.
+        presf = ttk.LabelFrame(f, text="Run configuration presets", padding=6)
+        presf.pack(fill='x', padx=10, pady=(6, 2))
+        ttk.Label(presf, text="Preset:").pack(side=tk.LEFT)
+        self.sldea_preset_select = ttk.Combobox(presf, width=22,
+                                                state='readonly')
+        self.sldea_preset_select.pack(side=tk.LEFT, padx=(4, 6))
+        add_tooltip(self.sldea_preset_select,
+                    "Saved run configurations. They live in the same shared "
+                    "presets/ library as the signal-generator presets, so "
+                    "the other bench user sees yours.")
+        add_tooltip(ttk.Button(presf, text="Load",
+                               command=self.sldea_load_preset),
+                    "Fill this tab from the selected preset: the staircase, "
+                    "Output dir, scope/SG channels, DEA diameter, electrode, "
+                    "Trek inverts, and the watchdog and telemetry settings.\n"
+                    "Your RUN NAME is left alone, and the tab always comes "
+                    "back in DRY — a preset never re-arms the HV. Anything "
+                    "the preset could not supply is listed rather than "
+                    "quietly skipped.").pack(side=tk.LEFT)
+        add_tooltip(ttk.Button(presf, text="Delete",
+                               command=self.sldea_delete_preset),
+                    "Remove the selected preset from the shared library. "
+                    "Asks first.").pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(presf, text="Save current as:").pack(side=tk.LEFT,
+                                                       padx=(16, 2))
+        self.sldea_preset_name = ttk.Entry(presf, width=20)
+        self.sldea_preset_name.pack(side=tk.LEFT)
+        add_tooltip(self.sldea_preset_name,
+                    "Name for the settings currently on this tab. Reusing a "
+                    "name overwrites that preset, after asking.")
+        add_tooltip(ttk.Button(presf, text="Save",
+                               command=self.sldea_save_preset),
+                    "Store this tab's settings under that name. Fields are "
+                    "saved exactly as typed, so a half-finished number is "
+                    "never the reason a save fails.").pack(side=tk.LEFT,
+                                                           padx=(4, 0))
+        self.sldea_refresh_presets()
+
+        # The two columns. Built left first, so the Tab key walks the
+        # left column top to bottom before the right one.
+        top = ttk.Frame(f)
+        top.pack(fill='x', padx=4)
+        top.columnconfigure(1, weight=1)
+        left = ttk.Frame(top)
+        left.grid(row=0, column=0, sticky='nw')
+        right = ttk.Frame(top)
+        right.grid(row=0, column=1, sticky='nsew')
+
+        inp = ttk.LabelFrame(left, text="Test Profile (voltages in kV; "
+                             "1 V control = 1 kV, Trek max 10 kV)",
+                             padding=(8, 6))
+        inp.pack(fill='x', padx=6, pady=(4, 4))
 
         def entry(parent, key, default, tip=None, width=8):
             e = ttk.Entry(parent, width=width)
@@ -2919,7 +3077,7 @@ LOGGING:
         # moved; each now carries the glyph its snapshot gets on the preview.
         snap_head = ttk.Label(inp, text="Snapshots each landing:")
         snap_head.grid(row=2, column=0, columnspan=8, sticky='w',
-                       padx=(8, 0), pady=(6, 0))
+                       padx=(8, 0), pady=(4, 0))
         add_tooltip(snap_head, "Two snapshots are taken at every voltage "
                                "landing, one near each end of the hold. The "
                                "preview below marks each with the same "
@@ -2949,27 +3107,40 @@ LOGGING:
         self.sldea_summary = tk.Label(inp, text="", fg='#1f3a5f', anchor='w',
                                       justify='left')
         self.sldea_summary.grid(row=4, column=0, columnspan=8, sticky='w',
-                                pady=(6, 0))
+                                pady=(4, 0))
 
         # The legend is drawn ON the canvas with the markers' own drawing
         # code, so it cannot drift from them; the title used to carry it as
         # colour words ("green=post-ramp red=pre-ramp") -- colour was the
         # only cue, and green/red is the commonest colour-blind confusion.
-        prev = ttk.LabelFrame(f, text="Preview — kV vs time  (hover a marker "
-                                      "for its landing, kV and time)",
+        prev = ttk.LabelFrame(right, text="Preview — kV vs time  (hover a "
+                                          "marker for its landing, kV and "
+                                          "time)",
                               padding=6)
-        prev.pack(fill='x', padx=10, pady=8)
-        self.sldea_canvas = tk.Canvas(prev, height=240, bg='white',
+        # The preview fills the right column, down to the bottom of the
+        # left one, which sets the row's height (owner decision 2026-10-08:
+        # no "planned" box for #404 until the panel itself lands). 230 px
+        # is only what it asks for, so it never makes the row taller or
+        # moves the run row. #404 puts its camera panel back by building
+        # it into `right` and packing it under this frame (fill='x',
+        # padx=6, pady=(0, 4)): pack serves every requested height before
+        # an expanding slave grows, so the preview then takes what is left,
+        # never less than its 230 px. _sldea_redraw reads the canvas's
+        # real size, so the plot follows either way.
+        prev.pack(fill='both', expand=True, padx=6, pady=(4, 4))
+        self.sldea_canvas = tk.Canvas(prev, height=230, bg='white',
                                       highlightthickness=0)
-        self.sldea_canvas.pack(fill='x')
+        self.sldea_canvas.pack(fill='both', expand=True)
         self.sldea_canvas.bind('<Configure>', lambda _ev: self._sldea_redraw())
         self.sldea_canvas.bind('<Motion>', self._sldea_hover)
         self.sldea_canvas.bind('<Leave>',
                                lambda _ev: self.sldea_canvas.delete('hover'))
         self._sldea_marks = []
+        self._sldea_reach = 0.0           # the pointer's reach, px (#401)
 
-        outf = ttk.LabelFrame(f, text="Output & Measurement", padding=10)
-        outf.pack(fill='x', padx=10, pady=8)
+        outf = ttk.LabelFrame(left, text="Output & Measurement",
+                              padding=(8, 6))
+        outf.pack(fill='x', padx=6, pady=(0, 4))
         ttk.Label(outf, text="Output dir:").grid(row=0, column=0, sticky='e')
         self.sldea_outdir = tk.StringVar(value=os.environ.get(
             'SCPI_SLDEA_DIR', self.SLDEA_SHARE_DIR))
@@ -2986,23 +3157,72 @@ LOGGING:
         btns.grid(row=0, column=2)
         ttk.Label(outf, text="Run name (blank = auto):").grid(row=1, column=0,
                                                               sticky='e')
-        self.sldea_runname = ttk.Entry(outf, width=26)
-        self.sldea_runname.grid(row=1, column=1, sticky='w', padx=6)
-        for r, lbl, key, default, vals in (
-                (0, "V_Out scope CH:", 'vch', '2', ['1', '2', '3', '4']),
-                (1, "I_Out scope CH:", 'ich', '3', ['1', '2', '3', '4']),
-                (2, "SG CH:", 'sgch', '1', ['1', '2'])):
-            ttk.Label(outf, text=lbl).grid(row=r, column=3, sticky='e',
-                                           padx=(16, 2))
-            cb = ttk.Combobox(outf, width=4, state='readonly', values=vals)
+        self.sldea_runname_var = tk.StringVar()
+        self.sldea_runname = ttk.Entry(outf, width=26,
+                                       textvariable=self.sldea_runname_var)
+        self.sldea_runname.grid(row=1, column=1, columnspan=2, sticky='w',
+                                padx=6)
+        # The folder the run will write to (#402), under the Run name box:
+        # the Output dir and the name joined as the worker joins them
+        # (sldea_profile.run_folder), redrawn at every keystroke and every
+        # change of the Output dir, which Browse and New folder... set too.
+        # A run name used before used to overwrite that run's setup.txt and
+        # data.csv without a word; the line warns, in words and in Tol's
+        # muted wine, when the folder already holds a run, and Run refuses
+        # it. The check behind the warning runs on a thread
+        # (_sldea_folder_check). Row 2, under the Run name box. Its size
+        # never follows its text, which changes at every keystroke: it asks
+        # for no width of its own (width=1) and takes the width its two
+        # columns already have, so the boxes above it stay put, and it is
+        # always two lines high (height=2), so the rows below it, the Run
+        # button's included, stay put too (#402 review). Line 1 is the
+        # folder, cut from the left to that width; line 2 a warning or
+        # nothing. It never wraps: run_folder_line fits each line to the
+        # width.
+        self.sldea_folder_line = tk.Label(outf, text='', anchor='nw',
+                                          justify='left', fg=MUTED, width=1,
+                                          height=2)
+        self.sldea_folder_line.grid(row=2, column=1, columnspan=2,
+                                    sticky='ew', padx=6)
+        try:
+            self._sldea_folder_font = tkfont.nametofont(
+                str(self.sldea_folder_line.cget('font')))
+        except tk.TclError:
+            self._sldea_folder_font = tkfont.Font(
+                root=self.root, font=self.sldea_folder_line.cget('font'))
+        self._sldea_folder_width = None    # the width last fitted to
+        self.sldea_folder_line.bind('<Configure>', self._sldea_folder_resized,
+                                    add='+')
+        self._sldea_folder_tip = Tooltip(self.sldea_folder_line, '')
+        self._sldea_folder_seen = None     # (folder, what its check found)
+        self._sldea_folder_pause = None    # after id: check once typing stops
+        self._sldea_folder_job = None      # the check out on its thread
+        self._sldea_folder_poll_id = None  # after id: its next look
+        self._sldea_folder_run_id = None   # after id: a run's folder again
+        self._sldea_folder_run = None      # (Output dir, Run name) of a run
+        self.sldea_folder_line.bind('<Destroy>', self._sldea_folder_stop,
+                                    add='+')
+        self.sldea_runname_var.trace_add('write', self._sldea_folder_refresh)
+        self.sldea_outdir.trace_add('write', self._sldea_folder_refresh)
+        # The three channels on one line under the run folder line (draft
+        # A, #403): they used to fill a column of their own at the frame's
+        # right edge.
+        chans = ttk.Frame(outf)
+        chans.grid(row=3, column=0, columnspan=4, sticky='w', pady=(2, 2))
+        for lbl, key, default, vals in (
+                ("V_Out scope CH:", 'vch', '2', ['1', '2', '3', '4']),
+                ("I_Out scope CH:", 'ich', '3', ['1', '2', '3', '4']),
+                ("SG CH:", 'sgch', '1', ['1', '2'])):
+            ttk.Label(chans, text=lbl).pack(side=tk.LEFT, padx=(14, 2))
+            cb = ttk.Combobox(chans, width=4, state='readonly', values=vals)
             cb.set(default)
-            cb.grid(row=r, column=4, sticky='w')
+            cb.pack(side=tk.LEFT)
             self.sldea_vars[key] = cb
         ttk.Label(outf, text="DEA active area diam (mm):").grid(
-            row=2, column=0, sticky='e')
+            row=4, column=0, sticky='e')
         diam = ttk.Entry(outf, width=8)
         diam.insert(0, '16')
-        diam.grid(row=2, column=1, sticky='w', padx=6)
+        diam.grid(row=4, column=1, sticky='w', padx=6)
         add_tooltip(diam, "Nominal resting active-area diameter. Written to "
                           "setup.txt and used by Edge Review for the px→mm "
                           "scale.")
@@ -3013,16 +3233,14 @@ LOGGING:
         # until now the material lived only in folder names. Run asks for
         # confirmation if it is left empty rather than silently recording
         # an unknown device class.
-        ttk.Label(outf, text="Electrode:").grid(row=3, column=0, sticky='e')
+        ttk.Label(outf, text="Electrode:").grid(row=5, column=0, sticky='e')
         # width 24 fits the longest brand ('Carbon Solutions P3-SWNT',
-        # `#272`) without truncating it in the box. It costs no layout:
-        # this column is already sized by the width-34 Output dir entry
-        # above it.
+        # `#272`) without truncating it in the box.
         electrode = ttk.Combobox(
             outf, width=24,
             values=[c for c in sldea_profile.ELECTRODE_CHOICES if c])
         electrode.set('')
-        electrode.grid(row=3, column=1, sticky='w', padx=6)
+        electrode.grid(row=5, column=1, columnspan=2, sticky='w', padx=6)
         add_tooltip(electrode,
                     "Compliant electrode material for this device. Pick one "
                     "of the listed inks — or TYPE ANY MATERIAL straight into "
@@ -3038,15 +3256,10 @@ LOGGING:
         # Concentration (mL) -- the CNT ink volume (`#276`). This formalises
         # the campaign's folder-name convention (P3_2.5mL_Triazole) into the
         # data, where it can be grouped on.
-        #
-        # Row 5 deliberately: rows 3-4 of this frame are contested (`#262`
-        # moves the Trek checkbutton off the electrode's row onto row 4), and
-        # a fresh row cannot collide with that. Once #262 has landed this
-        # could be tucked closer to the Electrode row it follows.
-        ttk.Label(outf, text="Concentration (mL):").grid(row=4, column=0,
+        ttk.Label(outf, text="Concentration (mL):").grid(row=6, column=0,
                                                          sticky='e')
         conc = ttk.Entry(outf, width=8)
-        conc.grid(row=4, column=1, sticky='w', padx=6)
+        conc.grid(row=6, column=1, sticky='w', padx=6)
         add_tooltip(conc,
                     "How much CNT ink went on this device — the '2.5mL' in a "
                     "folder name like P3_2.5mL_Triazole, recorded in the run "
@@ -3059,7 +3272,7 @@ LOGGING:
         # Says WHY the box is greyed, right beside it -- a disabled field
         # with no explanation is a support question.
         self.sldea_conc_note = tk.Label(outf, text='', fg='#777', anchor='w')
-        self.sldea_conc_note.grid(row=4, column=2, columnspan=3, sticky='w')
+        self.sldea_conc_note.grid(row=6, column=2, columnspan=2, sticky='w')
         # Follow the electrode as it is SELECTED and as it is TYPED: the box
         # is free text, so a custom material never fires ComboboxSelected.
         electrode.bind('<<ComboboxSelected>>',
@@ -3071,11 +3284,11 @@ LOGGING:
         # PRESTRETCHED (owner decision 2026-10-06), so the number is t0
         # itself and no prestretch is asked for. Blank by default and
         # never greyed: every film has a thickness, whatever the electrode.
-        # Row 5, under Concentration, because it describes the device too.
-        ttk.Label(outf, text="Film thickness (µm):").grid(row=5, column=0,
+        # The row under Concentration, because it describes the device too.
+        ttk.Label(outf, text="Film thickness (µm):").grid(row=7, column=0,
                                                           sticky='e')
         thick = ttk.Entry(outf, width=8)
-        thick.grid(row=5, column=1, sticky='w', padx=6)
+        thick.grid(row=7, column=1, sticky='w', padx=6)
         add_tooltip(thick,
                     "Thickness of the dielectric film in micrometres, "
                     "measured with the film MOUNTED AND PRESTRETCHED on the "
@@ -3103,29 +3316,40 @@ LOGGING:
                     "then drives a negative control so the HV output, and "
                     "the V_Out and I_Out monitors, read positive. Ticked by "
                     "default: the lab's Trek inverts. Untick it for an "
-                    "amplifier wired non-inverting.").grid(row=6, column=0,
+                    "amplifier wired non-inverting.").grid(row=8, column=0,
                                                   columnspan=3, sticky='w',
                                                   pady=(4, 0))
-        # row=6, BELOW the electrode, concentration and film thickness:
-        # those define the DEVICE and read as one flow (operator note
-        # 2026-08-08: the checkbutton between them broke it); this is a
-        # DRIVE setting and comes after. History: it once overlapped the
-        # electrode row outright (`#231` moved the field in, `#262`
-        # un-stacked it), and sat on row 5 until the thickness took it
-        # (`#398`).
+        # BELOW the electrode, concentration and film thickness: those
+        # define the DEVICE and read as one flow (operator note 2026-08-08:
+        # the checkbutton between them broke it); this is a DRIVE setting
+        # and comes after. History: it once overlapped the electrode row
+        # outright (`#231` moved the field in, `#262` un-stacked it), sat
+        # on row 5 until the thickness took it (`#398`), and moved down
+        # two more when the three channels took a line of their own
+        # (`#403`) under the run folder line (`#402`).
 
         # Breakdown watchdog (LIVE runs): deliberately slow-to-trip monitor
         # of the Trek I_Out on the scope; sustained overcurrent -> snapshot
         # the breakdown + ramp to 0 + abort.
-        wdf = ttk.LabelFrame(f, text="⚡ Breakdown watchdog (LIVE runs)",
-                             padding=8)
-        wdf.pack(fill='x', padx=10, pady=(0, 8))
+        wdf = ttk.LabelFrame(left, text="⚡ Breakdown watchdog (LIVE runs)",
+                             padding=6)
+        wdf.pack(fill='x', padx=6, pady=(0, 4))
+        # Ticked by default (owner decision 2026-10-08, #406): the 100 uA /
+        # 3 s rule misses small breakdowns (#219), but it is the only
+        # thing that stops a LIVE run on a breakdown, and replayed on the
+        # single-layer runs on file it stops none that was not breaking
+        # down (healthy runs stayed within 15 uA of their baseline). A
+        # preset saved unticked still loads unticked, so "Energize HV?",
+        # run.log and setup.txt name the state either way
+        # (sldea_profile.watchdog_record).
         self.sldea_wd_on = tk.BooleanVar(value=True)
         add_tooltip(ttk.Checkbutton(wdf, text="Enabled",
                                     variable=self.sldea_wd_on),
                     "Watch the Trek current during a live run; a CONFIRMED "
                     "breakdown captures a frame, ramps to 0 kV and aborts. "
-                    "Ignored on dry runs.").pack(side=tk.LEFT)
+                    "Unticked, only ■ Abort or the end of the run stops a "
+                    "run that breaks down; Energize HV? says which. Ignored "
+                    "on dry runs.").pack(side=tk.LEFT)
         ttk.Label(wdf, text="Trip (µA):").pack(side=tk.LEFT, padx=(14, 2))
         wd_ua = ttk.Entry(wdf, width=7)
         wd_ua.insert(0, '100')
@@ -3183,9 +3407,9 @@ LOGGING:
         # docs/digital-multitool-manual.{html,pdf} carry the label too,
         # but they are GENERATED: the manual pipeline rewrites them at the
         # next version bump. Never hand-edit those.
-        telf = ttk.LabelFrame(f, text="📈 Scope kV/µA log (telemetry.csv)",
-                              padding=8)
-        telf.pack(fill='x', padx=10, pady=(0, 8))
+        telf = ttk.LabelFrame(left, text="📈 Scope kV/µA log (telemetry.csv)",
+                              padding=6)
+        telf.pack(fill='x', padx=6, pady=(0, 4))
         self.sldea_tel_on = tk.BooleanVar(value=True)
         add_tooltip(ttk.Checkbutton(telf, text="Enabled",
                                     variable=self.sldea_tel_on),
@@ -3218,9 +3442,9 @@ LOGGING:
         # gigabytes. The snapshots keep coming at their scheduled times --
         # taken off the same stream -- so data.csv and every tool reading
         # it are untouched; the video is an addition, never a replacement.
-        vidf = ttk.LabelFrame(f, text="🎥 Video beside the snapshots "
-                                      "(lossless)", padding=8)
-        vidf.pack(fill='x', padx=10, pady=(0, 8))
+        vidf = ttk.LabelFrame(left, text="🎥 Video beside the snapshots "
+                                         "(lossless)", padding=6)
+        vidf.pack(fill='x', padx=6, pady=(0, 4))
         self.sldea_vid_on = tk.BooleanVar(value=False)
         add_tooltip(ttk.Checkbutton(vidf, text="Record",
                                     variable=self.sldea_vid_on,
@@ -3264,64 +3488,52 @@ LOGGING:
         self.sldea_vid_info = tk.Label(vidf, text='', fg='#555')
         self.sldea_vid_info.pack(side=tk.LEFT, padx=12)
 
-        # Named run-configuration presets (`#265`) -- everything above this
-        # frame, saved under a name in the shared presets/ library so a
-        # campaign's staircase is recalled instead of retyped.
-        #
-        # It gets its OWN frame directly above the run row, deliberately:
-        #   * "Output & Measurement" rows 2-4 are being rearranged in
-        #     parallel (`#262`), and squeezing preset controls in among them
-        #     would collide for no benefit;
-        #   * sitting here, the DRY/LIVE checkbox is the next thing under
-        #     the Load button -- and a load always leaves the tab in DRY,
-        #     so the operator sees that state exactly where they clicked.
-        # What a preset does NOT carry (run name, DRY/LIVE) and why is in
-        # sldea_presets.py.
-        presf = ttk.LabelFrame(f, text="Run configuration presets", padding=8)
-        presf.pack(fill='x', padx=10, pady=(0, 8))
-        ttk.Label(presf, text="Preset:").pack(side=tk.LEFT)
-        self.sldea_preset_select = ttk.Combobox(presf, width=22,
-                                                state='readonly')
-        self.sldea_preset_select.pack(side=tk.LEFT, padx=(4, 6))
-        add_tooltip(self.sldea_preset_select,
-                    "Saved run configurations. They live in the same shared "
-                    "presets/ library as the signal-generator presets, so "
-                    "the other bench user sees yours.")
-        add_tooltip(ttk.Button(presf, text="Load",
-                               command=self.sldea_load_preset),
-                    "Fill this tab from the selected preset: the staircase, "
-                    "Output dir, scope/SG channels, DEA diameter, electrode, "
-                    "Trek inverts, and the watchdog and telemetry settings.\n"
-                    "Your RUN NAME is left alone, and the tab always comes "
-                    "back in DRY — a preset never re-arms the HV. Anything "
-                    "the preset could not supply is listed rather than "
-                    "quietly skipped.").pack(side=tk.LEFT)
-        add_tooltip(ttk.Button(presf, text="Delete",
-                               command=self.sldea_delete_preset),
-                    "Remove the selected preset from the shared library. "
-                    "Asks first.").pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Label(presf, text="Save current as:").pack(side=tk.LEFT,
-                                                       padx=(16, 2))
-        self.sldea_preset_name = ttk.Entry(presf, width=20)
-        self.sldea_preset_name.pack(side=tk.LEFT)
-        add_tooltip(self.sldea_preset_name,
-                    "Name for the settings currently on this tab. Reusing a "
-                    "name overwrites that preset, after asking.")
-        add_tooltip(ttk.Button(presf, text="Save",
-                               command=self.sldea_save_preset),
-                    "Store this tab's settings under that name. Fields are "
-                    "saved exactly as typed, so a half-finished number is "
-                    "never the reason a save fails.").pack(side=tk.LEFT,
-                                                           padx=(4, 0))
-        self.sldea_refresh_presets()
+        # The run row, the background job's line and the camera line stay
+        # one pack column: _sldea_job_show packs the job line before the
+        # camera line, and sldea_video_btn_sync re-packs Video review...
+        # as the run row's last slave.
+        runarea = ttk.Frame(f)
+        runarea.pack(fill='x')
+        runf = ttk.Frame(runarea)
+        runf.pack(fill='x', padx=10, pady=(4, 6))
+        self._sldea_build_run_row(runf, runarea)
 
-        runf = ttk.Frame(f)
-        runf.pack(fill='x', padx=10, pady=8)
+        logf = ttk.LabelFrame(f, text="Run log", padding=6)
+        logf.pack(fill='both', expand=True, padx=10, pady=8)
+        self.sldea_log = tk.Text(logf, height=8, state='disabled')
+        self.sldea_log.pack(fill='both', expand=True)
+
+        self._sldea_dry_toggle()
+        self._sldea_refresh()
+        self.notebook.bind('<<NotebookTabChanged>>',
+                           lambda _ev: self._sldea_cam_line_refresh(),
+                           add='+')
+        for w in (f, runarea):
+            w.bind('<Enter>', lambda _ev: self._sldea_cam_line_refresh(),
+                   add='+')
+        self._sldea_cam_line_refresh()
+        # The run folder line (#402) checks again when a tab is selected:
+        # another PC may have written a run there meanwhile. Not on <Enter>,
+        # which fires at every move between the tab's widgets and would
+        # stat the share each time.
+        self.notebook.bind('<<NotebookTabChanged>>',
+                           lambda _ev: self._sldea_folder_refresh(), add='+')
+        self._sldea_folder_refresh()
+
+    def _sldea_build_run_row(self, runf, column):
+        """The run row in `runf`, then the background job's line and the
+        camera line under it in `column`, the pack column that holds
+        `runf` (#403). Nothing here changed from the single-column tab
+        but the parents."""
         self.sldea_dryrun = tk.BooleanVar(value=True)
         self.sldea_dry_cb = tk.Checkbutton(
             runf, text="DRY RUN — HV OFF", variable=self.sldea_dryrun,
             command=self._sldea_dry_toggle, font=('TkDefaultFont', 10, 'bold'),
             indicatoron=True, padx=6)
+        # the same drawn box as every ttk checkbox (#407): on X11 the
+        # classic indicator is a square filled with selectcolor, which is
+        # this box's own background, so DRY and LIVE drew the same square
+        mark_classic_checkbutton(self.sldea_dry_cb)
         self.sldea_dry_cb.pack(side=tk.LEFT, padx=4)
         self.sldea_run_btn = tk.Button(runf, text="▶ Run", command=self.sldea_run,
                                        font=('TkDefaultFont', 10, 'bold'),
@@ -3415,9 +3627,9 @@ LOGGING:
         # program reports it (_sldea_job_watch). A line of its own, never
         # the status above: that one carries the run's alarms ("NOT
         # ZEROED"), which a progress line must not overwrite. Packed the
-        # first time a job reports, so a session without video looks as
-        # it did.
-        self.sldea_job_line = tk.Label(f, text="", anchor='w',
+        # first time a job reports (_sldea_job_show, before the camera
+        # line), so a session without video looks as it did.
+        self.sldea_job_line = tk.Label(column, text="", anchor='w',
                                        justify='left', fg=MUTED,
                                        wraplength=1100)
 
@@ -3429,24 +3641,10 @@ LOGGING:
         # this tab (the Webcam tab fills its boxes from the camera in a
         # background job at startup, possibly after this tab is showing);
         # it reads two entry boxes and the lock dict, never the camera.
-        self.sldea_cam_line = tk.Label(f, text="", anchor='w',
+        self.sldea_cam_line = tk.Label(column, text="", anchor='w',
                                        justify='left', fg='#555',
                                        wraplength=1100)
         self.sldea_cam_line.pack(fill='x', padx=14, pady=(0, 2))
-
-        logf = ttk.LabelFrame(f, text="Run log", padding=6)
-        logf.pack(fill='both', expand=True, padx=10, pady=8)
-        self.sldea_log = tk.Text(logf, height=8, state='disabled')
-        self.sldea_log.pack(fill='both', expand=True)
-
-        self._sldea_dry_toggle()
-        self._sldea_refresh()
-        self.notebook.bind('<<NotebookTabChanged>>',
-                           lambda _ev: self._sldea_cam_line_refresh(),
-                           add='+')
-        f.bind('<Enter>', lambda _ev: self._sldea_cam_line_refresh(),
-               add='+')
-        self._sldea_cam_line_refresh()
 
     def _sldea_build_profile(self):
         try:
@@ -3564,9 +3762,15 @@ LOGGING:
         if pts:
             c.create_line(*pts, fill=sldea_preview.LINE, width=2)
         marks = sldea_preview.snapshot_points(p, x0, y0, x1, y1)
+        landing = [(x, y) for x, y, s in marks if s['step'] > 0]
         r = sldea_preview.marker_radius(
-            [(x, y) for x, y, s in marks if s['step'] > 0],
+            landing,
             r_min=sldea_preview.R_MIN * k, r_max=sldea_preview.R_MAX * k)
+        # The pointer's reach is the radius the markers had before #401,
+        # plus 3 px, so the smaller markers are no harder to hover.
+        self._sldea_reach = sldea_preview.marker_radius(
+            landing, r_min=sldea_preview.HOVER_R_MIN * k,
+            r_max=sldea_preview.HOVER_R_MAX * k) + 3
         # time order: the baseline lands on top of the warm-up ring it
         # shares 0 kV with, and each landing's markers over the one before
         for x, y, s in marks:
@@ -3592,7 +3796,7 @@ LOGGING:
         display factor `k`. Anchored LEFT on purpose: the tab scrolls
         sideways when the window is narrower than its widest row, and a
         right-aligned legend went off-screen."""
-        r = 4.5 * k
+        r = sldea_preview.R_LEGEND * k
         x = left
         for tag in tags:
             self._sldea_draw_marker(c, tag, x + 1.4 * r, y, r, tags='legend')
@@ -3611,9 +3815,10 @@ LOGGING:
         p = self._sldea_profile
         if not p or not self._sldea_marks:
             return
+        reach = self._sldea_reach
         near = [(abs(x - ev.x) + abs(y - ev.y), s)
-                for x, y, r, s in self._sldea_marks
-                if abs(x - ev.x) <= r + 3 and abs(y - ev.y) <= r + 3]
+                for x, y, _r, s in self._sldea_marks
+                if abs(x - ev.x) <= reach and abs(y - ev.y) <= reach]
         if not near:
             return
         near.sort(key=lambda d: (d[0], -d[1]['t']))
@@ -3709,6 +3914,247 @@ LOGGING:
         if self._sldea_out_locked():
             return
         self._new_folder_into(self.sldea_outdir, "Output dir")
+
+    # The run folder line under Run name (#402). Its check is two stats in
+    # the run folder, on a thread, once the typing has paused, one at a
+    # time: a stat on a share that has gone away can block for minutes,
+    # and on the Tk thread that would freeze the window at every
+    # keystroke. A check with no answer after SLDEA_FOLDER_SLOW_S says so
+    # on the line and keeps waiting at a slower pace. Once the boxes name
+    # another folder, a check that slow is left to finish on its own and
+    # the folder named now is checked instead (#402 review), so a new
+    # check goes out at most once per SLDEA_FOLDER_SLOW_S however long a
+    # share hangs. While a run is on, the line names the folder that run
+    # writes to instead of judging the boxes.
+    SLDEA_FOLDER_PAUSE_MS = 300
+    SLDEA_FOLDER_POLL_MS = 100
+    SLDEA_FOLDER_SLOW_S = 2.0
+    SLDEA_FOLDER_RUN_MS = 500
+    # The job line's colors (#396): the repo's muted gray, and Paul Tol's
+    # muted wine for a warning (7.7:1 as text on the Windows background).
+    SLDEA_FOLDER_COLORS = {'ok': MUTED, 'warn': '#882255'}
+
+    def _sldea_folder_boxes(self):
+        """(Output dir, Run name) as the line reads them. The name comes
+        from its variable: Tcl runs the newest trace on a variable first,
+        so while this line's trace runs, the Entry still shows the text
+        from before the change."""
+        return (self.sldea_outdir.get(),
+                self.sldea_runname_var.get().strip())
+
+    def _sldea_folder_stuck(self, job):
+        """Has this check been out longer than SLDEA_FOLDER_SLOW_S?"""
+        return bool(job is not None and not job['done']
+                    and time.monotonic() - job['t0']
+                    > self.SLDEA_FOLDER_SLOW_S)
+
+    def _sldea_folder_slow(self, folder):
+        """True while the check of `folder` has been out longer than
+        SLDEA_FOLDER_SLOW_S. A check of another folder never makes the
+        line say "not answering" (#402 review): the line describes the
+        folder the boxes name now."""
+        job = self._sldea_folder_job
+        return (job is not None and job['folder'] == folder
+                and self._sldea_folder_stuck(job))
+
+    def _sldea_folder_writing(self):
+        """The folder the run in progress writes to: the worker's own, once
+        its run.log is live (exact for a blank name too), else the boxes
+        sldea_run read when Run was pressed -> (folder, exact)."""
+        runlog = getattr(self, '_sldea_runlog', None)
+        if runlog:
+            return os.path.dirname(runlog), True
+        where = getattr(self, '_sldea_folder_run', None)
+        if where:
+            return sldea_profile.run_folder(*where), bool(where[1])
+        return sldea_profile.run_folder(*self._sldea_folder_boxes()), False
+
+    def _sldea_folder_redraw(self):
+        """Draw the line for what the boxes name now, from the last check
+        of that folder when there is one, or, while a run is on, for the
+        folder that run writes to -> (Output dir, Run name)."""
+        outdir, name = self._sldea_folder_boxes()
+        if self._sldea_running:
+            folder, exact = self._sldea_folder_writing()
+            text, warn, full = sldea_profile.run_folder_writing_line(
+                folder, fits=self._sldea_folder_fits())
+            self.sldea_folder_line.config(
+                text=text,
+                fg=self.SLDEA_FOLDER_COLORS['warn' if warn else 'ok'])
+            self._sldea_folder_tip.text = full
+            if not exact and self._sldea_folder_run_id is None:
+                # a blank name's folder is stamped by the worker: look again
+                self._sldea_folder_run_id = self.root.after(
+                    self.SLDEA_FOLDER_RUN_MS, self._sldea_folder_run_tick)
+            return outdir, name
+        folder = sldea_profile.run_folder(outdir, name)
+        seen = self._sldea_folder_seen
+        self._sldea_folder_show(
+            outdir, name, seen[1] if seen and seen[0] == folder else None,
+            slow=self._sldea_folder_slow(folder))
+        return outdir, name
+
+    def _sldea_folder_run_tick(self):
+        self._sldea_folder_run_id = None
+        if self._sldea_running:
+            try:
+                self._sldea_folder_redraw()
+            except Exception:
+                pass
+
+    def _sldea_folder_wanted(self, outdir, name):
+        """Is there anything to check for this folder? A typed name it can
+        use, or a blank name on the share, whose mount is checked (#402
+        review), and never while a run is on. Text only, no file system
+        call."""
+        if self._sldea_running:
+            return False
+        if name:
+            return not sldea_profile.run_name_problem(name)
+        return output_folder.on_share(sldea_profile.run_folder(outdir, name),
+                                      sldea_share_mount())
+
+    def _sldea_folder_refresh(self, *_args):
+        """Redraw the run folder line from the two boxes now, then check
+        that folder once the typing pauses. A trace, a tab change, the
+        start of a run and its end call this; it never raises, it is a
+        label."""
+        try:
+            outdir, name = self._sldea_folder_redraw()
+            if self._sldea_folder_pause is not None:
+                self.root.after_cancel(self._sldea_folder_pause)
+                self._sldea_folder_pause = None
+            if self._sldea_folder_wanted(outdir, name):
+                self._sldea_folder_pause = self.root.after(
+                    self.SLDEA_FOLDER_PAUSE_MS, self._sldea_folder_check)
+        except Exception:
+            pass
+
+    def _sldea_folder_show(self, outdir, name, found, slow=False):
+        text, warn, full = sldea_profile.run_folder_line(
+            outdir, name, found, slow, fits=self._sldea_folder_fits(),
+            mount=sldea_share_mount())
+        self.sldea_folder_line.config(
+            text=text, fg=self.SLDEA_FOLDER_COLORS['warn' if warn else 'ok'])
+        self._sldea_folder_tip.text = full
+
+    def _sldea_folder_fits(self):
+        """fits(text): does one line of text fit the run folder line's
+        width, in its font? None before Tk has laid the line out, and
+        run_folder_line then counts characters until the <Configure> that
+        gives it a width redraws it."""
+        line = self.sldea_folder_line
+        width = line.winfo_width()
+        if width <= 1:
+            return None
+        room = width - 2 * sum(line.winfo_pixels(line.cget(opt)) for opt in
+                               ('borderwidth', 'highlightthickness', 'padx'))
+        measure = self._sldea_folder_font.measure
+        return lambda text: measure(text) <= room
+
+    def _sldea_folder_resized(self, event):
+        """<Configure> of the line: fit its text to its new width. The text
+        never changes its size (width=1, height=2), so this cannot loop."""
+        if event.width == self._sldea_folder_width:
+            return
+        self._sldea_folder_width = event.width
+        try:
+            self._sldea_folder_redraw()
+        except Exception:
+            pass
+
+    def _sldea_folder_abandon(self):
+        """Leave the check out now to finish on its own thread, into its own
+        dict, which nothing reads any more, and stop polling it."""
+        self._sldea_folder_job = None
+        if self._sldea_folder_poll_id is not None:
+            try:
+                self.root.after_cancel(self._sldea_folder_poll_id)
+            except Exception:
+                pass
+            self._sldea_folder_poll_id = None
+
+    def _sldea_folder_check(self):
+        """Send the check of the run folder the boxes name out on its
+        thread, or, while one is still out, ask for another when it is
+        back. A check stuck on a folder the boxes no longer name is
+        abandoned instead of waited for."""
+        self._sldea_folder_pause = None
+        try:
+            outdir, name = self._sldea_folder_boxes()
+            if not self._sldea_folder_wanted(outdir, name):
+                return
+            folder = sldea_profile.run_folder(outdir, name)
+            mount = sldea_share_mount()
+        except Exception:
+            return
+        job = self._sldea_folder_job
+        if job is not None:
+            if job['folder'] == folder or not self._sldea_folder_stuck(job):
+                job['again'] = True
+                return
+            self._sldea_folder_abandon()
+        job = {'folder': folder, 'outdir': outdir, 'name': name,
+               'mount': mount, 'found': None, 'done': False,
+               'again': False, 't0': time.monotonic()}
+        self._sldea_folder_job = job
+        threading.Thread(target=_sldea_folder_look, args=(job,),
+                         name='sldea-run-folder-line', daemon=True).start()
+        self._sldea_folder_next(self.SLDEA_FOLDER_POLL_MS)
+
+    def _sldea_folder_next(self, ms):
+        try:
+            self._sldea_folder_poll_id = self.root.after(
+                ms, self._sldea_folder_poll)
+        except Exception:
+            self._sldea_folder_poll_id = None
+
+    def _sldea_folder_poll(self):
+        """Read the check's answer on the Tk thread, and show it when the
+        boxes still name that folder."""
+        self._sldea_folder_poll_id = None
+        job = self._sldea_folder_job
+        if job is None:
+            return
+        try:
+            if not job['done']:
+                stuck = self._sldea_folder_stuck(job)
+                if stuck:
+                    outdir, name = self._sldea_folder_boxes()
+                    if sldea_profile.run_folder(outdir, name) != \
+                            job['folder']:
+                        # stuck on a folder the boxes no longer name: it
+                        # has no claim on the line (#402 review)
+                        self._sldea_folder_abandon()
+                        self._sldea_folder_redraw()
+                        self._sldea_folder_check()
+                        return
+                    self._sldea_folder_redraw()
+                self._sldea_folder_next(
+                    self.SLDEA_FOLDER_POLL_MS * (5 if stuck else 1))
+                return
+            self._sldea_folder_job = None
+            self._sldea_folder_seen = (job['folder'], job['found'])
+            outdir, name = self._sldea_folder_redraw()
+            now = sldea_profile.run_folder(outdir, name)
+            if job['again'] or now != job['folder']:
+                self._sldea_folder_check()
+        except Exception:
+            pass
+
+    def _sldea_folder_stop(self, _event=None):
+        """<Destroy> of the line: cancel its timers, so none fires into a
+        window that is gone. A check still out on its thread finishes on
+        its own; it holds nothing of the app's."""
+        for attr in ('_sldea_folder_pause', '_sldea_folder_poll_id',
+                     '_sldea_folder_run_id'):
+            job = getattr(self, attr, None)
+            setattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
 
     # The SLDEA tab's built-in Output dir: the lab share as the Linux bench
     # mounts it (SCPI_SLDEA_DIR overrides the box per PC). New folder... on
@@ -4029,8 +4475,9 @@ LOGGING:
         if 'camera-ctrl' in self._bg_busy:
             reasons.append((
                 "a camera adjustment is running",
-                "A camera adjustment (Apply & Lock, Auto-expose, Auto-WB "
-                "once or Stabilize) is still running on the Webcam tab. It "
+                "A camera adjustment (Auto-set camera, Apply & Lock, "
+                "Auto-expose, Auto-WB once or Stabilize) is still running on "
+                "the Webcam tab. It "
                 "rewrites the camera settings this run is about to lock. "
                 "It finishes by itself, usually within seconds."))
         if not dry and 'sg-io' in self._bg_busy:
@@ -4106,14 +4553,78 @@ LOGGING:
             go, allowed_sweep = self._sldea_start_gate(sgch, dry)
             if not go:
                 return
+            # The run folder (#402), right after the gate and before any HV
+            # question, so no operator answers the HV questions only to be
+            # refused over a name. A name used before made the worker write
+            # over that run's setup.txt and data.csv; that folder, a name
+            # that cannot be a folder name, a folder that could not be
+            # checked or does not answer within RUN_FOLDER_CHECK_S, and a
+            # folder on the share while the share is not mounted (#402
+            # review) are refused, with no "start anyway". Both boxes are
+            # read once, here, and handed to the worker, so the folder
+            # checked is the folder written.
+            outdir = self.sldea_outdir.get()
+            runname = self.sldea_runname.get().strip()
+            refusal = sldea_profile.run_folder_refusal(
+                outdir, runname, mount=sldea_share_mount())
+            if refusal:
+                messagebox.showerror("SLDEA run folder", refusal)
+                self._sldea_log("run refused: " + " ".join(refusal.split()))
+                return
             # Video (2026-09-23) is settled next, still before any HV
-            # question (the start gate above asks nothing):
+            # question (the start gate above asks only whether to run
+            # beside a stepped sweep, which writes to no instrument):
             # an operator who asked for a recording must not learn it is
             # impossible after agreeing to energize the Trek.
             vid_on, vid_fps = self._sldea_video_preflight(p)
             if vid_on is None:
                 return
             vid_detect = bool(vid_on and self.sldea_vid_detect.get())
+            # Breakdown watchdog (live only), read ONCE, here, so "Energize
+            # HV?" below names exactly the watchdog the worker is handed
+            # (#406). Only claim it is armed when it actually will be: the
+            # worker needs a scope to read the current (audit 2026-07-25).
+            wd_ticked = bool(self.sldea_wd_on.get())
+            wd_on = bool(wd_ticked and not dry and self.scope is not None)
+            # Trip and Confirm. Ticked on a LIVE run, they are the rule
+            # "Energize HV?" and the records quote as ON, so anything but a
+            # finite number above zero is refused here, before any HV
+            # question (HV review 2026-10-08, #406; the start gate and the
+            # video pre-flight above may already have asked theirs, which
+            # write to no instrument). Junk used to fall back
+            # to 100 uA / 3 s unsaid; a nan or inf trip (or confirm) was
+            # armed and could never fire; a zero or negative trip fires on
+            # every read. A DRY or unticked run arms nothing from them and
+            # keeps the old fallback.
+            if wd_ticked and not dry:
+                for key, box, default in (('wd_ua', 'Trip (µA)', '100'),
+                                          ('wd_s', 'Confirm (s)', '3')):
+                    try:
+                        text = str(self.sldea_vars[key].get()).strip()
+                    except KeyError:
+                        continue          # no such box: the default below
+                    try:
+                        sldea_profile.parse_watchdog_value(text)
+                    except ValueError:
+                        self._sldea_log(f"run refused — breakdown watchdog "
+                                        f"{box} is '{text}', not a "
+                                        f"positive number")
+                        messagebox.showerror(
+                            "SLDEA",
+                            f"Breakdown watchdog {box} must be a positive "
+                            f"number — '{text}' is not one.\n\nThe watchdog "
+                            f"is ticked for this LIVE run, and Energize HV? "
+                            f"and the run's records would quote this box as "
+                            f"its rule. Fix the box (the default is "
+                            f"{default}), then press ▶ Run again.")
+                        return
+            try:
+                wd_ua = float(self.sldea_vars['wd_ua'].get())
+                wd_s = float(self.sldea_vars['wd_s'].get())
+            except (KeyError, ValueError):
+                wd_ua, wd_s = 100.0, 3.0
+            wd_setup, wd_log, wd_dialog = sldea_profile.watchdog_record(
+                wd_ticked, wd_on, dry, wd_ua, wd_s)
             if not dry:
                 if not INSTRUMENTS_SUPPORTED:
                     messagebox.showinfo("Linux only", NOT_LINUX_NOTE)
@@ -4154,7 +4665,8 @@ LOGGING:
                         "Energize HV?",
                         f"LIVE run — this drives the Trek up to "
                         f"{max(p.levels):g} kV via SG CH{sgch}"
-                        f".\n\n{p.summary()}\n\nProceed?", default='no'):
+                        f".\n\n{p.summary()}\n\n{wd_dialog}\n\nProceed?",
+                        default='no'):
                     return
             vch = int(self.sldea_vars['vch'].get())
             ich = int(self.sldea_vars['ich'].get())
@@ -4272,19 +4784,11 @@ LOGGING:
                 return
             autoproc = self.sldea_autoproc.get()
             trek_sign = -1.0 if self.sldea_trek_inv.get() else 1.0
-            # Breakdown watchdog (live only). Only claim it is armed when it
-            # actually will be: the worker needs a scope to read the current
-            # (audit 2026-07-25 — the old banner printed either way).
-            wd_on = (self.sldea_wd_on.get() and not dry
-                     and self.scope is not None)
-            if self.sldea_wd_on.get() and not dry and self.scope is None:
+            # Breakdown watchdog: wd_on, wd_ua and wd_s were read above,
+            # before "Energize HV?" (#406).
+            if wd_ticked and not dry and self.scope is None:
                 self._sldea_log("⚠ watchdog requested but NO SCOPE — running "
                                 "without breakdown protection")
-            try:
-                wd_ua = float(self.sldea_vars['wd_ua'].get())
-                wd_s = float(self.sldea_vars['wd_s'].get())
-            except (KeyError, ValueError):
-                wd_ua, wd_s = 100.0, 3.0
             # Telemetry needs the scope, not HV: a dry run logs its monitor
             # readings too, which is how the rig gets checked before the
             # Trek is energized. clamp_telemetry_hz absorbs an empty or
@@ -4298,6 +4802,11 @@ LOGGING:
             if self.sldea_tel_on.get() and self.scope is None:
                 self._sldea_log("telemetry requested but NO SCOPE — no "
                                 "monitor log for this run")
+            # The #219 N-sigma rule runs in shadow on a LIVE run whose
+            # monitor reads run; its setup.txt line, decided here from the
+            # same wd_on and tel_on the worker is handed.
+            shadow_setup = sldea_profile.shadow_record(
+                not dry, bool(wd_on or tel_on))
             # Free the camera: the Webcam preview holds /dev/video0 open and
             # a one-shot grab can't run while it streams (empty frames
             # otherwise).
@@ -4322,6 +4831,9 @@ LOGGING:
             # skipped pre-flight leaves both at their defaults, which is
             # the behaviour before those decisions.
             self._sldea_preflight_seen = {'frame': False, 'override': ''}
+            # ...and so is the camera it found, for setup.txt (#400): a
+            # skipped pre-flight leaves it unknown, never the last run's
+            self._sldea_preflight_camera = None
             if not getattr(self, '_sldea_skip_preflight', False):
                 if not self._sldea_preflight(cam_exp, cam_gain):
                     self._sldea_log("run cancelled at camera pre-flight")
@@ -4329,6 +4841,20 @@ LOGGING:
             seen = self._sldea_preflight_seen
             cam_expected = bool(seen.get('frame'))
             picture_override = str(seen.get('override') or '')
+            # setup.txt's camera block (#400), built here on the Tk thread
+            # from what the app already holds: the lock the run will stamp,
+            # what the pre-flight resolved, and which values are fallbacks.
+            # No camera I/O, and it never raises; None leaves the worker
+            # its plain line.
+            try:
+                cam_record = sldea_profile.camera_record(
+                    cam_exp, cam_gain,
+                    sldea_run_lock(dict(webcam.LOCKED_CONTROLS), cam_exp,
+                                   cam_gain),
+                    camera=getattr(self, '_sldea_preflight_camera', None),
+                    defaults=self._sldea_cam_defaults())
+            except Exception:
+                cam_record = None
             # ...and again at the commit point, where it asks nothing: every
             # question above waits on the operator for as long as they take,
             # and nothing between this check and _sldea_live_ch claiming the
@@ -4336,6 +4862,36 @@ LOGGING:
             go, _ = self._sldea_start_gate(sgch, dry, allowed_sweep,
                                            final=True)
             if not go:
+                return
+            # The watchdog decision once more, here, with the expression
+            # it was first read with (HV review 2026-10-08, #406). "Energize
+            # HV?", the start line and setup.txt are worded from the
+            # reading taken before the questions, and a scope Reconnect
+            # whose done callback ran inside one of them changes it: the
+            # scope back means a ticked run would start unarmed beside a
+            # connected scope, the scope gone means records that say ON
+            # for a run that cannot arm. Nothing from here to the worker
+            # yields to Tk, so a run whose state still matches starts with
+            # exactly what it was asked about; one whose state changed is
+            # refused before any HV, like the start gate above.
+            wd_ticked_now = bool(self.sldea_wd_on.get())
+            wd_now = bool(wd_ticked_now and not dry
+                          and self.scope is not None)
+            if wd_now != wd_on:
+                was = sldea_profile.watchdog_state(wd_ticked, wd_on, dry)
+                now = sldea_profile.watchdog_state(wd_ticked_now, wd_now,
+                                                   dry)
+                change = f"{was} → {now}"
+                self._sldea_log(f"run refused — the breakdown watchdog's "
+                                f"state changed since Energize HV? "
+                                f"({change}); nothing was sent to the SG")
+                messagebox.showerror(
+                    "SLDEA — run blocked",
+                    f"The breakdown watchdog's state changed since "
+                    f"Energize HV? ({change}). A scope Reconnect that "
+                    f"finished while a question was open does this.\n\n"
+                    f"Nothing was sent to the signal generator. Press ▶ Run "
+                    f"again to be asked with the state as it is now.")
                 return
             self._sldea_stop = False
             self._sldea_bd_tripped = False
@@ -4354,8 +4910,7 @@ LOGGING:
             self._sldea_elapsed = 0.0
             self._sldea_log(
                 f"{'DRY-RUN' if dry else 'LIVE HV'} start — {p.summary()}"
-                + (f"  [watchdog: dev ≥{wd_ua:g} µA for {wd_s:g}s, "
-                   f"baseline learned at 0 kV]" if wd_on else "")
+                + f"  [{wd_log}]"
                 + (f"  [telemetry: {tel_hz:g} Hz → "
                    f"{sldea_profile.TELEMETRY_FILENAME}]" if tel_on else "")
                 + (f"  [video: {vid_fps:g} fps → "
@@ -4372,8 +4927,7 @@ LOGGING:
             started = True
             threading.Thread(
                 target=self._sldea_worker,
-                args=(p, self.sldea_outdir.get(),
-                      self.sldea_runname.get().strip(),
+                args=(p, outdir, runname,
                       sgch, vch, ich, dry, cam_exp, cam_gain, diam_mm,
                       autoproc, wd_on, wd_ua, wd_s, trek_sign, scope_setup,
                       tel_on, tel_hz, electrode, concentration_ml),
@@ -4381,13 +4935,24 @@ LOGGING:
                             picture_override=picture_override,
                             vid_on=vid_on, vid_fps=vid_fps or 1.0,
                             vid_detect=vid_detect,
-                            film_thickness_um=film_thickness_um),
+                            film_thickness_um=film_thickness_um,
+                            cam_record=cam_record,
+                            watchdog_setup=wd_setup,
+                            watchdog_shadow=shadow_setup),
                 daemon=True).start()
             self.root.after(100, self._sldea_animate_cursor)  # playhead
             # ...and opens with the run, once the worker is on its way:
             # beside this window when there is room, otherwise behind it,
             # and the keyboard focus comes back here either way
             sldea_liveview.notify(self, 'open_with_run')
+            # The run folder line names the folder this run writes to until
+            # it ends, instead of judging the boxes, which stay editable
+            # (#402 review). A label: no file system call, it never raises,
+            # and a test's stand-in app has no line.
+            self._sldea_folder_run = (outdir, runname)
+            refresh = getattr(self, '_sldea_folder_refresh', None)
+            if refresh is not None:
+                refresh()
             # Video review... steps out of the run row until the run ends,
             # so the status line and Live view... keep their room (#395).
             # Last, once the run is under way; it never raises.
@@ -4632,8 +5197,10 @@ LOGGING:
         # stamped by neither the pre-flight nor the run, so it has no lock
         # to disagree with and `lock` stays empty.
         lock = {}
+        seen_spec = None
         try:
             spec = webcam.resolve_camera(0)
+            seen_spec = spec
             if spec.get('device'):
                 dev = spec['device']
                 lock = sldea_run_lock(lock_before, cam_exp, cam_gain)
@@ -4648,6 +5215,18 @@ LOGGING:
             frame = None
         finally:
             webcam.set_locked(lock_before)
+        # What the camera is, for the run's setup.txt (#400): the spec this
+        # pre-flight resolved anyway, and the size of the picture it took.
+        # No camera I/O of its own, and nothing here can change the verdict.
+        self._sldea_preflight_camera = None
+        if seen_spec is not None:
+            try:
+                cam = dict(seen_spec)
+                if frame is not None:
+                    cam['frame'] = (int(frame.shape[1]), int(frame.shape[0]))
+                self._sldea_preflight_camera = cam
+            except Exception:
+                pass
         # #361's sentence, for a camera the lock applies to: one with a
         # device path (`lock` is set only then). Neither the pre-flight
         # nor the run stamps any other camera, so it has no lock to
@@ -5026,6 +5605,13 @@ LOGGING:
         # Video review... now opens THIS run's video, when it recorded one
         # (#395). Never raises, so the live view below is still told.
         sldea_video_after_run(self, runlog)
+        # The run folder line now warns that this run's folder holds a run
+        # (#402), before the next Run press is refused for it. It only
+        # schedules a check on a thread and never raises; a test's
+        # stand-in app has no line.
+        refresh = getattr(self, '_sldea_folder_refresh', None)
+        if refresh is not None:
+            refresh()
         # Last, once the tab is released: the live view keeps its last
         # frame, labelled RUN ENDED (#376). notify never raises.
         sldea_liveview.notify(self, 'end_run')
@@ -5115,7 +5701,9 @@ LOGGING:
                       tel_hz=sldea_profile.TELEMETRY_MAX_HZ, electrode='',
                       concentration_ml=None, cam_expected=False,
                       picture_override='', vid_on=False, vid_fps=1.0,
-                      vid_detect=False, film_thickness_um=None):
+                      vid_detect=False, film_thickness_um=None,
+                      cam_record=None,
+                      watchdog_setup=None, watchdog_shadow=None):
         """Host-sequenced staircase runner (daemon thread; no Tk calls except
         via _sldea_log/_sldea_set_status/after). Drives the SG DC offset along
         p.kv_at(t), fires webcam+scope snapshots on schedule, writes the run
@@ -5131,7 +5719,23 @@ LOGGING:
 
         `film_thickness_um` is the film thickness box as sldea_run checked
         it (`#398`): the number, '' when the operator declined, None with
-        no box. It only reaches setup.txt (sldea_profile.setup_text)."""
+        no box. It only reaches setup.txt (sldea_profile.setup_text).
+
+        `cam_record` is setup.txt's camera block as sldea_run built it on
+        the Tk thread (sldea_profile.camera_record, #400): the lock this run
+        stamps, the camera the pre-flight found, and any fallback value.
+        None (a caller that predates it) writes the plain summary line.
+
+        `watchdog_setup` is sldea_run's setup.txt line for the watchdog it
+        armed or not (sldea_profile.watchdog_record, #406); None writes no
+        line. It only reaches setup.txt: arming still reads wd_on.
+
+        `watchdog_shadow` is sldea_run's setup.txt line for the #219
+        N-sigma rule (sldea_profile.shadow_record). With it, a LIVE run
+        whose monitor reads run feeds the rule those same reads in SHADOW:
+        it acts on nothing, and its outcome and every away read it saw are
+        written after the SG is zeroed. None (a caller that predates it)
+        runs no shadow."""
         import os
         import csv as _csv
         started = datetime.now()
@@ -5142,7 +5746,13 @@ LOGGING:
         vid_stop = None               # words, when its codec check stopped it
         completed = False
         cam_lock_saved = None         # Webcam-tab lock, restored at the end
-        rundir = os.path.join(outdir, runname or p.run_dirname(started))
+        shadow = None                 # #219 N-sigma rule, shadow (below)
+        shadow_rule = None            # ...the same rule, kept after an error
+        shadow_end = None             # its outcome when it could not run
+        shadow_base = (None, None)    # 0 kV baseline (median, sigma) for it
+        shadow_refused = None         # ...or the baseline the bound refused
+        # the folder the SLDEA tab's line showed and sldea_run checked (#402)
+        rundir = sldea_profile.run_folder(outdir, runname, started)
         framedir = os.path.join(rundir, 'frames')
         fh = None
         # Capture the SG handle ONCE: a mid-run Reconnect nulls self.sg, and
@@ -5154,15 +5764,24 @@ LOGGING:
             os.makedirs(framedir, exist_ok=True)
             # Write run metadata FIRST -- before any (possibly slow) camera
             # setup -- so even an interrupted run leaves setup.txt + the header.
-            with open(os.path.join(rundir, 'setup.txt'), 'w') as sf:
+            # A typed run name opens it, and data.csv below, with mode 'x'
+            # (#402 review): sldea_run checked the folder held no run, but
+            # a run that started there since (the dialogs take minutes)
+            # makes this one fail HERE, before the camera and the SG, the
+            # way a makedirs failure does, instead of writing over it.
+            with sldea_profile.open_run_file(rundir, 'setup.txt',
+                                             runname) as sf:
                 sf.write(p.setup_text(
                     runname or p.run_dirname(started),
                     started.isoformat(timespec='seconds'),
                     sgch, vch, ich, dry,
-                    f"exposure {cam_exp}, gain {cam_gain}, WB off (manual)",
+                    cam_record or sldea_profile.camera_record(cam_exp,
+                                                              cam_gain),
                     dea_diam_mm=diam_mm, electrode=electrode,
                     concentration_ml=concentration_ml,
-                    film_thickness_um=film_thickness_um))
+                    film_thickness_um=film_thickness_um,
+                    watchdog=watchdog_setup,
+                    watchdog_shadow=watchdog_shadow))
                 if trek_sign < 0:
                     sf.write("Trek control polarity: INVERTED (control = "
                              "-kV/gain; monitor readings logged as read)\n")
@@ -5216,7 +5835,8 @@ LOGGING:
                     pass
                 self._sldea_runlog = runlog
                 self._sldea_prelog = None
-            fh = open(os.path.join(rundir, 'data.csv'), 'w', newline='')
+            fh = sldea_profile.open_run_file(rundir, 'data.csv', runname,
+                                             newline='')
             writer = _csv.DictWriter(fh, fieldnames=p.CSV_COLUMNS)
             writer.writeheader()
             fh.flush()
@@ -5417,6 +6037,26 @@ LOGGING:
 
             watchdog = (sldea_profile.BreakdownWatchdog(wd_ua, wd_s)
                         if (wd_on and not dry and self.scope) else None)
+            # Asked to arm, and could not: the scope went (a LIVE Reconnect
+            # confirmed in the run's first seconds, #339) after "Energize
+            # HV?", run.log's start line and setup.txt all said ON. The run
+            # goes on unwatched (owner decision 2026-10-08, HV review of
+            # #406), and the records say so, the way the telemetry branch
+            # above does for its own file. ASCII in setup.txt, which is
+            # written in the locale encoding.
+            if wd_on and not dry and watchdog is None:
+                self._sldea_log(
+                    "⚠⚠ BREAKDOWN WATCHDOG NOT ARMED — the scope was gone "
+                    "when the run reached the arming line (a Reconnect?). "
+                    "Nothing stops this run on a breakdown; only ■ Abort or "
+                    "the end of the run does. Energize HV? and the start "
+                    "line said ON.")
+                try:
+                    with open(os.path.join(rundir, 'setup.txt'), 'a') as sf:
+                        sf.write("Breakdown watchdog (start): NOT armed (no "
+                                 "scope)\n")
+                except OSError:
+                    pass
             if watchdog is not None and not self._sldea_stop:
                 # Learn the I_Out rest level at 0 kV (SG is at 0 V here) so
                 # the trip is |I − baseline|, not |I|: the whole 07-29
@@ -5443,18 +6083,27 @@ LOGGING:
                     n = len(base)
                     med = (base[n // 2] if n % 2 else
                            0.5 * (base[n // 2 - 1] + base[n // 2]))
+                    # The reads' spread too, for the #219 shadow: its
+                    # sigma before the run has landing reads of its own.
+                    # (Not `dev`: that is the camera device above, which
+                    # the recorder's restamp lambda reads when it runs.)
+                    spread = sorted(abs(v - med) for v in base)
+                    mad = (spread[n // 2] if n % 2 else
+                           0.5 * (spread[n // 2 - 1] + spread[n // 2]))
                     # Credibility bound (sldea_profile.credible_baseline_ua):
                     # a large 'rest level' at 0 kV is a standing fault
                     # current, and anchoring the deviation trip to it would
                     # normalize the fault. The absolute rule then trips on
                     # it — the correct outcome.
                     if sldea_profile.credible_baseline_ua(med, wd_ua):
+                        shadow_base = (med, 1.4826 * mad)
                         watchdog.baseline_ua = med
                         self._sldea_log(
                             f"watchdog baseline {med:.1f} µA "
                             f"(median of {n} reads at 0 kV); trip "
                             f"|I−baseline| ≥ {wd_ua:g} µA for {wd_s:g}s")
                     else:
+                        shadow_refused = med
                         self._sldea_log(
                             f"⚠ watchdog baseline {med:.1f} µA is not a "
                             f"credible 0 kV rest level — keeping absolute "
@@ -5464,6 +6113,25 @@ LOGGING:
                         f"watchdog baseline unavailable ({len(base)}/8 "
                         f"reads ok) — absolute trip |I| ≥ {wd_ua:g} µA "
                         f"for {wd_s:g}s")
+            # #219: the N-sigma rule in SHADOW on a LIVE run whose monitor
+            # reads run (the watchdog armed, or telemetry on): the same
+            # wd_on and tel_on sldea_run worded its setup.txt line from,
+            # so a run whose line says OFF gets no shadow and no end line.
+            # It is fed only what the monitor tick below already reads and
+            # acts on nothing. Not armed on a refused 0 kV baseline: a
+            # deviation rule anchored to a standing fault current would
+            # take the fault as normal (the reason BreakdownWatchdog
+            # refuses it).
+            if watchdog_shadow is not None and not dry and (wd_on or tel_on):
+                if watchdog is None and tel is None:
+                    shadow_end = "not run: no current reads this run"
+                elif shadow_refused is not None:
+                    shadow_end = (f"not armed: the 0 kV baseline "
+                                  f"{shadow_refused:.1f} uA was refused "
+                                  f"(a standing fault current)")
+                else:
+                    shadow = shadow_rule = sldea_profile.NSigmaWatchdog(
+                        base_loc=shadow_base[0], base_sigma=shadow_base[1])
             self._sldea_voff_logged = False   # V_Out clip: log once per run
             self._sldea_ioff_logged = False   # I_Out clip: log once per run
             snaps = sorted(p.snapshots, key=lambda s: s['t'])
@@ -5626,6 +6294,44 @@ LOGGING:
                                           else (None, None)))
                         self._sldea_stop = True
                         break
+                    # The #219 shadow, on the same read, AFTER the watchdog
+                    # decided: it cannot delay a trip, and it acts on
+                    # nothing. A would-trip is one telemetry event row now
+                    # (no current on it, so no reader counts the read twice)
+                    # and one run.log line after the SG is zeroed. Every
+                    # away read, a lone one included, is only kept in the
+                    # rule's memory here (capped) and written after the SG
+                    # is zeroed: no file or Tk call on this loop for it. Any
+                    # error stops only the shadow, never this loop.
+                    if shadow is not None and not shadow.tripped:
+                        try:
+                            if (shadow.update(el, p.kv_at(el), ua,
+                                              offscreen=ioff)
+                                    and tel is not None):
+                                # Written, not flushed (HV review
+                                # 2026-10-08): this row is the one file
+                                # write the shadow adds to this loop, and
+                                # its own flush on a stalled share delayed
+                                # the next tick's live trip by the stall.
+                                # hold_flush keeps the row in the file's
+                                # buffer; the next flush (the periodic row
+                                # below, or tel.close() after the SG is
+                                # zeroed) writes it out.
+                                held = tel.hold_flush
+                                tel.hold_flush = True
+                                try:
+                                    tel.event(
+                                        el, datetime.now().isoformat(
+                                            timespec='milliseconds'),
+                                        p.kv_at(el), "SHADOW N-sigma "
+                                        + shadow.outcome_text())
+                                finally:
+                                    tel.hold_flush = held
+                        except Exception as e:
+                            shadow_end = (f"stopped by an error at "
+                                          f"{el:.1f} s: "
+                                          f"{type(e).__name__}: {e}")
+                            shadow = None
                     # Periodic telemetry row, off the current already read.
                     # V_Out costs a SECOND locked round-trip, so it is
                     # sub-sampled (>= 1 s) — nominal_kV carries the exact
@@ -5871,6 +6577,35 @@ LOGGING:
                     except Exception:
                         pass
                     tel.close()
+                # The #219 shadow's away reads, after the SG is zeroed: a
+                # count line and one line per listed read, as ONE run.log
+                # entry, so one file write and one Tk hand-off however many
+                # there are (the rule caps the list). None at all on a run
+                # that never left the bar. A record, so it never leaves
+                # this block.
+                if shadow_rule is not None:
+                    try:
+                        away = shadow_rule.away_lines()
+                        if away:
+                            self._sldea_log(
+                                "SHADOW away reads (N-sigma, acts on "
+                                "nothing): " + "\n  ".join(away))
+                    except Exception:
+                        pass
+                # The #219 shadow's outcome, after the SG is zeroed: one
+                # run.log line and one setup.txt line, whatever it saw. A
+                # record like the telemetry, so it never leaves this block.
+                if shadow is not None or shadow_end is not None:
+                    try:
+                        text = (shadow.outcome_text() if shadow is not None
+                                else shadow_end)
+                        self._sldea_log(f"SHADOW N-sigma (acts on "
+                                        f"nothing): {text}")
+                        with open(os.path.join(rundir, 'setup.txt'),
+                                  'a') as sf:
+                            sf.write(f"Watchdog shadow (end): {text}\n")
+                    except Exception:
+                        pass
                 # Video after that, the same kind of record: stop() gives up
                 # after its timeout, and moving the file into the run folder
                 # (gigabytes, usually to the share) plus the optional
@@ -8126,39 +8861,82 @@ LOGGING:
                                command=self.cam_snapshot),
                     "Save the current preview frame as a timestamped PNG in "
                     "the folder below.").pack(side=tk.LEFT)
-        self.cam_focus_var = tk.BooleanVar(value=False)
+        self.cam_focus_var = tk.BooleanVar(value=CAM_FOCUS_DEFAULT)
         add_tooltip(ttk.Checkbutton(top, text="Show focus score",
                                     variable=self.cam_focus_var),
-                    "Overlay a live sharpness number + the green area-of-"
-                    "interest circle. The score is weighted to that central "
+                    "Overlay a live sharpness number + the area-of-interest "
+                    "circle. The score is weighted to that central "
                     "circle and is noise-robust: HIGHER = sharper. Turn the "
                     "lens to maximise it.").pack(side=tk.LEFT, padx=8)
 
-        # --- camera controls: EVERY knob, hard-locked on Apply -------------
+        # --- camera settings: what a run uses, and Auto-set (#400) ---------
         # The DFK kept "auto adjusting" because nothing re-asserted the
         # user's values when a stream (re)opened; and stale auto-WB gains
         # (red_balance 204 vs default 64) gave the heavy colour cast. Apply
         # & Lock stores every control in webcam.LOCKED_CONTROLS, which every
         # capture path stamps onto the device before each grab/stream.
+        # The main view keeps exposure and gain (a run takes them from these
+        # boxes), Apply & Lock beside them, and Auto-set camera, which
+        # finds and locks everything in one press; every other control
+        # and the single steps sit under Advanced, collapsed until
+        # opened (#400).
         sens = ttk.LabelFrame(
-            tab, text="Camera controls — Apply locks EVERY knob on all "
-                      "captures", padding=8)
+            tab, text="Camera settings (locked on every capture)",
+            padding=8)
         sens.pack(fill='x', padx=8)
         self.camctl_rows = {}
-        self.camctl_grid = ttk.Frame(sens)
+        main = ttk.Frame(sens)
+        main.pack(fill='x')
+        self.camctl_main = ttk.Frame(main)
+        self.camctl_main.pack(side=tk.LEFT)
+        # Apply & Lock beside the boxes it locks (owner decision
+        # 2026-10-08): a value typed in them and not locked would bring
+        # back the boxes-versus-lock split that cost 13_backlight. The one
+        # Apply & Lock on the tab; Advanced does not repeat it.
+        self.cam_apply_btn = tk.Button(main, text="🔒 Apply & Lock",
+                                       command=self.cam_apply_controls,
+                                       font=('TkDefaultFont', 9, 'bold'))
+        self.cam_apply_btn.pack(side=tk.LEFT, padx=(4, 0))
+        add_tooltip(self.cam_apply_btn,
+                    "Write every value to the camera (these two and every "
+                    "one under Advanced), LOCK them (re-stamped before every "
+                    "preview/one-shot/run capture), and save them for the "
+                    "next start. Needed after typing a value by hand.")
+        self.cam_autoset_btn = tk.Button(
+            main, text=CAM_AUTOSET_TEXT, command=self.cam_auto_set,
+            font=('TkDefaultFont', 9, 'bold'))
+        self.cam_autoset_btn.pack(side=tk.LEFT, padx=(4, 0))
+        add_tooltip(self.cam_autoset_btn,
+                    "One press for a stable, locked picture: stops the "
+                    "preview, pins gain at 0 (where the camera's own "
+                    "auto-gain is clamped), finds the exposure for a "
+                    "mid-gray picture, balances white on the scene in "
+                    "view (gray world), then writes and locks everything "
+                    "for every capture, saves it for the next start, and "
+                    "starts the preview. Takes several seconds. A step "
+                    "that fails leaves the previous lock as it was.")
+        self.cam_sensor_status = ttk.Label(sens, text="", foreground=MUTED)
+        self.cam_sensor_status.pack(fill='x', pady=(4, 0))
+        self.cam_adv_btn = ttk.Button(sens, text=CAM_ADVANCED_SHOW,
+                                      command=self._cam_toggle_advanced)
+        self.cam_adv_btn.pack(anchor='w', pady=(4, 0))
+        add_tooltip(self.cam_adv_btn,
+                    "Every control the camera reports, and the single "
+                    "steps Auto-set camera runs in order.")
+        self.cam_adv_frame = ttk.Frame(sens)   # packed by the toggle
+        self.cam_adv_shown = False
+        ttk.Label(self.cam_adv_frame, foreground=MUTED, wraplength=900,
+                  justify=tk.LEFT,
+                  text="A value typed here changes nothing until 🔒 Apply "
+                       "& Lock, above.").pack(anchor='w', pady=(4, 2))
+        self.camctl_grid = ttk.Frame(self.cam_adv_frame)
         self.camctl_grid.pack(fill='x')
-        btns = ttk.Frame(sens)
+        btns = ttk.Frame(self.cam_adv_frame)
         btns.pack(fill='x', pady=(6, 0))
-        add_tooltip(tk.Button(btns, text="🔒 Apply & Lock",
-                              command=self.cam_apply_controls,
-                              font=('TkDefaultFont', 9, 'bold')),
-                    "Write every value to the camera, LOCK them (re-stamped "
-                    "before every preview/one-shot/run capture), and save "
-                    "them for the next start.").pack(side=tk.LEFT)
         add_tooltip(ttk.Button(btns, text="Read camera",
                                command=self.cam_read_controls),
                     "Refresh the fields from the camera's current state."
-                    ).pack(side=tk.LEFT, padx=6)
+                    ).pack(side=tk.LEFT, padx=(0, 6))
         add_tooltip(ttk.Button(btns, text="Auto-expose",
                                command=self.cam_auto_expose),
                     "Try a range of exposures, keep the one giving a "
@@ -8166,10 +8944,11 @@ LOGGING:
                     "Lock.").pack(side=tk.LEFT)
         add_tooltip(ttk.Button(btns, text="Auto-WB once",
                                command=self.cam_grey_world),
-                    "Grey-world calibrate red/blue balance on the CURRENT "
-                    "scene (a few seconds; stop the preview first), fill "
-                    "the fields in, and lock. Bench-tuned 2026-07-24: "
-                    "red 92 / blue 151.").pack(side=tk.LEFT, padx=6)
+                    "Grey-world calibrate red/blue balance on the scene in "
+                    "view (a few seconds; it pauses the preview itself) and "
+                    "fill the fields in; then Apply & Lock. Bench-tuned "
+                    "2026-07-24: red 92 / blue 151.").pack(side=tk.LEFT,
+                                                          padx=6)
         add_tooltip(ttk.Button(btns, text="Stabilize (pin gain 0)",
                                command=self.cam_stabilize),
                     "The camera's firmware auto-gain can't be switched off "
@@ -8177,8 +8956,6 @@ LOGGING:
                     "(where the auto is clamped) and finds an EXPOSURE for a "
                     "mid-grey image — the only genuinely stable combo. Fills "
                     "the fields; then Apply & Lock.").pack(side=tk.LEFT)
-        self.cam_sensor_status = ttk.Label(btns, text="", foreground=MUTED)
-        self.cam_sensor_status.pack(side=tk.LEFT, padx=10)
         self._cam_build_control_rows()
 
         # --- preview image ---
@@ -8450,23 +9227,39 @@ LOGGING:
     }
 
     def _cam_build_control_rows(self):
-        """(Re)build one row per V4L2 control the camera reports."""
-        for w in self.camctl_grid.winfo_children():
-            w.destroy()
+        """(Re)build one row per V4L2 control the camera reports: exposure
+        and gain in the main view, every other one under Advanced (#400)."""
+        main = getattr(self, 'camctl_main', None)
+        for holder in (self.camctl_grid, main):
+            if holder is not None:
+                for w in holder.winfo_children():
+                    w.destroy()
         self.camctl_rows = {}
         device = self._cam_device() or '/dev/video0'
         ctrls = webcam.list_controls(device)
         if not ctrls:
-            ttk.Label(self.camctl_grid, foreground='#8a5a00',
+            ttk.Label(main if main is not None else self.camctl_grid,
+                      foreground='#8a5a00',
                       text="no camera controls detected — plug the camera "
-                           "in and press Read camera").grid(sticky='w')
+                           "in and press Read camera (under Advanced)"
+                      ).grid(sticky='w')
             return
         saved = webcam.load_camera_settings()
         col = row = 0
         for c in ctrls:
             name = c['name']
-            frame = ttk.Frame(self.camctl_grid)
-            frame.grid(row=row, column=col, sticky='w', padx=(0, 18), pady=2)
+            if main is not None and name in CAM_MAIN_CONTROLS:
+                # exposure first, then gain, whatever order the camera
+                # reports them in
+                frame = ttk.Frame(main)
+                frame.grid(row=0, column=CAM_MAIN_CONTROLS.index(name),
+                           sticky='w', padx=(0, 18), pady=2)
+                in_main = True
+            else:
+                frame = ttk.Frame(self.camctl_grid)
+                frame.grid(row=row, column=col, sticky='w', padx=(0, 18),
+                           pady=2)
+                in_main = False
             val = saved.get(name, c['value'])
             if c['type'] == 'bool':
                 var = tk.BooleanVar(value=bool(val))
@@ -8497,18 +9290,151 @@ LOGGING:
                     self.cam_exposure = e
                 elif name == 'gain':
                     self.cam_gain = e
+                if in_main:
+                    # a value typed in the main view is not locked until
+                    # Apply & Lock: say so as it is typed (#400)
+                    for seq in ('<KeyRelease>', '<FocusOut>'):
+                        e.bind(seq, lambda _ev: self._cam_typed_hint(),
+                               add='+')
             hint = self._CAM_CTRL_HINTS.get(name)
             if hint:
                 add_tooltip(wdg, hint)
+            if in_main:
+                continue
             col += 1
             if col == 3:
                 col, row = 0, row + 1
         # apply persisted lock from the previous session
         if saved:
             webcam.set_locked(saved)
-            self.cam_sensor_status.config(
-                text=f"restored + locked {len(saved)} saved controls",
-                foreground=MUTED)
+            self._cam_status(
+                f"restored + locked {len(saved)} saved controls", 'busy')
+
+    def _cam_status(self, text, kind='busy'):
+        """The camera settings' status line: `kind` 'busy' (muted), 'done'
+        or 'warn' (Tol muted green and wine). The words carry the state."""
+        self._cam_hint_on = False
+        color = {'done': CAM_STATUS_DONE, 'warn': CAM_STATUS_WARN}.get(
+            kind, MUTED)
+        try:
+            self.cam_sensor_status.config(text=text, foreground=color)
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _cam_typed_hint(self):
+        """Say on the status line when exposure or gain, as typed in the
+        main view, differ from the lock (#400). A run takes these boxes and
+        the preview the lock, so a value typed and never locked would
+        split the two, as on 13_backlight; it is named as it is typed.
+        Reads two
+        boxes and the lock dict, never the camera; nothing locked is
+        nothing to disagree with."""
+        lock = dict(webcam.LOCKED_CONTROLS)
+        diffs = []
+        for name, label in (('exposure_time_absolute', 'exposure'),
+                            ('gain', 'gain')):
+            row = self.camctl_rows.get(name)
+            if row is None or name not in lock:
+                continue
+            try:
+                typed = int(float(row[1].get()))
+            except (TypeError, ValueError):
+                diffs.append(f"{label} is not a number")
+                continue
+            if typed != int(lock[name]):
+                diffs.append(f"{label} {typed} (locked {int(lock[name])})")
+        if diffs:
+            self._cam_status("Typed, not locked: " + ", ".join(diffs)
+                             + ". Press 🔒 Apply & Lock to lock it, or "
+                               "Auto-set camera.", 'warn')
+            self._cam_hint_on = True
+        elif getattr(self, '_cam_hint_on', False):
+            self._cam_status("", 'busy')
+
+    def _cam_toggle_advanced(self):
+        """Show or hide Advanced (#400): every control the camera reports
+        and the single steps. Collapsed when the tab is built."""
+        if self.cam_adv_shown:
+            self.cam_adv_frame.pack_forget()
+            self.cam_adv_btn.config(text=CAM_ADVANCED_SHOW)
+        else:
+            self.cam_adv_frame.pack(fill='x', after=self.cam_adv_btn)
+            self.cam_adv_btn.config(text=CAM_ADVANCED_HIDE)
+        self.cam_adv_shown = not self.cam_adv_shown
+
+    def _cam_fill_rows(self, values):
+        """Put `values` ({control: value}) into the panel's rows, each the
+        way its kind shows it; controls the panel has no row for are left
+        out."""
+        for name, val in values.items():
+            if name not in self.camctl_rows or val is None:
+                continue
+            kind, w = self.camctl_rows[name]
+            if kind == 'bool':
+                w.set(bool(val))
+            elif kind == 'menu':
+                for s in w['values']:
+                    if s.startswith(f"{val}:"):
+                        w.set(s)
+                        break
+            else:
+                self._set_entry(w, val)
+
+    def _cam_base_controls(self):
+        """What an adjustment shoots its trials under (#400): the panel's
+        values when every one reads as a number, else the lock."""
+        try:
+            return self._cam_collect_controls()
+        except (TypeError, ValueError):
+            return dict(webcam.LOCKED_CONTROLS)
+
+    @staticmethod
+    def _cam_lock_and_save(device, controls):
+        """Lock `controls`, stamp them onto `device` and save them for the
+        next start -> (stamped, saved_path, save_error). Camera and file
+        work only, for a worker thread: Apply & Lock, and Auto-set camera's
+        last step. Persistence never sinks the lock itself (bench
+        2026-07-24: a root-owned ~/.local/share/scpi_control gave Errno 13
+        here).
+
+        A lock that set no control on the camera is no lock (#400 review):
+        the previous lock goes back, nothing is saved, and it returns
+        (0, None, None) for the caller to report as a failure
+        (_cam_nothing_locked). It used to say "locked 0 controls; saved for
+        next start", over a lock it had replaced in the app and in the file
+        the next start restores."""
+        previous = dict(webcam.LOCKED_CONTROLS)
+        webcam.set_locked(controls)
+        n = webcam.apply_locked(device)
+        if not n:
+            webcam.set_locked(previous)
+            return 0, None, None
+        try:
+            saved, err = webcam.save_camera_settings(controls), None
+        except OSError as e:
+            saved, err = None, str(e)
+        return n, saved, err
+
+    @staticmethod
+    def _cam_nothing_locked(device, controls):
+        """Why a lock set no control on the camera, for the status line."""
+        if not controls:
+            return ("the camera reported no controls, so there was nothing "
+                    "to lock. Plug it in and press Read camera (under "
+                    "Advanced)")
+        return (f"none of the {len(controls)} controls reached the camera "
+                f"at {device} (unplugged, or v4l2-ctl refused them?)")
+
+    @staticmethod
+    def _cam_saved_words(saved, err):
+        """How a lock's save went, for the status line -> (words, kind)."""
+        if saved:
+            note = (" (fallback location)" if saved ==
+                    webcam.CAMERA_SETTINGS_FALLBACK else "")
+            return f"saved for next start{note}", 'done'
+        return (f"but could NOT save for next start ({err}). Fix "
+                f"ownership: mv ~/.local/share/scpi_control{{,.bak}}",
+                'warn')
 
     def _cam_collect_controls(self):
         """Panel -> {name: int}, with the autos forced sane unless the user
@@ -8530,25 +9456,20 @@ LOGGING:
         # (adversarial review 2026-09-23)
         if self._cam_owned_by_sldea():
             return
+        if 'camera-ctrl' in self._bg_busy:
+            # ...and while an adjustment runs (#400 review): it would fill
+            # the boxes a run takes with the trial values the camera is
+            # shooting under, and put the saved lock back over the one Apply
+            # & Lock or Auto-set is writing
+            self._cam_status("another camera adjustment is still running; "
+                             "press Read camera when it has finished",
+                             'warn')
+            return
         self._cam_build_control_rows()
         device = self._cam_device() or '/dev/video0'
         ctrls = webcam.list_controls(device)
-        for c in ctrls:
-            name, val = c['name'], c['value']
-            if name not in self.camctl_rows or val is None:
-                continue
-            kind, w = self.camctl_rows[name]
-            if kind == 'bool':
-                w.set(bool(val))
-            elif kind == 'menu':
-                for s in w['values']:
-                    if s.startswith(f"{val}:"):
-                        w.set(s)
-                        break
-            else:
-                self._set_entry(w, val)
-        self.cam_sensor_status.config(text="read from camera",
-                                      foreground=MUTED)
+        self._cam_fill_rows({c['name']: c['value'] for c in ctrls})
+        self._cam_status("read from camera", 'busy')
 
     def cam_apply_controls(self):
         """Write EVERY panel value to the camera, lock them for all capture
@@ -8572,35 +9493,167 @@ LOGGING:
             return
 
         def work():
-            webcam.set_locked(controls)
-            n = webcam.apply_locked(device)
-            # Persistence must never sink the LOCK itself (bench 2026-07-24:
-            # a root-owned ~/.local/share/scpi_control gave Errno 13 here).
-            try:
-                saved = webcam.save_camera_settings(controls)
-                err = None
-            except OSError as e:
-                saved, err = None, str(e)
-            return n, saved, err
+            return self._cam_lock_and_save(device, controls)
 
         def done(result, error):
             if error:
                 messagebox.showerror("Camera", str(error))
                 return
             n, saved, err = result
-            if saved:
-                note = (" (fallback location)" if saved ==
-                        webcam.CAMERA_SETTINGS_FALLBACK else "")
-                self.cam_sensor_status.config(
-                    text=f"🔒 locked {n} controls — saved for next "
-                         f"start{note}", foreground='#2e7d32')
-            else:
-                self.cam_sensor_status.config(
-                    text=f"🔒 locked {n} controls — but could NOT save for "
-                         f"next start ({err}). Fix ownership: mv "
-                         f"~/.local/share/scpi_control{{,.bak}}",
-                    foreground='#b36b00')
+            if not n:
+                why = self._cam_nothing_locked(device, controls)
+                self._cam_status(f"Nothing locked: {why}. The previous lock "
+                                 "is unchanged.", 'warn')
+                messagebox.showerror(
+                    "Camera", f"Nothing locked: {why}.\n\nThe previous lock "
+                              f"is unchanged.")
+                return
+            words, kind = self._cam_saved_words(saved, err)
+            self._cam_status(f"🔒 locked {n} controls; {words}", kind)
             self.status_bar.config(text=f"Camera: {n} controls locked")
+
+        self._run_bg(work, done, busy='camera-ctrl')
+
+    def cam_auto_set(self):
+        """Auto-set camera (#400): the whole setup in one press, in the
+        order the steps depend on each other. Gain is pinned at its floor,
+        the exposure found for a mid-gray picture at that gain, the white
+        balanced on the scene in view (gray world) at that exposure, then
+        everything written and locked as Apply & Lock does, saved for the
+        next start, and the preview started so the operator sees the
+        result, also when it was off before (owner decision 2026-10-08).
+
+        Every trial picture is shot under its own controls, never under the
+        lock (webcam.find_exposure, webcam.balance_gray_world), and the lock
+        changes only at the last step: a step that fails stops the sequence,
+        names the step, and leaves the previous lock and the boxes as they
+        were. The boxes and the lock come out equal by construction, so the
+        run (which takes the boxes) and the preview (which shows the lock)
+        see the same picture. Refused while an SLDEA run holds the camera,
+        like every other adjustment; a run start is refused while this
+        runs ('camera-ctrl', _sldea_start_conflicts)."""
+        if self._cam_owned_by_sldea():
+            return
+        if 'camera-ctrl' in self._bg_busy:
+            # checked before the preview is stopped for nothing
+            self._cam_status("another camera adjustment is still running; "
+                             "press Auto-set camera when it has finished",
+                             'warn')
+            return
+        device = self._cam_device()
+        if not device or not webcam.v4l2_available():
+            messagebox.showerror("Camera", "No camera / v4l2-ctl available.")
+            return
+        try:
+            panel = self._cam_collect_controls()
+        except (TypeError, ValueError) as e:
+            messagebox.showerror("Camera", f"Control values must be "
+                                           f"numbers: {e}")
+            return
+        previous = dict(webcam.LOCKED_CONTROLS)
+        balance = 'red_balance' in panel and 'blue_balance' in panel
+        was_previewing = self.cam_previewing
+        self.cam_stop_preview()
+        if self.cam is not None:
+            try:
+                self.cam.close()
+            except Exception:
+                pass
+            self.cam = None
+        self._cam_status("Auto-set: preview stopped, gain pinned at "
+                         f"{webcam.GAIN_FLOOR}...", 'busy')
+
+        def say(text):
+            # progress from the worker, shown on the Tk thread
+            try:
+                self.root.after(0, lambda: self._cam_status(text, 'busy'))
+            except Exception:
+                pass
+
+        def work():
+            step = 'opening the camera'
+            try:
+                m = re.search(r'(\d+)$', device)
+                spec = webcam.resolve_camera(int(m.group(1)) if m else 0)
+                step = 'finding the exposure'
+                say("Auto-set 1/3: finding the exposure for a mid-gray "
+                    f"picture at gain {webcam.GAIN_FLOOR}...")
+                found = webcam.find_exposure(spec, panel)
+                if found is None:
+                    raise RuntimeError("no trial exposure gave a picture "
+                                       "(camera busy or unplugged?)")
+                exp, mean = found
+                locked = webcam.exposure_trial(panel, exp)
+                gray = None
+                if balance:
+                    step = 'balancing the white'
+                    say(f"Auto-set 2/3: exposure {exp}; balancing the "
+                        "white on the scene in view...")
+                    gray = webcam.balance_gray_world(
+                        spec, locked, red=panel.get('red_balance'),
+                        blue=panel.get('blue_balance'))
+                    locked.update(red_balance=gray[1], blue_balance=gray[2])
+                step = 'locking'
+                say("Auto-set 3/3: writing and locking...")
+                n, saved, err = self._cam_lock_and_save(device, locked)
+                if not n:
+                    raise RuntimeError(
+                        self._cam_nothing_locked(device, locked))
+            except Exception as e:
+                # nothing new stays locked: the previous lock goes back in
+                # the dict and onto the device
+                try:
+                    webcam.set_locked(previous)
+                    webcam.apply_locked(device)
+                except Exception:
+                    pass
+                raise RuntimeError(f"stopped while {step}: {e}") from e
+            return {'controls': locked, 'exposure': exp, 'mean': mean,
+                    'gray': gray, 'n': n, 'saved': saved, 'save_err': err}
+
+        def done(result, error):
+            try:
+                if error:
+                    self._cam_status(f"Auto-set {error}. The previous lock "
+                                     "is unchanged.", 'warn')
+                    messagebox.showerror(
+                        "Auto-set camera",
+                        f"Auto-set {error}.\n\nThe previous lock is "
+                        f"unchanged.")
+                    return
+                c = result['controls']
+                self._cam_fill_rows(c)
+                words, kind = self._cam_saved_words(result['saved'],
+                                                    result['save_err'])
+                if result['gray'] is not None:
+                    white = (f"red {c['red_balance']}, blue "
+                             f"{c['blue_balance']}")
+                else:
+                    white = "white balance not set (the camera reports no "\
+                            "red or blue balance)"
+                self._cam_status(
+                    f"🔒 locked: exposure {c['exposure_time_absolute']}, "
+                    f"gain {c['gain']}, {white} (picture mean "
+                    f"{result['mean']:.0f}); {words}", kind)
+                self.status_bar.config(
+                    text=f"Camera: auto-set, {result['n']} controls locked")
+            finally:
+                if error is None and not (CAM_STOP_PREVIEW_ON_TAB_LEAVE
+                                          and not self._cam_tab_selected()):
+                    # the result on screen, even when the preview was off
+                    # before (owner decision 2026-10-08). cam_start_preview
+                    # refuses while an SLDEA run holds the camera. A failed
+                    # Auto-set, or one finished after the operator left the
+                    # tab, restores the preview as any adjustment does.
+                    self.cam_start_preview()
+                else:
+                    self._cam_after_adjustment(was_previewing)
+                refresh = getattr(self, '_sldea_cam_line_refresh', None)
+                if refresh is not None and hasattr(self, 'sldea_cam_line'):
+                    try:
+                        refresh()
+                    except Exception:
+                        pass
 
         self._run_bg(work, done, busy='camera-ctrl')
 
@@ -8621,33 +9674,26 @@ LOGGING:
             except Exception:
                 pass
             self.cam = None
-        self.cam_sensor_status.config(text="stabilizing (pinning gain)…",
-                                      foreground='#b36b00')
+        # the trials are shot under the panel's values, not the lock, so
+        # the search sees the scene (#400). It is Auto-set's own search,
+        # judged on the green channel (owner decision 2026-10-08: one
+        # search, so the two can never pick different exposures).
+        base = self._cam_base_controls()
+        self._cam_status("stabilizing (pinning gain)…", 'busy')
 
         def work():
             m = re.search(r'(\d+)$', device)
             spec = webcam.resolve_camera(int(m.group(1)) if m else 0)
-            webcam.set_control(device, 'auto_exposure', 1)     # manual
-            webcam.set_control(device, 'white_balance_automatic', 0)
-            webcam.set_control(device, 'gain', 0)              # AGC floor
-            best = None
-            for exp in (16, 24, 32, 40, 50, 64, 80, 100, 130):
-                webcam.set_control(device, 'exposure_time_absolute', exp)
-                f = webcam.oneshot_rgb(spec, count=3)
-                if f is None:
-                    continue
-                mean = float(f.mean())
-                if best is None or abs(mean - 150) < abs(best[2] - 150):
-                    best = (exp, 0, mean)
-                if mean >= 150:
-                    break
-            return best
+            found = webcam.find_exposure(spec, base)
+            if found is None:
+                return None
+            exp, mean = found
+            return exp, webcam.GAIN_FLOOR, mean
 
         def done(best, error):
             try:
                 if error or not best:
-                    self.cam_sensor_status.config(
-                        text="stabilize failed", foreground='red')
+                    self._cam_status("stabilize failed", 'warn')
                     if error:
                         messagebox.showerror("Stabilize", str(error))
                     return
@@ -8656,9 +9702,9 @@ LOGGING:
                                   ('exposure_time_absolute', exp)):
                     if name in self.camctl_rows:
                         self._set_entry(self.camctl_rows[name][1], val)
-                self.cam_sensor_status.config(
-                    text=f"gain 0 / exposure {exp} (mean {mean:.0f}) — "
-                         "now Apply & Lock", foreground='#2e7d32')
+                self._cam_status(
+                    f"gain {gain} / exposure {exp} (mean {mean:.0f}); now "
+                    "Apply & Lock", 'done')
             finally:
                 self._cam_after_adjustment(was_previewing)
 
@@ -8681,52 +9727,30 @@ LOGGING:
             except Exception:
                 pass
             self.cam = None
-        self.cam_sensor_status.config(text="grey-world balancing…",
-                                      foreground='#b36b00')
+        # the trials are shot under the panel's values, not the lock, so
+        # each one shows its own balance (#400)
+        base = self._cam_base_controls()
+        self._cam_status("grey-world balancing…", 'busy')
 
         def work():
             m = re.search(r'(\d+)$', device)
             spec = webcam.resolve_camera(int(m.group(1)) if m else 0)
-            webcam.set_control(device, 'white_balance_automatic', 0)
-            rb = webcam.get_control(device, 'red_balance') or 64
-            bb = webcam.get_control(device, 'blue_balance') or 64
-            best = None
-            for _ in range(5):
-                webcam.set_control(device, 'red_balance', int(rb))
-                webcam.set_control(device, 'blue_balance', int(bb))
-                f = webcam.oneshot_rgb(spec, count=3)
-                if f is None:
-                    raise RuntimeError("no frame (camera busy?)")
-                r, g, b = [float(f[..., i].mean()) for i in range(3)]
-                err = abs(r / g - 1) + abs(b / g - 1)
-                if best is None or err < best[0]:
-                    best = (err, int(rb), int(bb))
-                if err < 0.04:
-                    break
-                rb = min(255, max(1, rb * (g / r) ** 0.9))
-                bb = min(255, max(1, bb * (g / b) ** 0.9))
-            return best
+            return webcam.balance_gray_world(
+                spec, base, red=base.get('red_balance'),
+                blue=base.get('blue_balance'))
 
         def done(best, error):
             try:
                 if error:
-                    self.cam_sensor_status.config(text="grey-world failed",
-                                                  foreground='red')
+                    self._cam_status("grey-world failed", 'warn')
                     messagebox.showerror("Auto-WB", str(error))
                     return
                 err, rb, bb = best
-                for name, val in (('red_balance', rb), ('blue_balance', bb),
-                                  ('white_balance_automatic', 0)):
-                    if name in self.camctl_rows:
-                        kind, w = self.camctl_rows[name]
-                        if kind == 'bool':
-                            w.set(bool(val))
-                        else:
-                            self._set_entry(w, val)
-                self.cam_sensor_status.config(
-                    text=f"grey-world: red {rb} / blue {bb} "
-                         f"(err {err:.2f}) — now Apply & Lock",
-                    foreground='#2e7d32')
+                self._cam_fill_rows({'red_balance': rb, 'blue_balance': bb,
+                                     'white_balance_automatic': 0})
+                self._cam_status(
+                    f"grey-world: red {rb} / blue {bb} (err {err:.2f}); "
+                    "now Apply & Lock", 'done')
             finally:
                 self._cam_after_adjustment(was_previewing)
 
@@ -8760,8 +9784,7 @@ LOGGING:
             except Exception:
                 pass
             self.cam = None
-        self.cam_sensor_status.config(text="auto exposure is checking...",
-                                      foreground='#b36b00')
+        self._cam_status("auto exposure is checking...", 'busy')
 
         def work():
             size = webcam.choose_size(webcam.parse_frame_sizes(
@@ -8772,22 +9795,19 @@ LOGGING:
         def done(result, error):
             try:
                 if error:
-                    self.cam_sensor_status.config(text="auto-expose failed",
-                                                  foreground='red')
+                    self._cam_status("auto-expose failed", 'warn')
                     messagebox.showerror("Auto-expose", str(error))
                     return
                 exp, mean = result
                 if exp is None:
-                    self.cam_sensor_status.config(
-                        text="auto-expose could not settle -- check lens cap"
-                             " / lighting, or set exposure by hand",
-                        foreground='red')
+                    self._cam_status(
+                        "auto-expose could not settle -- check lens cap"
+                        " / lighting, or set exposure by hand", 'warn')
                 else:
                     self._set_entry(self.cam_exposure, exp)
                     self.cam_sync_controls()
-                    self.cam_sensor_status.config(
-                        text=f"exposure {exp} (mean level {mean:.0f})",
-                        foreground=MUTED)
+                    self._cam_status(
+                        f"exposure {exp} (mean level {mean:.0f})", 'busy')
             finally:
                 self._cam_after_adjustment(was_previewing)
 
@@ -8923,7 +9943,7 @@ LOGGING:
     def _cam_show(self, rgb):
         """Render an RGB numpy frame into the preview label (with optional
         focus-score overlay)."""
-        from PIL import Image, ImageDraw, ImageTk
+        from PIL import Image, ImageTk
         img = Image.fromarray(rgb)
         # Fit the width of the view, but use a FIXED height budget: the
         # label sizes itself to whatever image we put in it, so deriving the
@@ -8932,21 +9952,15 @@ LOGGING:
         maxw = max(self.cam_view.winfo_width() - 4, 320)
         img.thumbnail((maxw, PREVIEW_MAX_HEIGHT))
         if self.cam_focus_var.get():
-            # Green circle = the central "area of interest" the focus score
-            # is weighted over; score printed top-left (higher = sharper).
-            draw = ImageDraw.Draw(img)
-            tw, th = img.size
-            cx, cy = tw // 2, th // 2
-            r = int(webcam.FOCUS_AOI_RADIUS_FRAC * min(tw, th))
-            draw.ellipse([cx - r, cy - r, cx + r, cy + r],
-                         outline=(0, 255, 0), width=3)
-            draw.line([cx - 6, cy, cx + 6, cy], fill=(0, 255, 0), width=1)
-            draw.line([cx, cy - 6, cx, cy + 6], fill=(0, 255, 0), width=1)
+            # The circle is the central "area of interest" the focus score
+            # is weighted over; the score is printed top-left (higher =
+            # sharper). On by default, drawn large (#400).
             try:
                 score = webcam.focus_score(rgb)
-                label = f"focus {score:.0f}  (higher = sharper)"
-                draw.text((7, 5), label, fill=(0, 0, 0))
-                draw.text((6, 4), label, fill=(0, 255, 0))
+            except Exception:
+                score = None
+            try:
+                draw_focus_overlay(img, score)
             except Exception:
                 pass
         photo = ImageTk.PhotoImage(img)
@@ -9034,10 +10048,10 @@ LOGGING:
         return True
 
     def _cam_after_adjustment(self, was_previewing):
-        """After Stabilize, Auto-WB once or Auto-expose: restart the
-        preview the adjustment paused, as before, unless the operator has
-        left the tab meanwhile. There the leave-tab rule would have stopped
-        it, and opening the tab starts it again."""
+        """After Auto-set camera, Stabilize, Auto-WB once or Auto-expose:
+        restart the preview the adjustment paused, as before, unless the
+        operator has left the tab meanwhile. There the leave-tab rule would
+        have stopped it, and opening the tab starts it again."""
         if was_previewing and not (CAM_STOP_PREVIEW_ON_TAB_LEAVE
                                    and not self._cam_tab_selected()):
             self.cam_start_preview()
@@ -9082,7 +10096,8 @@ LOGGING:
         if self.cam_seq_running or self._cam_worker_alive():
             return (CAM_OFF_SWEEP if self._cam_seq_kind == 'sweep'
                     else CAM_OFF_TIMED)
-        # Stabilize, Auto-WB once and Auto-expose grab one-shot frames too
+        # Auto-set camera, Stabilize, Auto-WB once and Auto-expose grab
+        # one-shot frames too
         if 'camera-ctrl' in getattr(self, '_bg_busy', ()):
             return CAM_OFF_ADJUSTING
         return None

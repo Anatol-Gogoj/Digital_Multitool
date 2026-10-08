@@ -874,6 +874,10 @@
   "purpose": "Runs an automated voltage-staircase test on a single-layer DEA: the signal generator drives the Trek HV amplifier (1 V control = 1 kV, max 10 kV), the scope logs the Trek's V_Out/I_Out monitors, and the webcam photographs the electrode at each voltage landing. Each run produces a self-contained folder (setup.txt, data.csv, run.log, frames/ — plus telemetry.csv when the scope is connected) ready for the Edge Review analysis program.",
   "controls": [
    {
+    "label": "Run configuration presets",
+    "what": "Across the top of the tab: saves this tab's settings under a name and recalls them later, so a campaign's staircase is not retyped each session. A preset covers the staircase, Output dir, scope/SG channels, DEA diameter, electrode, Trek inverts, and the watchdog and telemetry settings. It deliberately does NOT carry your run name, and never the DRY/LIVE state — loading one always leaves the tab in DRY, so arming the HV stays a separate deliberate click. Presets live in the same shared presets/ library as the signal-generator presets. If a preset was written by an older or newer version and something in it no longer fits, the load says what it could not apply instead of skipping it quietly."
+   },
+   {
     "label": "Start / End / Step (kV)",
     "what": "Defines the voltage staircase; End must be 10 kV or below."
    },
@@ -927,7 +931,7 @@
    },
    {
     "label": "⚡ Breakdown watchdog (LIVE runs)",
-    "what": "Watches Trek current during live runs; current above Trip (µA) sustained for Confirm (s) snapshots the breakdown, ramps to 0 and aborts. Transient spikes never trip it."
+    "what": "Watches Trek current during live runs; current above Trip (µA) sustained for Confirm (s) snapshots the breakdown, ramps to 0 and aborts. Transient spikes never trip it. The Energize HV? question says whether it is on, and run.log and setup.txt record it; unticked, only ■ Abort or the end of the run stops a run that breaks down."
    },
    {
     "label": "📈 Scope kV/µA log (telemetry.csv)",
@@ -936,10 +940,6 @@
    {
     "label": "🎥 Video beside the snapshots: Record / fps / detect edges",
     "what": "Off by default. Record adds a lossless grey video of the whole run (video.mkv, about 1 MB per frame, so roughly 2.5 GB for a 40-minute run at 1 fps; the line beside the boxes shows the estimate for the staircase above) and video_frames.csv with each frame's time and commanded kV. The snapshots are still taken on schedule from the same stream, so data.csv and everything that reads it are unchanged. The file is written to this PC's local disk during the run and moved into the run folder once the HV is off. The run refuses to start video without the lossless encoder or enough local disk, and offers a snapshots-only run instead. Once the camera is streaming, still at 0 kV, the run writes and reads back one of the camera's own frames on the local disk. If that check fails (for example a frame size the encoder cannot record losslessly), the run stops itself before any HV and says why; unticking Record then runs it with snapshots only. A check still running after 15 s counts as failed, and until it ends, ▶ Run offers a snapshots-only run instead of checking again. At the end of a video run, setup.txt gets a Video outcome (end) line: how many frames were recorded, or NOT recorded, and why the video stopped (for example, the camera stopped delivering). While any SLDEA run is going, the Webcam tab cannot open the camera or change its exposure. 'then detect edges on every frame' runs Edge Review's own detector on every recorded frame after a completed run, in a separate program, and writes video_edges.csv and video_edges.png; each row carries the detector's confidence and needs-review verdict instead of a review queue."
-   },
-   {
-    "label": "Run configuration presets",
-    "what": "Saves everything above under a name and recalls it later, so a campaign's staircase is not retyped each session. A preset covers the staircase, Output dir, scope/SG channels, DEA diameter, electrode, Trek inverts, and the watchdog and telemetry settings. It deliberately does NOT carry your run name, and never the DRY/LIVE state — loading one always leaves the tab in DRY, so arming the HV stays a separate deliberate click. Presets live in the same shared presets/ library as the signal-generator presets. If a preset was written by an older or newer version and something in it no longer fits, the load says what it could not apply instead of skipping it quietly."
    },
    {
     "label": "DRY RUN — HV OFF / ▶ Run / ■ Abort",
@@ -1347,30 +1347,38 @@
    },
    {
     "label": "Show focus score",
-    "what": "Overlays a live sharpness number and a green area-of-interest circle — higher = sharper; turn the lens to maximise it."
+    "what": "Overlays a live sharpness number and the area-of-interest circle; on by default. Higher = sharper: turn the lens to maximise it."
    },
    {
-    "label": "Camera controls panel",
-    "what": "One field per camera knob (exposure, gain, white balance…), built from what the camera reports."
+    "label": "Exposure and gain",
+    "what": "The two values a run takes, in the main view. A value typed here changes nothing until it is locked; the line under the boxes says so as you type."
    },
    {
     "label": "🔒 Apply & Lock",
-    "what": "Writes every panel value to the camera, keeps re-asserting them during all captures, and saves them for the next start."
+    "what": "Beside the exposure and gain boxes: writes every panel value to the camera, keeps re-asserting them during all captures, and saves them for the next start. Needed after typing a value by hand."
    },
    {
-    "label": "Read camera",
+    "label": "Auto-set camera",
+    "what": "One press: stops the preview, pins gain at 0, finds the exposure for a mid-gray picture, balances the white on the scene in view, then writes and locks everything for every capture, saves it for the next start and starts the preview, so you see the result. A step that fails leaves the previous lock."
+   },
+   {
+    "label": "Advanced camera settings",
+    "what": "Opens one field per camera knob the camera reports (white balance, brightness and the rest) and the single steps below. Closed when the tab opens."
+   },
+   {
+    "label": "Read camera (Advanced)",
     "what": "Refills the fields from the camera's current state."
    },
    {
-    "label": "Auto-expose",
+    "label": "Auto-expose (Advanced)",
     "what": "Searches for an exposure giving a mid-grey image and fills it in; then Apply & Lock."
    },
    {
-    "label": "Auto-WB once",
-    "what": "One-shot grey-world colour balance on the current scene; stop the preview first."
+    "label": "Auto-WB once (Advanced)",
+    "what": "One-shot grey-world colour balance on the scene in view; it fills the fields in, then Apply & Lock."
    },
    {
-    "label": "Stabilize (pin gain 0)",
+    "label": "Stabilize (pin gain 0) (Advanced)",
     "what": "Pins gain at 0 (defeats the firmware auto-gain) and finds a matching exposure — the only drift-free combo."
    },
    {
@@ -1396,8 +1404,8 @@
   ],
   "workflow": [
    "Open the tab; the preview starts by itself. If the view says PREVIEW OFF, read the reason under it: when it names something running, the preview starts by itself when that ends, unless you pressed Stop Preview or the camera already failed to open on this visit; otherwise pick the camera number and click Start Preview.",
-   "Tick Show focus score; turn the lens until the number peaks.",
-   "Set exposure/colour (or use Stabilize), then 🔒 Apply & Lock.",
+   "Turn the lens until the focus score (on by default) peaks.",
+   "Press Auto-set camera and wait for \"locked\" on the line under it (or type the exposure and gain and press 🔒 Apply & Lock beside them).",
    "Set the save folder and filename prefix.",
    "Snapshot for one photo, or Start interval for a timelapse.",
    "For voltage-vs-image runs: fill start/stop/step and dwell, click Run sweep.",
@@ -1408,7 +1416,7 @@
    "Before a sweep, turn the channel's Output ON in the Signal Gen tab — otherwise the levels are written but never reach the device, and you get a folder of identical photos.",
    "A sweep leaves the generator sitting at the LAST level when it ends — it does not return the output to zero.",
    "Starting a sweep or timed capture stops the live preview to free the camera; a running interval capture stops with it. The preview starts again by itself when the capture ends, if the tab is on screen and you have not pressed Stop Preview.",
-   "Without 🔒 Apply & Lock the camera's firmware auto-gain/auto-WB drifts brightness and colour mid-run.",
+   "Without a lock (Auto-set camera, or 🔒 Apply & Lock) the camera's firmware auto-gain/auto-WB drifts brightness and colour mid-run.",
    "The focus CSV is rewritten on every run with the same prefix — change the prefix to keep the previous one.",
    "Keep folder and run names plain ASCII (2.5uL, not 2.5µL): OpenCV on the Windows PCs cannot save or open images under other characters, and New folder… refuses them."
   ],
@@ -1426,8 +1434,8 @@
     "note": "Higher = sharper; peak it while focusing"
    },
    {
-    "widget_text": "🔒 Apply & Lock",
-    "note": "Locks every camera knob for all captures"
+    "widget_text": "Auto-set camera",
+    "note": "Finds and locks gain, exposure and white balance"
    },
    {
     "widget_text": "Save to:",

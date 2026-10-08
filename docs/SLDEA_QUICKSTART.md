@@ -69,23 +69,28 @@ later. The repo has no lighting or mounting advice, so ask the lab (box item 8).
   250 or more; the two clipped ones read mean 239 to 242 with 80 to 83 percent.
 
 Set it on the "Webcam" tab:
-1. Press "Start Preview". The run always uses camera 0, whatever "Camera" says.
-2. Tick "Show focus score" and turn the lens for the highest number, then check by eye. It counts
-   mostly the middle of the picture (the green circle), so center the disc first. It has no pass
+1. The preview starts when you open the tab; if it does not, press "Start Preview". The run always
+   uses camera 0, whatever "Camera" says.
+2. The focus score is on: turn the lens for the highest number, then check by eye. It counts
+   mostly the middle of the picture (the circle), so center the disc first. It has no pass
    mark: real baselines on file read 7 to 768, a blank picture reads 0.
-3. Set the exposure by hand, in a loop. Type a value in "exposure_time_absolute" (units of 100
-   microseconds: 20 = 2 ms), keep "gain" at 0 (its hint: "prefer exposure/light"), press "Apply &
-   Lock" ("saved for next start" means it saved), then look at the preview. Typing alone changes
-   nothing in the preview. Repeat until the disc is clear. Every run on file except 2026-10-01
-   used exposure 23 to 100; that run used 3 (0.3 ms).
-4. Skip "Stabilize (pin gain 0)", though BENCH_TEST.md section P2 lists it. When a lock exists (a
-   saved lock comes back every time the app starts), its test photos are shot at the locked exposure
-   and gain. The exposure it fills in then says nothing about your scene.
-5. Make "Apply & Lock" your last camera action. "Refresh", "Read camera", "Auto-expose" and
-   starting the app refill the exposure and gain fields from the camera. The run uses those fields;
-   the pre-flight picture uses the locked values. They agree only if "Apply & Lock" came last.
+3. Press "Auto-set camera" and wait until the line under it starts "locked: exposure". It pins
+   gain at 0, finds the exposure for a mid-gray picture, balances the white on the scene in view,
+   and locks it all; the exposure and gain boxes then say what is locked. Look at the preview. If
+   the disc is still not clear, change the light, then press "Auto-set camera" again. If a step
+   fails, the line says which, and the previous lock stays.
+4. To set the exposure by hand instead, type it in "exposure_time_absolute" (units of 100
+   microseconds: 20 = 2 ms), keep "gain" at 0, and press "Apply & Lock" beside them ("saved
+   for next start" means it saved). Typing alone changes nothing in the preview, and
+   the line under the boxes says "Typed, not locked" until you lock. Every run on file except
+   2026-10-01 used exposure 23 to 100; that run used 3 (0.3 ms).
+5. Make a lock your last camera action: "Auto-set camera", or "Apply & Lock". "Refresh", "Read
+   camera", "Auto-expose" and starting the app refill the exposure and gain fields from the camera.
+   The run uses those fields; the pre-flight picture uses the locked values. They agree only if a
+   lock came last.
 6. "no camera controls detected" on the panel: stop. The run then asks for exposure 6 and gain 60
-   (a fallback) and setup.txt records them as if applied. Plug the camera in, "Read camera".
+   (a fallback), and setup.txt names them as built-in defaults. Plug the camera in, open "Advanced
+   camera settings", press "Read camera".
 
 The pre-flight picture appears when you press Run (section 5). Judge it like this:
 1. Look first. Can you see the disc edge all the way round? If not, press "Adjust (open Webcam
@@ -155,10 +160,12 @@ never touches the signal generator. Keep the Trek's HV output off for the whole 
 
 ## 5. Live run
 
-Before you press Run: "Apply & Lock" was your last camera action, the scope is as in section 3,
+Before you press Run: a lock ("Auto-set camera" or "Apply & Lock") was your last camera action, the scope is as in section 3,
 "Trek inverts (negate control)" is set as the lab says, and the lab box steps are done. Leave
-"Breakdown watchdog (LIVE runs)" enabled. Use a NEW "Run name (blank = auto)" (a used name is reused
-and overwritten) and check "Output dir" now: the app does not check it until after the last dialog.
+"Breakdown watchdog (LIVE runs)" enabled. Use a NEW "Run name (blank = auto)": the line under the box
+shows the folder the run will write to, and when that folder already holds a run, or the share it is
+on is not mounted, the line warns and "Run" refuses to start. Check "Output dir" now too: whether the
+app can write there is only found out after the last dialog.
 
 **The app sends nothing to the signal generator until the last dialog is answered.** Whatever the
 drive channel (CH1 by default) was left outputting goes to the Trek's control input, and is
@@ -184,9 +191,11 @@ monitor setup" (Yes) and the pre-flight picture (Enter presses "Looks good - sta
    section O says take the fix). No keeps what was flagged ("this silently ruined five runs on
    2026-07-25", manual). No problem: no dialog, only the log line "monitor check: OK".
 4. "Energize HV?": "LIVE run - this drives the Trek up to" your top kV "via SG CH" and the channel,
-   then the staircase summary and "Proceed?". Yes means carry on. Nothing is sent to the signal
-   generator until the last dialog is answered. Then the program sets the channel to DC at 0 V,
-   output ON, and ramps up. The dialog shows no polarity, watchdog or folder, so check them first.
+   then the staircase summary, the breakdown watchdog's state ("Breakdown watchdog: ON..." with
+   its trip and confirm time, or "Breakdown watchdog: OFF. Nothing stops this run on a
+   breakdown..." if the box was unticked), and "Proceed?". Yes means carry on. Nothing is sent to the signal generator until the
+   last dialog is answered. Then the program sets the channel to DC at 0 V, output ON, and ramps
+   up. The dialog shows no polarity or folder, so check them first.
 5. "No electrode specified", "No concentration specified" (CNT inks only), "No film thickness
    specified": "Start the run without it?" Yes records nothing. Answer No, fill the field, press
    Run again. "Film thickness looks unusual" means a value outside 5 to 2000 um, such as one typed
@@ -344,8 +353,8 @@ On 2026-10-01 (run SLDEA_20261001_151016) three things went wrong in a row, mark
 
 | You see | Likely cause | Do this |
 |---|---|---|
-| Baseline photo in frames/ is flat dark gray, no disc (failure 1); the pre-flight picture may have looked fine | The exposure field and the lock disagreed, or exposure really was 3 (setup.txt; the other runs used 23 to 100). Not provable: nothing logs the pre-flight | "Abort" (section 6). Section 2: raise exposure, "Apply & Lock" last, press Run again |
-| The exposure field shows a number you did not type | Starting the app, "Refresh", "Read camera" or "Auto-expose" filled it from the camera | Type your value, press "Apply & Lock" last |
+| Baseline photo in frames/ is flat dark gray, no disc (failure 1); the pre-flight picture may have looked fine | The exposure field and the lock disagreed, or exposure really was 3 (setup.txt; the other runs used 23 to 100). Not provable: nothing logs the pre-flight | "Abort" (section 6). Section 2: press "Auto-set camera" (or raise the exposure and "Apply & Lock" last), press Run again |
+| The exposure field shows a number you did not type | Starting the app, "Refresh", "Read camera" or "Auto-expose" filled it from the camera | Press "Auto-set camera", or type your value and press "Apply & Lock" last |
 | First "meas" line has a sign or size the lab did not expect | Trek polarity, the "Trek inverts" box and the scope window disagree | "Abort", ask the lab (box item 3), start a new run |
 | "V_Out off-screen (9.9E37 sentinel)" (failure 2: lost from 2.25 kV, run aborted at 3.0 kV) | The reading left the scope screen (window framed for positive kV, readings negative), though "monitor check: OK" was logged | Not an Abort rule here: ask the lab (box item 10). Section 3, step 5 |
 | Dialog "HV NOT ZEROED" | The app could not zero the signal generator | Do what the dialog says, at once |

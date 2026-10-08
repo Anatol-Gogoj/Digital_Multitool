@@ -52,6 +52,11 @@ pass when its edges are stale (after_save), and review_flags sends to a
 human only the frames the detector doubts or that disagree with the run's
 accepted stills.
 
+THE BACKGROUND JOBS (#396, 2026-10-06): both start detached and at low
+priority (launch_finalize, launch_rerun, lower_job_priority), and each
+keeps a small progress record on local disk (JobProgress) that the SLDEA
+tab shows on its job line (progress_text).
+
 Usage:
     python sldea_video.py RUN [--stride N] [--limit N] [--no-plot]
     python sldea_video.py RUN --after-save       (what Save starts)
@@ -62,6 +67,8 @@ Headless tests: .venv/bin/python tests/test_sldea_video.py
 """
 import csv
 import datetime
+import errno
+import hashlib
 import json
 import os
 import queue
@@ -1046,17 +1053,22 @@ class VideoRecorder:
 # moving a finished recording into the run folder
 # ---------------------------------------------------------------------------
 
-def _copy_throttled(src, dst, max_bps=COPY_MAX_BPS, chunk=8 << 20):
-    """Copy `src` to `dst` at no more than `max_bps` bytes a second."""
+def _copy_throttled(src, dst, max_bps=COPY_MAX_BPS, chunk=8 << 20,
+                    progress=None):
+    """Copy `src` to `dst` at no more than `max_bps` bytes a second.
+    `progress(bytes done, bytes in all)` is called after every chunk."""
     t0 = time.monotonic()
     done = 0
     with open(src, 'rb') as fi, open(dst, 'wb') as fo:
+        total = os.fstat(fi.fileno()).st_size
         while True:
             buf = fi.read(chunk)
             if not buf:
                 break
             fo.write(buf)
             done += len(buf)
+            if progress is not None:
+                progress(done, total)
             if max_bps:
                 ahead = done / max_bps - (time.monotonic() - t0)
                 if ahead > 0:
@@ -1065,7 +1077,8 @@ def _copy_throttled(src, dst, max_bps=COPY_MAX_BPS, chunk=8 << 20):
         os.fsync(fo.fileno())
 
 
-def finalize(staging_dir, rundir, log=print, max_bps=COPY_MAX_BPS):
+def finalize(staging_dir, rundir, log=print, max_bps=COPY_MAX_BPS,
+             progress=None):
     """Move a finished recording from local staging into the run folder.
     -> {filename: path in the run folder, or None when it did not move}.
 
@@ -1073,7 +1086,10 @@ def finalize(staging_dir, rundir, log=print, max_bps=COPY_MAX_BPS):
     `<name>.part`, renamed into place only when complete, the staged
     original removed only after that -- so an interrupted move leaves an
     obvious .part beside an intact original, never a truncated video.mkv.
-    Every file is reported; a failure says where the original still is."""
+    Every file is reported; a failure says where the original still is.
+
+    `progress(name, bytes done, bytes in all)` follows a copy chunk by
+    chunk (#396); a rename is instant and reports nothing."""
     out = {}
     for name in (VIDEO_FILENAME, VIDEO_INDEX_FILENAME):
         src = os.path.join(staging_dir, name)
@@ -1086,7 +1102,12 @@ def finalize(staging_dir, rundir, log=print, max_bps=COPY_MAX_BPS):
                 os.replace(src, dst)          # same volume: instant
             except OSError:
                 part = dst + '.part'
-                _copy_throttled(src, part, max_bps)
+                # the keyword only when there is a listener, so a stand-in
+                # copy with the old signature still runs as it did
+                kw = ({} if progress is None else
+                      {'progress': (lambda n, t, _name=name:
+                                    progress(_name, n, t))})
+                _copy_throttled(src, part, max_bps, **kw)
                 os.replace(part, dst)
                 os.remove(src)
             out[name] = dst
@@ -1100,6 +1121,317 @@ def finalize(staging_dir, rundir, log=print, max_bps=COPY_MAX_BPS):
     except OSError:
         pass
     return out
+
+
+# ---------------------------------------------------------------------------
+# what a background job tells the SLDEA tab (#396)
+# ---------------------------------------------------------------------------
+
+# A BACKGROUND JOB SAYS HOW FAR IT HAS GOT (#396, 2026-10-06). The
+# post-run job (--finalize) and the re-run after Save (--after-save) are
+# programs of their own, and run.log was all they reported: a line every
+# 50 frames while detecting, nothing while copying gigabytes into the run
+# folder. The operator watched a slow window with nothing on screen to
+# say why. Each job now keeps ONE small JSON record of where it is, and
+# the SLDEA tab shows it on its job line (progress_text).
+#
+# The record lives on LOCAL disk beside the staging folders, never in the
+# run folder: the tab reads it on its Tk thread, and a read on the share
+# can wait behind the very copy it reports. It is replaced whole (a .part
+# file, then os.replace), so a reader gets the old record or the new one,
+# never half of either. One record per run: the finalize job writes it,
+# and a re-run after Save replaces it. The launcher writes the first word
+# itself and names the file to the job in JOB_PROGRESS_ENV, so a job run
+# by hand writes none.
+PROGRESS_DIRNAME = 'progress'
+JOB_PROGRESS_ENV = 'SCPI_SLDEA_JOB_PROGRESS'
+# At most one write a second while a job is busy; a change of phase and
+# the last word are written at once. A few hundred bytes on local disk,
+# against ~0.2 s of detection per frame or an 8 MB chunk of the copy.
+PROGRESS_EVERY_S = 1.0
+# How long a record may stand unchanged while it says a job is busy
+# before the tab says the job has gone quiet: it died without a last
+# word, or one step of it (the fsync to a slow share, the figure) takes
+# that long. Either way run.log is where to look.
+PROGRESS_STALE_S = 120.0
+# Records older than this are deleted when a job starts. The tab needs
+# one only while it follows a job; run.log is the lasting record.
+PROGRESS_KEEP_S = 3 * 24 * 3600.0
+# The phases: 'starting' (the launcher writes it, so a watcher finds the
+# job before it has said a word), 'detect', 'copy', then one of these.
+PROGRESS_FINAL = ('done', 'failed')
+
+
+def progress_path(rundir):
+    """The progress record of the background video jobs of `rundir`:
+    <staging_root>/progress/<run name>_<10 hex digits>.json. The digits
+    hash the normalized absolute path, so two runs of one name in
+    different output folders never share a record; the name is there for
+    a person looking in the folder."""
+    full = os.path.abspath(rundir)
+    tag = hashlib.sha1(os.fsencode(os.path.normcase(full))).hexdigest()
+    name = os.path.basename(full) or 'run'
+    return os.path.join(staging_root(), PROGRESS_DIRNAME,
+                        f"{name}_{tag[:10]}.json")
+
+
+class JobProgress:
+    """The progress record of ONE background job (progress_path).
+
+    update() keeps the record in memory and writes it at most once per
+    PROGRESS_EVERY_S, a change of phase at once; finish() writes the
+    job's last word. Nothing here raises: the record is for the
+    operator's eyes, and failing to write it must never cost the job its
+    real work. `clock` is for tests.
+
+    `pid` is the JOB's process, which a watcher asks about once the record
+    has gone quiet (pid_alive): -1, the default, for this process; None in
+    the record a launcher writes before the job exists (_launch_job)."""
+
+    def __init__(self, rundir, job, path=None, clock=time.time,
+                 pid=-1):
+        self.path = path or progress_path(rundir)
+        self._clock = clock
+        now = clock()
+        self.rec = {'job': job,
+                    'run': os.path.basename(os.path.abspath(rundir)),
+                    'pid': os.getpid() if pid == -1 else pid,
+                    'phase': 'starting',
+                    'started': now, 'phase_started': now, 't': now}
+        self._wrote = None              # when the record last reached disk
+
+    def update(self, phase, done=None, total=None, force=False, **extra):
+        """Say which phase the job is in and how far into it; written
+        when due."""
+        now = self._clock()
+        rec = self.rec
+        if phase != rec.get('phase'):
+            # a new phase starts its own count and its own clock
+            for k in ('done', 'total', 'what', 'text', 'warn'):
+                rec.pop(k, None)
+            rec['phase'], rec['phase_started'] = phase, now
+            force = True
+        if done is not None:
+            rec['done'] = done
+        if total is not None:
+            rec['total'] = total
+        rec.update(extra)
+        if (force or self._wrote is None
+                or now - self._wrote >= PROGRESS_EVERY_S):
+            self.write(now)
+
+    def finish(self, ok, text, warn=False):
+        """The job's last word: 'done' (ok) or 'failed', and one plain
+        sentence for the tab. Retried for about a second, because nothing
+        is written after it, and on Windows a reader that has the file
+        open at that moment makes the replace fail (WinError 5, measured
+        2026-10-06); an ordinary update simply goes out with the next."""
+        rec = self.rec
+        for k in ('done', 'total', 'what'):
+            rec.pop(k, None)
+        rec.update(phase='done' if ok else 'failed', text=str(text),
+                   warn=bool(warn), phase_started=self._clock())
+        for _ in range(10):
+            if self.write():
+                return True
+            time.sleep(0.1)
+        return False
+
+    def write(self, now=None):
+        """Replace the record on disk. -> True when it got there."""
+        now = self._clock() if now is None else now
+        self.rec['t'] = now
+        part = f"{self.path}.{os.getpid()}.part"
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            with open(part, 'w', encoding='utf-8') as f:
+                json.dump(self.rec, f, sort_keys=True)
+            os.replace(part, self.path)
+        except Exception:
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+            return False
+        self._wrote = now
+        return True
+
+
+def job_progress(rundir, job):
+    """The JobProgress a background job reports through: at the path its
+    launcher named in JOB_PROGRESS_ENV, written at once so the record
+    carries this process; None when nobody is watching (a job run by
+    hand, or by a test). Old records beside it are cleared first."""
+    path = os.environ.get(JOB_PROGRESS_ENV)
+    if not path:
+        return None
+    _prune_progress(os.path.dirname(path), keep=path)
+    prog = JobProgress(rundir, job, path=path)
+    prog.write()
+    return prog
+
+
+def _prune_progress(folder, keep=None):
+    """Delete progress records (and .part leftovers) older than
+    PROGRESS_KEEP_S from `folder`, except `keep`. Never raises."""
+    cutoff = time.time() - PROGRESS_KEEP_S
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return
+    for n in names:
+        p = os.path.join(folder, n)
+        if p == keep or not n.endswith(('.json', '.part')):
+            continue
+        try:
+            if os.path.getmtime(p) < cutoff:
+                os.remove(p)
+        except OSError:
+            pass
+
+
+def read_progress(path):
+    """A progress record as a dict, or None when there is none or it does
+    not read. Never raises."""
+    try:
+        with open(path, encoding='utf-8') as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+_KERNEL32 = None
+
+
+def pid_alive(pid):
+    """True while process `pid` exists and has not exited, False once it
+    is gone (or `pid` is no process id). One that exists but is not ours
+    to ask about counts as alive. Never raises, and never signals: on
+    Windows os.kill would TERMINATE the process, so this asks
+    OpenProcess and GetExitCodeProcess there. A process id can be reused
+    once its process is gone (soon, on Windows), so a caller asks only
+    about a job it has reason to think recent."""
+    global _KERNEL32
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name == 'nt':
+        try:
+            import ctypes
+            from ctypes import wintypes
+            if _KERNEL32 is None:
+                k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+                k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL,
+                                            wintypes.DWORD)
+                k32.OpenProcess.restype = wintypes.HANDLE
+                k32.GetExitCodeProcess.argtypes = (
+                    wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+                k32.GetExitCodeProcess.restype = wintypes.BOOL
+                k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+                _KERNEL32 = k32
+            k32 = _KERNEL32
+            # PROCESS_QUERY_LIMITED_INFORMATION
+            h = k32.OpenProcess(0x1000, False, pid)
+            if not h:
+                # ERROR_ACCESS_DENIED: there, but not ours to ask about
+                return ctypes.get_last_error() == 5
+            try:
+                code = wintypes.DWORD()
+                if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                    return True
+                return code.value == 259            # STILL_ACTIVE
+            finally:
+                k32.CloseHandle(h)
+        except Exception:
+            return True
+    try:
+        os.kill(pid, 0)                 # signal 0: a check, sends nothing
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _count(v):
+    """A record's count as an int, or None."""
+    f = _num(v)
+    return int(f) if f is not None else None
+
+
+def _dur(sec):
+    """'40 s', '12 min', '1.5 h': a plain duration for the job line."""
+    sec = max(0.0, float(sec))
+    if sec < 90:
+        return f"{sec:.0f} s"
+    if sec < 90 * 60:
+        return f"{sec / 60:.0f} min"
+    return f"{sec / 3600:.1f} h"
+
+
+# The jobs by name, in words for the job line.
+_JOB_WORDS = {'finalize': 'the post-run job',
+              'rerun': 'the edge re-run after Save'}
+
+
+def progress_text(rec, now=None, ended=None):
+    """The SLDEA tab's job line for a progress record -> (text, level).
+
+    `level` is 'busy', 'done' or 'warn'. The tab colors the line by it,
+    and the words say the same thing without the color: every warning,
+    a failure, a job gone quiet or one that ended with a caveat, starts
+    with the warning sign and names run.log. A busy line quotes the time
+    left once the phase has run 5 s, from its own rate.
+
+    `ended`: the watcher knows the job's program is gone while its record
+    still says busy, so the job ended without its last word; an exit code
+    (int) when the watcher has one, else True. Pure."""
+    now = time.time() if now is None else float(now)
+    head = f"video of {rec.get('run') or 'the run'}"
+    phase = rec.get('phase')
+    rerun = rec.get('job') == 'rerun'
+    if phase == 'done':
+        if rec.get('warn'):
+            return (f"⚠ {head}: {rec.get('text') or 'done'}; see run.log",
+                    'warn')
+        return f"{head}: {rec.get('text') or 'done'}", 'done'
+    if phase == 'failed':
+        return (f"⚠ {head}: {rec.get('text') or 'the job failed'}; see "
+                f"run.log", 'warn')
+    if ended is not None and ended is not False:
+        code = '' if ended is True else f" (exit code {ended})"
+        return (f"⚠ {head}: "
+                f"{_JOB_WORDS.get(rec.get('job'), 'the video job')} ended"
+                f"{code} without its last word; see run.log", 'warn')
+    done, total = _count(rec.get('done')), _count(rec.get('total'))
+    if phase == 'detect':
+        busy = (("re-running edge detection after Save" if rerun
+                 else "detecting edges")
+                + f" {done or 0}/{'?' if total is None else total}")
+    elif phase == 'copy':
+        busy = (f"copying {rec.get('what') or VIDEO_FILENAME} into the run "
+                f"folder, {fmt_bytes(done or 0)} of {fmt_bytes(total or 0)}")
+    elif rerun:
+        busy = "starting the edge re-run after Save"
+    else:
+        busy = "starting the post-run job"
+    t = _num(rec.get('t'))
+    quiet = now - t if t is not None else 0.0
+    if quiet > PROGRESS_STALE_S:
+        return (f"⚠ {head}: no word from the job for {_dur(quiet)} (it "
+                f"last said: {busy}); see run.log", 'warn')
+    eta = ''
+    start = _num(rec.get('phase_started'))
+    if start is not None and done and total and done < total \
+            and now - start >= 5.0:
+        eta = f", about {_dur((now - start) / done * (total - done))} left"
+    return f"{head}: {busy}{eta}", 'busy'
 
 
 # ---------------------------------------------------------------------------
@@ -1156,7 +1488,7 @@ def video_gray(path):
 
 
 def detect_video(rundir, stride=1, limit=None, log=print, plot=True,
-                 video_dir=None):
+                 video_dir=None, progress=None):
     """Run Edge Review's detector on every `stride`-th recorded frame.
 
     The SAME detection as the stills get: sldea_edge.candidates against the
@@ -1182,6 +1514,10 @@ def detect_video(rundir, stride=1, limit=None, log=print, plot=True,
     pass re-run after Save can then never leave a reader, or the window,
     with half a new file over half an old one, and two passes that overlap
     leave whichever finished last, whose stamp says what it measured with.
+
+    `progress(frames analyzed, frames to analyze)` is called after every
+    analyzed frame (#396); the second number comes from the index, so it
+    is what the pass expects rather than what the decoder will deliver.
     -> summary dict."""
     import sldea_edge as se
     stride = max(1, int(stride))
@@ -1202,6 +1538,9 @@ def detect_video(rundir, stride=1, limit=None, log=print, plot=True,
     scale = se.mm_per_px({}, run['rows'], settings, baseline_ref=ref)
     src = se.scale_source({}, run['rows'], baseline_ref=ref)
     index = read_index(src_dir)
+    expect = len(range(0, len(index), stride))
+    if limit is not None:
+        expect = min(expect, max(0, int(limit)))
     out_path = os.path.join(rundir, VIDEO_EDGES_FILENAME)
     part = f"{out_path}.{os.getpid()}.part"
     t_start = time.monotonic()
@@ -1254,6 +1593,8 @@ def detect_video(rundir, stride=1, limit=None, log=print, plot=True,
                 fh.flush()
                 rows.append(row)
                 done += 1
+                if progress is not None:
+                    progress(done, expect)
                 if done % 50 == 0:
                     el = time.monotonic() - t_start
                     log(f"video edges: {done} frames, {el / done:.2f} s each")
@@ -1531,6 +1872,145 @@ def _fit_text(d):
 
 
 # ---------------------------------------------------------------------------
+# starting a background job, and how hard it may run (#396)
+# ---------------------------------------------------------------------------
+
+# How far a background job lowers itself on Linux: the nice value the jobs
+# have used since 2026-09-23, now given to the job's autogroup as well
+# (lower_job_priority).
+JOB_NICE = 10
+
+
+def job_popen_kwargs(progress=None):
+    """How a background video job is started. DETACHED, so closing the
+    program that started it cannot cut it off. LOW PRIORITY from its first
+    instruction on Windows (BELOW_NORMAL_PRIORITY_CLASS); elsewhere in a
+    session of its own, and the job lowers itself (lower_job_priority).
+    Output discarded, in UTF-8: run.log lines carry warning signs, and a
+    Windows child writing to DEVNULL would otherwise encode them as
+    cp1252. `progress` names the record the job reports through
+    (JOB_PROGRESS_ENV); None, and it reports through none."""
+    env = dict(os.environ, PYTHONIOENCODING='utf-8')
+    env.pop(JOB_PROGRESS_ENV, None)
+    if progress:
+        env[JOB_PROGRESS_ENV] = progress
+    kw = {'stdin': subprocess.DEVNULL, 'stdout': subprocess.DEVNULL,
+          'stderr': subprocess.DEVNULL, 'env': env}
+    if os.name == 'nt':
+        kw['creationflags'] = (getattr(subprocess, 'DETACHED_PROCESS', 0)
+                               | getattr(subprocess,
+                                         'CREATE_NEW_PROCESS_GROUP', 0)
+                               | getattr(subprocess,
+                                         'BELOW_NORMAL_PRIORITY_CLASS', 0))
+    else:
+        kw['start_new_session'] = True
+    return kw
+
+
+def _launch_job(cmd, rundir, job, popen=None):
+    """Start one background job, announced in its progress record FIRST:
+    a watcher that looks before the job has said a word still finds it
+    starting. That matters for the re-run after Save, because an --auto
+    Edge Review closes right after the Save that started it (#363), and
+    the SLDEA tab stops following a run once nothing is left that may
+    report on it. A launch that fails says so in the record as well. The
+    record's pid stays None until the job writes its own (job_progress,
+    the first thing it does), so no watcher mistakes the launcher for the
+    job. -> the Popen."""
+    prog = JobProgress(rundir, job, pid=None)
+    prog.write()
+    try:
+        return (popen or subprocess.Popen)(cmd,
+                                           **job_popen_kwargs(prog.path))
+    except Exception as e:
+        prog.finish(False, f"{_JOB_WORDS.get(job, job)} could not start "
+                           f"({e})")
+        raise
+
+
+def launch_finalize(staging, rundir, detect=False, popen=None):
+    """Start the post-run job, `sldea_video.py --finalize STAGING RUN
+    [--detect]`, the way launch_rerun starts the re-run after Save:
+    detached, at low priority, reporting through its progress record. Until
+    #396 the SLDEA tab started it with a Popen of its own, at normal
+    priority on Windows. -> the Popen. `popen` is for tests."""
+    cmd = ([sys.executable, os.path.abspath(__file__), '--finalize',
+            staging, rundir] + (['--detect'] if detect else []))
+    return _launch_job(cmd, rundir, 'finalize', popen=popen)
+
+
+def lower_job_priority():
+    """Lower this background job's CPU priority. Never raises.
+
+    Windows: nothing to do here; the launcher started the job BELOW_NORMAL
+    (job_popen_kwargs).
+
+    Linux: os.nice(JOB_NICE) as before #396, and the same value for the
+    job's AUTOGROUP. The launcher starts the job in a session of its own,
+    and sched(7) says of group scheduling that "a thread's nice value has
+    an effect for scheduling decisions only relative to other threads in
+    the same task group", and that with autogrouping each session is
+    such a group. The job's own nice therefore did nothing against the
+    GUI, which runs in another session. The man page's own workaround is
+    `echo 10 > /proc/self/autogroup`, which lowers the whole group. It is
+    written only when this process LEADS its session, so the group is the
+    job's alone: a job run by hand from a terminal never lowers that
+    terminal's group. Without autogroup support, or with it switched off,
+    the write fails or changes nothing, and the plain nice is the one
+    that counts. (A CPU cgroup other than the root one also overrides
+    autogrouping, sched(7) again; the nice then ranks the job inside it.)
+    A positive value needs no privilege, but the kernel answers EAGAIN to
+    an unprivileged write within HZ/10 of the last one on the system
+    (proc_sched_autogroup_set_nice, kernel/sched/autogroup.c), so it is
+    tried twice."""
+    try:
+        os.nice(JOB_NICE)
+    except (AttributeError, OSError):
+        pass
+    try:
+        if os.getsid(0) != os.getpid():
+            return
+    except (AttributeError, OSError):
+        return
+    for attempt in range(2):
+        try:
+            with open('/proc/self/autogroup', 'w') as f:
+                f.write(str(JOB_NICE))
+            return
+        except OSError as e:
+            if e.errno != errno.EAGAIN or attempt:
+                return
+        time.sleep(0.2)
+
+
+def _cap_cv_threads():
+    """Hold OpenCV to half the cores while a background job detects
+    (#396), so the GUI and the next run keep the other half. Measured
+    2026-10-06 on synthetic recordings (320 x 240 and 960 x 540, OpenCV
+    4.13, 16 cores): video_edges.csv is byte-identical at 16, 8 and 1
+    threads. -> the count to restore afterwards, or None. Never raises."""
+    try:
+        import cv2
+        old = cv2.getNumThreads()
+        cv2.setNumThreads(max(1, (os.cpu_count() or 2) // 2))
+        return old
+    except Exception:
+        return None
+
+
+def _restore_cv_threads(old):
+    """Undo _cap_cv_threads, for a caller in a process that lives on (the
+    tests call the jobs in-process). Never raises."""
+    if old is None:
+        return
+    try:
+        import cv2
+        cv2.setNumThreads(old)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # re-running the video pass after Edge Review's Save
 # ---------------------------------------------------------------------------
 
@@ -1542,23 +2022,30 @@ def has_video(rundir):
 def launch_rerun(rundir, popen=None):
     """Start `sldea_video.py RUN --after-save` as a DETACHED, low-priority
     process (it logs into the run's run.log), so closing Edge Review, which
-    a clean Save may now do by itself, cannot cut it off. -> the Popen.
-    `popen` is for tests."""
+    a clean Save may now do by itself, cannot cut it off. Announced in the
+    run's progress record first, so the SLDEA tab's job line reports it
+    (#396). -> the Popen. `popen` is for tests."""
     cmd = [sys.executable, os.path.abspath(__file__), rundir, '--after-save']
-    # UTF-8 output: run.log lines carry warning signs, and a Windows
-    # child writing to DEVNULL would otherwise encode them as cp1252
-    kw = {'stdin': subprocess.DEVNULL, 'stdout': subprocess.DEVNULL,
-          'stderr': subprocess.DEVNULL,
-          'env': dict(os.environ, PYTHONIOENCODING='utf-8')}
-    if os.name == 'nt':
-        kw['creationflags'] = (getattr(subprocess, 'DETACHED_PROCESS', 0)
-                               | getattr(subprocess,
-                                         'CREATE_NEW_PROCESS_GROUP', 0)
-                               | getattr(subprocess,
-                                         'BELOW_NORMAL_PRIORITY_CLASS', 0))
-    else:
-        kw['start_new_session'] = True
-    return (popen or subprocess.Popen)(cmd, **kw)
+    return _launch_job(cmd, rundir, 'rerun', popen=popen)
+
+
+def rerun_running(rundir, now=None):
+    """True while the run's progress record says a re-run after Save is
+    at work: phase not final, a word within PROGRESS_STALE_S, and its
+    program alive (pid_alive), or no pid of its own yet because the
+    launcher has only just announced it. A record gone quiet longer than
+    that is not trusted, because a dead job's process id can be reused.
+    Never raises."""
+    rec = read_progress(progress_path(rundir))
+    if not rec or rec.get('job') != 'rerun' \
+            or rec.get('phase') in PROGRESS_FINAL:
+        return False
+    t = _num(rec.get('t'))
+    now = time.time() if now is None else now
+    if t is None or now - t > PROGRESS_STALE_S:
+        return False
+    pid = rec.get('pid')
+    return pid is None or pid_alive(pid)
 
 
 def after_save(rundir, popen=None):
@@ -1569,7 +2056,15 @@ def after_save(rundir, popen=None):
     No video in the folder also covers a run whose recording is still in
     local staging: the post-run job detects there first and moves the
     files in only afterwards, so a video in the folder means that job's
-    detection is over and a re-run cannot race it."""
+    detection is over and a re-run cannot race it.
+
+    ONE RE-RUN AT A TIME (#396 review). A second Save while a re-run is
+    still at work (rerun_running) starts no second one: two would share
+    the run's progress record, so the SLDEA tab's line would flip between
+    their counts, and together they would take every core. The sentence
+    says so, and begins like the other "not re-run" sentences
+    (VIDEO_SAVE_PROBLEMS in Edge Review), so an --auto window stays open
+    for it: the edges stay out of date until a Save after that re-run."""
     if not has_video(rundir):
         return None
     try:
@@ -1578,6 +2073,10 @@ def after_save(rundir, popen=None):
         why = f"their inputs could not be checked ({e})"
     if why is None:
         return "video edges are current"
+    if rerun_running(rundir):
+        return (f"video edges are out of date ({why}), and a re-run is "
+                f"already running, so no second one was started: Save "
+                f"again when it has finished")
     try:
         launch_rerun(rundir, popen=popen)
     except Exception as e:
@@ -1902,31 +2401,76 @@ def _run_log(rundir):
     return log
 
 
-def finalize_and_detect(staging, rundir, detect=False):
+def finalize_and_detect(staging, rundir, detect=False, progress=None):
     """The detached post-run job: detect on the LOCAL copy first (so the
     gigabytes are read from local disk, not back over the share), then
-    move the files in. -> 0 when the video reached the run folder."""
+    move the files in. -> 0 when the video reached the run folder.
+
+    A long background job, so it yields the CPU first (lower_job_priority)
+    and holds OpenCV to half the cores while it detects. `progress` (a
+    JobProgress, or None) follows it for the SLDEA tab (#396): frames
+    while detecting, bytes while copying, then one sentence on how it
+    ended. Nothing it writes into the run folder or run.log changed."""
     log = _run_log(rundir)
-    have = all(os.path.exists(os.path.join(staging, n))
-               for n in (VIDEO_FILENAME, VIDEO_INDEX_FILENAME))
-    if detect and have:
-        try:
+    on_frame = on_copy = None
+    if progress is not None:
+        def on_frame(n, total):
+            progress.update('detect', n, total)
+
+        def on_copy(name, n, total):
+            progress.update('copy', n, total, what=name)
+    try:
+        lower_job_priority()
+        have = all(os.path.exists(os.path.join(staging, n))
+                   for n in (VIDEO_FILENAME, VIDEO_INDEX_FILENAME))
+        edges, missed = None, None
+        if detect and have:
+            threads = _cap_cv_threads()
             try:
-                os.nice(10)          # a long background job: yield the CPU
-            except (AttributeError, OSError):
-                pass
-            s = detect_video(rundir, log=log, video_dir=staging)
-            log(f"video edges: {s['frames']} frames in {s['seconds']:.0f} "
-                f"s, {_flag_text(s)} -> {VIDEO_EDGES_FILENAME}"
-                + (f", {VIDEO_PLOT_FILENAME}" if s.get('png') else ''))
-        except Exception as e:
-            log(f"⚠ video edges: detection failed ({e}) -- run `python "
-                f"sldea_video.py \"{rundir}\"` once the video is in place")
-    elif detect:
-        log("⚠ video edges: not run -- the recording or its index is "
-            "missing from staging")
-    moved = finalize(staging, rundir, log=log)
-    return 0 if moved.get(VIDEO_FILENAME) else 1
+                s = detect_video(rundir, log=log, video_dir=staging,
+                                 progress=on_frame)
+                log(f"video edges: {s['frames']} frames in "
+                    f"{s['seconds']:.0f} s, {_flag_text(s)} -> "
+                    f"{VIDEO_EDGES_FILENAME}"
+                    + (f", {VIDEO_PLOT_FILENAME}" if s.get('png') else ''))
+                edges = s
+            except Exception as e:
+                log(f"⚠ video edges: detection failed ({e}) -- run `python "
+                    f"sldea_video.py \"{rundir}\"` once the video is in "
+                    f"place")
+                missed = f"edge detection failed ({e})"
+            finally:
+                _restore_cv_threads(threads)
+        elif detect:
+            log("⚠ video edges: not run -- the recording or its index is "
+                "missing from staging")
+            missed = "edge detection did not run (nothing in staging)"
+        moved = finalize(staging, rundir, log=log, progress=on_copy)
+    except BaseException as e:
+        if progress is not None:
+            progress.finish(False, f"the post-run job stopped ({e!r})")
+        raise
+    ok = bool(moved.get(VIDEO_FILENAME))
+    if progress is not None:
+        progress.finish(ok, *_finalize_word(staging, ok, moved, edges,
+                                            missed))
+    return 0 if ok else 1
+
+
+def _finalize_word(staging, ok, moved, edges, missed):
+    """The post-run job's last word on the job line -> (text, warn)."""
+    if not ok:
+        return (f"{VIDEO_FILENAME} could not be moved into the run folder; "
+                f"the recording is still in {staging}"), False
+    text, warn = "ready in the run folder", False
+    if edges is not None:
+        text += (f", edges of {edges['frames']} frames "
+                 f"({edges['flagged']} flagged for review)")
+    if missed:
+        text, warn = f"{text}, but {missed}", True
+    if not moved.get(VIDEO_INDEX_FILENAME):
+        text, warn = f"{text}, but {VIDEO_INDEX_FILENAME} did not move", True
+    return text, warn
 
 
 def _ffmpeg_version():
@@ -1971,7 +2515,9 @@ def main(argv):
             print("--finalize needs STAGING and RUN")
             return 2
         return finalize_and_detect(rest[0], rest[1],
-                                   detect='--detect' in argv)
+                                   detect='--detect' in argv,
+                                   progress=job_progress(rest[1],
+                                                         'finalize'))
     run, stride, limit, plot, after = None, 1, None, True, False
     i = 0
     while i < len(argv):
@@ -2001,17 +2547,25 @@ def main(argv):
     if not run:
         print("give a run folder")
         return 2
+    # The re-run's own pid goes into its record first, before the import
+    # and the run lookup below, which may wait on the share: a watcher
+    # that finds the record quiet asks whether this process is alive.
+    prog = job_progress(run, 'rerun') if after else None
     import sldea_edge as se
     rundir = se.resolve_run(run) or run
     if not os.path.exists(os.path.join(rundir, VIDEO_FILENAME)):
         print(f"no {VIDEO_FILENAME} in {rundir}")
+        if prog is not None:
+            prog.finish(False, f"no {VIDEO_FILENAME} in the run folder")
         return 2
+    if after:
+        # the detached job Save starts: its own session's autogroup too
+        lower_job_priority()
+        return rerun_after_save(rundir, plot=plot, progress=prog)
     try:
         os.nice(10)
     except (AttributeError, OSError):
         pass
-    if after:
-        return rerun_after_save(rundir, plot=plot)
     s = detect_video(rundir, stride=stride, limit=limit, plot=plot)
     print(f"video edges: {s['frames']} frames in {s['seconds']:.0f} s, "
           f"{_flag_text(s)} -> {s['csv']}"
@@ -2028,24 +2582,46 @@ def _flag_text(s):
                f"stills overall" if off else "") + ")")
 
 
-def rerun_after_save(rundir, plot=True):
+def rerun_after_save(rundir, plot=True, progress=None):
     """The detached job Edge Review's Save starts (launch_rerun): say why
-    in run.log, measure every frame again, say what came of it. -> 0."""
+    in run.log, measure every frame again, say what came of it. -> 0.
+
+    OpenCV is held to half the cores while it measures, and `progress` (a
+    JobProgress, or None) follows it for the SLDEA tab (#396)."""
     log = _run_log(rundir)
     try:
-        why = edges_stale(rundir)
-    except Exception as e:
-        why = f"inputs not checked ({e})"
-    log(f"video edges: re-running after Save ({why or 'current'})")
-    try:
-        s = detect_video(rundir, log=log, plot=plot)
-    except Exception as e:
-        log(f"⚠ video edges: the re-run after Save failed ({e}) -- run "
-            f"`python sldea_video.py \"{rundir}\"`")
-        return 1
-    log(f"video edges: {s['frames']} frames in {s['seconds']:.0f} s, "
-        f"{_flag_text(s)} -> {VIDEO_EDGES_FILENAME}"
-        + (f", {VIDEO_PLOT_FILENAME}" if s.get('png') else ''))
+        try:
+            why = edges_stale(rundir)
+        except Exception as e:
+            why = f"inputs not checked ({e})"
+        log(f"video edges: re-running after Save ({why or 'current'})")
+        threads = _cap_cv_threads()
+        try:
+            s = detect_video(rundir, log=log, plot=plot,
+                             progress=(None if progress is None else
+                                       (lambda n, t: progress.update(
+                                           'detect', n, t))))
+        except Exception as e:
+            log(f"⚠ video edges: the re-run after Save failed ({e}) -- run "
+                f"`python sldea_video.py \"{rundir}\"`")
+            if progress is not None:
+                progress.finish(False, f"the edge re-run after Save failed "
+                                       f"({e})")
+            return 1
+        finally:
+            _restore_cv_threads(threads)
+        log(f"video edges: {s['frames']} frames in {s['seconds']:.0f} s, "
+            f"{_flag_text(s)} -> {VIDEO_EDGES_FILENAME}"
+            + (f", {VIDEO_PLOT_FILENAME}" if s.get('png') else ''))
+    except BaseException as e:
+        if progress is not None and progress.rec.get('phase') \
+                not in PROGRESS_FINAL:
+            progress.finish(False, f"the edge re-run after Save stopped "
+                                   f"({e!r})")
+        raise
+    if progress is not None:
+        progress.finish(True, f"edges re-run after Save, {s['frames']} "
+                              f"frames ({s['flagged']} flagged for review)")
     return 0
 
 

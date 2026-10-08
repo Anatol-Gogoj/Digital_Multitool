@@ -189,7 +189,15 @@ cockpit and stays open after every Save. Keyboard: 1/2/3 pick a
 candidate, R reject, 4/D/T open the manual tracer (#162/#172 -- its Done
 stages the polygon as candidate D; Accept commits it like any other
 candidate), Left/Right navigate, Enter accept + next.
+
+SAVE WRITES ON A WORKER THREAD (#396, 2026-10-06). Once confirmed, Save's
+file work runs off the Tk thread behind a modal "Saving n/N" box with the
+busy cursor, so the window keeps repainting. The same files are written,
+byte for byte and in the same order; the plot (matplotlib), the dialogs
+and the status strip stay on the Tk thread. While it writes, a second
+Save, the close box and the review keys are refused.
 """
+import gc
 import math
 import os
 import sys
@@ -613,6 +621,51 @@ def session_readout(secs):
 # read (#363 meets the video review, 2026-10-06).
 VIDEO_SAVE_PROBLEMS = ('video edges not re-run',
                        'video edges are out of date')
+
+# SAVE WRITES ON A WORKER THREAD (#396, 2026-10-06). The steps the "Saving
+# n/N" box counts before the overlays (_save_write): data.csv, the frame
+# renames, the scale anchor, the area-method stamp, the video hook and the
+# plot. Then one step per overlay. And how often the Tk thread looks at
+# what the worker has asked of it.
+SAVE_FIXED_STEPS = 6
+SAVE_POLL_MS = 50
+
+
+class SaveJob:
+    """What Save's worker thread sees of the window (#396). The worker
+    never touches a widget. step() hands the Tk thread the next line of
+    the "Saving n/N" box; call() hands it one function to run (a dialog,
+    the status strip, the matplotlib plot), waits for it, and returns its
+    result or raises its exception, so _save_write reads as if it ran on
+    the Tk thread. Once the window has gone (`abandoned`), call() raises
+    at once rather than wait for a thread that will never answer."""
+
+    def __init__(self, total):
+        self.total = total
+        self.n = 0
+        self.q = _queue.Queue()
+        self.abandoned = False      # the window went away mid-Save
+        self.ended = False          # the Tk thread saw the worker finish
+        self.value = None
+        self.error = None
+
+    def step(self, what):
+        self.n += 1
+        self.q.put(('step', self.n, what))
+
+    def call(self, fn, *a, **kw):
+        done = threading.Event()
+        box = {}
+        if not self.abandoned:
+            self.q.put(('call', fn, a, kw, done, box))
+        while not done.wait(0.05):
+            if self.abandoned:
+                raise tk.TclError("the window closed during Save")
+        if 'error' in box:
+            raise box['error']
+        return box.get('value')
+
+
 # ---------------------------------------------------------------------------
 # hover tooltips (`#216`)
 #
@@ -2301,6 +2354,11 @@ class EdgeReviewApp:
         # generation token so a stale chain can never resurrect state.
         self._detect_busy = False
         self._detect_gen = 0
+        # Save-in-flight guard (#396). Save writes on a worker thread
+        # behind a modal "Saving n/N" box; while it writes, a second Save,
+        # the close box and the review keys are refused
+        # (_save_in_background)
+        self._save_busy = False
         # auxiliary windows are modal or SINGLETON, never unbounded (#176)
         self._adv_win = None
         self._cal_win = None    # the gate dialog is a singleton too: the
@@ -2792,7 +2850,14 @@ class EdgeReviewApp:
         # catches only the first. add='+' because `#281` was exactly this
         # bind replacing a handler that was already there.
         self.root.bind('<Destroy>', self._on_destroy, add='+')
+        # The close box goes through _close_request (#396), which refuses
+        # while a Save writes and is Tk's own default (destroy) otherwise.
+        self.root.protocol('WM_DELETE_WINDOW', self._close_request)
 
+        # The review keys are inert while a Save writes (#396): the Saving
+        # box's grab stops the mouse, never the keyboard, and a key that
+        # accepted or rejected a frame then would change what the worker
+        # is writing.
         for key, fn in (('<Key-1>', lambda e: self._pick_k(0)),
                         ('<Key-2>', lambda e: self._pick_k(1)),
                         ('<Key-3>', lambda e: self._pick_k(2)),
@@ -2809,7 +2874,8 @@ class EdgeReviewApp:
                         ('<Return>', lambda e: self._accept_next()),
                         ('<Left>', lambda e: self._step(-1)),
                         ('<Right>', lambda e: self._step(+1))):
-            self.root.bind(key, fn)
+            self.root.bind(key, lambda e, fn=fn: (None if self._save_busy
+                                                  else fn(e)))
 
     # ---------------- hover help + the primary action's state ----------
     def _attach_tooltips(self):
@@ -3931,8 +3997,29 @@ class EdgeReviewApp:
             return
         self._cancel_pending()
 
+    def _close_request(self):
+        """The window's close box (WM_DELETE_WINDOW, #396). Refused with a
+        bell while a Save writes: its files would be cut off half way, and
+        the "Saving n/N" box in front says why nothing happens. Otherwise
+        the window goes exactly as Tk's own default close made it go,
+        through root.destroy(), whose <Destroy> binding cancels pending
+        work."""
+        if self._save_busy:
+            try:
+                self.root.bell()
+            except tk.TclError:
+                pass
+            return
+        self.root.destroy()
+
     def _redraw_card(self):
         self._resize_job = None
+        if self._save_busy:
+            # not while a Save writes (#396): its renames move frame files
+            # under the rows, and a card drawn between the two would read
+            # FRAME UNREADABLE. Tried again once the Save is over.
+            self._resize_job = self.root.after(120, self._redraw_card)
+            return
         i = self._current()
         if self.run is None or i is None or i not in self.cands_all:
             # nothing to render: re-centre the empty-canvas hint on the new
@@ -4441,6 +4528,14 @@ class EdgeReviewApp:
 
     # ---------------- save ----------------
     def save(self):
+        if self._save_busy:
+            # a second Save while one writes (#396): the Saving box's grab
+            # stops the button, but a script or a key path can get here
+            try:
+                self.root.bell()
+            except tk.TclError:
+                pass
+            return
         if not self.run:
             return
         if self.manual_ref is None:
@@ -4576,6 +4671,34 @@ class EdgeReviewApp:
                  "and outline overlays are saved beside it.")
         if not messagebox.askyesno("Save results", msg):
             return
+        # THE WRITING GOES TO A WORKER THREAD (#396, 2026-10-06). It used to
+        # run here, on the Tk thread, with nothing on screen: data.csv, the
+        # renames, setup.txt, the plot and an overlay rewritten for every
+        # accepted frame (the issue measured 67 ms a frame on a local SSD,
+        # about 4 s for 60, and the bench adds the share's latency), so the
+        # window stopped repainting and looked hung. Now the window keeps
+        # repainting behind a "Saving n/N" box with the busy cursor;
+        # _save_write is the same steps in the same order, and only its
+        # dialogs, its status lines and the matplotlib plot come back to
+        # this thread. One step per fixed file, then one per overlay.
+        close = self._save_in_background(
+            lambda job: self._save_write(job, q, stale, old_stamp),
+            SAVE_FIXED_STEPS + accepted)
+        # CLOSE AFTER A CLEAN SAVE (#363), decided by _save_write and done
+        # here, on this thread, once the Saving box is gone
+        if close:
+            self.root.destroy()
+
+    def _save_write(self, job, q, stale, old_stamp):
+        """Everything Save does once the operator has said yes, on the
+        worker thread of _save_in_background (#396), in the order Save has
+        always used: data.csv, the frame renames, the scale anchor, the
+        area-method stamp, the video hook, the plot, the overlays.
+        `job.step(what)` moves the Saving box on; `job.call(fn, ...)` runs
+        fn on the Tk thread and returns what it returned (the dialogs, the
+        status strip, and the plot, which is matplotlib). `q`, `stale` and
+        `old_stamp` are what the confirmation dialog was built from.
+        -> True when an --auto window should now close (#363)."""
         ref = self.manual_ref or self.base_ref
         scale = se.mm_per_px(self.results, self.run['rows'], self.settings,
                              baseline_ref=ref)
@@ -4646,6 +4769,7 @@ class EdgeReviewApp:
         # a full disk left renamed frames, a stale CSV and a dialog
         # promising a .bak that was never made.
         csv_path = self.run.get('csv_path') or ''
+        job.step("data.csv (the old one is kept as data.csv.bak)")
         try:
             se.apply_results(self.run['rows'], self.results, scale,
                              self.flags, annos, stale=stale)
@@ -4653,14 +4777,16 @@ class EdgeReviewApp:
             se.write_back(self.rundir, self.run)
         except Exception as e:
             has_bak = csv_path and os.path.exists(csv_path + '.bak')
-            messagebox.showerror(
+            job.call(
+                messagebox.showerror,
                 "Save FAILED",
                 f"Writing results failed:\n\n{e}\n\nYour review is still "
                 f"in memory — fix the problem (share up? disk full?) and "
                 f"Save again. No frame files were renamed."
                 + (f"\nA pre-save backup is at data.csv.bak."
                    if has_bak else ""))
-            return
+            return False
+        job.step(f"frame file renames ({len(plan)})")
         renamed, rn_errors = se.apply_rename_plan(plan)
         # NOTHING TO REPORT (#363, 2026-10-05). A failed rename, anchor
         # write or stamp write clears it. A failed plot or overlay returns
@@ -4669,7 +4795,8 @@ class EdgeReviewApp:
         # close an --auto window; any other ending keeps the window open.
         quiet = not rn_errors
         if rn_errors:
-            messagebox.showwarning(
+            job.call(
+                messagebox.showwarning,
                 "Save: renames incomplete",
                 f"data.csv is saved, but {len(rn_errors)} frame "
                 f"rename(s) failed:\n\n" + '\n'.join(rn_errors[:4])
@@ -4686,6 +4813,7 @@ class EdgeReviewApp:
         # writes NO `reanchor` marker — this run WAS reviewed, and the
         # marker's whole job is to distinguish the two.
         anchor_fail_txt = ''
+        job.step("setup.txt: the scale anchor")
         try:
             se.save_scale_anchor(self.rundir,
                                  self._anchor_record(self.manual_ref, scale))
@@ -4708,6 +4836,7 @@ class EdgeReviewApp:
         # only now, after data.csv committed. A failure must be SEEN:
         # with no stamp the run reads as old-method data, and the next
         # Save empties its unreviewed tracker rows.
+        job.step("setup.txt: the area-method stamp")
         if (not self.cands_all
                 and old_stamp.get('area_estimator')
                 == se.AREA_ESTIMATOR_VERSION):
@@ -4727,7 +4856,8 @@ class EdgeReviewApp:
             se.stamp_area_estimator(self.rundir, stamp)
         except OSError as e:
             quiet = False
-            messagebox.showwarning(
+            job.call(
+                messagebox.showwarning,
                 "Save: area-method stamp not written",
                 f"data.csv is saved, but setup.txt could not be updated:"
                 f"\n\n{e}\n\nUntil it is, this run looks as if the OLD "
@@ -4751,6 +4881,7 @@ class EdgeReviewApp:
         # are its inputs: the accepted stills are its checkpoints, the
         # anchor its scale. It starts a detached job and returns at once;
         # a run with no video in its folder says nothing.
+        job.step("video edges: checking whether they need a re-run")
         vid = self._video_after_save()
         vid_txt = f"; {vid}" if vid else ""
         if vid and vid.startswith(VIDEO_SAVE_PROBLEMS):
@@ -4758,18 +4889,21 @@ class EdgeReviewApp:
             # an --auto window must stay open for it (#363)
             quiet = False
         try:
-            self._save_plot(scale)
-            self._save_overlays()
+            # the plot is matplotlib, so it is drawn on the Tk thread (#396)
+            job.step("area_vs_voltage.png")
+            job.call(self._save_plot, scale)
+            self._save_overlays(job.step)
         except Exception as e:
             # data.csv is already written at this anchor, so the caveat
             # belongs on this strip as much as on the one below, and ahead
             # of the error text for the same reason (2026-10-02)
             cav = anchor_caveat(self.manual_ref)
-            self.status.config(text="saved CSV; "
-                                    + (f"{cav}. " if cav else '')
-                                    + anchor_fail_txt
-                                    + f"plot/overlays failed: {e}{vid_txt}")
-            return
+            job.call(self.status.config,
+                     text="saved CSV; "
+                          + (f"{cav}. " if cav else '')
+                          + anchor_fail_txt
+                          + f"plot/overlays failed: {e}{vid_txt}")
+            return False
         scale_txt = (f"scale {scale:.5f} mm/px [{src}]" if scale
                      else "no mm scale — use 📏 Calibrate / "
                           "re-anchor")
@@ -4782,22 +4916,201 @@ class EdgeReviewApp:
         # too large. The caveat goes FIRST after "saved", because the strip
         # is one unwrapped line and its tail is what a narrow window cuts.
         cav = anchor_caveat(self.manual_ref)
-        self.status.config(
-            text=f"saved in {took} — "
-                 + (f"{cav}. " if cav else '')
-                 + anchor_fail_txt
-                 + f"data.csv updated ({scale_txt}){bd_txt}{vid_txt}")
+        job.call(self.status.config,
+                 text=f"saved in {took} — "
+                      + (f"{cav}. " if cav else '')
+                      + anchor_fail_txt
+                      + f"data.csv updated ({scale_txt}){bd_txt}{vid_txt}")
         # CLOSE AFTER A CLEAN SAVE (#363, 2026-10-05), in an --auto window
         # on its own run only. Clean means `quiet` held to the end, the
         # strip names a real mm scale (not "no mm scale -- use Calibrate"),
         # and there is no anchor caveat: the strip above is then routine
         # and nobody needs to read it, so it is allowed to go unseen. Any
-        # other Save leaves the window open exactly as before. Closed by
-        # root.destroy(), the same path as the title-bar close button
-        # (there is no WM_DELETE_WINDOW handler): its <Destroy> binding
-        # runs _cancel_pending, so no `after` callback outlives the window.
-        if quiet and scale and not cav and self._closes_after_save():
-            self.root.destroy()
+        # other Save leaves the window open exactly as before. save()
+        # closes it with root.destroy(), the same call the title-bar close
+        # makes (_close_request): its <Destroy> binding runs
+        # _cancel_pending, so no `after` callback outlives the window.
+        return bool(quiet and scale and not cav
+                    and self._closes_after_save())
+
+    def _save_in_background(self, work, total):
+        """Run `work(job)` (job: a SaveJob) on a worker thread while this
+        window shows the "Saving n/N" box and the busy cursor, and return
+        what it returned. Its exception is raised here, on the Tk thread,
+        where Save's own always was (#396).
+
+        The Tk thread does not block: it waits in the box's event loop, so
+        the window keeps repainting, and every SAVE_POLL_MS it shows the
+        worker's steps and runs what the worker hands it (SaveJob.call).
+        While the worker writes, a second Save, the close box and the
+        review keys are refused (_save_busy), and the box's grab stops the
+        mouse everywhere else in the application.
+
+        The worker is not a daemon thread: should the window be torn down
+        anyway (the close box is refused, but a parent teardown is not),
+        the program waits for the file in hand at exit instead of cutting
+        it off, and the worker stops at its next call into the window.
+        -> None when the window went away first."""
+        job = SaveJob(total)
+        try:
+            old_cursor = self.root.cget('cursor')
+        except tk.TclError:
+            old_cursor = ''
+        try:
+            prev_focus = self.root.focus_get()
+        except (KeyError, tk.TclError):
+            prev_focus = None
+
+        def run():
+            try:
+                job.value = work(job)
+            except BaseException as e:
+                job.error = e
+                if job.abandoned:
+                    print(f"save: stopped after the window closed: {e!r}")
+            finally:
+                job.q.put(('end',))
+        worker = threading.Thread(target=run, name='edge-review-save')
+        # Garbage first, and on this thread. The cyclic collector runs on
+        # whichever thread happens to allocate, and the worker allocates.
+        # A Tk object it frees there runs its finalizer off the Tk thread,
+        # and a whole Tk interpreter freed there aborts the program
+        # ("Tcl_AsyncDelete: async handler deleted by the wrong thread").
+        # Seen 2026-10-06 in a test run of a deliberately broken Save that
+        # drew its plot on the worker: a dead window from an earlier test
+        # was collected there. The window this Save belongs to cannot become
+        # garbage while it runs. Measured 2026-10-06: 13 to 15 ms with 120
+        # frames detected.
+        gc.collect()
+        self._save_busy = True
+        try:
+            dlg, show = self._save_dialog(total)
+            try:
+                self.root.config(cursor='watch')
+                worker.start()
+                self.root.after(SAVE_POLL_MS,
+                                lambda: self._save_poll(job, dlg, show))
+            except BaseException:
+                dlg.destroy()
+                raise
+            dlg.wait_window()
+        finally:
+            self._save_busy = False
+            if not job.ended:
+                job.abandoned = True
+            try:
+                self.root.config(cursor=old_cursor)
+                if prev_focus is not None and prev_focus.winfo_exists():
+                    prev_focus.focus_set()
+            except tk.TclError:
+                pass
+        if job.abandoned:
+            return None
+        worker.join()
+        if job.error is not None:
+            raise job.error
+        return job.value
+
+    def _save_poll(self, job, dlg, show):
+        """On the Tk thread every SAVE_POLL_MS while a Save writes: show
+        the worker's steps, run what it asked for, and close the Saving
+        box once it has finished, which ends _save_in_background's wait.
+        Each call either ends the wait or schedules the next one, so an
+        error in here cannot leave the box up forever."""
+        try:
+            while True:
+                item = job.q.get_nowait()
+                if item[0] == 'step':
+                    try:
+                        show(item[1], item[2])
+                    except tk.TclError:
+                        pass
+                elif item[0] == 'call':
+                    _kind, fn, a, kw, done, box = item
+                    try:
+                        box['value'] = fn(*a, **kw)
+                    except BaseException as e:
+                        box['error'] = e
+                    finally:
+                        done.set()
+                else:                       # 'end': the worker is done
+                    job.ended = True
+                    break
+        except _queue.Empty:
+            pass
+        finally:
+            try:
+                if job.ended:
+                    dlg.destroy()
+                else:
+                    self.root.after(SAVE_POLL_MS,
+                                    lambda: self._save_poll(job, dlg, show))
+            except tk.TclError:
+                pass                        # the window is gone
+
+    def _save_dialog(self, total):
+        """The "Saving n/N" box (#396): transient to this window, centered
+        over it, with a bar and the file being written, and the busy
+        cursor. It holds the grab, so nothing else can be pressed while
+        Save writes. It has no button and its close box does nothing: a
+        Save cannot be stopped half way, because the order of its
+        destructive phase is load-bearing (see _save_write).
+        -> (the box, show(n, what))."""
+        dlg = tk.Toplevel(self.root)
+        try:
+            dlg.withdraw()              # placed before it is shown, no jump
+            dlg.title("Saving…")
+            dlg.transient(self.root)
+            dlg.resizable(False, False)
+            dlg.protocol('WM_DELETE_WINDOW', lambda: None)
+            dlg.config(cursor='watch')
+            head = tk.Label(dlg, anchor='w',
+                            font=('TkDefaultFont', 11, 'bold'))
+            head.pack(fill='x', padx=14, pady=(12, 4))
+            bar = ttk.Progressbar(dlg, length=360, mode='determinate',
+                                  maximum=max(1, total))
+            bar.pack(fill='x', padx=14)
+            what = tk.Label(dlg, anchor='w', justify='left', wraplength=360)
+            what.pack(fill='x', padx=14, pady=(4, 12))
+
+            def show(n, text):
+                head.config(text=f"Saving {n}/{total}")
+                bar.config(value=min(n, total))
+                what.config(text=text)
+            show(0, "starting")
+            # centered over the window, kept on the screen (as cal_choice)
+            dlg.update_idletasks()
+            w_, h_ = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+            try:
+                px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
+                pw, ph = self.root.winfo_width(), self.root.winfo_height()
+            except tk.TclError:
+                px = py = 0
+                pw, ph = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
+            x = max(0, min(px + max(0, (pw - w_) // 2),
+                           dlg.winfo_screenwidth() - w_))
+            y = max(0, min(py + max(0, (ph - h_) // 3),
+                           dlg.winfo_screenheight() - h_))
+            dlg.geometry(f"+{x}+{y}")
+            # Shown and given the grab only over a window that is itself
+            # on screen. Over a withdrawn one (the tests) it stays hidden:
+            # Tk on Windows grants a grab to a window that is not mapped,
+            # and that would hold the pointer of every other window of the
+            # application. _save_busy refuses a second Save, the close box
+            # and the review keys either way.
+            if self.root.winfo_viewable():
+                dlg.deiconify()
+                dlg.lift()
+                dlg.focus_set()
+                try:
+                    dlg.grab_set()
+                except tk.TclError as e:
+                    # costs the modality, not the Save
+                    print(f"save: the Saving box has no grab: {e}")
+        except BaseException:
+            dlg.destroy()
+            raise
+        return dlg, show
 
     def _closes_after_save(self):
         """True when this window is an --auto launch AND the run loaded now
@@ -4863,16 +5176,21 @@ class EdgeReviewApp:
         fig.savefig(os.path.join(self.rundir, 'area_vs_voltage.png'), dpi=110)
         plt.close(fig)
 
-    def _save_overlays(self):
+    def _save_overlays(self, step=None):
+        """One outline overlay per accepted frame, in overlays/. Runs on
+        Save's worker thread (#396); `step(what)` is called before each
+        frame, so the Saving box counts them."""
         import cv2
         import numpy as np
         outdir = os.path.join(self.rundir, 'overlays')
         os.makedirs(outdir, exist_ok=True)
-        for i, r in self.results.items():
-            if not r:
-                continue
+        todo = [(i, r) for i, r in self.results.items() if r]
+        for k, (i, r) in enumerate(todo, 1):
             row = self.run['rows'][i]
             path = se.frame_path(self.run, row)
+            if step is not None:
+                step(f"overlays: {os.path.basename(path or '')} "
+                     f"({k}/{len(todo)})")
             img = cv2.imread(path)
             if img is None:
                 continue

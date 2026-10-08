@@ -522,6 +522,11 @@ class InstrumentControlGUI:
         # start asks first while one is copying to the share)
         self._sldea_recorder = None
         self._sldea_video_jobs = []
+        # The job line (#396): the run whose background video jobs it
+        # follows (see _sldea_job_watch), and the Edge Review windows this
+        # tab opened, whose Save may start a re-run of the video pass
+        self._sldea_job = None
+        self._sldea_edge_procs = []
         # The live view (#376): a window that shows frames the run already
         # holds, never the camera itself. A stills-only run hands each
         # still over in ONE attribute (a reference swap in _sldea_capture);
@@ -3404,6 +3409,18 @@ LOGGING:
                     "right-click menu, or "
                     "Edge Review.").pack(side=tk.RIGHT, padx=(8, 0))
 
+        # The background video job's line (#396), under the run row: the
+        # post-run move of a recording into the run folder (with its edge
+        # detection), then a re-run after Edge Review's Save, each as its
+        # program reports it (_sldea_job_watch). A line of its own, never
+        # the status above: that one carries the run's alarms ("NOT
+        # ZEROED"), which a progress line must not overwrite. Packed the
+        # first time a job reports, so a session without video looks as
+        # it did.
+        self.sldea_job_line = tk.Label(f, text="", anchor='w',
+                                       justify='left', fg=MUTED,
+                                       wraplength=1100)
+
         # The camera settings a run started now would use (2026-10-02). A
         # run takes its exposure and gain from the Webcam tab's entry
         # boxes, and nothing on this tab said so: the 2026-10-01 run went
@@ -4837,11 +4854,18 @@ LOGGING:
         target = rundir or self.sldea_outdir.get()
         cmd = [sys.executable, script, target] + (['--auto'] if auto else [])
         try:
-            subprocess.Popen(cmd, start_new_session=True)
+            proc = subprocess.Popen(cmd, start_new_session=True)
             self.status_bar.config(
                 text=f"Edge Review opened on {os.path.basename(target)}")
         except Exception as e:
             messagebox.showerror("Edge Review", f"Could not launch: {e}")
+            return
+        # Kept (#396): while a window opened here is open, its Save may
+        # start a re-run of the video pass, and the job line reports it.
+        procs = getattr(self, '_sldea_edge_procs', [])
+        self._sldea_edge_procs = [p for p in procs if p.poll() is None]
+        self._sldea_edge_procs.append(proc)
+        self._sldea_job_resume()
 
     def _sldea_tuner_confirmed(self):
         """Modal 'are you sure' gate in front of the parameter tuner.
@@ -5923,7 +5947,12 @@ LOGGING:
         copy for a COMPLETED run when asked, then a throttled, .part-safe
         move into the run folder. Detached, so closing this app cannot cut
         a multi-gigabyte copy off half way; it logs into that run's
-        run.log itself."""
+        run.log itself.
+
+        Started by sldea_video.launch_finalize (#396): at below-normal
+        priority on Windows, lowering itself on Linux, and reporting
+        through a progress record that the job line under the run row
+        follows (_sldea_job_watch)."""
         log = self._sldea_run_logger(rundir)
         if not rec.wait_finished(600.0):
             log(f"⚠ video: the encoder was still writing after 10 min — "
@@ -5938,14 +5967,9 @@ LOGGING:
             except OSError:
                 pass
             return
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              'sldea_video.py')
-        cmd = ([sys.executable, script, '--finalize', staging, rundir]
-               + (['--detect'] if detect else []))
+        proc = None
         try:
-            proc = subprocess.Popen(cmd, start_new_session=True,
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL)
+            proc = sldea_video.launch_finalize(staging, rundir, detect)
             self._sldea_video_jobs.append(proc)
             log("video: moving the recording into the run folder"
                 + (", after edge detection on every frame" if detect
@@ -5956,6 +5980,149 @@ LOGGING:
             log(f"⚠ video: could not start the move ({e}) — the recording "
                 f"is in {staging}; run `python sldea_video.py --finalize "
                 f"\"{staging}\" \"{rundir}\"` by hand")
+        # The job line follows it from here, a launch that failed included
+        # (its record says so). Handed to the Tk thread, which owns the
+        # label and the poll.
+        try:
+            self.root.after(0, lambda: self._sldea_job_watch(rundir, proc))
+        except Exception:
+            pass
+
+    # The job line re-reads the followed run's progress record this often
+    # while a job is busy: a stat of one local file, and a read of a few
+    # hundred bytes only when the stat says it changed (16 us and 51 us,
+    # measured 2026-10-06 on the Windows PC). The job writes it at most
+    # once a second (sldea_video.PROGRESS_EVERY_S). While no job is busy
+    # and the line only waits for a re-run after Save, it looks half as
+    # often.
+    SLDEA_JOB_POLL_MS = 1000
+    SLDEA_JOB_IDLE_MS = 2000
+    # How long the line goes on looking at a busy record that has stopped
+    # changing (#396 review). A re-run after Save is a program nobody here
+    # holds a handle on, and a step of it can write nothing for longer than
+    # sldea_video.PROGRESS_STALE_S: its start-up and staleness check on a
+    # stalled share, or the CSV and the figure after its last frame. The
+    # line then says the job has gone quiet, but keeps looking at the idle
+    # pace while the job's program is alive (sldea_video.pid_alive), so its
+    # last word is still read when it comes; at most this long, because
+    # Windows reuses process ids.
+    SLDEA_JOB_GIVE_UP_S = 30 * 60
+    # The job line's colors (#396 review): the repo's muted gray (MUTED)
+    # while a job works, then Paul Tol's muted green and muted wine, the
+    # two muted Tol colors sldea_plot.GROUP_COLORS already uses. Their WCAG
+    # contrast as text on the Windows default background (#F0F0F0) is
+    # 6.5:1, 5.0:1 and 7.7:1; the repo's Tol yellows come to 1.7 and
+    # 1.9:1 there, too faint for words. The words carry the meaning, and
+    # the color only repeats it.
+    SLDEA_JOB_COLORS = {'busy': MUTED, 'done': '#117733', 'warn': '#882255'}
+
+    def _sldea_job_watch(self, rundir, proc=None):
+        """Follow the background video jobs of `rundir` on the job line
+        (#396): the post-run job `proc` started by _sldea_video_postrun,
+        then a re-run after Edge Review's Save. That one is a program the
+        Edge Review window starts, announced in the same progress record,
+        so it is reported here too, which matters because an --auto window
+        closes after a clean Save (#363). Tk thread only. A newer run
+        replaces the one followed."""
+        old = getattr(self, '_sldea_job', None)
+        if old is not None and old.get('after') is not None:
+            try:
+                self.root.after_cancel(old['after'])
+            except Exception:
+                pass
+        self._sldea_job = {'rundir': rundir, 'proc': proc,
+                           'path': sldea_video.progress_path(rundir),
+                           'sig': None, 'rec': None, 'after': None}
+        self._sldea_job_tick()
+
+    def _sldea_job_resume(self):
+        """Look at the followed run again, on a schedule, if the line had
+        stopped: an Edge Review window just opened here may Save it."""
+        job = getattr(self, '_sldea_job', None)
+        if job is not None and job.get('after') is None:
+            self._sldea_job_tick()
+
+    def _sldea_job_tick(self):
+        """One look at the followed run's progress record, and the next
+        one scheduled while anything may still report on it: the post-run
+        job still running, a record saying a job is busy (once it has gone
+        quiet, sldea_video.PROGRESS_STALE_S, only while its program is
+        alive and for at most SLDEA_JOB_GIVE_UP_S), or an Edge Review
+        window opened from this tab, whose Save may start a re-run.
+        Otherwise the poll stops, and the line keeps the last word. Tk
+        thread only; never raises. The process check runs only on a quiet
+        record, so a tick is still a stat and, when that changed, a read."""
+        job = getattr(self, '_sldea_job', None)
+        if job is None:
+            return
+        job['after'] = None
+        try:
+            # the job's exit first, its record second: a job that wrote its
+            # last word and exited between the two would otherwise read as
+            # one that died mid-copy
+            proc = job['proc']
+            code = proc.poll() if proc is not None else None
+            try:
+                st = os.stat(job['path'])
+                sig = (st.st_ino, st.st_mtime_ns, st.st_size)
+            except OSError:
+                sig = None
+            if sig is not None and sig != job['sig']:
+                rec = sldea_video.read_progress(job['path'])
+                if rec is not None:
+                    job['sig'], job['rec'] = sig, rec
+            rec, now = job['rec'], time.time()
+            run = os.path.basename(os.path.abspath(job['rundir']))
+            busy = (rec is not None and rec.get('phase')
+                    not in sldea_video.PROGRESS_FINAL)
+            quiet = (now - float(rec.get('t') or 0.0)) if busy else 0.0
+            fresh = busy and quiet <= sldea_video.PROGRESS_STALE_S
+            ended = None        # the job's program is gone without a word
+            if (code is not None and busy
+                    and rec.get('job') == 'finalize'):
+                ended = code
+            elif busy and not fresh and rec.get('pid') is not None \
+                    and not sldea_video.pid_alive(rec.get('pid')):
+                ended = True
+            waiting = (busy and ended is None
+                       and quiet <= self.SLDEA_JOB_GIVE_UP_S)
+            if rec is None:
+                text, level = (f"video of {run}: the post-run job gives no "
+                               f"progress here; see run.log"), 'busy'
+            else:
+                text, level = sldea_video.progress_text(rec, now=now,
+                                                        ended=ended)
+            self._sldea_job_show(text, level)
+            edge_open = any(p.poll() is None for p in
+                            getattr(self, '_sldea_edge_procs', ()))
+            running = proc is not None and code is None
+            if running or waiting or edge_open:
+                job['after'] = self.root.after(
+                    self.SLDEA_JOB_POLL_MS if (running or fresh)
+                    else self.SLDEA_JOB_IDLE_MS, self._sldea_job_tick)
+        except Exception:
+            pass                # a progress line is never worth a traceback
+
+    def _sldea_job_show(self, text, level):
+        """Put `text` on the job line, colored by `level` ('busy', 'done'
+        or 'warn', SLDEA_JOB_COLORS). The words carry the meaning on their
+        own: a warning starts with the warning sign and names run.log.
+        Packed under the run row the first time."""
+        lbl = getattr(self, 'sldea_job_line', None)
+        if lbl is None:
+            return
+        colors = self.SLDEA_JOB_COLORS
+        fg = colors.get(level, colors['warn'])
+        try:
+            if lbl.cget('text') != text or lbl.cget('fg') != fg:
+                lbl.config(text=text, fg=fg)
+            if not lbl.winfo_manager():
+                cam = getattr(self, 'sldea_cam_line', None)
+                where = ({'before': cam} if cam is not None
+                         and cam.winfo_manager() == 'pack' else {})
+                lbl.pack(fill='x', padx=14, pady=(0, 2), **where)
+        except tk.TclError:
+            pass
 
     def _sldea_cam_value(self, attr, default):
         try:

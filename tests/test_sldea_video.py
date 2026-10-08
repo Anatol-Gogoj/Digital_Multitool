@@ -1539,11 +1539,17 @@ def test_after_save_reruns_stale_edges_detached_and_only_then():
         return None
     bare = _video_run(video=False)
     d = _video_run(3)
+    # the launch announces the job in a progress record under the staging
+    # root (#396): a temporary one here, never that of the PC running this
+    stage = tempfile.mkdtemp(prefix='sldea_video_stage_')
+    saved_stage = os.environ.get('SCPI_SLDEA_VIDEO_STAGING')
+    os.environ['SCPI_SLDEA_VIDEO_STAGING'] = stage
     try:
         assert sv.after_save(bare, popen=popen) is None and not calls
         msg = sv.after_save(d, popen=popen)
         assert msg.startswith('video edges re-running in the background'), \
             msg
+        assert os.listdir(os.path.join(stage, sv.PROGRESS_DIRNAME))
         assert 'there are no video edges yet' in msg
         cmd, kw = calls[-1]
         assert cmd[-2:] == [d, '--after-save'], cmd
@@ -1558,6 +1564,11 @@ def test_after_save_reruns_stale_edges_detached_and_only_then():
         assert sv.after_save(d, popen=popen) == 'video edges are current'
         assert len(calls) == n
     finally:
+        if saved_stage is None:
+            os.environ.pop('SCPI_SLDEA_VIDEO_STAGING', None)
+        else:
+            os.environ['SCPI_SLDEA_VIDEO_STAGING'] = saved_stage
+        shutil.rmtree(stage, ignore_errors=True)
         shutil.rmtree(bare, ignore_errors=True)
         shutil.rmtree(d, ignore_errors=True)
 

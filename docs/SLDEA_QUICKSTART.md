@@ -80,8 +80,8 @@ Set it on the "Webcam" tab:
    the disc is still not clear, change the light, then press "Auto-set camera" again. If a step
    fails, the line says which, and the previous lock stays.
 4. To set the exposure by hand instead, type it in "exposure_time_absolute" (units of 100
-   microseconds: 20 = 2 ms), keep "gain" at 0, open "Advanced camera settings" and press "Apply &
-   Lock" ("saved for next start" means it saved). Typing alone changes nothing in the preview, and
+   microseconds: 20 = 2 ms), keep "gain" at 0, and press "Apply & Lock" beside them ("saved
+   for next start" means it saved). Typing alone changes nothing in the preview, and
    the line under the boxes says "Typed, not locked" until you lock. Every run on file except
    2026-10-01 used exposure 23 to 100; that run used 3 (0.3 ms).
 5. Make a lock your last camera action: "Auto-set camera", or "Apply & Lock". "Refresh", "Read
@@ -334,7 +334,7 @@ On 2026-10-01 (run SLDEA_20261001_151016) three things went wrong in a row, mark
 | You see | Likely cause | Do this |
 |---|---|---|
 | Baseline photo in frames/ is flat dark gray, no disc (failure 1); the pre-flight picture may have looked fine | The exposure field and the lock disagreed, or exposure really was 3 (setup.txt; the other runs used 23 to 100). Not provable: nothing logs the pre-flight | "Abort" (section 6). Section 2: press "Auto-set camera" (or raise the exposure and "Apply & Lock" last), press Run again |
-| The exposure field shows a number you did not type | Starting the app, "Refresh", "Read camera" or "Auto-expose" filled it from the camera | Press "Auto-set camera", or type your value and press "Apply & Lock" (under "Advanced camera settings") last |
+| The exposure field shows a number you did not type | Starting the app, "Refresh", "Read camera" or "Auto-expose" filled it from the camera | Press "Auto-set camera", or type your value and press "Apply & Lock" last |
 | First "meas" line has a sign or size the lab did not expect | Trek polarity, the "Trek inverts" box and the scope window disagree | "Abort", ask the lab (box item 3), start a new run |
 | "V_Out off-screen (9.9E37 sentinel)" (failure 2: lost from 2.25 kV, run aborted at 3.0 kV) | The reading left the scope screen (window framed for positive kV, readings negative), though "monitor check: OK" was logged | Not an Abort rule here: ask the lab (box item 10). Section 3, step 5 |
 | Dialog "HV NOT ZEROED" | The app could not zero the signal generator | Do what the dialog says, at once |

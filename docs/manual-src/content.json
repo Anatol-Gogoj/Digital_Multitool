@@ -1320,10 +1320,6 @@
     "what": "Opens one field per camera knob the camera reports (white balance, brightness and the rest) and the single steps below. Closed when the tab opens."
    },
    {
-    "label": "🔒 Apply & Lock (Advanced)",
-    "what": "Writes every panel value to the camera, keeps re-asserting them during all captures, and saves them for the next start. Needed after typing a value by hand."
-   },
-   {
     "label": "Read camera (Advanced)",
     "what": "Refills the fields from the camera's current state."
    },
@@ -1363,7 +1359,7 @@
   "workflow": [
    "Open the tab; the preview starts by itself. If the view says PREVIEW OFF, read the reason under it, then pick the camera number and click Start Preview.",
    "Turn the lens until the focus score (on by default) peaks.",
-   "Press Auto-set camera and wait for \"locked\" on the line under it (or set the values under Advanced camera settings and press 🔒 Apply & Lock).",
+   "Press Auto-set camera and wait for \"locked\" on the line under it (or type the exposure and gain and press 🔒 Apply & Lock beside them).",
    "Set the save folder and filename prefix.",
    "Snapshot for one photo, or Start interval for a timelapse.",
    "For voltage-vs-image runs: fill start/stop/step and dwell, click Run sweep.",
@@ -1374,7 +1370,7 @@
    "Before a sweep, turn the channel's Output ON in the Signal Gen tab — otherwise the levels are written but never reach the device, and you get a folder of identical photos.",
    "A sweep leaves the generator sitting at the LAST level when it ends — it does not return the output to zero.",
    "Starting a sweep or timed capture stops the live preview to free the camera; a running interval capture stops with it.",
-   "Without a lock (Auto-set camera, or 🔒 Apply & Lock under Advanced) the camera's firmware auto-gain/auto-WB drifts brightness and colour mid-run.",
+   "Without a lock (Auto-set camera, or 🔒 Apply & Lock) the camera's firmware auto-gain/auto-WB drifts brightness and colour mid-run.",
    "The focus CSV is rewritten on every run with the same prefix — change the prefix to keep the previous one."
   ],
   "callouts": [

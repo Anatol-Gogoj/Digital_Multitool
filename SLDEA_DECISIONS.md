@@ -1280,7 +1280,10 @@ time, and setup.txt records as much as possible).**
    depends on the one before. A step that fails stops the sequence, names
    the step, and leaves the previous lock and the boxes as they were. The
    boxes and the lock come out equal, so the run (which takes the boxes)
-   and the preview (which shows the lock) see the same picture.
+   and the preview (which shows the lock) see the same picture. 🔒 Apply
+   & Lock sits beside the exposure and gain boxes (owner, 2026-10-08),
+   because a value typed there and left unlocked splits the boxes from
+   the lock again.
 2. **Every trial picture is shot under its own controls**
    (`oneshot_rgb(..., controls=...)`), and the lock changes only at the
    last step. Stabilize and Auto-WB once use the same two searches

@@ -222,9 +222,10 @@ CAM_OFF_NOT_FOUND = "Camera not found: {}"
 CAM_NO_FRAME_REASON = "The camera is not sending frames"
 
 # ---- Webcam tab: Auto-set camera, Advanced, the focus overlay (#400) -------
-# The main view keeps what a run uses (exposure and gain) and Auto-set
-# camera. Every other control the camera reports and the single-step
-# buttons sit under Advanced, collapsed until opened.
+# The main view keeps what a run uses (exposure and gain), Apply & Lock
+# beside them, and Auto-set camera. Every other control the camera
+# reports and the single steps sit under Advanced, collapsed until
+# opened.
 CAM_MAIN_CONTROLS = ('exposure_time_absolute', 'gain')
 CAM_AUTOSET_TEXT = "Auto-set camera"
 CAM_ADVANCED_SHOW = "▸ Advanced camera settings"
@@ -275,7 +276,7 @@ def sldea_lock_mismatch(lock, cam_exp, cam_gain):
     return ("The Webcam tab's fields differ from its lock: "
             + ", ".join(diffs) + ". The Webcam preview uses the lock; this "
             "run uses the fields, as this picture does. Press Apply & Lock "
-            "(under Advanced on the Webcam tab) to make them agree.")
+            "on the Webcam tab to make them agree.")
 
 
 def sldea_video_after_run(app, runlog):
@@ -8224,9 +8225,10 @@ LOGGING:
         # & Lock stores every control in webcam.LOCKED_CONTROLS, which every
         # capture path stamps onto the device before each grab/stream.
         # The main view keeps exposure and gain (a run takes them from these
-        # boxes) and Auto-set camera, which finds and locks everything in
-        # one press; every other control and the single steps sit under
-        # Advanced, collapsed until opened (#400).
+        # boxes), Apply & Lock beside them, and Auto-set camera, which
+        # finds and locks everything in one press; every other control
+        # and the single steps sit under Advanced, collapsed until
+        # opened (#400).
         sens = ttk.LabelFrame(
             tab, text="Camera settings (locked on every capture)",
             padding=8)
@@ -8236,6 +8238,19 @@ LOGGING:
         main.pack(fill='x')
         self.camctl_main = ttk.Frame(main)
         self.camctl_main.pack(side=tk.LEFT)
+        # Apply & Lock beside the boxes it locks (owner decision
+        # 2026-10-08): a value typed in them and not locked would bring
+        # back the boxes-versus-lock split that cost 13_backlight. The one
+        # Apply & Lock on the tab; Advanced does not repeat it.
+        self.cam_apply_btn = tk.Button(main, text="🔒 Apply & Lock",
+                                       command=self.cam_apply_controls,
+                                       font=('TkDefaultFont', 9, 'bold'))
+        self.cam_apply_btn.pack(side=tk.LEFT, padx=(4, 0))
+        add_tooltip(self.cam_apply_btn,
+                    "Write every value to the camera (these two and every "
+                    "one under Advanced), LOCK them (re-stamped before every "
+                    "preview/one-shot/run capture), and save them for the "
+                    "next start. Needed after typing a value by hand.")
         self.cam_autoset_btn = tk.Button(
             main, text=CAM_AUTOSET_TEXT, command=self.cam_auto_set,
             font=('TkDefaultFont', 9, 'bold'))
@@ -8261,23 +8276,16 @@ LOGGING:
         self.cam_adv_shown = False
         ttk.Label(self.cam_adv_frame, foreground=MUTED, wraplength=900,
                   justify=tk.LEFT,
-                  text="A value typed here, or in exposure or gain above, "
-                       "changes nothing until 🔒 Apply & Lock.").pack(
-            anchor='w', pady=(4, 2))
+                  text="A value typed here changes nothing until 🔒 Apply "
+                       "& Lock, above.").pack(anchor='w', pady=(4, 2))
         self.camctl_grid = ttk.Frame(self.cam_adv_frame)
         self.camctl_grid.pack(fill='x')
         btns = ttk.Frame(self.cam_adv_frame)
         btns.pack(fill='x', pady=(6, 0))
-        add_tooltip(tk.Button(btns, text="🔒 Apply & Lock",
-                              command=self.cam_apply_controls,
-                              font=('TkDefaultFont', 9, 'bold')),
-                    "Write every value to the camera, LOCK them (re-stamped "
-                    "before every preview/one-shot/run capture), and save "
-                    "them for the next start.").pack(side=tk.LEFT)
         add_tooltip(ttk.Button(btns, text="Read camera",
                                command=self.cam_read_controls),
                     "Refresh the fields from the camera's current state."
-                    ).pack(side=tk.LEFT, padx=6)
+                    ).pack(side=tk.LEFT, padx=(0, 6))
         add_tooltip(ttk.Button(btns, text="Auto-expose",
                                command=self.cam_auto_expose),
                     "Try a range of exposures, keep the one giving a "
@@ -8633,8 +8641,7 @@ LOGGING:
                     self.cam_gain = e
                 if in_main:
                     # a value typed in the main view is not locked until
-                    # Apply & Lock, which now sits under Advanced: say so
-                    # as it is typed (#400)
+                    # Apply & Lock: say so as it is typed (#400)
                     for seq in ('<KeyRelease>', '<FocusOut>'):
                         e.bind(seq, lambda _ev: self._cam_typed_hint(),
                                add='+')
@@ -8666,8 +8673,9 @@ LOGGING:
     def _cam_typed_hint(self):
         """Say on the status line when exposure or gain, as typed in the
         main view, differ from the lock (#400). A run takes these boxes and
-        the preview the lock, and Apply & Lock now sits under Advanced, so
-        a value typed and never locked is named as it is typed. Reads two
+        the preview the lock, so a value typed and never locked would
+        split the two, as on 13_backlight; it is named as it is typed.
+        Reads two
         boxes and the lock dict, never the camera; nothing locked is
         nothing to disagree with."""
         lock = dict(webcam.LOCKED_CONTROLS)
@@ -8686,8 +8694,8 @@ LOGGING:
                 diffs.append(f"{label} {typed} (locked {int(lock[name])})")
         if diffs:
             self._cam_status("Typed, not locked: " + ", ".join(diffs)
-                             + ". Press Auto-set camera, or 🔒 Apply & Lock "
-                               "under Advanced.", 'warn')
+                             + ". Press 🔒 Apply & Lock to lock it, or "
+                               "Auto-set camera.", 'warn')
             self._cam_hint_on = True
         elif getattr(self, '_cam_hint_on', False):
             self._cam_status("", 'busy')

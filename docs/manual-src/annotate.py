@@ -231,11 +231,13 @@ S["tab_webcam"] = {
         {"match": "Start Preview", "badge_at": [299, 204], "label": "Live view — the same button stops it"},
         {"match": "Snapshot", "badge_at": [394, 204], "label": "Save one timestamped PNG"},
         {"match": "Show focus score", "label": "Sharpness number — turn the lens until it peaks"},
-        # #400: one button replaces the four-press sequence; the single
-        # steps (Apply & Lock among them) sit under Advanced, closed in the
-        # shot, so no callout may name them.
+        # #400: one button replaces the four-press sequence, and Apply &
+        # Lock sits beside the boxes it locks (owner decision 2026-10-08).
+        # The single steps sit under Advanced, closed in the shot, so no
+        # callout may name them.
+        {"match": "🔒 Apply & Lock", "label": "Locks what the boxes say, for every capture"},
         {"match": "Auto-set camera", "label": "One press: gain 0, exposure for mid-gray, white balance, then locks it all"},
-        {"match": "▸ Advanced camera settings", "label": "Every camera control, and the single steps with Apply & Lock"},
+        {"match": "▸ Advanced camera settings", "label": "Every camera control, and the single steps (Stabilize, Auto-WB once...)"},
         {"match": "Start interval", "badge_side": "right", "label": "Automatic photo every N seconds"},
         {"match": "Run sweep", "label": "Steps a sig-gen voltage, one photo per level"},
         {"match": "Start timed capture", "label": "Photos at chosen delays after t=0"},

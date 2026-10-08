@@ -180,6 +180,24 @@ def test_the_main_view_keeps_what_a_run_uses_and_advanced_starts_closed():
             assert app.cam_adv_btn.cget('text') == gui.CAM_ADVANCED_SHOW
             assert app.cam_autoset_btn.winfo_ismapped()
             assert app.cam_autoset_btn.cget('text') == gui.CAM_AUTOSET_TEXT
+            # Apply & Lock sits beside the boxes it locks, in view with
+            # Advanced closed, and is the tab's only one (owner decision
+            # 2026-10-08)
+            assert app.cam_apply_btn.cget('text') == "🔒 Apply & Lock"
+            assert app.cam_apply_btn.winfo_ismapped()
+            assert app.cam_apply_btn.master is app.camctl_main.master
+            assert not _descends(app.cam_apply_btn, app.cam_adv_frame)
+            everything = [app._cam_tab]
+            applies = []
+            while everything:
+                w = everything.pop()
+                everything.extend(w.winfo_children())
+                try:
+                    if w.cget('text') == "🔒 Apply & Lock":
+                        applies.append(w)
+                except Exception:
+                    pass
+            assert applies == [app.cam_apply_btn], applies
             # the single steps and Read camera are all under Advanced
             labels = {}
             stack = [app.cam_adv_frame]
@@ -190,8 +208,8 @@ def test_the_main_view_keeps_what_a_run_uses_and_advanced_starts_closed():
                     labels[w.cget('text')] = w
                 except Exception:
                     pass
-            for text in ("🔒 Apply & Lock", "Read camera", "Auto-expose",
-                         "Auto-WB once", "Stabilize (pin gain 0)"):
+            for text in ("Read camera", "Auto-expose", "Auto-WB once",
+                         "Stabilize (pin gain 0)"):
                 assert text in labels, (text, sorted(labels))
             # ...and the toggle opens and closes it
             app._cam_toggle_advanced()
@@ -384,6 +402,24 @@ def test_a_value_typed_in_the_main_view_and_not_locked_is_named():
             WA._pump(root, 0.1)
             assert app.cam_sensor_status.cget('text') == '', \
                 app.cam_sensor_status.cget('text')
+            # the Apply & Lock beside the boxes locks what they say, with
+            # Advanced closed (owner decision 2026-10-08)
+            box.delete(0, 'end')
+            box.insert(0, '31')
+            box.event_generate('<KeyRelease>')
+            assert not app.cam_adv_shown
+            app.cam_apply_btn.invoke()
+            assert WA._pump_in_mainloop(
+                root, lambda: 'camera-ctrl' not in app._bg_busy, secs=10)
+            WA._pump(root, 0.1)
+            assert webcam.LOCKED_CONTROLS['exposure_time_absolute'] == 31, \
+                webcam.LOCKED_CONTROLS
+            status = app.cam_sensor_status.cget('text')
+            assert status.startswith("🔒 locked"), status
+            box.event_generate('<KeyRelease>')
+            WA._pump(root, 0.1)
+            assert app.cam_sensor_status.cget('text') == status, \
+                "a locked value was named as not locked"
         finally:
             WA._close(root, app)
             WA._reap()

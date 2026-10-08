@@ -650,8 +650,7 @@ def camera_line(cam_exp, cam_gain, locked=None, defaults=()):
     return (f"{text}\n⚠ The Webcam tab has LOCKED {preview} instead, so "
             f"its live preview will NOT show what the run records (the "
             f"pre-flight does). Check the boxes on the Webcam tab, then "
-            f"press Apply & Lock (under Advanced), or press Auto-set "
-            f"camera there.",
+            f"press Apply & Lock there, or Auto-set camera.",
             True)
 
 
@@ -846,9 +845,8 @@ def preflight_report(frame, cam_exp, cam_gain, locked=None, focus=None,
         mismatch_line = (f"The preview used {preview} (what the Webcam tab "
                          f"has locked). The run will use {run} (what the "
                          f"boxes on the Webcam tab say). Press Adjust, make "
-                         f"the boxes say what you want, press Apply & Lock "
-                         f"(under Advanced on the Webcam tab), and run "
-                         f"again.")
+                         f"the boxes say what you want, press Apply & Lock, "
+                         f"and run again.")
     ctxt = (f"contrast {content['contrast']:.0f} gray levels" if content
             else "contrast not checked")
     stats = ((f"focus {focus:.0f}   " if focus is not None else "")
@@ -1055,7 +1053,7 @@ def baseline_stop_words(reason, dry, drive_kv, video=False):
                 "measured.\n\n" + drive
                 + "\n\nOpen the Webcam tab, press Auto-set camera (or "
                 "change the exposure or the light by hand and press Apply & "
-                "Lock under Advanced) until you can see the disc, then "
+                "Lock) until you can see the disc, then "
                 "press Run again." + tail)}
 
 

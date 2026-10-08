@@ -8991,6 +8991,16 @@ LOGGING:
         self._new_folder_into(self.cam_dir_var, "Save to")
 
     def cam_refresh_devices(self):
+        if 'camera-ctrl' in self._bg_busy:
+            # Refused while an adjustment runs, as Read camera is (#425):
+            # cam_sync_controls below reads exposure and gain off the
+            # camera, which is then shooting a trial, into the boxes a run
+            # takes, and a search that failed left that trial there over
+            # the unchanged lock. Nothing is re-listed either; the
+            # adjustment has the selected camera until it finishes.
+            self._cam_status("another camera adjustment is still running; "
+                             "press Refresh when it has finished", 'warn')
+            return
         idxs = webcam.list_cameras()
         vals = [str(i) for i in idxs]
         self.cam_combo['values'] = vals

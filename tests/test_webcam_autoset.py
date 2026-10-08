@@ -492,6 +492,96 @@ def test_read_camera_refuses_while_a_run_or_an_adjustment_has_the_camera():
             WA._reap()
 
 
+def test_refresh_refuses_while_an_adjustment_is_writing_the_camera():
+    """#425: Refresh re-lists the cameras and reads exposure and gain off
+    the camera into the boxes (cam_sync_controls). Pressed while Auto-set
+    or Stabilize was mid-search, it read the trial the camera was being
+    shot under, and a search that then failed left that trial in the boxes
+    a run takes, over the unchanged lock. Refresh now refuses while an
+    adjustment runs, as Read camera does, and changes nothing; with the
+    camera free it re-lists and reads it, as before."""
+    import threading
+    for adjust in ('cam_auto_set', 'cam_stabilize'):
+        WA._reap()
+        with WA._Patched(), _Camera():
+            root, app = _tab()
+            if root is None:
+                return
+            # the device: what the last grab stamped on it (oneshot_rgb
+            # stamps a trial's controls), read back as v4l2-ctl would
+            device = dict(STALE_LOCK)
+            held, release = threading.Event(), threading.Event()
+
+            def oneshot(spec, count=2, controls=None):
+                device.update(webcam.LOCKED_CONTROLS if controls is None
+                              else controls)
+                if not held.is_set():
+                    held.set()               # the first trial, held
+                    release.wait(10)
+                return None                  # ...and no trial gives one
+
+            webcam.oneshot_rgb = oneshot
+            webcam.get_control = lambda dev, name: device.get(name)
+
+            def boxes():
+                return (_box(app, 'exposure_time_absolute'),
+                        _box(app, 'gain'))
+
+            try:
+                rows = dict(app.camctl_rows)
+                assert boxes() == ('20', '44'), boxes()
+                getattr(app, adjust)()
+                assert WA._pump_in_mainloop(root, held.is_set, secs=10), \
+                    f"{adjust} never shot a trial"
+                trial = (device['exposure_time_absolute'], device['gain'])
+                assert trial == (webcam.EXPOSURE_TRIALS[0],
+                                 webcam.GAIN_FLOOR), trial
+                # a camera plugged in meanwhile, and Refresh pressed
+                webcam.list_cameras = lambda max_index=8: [0, 2]
+                bar = app.status_bar.cget('text')
+                app.cam_refresh_devices()
+                WA._pump(root, 0.1)
+                mid = boxes()
+                status = app.cam_sensor_status.cget('text')
+                color = str(app.cam_sensor_status.cget('foreground'))
+                values = tuple(app.cam_combo['values'])
+                rebuilt = app.camctl_rows != rows
+                said = app.status_bar.cget('text')
+            finally:
+                release.set()
+            try:
+                # the search found nothing, so it fails and, by design,
+                # leaves the boxes and the lock as they were
+                assert WA._pump_in_mainloop(
+                    root, lambda: 'camera-ctrl' not in app._bg_busy,
+                    secs=10), f"{adjust} never finished"
+                WA._pump(root, 0.1)
+                assert webcam.LOCKED_CONTROLS == STALE_LOCK, \
+                    webcam.LOCKED_CONTROLS
+                assert boxes() == ('20', '44'), (
+                    f"{adjust}: the boxes hold {boxes()} after the search "
+                    f"(Refresh mid-search filled in {mid}; the trial was "
+                    f"{trial}) while the lock holds exposure 20, gain 44")
+                assert mid == ('20', '44'), mid
+                assert not rebuilt, "the rows were rebuilt"
+                assert values == ('0',), values
+                assert said == bar, said
+                assert 'another camera adjustment is still running' in \
+                    status, status
+                assert 'Refresh' in status, status
+                assert color == gui.CAM_STATUS_WARN, color
+                # with the camera free, Refresh re-lists and reads it
+                device.update(exposure_time_absolute=33, gain=5)
+                app.cam_refresh_devices()
+                assert boxes() == ('33', '5'), boxes()
+                assert tuple(app.cam_combo['values']) == ('0', '2')
+                assert app.status_bar.cget('text') == "Found 2 camera(s)"
+            finally:
+                app._bg_busy.discard('camera-ctrl')
+                WA._close(root, app)
+        WA._reap()
+
+
 def _preview_stopped_by_the_operator(root, app):
     """The Webcam tab on screen with its preview off: opened (the tab
     starts its preview, #375), then stopped with Start/Stop Preview."""

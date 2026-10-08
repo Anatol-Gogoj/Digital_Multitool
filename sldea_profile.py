@@ -654,6 +654,166 @@ def camera_line(cam_exp, cam_gain, locked=None, defaults=()):
             True)
 
 
+# ---------------------------------------------------------------------------
+# The run folder (`#402`)
+# ---------------------------------------------------------------------------
+# The worker makes the run folder with exist_ok=True and opens setup.txt and
+# data.csv in it with mode 'w', so a run name used before overwrote that
+# run without a word. The SLDEA tab now shows the folder a run will write
+# to, warns while the operator types, and Run refuses a folder that already
+# holds a run.
+
+# The files that make a folder a run. The worker writes setup.txt right
+# after making the folder and data.csv next, so a run that wrote anything
+# left setup.txt. Looked for by name (two stats), never by listing the
+# folder: a run folder holds thousands of frames, and the share can be slow.
+RUN_FILES = ('setup.txt', 'data.csv')
+# The line's stand-in for a blank Run name, whose folder is only named
+# (SldeaProfile.run_dirname) when the run starts.
+AUTO_RUN_DIRNAME = 'SLDEA_<date>_<time>'
+# How long Run waits for those two stats before it refuses. They run on a
+# thread because sldea_run is on the Tk thread, and a stat on a share that
+# has gone away can block for minutes.
+RUN_FOLDER_CHECK_S = 3.0
+# Past this many characters the line shortens the path from the left, so a
+# long Output dir cannot push the tab's channel boxes aside. The run
+# folder's own name always shows whole; the tooltip has the whole path.
+RUN_FOLDER_LINE_CHARS = 60
+
+
+def run_folder(outdir, run_name, started=None):
+    """The folder a run writes to: <outdir>/<run_name>, or with the name
+    blank, <outdir>/SLDEA_YYYYmmdd_HHMMSS from `started`, the run's start
+    time. With `started` None (the SLDEA tab's line, before any run) a
+    blank name shows as AUTO_RUN_DIRNAME. The worker makes its folder from
+    this and the tab's line shows what it returns, so they cannot drift."""
+    import os
+    if not run_name:
+        run_name = (SldeaProfile.run_dirname(started) if started is not None
+                    else AUTO_RUN_DIRNAME)
+    return os.path.join(outdir, run_name)
+
+
+def run_name_problem(run_name):
+    """Why `run_name` cannot name a run folder, as the message to show, or
+    None when it can. A blank name always can: the run names its folder
+    from its start time. A typed one follows New folder...'s rules
+    (output_folder.name_problem): one folder inside the Output dir, with a
+    name Windows and the share accept, in plain ASCII, because OpenCV on
+    the lab's Windows PCs cannot open frames in a folder named otherwise."""
+    if not (run_name or '').strip():
+        return None
+    import output_folder
+    return output_folder.name_problem(run_name)
+
+
+def holds_run(folder):
+    """The RUN_FILES already in `folder`, in that order: empty when no run
+    is there, the folder itself missing included. Two stats; a stat that
+    fails reads as absent."""
+    import os
+    return [n for n in RUN_FILES if os.path.exists(os.path.join(folder, n))]
+
+
+def holds_run_within(folder, timeout_s=RUN_FOLDER_CHECK_S):
+    """holds_run(folder), waited for at most `timeout_s` -> its list, or
+    None when the stats have not returned by then (a share that hangs).
+    They run on a daemon thread left to finish on its own, which holds the
+    folder's name and a list and nothing of the caller's."""
+    import threading
+    out = []
+    worker = threading.Thread(target=lambda: out.append(holds_run(folder)),
+                              name='sldea-run-folder-check', daemon=True)
+    worker.start()
+    worker.join(timeout_s)
+    return out[0] if out else None
+
+
+def run_folder_refusal(outdir, run_name, timeout_s=RUN_FOLDER_CHECK_S):
+    """Why Run must not start into this run's folder, as the message to
+    show, or None when it may.
+
+    Refused: a typed name that cannot be a folder name, a folder that
+    already holds a run, and a folder whose check has not answered within
+    `timeout_s`, because a run already there cannot be ruled out and
+    writing over the only copy of a run cannot be undone. There is no
+    "start anyway". A blank name is never refused: its folder is named
+    from the start time."""
+    name = (run_name or '').strip()
+    if not name:
+        return None
+    problem = run_name_problem(name)
+    if problem:
+        return (f"The run name '{name}' cannot name the run's folder.\n\n"
+                f"{problem}\n\nType another name, or clear the box and the "
+                f"run names its folder from its start time "
+                f"({AUTO_RUN_DIRNAME}).")
+    folder = run_folder(outdir, name)
+    found = holds_run_within(folder, timeout_s)
+    if found is None:
+        return (f"Could not check the run folder\n{folder}\n\nThe Output dir "
+                f"did not answer within {timeout_s:g} s, so a run already "
+                f"there cannot be ruled out. If it is on the share, check "
+                f"that the share is mounted, then press ▶ Run again.")
+    if found:
+        return (f"The run folder\n{folder}\nalready holds a run: "
+                f"{' and '.join(found)}. A run started there would write "
+                f"over that run's files.\n\nType another run name, or clear "
+                f"the box and the run names its folder from its start time "
+                f"({AUTO_RUN_DIRNAME}).")
+    return None
+
+
+def _short_path(path, limit=RUN_FOLDER_LINE_CHARS):
+    """`path` cut from the left at a separator, behind an ellipsis, to fit
+    `limit` characters. Its last part, the run folder's name, is always
+    kept whole."""
+    if len(path) <= limit:
+        return path
+    cuts = [i for i, c in enumerate(path) if c in '/\\']
+    if not cuts:
+        return path
+    keep = cuts[-1]
+    for i in reversed(cuts):
+        if len(path) - i + 1 > limit:
+            break
+        keep = i
+    return '…' + path[keep:]
+
+
+def run_folder_line(outdir, run_name, found=None, slow=False):
+    """The SLDEA tab's line under Run name -> (text, warn, full).
+
+    `found` is what the last check of this folder saw (holds_run's list),
+    None while that is not known. `slow` says the check out now has not
+    answered for a while. `full` is the whole path, or the whole message
+    for a refused name, for the tooltip. `warn` asks the caller for its
+    warning colour; the words say the same, so colour is never the only
+    cue. A relative Output dir is shown from the working folder, where the
+    run would really write; that costs no file system call."""
+    import os
+    name = (run_name or '').strip()
+    problem = run_name_problem(name)
+    if problem:
+        first = problem.split('. ')[0].rstrip('.') + '.'
+        return (f"⚠ Run name: {first} ▶ Run will refuse it.", True,
+                problem)
+    folder = os.path.abspath(run_folder(outdir, name))
+    short = _short_path(folder)
+    if not name:
+        return (f"Saves to: {short}  (stamped when the run starts)", False,
+                folder)
+    if found:
+        return (f"⚠ {short} already holds a run "
+                f"({' and '.join(found)}). ▶ Run will refuse it: type "
+                f"another name.", True, folder)
+    if slow and found is None:
+        return (f"⚠ Saves to: {short}  (the Output dir is not answering, "
+                f"so a run already there cannot be ruled out yet)", True,
+                folder)
+    return f"Saves to: {short}", False, folder
+
+
 def preflight_start_button(level, mismatch=False, checked=True,
                            fallback=False, tab_mismatch=False):
     """The pre-flight's start button -> (label, is_default).

@@ -4847,6 +4847,87 @@ def test_a_wide_short_window_keeps_the_caption_clear_of_the_axes():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_members_cut_never_leaves_half_an_escaped_dollar():
+    """The #391 review: the Members line's cut strips a trailing '\\'
+    because a cut can land between the two characters of an escaped '$'
+    (_shown), and a lone '\\' then draws as a stray backslash. Nothing
+    tested it: without the strip, 58 of 840 cuts in the review's sweep
+    left one. Here names holding '$' are cut at many widths, and no row
+    may hold a '\\' that does not escape a '$', or read as mathtext."""
+    if not _has_mpl():
+        return
+    from matplotlib import cbook
+    from matplotlib.figure import Figure
+    tail = "… (full membership in the tidy CSV's group column)"
+    cuts = 0
+    for i in range(40):
+        fits = sp._caption_fitter(Figure(figsize=(3.1 + 0.113 * i, 5.4)))
+        for stem in ('R$', '$$', 'x$y$z'):
+            runs = [{'name': f"{stem}{k:02d}_{'x' * (k % 7)}"}
+                    for k in range(40)]
+            cap = sp._group_members_caption(
+                [('G$roup', runs, None, None, None, None)], fits=fits)
+            joined = cap.lstrip('\n')
+            cuts += tail in joined
+            for k, ch in enumerate(joined):
+                if ch == '\\':
+                    assert joined[k + 1:k + 2] == '$', \
+                        (i, stem, joined[max(0, k - 20):k + 25])
+            for row in joined.split('\n'):
+                assert not cbook.is_math_text(row), (i, stem, row)
+    assert cuts > 60, f'only {cuts} cut lines: the sweep stopped cutting'
+
+
+def test_legend_cover_counts_markers_bands_and_text():
+    """_legend_covers_data counts more than lines: a marker by its
+    radius, a band, and a text on the axes. Only the line case was
+    pinned (the #391 review removed each of the other three checks and
+    the suite still passed). Each kind is put under the legend alone,
+    then away from it; a marker just outside the legend's box but
+    within its radius counts."""
+    if not _has_mpl():
+        return
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    from matplotlib.lines import Line2D
+
+    def place(what, where):
+        fig = Figure(figsize=(6.0, 4.0), dpi=100)
+        FigureCanvasAgg(fig)
+        ax = fig.add_subplot(111)
+        ax.set_xlim(0, 10)
+        ax.set_ylim(0, 10)
+        legend = ax.legend(handles=[Line2D([], [], color='k',
+                                           label='run A, a long name')],
+                           loc='upper left')
+        fig.canvas.draw()
+        rend = fig.canvas.get_renderer()
+        box = legend.get_window_extent(rend)
+        inv = ax.transData.inverted()
+        if where == 'under':
+            x, y = inv.transform(((box.x0 + box.x1) / 2,
+                                  (box.y0 + box.y1) / 2))
+        elif where == 'edge':
+            # 2 px below the box: inside an 8 pt marker's radius
+            x, y = inv.transform(((box.x0 + box.x1) / 2, box.y0 - 2))
+        else:
+            x, y = 8.5, 1.5
+        if what == 'marker':
+            ax.plot([x], [y], linestyle='None', marker='o', markersize=8)
+        elif what == 'band':
+            ax.fill_between([x - 0.2, x + 0.2], [y - 0.2] * 2,
+                            [y + 0.2] * 2)
+        else:
+            ax.text(x, y, 'note', ha='center', va='center')
+        fig.canvas.draw()
+        return sp._legend_covers_data(ax, legend, fig.canvas.get_renderer())
+
+    for what in ('marker', 'band', 'text'):
+        assert place(what, 'under'), what
+        assert not place(what, 'away'), what
+    assert place('marker', 'edge'), 'a marker is counted by its radius'
+
+
 # --------------------------------------------------------------------------
 # the export format and the dpi (`#314`) -- the first options that describe
 # the FILE rather than the drawing

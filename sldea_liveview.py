@@ -48,10 +48,12 @@ the ramp):
   the Tk thread by _tkinter and wait until that thread takes them, so
   one made while a tick of this loop runs waits for the tick to end.
   With a 1080p frame a tick costs about 10 ms, twice a second (#388:
-  6.6 ms median and 7.3 ms max without the Tk paste in the review; 9.5
-  ms median and 13 ms max with it on the development PC, 2026-10-06).
-  Any Tk work delays those calls the same way; the coupling predates
-  this window. A closed window has no tick and adds nothing.
+  6.6 ms median and 7.3 ms max without the Tk paste in the review; with
+  it, 9.4 to 9.5 ms median and 13 to 16 ms max in two runs on the
+  Windows development PC, 2026-10-06 and 07; not yet measured on the
+  Linux bench, see bench/test_sldea_liveview_probe.py). Any Tk work
+  delays those calls the same way; the coupling predates this window. A
+  closed window has no tick and adds nothing.
 * Everything here runs on the Tk thread, from a Tk `after` loop at about
   2 Hz that only reads. It never opens, grabs from or re-stamps the
   camera: in a stills-only run a stream would contend for the device

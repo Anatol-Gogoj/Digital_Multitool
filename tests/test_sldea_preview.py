@@ -14,7 +14,8 @@ What these pin down (2026-09-23):
     SLDEA_DECISIONS.md), where that same floor is 15.35, so 18 is the
     stricter of the two bars.) The old green/red pair is held to the same
     bar and must FAIL it, so the check is one that can fail;
-  * marker size follows the room between landings, within its limits;
+  * marker size follows the room between landings, within its limits,
+    and the markers made smaller in #401 keep the old hover reach;
   * the hover text names each snapshot in the tab's own words;
   * on the real tab: the two timing fields sit together under their tags'
     names and still drive the profile, the canvas draws one marker per
@@ -182,6 +183,17 @@ def test_marker_radius_follows_the_room():
     assert pv.R_MIN > 3, "the floor must still beat the old 3 px dots"
 
 
+def test_smaller_markers_keep_the_old_reach_and_legend_place():
+    # #401 drew the markers about 14 % smaller (4 -> 3.5, 7 -> 6). The
+    # pointer's reach keeps the bounds they had before, so the reach did
+    # not shrink with them, and the legend glyph keeps its place between
+    # floor and ceiling.
+    assert (pv.HOVER_R_MIN, pv.HOVER_R_MAX) == (4.0, 7.0), \
+        "the hover reach must keep the pre-#401 radius bounds"
+    assert pv.R_MIN < pv.HOVER_R_MIN and pv.R_MAX < pv.HOVER_R_MAX
+    assert pv.R_MIN <= pv.R_LEGEND <= pv.R_MAX, pv.R_LEGEND
+
+
 def test_real_profiles_size_their_markers_sensibly():
     box = (52, 42, 1240 - 14, 240 - 26)          # the tab's plot box
 
@@ -229,7 +241,7 @@ def test_snapshot_points_run_in_time_order_inside_the_box():
 def test_marker_geometry_is_centred_and_scales():
     for shape in {m[0] for m in pv.MARKERS.values()}:
         spans = []
-        for r in (4, 7):
+        for r in (pv.R_MIN, pv.R_MAX):
             kind, co = pv.marker_coords(shape, 100.0, 50.0, r)
             if kind == 'oval':
                 cx, cy = (co[0] + co[2]) / 2, (co[1] + co[3]) / 2
@@ -419,6 +431,41 @@ def test_hovering_a_marker_describes_it():
         assert 'Baseline' in both and 'warm-up' in both, both
         app._sldea_hover(_Ev(3, 3))                    # empty corner
         assert not c.find_withtag('hover')
+    finally:
+        root.destroy()
+
+
+def test_smaller_markers_are_hovered_from_as_far_as_before():
+    # #401 drew the markers smaller, but a pointer the old reach found
+    # (the pre-#401 radius plus 3 px) must still find the marker.
+    root, app = _app()
+    try:
+        for key, val in (('end_kv', '10'), ('step_kv', '2')):    # sparse
+            e = app.sldea_vars[key]
+            e.delete(0, 'end')
+            e.insert(0, val)
+        app._sldea_refresh()
+        _settle(root, 4)
+        c = app.sldea_canvas
+        p = app._sldea_profile
+        k = app._sldea_ui_scale()
+        x, y, r, s = next(m for m in app._sldea_marks
+                          if m[3]['tag'] == 'post-ramp')
+        assert r == pv.R_MAX * k, (r, k)            # sparse: the ceiling
+        reach = pv.HOVER_R_MAX * k + 3
+        assert r + 3 < reach - 0.5, "the drawn marker did not shrink"
+        head = pv.describe(s, p).splitlines()[0]
+
+        def shown(px, py):
+            app._sldea_hover(_Ev(px, py))
+            return "\n".join(c.itemcget(i, 'text')
+                             for i in c.find_withtag('hover')
+                             if c.type(i) == 'text')
+        # to the left: the ramp up to this landing, with no marker near it
+        assert head in shown(x - (reach - 0.5), y), \
+            "a pointer the old reach found now misses the marker"
+        assert head not in shown(x - (reach + 1.5), y), \
+            "the reach grew past the old one"
     finally:
         root.destroy()
 

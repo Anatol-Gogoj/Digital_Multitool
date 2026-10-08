@@ -10,14 +10,20 @@ What is pinned here:
   worker's old expression to the byte, and the REAL worker makes its
   folder through it, so the line cannot show one folder while the run
   writes another.
-* Run refuses a folder that holds a run, and a name that cannot be a
-  folder name, right after the start gate: before any question, before
-  the video and camera pre-flights and before anything drives the HV,
-  with nothing started and the earlier run's files untouched. It reads
-  the boxes once, there, and the worker gets exactly those values.
+* Run refuses a folder that holds a run, a name that cannot be a folder
+  name, a folder whose check failed or did not answer, and a folder on
+  the share while the share is not mounted, right after the start gate:
+  before any HV question, before the video and camera pre-flights and
+  before anything drives the HV, with nothing started and the earlier
+  run's files untouched. It reads the boxes once, there, and the worker
+  gets exactly those values.
+* A run that appears in the folder after the check makes the worker fail
+  at its first write, before the camera and the SG (mode 'x').
 * The line follows the boxes, warns in words and in Tol's muted wine, and
-  checks the folder on a thread, one check at a time, so a share that
-  hangs never freezes the window. A finished run turns it to a warning.
+  checks the folder on a thread, so a share that hangs never freezes the
+  window. It is two lines high whatever it says, so nothing below it
+  moves; it describes the folder the boxes name now, or, during a run,
+  the run's own. A finished run turns it to a warning.
 
 The run-start cases drive the real sldea_run on test_sldea_interlock's
 stub app, whose messagebox stand-in fails on any question it was not told

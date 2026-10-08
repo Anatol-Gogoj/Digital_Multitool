@@ -1611,9 +1611,10 @@ this fails.
 **TL;DR:** typing a run name a second time made the next run write over
 the first one: the worker opens setup.txt and data.csv with mode 'w' in a
 folder made with `exist_ok=True`. ▶ Run now refuses a run folder that
-already holds setup.txt or data.csv, with no "start anyway", before it
-asks anything. A line under Run name shows the folder as the operator
-types and warns when it already holds a run.
+already holds setup.txt or data.csv, with no "start anyway", before any
+HV question. It also refuses a run folder on the share while the share
+is not mounted. A line under Run name shows the folder as the operator
+types and warns when Run would refuse it.
 
 **Observation.** Read in the code (`#402`), not met on the bench yet.
 `_sldea_worker` built `rundir = os.path.join(outdir, runname or
@@ -1628,8 +1629,8 @@ too. Nothing asked first, and nothing on the tab showed the folder.
 **Decision.**
 
 - **Refuse, do not ask.** An earlier run's data.csv may be the only copy,
-  and an overwrite cannot be undone. A blank name is never refused: its
-  folder is named from the start time.
+  and an overwrite cannot be undone. A blank name is never refused over a
+  run already there: its folder is named from the start time.
 - **A typed name follows New folder's rules** (`output_folder.name_problem`,
   `#394`): one folder inside the Output dir, a name Windows and the share
   accept, plain ASCII, because OpenCV on the lab's Windows PCs cannot open
@@ -1639,8 +1640,9 @@ too. Nothing asked first, and nothing on the tab showed the folder.
   already there cannot be ruled out, and a share that hangs would stall
   the run's own writes as well. On a local disk the check costs 0.15 ms
   (median of 200, Windows VM).
-- **Where it sits.** Right after the start gate, before the video
-  pre-flight, the HV questions and the camera pre-flight, so an operator
+- **Where it sits.** Right after the start gate, which asks a question
+  only when a stepped sweep is still running, and before the video
+  pre-flight, every HV question and the camera pre-flight, so an operator
   is never asked about the HV and then refused over a name. `sldea_run`
   reads both boxes there, once, and hands those values to the worker, so
   the folder checked is the folder written.
@@ -1648,16 +1650,61 @@ too. Nothing asked first, and nothing on the tab showed the folder.
   `sldea_profile.run_folder`, which the tab's line uses too; it gives the
   old expression's result to the byte.
 
+**Review, same day.** Observations, read in the code and reproduced in
+tests:
+
+- A share that is not mounted passed the check. Unmounted, a stat under
+  `/mnt/shareDrive` finds nothing at once, so the line said a plain
+  "Saves to:" and Run went on, to fail at `makedirs` after "Energize
+  HV?", or, with a writable mount point, to write the run to the bench
+  PC's own disk. That is what `#394`'s New folder... already refuses.
+- `os.path.exists` reads every failed stat as "absent", so EIO, ESTALE or
+  EACCES on a share that had just dropped passed the check as "no run
+  here".
+- The check and the worker's first write are minutes apart (every dialog
+  and the camera pre-flight), so a run started in the same folder
+  meanwhile, from another PC on the share, was still overwritten.
+- The line had no fixed height: a warning took it to two lines and the
+  u-for-µ hint to three, and ▶ Run moved 15 to 30 px after each typing
+  pause (999, 1014 and 1029 px, measured on the tab).
+
+Decisions:
+
+- **A run folder under the share's mount point while nothing is mounted
+  there is refused**, named or blank, with New folder's own test
+  (`output_folder.share_unmounted`, the mount read off `SLDEA_SHARE_DIR`).
+  It runs on the check's thread, since `os.path.ismount` stats the mount
+  point. A blank name on the share is therefore checked for the mount,
+  and refused when that check does not answer, like a typed one. An
+  Output dir off the share is not touched by it.
+- **Only a missing file means "absent".** The stats use `os.stat`;
+  `FileNotFoundError` and `NotADirectoryError` mean no run there, and any
+  other failure refuses ("could not be checked").
+- **The worker opens setup.txt and data.csv with mode 'x'** for a typed
+  name. setup.txt is its first write, right after `makedirs`, and data.csv
+  follows; both come before the camera and the first SG write, so a lost
+  race takes the `makedirs` failure's path: "ERROR:" in the run log, and
+  the finally zeroes the SG. A blank name keeps 'w'.
+- **The line is always two lines high**: "Saves to:" and the folder, cut
+  from the left to the line's width so the run folder's name shows, then
+  a warning or nothing. While a run is on it says "Writing to:" and that
+  run's folder, and checks nothing.
+
 **What changed.** `sldea_profile.py`: `run_folder`, `run_name_problem`,
-`holds_run`, `holds_run_within`, `run_folder_refusal`, `run_folder_line`.
-`gui.py`: the line under Run name (row 2 of the Output & Measurement box;
-the device rows below it moved down one), its check on a thread, the
-refusal in `sldea_run`, the worker's one line, and a look again from
-`_sldea_finished`. Pinned by `tests/test_sldea_run_folder.py`.
+`holds_run`, `run_folder_look`, `run_folder_look_within`,
+`run_folder_refusal`, `open_run_file`, `run_folder_line`,
+`run_folder_writing_line`. `output_folder.py`: `on_share`,
+`share_unmounted`, which `parent_problem` now calls. `gui.py`: the line
+under Run name (row 2 of the Output & Measurement box; the device rows
+below it moved down one), its check on a thread, the refusal in
+`sldea_run`, the worker's folder and its two 'x' opens, and a look again
+from `_sldea_finished`. Pinned by `tests/test_sldea_run_folder.py`.
 
 **Bench check (#369).** On a lab PC, type the name of a run that exists:
-the line warns and ▶ Run refuses. Check the line on the real share's
-mount, also while the share is unmounted.
+the line warns and ▶ Run refuses. On the Linux bench, unmount the share
+with Output dir on it: the line says the share is not mounted, for a
+typed name and a blank one, and ▶ Run refuses with "The share is not
+mounted at /mnt/shareDrive" before any other dialog.
 
 ## A run cannot start, or carry on, on a picture with nothing in it (2026-10-02)
 

@@ -29,7 +29,9 @@ Reading a record. The CPU time says what kind of stall it was:
     the same program ran meanwhile, and the Tk thread may have waited
     for one of them.
 The gap is measured between heartbeats, so it includes up to one
-HEARTBEAT_MS of ordinary idle time before the freeze began.
+HEARTBEAT_MS of ordinary idle time before the freeze began. It is measured
+on a clock that stops while the PC sleeps (see _awake_clock), so a window
+left open over a suspend does not log the sleep as a stall.
 
 A stall that is still going after HANG_S also gets an early STALLING
 record, so that a window that never recovers still leaves its stack
@@ -40,23 +42,31 @@ nothing more. If the window does recover, the STALL record with the same
 stall number follows and supersedes it.
 
 The log is LOCAL and per user, never the share, because a share stall is
-one of the suspects. It goes where sldea_video.staging_root() puts local
-files: ~/.cache/scpi_control/tk_stall.log on Linux, beside the launcher's
-launch.log, and %LOCALAPPDATA%\\scpi_control\\tk_stall.log on Windows,
-beside the Windows launcher's setup.log. Over MAX_BYTES it is rotated
-once, to tk_stall.log.1, so the two files stay near 2 x MAX_BYTES. All
-windows append to the same file, each record in one write() to a file
-opened for appending; Linux keeps such writes whole when several windows
-write at once, while on Windows two records written in the same instant
-could interleave.
+one of the suspects. It sits beside the launchers' own logs: on Linux in
+the launcher's cache folder with launch.log ($SCPI_CACHE when that is
+set, else ~/.cache/scpi_control), on Windows in
+%LOCALAPPDATA%\\scpi_control with the Windows launcher's setup.log. Over
+MAX_BYTES it is rotated once, to tk_stall.log.1, so the two files stay
+near 2 x MAX_BYTES. All windows append to the same file, each record in
+one write(), and they take turns through a lock file beside it
+(tk_stall.log.lock). Without the turns, two windows could rotate at once
+and throw the old log away, and on Windows, where an append is a seek and
+then a write, two records could overwrite each other. Three writer
+processes appending 1500 records each as fast as they could lost nothing
+with the lock, 10 runs on ext4 and 5 on NTFS; without it, ext4 saw 4 bad
+rotations in 613, and NTFS refused 152 appends at a 20 KB cap and
+overwrote 1708 of 22500 records without rotation (#397 review, measured
+2026-10-07). A window that cannot get the lock within LOCK_WAIT_S writes
+without it rather than drop its record.
 
 ON BY DEFAULT: the freezes this exists to find are the ones that happen
 when nobody planned to measure. SCPI_STALL_LOG=0 (or off, no, false)
-switches it off, and SCPI_STALL_LOG=<file> writes to that file instead.
-While nothing stalls it costs one Tk timer callback every HEARTBEAT_MS
-(41-47 us each, of which a bare after(50) is 38-39 us: under 0.1 % of one
-core) and about four watchdog wake-ups a second (measured 2026-10-06 on
-Windows 11).
+switches it off; 1 (or on, yes, true) keeps the default; any other value
+is the log file, a relative one taken inside the default folder (see
+log_path). While nothing stalls it costs one Tk timer callback every
+HEARTBEAT_MS (41-47 us each, of which a bare after(50) is 38-39 us: under
+0.1 % of one core) and about four watchdog wake-ups a second (measured
+2026-10-06 on Windows 11).
 
 It never raises into the window. A failure is caught, reported on stderr
 (and in the log, when the log can be written), and ends only the logging.
@@ -79,9 +89,12 @@ MAX_SAMPLES = 12           # stacks kept per stall: the first 11 + the latest
 MAX_FRAMES = 60            # innermost frames kept per stack
 STALL_POLL_S = 0.1         # how often the watchdog looks while a stall lasts
 MAX_BYTES = 1000000        # the log rotates to <log>.1 above this size
+OPEN_RETRY_S = 0.05        # wait before the one retry of a refused open
+LOCK_WAIT_S = 2.0          # longest wait for the log's lock (append_record)
 LOG_NAME = 'tk_stall.log'
-ENV = 'SCPI_STALL_LOG'     # 0/off/no/false: off; anything else: the log file
+ENV = 'SCPI_STALL_LOG'     # see log_path
 OFF_WORDS = ('0', 'off', 'no', 'false')
+ON_WORDS = ('1', 'on', 'yes', 'true')
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 THREAD_QUERY_LIMITED_INFORMATION = 0x0800          # winnt.h
@@ -92,36 +105,53 @@ THREAD_QUERY_LIMITED_INFORMATION = 0x0800          # winnt.h
 # ---------------------------------------------------------------------------
 
 def default_log_path(env=None):
-    """The house place for a local per-user file, as sldea_video's
-    staging_root() uses it: %LOCALAPPDATA%\\scpi_control on Windows,
-    ~/.cache/scpi_control elsewhere. The Linux launcher creates
-    ~/.cache/scpi_control at every start, so it is writable."""
+    """The local per-user place, beside the launchers' own logs.
+
+    Linux: the launcher's cache folder, where launch.log is: $SCPI_CACHE,
+    or ~/.cache/scpi_control when that is unset or empty, resolved as
+    relaunch.py and the launchers resolve it. The launcher creates it at
+    every start, so it is writable. Windows: %LOCALAPPDATA%\\scpi_control,
+    the Windows launcher's folder (setup.log), as sldea_video's
+    staging_root() uses it."""
     env = os.environ if env is None else env
     if os.name == 'nt':
         base = env.get('LOCALAPPDATA') or os.path.expanduser('~')
         return os.path.join(base, 'scpi_control', LOG_NAME)
-    return os.path.join(os.path.expanduser('~'), '.cache', 'scpi_control',
-                        LOG_NAME)
+    home = env.get('HOME') or os.path.expanduser('~')
+    cache = env.get('SCPI_CACHE') or os.path.join(home, '.cache',
+                                                  'scpi_control')
+    return os.path.join(cache, LOG_NAME)
 
 
 def log_path(env=None):
     """Where stall records go, or None when SCPI_STALL_LOG switches the
-    logger off."""
+    logger off.
+
+    0, off, no or false: off. Unset, empty, 1, on, yes or true: the default
+    place. Anything else names the log file. A relative name is taken
+    inside the default folder, never the current one: the bench app runs
+    with its current folder on the share (launch_gui.sh changes to it so
+    presets stay shared), and Edge Review and the plot window inherit it."""
     env = os.environ if env is None else env
     value = (env.get(ENV) or '').strip()
+    default = default_log_path(env)
     if value.lower() in OFF_WORDS:
         return None
-    if value:
-        return os.path.expanduser(value)
-    return default_log_path(env)
+    if not value or value.lower() in ON_WORDS:
+        return default
+    value = os.path.expanduser(value)
+    if not os.path.isabs(value):
+        value = os.path.join(os.path.dirname(default), value)
+    return value
 
 
 # ---------------------------------------------------------------------------
 # the decisions, with no clock, thread, Tk or file of their own
 # ---------------------------------------------------------------------------
 
-# A heartbeat stamp is (monotonic s, Tk-thread CPU s, process CPU s); either
-# CPU value is None where it could not be read.
+# A heartbeat stamp is (stall-clock s, Tk-thread CPU s, process CPU s); either
+# CPU value is None where it could not be read. The stall clock is
+# _awake_clock's: monotonic, and it stops while the PC sleeps.
 
 Look = collections.namedtuple('Look', 'cpu pcpu load stack threads note')
 Look.__doc__ = """What the watchdog saw at one moment of a stall: absolute
@@ -216,7 +246,7 @@ class StallTracker:
         return out
 
     def poll(self, t, look):
-        """The watchdog at monotonic time `t`; `look()` returns a Look at
+        """The watchdog at stall-clock time `t`; `look()` returns a Look at
         the Tk thread now. Returns (records to write, when to poll next)."""
         out = self.drain()
         last = self.last
@@ -318,8 +348,8 @@ def _frame_lines(stack):
 
 def format_record(rec, window, pid, tk_name, opened_t, wall,
                   load_after=None):
-    """The text of one Record. `opened_t` is the monotonic time watching
-    began and `wall(t)` turns a monotonic time into epoch seconds. The
+    """The text of one Record. `opened_t` is the stall-clock time watching
+    began and `wall(t)` turns a stall-clock time into epoch seconds. The
     first line starts with the local time the stall BEGAN."""
     when = _clock_text(wall(rec.start[0]))
     if rec.kind == 'STALL':
@@ -377,6 +407,49 @@ def format_record(rec, window, pid, tk_name, opened_t, wall,
 # reading the Tk thread from the watchdog thread
 # ---------------------------------------------------------------------------
 
+def _awake_clock():
+    """(clock, how): seconds the PC has been awake. Every time the logger
+    measures is on this clock, so a window left open while the PC sleeps
+    does not log the sleep as one long stall.
+
+    Linux: time.monotonic(), which is CLOCK_MONOTONIC and stops while the
+    PC is suspended. Windows: time.monotonic() may count a suspend, so the
+    unbiased interrupt time, which leaves sleep and hibernation out (Win32
+    docs for QueryUnbiasedInterruptTime). The Precise variant (Windows 10
+    and later) has the performance counter's resolution; it followed
+    time.monotonic() to 2 us over 0.5 s awake, at 0.6 us a call (measured
+    2026-10-07). A real suspend was not available to test."""
+    if os.name != 'nt':
+        return time.monotonic, 'monotonic'
+    try:
+        import ctypes
+        u64p = ctypes.POINTER(ctypes.c_ulonglong)
+        try:
+            # a private WinDLL, as in _windows_thread_clock
+            fn = ctypes.WinDLL('kernelbase').QueryUnbiasedInterruptTimePrecise
+            fn.restype = None
+            how = 'QueryUnbiasedInterruptTimePrecise'
+        except (OSError, AttributeError):
+            fn = ctypes.WinDLL('kernel32').QueryUnbiasedInterruptTime
+            fn.restype = ctypes.c_int
+            how = 'QueryUnbiasedInterruptTime, about 16 ms resolution'
+        fn.argtypes = (u64p,)
+
+        def awake():
+            value = ctypes.c_ulonglong()   # one per call: two threads read it
+            fn(ctypes.byref(value))
+            return value.value * 1e-7
+
+        awake()
+        return awake, how
+    except Exception as e:
+        return time.monotonic, (f'monotonic ({type(e).__name__}: {e}); a '
+                                f'suspend would count as a stall')
+
+
+_awake, AWAKE_HOW = _awake_clock()
+
+
 def _now():
     """A heartbeat stamp. Taken ON the Tk thread, so that thread_time() is
     the Tk thread's own CPU time."""
@@ -388,12 +461,13 @@ def _now():
         pcpu = time.process_time()
     except Exception:
         pcpu = None
-    return (time.monotonic(), cpu, pcpu)
+    return (_awake(), cpu, pcpu)
 
 
 def _wall(t):
-    """Epoch seconds at monotonic time `t`."""
-    return time.time() - (time.monotonic() - t)
+    """Epoch seconds at stall-clock time `t` (a suspend in between would
+    shift it by the time asleep)."""
+    return time.time() - (_awake() - t)
 
 
 def _current_frames():
@@ -531,14 +605,100 @@ def _cpu_clock():
 def _open_log(path):
     flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, 'O_BINARY',
                                                                0)
+    for attempt in (1, 2):
+        try:
+            try:
+                return os.open(path, flags, 0o644)
+            except FileNotFoundError:
+                folder = os.path.dirname(path)
+                if not folder:
+                    raise
+                os.makedirs(folder, exist_ok=True)
+                return os.open(path, flags, 0o644)
+        except PermissionError:
+            # Windows refuses the open while another window renames the
+            # log to .1; a moment later the path is free again
+            if attempt == 2:
+                raise
+            time.sleep(OPEN_RETRY_S)
+
+
+def _rotate(path, measured, max_bytes):
+    """Rename the log to <path>.1, but only while `path` is still the file
+    that was measured over the cap.
+
+    Two windows can find the log over the cap at the same moment. If the
+    second renamed whatever is at `path` by then, it would move the first
+    one's fresh log over the .1 file, and the old log would be lost
+    (reproduced on ext4 in the #397 review). The lock in append_record
+    makes the windows take turns; this check still covers an append that
+    had to go ahead without it. Only the inode is compared, and only when
+    both are known, so a Python whose stat and fstat disagree on it cannot
+    stop rotation for good: past twice the cap the log is rotated anyway."""
     try:
-        return os.open(path, flags, 0o644)
-    except FileNotFoundError:
-        folder = os.path.dirname(path)
-        if not folder:
-            raise
-        os.makedirs(folder, exist_ok=True)
-        return os.open(path, flags, 0o644)
+        now = os.stat(path)
+        moved = (now.st_ino and measured.st_ino
+                 and now.st_ino != measured.st_ino)
+        if moved and now.st_size <= 2 * max_bytes:
+            return                  # another window rotated it already
+        os.replace(path, path + '.1')
+    except OSError:
+        pass                        # gone, or held open: rotate next time
+
+
+def _lock(path):
+    """An exclusive lock on the file `path` (made, empty, if missing), or
+    None when it cannot be had within LOCK_WAIT_S. POSIX: flock. Windows:
+    msvcrt.locking on the first byte. Both are tried without blocking every
+    10 ms: msvcrt's blocking mode waits a whole second between tries, and
+    a bound keeps a window that hangs while holding the lock from stopping
+    every other window's log."""
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, 'O_BINARY', 0)
+    try:
+        try:
+            fd = os.open(path, flags, 0o644)
+        except FileNotFoundError:
+            os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+            fd = os.open(path, flags, 0o644)
+    except OSError:
+        return None
+    try:
+        if os.name == 'nt':
+            import msvcrt
+
+            def take():
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            def take():
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        end = time.monotonic() + LOCK_WAIT_S
+        while True:
+            try:
+                take()
+                return fd
+            except OSError:
+                if time.monotonic() > end:
+                    raise
+                time.sleep(0.01)
+    except (OSError, ImportError):
+        os.close(fd)
+        return None
+
+
+def _unlock(fd):
+    if fd is None:
+        return
+    try:
+        if os.name == 'nt':
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)                # closing also drops a flock
 
 
 def append_record(path, text, max_bytes=MAX_BYTES):
@@ -546,29 +706,42 @@ def append_record(path, text, max_bytes=MAX_BYTES):
     for appending, after rotating the log to <path>.1 when it is over
     `max_bytes`. Raises OSError when it cannot write.
 
-    Four system calls when nothing needs doing: like a file read (see
-    _source), each one costs the watchdog a GIL switch interval while the
-    Tk thread computes. Measured the same way: 41-50 ms, against 71-78 ms
-    for makedirs + getsize + open + write + close."""
+    The whole append holds the lock <path>.lock, so the windows writing to
+    one log take turns. Without it, two windows found over the cap at once
+    could both rotate, the second moving the first one's fresh log over
+    .1 (reproduced on ext4 in the #397 review; checking the inode before
+    the rename alone still let both through: 7 such rotations in 582 in a
+    stress test), and on Windows, where an append is a seek and then a
+    write, records written at the same instant overwrote each other. When
+    the lock cannot be had, the append goes ahead without it rather than
+    drop the record.
+
+    Seven system calls on Linux, nine on Windows, when nothing needs doing:
+    like a file read (see _source), each one costs the watchdog a GIL
+    switch interval while the Tk thread computes. Measured that way on
+    2026-10-07: 56-83 ms on Windows, against 95-105 ms for the makedirs,
+    getsize, open, write and close it started as."""
     data = memoryview(text.encode('utf-8', 'replace'))
-    fd = _open_log(path)
+    lock = _lock(path + '.lock')
     try:
-        if os.fstat(fd).st_size > max_bytes:
-            os.close(fd)
-            fd = None
-            try:
-                os.replace(path, path + '.1')
-            except OSError:
-                pass        # another window has it open: rotate next time
-            fd = _open_log(path)
-        while data:
-            n = os.write(fd, data)
-            if n <= 0:
-                break
-            data = data[n:]
+        fd = _open_log(path)
+        try:
+            measured = os.fstat(fd)
+            if measured.st_size > max_bytes:
+                os.close(fd)
+                fd = None
+                _rotate(path, measured, max_bytes)
+                fd = _open_log(path)
+            while data:
+                n = os.write(fd, data)
+                if n <= 0:
+                    break
+                data = data[n:]
+        finally:
+            if fd is not None:
+                os.close(fd)
     finally:
-        if fd is not None:
-            os.close(fd)
+        _unlock(lock)
 
 
 def _complain(msg):
@@ -674,11 +847,10 @@ class StallLogger:
         try:
             self._write(self._start_line())
             while not self._done.is_set():
-                records, wake = self.tracker.poll(time.monotonic(),
-                                                  self._look)
+                records, wake = self.tracker.poll(_awake(), self._look)
                 for rec in records:
                     self._write(self._format(rec))
-                self._done.wait(max(0.01, wake - time.monotonic() + 0.005))
+                self._done.wait(max(0.01, wake - _awake() + 0.005))
             for rec in self.tracker.drain():
                 self._write(self._format(rec))
             self._write(self._stop_line())
@@ -743,7 +915,7 @@ class StallLogger:
                 f"Python {sys.version.split()[0]} on {sys.platform}; logs "
                 f"gaps over {THRESHOLD_S:.2f} s between the {HEARTBEAT_MS} "
                 f"ms heartbeats of its Tk thread ({self.tk_name}); "
-                f"cpu clock: {self.clock_how}\n")
+                f"cpu clock: {self.clock_how}; stall clock: {AWAKE_HOW}\n")
 
     def _stop_line(self):
         n = self.tracker.count
@@ -751,7 +923,7 @@ class StallLogger:
         if self.tracker.longest:
             stalls += f", longest {self.tracker.longest:.2f} s"
         why = f"; {self.failed}" if self.failed else ""
-        up = time.monotonic() - self.tracker.first[0]
+        up = _awake() - self.tracker.first[0]
         return (f"{_clock_text(time.time())} STOP {self.window} "
                 f"(pid {self.pid}): watched {_span(up)}; {stalls}{why}\n")
 

@@ -209,6 +209,28 @@ def test_a_look_that_races_the_recovery_is_dropped():
     assert rec.samples == (), rec.samples
 
 
+def test_a_stall_that_recovers_during_the_hang_look_writes_no_early_record():
+    """STALLING is for a window still frozen at HANG_S. If the Tk thread
+    comes back while the watchdog takes its 4 s look, the stall is over:
+    only its STALL record may be written."""
+    tr = tk_stall.StallTracker((0.0, 0.0, 0.0))
+    tr.beat((0.05, 0.0, 0.0))
+
+    def look():
+        return tk_stall.Look(0.0, 0.0, None, list(STACK), [], None)
+    for t in (0.36, 1.06, 2.06):            # the looks at 0.3, 1 and 2 s
+        got, _ = tr.poll(t, look)
+        assert got == [], got
+
+    def recovering():
+        tr.beat((4.10, 0.0, 0.0))           # the Tk thread is back meanwhile
+        return look()
+    got, _ = tr.poll(4.06, recovering)      # the look at 4 s
+    assert got == [], got
+    [rec] = tr.drain()
+    assert rec.kind == 'STALL' and abs(rec.end[0] - 4.10) < 1e-9, rec
+
+
 def test_the_stall_before_the_first_heartbeat_is_marked_startup():
     beats = [2.0] + _beats(2.05, 3.0) + _beats(4.0, 5.0)
     _, records, _ = _simulate(beats, 5.0)
@@ -312,8 +334,126 @@ def test_the_log_rotates_once_when_over_its_cap():
         assert live == recs[4], live
         assert old == recs[2] + recs[3], old
         assert sorted(os.listdir(os.path.dirname(log))) == \
-            ['tk_stall.log', 'tk_stall.log.1']
+            ['tk_stall.log', 'tk_stall.log.1', 'tk_stall.log.lock']
     finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def test_writers_take_turns_through_the_lock():
+    """While another window holds the log's lock an append waits for it,
+    so two rotations cannot race and, on Windows, two records cannot
+    overwrite each other. Held past LOCK_WAIT_S, the append goes ahead
+    without it rather than drop the record."""
+    folder = tempfile.mkdtemp(prefix='tk_stall_')
+    log = os.path.join(folder, 'tk_stall.log')
+    held = tk_stall._lock(log + '.lock')
+    assert held is not None
+    done = threading.Event()
+
+    def writer(text):
+        tk_stall.append_record(log, text)
+        done.set()
+
+    th = threading.Thread(target=writer, args=('waited\n',))
+    try:
+        th.start()
+        assert not done.wait(0.3), 'wrote while another window held the lock'
+        assert not os.path.exists(log)
+    finally:
+        tk_stall._unlock(held)
+        th.join(10)
+    saved = tk_stall.LOCK_WAIT_S
+    held = tk_stall._lock(log + '.lock')
+    try:
+        assert done.is_set() and _read(log) == 'waited\n'
+        tk_stall.LOCK_WAIT_S = 0.2
+        done.clear()
+        t0 = time.monotonic()
+        writer('anyway\n')                  # the lock is never let go
+        assert time.monotonic() - t0 >= 0.2
+        assert _read(log) == 'waited\nanyway\n'
+    finally:
+        tk_stall.LOCK_WAIT_S = saved
+        tk_stall._unlock(held)
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _read(path):
+    with open(path, encoding='utf-8', newline='') as fh:
+        return fh.read()
+
+
+def _write(path, text, mode='w'):
+    with open(path, mode, encoding='utf-8', newline='') as fh:
+        fh.write(text)
+
+
+def test_a_late_rotation_keeps_the_old_log():
+    """Two windows find the log over the cap at once. The first rotates it
+    and writes to a fresh log; the second, a moment late, must not move
+    that fresh log over the .1 file (reproduced on ext4 in the review)."""
+    folder = tempfile.mkdtemp(prefix='tk_stall_')
+    try:
+        log = os.path.join(folder, 'tk_stall.log')
+        old = 'old record\n' * 20
+        _write(log, old)
+        measured = os.stat(log)             # what the late window measured
+        os.replace(log, log + '.1')         # the first window rotated it
+        _write(log, 'fresh record\n')       # ... and wrote a fresh log
+        tk_stall._rotate(log, measured, 100)
+        assert _read(log) == 'fresh record\n'
+        assert _read(log + '.1') == old
+        # past twice the cap it rotates whatever the inode says, so a
+        # Python whose stat and fstat disagree cannot stop rotation
+        _write(log, 'x' * 250, 'a')
+        tk_stall._rotate(log, measured, 100)
+        assert not os.path.exists(log)
+        assert _read(log + '.1').startswith('fresh record\n')
+        # the usual case: the file measured is still there, so it goes
+        _write(log, 'y' * 150)
+        tk_stall._rotate(log, os.stat(log), 100)
+        assert not os.path.exists(log) and _read(log + '.1') == 'y' * 150
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def test_an_open_refused_once_is_tried_again():
+    """Windows refuses an open while another window renames the log; the
+    record must still land once the path is free again. Refused twice, it
+    goes to the caller (which sends it to stderr)."""
+    folder = tempfile.mkdtemp(prefix='tk_stall_')
+    log = os.path.join(folder, 'tk_stall.log')
+    real_open = os.open
+    refusals = []
+
+    def refuse(times):
+        def flaky(path, flags, mode=0o777, **kw):
+            if path == log and len(refusals) < times:
+                refusals.append(path)
+                raise PermissionError(13, 'refused (simulated)', path)
+            return real_open(path, flags, mode, **kw)
+        return flaky
+
+    try:
+        os.open = refuse(1)
+        try:
+            tk_stall.append_record(log, 'the record\n')
+        finally:
+            os.open = real_open
+        assert refusals == [log] and _read(log) == 'the record\n'
+        refusals.clear()
+        os.open = refuse(2)
+        try:
+            tk_stall.append_record(log, 'not this one\n')
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError('a second refusal was swallowed')
+        finally:
+            os.open = real_open
+        assert refusals == [log, log] and _read(log) == 'the record\n'
+    finally:
+        os.open = real_open
         shutil.rmtree(folder, ignore_errors=True)
 
 
@@ -344,12 +484,33 @@ def test_the_switch_and_the_default_place():
     if os.name == 'nt':
         assert tk_stall.default_log_path({'LOCALAPPDATA': r'C:\L'}) == \
             r'C:\L\scpi_control\tk_stall.log'
+        # the Windows launcher has no SCPI_CACHE, so it is not looked at
+        assert tk_stall.default_log_path({'LOCALAPPDATA': r'C:\L',
+                                          'SCPI_CACHE': r'C:\C'}) == \
+            r'C:\L\scpi_control\tk_stall.log'
     else:
         assert path == os.path.join(os.path.expanduser('~'), '.cache',
                                     'scpi_control', 'tk_stall.log')
+        # beside launch.log wherever the launcher keeps it: $SCPI_CACHE,
+        # an empty one counting as unset, as in relaunch.py
+        assert tk_stall.default_log_path({'SCPI_CACHE': '/opt/c'}) == \
+            '/opt/c/tk_stall.log'
+        assert tk_stall.default_log_path({'SCPI_CACHE': '',
+                                          'HOME': '/home/u'}) == \
+            '/home/u/.cache/scpi_control/tk_stall.log'
     for off in ('0', 'off', ' OFF ', 'No', 'false'):
         assert tk_stall.log_path({tk_stall.ENV: off}) is None, off
-    assert tk_stall.log_path({tk_stall.ENV: ''}) == path
+    for on in ('', '1', 'on', ' TRUE ', 'Yes'):
+        assert tk_stall.log_path({tk_stall.ENV: on}) == path, on
+    # a relative name lands in the default folder, never in the current
+    # one: the bench app's current folder is the share
+    folder = os.path.dirname(path)
+    assert tk_stall.log_path({tk_stall.ENV: 'mine.log'}) == \
+        os.path.join(folder, 'mine.log')
+    assert tk_stall.log_path({tk_stall.ENV: os.path.join('sub', 'x.log')}) \
+        == os.path.join(folder, 'sub', 'x.log')
+    absolute = os.path.join(tempfile.gettempdir(), 'x', 's.log')
+    assert tk_stall.log_path({tk_stall.ENV: absolute}) == absolute
     assert tk_stall.log_path({tk_stall.ENV: '~/x/s.log'}) == \
         os.path.expanduser('~/x/s.log')
 
@@ -624,6 +785,62 @@ def test_other_threads_cpu_is_not_charged_to_the_tk_thread():
         stop.set()
         if hasher.ident is not None:
             hasher.join()
+        root.close()
+        if saved is not None:
+            os.environ[tk_stall.ENV] = saved
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _sleep_for_the_test(state, seconds):
+    """Stands in for the PC being suspended: the stall clock stops."""
+    state['frozen_at'] = time.monotonic()
+    time.sleep(seconds)
+    state['asleep'] += time.monotonic() - state['frozen_at']
+    state['frozen_at'] = None
+
+
+def test_time_asleep_is_not_a_stall():
+    """A window left open while the PC sleeps did not freeze. Everything
+    the logger times is on tk_stall._awake, a clock that stops while the
+    PC sleeps; here a stand-in for it stops while the 'Tk thread' sleeps,
+    so no stall may be logged for that pause."""
+    # the real one runs at the rate of time.monotonic() while awake, and
+    # on Windows it is the unbiased interrupt time, not a fallback
+    a0, m0 = tk_stall._awake(), time.monotonic()
+    time.sleep(0.2)
+    assert abs((tk_stall._awake() - a0) - (time.monotonic() - m0)) < 0.02
+    if os.name == 'nt':
+        assert tk_stall.AWAKE_HOW.startswith('QueryUnbiasedInterruptTime'), \
+            tk_stall.AWAKE_HOW
+    else:
+        assert tk_stall._awake is time.monotonic
+
+    state = {'frozen_at': None, 'asleep': 0.0}
+
+    def stand_in():
+        frozen = state['frozen_at']
+        return (time.monotonic() if frozen is None else frozen) \
+            - state['asleep']
+
+    folder = tempfile.mkdtemp(prefix='tk_stall_')
+    saved = os.environ.pop(tk_stall.ENV, None)
+    real = tk_stall._awake
+    root = _FakeRoot()
+    try:
+        tk_stall._awake = stand_in
+        log = os.path.join(folder, 'tk_stall.log')
+        tk_stall.watch(root, 'fake window', path=log)
+        root.run(0.3)
+        root.after(0, _sleep_for_the_test, state, 0.6)
+        root.run(0.5)
+        root.close()
+        entries = _entries(_read(log))
+        assert entries[0][0] == 'START' and entries[-1][0] == 'STOP'
+        assert 'STALLING' not in [k for k, _ in entries], entries
+        gaps = [_gap_and_cpu(r)[0] for k, r in entries if k == 'STALL']
+        assert all(g < 0.45 for g in gaps), entries      # 0.6 s asleep
+    finally:
+        tk_stall._awake = real
         root.close()
         if saved is not None:
             os.environ[tk_stall.ENV] = saved

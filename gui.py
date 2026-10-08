@@ -4951,6 +4951,14 @@ LOGGING:
             if vid_on and spec is None:
                 self._sldea_log("⚠ video requested but there is no camera "
                                 "— no recording")
+                # setup.txt promised a video above; the other no-video
+                # branches below say so there too (#392 review)
+                try:
+                    with open(os.path.join(rundir, 'setup.txt'), 'a') as sf:
+                        sf.write("Video outcome: NOT recorded: camera setup "
+                                 "failed\n")
+                except OSError:
+                    pass
             elif vid_on:
                 dev = spec.get('device')
                 # unique per RUN, not per run name: a reused name while the

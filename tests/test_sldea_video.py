@@ -1831,6 +1831,35 @@ def test_a_stream_that_delivers_nothing_falls_back_to_one_shot_stills():
             "an empty staging dir was left behind"
 
 
+def test_a_camera_setup_that_fails_says_so_in_setup_txt():
+    """#392 review: with no camera attached the stream fails to open and
+    the branch above writes its NOT recorded line. Only a camera setup
+    that raises (no spec at all) wrote nothing, and setup.txt kept its
+    promise of a video.mkv. The run still goes on without frames, as it
+    always did; setup.txt now ends "NOT recorded: camera setup failed"."""
+    import gui
+    with tempfile.TemporaryDirectory() as tmp:
+        app = _StubApp()
+
+        def broken(index):
+            raise RuntimeError('v4l2-ctl went away')
+        with _Patched(tmp, lambda spec, fps=10: _FakeCam(), _no_oneshot):
+            gui.webcam.resolve_camera = broken     # _Patched puts it back
+            app._sldea_worker(_short_profile(), tmp, 'RUN', 1, 2, 3, True,
+                              tel_on=False, vid_on=True, vid_fps=5.0)
+        rundir = os.path.join(tmp, 'RUN')
+        assert app.finished == 1, app.lines
+        assert any('camera setup failed (v4l2-ctl went away)' in ln
+                   for ln in app.lines), app.lines
+        with open(os.path.join(rundir, 'setup.txt')) as f:
+            lines = f.read().splitlines()
+        assert lines[-1] == "Video outcome: NOT recorded: camera setup " \
+            "failed", lines[-3:]
+        assert not os.path.exists(os.path.join(tmp, 'staging'))
+        data = _read_csv(os.path.join(rundir, 'data.csv'))
+        assert data and not any(r['frame_file'] for r in data), data
+
+
 def test_the_last_still_gets_its_row_even_when_its_frame_never_comes():
     """Adversarial review 2026-10-05: the loop ends 0.3 s after the
     staircase, the final pre-ramp is snap_lead_s before it, and a stream

@@ -384,6 +384,91 @@ def test_the_short_state_words_match_the_records():
             'Breakdown watchdog: ' + sp.watchdog_state(ticked, armed, dry))
 
 
+BAD_WATCHDOG_VALUES = ('nan', 'inf', '0', '-5', 'abc')
+
+
+def test_the_watchdog_boxes_parse_to_positive_finite_numbers_only():
+    for good, value in (('100', 100.0), (' 2.5 ', 2.5), ('1e2', 100.0)):
+        assert sp.parse_watchdog_value(good) == value, good
+    for bad in BAD_WATCHDOG_VALUES + ('', '  ', '-inf', 'NaN', None):
+        try:
+            sp.parse_watchdog_value(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad!r} was accepted")
+
+
+def test_a_ticked_live_run_refuses_a_trip_or_confirm_it_cannot_use():
+    """HV review 2026-10-08: ticked on a LIVE run, a Trip or Confirm that
+    is not a finite number above zero refuses Run before any question,
+    with a message naming the box. The fault predates #406, but the
+    records now quote these boxes as the rule: "abc" used to run as
+    100 uA / 3 s unsaid, nan and inf never trip, a zero or negative trip
+    fires on every read. Nothing is asked, driven or made."""
+    for key, box, default in (('wd_ua', 'Trip (µA)', '100'),
+                              ('wd_s', 'Confirm (s)', '3')):
+        for bad in BAD_WATCHDOG_VALUES:
+            with tempfile.TemporaryDirectory() as tmp:
+                mb = L._MB({})          # any question fails the test
+                with L._patched(mb):
+                    app = L._App(tmp, dry=False, wd_on=True)
+                    app.sldea_vars[key].set(bad)
+                    app.sldea_run()
+                assert [c[:2] for c in mb.calls] == \
+                    [('showerror', 'SLDEA')], (box, bad, mb.calls)
+                msg = mb.calls[0][2]
+                assert msg.startswith(
+                    f"Breakdown watchdog {box} must be a positive number — "
+                    f"'{bad}' is not one."), msg
+                assert f"(the default is {default})" in msg, msg
+                assert any(ln.startswith(f"run refused — breakdown watchdog "
+                                         f"{box} is '{bad}'")
+                           for ln in app.lines), app.lines
+                assert app.worker_args is None, (box, bad)
+                assert app.sg.writes == [], app.sg.writes
+                assert not os.path.exists(_rundir(tmp))
+                assert app._sldea_prelog is None
+                assert not getattr(app, '_sldea_starting', False)
+
+
+def test_a_dry_or_unticked_run_is_not_refused_for_the_watchdog_boxes():
+    """Neither arms anything from the boxes, so neither is refused for
+    them: the unticked LIVE run reaches "Energize HV?" (answered No) and
+    says OFF, and the ticked DRY run starts and records OFF. A good value
+    on a ticked LIVE run reaches "Energize HV?" with that value."""
+    for bad in BAD_WATCHDOG_VALUES:
+        with tempfile.TemporaryDirectory() as tmp:
+            mb = L._MB({'Energize HV?': False})
+            with L._patched(mb):
+                app = L._App(tmp, dry=False, wd_on=False)
+                app.sldea_vars['wd_ua'].set(bad)
+                app.sldea_vars['wd_s'].set(bad)
+                app.sldea_run()
+            assert mb.titles() == ['Energize HV?'], (bad, mb.calls)
+            assert ("\n\n" + OFF_DIALOG + "\n\nProceed?") in mb.calls[0][2]
+        with tempfile.TemporaryDirectory() as tmp:
+            mb = L._MB({})
+            with L._patched(mb):
+                app = L._App(tmp, dry=True, wd_on=True)
+                app.sldea_vars['wd_ua'].set(bad)
+                app.sldea_vars['wd_s'].set(bad)
+                app.sldea_run()
+                assert app.worker_done.wait(10), app.lines
+            assert mb.calls == [], (bad, mb.calls)
+            assert app.worker_args[11] is False
+            assert '  [watchdog: OFF (dry run, no HV)]' in _start_line(app)
+    with tempfile.TemporaryDirectory() as tmp:
+        mb = L._MB({'Energize HV?': False})
+        with L._patched(mb):
+            app = L._App(tmp, dry=False, wd_on=True)
+            app.sldea_vars['wd_ua'].set(' 50 ')
+            app.sldea_vars['wd_s'].set('2.5')
+            app.sldea_run()
+        assert mb.titles() == ['Energize HV?'], mb.calls
+        assert ("stays 50 µA or more away from the baseline it learns at "
+                "0 kV, for 2.5 s of consecutive reads.") in mb.calls[0][2]
+
+
 def test_a_dry_run_records_off_whatever_the_box_says():
     for ticked in (True, False):
         with tempfile.TemporaryDirectory() as tmp:

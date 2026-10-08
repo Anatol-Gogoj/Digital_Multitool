@@ -1075,6 +1075,23 @@ class BreakdownWatchdog:
         return False
 
 
+def parse_watchdog_value(text):
+    """The watchdog's Trip (uA) or Confirm (s) box -> a positive float, or
+    ValueError (HV review 2026-10-08, #406).
+
+    Junk, blank, zero, negatives, nan and inf are all refused. A ticked
+    LIVE run quotes these numbers as its rule in "Energize HV?", run.log
+    and setup.txt, and with any of them the rule is not the one quoted:
+    nan or inf never trips, and a zero or negative trip trips on every
+    read."""
+    import math
+    s = str(text or '').strip()
+    value = float(s)                       # ValueError on blank or junk
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"must be a positive number, got {s!r}")
+    return value
+
+
 def watchdog_off_reason(ticked, dry):
     """Why a run's breakdown watchdog is not armed, in the words
     watchdog_record uses: a DRY run, the box unticked, or, ticked on a

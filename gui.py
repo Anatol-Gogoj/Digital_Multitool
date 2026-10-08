@@ -4130,6 +4130,36 @@ LOGGING:
             # worker needs a scope to read the current (audit 2026-07-25).
             wd_ticked = bool(self.sldea_wd_on.get())
             wd_on = bool(wd_ticked and not dry and self.scope is not None)
+            # Trip and Confirm. Ticked on a LIVE run, they are the rule
+            # "Energize HV?" and the records quote as ON, so anything but a
+            # finite number above zero is refused here, before any
+            # question (HV review 2026-10-08, #406). Junk used to fall back
+            # to 100 uA / 3 s unsaid; a nan or inf trip (or confirm) was
+            # armed and could never fire; a zero or negative trip fires on
+            # every read. A DRY or unticked run arms nothing from them and
+            # keeps the old fallback.
+            if wd_ticked and not dry:
+                for key, box, default in (('wd_ua', 'Trip (µA)', '100'),
+                                          ('wd_s', 'Confirm (s)', '3')):
+                    try:
+                        text = str(self.sldea_vars[key].get()).strip()
+                    except KeyError:
+                        continue          # no such box: the default below
+                    try:
+                        sldea_profile.parse_watchdog_value(text)
+                    except ValueError:
+                        self._sldea_log(f"run refused — breakdown watchdog "
+                                        f"{box} is '{text}', not a "
+                                        f"positive number")
+                        messagebox.showerror(
+                            "SLDEA",
+                            f"Breakdown watchdog {box} must be a positive "
+                            f"number — '{text}' is not one.\n\nThe watchdog "
+                            f"is ticked for this LIVE run, and Energize HV? "
+                            f"and the run's records would quote this box as "
+                            f"its rule. Fix the box (the default is "
+                            f"{default}), then press ▶ Run again.")
+                        return
             try:
                 wd_ua = float(self.sldea_vars['wd_ua'].get())
                 wd_s = float(self.sldea_vars['wd_s'].get())

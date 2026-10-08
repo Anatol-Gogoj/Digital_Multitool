@@ -1211,12 +1211,16 @@ class _Win:
             f'the coalesced redraw never landed after resizing to {size}'
 
     def __exit__(self, *_exc):
-        if self.root is not None:
-            try:
-                self.win._closing()     # the X's own path (`#427`)
-            finally:
-                _shut(self.root)
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        try:
+            if self.root is not None:
+                try:
+                    self.win._closing()     # the X's own path (`#427`)
+                finally:
+                    _shut(self.root)
+        finally:
+            # its own finally: _shut can fail the case now, and a failed
+            # case still removes its fixture folder
+            shutil.rmtree(self.tmp, ignore_errors=True)
         return False
 
 
@@ -2834,12 +2838,16 @@ class _Bare:
         return self
 
     def __exit__(self, *_exc):
-        if self.root is not None:
-            try:
-                self.win._closing()     # the X's own path (`#427`)
-            finally:
-                _shut(self.root)
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        try:
+            if self.root is not None:
+                try:
+                    self.win._closing()     # the X's own path (`#427`)
+                finally:
+                    _shut(self.root)
+        finally:
+            # its own finally: _shut can fail the case now, and a failed
+            # case still removes its fixture folder
+            shutil.rmtree(self.tmp, ignore_errors=True)
         return False
 
 
@@ -4174,12 +4182,16 @@ class _Pair:
         return self
 
     def __exit__(self, *_exc):
-        if self.root is not None:
-            try:
-                self.win._closing()     # the X's own path (`#427`)
-            finally:
-                _shut(self.root)
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        try:
+            if self.root is not None:
+                try:
+                    self.win._closing()     # the X's own path (`#427`)
+                finally:
+                    _shut(self.root)
+        finally:
+            # its own finally: _shut can fail the case now, and a failed
+            # case still removes its fixture folder
+            shutil.rmtree(self.tmp, ignore_errors=True)
         return False
 
 

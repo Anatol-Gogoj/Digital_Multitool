@@ -152,8 +152,10 @@ never touches the signal generator. Keep the Trek's HV output off for the whole 
 
 Before you press Run: "Apply & Lock" was your last camera action, the scope is as in section 3,
 "Trek inverts (negate control)" is set as the lab says, and the lab box steps are done. Leave
-"Breakdown watchdog (LIVE runs)" enabled. Use a NEW "Run name (blank = auto)" (a used name is reused
-and overwritten) and check "Output dir" now: the app does not check it until after the last dialog.
+"Breakdown watchdog (LIVE runs)" enabled. Use a NEW "Run name (blank = auto)": the line under the box
+shows the folder the run will write to, and when that folder already holds a run the line warns and
+"Run" refuses to start. Check "Output dir" now too: whether the app can write there is only found
+out after the last dialog.
 
 **The app sends nothing to the signal generator until the last dialog is answered.** Whatever the
 drive channel (CH1 by default) was left outputting goes to the Trek's control input, and is

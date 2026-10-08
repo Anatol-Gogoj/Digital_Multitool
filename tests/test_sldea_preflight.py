@@ -1572,6 +1572,34 @@ def test_dialog_a_normal_frame_keeps_start_as_the_default():
     assert app._sldea_preflight_seen == SEEN_FRAME, app._sldea_preflight_seen
 
 
+def test_the_preflight_keeps_the_camera_it_found_for_setup_txt():
+    """#400: setup.txt records the camera a run used. The pre-flight
+    already resolves the camera and takes a picture, so it keeps the spec
+    and the picture's size for the run's camera block
+    (_sldea_preflight_camera), with no camera I/O of its own; what it
+    leaves for the start path is unchanged."""
+    mb = _MB({'Camera pre-flight': False})
+    app = _FlightApp()
+    with _camera(lambda n: None, device='/dev/video0'), _messagebox(mb):
+        assert app._sldea_preflight(3, 0) is False
+    # no picture: the camera is named, without a size
+    assert app._sldea_preflight_camera == {
+        'kind': 'cv2', 'index': 0, 'device': '/dev/video0'}, \
+        app._sldea_preflight_camera
+    assert app._sldea_preflight_seen == SEEN_NONE
+
+    def probe(dlg, app, mb):
+        dlg.start.invoke()
+
+    go, app, mb, cam, _lock_after = _dialog(GOOD, {}, probe)
+    assert go is True and cam['grabs'] == 1, (go, cam)
+    assert app._sldea_preflight_camera == {
+        'kind': 'cv2', 'index': 0, 'device': '/dev/video0',
+        'frame': (GOOD.shape[1], GOOD.shape[0])}, \
+        app._sldea_preflight_camera
+    assert app._sldea_preflight_seen == SEEN_FRAME
+
+
 def test_dialog_starting_past_a_warning_is_one_click_and_one_log_line():
     """dark, bright and a preview mismatch are warnings, not gates: no
     second question. They still cost the default button, and the click

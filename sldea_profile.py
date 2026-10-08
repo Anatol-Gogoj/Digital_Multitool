@@ -1392,6 +1392,41 @@ class BreakdownWatchdog:
         return False
 
 
+def parse_watchdog_value(text):
+    """The watchdog's Trip (uA) or Confirm (s) box -> a positive float, or
+    ValueError (HV review 2026-10-08, #406).
+
+    Junk, blank, zero, negatives, nan and inf are all refused. A ticked
+    LIVE run quotes these numbers as its rule in "Energize HV?", run.log
+    and setup.txt, and with any of them the rule is not the one quoted:
+    nan or inf never trips, and a zero or negative trip trips on every
+    read."""
+    import math
+    s = str(text or '').strip()
+    value = float(s)                       # ValueError on blank or junk
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"must be a positive number, got {s!r}")
+    return value
+
+
+def watchdog_off_reason(ticked, dry):
+    """Why a run's breakdown watchdog is not armed, in the words
+    watchdog_record uses: a DRY run, the box unticked, or, ticked on a
+    LIVE run, no scope to read the current."""
+    if dry:
+        return "dry run, no HV"
+    if not ticked:
+        return "box unticked"
+    return "no scope to read the current"
+
+
+def watchdog_state(ticked, armed, dry):
+    """'ON' or 'OFF (<reason>)': watchdog_record's state in short, for
+    sldea_run's refusal when it changed between "Energize HV?" and the
+    commit point (HV review 2026-10-08, #406)."""
+    return "ON" if armed else f"OFF ({watchdog_off_reason(ticked, dry)})"
+
+
 def watchdog_record(ticked, armed, dry, trip_ua, confirm_s):
     """(setup_line, log_tag, dialog_text): the breakdown watchdog a run
     starts with, worded for setup.txt, run.log and "Energize HV?" (#406).
@@ -1417,12 +1452,7 @@ def watchdog_record(ticked, armed, dry, trip_ua, confirm_s):
                 f"current stays {trip_ua:g} µA or more away from the "
                 f"baseline it learns at 0 kV, for {confirm_s:g} s of "
                 f"consecutive reads.")
-    if dry:
-        why = "dry run, no HV"
-    elif not ticked:
-        why = "box unticked"
-    else:
-        why = "no scope to read the current"
+    why = watchdog_off_reason(ticked, dry)
     return (f"Breakdown watchdog: OFF ({why})",
             f"watchdog: OFF ({why})",
             "Breakdown watchdog: OFF"
@@ -1491,9 +1521,13 @@ class NSigmaWatchdog:
     `base_sigma`: the runner's reads before the ramp) stands in. With no
     baseline, settled landing reads seed the window unjudged until it
     holds `w_min` of them; a fault present from the first landing is then
-    taken as normal, which the fixed rule beside it still catches. (The
-    desk prototype of 2026-10-08 judged reads before it had anything to
-    judge them by, so without a baseline its window never filled.)"""
+    taken as normal. The fixed rule catches that only on a run where it is
+    armed (its absolute |I| rule, when its baseline read failed). On a run
+    whose watchdog is not armed (the box unticked, or no scope at its
+    arming line) nothing does, so such a run's "no trip" is no evidence;
+    only its would-trips are (HV review 2026-10-08). (The desk
+    prototype of 2026-10-08 judged reads before it had anything to judge
+    them by, so without a baseline its window never filled.)"""
 
     def __init__(self, n_sigma=None, window=None, k_consec=None,
                  dev_min=None, sigma_floor=None, guard=None, w_min=None,

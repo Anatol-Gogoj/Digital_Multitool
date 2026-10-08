@@ -4467,6 +4467,36 @@ LOGGING:
             # worker needs a scope to read the current (audit 2026-07-25).
             wd_ticked = bool(self.sldea_wd_on.get())
             wd_on = bool(wd_ticked and not dry and self.scope is not None)
+            # Trip and Confirm. Ticked on a LIVE run, they are the rule
+            # "Energize HV?" and the records quote as ON, so anything but a
+            # finite number above zero is refused here, before any
+            # question (HV review 2026-10-08, #406). Junk used to fall back
+            # to 100 uA / 3 s unsaid; a nan or inf trip (or confirm) was
+            # armed and could never fire; a zero or negative trip fires on
+            # every read. A DRY or unticked run arms nothing from them and
+            # keeps the old fallback.
+            if wd_ticked and not dry:
+                for key, box, default in (('wd_ua', 'Trip (µA)', '100'),
+                                          ('wd_s', 'Confirm (s)', '3')):
+                    try:
+                        text = str(self.sldea_vars[key].get()).strip()
+                    except KeyError:
+                        continue          # no such box: the default below
+                    try:
+                        sldea_profile.parse_watchdog_value(text)
+                    except ValueError:
+                        self._sldea_log(f"run refused — breakdown watchdog "
+                                        f"{box} is '{text}', not a "
+                                        f"positive number")
+                        messagebox.showerror(
+                            "SLDEA",
+                            f"Breakdown watchdog {box} must be a positive "
+                            f"number — '{text}' is not one.\n\nThe watchdog "
+                            f"is ticked for this LIVE run, and Energize HV? "
+                            f"and the run's records would quote this box as "
+                            f"its rule. Fix the box (the default is "
+                            f"{default}), then press ▶ Run again.")
+                        return
             try:
                 wd_ua = float(self.sldea_vars['wd_ua'].get())
                 wd_s = float(self.sldea_vars['wd_s'].get())
@@ -4694,6 +4724,36 @@ LOGGING:
             go, _ = self._sldea_start_gate(sgch, dry, allowed_sweep,
                                            final=True)
             if not go:
+                return
+            # The watchdog decision once more, here, with the expression
+            # it was first read with (HV review 2026-10-08, #406). "Energize
+            # HV?", the start line and setup.txt are worded from the
+            # reading taken before the questions, and a scope Reconnect
+            # whose done callback ran inside one of them changes it: the
+            # scope back means a ticked run would start unarmed beside a
+            # connected scope, the scope gone means records that say ON
+            # for a run that cannot arm. Nothing from here to the worker
+            # yields to Tk, so a run whose state still matches starts with
+            # exactly what it was asked about; one whose state changed is
+            # refused before any HV, like the start gate above.
+            wd_ticked_now = bool(self.sldea_wd_on.get())
+            wd_now = bool(wd_ticked_now and not dry
+                          and self.scope is not None)
+            if wd_now != wd_on:
+                was = sldea_profile.watchdog_state(wd_ticked, wd_on, dry)
+                now = sldea_profile.watchdog_state(wd_ticked_now, wd_now,
+                                                   dry)
+                change = f"{was} → {now}"
+                self._sldea_log(f"run refused — the breakdown watchdog's "
+                                f"state changed since Energize HV? "
+                                f"({change}); nothing was sent to the SG")
+                messagebox.showerror(
+                    "SLDEA — run blocked",
+                    f"The breakdown watchdog's state changed since "
+                    f"Energize HV? ({change}). A scope Reconnect that "
+                    f"finished while a question was open does this.\n\n"
+                    f"Nothing was sent to the signal generator. Press ▶ Run "
+                    f"again to be asked with the state as it is now.")
                 return
             self._sldea_stop = False
             self._sldea_bd_tripped = False
@@ -5817,6 +5877,26 @@ LOGGING:
 
             watchdog = (sldea_profile.BreakdownWatchdog(wd_ua, wd_s)
                         if (wd_on and not dry and self.scope) else None)
+            # Asked to arm, and could not: the scope went (a LIVE Reconnect
+            # confirmed in the run's first seconds, #339) after "Energize
+            # HV?", run.log's start line and setup.txt all said ON. The run
+            # goes on unwatched (owner decision 2026-10-08, HV review of
+            # #406), and the records say so, the way the telemetry branch
+            # above does for its own file. ASCII in setup.txt, which is
+            # written in the locale encoding.
+            if wd_on and not dry and watchdog is None:
+                self._sldea_log(
+                    "⚠⚠ BREAKDOWN WATCHDOG NOT ARMED — the scope was gone "
+                    "when the run reached the arming line (a Reconnect?). "
+                    "Nothing stops this run on a breakdown; only ■ Abort or "
+                    "the end of the run does. Energize HV? and the start "
+                    "line said ON.")
+                try:
+                    with open(os.path.join(rundir, 'setup.txt'), 'a') as sf:
+                        sf.write("Breakdown watchdog (start): NOT armed (no "
+                                 "scope)\n")
+                except OSError:
+                    pass
             if watchdog is not None and not self._sldea_stop:
                 # Learn the I_Out rest level at 0 kV (SG is at 0 V here) so
                 # the trip is |I − baseline|, not |I|: the whole 07-29
@@ -6059,11 +6139,25 @@ LOGGING:
                             if (shadow.update(el, p.kv_at(el), ua,
                                               offscreen=ioff)
                                     and tel is not None):
-                                tel.event(
-                                    el, datetime.now().isoformat(
-                                        timespec='milliseconds'),
-                                    p.kv_at(el), "SHADOW N-sigma "
-                                    + shadow.outcome_text())
+                                # Written, not flushed (HV review
+                                # 2026-10-08): this row is the one file
+                                # write the shadow adds to this loop, and
+                                # its own flush on a stalled share delayed
+                                # the next tick's live trip by the stall.
+                                # hold_flush keeps the row in the file's
+                                # buffer; the next flush (the periodic row
+                                # below, or tel.close() after the SG is
+                                # zeroed) writes it out.
+                                held = tel.hold_flush
+                                tel.hold_flush = True
+                                try:
+                                    tel.event(
+                                        el, datetime.now().isoformat(
+                                            timespec='milliseconds'),
+                                        p.kv_at(el), "SHADOW N-sigma "
+                                        + shadow.outcome_text())
+                                finally:
+                                    tel.hold_flush = held
                         except Exception as e:
                             shadow_end = (f"stopped by an error at "
                                           f"{el:.1f} s: "

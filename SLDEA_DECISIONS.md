@@ -1514,7 +1514,8 @@ telemetry, so the rule has not yet met one at its live read rate. Every
 away read, a lone one included, is listed in run.log once the SG is
 zeroed, so the owner can decide later whether a single away read is a
 breakdown. It stays in shadow until the §N1 probe and a bench campaign
-say it should act.
+say it should act. A run whose watchdog was not armed counts as
+evidence only through its would-trips (HV review, decision 10).
 
 **Observation** (replay on the 18 single-layer runs with current copied
 from the lab share, 2026-10-08: data.csv, telemetry.csv, setup.txt and
@@ -1596,9 +1597,58 @@ run.log only).
    reason telemetry.csv gets no row per away read; its periodic rows
    already carry the current at the telemetry rate.
 
+**HV review, same day (2026-10-08).** An adversarial review of the
+shadow's place on the HV path, on the real worker over the scope-lock
+suite's fakes. The rule itself held against every attack (exceptions,
+the `finally` block, the readers of its telemetry row and run.log lines).
+
+*Observation.*
+
+- Nothing pinned that the shadow runs after the fixed watchdog has
+  decided. With the shadow's block moved above the trip branch and a
+  would-trip made to cost 2 s, every suite still passed: the run-level
+  test checked only that the run tripped in the end, not when.
+- The would-trip's telemetry row is the one file write the shadow adds to
+  the HV loop, once per run. Model: 10 µA, then 40 µA (a would-trip under
+  the 100 µA trip), then 160 µA a second later, confirm 3 s. A 3 s stall
+  on that row's own flush moved the 160 µA onset to the SG zero from
+  3.06 s to 5.67 s. With every flush of a stalled share stalling instead,
+  the shadow made no difference, because the periodic row pays the same
+  stall (the review's 5.15 s with and without it, at 2 Hz).
+- On a run whose watchdog is not armed (the box unticked with telemetry
+  on, or a scope lost before the arming line), the shadow has no 0 kV
+  baseline. It seeds its window from settled landing reads, so a fault
+  present from the first landing is learned as normal, and no fixed rule
+  runs beside it: in the review's run whose watchdog never armed, 120 µA
+  from the ramp on gave "no trip". The class docstring said the fixed
+  rule "still catches" that case; on this path there is none.
+
+*Decision (2026-10-08).*
+
+8. A test pins the order in a real worker run: on every read the shadow
+   is fed, the call just before it is the fixed watchdog's decision on
+   that same read, and a would-trip's telemetry row comes after both
+   decisions of its tick. The review's mutant fails it.
+9. The would-trip row is written with the telemetry log's `hold_flush`
+   set, and the hold is put back after it. The row issues no flush of
+   its own; the next flush writes it out (the periodic row in the same
+   tick at 2 Hz, or the log's close after the SG is zeroed), so it is
+   kept. In the model above, the stall on that row's flush now costs
+   nothing: 3.07 s, against 3.06 s with no stall. Not covered: a write
+   that reaches the disk because the file's buffer is full, which only a
+   long slow-mode flush window can cause, and which the periodic rows
+   meet the same way. Taking every row off this thread is the queue
+   TelemetryLog's docstring already names as a follow-up.
+10. Evidence from a run whose watchdog was not armed (the box unticked,
+    or `Breakdown watchdog (start): NOT armed` in its setup.txt) counts
+    only through its would-trips. Its "no trip" means nothing, because a
+    fault there from the first landing looks normal to the rule. The
+    docstring says so.
+
 **Before it may act.** The §N1 probe's quiet-rig sigma per measurement
 token; a bench campaign of LIVE runs in shadow with no false would-trip and
-every confirmed event caught, which would also be the first real
+every confirmed event caught (a "no trip" counting only from runs whose
+watchdog was armed, decision 10), which would also be the first real
 breakdowns it sees at its live read rate; the owner's call on whether a
 self-clearing excursion (one read far off, or a short burst past the
 scope's screen) should stop a run; and a peak token (`#189`) if
@@ -3289,7 +3339,9 @@ ticked by default. Its 100 µA / 3 s rule misses small breakdowns
 (`#219`), but it is the only thing that stops a LIVE run on a
 breakdown, and replayed on the single-layer runs on file it stops none
 that was not breaking down: healthy runs stayed within 15.0 µA of their
-baseline.
+baseline. After the same day's HV review, Run is refused before any HV
+when the state changed while a question was open, or when a ticked LIVE
+run's Trip or Confirm is not a positive number.
 
 **Observation.**
 
@@ -3373,13 +3425,67 @@ single-layer runs above.
    have no such line, so "OFF" and "not recorded" stay apart.
 5. One function, `sldea_profile.watchdog_record`, words all three from the
    one reading that sldea_run hands the worker, taken before
-   "Energize HV?". The dialog cannot name a watchdog the run does not get.
+   "Energize HV?" and checked again at the commit point (decision 6).
+   The dialog cannot name a watchdog the run does not start with. A scope
+   lost after the run has started is the HV review's second observation
+   below.
 
-**What it costs.** Nothing changes for a ticked run. An operator who
+**What it costs.** A ticked run that starts is armed as on main: the box
+ticked, a LIVE run, a scope at the commit point. What is new for it is
+two refusals before any HV (decisions 6 and 7). An operator who
 unticks the box still can, and that LIVE run keeps ramping through a
 breakdown or a short until its end or ■ Abort, with the Trek's own current
 limit as the only automatic stop. The difference is that it is now said
 before the HV and written into the run's own files.
+
+**HV review, same day (2026-10-08).** An adversarial review of this
+change's HV path. Each observation was reproduced on the real sldea_run
+and worker over the scope-lock suite's fakes.
+
+*Observation.*
+
+- Reading the state before the questions opened a gap that main
+  (`9e94274`) did not have. A scope Reconnect sets the scope handle to
+  None at once and restores it from its done callback, and that callback
+  can run inside a pre-HV dialog's nested event loop. With the scope back
+  inside "No current monitoring", "Energize HV?" said "OFF (no scope to
+  read the current)" and the run went unarmed beside a connected scope:
+  at 120 µA over a 100 µA / 1 s trip it ran to its end, where main armed
+  and ended in BREAKDOWN-ABORT. The other way round, a scope gone inside
+  "Energize HV?" left all three records saying ON for a run that could
+  not arm.
+- The worker does not arm on the decision it is handed alone. Its arming
+  line, after the SG output goes on, needs the scope as well, so a LIVE
+  Reconnect confirmed in the run's first seconds (the open item of
+  `#339`) leaves the run unarmed while all three records say ON, and no
+  line says so. Losing the watchdog this way predates `#406`; the records
+  that claim ON are this change's.
+- The Trip and Confirm boxes took any value. Junk ran as 100 µA / 3 s
+  without a word; a nan or inf trip or confirm was armed and can never
+  fire; a zero or negative trip fires on every read. That predates
+  `#406` too, but the records now quote the boxes as the rule.
+
+*Decision (2026-10-08).*
+
+6. sldea_run computes the decision once more at the commit point, after
+   the final start gate, with the same expression (box ticked, a LIVE
+   run, a scope). Nothing from there to the worker yields to Tk. If it
+   differs from the one the dialog and the records were worded from, the
+   run is refused the way the start gate refuses one: a "run blocked"
+   box that names the change (for example "OFF (no scope to read the
+   current) → ON"), nothing sent to the SG, and ▶ Run asks again with the
+   state as it is then.
+7. Ticked on a LIVE run, a Trip or Confirm that is not a finite number
+   above zero refuses Run before any question, with a message naming the
+   box. A DRY run and an unticked LIVE run arm nothing from the boxes and
+   keep the old fallback.
+8. For the second observation the owner chose to run on with a truthful
+   record (2026-10-08): a ticked LIVE run that reaches the worker's
+   arming line with no scope goes on unwatched, run.log gets a
+   "⚠⚠ BREAKDOWN WATCHDOG NOT ARMED" warning and setup.txt an ASCII
+   `Breakdown watchdog (start): NOT armed (no scope)` line, and the start
+   records keep what the dialog said; the `#339` open item (a LIVE
+   Reconnect early in a run leaves it unwatched) stands.
 
 **Not done here.** Setting the trip from real runs (`#219`), and the trip
 logic and spike capture (`#189`).

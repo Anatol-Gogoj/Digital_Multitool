@@ -3257,22 +3257,73 @@ class PlotWindow:
         remember_now FIRST (`#275`): it reads the live widgets, and a
         destroyed root has none.
 
-        Then the pending debounced redraw, BEFORE destroy. A close landing
-        inside REDRAW_MS of a click -- picking a run and reaching straight
-        for the X -- left one queued at a command Tk had just deleted, and
-        its background error handler printed `invalid command name
-        ...redraw` on the console (`#283`). Harmless, but it is exactly
-        the kind of line a real failure hides behind, which is why the
-        test suite's own _shut() helper has been sweeping it up by hand.
-
-        The only other after() in this module is Tooltip's hover timer,
-        and it cancels itself: Tooltip binds <Destroy> to _hide. Nothing
-        else here queues a callback, so this is the whole sweep -- and it
-        stays a list of THIS window's ids rather than 'after info', which
-        on a shared root would cancel someone else's."""
+        Then every callback this window queued (cancel_pending), BEFORE
+        destroy. A close landing inside REDRAW_MS of a click (picking a
+        run and reaching straight for the X) left the debounced redraw
+        queued at a command Tk had just deleted, and its background error
+        handler printed `invalid command name ...redraw` on the console
+        (`#283`). Harmless, but it is exactly the kind of line a real
+        failure hides behind. The test suite's _shut() no longer sweeps
+        up after this method: it fails a case that leaves anything queued
+        (`#427`)."""
         self.remember_now()
-        self._cancel_redraw()
+        self.cancel_pending()
         self.root.destroy()
+
+    def cancel_pending(self):
+        """Cancel every callback this window has queued, and leave the
+        root alive. Never raises.
+
+        _closing's sweep, and on its own the way out for a window whose
+        root lives on: the test suite opens window after window on one
+        root, which the app (one window per process) never does (`#427`).
+
+        A list of THIS window's ids rather than 'after info', which on a
+        shared root would cancel someone else's:
+          - the debounced redraw (_cancel_redraw);
+          - the figure canvas's idle draw (_cancel_figure_draw).
+        The only other after() in this module is Tooltip's hover timer,
+        and it cancels itself: Tooltip binds <Destroy> to _hide, so a
+        close takes it with the widgets. A window left alive keeps its
+        tips and their timers, which this does not reach: a case that
+        hovers one closes the window instead."""
+        self._cancel_redraw()
+        self._cancel_figure_draw()
+
+    def _cancel_figure_draw(self):
+        """Drop the figure canvas's pending idle draw, if any. Never
+        raises.
+
+        Many paths queue one through matplotlib's draw_idle: this
+        window's relayout() and its toolbar's Save; matplotlib's own
+        <Configure> handler on every canvas resize, and its <Map> handler
+        when the pixel ratio changes (backends/_backend_tk.py); and the
+        toolbar's pan, zoom, Home, Back and Forward (backend_bases.py),
+        as of matplotlib 3.11.2. So it is cancelled by its id, whoever
+        queued it. Nothing else cancels it: this window embeds the
+        canvas with no FigureManager, and FigureManagerTk.destroy is
+        where matplotlib cancels it for the windows it makes itself.
+        The id is that method's own, the canvas's private
+        _idle_draw_id. Should a matplotlib
+        release rename it, this finds nothing to cancel and the test
+        suite's _shut() names the draw it left (`#427`).
+
+        Cancelled through the canvas widget, which queued it: tkinter's
+        after_cancel deletes the command but takes it off the list of
+        the widget it is called on only, and a name left on the canvas's
+        list then fails the canvas's own destroy (`#280`, measured in
+        Edge Review's suite). The id is cleared too, or a window that
+        lives on would never draw idle again: draw_idle returns early
+        while one is set."""
+        canvas = getattr(self, 'canvas', None)
+        draw_id = getattr(canvas, '_idle_draw_id', None)
+        if not draw_id:
+            return
+        try:
+            canvas.get_tk_widget().after_cancel(draw_id)
+        except Exception:
+            pass
+        canvas._idle_draw_id = None
 
     def _cancel_redraw(self):
         """Drop the pending debounced redraw, if any. Never raises -- an
@@ -3626,7 +3677,14 @@ class PlotWindow:
             self._refresh_hints()
 
     def _redraw(self):
-        self._redraw_after = None
+        # CANCELLED, not forgotten (`#427`). From _debounced there is
+        # nothing left to cancel; a redraw() called directly overtakes a
+        # pending one, which would only draw the same figure again. Its
+        # id used to be dropped here with the timer still queued, so
+        # _closing had nothing to cancel it by: the test suite's
+        # redraw()-then-close case printed `invalid command name
+        # ..._debounced`, the `#283` line (measured 2026-10-08).
+        self._cancel_redraw()
         # the click line goes back to being a hint: what it says otherwise
         # is which frame the LAST double-click opened, and that answer
         # belongs to the figure that was on screen when it was clicked --

@@ -71,9 +71,13 @@ Modes:
               figure after a setup.txt edit, and the tidy CSV carries t0
               and the field on every row. The X marks sit at the breakdown
               field. --aggregate pools runs on the field grid by
-              interpolation; --aggregate-exact pools only runs that share
-              one t0, since films of different thickness share no field
-              levels. Refuses --vs-area.
+              interpolation. --aggregate-exact pools exact levels as on
+              the kV axis, but two films of different thickness share a
+              field level only where V1/t1 = V2/t2 (0 V/um always, 25 and
+              50 um films on 0.5 kV steps every 20 V/um), so most levels
+              may hold one film's runs; the console and the caption say
+              how many levels hold more than one thickness. Refuses
+              --vs-area.
 
 Up/down and repeated runs:
     A run whose voltage also FELL (Up/down, or a Repeat that restarts
@@ -1467,8 +1471,16 @@ def check_film_thickness(value):
             return None, (f"film thickness entry {entry!r} must be a run "
                           f"directory and a thickness in um")
         t0 = pair[1]
-        if (isinstance(t0, bool) or not isinstance(t0, (int, float))
-                or not math.isfinite(t0) or t0 <= 0):
+        try:
+            # float() first: math.isfinite on a JSON integer too large for
+            # a float raises OverflowError (a 400-digit thickness in a
+            # hand-edited spec, review 2026-10-07), and a spec must be
+            # refused, never crash the command line
+            t0 = (None if isinstance(t0, bool)
+                  or not isinstance(t0, (int, float)) else float(t0))
+        except OverflowError:
+            t0 = None
+        if t0 is None or not math.isfinite(t0) or t0 <= 0:
             return None, (f"film thickness entry {entry!r}: the thickness "
                           f"must be a positive number of um")
         path = os.path.abspath(pair[0].strip())
@@ -1899,6 +1911,22 @@ def aggregate_thin_levels(ag):
     all."""
     full = aggregate_full_n(ag)
     return [l for l in ag if l['n_measured'] < full]
+
+
+def _levels_across_films(runs, ag, legs=True):
+    """How many of the aggregate's levels `ag` hold runs of MORE THAN ONE
+    film thickness (`#398`), read from each run's own level curve exactly
+    as aggregate_levels pooled it.
+
+    For an exact-pooled field aggregate: a level is a field, and two films
+    of different thickness share one only where V1/t1 = V2/t2, so this is
+    the number of levels whose n really mixes films. The rest count the
+    runs of one film."""
+    films = {}
+    for r in runs:
+        for p in run_level_curve(r, legs=legs):
+            films.setdefault(p['key'], set()).add(r.get('t0_um'))
+    return sum(1 for l in ag if len(films.get(l['kv'], ())) > 1)
 
 
 # ---------------------------------------------------------------------------
@@ -3285,31 +3313,12 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
             warn(f"aggregate by group: {note}")
         label_ax = axl if axl is not None else axr
         drawn_groups = []
-        # pools exact-key pooling cannot draw on the field axis (`#398`)
-        refused = []
+        # exact-level pools of more than one film thickness on the field
+        # axis (`#398`): (what, t0s, levels holding more than one, levels)
+        mixed_films = []
         for i, (name, subset) in enumerate(
                 sets if grouped else [(None, runs)]):
             color, ls = styles[i] if grouped else (AGGREGATE_COLOR, '-')
-            t0s = (sorted({r.get('t0_um') or 0.0 for r in subset})
-                   if fieldax else [])
-            if opts.get('aggregate_exact') and len(t0s) > 1:
-                # REFUSED, and said, rather than drawn: a run's field
-                # levels are its kV levels over its own t0, so runs on
-                # films of different thickness share no field level, and
-                # exact-key pooling would draw each run's points as a
-                # "mean" of one with no band. Interpolation onto the
-                # field grid is the pooling that works across them. The
-                # pool's color stays reserved, so the others keep theirs.
-                what = f"group {name!r}" if grouped else 'aggregate'
-                refused.append((what, t0s))
-                warn(f"{what}: NOT drawn. Exact-level pooling on the "
-                     f"field axis needs every run in it to share one film "
-                     f"thickness, and these have "
-                     f"{', '.join(f'{t:g}' for t in t0s)} µm, which share "
-                     f"no field level. Untick exact pooling "
-                     f"(--aggregate-exact) to interpolate them onto a "
-                     f"common field grid.")
-                continue
             cap_kv = aggregate_cap_kv(subset)
             # n = 1 is a REFUSAL, not a fallback (`#268`, decided
             # 2026-08-09): the band drops out entirely and the caption
@@ -3367,6 +3376,28 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                             what=(f"group {name!r}" if grouped
                                   else 'aggregate'),
                             labels=not grouped)
+            t0s = (sorted({r.get('t0_um') or 0.0 for r in subset})
+                   if fieldax and opts.get('aggregate_exact') else [])
+            if len(t0s) > 1:
+                # Pooled exactly, as on the kV axis, and SAID (owner
+                # decision 2026-10-07): a run's field levels are its kV
+                # levels over its own t0, so two films of different
+                # thickness meet only where V1/t1 = V2/t2. That is 0 V/um
+                # for every pair, and every 20 V/um for 25 and 50 um films
+                # on 0.5 kV steps, but most levels of most pairs hold one
+                # film's runs, which n alone does not show.
+                what = f"group {name!r}" if grouped else 'aggregate'
+                shared = _levels_across_films(
+                    subset, ag, opts.get('split_legs', True))
+                mixed_films.append((what, t0s, shared, len(ag)))
+                warn(f"{what}: exact-level pooling across films of "
+                     f"different thickness "
+                     f"({', '.join(f'{t:g}' for t in t0s)} µm). Two films "
+                     f"share a field level only where V1/t1 = V2/t2, so "
+                     f"{shared} of {len(ag)} levels hold more than one "
+                     f"thickness, and n at the others counts the runs of "
+                     f"one film. Without --aggregate-exact the runs are "
+                     f"interpolated onto a common field grid.")
         if drawn_groups and grouped:
             # WRAPPED to the width it really renders at (`#373`): seeded
             # group names are whole material names, and neither the
@@ -3393,17 +3424,18 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                  f"voltage -- only the first rising leg joins the mean, "
                  f"since averaging a device's rising and falling visits "
                  f"to a level is the blending the leg view exists to stop")
-        if refused:
+        if mixed_films:
             # on the figure too: the PNG travels without the console, and
-            # a requested mean that is simply absent reads as "none asked
-            # for" (`#398`)
+            # an n that counts one film at most levels is not the n a
+            # reader assumes (`#398`)
             agg_caption += (
-                "\nNOT drawn: " + '; '.join(
-                    f"{what} ({', '.join(f'{t:g}' for t in t0s)} µm)"
-                    for what, t0s in refused)
-                + ". Exact-level pooling on the field axis needs one film "
-                  "thickness per pool; films of different thickness share "
-                  "no field level.")
+                "\nExact levels across films of different thickness: two "
+                "films share a field level only where V1/t1 = V2/t2. "
+                + '; '.join(
+                    f"{what} ({', '.join(f'{t:g}' for t in t0s)} µm): "
+                    f"{shared} of {levels} levels hold more than one "
+                    f"thickness"
+                    for what, t0s, shared, levels in mixed_films) + ".")
 
     scale_notes = []
     # the headings both panels will carry, resolved in ONE place so the
@@ -4652,9 +4684,10 @@ def prepare_runs(args, opts, warn=lambda m: None, allow_suspect=False,
              f"film thickness: "
              + '; '.join(f"{name} ({why})" for name, why in no_t0)
              + ". To plot a run against the field, add a line like "
-               "'Film thickness: 50 µm' (its film's thickness, measured "
-               "mounted and prestretched) to that run's setup.txt by "
-               "hand, then plot again. This tool never writes setup.txt.")
+               "'Film thickness: 50 um' (its film's thickness in um, "
+               "measured mounted and prestretched) to that run's setup.txt "
+               "by hand, then plot again. This tool never writes "
+               "setup.txt.")
     if uses_areas:
         kept = []
         for run in runs:

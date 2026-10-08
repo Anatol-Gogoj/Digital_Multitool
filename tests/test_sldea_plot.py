@@ -5035,7 +5035,7 @@ def test_a_run_with_no_film_thickness_is_left_off_and_named_with_the_fix():
             in m, m
         assert ("ODD (its setup.txt records 'fifty microns', which is not "
                 f"a thickness in {UM})") in m, m
-        assert f"'Film thickness: 50 {UM}'" in m, m
+        assert "'Film thickness: 50 um'" in m, m
         assert 'mounted and prestretched' in m and 'by hand' in m, m
         assert 'never writes setup.txt' in m, m
         for d, was in before.items():
@@ -5111,19 +5111,15 @@ def test_the_figspec_fixes_each_t0_so_from_spec_redraws_after_an_edit():
             shutil.rmtree(d, ignore_errors=True)
 
 
-def test_the_field_aggregate_interpolates_and_exact_pooling_needs_one_film():
+def test_the_field_aggregate_interpolates_onto_the_field_grid():
     """`#398`. Interpolated pooling works on the field grid, capped at the
-    lowest breakdown FIELD and saying so in V/um. Exact-key pooling finds
-    no common level across films of different thickness, so such a pool
-    is refused on the console AND on the figure rather than drawn as a
-    'mean' of one; over one film it pools as it does on the kV axis."""
+    lowest breakdown FIELD and saying so in V/um."""
     if not _has_mpl():
         return
     p = _mktmp()
     try:
         a = _field_run(p, 'A', 50)
         b = _field_run(p, 'B', 40)
-        same = _field_run(p, 'S', 50)
         warns = []
         opts = sp.make_opts(x='field', aggregate=True)[0]
         fig = _drawn(sp.prepare_runs([a, b], opts), opts, warns.append)
@@ -5137,40 +5133,121 @@ def test_the_field_aggregate_interpolates_and_exact_pooling_needs_one_film():
         assert any(f"capped at 70 V/{UM}" in w for w in warns), warns
         assert any(f"V/{UM}, " in w and 'thinnest measured support' in w
                    for w in warns), warns
-        # exact pooling across two films: refused, and said twice
-        opts = sp.make_opts(x='field', aggregate=True,
-                            aggregate_exact=True)[0]
-        warns = []
-        fig = _drawn(sp.prepare_runs([a, b], opts), opts, warns.append)
-        assert _thick(fig) == [], 'a mean of fields no two runs share'
-        assert any(w.startswith('aggregate: NOT drawn') and f"40, 50 {UM}"
-                   in w and '--aggregate-exact' in w for w in warns), warns
-        assert f"NOT drawn: aggregate (40, 50 {UM})" in _caption(fig)
-        # ...over one film it is the kV pooling, rescaled
-        warns = []
-        fig = _drawn(sp.prepare_runs([a, same], opts), opts, warns.append)
-        agg = _thick(fig)
-        assert len(agg) == 1
-        assert list(agg[0].get_xdata()) == [10.0 * k for k in range(0, 7)]
-        assert 'NOT drawn' not in _caption(fig)
-        assert not any('NOT drawn' in w for w in warns), warns
-        # grouped: each pool is judged on its own runs, and the refused
-        # one keeps its color slot, so the other's color does not move
-        groups = [['mixed', [a, b]], ['fifty', [same]]]
-        opts = sp.make_opts(x='field', aggregate=True, aggregate_exact=True,
-                            groups=groups)[0]
-        warns = []
-        fig = _drawn(sp.prepare_runs([a, b, same], opts), opts,
-                     warns.append)
-        labels = _agg_lines(fig)
-        assert not any(t.startswith('mixed') for t in labels), labels
-        fifty = [h for t, h in labels.items() if t.startswith('fifty')]
-        assert len(fifty) == 1 and fifty[0].get_color() == \
-            sp.GROUP_COLORS[1], labels
-        assert any(w.startswith("group 'mixed': NOT drawn") for w in warns)
-        assert f"NOT drawn: group 'mixed' (40, 50 {UM})" in _caption(fig)
+        assert not any('across films' in w for w in warns), warns
     finally:
         shutil.rmtree(p, ignore_errors=True)
+
+
+def test_exact_field_pooling_counts_the_levels_where_films_meet():
+    """`#398`, owner decision 2026-10-07: exact-key pooling on the field
+    axis pools as it does on the kV axis, n per level, and is never
+    refused. Two films of different thickness share a field level only
+    where V1/t1 = V2/t2: 0 V/um for every pair, every 20 V/um for 25 and
+    50 um films on these 0.5 kV steps, and nothing else for 47 and 50 um.
+    The console and the caption say how many levels hold more than one
+    thickness; one film says nothing; a group is judged on its own runs."""
+    if not _has_mpl():
+        return
+    p = _mktmp()
+    try:
+        f25 = _field_run(p, 'F25', 25)
+        f47 = _field_run(p, 'F47', 47)
+        f50 = _field_run(p, 'F50', 50)
+        s50 = _field_run(p, 'S50', 50)
+        opts = sp.make_opts(x='field', aggregate=True,
+                            aggregate_exact=True)[0]
+        # every run breaks at 3.5 kV, so the cap is the 50 um film's 70
+        for pair, shared, total in (((f25, f50), 4, 7), ((f47, f50), 1, 13)):
+            runs = sp.prepare_runs(list(pair), opts)
+            ag = sp.aggregate_levels(runs, exact=True)
+            assert len(ag) == total, ag
+            assert sum(1 for l in ag if l['n'] == 2) == shared, ag
+            if shared == 4:
+                assert [(l['kv'], l['n']) for l in ag] == [
+                    (0.0, 2), (10.0, 1), (20.0, 2), (30.0, 1), (40.0, 2),
+                    (50.0, 1), (60.0, 2)], ag
+            else:
+                # 0.5 kV over 47 um is 10.638 V/um, which no multiple of
+                # 10 meets below the cap: the films share 0 V/um alone
+                assert [l['kv'] for l in ag if l['n'] == 2] == [0.0], ag
+            warns = []
+            fig = _drawn(runs, opts, warns.append)
+            agg = _thick(fig)
+            assert len(agg) == 1, 'the exact mean must be drawn'
+            assert list(agg[0].get_xdata()) == [l['kv'] for l in ag]
+            t0s = ', '.join(f"{r['t0_um']:g}"
+                            for r in sorted(runs, key=lambda r: r['t0_um']))
+            note = (f"{shared} of {total} levels hold more than one "
+                    f"thickness")
+            assert any(w.startswith('aggregate: exact-level pooling across '
+                                    'films of different thickness')
+                       and f"({t0s} {UM})" in w and note in w
+                       and 'V1/t1 = V2/t2' in w for w in warns), warns
+            cap = _caption(fig)
+            assert 'V1/t1 = V2/t2' in cap, cap
+            assert f"aggregate ({t0s} {UM}): {note}" in cap, cap
+            assert 'NOT drawn' not in cap
+        # one film: the kV pooling rescaled, and nothing to say
+        warns = []
+        fig = _drawn(sp.prepare_runs([f50, s50], opts), opts, warns.append)
+        assert list(_thick(fig)[0].get_xdata()) == [10.0 * k
+                                                    for k in range(0, 7)]
+        assert not any('across films' in w for w in warns), warns
+        assert 'across films' not in _caption(fig)
+        # grouped: each group is judged on its own runs
+        groups = [['mixed', [f25, f50]], ['fifty', [s50]]]
+        gopts = sp.make_opts(x='field', aggregate=True, aggregate_exact=True,
+                             groups=groups)[0]
+        warns = []
+        fig = _drawn(sp.prepare_runs([f25, f50, s50], gopts), gopts,
+                     warns.append)
+        labels = _agg_lines(fig)
+        assert any(t.startswith('mixed') for t in labels), labels
+        assert any(t.startswith('fifty') for t in labels), labels
+        across = [w for w in warns if 'across films' in w]
+        assert len(across) == 1 and across[0].startswith("group 'mixed'"), \
+            warns
+        assert (f"group 'mixed' (25, 50 {UM}): 4 of 7 levels hold more "
+                f"than one thickness") in _caption(fig)
+    finally:
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def test_an_updown_run_on_the_field_axis_draws_its_legs_at_v_over_t0():
+    """`#398`, review 2026-10-07: a run whose voltage also fell is drawn
+    leg by leg (_draw_area_legs), a path of its own beside the per-level
+    one, so it gets a pin of its own: its triangles, its two leg lines
+    and its arrows sit at kV x 1000 / t0, and so does its aggregate, which
+    takes the first rising leg."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        rd = os.path.join(d, 'UD_run')
+        _fake_run(rd, _updown_rows())
+        _set_thickness(rd, '40 um')
+        opts = sp.make_opts(x='field')[0]
+        runs = sp.prepare_runs([rd], opts)
+        assert runs and runs[0]['x_scale'] == 25.0, runs
+        assert sp.multi_leg(runs[0])
+        ax = _drawn(runs, opts).axes[0]
+        assert sorted(x for x, _y in _marked(ax, '^')) == [
+            0.0, 12.5, 25.0, 37.5]
+        assert sorted(x for x, _y in _marked(ax, 'v')) == [12.5, 25.0]
+        legs = sorted(tuple(float(x) for x in ln.get_xdata())
+                      for ln in ax.get_lines()
+                      if ln.get_marker() in ('None', '', None)
+                      and len(ln.get_xdata()) > 1)
+        assert legs == [(0.0, 12.5, 25.0, 37.5), (37.5, 25.0, 12.5)], legs
+        arrows = _arrows(ax)
+        assert arrows, 'no direction arrows on an up/down run'
+        assert max(max(tx, hx) for tx, _ty, hx, _hy in arrows) > 1.5, \
+            arrows
+        aopts = sp.make_opts(x='field', aggregate=True)[0]
+        fig = _drawn(sp.prepare_runs([rd], aopts), aopts)
+        assert list(_thick(fig)[0].get_xdata()) == [0.0, 12.5, 25.0, 37.5]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_the_field_axis_options_are_checked_like_every_other():
@@ -5211,6 +5288,31 @@ def test_the_field_axis_options_are_checked_like_every_other():
     parsed = sp._parse_argv(['somerun', '--x', 'field'])
     _args, flags, vals = parsed
     assert sp._cli_opts(flags, vals)[0]['x'] == 'field'
+
+
+def test_a_thickness_too_large_for_a_float_is_refused_not_a_crash():
+    """Review 2026-10-07: a JSON integer too large for a float (here 400
+    digits, from a hand-edited figspec) made math.isfinite raise
+    OverflowError out of make_opts. It is refused like any other bad
+    thickness, and --from-spec says so and exits 2."""
+    import json
+    huge = 10 ** 400
+    o, err = sp.make_opts(x='field', film_thickness=[['r', huge]])
+    assert o is None and 'positive number' in (err or ''), err
+    out = _mktmp()
+    try:
+        path = os.path.join(out, 'huge.figspec.json')
+        opts = dict(sp.make_opts(x='field')[0],
+                    film_thickness=[[os.path.join(out, 'r'), huge]])
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({'spec_version': sp.SPEC_VERSION, 'stem': 's',
+                       'runs': [os.path.join(out, 'r')], 'opts': opts}, f)
+        rc, printed = _stdout_of(sp.main, ['--from-spec', path, '--out',
+                                           out])
+        assert rc == 2, (rc, printed)
+        assert 'film thickness entry' in printed, printed
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
 
 
 def test_the_tidy_csv_carries_t0_and_the_field_on_a_field_figure_only():

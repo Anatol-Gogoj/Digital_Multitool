@@ -996,8 +996,10 @@ DRAW_TIPS = {
         "messages below name it and say how to add the line to its "
         "setup.txt by hand; this window never writes setup.txt, and reads "
         "the line each time it redraws, so pick the run again after "
-        "adding it. Exact-level pooling draws a mean only over runs that "
-        "share one t₀."),
+        "adding it. With exact-level pooling, two films of different "
+        "thickness share a field level only where V1/t1 = V2/t2, so most "
+        "levels may hold one film's runs; the messages say how many hold "
+        "more than one."),
     'split_legs': (
         "For a run whose voltage also FELL (Up/down, or a Repeat that "
         "restarts lower): one line per leg, triangle-up points rising and "

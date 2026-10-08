@@ -3313,7 +3313,7 @@ def test_the_axis_and_leg_controls_explain_themselves():
     # `#398`: what the field axis is, and where its t0 comes from
     tip = g.DRAW_TIPS['x']
     for phrase in ('NOMINAL electric field', 'mounted and prestretched',
-                   'never writes setup.txt', 'by hand'):
+                   'never writes setup.txt', 'by hand', 'V1/t1 = V2/t2'):
         assert phrase in tip, phrase
 
 
@@ -3421,7 +3421,7 @@ def test_the_window_names_a_run_with_no_thickness_and_draws_it_once_added():
         msg = win.msg.get('1.0', 'end')
         assert 'field axis: 1 run(s) left off' in msg, msg
         assert "B_run (no 'Film thickness:' line in its setup.txt)" in msg
-        assert "'Film thickness: 50 µm'" in msg and 'by hand' in msg
+        assert "'Film thickness: 50 um'" in msg and 'by hand' in msg
         assert not os.path.exists(os.path.join(w.b, 'setup.txt')), \
             'the window wrote a setup.txt'
         # the fixture's two snapshots sit at 0 and 1 kV: 0 and 25 V/um

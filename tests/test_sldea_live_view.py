@@ -8,15 +8,22 @@ stills-only run's newest still, which the run thread hands over in one
 attribute (app._sldea_live_still). What is pinned here:
 
 * The run thread's side: the hand-over is one reference swap of the very
-  frame about to be saved (no copy), only for one-shot stills, and it
-  never touches the view object. A closed, destroyed or never-opened
-  view costs the run nothing, and a hand-over that raises is swallowed:
-  the still is saved and its row written as before.
+  frame just saved (no copy), only for one-shot stills and only once the
+  save has succeeded (#388), and it never touches the view object. A
+  closed, destroyed or never-opened view costs the run nothing, and a
+  hand-over that raises is swallowed: the still is saved and its row
+  written as before. Nothing on the run's side writes into the frame the
+  view holds (#388).
 * The Tk side: the loop picks up a swapped still and labels it a still
   with its age, never as live; (None, None) from the recorder shows
-  NO FRAME (stream stalled); a recorder left over from an earlier run is
-  never read; the window survives the run end with its last frame
-  labelled RUN ENDED; a new run clears the previous frame.
+  NO FRAME (stream stalled), and a NO FRAME stays red through Abort
+  unless the view saw the stream deliver with the run over (#388); a
+  video run whose stream delivers nothing in its first 5 s shows the
+  stills it goes on with, under VIDEO STREAM DOWN (#388, #392);
+  a recorder left over from an earlier run is never read; the window
+  survives the run end with its last frame labelled RUN ENDED; a new run
+  clears the previous frame; a window destroyed without close() reopens
+  with its picture (#388).
 * The view never opens, grabs from or re-stamps the camera: every webcam
   entry point is replaced by a stub that fails the test if called.
 * The start and end paths: sldea_run forgets the previous run before the
@@ -169,7 +176,8 @@ def _hex(rgb):
 def test_every_state_is_named_on_the_picture_in_a_tol_colour():
     th = lv.thumbnail(_disc_frame())
     for kind, (word, color) in lv.BANNERS.items():
-        thumb = th if kind in ('live', 'still', 'ended') else None
+        thumb = th if kind in ('live', 'still', 'ended',
+                               'stream_down') else None
         img = lv.render(thumb, kind)
         assert img.size == (480, 360 if thumb is not None else 270), \
             (kind, img.size)
@@ -308,11 +316,11 @@ def _oneshot(frame):
         webcam.resolve_camera, webcam.oneshot_rgb = saved
 
 
-def _capture(app, frame, stream=False, tmp=None):
+def _capture(app, frame, stream=False, tmp=None, step=3):
     """The REAL _sldea_capture for one landing still -> (its return,
     the data.csv rows)."""
     p = _profile()
-    snap = {'t': 1.0, 'step': 3, 'nominal_kv': 0.5, 'tag': 'landing'}
+    snap = {'t': 1.0, 'step': step, 'nominal_kv': 0.5, 'tag': 'landing'}
     framedir = _os.path.join(tmp, 'frames')
     _os.makedirs(framedir, exist_ok=True)
     path = _os.path.join(tmp, 'data.csv')
@@ -327,6 +335,23 @@ def _capture(app, frame, stream=False, tmp=None):
     with open(path, newline='') as f:
         rows = list(_csv.DictReader(f))
     return got, rows
+
+
+def _start_worker(app, p, tmp, **kw):
+    """The REAL worker on a daemon thread (a DRY run 'RUN' on CH1, 2, 3),
+    started after a gc.collect() on THIS thread. An earlier Tk test can
+    leave a garbage cycle that holds Tk objects (an app and its view
+    refer to each other). If the cyclic GC first runs on another thread,
+    it frees them there and Tcl aborts the whole process: "Tcl_AsyncDelete:
+    async handler deleted by the wrong thread" (4 of 4 runs of the
+    stays-red tests followed by the Abort test, 2026-10-07)."""
+    import gc
+    gc.collect()
+    t = _threading.Thread(
+        target=app._sldea_worker, args=(p, tmp, 'RUN', 1, 2, 3, True),
+        kwargs=dict(dict(cam_exp=3, cam_gain=0), **kw), daemon=True)
+    t.start()
+    return t
 
 
 def test_a_still_is_handed_over_as_one_reference_to_the_saved_frame():
@@ -389,10 +414,7 @@ def test_the_run_thread_never_touches_the_view_closed_or_never_opened():
     bomb = _Bomb()
     app._sldea_live_view = bomb
     with _tempfile.TemporaryDirectory() as tmp, _oneshot(_disc_frame()):
-        t = _threading.Thread(
-            target=app._sldea_worker, args=(p, tmp, 'RUN', 1, 2, 3, True),
-            kwargs=dict(cam_exp=3, cam_gain=0), daemon=True)
-        t.start()
+        t = _start_worker(app, p, tmp)
         t.join(60)
         assert not t.is_alive(), ("the worker stalled", app.lines)
     assert bomb.touched == [], bomb.touched
@@ -414,14 +436,110 @@ def test_the_run_threads_code_has_one_hand_over_and_no_view_call():
                      'begin_run', 'end_run'):
             assert word not in src, (name, word)
     assert '_sldea_live_still' not in work, "the worker swaps nothing"
-    # the swap sits in a try that swallows everything, inside the
-    # one-shot branch only
+    # the swap sits in a try that swallows everything, in the one-shot
+    # branch only, and AFTER the save, only when it succeeded (#388)
     i = cap.index('self._sldea_live_still =')
     head = cap[:i]
-    assert head.rstrip().endswith('now = time.monotonic()'), head[-200:]
-    assert 'if not stream:' in head[head.rindex('fname = p.frame_filename'):]
+    assert head.rstrip().endswith('try:'), head[-200:]
+    branch = head[head.rindex('fname = p.frame_filename'):]
+    gate = branch.index('if not stream and not save_failed:')
+    assert branch.index('cv2.imwrite(') < gate, branch
+    assert branch.index('save_failed = True') < gate, branch
     tail = cap[i:]
     assert 'except Exception:' in tail[:600] and 'pass' in tail[:600]
+
+
+@_contextlib.contextmanager
+def _failing_imwrite(how):
+    """cv2.imwrite failing as on a full disk or a share that went away:
+    it returns False (`how` False) or raises `how`. Nothing is written."""
+    import cv2
+    saved = cv2.imwrite
+    calls = []
+
+    def fail(path, *a, **k):
+        calls.append(path)
+        if isinstance(how, BaseException):
+            raise how
+        return False
+    cv2.imwrite = fail
+    try:
+        yield calls
+    finally:
+        cv2.imwrite = saved
+
+
+def test_a_still_that_could_not_be_saved_is_never_handed_over():
+    """#388: the view must never show a frame as LAST STILL when it was
+    not saved. The hand-over follows a successful save, so a failed one
+    (imwrite returning False, or raising) hands nothing over, and the
+    view keeps the last still that was saved. The row and the run log
+    say NO FRAME as before, and the runner still gets its frame back."""
+    for how in (False, OSError("the share went away")):
+        app = _HandOverApp()
+        with _tempfile.TemporaryDirectory() as tmp:
+            _capture(app, _disc_frame(), tmp=tmp, step=3)          # saved
+            assert len(app.handed) == 1, app.handed
+            first = app.handed[0]
+            frame = _backlit_frame()
+            with _failing_imwrite(how) as calls:
+                got, rows = _capture(app, frame, tmp=tmp, step=4)
+        assert calls, "the save was never attempted"
+        assert got is frame, "the runner lost its frame"
+        assert len(app.handed) == 1 and app.handed[0] is first, \
+            (how, [h.step for h in app.handed])
+        assert app._sldea_live_still is first
+        assert rows and rows[0]['step'] == '4' and \
+            rows[0]['frame_file'] == '', rows
+        assert any('frame save error' in ln for ln in app.lines), app.lines
+        assert any('could not be saved' in ln for ln in app.lines), \
+            app.lines
+
+
+def _color_disc_frame():
+    """_disc_frame with R, G and B apart (R = gray + 40, B = gray - 40):
+    the same gray mean, so the baseline check sees the same contrast, but
+    a channel swap now changes its bytes. A gray frame (R = G = B) let an
+    in-place RGB-to-BGR conversion through (review F2)."""
+    f = _disc_frame().astype(_np.int16)
+    f[:, :, 0] += 40
+    f[:, :, 2] -= 40
+    return _np.clip(f, 0, 255).astype(_np.uint8)
+
+
+def test_the_frame_is_byte_identical_after_the_capture_and_baseline_check():
+    """#388: the hand-over makes no copy, so the view holds the very array
+    the run thread goes on using. Nothing on that side may write into it:
+    pinned byte for byte after _sldea_capture and the baseline picture
+    check, alone and in a whole stills-only DRY run (warm-up, baseline
+    and its check, landings), where every still is that one array. Its
+    three channels differ, so a channel swap in place shows too."""
+    frame = _color_disc_frame()
+    assert (frame[:, :, 0] != frame[:, :, 2]).all()
+    assert (frame[:, :, 0] != frame[:, :, 1]).all()
+    before = frame.copy()
+    app = _HandOverApp()
+    with _tempfile.TemporaryDirectory() as tmp:
+        got, rows = _capture(app, frame, tmp=tmp)
+    assert got is frame and app.handed[0].frame is frame
+    flat, line = sldea_profile.baseline_picture_check(got, '')
+    assert not flat and line.endswith('OK'), line
+    assert frame.dtype == before.dtype and frame.shape == before.shape
+    assert frame.tobytes() == before.tobytes(), \
+        "the capture or the baseline check wrote into the frame"
+    p = _profile()
+    app = _HandOverApp()
+    with _tempfile.TemporaryDirectory() as tmp, _oneshot(frame):
+        t = _start_worker(app, p, tmp)
+        t.join(60)
+        assert not t.is_alive(), ("the worker stalled", app.lines)
+    assert not any(ln.startswith('ERROR') for ln in app.lines), app.lines
+    assert any(ln.startswith('baseline picture check') for ln in
+               app.lines), app.lines
+    assert len(app.handed) == len(p.snapshots), app.handed
+    assert all(h.frame is frame for h in app.handed)
+    assert frame.tobytes() == before.tobytes(), \
+        "the run wrote into the frame the view holds"
 
 
 def test_the_start_path_forgets_the_last_run_before_the_worker_exists():
@@ -759,16 +877,51 @@ def test_closing_stops_the_loop_and_reopening_shows_the_newest():
         assert view._job is not None
 
 
+def test_a_still_that_could_not_be_saved_never_shows_as_last_still():
+    """#388, in the window, through the REAL _sldea_capture: still 3 is
+    saved and shown; still 4, a backlit frame, fails to save. The window
+    goes on showing still 3 with its own exposure verdict (OK), never
+    still 4 or its CLIPPED."""
+    with _view() as (root, app, view):
+        app.scope = None
+        app._sldea_capture = _types.MethodType(G._sldea_capture, app)
+        _start(app, view)
+        with _tempfile.TemporaryDirectory() as tmp:
+            _capture(app, _disc_frame(), tmp=tmp, step=3)
+            _pump(root, 0.3)
+            assert view.state['kind'] == 'still', view.state
+            assert 'step 3 [landing]' in view._state_lbl.cget('text')
+            with _failing_imwrite(False):
+                _capture(app, _backlit_frame(), tmp=tmp, step=4)
+            _pump(root, 0.3)
+        text = view._state_lbl.cget('text')
+        assert view.state['kind'] == 'still', view.state
+        assert 'step 3 [landing]' in text and 'step 4' not in text, text
+        assert view._level_lbl.cget('text') == 'OK', _texts(view)
+
+
 def test_a_destroyed_window_or_root_never_raises():
+    """...and a window destroyed without close() reopens WITH its picture
+    (#388). The new window's label gets an image of its own; it used to
+    be left blank while _show pasted into the dead window's image, which
+    it did whenever the two pictures were the same size."""
     with _view() as (root, app, view):
         _start(app, view)
+        app._sldea_live_still = _still(step=1)
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'still' and view._photo is not None
+        old = view._photo
         view.win.destroy()                       # the window manager's way
         _pump(root, 0.3)
         assert view._job is None
-        app._sldea_live_still = _still(step=2)
+        app._sldea_live_still = _still(step=2)   # the same size as step 1
         _finish(app)
         assert view.state['kind'] == 'ended'
         assert lv.notify(app, 'open')            # reopens cleanly
+        assert view.is_open() and 'step 2' in view._state_lbl.cget('text')
+        shown = str(view._img_lbl.cget('image'))
+        assert shown and shown == str(view._photo), (shown, view._photo)
+        assert view._photo is not old
         root.destroy()
         view._tick()                             # a late tick: no raise
         assert lv.notify(app, 'end_run') in (True, False)
@@ -1031,7 +1184,9 @@ def test_a_stream_frame_is_never_shown_as_a_still():
     """Finding 4: a recorder that stops being readable (a natural cleanup
     of _sldea_recorder would do it) leaves a STREAM frame in hand. That
     is not a still: no 'still' state, no VIEW ERROR, and the run end
-    still shows the stream frame."""
+    still shows the stream frame. Mid-run it is a red NO FRAME that the
+    staircase's end does not relabel (#388); once the staircase is over
+    it is the run ending."""
     with _view() as (root, app, view):
         _start(app, view)
         app._sldea_recorder = _Rec(frame=_disc_frame(), age=0.1)
@@ -1043,11 +1198,23 @@ def test_a_stream_frame_is_never_shown_as_a_still():
         assert 'error' not in view.state['kind']
         app._sldea_elapsed = 99.0                        # staircase over
         _pump(root, 0.3)
-        assert view.state['kind'] == 'finishing', view.state
+        assert view.state['kind'] == 'closed', view.state
         _finish(app)
         text = view._state_lbl.cget('text')
         assert view.state['kind'] == 'ended'
         assert 'video stream frame taken' in text, text
+        # cleaned up after the view saw the stream deliver with the
+        # staircase over: the run ending, in grey
+        _start(app, view)
+        app._sldea_recorder = _Rec(frame=_disc_frame(), age=0.1)
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live'
+        app._sldea_elapsed = 99.0
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live'
+        app._sldea_recorder = None
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'finishing', view.state
     # and the state builder refuses a still state on a stream frame
     view = lv.LiveView(_types.SimpleNamespace(root=None))
     view._good = {'src': 'stream', 'wall': _time.time(), 'thumb': None,
@@ -1059,9 +1226,11 @@ def test_a_stream_frame_is_never_shown_as_a_still():
 
 def test_a_stream_closing_as_the_run_finishes_is_grey_not_a_fault():
     """Finding 5: between rec.stop() and _sldea_finished the stream
-    closes at every normal video-run end. Once the staircase is over or
-    the run was stopped, that is RECORDING ENDED in grey, with the last
-    frame kept; a stream that dies mid-run is still red NO FRAME."""
+    closes at every normal video-run end. A stream the view saw still
+    delivering after the staircase ended or the run was stopped, which
+    closes or stalls only after that, is RECORDING ENDED in grey, with
+    the last frame kept. (Every other NO FRAME stays red: the next tests,
+    #388.)"""
     with _view() as (root, app, view):
         p = _profile()
         _start(app, view, p)
@@ -1070,13 +1239,12 @@ def test_a_stream_closing_as_the_run_finishes_is_grey_not_a_fault():
         app._sldea_elapsed = 1.0
         _pump(root, 0.3)
         assert view.state['kind'] == 'live'
-        # mid-run death: red
-        rec.frame, rec.alive = None, False
-        _pump(root, 0.3)
-        assert view.state['kind'] == 'closed'
-        assert lv.BANNERS['closed'][1] == lv.TOL_RED
-        # the staircase is over: grey, in words, with the last frame
+        # the staircase is over; the stream delivers until rec.stop()
         app._sldea_elapsed = p.total_duration_s + 0.1
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live', view.state
+        # ...and then closes: grey, in words, with the last frame
+        rec.frame, rec.alive = None, False
         _pump(root, 0.3)
         st = view.state
         assert st['kind'] == 'finishing', st
@@ -1084,14 +1252,356 @@ def test_a_stream_closing_as_the_run_finishes_is_grey_not_a_fault():
         assert lv.BANNERS['finishing'][1] == lv.TOL_GREY
         assert 'expected' in st['text'] and 'NO FRAME' not in st['text']
         assert st['thumb'] is not None
-        # a stall after an Abort is the run ending too
+        # a stall that starts only after an Abort is the run ending too
+        _finish(app)
+        _start(app, view, p)
+        rec = _Rec(frame=_disc_frame(), age=0.1)
+        app._sldea_recorder = rec
         app._sldea_elapsed = 1.0
-        rec.alive = True                                 # stalled
         _pump(root, 0.3)
-        assert view.state['kind'] == 'stalled'
-        app._sldea_stop = True
+        assert view.state['kind'] == 'live'
+        app._sldea_stop = True                           # Abort
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live', view.state
+        rec.frame = None                                 # stalls after it
         _pump(root, 0.3)
         assert view.state['kind'] == 'finishing', view.state
+
+
+def test_a_no_frame_on_show_before_the_run_ended_stays_red():
+    """#388: the camera dies, the view says NO FRAME in red, and the
+    operator presses Abort BECAUSE of it. That used to turn into the grey
+    "RECORDING ENDED ... This is expected." A stall or close the view
+    showed while the run was still going now stays red until the run has
+    ended: after an Abort and at the staircase's end alike, and through
+    a close and reopen of the window. A frame seen with the run over
+    makes a later stall the run ending, and a new run forgets that: its
+    stream that never delivers is red even when first seen after an
+    Abort (review F1)."""
+    with _view() as (root, app, view):
+        p = _profile()
+        _start(app, view, p)
+        rec = _Rec(frame=_disc_frame(), age=0.1)
+        app._sldea_recorder = rec
+        app._sldea_elapsed = 1.0
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live'
+        rec.frame = None                                 # camera unplugged
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'stalled'
+        app._sldea_stop = True                           # Abort, for that
+        _pump(root, 0.3)
+        st = view.state
+        assert st['kind'] == 'stalled', st
+        assert st['banner'] == "NO FRAME (stream stalled)"
+        assert lv.BANNERS['stalled'][1] == lv.TOL_RED
+        assert st['text'].startswith('NO FRAME'), st['text']
+        assert 'expected' not in st['text'], st['text']
+        assert view._run_lbl.cget('text').startswith('Stopping'), \
+            _texts(view)
+        rec.alive = False                                # rec.stop()
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'closed', view.state
+        lv.notify(app, 'close')                          # and reopened
+        assert lv.notify(app, 'open')
+        assert view.state['kind'] == 'closed', view.state
+        _finish(app)
+        assert view.state['kind'] == 'ended'
+        # the staircase's end after a death mid-run: red as well
+        _start(app, view, p)
+        rec = _Rec(frame=_disc_frame(), age=0.1)
+        app._sldea_recorder = rec
+        app._sldea_elapsed = 1.0
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live'
+        rec.frame, rec.alive = None, False               # dies mid-run
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'closed'
+        app._sldea_elapsed = p.total_duration_s + 0.1    # staircase over
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'closed', view.state
+        assert lv.BANNERS['closed'][1] == lv.TOL_RED
+        # a frame seen with the run over: a stall after that is the end
+        rec.frame, rec.alive = _disc_frame(), True
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live', view.state
+        rec.frame = None
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'finishing', view.state
+        _finish(app)
+        # a new run forgets that frame. Stopped before its stream ever
+        # delivered (a dead-at-start stream registered after an Abort,
+        # review F1), its stall is red, not the run ending
+        _start(app, view, p)
+        app._sldea_stop = True
+        app._sldea_recorder = _Rec(frame=None)
+        _pump(root, 0.3)
+        st = view.state
+        assert st['kind'] == 'stalled', st
+        assert 'expected' not in st['text'], st['text']
+
+
+def test_a_stream_that_died_while_the_window_was_closed_stays_red():
+    """#388 review F1 (b): the window is closed, the camera dies, the
+    operator presses Abort and then reopens the window. The view never
+    showed the stall, and it never saw the stream deliver after the run
+    was over, so the stall is red, not the run ending."""
+    with _view() as (root, app, view):
+        p = _profile()
+        _start(app, view, p)
+        rec = _Rec(frame=_disc_frame(), age=0.1)
+        app._sldea_recorder = rec
+        app._sldea_elapsed = 1.0
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'live'
+        lv.notify(app, 'close')
+        rec.frame = None                                 # dies, unseen
+        app._sldea_stop = True                           # Abort
+        assert lv.notify(app, 'open')                    # reopened
+        st = view.state
+        assert st['kind'] == 'stalled', st
+        assert 'expected' not in st['text'], st['text']
+        rec.alive = False                                # rec.stop()
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'closed', view.state
+        _finish(app)
+        assert view.state['kind'] == 'ended'
+
+
+def test_a_dead_streams_stills_show_under_video_stream_down():
+    """#388 with #392's decision: a video run whose stream never started
+    goes on with one-shot stills, and the worker registers its dead
+    recorder. The view shows the red NO FRAME (stream closed) until the
+    first still, then that still under a red "VIDEO STREAM DOWN: LAST
+    STILL, NOT LIVE" banner with the still's own exposure: through an
+    Abort, past the staircase's end, and with a reader that outlived
+    stop() (stalled). RUN ENDED keeps the last still."""
+    with _view() as (root, app, view):
+        p = _profile()
+        _start(app, view, p)
+        rec = _Rec(frame=None, alive=False)          # never gave a frame
+        app._sldea_recorder = rec
+        app._sldea_elapsed = 0.3
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'closed', view.state  # no still yet
+        app._sldea_live_still = _still(step=1, tag='warmup')
+        _pump(root, 0.3)
+        st = view.state
+        assert st['kind'] == 'stream_down', st
+        assert st['banner'] == "VIDEO STREAM DOWN: LAST STILL, NOT LIVE"
+        assert lv.BANNERS['stream_down'][1] == lv.TOL_RED
+        text = view._state_lbl.cget('text')
+        assert text.startswith('VIDEO STREAM DOWN'), text
+        assert 'no video is being recorded' in text, text
+        assert 'LAST STILL, not live: step 1 [warmup]' in text, text
+        assert st['thumb'] is not None and view._photo is not None
+        assert view._level_lbl.cget('text') == 'OK', _texts(view)
+        img = lv.render(st['thumb'], st['kind'])
+        assert _hex(_px(img, img.width - 3, 4)) == lv.TOL_RED    # banner
+        assert _hex(_px(img, img.width / 2.0, img.height * 0.8)) == \
+            lv.TOL_CYAN                    # the picture and its reticle
+        app._sldea_live_still = _still(step=2, tag='baseline')
+        _pump(root, 0.3)
+        assert 'step 2 [baseline]' in view._state_lbl.cget('text')
+        app._sldea_stop = True                           # Abort
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'stream_down', view.state
+        assert view._run_lbl.cget('text').startswith('Stopping'), \
+            _texts(view)
+        app._sldea_elapsed = p.total_duration_s + 0.1    # staircase over
+        rec.alive = True                       # reader outlived stop()
+        _pump(root, 0.3)
+        assert view.state['kind'] == 'stream_down', view.state
+        _finish(app)
+        assert view.state['kind'] == 'ended'
+        assert 'still step 2 [baseline]' in view._state_lbl.cget('text')
+
+
+def test_a_still_over_a_dead_stream_must_be_newer_than_its_last_frame():
+    """#388: how VIDEO STREAM DOWN and item 1's red NO FRAME combine. A
+    still handed over since the last stream frame shown takes the place
+    of the red NO FRAME; an older one does not, so a stream that dies
+    mid-run with no still since stays red through Abort. Tk-free: poll()
+    only reads the run's state."""
+    p = _profile()
+    app = _types.SimpleNamespace(
+        root=None, _sldea_running=True, _sldea_stop=False,
+        _sldea_elapsed=1.0, _sldea_recorder=None, _sldea_live_still=None)
+    view = lv.LiveView(app)
+    view.begin_run(p, True)
+    rec = _Rec(frame=_disc_frame(), age=0.1)
+    app._sldea_recorder = rec
+    app._sldea_live_still = _still(step=1, age=5.0)  # older than the stream
+    assert view.poll()['kind'] == 'live'             # a live frame wins
+    rec.frame = None                                 # dies mid-run
+    st = view.poll()                                 # the old still: no
+    assert st['kind'] == 'stalled' and st['thumb'] is None, st
+    app._sldea_live_still = _still(step=2)           # handed over since
+    st = view.poll()
+    assert st['kind'] == 'stream_down', st
+    assert 'step 2 [landing]' in st['text'], st['text']
+    # a still newer than the last stream frame counts even when the view
+    # showed it BEFORE that (stale) frame: it takes the still back, not
+    # the stream frame it holds
+    app._sldea_live_still = _still(step=3)
+    assert view.poll()['kind'] == 'stream_down'
+    rec.frame, rec.age = _disc_frame(), 1.5          # older than step 3
+    assert view.poll()['kind'] == 'live'
+    rec.frame = None
+    st = view.poll()
+    assert st['kind'] == 'stream_down', st
+    assert 'step 3 [landing]' in st['text'], st['text']
+    # once a stream frame newer than every still has been shown, a death
+    # is the red NO FRAME again, and it stays red through Abort
+    rec.frame, rec.age = _disc_frame(), 0.0
+    assert view.poll()['kind'] == 'live'
+    rec.frame = None
+    assert view.poll()['kind'] == 'stalled'
+    app._sldea_stop = True                           # Abort
+    st = view.poll()
+    assert st['kind'] == 'stalled' and st['thumb'] is None, st
+    _time.sleep(0.05)              # later than that frame on any clock
+    app._sldea_live_still = _still(step=4)           # a still after it
+    st = view.poll()
+    assert st['kind'] == 'stream_down', st
+    assert 'step 4 [landing]' in st['text'], st['text']
+
+
+class _SilentCam:
+    """A camera stream that opens and never delivers: read() blocks until
+    close(), as a wedged device's does."""
+
+    def __init__(self):
+        self.closed = _threading.Event()
+
+    def read(self):
+        self.closed.wait()
+        return None
+
+    def close(self):
+        self.closed.set()
+
+
+@_contextlib.contextmanager
+def _stream_never_starts(tmp, frame, opener=None):
+    """A video run whose camera stream gives nothing while one-shot grabs
+    work: by default open_stream raises (as on EBUSY), or `opener` makes
+    the stream. The worker registers the dead recorder after its 5 s
+    first-frame wait and goes on with one-shot stills (#392)."""
+    saved = (webcam.resolve_camera, webcam.oneshot_rgb,
+             sldea_video.open_stream,
+             _os.environ.get('SCPI_SLDEA_VIDEO_STAGING'))
+
+    def dead(spec, fps=None):
+        raise RuntimeError("EBUSY")
+    webcam.resolve_camera = lambda idx: {'kind': 'cv2', 'index': 0}
+    webcam.oneshot_rgb = lambda spec, count=2: frame
+    sldea_video.open_stream = opener or dead
+    _os.environ['SCPI_SLDEA_VIDEO_STAGING'] = _os.path.join(tmp, 'staging')
+    try:
+        yield
+    finally:
+        (webcam.resolve_camera, webcam.oneshot_rgb,
+         sldea_video.open_stream) = saved[:3]
+        if saved[3] is None:
+            _os.environ.pop('SCPI_SLDEA_VIDEO_STAGING', None)
+        else:
+            _os.environ['SCPI_SLDEA_VIDEO_STAGING'] = saved[3]
+
+
+def test_a_video_run_whose_stream_never_starts_shows_its_stills():
+    """#388 with #392's decision, end to end: the REAL worker, a stream
+    that never opens. The worker registers the dead recorder (the
+    Webcam-tab guard) and hands each saved still over; the view shows
+    every one under VIDEO STREAM DOWN from the first on, and after an
+    Abort, until the tab is released. It used to show a red NO FRAME
+    (stream closed) all run long. The test thread polls the view as its
+    Tk loop would."""
+    p = _profile()
+    app = _HandOverApp()
+    app._sldea_running = True
+    view = lv.LiveView(app)
+    view.begin_run(p, True)                 # before the worker, as sldea_run
+    seen = []
+    with _tempfile.TemporaryDirectory() as tmp, \
+            _stream_never_starts(tmp, _disc_frame()):
+        t = _start_worker(app, p, tmp, vid_on=True, vid_fps=5.0)
+        end = _time.monotonic() + 60
+        while t.is_alive() and _time.monotonic() < end:
+            n = len(app.handed)             # read BEFORE the poll
+            seen.append((n, view.poll()['kind']))
+            if n >= 2:
+                app._sldea_stop = True      # Abort, two stills in
+            _time.sleep(0.02)
+        t.join(10)
+        assert not t.is_alive(), ("the worker stalled", app.lines)
+    assert not any(ln.startswith('ERROR') for ln in app.lines), app.lines
+    assert any('NO recording' in ln for ln in app.lines), app.lines
+    rec = app._sldea_recorder
+    assert rec is not None and not rec.reader_alive(), \
+        "the worker did not register the dead recorder"
+    assert app._sldea_stop and len(app.handed) >= 2, len(app.handed)
+    early = {k for n, k in seen if n == 0}
+    later = {k for n, k in seen if n > 0}
+    assert early <= {'waiting', 'closed', 'stalled'}, early
+    assert later == {'stream_down'}, later
+    last = app.handed[-1]
+    st = view.poll()                        # after the Abort, before the
+    assert st['kind'] == 'stream_down', st  # tab is released
+    assert st['text'].startswith('VIDEO STREAM DOWN'), st['text']
+    assert f"step {last.step} [{last.tag}]" in st['text'], st['text']
+    assert st['thumb'] is not None
+    app._sldea_running = False
+    view.end_run()                          # what _sldea_finished does
+    assert view.state['kind'] == 'ended', view.state
+    assert f"still step {last.step} [{last.tag}]" in view.state['text']
+
+
+def test_an_abort_before_a_dead_stream_is_registered_stays_red():
+    """#388 review F1 (a), with the REAL worker: a video run's stream
+    opens but never delivers. The operator presses Abort during the 5 s
+    wait for its first frame, while the view says WAITING; the worker
+    then registers the dead recorder with the stop flag already set and
+    logs NO recording. The view must show that red, never the grey
+    "RECORDING ENDED ... This is expected.", until the tab is released.
+    About 8 s: the worker's own 5 s wait plus stop()'s 2 s join."""
+    p = _profile()
+    app = _HandOverApp()
+    app._sldea_running = True
+    view = lv.LiveView(app)
+    view.begin_run(p, True)                 # before the worker, as sldea_run
+    cams, seen = [], []
+
+    def silent(spec, fps=None):
+        cams.append(_SilentCam())
+        return cams[-1]
+    with _tempfile.TemporaryDirectory() as tmp, \
+            _stream_never_starts(tmp, _disc_frame(), opener=silent):
+        t = _start_worker(app, p, tmp, vid_on=True, vid_fps=5.0)
+        started = _time.monotonic()
+        while t.is_alive() and _time.monotonic() < started + 60:
+            registered = app._sldea_recorder is not None   # BEFORE the poll
+            seen.append((registered, view.poll()['kind']))
+            if cams and not app._sldea_stop and \
+                    _time.monotonic() > started + 0.5:
+                assert not registered, "registered before the 5 s wait"
+                app._sldea_stop = True      # Abort, during the wait
+            _time.sleep(0.02)
+        t.join(15)
+        assert not t.is_alive(), ("the worker stalled", app.lines)
+    assert not any(ln.startswith('ERROR') for ln in app.lines), app.lines
+    assert any('NO recording' in ln for ln in app.lines), app.lines
+    assert app._sldea_stop and app.handed == [], app.handed
+    rec = app._sldea_recorder
+    assert rec is not None and not rec.reader_alive(), \
+        "the worker did not register the dead recorder"
+    early = {k for reg, k in seen if not reg}
+    later = {k for reg, k in seen if reg}
+    assert early == {'waiting'}, early
+    assert later and later <= {'stalled', 'closed'}, later
+    st = view.poll()                        # the tab is not released yet
+    assert st['kind'] == 'closed', st
+    assert 'expected' not in st['text'], st['text']
 
 
 def test_only_the_thumbnail_is_converted_from_bgr():

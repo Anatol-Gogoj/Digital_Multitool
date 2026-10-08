@@ -13,14 +13,26 @@ frames the run ALREADY holds in memory:
   VideoRecorder.latest() (a lock held for one reference read, and a BGR
   copy made outside it; only the thumbnail is converted to RGB).
   (None, None) from it is shown as "NO FRAME (stream stalled)", the
-  dead-camera signal #48 asks for, unless the run is already finishing,
-  when a closing stream is expected and is shown in grey as "RECORDING
-  ENDED";
-* a stills-only run: the newest still, which the run thread hands over in
-  ONE attribute, app._sldea_live_still, as a LiveStill. That is a plain
-  reference swap: no copy, no lock the view could hold, no Tk call. The
-  view reads it on the Tk thread and labels it a still with its age, so
-  it is never read as live.
+  dead-camera signal #48 asks for. Only a stream this view saw still
+  delivering once the run was over (stopped or past its staircase) is
+  expected to close: when it then stalls or closes, that is shown in grey
+  as "RECORDING ENDED". Every other stall or close stays red until the
+  run has ended (#388): one on show before the run ended, a stream that
+  never delivered (registered dead after an Abort included), and one that
+  died while this window was closed. An operator who pressed Abort
+  because the camera died must not see that relabeled as expected;
+* a video run whose stream delivers nothing in its first 5 s (it goes on
+  with one-shot stills, #392): the newest saved still, under a red
+  "VIDEO STREAM DOWN: LAST STILL, NOT LIVE" banner (#388). A still handed
+  over since the last stream frame shown takes the place of the red NO
+  FRAME; without one, the rule above holds. A recorder that fails to
+  start at all is never registered, and that run reads as stills-only;
+* a stills-only run: the newest SAVED still, which the run thread hands
+  over in ONE attribute, app._sldea_live_still, as a LiveStill, once its
+  save has succeeded: a still that could not be saved is never shown as
+  one (#388). That is a plain reference swap: no copy, no lock the view
+  could hold, no Tk call. The view reads it on the Tk thread and labels
+  it a still with its age, so it is never read as live.
 
 It is called "live view" in code because "preview" already means the
 run-plan staircase on the SLDEA tab (sldea_preview).
@@ -28,15 +40,29 @@ run-plan staircase on the SLDEA tab (sldea_preview).
 HV-safety rules this module keeps (the run thread runs the watchdog and
 the ramp):
 
-* The run thread never calls anything here and never waits on it. Its
-  only contact is the attribute swap above, and that never depends on
-  whether this window is open, closed or destroyed.
+* The run thread never calls anything here. Its only contact is the
+  attribute swap above, and that never depends on whether this window is
+  open, closed or destroyed.
+* The run thread is not fully decoupled from this window, though. Its
+  own root.after calls (_sldea_log, _sldea_set_status) are marshaled to
+  the Tk thread by _tkinter and wait until that thread takes them, so
+  one made while a tick of this loop runs waits for the tick to end.
+  With a 1080p frame a tick costs about 10 ms, twice a second (#388:
+  6.6 ms median and 7.3 ms max without the Tk paste in the review; with
+  it, 9.4 to 9.5 ms median and 13 to 16 ms max in two runs on the
+  Windows development PC, 2026-10-06 and 07; not yet measured on the
+  Linux bench, see bench/test_sldea_liveview_probe.py). Any Tk work
+  delays those calls the same way; the coupling predates this window. A
+  closed window has no tick and adds nothing.
 * Everything here runs on the Tk thread, from a Tk `after` loop at about
   2 Hz that only reads. It never opens, grabs from or re-stamps the
   camera: in a stills-only run a stream would contend for the device
   exactly as the refused Webcam preview did.
 * A frame from the run is never written to: the view works on its own
   thumbnail, and the full-size frame is dropped at the end of each tick.
+  The run thread goes on reading a still's frame after the hand-over
+  (the baseline picture check), so it may not write into it either;
+  gui._sldea_capture says so, and a test pins it byte for byte.
 * A new run forgets the previous one before that run's worker exists
   (begin_run), and a recorder left over from an earlier run is never
   taken for this run's (they are told apart by identity), so nothing
@@ -89,8 +115,14 @@ BANNERS = {
     'ended': ("RUN ENDED, NOT LIVE", TOL_GREY),
     'error': ("LIVE VIEW ERROR, NOT LIVE", TOL_RED),
     # the stream closing once the staircase is over or the run was
-    # stopped: expected, so grey and in words, never the red NO FRAME
+    # stopped: expected, so grey and in words. Only for a stream this
+    # view saw still delivering with the run over; any other NO FRAME
+    # stays red (#388, LiveView.poll)
     'finishing': ("RECORDING ENDED, NOT LIVE", TOL_GREY),
+    # a video run whose stream gives no frame but which hands over
+    # one-shot stills (it delivered nothing in its first 5 s, #392): the
+    # newest saved still, with the stream fault in words and in red (#388)
+    'stream_down': ("VIDEO STREAM DOWN: LAST STILL, NOT LIVE", TOL_RED),
 }
 
 # exposure_verdict's levels, in words and in colour
@@ -104,16 +136,18 @@ NOTE = ("Read-only: this window shows frames the run already holds and "
         "Abort is on the SLDEA tab.")
 
 # One still, as the run thread hands it over (gui._sldea_capture):
-#   frame  the RGB frame about to be saved (the run's own array: the view
-#          only reads it)
+#   frame  the RGB frame just saved (the run's own array, not a copy: the
+#          view only reads it, and the run thread does not write it)
 #   step, kv, tag   the snapshot's step, nominal kV and tag
-#   t_run  run time when it was handed over (None without a run clock)
-#   mono   time.monotonic() then: the view's age clock, and its key for
-#          "is this a new still"
-#   wall   time.time() then, for the clock time shown
-# The hand-over happens just before the save, after the capture's scope
+#   t_run  run time at `mono` (None without a run clock)
+#   mono   time.monotonic() just before the save: the view's age clock,
+#          and its key for "is this a new still"
+#   wall   time.time() at the same moment, for the clock time shown
+# The clock is read just before the save, after the capture's scope
 # reads, so the shown age can understate the grab's by those reads (two
-# scope round trips; zero without a scope).
+# scope round trips; zero without a scope). The hand-over itself comes
+# after the save, and only when the save succeeded (#388), so a slow save
+# delays the still on screen but does not make it look younger.
 LiveStill = collections.namedtuple(
     'LiveStill', 'frame step kv tag t_run mono wall')
 
@@ -328,7 +362,12 @@ def choose_place(root, area, size, gap=16, bottom_margin=48, slack=16):
     on the main window's own monitor whatever the layout, and
     `covers_root` is True: the caller then keeps the main window above
     it, so an automatic open never covers the SLDEA tab or its status
-    line, which carries the run's alarms."""
+    line, which carries the run's alarms.
+
+    Owner decision 2026-10-06 (#388): keep it so. With no room beside
+    the main window, the view opened at a run start stays behind it
+    until "Live view..." is pressed, so it can never cover the run
+    controls or Abort."""
     rx, ry, rw, rh = (int(v) for v in root)
     x0, y0, x1, y1 = (int(v) for v in area)
     w, h = (int(v) for v in size)
@@ -439,6 +478,8 @@ class LiveView:
         self._prev_rec = _ref(None)  # the recorder that predates this run
         self._good = None            # the last real frame shown this run
         self._still_key = None       # LiveStill.mono of the one in _good
+        self._live_after_end = False  # a stream frame seen, the run over
+        self._stream_mono = None     # capture time of the last stream frame
         self._ended_wall = None
         self._covers_root = False    # placed inside the main window's area
         self.state = None
@@ -453,6 +494,8 @@ class LiveView:
         self._prev_rec = _ref(getattr(self.app, '_sldea_recorder', None))
         self._good = None
         self._still_key = None
+        self._live_after_end = False
+        self._stream_mono = None
         self._ended_wall = None
         self._img_key = None
         self._mode = 'running'
@@ -564,6 +607,11 @@ class LiveView:
     def _build(self):
         import tkinter as tk
         root = self.app.root
+        # A window destroyed without close() leaves its image behind
+        # (#388). _show would paste into it whenever the size matched and
+        # never give the new label an image, so the new window starts
+        # without one and _show makes its own.
+        self._photo = None
         win = tk.Toplevel(root)
         win.title("SLDEA live view")
         win.resizable(False, False)
@@ -687,7 +735,26 @@ class LiveView:
     def poll(self, now_mono=None, now_wall=None):
         """One look at what the run holds -> the display state (a dict,
         also kept as self.state). Reads only; never waits on the run and
-        never touches the camera."""
+        never touches the camera.
+
+        A stall or close is the run ending, grey 'finishing', only once
+        this view has seen the stream deliver a frame with the run already
+        over (_run_over). At a normal end and after an Abort the reader
+        goes on until rec.stop(), and latest() serves its last frame for
+        2 s after that, so an open window sees about four such polls.
+        Every other stall or close stays red until _sldea_finished (#388):
+        one on show before the run ended, a stream that never delivered
+        (registered dead after an Abort included), and one that died while
+        the window was closed. The cost: a window first opened after a
+        normal end's last frame has aged out shows red until RUN ENDED.
+
+        A still handed over since the last stream frame this view showed
+        (or with none shown this run) comes first: while this run's
+        stream gives no frame, that still is shown as 'stream_down', the
+        still under a red VIDEO STREAM DOWN banner, Abort or not. That is
+        a video run whose stream delivered nothing in its first 5 s, which
+        goes on with one-shot stills (#392). The red NO FRAME rule above
+        applies only without such a still."""
         now_mono = time.monotonic() if now_mono is None else now_mono
         now_wall = time.time() if now_wall is None else now_wall
         app = self.app
@@ -701,14 +768,38 @@ class LiveView:
             rec = None               # an earlier run's: never this one's
         if rec is not None:
             kind = self._poll_stream(rec, now_mono, now_wall)
+            if kind in ('stalled', 'closed') and self._still_since_stream():
+                # the stream gives no frame, but the run hands over stills
+                # (the worker registers a recorder whose stream delivered
+                # nothing in 5 s, then goes on with one-shot stills): show
+                # the newest, and say in red that the stream is down
+                if (self._good or {}).get('src') != 'still':
+                    self._still_key = None   # take the still, not _good
+                self._poll_still(now_mono)
+                kind = 'stream_down'
         else:
             kind = self._poll_still(now_mono)
-        if kind in ('stalled', 'closed') and self._run_over():
-            # rec.stop() runs after the staircase (up to 10 s) before
-            # _sldea_finished: a stream closing then is the run ending,
-            # not a camera fault, and is not shown in red
-            kind = 'finishing'
+        if kind in ('live', 'stalled', 'closed') and self._run_over():
+            if kind == 'live':
+                # still delivering with the run over: the stream closes
+                # because the run ends (rec.stop() runs after the
+                # staircase, up to 10 s before _sldea_finished)
+                self._live_after_end = True
+            elif self._live_after_end:
+                kind = 'finishing'
+            # else it stays red: an Abort pressed BECAUSE the camera died
+            # must not relabel that as the recording's expected end (#388)
         return self._state(kind, now_mono, now_wall)
+
+    def _still_since_stream(self):
+        """True when this run has handed over a still since the last
+        stream frame this view showed, or with no stream frame shown this
+        run at all. Both clocks are time.monotonic(): LiveStill.mono, and
+        the stream frame's capture time (_poll_stream)."""
+        still = getattr(self.app, '_sldea_live_still', None)
+        if still is None:
+            return False
+        return self._stream_mono is None or still.mono > self._stream_mono
 
     def _run_over(self):
         """True once the run is on its way out: stopped (Abort, a
@@ -743,6 +834,7 @@ class LiveView:
                       'age_at_poll': age, 'mono': now_mono - (age or 0.0),
                       'wall': now_wall - (age or 0.0), 't_run': t,
                       'seq': now_mono}
+        self._stream_mono = self._good['mono']
         del frame
         return 'live'
 
@@ -770,8 +862,9 @@ class LiveView:
 
     def _state(self, kind, now_mono, now_wall):
         g = self._good
-        if kind == 'still' and (g is None or g.get('src') != 'still'):
-            kind = 'waiting' if g is None else 'closed'
+        if kind in ('still', 'stream_down') and \
+                (g is None or g.get('src') != 'still'):
+            kind = 'waiting' if g is None and kind == 'still' else 'closed'
         st = {'kind': kind, 'banner': BANNERS[kind][0]}
         if kind == 'idle':
             st['text'] = ("No SLDEA run yet. This window opens by itself "
@@ -792,7 +885,15 @@ class LiveView:
                 f"{float(g['kv']):.2f} kV, taken "
                 f"{fmt_age(now_mono - g['mono'])} ago "
                 f"({fmt_clock(g['wall'])}). This run takes stills only, "
-                f"so this window shows the newest still the run took.")
+                f"so this window shows the newest still the run saved.")
+        elif kind == 'stream_down':
+            st['text'] = (
+                f"VIDEO STREAM DOWN: the camera stream gives no frame, so "
+                f"no video is being recorded and the run takes one-shot "
+                f"stills. LAST STILL, not live: step {g['step']} "
+                f"[{g['tag']}] at {float(g['kv']):.2f} kV, taken "
+                f"{fmt_age(now_mono - g['mono'])} ago "
+                f"({fmt_clock(g['wall'])}).")
         elif kind in ('stalled', 'closed'):
             why = ("the recorder has had no new frame for over 2 s"
                    if kind == 'stalled' else
@@ -821,7 +922,7 @@ class LiveView:
                           f"not live. {what}")
         st['run'] = self._run_words(kind)
         shows_frame = g is not None and kind in ('live', 'still', 'ended',
-                                                 'finishing')
+                                                 'finishing', 'stream_down')
         st['exposure'] = exposure_words(g['exposure'] if shows_frame
                                         else None)
         st['thumb'] = g['thumb'] if shows_frame else None

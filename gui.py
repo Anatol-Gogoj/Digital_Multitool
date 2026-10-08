@@ -5842,21 +5842,10 @@ LOGGING:
         if frame is not None:
             fname = p.frame_filename(snap['step'], snap['nominal_kv'],
                                      snap['tag'])
-            if not stream:
-                # The live view (#376) shows this still: ONE reference
-                # swap of an immutable tuple. No copy, no lock, no Tk, and
-                # nothing that depends on the view being open; the view
-                # only reads the frame. The try keeps even this from ever
-                # raising into the run. (A video run's view reads the
-                # recorder's stream instead.)
-                try:
-                    now = time.monotonic()
-                    self._sldea_live_still = sldea_liveview.LiveStill(
-                        frame, snap['step'], snap['nominal_kv'],
-                        snap['tag'], None if t0 is None else now - t0,
-                        now, time.time())
-                except Exception:
-                    pass
+            # The moment the live view dates this still by. Read before the
+            # save, where it was before #388, so a slow save (a stalled
+            # share) cannot make the still look younger than it is.
+            now, now_wall = time.monotonic(), time.time()
             try:
                 import cv2
                 if not cv2.imwrite(os.path.join(framedir, fname),
@@ -5866,6 +5855,22 @@ LOGGING:
                 self._sldea_log(f"frame save error: {e}")
                 fname = ''
                 save_failed = True
+            if not stream and not save_failed:
+                # The live view (#376) shows this still, once it is saved:
+                # a still that could not be saved must never show as LAST
+                # STILL, so the view keeps the last one that was (#388).
+                # ONE reference swap of an immutable tuple. No copy, no
+                # lock, no Tk, and nothing that depends on the view being
+                # open; the view only reads the frame. The try keeps even
+                # this from ever raising into the run. (A video run's view
+                # reads the recorder's stream instead.)
+                try:
+                    self._sldea_live_still = sldea_liveview.LiveStill(
+                        frame, snap['step'], snap['nominal_kv'],
+                        snap['tag'], None if t0 is None else now - t0,
+                        now, now_wall)
+                except Exception:
+                    pass
         writer.writerow({
             'snapshot': index, 'step': snap['step'], 'tag': snap['tag'],
             'nominal_kV': round(snap['nominal_kv'], 3),
@@ -5910,7 +5915,10 @@ LOGGING:
             # the notes column of every row it reviews
             + (f"  (frame t={frame_t:.2f}s)" if frame_t is not None else ""))
         # The frame as grabbed (None when the camera gave none): the
-        # runner's baseline picture check reads it.
+        # runner's baseline picture check reads it. The live view holds a
+        # reference to this very array (the hand-over above makes no
+        # copy), so nothing may modify it in place: draw or convert on a
+        # copy. The live-view tests pin it byte for byte (#388).
         return frame
 
     def create_logging_tab(self):

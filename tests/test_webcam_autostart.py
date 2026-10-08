@@ -336,7 +336,8 @@ class _CameraWork:
         self.saved = {n: getattr(webcam, n) for n in self.NAMES}
         self.locked = dict(webcam.LOCKED_CONTROLS)
 
-        def oneshot(spec, count=2):
+        def oneshot(spec, count=2, controls=None):
+            # `controls`: a camera adjustment's trial values (#400)
             self._hold()
             return self.frame
 

@@ -654,10 +654,23 @@ def exposure_trial(base, exposure):
                 gain=GAIN_FLOOR, exposure_time_absolute=int(exposure))
 
 
+def picture_level(frame):
+    """The level the exposure search aims at: the GREEN channel's mean of
+    an RGB picture (the whole mean of a gray one). Red and blue balance do
+    not touch green, so an exposure found before the white is balanced
+    still holds after it: once the three means are equal, the picture's
+    mean is the green one (#400). The whole RGB mean moved instead: a
+    stale red balance of 204 brightened every trial, and balancing it
+    afterwards left the picture well under mid-gray."""
+    if getattr(frame, 'ndim', 0) == 3 and frame.shape[2] >= 3:
+        return float(frame[..., 1].mean())
+    return float(frame.mean())
+
+
 def find_exposure(spec, base, trials=EXPOSURE_TRIALS, target=MID_GRAY):
-    """Pin gain at its floor and find the exposure whose picture mean is
-    nearest `target` -> (exposure, mean), or None when no trial gave a
-    picture.
+    """Pin gain at its floor and find the exposure whose picture level
+    (picture_level) is nearest `target` -> (exposure, level), or None when
+    no trial gave a picture.
 
     Stabilize's search (2026-07-24): trials from short to long, stopping at
     the first picture at or above the target, the nearest one winning. Each
@@ -667,7 +680,7 @@ def find_exposure(spec, base, trials=EXPOSURE_TRIALS, target=MID_GRAY):
         frame = oneshot_rgb(spec, count=3, controls=exposure_trial(base, exp))
         if frame is None:
             continue
-        mean = float(frame.mean())
+        mean = picture_level(frame)
         if best is None or abs(mean - target) < abs(best[1] - target):
             best = (int(exp), mean)
         if mean >= target:

@@ -221,6 +221,23 @@ CAM_OFF_DIALOG = "A dialog is open"
 CAM_OFF_NOT_FOUND = "Camera not found: {}"
 CAM_NO_FRAME_REASON = "The camera is not sending frames"
 
+# ---- Webcam tab: Auto-set camera, Advanced, the focus overlay (#400) -------
+# The main view keeps what a run uses (exposure and gain) and Auto-set
+# camera. Every other control the camera reports and the single-step
+# buttons sit under Advanced, collapsed until opened.
+CAM_MAIN_CONTROLS = ('exposure_time_absolute', 'gain')
+CAM_AUTOSET_TEXT = "Auto-set camera"
+CAM_ADVANCED_SHOW = "▸ Advanced camera settings"
+CAM_ADVANCED_HIDE = "▾ Advanced camera settings"
+# Status colors, Paul Tol muted green and wine. The words carry the state.
+CAM_STATUS_DONE = '#117733'
+CAM_STATUS_WARN = '#882255'
+# The focus score is on by default, and its label is drawn about twice its
+# old 11 px height (24 px type: 22 px tall in Arial Bold, 23 in DejaVu
+# Sans Bold, measured 2026-10-07).
+CAM_FOCUS_DEFAULT = True
+CAM_FOCUS_LABEL_PX = 24
+
 SG_LOAD_HIGHZ = 'High-Z'   # UI label for the SCPI 'HZ' (high impedance) token
 
 # Signal generator over LAN. Arb upload works only over the wire (USB's
@@ -258,7 +275,7 @@ def sldea_lock_mismatch(lock, cam_exp, cam_gain):
     return ("The Webcam tab's fields differ from its lock: "
             + ", ".join(diffs) + ". The Webcam preview uses the lock; this "
             "run uses the fields, as this picture does. Press Apply & Lock "
-            "on the Webcam tab to make them agree.")
+            "(under Advanced on the Webcam tab) to make them agree.")
 
 
 def sldea_video_after_run(app, runlog):
@@ -379,6 +396,41 @@ def _splash_font(px):
             font = ImageFont.load_default()
     _SPLASH_FONTS[px] = font
     return font
+
+
+def draw_focus_overlay(img, score):
+    """Draw the focus score's area-of-interest circle, its center cross and
+    its label on `img` (an RGB PIL image, changed in place); return the
+    label's height in pixels, 0 with no label (#400).
+
+    Drawn like the live view's reticle (sldea_liveview): Tol cyan over a
+    black under-stroke, so it reads on a bright picture and on a dark one.
+    The label is CAM_FOCUS_LABEL_PX type, about twice its old height, and
+    shrinks only when the picture is too narrow for it. `score` None draws
+    the circle alone."""
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(img)
+    tw, th = img.size
+    cx, cy = tw // 2, th // 2
+    r = int(webcam.FOCUS_AOI_RADIUS_FRAC * min(tw, th))
+    for fill, cw, lw in (('#000000', 5, 3),
+                         (sldea_liveview.TOL_CYAN, 3, 1)):
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=fill,
+                     width=cw)
+        draw.line([cx - 6, cy, cx + 6, cy], fill=fill, width=lw)
+        draw.line([cx, cy - 6, cx, cy + 6], fill=fill, width=lw)
+    if score is None:
+        return 0
+    label = f"focus {score:.0f}  (higher = sharper)"
+    px = CAM_FOCUS_LABEL_PX
+    font = _splash_font(px)
+    while px > 10 and draw.textlength(label, font=font) > tw - 12:
+        px -= 2
+        font = _splash_font(px)
+    draw.text((6, 4), label, font=font, fill=sldea_liveview.TOL_CYAN,
+              stroke_width=2, stroke_fill='#000000')
+    box = draw.textbbox((6, 4), label, font=font)
+    return box[3] - box[1]
 
 
 def draw_preview_splash(img, headline, reason, stamp=None):
@@ -4029,8 +4081,9 @@ LOGGING:
         if 'camera-ctrl' in self._bg_busy:
             reasons.append((
                 "a camera adjustment is running",
-                "A camera adjustment (Apply & Lock, Auto-expose, Auto-WB "
-                "once or Stabilize) is still running on the Webcam tab. It "
+                "A camera adjustment (Auto-set camera, Apply & Lock, "
+                "Auto-expose, Auto-WB once or Stabilize) is still running on "
+                "the Webcam tab. It "
                 "rewrites the camera settings this run is about to lock. "
                 "It finishes by itself, usually within seconds."))
         if not dry and 'sg-io' in self._bg_busy:
@@ -8117,28 +8170,64 @@ LOGGING:
                                command=self.cam_snapshot),
                     "Save the current preview frame as a timestamped PNG in "
                     "the folder below.").pack(side=tk.LEFT)
-        self.cam_focus_var = tk.BooleanVar(value=False)
+        self.cam_focus_var = tk.BooleanVar(value=CAM_FOCUS_DEFAULT)
         add_tooltip(ttk.Checkbutton(top, text="Show focus score",
                                     variable=self.cam_focus_var),
-                    "Overlay a live sharpness number + the green area-of-"
-                    "interest circle. The score is weighted to that central "
+                    "Overlay a live sharpness number + the area-of-interest "
+                    "circle. The score is weighted to that central "
                     "circle and is noise-robust: HIGHER = sharper. Turn the "
                     "lens to maximise it.").pack(side=tk.LEFT, padx=8)
 
-        # --- camera controls: EVERY knob, hard-locked on Apply -------------
+        # --- camera settings: what a run uses, and Auto-set (#400) ---------
         # The DFK kept "auto adjusting" because nothing re-asserted the
         # user's values when a stream (re)opened; and stale auto-WB gains
         # (red_balance 204 vs default 64) gave the heavy colour cast. Apply
         # & Lock stores every control in webcam.LOCKED_CONTROLS, which every
         # capture path stamps onto the device before each grab/stream.
+        # The main view keeps exposure and gain (a run takes them from these
+        # boxes) and Auto-set camera, which finds and locks everything in
+        # one press; every other control and the single steps sit under
+        # Advanced, collapsed until opened (#400).
         sens = ttk.LabelFrame(
-            tab, text="Camera controls — Apply locks EVERY knob on all "
-                      "captures", padding=8)
+            tab, text="Camera settings (locked on every capture)",
+            padding=8)
         sens.pack(fill='x', padx=8)
         self.camctl_rows = {}
-        self.camctl_grid = ttk.Frame(sens)
+        main = ttk.Frame(sens)
+        main.pack(fill='x')
+        self.camctl_main = ttk.Frame(main)
+        self.camctl_main.pack(side=tk.LEFT)
+        self.cam_autoset_btn = tk.Button(
+            main, text=CAM_AUTOSET_TEXT, command=self.cam_auto_set,
+            font=('TkDefaultFont', 9, 'bold'))
+        self.cam_autoset_btn.pack(side=tk.LEFT, padx=(4, 0))
+        add_tooltip(self.cam_autoset_btn,
+                    "One press for a stable, locked picture: stops the "
+                    "preview, pins gain at 0 (where the camera's own "
+                    "auto-gain is clamped), finds the exposure for a "
+                    "mid-gray picture, balances white on the scene in "
+                    "view (gray world), then writes and locks everything "
+                    "for every capture, saves it for the next start, and "
+                    "restarts the preview. Takes several seconds. A step "
+                    "that fails leaves the previous lock as it was.")
+        self.cam_sensor_status = ttk.Label(sens, text="", foreground=MUTED)
+        self.cam_sensor_status.pack(fill='x', pady=(4, 0))
+        self.cam_adv_btn = ttk.Button(sens, text=CAM_ADVANCED_SHOW,
+                                      command=self._cam_toggle_advanced)
+        self.cam_adv_btn.pack(anchor='w', pady=(4, 0))
+        add_tooltip(self.cam_adv_btn,
+                    "Every control the camera reports, and the single "
+                    "steps Auto-set camera runs in order.")
+        self.cam_adv_frame = ttk.Frame(sens)   # packed by the toggle
+        self.cam_adv_shown = False
+        ttk.Label(self.cam_adv_frame, foreground=MUTED, wraplength=900,
+                  justify=tk.LEFT,
+                  text="A value typed here, or in exposure or gain above, "
+                       "changes nothing until 🔒 Apply & Lock.").pack(
+            anchor='w', pady=(4, 2))
+        self.camctl_grid = ttk.Frame(self.cam_adv_frame)
         self.camctl_grid.pack(fill='x')
-        btns = ttk.Frame(sens)
+        btns = ttk.Frame(self.cam_adv_frame)
         btns.pack(fill='x', pady=(6, 0))
         add_tooltip(tk.Button(btns, text="🔒 Apply & Lock",
                               command=self.cam_apply_controls,
@@ -8157,10 +8246,11 @@ LOGGING:
                     "Lock.").pack(side=tk.LEFT)
         add_tooltip(ttk.Button(btns, text="Auto-WB once",
                                command=self.cam_grey_world),
-                    "Grey-world calibrate red/blue balance on the CURRENT "
-                    "scene (a few seconds; stop the preview first), fill "
-                    "the fields in, and lock. Bench-tuned 2026-07-24: "
-                    "red 92 / blue 151.").pack(side=tk.LEFT, padx=6)
+                    "Grey-world calibrate red/blue balance on the scene in "
+                    "view (a few seconds; it pauses the preview itself) and "
+                    "fill the fields in; then Apply & Lock. Bench-tuned "
+                    "2026-07-24: red 92 / blue 151.").pack(side=tk.LEFT,
+                                                          padx=6)
         add_tooltip(ttk.Button(btns, text="Stabilize (pin gain 0)",
                                command=self.cam_stabilize),
                     "The camera's firmware auto-gain can't be switched off "
@@ -8168,8 +8258,6 @@ LOGGING:
                     "(where the auto is clamped) and finds an EXPOSURE for a "
                     "mid-grey image — the only genuinely stable combo. Fills "
                     "the fields; then Apply & Lock.").pack(side=tk.LEFT)
-        self.cam_sensor_status = ttk.Label(btns, text="", foreground=MUTED)
-        self.cam_sensor_status.pack(side=tk.LEFT, padx=10)
         self._cam_build_control_rows()
 
         # --- preview image ---
@@ -8441,23 +8529,39 @@ LOGGING:
     }
 
     def _cam_build_control_rows(self):
-        """(Re)build one row per V4L2 control the camera reports."""
-        for w in self.camctl_grid.winfo_children():
-            w.destroy()
+        """(Re)build one row per V4L2 control the camera reports: exposure
+        and gain in the main view, every other one under Advanced (#400)."""
+        main = getattr(self, 'camctl_main', None)
+        for holder in (self.camctl_grid, main):
+            if holder is not None:
+                for w in holder.winfo_children():
+                    w.destroy()
         self.camctl_rows = {}
         device = self._cam_device() or '/dev/video0'
         ctrls = webcam.list_controls(device)
         if not ctrls:
-            ttk.Label(self.camctl_grid, foreground='#8a5a00',
+            ttk.Label(main if main is not None else self.camctl_grid,
+                      foreground='#8a5a00',
                       text="no camera controls detected — plug the camera "
-                           "in and press Read camera").grid(sticky='w')
+                           "in and press Read camera (under Advanced)"
+                      ).grid(sticky='w')
             return
         saved = webcam.load_camera_settings()
         col = row = 0
+        main_col = 0
         for c in ctrls:
             name = c['name']
-            frame = ttk.Frame(self.camctl_grid)
-            frame.grid(row=row, column=col, sticky='w', padx=(0, 18), pady=2)
+            if main is not None and name in CAM_MAIN_CONTROLS:
+                frame = ttk.Frame(main)
+                frame.grid(row=0, column=main_col, sticky='w',
+                           padx=(0, 18), pady=2)
+                main_col += 1
+                in_main = True
+            else:
+                frame = ttk.Frame(self.camctl_grid)
+                frame.grid(row=row, column=col, sticky='w', padx=(0, 18),
+                           pady=2)
+                in_main = False
             val = saved.get(name, c['value'])
             if c['type'] == 'bool':
                 var = tk.BooleanVar(value=bool(val))
@@ -8488,18 +8592,130 @@ LOGGING:
                     self.cam_exposure = e
                 elif name == 'gain':
                     self.cam_gain = e
+                if in_main:
+                    # a value typed in the main view is not locked until
+                    # Apply & Lock, which now sits under Advanced: say so
+                    # as it is typed (#400)
+                    for seq in ('<KeyRelease>', '<FocusOut>'):
+                        e.bind(seq, lambda _ev: self._cam_typed_hint(),
+                               add='+')
             hint = self._CAM_CTRL_HINTS.get(name)
             if hint:
                 add_tooltip(wdg, hint)
+            if in_main:
+                continue
             col += 1
             if col == 3:
                 col, row = 0, row + 1
         # apply persisted lock from the previous session
         if saved:
             webcam.set_locked(saved)
-            self.cam_sensor_status.config(
-                text=f"restored + locked {len(saved)} saved controls",
-                foreground=MUTED)
+            self._cam_status(
+                f"restored + locked {len(saved)} saved controls", 'busy')
+
+    def _cam_status(self, text, kind='busy'):
+        """The camera settings' status line: `kind` 'busy' (muted), 'done'
+        or 'warn' (Tol muted green and wine). The words carry the state."""
+        self._cam_hint_on = False
+        color = {'done': CAM_STATUS_DONE, 'warn': CAM_STATUS_WARN}.get(
+            kind, MUTED)
+        try:
+            self.cam_sensor_status.config(text=text, foreground=color)
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _cam_typed_hint(self):
+        """Say on the status line when exposure or gain, as typed in the
+        main view, differ from the lock (#400). A run takes these boxes and
+        the preview the lock, and Apply & Lock now sits under Advanced, so
+        a value typed and never locked is named as it is typed. Reads two
+        boxes and the lock dict, never the camera; nothing locked is
+        nothing to disagree with."""
+        lock = dict(webcam.LOCKED_CONTROLS)
+        diffs = []
+        for name, label in (('exposure_time_absolute', 'exposure'),
+                            ('gain', 'gain')):
+            row = self.camctl_rows.get(name)
+            if row is None or name not in lock:
+                continue
+            try:
+                typed = int(float(row[1].get()))
+            except (TypeError, ValueError):
+                diffs.append(f"{label} is not a number")
+                continue
+            if typed != int(lock[name]):
+                diffs.append(f"{label} {typed} (locked {int(lock[name])})")
+        if diffs:
+            self._cam_status("Typed, not locked: " + ", ".join(diffs)
+                             + ". Press Auto-set camera, or 🔒 Apply & Lock "
+                               "under Advanced.", 'warn')
+            self._cam_hint_on = True
+        elif getattr(self, '_cam_hint_on', False):
+            self._cam_status("", 'busy')
+
+    def _cam_toggle_advanced(self):
+        """Show or hide Advanced (#400): every control the camera reports
+        and the single steps. Collapsed when the tab is built."""
+        if self.cam_adv_shown:
+            self.cam_adv_frame.pack_forget()
+            self.cam_adv_btn.config(text=CAM_ADVANCED_SHOW)
+        else:
+            self.cam_adv_frame.pack(fill='x', after=self.cam_adv_btn)
+            self.cam_adv_btn.config(text=CAM_ADVANCED_HIDE)
+        self.cam_adv_shown = not self.cam_adv_shown
+
+    def _cam_fill_rows(self, values):
+        """Put `values` ({control: value}) into the panel's rows, each the
+        way its kind shows it; controls the panel has no row for are left
+        out."""
+        for name, val in values.items():
+            if name not in self.camctl_rows or val is None:
+                continue
+            kind, w = self.camctl_rows[name]
+            if kind == 'bool':
+                w.set(bool(val))
+            elif kind == 'menu':
+                for s in w['values']:
+                    if s.startswith(f"{val}:"):
+                        w.set(s)
+                        break
+            else:
+                self._set_entry(w, val)
+
+    def _cam_base_controls(self):
+        """What an adjustment shoots its trials under (#400): the panel's
+        values when every one reads as a number, else the lock."""
+        try:
+            return self._cam_collect_controls()
+        except (TypeError, ValueError):
+            return dict(webcam.LOCKED_CONTROLS)
+
+    @staticmethod
+    def _cam_lock_and_save(device, controls):
+        """Lock `controls`, stamp them onto `device` and save them for the
+        next start -> (stamped, saved_path, save_error). Camera and file
+        work only, for a worker thread: Apply & Lock, and Auto-set camera's
+        last step. Persistence never sinks the lock itself (bench
+        2026-07-24: a root-owned ~/.local/share/scpi_control gave Errno 13
+        here)."""
+        webcam.set_locked(controls)
+        n = webcam.apply_locked(device)
+        try:
+            saved, err = webcam.save_camera_settings(controls), None
+        except OSError as e:
+            saved, err = None, str(e)
+        return n, saved, err
+
+    @staticmethod
+    def _cam_saved_words(saved, err):
+        """How a lock's save went, for the status line -> (words, kind)."""
+        if saved:
+            note = (" (fallback location)" if saved ==
+                    webcam.CAMERA_SETTINGS_FALLBACK else "")
+            return f"saved for next start{note}", 'done'
+        return (f"but could NOT save for next start ({err}). Fix "
+                f"ownership: mv ~/.local/share/scpi_control{{,.bak}}",
+                'warn')
 
     def _cam_collect_controls(self):
         """Panel -> {name: int}, with the autos forced sane unless the user
@@ -8524,22 +8740,8 @@ LOGGING:
         self._cam_build_control_rows()
         device = self._cam_device() or '/dev/video0'
         ctrls = webcam.list_controls(device)
-        for c in ctrls:
-            name, val = c['name'], c['value']
-            if name not in self.camctl_rows or val is None:
-                continue
-            kind, w = self.camctl_rows[name]
-            if kind == 'bool':
-                w.set(bool(val))
-            elif kind == 'menu':
-                for s in w['values']:
-                    if s.startswith(f"{val}:"):
-                        w.set(s)
-                        break
-            else:
-                self._set_entry(w, val)
-        self.cam_sensor_status.config(text="read from camera",
-                                      foreground=MUTED)
+        self._cam_fill_rows({c['name']: c['value'] for c in ctrls})
+        self._cam_status("read from camera", 'busy')
 
     def cam_apply_controls(self):
         """Write EVERY panel value to the camera, lock them for all capture
@@ -8563,35 +8765,146 @@ LOGGING:
             return
 
         def work():
-            webcam.set_locked(controls)
-            n = webcam.apply_locked(device)
-            # Persistence must never sink the LOCK itself (bench 2026-07-24:
-            # a root-owned ~/.local/share/scpi_control gave Errno 13 here).
-            try:
-                saved = webcam.save_camera_settings(controls)
-                err = None
-            except OSError as e:
-                saved, err = None, str(e)
-            return n, saved, err
+            return self._cam_lock_and_save(device, controls)
 
         def done(result, error):
             if error:
                 messagebox.showerror("Camera", str(error))
                 return
             n, saved, err = result
-            if saved:
-                note = (" (fallback location)" if saved ==
-                        webcam.CAMERA_SETTINGS_FALLBACK else "")
-                self.cam_sensor_status.config(
-                    text=f"🔒 locked {n} controls — saved for next "
-                         f"start{note}", foreground='#2e7d32')
-            else:
-                self.cam_sensor_status.config(
-                    text=f"🔒 locked {n} controls — but could NOT save for "
-                         f"next start ({err}). Fix ownership: mv "
-                         f"~/.local/share/scpi_control{{,.bak}}",
-                    foreground='#b36b00')
+            words, kind = self._cam_saved_words(saved, err)
+            self._cam_status(f"🔒 locked {n} controls; {words}", kind)
             self.status_bar.config(text=f"Camera: {n} controls locked")
+
+        self._run_bg(work, done, busy='camera-ctrl')
+
+    def cam_auto_set(self):
+        """Auto-set camera (#400): the whole setup in one press, in the
+        order the steps depend on each other. Gain is pinned at its floor,
+        the exposure found for a mid-gray picture at that gain, the white
+        balanced on the scene in view (gray world) at that exposure, then
+        everything written and locked as Apply & Lock does, saved for the
+        next start, and the preview restarted as after any adjustment.
+
+        Every trial picture is shot under its own controls, never under the
+        lock (webcam.find_exposure, webcam.balance_gray_world), and the lock
+        changes only at the last step: a step that fails stops the sequence,
+        names the step, and leaves the previous lock and the boxes as they
+        were. The boxes and the lock come out equal by construction, so the
+        run (which takes the boxes) and the preview (which shows the lock)
+        see the same picture. Refused while an SLDEA run holds the camera,
+        like every other adjustment; a run start is refused while this
+        runs ('camera-ctrl', _sldea_start_conflicts)."""
+        if self._cam_owned_by_sldea():
+            return
+        if 'camera-ctrl' in self._bg_busy:
+            # checked before the preview is stopped for nothing
+            self._cam_status("another camera adjustment is still running; "
+                             "press Auto-set camera when it has finished",
+                             'warn')
+            return
+        device = self._cam_device()
+        if not device or not webcam.v4l2_available():
+            messagebox.showerror("Camera", "No camera / v4l2-ctl available.")
+            return
+        try:
+            panel = self._cam_collect_controls()
+        except (TypeError, ValueError) as e:
+            messagebox.showerror("Camera", f"Control values must be "
+                                           f"numbers: {e}")
+            return
+        previous = dict(webcam.LOCKED_CONTROLS)
+        balance = 'red_balance' in panel and 'blue_balance' in panel
+        was_previewing = self.cam_previewing
+        self.cam_stop_preview()
+        if self.cam is not None:
+            try:
+                self.cam.close()
+            except Exception:
+                pass
+            self.cam = None
+        self._cam_status("Auto-set: preview stopped, gain pinned at "
+                         f"{webcam.GAIN_FLOOR}...", 'busy')
+
+        def say(text):
+            # progress from the worker, shown on the Tk thread
+            try:
+                self.root.after(0, lambda: self._cam_status(text, 'busy'))
+            except Exception:
+                pass
+
+        def work():
+            step = 'opening the camera'
+            try:
+                m = re.search(r'(\d+)$', device)
+                spec = webcam.resolve_camera(int(m.group(1)) if m else 0)
+                step = 'finding the exposure'
+                say("Auto-set 1/3: finding the exposure for a mid-gray "
+                    f"picture at gain {webcam.GAIN_FLOOR}...")
+                found = webcam.find_exposure(spec, panel)
+                if found is None:
+                    raise RuntimeError("no trial exposure gave a picture "
+                                       "(camera busy or unplugged?)")
+                exp, mean = found
+                locked = webcam.exposure_trial(panel, exp)
+                gray = None
+                if balance:
+                    step = 'balancing the white'
+                    say(f"Auto-set 2/3: exposure {exp}; balancing the "
+                        "white on the scene in view...")
+                    gray = webcam.balance_gray_world(
+                        spec, locked, red=panel.get('red_balance'),
+                        blue=panel.get('blue_balance'))
+                    locked.update(red_balance=gray[1], blue_balance=gray[2])
+                step = 'locking'
+                say("Auto-set 3/3: writing and locking...")
+                n, saved, err = self._cam_lock_and_save(device, locked)
+            except Exception as e:
+                # nothing new stays locked: the previous lock goes back in
+                # the dict and onto the device
+                try:
+                    webcam.set_locked(previous)
+                    webcam.apply_locked(device)
+                except Exception:
+                    pass
+                raise RuntimeError(f"stopped while {step}: {e}") from e
+            return {'controls': locked, 'exposure': exp, 'mean': mean,
+                    'gray': gray, 'n': n, 'saved': saved, 'save_err': err}
+
+        def done(result, error):
+            try:
+                if error:
+                    self._cam_status(f"Auto-set {error}. The previous lock "
+                                     "is unchanged.", 'warn')
+                    messagebox.showerror(
+                        "Auto-set camera",
+                        f"Auto-set {error}.\n\nThe previous lock is "
+                        f"unchanged.")
+                    return
+                c = result['controls']
+                self._cam_fill_rows(c)
+                words, kind = self._cam_saved_words(result['saved'],
+                                                    result['save_err'])
+                if result['gray'] is not None:
+                    white = (f"red {c['red_balance']}, blue "
+                             f"{c['blue_balance']}")
+                else:
+                    white = "white balance not set (the camera reports no "\
+                            "red or blue balance)"
+                self._cam_status(
+                    f"🔒 locked: exposure {c['exposure_time_absolute']}, "
+                    f"gain {c['gain']}, {white} (picture mean "
+                    f"{result['mean']:.0f}); {words}", kind)
+                self.status_bar.config(
+                    text=f"Camera: auto-set, {result['n']} controls locked")
+            finally:
+                self._cam_after_adjustment(was_previewing)
+                refresh = getattr(self, '_sldea_cam_line_refresh', None)
+                if refresh is not None and hasattr(self, 'sldea_cam_line'):
+                    try:
+                        refresh()
+                    except Exception:
+                        pass
 
         self._run_bg(work, done, busy='camera-ctrl')
 
@@ -8612,33 +8925,24 @@ LOGGING:
             except Exception:
                 pass
             self.cam = None
-        self.cam_sensor_status.config(text="stabilizing (pinning gain)…",
-                                      foreground='#b36b00')
+        # the trials are shot under the panel's values, not the lock, so
+        # the search sees the scene (#400)
+        base = self._cam_base_controls()
+        self._cam_status("stabilizing (pinning gain)…", 'busy')
 
         def work():
             m = re.search(r'(\d+)$', device)
             spec = webcam.resolve_camera(int(m.group(1)) if m else 0)
-            webcam.set_control(device, 'auto_exposure', 1)     # manual
-            webcam.set_control(device, 'white_balance_automatic', 0)
-            webcam.set_control(device, 'gain', 0)              # AGC floor
-            best = None
-            for exp in (16, 24, 32, 40, 50, 64, 80, 100, 130):
-                webcam.set_control(device, 'exposure_time_absolute', exp)
-                f = webcam.oneshot_rgb(spec, count=3)
-                if f is None:
-                    continue
-                mean = float(f.mean())
-                if best is None or abs(mean - 150) < abs(best[2] - 150):
-                    best = (exp, 0, mean)
-                if mean >= 150:
-                    break
-            return best
+            found = webcam.find_exposure(spec, base)
+            if found is None:
+                return None
+            exp, mean = found
+            return exp, webcam.GAIN_FLOOR, mean
 
         def done(best, error):
             try:
                 if error or not best:
-                    self.cam_sensor_status.config(
-                        text="stabilize failed", foreground='red')
+                    self._cam_status("stabilize failed", 'warn')
                     if error:
                         messagebox.showerror("Stabilize", str(error))
                     return
@@ -8647,9 +8951,9 @@ LOGGING:
                                   ('exposure_time_absolute', exp)):
                     if name in self.camctl_rows:
                         self._set_entry(self.camctl_rows[name][1], val)
-                self.cam_sensor_status.config(
-                    text=f"gain 0 / exposure {exp} (mean {mean:.0f}) — "
-                         "now Apply & Lock", foreground='#2e7d32')
+                self._cam_status(
+                    f"gain {gain} / exposure {exp} (mean {mean:.0f}); now "
+                    "Apply & Lock", 'done')
             finally:
                 self._cam_after_adjustment(was_previewing)
 
@@ -8672,52 +8976,30 @@ LOGGING:
             except Exception:
                 pass
             self.cam = None
-        self.cam_sensor_status.config(text="grey-world balancing…",
-                                      foreground='#b36b00')
+        # the trials are shot under the panel's values, not the lock, so
+        # each one shows its own balance (#400)
+        base = self._cam_base_controls()
+        self._cam_status("grey-world balancing…", 'busy')
 
         def work():
             m = re.search(r'(\d+)$', device)
             spec = webcam.resolve_camera(int(m.group(1)) if m else 0)
-            webcam.set_control(device, 'white_balance_automatic', 0)
-            rb = webcam.get_control(device, 'red_balance') or 64
-            bb = webcam.get_control(device, 'blue_balance') or 64
-            best = None
-            for _ in range(5):
-                webcam.set_control(device, 'red_balance', int(rb))
-                webcam.set_control(device, 'blue_balance', int(bb))
-                f = webcam.oneshot_rgb(spec, count=3)
-                if f is None:
-                    raise RuntimeError("no frame (camera busy?)")
-                r, g, b = [float(f[..., i].mean()) for i in range(3)]
-                err = abs(r / g - 1) + abs(b / g - 1)
-                if best is None or err < best[0]:
-                    best = (err, int(rb), int(bb))
-                if err < 0.04:
-                    break
-                rb = min(255, max(1, rb * (g / r) ** 0.9))
-                bb = min(255, max(1, bb * (g / b) ** 0.9))
-            return best
+            return webcam.balance_gray_world(
+                spec, base, red=base.get('red_balance'),
+                blue=base.get('blue_balance'))
 
         def done(best, error):
             try:
                 if error:
-                    self.cam_sensor_status.config(text="grey-world failed",
-                                                  foreground='red')
+                    self._cam_status("grey-world failed", 'warn')
                     messagebox.showerror("Auto-WB", str(error))
                     return
                 err, rb, bb = best
-                for name, val in (('red_balance', rb), ('blue_balance', bb),
-                                  ('white_balance_automatic', 0)):
-                    if name in self.camctl_rows:
-                        kind, w = self.camctl_rows[name]
-                        if kind == 'bool':
-                            w.set(bool(val))
-                        else:
-                            self._set_entry(w, val)
-                self.cam_sensor_status.config(
-                    text=f"grey-world: red {rb} / blue {bb} "
-                         f"(err {err:.2f}) — now Apply & Lock",
-                    foreground='#2e7d32')
+                self._cam_fill_rows({'red_balance': rb, 'blue_balance': bb,
+                                     'white_balance_automatic': 0})
+                self._cam_status(
+                    f"grey-world: red {rb} / blue {bb} (err {err:.2f}); "
+                    "now Apply & Lock", 'done')
             finally:
                 self._cam_after_adjustment(was_previewing)
 
@@ -8751,8 +9033,7 @@ LOGGING:
             except Exception:
                 pass
             self.cam = None
-        self.cam_sensor_status.config(text="auto exposure is checking...",
-                                      foreground='#b36b00')
+        self._cam_status("auto exposure is checking...", 'busy')
 
         def work():
             size = webcam.choose_size(webcam.parse_frame_sizes(
@@ -8763,22 +9044,19 @@ LOGGING:
         def done(result, error):
             try:
                 if error:
-                    self.cam_sensor_status.config(text="auto-expose failed",
-                                                  foreground='red')
+                    self._cam_status("auto-expose failed", 'warn')
                     messagebox.showerror("Auto-expose", str(error))
                     return
                 exp, mean = result
                 if exp is None:
-                    self.cam_sensor_status.config(
-                        text="auto-expose could not settle -- check lens cap"
-                             " / lighting, or set exposure by hand",
-                        foreground='red')
+                    self._cam_status(
+                        "auto-expose could not settle -- check lens cap"
+                        " / lighting, or set exposure by hand", 'warn')
                 else:
                     self._set_entry(self.cam_exposure, exp)
                     self.cam_sync_controls()
-                    self.cam_sensor_status.config(
-                        text=f"exposure {exp} (mean level {mean:.0f})",
-                        foreground=MUTED)
+                    self._cam_status(
+                        f"exposure {exp} (mean level {mean:.0f})", 'busy')
             finally:
                 self._cam_after_adjustment(was_previewing)
 
@@ -8914,7 +9192,7 @@ LOGGING:
     def _cam_show(self, rgb):
         """Render an RGB numpy frame into the preview label (with optional
         focus-score overlay)."""
-        from PIL import Image, ImageDraw, ImageTk
+        from PIL import Image, ImageTk
         img = Image.fromarray(rgb)
         # Fit the width of the view, but use a FIXED height budget: the
         # label sizes itself to whatever image we put in it, so deriving the
@@ -8923,21 +9201,15 @@ LOGGING:
         maxw = max(self.cam_view.winfo_width() - 4, 320)
         img.thumbnail((maxw, PREVIEW_MAX_HEIGHT))
         if self.cam_focus_var.get():
-            # Green circle = the central "area of interest" the focus score
-            # is weighted over; score printed top-left (higher = sharper).
-            draw = ImageDraw.Draw(img)
-            tw, th = img.size
-            cx, cy = tw // 2, th // 2
-            r = int(webcam.FOCUS_AOI_RADIUS_FRAC * min(tw, th))
-            draw.ellipse([cx - r, cy - r, cx + r, cy + r],
-                         outline=(0, 255, 0), width=3)
-            draw.line([cx - 6, cy, cx + 6, cy], fill=(0, 255, 0), width=1)
-            draw.line([cx, cy - 6, cx, cy + 6], fill=(0, 255, 0), width=1)
+            # The circle is the central "area of interest" the focus score
+            # is weighted over; the score is printed top-left (higher =
+            # sharper). On by default, drawn large (#400).
             try:
                 score = webcam.focus_score(rgb)
-                label = f"focus {score:.0f}  (higher = sharper)"
-                draw.text((7, 5), label, fill=(0, 0, 0))
-                draw.text((6, 4), label, fill=(0, 255, 0))
+            except Exception:
+                score = None
+            try:
+                draw_focus_overlay(img, score)
             except Exception:
                 pass
         photo = ImageTk.PhotoImage(img)
@@ -9025,10 +9297,10 @@ LOGGING:
         return True
 
     def _cam_after_adjustment(self, was_previewing):
-        """After Stabilize, Auto-WB once or Auto-expose: restart the
-        preview the adjustment paused, as before, unless the operator has
-        left the tab meanwhile. There the leave-tab rule would have stopped
-        it, and opening the tab starts it again."""
+        """After Auto-set camera, Stabilize, Auto-WB once or Auto-expose:
+        restart the preview the adjustment paused, as before, unless the
+        operator has left the tab meanwhile. There the leave-tab rule would
+        have stopped it, and opening the tab starts it again."""
         if was_previewing and not (CAM_STOP_PREVIEW_ON_TAB_LEAVE
                                    and not self._cam_tab_selected()):
             self.cam_start_preview()
@@ -9073,7 +9345,8 @@ LOGGING:
         if self.cam_seq_running or self._cam_worker_alive():
             return (CAM_OFF_SWEEP if self._cam_seq_kind == 'sweep'
                     else CAM_OFF_TIMED)
-        # Stabilize, Auto-WB once and Auto-expose grab one-shot frames too
+        # Auto-set camera, Stabilize, Auto-WB once and Auto-expose grab
+        # one-shot frames too
         if 'camera-ctrl' in getattr(self, '_bg_busy', ()):
             return CAM_OFF_ADJUSTING
         return None

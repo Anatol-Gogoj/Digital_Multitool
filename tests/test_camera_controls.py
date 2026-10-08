@@ -263,6 +263,23 @@ def test_the_exposure_search_shoots_each_trial_under_its_own_exposure():
         webcam.set_locked({})
 
 
+def test_the_exposure_found_does_not_depend_on_the_white_balance():
+    """The search judges the green channel, which red and blue balance do
+    not touch. On the whole RGB mean, the stale bench balance (red 204,
+    blue 104) brightened every trial, the search stopped at 64, and the
+    picture fell to a mean of 128 once the white was balanced."""
+    found = []
+    for red, blue in ((92, 151), (204, 104)):
+        scene = _Scene()
+        with _Swap(oneshot_rgb=scene.oneshot):
+            found.append(webcam.find_exposure(
+                {'kind': 'bayer'}, {'red_balance': red, 'blue_balance': blue}))
+    assert found[0] == found[1] == (80, 160.0), found
+    import numpy as np
+    gray = np.full((2, 2), 90.0)
+    assert webcam.picture_level(gray) == 90.0     # a mono picture
+
+
 def test_an_exposure_search_with_no_picture_finds_nothing():
     with _Swap(oneshot_rgb=lambda spec, count=2, controls=None: None):
         assert webcam.find_exposure({'kind': 'bayer'}, {}) is None

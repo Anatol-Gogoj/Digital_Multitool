@@ -768,8 +768,9 @@ def preflight_report(frame, cam_exp, cam_gain, locked=None, focus=None,
         mismatch_line = (f"The preview used {preview} (what the Webcam tab "
                          f"has locked). The run will use {run} (what the "
                          f"boxes on the Webcam tab say). Press Adjust, make "
-                         f"the boxes say what you want, press Apply & Lock, "
-                         f"and run again.")
+                         f"the boxes say what you want, press Apply & Lock "
+                         f"(under Advanced on the Webcam tab), and run "
+                         f"again.")
     ctxt = (f"contrast {content['contrast']:.0f} gray levels" if content
             else "contrast not checked")
     stats = ((f"focus {focus:.0f}   " if focus is not None else "")
@@ -974,9 +975,10 @@ def baseline_stop_words(reason, dry, drive_kv, video=False):
                 "picture.\n\nThat picture is flat: the disc is not "
                 "visible, so nothing in this run could have been "
                 "measured.\n\n" + drive
-                + "\n\nOpen the Webcam tab, change the exposure or the "
-                "light until you can see the disc, press Apply & Lock, "
-                "then press Run again." + tail)}
+                + "\n\nOpen the Webcam tab, press Auto-set camera (or "
+                "change the exposure or the light by hand and press Apply & "
+                "Lock under Advanced) until you can see the disc, then "
+                "press Run again." + tail)}
 
 
 def credible_baseline_ua(baseline_ua, trip_ua):

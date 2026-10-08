@@ -2991,7 +2991,7 @@ LOGGING:
         self.sldea_outdir = tk.StringVar(value=os.environ.get(
             'SCPI_SLDEA_DIR', self.SLDEA_SHARE_DIR))
         ttk.Entry(outf, textvariable=self.sldea_outdir, width=34).grid(
-            row=0, column=1, columnspan=2, padx=6, sticky='w')
+            row=0, column=1, padx=6)
         # Browse opens at the folder in the box; New folder... makes one
         # inside it (#394), because the bench's Tk folder dialog cannot.
         # Both refuse while a run is on (_sldea_out_locked): the run keeps
@@ -3000,7 +3000,7 @@ LOGGING:
         btns, self.sldea_browse_btn, self.sldea_newdir_btn = folder_buttons(
             outf, self._sldea_browse_out, self._sldea_new_folder,
             "Output dir", "the runs that follow")
-        btns.grid(row=0, column=3, sticky='w')
+        btns.grid(row=0, column=2)
         ttk.Label(outf, text="Run name (blank = auto):").grid(row=1, column=0,
                                                               sticky='e')
         self.sldea_runname = ttk.Entry(outf, width=26)

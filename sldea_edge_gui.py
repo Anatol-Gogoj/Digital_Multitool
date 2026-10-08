@@ -228,6 +228,7 @@ import sldea_trace as strc
 # modules. If it happens, these two travel together or both get copied
 # then -- one decision, made once, with the split in front of us.
 import ui_widgets as uiw
+import tk_checkmarks
 
 DEFAULT_PARENT = os.environ.get('SCPI_SLDEA_DIR',
                                 '/mnt/shareDrive/robot_incubator/SLDEA_data')
@@ -2305,6 +2306,7 @@ def tracker_card_text(cands):
 class EdgeReviewApp:
     def __init__(self, root, path=None, auto=False, goto=None):
         self.root = root
+        tk_checkmarks.install_check_marks(root)   # not filled squares (#407)
         root.title("SLDEA Edge Review — Digital Multitool")
         root.geometry("1150x760")
         # Corrected after _build_ui, once the layout can be asked what it

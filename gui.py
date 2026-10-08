@@ -57,6 +57,7 @@ from sldea_profile import (SldeaProfile, control_v_for_kv, measured_kv,
 import sweep_plan
 from ui_widgets import (ScrollableTab, SplashScreen, add_tooltip,
                         browse_folder, folder_buttons, new_folder)
+from tk_checkmarks import install_check_marks, mark_classic_checkbutton
 from arb_editor import ArbWaveformEditor
 from waveform_render import unit_waveform, scale_waveform
 from version import version_string
@@ -448,6 +449,9 @@ class InstrumentControlGUI:
         # to report what is being built (tab construction takes ~2.6 s).
         self._progress = progress or (lambda _text: None)
         self.root = root
+        # a check mark in every checkbox, not the Linux theme's filled
+        # square (#407); before any widget, so all of them get it
+        install_check_marks(root)
         self.root.title(f"Lab Instrument Control  —  {version_string()}")
         # A comfortable default, no longer load-bearing. This size used to
         # be the only thing keeping the LCR tab's right-hand column
@@ -3322,6 +3326,10 @@ LOGGING:
             runf, text="DRY RUN — HV OFF", variable=self.sldea_dryrun,
             command=self._sldea_dry_toggle, font=('TkDefaultFont', 10, 'bold'),
             indicatoron=True, padx=6)
+        # the same drawn box as every ttk checkbox (#407): on X11 the
+        # classic indicator is a square filled with selectcolor, which is
+        # this box's own background, so DRY and LIVE drew the same square
+        mark_classic_checkbutton(self.sldea_dry_cb)
         self.sldea_dry_cb.pack(side=tk.LEFT, padx=4)
         self.sldea_run_btn = tk.Button(runf, text="▶ Run", command=self.sldea_run,
                                        font=('TkDefaultFont', 10, 'bold'),

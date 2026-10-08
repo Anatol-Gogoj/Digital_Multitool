@@ -118,6 +118,23 @@ def name_problem(name):
     if text.partition('.')[0].rstrip(' ').upper() in _WINDOWS_DEVICES:
         return (f"'{text}' is a device name on Windows (like CON, NUL, COM1 "
                 f"or LPT1), so it cannot be a folder name there.")
+    # Plain ASCII only (review of #394). Measured 2026-10-07 with the pinned
+    # cv2 4.13 on Windows (ANSI code page cp1252): cv2.imwrite returns
+    # False and cv2.imread returns None for a path holding a micro sign, a
+    # Greek mu, an accented letter or an emoji, while the same path in
+    # ASCII works. The Webcam tab saves with cv2.imwrite (its interval
+    # capture then skips the shot without a word), and Edge Review reads
+    # frames with cv2.imread (sldea_edge.load_gray), so a run recorded on
+    # the bench into such a folder could not be reviewed on Windows.
+    odd = sorted(set(c for c in text if ord(c) > 127))
+    if odd:
+        return (f"A folder name can only use plain ASCII letters, digits and "
+                f"punctuation, and {' '.join(odd)} "
+                f"{'is' if len(odd) == 1 else 'are'} not. On the lab's "
+                f"Windows PCs, OpenCV cannot save or open images in a folder "
+                f"with such a character in its path, so Webcam saves and Edge "
+                f"Review fail there. Use plain letters instead: u for "
+                f"\u00b5, as in 2.5uL.")
     return None
 
 

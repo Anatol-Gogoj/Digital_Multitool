@@ -142,9 +142,28 @@ def test_the_device_names_match_cpythons_own_list():
 
 def test_ordinary_names_pass():
     for name in ('P3_2.5mL_Triazole', '2026-10-06 session 2', 'run (2)',
-                 'Probe #4', 'CNT+CB mix', 'r\u00e9sum\u00e9', '  padded  ',
+                 'Probe #4', 'CNT+CB mix', 'P3 2.5uL', '  padded  ',
                  'CONSOLE', 'con test', 'COM10', 'my.folder', '.hidden'):
         assert of.name_problem(name) is None, (name, of.name_problem(name))
+
+
+def test_a_name_that_is_not_plain_ascii_is_refused():
+    """cv2 4.13 on Windows (the pinned build) cannot write or read an image
+    under a folder whose path holds any of these (measured 2026-10-07), so
+    the Webcam's saves and Edge Review would fail in such a folder. The
+    message says which characters, and offers u for the micro sign."""
+    for name, odd in (('P3 2.5\u00b5L', '\u00b5'),          # micro sign
+                      ('P3 2.5\u03bcL', '\u03bc'),          # Greek mu
+                      ('r\u00e9sum\u00e9', '\u00e9'),
+                      ('na\u00efve caf\u00e9', '\u00e9 \u00ef'),
+                      ('run \U0001F600', '\U0001F600'),
+                      ('\u00a0nbsp inside\u00a0x', '\u00a0')):
+        msg = of.name_problem(name)
+        assert msg and 'plain ASCII' in msg, (name, msg)
+        assert f"and {odd} " in msg, (name, msg)
+        assert 'u for \u00b5, as in 2.5uL' in msg, msg
+    assert 'are not' in of.name_problem('na\u00efve caf\u00e9')
+    assert 'is not' in of.name_problem('r\u00e9sum\u00e9')
 
 
 def test_make_makes_exactly_one_folder_and_returns_its_path():
@@ -175,7 +194,8 @@ def test_make_refuses_a_name_already_taken_and_changes_nothing():
 def test_make_refuses_every_bad_name_before_touching_the_disk():
     with _tmpdir() as tmp:
         for name in ('', ' ', '.', '..', 'a/b', 'a\\b', 'D:x', 'C:x', 'x?',
-                     'run.', 'CON', 'tab\there'):
+                     'run.', 'CON', 'tab\there', 'r\u00e9sum\u00e9',
+                     'P3 2.5\u00b5L'):
             _refusal(tmp, name)
         assert os.listdir(tmp) == [], os.listdir(tmp)
 
@@ -443,16 +463,16 @@ def test_new_folder_makes_it_inside_the_box_and_fills_the_box():
 def test_a_refused_name_is_explained_and_asked_again_holding_it():
     ui = _ui()
     answers = ['', '.', '..', 'a/b', 'a\\b', 'taken', 'P3: 2.5 mL',
-               'P3 2.5 mL']
+               'P3 2.5\u00b5L', 'P3 2.5uL']
     expect = ['Type a name', 'is not a folder name', 'is not a folder name',
               '/ or \\', '/ or \\', "already a folder called 'taken'",
-              'cannot contain :.']
+              'cannot contain :.', 'u for \u00b5']
     with _tmpdir() as tmp:
         os.mkdir(os.path.join(tmp, 'taken'))
         with _fake_dialogs(ui, names=answers) as d:
             var = _Var(tmp)
             got = ui.new_folder(var, 'Output dir', parent='PARENT')
-        want = os.path.join(tmp, 'P3 2.5 mL')
+        want = os.path.join(tmp, 'P3 2.5uL')
         assert got == want == var.get(), (got, var.get())
         errors = d.texts('showerror')
         assert len(errors) == len(expect), errors
@@ -462,7 +482,7 @@ def test_a_refused_name_is_explained_and_asked_again_holding_it():
         # each re-ask holds what was typed, to be fixed rather than retyped
         assert [a[3]['initialvalue'] for a in asks] == [''] + answers[:-1]
         assert all(c[3]['parent'] == 'PARENT' for c in d.calls), d.calls
-        assert sorted(os.listdir(tmp)) == ['P3 2.5 mL', 'taken']
+        assert sorted(os.listdir(tmp)) == ['P3 2.5uL', 'taken']
 
 
 def test_cancel_makes_nothing_and_leaves_the_box():

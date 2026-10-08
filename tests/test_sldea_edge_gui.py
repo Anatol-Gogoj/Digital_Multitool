@@ -1690,8 +1690,10 @@ def test_every_round_set_is_logged_accepted_or_declined():
         gui.spawn_circle = real_spawn
         spy = _ModalSpy(real_mb, app, answers=[True] * 8)
         gui.messagebox = gui.cal_choice = spy
+        dialog_st = []
 
         def advance_b(win):
+            dialog_st.append(app._cal_probe['st'])
             _cal_onscreen(root, win)
             for _ in range(12):
                 if not win.winfo_exists():
@@ -1713,8 +1715,16 @@ def test_every_round_set_is_logged_accepted_or_declined():
         rots = re.search(r'rot=([0-9.,]+)deg', two)
         assert rots, two
         angs = [float(v) for v in rots.group(1).split(',')]
-        assert len(angs) == 5 and len(set(angs)) == 5, angs
-        assert sorted(int(a // 72.0) for a in angs) == [0, 1, 2, 3, 4], angs
+        # one angle per 72 degree sector, read from the dialog's own angles:
+        # the log rounds to 0.1 degree, so an angle drawn in the last 0.05
+        # degree of a sector is LOGGED on the next sector's boundary. Seen
+        # 2026-10-06 in the `#280` runs (one logged as 288.0); the odds are
+        # 0.05/72 per angle, about one run in 290. The log must carry
+        # exactly those angles, rounded.
+        drawn = dialog_st[0]['rots']
+        assert len(drawn) == 5 and len(set(drawn)) == 5, drawn
+        assert sorted(int(a // 72.0) for a in drawn) == [0, 1, 2, 3, 4], drawn
+        assert angs == [float(f'{a:.1f}') for a in drawn], (angs, drawn)
         # the whole file is one line per round-set plus a header block,
         # ASCII, so it can be grepped and pasted into an issue
         with open(log, encoding='utf-8') as f:
@@ -2441,6 +2451,58 @@ def test_closing_mid_pass_leaves_nothing_scheduled():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_hover_tip_timer_pending_at_close_does_not_stop_the_destroy():
+    """`#280`, measured 2026-10-06: the runner-context flake on this suite.
+
+    A Tooltip starts its popup timer on <Enter> with widget.after(), so the
+    job and its Tcl command belong to that control, and a window a case
+    puts on screen gets one whenever the pointer rests on a control with a
+    tip. _cancel_pending() cancelled every job through root.after_cancel(),
+    which deletes the command but takes its name off the ROOT's list only,
+    so the control kept a name that no longer existed. root.destroy() then
+    raised "can't delete Tcl command" at that control, before it cleared
+    tkinter._default_root, and each later case that drew made its image in
+    the dead interpreter: one teardown fault (the info label's tip, the
+    pointer resting on the side panel), then 'image "pyimage..." doesn't
+    exist' in every later case that draws (2 and 6 of them in the two
+    failing runs measured).
+
+    The timer is started here directly, as <Enter> starts it, so the case
+    does not depend on where the pointer is."""
+    import tkinter as tk
+    import sldea_edge_gui as gui
+    root = _tk_root_or_skip('hover tip pending at close')
+    if root is None:
+        return
+    d = tempfile.mkdtemp(prefix='edge_gui_tip_close_')
+    try:
+        run = _fake_run(os.path.join(d, 'SLDEA_20260101_000000'))
+        app = gui.EdgeReviewApp(root, path=run)
+        assert tk._default_root is root, "a root from an earlier case is live"
+        tip = app._tips['info']
+        tip._schedule()                    # what <Enter> on the label does
+        # SELF-CHECK: the timer is pending and the LABEL owns its command,
+        # or nothing here is tested
+        script = str(root.tk.splitlist(
+            root.tk.call('after', 'info', tip._after_id))[0])
+        assert script in (tip.widget._tclCommands or []), script
+        app._cancel_pending()
+        assert not root.tk.call('after', 'info'), root.tk.call('after', 'info')
+        try:
+            root.destroy()
+        except tk.TclError as e:
+            raise AssertionError(f"root.destroy() stopped half way: {e}")
+        assert tk._default_root is None, "root.destroy() did not finish"
+        root = None
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except tk.TclError:
+                pass
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_run_switch_mid_detect_cannot_cross_contaminate():
     """CRITICAL (audit 2026-08-05): the Run combobox and Browse… stayed
     live during a multi-minute detect, and the stale worker/poll chain
@@ -2449,6 +2511,7 @@ def test_run_switch_mid_detect_cannot_cross_contaminate():
     Now: switching is disabled while a worker runs, and even a forced
     switch (the pierced-event case) leaves stale output dropped by the
     generation token."""
+    import threading
     import sldea_edge as se
     import sldea_edge_gui as gui
     root = _tk_root_or_skip('mid-detect switch')
@@ -2465,6 +2528,7 @@ def test_run_switch_mid_detect_cannot_cross_contaminate():
         return real_cands(*a, **k)
 
     se.candidates = slow_cands
+    workers = []
     try:
         import cv2
         run_a = _fake_run(os.path.join(d, 'SLDEA_A'))
@@ -2493,7 +2557,9 @@ def test_run_switch_mid_detect_cannot_cross_contaminate():
             w.writerows(rows_a)
         app = gui.EdgeReviewApp(root, path=os.path.join(d, 'SLDEA_B'))
         app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        before = set(threading.enumerate())
         app.detect()
+        workers += _new_threads(before)
         assert app._detect_busy
         # the UI path is CLOSED during detection
         assert str(app.run_box.cget('state')) == 'disabled'
@@ -2523,7 +2589,9 @@ def test_run_switch_mid_detect_cannot_cross_contaminate():
         # 3-frame pass and report 'detected 3 frames' (review
         # 2026-08-05: this exact mutant survived the earlier version).
         app.manual_ref = {'method': 'manual-calibration', 'diam_px': 160.0}
+        before = set(threading.enumerate())
         app.detect()
+        workers += _new_threads(before)
         t0 = time.time()
         while app._detect_busy and time.time() - t0 < 15.0:
             root.update()
@@ -2537,6 +2605,11 @@ def test_run_switch_mid_detect_cannot_cross_contaminate():
         se.candidates = real_cands
         gui.messagebox = real_mb
         root.destroy()
+        # joined while this frame still holds the app: a worker's target is
+        # the app's bound method, so one that outlived the case would drop
+        # the app's last reference on its own thread (`#280`, see _run)
+        for t in workers:
+            t.join(15.0)
         shutil.rmtree(d, ignore_errors=True)
 
 
@@ -8551,11 +8624,17 @@ def _run():
     # broken test in suites that had five. Tracebacks land after the count
     # line, in name order, in one bounded block -- run_tests.py explains why.
     import gc
+    import threading
     import traceback
+    import weakref
 
-    gui_mod = None
+    gui_mod = tk_mod = None
     try:
         import sldea_edge_gui as gui_mod
+    except Exception:
+        pass
+    try:
+        import tkinter as tk_mod
     except Exception:
         pass
     real_choice = getattr(gui_mod, 'cal_choice', None)
@@ -8587,23 +8666,108 @@ def _run():
         how it was finally caught.
 
         Collecting after every case keeps the freeing on this thread, where
-        Tk allows it.
+        Tk allows it. It cannot reach a thread or a root that outlives its
+        case; _stragglers and _roots_left below handle those.
         """
         gc.collect()
+
+    def _stragglers(before):
+        """Join the threads a case started and left running; return their
+        names. (`#280`)
+
+        A detection worker's target is the app's bound method, so while it
+        runs it holds the app and, through it, the root. One that outlives
+        its case drops that last reference on its own thread: the app's Tk
+        variables are freed there, and the root waits for the next
+        collection, which must not run on a worker either (measured
+        2026-10-06: a collection on another thread then aborts on
+        Tcl_AsyncDelete). Joined here, bounded, BEFORE _reap(), so that
+        collection is _reap()'s. Still a failure of the case, because only
+        the case can join while its own references hold the app, as
+        test_closing_mid_pass_leaves_nothing_scheduled does."""
+        # A _DummyThread is one Python did not start (a foreign thread that
+        # called in). It cannot be joined, and is_alive() on one raises
+        # on 3.13 and asserts on the bench's 3.11, so it is left out
+        # rather than let this guard end the run.
+        left = [t for t in threading.enumerate()
+                if t not in before
+                and not isinstance(t, threading._DummyThread)
+                and t.is_alive()]
+        names = []
+        for t in left:
+            t.join(15.0)
+            names.append(t.name + (' (still running after 15 s)'
+                                   if t.is_alive() else ''))
+        return names
+
+    blamed = weakref.WeakSet()          # roots _roots_left has reported
+
+    def _roots_left():
+        """Destroy the Tk roots still alive after _reap(); return how many.
+        (`#280`)
+
+        Tk.destroy() clears tkinter._default_root on its way OUT, so a
+        destroy that raises half way leaves it naming a dead interpreter,
+        and every later image made without a master (each ImageTk.PhotoImage
+        in Edge Review) is made there. One teardown fault then reads as
+        'image "pyimage..." doesn't exist' in every later case that draws
+        (measured 2026-10-06: 2 and 6 such failures after one fault). A
+        root left alive is also freed later, on whichever thread drops it.
+        Cleared here so neither reaches the next case, as
+        tests/test_sldea_plot_gui.py's _shut does after each of its cases.
+
+        A destroy that raised stopped at the widget it raised on, and the
+        widgets after it keep their Tcl commands, which hold the root alive
+        from inside Tcl. So the destroy is retried until it gets past every
+        such widget. A root that still cannot be freed is reported once, by
+        the case that left it, never again by the cases after it."""
+        if tk_mod is None:
+            return 0
+        roots = [o for o in gc.get_objects()
+                 if isinstance(o, tk_mod.Tk) and o not in blamed]
+        n = len(roots)
+        while roots:
+            r = roots.pop()
+            blamed.add(r)
+            for _ in range(20):
+                try:
+                    r.destroy()
+                except Exception:
+                    if r.children:      # stopped at a child: go past it
+                        continue
+                break
+            if getattr(tk_mod, '_default_root', None) is r:
+                tk_mod._default_root = None
+            del r
+        return n
 
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     failed = []
     for fn in fns:
+        before = set(threading.enumerate())
+        tb = ''
         try:
             fn()
         except Exception:
-            failed.append((fn.__name__, traceback.format_exc()))
-            print(f"FAIL {fn.__name__}")
-            _unspy()
-            _reap()
-            continue
+            tb = traceback.format_exc()
         _unspy()
+        left = _stragglers(before)
         _reap()
+        roots = _roots_left()
+        if roots:
+            _reap()
+        if left:
+            tb += (f"left behind (`#280`): {len(left)} thread(s) still "
+                   f"running when the case returned: {', '.join(left)}; "
+                   f"join them before the case's own references go\n")
+        if roots:
+            tb += (f"left behind (`#280`): {roots} Tk root(s) alive after "
+                   f"the collect; destroyed here and tkinter._default_root "
+                   f"cleared, so the cases after this one are unaffected\n")
+        if tb:
+            failed.append((fn.__name__, tb))
+            print(f"FAIL {fn.__name__}")
+            continue
         print(f"ok  {fn.__name__}")
     if not failed:
         print(f"\n{len(fns)} tests passed")

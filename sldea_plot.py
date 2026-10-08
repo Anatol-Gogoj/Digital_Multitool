@@ -1863,10 +1863,13 @@ def _set_caption(fig, cap, bottom):
     function of _caption_fitter's width test that composes it. `bottom`
     is the caption strip the caller reserved for `cap` as composed, in
     figure height; _place_caption keeps it when every line fits and grows
-    it when one does not. None, the grouped figure's, always measures."""
+    it when one does not. None, the grouped figure's, always measures.
+
+    Last, a run legend that covers data moves below the panels
+    (_place_legend, `#391`)."""
     text = fig.text(0.01, 0.005, '', fontsize=7, color='#555555')
     setattr(fig, _CAPTION_ATTR, (text, cap, bottom))
-    return _tight(fig, (0, _place_caption(fig), 1, 1))
+    return _place_legend(fig, _tight(fig, (0, _place_caption(fig), 1, 1)))
 
 
 def _place_caption(fig):
@@ -1974,24 +1977,204 @@ def relayout(fig):
     would have laid out, which is the only thing that makes it a shortcut
     rather than a second layout engine.
 
+    The run legend goes back into its panel first and is placed again
+    after the layout, as draw() places it (`#391`, _place_legend): whether
+    it covers data depends on the size.
+
     -> True when there was a layout to re-run, False when this figure was
     never drawn by draw() (or was cleared since), which is the caller's
     signal that it needs a real draw and not a shortcut."""
-    from matplotlib import rcParams
-
     rect = getattr(fig, _RECT_ATTR, None)
     if rect is None or not fig.axes:
         return False
-    fig.subplots_adjust(**{k: rcParams['figure.subplot.' + k]
-                           for k in _SUBPLOTPARS})
+    _default_subplotpars(fig)
     held = getattr(fig, _CAPTION_ATTR, None)
     if held is not None and held[0] in fig.texts:
         # the one width-dependent thing on a figure, the caption, is
         # re-wrapped for the new width, and its strip with it
         rect = (rect[0], _place_caption(fig), rect[2], rect[3])
         setattr(fig, _RECT_ATTR, rect)
+        _legend_inside(fig)
+        fig.tight_layout(rect=rect)
+        _place_legend(fig, rect)
+        return True
     fig.tight_layout(rect=rect)
     return True
+
+
+def _default_subplotpars(fig):
+    """Reset `fig`'s subplot params to the rcParams defaults, the state a
+    fresh figure is laid out from (see relayout)."""
+    from matplotlib import rcParams
+    fig.subplots_adjust(**{k: rcParams['figure.subplot.' + k]
+                           for k in _SUBPLOTPARS})
+
+
+# ---------------------------------------------------------------------------
+# the run legend below the panels when it covers data (`#391`)
+# ---------------------------------------------------------------------------
+
+# The area figure's run legend, held as {'ax', 'legend', 'handles',
+# 'handlelength', 'below'} so relayout can place it again; None on every
+# other figure. 'below' is the figure legend standing in for it while it
+# sits under the panels, else None.
+#
+# Observed on a five-group seeded render (#382's review): the run legend
+# sits upper left, and with whole material names it is wide and tall
+# enough to cover curves and markers of the left panel, where the frame
+# hides them at 90 %. Area curves rise to the right, so the free corners
+# are upper left, where the legend is, and lower right, where the marker
+# key is; no other corner of a panel helps a legend that size. So a
+# legend that covers data leaves the panel, and one that does not stays
+# exactly where it was, to the byte.
+_LEGEND_ATTR = '_sldea_run_legend'
+
+# ...but only when the strip it needs there is at most this share of the
+# height its panel had with the legend inside; otherwise the legend stays
+# in its panel, as before. The panels give the strip up, so past this the
+# cure is worse than the overlap. Without the limit a 13-entry legend
+# moved out of a 7 x 3.5 in window left the panels 0.15 of the figure
+# (0.45 with it in), and out of an export of that size it made
+# tight_layout give up, so the axes overprinted legend and caption.
+LEGEND_BELOW_MAX = 0.5
+
+# Clear space above and below a legend placed under the panels, points.
+LEGEND_GAP_PT = 4.0
+
+
+def _legend_covers_data(ax, legend, renderer):
+    """Does `legend`, where it is laid out now, cover anything drawn on
+    `ax`: a line, a marker (by its radius), a band, or a text on the axes?
+    A reference line across the axes counts as well."""
+    from matplotlib.transforms import Bbox
+    box = legend.get_window_extent(renderer)
+    px = ax.get_figure().dpi / 72.0
+    for line in ax.get_lines():
+        if not line.get_visible():
+            continue
+        path = line.get_transform().transform_path(line.get_path())
+        if line.get_linestyle() not in ('None', '', ' ') \
+                and len(path.vertices) > 1 \
+                and path.intersects_bbox(box, filled=False):
+            return True
+        if line.get_marker() not in (None, 'None', '', ' '):
+            r = line.get_markersize() * px / 2.0
+            grown = Bbox.from_extents(box.x0 - r, box.y0 - r,
+                                      box.x1 + r, box.y1 + r)
+            if grown.count_contains(path.vertices):
+                return True
+    for coll in ax.collections:
+        if not coll.get_visible():
+            continue
+        to = coll.get_transform()
+        if any(to.transform_path(p).intersects_bbox(box, filled=True)
+               for p in coll.get_paths()):
+            return True
+    return any(t.get_visible() and t.get_text()
+               and t.get_window_extent(renderer).overlaps(box)
+               for t in ax.texts)
+
+
+def _legend_columns(widths, legend, fs, room):
+    """The most columns whose legend is no wider than `room` -> int.
+
+    `widths` are the entries' widths, handle and pad included, in
+    pixels, and `fs` the font size in pixels. Columns are filled the way
+    matplotlib fills them, top to bottom in np.array_split's chunks, so
+    a column is as wide as its widest entry."""
+    import numpy as np
+    for k in range(len(widths), 1, -1):
+        cols = [max(c) for c in np.array_split(widths, k) if len(c)]
+        need = (sum(cols) + (len(cols) - 1) * legend.columnspacing * fs
+                + 2 * legend.borderpad * fs)
+        if need <= room:
+            return k
+    return 1
+
+
+def _legend_below(fig, held, floor, renderer):
+    """Stand a figure legend in for the run legend under the panels, just
+    above the caption strip that ends at `floor` -> the strip it takes,
+    in figure height, or None when it cannot go there: wider than the
+    figure in one column, or a strip past LEGEND_BELOW_MAX of the panel's
+    height. Then nothing has changed."""
+    legend = held['legend']
+    panel = held['ax'].get_position().height
+    fs = 8 * fig.dpi / 72.0
+    pad = (legend.handlelength + legend.handletextpad) * fs
+    widths = [pad + t.get_window_extent(renderer).width
+              for t in legend.get_texts()]
+    # the caption's budget, for the caption's reason: text drawn at
+    # another dpi than it was measured at hints wider. Measured at 0.98
+    # instead, a three-column legend ended at 1.02 of the width at 96 dpi
+    room = (CAPTION_FIT_FRAC - 0.01) * fig.bbox.width
+    gap = LEGEND_GAP_PT / 72.0 / fig.get_figheight()
+    extra = ({} if held['handlelength'] is None
+             else {'handlelength': held['handlelength']})
+    k = _legend_columns(widths, legend, fs, room)
+    below = None
+    try:
+        while True:
+            below = fig.legend(handles=held['handles'], ncols=k,
+                               loc='lower left',
+                               bbox_to_anchor=(0.01, floor + gap),
+                               bbox_transform=fig.transFigure,
+                               borderaxespad=0, fontsize=8, framealpha=0.9,
+                               **extra)
+            box = below.get_window_extent(renderer)
+            if box.width <= room or k == 1:
+                break
+            below.remove()
+            below, k = None, k - 1
+        strip = box.height / fig.bbox.height + 2 * gap
+        if box.width > room or strip > LEGEND_BELOW_MAX * panel:
+            return None
+        legend.set_visible(False)
+        held['below'], below = below, None
+        return strip
+    finally:
+        # a candidate that does not stand in, or one whose measuring
+        # failed part way, never stays on the figure as a second legend
+        if below is not None:
+            below.remove()
+
+
+def _legend_inside(fig):
+    """Put a run legend _legend_below moved back into its panel."""
+    held = getattr(fig, _LEGEND_ATTR, None)
+    if held is not None and held['below'] is not None:
+        held['below'].remove()
+        held['below'] = None
+        held['legend'].set_visible(True)
+
+
+def _place_legend(fig, rect):
+    """Leave the run legend in its panel unless it covers data there; if
+    it does, move it below the panels when they keep enough height, and
+    lay the panels out above it -> the layout rect.
+
+    Runs right after the layout above the caption strip `rect` ends at,
+    with the legend in its panel, which is where draw() leaves it and
+    where relayout puts it back first. A legend that covers nothing is
+    only measured, so its figure stays the same to the byte.
+
+    In the plot window, a window that had to cut its caption has no
+    height to spare, so its legend stays in the panel: moving it out
+    would take back the room the cut gave the panels."""
+    held = getattr(fig, _LEGEND_ATTR, None)
+    if held is None or getattr(fig, _CUT_ATTR, 0):
+        return rect
+    try:
+        renderer = fig.canvas.get_renderer()
+        if not _legend_covers_data(held['ax'], held['legend'], renderer):
+            return rect
+        strip = _legend_below(fig, held, rect[1], renderer)
+    except (AttributeError, TypeError, ValueError):
+        return rect             # no renderer to measure with: leave it
+    if strip is None:
+        return rect
+    _default_subplotpars(fig)
+    return _tight(fig, (rect[0], rect[1] + strip, rect[2], rect[3]))
 
 
 def _style_axes(ax, xlabel, ylabel):
@@ -2870,13 +3053,19 @@ def _legend(ax, run_handles, style_rows, handlelength=None):
     `handlelength` (font-size units) is GROUP_HANDLE_EM on a grouped
     figure, so a dash pattern is long enough to read in the key (`#373`);
     None keeps matplotlib's default and every other figure's layout."""
+    extra = {} if handlelength is None else {'handlelength': handlelength}
+    return ax.legend(handles=_legend_handles(run_handles, style_rows),
+                     fontsize=8, loc='upper left', framealpha=0.9, **extra)
+
+
+def _legend_handles(run_handles, style_rows):
+    """The run legend's entries: the runs (and means), then the style rows
+    this figure earned, each a grey proxy line."""
     from matplotlib.lines import Line2D
     handles = list(run_handles)
     for label, kw in style_rows:
         handles.append(Line2D([], [], color='#666666', label=label, **kw))
-    extra = {} if handlelength is None else {'handlelength': handlelength}
-    return ax.legend(handles=handles, fontsize=8, loc='upper left',
-                     framealpha=0.9, **extra)
+    return handles
 
 
 # the two marker fills `_series` draws, as the figure's own key (`#267`).
@@ -3431,6 +3620,11 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                            {'linestyle': '--'}))
     main_legend = _legend(legend_ax, run_handles, style_rows,
                           handlelength=handle_em)
+    # held so the layout can move it below the panels if it covers data
+    # there, and relayout can place it again (`#391`, _place_legend)
+    setattr(fig, _LEGEND_ATTR, {
+        'ax': legend_ax, 'legend': main_legend, 'handlelength': handle_em,
+        'handles': _legend_handles(run_handles, style_rows), 'below': None})
     # the open/closed key explains the RUN markers, and with the runs
     # hidden there are none on the figure to explain -- the same rule that
     # keeps it out of current/power mode (`#267`), reached from the other
@@ -3795,9 +3989,10 @@ def draw(fig, runs, opts, warn=lambda m: None):
     the axes it needs. THE entry point for anything that renders: the
     window's live canvas calls it on every toggle, and save_figure() calls
     it for the PNG, so what you see on screen is what lands in the file."""
-    # a figure reused for a new draw must not keep the last one's caption;
-    # draw_area / draw_signal hold this one's
+    # a figure reused for a new draw must not keep the last one's caption
+    # or run legend; draw_area / draw_signal hold this one's
     setattr(fig, _CAPTION_ATTR, None)
+    setattr(fig, _LEGEND_ATTR, None)
     if opts['mode'] == 'area':
         axl, axr = area_axes(fig, opts)
         return draw_area(fig, axl, axr, runs, opts, warn)

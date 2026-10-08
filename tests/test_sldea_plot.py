@@ -4506,10 +4506,14 @@ def _window_fig(runs, opts, size):
 
 
 def _layout_state(fig):
-    """Everything a relayout must reproduce: caption rows, rect and
-    axes."""
+    """Everything a relayout must reproduce: caption rows, rect, axes,
+    and where the run legend is."""
+    held = getattr(fig, sp._LEGEND_ATTR, None)
+    below = held and held['below']
     return (_caption_rows(fig), tuple(getattr(fig, sp._RECT_ATTR)),
-            [tuple(ax.get_position().bounds) for ax in fig.axes])
+            [tuple(ax.get_position().bounds) for ax in fig.axes],
+            None if below is None else
+            (below._ncols, tuple(below.get_bbox_to_anchor().bounds)))
 
 
 def test_the_window_cuts_a_caption_that_would_squeeze_its_panels():
@@ -4623,6 +4627,142 @@ def test_an_export_is_byte_identical_whatever_the_window_cut():
     finally:
         for p in (d, out):
             shutil.rmtree(p, ignore_errors=True)
+
+
+def _five_seeded(d):
+    """The #382 reviewer's five-run seed: P3 at 2.5 and 1.5 mL, Invisicon
+    3900, carbon black and a run with no electrode line, one run each."""
+    runs = _labeled(d, [('RA', P3, '2.5 mL', 0), ('RB', P3, '1.5 mL', 3),
+                        ('RC', N3900, _ABSENT, 6), ('RD', CB, _ABSENT, 9),
+                        ('RE', _ABSENT, _ABSENT, 12)])
+    return runs, _seeded_opts(runs, 'concentration')
+
+
+def test_a_legend_that_covers_data_moves_below_the_panels():
+    """`#391`, the #382 reviewer's render: the five-group seed's run legend,
+    upper left, covered curves and markers of the left panel. It moves
+    below the panels, as one legend over several columns with every entry
+    it had, clear of the axes above and the caption below and inside the
+    frame at every dpi checked; nothing on a panel is under it; and a
+    resize lands where a fresh draw lands."""
+    if not _has_mpl():
+        return
+    from matplotlib.legend import Legend
+    d = _mktmp()
+    try:
+        runs, opts = _five_seeded(d)
+        real = sp._place_legend
+        sp._place_legend = lambda fig, rect: rect
+        try:
+            before = _drawn(runs, opts)
+        finally:
+            sp._place_legend = real
+        held = getattr(before, sp._LEGEND_ATTR)
+        rend = before.canvas.get_renderer()
+        assert sp._legend_covers_data(held['ax'], held['legend'], rend), \
+            'the fixture no longer shows the reviewer\'s overlap'
+        fig = _drawn(runs, opts)
+        held = getattr(fig, sp._LEGEND_ATTR)
+        below = held['below']
+        assert below is not None and below in fig.legends
+        assert not held['legend'].get_visible()
+        assert below._ncols > 1, below._ncols
+        assert [t.get_text() for t in below.get_texts()] == \
+            [t.get_text() for t in held['legend'].get_texts()]
+        caption = getattr(fig, sp._CAPTION_ATTR)[0]
+        for dpi in (88, 96, 100, 150, 300):
+            fig.set_dpi(dpi)
+            fig.canvas.draw()
+            rend = fig.canvas.get_renderer()
+            box = below.get_window_extent(rend)
+            assert box.y1 < min(ax.get_tightbbox(rend).y0
+                                for ax in fig.axes), dpi
+            assert box.y0 > caption.get_window_extent(rend).y1, dpi
+            assert box.x1 <= 0.99 * fig.bbox.width, (dpi, box.x1)
+            for ax in fig.axes:
+                assert not sp._legend_covers_data(ax, below, rend), dpi
+                assert not [c for c in ax.get_children()
+                            if isinstance(c, Legend) and c.get_visible()
+                            and c.get_title().get_text() != 'marker fill']
+        fig.set_dpi(100)
+        for size in ((9.0, 5.4), (7.0, 4.5), sp.FIGSIZE['area']):
+            fig.set_size_inches(*size)
+            assert sp.relayout(fig)
+            assert _layout_state(fig) == _layout_state(
+                _sized(runs, opts, size)), size
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_legend_that_covers_nothing_stays_put_to_the_byte():
+    """The other half of `#391`'s legend rule: a legend that covers no data
+    is measured and left exactly where it was, so its figure is
+    byte-identical to one drawn with the rule switched off. The default
+    figures' byte-identity tests above hold the same line against the
+    engines read from git."""
+    if not _has_mpl():
+        return
+    d, out = _mktmp(), _mktmp()
+    try:
+        one = os.path.join(d, 'one')
+        _fake_run(one, _healthy_rows(8))
+        two = os.path.join(d, 'two')
+        _fake_run(two, _healthy_rows(8))
+        cb = _agg_run(d, 'CB1', [1.0, 2.0, 3.0], lambda kv: 100.0 + 5 * kv)
+        p1 = _agg_run(d, 'P3_1', [1.0, 2.0, 3.0], lambda kv: 110.0 + 10 * kv)
+        groups = [['CB', [cb['dir']]], ['P3', [p1['dir']]]]
+        cases = [(sp.make_opts()[0], [one]),
+                 (sp.make_opts(prepost=True)[0], [one]),
+                 (sp.make_opts(aggregate=True)[0], [one, two]),
+                 (sp.make_opts(aggregate=True, groups=groups)[0], None)]
+        for i, (opts, dirs) in enumerate(cases):
+            runs = sp.prepare_runs(dirs, opts) if dirs else [cb, p1]
+            fig = _drawn(runs, opts)
+            assert getattr(fig, sp._LEGEND_ATTR)['below'] is None, i
+            with_rule = sp.save_figure(runs, opts,
+                                       os.path.join(out, f"{i}_on.png"))
+            real = sp._place_legend
+            sp._place_legend = lambda fig, rect: rect
+            try:
+                without = sp.save_figure(runs, opts,
+                                         os.path.join(out, f"{i}_off.png"))
+            finally:
+                sp._place_legend = real
+            with open(with_rule, 'rb') as a, open(without, 'rb') as b:
+                assert a.read() == b.read(), i
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def test_a_legend_too_big_to_move_stays_in_its_panel():
+    """`#391`: moving a legend out costs the panels its strip. Past half
+    the panel's height the cure is worse than the overlap, so a thirteen-
+    entry legend in a 7 x 3.5 in figure stays in its panel, visible. And
+    in the window, once the caption had to be cut there is no height to
+    give, so the six-group seed's legend stays in at FIGSIZE although the
+    export of the same figure moves it."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        runs = _twelve_seeded(d)
+        plain = sp.make_opts(aggregate=True)[0]
+        small = _sized(runs, plain, (7.0, 3.5))
+        held = getattr(small, sp._LEGEND_ATTR)
+        rend = small.canvas.get_renderer()
+        assert sp._legend_covers_data(held['ax'], held['legend'], rend)
+        assert held['below'] is None and held['legend'].get_visible()
+        assert not small.legends, 'a rejected candidate legend stayed on'
+        seeded = _seeded_opts(runs, 'concentration')
+        assert getattr(_drawn(runs, seeded), sp._LEGEND_ATTR)['below'] \
+            is not None
+        win = _window_fig(runs, seeded, sp.FIGSIZE['area'])
+        assert getattr(win, sp._CUT_ATTR) > 0
+        held = getattr(win, sp._LEGEND_ATTR)
+        assert held['below'] is None and held['legend'].get_visible()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------

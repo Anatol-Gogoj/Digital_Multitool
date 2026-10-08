@@ -3224,12 +3224,16 @@ and worker over the scope-lock suite's fakes.
    above zero refuses Run before any question, with a message naming the
    box. A DRY run and an unticked LIVE run arm nothing from the boxes and
    keep the old fallback.
+8. For the second observation the owner chose to run on with a truthful
+   record (2026-10-08): a ticked LIVE run that reaches the worker's
+   arming line with no scope goes on unwatched, run.log gets a
+   "⚠⚠ BREAKDOWN WATCHDOG NOT ARMED" warning and setup.txt an ASCII
+   `Breakdown watchdog (start): NOT armed (no scope)` line, and the start
+   records keep what the dialog said; the `#339` open item (a LIVE
+   Reconnect early in a run leaves it unwatched) stands.
 
 **Not done here.** Setting the trip from real runs (`#219`), and the trip
-logic and spike capture (`#189`). The HV review's second observation: whether
-a ticked LIVE run whose watchdog cannot be built at its arming line
-stops before the SG output goes on, or goes on with records that say it
-was not armed, is the owner's call.
+logic and spike capture (`#189`).
 
 ## A LIVE run locks the scope channels it reads, and the settings they share (2026-09-24)
 

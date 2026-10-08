@@ -19,6 +19,7 @@ answers, an SG that records, no camera.
 import os
 import sys
 import tempfile
+import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -263,6 +264,63 @@ def test_a_ticked_live_run_arms_it_as_before_and_records_on():
                 "100 uA for 1 s of consecutive reads (baseline learned at "
                 "0 kV; absolute |I| if that baseline is refused)\n") in \
             setup, setup
+        # armed, so neither record says otherwise
+        assert 'NOT armed' not in setup, setup
+        assert not any('NOT ARMED' in ln for ln in app.lines), app.lines
+
+
+def test_a_scope_lost_before_the_arming_line_is_recorded_not_armed():
+    """HV review 2026-10-08, finding 2; the owner chose to run on and say
+    so. A LIVE Reconnect confirmed in the run's first seconds (#339): the
+    scope is gone where the worker resolves the camera, before its arming
+    line, and back 0.3 s later. The run goes on unwatched, as before, and
+    at 120 uA over the 100 uA trip nothing stops it; now run.log carries
+    the NOT ARMED warning and setup.txt an ASCII line, while the start
+    records still say ON, as "Energize HV?" did."""
+    with tempfile.TemporaryDirectory() as tmp:
+        mb = L._MB(L.LIVE_OK)
+        with L._patched(mb):
+            app = L._App(tmp, dry=False, real_worker=True, wd_on=True)
+            app.sldea_tel_on = L._Field(True)
+            app.sldea_vars['wd_ua'].set('100')
+            app.sldea_vars['wd_s'].set('1')
+            app._sldea_build_profile = lambda: (
+                L._short_profile(landing_s=6.0), None)
+            scope = app.scope
+            scope.volts = lambda ch: (0.6 if ch == 3 and L._ramping(app)
+                                      else 0.0)
+
+            def reconnect_now(idx):
+                app.scope = None                 # what _reconnect does
+                threading.Timer(
+                    0.3, lambda: setattr(app, 'scope', scope)).start()
+                return {'kind': 'cv2', 'index': int(idx)}
+            gui.webcam.resolve_camera = reconnect_now   # _patched restores
+            app.sldea_run()
+            assert app.worker_done.wait(60), app.lines
+            assert app.worker_error is None, repr(app.worker_error)
+            app.root.run_pending()
+        assert app.worker_args[11:14] == (True, 100.0, 1.0), \
+            app.worker_args[11:14]
+        assert any(ln.startswith('run complete') for ln in app.lines), \
+            app.lines
+        assert not app._sldea_bd_tripped
+        [hv] = [c[2] for c in mb.calls if c[1] == 'Energize HV?']
+        assert "\n\nBreakdown watchdog: ON. " in hv, hv
+        assert ('  [watchdog: dev ≥100 µA for 1s, baseline learned at '
+                '0 kV]') in _start_line(app)
+        [warn] = [ln for ln in app.lines if 'NOT ARMED' in ln]
+        assert warn.startswith("⚠⚠ BREAKDOWN WATCHDOG NOT ARMED — the scope "
+                               "was gone when the run reached the arming "
+                               "line"), warn
+        assert "Nothing stops this run on a breakdown" in warn, warn
+        setup = _read(os.path.join(_rundir(tmp), 'setup.txt'))
+        assert "\nBreakdown watchdog: ON, trips when " in setup, setup
+        assert "\nBreakdown watchdog (start): NOT armed (no scope)\n" in \
+            setup, setup
+        with open(os.path.join(_rundir(tmp), 'setup.txt'), 'rb') as f:
+            f.read().decode('ascii')     # still ASCII, line and all
+        assert se.load_settings(_rundir(tmp))['diam_mm'] == 16.0
 
 
 class _MBThen(L._MB):

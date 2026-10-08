@@ -5499,6 +5499,26 @@ LOGGING:
 
             watchdog = (sldea_profile.BreakdownWatchdog(wd_ua, wd_s)
                         if (wd_on and not dry and self.scope) else None)
+            # Asked to arm, and could not: the scope went (a LIVE Reconnect
+            # confirmed in the run's first seconds, #339) after "Energize
+            # HV?", run.log's start line and setup.txt all said ON. The run
+            # goes on unwatched (owner decision 2026-10-08, HV review of
+            # #406), and the records say so, the way the telemetry branch
+            # above does for its own file. ASCII in setup.txt, which is
+            # written in the locale encoding.
+            if wd_on and not dry and watchdog is None:
+                self._sldea_log(
+                    "⚠⚠ BREAKDOWN WATCHDOG NOT ARMED — the scope was gone "
+                    "when the run reached the arming line (a Reconnect?). "
+                    "Nothing stops this run on a breakdown; only ■ Abort or "
+                    "the end of the run does. Energize HV? and the start "
+                    "line said ON.")
+                try:
+                    with open(os.path.join(rundir, 'setup.txt'), 'a') as sf:
+                        sf.write("Breakdown watchdog (start): NOT armed (no "
+                                 "scope)\n")
+                except OSError:
+                    pass
             if watchdog is not None and not self._sldea_stop:
                 # Learn the I_Out rest level at 0 kV (SG is at 0 V here) so
                 # the trip is |I − baseline|, not |I|: the whole 07-29

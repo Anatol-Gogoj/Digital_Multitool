@@ -9667,7 +9667,9 @@ LOGGING:
 
     def cam_grey_world(self):
         """One-shot grey-world WB: tune red/blue_balance on the CURRENT
-        scene until the channel means match, then fill + lock."""
+        scene until the channel means match, then fill the boxes. It locks
+        nothing (Apply & Lock does), and puts the lock back on the camera
+        once its trials are over (#425)."""
         if self._cam_owned_by_sldea():
             return
         device = self._cam_device()

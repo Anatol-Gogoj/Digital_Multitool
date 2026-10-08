@@ -6380,6 +6380,78 @@ Observation → decision:
   actually wins, and refuses to start a run from a frame that has
   already lost the measurement.
 
+## Correction: the watchdog's 0.5 s cadence was never timed, and the telemetry shortfall bar is 70 %, not 80 % (2026-10-08)
+
+**TL;DR:** The telemetry sidecar entry below (2026-08-05) calls the
+breakdown watchdog's 0.5 s monitor cadence "bench-validated". No bench
+session has timed it: 0.5 s is the value the confirm streak was designed
+around. The same entry says the shortfall warning fires below 80 % of the
+target rate, but the code has always used 70 %. Wording only; no value
+and no behavior changes (`#424`).
+
+**Observation.**
+
+- The 2026-08-05 entry says: "When the watchdog is armed the monitor
+  cadence stays exactly 0.5 s: a logging feature does not get to re-time
+  a bench-validated safety sampler (its confirm-streak semantics are tuned
+  to that cadence)." The run loop's comment in `gui.py` said: "With the
+  watchdog armed it stays exactly 0.5 s — its bench-validated sampling is
+  NOT re-timed by a logging feature".
+- The commit that wrote both (`6bd72c9`, 2026-08-05) says "the watchdog's
+  0.5 s cadence is untouched" and "Not bench-verified yet". Untouched was
+  true; validated never was.
+- 0.5 s is a gate, not a period. The loop sleeps `SLDEA_POLL_S` = 0.1 s a
+  pass and reads I_Out on the first pass where `el - last_mon >= mon_dt`,
+  so a tick is never shorter than 0.5 s and is longer by however late the
+  pass that notices it runs. The code's own estimate, beside
+  `TELEMETRY_SHORTFALL_FRAC`: "a 0.5 s gate actually fires at 0.5-0.6 s,
+  and every snapshot steals a tick for its camera grab". That is a desk
+  estimate too.
+- The confirm streak is counted in seconds, not reads: it trips on the
+  first read at least `confirm_s` (3 s) after the first over-trip read.
+  At an exact 0.5 s that is 3.0 / 0.5 + 1 = 7 consecutive reads. A longer
+  real period means fewer reads in the streak and up to one period more
+  before the trip.
+- Nothing on record measures the period. The repo quotes no measured
+  value, and both bench checks that bear on it are unticked in `#369`:
+  - §N1, the watchdog probe. `#369` says: "Its section B times one I_Out
+    read and an I+V pair." Section B times the scope read each tick makes
+    and prints the worst-case I_Out read as a share of the 0.5 s tick
+    (`rate_verdict` in `bench/test_sldea_watchdog_probe.py`). It does not
+    run the run loop, so it bounds the read's part of the period, not the
+    period.
+  - §M, the telemetry dry-run smoke. Its pass bar is "the achieved rate is
+    **1.4 Hz or better**". At the default 2 Hz every tick writes one
+    periodic row stamped with the tick's own elapsed time, so the run
+    log's `telemetry: N samples, X.XX Hz achieved (target 2), max gap …`
+    line is the tick's achieved rate and worst gap. On a DRY run the
+    watchdog is not armed, but the gate is the same 0.5 s
+    (`tel.period_s` at 2 Hz). A DRY run also makes none of the SG writes
+    a LIVE ramp makes in the same loop. On a LIVE run with the watchdog
+    armed the same line reports the watchdog's own cadence.
+- The 2026-08-05 entry also says: "a run below 80 % of target says so
+  explicitly". The same commit set `TELEMETRY_SHORTFALL_FRAC = 0.7`, with
+  the comment "Only a real inability to keep up should raise a warning,
+  so the bar is 70% of target, not 80%." §M's 1.4 Hz bar is 70 % of 2 Hz.
+  No other document states 80 % (searched: README, BENCH_TEST,
+  SLDEA_MEASUREMENT, the quickstart, CHANGELOG and the manual sources).
+
+**Decision.**
+
+- Quote 0.5 s as the watchdog's monitor gate, the cadence its confirm
+  streak was designed around. Its real period on the bench is unmeasured;
+  do not call it validated. Telemetry still does not re-time it.
+- The first numbers come from `#369`: §N1 section B for the cost of the
+  read inside a tick, and §M's `telemetry:` line for the achieved rate and
+  worst gap at the 0.5 s gate. The figure that counts is the same line
+  from a LIVE run with the watchdog armed and telemetry at 2 Hz, which
+  times the watchdog itself.
+- The telemetry shortfall warning fires below 70 % of the target rate
+  (`TELEMETRY_SHORTFALL_FRAC`), 1.4 Hz at the default 2 Hz. Read the
+  80 % in the 2026-08-05 entry as 70 %.
+- The run loop's comment in `gui.py` now says this. The 2026-08-05 entry
+  stays as written, because this log is append-only.
+
 ## Live telemetry sidecar — the watchdog's 2 Hz samples are written down (2026-08-05)
 
 **TL;DR:** Every live run has been measuring the Trek current twice a

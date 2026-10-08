@@ -5494,10 +5494,16 @@ LOGGING:
             last_kv = None
             last_mon = -1.0
             # One monitor cadence for both consumers. With the watchdog
-            # armed it stays exactly 0.5 s — its bench-validated sampling
-            # is NOT re-timed by a logging feature — and telemetry (capped
-            # at 2 Hz, so never faster) decimates off it. Telemetry alone
-            # sets its own period.
+            # armed the gate stays at 0.5 s whatever telemetry's rate: the
+            # watchdog's confirm streak was designed around 0.5 s, and a
+            # logging feature does not re-time it. That is a design value.
+            # The real tick period (never under 0.5 s: the gate is polled
+            # every SLDEA_POLL_S, and snapshot grabs hold the loop) has not
+            # been timed on the bench (#424). BENCH_TEST N1's probe,
+            # section B, times the scope read inside each tick; a run's
+            # "telemetry:" log line reports the achieved rate. Telemetry
+            # (capped at 2 Hz, so never faster) decimates off the tick.
+            # Telemetry alone sets its own period.
             mon_dt = 0.5 if watchdog is not None else (
                 tel.period_s if tel is not None else 0.5)
             wd_bad_since, wd_blind = None, False

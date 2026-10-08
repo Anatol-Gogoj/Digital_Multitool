@@ -927,7 +927,7 @@
    },
    {
     "label": "⚡ Breakdown watchdog (LIVE runs)",
-    "what": "Watches Trek current during live runs; current above Trip (µA) sustained for Confirm (s) snapshots the breakdown, ramps to 0 and aborts. Transient spikes never trip it."
+    "what": "Watches Trek current during live runs; current above Trip (µA) sustained for Confirm (s) snapshots the breakdown, ramps to 0 and aborts. Transient spikes never trip it. The Energize HV? question says whether it is on, and run.log and setup.txt record it; unticked, only ■ Abort or the end of the run stops a run that breaks down."
    },
    {
     "label": "📈 Scope kV/µA log (telemetry.csv)",

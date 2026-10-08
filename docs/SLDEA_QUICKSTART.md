@@ -160,8 +160,10 @@ never touches the signal generator. Keep the Trek's HV output off for the whole 
 
 Before you press Run: a lock ("Auto-set camera" or "Apply & Lock") was your last camera action, the scope is as in section 3,
 "Trek inverts (negate control)" is set as the lab says, and the lab box steps are done. Leave
-"Breakdown watchdog (LIVE runs)" enabled. Use a NEW "Run name (blank = auto)" (a used name is reused
-and overwritten) and check "Output dir" now: the app does not check it until after the last dialog.
+"Breakdown watchdog (LIVE runs)" enabled. Use a NEW "Run name (blank = auto)": the line under the box
+shows the folder the run will write to, and when that folder already holds a run, or the share it is
+on is not mounted, the line warns and "Run" refuses to start. Check "Output dir" now too: whether the
+app can write there is only found out after the last dialog.
 
 **The app sends nothing to the signal generator until the last dialog is answered.** Whatever the
 drive channel (CH1 by default) was left outputting goes to the Trek's control input, and is
@@ -187,9 +189,11 @@ monitor setup" (Yes) and the pre-flight picture (Enter presses "Looks good - sta
    section O says take the fix). No keeps what was flagged ("this silently ruined five runs on
    2026-07-25", manual). No problem: no dialog, only the log line "monitor check: OK".
 4. "Energize HV?": "LIVE run - this drives the Trek up to" your top kV "via SG CH" and the channel,
-   then the staircase summary and "Proceed?". Yes means carry on. Nothing is sent to the signal
-   generator until the last dialog is answered. Then the program sets the channel to DC at 0 V,
-   output ON, and ramps up. The dialog shows no polarity, watchdog or folder, so check them first.
+   then the staircase summary, the breakdown watchdog's state ("Breakdown watchdog: ON..." with
+   its trip and confirm time, or "Breakdown watchdog: OFF. Nothing stops this run on a
+   breakdown..." if the box was unticked), and "Proceed?". Yes means carry on. Nothing is sent to the signal generator until the
+   last dialog is answered. Then the program sets the channel to DC at 0 V, output ON, and ramps
+   up. The dialog shows no polarity or folder, so check them first.
 5. "No electrode specified", "No concentration specified" (CNT inks only), "No film thickness
    specified": "Start the run without it?" Yes records nothing. Answer No, fill the field, press
    Run again. "Film thickness looks unusual" means a value outside 5 to 2000 um, such as one typed

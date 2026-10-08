@@ -43,6 +43,7 @@ import presets_path
 import relaunch
 from instruments import BK894, TekMSO24, BK4055B, BK9174B, BK5493C
 import lcr_format
+import output_folder
 import scope_trace
 import siggen_presets
 from siggen_presets import SignalGenPresetStore
@@ -55,7 +56,7 @@ import sldea_video
 from sldea_profile import (SldeaProfile, control_v_for_kv, measured_kv,
                            measured_ua, fmt_duration)
 import sweep_plan
-from ui_widgets import (ScrollableTab, SplashScreen, add_tooltip,
+from ui_widgets import (ScrollableTab, SplashScreen, Tooltip, add_tooltip,
                         browse_folder, folder_buttons, new_folder)
 from arb_editor import ArbWaveformEditor
 from waveform_render import unit_waveform, scale_waveform
@@ -345,6 +346,31 @@ def sldea_video_btn_sync(app):
                    else 'disabled')
     except Exception:
         pass
+
+
+def _sldea_folder_look(job):
+    """The SLDEA run folder line's check (#402), on its own thread: what
+    the run folder of `job['outdir']` and `job['name']` holds, or that the
+    share it is on is not mounted at `job['mount']`
+    (sldea_profile.run_folder_look). It is handed a dict of text, nothing
+    of the app's, so a check that outlives the window frees no Tk object
+    off the Tk thread. `found` stays None when the check itself raised,
+    which the line shows as not known."""
+    try:
+        job['found'] = sldea_profile.run_folder_look(
+            job['outdir'], job['name'], job['mount'])
+    finally:
+        job['done'] = True
+
+
+def sldea_share_mount():
+    """The lab share's mount point, read off the SLDEA tab's built-in
+    Output dir as New folder... reads it (#394): /mnt/shareDrive. Run
+    refuses a run folder under it while nothing is mounted there, and the
+    run folder line warns about it (#402 review); a folder anywhere else
+    is not affected. A function, so a test can aim it at a folder of its
+    own."""
+    return output_folder.share_mount(InstrumentControlGUI.SLDEA_SHARE_DIR)
 
 
 def _lan_reachable(resource, timeout=2.0):
@@ -3039,8 +3065,52 @@ LOGGING:
         btns.grid(row=0, column=2)
         ttk.Label(outf, text="Run name (blank = auto):").grid(row=1, column=0,
                                                               sticky='e')
-        self.sldea_runname = ttk.Entry(outf, width=26)
+        self.sldea_runname_var = tk.StringVar()
+        self.sldea_runname = ttk.Entry(outf, width=26,
+                                       textvariable=self.sldea_runname_var)
         self.sldea_runname.grid(row=1, column=1, sticky='w', padx=6)
+        # The folder the run will write to (#402), under the Run name box:
+        # the Output dir and the name joined as the worker joins them
+        # (sldea_profile.run_folder), redrawn at every keystroke and every
+        # change of the Output dir, which Browse and New folder... set too.
+        # A run name used before used to overwrite that run's setup.txt and
+        # data.csv without a word; the line warns, in words and in Tol's
+        # muted wine, when the folder already holds a run, and Run refuses
+        # it. The check behind the warning runs on a thread
+        # (_sldea_folder_check). Row 2, beside the SG channel box. Its size
+        # never follows its text, which changes at every keystroke: it asks
+        # for no width of its own (width=1) and takes the width its two
+        # columns already have, so the boxes beside it stay put, and it is
+        # always two lines high (height=2), so the rows below it, the Run
+        # button's included, stay put too (#402 review). Line 1 is the
+        # folder, cut from the left to that width; line 2 a warning or
+        # nothing. It never wraps: run_folder_line fits each line to the
+        # width.
+        self.sldea_folder_line = tk.Label(outf, text='', anchor='nw',
+                                          justify='left', fg=MUTED, width=1,
+                                          height=2)
+        self.sldea_folder_line.grid(row=2, column=1, columnspan=2,
+                                    sticky='ew', padx=6)
+        try:
+            self._sldea_folder_font = tkfont.nametofont(
+                str(self.sldea_folder_line.cget('font')))
+        except tk.TclError:
+            self._sldea_folder_font = tkfont.Font(
+                root=self.root, font=self.sldea_folder_line.cget('font'))
+        self._sldea_folder_width = None    # the width last fitted to
+        self.sldea_folder_line.bind('<Configure>', self._sldea_folder_resized,
+                                    add='+')
+        self._sldea_folder_tip = Tooltip(self.sldea_folder_line, '')
+        self._sldea_folder_seen = None     # (folder, what its check found)
+        self._sldea_folder_pause = None    # after id: check once typing stops
+        self._sldea_folder_job = None      # the check out on its thread
+        self._sldea_folder_poll_id = None  # after id: its next look
+        self._sldea_folder_run_id = None   # after id: a run's folder again
+        self._sldea_folder_run = None      # (Output dir, Run name) of a run
+        self.sldea_folder_line.bind('<Destroy>', self._sldea_folder_stop,
+                                    add='+')
+        self.sldea_runname_var.trace_add('write', self._sldea_folder_refresh)
+        self.sldea_outdir.trace_add('write', self._sldea_folder_refresh)
         for r, lbl, key, default, vals in (
                 (0, "V_Out scope CH:", 'vch', '2', ['1', '2', '3', '4']),
                 (1, "I_Out scope CH:", 'ich', '3', ['1', '2', '3', '4']),
@@ -3052,10 +3122,10 @@ LOGGING:
             cb.grid(row=r, column=4, sticky='w')
             self.sldea_vars[key] = cb
         ttk.Label(outf, text="DEA active area diam (mm):").grid(
-            row=2, column=0, sticky='e')
+            row=3, column=0, sticky='e')
         diam = ttk.Entry(outf, width=8)
         diam.insert(0, '16')
-        diam.grid(row=2, column=1, sticky='w', padx=6)
+        diam.grid(row=3, column=1, sticky='w', padx=6)
         add_tooltip(diam, "Nominal resting active-area diameter. Written to "
                           "setup.txt and used by Edge Review for the px→mm "
                           "scale.")
@@ -3066,7 +3136,7 @@ LOGGING:
         # until now the material lived only in folder names. Run asks for
         # confirmation if it is left empty rather than silently recording
         # an unknown device class.
-        ttk.Label(outf, text="Electrode:").grid(row=3, column=0, sticky='e')
+        ttk.Label(outf, text="Electrode:").grid(row=4, column=0, sticky='e')
         # width 24 fits the longest brand ('Carbon Solutions P3-SWNT',
         # `#272`) without truncating it in the box. It costs no layout:
         # this column is already sized by the width-34 Output dir entry
@@ -3075,7 +3145,7 @@ LOGGING:
             outf, width=24,
             values=[c for c in sldea_profile.ELECTRODE_CHOICES if c])
         electrode.set('')
-        electrode.grid(row=3, column=1, sticky='w', padx=6)
+        electrode.grid(row=4, column=1, sticky='w', padx=6)
         add_tooltip(electrode,
                     "Compliant electrode material for this device. Pick one "
                     "of the listed inks — or TYPE ANY MATERIAL straight into "
@@ -3096,10 +3166,10 @@ LOGGING:
         # moves the Trek checkbutton off the electrode's row onto row 4), and
         # a fresh row cannot collide with that. Once #262 has landed this
         # could be tucked closer to the Electrode row it follows.
-        ttk.Label(outf, text="Concentration (mL):").grid(row=4, column=0,
+        ttk.Label(outf, text="Concentration (mL):").grid(row=5, column=0,
                                                          sticky='e')
         conc = ttk.Entry(outf, width=8)
-        conc.grid(row=4, column=1, sticky='w', padx=6)
+        conc.grid(row=5, column=1, sticky='w', padx=6)
         add_tooltip(conc,
                     "How much CNT ink went on this device — the '2.5mL' in a "
                     "folder name like P3_2.5mL_Triazole, recorded in the run "
@@ -3112,7 +3182,7 @@ LOGGING:
         # Says WHY the box is greyed, right beside it -- a disabled field
         # with no explanation is a support question.
         self.sldea_conc_note = tk.Label(outf, text='', fg='#777', anchor='w')
-        self.sldea_conc_note.grid(row=4, column=2, columnspan=3, sticky='w')
+        self.sldea_conc_note.grid(row=5, column=2, columnspan=3, sticky='w')
         # Follow the electrode as it is SELECTED and as it is TYPED: the box
         # is free text, so a custom material never fires ComboboxSelected.
         electrode.bind('<<ComboboxSelected>>',
@@ -3124,11 +3194,11 @@ LOGGING:
         # PRESTRETCHED (owner decision 2026-10-06), so the number is t0
         # itself and no prestretch is asked for. Blank by default and
         # never greyed: every film has a thickness, whatever the electrode.
-        # Row 5, under Concentration, because it describes the device too.
-        ttk.Label(outf, text="Film thickness (µm):").grid(row=5, column=0,
+        # The row under Concentration, because it describes the device too.
+        ttk.Label(outf, text="Film thickness (µm):").grid(row=6, column=0,
                                                           sticky='e')
         thick = ttk.Entry(outf, width=8)
-        thick.grid(row=5, column=1, sticky='w', padx=6)
+        thick.grid(row=6, column=1, sticky='w', padx=6)
         add_tooltip(thick,
                     "Thickness of the dielectric film in micrometres, "
                     "measured with the film MOUNTED AND PRESTRETCHED on the "
@@ -3156,16 +3226,17 @@ LOGGING:
                     "then drives a negative control so the HV output, and "
                     "the V_Out and I_Out monitors, read positive. Ticked by "
                     "default: the lab's Trek inverts. Untick it for an "
-                    "amplifier wired non-inverting.").grid(row=6, column=0,
+                    "amplifier wired non-inverting.").grid(row=7, column=0,
                                                   columnspan=3, sticky='w',
                                                   pady=(4, 0))
-        # row=6, BELOW the electrode, concentration and film thickness:
+        # row=7, BELOW the electrode, concentration and film thickness:
         # those define the DEVICE and read as one flow (operator note
         # 2026-08-08: the checkbutton between them broke it); this is a
         # DRIVE setting and comes after. History: it once overlapped the
         # electrode row outright (`#231` moved the field in, `#262`
         # un-stacked it), and sat on row 5 until the thickness took it
-        # (`#398`).
+        # (`#398`), and on row 6 until the run folder line took row 2
+        # (`#402`).
 
         # Breakdown watchdog (LIVE runs): deliberately slow-to-trip monitor
         # of the Trek I_Out on the scope; sustained overcurrent -> snapshot
@@ -3173,12 +3244,22 @@ LOGGING:
         wdf = ttk.LabelFrame(f, text="⚡ Breakdown watchdog (LIVE runs)",
                              padding=8)
         wdf.pack(fill='x', padx=10, pady=(0, 8))
+        # Ticked by default (owner decision 2026-10-08, #406): the 100 uA /
+        # 3 s rule misses small breakdowns (#219), but it is the only
+        # thing that stops a LIVE run on a breakdown, and replayed on the
+        # single-layer runs on file it stops none that was not breaking
+        # down (healthy runs stayed within 15 uA of their baseline). A
+        # preset saved unticked still loads unticked, so "Energize HV?",
+        # run.log and setup.txt name the state either way
+        # (sldea_profile.watchdog_record).
         self.sldea_wd_on = tk.BooleanVar(value=True)
         add_tooltip(ttk.Checkbutton(wdf, text="Enabled",
                                     variable=self.sldea_wd_on),
                     "Watch the Trek current during a live run; a CONFIRMED "
                     "breakdown captures a frame, ramps to 0 kV and aborts. "
-                    "Ignored on dry runs.").pack(side=tk.LEFT)
+                    "Unticked, only ■ Abort or the end of the run stops a "
+                    "run that breaks down; Energize HV? says which. Ignored "
+                    "on dry runs.").pack(side=tk.LEFT)
         ttk.Label(wdf, text="Trip (µA):").pack(side=tk.LEFT, padx=(14, 2))
         wd_ua = ttk.Entry(wdf, width=7)
         wd_ua.insert(0, '100')
@@ -3500,6 +3581,13 @@ LOGGING:
         f.bind('<Enter>', lambda _ev: self._sldea_cam_line_refresh(),
                add='+')
         self._sldea_cam_line_refresh()
+        # The run folder line (#402) checks again when a tab is selected:
+        # another PC may have written a run there meanwhile. Not on <Enter>,
+        # which fires at every move between the tab's widgets and would
+        # stat the share each time.
+        self.notebook.bind('<<NotebookTabChanged>>',
+                           lambda _ev: self._sldea_folder_refresh(), add='+')
+        self._sldea_folder_refresh()
 
     def _sldea_build_profile(self):
         try:
@@ -3762,6 +3850,247 @@ LOGGING:
         if self._sldea_out_locked():
             return
         self._new_folder_into(self.sldea_outdir, "Output dir")
+
+    # The run folder line under Run name (#402). Its check is two stats in
+    # the run folder, on a thread, once the typing has paused, one at a
+    # time: a stat on a share that has gone away can block for minutes,
+    # and on the Tk thread that would freeze the window at every
+    # keystroke. A check with no answer after SLDEA_FOLDER_SLOW_S says so
+    # on the line and keeps waiting at a slower pace. Once the boxes name
+    # another folder, a check that slow is left to finish on its own and
+    # the folder named now is checked instead (#402 review), so a new
+    # check goes out at most once per SLDEA_FOLDER_SLOW_S however long a
+    # share hangs. While a run is on, the line names the folder that run
+    # writes to instead of judging the boxes.
+    SLDEA_FOLDER_PAUSE_MS = 300
+    SLDEA_FOLDER_POLL_MS = 100
+    SLDEA_FOLDER_SLOW_S = 2.0
+    SLDEA_FOLDER_RUN_MS = 500
+    # The job line's colors (#396): the repo's muted gray, and Paul Tol's
+    # muted wine for a warning (7.7:1 as text on the Windows background).
+    SLDEA_FOLDER_COLORS = {'ok': MUTED, 'warn': '#882255'}
+
+    def _sldea_folder_boxes(self):
+        """(Output dir, Run name) as the line reads them. The name comes
+        from its variable: Tcl runs the newest trace on a variable first,
+        so while this line's trace runs, the Entry still shows the text
+        from before the change."""
+        return (self.sldea_outdir.get(),
+                self.sldea_runname_var.get().strip())
+
+    def _sldea_folder_stuck(self, job):
+        """Has this check been out longer than SLDEA_FOLDER_SLOW_S?"""
+        return bool(job is not None and not job['done']
+                    and time.monotonic() - job['t0']
+                    > self.SLDEA_FOLDER_SLOW_S)
+
+    def _sldea_folder_slow(self, folder):
+        """True while the check of `folder` has been out longer than
+        SLDEA_FOLDER_SLOW_S. A check of another folder never makes the
+        line say "not answering" (#402 review): the line describes the
+        folder the boxes name now."""
+        job = self._sldea_folder_job
+        return (job is not None and job['folder'] == folder
+                and self._sldea_folder_stuck(job))
+
+    def _sldea_folder_writing(self):
+        """The folder the run in progress writes to: the worker's own, once
+        its run.log is live (exact for a blank name too), else the boxes
+        sldea_run read when Run was pressed -> (folder, exact)."""
+        runlog = getattr(self, '_sldea_runlog', None)
+        if runlog:
+            return os.path.dirname(runlog), True
+        where = getattr(self, '_sldea_folder_run', None)
+        if where:
+            return sldea_profile.run_folder(*where), bool(where[1])
+        return sldea_profile.run_folder(*self._sldea_folder_boxes()), False
+
+    def _sldea_folder_redraw(self):
+        """Draw the line for what the boxes name now, from the last check
+        of that folder when there is one, or, while a run is on, for the
+        folder that run writes to -> (Output dir, Run name)."""
+        outdir, name = self._sldea_folder_boxes()
+        if self._sldea_running:
+            folder, exact = self._sldea_folder_writing()
+            text, warn, full = sldea_profile.run_folder_writing_line(
+                folder, fits=self._sldea_folder_fits())
+            self.sldea_folder_line.config(
+                text=text,
+                fg=self.SLDEA_FOLDER_COLORS['warn' if warn else 'ok'])
+            self._sldea_folder_tip.text = full
+            if not exact and self._sldea_folder_run_id is None:
+                # a blank name's folder is stamped by the worker: look again
+                self._sldea_folder_run_id = self.root.after(
+                    self.SLDEA_FOLDER_RUN_MS, self._sldea_folder_run_tick)
+            return outdir, name
+        folder = sldea_profile.run_folder(outdir, name)
+        seen = self._sldea_folder_seen
+        self._sldea_folder_show(
+            outdir, name, seen[1] if seen and seen[0] == folder else None,
+            slow=self._sldea_folder_slow(folder))
+        return outdir, name
+
+    def _sldea_folder_run_tick(self):
+        self._sldea_folder_run_id = None
+        if self._sldea_running:
+            try:
+                self._sldea_folder_redraw()
+            except Exception:
+                pass
+
+    def _sldea_folder_wanted(self, outdir, name):
+        """Is there anything to check for this folder? A typed name it can
+        use, or a blank name on the share, whose mount is checked (#402
+        review), and never while a run is on. Text only, no file system
+        call."""
+        if self._sldea_running:
+            return False
+        if name:
+            return not sldea_profile.run_name_problem(name)
+        return output_folder.on_share(sldea_profile.run_folder(outdir, name),
+                                      sldea_share_mount())
+
+    def _sldea_folder_refresh(self, *_args):
+        """Redraw the run folder line from the two boxes now, then check
+        that folder once the typing pauses. A trace, a tab change, the
+        start of a run and its end call this; it never raises, it is a
+        label."""
+        try:
+            outdir, name = self._sldea_folder_redraw()
+            if self._sldea_folder_pause is not None:
+                self.root.after_cancel(self._sldea_folder_pause)
+                self._sldea_folder_pause = None
+            if self._sldea_folder_wanted(outdir, name):
+                self._sldea_folder_pause = self.root.after(
+                    self.SLDEA_FOLDER_PAUSE_MS, self._sldea_folder_check)
+        except Exception:
+            pass
+
+    def _sldea_folder_show(self, outdir, name, found, slow=False):
+        text, warn, full = sldea_profile.run_folder_line(
+            outdir, name, found, slow, fits=self._sldea_folder_fits(),
+            mount=sldea_share_mount())
+        self.sldea_folder_line.config(
+            text=text, fg=self.SLDEA_FOLDER_COLORS['warn' if warn else 'ok'])
+        self._sldea_folder_tip.text = full
+
+    def _sldea_folder_fits(self):
+        """fits(text): does one line of text fit the run folder line's
+        width, in its font? None before Tk has laid the line out, and
+        run_folder_line then counts characters until the <Configure> that
+        gives it a width redraws it."""
+        line = self.sldea_folder_line
+        width = line.winfo_width()
+        if width <= 1:
+            return None
+        room = width - 2 * sum(line.winfo_pixels(line.cget(opt)) for opt in
+                               ('borderwidth', 'highlightthickness', 'padx'))
+        measure = self._sldea_folder_font.measure
+        return lambda text: measure(text) <= room
+
+    def _sldea_folder_resized(self, event):
+        """<Configure> of the line: fit its text to its new width. The text
+        never changes its size (width=1, height=2), so this cannot loop."""
+        if event.width == self._sldea_folder_width:
+            return
+        self._sldea_folder_width = event.width
+        try:
+            self._sldea_folder_redraw()
+        except Exception:
+            pass
+
+    def _sldea_folder_abandon(self):
+        """Leave the check out now to finish on its own thread, into its own
+        dict, which nothing reads any more, and stop polling it."""
+        self._sldea_folder_job = None
+        if self._sldea_folder_poll_id is not None:
+            try:
+                self.root.after_cancel(self._sldea_folder_poll_id)
+            except Exception:
+                pass
+            self._sldea_folder_poll_id = None
+
+    def _sldea_folder_check(self):
+        """Send the check of the run folder the boxes name out on its
+        thread, or, while one is still out, ask for another when it is
+        back. A check stuck on a folder the boxes no longer name is
+        abandoned instead of waited for."""
+        self._sldea_folder_pause = None
+        try:
+            outdir, name = self._sldea_folder_boxes()
+            if not self._sldea_folder_wanted(outdir, name):
+                return
+            folder = sldea_profile.run_folder(outdir, name)
+            mount = sldea_share_mount()
+        except Exception:
+            return
+        job = self._sldea_folder_job
+        if job is not None:
+            if job['folder'] == folder or not self._sldea_folder_stuck(job):
+                job['again'] = True
+                return
+            self._sldea_folder_abandon()
+        job = {'folder': folder, 'outdir': outdir, 'name': name,
+               'mount': mount, 'found': None, 'done': False,
+               'again': False, 't0': time.monotonic()}
+        self._sldea_folder_job = job
+        threading.Thread(target=_sldea_folder_look, args=(job,),
+                         name='sldea-run-folder-line', daemon=True).start()
+        self._sldea_folder_next(self.SLDEA_FOLDER_POLL_MS)
+
+    def _sldea_folder_next(self, ms):
+        try:
+            self._sldea_folder_poll_id = self.root.after(
+                ms, self._sldea_folder_poll)
+        except Exception:
+            self._sldea_folder_poll_id = None
+
+    def _sldea_folder_poll(self):
+        """Read the check's answer on the Tk thread, and show it when the
+        boxes still name that folder."""
+        self._sldea_folder_poll_id = None
+        job = self._sldea_folder_job
+        if job is None:
+            return
+        try:
+            if not job['done']:
+                stuck = self._sldea_folder_stuck(job)
+                if stuck:
+                    outdir, name = self._sldea_folder_boxes()
+                    if sldea_profile.run_folder(outdir, name) != \
+                            job['folder']:
+                        # stuck on a folder the boxes no longer name: it
+                        # has no claim on the line (#402 review)
+                        self._sldea_folder_abandon()
+                        self._sldea_folder_redraw()
+                        self._sldea_folder_check()
+                        return
+                    self._sldea_folder_redraw()
+                self._sldea_folder_next(
+                    self.SLDEA_FOLDER_POLL_MS * (5 if stuck else 1))
+                return
+            self._sldea_folder_job = None
+            self._sldea_folder_seen = (job['folder'], job['found'])
+            outdir, name = self._sldea_folder_redraw()
+            now = sldea_profile.run_folder(outdir, name)
+            if job['again'] or now != job['folder']:
+                self._sldea_folder_check()
+        except Exception:
+            pass
+
+    def _sldea_folder_stop(self, _event=None):
+        """<Destroy> of the line: cancel its timers, so none fires into a
+        window that is gone. A check still out on its thread finishes on
+        its own; it holds nothing of the app's."""
+        for attr in ('_sldea_folder_pause', '_sldea_folder_poll_id',
+                     '_sldea_folder_run_id'):
+            job = getattr(self, attr, None)
+            setattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
 
     # The SLDEA tab's built-in Output dir: the lab share as the Linux bench
     # mounts it (SCPI_SLDEA_DIR overrides the box per PC). New folder... on
@@ -4160,6 +4489,24 @@ LOGGING:
             go, allowed_sweep = self._sldea_start_gate(sgch, dry)
             if not go:
                 return
+            # The run folder (#402), right after the gate and before any HV
+            # question, so no operator answers the HV questions only to be
+            # refused over a name. A name used before made the worker write
+            # over that run's setup.txt and data.csv; that folder, a name
+            # that cannot be a folder name, a folder that could not be
+            # checked or does not answer within RUN_FOLDER_CHECK_S, and a
+            # folder on the share while the share is not mounted (#402
+            # review) are refused, with no "start anyway". Both boxes are
+            # read once, here, and handed to the worker, so the folder
+            # checked is the folder written.
+            outdir = self.sldea_outdir.get()
+            runname = self.sldea_runname.get().strip()
+            refusal = sldea_profile.run_folder_refusal(
+                outdir, runname, mount=sldea_share_mount())
+            if refusal:
+                messagebox.showerror("SLDEA run folder", refusal)
+                self._sldea_log("run refused: " + " ".join(refusal.split()))
+                return
             # Video (2026-09-23) is settled next, still before any HV
             # question (the start gate above asks nothing):
             # an operator who asked for a recording must not learn it is
@@ -4168,6 +4515,19 @@ LOGGING:
             if vid_on is None:
                 return
             vid_detect = bool(vid_on and self.sldea_vid_detect.get())
+            # Breakdown watchdog (live only), read ONCE, here, so "Energize
+            # HV?" below names exactly the watchdog the worker is handed
+            # (#406). Only claim it is armed when it actually will be: the
+            # worker needs a scope to read the current (audit 2026-07-25).
+            wd_ticked = bool(self.sldea_wd_on.get())
+            wd_on = bool(wd_ticked and not dry and self.scope is not None)
+            try:
+                wd_ua = float(self.sldea_vars['wd_ua'].get())
+                wd_s = float(self.sldea_vars['wd_s'].get())
+            except (KeyError, ValueError):
+                wd_ua, wd_s = 100.0, 3.0
+            wd_setup, wd_log, wd_dialog = sldea_profile.watchdog_record(
+                wd_ticked, wd_on, dry, wd_ua, wd_s)
             if not dry:
                 if not INSTRUMENTS_SUPPORTED:
                     messagebox.showinfo("Linux only", NOT_LINUX_NOTE)
@@ -4208,7 +4568,8 @@ LOGGING:
                         "Energize HV?",
                         f"LIVE run — this drives the Trek up to "
                         f"{max(p.levels):g} kV via SG CH{sgch}"
-                        f".\n\n{p.summary()}\n\nProceed?", default='no'):
+                        f".\n\n{p.summary()}\n\n{wd_dialog}\n\nProceed?",
+                        default='no'):
                     return
             vch = int(self.sldea_vars['vch'].get())
             ich = int(self.sldea_vars['ich'].get())
@@ -4326,19 +4687,11 @@ LOGGING:
                 return
             autoproc = self.sldea_autoproc.get()
             trek_sign = -1.0 if self.sldea_trek_inv.get() else 1.0
-            # Breakdown watchdog (live only). Only claim it is armed when it
-            # actually will be: the worker needs a scope to read the current
-            # (audit 2026-07-25 — the old banner printed either way).
-            wd_on = (self.sldea_wd_on.get() and not dry
-                     and self.scope is not None)
-            if self.sldea_wd_on.get() and not dry and self.scope is None:
+            # Breakdown watchdog: wd_on, wd_ua and wd_s were read above,
+            # before "Energize HV?" (#406).
+            if wd_ticked and not dry and self.scope is None:
                 self._sldea_log("⚠ watchdog requested but NO SCOPE — running "
                                 "without breakdown protection")
-            try:
-                wd_ua = float(self.sldea_vars['wd_ua'].get())
-                wd_s = float(self.sldea_vars['wd_s'].get())
-            except (KeyError, ValueError):
-                wd_ua, wd_s = 100.0, 3.0
             # Telemetry needs the scope, not HV: a dry run logs its monitor
             # readings too, which is how the rig gets checked before the
             # Trek is energized. clamp_telemetry_hz absorbs an empty or
@@ -4352,6 +4705,11 @@ LOGGING:
             if self.sldea_tel_on.get() and self.scope is None:
                 self._sldea_log("telemetry requested but NO SCOPE — no "
                                 "monitor log for this run")
+            # The #219 N-sigma rule runs in shadow on a LIVE run whose
+            # monitor reads run; its setup.txt line, decided here from the
+            # same wd_on and tel_on the worker is handed.
+            shadow_setup = sldea_profile.shadow_record(
+                not dry, bool(wd_on or tel_on))
             # Free the camera: the Webcam preview holds /dev/video0 open and
             # a one-shot grab can't run while it streams (empty frames
             # otherwise).
@@ -4425,8 +4783,7 @@ LOGGING:
             self._sldea_elapsed = 0.0
             self._sldea_log(
                 f"{'DRY-RUN' if dry else 'LIVE HV'} start — {p.summary()}"
-                + (f"  [watchdog: dev ≥{wd_ua:g} µA for {wd_s:g}s, "
-                   f"baseline learned at 0 kV]" if wd_on else "")
+                + f"  [{wd_log}]"
                 + (f"  [telemetry: {tel_hz:g} Hz → "
                    f"{sldea_profile.TELEMETRY_FILENAME}]" if tel_on else "")
                 + (f"  [video: {vid_fps:g} fps → "
@@ -4443,8 +4800,7 @@ LOGGING:
             started = True
             threading.Thread(
                 target=self._sldea_worker,
-                args=(p, self.sldea_outdir.get(),
-                      self.sldea_runname.get().strip(),
+                args=(p, outdir, runname,
                       sgch, vch, ich, dry, cam_exp, cam_gain, diam_mm,
                       autoproc, wd_on, wd_ua, wd_s, trek_sign, scope_setup,
                       tel_on, tel_hz, electrode, concentration_ml),
@@ -4453,13 +4809,23 @@ LOGGING:
                             vid_on=vid_on, vid_fps=vid_fps or 1.0,
                             vid_detect=vid_detect,
                             film_thickness_um=film_thickness_um,
-                            cam_record=cam_record),
+                            cam_record=cam_record,
+                            watchdog_setup=wd_setup,
+                            watchdog_shadow=shadow_setup),
                 daemon=True).start()
             self.root.after(100, self._sldea_animate_cursor)  # playhead
             # ...and opens with the run, once the worker is on its way:
             # beside this window when there is room, otherwise behind it,
             # and the keyboard focus comes back here either way
             sldea_liveview.notify(self, 'open_with_run')
+            # The run folder line names the folder this run writes to until
+            # it ends, instead of judging the boxes, which stay editable
+            # (#402 review). A label: no file system call, it never raises,
+            # and a test's stand-in app has no line.
+            self._sldea_folder_run = (outdir, runname)
+            refresh = getattr(self, '_sldea_folder_refresh', None)
+            if refresh is not None:
+                refresh()
             # Video review... steps out of the run row until the run ends,
             # so the status line and Live view... keep their room (#395).
             # Last, once the run is under way; it never raises.
@@ -5112,6 +5478,13 @@ LOGGING:
         # Video review... now opens THIS run's video, when it recorded one
         # (#395). Never raises, so the live view below is still told.
         sldea_video_after_run(self, runlog)
+        # The run folder line now warns that this run's folder holds a run
+        # (#402), before the next Run press is refused for it. It only
+        # schedules a check on a thread and never raises; a test's
+        # stand-in app has no line.
+        refresh = getattr(self, '_sldea_folder_refresh', None)
+        if refresh is not None:
+            refresh()
         # Last, once the tab is released: the live view keeps its last
         # frame, labelled RUN ENDED (#376). notify never raises.
         sldea_liveview.notify(self, 'end_run')
@@ -5202,7 +5575,8 @@ LOGGING:
                       concentration_ml=None, cam_expected=False,
                       picture_override='', vid_on=False, vid_fps=1.0,
                       vid_detect=False, film_thickness_um=None,
-                      cam_record=None):
+                      cam_record=None,
+                      watchdog_setup=None, watchdog_shadow=None):
         """Host-sequenced staircase runner (daemon thread; no Tk calls except
         via _sldea_log/_sldea_set_status/after). Drives the SG DC offset along
         p.kv_at(t), fires webcam+scope snapshots on schedule, writes the run
@@ -5223,7 +5597,18 @@ LOGGING:
         `cam_record` is setup.txt's camera block as sldea_run built it on
         the Tk thread (sldea_profile.camera_record, #400): the lock this run
         stamps, the camera the pre-flight found, and any fallback value.
-        None (a caller that predates it) writes the plain summary line."""
+        None (a caller that predates it) writes the plain summary line.
+
+        `watchdog_setup` is sldea_run's setup.txt line for the watchdog it
+        armed or not (sldea_profile.watchdog_record, #406); None writes no
+        line. It only reaches setup.txt: arming still reads wd_on.
+
+        `watchdog_shadow` is sldea_run's setup.txt line for the #219
+        N-sigma rule (sldea_profile.shadow_record). With it, a LIVE run
+        whose monitor reads run feeds the rule those same reads in SHADOW:
+        it acts on nothing, and its outcome and every away read it saw are
+        written after the SG is zeroed. None (a caller that predates it)
+        runs no shadow."""
         import os
         import csv as _csv
         started = datetime.now()
@@ -5234,7 +5619,13 @@ LOGGING:
         vid_stop = None               # words, when its codec check stopped it
         completed = False
         cam_lock_saved = None         # Webcam-tab lock, restored at the end
-        rundir = os.path.join(outdir, runname or p.run_dirname(started))
+        shadow = None                 # #219 N-sigma rule, shadow (below)
+        shadow_rule = None            # ...the same rule, kept after an error
+        shadow_end = None             # its outcome when it could not run
+        shadow_base = (None, None)    # 0 kV baseline (median, sigma) for it
+        shadow_refused = None         # ...or the baseline the bound refused
+        # the folder the SLDEA tab's line showed and sldea_run checked (#402)
+        rundir = sldea_profile.run_folder(outdir, runname, started)
         framedir = os.path.join(rundir, 'frames')
         fh = None
         # Capture the SG handle ONCE: a mid-run Reconnect nulls self.sg, and
@@ -5246,7 +5637,13 @@ LOGGING:
             os.makedirs(framedir, exist_ok=True)
             # Write run metadata FIRST -- before any (possibly slow) camera
             # setup -- so even an interrupted run leaves setup.txt + the header.
-            with open(os.path.join(rundir, 'setup.txt'), 'w') as sf:
+            # A typed run name opens it, and data.csv below, with mode 'x'
+            # (#402 review): sldea_run checked the folder held no run, but
+            # a run that started there since (the dialogs take minutes)
+            # makes this one fail HERE, before the camera and the SG, the
+            # way a makedirs failure does, instead of writing over it.
+            with sldea_profile.open_run_file(rundir, 'setup.txt',
+                                             runname) as sf:
                 sf.write(p.setup_text(
                     runname or p.run_dirname(started),
                     started.isoformat(timespec='seconds'),
@@ -5255,7 +5652,9 @@ LOGGING:
                                                               cam_gain),
                     dea_diam_mm=diam_mm, electrode=electrode,
                     concentration_ml=concentration_ml,
-                    film_thickness_um=film_thickness_um))
+                    film_thickness_um=film_thickness_um,
+                    watchdog=watchdog_setup,
+                    watchdog_shadow=watchdog_shadow))
                 if trek_sign < 0:
                     sf.write("Trek control polarity: INVERTED (control = "
                              "-kV/gain; monitor readings logged as read)\n")
@@ -5309,7 +5708,8 @@ LOGGING:
                     pass
                 self._sldea_runlog = runlog
                 self._sldea_prelog = None
-            fh = open(os.path.join(rundir, 'data.csv'), 'w', newline='')
+            fh = sldea_profile.open_run_file(rundir, 'data.csv', runname,
+                                             newline='')
             writer = _csv.DictWriter(fh, fieldnames=p.CSV_COLUMNS)
             writer.writeheader()
             fh.flush()
@@ -5536,18 +5936,27 @@ LOGGING:
                     n = len(base)
                     med = (base[n // 2] if n % 2 else
                            0.5 * (base[n // 2 - 1] + base[n // 2]))
+                    # The reads' spread too, for the #219 shadow: its
+                    # sigma before the run has landing reads of its own.
+                    # (Not `dev`: that is the camera device above, which
+                    # the recorder's restamp lambda reads when it runs.)
+                    spread = sorted(abs(v - med) for v in base)
+                    mad = (spread[n // 2] if n % 2 else
+                           0.5 * (spread[n // 2 - 1] + spread[n // 2]))
                     # Credibility bound (sldea_profile.credible_baseline_ua):
                     # a large 'rest level' at 0 kV is a standing fault
                     # current, and anchoring the deviation trip to it would
                     # normalize the fault. The absolute rule then trips on
                     # it — the correct outcome.
                     if sldea_profile.credible_baseline_ua(med, wd_ua):
+                        shadow_base = (med, 1.4826 * mad)
                         watchdog.baseline_ua = med
                         self._sldea_log(
                             f"watchdog baseline {med:.1f} µA "
                             f"(median of {n} reads at 0 kV); trip "
                             f"|I−baseline| ≥ {wd_ua:g} µA for {wd_s:g}s")
                     else:
+                        shadow_refused = med
                         self._sldea_log(
                             f"⚠ watchdog baseline {med:.1f} µA is not a "
                             f"credible 0 kV rest level — keeping absolute "
@@ -5557,6 +5966,25 @@ LOGGING:
                         f"watchdog baseline unavailable ({len(base)}/8 "
                         f"reads ok) — absolute trip |I| ≥ {wd_ua:g} µA "
                         f"for {wd_s:g}s")
+            # #219: the N-sigma rule in SHADOW on a LIVE run whose monitor
+            # reads run (the watchdog armed, or telemetry on): the same
+            # wd_on and tel_on sldea_run worded its setup.txt line from,
+            # so a run whose line says OFF gets no shadow and no end line.
+            # It is fed only what the monitor tick below already reads and
+            # acts on nothing. Not armed on a refused 0 kV baseline: a
+            # deviation rule anchored to a standing fault current would
+            # take the fault as normal (the reason BreakdownWatchdog
+            # refuses it).
+            if watchdog_shadow is not None and not dry and (wd_on or tel_on):
+                if watchdog is None and tel is None:
+                    shadow_end = "not run: no current reads this run"
+                elif shadow_refused is not None:
+                    shadow_end = (f"not armed: the 0 kV baseline "
+                                  f"{shadow_refused:.1f} uA was refused "
+                                  f"(a standing fault current)")
+                else:
+                    shadow = shadow_rule = sldea_profile.NSigmaWatchdog(
+                        base_loc=shadow_base[0], base_sigma=shadow_base[1])
             self._sldea_voff_logged = False   # V_Out clip: log once per run
             self._sldea_ioff_logged = False   # I_Out clip: log once per run
             snaps = sorted(p.snapshots, key=lambda s: s['t'])
@@ -5710,6 +6138,30 @@ LOGGING:
                                           else (None, None)))
                         self._sldea_stop = True
                         break
+                    # The #219 shadow, on the same read, AFTER the watchdog
+                    # decided: it cannot delay a trip, and it acts on
+                    # nothing. A would-trip is one telemetry event row now
+                    # (no current on it, so no reader counts the read twice)
+                    # and one run.log line after the SG is zeroed. Every
+                    # away read, a lone one included, is only kept in the
+                    # rule's memory here (capped) and written after the SG
+                    # is zeroed: no file or Tk call on this loop for it. Any
+                    # error stops only the shadow, never this loop.
+                    if shadow is not None and not shadow.tripped:
+                        try:
+                            if (shadow.update(el, p.kv_at(el), ua,
+                                              offscreen=ioff)
+                                    and tel is not None):
+                                tel.event(
+                                    el, datetime.now().isoformat(
+                                        timespec='milliseconds'),
+                                    p.kv_at(el), "SHADOW N-sigma "
+                                    + shadow.outcome_text())
+                        except Exception as e:
+                            shadow_end = (f"stopped by an error at "
+                                          f"{el:.1f} s: "
+                                          f"{type(e).__name__}: {e}")
+                            shadow = None
                     # Periodic telemetry row, off the current already read.
                     # V_Out costs a SECOND locked round-trip, so it is
                     # sub-sampled (>= 1 s) — nominal_kV carries the exact
@@ -5955,6 +6407,35 @@ LOGGING:
                     except Exception:
                         pass
                     tel.close()
+                # The #219 shadow's away reads, after the SG is zeroed: a
+                # count line and one line per listed read, as ONE run.log
+                # entry, so one file write and one Tk hand-off however many
+                # there are (the rule caps the list). None at all on a run
+                # that never left the bar. A record, so it never leaves
+                # this block.
+                if shadow_rule is not None:
+                    try:
+                        away = shadow_rule.away_lines()
+                        if away:
+                            self._sldea_log(
+                                "SHADOW away reads (N-sigma, acts on "
+                                "nothing): " + "\n  ".join(away))
+                    except Exception:
+                        pass
+                # The #219 shadow's outcome, after the SG is zeroed: one
+                # run.log line and one setup.txt line, whatever it saw. A
+                # record like the telemetry, so it never leaves this block.
+                if shadow is not None or shadow_end is not None:
+                    try:
+                        text = (shadow.outcome_text() if shadow is not None
+                                else shadow_end)
+                        self._sldea_log(f"SHADOW N-sigma (acts on "
+                                        f"nothing): {text}")
+                        with open(os.path.join(rundir, 'setup.txt'),
+                                  'a') as sf:
+                            sf.write(f"Watchdog shadow (end): {text}\n")
+                    except Exception:
+                        pass
                 # Video after that, the same kind of record: stop() gives up
                 # after its timeout, and moving the file into the run folder
                 # (gigabytes, usually to the share) plus the optional

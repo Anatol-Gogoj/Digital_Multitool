@@ -1144,6 +1144,69 @@ def watchdog_record(ticked, armed, dry, trip_ua, confirm_s):
               "the end of the run does.")
 
 
+def scope_wait_record(outcome, waited_s, limit_s, good=0):
+    """(log_line, setup_lines): the records of a ticked LIVE run that
+    reached its watchdog's arming line while a scope Reconnect was still
+    in flight, and waited for it there at 0 V, before the run clock
+    started (#423).
+
+    `outcome` is what the wait came to:
+    - 'armed': the scope came back and the watchdog armed, from the usual
+      0 kV baseline;
+    - 'unread': the scope came back, but only `good` of the 8 baseline
+      reads that count answered, fewer than a baseline needs (4), so the
+      watchdog is NOT armed;
+    - 'timeout': the Reconnect was still running at `limit_s`;
+    - 'failed': the Reconnect ended without a scope;
+    - 'aborted': Abort was pressed during the wait.
+
+    A NOT armed outcome writes a `Breakdown watchdog (start):` line, #406's
+    `NOT armed (no scope)` when the scope never came back, then a
+    `Breakdown watchdog (scope wait):` line; an armed one writes the wait
+    line only. Both are ASCII, because the worker writes setup.txt in the
+    locale encoding. The run.log line for a NOT armed outcome is #406's
+    warning, with the wait in place of its guess "(a Reconnect?)"."""
+    w = f"{waited_s:.1f} s"
+    wait = f"Breakdown watchdog (scope wait): {w} at 0 V for a scope Reconnect"
+    if outcome == 'armed':
+        return (f"breakdown watchdog ARMED after a {w} wait at 0 V for the "
+                f"scope Reconnect, as at any arming (the line above says "
+                f"what its 0 kV baseline came to)",
+                [f"{wait}; the scope came back and the watchdog armed"])
+    head = "⚠⚠ BREAKDOWN WATCHDOG NOT ARMED — "
+    tail = (" Nothing stops this run on a breakdown; only ■ Abort or the "
+            "end of the run does. Energize HV? and the start line said ON.")
+    gone = "the scope was gone when the run reached the arming line, and "
+    if outcome == 'unread':
+        return (head + f"the scope came back after a {w} wait at 0 V for "
+                f"its Reconnect, but only {good} of the 8 baseline reads at "
+                f"0 kV answered (a baseline needs 4), so there is no "
+                f"baseline to arm from." + tail,
+                ["Breakdown watchdog (start): NOT armed (scope back, but no "
+                 "0 kV baseline)",
+                 f"{wait}; the scope came back, but only {good} of 8 0 kV "
+                 f"reads answered, so NOT armed"])
+    if outcome == 'timeout':
+        return (head + gone + f"its Reconnect was still running after a "
+                f"{w} wait at 0 V, the limit." + tail,
+                ["Breakdown watchdog (start): NOT armed (no scope)",
+                 f"{wait}, still running at the {limit_s:g} s limit, so NOT "
+                 f"armed"])
+    if outcome == 'failed':
+        return (head + gone + f"its Reconnect failed after a {w} wait at "
+                f"0 V." + tail,
+                ["Breakdown watchdog (start): NOT armed (no scope)",
+                 f"{wait}, which failed, so NOT armed"])
+    if outcome == 'aborted':
+        return (head + f"■ Abort was pressed after a {w} wait at 0 V for the "
+                f"scope Reconnect. The run ends here, at 0 V. Energize HV? "
+                f"and the start line said ON.",
+                ["Breakdown watchdog (start): NOT armed (stopped while "
+                 "waiting for the scope)",
+                 f"{wait}, ended by Abort, so NOT armed"])
+    raise ValueError(f"unknown scope wait outcome {outcome!r}")
+
+
 # The #219 N-sigma rule's defaults, chosen on the 18 single-layer runs
 # replayed on 2026-10-08 (SLDEA_DECISIONS.md, "The N-sigma breakdown rule
 # runs in shadow"): no false trip on any healthy run and none on the three

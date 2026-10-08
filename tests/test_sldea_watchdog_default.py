@@ -276,7 +276,13 @@ def test_a_scope_lost_before_the_arming_line_is_recorded_not_armed():
     line, and back 0.3 s later. The run goes on unwatched, as before, and
     at 120 uA over the 100 uA trip nothing stops it; now run.log carries
     the NOT ARMED warning and setup.txt an ASCII line, while the start
-    records still say ON, as "Energize HV?" did."""
+    records still say ON, as "Energize HV?" did.
+
+    Since #423 a real Reconnect still in flight at the arming line is
+    waited for there (tests/test_sldea_watchdog_reconnect_wait.py). This
+    stand-in drops the handle without marking a Reconnect in flight, so
+    it is the path where nothing is in flight: no wait, and a scope back
+    after the arming line still arms nothing."""
     with tempfile.TemporaryDirectory() as tmp:
         mb = L._MB(L.LIVE_OK)
         with L._patched(mb):

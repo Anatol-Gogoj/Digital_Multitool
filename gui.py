@@ -2885,9 +2885,18 @@ LOGGING:
         # left column (staircase, output and device, watchdog / telemetry /
         # video) and what they LOOK AT is in the right one (the kV preview,
         # and later the camera panel #404 adds). It fits a 1320 x 990 window
-        # with no scrolling (875 px at 96 dpi; the single column it replaced
+        # with no scrolling (847 px at 96 dpi; the single column it replaced
         # was 1183 px), and the Run button stays in the lower third of the
-        # tab, under everything it acts on.
+        # tab, under everything it acts on. At 1024 x 768 the whole Run
+        # button is in view as well (owner decision 2026-10-08), with 11 px
+        # to spare once #402's run folder line, two text lines tall, is in.
+        # The vertical padding above the run row was trimmed by 28 px for
+        # that: the columns sit right under the presets, the boxes are 4 px
+        # apart, Test Profile and Output & Measurement take 6 px of
+        # vertical padding instead of 8, and the snapshot line, the summary
+        # and the run row have 4 px of top padding instead of 6. Anything
+        # that adds height above the run row cuts the button's bottom edge
+        # off again.
         #
         # Named run-configuration presets (`#265`) come FIRST, across the
         # top: a session starts by loading the campaign's preset, and
@@ -2937,7 +2946,7 @@ LOGGING:
         # The two columns. Built left first, so the Tab key walks the
         # left column top to bottom before the right one.
         top = ttk.Frame(f)
-        top.pack(fill='x', padx=4, pady=(4, 0))
+        top.pack(fill='x', padx=4)
         top.columnconfigure(1, weight=1)
         left = ttk.Frame(top)
         left.grid(row=0, column=0, sticky='nw')
@@ -2945,8 +2954,9 @@ LOGGING:
         right.grid(row=0, column=1, sticky='nsew')
 
         inp = ttk.LabelFrame(left, text="Test Profile (voltages in kV; "
-                             "1 V control = 1 kV, Trek max 10 kV)", padding=8)
-        inp.pack(fill='x', padx=6, pady=(4, 6))
+                             "1 V control = 1 kV, Trek max 10 kV)",
+                             padding=(8, 6))
+        inp.pack(fill='x', padx=6, pady=(4, 4))
 
         def entry(parent, key, default, tip=None, width=8):
             e = ttk.Entry(parent, width=width)
@@ -2984,7 +2994,7 @@ LOGGING:
         # moved; each now carries the glyph its snapshot gets on the preview.
         snap_head = ttk.Label(inp, text="Snapshots each landing:")
         snap_head.grid(row=2, column=0, columnspan=8, sticky='w',
-                       padx=(8, 0), pady=(6, 0))
+                       padx=(8, 0), pady=(4, 0))
         add_tooltip(snap_head, "Two snapshots are taken at every voltage "
                                "landing, one near each end of the hold. The "
                                "preview below marks each with the same "
@@ -3014,7 +3024,7 @@ LOGGING:
         self.sldea_summary = tk.Label(inp, text="", fg='#1f3a5f', anchor='w',
                                       justify='left')
         self.sldea_summary.grid(row=4, column=0, columnspan=8, sticky='w',
-                                pady=(6, 0))
+                                pady=(4, 0))
 
         # The legend is drawn ON the canvas with the markers' own drawing
         # code, so it cannot drift from them; the title used to carry it as
@@ -3030,11 +3040,11 @@ LOGGING:
         # is only what it asks for, so it never makes the row taller or
         # moves the run row. #404 puts its camera panel back by building
         # it into `right` and packing it under this frame (fill='x',
-        # padx=6, pady=(0, 6)): pack serves every requested height before
+        # padx=6, pady=(0, 4)): pack serves every requested height before
         # an expanding slave grows, so the preview then takes what is left,
         # never less than its 230 px. _sldea_redraw reads the canvas's
         # real size, so the plot follows either way.
-        prev.pack(fill='both', expand=True, padx=6, pady=(4, 6))
+        prev.pack(fill='both', expand=True, padx=6, pady=(4, 4))
         self.sldea_canvas = tk.Canvas(prev, height=230, bg='white',
                                       highlightthickness=0)
         self.sldea_canvas.pack(fill='both', expand=True)
@@ -3044,8 +3054,9 @@ LOGGING:
                                lambda _ev: self.sldea_canvas.delete('hover'))
         self._sldea_marks = []
 
-        outf = ttk.LabelFrame(left, text="Output & Measurement", padding=8)
-        outf.pack(fill='x', padx=6, pady=(0, 6))
+        outf = ttk.LabelFrame(left, text="Output & Measurement",
+                              padding=(8, 6))
+        outf.pack(fill='x', padx=6, pady=(0, 4))
         ttk.Label(outf, text="Output dir:").grid(row=0, column=0, sticky='e')
         self.sldea_outdir = tk.StringVar(value=os.environ.get(
             'SCPI_SLDEA_DIR', self.SLDEA_SHARE_DIR))
@@ -3192,7 +3203,7 @@ LOGGING:
         # the breakdown + ramp to 0 + abort.
         wdf = ttk.LabelFrame(left, text="⚡ Breakdown watchdog (LIVE runs)",
                              padding=6)
-        wdf.pack(fill='x', padx=6, pady=(0, 6))
+        wdf.pack(fill='x', padx=6, pady=(0, 4))
         self.sldea_wd_on = tk.BooleanVar(value=True)
         add_tooltip(ttk.Checkbutton(wdf, text="Enabled",
                                     variable=self.sldea_wd_on),
@@ -3258,7 +3269,7 @@ LOGGING:
         # next version bump. Never hand-edit those.
         telf = ttk.LabelFrame(left, text="📈 Scope kV/µA log (telemetry.csv)",
                               padding=6)
-        telf.pack(fill='x', padx=6, pady=(0, 6))
+        telf.pack(fill='x', padx=6, pady=(0, 4))
         self.sldea_tel_on = tk.BooleanVar(value=True)
         add_tooltip(ttk.Checkbutton(telf, text="Enabled",
                                     variable=self.sldea_tel_on),
@@ -3293,7 +3304,7 @@ LOGGING:
         # it are untouched; the video is an addition, never a replacement.
         vidf = ttk.LabelFrame(left, text="🎥 Video beside the snapshots "
                                          "(lossless)", padding=6)
-        vidf.pack(fill='x', padx=6, pady=(0, 6))
+        vidf.pack(fill='x', padx=6, pady=(0, 4))
         self.sldea_vid_on = tk.BooleanVar(value=False)
         add_tooltip(ttk.Checkbutton(vidf, text="Record",
                                     variable=self.sldea_vid_on,
@@ -3344,7 +3355,7 @@ LOGGING:
         runarea = ttk.Frame(f)
         runarea.pack(fill='x')
         runf = ttk.Frame(runarea)
-        runf.pack(fill='x', padx=10, pady=6)
+        runf.pack(fill='x', padx=10, pady=(4, 6))
         self._sldea_build_run_row(runf, runarea)
 
         logf = ttk.LabelFrame(f, text="Run log", padding=6)

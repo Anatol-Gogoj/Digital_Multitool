@@ -2,7 +2,7 @@
 
 `../digital-multitool-manual.html` is the illustrated user manual — a single
 self-contained file (all screenshots embedded as base64). It was last built
-from the **live app** at v1.4.4+6c2fc25 on 2026-10-08 (67 pages incl. Part II; captured in a Windows 11 VM at 100 % display, 1920 x 1080, with Tk at 96 dpi; the Edge Review figure is carried over from v1.4.3, because the run it is shot on was not reachable from the build machine): every
+from the **live app** at v1.4.5+417614e on 2026-10-08 (68 pages incl. Part II; captured in a Windows 11 VM at 100 % display, 1920 x 1080, with Tk at 96 dpi and `SCPI_SLDEA_DIR` set to an empty `C:\SLDEA`; the Edge Review figure is carried over from v1.4.3, because the run it is shot on was not reachable from the build machine): every
 screenshot is a real capture and every red callout is anchored to the actual
 widget's on-screen coordinates. When the GUI changes visibly, regenerate
 rather than hand-edit. This line is easy to forget — check it against the

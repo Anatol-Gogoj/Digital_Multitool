@@ -336,6 +336,23 @@ def _capture(app, frame, stream=False, tmp=None, step=3):
     return got, rows
 
 
+def _start_worker(app, p, tmp, **kw):
+    """The REAL worker on a daemon thread (a DRY run 'RUN' on CH1, 2, 3),
+    started after a gc.collect() on THIS thread. An earlier Tk test can
+    leave a garbage cycle that holds Tk objects (an app and its view
+    refer to each other). If the cyclic GC first runs on another thread,
+    it frees them there and Tcl aborts the whole process: "Tcl_AsyncDelete:
+    async handler deleted by the wrong thread" (4 of 4 runs of the
+    stays-red tests followed by the Abort test, 2026-10-07)."""
+    import gc
+    gc.collect()
+    t = _threading.Thread(
+        target=app._sldea_worker, args=(p, tmp, 'RUN', 1, 2, 3, True),
+        kwargs=dict(dict(cam_exp=3, cam_gain=0), **kw), daemon=True)
+    t.start()
+    return t
+
+
 def test_a_still_is_handed_over_as_one_reference_to_the_saved_frame():
     frame = _disc_frame()
     app = _HandOverApp()
@@ -396,10 +413,7 @@ def test_the_run_thread_never_touches_the_view_closed_or_never_opened():
     bomb = _Bomb()
     app._sldea_live_view = bomb
     with _tempfile.TemporaryDirectory() as tmp, _oneshot(_disc_frame()):
-        t = _threading.Thread(
-            target=app._sldea_worker, args=(p, tmp, 'RUN', 1, 2, 3, True),
-            kwargs=dict(cam_exp=3, cam_gain=0), daemon=True)
-        t.start()
+        t = _start_worker(app, p, tmp)
         t.join(60)
         assert not t.is_alive(), ("the worker stalled", app.lines)
     assert bomb.touched == [], bomb.touched
@@ -501,10 +515,7 @@ def test_the_frame_is_byte_identical_after_the_capture_and_baseline_check():
     p = _profile()
     app = _HandOverApp()
     with _tempfile.TemporaryDirectory() as tmp, _oneshot(frame):
-        t = _threading.Thread(
-            target=app._sldea_worker, args=(p, tmp, 'RUN', 1, 2, 3, True),
-            kwargs=dict(cam_exp=3, cam_gain=0), daemon=True)
-        t.start()
+        t = _start_worker(app, p, tmp)
         t.join(60)
         assert not t.is_alive(), ("the worker stalled", app.lines)
     assert not any(ln.startswith('ERROR') for ln in app.lines), app.lines
@@ -1448,11 +1459,7 @@ def test_a_video_run_whose_stream_never_starts_shows_its_stills():
     seen = []
     with _tempfile.TemporaryDirectory() as tmp, \
             _stream_never_starts(tmp, _disc_frame()):
-        t = _threading.Thread(
-            target=app._sldea_worker, args=(p, tmp, 'RUN', 1, 2, 3, True),
-            kwargs=dict(cam_exp=3, cam_gain=0, vid_on=True, vid_fps=5.0),
-            daemon=True)
-        t.start()
+        t = _start_worker(app, p, tmp, vid_on=True, vid_fps=5.0)
         end = _time.monotonic() + 60
         while t.is_alive() and _time.monotonic() < end:
             n = len(app.handed)             # read BEFORE the poll

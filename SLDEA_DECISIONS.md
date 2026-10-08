@@ -1514,7 +1514,7 @@ telemetry, so the rule has not yet met one at its live read rate. Every
 away read, a lone one included, is listed in run.log once the SG is
 zeroed, so the owner can decide later whether a single away read is a
 breakdown. It stays in shadow until the §N1 probe and a bench campaign
-say it should act. A run with the watchdog box unticked counts as
+say it should act. A run whose watchdog was not armed counts as
 evidence only through its would-trips (HV review, decision 10).
 
 **Observation** (replay on the 18 single-layer runs with current copied
@@ -1615,12 +1615,13 @@ the `finally` block, the readers of its telemetry row and run.log lines).
   3.06 s to 5.67 s. With every flush of a stalled share stalling instead,
   the shadow made no difference, because the periodic row pays the same
   stall (the review's 5.15 s with and without it, at 2 Hz).
-- With the watchdog box unticked (telemetry on), the shadow has no 0 kV
+- On a run whose watchdog is not armed (the box unticked with telemetry
+  on, or a scope lost before the arming line), the shadow has no 0 kV
   baseline. It seeds its window from settled landing reads, so a fault
   present from the first landing is learned as normal, and no fixed rule
-  runs beside it on such a run: 120 µA from the ramp on gave "no trip".
-  The class docstring said the fixed rule "still catches" that case; on
-  this path there is none.
+  runs beside it: in the review's run whose watchdog never armed, 120 µA
+  from the ramp on gave "no trip". The class docstring said the fixed
+  rule "still catches" that case; on this path there is none.
 
 *Decision (2026-10-08).*
 
@@ -1638,14 +1639,16 @@ the `finally` block, the readers of its telemetry row and run.log lines).
    long slow-mode flush window can cause, and which the periodic rows
    meet the same way. Taking every row off this thread is the queue
    TelemetryLog's docstring already names as a follow-up.
-10. Evidence from a run with the box unticked counts only through its
-    would-trips. Its "no trip" means nothing, because a fault there from
-    the first landing looks normal to the rule. The docstring says so.
+10. Evidence from a run whose watchdog was not armed (the box unticked,
+    or `Breakdown watchdog (start): NOT armed` in its setup.txt) counts
+    only through its would-trips. Its "no trip" means nothing, because a
+    fault there from the first landing looks normal to the rule. The
+    docstring says so.
 
 **Before it may act.** The §N1 probe's quiet-rig sigma per measurement
 token; a bench campaign of LIVE runs in shadow with no false would-trip and
-every confirmed event caught (a "no trip" counting only from runs with the
-box ticked, decision 10), which would also be the first real
+every confirmed event caught (a "no trip" counting only from runs whose
+watchdog was armed, decision 10), which would also be the first real
 breakdowns it sees at its live read rate; the owner's call on whether a
 self-clearing excursion (one read far off, or a short burst past the
 scope's screen) should stop a run; and a peak token (`#189`) if

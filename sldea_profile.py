@@ -1205,9 +1205,10 @@ class NSigmaWatchdog:
     baseline, settled landing reads seed the window unjudged until it
     holds `w_min` of them; a fault present from the first landing is then
     taken as normal. The fixed rule catches that only on a run where it is
-    armed (its absolute |I| rule, when its baseline read failed). With the
-    watchdog box unticked nothing does, so such a run's "no trip" is no
-    evidence; only its would-trips are (HV review 2026-10-08). (The desk
+    armed (its absolute |I| rule, when its baseline read failed). On a run
+    whose watchdog is not armed (the box unticked, or no scope at its
+    arming line) nothing does, so such a run's "no trip" is no evidence;
+    only its would-trips are (HV review 2026-10-08). (The desk
     prototype of 2026-10-08 judged reads before it had anything to judge
     them by, so without a baseline its window never filled.)"""
 

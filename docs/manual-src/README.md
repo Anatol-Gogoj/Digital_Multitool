@@ -145,6 +145,12 @@ Notes:
   window; a locked screen or RDP-disconnected session gives black images).
   It is DPI-aware and forces the window topmost. On Windows the app runs in
   view/edit mode, so no instrument is ever touched.
+- Set `SCPI_SLDEA_DIR` to an empty local folder (for example `C:\SLDEA`,
+  the Tools chapter's own example) in the shell that runs `capture.py`.
+  Without it the SLDEA tab's Output dir is the lab share's Linux path,
+  which on Windows counts as an unmounted share, so the run folder line
+  under Run name (#402) shows its "share is not mounted" warning in the
+  shot.
 - `annotate.py` **fails (exit 1) when any callout string matches no widget**:
   it lists every miss and deletes `annotated/legends.json`, so a chained
   `build_manual.py` stops instead of assembling the manual from the previous

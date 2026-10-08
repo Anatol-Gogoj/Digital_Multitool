@@ -906,6 +906,10 @@
     "what": "Where the run folder is created; blank name auto-stamps SLDEA_YYYYMMDD_HHMMSS. Browse opens at the folder in the box; New folder… asks for a name, makes that folder inside the one in the box and switches the box to it. Both refuse while a run is going: the run keeps the folder it started in."
    },
    {
+    "label": "Saves to (the line under Run name)",
+    "what": "Shows the folder the run will write to, and warns as you type when ▶ Run will refuse it: a folder that already holds a run (setup.txt or data.csv), a run name that cannot be a folder name (plain ASCII only: u for µ, as in 2.5uL), an Output dir on the lab share while the share is not mounted, or an Output dir that does not answer within 3 s. ▶ Run refuses those before any HV question, with no start anyway, so a used name can no longer overwrite an earlier run. A blank name is refused only on the share, when it is not mounted or does not answer. During a run the line reads Writing to: and the run's own folder."
+   },
+   {
     "label": "V_Out / I_Out scope CH, SG CH",
     "what": "Which scope channels carry the Trek monitor outputs and which SG channel drives the Trek."
    },
@@ -931,7 +935,7 @@
    },
    {
     "label": "⚡ Breakdown watchdog (LIVE runs)",
-    "what": "Watches Trek current during live runs; current above Trip (µA) sustained for Confirm (s) snapshots the breakdown, ramps to 0 and aborts. Transient spikes never trip it. The Energize HV? question says whether it is on, and run.log and setup.txt record it; unticked, only ■ Abort or the end of the run stops a run that breaks down."
+    "what": "Ticked by default. Watches Trek current during live runs: a current that stays Trip (µA) or more away from the baseline it learns at 0 kV, for Confirm (s) of consecutive reads, snapshots the breakdown, ramps to 0 and aborts. Transient spikes never trip it. The Energize HV? question says whether it is on (ON with its Trip and Confirm, or OFF and why), and run.log and setup.txt record it; unticked, only ■ Abort or the end of the run stops a run that breaks down. With it ticked, ▶ Run refuses a Trip or Confirm that is not a positive number. Beside it, every LIVE run with current reads also runs a second rule, the N-sigma rule, in shadow only: it stops nothing, marks in telemetry.csv when it would have tripped, and after the run lists what it saw in run.log and setup.txt (Watchdog shadow lines)."
    },
    {
     "label": "📈 Scope kV/µA log (telemetry.csv)",
@@ -947,7 +951,7 @@
    },
    {
     "label": "Camera for this run (the line under ▶ Run)",
-    "what": "Says which exposure and gain a run started now would use. A run takes them from the Webcam tab's boxes, not from whatever the camera happens to be set to. The line turns amber and starts with ⚠, giving the reason in words, when a value is a built-in default because the Webcam tab has no readable box for it (open the Webcam tab and press Read camera), or when the Webcam tab has locked different values, so its live preview does not show what the run will record (the pre-flight does)."
+    "what": "Says which exposure and gain a run started now would use. A run takes them from the Webcam tab's boxes, not from whatever the camera happens to be set to. The line turns amber and starts with ⚠, giving the reason in words, when a value is a built-in default because the Webcam tab has no readable box for it (open the Webcam tab, open Advanced camera settings and press Read camera), or when the Webcam tab has locked different values, so its live preview does not show what the run will record (the pre-flight does; Auto-set camera or 🔒 Apply & Lock on the Webcam tab makes them agree). setup.txt's camera block records the same summary, then the camera device, pixel format, frame size and every locked control."
    },
    {
     "label": "Auto-open Edge Review",
@@ -955,7 +959,7 @@
    },
    {
     "label": "🔍 Edge Review… / 🎚 Tune params…",
-    "what": "Open the analysis program, or the live slider tuner. Tune params is advanced and confirmation-gated — its Save rewrites the run's setup.txt."
+    "what": "Open the analysis program, or the live slider tuner. Tune params is advanced and confirmation-gated — its Save rewrites the run's setup.txt. These two, 📊 Plot runs… and 🎞 Video review… each start a program of their own: the status bar says starting, then opened once it has run for 2 s. One that fails before then is named on the status bar, with a box giving its exit code, its last lines and its log file (in launch_logs, beside tk_stall.log); during a run the box waits until the run has ended."
    },
    {
     "label": "📊 Plot runs…",
@@ -975,15 +979,15 @@
    },
    {
     "label": "Run log",
-    "what": "Timestamped record of the run: directory path, each landing, watchdog status, warnings."
+    "what": "Timestamped record of the run: directory path, each landing, watchdog status, warnings. The start line names the breakdown watchdog's state. After a LIVE run come any reads the N-sigma shadow judged away (SHADOW away reads) and its verdict (SHADOW N-sigma); the shadow acted on none of them."
    }
   ],
   "workflow": [
-   "1. Enter the staircase: Start/End/Step kV, Ramp and Landing times.",
+   "1. Load a saved setup under Run configuration presets at the top (the tab stays in DRY), or enter the staircase: Start/End/Step kV, Ramp and Landing times.",
    "2. Check the preview and summary line — dots are photos, total time shown.",
-   "3. Set Output dir (New folder… makes a fresh one), the device fields (DEA active area diam, electrode, concentration, film thickness) and the scope/SG channels.",
+   "3. Set Output dir (New folder… makes a fresh one), a new Run name (the Saves to line under it names the folder and warns if ▶ Run will refuse it), the device fields (DEA active area diam, electrode, concentration, film thickness) and the scope/SG channels.",
    "4. Do a dry run first to rehearse timing and camera captures.",
-   "5. Untick DRY RUN; answer the scope-monitor and Energize HV prompts.",
+   "5. Untick DRY RUN; answer the scope-monitor and Energize HV? prompts (Energize HV? should say Breakdown watchdog: ON).",
    "6. In camera pre-flight, center the DEA in the circle, check focus, start (Return starts only a clean pre-flight).",
    "7. Let it finish (or ■ Abort); Edge Review opens on the new run folder."
   ],
@@ -1053,7 +1057,7 @@
    },
    {
     "name": "Energize HV? confirmation",
-    "how_opened": "▶ Run — LIVE HV, final confirmation before driving the Trek"
+    "how_opened": "▶ Run — LIVE HV, final confirmation before driving the Trek; it names the breakdown watchdog's state (ON with its Trip and Confirm, or OFF and why)"
    },
    {
     "name": "SLDEA Edge Review (separate program)",
@@ -1335,7 +1339,7 @@
   "controls": [
    {
     "label": "Camera + Refresh",
-    "what": "Pick the video device number; Refresh rescans after plugging or unplugging a camera."
+    "what": "Pick the video device number; Refresh rescans after plugging or unplugging a camera and reads the exposure and gain back into their boxes. It refuses while a camera adjustment runs (Auto-set camera, Apply & Lock, Stabilize, Auto-WB once, Auto-expose)."
    },
    {
     "label": "Start Preview",
@@ -1355,7 +1359,7 @@
    },
    {
     "label": "🔒 Apply & Lock",
-    "what": "Beside the exposure and gain boxes: writes every panel value to the camera, keeps re-asserting them during all captures, and saves them for the next start. Needed after typing a value by hand."
+    "what": "Beside the exposure and gain boxes: writes every panel value to the camera, keeps re-asserting them during all captures, and saves them for the next start. Needed after typing a value by hand. If no value reaches the camera (it reported no controls, say), it says Nothing locked and keeps the previous lock."
    },
    {
     "label": "Auto-set camera",
@@ -1367,7 +1371,7 @@
    },
    {
     "label": "Read camera (Advanced)",
-    "what": "Refills the fields from the camera's current state."
+    "what": "Refills the fields from the camera's current state. Refused while a camera adjustment runs."
    },
    {
     "label": "Auto-expose (Advanced)",
@@ -1375,11 +1379,11 @@
    },
    {
     "label": "Auto-WB once (Advanced)",
-    "what": "One-shot grey-world colour balance on the scene in view; it fills the fields in, then Apply & Lock."
+    "what": "One-shot grey-world colour balance on the scene in view, not on the locked values; it fills the fields in and puts the lock back on the camera, so nothing changes until Apply & Lock."
    },
    {
     "label": "Stabilize (pin gain 0) (Advanced)",
-    "what": "Pins gain at 0 (defeats the firmware auto-gain) and finds a matching exposure — the only drift-free combo."
+    "what": "Pins gain at 0 (defeats the firmware auto-gain) and finds a matching exposure — the only drift-free combo. It runs Auto-set camera's exposure search on the scene in view, fills the fields in and puts the lock back on the camera; then Apply & Lock."
    },
    {
     "label": "Save to (Browse, New folder…) / Prefix",

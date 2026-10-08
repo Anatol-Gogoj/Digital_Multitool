@@ -232,7 +232,10 @@ S["tab_battery"] = {
 
 S["tab_webcam"] = {
     "callouts": [
-        {"union": ["Camera:", "Refresh"], "extend_right": 40, "badge_at": [215, 204],
+        # No extend_right: the union already spans the camera box between
+        # the two, and the 40 px it had ran the capsule's edge through
+        # "Start Preview" (v1.4.4 shot).
+        {"union": ["Camera:", "Refresh"], "badge_at": [215, 204],
          "label": "Pick the camera; Refresh rescans devices"},
         {"match": "Start Preview", "badge_at": [299, 204], "label": "Live view — the same button stops it"},
         {"match": "Snapshot", "badge_at": [394, 204], "label": "Save one timestamped PNG"},
@@ -243,13 +246,19 @@ S["tab_webcam"] = {
         # callout may name them.
         {"match": "🔒 Apply & Lock", "label": "Locks what the boxes say, for every capture"},
         {"match": "Auto-set camera", "label": "One press: gain 0, exposure for mid-gray, white balance, then locks it all"},
-        {"match": "▸ Advanced camera settings", "label": "Every camera control, and the single steps (Stabilize, Auto-WB once...)"},
+        # badge under the toggle, in the preview's top margin beside badges
+        # 1 to 3: the automatic right-hand badge sat on badge 1's arrow
+        # (v1.4.5 layout check, 2026-10-08).
+        {"match": "▸ Advanced camera settings", "badge_side": "bottom",
+         "label": "Every camera control, and the single steps (Stabilize, Auto-WB once...)"},
     ],
 }
 
 # v1.4.4: the PREVIEW OFF splash (#385) made the tab taller than the capture
-# window, so its capture rows are annotated on the scrolled shot, as the
-# SLDEA tab's lower half is.
+# window, so its capture rows are annotated on the scrolled shot. With
+# Advanced camera settings closed (#400) it still is: the tab body is
+# 1087 px against the 925 px view of the 990 px capture window (measured
+# 2026-10-08, Tk at 96 dpi), and Start timed capture sits below the fold.
 S["tab_webcam_bottom"] = {
     "callouts": [
         {"union": ["Save to:", "New folder…"],
@@ -266,7 +275,8 @@ S["tab_sldea"] = {
         # 1000 px capture window from v1.4.1 (the video row, #359) until
         # the two-column layout, so its lower half had a scrolled shot of
         # its own, tab_sldea_bottom, annotated separately. The tab is now
-        # 847 px at 96 dpi and capture.py takes that second shot only when
+        # 883 px at 96 dpi with #402's folder line (925 px view, measured
+        # 2026-10-08), and capture.py takes that second shot only when
         # the body is taller than the view, so every callout is here, in
         # screen order: the presets across the top, the left column top
         # to bottom, then the run row. Badge numbers follow this order.
@@ -274,6 +284,15 @@ S["tab_sldea"] = {
          "label": "Start here: load a saved setup, or save this tab under a name. Never the run name, and never the LIVE state"},
         {"match": "Test Profile (voltages in kV",
          "label": "The voltage staircase — start/end/step, ramp and landing times (the 0 kV reference photo is always taken)"},
+        # #402 (v1.4.5): the run folder line under Run name. Its text
+        # changes with the boxes ("Saves to: ...", a warning on its second
+        # line, "Writing to: ..." during a run), so the match is its stable
+        # start. On a build PC with no SCPI_SLDEA_DIR the built-in Output
+        # dir is a Linux path under the share, and the line then warns
+        # "The share is not mounted": capture with SCPI_SLDEA_DIR set to
+        # an empty local folder (README.md, the notes on capture.py).
+        {"match": "Saves to:",
+         "label": "Where this run will save; a warning here means ▶ Run will refuse (a used name, an unmounted share)"},
         # `#292`: ONE capsule over the rows that define the device. They
         # were two separate callouts (diam, and concentration numbered
         # last and eleven badges away) for fields the operator fills in as
@@ -291,7 +310,9 @@ S["tab_sldea"] = {
                   "scale — a wrong value corrupts every area), electrode "
                   "material, ink concentration (greyed for non-inks), film "
                   "thickness (mounted and prestretched)"},
-        {"match": "⚡ Breakdown watchdog (LIVE runs)", "label": "Aborts on sustained overcurrent — leave Enabled"},
+        # #406 (v1.4.5): ticked by default, and Energize HV? names its state.
+        {"match": "⚡ Breakdown watchdog (LIVE runs)",
+         "label": "Stops a LIVE run on sustained overcurrent; Energize HV? says whether it is on. Leave Enabled"},
         {"match": "📈 Scope kV/µA log", "label": "Logs kV/µA continuously to telemetry.csv — the current between photos"},
         {"match": "🎥 Video beside the snapshots (lossless)",
          "label": "Optional lossless video beside the snapshots (1–2 fps). "

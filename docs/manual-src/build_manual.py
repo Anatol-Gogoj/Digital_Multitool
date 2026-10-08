@@ -491,6 +491,8 @@ body.append(section("logging", "Continuous Logging",
 body.append(section("battery", "Battery Data", caution_keep=[0, 2, 4]))
 # The Webcam tab outgrew the capture window in v1.4.4 (the PREVIEW OFF
 # splash, #385), so its capture rows are annotated on the scrolled shot.
+# Closing Advanced camera settings (#400) did not bring it back under the
+# window (1087 px against a 925 px view, 2026-10-08), so the shot stays.
 body.append(section("webcam", "Webcam", caution_keep=[1, 2, 4, 6],
                     more_imgs=("tab_webcam_bottom",)))
 # Index 9 is the flat or missing baseline stop (#348, v1.4.3). It was

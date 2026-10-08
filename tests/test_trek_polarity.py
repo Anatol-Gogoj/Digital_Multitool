@@ -7,6 +7,8 @@ both monitors, positive. Until 2026-10-05 a ticked box also framed the
 V_Out window 0..-need and multiplied both readings by -1, which put a
 correctly set run off-screen and logged it negative. These tests pin the
 corrected rule: the box flips the control voltage and nothing else.
+
+Run: .venv/bin/python tests/test_trek_polarity.py
 """
 import os
 import sys
@@ -70,18 +72,21 @@ def _scope_framed_positive(max_kv=10.0, wd_ua=100.0):
     return _QueryScope(ans)
 
 
-def test_a_ticked_box_still_frames_v_out_on_the_positive_side(monkeypatch):
+def test_a_ticked_box_still_frames_v_out_on_the_positive_side():
     import gui
     # a problem would ask Yes/No/Cancel; answer Cancel so a regression
     # fails here instead of opening a dialog
-    monkeypatch.setattr(gui.messagebox, 'askyesnocancel',
-                        lambda *a, **k: None)
-    p = _short_profile(end_kv=10.0, step_kv=5.0)
-    for ticked in (True, False):
-        app = _CheckApp(_scope_framed_positive(), trek_inv=ticked)
-        assert app._sldea_check_monitors(p) is True, (ticked, app.lines)
-        assert 'monitor check: OK' in app.lines, app.lines
-        assert app.scope.writes == [], app.scope.writes
+    real_ask = gui.messagebox.askyesnocancel
+    try:
+        gui.messagebox.askyesnocancel = lambda *a, **k: None
+        p = _short_profile(end_kv=10.0, step_kv=5.0)
+        for ticked in (True, False):
+            app = _CheckApp(_scope_framed_positive(), trek_inv=ticked)
+            assert app._sldea_check_monitors(p) is True, (ticked, app.lines)
+            assert 'monitor check: OK' in app.lines, app.lines
+            assert app.scope.writes == [], app.scope.writes
+    finally:
+        gui.messagebox.askyesnocancel = real_ask
 
 
 def test_readings_are_logged_as_read_when_the_box_is_ticked():
@@ -131,3 +136,36 @@ def test_the_box_negates_the_sg_control_voltage():
         powered = [v for _ch, v in app.sg.offsets if abs(v) > 1e-9]
         assert powered, ("the worker never drove the SG", app.lines)
         assert all(v * sign > 0 for v in powered), (sign, powered)
+
+
+def _run():
+    # Failures are collected, not fatal (`#280`): failing fast reported one
+    # broken test in suites that had five. Tracebacks land after the count
+    # line, in name order, in one bounded block (run_tests.py explains why).
+    # Until #426 this file had no runner at all: run_tests.py executes each
+    # suite as a script, so it exited 0 having run none of these.
+    import traceback
+    fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
+    failed = []
+    for fn in fns:
+        try:
+            fn()
+        except Exception:
+            failed.append((fn.__name__, traceback.format_exc()))
+            print(f"FAIL {fn.__name__}")
+            continue
+        print(f"ok  {fn.__name__}")
+    if not failed:
+        print(f"\n{len(fns)} tests passed")
+        return 0
+    head = f"{len(failed)} of {len(fns)} tests failed"
+    print(f"\n{head}")
+    for name, tb in failed:
+        print(f"===== FAIL {name} =====")
+        print(tb.rstrip('\n'))
+    print(f"===== end {head} =====")
+    return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(_run())

@@ -137,7 +137,9 @@ polarity or the drive: it skips the scope check, the "Energize HV?" dialog and t
 never touches the signal generator. Keep the Trek's HV output off for the whole dry run.
 1. On the "SLDEA Test" tab the checkbox "DRY RUN - HV OFF" is ticked at start and the button reads
    "Run (DRY)". If it says "LIVE - HV WILL BE DRIVEN", tick the checkbox again.
-2. For a quick rehearsal use Start 0, End 1, Step 0.5, Ramp 2, Landing 10 (BENCH_TEST.md section M):
+2. A saved setup is faster: pick it under "Run configuration presets", across the top of the tab,
+   and press "Load" (the tab stays in DRY), then still check every field this step and the next
+   name. For a quick rehearsal use Start 0, End 1, Step 0.5, Ramp 2, Landing 10 (BENCH_TEST.md section M):
    the summary line reads "2 levels 0->1 kV: 2 landings, 6 frames, total 0:00:26". The defaults take
    0:43:22 for 82 frames. Keep "Start (kV)" at 0: the first ramp always starts from 0 kV.
 3. Fill "Output dir", "Run name (blank = auto)", "DEA active area diam (mm)" (16 for the standard
@@ -197,8 +199,8 @@ The app never stops a run because a monitor or the camera failed. Its own warnin
 monitoring says: "Run continues; watch the DEA and abort manually if in doubt."
 - The status next to the buttons reads like `LIVE  t=120/2602s  ~0.50 kV  frames 5/82` (the
   defaults, 120 s in). That kV is commanded, not what the Trek does, and the frame count counts
-  attempts, not saved photos. The "Run log" is at the bottom of the tab (scroll down) and shows 8
-  lines, so a warning scrolls away. Check the first landing at once (section 3, step 4).
+  attempts, not saved photos. The "Run log" is at the bottom of the tab, under the buttons, and
+  shows 8 lines, so a warning scrolls away. Check the first landing at once (section 3, step 4).
 - Also check the picture early. When the "Run log" shows the line "snap s00 0.00 kV [baseline]",
   open frames/SLDEA_s00_00.00kV_baseline.png in the run's folder (the "run dir:" log line names it).
   No disc, or flat dark gray: press "Abort". The pre-flight picture can miss this (section 2): on

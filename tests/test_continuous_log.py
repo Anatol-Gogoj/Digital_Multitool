@@ -445,10 +445,13 @@ def test_live_stats_survive_a_writer_and_a_reader_at_once():
         wrote.append(i)
 
     saved = _sys.getswitchinterval()
-    _sys.setswitchinterval(1e-6)
-    t = threading.Thread(target=writer, daemon=True)
-    t.start()
+    t = None
     try:
+        # inside the try, so a writer that fails to start still gets the
+        # switch interval put back
+        _sys.setswitchinterval(1e-6)
+        t = threading.Thread(target=writer, daemon=True)
+        t.start()
         deadline = time.monotonic() + 0.2
         while time.monotonic() < deadline:
             rows, _ticks, _s = st.snapshot()
@@ -457,7 +460,8 @@ def test_live_stats_survive_a_writer_and_a_reader_at_once():
                     assert r['max'] is not None and r['min'] <= r['max'], r
     finally:
         stop.set()
-        t.join(5)
+        if t is not None and t.is_alive():
+            t.join(5)
         _sys.setswitchinterval(saved)
     assert not errors and wrote, (errors, wrote)
     # nothing the writer did was lost or garbled

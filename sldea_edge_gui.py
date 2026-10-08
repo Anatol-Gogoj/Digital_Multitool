@@ -5000,7 +5000,7 @@ class EdgeReviewApp:
         the worker's steps, run what it asked for, and close the Saving
         box once it has finished, which ends _save_in_background's wait.
         Each call either ends the wait or schedules the next one, so an
-        error in here cannot leave the box up for ever."""
+        error in here cannot leave the box up forever."""
         try:
             while True:
                 item = job.q.get_nowait()
@@ -5033,7 +5033,7 @@ class EdgeReviewApp:
                 pass                        # the window is gone
 
     def _save_dialog(self, total):
-        """The "Saving n/N" box (#396): transient to this window, centred
+        """The "Saving n/N" box (#396): transient to this window, centered
         over it, with a bar and the file being written, and the busy
         cursor. It holds the grab, so nothing else can be pressed while
         Save writes. It has no button and its close box does nothing: a
@@ -5062,7 +5062,7 @@ class EdgeReviewApp:
                 bar.config(value=min(n, total))
                 what.config(text=text)
             show(0, "starting")
-            # centred over the window, kept on the screen (as cal_choice)
+            # centered over the window, kept on the screen (as cal_choice)
             dlg.update_idletasks()
             w_, h_ = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
             try:

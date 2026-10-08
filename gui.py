@@ -5726,8 +5726,8 @@ LOGGING:
             pass                # a progress line is never worth a traceback
 
     def _sldea_job_show(self, text, level):
-        """Put `text` on the job line, coloured by `level` ('busy', 'done'
-        or 'warn': the status line's grey and green, the camera line's
+        """Put `text` on the job line, colored by `level` ('busy', 'done'
+        or 'warn': the status line's gray and green, the camera line's
         amber). The words carry the meaning on their own: a warning starts
         with the warning sign. Packed under the run row the first time."""
         lbl = getattr(self, 'sldea_job_line', None)

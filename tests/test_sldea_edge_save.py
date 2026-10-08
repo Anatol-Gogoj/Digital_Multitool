@@ -514,7 +514,7 @@ def test_a_window_torn_down_mid_save_lets_the_worker_stop_cleanly():
     """The close box is refused during a Save, but a teardown from
     outside is not. Then save() returns at once, the worker finishes
     the file in hand (data.csv), stops at its next call into the gone
-    window instead of waiting for it for ever, and its thread ends."""
+    window instead of waiting for it forever, and its thread ends."""
     import sldea_edge_gui as gui
     root = _root()
     real_mb = gui.messagebox

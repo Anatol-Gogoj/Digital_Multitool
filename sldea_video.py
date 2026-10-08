@@ -1119,8 +1119,8 @@ def _dur(sec):
 def progress_text(rec, now=None):
     """The SLDEA tab's job line for a progress record -> (text, level).
 
-    `level` is 'busy', 'done' or 'warn'. The tab colours the line by it,
-    and the words say the same thing without the colour: a failure or a
+    `level` is 'busy', 'done' or 'warn'. The tab colors the line by it,
+    and the words say the same thing without the color: a failure or a
     job gone quiet starts with the warning sign and names run.log. A busy
     line quotes the time left once the phase has run 5 s, from its own
     rate. Pure."""
@@ -1241,8 +1241,8 @@ def detect_video(rundir, stride=1, limit=None, log=print, plot=True,
     with half a new file over half an old one, and two passes that overlap
     leave whichever finished last, whose stamp says what it measured with.
 
-    `progress(frames analysed, frames to analyse)` is called after every
-    analysed frame (#396); the second number comes from the index, so it
+    `progress(frames analyzed, frames to analyze)` is called after every
+    analyzed frame (#396); the second number comes from the index, so it
     is what the pass expects rather than what the decoder will deliver.
     -> summary dict."""
     import sldea_edge as se

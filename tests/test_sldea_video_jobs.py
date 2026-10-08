@@ -622,7 +622,7 @@ class _Root:
     """Records `after` calls instead of running them."""
 
     def __init__(self):
-        self.jobs, self.cancelled, self.n = [], [], 0
+        self.jobs, self.canceled, self.n = [], [], 0
 
     def after(self, ms, fn=None, *a):
         self.n += 1
@@ -630,11 +630,11 @@ class _Root:
         return self.n
 
     def after_cancel(self, jid):
-        self.cancelled.append(jid)
+        self.canceled.append(jid)
 
     def pending(self):
-        """The (ms, fn) of the newest job not cancelled, or None."""
-        live = [j for j in self.jobs if j[2] not in self.cancelled]
+        """The (ms, fn) of the newest job not canceled, or None."""
+        live = [j for j in self.jobs if j[2] not in self.canceled]
         return live[-1][:2] if live else None
 
 

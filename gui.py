@@ -4363,6 +4363,11 @@ LOGGING:
             if self.sldea_tel_on.get() and self.scope is None:
                 self._sldea_log("telemetry requested but NO SCOPE — no "
                                 "monitor log for this run")
+            # The #219 N-sigma rule runs in shadow on a LIVE run whose
+            # monitor reads run; its setup.txt line, decided here from the
+            # same wd_on and tel_on the worker is handed.
+            shadow_setup = sldea_profile.shadow_record(
+                not dry, bool(wd_on or tel_on))
             # Free the camera: the Webcam preview holds /dev/video0 open and
             # a one-shot grab can't run while it streams (empty frames
             # otherwise).
@@ -4476,7 +4481,8 @@ LOGGING:
                             vid_on=vid_on, vid_fps=vid_fps or 1.0,
                             vid_detect=vid_detect,
                             film_thickness_um=film_thickness_um,
-                            watchdog_setup=wd_setup),
+                            watchdog_setup=wd_setup,
+                            watchdog_shadow=shadow_setup),
                 daemon=True).start()
             self.root.after(100, self._sldea_animate_cursor)  # playhead
             # ...and opens with the run, once the worker is on its way:
@@ -5211,7 +5217,7 @@ LOGGING:
                       concentration_ml=None, cam_expected=False,
                       picture_override='', vid_on=False, vid_fps=1.0,
                       vid_detect=False, film_thickness_um=None,
-                      watchdog_setup=None):
+                      watchdog_setup=None, watchdog_shadow=None):
         """Host-sequenced staircase runner (daemon thread; no Tk calls except
         via _sldea_log/_sldea_set_status/after). Drives the SG DC offset along
         p.kv_at(t), fires webcam+scope snapshots on schedule, writes the run
@@ -5231,7 +5237,14 @@ LOGGING:
 
         `watchdog_setup` is sldea_run's setup.txt line for the watchdog it
         armed or not (sldea_profile.watchdog_record, #406); None writes no
-        line. It only reaches setup.txt: arming still reads wd_on."""
+        line. It only reaches setup.txt: arming still reads wd_on.
+
+        `watchdog_shadow` is sldea_run's setup.txt line for the #219
+        N-sigma rule (sldea_profile.shadow_record). With it, a LIVE run
+        whose monitor reads run feeds the rule those same reads in SHADOW:
+        it acts on nothing, and its outcome and every away read it saw are
+        written after the SG is zeroed. None (a caller that predates it)
+        runs no shadow."""
         import os
         import csv as _csv
         started = datetime.now()
@@ -5242,6 +5255,11 @@ LOGGING:
         vid_stop = None               # words, when its codec check stopped it
         completed = False
         cam_lock_saved = None         # Webcam-tab lock, restored at the end
+        shadow = None                 # #219 N-sigma rule, shadow (below)
+        shadow_rule = None            # ...the same rule, kept after an error
+        shadow_end = None             # its outcome when it could not run
+        shadow_base = (None, None)    # 0 kV baseline (median, sigma) for it
+        shadow_refused = None         # ...or the baseline the bound refused
         rundir = os.path.join(outdir, runname or p.run_dirname(started))
         framedir = os.path.join(rundir, 'frames')
         fh = None
@@ -5263,7 +5281,8 @@ LOGGING:
                     dea_diam_mm=diam_mm, electrode=electrode,
                     concentration_ml=concentration_ml,
                     film_thickness_um=film_thickness_um,
-                    watchdog=watchdog_setup))
+                    watchdog=watchdog_setup,
+                    watchdog_shadow=watchdog_shadow))
                 if trek_sign < 0:
                     sf.write("Trek control polarity: INVERTED (control = "
                              "-kV/gain; monitor readings logged as read)\n")
@@ -5564,18 +5583,27 @@ LOGGING:
                     n = len(base)
                     med = (base[n // 2] if n % 2 else
                            0.5 * (base[n // 2 - 1] + base[n // 2]))
+                    # The reads' spread too, for the #219 shadow: its
+                    # sigma before the run has landing reads of its own.
+                    # (Not `dev`: that is the camera device above, which
+                    # the recorder's restamp lambda reads when it runs.)
+                    spread = sorted(abs(v - med) for v in base)
+                    mad = (spread[n // 2] if n % 2 else
+                           0.5 * (spread[n // 2 - 1] + spread[n // 2]))
                     # Credibility bound (sldea_profile.credible_baseline_ua):
                     # a large 'rest level' at 0 kV is a standing fault
                     # current, and anchoring the deviation trip to it would
                     # normalize the fault. The absolute rule then trips on
                     # it — the correct outcome.
                     if sldea_profile.credible_baseline_ua(med, wd_ua):
+                        shadow_base = (med, 1.4826 * mad)
                         watchdog.baseline_ua = med
                         self._sldea_log(
                             f"watchdog baseline {med:.1f} µA "
                             f"(median of {n} reads at 0 kV); trip "
                             f"|I−baseline| ≥ {wd_ua:g} µA for {wd_s:g}s")
                     else:
+                        shadow_refused = med
                         self._sldea_log(
                             f"⚠ watchdog baseline {med:.1f} µA is not a "
                             f"credible 0 kV rest level — keeping absolute "
@@ -5585,6 +5613,25 @@ LOGGING:
                         f"watchdog baseline unavailable ({len(base)}/8 "
                         f"reads ok) — absolute trip |I| ≥ {wd_ua:g} µA "
                         f"for {wd_s:g}s")
+            # #219: the N-sigma rule in SHADOW on a LIVE run whose monitor
+            # reads run (the watchdog armed, or telemetry on): the same
+            # wd_on and tel_on sldea_run worded its setup.txt line from,
+            # so a run whose line says OFF gets no shadow and no end line.
+            # It is fed only what the monitor tick below already reads and
+            # acts on nothing. Not armed on a refused 0 kV baseline: a
+            # deviation rule anchored to a standing fault current would
+            # take the fault as normal (the reason BreakdownWatchdog
+            # refuses it).
+            if watchdog_shadow is not None and not dry and (wd_on or tel_on):
+                if watchdog is None and tel is None:
+                    shadow_end = "not run: no current reads this run"
+                elif shadow_refused is not None:
+                    shadow_end = (f"not armed: the 0 kV baseline "
+                                  f"{shadow_refused:.1f} uA was refused "
+                                  f"(a standing fault current)")
+                else:
+                    shadow = shadow_rule = sldea_profile.NSigmaWatchdog(
+                        base_loc=shadow_base[0], base_sigma=shadow_base[1])
             self._sldea_voff_logged = False   # V_Out clip: log once per run
             self._sldea_ioff_logged = False   # I_Out clip: log once per run
             snaps = sorted(p.snapshots, key=lambda s: s['t'])
@@ -5738,6 +5785,44 @@ LOGGING:
                                           else (None, None)))
                         self._sldea_stop = True
                         break
+                    # The #219 shadow, on the same read, AFTER the watchdog
+                    # decided: it cannot delay a trip, and it acts on
+                    # nothing. A would-trip is one telemetry event row now
+                    # (no current on it, so no reader counts the read twice)
+                    # and one run.log line after the SG is zeroed. Every
+                    # away read, a lone one included, is only kept in the
+                    # rule's memory here (capped) and written after the SG
+                    # is zeroed: no file or Tk call on this loop for it. Any
+                    # error stops only the shadow, never this loop.
+                    if shadow is not None and not shadow.tripped:
+                        try:
+                            if (shadow.update(el, p.kv_at(el), ua,
+                                              offscreen=ioff)
+                                    and tel is not None):
+                                # Written, not flushed (HV review
+                                # 2026-10-08): this row is the one file
+                                # write the shadow adds to this loop, and
+                                # its own flush on a stalled share delayed
+                                # the next tick's live trip by the stall.
+                                # hold_flush keeps the row in the file's
+                                # buffer; the next flush (the periodic row
+                                # below, or tel.close() after the SG is
+                                # zeroed) writes it out.
+                                held = tel.hold_flush
+                                tel.hold_flush = True
+                                try:
+                                    tel.event(
+                                        el, datetime.now().isoformat(
+                                            timespec='milliseconds'),
+                                        p.kv_at(el), "SHADOW N-sigma "
+                                        + shadow.outcome_text())
+                                finally:
+                                    tel.hold_flush = held
+                        except Exception as e:
+                            shadow_end = (f"stopped by an error at "
+                                          f"{el:.1f} s: "
+                                          f"{type(e).__name__}: {e}")
+                            shadow = None
                     # Periodic telemetry row, off the current already read.
                     # V_Out costs a SECOND locked round-trip, so it is
                     # sub-sampled (>= 1 s) — nominal_kV carries the exact
@@ -5983,6 +6068,35 @@ LOGGING:
                     except Exception:
                         pass
                     tel.close()
+                # The #219 shadow's away reads, after the SG is zeroed: a
+                # count line and one line per listed read, as ONE run.log
+                # entry, so one file write and one Tk hand-off however many
+                # there are (the rule caps the list). None at all on a run
+                # that never left the bar. A record, so it never leaves
+                # this block.
+                if shadow_rule is not None:
+                    try:
+                        away = shadow_rule.away_lines()
+                        if away:
+                            self._sldea_log(
+                                "SHADOW away reads (N-sigma, acts on "
+                                "nothing): " + "\n  ".join(away))
+                    except Exception:
+                        pass
+                # The #219 shadow's outcome, after the SG is zeroed: one
+                # run.log line and one setup.txt line, whatever it saw. A
+                # record like the telemetry, so it never leaves this block.
+                if shadow is not None or shadow_end is not None:
+                    try:
+                        text = (shadow.outcome_text() if shadow is not None
+                                else shadow_end)
+                        self._sldea_log(f"SHADOW N-sigma (acts on "
+                                        f"nothing): {text}")
+                        with open(os.path.join(rundir, 'setup.txt'),
+                                  'a') as sf:
+                            sf.write(f"Watchdog shadow (end): {text}\n")
+                    except Exception:
+                        pass
                 # Video after that, the same kind of record: stop() gives up
                 # after its timeout, and moving the file into the run folder
                 # (gigabytes, usually to the share) plus the optional

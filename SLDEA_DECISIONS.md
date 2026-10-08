@@ -1500,6 +1500,161 @@ flag source-scan test remain.
   as a pass, so that guard has not been running; the new leg tests pin
   `78315cc` instead, which every clone has.
 
+## The N-sigma breakdown rule runs in shadow on every LIVE run, beside the fixed watchdog (2026-10-08)
+
+**TL;DR:** A second breakdown rule now runs on every LIVE run whose
+monitor reads run. It trips, in its own record only, when the current sits
+5 sigma or 20 µA (whichever is larger) from where this run's current has
+been, for 2 reads in a row (`#219`). It acts on nothing: the 100 µA / 3 s
+watchdog still stops runs. Replayed on the 18 single-layer runs with
+current on file, it made no false trip, let the three self-clearing
+transients pass, and caught two of the three breakdowns, one that the
+fixed rule missed and one 44 s sooner. None of those breakdowns has
+telemetry, so the rule has not yet met one at its live read rate. Every
+away read, a lone one included, is listed in run.log once the SG is
+zeroed, so the owner can decide later whether a single away read is a
+breakdown. It stays in shadow until the §N1 probe and a bench campaign
+say it should act. A run whose watchdog was not armed counts as
+evidence only through its would-trips (HV review, decision 10).
+
+**Observation** (replay on the 18 single-layer runs with current copied
+from the lab share, 2026-10-08: data.csv, telemetry.csv, setup.txt and
+run.log only).
+
+- 6 runs have telemetry.csv (about 2 Hz). 12 are snapshot-only, two reads
+  per landing seconds to a minute apart; they were replayed as settled
+  landing reads, which understates what the live rule sees. The two
+  2026-08-05 runs recorded no current. Three more runs in the same share
+  folder are multilayer devices filed there by mistake; they are not
+  evidence here.
+- Labels were set from the samples themselves:
+  - 3 breakdowns, all snapshot-only: `SLDEA_20260723_152205`,
+    `SLDEA_20260723_155425` and `SLDEA_20260723_233451`.
+  - 3 self-clearing transients: `SLDEA_20260729_104531`'s -153 µA
+    snapshot, `P3_7_2.3mL_20260729`'s -64 µA snapshot, and one -24 µA read
+    on a ramp in an operator run.
+  - 1 borderline: `SLDEA_20260806_151857`'s two reads 14.5 µA off its
+    -16 µA level.
+  - 11 healthy.
+- Today's rule missed 152205 and 155425, caught 233451 52 s after its
+  onset, and made no false trip.
+- The N-sigma rule (N 5, floor 20 µA, 2 in a row, window 40) made no false
+  trip and tripped on no transient. It caught 152205 (+7 s) and 233451
+  (+8 s). It missed 155425, whose event is the run's last snapshot, where
+  no two-in-a-row rule can see it. It did not trip on the 08-06 dip.
+- The floor decides, not N. From N 3 to 8 nothing in the sweep changes,
+  because sigma stays at its 0.5 µA floor on MEAN reads. A 10 µA floor
+  false-trips healthy P3_5 (an 11.1 µA wobble), 12.5 µA trips the 08-06
+  dip, 15 to 25 µA does neither, and 30 µA misses 152205.
+- What the single-layer runs cannot show. None of their three
+  breakdowns has telemetry, so the rule has been replayed on a real
+  breakdown only at snapshot spacing, never at 2 Hz. None shows a
+  slow-onset fault, which the rule's window would follow by design (the
+  suite pins it: 20 µA of creep over 400 reads is never away). Both rest
+  on the rule's design and on synthetic reads, not on runs.
+- The desk prototype of the same morning judged reads before it had a
+  location. On a run without a 0 kV baseline its window never filled and it
+  could not trip, so its first real-run sweep was vacuous.
+
+**Decision (owner, 2026-10-08, "shadow mode now"; `#219`).**
+
+1. `sldea_profile.NSigmaWatchdog`, with `NSIGMA_DEFAULTS`: N 5, floor
+   20 µA, 2 reads in a row, window 40 quiet landing reads, bar doubled on
+   ramps and in a landing's first second, off-screen counted as away. 20 µA
+   is the middle of the zero-false range and the after-the-fact detector's
+   own `breakdown_dev_ua`, so the live and post-hoc verdicts draw one line.
+   No single-read spike tier.
+2. It runs in shadow on every LIVE run whose monitor reads run (the
+   watchdog armed, or telemetry on). It reads only what the monitor tick
+   already reads, after the fixed watchdog has decided. No new instrument
+   I/O.
+3. It acts on nothing. A would-trip writes one telemetry.csv event row,
+   with no current on it so no reader counts that read twice. After the SG
+   is zeroed, one run.log line and setup.txt's `Watchdog shadow (end):`
+   line give its outcome. Any exception inside it disables only the
+   shadow.
+4. setup.txt's `Watchdog shadow:` line, under `#406`'s watchdog line, names
+   the rule and its parameters. DRY runs and runs with no current reads say
+   OFF and run no shadow.
+5. It is not armed on a refused 0 kV baseline, by the fixed watchdog's own
+   bound (`credible_baseline_ua`).
+6. The fixed rule stays beside it as the backstop. The N-sigma window
+   follows slow drift, so a fault that grows slowly enough would be taken
+   as normal; the fixed rule's 0 kV baseline does not move. No
+   single-layer run on file shows that case: the backstop rests on the
+   design and on the owner's decision.
+7. Every away read is logged, a lone one included (owner, 2026-10-08),
+   so the owner can judge single-read excursions before any spike rule
+   is decided. The rule keeps each away read in memory: its time, kV and
+   reading, the location it was judged against, the deviation, the bar,
+   whether it fell on a ramp, a settling landing or a landing, and how
+   many in a row. It counts all of them and keeps the first 100
+   (`NSIGMA_AWAY_LOG_MAX`). After the SG is zeroed, run.log gets one
+   entry: a count line, then one line per kept read. A run with no away
+   read gets no entry. Nothing about it is written from the run loop: a
+   file write or a Tk hand-off there per away read could hold up the
+   loop that services ■ Abort and the ramp to zero (`#405`). For the same
+   reason telemetry.csv gets no row per away read; its periodic rows
+   already carry the current at the telemetry rate.
+
+**HV review, same day (2026-10-08).** An adversarial review of the
+shadow's place on the HV path, on the real worker over the scope-lock
+suite's fakes. The rule itself held against every attack (exceptions,
+the `finally` block, the readers of its telemetry row and run.log lines).
+
+*Observation.*
+
+- Nothing pinned that the shadow runs after the fixed watchdog has
+  decided. With the shadow's block moved above the trip branch and a
+  would-trip made to cost 2 s, every suite still passed: the run-level
+  test checked only that the run tripped in the end, not when.
+- The would-trip's telemetry row is the one file write the shadow adds to
+  the HV loop, once per run. Model: 10 µA, then 40 µA (a would-trip under
+  the 100 µA trip), then 160 µA a second later, confirm 3 s. A 3 s stall
+  on that row's own flush moved the 160 µA onset to the SG zero from
+  3.06 s to 5.67 s. With every flush of a stalled share stalling instead,
+  the shadow made no difference, because the periodic row pays the same
+  stall (the review's 5.15 s with and without it, at 2 Hz).
+- On a run whose watchdog is not armed (the box unticked with telemetry
+  on, or a scope lost before the arming line), the shadow has no 0 kV
+  baseline. It seeds its window from settled landing reads, so a fault
+  present from the first landing is learned as normal, and no fixed rule
+  runs beside it: in the review's run whose watchdog never armed, 120 µA
+  from the ramp on gave "no trip". The class docstring said the fixed
+  rule "still catches" that case; on this path there is none.
+
+*Decision (2026-10-08).*
+
+8. A test pins the order in a real worker run: on every read the shadow
+   is fed, the call just before it is the fixed watchdog's decision on
+   that same read, and a would-trip's telemetry row comes after both
+   decisions of its tick. The review's mutant fails it.
+9. The would-trip row is written with the telemetry log's `hold_flush`
+   set, and the hold is put back after it. The row issues no flush of
+   its own; the next flush writes it out (the periodic row in the same
+   tick at 2 Hz, or the log's close after the SG is zeroed), so it is
+   kept. In the model above, the stall on that row's flush now costs
+   nothing: 3.07 s, against 3.06 s with no stall. Not covered: a write
+   that reaches the disk because the file's buffer is full, which only a
+   long slow-mode flush window can cause, and which the periodic rows
+   meet the same way. Taking every row off this thread is the queue
+   TelemetryLog's docstring already names as a follow-up.
+10. Evidence from a run whose watchdog was not armed (the box unticked,
+    or `Breakdown watchdog (start): NOT armed` in its setup.txt) counts
+    only through its would-trips. Its "no trip" means nothing, because a
+    fault there from the first landing looks normal to the rule. The
+    docstring says so.
+
+**Before it may act.** The §N1 probe's quiet-rig sigma per measurement
+token; a bench campaign of LIVE runs in shadow with no false would-trip and
+every confirmed event caught (a "no trip" counting only from runs whose
+watchdog was armed, decision 10), which would also be the first real
+breakdowns it sees at its live read rate; the owner's call on whether a
+self-clearing excursion (one read far off, or a short burst past the
+scope's screen) should stop a run; and a peak token (`#189`) if
+millisecond arcs are to be seen at all. Letting it act changes breakdown
+semantics and gets a dated entry of its own.
+
 ## Calibration questions name their buttons and open over the calibration window (2026-10-05)
 
 **TL;DR:** the questions that follow a hand calibration (mostly met when

@@ -807,12 +807,15 @@ def test_the_sldea_tab_launches_the_review_like_its_neighbours():
             assert os.path.dirname(argv[1]) == os.path.dirname(plot_argv[1])
             assert os.path.exists(argv[1])
             assert argv[2:] == [run], argv
-            # detached as before, no working folder or environment of its
-            # own, and its stdout and stderr in one log file per start
+            # detached as before, no working folder of its own, the app's
+            # environment with PYTHONUNBUFFERED=1, and its stdout and
+            # stderr in one log file per start
             for k in (kw, plot_kw, edge_kw):
-                assert set(k) == {'start_new_session', 'stdout', 'stderr'}, k
+                assert set(k) == {'start_new_session', 'stdout', 'stderr',
+                                  'env'}, k
                 assert k['start_new_session'] is True
                 assert k['stderr'] == subprocess.STDOUT
+                assert k['env'] == dict(os.environ, PYTHONUNBUFFERED='1')
                 assert k['stdout'].closed, "the app kept the log open"
             assert len({id(k['stdout']) for k in (kw, plot_kw, edge_kw)}) == 3
             assert len([n for n in os.listdir(logs) if n.endswith('.log')]) \

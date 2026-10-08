@@ -262,6 +262,43 @@ def sldea_lock_mismatch(lock, cam_exp, cam_gain):
             "on the Webcam tab to make them agree.")
 
 
+# How often a launch error box held back by an SLDEA run looks for the
+# run's end (#429 review).
+SLDEA_LAUNCH_HOLD_MS = 500
+SLDEA_LAUNCH_HELD = "; details when the run ends"
+
+
+def sldea_run_going(app):
+    """True while an SLDEA run is starting (its Start dialogs,
+    _sldea_starting, #393) or going (_sldea_running)."""
+    return bool(getattr(app, '_sldea_running', False)
+                or getattr(app, '_sldea_starting', False))
+
+
+def sldea_box_after_run(app, title, text):
+    """An error box for a launch that failed: now, or, while an SLDEA run
+    is starting or going, once it has ended (#429 review).
+
+    A message box takes a grab (msgbox.tcl) and on Windows is owner-modal,
+    so while one is open ■ Abort, which has no key binding, does not
+    respond. Edge Review..., Tune params and Plot runs... stay enabled
+    during a run, and the worker opens Edge Review itself before its ramp
+    to 0, so a box that pops up 0.2 to 2 s after a launch could stand
+    between the operator and Abort. While the run lasts the caller's status
+    line says what happened, and this looks again every
+    SLDEA_LAUNCH_HOLD_MS with after(). The box comes in a callback of its
+    own, so the run's end path (_sldea_finished) is never held up by it."""
+    def show():
+        try:
+            if sldea_run_going(app):
+                app.root.after(SLDEA_LAUNCH_HOLD_MS, show)
+                return
+        except Exception:
+            return              # the window is gone: nobody left to tell
+        messagebox.showerror(title, text)
+    show()
+
+
 def sldea_launch(app, program, cmd, target, title=None):
     """Start `cmd`, one of the SLDEA tab's programs, as a process of its
     own and say on the status bar whether it opened (#429). -> its Popen,
@@ -273,21 +310,31 @@ def sldea_launch(app, program, cmd, target, title=None):
     went nowhere the operator could see. Now the line says "starting"
     until the program has run for launch_check.CHECK_MS, then "opened" (if
     nothing else has used the status bar meanwhile). A program that
-    exited by then is said on the status bar, and in a box with its exit
-    code, the last lines it printed and its log. The program's output is
-    in that log, a local file (launch_check), never a pipe it could fill.
+    exited with an error by then is said on the status bar, and in a box
+    with its exit code, the last lines it printed and its log; during an
+    SLDEA run the box waits for the run's end (sldea_box_after_run). Exit
+    code 0 by then is a normal close, said as "closed" with no box: none
+    of these programs hands off to a copy already running. The program's
+    output is in that log, a local file (launch_check), never a pipe it
+    could fill.
 
-    Started as before: the same arguments, working folder, environment
-    and start_new_session. The look is after() polls of proc.poll() on
-    the Tk thread, so nothing here waits: this is the app that drives the
-    HV, and the run worker's Tk calls wait on this thread (#397, #405).
-    Module-level, like sldea_video_after_run, so a test's stand-in app
-    can launch."""
+    Started as before: the same arguments, working folder and
+    start_new_session, and the same environment but for
+    PYTHONUNBUFFERED=1 (launch_check). The look is after() polls of
+    proc.poll() on the Tk thread, so nothing here waits: this is the app
+    that drives the HV, and the run worker's Tk calls wait on this thread
+    (#397, #405). Module-level, like sldea_video_after_run, so a test's
+    stand-in app can launch."""
     name = os.path.basename(target)
+    title = title or program
     try:
         run = launch_check.start(cmd, program, popen=subprocess.Popen)
     except Exception as e:
-        messagebox.showerror(title or program, f"Could not launch: {e}")
+        if sldea_run_going(app):
+            app.status_bar.config(
+                text=f"{program} could not be started on {name}"
+                     + SLDEA_LAUNCH_HELD)
+        sldea_box_after_run(app, title, f"Could not launch: {e}")
         return None
     starting = f"{program} starting on {name}…"
     app.status_bar.config(text=starting)
@@ -297,11 +344,16 @@ def sldea_launch(app, program, cmd, target, title=None):
             app.status_bar.config(text=f"{program} opened on {name}")
 
     def down(code):
-        app.status_bar.config(
-            text=f"{program} stopped on {name} before it opened "
-                 f"({launch_check.exit_words(code)})")
-        messagebox.showerror(title or program,
-                             launch_check.report(run, code))
+        if code == 0:
+            if app.status_bar.cget('text') == starting:
+                app.status_bar.config(text=f"{program} closed on {name}")
+            return
+        said = (f"{program} stopped on {name} before it opened "
+                f"({launch_check.exit_words(code)})")
+        if sldea_run_going(app):
+            said += SLDEA_LAUNCH_HELD
+        app.status_bar.config(text=said)
+        sldea_box_after_run(app, title, launch_check.report(run, code))
 
     launch_check.watch(app.root, run.proc, up, down)
     return run.proc

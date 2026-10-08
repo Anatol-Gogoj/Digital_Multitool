@@ -19,10 +19,19 @@ the local log, once, after the process has exited.
 
 Why a file and not a pipe. The program outlives the app, so nothing would
 drain a pipe once the app has gone, and a full pipe stops the program at
-its next print. A file needs no reader. Both streams go to the one file, in
-the order they were written. That also takes the program off the bench
-app's own output: before #429 an open Edge Review held the launcher's tee
-pipe, and with it the launcher script, after the app had closed.
+its next print. A file needs no reader. Both streams go to the one file.
+That also takes the program off the bench app's own output: before #429 an
+open Edge Review held the write end of the launcher's tee pipe, which by
+launch_gui.sh.reference keeps the launcher script waiting after the app
+has closed (read, not measured).
+
+Unbuffered. A Python program writing to a file buffers its stdout and
+writes it at exit, AFTER the traceback on its stderr, so the lines it
+printed last could push the traceback out of the tail: 20 printed lines
+and then a RuntimeError left a 12-line tail of printed lines only (#429
+review, measured 2026-10-08). The program therefore runs with
+PYTHONUNBUFFERED=1, and both streams reach the file in the order they were
+written. That one variable is the only change to its environment.
 
 Where the logs go. LOCAL and per user, never the run folder: the run
 folder is usually on the share, which stalls (#397), and on the analysis
@@ -60,6 +69,9 @@ LINE_CHARS = 200     # a longer output line is cut to this in the box
 KEEP_S = 7 * 24 * 3600   # logs older than this go at the next start
 LOG_SUBDIR = 'launch_logs'
 LOG_SUFFIX = '.log'
+# added to the program's environment when its output goes to a log (see
+# the module docstring: a traceback must not fall out of the tail)
+UNBUFFERED_ENV = {'PYTHONUNBUFFERED': '1'}
 
 # Tests aim this at a folder of their own; None is the per-user default.
 LOG_DIR = None
@@ -148,8 +160,9 @@ def _open_log(program, cmd):
 def start(cmd, program, popen=subprocess.Popen):
     """Start `cmd` as a process of its own (start_new_session, as the
     launchers always have) with its stdout and stderr in a new log file.
-    -> a Launch. Its arguments, working folder and environment are the
-    caller's, unchanged. `popen` is the caller's subprocess.Popen, so a
+    -> a Launch. Its arguments and working folder are the caller's,
+    unchanged, and so is its environment but for PYTHONUNBUFFERED=1 (see
+    the module docstring). `popen` is the caller's subprocess.Popen, so a
     test that stands in for the caller's subprocess module catches this
     start too.
 
@@ -162,7 +175,8 @@ def start(cmd, program, popen=subprocess.Popen):
         return Launch(proc, program, None, why=str(e))
     try:
         proc = popen(cmd, start_new_session=True, stdout=f,
-                     stderr=subprocess.STDOUT)
+                     stderr=subprocess.STDOUT,
+                     env=dict(os.environ, **UNBUFFERED_ENV))
     except BaseException:
         f.close()
         try:

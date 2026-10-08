@@ -6,16 +6,21 @@ programs of their own. Each used to say "<program> opened on <run>" as soon
 as Popen returned, so a program that died at once still read as opened,
 and what it printed went to the bench app's own output. Pinned here:
 
-* a program that exits at once is said on the status bar and in a box,
-  with its exit code, the last lines it printed and the log they are in;
+* a program that exits at once with an error is said on the status bar
+  and in a box, with its exit code, the last lines it printed (its
+  traceback last, however much it printed before it) and the log they are
+  in; during an SLDEA run the box waits for the run's end, so it can never
+  stand between the operator and ■ Abort; exit code 0 is a normal close,
+  said as "closed" with no box;
 * a program that stays up reads "starting" until launch_check.CHECK_MS
   has passed, then "opened", unless something else has used the status
   bar meanwhile;
 * each look is one poll() on the Tk thread, and the launcher returns
   without waiting for its program;
-* a healthy program starts as before: the same arguments, working folder,
-  environment and start_new_session, with its stdout and stderr in a log
-  file of its own, never a pipe;
+* a healthy program starts as before: the same arguments, working folder
+  and start_new_session, and the same environment but for
+  PYTHONUNBUFFERED=1, with its stdout and stderr in a log file of its own,
+  never a pipe;
 * launch_check itself: the tail of a log, the sweep of old logs, a log
   that cannot be made (the program still starts), a Popen that raises,
   and a window that closes during the look.
@@ -54,11 +59,19 @@ DIES = [sys.executable, '-c',
         'sys.exit(3)']
 STAYS = [sys.executable, '-c', 'import time; time.sleep(60)']
 PROBE_ENV = 'LAUNCH_CHECK_PROBE_429'
-# ...and one that says where it runs and what it was given, then stays
+# ...one that says where it runs and what it was given, then stays
 TELLS = [sys.executable, '-c',
          'import json, os, sys, time; '
-         f'print(json.dumps([os.getcwd(), os.environ.get("{PROBE_ENV}")])); '
+         f'print(json.dumps([os.getcwd(), os.environ.get("{PROBE_ENV}"), '
+         'os.environ.get("PYTHONUNBUFFERED")])); '
          'sys.stdout.flush(); time.sleep(60)']
+# ...one that prints more lines than the tail holds, then raises: buffered,
+# its prints reached the file at exit, after the traceback (#429 review)
+CHATTY = [sys.executable, '-c',
+          'import sys\nfor i in range(20): print("progress", i)\n'
+          'raise RuntimeError("the real error")']
+# ...and one that closes normally at once
+CLOSES = [sys.executable, '-c', 'import sys; sys.exit(0)']
 
 # program -> (its script, the title of its boxes)
 PROGRAMS = {
@@ -208,6 +221,7 @@ def _app(root, outdir):
         _sldea_open_tuner = G._sldea_open_tuner
         _sldea_open_plot = G._sldea_open_plot
         _sldea_open_video_review = G._sldea_open_video_review
+        sldea_abort = G.sldea_abort
 
         def __init__(self):
             self.root = _TimedRoot(root)
@@ -216,12 +230,18 @@ def _app(root, outdir):
             self._sldea_edge_procs = []
             self._sldea_video_reviews = {}
             self._sldea_video_run = None
+            self._sldea_running = self._sldea_starting = False
+            self._sldea_stop = False
+            self.logged = []
 
         def _sldea_tuner_confirmed(self):
             return True
 
         def _sldea_job_resume(self):
             pass
+
+        def _sldea_log(self, msg):
+            self.logged.append(msg)
 
         def status(self):
             return self.status_bar.cget('text')
@@ -379,9 +399,10 @@ def test_a_program_that_stays_up_reads_starting_then_opened():
 
 
 def test_a_healthy_program_starts_as_it_did_with_its_output_in_a_log():
-    """The arguments, working folder and environment are the app's, as
-    they were before #429, and start_new_session too. Only its output
-    moves: stdout and stderr together, into a file of its own."""
+    """The arguments and working folder are the app's, as they were before
+    #429, and start_new_session too. Its output moves: stdout and stderr
+    together, into a file of its own, unbuffered. PYTHONUNBUFFERED=1 is
+    the one change to its environment."""
     os.environ[PROBE_ENV] = 'x429'
     try:
         with _Bench(TELLS) as b:
@@ -391,9 +412,11 @@ def test_a_healthy_program_starts_as_it_did_with_its_output_in_a_log():
             script = os.path.join(os.path.dirname(os.path.abspath(
                 b.gui.__file__)), 'sldea_edge_gui.py')
             assert cmd == [sys.executable, script, b.run, '--auto'], cmd
-            assert set(kw) == {'start_new_session', 'stdout', 'stderr'}, kw
+            assert set(kw) == {'start_new_session', 'stdout', 'stderr',
+                               'env'}, kw
             assert kw['start_new_session'] is True
             assert kw['stderr'] == subprocess.STDOUT
+            assert kw['env'] == dict(os.environ, PYTHONUNBUFFERED='1')
             assert not isinstance(kw['stdout'], int), kw['stdout']
             assert kw['stdout'].closed, "the app kept the log open"
             assert app._sldea_edge_procs == b.swap.procs
@@ -405,7 +428,7 @@ def test_a_healthy_program_starts_as_it_did_with_its_output_in_a_log():
             assert lines[0].startswith('# Edge Review, started '), lines
             assert 'sldea_edge_gui.py' in lines[1], lines
             told = json.loads(lines[2])
-            assert told == [os.getcwd(), 'x429'], told
+            assert told == [os.getcwd(), 'x429', '1'], told
     finally:
         os.environ.pop(PROBE_ENV, None)
 
@@ -433,6 +456,112 @@ def test_a_program_that_cannot_start_is_said_as_before():
             app._sldea_video_reviews == {}
         left = os.listdir(b.logs) if os.path.isdir(b.logs) else []
         assert left == [], left
+
+
+def test_the_traceback_is_in_the_tail_after_many_printed_lines():
+    """#429 review: a Python program writing to a file buffered its
+    stdout and wrote it at exit, after the traceback, so 20 printed lines
+    pushed the error out of the 12-line tail. Unbuffered, the error is
+    the tail's last line."""
+    with _Bench(CHATTY) as b:
+        app = _app(b.root, b.run)
+        app._sldea_open_tuner(b.run)
+        assert _until(b.root, lambda: b.boxes.errors,
+                      timeout=_check_ms() / 1000.0 + 5.0), app.status()
+        [(title, text)] = b.boxes.errors
+        assert title == 'Edge tuner', title
+        assert "(exit code 1)" in text, text
+        shown = text.split('The last lines it printed:\n\n', 1)[1]
+        shown = shown.split('\n\nAll of its output:', 1)[0].splitlines()
+        assert shown[-1] == 'RuntimeError: the real error', shown
+        assert 'progress 19' in shown, shown
+
+
+def test_a_program_closed_at_once_reads_closed_with_no_box():
+    """Exit code 0 inside the check is a normal close: none of the four
+    programs hands off to a copy already running. The status line says
+    "closed" and no box opens."""
+    with _Bench(CLOSES) as b:
+        name = os.path.basename(b.run)
+        apps = {}
+        for program in PROGRAMS:
+            apps[program] = app = _app(b.root, b.run)
+            _press(app, program, b.run)
+
+        def all_closed():
+            return all(a.status() == f"{p} closed on {name}"
+                       for p, a in apps.items())
+        assert _until(b.root, all_closed,
+                      timeout=_check_ms() / 1000.0 + 5.0), \
+            {p: a.status() for p, a in apps.items()}
+        for p in b.swap.procs:
+            assert p.poll() == 0, p.poll()
+        _until(b.root, lambda: False, timeout=0.3)
+        assert not (b.boxes.errors or b.boxes.infos), b.boxes.errors
+
+
+def test_during_a_run_the_box_waits_for_the_run_to_end():
+    """#429 review, HV-relevant. A message box takes a grab, and on
+    Windows it is owner-modal, so while one is open ■ Abort (no key
+    binding) does not respond. Edge Review..., Tune params and Plot
+    runs... stay enabled during a run, and the worker opens Edge Review
+    itself before its ramp to 0. While _sldea_running or _sldea_starting
+    is set, a launch that failed is said on the status line only; the box
+    comes once the run has ended, in a callback of its own, never from
+    the run's end path."""
+    import tkinter as tk
+    gui = _gui()
+    # (500 ms without the constant: the review's proof ran this on the
+    # head before the fix, where it must fail on the box, not the name)
+    hold_s = getattr(gui, 'SLDEA_LAUNCH_HOLD_MS', 500) / 1000.0
+    with _Bench(DIES) as b:
+        name = os.path.basename(b.run)
+        app = _app(b.root, b.run)
+        abort = tk.Button(b.root, text='■ Abort', command=app.sldea_abort)
+        app._sldea_running = True
+        app._sldea_open_edge_review(b.run)
+        assert _until(b.root, lambda: 'stopped' in app.status(),
+                      timeout=_check_ms() / 1000.0 + 5.0), app.status()
+        _until(b.root, lambda: False, timeout=3 * hold_s)
+        assert b.boxes.errors == [], (
+            f"a box opened during the run: {b.boxes.errors}")
+        assert app.status() == (
+            f"Edge Review stopped on {name} before it opened (exit code 3)"
+            f"; details when the run ends"), app.status()
+        # ■ Abort still answers while the program has died
+        abort.invoke()
+        assert app._sldea_stop is True and app.logged, app.logged
+        # the run ends: what _sldea_finished does to the flag. The box is
+        # not shown from there...
+        app._sldea_running = False
+        assert b.boxes.errors == []
+        # ...but by the next look, in a callback of its own
+        t = time.monotonic()
+        assert _until(b.root, lambda: b.boxes.errors, timeout=hold_s + 3.0)
+        assert time.monotonic() - t < hold_s + 0.5, time.monotonic() - t
+        [(title, text)] = b.boxes.errors
+        assert title == 'Edge Review' and '(exit code 3)' in text, text
+        assert 'boom from the child' in text, text
+        spans = app.root.spans
+        assert len(spans) > 3 and max(spans) < LOOK_MAX_S, spans
+
+        # a Popen that fails while the Start dialogs are up (_sldea_starting)
+        del b.boxes.errors[:]
+
+        class _Refuse:
+            def Popen(self, cmd, **kw):
+                raise OSError("no fork")
+        b.gui.subprocess = _Refuse()
+        app._sldea_starting = True
+        app._sldea_open_plot(b.run)
+        assert app.status() == (f"Plot window could not be started on "
+                                f"{name}; details when the run ends"), \
+            app.status()
+        _until(b.root, lambda: False, timeout=2 * hold_s)
+        assert b.boxes.errors == []
+        app._sldea_starting = False
+        assert _until(b.root, lambda: b.boxes.errors, timeout=hold_s + 3.0)
+        assert b.boxes.errors == [('SLDEA plot', 'Could not launch: no fork')]
 
 
 def test_a_signal_is_said_as_a_signal():

@@ -405,6 +405,36 @@ def test_auto_set_shows_its_result_even_when_the_preview_was_off():
             WA._reap()
 
 
+def test_stabilize_and_auto_set_are_one_search():
+    """Owner decision 2026-10-08: Stabilize uses Auto-set's own exposure
+    search (webcam.find_exposure, judged on the green channel), so the two
+    cannot pick different exposures. Under the stale balance both land on
+    80; a whole-mean search would stop at 64 there."""
+    with WA._Patched(), _Camera():
+        root, app = _tab()
+        if root is None:
+            return
+        real = webcam.find_exposure
+        found = []
+
+        def spy(spec, base, *a, **kw):
+            found.append(real(spec, base, *a, **kw))
+            return found[-1]
+
+        webcam.find_exposure = spy
+        try:
+            _press(root, app, app.cam_stabilize)
+            stabilized = _box(app, 'exposure_time_absolute')
+            _press(root, app, app.cam_auto_set)
+            assert len(found) == 2 and found[0] == found[1], found
+            assert stabilized == '80', stabilized
+            assert webcam.LOCKED_CONTROLS['exposure_time_absolute'] == 80
+        finally:
+            webcam.find_exposure = real
+            WA._close(root, app)
+            WA._reap()
+
+
 def test_the_single_steps_search_the_scene_not_the_lock():
     """Stabilize and Auto-WB once used to shoot every trial under the lock
     (oneshot_rgb stamped it), so with the stale lock in place Stabilize

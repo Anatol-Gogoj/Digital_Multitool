@@ -1287,7 +1287,9 @@ time, and setup.txt records as much as possible).**
 2. **Every trial picture is shot under its own controls**
    (`oneshot_rgb(..., controls=...)`), and the lock changes only at the
    last step. Stabilize and Auto-WB once use the same two searches
-   (`webcam.find_exposure`, `webcam.balance_gray_world`).
+   (`webcam.find_exposure`, `webcam.balance_gray_world`): one exposure
+   search with one target for Stabilize and Auto-set (owner,
+   2026-10-08), so the two can never pick different exposures.
 3. **The exposure search judges the green channel**, which red and blue
    balance do not touch. The exposure it finds holds once the white is
    balanced, when the three means are equal: in the model, exposure 80 with

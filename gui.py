@@ -8983,7 +8983,9 @@ LOGGING:
                 pass
             self.cam = None
         # the trials are shot under the panel's values, not the lock, so
-        # the search sees the scene (#400)
+        # the search sees the scene (#400). It is Auto-set's own search,
+        # judged on the green channel (owner decision 2026-10-08: one
+        # search, so the two can never pick different exposures).
         base = self._cam_base_controls()
         self._cam_status("stabilizing (pinning gain)…", 'busy')
 

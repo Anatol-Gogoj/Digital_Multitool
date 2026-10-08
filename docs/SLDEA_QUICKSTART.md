@@ -140,9 +140,12 @@ never touches the signal generator. Keep the Trek's HV output off for the whole 
 2. For a quick rehearsal use Start 0, End 1, Step 0.5, Ramp 2, Landing 10 (BENCH_TEST.md section M):
    the summary line reads "2 levels 0->1 kV: 2 landings, 6 frames, total 0:00:26". The defaults take
    0:43:22 for 82 frames. Keep "Start (kV)" at 0: the first ramp always starts from 0 kV.
-3. Fill "Output dir", "Run name (blank = auto)", "DEA active area diam (mm)" (16 for the standard
-   disc; text that is not a number silently becomes 16), "Electrode" and "Concentration (mL)" (CNT
-   inks only). Start the run name with DRY, so you can tell the folder from a live run later. This
+3. Fill "Output dir" ("New folder..." beside "Browse" makes a fresh folder inside it, for example
+   one per session; set it before you press Run, since both buttons refuse during a run), "Run
+   name (blank = auto)", "DEA active area diam (mm)" (16 for the standard disc; text that is not a
+   number silently becomes 16), "Electrode", "Concentration (mL)" (CNT inks only) and "Film
+   thickness (um)": the film measured mounted and prestretched, in micrometers (the plot's field
+   axis divides the voltage by it). Start the run name with DRY, so you can tell the folder from a live run later. This
    is advice on this page, not a repo rule. The automatic folder name does not say DRY.
 4. Press "Run (DRY)", answer the dialogs (section 5) and judge the pre-flight picture (section 2).
 5. At "complete", open the run folder and frames/SLDEA_s00_00.00kV_baseline.png: disc visible and
@@ -182,8 +185,10 @@ monitor setup" (Yes) and the pre-flight picture (Enter presses "Looks good - sta
    then the staircase summary and "Proceed?". Yes means carry on. Nothing is sent to the signal
    generator until the last dialog is answered. Then the program sets the channel to DC at 0 V,
    output ON, and ramps up. The dialog shows no polarity, watchdog or folder, so check them first.
-5. "No electrode specified", "No concentration specified" (CNT inks only): "Start the run without
-   it?" Yes records nothing. Answer No, fill the field, press Run again.
+5. "No electrode specified", "No concentration specified" (CNT inks only), "No film thickness
+   specified": "Start the run without it?" Yes records nothing. Answer No, fill the field, press
+   Run again. "Film thickness looks unusual" means a value outside 5 to 2000 um, such as one typed
+   in mm: answer No and fix it.
 6. The camera pre-flight. With no frame it is a question, "Camera pre-flight": "No camera frame
    available", "Continue anyway?". Yes starts a run with no images and no areas: answer No and fix
    the camera. Otherwise it is the picture window, "Camera pre-flight - SLDEA run". "Looks good -
@@ -203,8 +208,9 @@ monitoring says: "Run continues; watch the DEA and abort manually if in doubt."
   open frames/SLDEA_s00_00.00kV_baseline.png in the run's folder (the "run dir:" log line names it).
   No disc, or flat dark gray: press "Abort". The pre-flight picture can miss this (section 2): on
   2026-10-01 the run went 209 s, to 3 kV, on such frames before the abort.
-- Leave the Webcam tab alone: preview, "Apply & Lock" and sweeps make photos fail with "NO FRAME
-  (camera busy? close the Webcam preview)". Nothing blocks you.
+- Leave the Webcam tab alone. While a run is going it cannot open the camera or change its
+  exposure, and its preview comes back by itself once the run lets go of the camera, unless you
+  pressed "Stop Preview".
 - **Press "Abort" if** you are in doubt, and in particular if the first landing is not what the lab
   expects, the baseline photo shows no disc, "CURRENT MONITORING LOST" appears, "NO FRAME" repeats,
   or anything on the rig or device looks wrong (box item 6). Do not close the window to stop a run
@@ -229,6 +235,8 @@ monitoring says: "Run continues; watch the DEA and abort manually if in doubt."
    touch. Follow the lab's answers (box items 4 and 5).
 4. Keep the run folder whole and out of the code repository. Edge Review opens itself only after
    "complete" (not "aborted" or "BREAKDOWN-ABORT"); else press "Edge Review..." (SLDEA Test tab).
+5. After a video run the recording is moved into the run folder in the background: the line under
+   the Run row says "ready in the run folder" when it is there.
 
 ## 8. Edge Review
 
@@ -301,11 +309,14 @@ data.csv until you press Save. Closing the window first loses your accept and re
 ## 9. Plot
 
 1. On the "SLDEA Test" tab press "Plot runs...". The window "SLDEA plot - cross-run figures" opens.
-   In "Runs (pick several)" pick runs marked "processed" ("Add folder..." adds a parent folder).
+   In "Runs (pick several)" pick runs with a check mark (processed); drag down the list or
+   Shift-click to pick several ("Add folder..." adds a parent folder).
    Keep the mode "area". The window reads each run once: after a review, close and reopen it. It
    remembers the last user's settings (shared account): check every box under "Draw".
 2. Read the figure before you trust it:
-   - The x axis is commanded kV. A flat stretch at A/A0 = 1.0 at low voltage is "resting": the
+   - The x axis is commanded kV unless you pick "field V/um": kV divided by each run's film
+     thickness, for comparing films of different thickness (a run with no thickness is left off
+     that axis by name, with how to add it). A flat stretch at A/A0 = 1.0 at low voltage is "resting": the
      machine asserted the baseline area where it saw no change. It is not a measurement. A straight
      line across several kV with no markers is a gap you did not review.
    - Open markers are hand-traced (outer toe), filled ones are machine (half-height). The shaded
@@ -315,6 +326,9 @@ data.csv until you press Save. Closing the window first loses your accept and re
      comes from the two edge conventions, not from the device: traced areas are divided by the
      machine's baseline area (SLDEA_MEASUREMENT.md: 5.2 to 5.7 percent). Do not report it as strain.
    - Read the "warning:" lines under the figure ("no reviewed areas" means a run was skipped).
+   - In a small or short window the caption may end with "[Caption cut in this window: N more rows
+     in the export.]". A large window shows the whole caption, and the exported figure, and a Save
+     from the toolbar, always carry it.
 3. Scroll the left column down to "Export (figure + tidy CSV)". Choose format, dpi (300 default),
    folder ("plots" beside the runs by default) and name. The lines under "Name" list the three
    files: figure, CSV and figspec (a redraw file). A file with the same name is overwritten without
@@ -335,6 +349,7 @@ On 2026-10-01 (run SLDEA_20261001_151016) three things went wrong in a row, mark
 | Dialog "HV NOT ZEROED" | The app could not zero the signal generator | Do what the dialog says, at once |
 | "Rounds disagree" after hand circles (failure 3: 23 percent apart, accepted) | Hand fits on a disc you cannot see | "Refit all", or "Cancel" and ask |
 | 25 of 26 frames "no-change/no-edge", queue empty | Blank pictures, not a stiff device | Do not Save. Look at the first and last frame |
+| A window froze (not responding) | Something held its main thread | Send tk_stall.log and tk_stall.log.1 from ~/.cache/scpi_control (or $SCPI_CACHE) with your report |
 
 ## 11. Words used in this tool
 

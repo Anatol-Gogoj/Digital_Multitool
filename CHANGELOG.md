@@ -21,9 +21,10 @@ Webcam tab starts its own preview.
   video run's stream, or a stills-only run's newest still labelled with its
   step and age, with the pre-flight reticle, the commanded kV and the exposure
   verdict of the frame on screen. It only reads frames the run already holds,
-  so it never opens the camera and never waits on the HV loop. A dead stream
-  stays red through ■ Abort, and a video run whose stream gives nothing in its
-  first 5 s shows its stills under a red VIDEO STREAM DOWN banner (#413).
+  so it never opens the camera; the run waits at most one view tick, about
+  10 ms, for it. A dead stream stays red through ■ Abort, and a video run
+  whose stream gives nothing in its first 5 s shows its stills under a red
+  VIDEO STREAM DOWN banner (#413).
 - **Film thickness** (#416). A "Film thickness (µm)" box under Concentration,
   measured with the film mounted and prestretched, checked at ▶ Run like the
   concentration and written to setup.txt as `Film thickness: 50 um`. A blank

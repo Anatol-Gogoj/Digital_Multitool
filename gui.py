@@ -269,28 +269,63 @@ SLDEA_LAUNCH_HELD = "; details when the run ends"
 
 
 def sldea_run_going(app):
-    """True while an SLDEA run is starting (its Start dialogs,
-    _sldea_starting, #393) or going (_sldea_running)."""
+    """True while an SLDEA run is going (_sldea_running), or in the last
+    stretch of its start (_sldea_starting, #393).
+
+    sldea_run sets _sldea_starting just before the camera pre-flight:
+    after the profile checks, the start gate, the video pre-flight, the
+    monitor and video-copy questions, "Energize HV?" and the electrode,
+    concentration and film-thickness questions. It clears it at the run
+    flag, or on any exit before that. So a held launch box (see
+    sldea_box_after_run) can still open on top of those earlier dialogs;
+    there the HV is off and ■ Abort is disabled."""
     return bool(getattr(app, '_sldea_running', False)
                 or getattr(app, '_sldea_starting', False))
 
 
+def sldea_alarm(app, show, title, text):
+    """Show one of an SLDEA run's own alarm boxes, `show(title, text)`
+    (messagebox.showerror for HV NOT ZEROED, showwarning for why a run
+    stopped), and count it open on `app` (_sldea_alarms_open) while it is
+    up, so a held launch box waits for it too (#429 re-check).
+
+    The worker queues these boxes before its finally queues
+    _sldea_finished, so _sldea_finished runs inside the open alarm and
+    clears the run flag; without the count, a held launch box would open
+    on top of the HV alarm within SLDEA_LAUNCH_HOLD_MS. The box is always
+    shown; the count is best effort and never raises past it."""
+    try:
+        app._sldea_alarms_open = getattr(app, '_sldea_alarms_open', 0) + 1
+    except Exception:
+        pass
+    try:
+        return show(title, text)
+    finally:
+        try:
+            app._sldea_alarms_open = max(
+                0, getattr(app, '_sldea_alarms_open', 1) - 1)
+        except Exception:
+            pass
+
+
 def sldea_box_after_run(app, title, text):
     """An error box for a launch that failed: now, or, while an SLDEA run
-    is starting or going, once it has ended (#429 review).
+    is starting or going (sldea_run_going) or one of its alarm boxes is
+    open (sldea_alarm), once that has ended (#429 review).
 
     A message box takes a grab (msgbox.tcl) and on Windows is owner-modal,
     so while one is open ■ Abort, which has no key binding, does not
     respond. Edge Review..., Tune params and Plot runs... stay enabled
     during a run, and the worker opens Edge Review itself before its ramp
     to 0, so a box that pops up 0.2 to 2 s after a launch could stand
-    between the operator and Abort. While the run lasts the caller's status
-    line says what happened, and this looks again every
-    SLDEA_LAUNCH_HOLD_MS with after(). The box comes in a callback of its
-    own, so the run's end path (_sldea_finished) is never held up by it."""
+    between the operator and Abort. Nor may it cover an HV NOT ZEROED
+    alarm. Meanwhile the caller's status line says what happened, and this
+    looks again every SLDEA_LAUNCH_HOLD_MS with after(). The box comes in
+    a callback of its own, so the run's end path (_sldea_finished) is
+    never held up by it."""
     def show():
         try:
-            if sldea_run_going(app):
+            if sldea_run_going(app) or getattr(app, '_sldea_alarms_open', 0):
                 app.root.after(SLDEA_LAUNCH_HOLD_MS, show)
                 return
         except Exception:
@@ -5855,8 +5890,10 @@ LOGGING:
                 # queued on the Tk thread; this thread goes straight on to
                 # the finally block and zeroes the SG without waiting.
                 self._sldea_set_status(stop_box['status'], fg='#c62828')
+                # (sldea_alarm: a held launch box waits for it, #429)
                 try:
-                    self.root.after(0, lambda: messagebox.showwarning(
+                    self.root.after(0, lambda: sldea_alarm(
+                        self, messagebox.showwarning,
                         stop_box['title'], stop_box['box']))
                 except Exception:
                     pass
@@ -5909,7 +5946,9 @@ LOGGING:
                         self._sldea_set_status(
                             "⚡ NOT ZEROED — turn off SG/Trek manually!",
                             fg='#c62828')
-                        self.root.after(0, lambda: messagebox.showerror(
+                        # sldea_alarm: no held launch box may cover it (#429)
+                        self.root.after(0, lambda: sldea_alarm(
+                            self, messagebox.showerror,
                             "HV NOT ZEROED",
                             "The run ended but the signal generator could not "
                             "be zeroed (link error).\n\nThe Trek may still be "

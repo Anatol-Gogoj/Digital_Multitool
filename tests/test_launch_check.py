@@ -10,7 +10,9 @@ and what it printed went to the bench app's own output. Pinned here:
   and in a box, with its exit code, the last lines it printed (its
   traceback last, however much it printed before it) and the log they are
   in; during an SLDEA run the box waits for the run's end, so it can never
-  stand between the operator and ■ Abort; exit code 0 is a normal close,
+  stand between the operator and ■ Abort, and while one of the run's own
+  alarms (HV NOT ZEROED) is open it waits for that too; exit code 0 is a
+  normal close,
   said as "closed" with no box;
 * a program that stays up reads "starting" until launch_check.CHECK_MS
   has passed, then "opened", unless something else has used the status
@@ -545,7 +547,10 @@ def test_during_a_run_the_box_waits_for_the_run_to_end():
         spans = app.root.spans
         assert len(spans) > 3 and max(spans) < LOOK_MAX_S, spans
 
-        # a Popen that fails while the Start dialogs are up (_sldea_starting)
+        # a Popen that fails during the camera pre-flight: sldea_run sets
+        # _sldea_starting just before it, after its earlier start dialogs
+        # (where the HV is off and Abort is disabled, and a held box may
+        # still open on top of them)
         del b.boxes.errors[:]
 
         class _Refuse:
@@ -562,6 +567,65 @@ def test_during_a_run_the_box_waits_for_the_run_to_end():
         app._sldea_starting = False
         assert _until(b.root, lambda: b.boxes.errors, timeout=hold_s + 3.0)
         assert b.boxes.errors == [('SLDEA plot', 'Could not launch: no fork')]
+
+
+def test_a_held_box_waits_for_an_open_hv_alarm():
+    """#429 re-check. When zeroing fails, the worker queues HV NOT ZEROED
+    before _sldea_finished, so _sldea_finished runs inside the open alarm
+    and clears the run flag. A held launch box must keep waiting until the
+    alarm is closed: nothing covers an HV alarm. Then it shows."""
+    import inspect
+    gui = _gui()
+    hold_s = getattr(gui, 'SLDEA_LAUNCH_HOLD_MS', 500) / 1000.0
+    with _Bench(DIES) as b:
+        app = _app(b.root, b.run)
+        app._sldea_running = True
+        app._sldea_open_edge_review(b.run)
+        assert _until(b.root, lambda: 'stopped' in app.status(),
+                      timeout=_check_ms() / 1000.0 + 5.0), app.status()
+        seen = {}
+
+        def alarm(title, text):
+            # what Tk does under a modal box: it keeps serving events, and
+            # the run's end (_sldea_finished) runs in here
+            app._sldea_running = False
+            seen['open'] = getattr(app, '_sldea_alarms_open', None)
+            _until(b.root, lambda: False, timeout=3 * hold_s)
+            seen['boxes'] = list(b.boxes.errors)
+            return 'dismissed'
+        assert gui.sldea_alarm(app, alarm, "HV NOT ZEROED",
+                               "turn it off") == 'dismissed'
+        assert seen['open'] == 1, seen
+        assert seen['boxes'] == [], \
+            f"a launch box opened over the HV alarm: {seen['boxes']}"
+        assert app._sldea_alarms_open == 0
+        # the alarm is closed: the box comes at the next look
+        assert _until(b.root, lambda: b.boxes.errors, timeout=hold_s + 3.0)
+        [(title, text)] = b.boxes.errors
+        assert title == 'Edge Review' and '(exit code 3)' in text, text
+
+    # an alarm box that raises still closes its count
+    class _App:
+        pass
+    a = _App()
+
+    def broken(title, text):
+        raise RuntimeError("Tk is gone")
+    try:
+        gui.sldea_alarm(a, broken, 't', 'x')
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("the alarm's error was swallowed")
+    assert a._sldea_alarms_open == 0
+    # both of the run's own boxes go through it. A source check, because
+    # driving the worker to a failed zeroing needs the whole run harness.
+    src = ' '.join(inspect.getsource(
+        gui.InstrumentControlGUI._sldea_worker).split())
+    assert 'sldea_alarm( self, messagebox.showerror, "HV NOT ZEROED",' \
+        in src, "HV NOT ZEROED is not shown through sldea_alarm"
+    assert 'sldea_alarm( self, messagebox.showwarning, stop_box' in src
+    assert 'lambda: messagebox.show' not in src
 
 
 def test_a_signal_is_said_as_a_signal():

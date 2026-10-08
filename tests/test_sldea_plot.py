@@ -4434,6 +4434,67 @@ def test_the_width_cache_tells_one_font_from_another():
     assert sp._caption_width(text, 7) == sans
 
 
+def test_lone_run_groups_are_listed_with_semicolons():
+    """`#391`: seeded names carry ', ' themselves, so 'A, 2.5 mL, B has one
+    run' read as three groups. The lone-run sentence joins them with
+    '; ', as the head line already does."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        runs = _labeled(d, [('A', P3, '2.5 mL', 0), ('B', P3, '1.5 mL', 3),
+                            ('C', N3900, _ABSENT, 6)])
+        fig = _drawn(runs, _seeded_opts(runs, 'concentration'))
+        flat = ' '.join(_caption(fig).split())
+        assert (f"{P3}, 1.5 mL; {P3}, 2.5 mL; {N3900} has one run: an "
+                f"aggregate needs ≥ 2 runs to earn a band.") in flat, flat
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_dollar_sign_in_a_name_is_drawn_as_typed():
+    """`#391`: matplotlib reads a '$...$' pair as mathtext, per caption row,
+    so a run or group name holding one came out as math on one row and
+    literally when the wrap split it, and two names with one '$' each
+    could pair up. The names are escaped where they are drawn: no legend
+    entry and no caption row is math at any width, every one reads as
+    typed once matplotlib unescapes it, and the tidy CSV keeps the
+    names as recorded."""
+    if not _has_mpl():
+        return
+    from matplotlib import cbook
+    from matplotlib.legend import Legend
+    d, out = _mktmp(), _mktmp()
+    try:
+        runs = _labeled(d, [('cost$1$_run', P3, '2.5 mL', 0),
+                            ('B$', P3, '2.5 mL', 3), ('C$x', CB, _ABSENT, 6)])
+        groups = [['P3 at $2.5$ mL', [runs[0]['dir'], runs[1]['dir']]],
+                  ['$CB', [runs[2]['dir']]]]
+        opts = sp.make_opts(aggregate=True, groups=groups)[0]
+        fig = _drawn(runs, opts)
+        for width in (12.6, 6.0, 4.0):
+            fig.set_size_inches(width, 5.4)
+            assert sp.relayout(fig)
+            legends = [c for ax in fig.axes for c in ax.get_children()
+                       if isinstance(c, Legend)] + list(fig.legends)
+            texts = [t.get_text() for leg in legends
+                     for t in leg.get_texts()] + _caption_rows(fig)
+            for t in texts:
+                assert not cbook.is_math_text(t), (width, t)
+            shown = ' '.join(t.replace(r'\$', '$') for t in texts)
+            for name in ('cost$1$_run', 'B$', 'C$x', 'P3 at $2.5$ mL',
+                         '$CB'):
+                assert name in shown, (width, name)
+        _img, tidy = sp.export(runs, opts, out, 'dollar')
+        with open(tidy, newline='', encoding='utf-8') as f:
+            got = {(r['run'], r['group']) for r in csv.DictReader(f)}
+        assert ('cost$1$_run', 'P3 at $2.5$ mL') in got, got
+        assert ('C$x', '$CB') in got, got
+    finally:
+        for p in (d, out):
+            shutil.rmtree(p, ignore_errors=True)
+
+
 # --------------------------------------------------------------------------
 # the export format and the dpi (`#314`) -- the first options that describe
 # the FILE rather than the drawing

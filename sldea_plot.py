@@ -707,12 +707,27 @@ def coarse_cadence(run, opts):
     return secs is not None and secs > CADENCE_COARSE_S
 
 
+def _shown(name):
+    """An operator's run or group name as figure text: every '$' escaped
+    (`#391`), so the name is drawn as typed.
+
+    matplotlib reads text with an even number of unescaped '$' as
+    mathtext, and decides that per caption ROW. So a '$...$' pair in a
+    name came out as math when a row held it whole and literally when the
+    wrap split it, and two names with one '$' each could pair up on one
+    row. Escaped, no row of a name is ever math, and matplotlib draws
+    '\\$' as '$'. A name with no '$' is returned as it is, so its figure
+    does not move. Only what is drawn is escaped: the tidy CSV, the
+    figspec and the console keep the name as recorded."""
+    return name.replace('$', r'\$')
+
+
 def _cadence_note(run):
     """'<run> every 6.1 s (snapshot spacing)' -- deliberately compact: it
     goes on ONE caption line, and the caption has a figure's width, not a
     console's. The console/window warning wraps this in the full
     sentence."""
-    return (f"{run['name']} every {run['cadence_s']:.1f} s "
+    return (f"{_shown(run['name'])} every {run['cadence_s']:.1f} s "
             f"({run.get('cadence_src', '?')})")
 
 
@@ -766,7 +781,7 @@ def _estimator_caption(runs):
     (kept on --allow-old-estimator), or '' when there are none. A figure
     that mixes the two estimators has to say so ON the figure: the PNG
     travels without the command line that made it."""
-    names = [r['name'] for r in runs if r.get('old_estimator_kept')]
+    names = [_shown(r['name']) for r in runs if r.get('old_estimator_kept')]
     if not names:
         return ''
     return (f"\nOLD area method (ellipse, before 2026-10-02; kept on "
@@ -2591,15 +2606,19 @@ def _group_caption(drawn, opts, hidden, materials=False, fits=None):
     heads = []
     for name, runs, ag, _cap, _color, style in drawn:
         n = len(runs)
-        heads.append(f"{name} ({group_style_name(style)}, {n} run"
+        heads.append(f"{_shown(name)} ({group_style_name(style)}, {n} run"
                      f"{'' if n == 1 else 's'}"
                      f"{'' if n >= 2 else ' — NO BAND'})")
     head = ("AGGREGATE BY GROUP (squares): " + '; '.join(heads)
             + f". Bands are SEM (σ/√n), NOT the ±{TRACED_BAND_PCT:g}–"
               f"{MACHINE_BAND_PCT:g}% instrument budget.")
-    lone = [name for name, runs, _a, _c, _col, _s in drawn if len(runs) < 2]
+    lone = [_shown(name) for name, runs, _a, _c, _col, _s in drawn
+            if len(runs) < 2]
     if lone:
-        head += (f" {', '.join(lone)} has one run: an aggregate needs ≥ 2 "
+        # joined with '; ' (`#391`): a seeded name carries ', ' itself
+        # ('Carbon Solutions P3-SWNT, 2.5 mL'), so ', ' made the list read
+        # as more groups than it named
+        head += (f" {'; '.join(lone)} has one run: an aggregate needs ≥ 2 "
                  f"runs to earn a band.")
     styles = ''
     if materials:
@@ -2620,7 +2639,7 @@ def _group_caption(drawn, opts, hidden, materials=False, fits=None):
         full = aggregate_full_n(ag)
         thin = len(aggregate_thin_levels(ag))
         capped = capped or cap is not None
-        bits.append(f"{name}: n = {full} over {len(ag)} levels"
+        bits.append(f"{_shown(name)}: n = {full} over {len(ag)} levels"
                     + (f", {thin} short or interpolated"
                        if thin else ", all measured")
                     + (f", capped at {cap:g} kV" if cap is not None
@@ -2653,7 +2672,7 @@ def _group_members_caption(drawn, limit=CAPTION_LINE_MAX, fits=None):
     always ends by pointing at the CSV. It is the one grouped line still
     allowed to stop short, and only past MEMBERS_MAX_ROWS rows; then it
     says so and where the rest is, so nothing is dropped silently."""
-    bits = [f"{name} = " + ', '.join(r['name'] for r in runs)
+    bits = [f"{_shown(name)} = " + ', '.join(_shown(r['name']) for r in runs)
             for name, runs, _ag, _cap, _col, _st in drawn]
     line = 'Members: ' + '; '.join(bits) + '.'
     if fits is not None:
@@ -2667,9 +2686,11 @@ def _group_members_caption(drawn, limit=CAPTION_LINE_MAX, fits=None):
             # `fits` only steers each probe's wrap, and the row count stops
             # at the limit, so every probe answers as the word-by-word wrap
             # does and the search lands where it always landed (`#391`).
+            # A '\' is never left at the cut: it would be half of an
+            # escaped '$' (_shown) and draw as a stray backslash.
 
             def cut(k):
-                return line[:k].rstrip(' ,;') + tail
+                return line[:k].rstrip(' ,;\\') + tail
 
             def ok(k):
                 return len(_wrap(cut(k), fits, limit=MEMBERS_MAX_ROWS)) \
@@ -3152,7 +3173,8 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                 warn(f"{run['name']}: confirmed breakdown row(s) "
                      f"{unanchored} have no reviewed area -- drawn as "
                      f"dashed verticals at their kV (see current mode)")
-        run_handles.append(Line2D([], [], color=color, label=run['name']))
+        run_handles.append(Line2D([], [], color=color,
+                                  label=_shown(run['name'])))
 
     agg_caption = ''
     # did the aggregate actually PRINT a count on the legend axis? Only
@@ -3245,8 +3267,9 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
             drawn_groups.append((name, subset, ag, cap_kv, color, ls))
             n = len(subset)
             if grouped:
-                label = (f"{name} — mean of {n} runs (±SEM)" if band
-                         else f"{name} — mean of 1 run (no band)")
+                label = (f"{_shown(name)} — mean of {n} runs (±SEM)"
+                         if band else
+                         f"{_shown(name)} — mean of 1 run (no band)")
             else:
                 label = (f"aggregate mean of {n} runs (±SEM)" if band
                          else 'aggregate mean (1 run — no band)')
@@ -3285,7 +3308,8 @@ def draw_area(fig, axl, axr, runs, opts, warn=lambda m: None):
                          in drawn_groups for r in subset if multi_leg(r)})
         if updown and opts.get('split_legs', True):
             agg_caption += ("\nUp/down runs contribute their FIRST RISING "
-                            "leg to the mean: " + ', '.join(updown) + ".")
+                            "leg to the mean: "
+                            + ', '.join(map(_shown, updown)) + ".")
             warn(f"aggregate: {', '.join(updown)} also ran DOWN in "
                  f"voltage -- only the first rising leg joins the mean, "
                  f"since averaging a device's rising and falling visits "
@@ -3599,7 +3623,8 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
                             markerfacecolor='white', markeredgewidth=1.2,
                             zorder=5)
                     had_adv = True
-        run_handles.append(Line2D([], [], color=color, label=run['name']))
+        run_handles.append(Line2D([], [], color=color,
+                                  label=_shown(run['name'])))
 
     ylabel = ('|kV × (µA − run median)|  (mW)' if power
               else 'Measured current (µA)')
@@ -3634,7 +3659,8 @@ def draw_signal(fig, ax, runs, opts, warn=lambda m: None):
               "product was ~100% instrument zero × kV on the P3 era "
               "(−16 µA idle)."
               + (f"  RAW product (no median): "
-                 f"{', '.join(raw_power)}." if raw_power else "")
+                 f"{', '.join(map(_shown, raw_power))}." if raw_power
+                 else "")
               if power else
               "Currents carry each era's instrument offset "
               "(07-29 ≈ −16 µA idle).")

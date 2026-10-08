@@ -182,9 +182,11 @@ monitor setup" (Yes) and the pre-flight picture (Enter presses "Looks good - sta
    section O says take the fix). No keeps what was flagged ("this silently ruined five runs on
    2026-07-25", manual). No problem: no dialog, only the log line "monitor check: OK".
 4. "Energize HV?": "LIVE run - this drives the Trek up to" your top kV "via SG CH" and the channel,
-   then the staircase summary and "Proceed?". Yes means carry on. Nothing is sent to the signal
-   generator until the last dialog is answered. Then the program sets the channel to DC at 0 V,
-   output ON, and ramps up. The dialog shows no polarity, watchdog or folder, so check them first.
+   then the staircase summary, the breakdown watchdog's state ("Breakdown watchdog: ON..." with
+   its trip and confirm time, or "Breakdown watchdog: OFF. Nothing stops this run on a
+   breakdown..." if the box was unticked), and "Proceed?". Yes means carry on. Nothing is sent to the signal generator until the
+   last dialog is answered. Then the program sets the channel to DC at 0 V, output ON, and ramps
+   up. The dialog shows no polarity or folder, so check them first.
 5. "No electrode specified", "No concentration specified" (CNT inks only), "No film thickness
    specified": "Start the run without it?" Yes records nothing. Answer No, fill the field, press
    Run again. "Film thickness looks unusual" means a value outside 5 to 2000 um, such as one typed

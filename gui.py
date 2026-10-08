@@ -3125,12 +3125,22 @@ LOGGING:
         wdf = ttk.LabelFrame(f, text="⚡ Breakdown watchdog (LIVE runs)",
                              padding=8)
         wdf.pack(fill='x', padx=10, pady=(0, 8))
+        # Ticked by default (owner decision 2026-10-08, #406): the 100 uA /
+        # 3 s rule misses small breakdowns (#219), but it is the only
+        # thing that stops a LIVE run on a breakdown, and replayed on the
+        # single-layer runs on file it stops none that was not breaking
+        # down (healthy runs stayed within 15 uA of their baseline). A
+        # preset saved unticked still loads unticked, so "Energize HV?",
+        # run.log and setup.txt name the state either way
+        # (sldea_profile.watchdog_record).
         self.sldea_wd_on = tk.BooleanVar(value=True)
         add_tooltip(ttk.Checkbutton(wdf, text="Enabled",
                                     variable=self.sldea_wd_on),
                     "Watch the Trek current during a live run; a CONFIRMED "
                     "breakdown captures a frame, ramps to 0 kV and aborts. "
-                    "Ignored on dry runs.").pack(side=tk.LEFT)
+                    "Unticked, only ■ Abort or the end of the run stops a "
+                    "run that breaks down; Energize HV? says which. Ignored "
+                    "on dry runs.").pack(side=tk.LEFT)
         ttk.Label(wdf, text="Trip (µA):").pack(side=tk.LEFT, padx=(14, 2))
         wd_ua = ttk.Entry(wdf, width=7)
         wd_ua.insert(0, '100')
@@ -4123,13 +4133,59 @@ LOGGING:
             if not go:
                 return
             # Video (2026-09-23) is settled next, still before any HV
-            # question (the start gate above asks nothing):
+            # question (the start gate above asks only whether to run
+            # beside a stepped sweep, which writes to no instrument):
             # an operator who asked for a recording must not learn it is
             # impossible after agreeing to energize the Trek.
             vid_on, vid_fps = self._sldea_video_preflight(p)
             if vid_on is None:
                 return
             vid_detect = bool(vid_on and self.sldea_vid_detect.get())
+            # Breakdown watchdog (live only), read ONCE, here, so "Energize
+            # HV?" below names exactly the watchdog the worker is handed
+            # (#406). Only claim it is armed when it actually will be: the
+            # worker needs a scope to read the current (audit 2026-07-25).
+            wd_ticked = bool(self.sldea_wd_on.get())
+            wd_on = bool(wd_ticked and not dry and self.scope is not None)
+            # Trip and Confirm. Ticked on a LIVE run, they are the rule
+            # "Energize HV?" and the records quote as ON, so anything but a
+            # finite number above zero is refused here, before any HV
+            # question (HV review 2026-10-08, #406; the start gate and the
+            # video pre-flight above may already have asked theirs, which
+            # write to no instrument). Junk used to fall back
+            # to 100 uA / 3 s unsaid; a nan or inf trip (or confirm) was
+            # armed and could never fire; a zero or negative trip fires on
+            # every read. A DRY or unticked run arms nothing from them and
+            # keeps the old fallback.
+            if wd_ticked and not dry:
+                for key, box, default in (('wd_ua', 'Trip (µA)', '100'),
+                                          ('wd_s', 'Confirm (s)', '3')):
+                    try:
+                        text = str(self.sldea_vars[key].get()).strip()
+                    except KeyError:
+                        continue          # no such box: the default below
+                    try:
+                        sldea_profile.parse_watchdog_value(text)
+                    except ValueError:
+                        self._sldea_log(f"run refused — breakdown watchdog "
+                                        f"{box} is '{text}', not a "
+                                        f"positive number")
+                        messagebox.showerror(
+                            "SLDEA",
+                            f"Breakdown watchdog {box} must be a positive "
+                            f"number — '{text}' is not one.\n\nThe watchdog "
+                            f"is ticked for this LIVE run, and Energize HV? "
+                            f"and the run's records would quote this box as "
+                            f"its rule. Fix the box (the default is "
+                            f"{default}), then press ▶ Run again.")
+                        return
+            try:
+                wd_ua = float(self.sldea_vars['wd_ua'].get())
+                wd_s = float(self.sldea_vars['wd_s'].get())
+            except (KeyError, ValueError):
+                wd_ua, wd_s = 100.0, 3.0
+            wd_setup, wd_log, wd_dialog = sldea_profile.watchdog_record(
+                wd_ticked, wd_on, dry, wd_ua, wd_s)
             if not dry:
                 if not INSTRUMENTS_SUPPORTED:
                     messagebox.showinfo("Linux only", NOT_LINUX_NOTE)
@@ -4170,7 +4226,8 @@ LOGGING:
                         "Energize HV?",
                         f"LIVE run — this drives the Trek up to "
                         f"{max(p.levels):g} kV via SG CH{sgch}"
-                        f".\n\n{p.summary()}\n\nProceed?", default='no'):
+                        f".\n\n{p.summary()}\n\n{wd_dialog}\n\nProceed?",
+                        default='no'):
                     return
             vch = int(self.sldea_vars['vch'].get())
             ich = int(self.sldea_vars['ich'].get())
@@ -4288,19 +4345,11 @@ LOGGING:
                 return
             autoproc = self.sldea_autoproc.get()
             trek_sign = -1.0 if self.sldea_trek_inv.get() else 1.0
-            # Breakdown watchdog (live only). Only claim it is armed when it
-            # actually will be: the worker needs a scope to read the current
-            # (audit 2026-07-25 — the old banner printed either way).
-            wd_on = (self.sldea_wd_on.get() and not dry
-                     and self.scope is not None)
-            if self.sldea_wd_on.get() and not dry and self.scope is None:
+            # Breakdown watchdog: wd_on, wd_ua and wd_s were read above,
+            # before "Energize HV?" (#406).
+            if wd_ticked and not dry and self.scope is None:
                 self._sldea_log("⚠ watchdog requested but NO SCOPE — running "
                                 "without breakdown protection")
-            try:
-                wd_ua = float(self.sldea_vars['wd_ua'].get())
-                wd_s = float(self.sldea_vars['wd_s'].get())
-            except (KeyError, ValueError):
-                wd_ua, wd_s = 100.0, 3.0
             # Telemetry needs the scope, not HV: a dry run logs its monitor
             # readings too, which is how the rig gets checked before the
             # Trek is energized. clamp_telemetry_hz absorbs an empty or
@@ -4353,6 +4402,36 @@ LOGGING:
                                            final=True)
             if not go:
                 return
+            # The watchdog decision once more, here, with the expression
+            # it was first read with (HV review 2026-10-08, #406). "Energize
+            # HV?", the start line and setup.txt are worded from the
+            # reading taken before the questions, and a scope Reconnect
+            # whose done callback ran inside one of them changes it: the
+            # scope back means a ticked run would start unarmed beside a
+            # connected scope, the scope gone means records that say ON
+            # for a run that cannot arm. Nothing from here to the worker
+            # yields to Tk, so a run whose state still matches starts with
+            # exactly what it was asked about; one whose state changed is
+            # refused before any HV, like the start gate above.
+            wd_ticked_now = bool(self.sldea_wd_on.get())
+            wd_now = bool(wd_ticked_now and not dry
+                          and self.scope is not None)
+            if wd_now != wd_on:
+                was = sldea_profile.watchdog_state(wd_ticked, wd_on, dry)
+                now = sldea_profile.watchdog_state(wd_ticked_now, wd_now,
+                                                   dry)
+                change = f"{was} → {now}"
+                self._sldea_log(f"run refused — the breakdown watchdog's "
+                                f"state changed since Energize HV? "
+                                f"({change}); nothing was sent to the SG")
+                messagebox.showerror(
+                    "SLDEA — run blocked",
+                    f"The breakdown watchdog's state changed since "
+                    f"Energize HV? ({change}). A scope Reconnect that "
+                    f"finished while a question was open does this.\n\n"
+                    f"Nothing was sent to the signal generator. Press ▶ Run "
+                    f"again to be asked with the state as it is now.")
+                return
             self._sldea_stop = False
             self._sldea_bd_tripped = False
             self._sldea_running = True
@@ -4370,8 +4449,7 @@ LOGGING:
             self._sldea_elapsed = 0.0
             self._sldea_log(
                 f"{'DRY-RUN' if dry else 'LIVE HV'} start — {p.summary()}"
-                + (f"  [watchdog: dev ≥{wd_ua:g} µA for {wd_s:g}s, "
-                   f"baseline learned at 0 kV]" if wd_on else "")
+                + f"  [{wd_log}]"
                 + (f"  [telemetry: {tel_hz:g} Hz → "
                    f"{sldea_profile.TELEMETRY_FILENAME}]" if tel_on else "")
                 + (f"  [video: {vid_fps:g} fps → "
@@ -4397,7 +4475,8 @@ LOGGING:
                             picture_override=picture_override,
                             vid_on=vid_on, vid_fps=vid_fps or 1.0,
                             vid_detect=vid_detect,
-                            film_thickness_um=film_thickness_um),
+                            film_thickness_um=film_thickness_um,
+                            watchdog_setup=wd_setup),
                 daemon=True).start()
             self.root.after(100, self._sldea_animate_cursor)  # playhead
             # ...and opens with the run, once the worker is on its way:
@@ -5131,7 +5210,8 @@ LOGGING:
                       tel_hz=sldea_profile.TELEMETRY_MAX_HZ, electrode='',
                       concentration_ml=None, cam_expected=False,
                       picture_override='', vid_on=False, vid_fps=1.0,
-                      vid_detect=False, film_thickness_um=None):
+                      vid_detect=False, film_thickness_um=None,
+                      watchdog_setup=None):
         """Host-sequenced staircase runner (daemon thread; no Tk calls except
         via _sldea_log/_sldea_set_status/after). Drives the SG DC offset along
         p.kv_at(t), fires webcam+scope snapshots on schedule, writes the run
@@ -5147,7 +5227,11 @@ LOGGING:
 
         `film_thickness_um` is the film thickness box as sldea_run checked
         it (`#398`): the number, '' when the operator declined, None with
-        no box. It only reaches setup.txt (sldea_profile.setup_text)."""
+        no box. It only reaches setup.txt (sldea_profile.setup_text).
+
+        `watchdog_setup` is sldea_run's setup.txt line for the watchdog it
+        armed or not (sldea_profile.watchdog_record, #406); None writes no
+        line. It only reaches setup.txt: arming still reads wd_on."""
         import os
         import csv as _csv
         started = datetime.now()
@@ -5178,7 +5262,8 @@ LOGGING:
                     f"exposure {cam_exp}, gain {cam_gain}, WB off (manual)",
                     dea_diam_mm=diam_mm, electrode=electrode,
                     concentration_ml=concentration_ml,
-                    film_thickness_um=film_thickness_um))
+                    film_thickness_um=film_thickness_um,
+                    watchdog=watchdog_setup))
                 if trek_sign < 0:
                     sf.write("Trek control polarity: INVERTED (control = "
                              "-kV/gain; monitor readings logged as read)\n")
@@ -5433,6 +5518,26 @@ LOGGING:
 
             watchdog = (sldea_profile.BreakdownWatchdog(wd_ua, wd_s)
                         if (wd_on and not dry and self.scope) else None)
+            # Asked to arm, and could not: the scope went (a LIVE Reconnect
+            # confirmed in the run's first seconds, #339) after "Energize
+            # HV?", run.log's start line and setup.txt all said ON. The run
+            # goes on unwatched (owner decision 2026-10-08, HV review of
+            # #406), and the records say so, the way the telemetry branch
+            # above does for its own file. ASCII in setup.txt, which is
+            # written in the locale encoding.
+            if wd_on and not dry and watchdog is None:
+                self._sldea_log(
+                    "⚠⚠ BREAKDOWN WATCHDOG NOT ARMED — the scope was gone "
+                    "when the run reached the arming line (a Reconnect?). "
+                    "Nothing stops this run on a breakdown; only ■ Abort or "
+                    "the end of the run does. Energize HV? and the start "
+                    "line said ON.")
+                try:
+                    with open(os.path.join(rundir, 'setup.txt'), 'a') as sf:
+                        sf.write("Breakdown watchdog (start): NOT armed (no "
+                                 "scope)\n")
+                except OSError:
+                    pass
             if watchdog is not None and not self._sldea_stop:
                 # Learn the I_Out rest level at 0 kV (SG is at 0 V here) so
                 # the trip is |I − baseline|, not |I|: the whole 07-29

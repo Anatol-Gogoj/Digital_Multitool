@@ -712,43 +712,88 @@ def run_name_problem(run_name):
 
 def holds_run(folder):
     """The RUN_FILES already in `folder`, in that order: empty when no run
-    is there, the folder itself missing included. Two stats; a stat that
-    fails reads as absent."""
+    is there, the folder itself missing included. Two stats. None when a
+    stat failed for any other reason than the file or a folder above it
+    being absent (a permission, an I/O error, a stale handle on the share):
+    a run there cannot be ruled out then (#402 review). os.path.exists,
+    used here before, reads every failure as absent."""
     import os
-    return [n for n in RUN_FILES if os.path.exists(os.path.join(folder, n))]
+    found = []
+    for name in RUN_FILES:
+        try:
+            os.stat(os.path.join(folder, name))
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except (OSError, ValueError):
+            return None
+        found.append(name)
+    return found
 
 
-def holds_run_within(folder, timeout_s=RUN_FOLDER_CHECK_S):
-    """holds_run(folder), waited for at most `timeout_s` -> its list, or
-    None when the stats have not returned by then (a share that hangs).
+# What a check of the run folder can find besides holds_run's list (#402
+# review): the folder is on the lab share while nothing is mounted at its
+# mount point, so it would be on this PC's own disk; or a stat failed in a
+# way that does not mean "absent". Either refuses the run.
+FOLDER_NOT_MOUNTED = 'share not mounted'
+FOLDER_NOT_CHECKED = 'could not be checked'
+
+
+def run_folder_look(outdir, run_name, mount=None):
+    """The check behind the line and the refusal, run on a thread: what the
+    run folder holds -> holds_run's list, FOLDER_NOT_MOUNTED, or
+    FOLDER_NOT_CHECKED.
+
+    `mount` is the lab share's mount point (output_folder.share_mount).
+    A folder under it while nothing is mounted there is refused, as New
+    folder... refuses such a parent (#394): unmounted, a stat there finds
+    nothing at once, and the run would write to this PC's own disk or fail
+    after "Energize HV?". A folder off the share costs no stat for this.
+    A blank name's folder is new by its time stamp, so it is only checked
+    for the mount, and off the share it costs nothing at all."""
+    import output_folder
+    folder = run_folder(outdir, run_name)
+    if output_folder.share_unmounted(folder, mount):
+        return FOLDER_NOT_MOUNTED
+    if not (run_name or '').strip():
+        return []
+    found = holds_run(folder)
+    return FOLDER_NOT_CHECKED if found is None else found
+
+
+def run_folder_look_within(outdir, run_name, mount=None,
+                           timeout_s=RUN_FOLDER_CHECK_S):
+    """run_folder_look, waited for at most `timeout_s` -> what it found, or
+    None when its stats have not returned by then (a share that hangs).
     They run on a daemon thread left to finish on its own, which holds the
-    folder's name and a list and nothing of the caller's."""
+    two boxes' text and a list and nothing of the caller's."""
     import threading
     out = []
-    worker = threading.Thread(target=lambda: out.append(holds_run(folder)),
-                              name='sldea-run-folder-check', daemon=True)
+    worker = threading.Thread(
+        target=lambda: out.append(run_folder_look(outdir, run_name, mount)),
+        name='sldea-run-folder-check', daemon=True)
     worker.start()
     worker.join(timeout_s)
     return out[0] if out else None
 
 
-def run_folder_refusal(outdir, run_name, timeout_s=None):
+def run_folder_refusal(outdir, run_name, timeout_s=None, mount=None):
     """Why Run must not start into this run's folder, as the message to
     show, or None when it may.
 
     Refused: a typed name that cannot be a folder name, a folder that
-    already holds a run, and a folder whose check has not answered within
-    `timeout_s`, because a run already there cannot be ruled out and
-    writing over the only copy of a run cannot be undone. There is no
-    "start anyway", for the folder that does not answer either (owner
-    decision 2026-10-08). A blank name is never refused: its folder is
-    named from the start time. `timeout_s` None means RUN_FOLDER_CHECK_S,
-    read at the call."""
+    already holds a run, a folder whose check failed or has not answered
+    within `timeout_s`, because a run already there cannot be ruled out and
+    writing over the only copy of a run cannot be undone, and a folder on
+    the lab share while the share is not mounted at `mount` (#402 review).
+    There is no "start anyway", for the folder that does not answer either
+    (owner decision 2026-10-08). A blank name's folder is named from the
+    start time, so it is refused only for the share: not mounted, or, under
+    the mount point, not answering. `timeout_s` None means
+    RUN_FOLDER_CHECK_S, read at the call."""
+    import output_folder
     if timeout_s is None:
         timeout_s = RUN_FOLDER_CHECK_S
     name = (run_name or '').strip()
-    if not name:
-        return None
     problem = run_name_problem(name)
     if problem:
         return (f"The run name '{name}' cannot name the run's folder.\n\n"
@@ -756,12 +801,27 @@ def run_folder_refusal(outdir, run_name, timeout_s=None):
                 f"run names its folder from its start time "
                 f"({AUTO_RUN_DIRNAME}).")
     folder = run_folder(outdir, name)
-    found = holds_run_within(folder, timeout_s)
+    if not name and not output_folder.on_share(folder, mount):
+        return None
+    found = run_folder_look_within(outdir, name, mount, timeout_s)
     if found is None:
+        what = ("a run already there cannot be ruled out" if name else
+                "whether the share is mounted cannot be told")
         return (f"Could not check the run folder\n{folder}\n\nThe Output dir "
-                f"did not answer within {timeout_s:g} s, so a run already "
-                f"there cannot be ruled out. If it is on the share, check "
-                f"that the share is mounted, then press ▶ Run again.")
+                f"did not answer within {timeout_s:g} s, so {what}. If it is "
+                f"on the share, check that the share is mounted, then press "
+                f"▶ Run again.")
+    if found == FOLDER_NOT_MOUNTED:
+        return (f"The share is not mounted at {mount}, so the run folder\n"
+                f"{folder}\nwould be on this PC's own disk instead of on the "
+                f"share.\n\nCheck that the share is mounted, then press ▶ Run "
+                f"again.")
+    if found == FOLDER_NOT_CHECKED:
+        return (f"Could not check the run folder\n{folder}\n\nLooking for "
+                f"{' and '.join(RUN_FILES)} there failed for another reason "
+                f"than the files being absent (a permission, or the share), "
+                f"so a run already there cannot be ruled out. Check that the "
+                f"Output dir can be read, then press ▶ Run again.")
     if found:
         return (f"The run folder\n{folder}\nalready holds a run: "
                 f"{' and '.join(found)}. A run started there would write "
@@ -813,7 +873,8 @@ def fit_end(text, fits=None):
     return '…'
 
 
-def run_folder_line(outdir, run_name, found=None, slow=False, fits=None):
+def run_folder_line(outdir, run_name, found=None, slow=False, fits=None,
+                    mount=None):
     """The SLDEA tab's line under Run name -> (text, warn, full).
 
     `text` is at most two lines, each fitting the line's width (`fits`,
@@ -822,13 +883,15 @@ def run_folder_line(outdir, run_name, found=None, slow=False, fits=None):
     warning or nothing. The label keeps two lines of height whatever this
     says, so the rows below never move (#402 review).
 
-    `found` is what the last check of this folder saw (holds_run's list),
-    None while that is not known. `slow` says the check out now has not
-    answered for a while. `full`, for the tooltip, is the whole path, and
-    below it the whole reason for a warning. `warn` asks the caller for its
-    warning colour; the words say the same, so colour is never the only
-    cue. A relative Output dir is shown from the working folder, where the
-    run would really write; that costs no file system call."""
+    `found` is what the last check of this folder saw (run_folder_look's
+    answer), None while that is not known. `slow` says the check out now
+    for this folder has not answered for a while. `mount`, the share's
+    mount point, is only named in the tooltip. `full`, for the tooltip, is
+    the whole path, and below it the whole reason for a warning. `warn`
+    asks the caller for its warning colour; the words say the same, so
+    colour is never the only cue. A relative Output dir is shown from the
+    working folder, where the run would really write; that costs no file
+    system call."""
     import os
     import output_folder
     fits = fits or _fits_chars
@@ -850,6 +913,17 @@ def run_folder_line(outdir, run_name, found=None, slow=False, fits=None):
             if not fits(warning):
                 warning = "⚠ Not a folder name: ▶ Run will refuse it."
         detail = problem
+    elif found == FOLDER_NOT_MOUNTED:
+        warning = "⚠ The share is not mounted: ▶ Run will refuse."
+        where = f" at {mount}" if mount else ""
+        detail = (f"The share is not mounted{where}, so this folder would "
+                  f"be on this PC's own disk instead of on the share.")
+    elif found == FOLDER_NOT_CHECKED:
+        warning = "⚠ Could not check this folder: ▶ Run will refuse."
+        detail = (f"Looking for {' and '.join(RUN_FILES)} here failed for "
+                  f"another reason than the files being absent (a "
+                  f"permission, or the share), so a run already here cannot "
+                  f"be ruled out.")
     elif found:
         warning = "⚠ Already holds a run: ▶ Run will refuse this name."
         detail = (f"It already holds {' and '.join(found)}. A run started "

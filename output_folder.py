@@ -96,6 +96,24 @@ def _is_under(path, top):
     return path == top or path.startswith(top.rstrip(os.sep) + os.sep)
 
 
+def on_share(where, mount):
+    """Is `where` the share's mount point `mount` (share_mount) or a folder
+    under it? Compared as text, so it never touches the share; False with
+    no `mount`."""
+    return bool(mount) and _is_under(where, mount)
+
+
+def share_unmounted(where, mount):
+    """Is `where` under the share's mount point `mount` while nothing is
+    mounted there? Then the mount point is a plain folder on this PC's own
+    disk, and so is anything under it. New folder... refuses such a
+    parent, and the SLDEA tab's Run refuses such a run folder (#402). A
+    path off the share costs no file system call; one under it costs
+    os.path.ismount's stats of the mount point, which can block while a
+    mounted share hangs."""
+    return on_share(where, mount) and not os.path.ismount(mount)
+
+
 def parent_problem(where, box, mount=None):
     """Why New folder... cannot make a folder inside `where` (the text in
     the `box` box), as the message to show, or None when it can.
@@ -116,7 +134,7 @@ def parent_problem(where, box, mount=None):
                 f"new one in.\n\nFill the box first (type a folder or use "
                 f"Browse), {again}")
     if os.path.isdir(where):
-        if mount and _is_under(where, mount) and not os.path.ismount(mount):
+        if share_unmounted(where, mount):
             return (f"The share is not mounted at {mount}, so the folder in "
                     f"the {box} box is on this PC's own disk:\n{where}\n\n"
                     f"A folder made there would stay on this PC instead of "

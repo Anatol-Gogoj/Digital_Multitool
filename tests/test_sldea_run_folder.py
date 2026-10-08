@@ -33,6 +33,7 @@ _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 
 import contextlib  # noqa: E402
 import datetime  # noqa: E402
+import errno  # noqa: E402
 import os  # noqa: E402
 import tempfile  # noqa: E402
 import threading  # noqa: E402
@@ -142,13 +143,144 @@ def test_holds_run_names_the_run_files_it_finds():
         assert sprof.holds_run(run) == ['data.csv']
         open(os.path.join(run, 'setup.txt'), 'w').close()
         assert sprof.holds_run(run) == ['setup.txt', 'data.csv']
-        assert sprof.holds_run_within(run, 5.0) == ['setup.txt', 'data.csv']
+        assert sprof.run_folder_look_within(tmp, 'RUN', None, 5.0) == \
+            ['setup.txt', 'data.csv']
+        # a file where a folder of the path should be is "absent" too
+        assert sprof.holds_run(os.path.join(run, 'setup.txt', 'x')) == []
+
+
+@contextlib.contextmanager
+def _stat_fails(under, err=errno.EIO):
+    """os.stat raises OSError(`err`) for any path under `under`, as on a
+    share that dropped mid-session (EIO, ESTALE) or a folder this user
+    may not read (EACCES)."""
+    real = os.stat
+    top = os.path.normcase(os.path.abspath(under))
+
+    def stat(path, *a, **k):
+        if os.path.normcase(os.path.abspath(path)).startswith(top):
+            raise OSError(err, os.strerror(err), path)
+        return real(path, *a, **k)
+    os.stat = stat
+    try:
+        yield
+    finally:
+        os.stat = real
+
+
+def test_a_stat_that_fails_is_not_read_as_no_run():
+    """#402 review, finding 2: os.path.exists read EIO, ESTALE or EACCES as
+    "absent", so a folder on a share that had just dropped passed the
+    check. Only FileNotFoundError and NotADirectoryError mean absent; any
+    other failure means a run there cannot be ruled out, and Run refuses,
+    saying the folder could not be checked."""
+    for err in (errno.EIO, errno.EACCES, getattr(errno, 'ESTALE', 116)):
+        with tempfile.TemporaryDirectory() as tmp, \
+                _stat_fails(os.path.join(tmp, 'RUN'), err):
+            assert sprof.holds_run(os.path.join(tmp, 'RUN')) is None, err
+            assert sprof.run_folder_look(tmp, 'RUN') == \
+                sprof.FOLDER_NOT_CHECKED
+            why = sprof.run_folder_refusal(tmp, 'RUN')
+            assert why and 'Could not check the run folder' in why, why
+            assert 'cannot be ruled out' in why, why
+            assert sprof.run_folder_refusal(tmp, 'OTHER') is None
+            text, warn, full = sprof.run_folder_line(
+                tmp, 'RUN', sprof.FOLDER_NOT_CHECKED)
+            second = _lines(text)[1]
+            assert warn and 'Could not check' in second, text
+            assert 'refuse' in second, text
+            assert 'cannot be ruled out' in full, full
+
+
+def test_a_stat_that_fails_refuses_the_run_before_any_question():
+    mb = T._MB(T.LIVE_OK)
+    with tempfile.TemporaryDirectory() as tmp, T._patched(mb), \
+            _stat_fails(os.path.join(tmp, 'RUN')):
+        app = _app(tmp, 'RUN', dry=False)
+        app.sldea_run()
+        assert mb.titles() == [REFUSED], mb.calls
+        assert 'Could not check' in mb.message(REFUSED), mb.calls
+        _not_started(app)
+
+
+@contextlib.contextmanager
+def _share_at(mount):
+    """Aim the app's share mount point at `mount`, a plain folder: a share
+    that is not mounted."""
+    real = gui.sldea_share_mount
+    gui.sldea_share_mount = lambda: mount
+    try:
+        yield mount
+    finally:
+        gui.sldea_share_mount = real
+
+
+def test_an_unmounted_share_is_refused_and_a_folder_elsewhere_is_not():
+    """#402 review, finding 1: unmounted, a stat under the mount point
+    finds nothing at once, so the line said a plain "Saves to:" and Run
+    went on, to fail at makedirs after "Energize HV?" or to write to this
+    PC's own disk. New folder's check (#394) now refuses it, named or
+    blank. An Output dir off the share is not touched by it: not one
+    os.path.ismount call."""
+    with tempfile.TemporaryDirectory() as tmp:
+        mnt = os.path.join(tmp, 'mnt')          # a plain folder: unmounted
+        share = os.path.join(mnt, 'robot_incubator', 'SLDEA_data')
+        os.makedirs(share)
+        for name in ('RUN', ''):
+            assert sprof.run_folder_look(share, name, mnt) == \
+                sprof.FOLDER_NOT_MOUNTED, name
+            why = sprof.run_folder_refusal(share, name, mount=mnt)
+            assert why and f'not mounted at {mnt}' in why, (name, why)
+            assert "this PC's own disk" in why, why
+            text, warn, full = sprof.run_folder_line(
+                share, name, sprof.FOLDER_NOT_MOUNTED, mount=mnt)
+            second = _lines(text)[1]
+            assert warn and 'not mounted' in second, text
+            assert 'refuse' in second and mnt in full, (text, full)
+        # off the share: nothing refused, and the mount never looked at
+        local = os.path.join(tmp, 'local')
+        os.mkdir(local)
+        calls = []
+        real = os.path.ismount
+        os.path.ismount = lambda p: calls.append(p) or real(p)
+        try:
+            for name in ('RUN', ''):
+                assert sprof.run_folder_look(local, name, mnt) == [], name
+                assert sprof.run_folder_refusal(local, name,
+                                                mount=mnt) is None
+        finally:
+            os.path.ismount = real
+        assert calls == [], calls
+        # a share that IS mounted (the root of this disk is a mount point)
+        root = os.path.abspath(os.sep)
+        assert os.path.ismount(root)
+        for name in ('RUN', ''):
+            assert sprof.run_folder_refusal(share, name, mount=root) is None
+
+
+def test_an_unmounted_share_refuses_the_run_before_any_question():
+    """DRY and LIVE, named and blank: the refusal is the only dialog,
+    nothing starts, and nothing is written under the bare mount point."""
+    for dry in (True, False):
+        for name in ('RUN', ''):
+            mb = T._MB(T.LIVE_OK)
+            with tempfile.TemporaryDirectory() as tmp, T._patched(mb), \
+                    _share_at(os.path.join(tmp, 'mnt')) as mnt:
+                share = os.path.join(mnt, 'SLDEA_data')
+                os.makedirs(share)
+                app = _app(share, name, dry=dry)
+                app.sldea_run()
+                assert mb.titles() == [REFUSED], (dry, name, mb.calls)
+                assert 'not mounted' in mb.message(REFUSED), mb.calls
+                _not_started(app)
+                assert os.listdir(share) == [], os.listdir(share)
 
 
 def test_a_share_that_hangs_is_given_up_on_within_the_bound():
     with _hanging_share():
         t0 = time.monotonic()
-        assert sprof.holds_run_within('/nowhere/RUN', 0.3) is None
+        assert sprof.run_folder_look_within('/nowhere', 'RUN', None,
+                                            0.3) is None
         took = time.monotonic() - t0
         assert 0.25 <= took < 1.5, took
         why = sprof.run_folder_refusal('/nowhere', 'RUN', timeout_s=0.3)
@@ -615,6 +747,29 @@ def test_the_line_never_moves_the_rows_below_it():
         assert texts['long'].startswith('Saves to: …'), texts['long']
         assert len(_lines(texts['used'])) == 2, texts['used']
         assert len(_lines(texts['micro'])) == 2, texts['micro']
+
+
+def test_the_line_warns_while_the_share_is_not_mounted():
+    """#402 review, finding 1, on the real tab: an Output dir under the
+    share's mount point while nothing is mounted there gets a warning, for
+    a typed name and a blank one; an Output dir off the share gets none."""
+    with tempfile.TemporaryDirectory() as tmp, _real_app() as (root, app),             _share_at(os.path.join(tmp, 'mnt')) as mnt:
+        share = os.path.join(mnt, 'SLDEA_data')
+        os.makedirs(share)
+        line = app.sldea_folder_line
+        app.sldea_outdir.set(share)
+        for name in ('RUN', ''):
+            app.sldea_runname_var.set(name)
+            assert _settle(root, lambda: 'not mounted' in line.cget('text')),                 (name, line.cget('text'))
+            assert line.cget('fg') == WINE
+            assert mnt in app._sldea_folder_tip.text
+        local = os.path.join(tmp, 'local')
+        os.mkdir(local)
+        app.sldea_outdir.set(local)
+        app.sldea_runname_var.set('RUN')
+        assert _settle(root, lambda: line.cget('text') ==
+                       _saves_to(app, os.path.join(local, 'RUN'))),             line.cget('text')
+        assert line.cget('fg') == app.SLDEA_FOLDER_COLORS['ok']
 
 
 def test_a_share_that_hangs_never_freezes_the_window():

@@ -43,6 +43,7 @@ import presets_path
 import relaunch
 from instruments import BK894, TekMSO24, BK4055B, BK9174B, BK5493C
 import lcr_format
+import output_folder
 import scope_trace
 import siggen_presets
 from siggen_presets import SignalGenPresetStore
@@ -330,15 +331,28 @@ def sldea_video_btn_sync(app):
 
 
 def _sldea_folder_look(job):
-    """The SLDEA run folder line's check (#402), on its own thread: which
-    run files `job['folder']` already holds. It is handed a dict and the
-    folder's name, nothing of the app's, so a check that outlives the
-    window frees no Tk object off the Tk thread. `found` stays None when
-    the check itself failed, which the line shows as not known."""
+    """The SLDEA run folder line's check (#402), on its own thread: what
+    the run folder of `job['outdir']` and `job['name']` holds, or that the
+    share it is on is not mounted at `job['mount']`
+    (sldea_profile.run_folder_look). It is handed a dict of text, nothing
+    of the app's, so a check that outlives the window frees no Tk object
+    off the Tk thread. `found` stays None when the check itself raised,
+    which the line shows as not known."""
     try:
-        job['found'] = sldea_profile.holds_run(job['folder'])
+        job['found'] = sldea_profile.run_folder_look(
+            job['outdir'], job['name'], job['mount'])
     finally:
         job['done'] = True
+
+
+def sldea_share_mount():
+    """The lab share's mount point, read off the SLDEA tab's built-in
+    Output dir as New folder... reads it (#394): /mnt/shareDrive. Run
+    refuses a run folder under it while nothing is mounted there, and the
+    run folder line warns about it (#402 review); a folder anywhere else
+    is not affected. A function, so a test can aim it at a folder of its
+    own."""
+    return output_folder.share_mount(InstrumentControlGUI.SLDEA_SHARE_DIR)
 
 
 def _lan_reachable(resource, timeout=2.0):
@@ -3813,16 +3827,25 @@ LOGGING:
             slow=self._sldea_folder_slow())
         return outdir, name
 
+    def _sldea_folder_wanted(self, outdir, name):
+        """Is there anything to check for this folder? A typed name it can
+        use, or a blank name on the share, whose mount is checked (#402
+        review). Text only, no file system call."""
+        if name:
+            return not sldea_profile.run_name_problem(name)
+        return output_folder.on_share(sldea_profile.run_folder(outdir, name),
+                                      sldea_share_mount())
+
     def _sldea_folder_refresh(self, *_args):
         """Redraw the run folder line from the two boxes now, then check
         that folder once the typing pauses. A trace and a tab change call
         this; it never raises, it is a label."""
         try:
-            _outdir, name = self._sldea_folder_redraw()
+            outdir, name = self._sldea_folder_redraw()
             if self._sldea_folder_pause is not None:
                 self.root.after_cancel(self._sldea_folder_pause)
                 self._sldea_folder_pause = None
-            if name and not sldea_profile.run_name_problem(name):
+            if self._sldea_folder_wanted(outdir, name):
                 self._sldea_folder_pause = self.root.after(
                     self.SLDEA_FOLDER_PAUSE_MS, self._sldea_folder_check)
         except Exception:
@@ -3830,7 +3853,8 @@ LOGGING:
 
     def _sldea_folder_show(self, outdir, name, found, slow=False):
         text, warn, full = sldea_profile.run_folder_line(
-            outdir, name, found, slow, fits=self._sldea_folder_fits())
+            outdir, name, found, slow, fits=self._sldea_folder_fits(),
+            mount=sldea_share_mount())
         self.sldea_folder_line.config(
             text=text, fg=self.SLDEA_FOLDER_COLORS['warn' if warn else 'ok'])
         self._sldea_folder_tip.text = full
@@ -3870,10 +3894,13 @@ LOGGING:
             job['again'] = True
             return
         try:
-            folder = sldea_profile.run_folder(*self._sldea_folder_boxes())
+            outdir, name = self._sldea_folder_boxes()
+            folder = sldea_profile.run_folder(outdir, name)
+            mount = sldea_share_mount()
         except Exception:
             return
-        job = {'folder': folder, 'found': None, 'done': False,
+        job = {'folder': folder, 'outdir': outdir, 'name': name,
+               'mount': mount, 'found': None, 'done': False,
                'again': False, 't0': time.monotonic()}
         self._sldea_folder_job = job
         threading.Thread(target=_sldea_folder_look, args=(job,),
@@ -3906,8 +3933,8 @@ LOGGING:
             self._sldea_folder_seen = (job['folder'], job['found'])
             outdir, name = self._sldea_folder_redraw()
             now = sldea_profile.run_folder(outdir, name)
-            if ((job['again'] or now != job['folder']) and name
-                    and not sldea_profile.run_name_problem(name)):
+            if ((job['again'] or now != job['folder'])
+                    and self._sldea_folder_wanted(outdir, name)):
                 self._sldea_folder_check()
         except Exception:
             pass
@@ -4321,17 +4348,20 @@ LOGGING:
             go, allowed_sweep = self._sldea_start_gate(sgch, dry)
             if not go:
                 return
-            # The run folder (#402), right after the gate and before any
+            # The run folder (#402), right after the gate and before any HV
             # question, so no operator answers the HV questions only to be
             # refused over a name. A name used before made the worker write
             # over that run's setup.txt and data.csv; that folder, a name
-            # that cannot be a folder name, or a folder that does not answer
-            # within RUN_FOLDER_CHECK_S is refused, with no "start anyway".
-            # Both boxes are read once, here, and handed to the worker, so
-            # the folder checked is the folder written.
+            # that cannot be a folder name, a folder that could not be
+            # checked or does not answer within RUN_FOLDER_CHECK_S, and a
+            # folder on the share while the share is not mounted (#402
+            # review) are refused, with no "start anyway". Both boxes are
+            # read once, here, and handed to the worker, so the folder
+            # checked is the folder written.
             outdir = self.sldea_outdir.get()
             runname = self.sldea_runname.get().strip()
-            refusal = sldea_profile.run_folder_refusal(outdir, runname)
+            refusal = sldea_profile.run_folder_refusal(
+                outdir, runname, mount=sldea_share_mount())
             if refusal:
                 messagebox.showerror("SLDEA run folder", refusal)
                 self._sldea_log("run refused: " + " ".join(refusal.split()))

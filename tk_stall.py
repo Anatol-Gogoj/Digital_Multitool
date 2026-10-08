@@ -745,8 +745,10 @@ def append_record(path, text, max_bytes=MAX_BYTES):
 
 
 def _complain(msg):
-    """stderr, best effort: the launchers send it to launch.log, and a
-    pythonw process has no stderr at all."""
+    """stderr, best effort: the main window's goes to launch.log through
+    the launchers, Edge Review's and the plot window's go to their own log
+    in launch_logs when the SLDEA tab opened them (launch_check, #429),
+    and a pythonw process has no stderr at all."""
     try:
         if sys.stderr is not None:
             sys.stderr.write(msg if msg.endswith('\n') else msg + '\n')

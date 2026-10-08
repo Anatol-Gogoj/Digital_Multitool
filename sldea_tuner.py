@@ -414,6 +414,8 @@ class TunerWindow:
         self.mb = messagebox or mb          # injectable: the tests drive the
         self.plt = plt                      # discard prompt without a modal
         self.root = root
+        import tk_checkmarks                # here, as tkinter is (#407)
+        tk_checkmarks.install_check_marks(root)
         # per-run state -- all of it replaced together by _load/_unload
         self.rundir = None
         self.parent = ''

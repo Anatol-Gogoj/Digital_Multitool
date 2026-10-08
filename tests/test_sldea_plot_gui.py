@@ -41,24 +41,46 @@ def _mktmp():
 
 
 def _shut(root):
-    """Destroy a test root WITHOUT the orphaned-callback noise.
+    """Destroy a test root, and FAIL the case if a callback is still
+    queued on it (`#427`).
 
-    PlotWindow debounces every redraw through root.after, so a window
-    built and torn down before the loop ever runs leaves one pending and
-    Tk's background error handler prints `invalid command name
-    ...redraw`. Harmless -- but noise on a test console is where a real
-    failure goes to hide, and these cases are read by counting.
+    Every window a case opens gives its callbacks up through its own API
+    before it gets here: _closing, the X's own path, or cancel_pending
+    for a window whose close must not run, meaning one replaced on a
+    shared root (_replace) or one remembering against an options file
+    the case has already put back. So anything left in Tcl's `after info` is a
+    callback some path queued and nothing cancelled. In the app it fires
+    at a command the destroy deleted and prints `invalid command name`
+    on the console, the `#283` line. It is named here, id, script and
+    type, and the case fails.
 
-    Cancelled by Tcl id rather than per window, because the precedence
-    case builds several on one root and keeps only the last."""
+    This helper used to cancel every pending id by hand, which is how a
+    leak like that passed silently. It still cancels what it finds, after
+    recording it, only so one failed case cannot spray the next ones; and
+    through Tcl's own `after cancel`, because tkinter's after_cancel on
+    the ROOT would delete a command a child widget still lists, which
+    fails that widget's destroy (`#280`). The suite queues no after() of
+    its own; a case that ever does cancels it before it gets here.
+
+    A case that is already failing keeps its own exception: a body that
+    stopped early never reached its close, so a callback then left
+    queued says nothing new."""
+    failing = _sys.exc_info()[0] is not None
+    left = []
     try:
         for after_id in root.tk.splitlist(root.tk.call('after', 'info')):
             try:
-                root.after_cancel(after_id)
+                what = ' '.join(root.tk.splitlist(
+                    root.tk.call('after', 'info', after_id)))
+            except Exception as e:
+                what = f'(unreadable: {e})'
+            left.append(f'{after_id} {what}')
+            try:
+                root.tk.call('after', 'cancel', after_id)
             except Exception:
                 pass
-    except Exception:
-        pass
+    except Exception as e:
+        left.append(f'(after info failed: {e})')
     try:
         root.destroy()
     except Exception:
@@ -73,11 +95,25 @@ def _shut(root):
     # as somebody else's bug. Seen 2026-08-10: the failure surfaced in
     # test_importing_the_module_opens_no_window, four cases later.
     #
-    # This helper's whole contract is "the root is gone afterwards", so it
-    # ends by making that true rather than hoping destroy() got there.
+    # Half of this helper's contract is "the root is gone afterwards", so it
+    # makes that true rather than hoping destroy() got there, and only
+    # then reports the other half.
     import tkinter as _tk
     if getattr(_tk, '_default_root', None) is root:
         _tk._default_root = None
+    assert failing or not left, (
+        'callbacks still queued when the root was shut; whatever queued '
+        'them has a teardown path that does not cancel them: '
+        + '; '.join(left))
+
+
+def _replace(win, *args, **kw):
+    """A NEW PlotWindow(win.root, *args, **kw), once `win` has given up
+    its callbacks through its own API (`#427`). One root hosting window
+    after window is a test construct, as the app opens one per process,
+    and the window it leaves behind is a teardown path like any close."""
+    win.cancel_pending()
+    return g.PlotWindow(win.root, *args, **kw)
 
 
 def _fake_run(parent, name, processed=True, csv_name='data.csv'):
@@ -282,9 +318,10 @@ def test_runs_from_several_parents_all_reach_the_selection():
             assert win.parent == os.path.abspath(p)
             assert 'remembered against [1]' in label
             # one parent only: no tag at all, and nothing to say
-            win2 = g.PlotWindow(root, [os.path.abspath(p)], remember=False)
+            win2 = _replace(win, [os.path.abspath(p)], remember=False)
             assert not any(l.startswith('[') for _d, l in win2.runs)
             assert win2.lbl_parent.cget('text') == os.path.abspath(p)
+            win2._closing()
         finally:
             _shut(root)
     finally:
@@ -410,6 +447,7 @@ def test_setup_reads_are_cached_by_path_and_mtime():
             assert win.move_to_group('CB') is None
             win.redraw()
             assert len(reads) == n, reads[n:]
+            win._closing()
         finally:
             _shut(root)
     finally:
@@ -505,6 +543,9 @@ def test_the_run_picker_shows_each_runs_material_and_group():
             g.OPTIONS_PATH = real
         assert _cells_by_name(win2)['R1']['group'] == 'CB'
         assert _cells_by_name(win2)['S2_3900']['group'] == ''
+        # a second window on b's root, which __exit__ does not know of;
+        # and it remembers, so its close would write the real options file
+        win2.cancel_pending()
 
 
 def test_sorting_the_picker_reorders_the_list_and_not_the_figure():
@@ -963,6 +1004,7 @@ def test_the_headings_are_measured_in_the_heading_font():
                     assert win._col_floor(col) >= need, (how, col)
                     assert tree.column(col, 'minwidth') >= \
                         head.measure(text) + inset, (how, col)
+                win._closing()
             finally:
                 _shut(root)
     finally:
@@ -1169,9 +1211,16 @@ class _Win:
             f'the coalesced redraw never landed after resizing to {size}'
 
     def __exit__(self, *_exc):
-        if self.root is not None:
-            _shut(self.root)
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        try:
+            if self.root is not None:
+                try:
+                    self.win._closing()     # the X's own path (`#427`)
+                finally:
+                    _shut(self.root)
+        finally:
+            # its own finally: _shut can fail the case now, and a failed
+            # case still removes its fixture folder
+            shutil.rmtree(self.tmp, ignore_errors=True)
         return False
 
 
@@ -2602,18 +2651,18 @@ def test_the_window_applies_the_precedence_it_documents():
                 # an explicit option beats the remembered one, and the
                 # ones it does not mention stay remembered
                 cli, _e = sp.make_opts(mode='current', bands=False)
-                w = g.PlotWindow(root, p, opts=cli)
+                w = _replace(w, p, opts=cli)
                 assert w.v_mode.get() == 'current'
                 assert w.v_prepost.get() is True, 'lost the remembered one'
                 # an explicit out_dir beats the remembered one
-                w = g.PlotWindow(root, p, out_dir=os.path.join(p, 'other'))
+                w = _replace(w, p, out_dir=os.path.join(p, 'other'))
                 assert w.v_out.get() == os.path.join(p, 'other')
                 # remember=False is the defaults, whatever is on disk
-                w = g.PlotWindow(root, p, remember=False)
+                w = _replace(w, p, remember=False)
                 assert w.v_mode.get() == 'area' and w.v_bands.get() is True
                 assert w.remember_now() is None, 'wrote anyway'
                 # ...and the round trip: change something, remember it
-                w = g.PlotWindow(root, p)
+                w = _replace(w, p)
                 w.v_mode.set('current')
                 w.v_breakdown.set(False)
                 assert w.remember_now() == cfg
@@ -2621,7 +2670,7 @@ def test_the_window_applies_the_precedence_it_documents():
                 assert g.load_options(p, path=cfg)['breakdown'] is False
                 # the new drawing options round-trip with the rest, and
                 # the panel headings deliberately do not come back
-                w = g.PlotWindow(root, p)
+                w = _replace(w, p)
                 w.v_mode.set('area')
                 w.v_logy.set(True)
                 w.v_marker_key.set(False)
@@ -2634,7 +2683,7 @@ def test_the_window_applies_the_precedence_it_documents():
                 assert back['cadence_guard'] is True
                 assert back['subplots'] == 'first'
                 assert 'title_first' not in back and 'title' not in back
-                w = g.PlotWindow(root, p)
+                w = _replace(w, p)
                 assert w.v_logy.get() is True
                 assert w.v_subplots.get() == 'first'
                 assert w.v_cadence.get() is True
@@ -2650,10 +2699,11 @@ def test_the_window_applies_the_precedence_it_documents():
                     {'mode': 'current', 'subplots': 'second'})
                 with open(cfg, 'w', encoding='utf-8') as f:
                     json.dump(blob, f)
-                w = g.PlotWindow(root, p)
+                w = _replace(w, p)
                 assert w.v_mode.get() == 'current'
                 assert w.v_subplots.get() == 'both', w.v_subplots.get()
                 assert not w.current_opts()[1], 'opened on an error'
+                w._closing()        # remembers into cfg, still the path
             finally:
                 _shut(root)
         finally:
@@ -2674,6 +2724,9 @@ def test_closing_cancels_the_pending_redraw_before_it_destroys_the_root():
     `#275` order is pinned with it: the options are on disk by then, so
     remember_now ran while the widgets it reads were still alive.
 
+    The figure canvas's idle draw goes the same way (`#427`): it is
+    matplotlib's after(), queued by relayout(), every canvas resize and
+    the toolbar (Save, pan, zoom, Home, Back, Forward), among others.
     The module's only other after() is Tooltip's hover timer, which
     cancels itself on <Destroy> -- asserted here rather than assumed,
     since _closing's docstring leans on it."""
@@ -2702,6 +2755,11 @@ def test_closing_cancels_the_pending_redraw_before_it_destroys_the_root():
             tip_id = win.tip_bands._after_id
             assert tip_id in set(root.tk.splitlist(
                 root.tk.call('after', 'info')))
+            win.canvas.draw_idle()
+            draw_id = win.canvas._idle_draw_id
+            assert draw_id in set(root.tk.splitlist(
+                root.tk.call('after', 'info'))), \
+                'the fixture never queued an idle draw to be orphaned'
 
             seen = {}
             real_destroy = root.destroy
@@ -2721,6 +2779,8 @@ def test_closing_cancels_the_pending_redraw_before_it_destroys_the_root():
             assert pending not in seen['queued'], \
                 'the debounced redraw was still queued when the root died'
             assert win._redraw_after is None, 'the id was left behind'
+            assert draw_id not in seen['queued'], \
+                "the figure's idle draw was still queued when the root died"
             assert seen['remembered'], \
                 'the options were not remembered before the destroy'
             assert g.load_options(p, path=cfg), 'remember_now wrote nothing'
@@ -2779,9 +2839,16 @@ class _Bare:
         return self
 
     def __exit__(self, *_exc):
-        if self.root is not None:
-            _shut(self.root)
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        try:
+            if self.root is not None:
+                try:
+                    self.win._closing()     # the X's own path (`#427`)
+                finally:
+                    _shut(self.root)
+        finally:
+            # its own finally: _shut can fail the case now, and a failed
+            # case still removes its fixture folder
+            shutil.rmtree(self.tmp, ignore_errors=True)
         return False
 
 
@@ -3424,6 +3491,8 @@ def test_no_derived_heading_reaches_the_remembered_options_file():
         for k in ('title', 'title_first', 'title_second'):
             assert spec['opts'][k] is None, (k, spec['opts'][k])
         win._closing()                 # the real on-close write
+        # ...which left nothing queued, redraw() and all (`#427`)
+        _shut(root)
         with open(cfg, encoding='utf-8') as f:
             blob = f.read()
         entry = json.loads(blob)['parents'][g.options_key(p)]
@@ -3633,6 +3702,9 @@ def test_a_grouping_survives_a_round_trip_through_the_options_file():
             assert [n for n, _m in win.group_list()] == ['CB'], \
                 win.group_list()
             assert win.current_opts()[0]['groups'] == opts['groups']
+            # it remembers, and the options path is the real one again:
+            # a close would write the user's file
+            win.cancel_pending()
         finally:
             _shut(root)
     finally:
@@ -3861,6 +3933,8 @@ def test_a_seeded_grouping_round_trips_through_the_figspec_and_tidy_csv():
             _select(again)
             assert again.current_opts()[0]['group_materials'] == \
                 opts['group_materials']
+            # a second window on b's root, which __exit__ does not know of
+            again.cancel_pending()
     finally:
         shutil.rmtree(out, ignore_errors=True)
 
@@ -3899,14 +3973,17 @@ def test_remembered_materials_travel_with_their_groups_only():
                 win = g.PlotWindow(root, p, preselect=['A_run'])
                 spec_opts = sp.make_opts(aggregate=True,
                                          groups=[['P3', [a]]])[0]
-                bare = g.PlotWindow(root, p, preselect=['A_run'],
-                                    opts=spec_opts)
+                bare = _replace(win, p, preselect=['A_run'],
+                                opts=spec_opts)
             finally:
                 g.OPTIONS_PATH = real
             assert win.group_material_list() == [['P3', P3]]
             assert bare.group_list() == spec_opts['groups']
             assert bare.group_material_list() == [], \
                 'explicit groups borrowed a remembered material'
+            # it remembers, and the options path is the real one again:
+            # a close would write the user's file
+            bare.cancel_pending()
         finally:
             _shut(root)
     finally:
@@ -4106,9 +4183,16 @@ class _Pair:
         return self
 
     def __exit__(self, *_exc):
-        if self.root is not None:
-            _shut(self.root)
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        try:
+            if self.root is not None:
+                try:
+                    self.win._closing()     # the X's own path (`#427`)
+                finally:
+                    _shut(self.root)
+        finally:
+            # its own finally: _shut can fail the case now, and a failed
+            # case still removes its fixture folder
+            shutil.rmtree(self.tmp, ignore_errors=True)
         return False
 
 
@@ -4229,6 +4313,7 @@ def test_a_window_opened_from_a_spec_keeps_the_specs_t0_and_exports_it():
                           encoding='utf-8') as f:
                     stored = json.load(f)['opts']['film_thickness']
                 assert stored == [[os.path.abspath(a), want[0]]], stored
+                win._closing()
             finally:
                 _shut(root)
     finally:

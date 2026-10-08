@@ -30,8 +30,11 @@ import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
     _os.path.abspath(__file__))))
 
+import atexit
 import gc
 import queue
+import shutil
+import tempfile
 import threading
 import time
 import types
@@ -40,6 +43,11 @@ import gui
 import webcam
 
 G = gui.InstrumentControlGUI
+# The stub runs' Output dir: an empty folder of their own. Run refuses a
+# folder that already holds a run (#402), so '.' with the name RUN would
+# have failed these cases in any checkout holding a stray RUN/setup.txt.
+_OUTDIR = tempfile.mkdtemp(prefix='test_webcam_autostart_')
+atexit.register(shutil.rmtree, _OUTDIR, True)
 # _Patched runs the reason watch every POLL_MS instead of the app's 500 ms:
 # the resume is only seen across watch periods, and the suite went from
 # about 16 s to 55 s at the app's rate. WATCH is one period with room for a
@@ -318,7 +326,7 @@ class _CameraWork:
     NAMES = ('resolve_camera', 'oneshot_rgb', 'set_control', 'get_control',
              'bayer_format', '_v4l2', 'parse_frame_sizes', 'choose_size',
              'auto_exposure', 'apply_locked', 'save_camera_settings',
-             'v4l2_available')
+             'load_camera_settings', 'v4l2_available')
 
     def __init__(self, frame=None):
         self.frame = _disc_frame() if frame is None else frame
@@ -336,7 +344,8 @@ class _CameraWork:
         self.saved = {n: getattr(webcam, n) for n in self.NAMES}
         self.locked = dict(webcam.LOCKED_CONTROLS)
 
-        def oneshot(spec, count=2):
+        def oneshot(spec, count=2, controls=None):
+            # `controls`: a camera adjustment's trial values (#400)
             self._hold()
             return self.frame
 
@@ -345,8 +354,10 @@ class _CameraWork:
             return None, None        # "could not settle": no field to fill
 
         def apply_locked(device, exclude=None):
+            # every locked control set, as the real one counts them: a
+            # lock that set none is a failure (#400 review)
             self._hold()
-            return 0
+            return len(webcam.LOCKED_CONTROLS)
 
         webcam.resolve_camera = lambda idx: {'kind': 'cv2', 'index': int(idx)}
         webcam.oneshot_rgb = oneshot
@@ -360,6 +371,7 @@ class _CameraWork:
         webcam.apply_locked = apply_locked
         webcam.save_camera_settings = (
             lambda controls, path=None: 'nowhere/camera_controls.json')
+        webcam.load_camera_settings = lambda path=None: {}
         webcam.v4l2_available = lambda: True
         return self
 
@@ -399,7 +411,7 @@ def _sldea_ready(app):
     for name in ('sldea_autoproc', 'sldea_trek_inv', 'sldea_wd_on',
                  'sldea_tel_on', 'sldea_vid_on', 'sldea_vid_detect'):
         setattr(app, name, _var(False))
-    app.sldea_outdir, app.sldea_runname = _var('.'), _var('RUN')
+    app.sldea_outdir, app.sldea_runname = _var(_OUTDIR), _var('RUN')
     app.sldea_run_btn = app.sldea_abort_btn = types.SimpleNamespace(
         config=lambda **kw: None)
     app.scope = None
@@ -627,6 +639,11 @@ def test_apply_and_lock_ending_resumes_the_preview_once():
     off ("A camera adjustment is running"). When Apply & Lock ends, the
     watch starts the preview once, with no dialog."""
     with _Patched() as p, _CameraWork() as work:
+        # a camera with a control to lock: Apply & Lock on a panel with
+        # none is a failure, with its own box (#400 review)
+        webcam.list_controls = lambda device: [{
+            'name': 'exposure_time_absolute', 'type': 'int', 'min': 1,
+            'max': 40000, 'default': 3, 'value': 20, 'menu': {}}]
         root, app = _app()
         if root is None:
             return

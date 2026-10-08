@@ -24,6 +24,25 @@ footer. One grep for "tests failed" lands on both ends of a bounded
 block. Skips are counted separately and are not failures: suites that
 can skip print `N of M tests ran` and still exit 0.
 
+A suite that exits 0 passes only when its stdout has a count line
+naming at least one case (`#426`); stderr is never read for it. Exit 0
+alone proved nothing: test_trek_polarity.py had no runner, ran none of
+its tests, and was listed `ok` with "(no output)" until #426. The last
+line of either of these shapes is the one read:
+
+  `N tests passed`, or `All N <one or more words> tests passed`, with
+  `test` for a single case, an optional `(...)` note after `passed`,
+  and an optional final period. N, the cases that passed, must be 1 or
+  more.
+
+  `N of M tests ran`, with `test` for a single case, followed by
+  anything (the skip note). M, the cases the suite has, must be 1 or
+  more, so a suite whose every case skipped (`0 of M tests ran`) still
+  passes: it named what it skipped.
+
+Anything else, `0 tests passed (3 skipped)` included, is a FAIL.
+tests/test_run_tests.py pins these lines.
+
 Console output is forced to ASCII (backslash-escaping anything else) --
 suite output can carry emoji, and a Windows console that cannot encode
 them would kill the runner mid-report, losing the very traceback this
@@ -32,12 +51,39 @@ exists to keep. The .log files are UTF-8 and hold the real characters.
 import glob
 import locale
 import os
+import re
 import subprocess
 import sys
 
 # Per-run failure dumps. Overwritten every run, named in the summary
 # footer, and .gitignore'd -- this is a test artifact, never a commit.
 FAIL_DIRNAME = 'test_failures'
+
+# The count line a suite prints after its cases (`#426`; the docstring
+# says exactly what is accepted): `N tests passed`, `All N arb_build
+# tests passed.`, `N tests passed (K skipped)`, or `N of M tests ran
+# (...)` from a suite that can skip. The group is the count that must be
+# 1 or more: the cases that passed, or the cases the suite has.
+_COUNT_PASSED = re.compile(
+    r'^(?:All )?(\d+) (?:[\w-]+ )*tests? passed(?: \([^)]*\))?\.?$')
+_COUNT_RAN = re.compile(r'^\d+ of (\d+) tests? ran\b')
+
+# Why a suite that exited 0 is still a FAIL; said after the summary and
+# in its dump, never inside the summary block.
+NO_CASES = ("exit 0, but no test cases reported (no 'N tests passed' or "
+            "'N of M tests ran' line, or a count of 0): nothing was "
+            "checked (#426)")
+
+
+def _cases_reported(out):
+    """How many cases a suite says it has, from its LAST count line;
+    None when it printed none (`#426`)."""
+    for line in reversed(out.splitlines()):
+        line = line.strip()
+        m = _COUNT_RAN.match(line) or _COUNT_PASSED.match(line)
+        if m:
+            return int(m.group(1))
+    return None
 
 
 def _ascii(text):
@@ -81,7 +127,8 @@ def _write_dump(fail_dir, name, returncode, out, err):
     body = (f"suite:     {name}\n"
             f"command:   {sys.executable} tests/{name}\n"
             f"exit code: {returncode}\n"
-            f"\n--- stdout ---\n{out}"
+            + (f"failed:    {NO_CASES}\n" if returncode == 0 else '')
+            + f"\n--- stdout ---\n{out}"
             f"\n--- stderr ---\n{err}")
     try:
         os.makedirs(fail_dir, exist_ok=True)
@@ -106,7 +153,8 @@ def main():
         err = _decode(result.stderr)
         lines = out.strip().splitlines()
         tail = lines[-1] if lines else '(no output)'
-        if result.returncode == 0:
+        # exit 0 is a pass only with at least one case reported (`#426`)
+        if result.returncode == 0 and _cases_reported(out):
             _say(f"ok   {name:28s} {tail}")
         else:
             # The dump goes AFTER the summary, never between these lines.
@@ -128,6 +176,8 @@ def main():
         for name, rc, out, err, _dump in dumps:
             _say()
             _say(f"===== FAIL {name} (exit {rc}) =====")
+            if rc == 0:
+                _say(NO_CASES)
             _say("--- stdout ---")
             _say(out.rstrip('\n') if out.strip() else '(empty)')
             _say("--- stderr ---")

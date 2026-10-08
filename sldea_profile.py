@@ -650,8 +650,413 @@ def camera_line(cam_exp, cam_gain, locked=None, defaults=()):
     return (f"{text}\n⚠ The Webcam tab has LOCKED {preview} instead, so "
             f"its live preview will NOT show what the run records (the "
             f"pre-flight does). Check the boxes on the Webcam tab, then "
-            f"press Apply & Lock.",
+            f"press Apply & Lock there, or Auto-set camera.",
             True)
+
+
+CAMERA_NOT_KNOWN = "(not known: the camera pre-flight did not run)"
+
+
+def camera_record(cam_exp, cam_gain, run_lock=None, camera=None,
+                  defaults=()):
+    """setup.txt's camera block, under '--- Camera ---' (#400): one
+    summary line, then `Key: value` lines with everything the app knows
+    about the camera when the run starts, so a run records the camera
+    state its pictures were shot under.
+
+    `run_lock` is the lock the run stamps before every grab
+    (gui.sldea_run_lock: the Webcam tab's lock, with manual exposure, white
+    balance auto off, and the run's exposure and gain on top), or None from
+    a caller that does not know it. `camera` is what the camera pre-flight
+    found: webcam.resolve_camera's spec ('kind', 'device', 'fourcc', 'w',
+    'h') and 'frame', the (width, height) of the picture it took; None when
+    the pre-flight did not run. `defaults` names the run's values that are
+    built-in fallbacks (gui._sldea_cam_defaults), as camera_for_run does.
+
+    The summary stays the first line: Edge Review's run health quotes the
+    line under the header (sldea_edge._health_setup). ASCII only, because
+    the runner writes setup.txt in the locale's encoding."""
+    lock = dict(run_lock or {})
+    cam = dict(camera or {})
+    if run_lock is None:
+        white = "white balance manual (balance not recorded)"
+    elif 'red_balance' in lock and 'blue_balance' in lock:
+        white = (f"white balance manual, red {int(lock['red_balance'])}, "
+                 f"blue {int(lock['blue_balance'])}")
+    else:
+        white = "white balance manual (red and blue not locked)"
+    stamped = bool(cam.get('device')) if camera is not None else True
+    if stamped:
+        summary = f"exposure {cam_exp}, gain {cam_gain}, {white}"
+    else:
+        summary = (f"exposure {cam_exp} and gain {cam_gain} asked for, but "
+                   f"this camera has no V4L2 controls, so none was set")
+    names = tuple(defaults or ())
+    if names:
+        summary += (f" ({names[0]} is a built-in default"
+                    if len(names) == 1 else
+                    f" ({' and '.join(names)} are built-in defaults")
+        summary += ": no readable box on the Webcam tab)"
+    lines = [summary]
+    if camera is None:
+        lines += [f"Camera device: {CAMERA_NOT_KNOWN}",
+                  f"Camera pixel format: {CAMERA_NOT_KNOWN}",
+                  f"Camera frame size: {CAMERA_NOT_KNOWN}"]
+    else:
+        index = cam.get('index')
+        lines.append("Camera device: " + (
+            str(cam['device']) if cam.get('device')
+            else f"OpenCV camera {index}" if index is not None
+            else "(not known)"))
+        if cam.get('kind') == 'bayer' and cam.get('fourcc'):
+            lines.append(f"Camera pixel format: {cam['fourcc']} (raw Bayer)")
+        else:
+            lines.append("Camera pixel format: (chosen by OpenCV)")
+        size = cam.get('frame') or (
+            (cam.get('w'), cam.get('h')) if cam.get('w') and cam.get('h')
+            else None)
+        lines.append(f"Camera frame size: {int(size[0])} x {int(size[1])}"
+                     if size else
+                     "Camera frame size: (not known: the pre-flight took "
+                     "no picture)")
+    if run_lock is None:
+        lines.append("Camera controls: (not recorded)")
+    elif not stamped:
+        lines.append("Camera controls: (none set: no V4L2 controls)")
+    elif not lock:
+        lines.append("Camera controls: (none locked)")
+    else:
+        lines.append("Camera controls: " + ", ".join(
+            f"{name}={int(lock[name])}" for name in sorted(lock)))
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# The run folder (`#402`)
+# ---------------------------------------------------------------------------
+# The worker makes the run folder with exist_ok=True and opens setup.txt and
+# data.csv in it with mode 'w', so a run name used before overwrote that
+# run without a word. The SLDEA tab now shows the folder a run will write
+# to, warns while the operator types, and Run refuses a folder that already
+# holds a run.
+
+# The files that make a folder a run. The worker writes setup.txt right
+# after making the folder and data.csv next, so a run that wrote anything
+# left setup.txt. Looked for by name (two stats), never by listing the
+# folder: a run folder holds thousands of frames, and the share can be slow.
+RUN_FILES = ('setup.txt', 'data.csv')
+# The line's stand-in for a blank Run name, whose folder is only named
+# (SldeaProfile.run_dirname) when the run starts.
+AUTO_RUN_DIRNAME = 'SLDEA_<date>_<time>'
+# How long Run waits for those two stats before it refuses. They run on a
+# thread because sldea_run is on the Tk thread, and a stat on a share that
+# has gone away can block for minutes.
+RUN_FOLDER_CHECK_S = 3.0
+# The line is two lines of text in a box of fixed height (#402 review): the
+# folder, then a warning or nothing, so its text never moves the rows
+# below it. Each line is shortened to the width the tab gives it, measured
+# in its font by the caller (run_folder_line's `fits`). Without a measured
+# width (the tab before Tk has laid it out) a line holds this many
+# characters.
+RUN_FOLDER_LINE_CHARS = 64
+
+
+def run_folder(outdir, run_name, started=None):
+    """The folder a run writes to: <outdir>/<run_name>, or with the name
+    blank, <outdir>/SLDEA_YYYYmmdd_HHMMSS from `started`, the run's start
+    time. With `started` None (the SLDEA tab's line, before any run) a
+    blank name shows as AUTO_RUN_DIRNAME. The worker makes its folder from
+    this and the tab's line shows what it returns, so they cannot drift."""
+    import os
+    if not run_name:
+        run_name = (SldeaProfile.run_dirname(started) if started is not None
+                    else AUTO_RUN_DIRNAME)
+    return os.path.join(outdir, run_name)
+
+
+def run_name_problem(run_name):
+    """Why `run_name` cannot name a run folder, as the message to show, or
+    None when it can. A blank name always can: the run names its folder
+    from its start time. A typed one follows New folder...'s rules
+    (output_folder.name_problem): one folder inside the Output dir, with a
+    name Windows and the share accept, in plain ASCII, because OpenCV on
+    the lab's Windows PCs cannot open frames in a folder named otherwise."""
+    if not (run_name or '').strip():
+        return None
+    import output_folder
+    return output_folder.name_problem(run_name)
+
+
+def holds_run(folder):
+    """The RUN_FILES already in `folder`, in that order: empty when no run
+    is there, the folder itself missing included. Two stats. None when a
+    stat failed for any other reason than the file or a folder above it
+    being absent (a permission, an I/O error, a stale handle on the share):
+    a run there cannot be ruled out then (#402 review). os.path.exists,
+    used here before, reads every failure as absent."""
+    import os
+    found = []
+    for name in RUN_FILES:
+        try:
+            os.stat(os.path.join(folder, name))
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except (OSError, ValueError):
+            return None
+        found.append(name)
+    return found
+
+
+# What a check of the run folder can find besides holds_run's list (#402
+# review): the folder is on the lab share while nothing is mounted at its
+# mount point, so it would be on this PC's own disk; or a stat failed in a
+# way that does not mean "absent". Either refuses the run.
+FOLDER_NOT_MOUNTED = 'share not mounted'
+FOLDER_NOT_CHECKED = 'could not be checked'
+
+
+def run_folder_look(outdir, run_name, mount=None):
+    """The check behind the line and the refusal, run on a thread: what the
+    run folder holds -> holds_run's list, FOLDER_NOT_MOUNTED, or
+    FOLDER_NOT_CHECKED.
+
+    `mount` is the lab share's mount point (output_folder.share_mount).
+    A folder under it while nothing is mounted there is refused, as New
+    folder... refuses such a parent (#394): unmounted, a stat there finds
+    nothing at once, and the run would write to this PC's own disk or fail
+    after "Energize HV?". A folder off the share costs no stat for this.
+    A blank name's folder is new by its time stamp, so it is only checked
+    for the mount, and off the share it costs nothing at all."""
+    import output_folder
+    folder = run_folder(outdir, run_name)
+    if output_folder.share_unmounted(folder, mount):
+        return FOLDER_NOT_MOUNTED
+    if not (run_name or '').strip():
+        return []
+    found = holds_run(folder)
+    return FOLDER_NOT_CHECKED if found is None else found
+
+
+def run_folder_look_within(outdir, run_name, mount=None,
+                           timeout_s=RUN_FOLDER_CHECK_S):
+    """run_folder_look, waited for at most `timeout_s` -> what it found, or
+    None when its stats have not returned by then (a share that hangs).
+    They run on a daemon thread left to finish on its own, which holds the
+    two boxes' text and a list and nothing of the caller's."""
+    import threading
+    out = []
+    worker = threading.Thread(
+        target=lambda: out.append(run_folder_look(outdir, run_name, mount)),
+        name='sldea-run-folder-check', daemon=True)
+    worker.start()
+    worker.join(timeout_s)
+    return out[0] if out else None
+
+
+def run_folder_refusal(outdir, run_name, timeout_s=None, mount=None):
+    """Why Run must not start into this run's folder, as the message to
+    show, or None when it may.
+
+    Refused: a typed name that cannot be a folder name, a folder that
+    already holds a run, a folder whose check failed or has not answered
+    within `timeout_s`, because a run already there cannot be ruled out and
+    writing over the only copy of a run cannot be undone, and a folder on
+    the lab share while the share is not mounted at `mount` (#402 review).
+    There is no "start anyway", for the folder that does not answer either
+    (owner decision 2026-10-08). A blank name's folder is named from the
+    start time, so it is refused only for the share: not mounted, or, under
+    the mount point, not answering. `timeout_s` None means
+    RUN_FOLDER_CHECK_S, read at the call."""
+    import output_folder
+    if timeout_s is None:
+        timeout_s = RUN_FOLDER_CHECK_S
+    name = (run_name or '').strip()
+    problem = run_name_problem(name)
+    if problem:
+        return (f"The run name '{name}' cannot name the run's folder.\n\n"
+                f"{problem}\n\nType another name, or clear the box and the "
+                f"run names its folder from its start time "
+                f"({AUTO_RUN_DIRNAME}).")
+    folder = run_folder(outdir, name)
+    if not name and not output_folder.on_share(folder, mount):
+        return None
+    found = run_folder_look_within(outdir, name, mount, timeout_s)
+    if found is None:
+        what = ("a run already there cannot be ruled out" if name else
+                "whether the share is mounted cannot be told")
+        return (f"Could not check the run folder\n{folder}\n\nThe Output dir "
+                f"did not answer within {timeout_s:g} s, so {what}. If it is "
+                f"on the share, check that the share is mounted, then press "
+                f"▶ Run again.")
+    if found == FOLDER_NOT_MOUNTED:
+        return (f"The share is not mounted at {mount}, so the run folder\n"
+                f"{folder}\nwould be on this PC's own disk instead of on the "
+                f"share.\n\nCheck that the share is mounted, then press ▶ Run "
+                f"again.")
+    if found == FOLDER_NOT_CHECKED:
+        return (f"Could not check the run folder\n{folder}\n\nLooking for "
+                f"{' and '.join(RUN_FILES)} there failed for another reason "
+                f"than the files being absent (a permission, or the share), "
+                f"so a run already there cannot be ruled out. Check that the "
+                f"Output dir can be read, then press ▶ Run again.")
+    if found:
+        return (f"The run folder\n{folder}\nalready holds a run: "
+                f"{' and '.join(found)}. A run started there would write "
+                f"over that run's files.\n\nType another run name, or clear "
+                f"the box and the run names its folder from its start time "
+                f"({AUTO_RUN_DIRNAME}).")
+    return None
+
+
+def open_run_file(rundir, name, run_name, **kw):
+    """open(<rundir>/<name>) for the worker to write a run's own file
+    (setup.txt, data.csv) -> the file object.
+
+    With a typed `run_name` the mode is 'x', so a run that started in that
+    folder after Run checked it (another PC on the share, in the minutes
+    the dialogs took) makes this one fail instead of writing over it
+    (#402 review). The FileExistsError then says so in words, for the run
+    log, with what this run had already left there: the worker opens
+    setup.txt first, then appends to run.log, then opens data.csv, so a
+    data.csv that fails finds this run's setup.txt and log lines already
+    in that folder (final HV review 2026-10-08, finding 3). A blank name's
+    folder is new by its time stamp and keeps 'w'."""
+    import os
+    path = os.path.join(rundir, name)
+    try:
+        return open(path, 'x' if (run_name or '').strip() else 'w', **kw)
+    except FileExistsError:
+        if name == 'setup.txt':
+            left = ("This run stopped before any HV and left that run's "
+                    "files as they were.")
+        else:
+            left = ("This run stopped before any HV, but it had already "
+                    "written its setup.txt in that folder and added its log "
+                    "lines to the run.log there; it overwrote none of the "
+                    "other run's files.")
+        raise FileExistsError(
+            f"{name} appeared in the run folder {rundir} after ▶ Run "
+            f"checked it: another run is writing there. {left} Type "
+            f"another run name and press ▶ Run again.") from None
+
+
+def _fits_chars(text):
+    """run_folder_line's `fits` when the caller has no measured width."""
+    return len(text) <= RUN_FOLDER_LINE_CHARS
+
+
+def fit_path(head, path, tail='', fits=None):
+    """One line of text, head + path + tail, with `path` cut from the left
+    behind an ellipsis until fits(line) holds: first at a separator, then,
+    when even the last part does not fit, character by character. So the
+    run folder's name, at the end, is what shows when anything does. A
+    width too narrow for `tail` as well loses the tail. `fits` None counts
+    characters (_fits_chars)."""
+    fits = fits or _fits_chars
+    line = head + path + tail
+    if fits(line):
+        return line
+    last = max(path.rfind('/'), path.rfind('\\'))
+    cuts = [i for i, c in enumerate(path) if c in '/\\' and i > 0]
+    cuts += range(last + 1, len(path))
+    for i in cuts:
+        line = head + '…' + path[i:] + tail
+        if fits(line):
+            return line
+    if tail:                       # a width too narrow for the tail too
+        return fit_path(head, path, '', fits)
+    return fit_end(head + '…' + path[-1:], fits)
+
+
+def fit_end(text, fits=None):
+    """`text` cut at its end behind an ellipsis until fits(text) holds. A
+    safety net for a warning that does not fit the line, as on a wider
+    font: the words are written to fit, and the tooltip has them whole."""
+    fits = fits or _fits_chars
+    if fits(text):
+        return text
+    for n in range(len(text) - 1, 0, -1):
+        cut = text[:n].rstrip() + '…'
+        if fits(cut):
+            return cut
+    return '…'
+
+
+def run_folder_line(outdir, run_name, found=None, slow=False, fits=None,
+                    mount=None):
+    """The SLDEA tab's line under Run name -> (text, warn, full).
+
+    `text` is at most two lines, each fitting the line's width (`fits`,
+    a test of one line of text; None counts characters): "Saves to:" and
+    the folder, cut from the left so the run folder's name shows, then a
+    warning or nothing. The label keeps two lines of height whatever this
+    says, so the rows below never move (#402 review).
+
+    `found` is what the last check of this folder saw (run_folder_look's
+    answer), None while that is not known. `slow` says the check out now
+    for this folder has not answered for a while. `mount`, the share's
+    mount point, is only named in the tooltip. `full`, for the tooltip, is
+    the whole path, and below it the whole reason for a warning. `warn`
+    asks the caller for its warning colour; the words say the same, so
+    colour is never the only cue. A relative Output dir is shown from the
+    working folder, where the run would really write; that costs no file
+    system call."""
+    import os
+    import output_folder
+    fits = fits or _fits_chars
+    name = (run_name or '').strip()
+    problem = run_name_problem(name)
+    folder = os.path.abspath(run_folder(outdir, name))
+    first = fit_path('Saves to: ', folder,
+                     '' if name else '  (stamped at start)', fits)
+    warning = detail = ''
+    if problem:
+        # a name that is not plain ASCII gets New folder's way round it,
+        # in its own words (owner decision 2026-10-08)
+        if output_folder.ASCII_HINT in problem:
+            warning = ("⚠ Plain ASCII only: u for µ, as in 2.5uL. "
+                       "▶ Run will refuse it.")
+        else:
+            reason = problem.split('. ')[0].rstrip('.') + '.'
+            warning = f"⚠ {reason} ▶ Run will refuse it."
+            if not fits(warning):
+                warning = "⚠ Not a folder name: ▶ Run will refuse it."
+        detail = problem
+    elif found == FOLDER_NOT_MOUNTED:
+        warning = "⚠ The share is not mounted: ▶ Run will refuse."
+        where = f" at {mount}" if mount else ""
+        detail = (f"The share is not mounted{where}, so this folder would "
+                  f"be on this PC's own disk instead of on the share.")
+    elif found == FOLDER_NOT_CHECKED:
+        warning = "⚠ Could not check this folder: ▶ Run will refuse."
+        detail = (f"Looking for {' and '.join(RUN_FILES)} here failed for "
+                  f"another reason than the files being absent (a "
+                  f"permission, or the share), so a run already here cannot "
+                  f"be ruled out.")
+    elif found:
+        warning = "⚠ Already holds a run: ▶ Run will refuse this name."
+        detail = (f"It already holds {' and '.join(found)}. A run started "
+                  f"there would write over that run's files.")
+    elif slow and found is None:
+        warning = ("⚠ The Output dir is not answering: ▶ Run would "
+                   "refuse.")
+        detail = ("The check of this folder has not answered yet, so a run "
+                  "already there cannot be ruled out. If it is on the share, "
+                  "check that the share is mounted.")
+    full = folder + (f"\n\n{detail}" if detail else '')
+    if not warning:
+        return first, False, full
+    return f"{first}\n{fit_end(warning, fits)}", True, full
+
+
+def run_folder_writing_line(folder, fits=None):
+    """The line while a run is on -> (text, warn, full): "Writing to:" and
+    the folder that run writes to, cut as run_folder_line cuts it. The
+    boxes stay editable during a run, and judging them then once warned
+    that the run's own folder "already holds a run" (#402 review)."""
+    import os
+    folder = os.path.abspath(folder)
+    return fit_path('Writing to: ', folder, '', fits), False, folder
 
 
 def preflight_start_button(level, mismatch=False, checked=True,
@@ -974,9 +1379,10 @@ def baseline_stop_words(reason, dry, drive_kv, video=False):
                 "picture.\n\nThat picture is flat: the disc is not "
                 "visible, so nothing in this run could have been "
                 "measured.\n\n" + drive
-                + "\n\nOpen the Webcam tab, change the exposure or the "
-                "light until you can see the disc, press Apply & Lock, "
-                "then press Run again." + tail)}
+                + "\n\nOpen the Webcam tab, press Auto-set camera (or "
+                "change the exposure or the light by hand and press Apply & "
+                "Lock) until you can see the disc, then "
+                "press Run again." + tail)}
 
 
 def credible_baseline_ua(baseline_ua, trip_ua):
@@ -1215,7 +1621,9 @@ def scope_wait_record(outcome, waited_s, limit_s, good=0):
 NSIGMA_DEFAULTS = {
     'n_sigma': 5.0,         # the bar is n_sigma x sigma ...
     'dev_min': 20.0,        # ... or this many uA, whichever is larger
-    'window': 40,           # quiet reads behind location and sigma (20 s)
+    'window': 40,           # quiet reads behind location and sigma; about
+                            # 24 s at the recorded 0.59 to 0.61 s mean tick
+                            # (#424), not 20 s: the 0.5 s gate is a minimum
     'k_consec': 2,          # away reads in a row that would trip it
     'sigma_floor': 0.5,     # uA; sigma is never taken below this
     'guard': 2,             # newest quiet reads left out of the window

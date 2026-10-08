@@ -1242,6 +1242,73 @@ and after by `sldea_batch_eval.py`).**
   `video_edges.csv` is empty. Since the video review entry above, the
   next Save of that run in Edge Review re-runs it with this fit.
 
+## A run records the camera state it was shot under, and the camera adjustments search the scene instead of the lock (2026-10-07)
+
+**TL;DR:** setup.txt now records the camera state a run stamps: every
+locked control with its value, the red and blue balance, the device, its
+pixel format and the picture size. The Webcam tab's new Auto-set camera
+runs gain, exposure, white balance and lock in one press. It, Stabilize and
+Auto-WB once now shoot each trial picture under the trial's own values;
+they used to shoot every trial under the lock, so with a lock in place
+their searches said nothing about the scene.
+
+**Observation (2026-10-07, from the code; the model numbers are from
+`tests/test_webcam_autoset.py` and `tests/test_camera_controls.py`).**
+
+- The camera block of setup.txt was one line, "exposure N, gain N, WB off
+  (manual)". It named neither the red and blue balance the run stamps nor
+  any other locked control (brightness among them), and it read the same
+  when exposure and gain were the built-in fallbacks 6 and 60.
+- `webcam.oneshot_rgb` stamps the lock onto the camera before every grab.
+  Stabilize wrote a trial exposure and gain 0, then grabbed, and the grab
+  put the locked exposure and gain back; Auto-WB once did the same with the
+  red and blue balance. A lock is restored at every start, so on the bench
+  every trial picture was the locked one. The quickstart already told
+  operators to skip Stabilize for this reason.
+- The exposure search judged the mean of all three channels, which the red
+  and blue balance change. In the camera model with the bench's stale
+  balance (red 204, blue 104; the bench read red 204 on 2026-07-24), the
+  search stopped at exposure 64 with a mean of 167, and balancing the white
+  afterwards left that picture at a mean of 128, well under mid-gray.
+
+**Decision (owner, 2026-10-07: Auto-set redoes the white balance every
+time, and setup.txt records as much as possible).**
+
+1. **Auto-set camera** pins gain at its floor (0), finds the exposure for a
+   mid-gray picture, balances the white by gray world on the scene in view,
+   then locks and saves everything, in that order, because each step
+   depends on the one before. A step that fails stops the sequence, names
+   the step, and leaves the previous lock and the boxes as they were. The
+   boxes and the lock come out equal, so the run (which takes the boxes)
+   and the preview (which shows the lock) see the same picture. 🔒 Apply
+   & Lock sits beside the exposure and gain boxes (owner, 2026-10-08),
+   because a value typed there and left unlocked splits the boxes from
+   the lock again.
+2. **Every trial picture is shot under its own controls**
+   (`oneshot_rgb(..., controls=...)`), and the lock changes only at the
+   last step. Stabilize and Auto-WB once use the same two searches
+   (`webcam.find_exposure`, `webcam.balance_gray_world`): one exposure
+   search with one target for Stabilize and Auto-set (owner,
+   2026-10-08), so the two can never pick different exposures.
+3. **The exposure search judges the green channel**, which red and blue
+   balance do not touch. The exposure it finds holds once the white is
+   balanced, when the three means are equal: in the model, exposure 80 with
+   or without the stale balance.
+4. **setup.txt's camera block** keeps its summary as the line under
+   `--- Camera ---`, because Edge Review's run health quotes that line,
+   and adds `Camera device:`, `Camera pixel format:`, `Camera frame size:`
+   and `Camera controls:` lines (every control of the run's lock, as
+   `name=value`). It is built on the Tk thread from what the app already
+   holds: the lock the run stamps (`sldea_run_lock`) and the camera the
+   pre-flight resolved. There is no camera I/O on the run path. A run
+   whose pre-flight did not run writes "(not known: ...)", never an earlier
+   run's camera, and fallback values are named as built-in defaults.
+
+**Not verified on the bench.** How long Auto-set takes on the DFK, whether
+its three steps converge on a real backlit scene, and whether the green
+channel picks the exposures the whole mean picked on the gray scenes on
+file. The checks are listed in #369.
+
 ## The camera pre-flight shoots under the run's own lock, and says when the Webcam tab's fields and lock disagree (2026-10-05)
 
 **TL;DR:** on run `13_backlight` the pre-flight picture looked fine and
@@ -1760,6 +1827,110 @@ reported, naming the ticked box. Pinned by `tests/test_trek_polarity.py`.
 close to the commanded kV, and V_Out on screen for the whole ramp. Decision
 23 (detect the sign at the first landing) still stands for the case where
 this fails.
+
+## A run name used before is refused, and the SLDEA tab shows where a run will write (2026-10-08)
+
+**TL;DR:** typing a run name a second time made the next run write over
+the first one: the worker opens setup.txt and data.csv with mode 'w' in a
+folder made with `exist_ok=True`. ▶ Run now refuses a run folder that
+already holds setup.txt or data.csv, with no "start anyway", before any
+HV question. It also refuses a run folder on the share while the share
+is not mounted. A line under Run name shows the folder as the operator
+types and warns when Run would refuse it.
+
+**Observation.** Read in the code (`#402`), not met on the bench yet.
+`_sldea_worker` built `rundir = os.path.join(outdir, runname or
+p.run_dirname(started))`, called `os.makedirs(framedir, exist_ok=True)`,
+then opened `setup.txt` and `data.csv` with mode `'w'` and appended to
+`run.log`. A typed name that matched an earlier run's folder truncated
+that run's setup.txt and data.csv, overwrote every frame whose step, kV
+and tag repeated, and mixed the two runs in one run.log. Edge Review's
+Save writes the areas into data.csv, so a reviewed run lost its review
+too. Nothing asked first, and nothing on the tab showed the folder.
+
+**Decision.**
+
+- **Refuse, do not ask.** An earlier run's data.csv may be the only copy,
+  and an overwrite cannot be undone. A blank name is never refused over a
+  run already there: its folder is named from the start time.
+- **A typed name follows New folder's rules** (`output_folder.name_problem`,
+  `#394`): one folder inside the Output dir, a name Windows and the share
+  accept, plain ASCII, because OpenCV on the lab's Windows PCs cannot open
+  frames in a folder named otherwise (measured in `#394`'s review).
+- **A folder that does not answer is refused too.** The two stats run on a
+  thread and Run waits for them at most `RUN_FOLDER_CHECK_S`, 3 s: a run
+  already there cannot be ruled out, and a share that hangs would stall
+  the run's own writes as well. On a local disk the check costs 0.15 ms
+  (median of 200, Windows VM).
+- **Where it sits.** Right after the start gate, which asks a question
+  only when a stepped sweep is still running, and before the video
+  pre-flight, every HV question and the camera pre-flight, so an operator
+  is never asked about the HV and then refused over a name. `sldea_run`
+  reads both boxes there, once, and hands those values to the worker, so
+  the folder checked is the folder written.
+- **One join.** The worker makes its folder through
+  `sldea_profile.run_folder`, which the tab's line uses too; it gives the
+  old expression's result to the byte.
+
+**Review, same day.** Observations, read in the code and reproduced in
+tests:
+
+- A share that is not mounted passed the check. Unmounted, a stat under
+  `/mnt/shareDrive` finds nothing at once, so the line said a plain
+  "Saves to:" and Run went on, to fail at `makedirs` after "Energize
+  HV?", or, with a writable mount point, to write the run to the bench
+  PC's own disk. That is what `#394`'s New folder... already refuses.
+- `os.path.exists` reads every failed stat as "absent", so EIO, ESTALE or
+  EACCES on a share that had just dropped passed the check as "no run
+  here".
+- The check and the worker's first write are minutes apart (every dialog
+  and the camera pre-flight), so a run started in the same folder
+  meanwhile, from another PC on the share, was still overwritten.
+- The line had no fixed height: a warning took it to two lines and the
+  u-for-µ hint to three, and ▶ Run moved 15 to 30 px after each typing
+  pause (999, 1014 and 1029 px, measured on the tab).
+
+Decisions:
+
+- **A run folder under the share's mount point while nothing is mounted
+  there is refused**, named or blank, with New folder's own test
+  (`output_folder.share_unmounted`, the mount read off `SLDEA_SHARE_DIR`).
+  It runs on the check's thread, since `os.path.ismount` stats the mount
+  point. A blank name on the share is therefore checked for the mount,
+  and refused when that check does not answer, like a typed one. An
+  Output dir off the share is not touched by it.
+- **Only a missing file means "absent".** The stats use `os.stat`;
+  `FileNotFoundError` and `NotADirectoryError` mean no run there, and any
+  other failure refuses ("could not be checked").
+- **The worker opens setup.txt and data.csv with mode 'x'** for a typed
+  name. setup.txt is its first write, right after `makedirs`, and data.csv
+  follows; both come before the camera and the first SG write, so a lost
+  race takes the `makedirs` failure's path: "ERROR:" in the run log, and
+  the finally zeroes the SG. A blank name keeps 'w'. When it is data.csv
+  that fails, this run has already written its setup.txt in that folder
+  and appended its log lines to the run.log there, so its message says
+  that, not that it left the folder as it was (final HV review,
+  2026-10-08).
+- **The line is always two lines high**: "Saves to:" and the folder, cut
+  from the left to the line's width so the run folder's name shows, then
+  a warning or nothing. While a run is on it says "Writing to:" and that
+  run's folder, and checks nothing.
+
+**What changed.** `sldea_profile.py`: `run_folder`, `run_name_problem`,
+`holds_run`, `run_folder_look`, `run_folder_look_within`,
+`run_folder_refusal`, `open_run_file`, `run_folder_line`,
+`run_folder_writing_line`. `output_folder.py`: `on_share`,
+`share_unmounted`, which `parent_problem` now calls. `gui.py`: the line
+under Run name (row 2 of the Output & Measurement box; the device rows
+below it moved down one), its check on a thread, the refusal in
+`sldea_run`, the worker's folder and its two 'x' opens, and a look again
+from `_sldea_finished`. Pinned by `tests/test_sldea_run_folder.py`.
+
+**Bench check (#369).** On a lab PC, type the name of a run that exists:
+the line warns and ▶ Run refuses. On the Linux bench, unmount the share
+with Output dir on it: the line says the share is not mounted, for a
+typed name and a blank one, and ▶ Run refuses with "The share is not
+mounted at /mnt/shareDrive" before any other dialog.
 
 ## A run cannot start, or carry on, on a picture with nothing in it (2026-10-02)
 
@@ -6831,6 +7002,102 @@ Observation → decision:
   the controls everywhere it should, re-applies them where the firmware
   actually wins, and refuses to start a run from a frame that has
   already lost the measurement.
+
+## Correction: the watchdog's 0.5 s cadence is a gate, not a validated period; LIVE runs record a 0.56 s median tick, and the shortfall bar is 70 %, not 80 % (2026-10-08)
+
+**TL;DR:** The telemetry sidecar entry below (2026-08-05) calls the
+breakdown watchdog's 0.5 s monitor cadence "bench-validated", but 0.5 s
+is only the gate: three LIVE runs with the watchdog armed recorded a
+median tick of 0.56 s and gaps up to 1.45 s, and nobody has checked the
+confirm streak against those numbers. The same entry says the shortfall
+warning fires below 80 % of target, but the code uses 70 %. Wording
+only; no value and no behavior changes (`#424`).
+
+**Observation.**
+
+- The 2026-08-05 entry says: "When the watchdog is armed the monitor
+  cadence stays exactly 0.5 s: a logging feature does not get to re-time
+  a bench-validated safety sampler (its confirm-streak semantics are tuned
+  to that cadence)." The run loop's comment in `gui.py` said: "With the
+  watchdog armed it stays exactly 0.5 s — its bench-validated sampling is
+  NOT re-timed by a logging feature".
+- The commit that wrote both (`6bd72c9`, 2026-08-05) says "the watchdog's
+  0.5 s cadence is untouched", which was true. Its "Not bench-verified
+  yet — smoke it on the next visit before trusting the file" is about
+  `telemetry.csv`, not the cadence. No check then or since has validated
+  the period.
+- 0.5 s is a gate, not a period. The loop sleeps `SLDEA_POLL_S` = 0.1 s a
+  pass and reads I_Out on the first pass where `el - last_mon >= mon_dt`,
+  so a tick is never shorter than 0.5 s. It runs late by however long the
+  pass that notices it takes, and a still's camera grab holds the loop.
+  The code's own desk estimate, beside `TELEMETRY_SHORTFALL_FRAC`: "a
+  0.5 s gate actually fires at 0.5-0.6 s, and every snapshot steals a
+  tick for its camera grab". The gate and `SLDEA_POLL_S` are unchanged
+  since `6bd72c9`.
+- **The bench records the period.** At the default 2 Hz every tick writes
+  one periodic `telemetry.csv` row stamped with the tick's own elapsed
+  time, and run.log's `telemetry:` line gives the achieved rate and the
+  longest gap. Three LIVE runs had the watchdog armed (`dev ≥100 µA for
+  3s, baseline learned at 0 kV`) and telemetry at 2 Hz. The gaps below
+  are recomputed from their periodic rows (copies pulled from the lab
+  share on 2026-10-08):
+
+  | Run | run.log `telemetry:` line | Ticks | Gap min / median / mean / max (s) | Gaps over 1 s | Stills |
+  |---|---|---|---|---|---|
+  | `SLDEA_20261001_151016` | 1.69 Hz, max gap 1.4 s | 347 | 0.500 / 0.555 / 0.592 / 1.433 | 22 | 26 |
+  | operator run 13 (2026-10-05) | 1.65 Hz, max gap 1.4 s | 623 | 0.500 / 0.558 / 0.606 / 1.449 | 51 | 52 |
+  | operator run 16 (2026-10-06, video) | 1.69 Hz, max gap 1.1 s | 136 | 0.501 / 0.556 / 0.591 / 1.101 | 2 | 14 |
+
+  Every gap over 1 s has a still inside it. The one-shot runs show about
+  one such gap per still; run 16 takes its stills off the video stream
+  and shows two. LIVE runs at the same gate with the watchdog off agree:
+  `13_backlight_2` 1.71 Hz with a max gap of 1.3 s (the figure `#369`
+  quotes under §M as evidence on file), `13_backlight` 1.66 Hz,
+  `SLDEA_20260806_151857` 1.78 Hz.
+- **Until now the repo quoted no bench value.** The only measured tick
+  figure in this log is a desk one, in the 2026-08-05 entry: "Measured:
+  mean tick gap at a 3 s share 3.10 s → 0.73 s", against a simulated
+  slow share.
+- **Recorded is not validated.** Nobody has checked the confirm streak
+  against these numbers. The streak counts seconds, not reads
+  (`BreakdownWatchdog.update`): `_over_since` is the first over-trip
+  read's time, and the trip is the first later read with
+  `t - _over_since >= confirm_s` (3 s). So the trip comes at least 3.0 s
+  after the first over-trip read and less than 3.0 s plus the gap that
+  crosses the 3 s mark: under 4.45 s at the longest gap measured. At an
+  exact 0.5 s it takes 3.0 / 0.5 + 1 = 7 reads. Replaying every tick of
+  the three runs above as the start of a sustained over-trip current, the
+  trip comes 3.01 to 4.27 s after the first over-trip read: after 7 reads
+  in 667 of 1090 starts, 6 reads in 375 and 5 reads in 48 (fewer reads
+  where a still's long gap falls inside the streak).
+- **§N1 section B measures the read, not the period.** `#369` says: "Its
+  section B times one I_Out read and an I+V pair." It prints the
+  worst-case read as a share of the 0.5 s tick (`rate_verdict` in
+  `bench/test_sldea_watchdog_probe.py`) and does not run the loop.
+- The 2026-08-05 entry also says: "a run below 80 % of target says so
+  explicitly". The same commit set `TELEMETRY_SHORTFALL_FRAC = 0.7`, with
+  the comment "Only a real inability to keep up should raise a warning,
+  so the bar is 70% of target, not 80%." §M's pass bar, 1.4 Hz, is 70 %
+  of 2 Hz. No other document states 80 % (searched: README, BENCH_TEST,
+  SLDEA_MEASUREMENT, the quickstart, CHANGELOG and the manual sources).
+
+**Decision.**
+
+- Quote 0.5 s as the watchdog's monitor gate, the cadence its confirm
+  streak was designed around. Quote the bench period as recorded, from
+  the three runs above: median tick 0.56 s, mean 0.59 to 0.61 s, longest
+  gap 1.45 s, 1.65 to 1.69 Hz. Call neither one validated: whether a 3 s
+  streak that trips 3.0 to 4.3 s in, after 5 to 7 reads, is the right
+  rule has not been decided. Telemetry still does not re-time the gate.
+- §N1 section B in `#369` stays open for what it measures: the cost of a
+  read and the headroom for polling faster than 2 Hz. The period needs no
+  new check; every LIVE run with telemetry at 2 Hz records it in its
+  `telemetry:` line.
+- The telemetry shortfall warning fires below 70 % of the target rate
+  (`TELEMETRY_SHORTFALL_FRAC`), 1.4 Hz at the default 2 Hz. Read the
+  80 % in the 2026-08-05 entry as 70 %.
+- The run loop's comment in `gui.py` now says this. The 2026-08-05 entry
+  stays as written, because this log is append-only.
 
 ## Live telemetry sidecar — the watchdog's 2 Hz samples are written down (2026-08-05)
 

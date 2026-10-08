@@ -64,6 +64,7 @@ It never raises into the window. A failure is caught, reported on stderr
 Headless self-test: .venv/bin/python tests/test_tk_stall.py
 """
 import collections
+import gc
 import os
 import sys
 import threading
@@ -395,6 +396,30 @@ def _wall(t):
     return time.time() - (time.monotonic() - t)
 
 
+def _current_frames():
+    """sys._current_frames() with the cyclic collector off, as CPython does
+    itself from 3.11.12 on.
+
+    Before that the call could hang the whole process: it holds the
+    runtime's thread-list lock while it allocates frame objects, an
+    allocation can start a collection, the collection can run Python code
+    that lets go of the GIL, and a thread that starts or ends then takes
+    the GIL and waits for the lock (gh-106883; Python 3.11.12 changelog,
+    C API: "Disable GC during the _PyThread_CurrentFrames() and
+    _PyThread_CurrentExceptions() calls to avoid the interpreter to
+    deadlock"). The bench runs /usr/bin/python3.11 at a patch level not
+    recorded yet, and the app starts and ends a thread for every
+    background job (gui.py _run_bg). On a fixed Python this costs two
+    cheap calls."""
+    was_on = gc.isenabled()
+    gc.disable()
+    try:
+        return sys._current_frames()
+    finally:
+        if was_on:
+            gc.enable()
+
+
 def _stack(frame, limit=MAX_FRAMES):
     """`frame` and its callers as (file, line, function), outermost first.
     Only the innermost `limit` are kept, behind a marker when any were
@@ -674,7 +699,7 @@ class StallLogger:
         stack = threads = cpu = note = None
         frames = top = None
         try:
-            frames = sys._current_frames()
+            frames = _current_frames()
             names = {t.ident: t.name for t in threading.enumerate()}
             mine = threading.get_ident()
             top = frames.get(self.tk_ident)

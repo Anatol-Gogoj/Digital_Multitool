@@ -17,6 +17,7 @@ import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
     _os.path.abspath(__file__))))
 import ast
+import gc
 import hashlib
 import io
 import os
@@ -417,6 +418,51 @@ def test_the_cpu_clock_reads_another_threads_cpu_from_outside():
     finally:
         done.set()
         th.join()
+
+
+def test_the_stack_is_read_with_the_collector_off():
+    """gh-106883: before Python 3.11.12, sys._current_frames() could hang
+    the whole process if a collection started inside it. The watchdog's
+    look turns the collector off around the call and puts it back as it
+    found it, even when the call raises."""
+    real = sys._current_frames
+    seen = []
+
+    def spy():
+        seen.append(gc.isenabled())
+        return real()
+
+    def boom():
+        raise RuntimeError('boom')
+
+    was_on = gc.isenabled()
+    logger = tk_stall.StallLogger(None, 'w', os.devnull)
+    try:
+        sys._current_frames = spy
+        gc.enable()
+        assert tk_stall._current_frames() and seen == [False], seen
+        assert gc.isenabled()                       # back on
+        logger._look()                              # the watchdog's way in
+        assert seen == [False, False] and gc.isenabled(), seen
+        gc.disable()
+        tk_stall._current_frames()
+        assert seen[-1] is False and not gc.isenabled()  # left off, as found
+        gc.enable()
+        sys._current_frames = boom
+        try:
+            tk_stall._current_frames()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError('the error was swallowed')
+        assert gc.isenabled()                       # back on after an error
+    finally:
+        sys._current_frames = real
+        logger._close_clock()
+        if was_on:
+            gc.enable()
+        else:
+            gc.disable()
 
 
 def _parked_for_the_test(ready, release):

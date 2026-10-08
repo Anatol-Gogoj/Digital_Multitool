@@ -104,6 +104,141 @@ figure's first caption lines, which that branch left unwrapped, now wrap
 too. `CAPTION_LINE_MAX` now cuts only a grouped line composed without a
 width test.
 
+### Follow-up (2026-10-07): the same caption rows from a faster wrap, a window-only cut, and the run legend out of the data (#391)
+
+**TL;DR:** the six-group seeded figure now draws in 208 ms instead of 363
+and re-lays out at a new width in 117 to 129 ms instead of 209 to 237,
+and every caption row is the row it was before. In the plot window only,
+a caption that would take more than 0.30 of the figure's height is cut,
+and its last row says how many more rows the export carries. A run
+legend that covers data moves below the panels when they can spare the
+height, which costs a second layout pass; a legend that covers nothing
+stays where it was, to the byte.
+
+**Observation** (main `f69eade`, Gogojster, matplotlib 3.11.1; the
+#380/#382 reviewer's seed of 12 runs in six concentration groups; every
+trial a fresh process, so the width cache starts cold; medians of 5
+trials with their ranges, measured while other test suites ran on the
+same desktop).
+
+- A grouped relayout at a width not seen before took 209 to 237 ms
+  (medians at 10, 8, 7 and 6 in; single trials 199 to 318), and the draw
+  363 ms (344 to 387). In one relayout at 8 in, 234 of 771 width lookups
+  missed the cache, and the misses cost 153 ms of the 207 ms. By caller,
+  in a second run at 8 in: 69 ms in the Members search's probes, 62 ms
+  in the other grouped lines, 16 ms in the first Members wrap and 9 ms
+  in the ungrouped lines. `_wrap` measured a row again after every word:
+  13 to 29 exact measurements of a growing string a row (23 on average
+  at 12.6 in, 18 at 8 in).
+- In a small window the measured caption strip squeezed the panels. On
+  the suite's synthetic runs the aggregate figure's strip took 0.50 of
+  the height at 4.5 x 3.0 in and its panels 0.19; at 3.6 x 2.5 in the
+  strip reached 0.84, tight_layout gave up and the axes overprinted the
+  caption. The default figure's panels kept 0.44 and 0.23.
+- On the reviewer's five-run seed (P3 at 2.5 and 1.5 mL, Invisicon 3900,
+  carbon black and a run with no electrode line, one run per group), the
+  run legend at `FIGSIZE` covered curves and markers of the left panel.
+  So did the legends of the twelve-run seed (18 entries, 1.30 times the
+  panel's height, over 0.75 of its area), of the same runs grouped by
+  material (16 entries, 1.10, 0.67), of the seed under `--aggregate-only`
+  (6 entries, 0.41, 0.32) and of the twelve runs as one ungrouped
+  aggregate (13 entries, 0.66, 0.28). The legends of the default,
+  `--prepost`, two-run aggregate and two-group figures the suite draws
+  cover nothing.
+- Seeded names carry ", ", so "A, 2.5 mL, B has one run" read as three
+  groups.
+
+**Decision** (owner, 2026-10-06: keep the pixels identical; cut the
+caption in the window only; change only figures whose legend covers
+data).
+
+- **The wrap is steered by an estimate and decided by measurement.**
+  `_caption_fitter` adds `fits.reach`: how many more words fit on the
+  row, from each word's cached width plus one typical word gap. `_wrap`
+  measures the row with that many words added in one exact test and
+  takes them when it passes; a guess that fails is shortened one word at
+  a time. Appending text never makes a row narrower, so the rows are
+  exactly the word-by-word loop's. On the fixture the guess landed on
+  every row's end, and a row costs about 2.5 exact tests.
+- **The Members search keeps its bisection and its probes,** so it cuts
+  where it always cut. Each probe is still answered by the exact width
+  test, through the steered wrap, which stops counting once a row past
+  `MEMBERS_MAX_ROWS` begins (`_wrap(limit=)`). A search that skipped or
+  moved probes on an estimate could land elsewhere: a cut that ends on a
+  comma is narrower than one that ends on "…", so whether a cut fits is
+  not guaranteed to be monotone in its length.
+- Tests compare the new wrap with a copy of the old one on every caption
+  line of a default, an aggregate and a five-group seeded figure plus
+  hand-made hard cases, and the new Members search with a copy of the
+  old one over three sets of names (the twelve-run seed, forty long
+  folder names in one group, and run names carrying ", " and "; ", a
+  double space and a name too long for a row), at 13 widths from 3.1 to
+  13.1 in, and again with an estimate that is wrong on purpose. A wrap
+  that trusts the estimate fails them.
+- Result, with the legend rule below switched off to isolate this: a
+  grouped relayout at a new width takes 96 to 113 ms (medians) and the
+  draw 152 ms; the twelve-run ungrouped aggregate 49 to 64 ms at a new
+  width, against 52 to 97 ms on main.
+- **The width cache's key holds the font,** the configured family and
+  the font file it resolves to, as well as the text and the size. No
+  pixel changes.
+- **In the plot window only** (`window_figure`), a caption strip past
+  `WINDOW_CAPTION_MAX` = 0.30 is cut: the window keeps the first rows and
+  ends with "[Caption cut in this window: N more rows in the export.]".
+  0.30 is the most the per-row allowance ever reserved before #380. The
+  aggregate figure's panels then keep 0.40 of the height at 4.5 x 3.0 in
+  and 0.33 at 3.6 x 2.5 in, with the caption clear of the axes. Exports
+  draw into a figure of their own and are never cut; a test checks an
+  export is byte-identical with the window's figure cut in the same
+  process, and with the cap set to 0.05.
+- **A run legend that covers data moves below the panels.** "Covers"
+  means its frame, as laid out, overlaps a drawn line, a marker (by its
+  radius), a band or a text on its axes. It then stands below the panels
+  as a figure legend with as many columns as fit in 0.87 of the width
+  (the caption's budget, for the same hinting reason: at 0.98 a legend
+  ended at 1.02 of the width at 96 dpi), clear of the axes above and the
+  caption below at every dpi from 50 to 158. It moves only when its strip
+  is at most half its panel's height (`LEGEND_BELOW_MAX`). Without that
+  limit, the 13-entry legend moved out of a 7 x 3.5 in window left the
+  panels 0.15 of the height (0.45 with it in), and out of an export of
+  that size it made tight_layout give up, so the axes overprinted the
+  legend and the caption. In the window, once the caption had to be cut,
+  the legend stays in its panel. A legend that covers nothing is only
+  measured. With the legend below, the reviewer's seed keeps 0.35 of the
+  height for its panels at `FIGSIZE`, and the twelve-run seed 0.23,
+  where its legend had covered 0.75 of the left panel.
+- The lone-run sentence joins its names with "; ".
+- Run and group names are drawn with every "$" escaped, so matplotlib
+  never reads a pair as mathtext and a wrap cannot split one. The tidy
+  CSV and the figspec keep the names as recorded; a name with no "$"
+  draws as before.
+
+**Byte identity, checked.** Nineteen figures exported as 300 and 120 dpi
+PNG and as SVG (57 files) match main `f69eade`'s engine byte for byte,
+with the legend rule switched off, except the two whose caption lists
+two or more lone-run groups; their caption text differs only in ", "
+changed to "; ". With the rule on, the five figures whose legend moves
+differ as well. The suite's byte-identity tests against older engines
+pass; the default-figure one ran against `7e45ac1a`, because the base
+it pins was renamed by a history rewrite (#399 re-pins it).
+
+**What the legend rule costs.** A second tight_layout on every draw and
+relayout of a figure whose legend moves, and a candidate legend built and
+measured wherever a legend covers data but cannot move. The twelve-run
+seed's relayout at a new width takes 117 to 129 ms with it (96 to 113
+without) and 111 ms at a size already seen (67 without, 59 on main). The
+twelve-run ungrouped aggregate, whose legend now moves too, re-lays out
+SLOWER than on main: 86 to 100 ms at a new width, against 52 to 97 (49
+to 64 with the rule off). A legend that covers nothing costs one overlap
+test: 0.3 ms on the default figure (10 lines on the panel), 0.7 ms on
+the two-run aggregate (22 lines), more as lines are added.
+
+**Not changed.** Current and power figures keep their legend upper left
+even where it covers the trace, as it does on the suite's own current
+figure, whose byte-identity test must not move. The per-row allowance
+and the three-row Members cap are unchanged; their alternatives are
+measured in the pull request.
+
 ## Group by material: setup.txt seeds the plot groups, and a group mean's line style is its electrode material (2026-10-06)
 
 **TL;DR:** the plot window can now fill its groups from each selected

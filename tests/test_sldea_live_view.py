@@ -496,13 +496,27 @@ def test_a_still_that_could_not_be_saved_is_never_handed_over():
             app.lines
 
 
+def _color_disc_frame():
+    """_disc_frame with R, G and B apart (R = gray + 40, B = gray - 40):
+    the same gray mean, so the baseline check sees the same contrast, but
+    a channel swap now changes its bytes. A gray frame (R = G = B) let an
+    in-place RGB-to-BGR conversion through (review F2)."""
+    f = _disc_frame().astype(_np.int16)
+    f[:, :, 0] += 40
+    f[:, :, 2] -= 40
+    return _np.clip(f, 0, 255).astype(_np.uint8)
+
+
 def test_the_frame_is_byte_identical_after_the_capture_and_baseline_check():
     """#388: the hand-over makes no copy, so the view holds the very array
     the run thread goes on using. Nothing on that side may write into it:
     pinned byte for byte after _sldea_capture and the baseline picture
     check, alone and in a whole stills-only DRY run (warm-up, baseline
-    and its check, landings), where every still is that one array."""
-    frame = _disc_frame()
+    and its check, landings), where every still is that one array. Its
+    three channels differ, so a channel swap in place shows too."""
+    frame = _color_disc_frame()
+    assert (frame[:, :, 0] != frame[:, :, 2]).all()
+    assert (frame[:, :, 0] != frame[:, :, 1]).all()
     before = frame.copy()
     app = _HandOverApp()
     with _tempfile.TemporaryDirectory() as tmp:

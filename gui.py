@@ -9161,6 +9161,16 @@ LOGGING:
         self._new_folder_into(self.cam_dir_var, "Save to")
 
     def cam_refresh_devices(self):
+        if 'camera-ctrl' in self._bg_busy:
+            # Refused while an adjustment runs, as Read camera is (#425):
+            # cam_sync_controls below reads exposure and gain off the
+            # camera, which is then shooting a trial, into the boxes a run
+            # takes, and a search that failed left that trial there over
+            # the unchanged lock. Nothing is re-listed either; the
+            # adjustment has the selected camera until it finishes.
+            self._cam_status("another camera adjustment is still running; "
+                             "press Refresh when it has finished", 'warn')
+            return
         idxs = webcam.list_cameras()
         vals = [str(i) for i in idxs]
         self.cam_combo['values'] = vals
@@ -9414,6 +9424,24 @@ LOGGING:
         except OSError as e:
             saved, err = None, str(e)
         return n, saved, err
+
+    @staticmethod
+    def _cam_put_lock_back(device):
+        """Stamp the lock back onto `device` once an adjustment's trials
+        are over, for a worker thread: Stabilize and Auto-WB once (#425
+        review). Every trial stamps its own controls (webcam.oneshot_rgb),
+        and these two lock nothing, so the camera kept the last trial. A
+        preview restarted afterwards stamps the lock as it opens, but with
+        the preview off nothing did, and Refresh then read that trial into
+        the boxes a run takes (exposure 130, gain 0 after a failed
+        Stabilize, over a lock of 20 and 44). The lock is the one in place
+        before the adjustment, as nothing changes it while one runs. Never
+        raises, like Auto-set's put-back on failure: the adjustment's own
+        result or error is what the operator sees."""
+        try:
+            webcam.apply_locked(device)
+        except Exception:
+            pass
 
     @staticmethod
     def _cam_nothing_locked(device, controls):
@@ -9684,7 +9712,10 @@ LOGGING:
         def work():
             m = re.search(r'(\d+)$', device)
             spec = webcam.resolve_camera(int(m.group(1)) if m else 0)
-            found = webcam.find_exposure(spec, base)
+            try:
+                found = webcam.find_exposure(spec, base)
+            finally:
+                self._cam_put_lock_back(device)
             if found is None:
                 return None
             exp, mean = found
@@ -9712,7 +9743,9 @@ LOGGING:
 
     def cam_grey_world(self):
         """One-shot grey-world WB: tune red/blue_balance on the CURRENT
-        scene until the channel means match, then fill + lock."""
+        scene until the channel means match, then fill the boxes. It locks
+        nothing (Apply & Lock does), and puts the lock back on the camera
+        once its trials are over (#425)."""
         if self._cam_owned_by_sldea():
             return
         device = self._cam_device()
@@ -9735,9 +9768,12 @@ LOGGING:
         def work():
             m = re.search(r'(\d+)$', device)
             spec = webcam.resolve_camera(int(m.group(1)) if m else 0)
-            return webcam.balance_gray_world(
-                spec, base, red=base.get('red_balance'),
-                blue=base.get('blue_balance'))
+            try:
+                return webcam.balance_gray_world(
+                    spec, base, red=base.get('red_balance'),
+                    blue=base.get('blue_balance'))
+            finally:
+                self._cam_put_lock_back(device)
 
         def done(best, error):
             try:

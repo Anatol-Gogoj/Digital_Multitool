@@ -408,7 +408,9 @@ On 2026-10-01 (run SLDEA_20261001_151016) three things went wrong in a row, mark
   0 kV photo two seconds before it, so the camera settles. **Resting:** the disc at 0 kV.
 - **Nominal / measured kV:** commanded / read by the scope. **V_Out / I_Out:** the Trek's voltage
   and current monitor outputs. **Watchdog:** aborts when the current stays "Trip" uA from its 0 kV
-  level for "Confirm (s)" seconds. **Breakdown:** an electrical failure of the device.
+  level for "Confirm (s)" seconds; with no usable 0 kV level (a short baseline, or no scope at the
+  arming line) it uses |I| >= "Trip" instead, and run.log says "absolute". **Breakdown:** an
+  electrical failure of the device.
 - **Scale / anchor:** pixels to millimeters (16 mm divided by the disc's pixels). **Verify, circle,
   twopoint:** the three ways to set it; files store these names, not letters.
 - **Candidate A to D:** outlines for a frame (D is yours). **conf:** the machine's score for an

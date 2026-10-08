@@ -1514,7 +1514,8 @@ telemetry, so the rule has not yet met one at its live read rate. Every
 away read, a lone one included, is listed in run.log once the SG is
 zeroed, so the owner can decide later whether a single away read is a
 breakdown. It stays in shadow until the §N1 probe and a bench campaign
-say it should act.
+say it should act. A run with the watchdog box unticked counts as
+evidence only through its would-trips (HV review, decision 10).
 
 **Observation** (replay on the 18 single-layer runs with current copied
 from the lab share, 2026-10-08: data.csv, telemetry.csv, setup.txt and
@@ -1596,9 +1597,55 @@ run.log only).
    reason telemetry.csv gets no row per away read; its periodic rows
    already carry the current at the telemetry rate.
 
+**HV review, same day (2026-10-08).** An adversarial review of the
+shadow's place on the HV path, on the real worker over the scope-lock
+suite's fakes. The rule itself held against every attack (exceptions,
+the `finally` block, the readers of its telemetry row and run.log lines).
+
+*Observation.*
+
+- Nothing pinned that the shadow runs after the fixed watchdog has
+  decided. With the shadow's block moved above the trip branch and a
+  would-trip made to cost 2 s, every suite still passed: the run-level
+  test checked only that the run tripped in the end, not when.
+- The would-trip's telemetry row is the one file write the shadow adds to
+  the HV loop, once per run. Model: 10 µA, then 40 µA (a would-trip under
+  the 100 µA trip), then 160 µA a second later, confirm 3 s. A 3 s stall
+  on that row's own flush moved the 160 µA onset to the SG zero from
+  3.06 s to 5.67 s. With every flush of a stalled share stalling instead,
+  the shadow made no difference, because the periodic row pays the same
+  stall (the review's 5.15 s with and without it, at 2 Hz).
+- With the watchdog box unticked (telemetry on), the shadow has no 0 kV
+  baseline. It seeds its window from settled landing reads, so a fault
+  present from the first landing is learned as normal, and no fixed rule
+  runs beside it on such a run: 120 µA from the ramp on gave "no trip".
+  The class docstring said the fixed rule "still catches" that case; on
+  this path there is none.
+
+*Decision (2026-10-08).*
+
+8. A test pins the order in a real worker run: on every read the shadow
+   is fed, the call just before it is the fixed watchdog's decision on
+   that same read, and a would-trip's telemetry row comes after both
+   decisions of its tick. The review's mutant fails it.
+9. The would-trip row is written with the telemetry log's `hold_flush`
+   set, and the hold is put back after it. The row issues no flush of
+   its own; the next flush writes it out (the periodic row in the same
+   tick at 2 Hz, or the log's close after the SG is zeroed), so it is
+   kept. In the model above, the stall on that row's flush now costs
+   nothing: 3.07 s, against 3.06 s with no stall. Not covered: a write
+   that reaches the disk because the file's buffer is full, which only a
+   long slow-mode flush window can cause, and which the periodic rows
+   meet the same way. Taking every row off this thread is the queue
+   TelemetryLog's docstring already names as a follow-up.
+10. Evidence from a run with the box unticked counts only through its
+    would-trips. Its "no trip" means nothing, because a fault there from
+    the first landing looks normal to the rule. The docstring says so.
+
 **Before it may act.** The §N1 probe's quiet-rig sigma per measurement
 token; a bench campaign of LIVE runs in shadow with no false would-trip and
-every confirmed event caught, which would also be the first real
+every confirmed event caught (a "no trip" counting only from runs with the
+box ticked, decision 10), which would also be the first real
 breakdowns it sees at its live read rate; the owner's call on whether a
 self-clearing excursion (one read far off, or a short burst past the
 scope's screen) should stop a run; and a peak token (`#189`) if

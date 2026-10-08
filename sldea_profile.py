@@ -1204,9 +1204,12 @@ class NSigmaWatchdog:
     `base_sigma`: the runner's reads before the ramp) stands in. With no
     baseline, settled landing reads seed the window unjudged until it
     holds `w_min` of them; a fault present from the first landing is then
-    taken as normal, which the fixed rule beside it still catches. (The
-    desk prototype of 2026-10-08 judged reads before it had anything to
-    judge them by, so without a baseline its window never filled.)"""
+    taken as normal. The fixed rule catches that only on a run where it is
+    armed (its absolute |I| rule, when its baseline read failed). With the
+    watchdog box unticked nothing does, so such a run's "no trip" is no
+    evidence; only its would-trips are (HV review 2026-10-08). (The desk
+    prototype of 2026-10-08 judged reads before it had anything to judge
+    them by, so without a baseline its window never filled.)"""
 
     def __init__(self, n_sigma=None, window=None, k_consec=None,
                  dev_min=None, sigma_floor=None, guard=None, w_min=None,

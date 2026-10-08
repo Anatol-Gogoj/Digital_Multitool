@@ -8564,6 +8564,166 @@ def test_cal_choice_names_its_buttons_and_opens_over_the_dialog():
         root.destroy()
 
 
+def test_cal_choice_asks_while_a_window_tk_made_holds_the_grab():
+    """A WINDOW TK MADE ITSELF HOLDS THE GRAB (#428). tkinter's
+    grab_current() looks the grabbing window up among the widgets tkinter
+    made, and raises KeyError for one Tk made itself: a message box or the
+    folder chooser on X11, a combobox dropdown anywhere. cal_choice read
+    the grab that way to hand it back afterwards, so in that state the
+    question would raise KeyError instead of being asked. No path in the
+    app reaches that state today; this case builds it directly. The grab
+    is now read and restored by its Tcl name, as gui.py's reason watch
+    does since #393.
+
+    Pinned, each question answered by a click:
+    - a Tcl-made toplevel (named as Tk's own X11 message box) holds the
+      grab: the box is asked, holds the grab while it is up, and hands the
+      grab and the focus back to that window;
+    - that window is destroyed while the box is up: nothing raises and
+      nothing holds the grab;
+    - a Tcl-made toplevel (named as Tk's X11 folder chooser, which is
+      withdrawn, not destroyed, when it closes) is withdrawn while the box
+      is up: the grab is NOT handed to it. A local grab on a window that
+      is not mapped is granted, on Windows and on X11, and would hold the
+      pointer of every window of the application;
+    - a combobox dropdown is posted: the question is asked, and the grab
+      goes back to the dropdown while it is on screen. Tk on Windows
+      unposts it when the box takes the focus, and ttk then hands the grab
+      to the calibration window, which held it before the dropdown."""
+    import sldea_edge_gui as gui
+    import tkinter as tk
+    from tkinter import ttk
+    root = _tk_root_or_skip('cal_choice under a Tk-made grab')
+    if root is None:
+        return
+
+    def grab_name():
+        return str(root.tk.call('grab', 'current', root._w))
+
+    def on_screen(name):
+        return (root.tk.getboolean(root.tk.call('winfo', 'exists', name))
+                and root.tk.getboolean(
+                    root.tk.call('winfo', 'viewable', name)))
+
+    try:
+        parent = tk.Toplevel(root)
+        parent.geometry('480x320+120+120')
+        parent.update()
+        seen = {}
+
+        def ask(while_up=None):
+            """cal_choice over `parent`, answered by a click on its
+            accepting button; `while_up` runs while the box is up."""
+            seen.clear()
+
+            def go():
+                boxes = [w for w in parent.winfo_children()
+                         if isinstance(w, tk.Toplevel)]
+                if not boxes:
+                    seen['error'] = 'no question box opened'
+                    return
+                box = boxes[-1]
+                box.update()
+                seen['box'] = str(box)
+                seen['grab'] = grab_name()
+                if while_up is not None:
+                    while_up()
+                btns = {b.cget('text'): b for b in _widgets(box, 'button')}
+                btns['Use unchecked scale'].invoke()
+
+            def stuck():
+                # never hang the suite: a box nobody could close is closed
+                # here, and the answer it returns then fails the case
+                for w in parent.winfo_children():
+                    if isinstance(w, tk.Toplevel):
+                        seen['stuck'] = True
+                        w.destroy()
+            jobs = [root.after(300, go), root.after(6000, stuck)]
+            try:
+                return gui.cal_choice(
+                    parent, 'Anchor NOT cross-checked',
+                    'Nothing can check this scale.', 'detail line',
+                    [('yes', 'Use unchecked scale'), ('no', 'Cancel')],
+                    'no')
+            finally:
+                for j in jobs:
+                    root.after_cancel(j)
+
+        # a window Tk made holds the grab, and is still there afterwards.
+        # Its entry had the focus; the focus goes back to the window that
+        # held the grab, as it always has, and `focus -lastfor` records
+        # that whether or not this application has the system focus.
+        root.tk.eval('toplevel .__tk__messagebox')
+        root.tk.eval('pack [entry .__tk__messagebox.e]')
+        root.update()
+        root.tk.eval('focus .__tk__messagebox.e')
+        root.tk.eval('grab set .__tk__messagebox')
+        assert grab_name() == '.__tk__messagebox', grab_name()
+        assert str(root.tk.eval('focus -lastfor .__tk__messagebox')) == \
+            '.__tk__messagebox.e'
+        assert ask() == 'yes', seen
+        assert 'stuck' not in seen and 'error' not in seen, seen
+        assert seen['grab'] == seen['box'], seen
+        assert grab_name() == '.__tk__messagebox', (
+            "the grab was not handed back", grab_name())
+        last = str(root.tk.eval('focus -lastfor .__tk__messagebox'))
+        assert last == '.__tk__messagebox', (
+            "the focus was not handed back", last)
+
+        # ... and is gone before the box closes: nothing to hand back
+        assert ask(lambda: root.tk.eval(
+            'destroy .__tk__messagebox')) == 'yes', seen
+        assert 'stuck' not in seen and 'error' not in seen, seen
+        assert grab_name() == '', grab_name()
+
+        # ... and is withdrawn, not destroyed, before the box closes: the
+        # grab must not go back to a window that is off the screen
+        root.tk.eval('toplevel .__tk_choosedir')
+        root.update()
+        root.tk.eval('grab set .__tk_choosedir')
+        assert grab_name() == '.__tk_choosedir', grab_name()
+
+        def withdraw_holder():
+            root.tk.eval('wm withdraw .__tk_choosedir')
+            root.update()
+        assert ask(withdraw_holder) == 'yes', seen
+        assert 'stuck' not in seen and 'error' not in seen, seen
+        assert seen['grab'] == seen['box'], seen
+        assert grab_name() == '', (
+            "the grab was handed to the withdrawn window", grab_name())
+        root.tk.eval('destroy .__tk_choosedir')
+
+        # a combobox dropdown is posted over the calibration window
+        parent.grab_set()
+        cb = ttk.Combobox(parent, values=['one', 'two'])
+        cb.pack()
+        parent.update()
+        try:
+            root.tk.call('ttk::combobox::Post', cb._w)
+            root.update()
+            popdown = grab_name()
+            if not popdown.endswith('.popdown'):
+                print(f"   (skipped the dropdown case: the dropdown took "
+                      f"no grab here: {popdown!r})")
+                return
+            assert ask() == 'yes', seen
+            assert 'stuck' not in seen and 'error' not in seen, seen
+            g = grab_name()
+            if on_screen(popdown):
+                assert g == popdown, ("the grab was not handed back to "
+                                      "the dropdown", g, seen)
+            else:
+                # unposted under the box: ttk handed the grab back to the
+                # calibration window, and it must stay there
+                assert g != popdown, (
+                    "the grab was handed to the withdrawn dropdown", seen)
+                assert g == str(parent), (g, seen)
+        finally:
+            root.tk.call('ttk::combobox::Unpost', cb._w)
+    finally:
+        root.destroy()
+
+
 def test_placing_trace_points_never_moves_the_canvas():
     """Bug report 2026-10-05: clicking points in the trace window sometimes
     jumped the picture to the right. The status line under the canvas was

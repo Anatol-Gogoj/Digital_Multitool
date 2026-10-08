@@ -1391,6 +1391,8 @@ def cal_choice(parent, title, headline, detail, buttons, default,
     The grab that was held before (the calibration window's) is handed
     back when this closes: a Tk grab is not a stack, so without that the
     calibration window would stop being modal after the first question.
+    It is handed back by its Tcl name, to a window still on screen, so a
+    window Tk made itself can hold it too (#428).
 
     `buttons` is [(key, label), ...] left to right. `detail_font` and
     `wraplength` exist for the re-anchor confirmation (2026-10-05), whose
@@ -1398,7 +1400,7 @@ def cal_choice(parent, title, headline, detail, buttons, default,
     and wider, so its columns line up. Monkeypatched by the GUI tests,
     which answer it without a display."""
     out = {'key': default}
-    prev_grab = None
+    prev_grab = ''          # the Tcl name of the window holding the grab
     dlg = tk.Toplevel(parent)
     try:
         dlg.withdraw()               # placed before it is shown, no jump
@@ -1464,7 +1466,17 @@ def cal_choice(parent, title, headline, detail, buttons, default,
             dlg.focus_force()
         except tk.TclError:
             pass
-        prev_grab = dlg.grab_current()
+        # The grab is read, and handed back below, by its Tcl name.
+        # tkinter's grab_current() looks the window up among the widgets
+        # tkinter made, and raises KeyError for one Tk made itself (a
+        # message box or the folder chooser on X11, a combobox dropdown
+        # anywhere), which would lose the question. No path reaches that
+        # today; this is the hardening #393 gave gui.py's reason watch
+        # (#428).
+        try:
+            prev_grab = str(dlg.tk.call('grab', 'current', dlg._w))
+        except tk.TclError:
+            prev_grab = ''
         try:
             dlg.grab_set()
         except tk.TclError as e:
@@ -1478,10 +1490,26 @@ def cal_choice(parent, title, headline, detail, buttons, default,
                 dlg.destroy()
         except tk.TclError:
             pass
+        # Handed back only to a window still on screen, the rule Tk's own
+        # dialogs keep (::tk::RestoreFocusGrab in tk.tcl re-grabs only a
+        # window that exists and is mapped). A window Tk made can be
+        # withdrawn rather than destroyed by now: the X11 folder chooser
+        # and file dialog are withdrawn when they close, and Tk on Windows
+        # unposts a combobox dropdown when the box takes the focus. A local
+        # grab on a window that is not mapped is granted, on Windows
+        # (measured 2026-10-08) and on X11 alike (tkGrab.c's Tk_Grab calls
+        # XGrabPointer, the source of "window not viewable", only for a
+        # global grab or with a button held), and it would hold the pointer
+        # of every window of the application.
+        tkapp = dlg.tk
         try:
-            if prev_grab is not None and prev_grab.winfo_exists():
-                prev_grab.grab_set()
-                prev_grab.focus_set()
+            if (prev_grab
+                    and tkapp.getboolean(
+                        tkapp.call('winfo', 'exists', prev_grab))
+                    and tkapp.getboolean(
+                        tkapp.call('winfo', 'viewable', prev_grab))):
+                tkapp.call('grab', 'set', prev_grab)
+                tkapp.call('focus', prev_grab)
         except tk.TclError:
             pass
     return out['key']

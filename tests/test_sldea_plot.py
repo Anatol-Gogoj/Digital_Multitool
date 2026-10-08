@@ -4591,8 +4591,9 @@ def _twelve_seeded(d):
 
 def test_an_export_is_byte_identical_whatever_the_window_cut():
     """`#391`: only the window's figure is cut. The six-group seed's
-    caption takes 0.375 of the height at FIGSIZE, past the window's cap,
-    so the window cuts it there; the exported PNG must still carry the
+    caption needs 0.329 of the height at FIGSIZE (measured top plus
+    CAPTION_PAD; its row allowance there is 0.375), past the window's
+    cap, so the window cuts it there; the exported PNG must still carry the
     whole caption and stay byte-identical: with the window's figure cut
     and re-laid at several sizes in the same process, and with the cap
     set far tighter."""
@@ -4761,6 +4762,87 @@ def test_a_legend_too_big_to_move_stays_in_its_panel():
         assert getattr(win, sp._CUT_ATTR) > 0
         held = getattr(win, sp._LEGEND_ATTR)
         assert held['below'] is None and held['legend'].get_visible()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _caption_clear_of_axes(fig):
+    """(caption top, lowest axes edge) in pixels, after a draw."""
+    fig.canvas.draw()
+    rend = fig.canvas.get_renderer()
+    top = getattr(fig, sp._CAPTION_ATTR)[0].get_window_extent(rend).y1
+    return top, min(ax.get_tightbbox(rend).y0 for ax in fig.axes)
+
+
+def test_a_large_window_shows_the_whole_grouped_caption():
+    """The #391 review: the window judged a grouped caption by its row
+    allowance (0.025 + 0.025 a row), not by what it measures, so every
+    grouped caption of 12 or more rows was cut at every window size. The
+    twelve-run seed lost 2 rows at 16 x 9 and 19 x 10 in, about a
+    maximized window, where the whole caption needs 0.163 and 0.149 of
+    the height, and 8 of 17 rows at 8 x 9 in, where it needs 0.245; and
+    because the caption was cut, the run legend stayed over the data
+    while the export at the same size moved it below. Now the window
+    shows every row there, as the export does, the legend moves as the
+    export's does, and the caption clears the axes."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        runs = _twelve_seeded(d)
+        opts = _seeded_opts(runs, 'concentration')
+        for size in ((16.0, 9.0), (19.0, 10.0), (8.0, 9.0)):
+            win = _window_fig(runs, opts, size)
+            assert getattr(win, sp._CUT_ATTR) == 0, size
+            ex = _sized(runs, opts, size)
+            assert _caption_rows(win) == _caption_rows(ex), size
+            top, floor = _caption_clear_of_axes(win)
+            assert top < floor, (size, top, floor)
+            if size != (8.0, 9.0):
+                assert getattr(win, sp._LEGEND_ATTR)['below'] is not None, \
+                    size
+                assert getattr(ex, sp._LEGEND_ATTR)['below'] is not None, \
+                    size
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_wide_short_window_keeps_the_caption_clear_of_the_axes():
+    """The #391 review, on main too: when no caption line wraps, the
+    window kept the strip the caption was composed for without measuring
+    it, so in a wide, short window (20 x 2.5 and 16 x 2.2 in, a two-run
+    aggregate) its five rows reached into the axes, and the window cut
+    was never reached. The window now measures every caption and keeps
+    the composed strip only where the caption really fits it: at 20 x 5.4
+    in, where no line wraps and the caption fits, the strip is the
+    composed one and the window lays out exactly as the export does, as
+    on main; at the export's own size, where one line wraps, the two
+    still agree."""
+    if not _has_mpl():
+        return
+    d = _mktmp()
+    try:
+        one = os.path.join(d, 'one')
+        _fake_run(one, _healthy_rows(8))
+        two = os.path.join(d, 'two')
+        _fake_run(two, _healthy_rows(8))
+        opts = sp.make_opts(aggregate=True)[0]
+        runs = sp.prepare_runs([one, two], opts)
+        for size in ((20.0, 2.5), (16.0, 2.2), (20.0, 2.0), (12.6, 2.4)):
+            win = _window_fig(runs, opts, size)
+            top, floor = _caption_clear_of_axes(win)
+            assert top < floor, (size, top, floor)
+        win = _window_fig(runs, opts, (20.0, 5.4))
+        text, cap, composed = getattr(win, sp._CAPTION_ATTR)
+        assert len(_caption_rows(win)) == cap.count('\n') + 1, 'it wrapped'
+        assert getattr(win, sp._RECT_ATTR)[1] == composed, \
+            'the composed strip moved where the caption fits it'
+        assert _layout_state(win) == _layout_state(
+            _sized(runs, opts, (20.0, 5.4)))
+        win = _window_fig(runs, opts, sp.FIGSIZE['area'])
+        assert getattr(win, sp._CUT_ATTR) == 0
+        assert _layout_state(win) == _layout_state(
+            _sized(runs, opts, sp.FIGSIZE['area']))
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

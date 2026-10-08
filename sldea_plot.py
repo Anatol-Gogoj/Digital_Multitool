@@ -1890,7 +1890,14 @@ def _place_caption(fig):
     caption leaves the axes something.
 
     On the plot window's figure (window_figure) a strip past
-    WINDOW_CAPTION_MAX is cut there instead (`#391`, _cut_caption)."""
+    WINDOW_CAPTION_MAX is cut there instead (`#391`, _cut_caption), and
+    two things are measured that an export takes on trust (the #391
+    review): a caption whose lines all fit is measured too, and keeps
+    its composed strip only when it really fits there (a wide, short
+    window overprinted the axes with it, on main as well); and a grouped
+    caption's allowance stops at the cap, so the cut follows what the
+    caption measures, not its row count (any grouped caption of 12 or
+    more rows was cut at every window size, a maximized one included)."""
     text, cap, bottom = getattr(fig, _CAPTION_ATTR)
     setattr(fig, _CUT_ATTR, 0)
     fits = _caption_fitter(fig)
@@ -1901,7 +1908,16 @@ def _place_caption(fig):
         rows += [line] if fits(line) else _wrap(line, fits)
     text.set_text('\n'.join(rows))
     if bottom is not None and len(rows) == cap.count('\n') + 1:
-        return bottom
+        if not getattr(fig, _WINDOW_ATTR, False):
+            return bottom
+        try:
+            renderer = fig.canvas.get_renderer()
+            top = (text.get_window_extent(renderer=renderer).y1
+                   / fig.bbox.height)
+        except (AttributeError, TypeError, ValueError):
+            return bottom
+        if top + CAPTION_PAD <= bottom:
+            return bottom       # fits its allowance: as on main
     strip = _caption_strip(fig, text, len(rows), bottom)
     if getattr(fig, _WINDOW_ATTR, False) and strip > WINDOW_CAPTION_MAX:
         strip = _cut_caption(fig, text, rows, bottom, fits)
@@ -1917,8 +1933,12 @@ def _caption_strip(fig, text, n, bottom):
         # takes about 0.022 of a 5.4 in figure, so the allowance keeps a
         # margin over the measured top that grows with the rows, and the
         # strip still clears the axes when it was measured at 300 dpi and
-        # is drawn at 90, where hinting makes 7 pt rows about 12 % taller
+        # is drawn at 90, where hinting makes 7 pt rows about 12 % taller.
+        # The window draws and measures at one dpi, so there the allowance
+        # stops at the cap and the measured top decides whether to cut
         bottom = 0.025 + 0.025 * n
+        if getattr(fig, _WINDOW_ATTR, False):
+            bottom = min(bottom, WINDOW_CAPTION_MAX)
     else:
         bottom = max(bottom, min(0.025 + 0.025 * n, 0.30))
     try:

@@ -119,6 +119,7 @@ class VideoReviewWindow:
         self.win = master if standalone else tk.Toplevel(master)
         self.win.title(f"Video review — {os.path.basename(rundir)}")
         self._cap = None
+        self._video_missing = False   # video.mkv not in the folder (_read)
         self._photo = None
         self._closed = False
         self._img = None
@@ -206,6 +207,20 @@ class VideoReviewWindow:
         top = ttk.Frame(w, padding=(8, 6, 8, 2))
         top.pack(fill='x')
         lines = []
+        have_video = sv.has_video(self.rundir)
+        if not os.path.exists(os.path.join(self.rundir, sv.VIDEO_FILENAME)):
+            # The post-run job writes video_edges.csv BEFORE it moves the
+            # recording in (finalize_and_detect), and that copy to the share
+            # is throttled to COPY_MAX_BPS. A review opened in between found
+            # every frame unreadable and said nothing about why (#395
+            # review).
+            lines.append(f"⚠ The recording is not in this run's folder yet, "
+                         f"so no frame can be shown. After a video run a "
+                         f"separate program moves it in once the edges are "
+                         f"measured; run.log in this folder shows its "
+                         f"progress, or why it stopped. Open this window "
+                         f"again once run.log says {sv.VIDEO_FILENAME} is "
+                         f"in the run folder.")
         if self.stale:
             lines.append(f"⚠ These video edges are out of date: {self.stale}."
                          f" Edge Review's Save re-runs them; or press "
@@ -239,7 +254,7 @@ class VideoReviewWindow:
         self.rerun_btn = ttk.Button(top, text="↻ Re-run video edges",
                                     command=self.rerun)
         self.rerun_btn.pack(side='right')
-        if not (self.stale and sv.has_video(self.rundir)):
+        if not (self.stale and have_video):
             self.rerun_btn.config(state='disabled')
 
         self.fig = Figure(figsize=(self.FIG_W_IN, self.FIG_H_IN), dpi=100)
@@ -386,7 +401,8 @@ class VideoReviewWindow:
         import cv2
         if self._cap is None:
             path = os.path.join(self.rundir, sv.VIDEO_FILENAME)
-            if not os.path.exists(path):
+            self._video_missing = not os.path.exists(path)
+            if self._video_missing:
                 return None
             self._cap = cv2.VideoCapture(path)
         return sv.read_frame(self._cap, frame)
@@ -412,8 +428,11 @@ class VideoReviewWindow:
         img = self._img
         if img is None:
             self.cv.create_text(self.CV_W // 2, self.CV_H // 2, fill='white',
-                                text="this frame does not read from "
-                                     "video.mkv")
+                                text=(f"{sv.VIDEO_FILENAME} is not in the "
+                                      f"run folder yet"
+                                      if self._video_missing else
+                                      "this frame does not read from "
+                                      "video.mkv"))
             return
         x0, y0, x1, y1 = self._view_box(img.shape)
         crop = img[y0:y1, x0:x1].astype(np.float32)

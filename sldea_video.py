@@ -380,6 +380,20 @@ def codec_stop_words(why, dry):
                 f"then press Run again.\n\nThe Run log has the details.")}
 
 
+def codec_check_stuck():
+    """The refusal words while a codec check given up on in this process
+    (VideoRecorder.check_codec) is still running, else ''. A new probe
+    could get stuck behind it, so nothing probes while it runs: neither
+    the run's check nor Run's own pre-flight, which runs on the Tk
+    thread, where a stuck probe would freeze the window (#392 review)."""
+    t = _abandoned_probe
+    if t is not None and t.is_alive():
+        return (f"the {VIDEO_FOURCC} check given up on in an earlier run is "
+                f"still running, and a new one could get stuck behind it; "
+                f"restart the app to record video")
+    return ''
+
+
 def open_stream(spec, fps=STREAM_FPS):
     """A continuously streaming camera for a resolve_camera() spec: the
     v4l2-ctl Bayer stream for the bench's DFK (OpenCV cannot open SRGGB8),
@@ -535,7 +549,8 @@ class VideoRecorder:
         codec_check_running() says whether it is still there. While it
         runs, every later check in this process refuses at once rather
         than start a second probe that could wait behind the first on a
-        lock inside FFmpeg. The refusal ends when that probe returns."""
+        lock inside FFmpeg (codec_check_stuck, which Run's pre-flight asks
+        too). The refusal ends when that probe returns."""
         global _abandoned_probe
         with self._lock:
             got = self._latest
@@ -546,12 +561,9 @@ class VideoRecorder:
         except Exception as e:
             return False, f"the stream's frame could not be made gray ({e})"
         size = f"{gray.shape[1]} x {gray.shape[0]}"
-        stuck = _abandoned_probe
-        if stuck is not None and stuck.is_alive():
-            return False, (f"the {VIDEO_FOURCC} check given up on in an "
-                           f"earlier run is still running, and a new one "
-                           f"could get stuck behind it; restart the app to "
-                           f"record video")
+        stuck = codec_check_stuck()
+        if stuck:
+            return False, stuck
         limit = CODEC_CHECK_TIMEOUT_S if timeout is None else float(timeout)
         answer = []
 

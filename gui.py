@@ -4143,7 +4143,14 @@ LOGGING:
             return False, None
         import shutil
         fps = sldea_video.clamp_fps(self.sldea_vars['vid_fps'].get())
-        ok, why = sldea_video.codec_available()
+        # A codec check given up on in an earlier run may still be stuck
+        # in FFmpeg or on the staging disk, and either probe below could
+        # then hang this, the Tk thread: refused in words instead, with
+        # both probes skipped (#392 review).
+        why = sldea_video.codec_check_stuck()
+        ok = not why
+        if ok:
+            ok, why = sldea_video.codec_available()
         if not ok:
             if messagebox.askyesno(
                     "Video unavailable",

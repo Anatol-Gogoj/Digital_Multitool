@@ -809,6 +809,67 @@ def test_check_codec_gives_up_on_a_hung_probe_and_refuses_while_it_runs():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_runs_preflight_probes_nothing_while_a_given_up_check_runs():
+    """#392 review: Run's own pre-flight runs on the Tk thread before any
+    worker exists: a 64 x 48 codec probe, then disk_usage on the staging
+    disk. While a check given up on in an earlier run is still running,
+    either could hang the whole window. The pre-flight then probes
+    nothing and asks the existing "Video unavailable" question in the
+    refusal's words: Yes is a snapshots-only run, No cancels. Once that
+    check has returned, both probes run as before."""
+    import shutil as _shutil
+    import types
+    import gui
+    calls, asked, answer = [], [], [True]
+    release = threading.Event()
+    stuck = threading.Thread(target=release.wait, args=(30,), daemon=True)
+    real_probe, real_usage = sv.codec_available, _shutil.disk_usage
+    real_ask = gui.messagebox.askyesno
+
+    def probe(*a, **k):
+        calls.append('codec_available')
+        return True, ''
+
+    def usage(path):
+        calls.append('disk_usage')
+        return real_usage(path)
+
+    def ask(title, message, **k):
+        asked.append((title, message, k.get('default')))
+        return answer[0]
+    app = types.SimpleNamespace(
+        sldea_vid_on=types.SimpleNamespace(get=lambda: True),
+        sldea_vars={'vid_fps': types.SimpleNamespace(get=lambda: '1')},
+        lines=[])
+    app._sldea_log = app.lines.append
+    preflight = gui.InstrumentControlGUI._sldea_video_preflight
+    p = _short_profile()
+    try:
+        sv.codec_available, _shutil.disk_usage = probe, usage
+        gui.messagebox.askyesno = ask
+        stuck.start()
+        sv._abandoned_probe = stuck
+        assert preflight(app, p) == (False, None)     # Yes: snapshots only
+        title, message, default = asked[-1]
+        assert title == 'Video unavailable' and default == 'no', asked
+        assert 'given up on in an earlier run is still running' in message \
+            and 'restart the app to record video' in message, message
+        assert any('snapshots only' in ln for ln in app.lines), app.lines
+        answer[0] = False
+        assert preflight(app, p) == (None, None)      # No: nothing starts
+        assert calls == [], calls
+        release.set()
+        stuck.join(5.0)
+        assert preflight(app, p) == (True, 1.0)
+        assert calls == ['codec_available', 'disk_usage'], calls
+        assert len(asked) == 2, asked
+    finally:
+        release.set()
+        sv.codec_available, _shutil.disk_usage = real_probe, real_usage
+        gui.messagebox.askyesno = real_ask
+        sv._abandoned_probe = None
+
+
 def test_the_end_outcome_of_a_clean_recording_and_of_one_never_begun():
     """#392: the words for setup.txt's `Video outcome (end):` line. A clean
     recording gives its frame count, which is the row count of

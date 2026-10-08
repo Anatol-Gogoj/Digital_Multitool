@@ -185,18 +185,20 @@ PREVIEW_MAX_HEIGHT = 520   # webcam preview height budget (px)
 # ---- Webcam preview: when it runs, and what the view says when not (#375) --
 # Opening the Webcam tab starts the preview by itself, through a start path
 # that never opens a dialog (InstrumentControlGUI._cam_start_preview_quiet).
-# The Start Preview button keeps its own path, dialogs included. False brings
-# back click-to-start; the manual's screenshot run and the full-app test
+# When something holds that start off, or takes the camera from the preview
+# (an SLDEA run, a capture, an adjustment, a dialog), the start runs once
+# that clears, if the tab is still shown (#393). The Start Preview button
+# keeps its own path, dialogs included. False brings back click-to-start,
+# with no resume either; the manual's screenshot run and the full-app test
 # harnesses set it False, so neither ever opens the camera of the PC they
 # run on (the manual would otherwise ship a photo of whatever it sees).
 CAM_AUTOSTART_ON_TAB = True
-# OPEN OWNER QUESTION (#375): should leaving the Webcam tab stop the preview?
-# True is the issue's recommendation: leaving stops it, unless interval
-# capture is running (it saves frames from the preview, so it needs it).
-# The stop is the Stop Preview button's: the tick ends and the device stays
-# open, so coming back resumes the stream instead of reopening it. False
-# leaves the preview reading frames on the Tk thread every 50 ms while you
-# work on other tabs.
+# Owner decision 2026-10-06 (#375): leaving the Webcam tab stops the preview.
+# Interval capture is the exception: it saves frames from the preview, so
+# it keeps it running. The stop is the Stop Preview button's: the tick ends
+# and the device stays open, so coming back resumes the stream instead of
+# reopening it. False leaves the preview reading frames on the Tk thread
+# every 50 ms while you work on other tabs.
 CAM_STOP_PREVIEW_ON_TAB_LEAVE = True
 CAM_AUTOSTART_DELAY_MS = 50   # lets the tab paint its splash before the open
 CAM_SPLASH_POLL_MS = 500      # keeps the reason current while it is on show
@@ -484,7 +486,9 @@ class InstrumentControlGUI:
         # The PREVIEW OFF splash (#375): what it says now, as (headline,
         # reason, stamp), or None while live frames show; the image drawn;
         # the key it was drawn for; why the last open failed; and the jobs
-        # behind the tab-click start and the reason watch.
+        # behind the tab-click start and the reason watch. Plus whether a
+        # quiet start is owed for when whatever holds the preview off
+        # clears (#393; _cam_resume_if_clear says who owes it).
         self.cam_splash = None
         self.cam_splash_img = None
         self._cam_splash_key = None
@@ -492,6 +496,7 @@ class InstrumentControlGUI:
         self._cam_autostart_job = None
         self._cam_splash_idle = None
         self._cam_watch_job = None
+        self._cam_resume_pending = False
         self.cam_interval_job = None
         self.cam_capture_index = 0
         self.cam_seq_running = False
@@ -4107,6 +4112,12 @@ LOGGING:
             # Free the camera: the Webcam preview holds /dev/video0 open and
             # a one-shot grab can't run while it streams (empty frames
             # otherwise).
+            # From here to the run flag the Webcam tab counts the camera as
+            # this run's (#393): the pre-flight can ask a question before
+            # its dialog exists, and on Windows that box holds no Tk grab.
+            # Cleared at the run flag, or in the finally on any exit before
+            # that.
+            self._sldea_starting = True
             try:
                 self.cam_stop_preview()
                 if self.cam is not None:
@@ -4140,6 +4151,7 @@ LOGGING:
             self._sldea_stop = False
             self._sldea_bd_tripped = False
             self._sldea_running = True
+            self._sldea_starting = False      # the run flag holds it now
             # LIVE interlock: the driven SG channel belongs to the run until
             # it ends (user decision 2026-07-25: lock the active channel,
             # leave the other usable, loud note on any attempt).
@@ -4188,6 +4200,7 @@ LOGGING:
             sldea_liveview.notify(self, 'open_with_run')
         finally:
             if not started:
+                self._sldea_starting = False
                 with self._sldea_loglock:
                     self._sldea_prelog = None
 
@@ -4795,10 +4808,14 @@ LOGGING:
         (they logged NO FRAME); Apply & Lock replaced the exposure the run
         had locked, so frames on either side of the click were exposed
         differently -- and a video run holds the camera for the whole
-        hour. Refused, with the reason, like a LIVE-owned SG channel."""
+        hour. Refused, with the reason, like a LIVE-owned SG channel.
+
+        The run holds it from the moment sldea_run frees the camera for it,
+        before the run flag is set (_sldea_starting, #393)."""
         rec = getattr(self, '_sldea_recorder', None)
-        if not getattr(self, '_sldea_running', False) and not (
-                rec is not None and rec.reader_alive()):
+        held = (getattr(self, '_sldea_running', False)
+                or getattr(self, '_sldea_starting', False))
+        if not held and not (rec is not None and rec.reader_alive()):
             # ...a run's recorder that is still shutting down holds the
             # camera too, even though the run itself has ended
             return False
@@ -8330,6 +8347,9 @@ LOGGING:
     def cam_toggle_preview(self):
         if self.cam_previewing:
             self.cam_stop_preview()
+            # the operator's own Stop: nothing starts the preview again by
+            # itself on this visit (#393)
+            self._cam_resume_pending = False
         else:
             self.cam_start_preview()
 
@@ -8340,6 +8360,9 @@ LOGGING:
         if self._cam_owned_by_sldea():
             self._cam_refresh_splash()
             return
+        # this try settles any quiet start that was owed (#393): a failed
+        # open is shown in the dialog below and not tried again quietly
+        self._cam_resume_pending = False
         try:
             self._cam_open_selected()
         except Exception as e:
@@ -8352,14 +8375,20 @@ LOGGING:
     def _cam_start_preview_quiet(self):
         """Start the preview without ever opening a dialog (#375); True if
         it started. Used when the Webcam tab is opened, which happens far
-        too often for a refusal box. What would have refused it (an SLDEA
-        run, a timed or stepped capture, a camera adjustment) or why the
-        camera did not open goes into the PREVIEW OFF splash instead."""
+        too often for a refusal box, and once more when whatever held that
+        start off clears (#393). What would have refused it (an SLDEA run,
+        a timed or stepped capture, a camera adjustment, a dialog) or why
+        the camera did not open goes into the PREVIEW OFF splash instead."""
         if self.cam_previewing:
             return True
         if self._cam_autostart_blocker() is not None:
+            # still owed: the reason watch starts it once this clears
+            self._cam_resume_pending = True
             self._cam_refresh_splash()
             return False
+        # the one try that was owed (#393): an open that fails below is not
+        # tried again until the next visit or the next hold-off
+        self._cam_resume_pending = False
         try:
             self._cam_open_selected()
         except Exception as e:
@@ -8385,6 +8414,7 @@ LOGGING:
         self._cam_preview_tick()
 
     def cam_stop_preview(self):
+        was_live = self.cam_previewing
         self.cam_previewing = False
         if self.cam_preview_job is not None:
             try:
@@ -8394,6 +8424,12 @@ LOGGING:
             self.cam_preview_job = None
         if hasattr(self, 'cam_preview_btn'):
             self.cam_preview_btn.config(text="Start Preview")
+        # A live preview stopped on the shown tab by whatever takes the
+        # camera (a capture, an adjustment, an SLDEA run start) is owed one
+        # quiet start once that ends (#393). The Stop Preview button and
+        # leaving the tab cancel it.
+        if was_live and self._cam_tab_selected():
+            self._cam_resume_pending = True
         # A stopped preview must not look live (#375): the splash goes over
         # the last frame. Queued rather than drawn here, because every
         # caller that stops the preview to take the camera (a capture, an
@@ -8487,16 +8523,17 @@ LOGGING:
 
     def _cam_on_tab_changed(self, _event=None):
         """<<NotebookTabChanged>>: opening the Webcam tab starts the
-        preview (quietly, after the tab has painted its splash); leaving it
-        stops the preview when CAM_STOP_PREVIEW_ON_TAB_LEAVE says so."""
+        preview (quietly, after the tab has painted its splash), or, while
+        something holds it off, once that clears (#393); leaving it stops
+        the preview when CAM_STOP_PREVIEW_ON_TAB_LEAVE says so."""
         if self._cam_tab_selected():
             if self.cam_previewing:
                 return
-            if (CAM_AUTOSTART_ON_TAB
-                    and getattr(self, '_cam_autostart_job', None) is None
-                    and self._cam_autostart_blocker() is None):
-                self._cam_autostart_job = self.root.after(
-                    CAM_AUTOSTART_DELAY_MS, self._cam_autostart)
+            if CAM_AUTOSTART_ON_TAB:
+                # this visit is owed one quiet start: now, or when the
+                # reason watch sees what holds it off clear
+                self._cam_resume_pending = True
+                self._cam_resume_if_clear()
             self._cam_refresh_splash()
             return
         job = getattr(self, '_cam_autostart_job', None)
@@ -8506,6 +8543,9 @@ LOGGING:
                 self.root.after_cancel(job)
             except Exception:
                 pass
+        # a start owed to this visit goes with it; the next visit is owed
+        # its own (#393)
+        self._cam_resume_pending = False
         # Interval capture saves frames from the preview, so it keeps it.
         if (CAM_STOP_PREVIEW_ON_TAB_LEAVE and self.cam_previewing
                 and self.cam_interval_job is None):
@@ -8516,6 +8556,33 @@ LOGGING:
         if self.cam_previewing or not self._cam_tab_selected():
             return
         self._cam_start_preview_quiet()
+
+    def _cam_resume_if_clear(self):
+        """Schedule the quiet start that is owed, once nothing holds it
+        off (#393). True if it was scheduled.
+
+        A start is owed (_cam_resume_pending) when the tab is opened, when
+        a quiet start finds something holding it off, and when whatever
+        takes the camera stops a live preview on the shown tab: a capture,
+        an adjustment, an SLDEA run start. Stop Preview, leaving the tab
+        and every start that is tried clear it. So each hold-off that ends
+        gets one try, an open that fails is not tried again in a loop, and
+        an operator's Stop stays stopped. Called when the tab is opened
+        and by the reason watch. It does nothing while
+        _cam_autostart_blocker names a reason: an SLDEA run or its
+        recorder, a dialog holding the grab, a capture, an adjustment."""
+        if (not getattr(self, '_cam_resume_pending', False)
+                or not CAM_AUTOSTART_ON_TAB or self.cam_previewing
+                or getattr(self, '_cam_autostart_job', None) is not None
+                or not self._cam_tab_selected()
+                or self._cam_autostart_blocker() is not None):
+            return False
+        self._cam_resume_pending = False
+        # scheduled like the tab-click start, so the splash says "Opening
+        # the camera..." first; _cam_autostart checks the blocker again
+        self._cam_autostart_job = self.root.after(
+            CAM_AUTOSTART_DELAY_MS, self._cam_autostart)
+        return True
 
     def _cam_after_adjustment(self, was_previewing):
         """After Stabilize, Auto-WB once or Auto-expose: restart the
@@ -8530,9 +8597,11 @@ LOGGING:
 
     def _cam_sldea_holds_camera(self):
         """_cam_owned_by_sldea's test, without its dialog: an SLDEA run is
-        going, or its video recorder is still letting go of the camera.
-        Keep the two in step (tests/test_webcam_autostart.py checks)."""
-        if getattr(self, '_sldea_running', False):
+        going, its start path has freed the camera for it (#393), or its
+        video recorder is still letting go of the camera. Keep the two in
+        step (tests/test_webcam_autostart.py checks)."""
+        if (getattr(self, '_sldea_running', False)
+                or getattr(self, '_sldea_starting', False)):
             return True
         rec = getattr(self, '_sldea_recorder', None)
         return rec is not None and rec.reader_alive()
@@ -8545,11 +8614,17 @@ LOGGING:
         # A modal dialog holds the pointer grab. The SLDEA camera pre-flight
         # is one: sldea_run has already closed the preview's camera for the
         # run, and _sldea_running is not set until the operator presses
-        # Start. A grab does not stop the keyboard reaching the notebook,
-        # so the tab can still be opened, and an auto-start there would
-        # hand the run a camera the preview holds.
+        # Start (_sldea_starting now covers that stretch as well). A grab
+        # does not stop the keyboard reaching the notebook, so the tab can
+        # still be opened, and an auto-start there would hand the run a
+        # camera the preview holds.
+        # The grab is asked for by its Tcl name. tkinter's grab_current()
+        # looks the window up among the widgets tkinter made, and raises
+        # KeyError for one Tk made itself (a message box or the folder
+        # chooser on X11, a combobox dropdown anywhere), which killed the
+        # reason watch (#393).
         try:
-            if self.root.grab_current() is not None:
+            if str(self.root.tk.call('grab', 'current', self.root._w)):
                 return CAM_OFF_DIALOG
         except tk.TclError:
             pass
@@ -8597,7 +8672,9 @@ LOGGING:
 
     def _cam_arm_splash_watch(self):
         """Keep the reason current while the tab shows it: an SLDEA run, a
-        capture or an adjustment that ends changes it, with no event here."""
+        capture or an adjustment that ends changes it, with no event here.
+        When that end clears the way, the watch also runs the quiet start
+        that is owed, once (#393)."""
         if (getattr(self, '_cam_watch_job', None) is not None
                 or not self._cam_tab_selected()):
             return
@@ -8611,6 +8688,7 @@ LOGGING:
         self._cam_watch_job = None
         if self.cam_previewing or not self._cam_tab_selected():
             return
+        self._cam_resume_if_clear()
         self._cam_refresh_splash()            # re-arms the watch
 
     def _cam_view_avail(self):

@@ -287,9 +287,41 @@ def sldea_video_after_run(app, runlog):
         target = None
     try:
         app._sldea_video_run = target
-        sync = getattr(app, '_sldea_video_btn_sync', None)
-        if sync is not None:
-            sync()
+    except Exception:
+        pass
+    sldea_video_btn_sync(app)
+
+
+def sldea_video_btn_sync(app):
+    """Show the SLDEA tab's Video review... button as the tab's state says
+    (#395): live when the run the tab finished last recorded video
+    (sldea_video_after_run), grey otherwise, and HIDDEN while a run is
+    going. It follows the run, not the disk: whether the recording has
+    reached the run folder is asked at the press, so nothing here touches
+    the share.
+
+    Hidden with pack_forget, and packed again once the run has ended, as
+    the last slave of the run row, where it was built: after Live view...,
+    so a row too short for everything takes its room from this button
+    first. It acts on the last finished run only, so nothing is lost
+    while it is away, and hidden it leaves the row exactly as it was
+    before #395. Behind a maximized main window the live view is reached
+    only through Live view..., which must therefore keep its room.
+
+    sldea_run calls this once its worker has started; _sldea_finished
+    calls it through sldea_video_after_run. It never raises, and an app
+    without the button (a test's stand-in) is left alone."""
+    btn = getattr(app, 'sldea_video_btn', None)
+    if btn is None:
+        return
+    try:
+        if getattr(app, '_sldea_running', False):
+            btn.pack_forget()
+            return
+        if not btn.winfo_manager():
+            btn.pack(side=tk.RIGHT, padx=(8, 0))
+        btn.config(state='normal' if getattr(app, '_sldea_video_run', None)
+                   else 'disabled')
     except Exception:
         pass
 
@@ -3286,29 +3318,6 @@ LOGGING:
                     "can be traced back to its numbers. Area "
                     "needs reviewed runs; current and power work on raw "
                     "ones.").pack(side=tk.LEFT, padx=(8, 0))
-        # The video review of the run this tab FINISHED last (#395), beside
-        # the other tools that open a run, and launched like them. Grey
-        # until a run that recorded video has ended here, and again after
-        # a run without video: sldea_video_after_run moves it on as each
-        # run ends. The reviews it started are kept per run folder, so a
-        # second press while one is still open starts no second window.
-        self._sldea_video_run = None
-        self._sldea_video_rec_seen = None
-        self._sldea_video_reviews = {}
-        self.sldea_video_btn = ttk.Button(
-            runf, text="🎞 Video review…",
-            command=self._sldea_open_video_review, state='disabled')
-        add_tooltip(self.sldea_video_btn,
-                    "Review the video of the last run this tab finished, "
-                    "when that run recorded one: the frames the detector "
-                    "doubts, or that disagree with the run's accepted "
-                    "stills. It opens as its own program, so it stays open "
-                    "if this app closes. Grey until a run with video has "
-                    "ended here. The recording reaches the run folder only "
-                    "once a separate program has moved it there after the "
-                    "run; a press before then says so. Older runs: the "
-                    "plot window's right-click menu, or "
-                    "Edge Review.").pack(side=tk.LEFT, padx=(8, 0))
         self.sldea_status = tk.Label(runf, text="idle", anchor='w', fg='#555')
         self.sldea_status.pack(side=tk.LEFT, padx=12)
         # The live view (#376), at the far right and packed AFTER the
@@ -3326,6 +3335,38 @@ LOGGING:
                     "frames the run already holds and never opens the "
                     "camera, so closing it never affects the run."
                     ).pack(side=tk.RIGHT, padx=(8, 4))
+        # The video review of the run this tab FINISHED last (#395), next
+        # to Live view... and launched like the tools on the left. Packed
+        # AFTER Live view..., so a row too short for everything takes its
+        # room from this button first: the status line and Live view...
+        # keep exactly what they had before it existed, during a run and
+        # after one that ended on a long alarm (measured: beside Plot
+        # runs..., it left Live view... 6 px during a run in the default
+        # window and pushed it off the row after "NOT ZEROED"). HIDDEN
+        # while a run is going, since it opens the last finished run only.
+        # Grey until a run that recorded video has ended here, and again
+        # after a run without video: sldea_video_after_run moves it on as
+        # each run ends, sldea_video_btn_sync shows and hides it. The
+        # reviews it started are kept per run folder, so a second press
+        # while one is still open starts no second window.
+        self._sldea_video_run = None
+        self._sldea_video_rec_seen = None
+        self._sldea_video_reviews = {}
+        self.sldea_video_btn = ttk.Button(
+            runf, text="🎞 Video review…",
+            command=self._sldea_open_video_review, state='disabled')
+        add_tooltip(self.sldea_video_btn,
+                    "Review the video of the last run this tab finished, "
+                    "when that run recorded one: the frames the detector "
+                    "doubts, or that disagree with the run's accepted "
+                    "stills. It opens as its own program, so it stays open "
+                    "if this app closes. Grey until a run with video has "
+                    "ended here, and hidden while a run is going. The "
+                    "recording reaches the run folder only once a separate "
+                    "program has moved it there after the run; a press "
+                    "before then says so. Older runs: the plot window's "
+                    "right-click menu, or "
+                    "Edge Review.").pack(side=tk.RIGHT, padx=(8, 0))
 
         # The camera settings a run started now would use (2026-10-02). A
         # run takes its exposure and gain from the Webcam tab's entry
@@ -4174,6 +4215,10 @@ LOGGING:
             # beside this window when there is room, otherwise behind it,
             # and the keyboard focus comes back here either way
             sldea_liveview.notify(self, 'open_with_run')
+            # Video review... steps out of the run row until the run ends,
+            # so the status line and Live view... keep their room (#395).
+            # Last, once the run is under way; it never raises.
+            sldea_video_btn_sync(self)
         finally:
             if not started:
                 with self._sldea_loglock:
@@ -4734,17 +4779,6 @@ LOGGING:
                 text=f"Plot window opened on {os.path.basename(target)}")
         except Exception as e:
             messagebox.showerror("SLDEA plot", f"Could not launch: {e}")
-
-    def _sldea_video_btn_sync(self):
-        """Video review... is live when the run this tab finished last
-        recorded video (#395, set by sldea_video_after_run). It follows the
-        run, not the disk: whether the recording has reached the run folder
-        is asked at the press, so nothing here touches the share."""
-        btn = getattr(self, 'sldea_video_btn', None)
-        if btn is None:
-            return
-        btn.config(state='normal' if getattr(self, '_sldea_video_run', None)
-                   else 'disabled')
 
     def _sldea_open_video_review(self):
         """Launch the video review window on the run this tab finished

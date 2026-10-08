@@ -14,10 +14,11 @@ tools. Pinned here:
 * the plot window's right-click menu offers Video review... for the run
   that was clicked, live only when that run's folder holds a recording,
   and the window starts one review per run;
-* the SLDEA tab's button sits beside Edge Review... and Plot runs...,
-  follows the run that just ended (live when that run recorded video),
-  and launches exactly like its neighbours, one review per run, without
-  looking in the run folder;
+* the SLDEA tab's button sits in the run row next to Live view... and
+  gives way first when the row is short, steps out of the row while a run
+  is going, follows the run that just ended (live when that run recorded
+  video), and launches exactly like Edge Review... and Plot runs..., one
+  review per run, without looking in the run folder;
 * Edge Review's button acts on the run in the Run box whether or not it
   loaded, and looks at the folder again when the pointer comes onto it.
 
@@ -543,19 +544,130 @@ def _end_run(app, rundir, rec):
     app._sldea_finished()
 
 
-def test_the_sldea_tab_has_the_button_beside_edge_review_and_plot_runs():
-    """Beside the other tools that open a run, before the status line, and
-    grey until a run with video has ended in this session."""
+def test_the_sldea_tab_has_the_button_next_to_live_view_giving_way_first():
+    """In the run row, at the right next to Live view..., and packed AFTER
+    it: a row too short for everything takes its room from this button
+    first, never from the status line or Live view.... Grey until a run
+    with video has ended in this session."""
     with _gui() as (_root, app):
         btn = app.sldea_video_btn
         slaves = btn.master.pack_slaves()
         texts = [str(w.cget('text')) for w in slaves]
-        i = texts.index('🎞 Video review…')
-        assert texts[i - 3:i] == ['🔍 Edge Review…', '🎚 Tune params…',
-                                  '📊 Plot runs…'], texts
-        assert slaves[i + 1] is app.sldea_status, texts
+        assert slaves[-1] is btn, texts
+        assert texts[-2] == 'Live view…', texts
+        assert slaves.index(app.sldea_status) < len(slaves) - 2, texts
+        assert all(w.pack_info()['side'] == 'right' for w in slaves[-2:])
         assert str(btn.cget('state')) == 'disabled'
         assert app._sldea_video_run is None
+
+
+# The widest status line a running run writes (the worker's one-second
+# tick), and the longest alarm the run's end leaves on it: 235 and 254 px
+# at 96 dpi, and main fits each beside a whole Live view... in the default
+# 1320x800 window.
+LIVE_STATUS = "LIVE  t=1234/3600s  ~10.25 kV  frames 12/34"
+ALARM_STATUS = "⚡ NOT ZEROED — turn off SG/Trek manually!"
+
+
+def _until(root, cond, timeout=3.0):
+    """Pump Tk until cond() holds or `timeout` s pass -> cond(). A child's
+    <Configure> lands 120 to 320 ms after a geometry change on this PC."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        root.update()
+        if cond():
+            return True
+        time.sleep(0.02)
+    return cond()
+
+
+def test_a_run_gives_the_row_back_to_the_status_line_and_live_view():
+    """Review finding (2026-10-06): beside Plot runs..., Video review...
+    took 109 px of the run row, and in the default 1320x800 window it left
+    Live view... 6 px of its 76 beside a running run's status line and
+    pushed it off the row after a run that ended on "NOT ZEROED". Behind a
+    maximized main window the live view is reached only through that
+    button.
+
+    The start path now takes Video review... out of the row once the
+    worker has started, and _sldea_finished puts it back as the row's last
+    slave, after Live view.... During the run the row holds the widgets it
+    held before #395, in the same order, so every width in it is main's at
+    any window size; at 1320x800, beside the widest running status line,
+    Abort, the status line and Live view... each get the full width they
+    ask for (where main's row has the room). After the run, beside the
+    longest alarm, the status line and Live view... get what they get in
+    main's row, the row without the button: the button gives way first."""
+    import inspect
+    import gui
+    with _gui() as (root, app):
+        root.geometry('1320x800+0+0')
+        root.deiconify()
+        assert app.select_manual_tab('sldea'), "cannot find the SLDEA tab"
+        btn = app.sldea_video_btn
+        row = btn.master
+        live = [w for w in row.pack_slaves()
+                if str(w.cget('text')) == 'Live view…'][0]
+        assert _until(root, lambda: live.winfo_ismapped())
+        idle = row.pack_slaves()
+        assert btn in idle
+        full = (app.sldea_abort_btn, app.sldea_status, live)
+
+        def widths():
+            return [(w.winfo_ismapped(), w.winfo_width()) for w in full]
+
+        # what sldea_run does once the worker is on its way, then what the
+        # worker writes on the status line every second
+        app._sldea_running = True
+        app.sldea_run_btn.config(state='disabled')
+        app.sldea_abort_btn.config(state='normal')
+        gui.sldea_video_btn_sync(app)
+        app.sldea_status.config(text=LIVE_STATUS)
+        _until(root, lambda: all(w.winfo_width() == w.winfo_reqwidth()
+                                 for w in full))
+        # what main's row asks for: this row less the button, if it stayed
+        # (its request plus its 8 px of padding)
+        main_req = row.winfo_reqwidth() - (
+            btn.winfo_reqwidth() + 8 if btn.winfo_manager() else 0)
+        if main_req <= row.winfo_width():
+            # main's row has the room for all of it here (this PC, 96 dpi)
+            for w in full:
+                assert w.winfo_ismapped(), w.cget('text')
+                assert w.winfo_width() == w.winfo_reqwidth(), (
+                    f"{w.cget('text')!r} is {w.winfo_width()} px wide "
+                    f"during a run, of the {w.winfo_reqwidth()} it asks for")
+        else:
+            print(f"   (main's row would ask {main_req} px of "
+                  f"{row.winfo_width()} on this PC; widths not compared)")
+        assert not btn.winfo_manager(), "Video review... stayed in the row"
+        assert row.pack_slaves() == [w for w in idle if w is not btn]
+        # the run ends: the button is back after Live view..., the row is
+        # as it was, and beside the longest alarm the button gives way,
+        # never the status line or Live view...
+        app._sldea_runlog = None
+        app._sldea_finished()
+        assert row.pack_slaves() == idle, row.pack_slaves()
+        assert str(btn.cget('state')) == 'disabled'
+        app.sldea_status.config(text=ALARM_STATUS)
+        btn.pack_forget()                    # main's row, for the reference
+        _pump(root, 0.6)
+        on_main = widths()
+        gui.sldea_video_btn_sync(app)        # back, as the run's end puts it
+        _pump(root, 0.6)
+        assert row.pack_slaves() == idle, row.pack_slaves()
+        assert widths() == on_main, (
+            f"beside {ALARM_STATUS!r}: (mapped, width) of Abort, the status "
+            f"line and Live view... are {widths()}, and {on_main} without "
+            f"the button")
+    # ...and it is the real start path that steps it aside: last, once the
+    # worker has started and the live view has opened
+    src = inspect.getsource(gui.InstrumentControlGUI.sldea_run)
+    assert 'sldea_video_btn_sync(self)' in src, \
+        "sldea_run never takes Video review... out of the row"
+    started = src.index('daemon=True).start()')
+    opened = src.index("sldea_liveview.notify(self, 'open_with_run')")
+    stepped = src.index('sldea_video_btn_sync(self)')
+    assert started < opened < stepped, (started, opened, stepped)
 
 
 def test_the_sldea_tab_button_follows_the_run_that_just_ended():
